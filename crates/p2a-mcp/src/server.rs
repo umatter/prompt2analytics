@@ -17,10 +17,15 @@ use serde::Deserialize;
 
 use p2a_core::{
     data::{DataLoader, Dataset, DatasetInfo},
-    regression::run_ols,
+    regression::{run_ols, run_ols_clustered, run_diagnostics},
     stats::{correlation_matrix, DescriptiveStats},
     // Econometrics
-    run_fixed_effects, run_random_effects, run_iv2sls, run_did,
+    run_fixed_effects, run_random_effects, run_hausman_test, run_iv2sls, run_did,
+    run_logit, run_probit, run_first_stage_diagnostics,
+    // Time series
+    run_var, run_varma, run_vecm, run_var_irf,
+    // Forecasting
+    run_arima, forecast_arima, run_mstl,
 };
 
 /// The main analytics server that handles MCP requests.
@@ -39,8 +44,8 @@ pub struct AnalyticsServer {
 /// Request to load a dataset from a file.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct LoadDatasetRequest {
-    /// Path to the data file (CSV or Parquet)
-    #[schemars(description = "Absolute or relative path to the data file. Supports CSV and Parquet formats.")]
+    /// Path to the data file
+    #[schemars(description = "Absolute or relative path to the data file. Supports CSV, Parquet, Excel (xlsx, xls, xlsb, ods), Stata (dta), and SAS (sas7bdat) formats.")]
     pub path: String,
 
     /// Optional name/identifier for the dataset
@@ -92,6 +97,38 @@ pub struct OlsRequest {
     pub x: Vec<String>,
 }
 
+/// Request for regression diagnostics.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DiagnosticsRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// R-style formula (e.g., "y ~ x1 + x2")
+    #[schemars(description = "R-style formula specifying the model (e.g., 'y ~ x1 + x2').")]
+    pub formula: String,
+}
+
+/// Request for OLS with clustered standard errors.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct OlsClusteredRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// R-style formula (e.g., "y ~ x1 + x2")
+    #[schemars(description = "R-style formula specifying the model (e.g., 'y ~ x1 + x2').")]
+    pub formula: String,
+
+    /// First cluster dimension column (e.g., "firm_id")
+    #[schemars(description = "Column name for first clustering dimension (e.g., 'firm_id').")]
+    pub cluster1: String,
+
+    /// Second cluster dimension column (optional, for two-way clustering)
+    #[schemars(description = "Optional column for second clustering dimension (e.g., 'year'). If provided, two-way clustering is used.")]
+    pub cluster2: Option<String>,
+}
+
 // ============================================================================
 // Econometrics Tool Input Types
 // ============================================================================
@@ -128,6 +165,22 @@ pub struct PanelRERequest {
     pub entity_var: String,
 }
 
+/// Request for Hausman specification test.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct HausmanRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// R-style formula (e.g., "y ~ x1 + x2")
+    #[schemars(description = "R-style formula specifying the model (e.g., 'y ~ x1 + x2').")]
+    pub formula: String,
+
+    /// Entity/individual identifier column
+    #[schemars(description = "Column name for entity/individual identifier (e.g., 'firm_id', 'person_id').")]
+    pub entity_var: String,
+}
+
 /// Request for IV/2SLS regression.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct IV2SLSRequest {
@@ -148,6 +201,26 @@ pub struct IV2SLSRequest {
     pub robust: Option<bool>,
 }
 
+/// Request for first-stage diagnostics.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct FirstStageRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Endogenous variable name
+    #[schemars(description = "Name of the endogenous variable to test instrument strength for.")]
+    pub endogenous_var: String,
+
+    /// Instrument variable names
+    #[schemars(description = "Names of the instrumental variables (e.g., ['parents_edu', 'distance_to_college']).")]
+    pub instruments: Vec<String>,
+
+    /// Control variable names (optional)
+    #[schemars(description = "Optional control variables to include in first-stage regression.")]
+    pub controls: Option<Vec<String>>,
+}
+
 /// Request for Difference-in-Differences estimation.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct DiDRequest {
@@ -166,6 +239,182 @@ pub struct DiDRequest {
     /// Post-treatment period indicator column (0/1)
     #[schemars(description = "Column indicating post-treatment period (1 = post, 0 = pre).")]
     pub post_var: String,
+}
+
+/// Request for Logit regression.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct LogitRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// R-style formula (e.g., "y ~ x1 + x2")
+    #[schemars(description = "R-style formula specifying the model (e.g., 'outcome ~ treatment + control_var').")]
+    pub formula: String,
+}
+
+/// Request for Probit regression.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ProbitRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// R-style formula (e.g., "y ~ x1 + x2")
+    #[schemars(description = "R-style formula specifying the model (e.g., 'outcome ~ treatment + control_var').")]
+    pub formula: String,
+}
+
+// ============================================================================
+// Time Series Tool Input Types
+// ============================================================================
+
+/// Request for VAR (Vector Autoregression) model.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct VarRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Columns to include in the VAR model
+    #[schemars(description = "Names of the columns to include in the VAR model (e.g., ['gdp', 'inflation', 'interest_rate']).")]
+    pub columns: Vec<String>,
+
+    /// Number of lags
+    #[schemars(description = "Number of lags to include in the VAR model.")]
+    pub lags: usize,
+}
+
+/// Request for VARMA (Vector ARMA) model.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct VarmaRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Columns to include in the VARMA model
+    #[schemars(description = "Names of the columns to include in the VARMA model.")]
+    pub columns: Vec<String>,
+
+    /// AR lags (p)
+    #[schemars(description = "Number of autoregressive (AR) lags.")]
+    pub p: usize,
+
+    /// MA lags (q)
+    #[schemars(description = "Number of moving average (MA) lags.")]
+    pub q: usize,
+}
+
+/// Request for VECM (Vector Error Correction Model).
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct VecmRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Columns to include in the VECM model
+    #[schemars(description = "Names of the columns to include in the VECM model. Should be I(1) cointegrated series.")]
+    pub columns: Vec<String>,
+
+    /// Number of lags
+    #[schemars(description = "Number of lags for the VECM (must be at least 2).")]
+    pub lags: usize,
+
+    /// Cointegration rank
+    #[schemars(description = "Cointegration rank (number of cointegrating relationships). Must be between 1 and k-1 where k is the number of variables.")]
+    pub rank: usize,
+}
+
+/// Request for VAR Impulse Response Functions.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct VarIrfRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Columns to include in the VAR model
+    #[schemars(description = "Names of the columns to include in the VAR model.")]
+    pub columns: Vec<String>,
+
+    /// Number of lags
+    #[schemars(description = "Number of lags for the VAR model.")]
+    pub lags: usize,
+
+    /// Number of IRF steps/periods
+    #[schemars(description = "Number of periods to compute impulse responses for.")]
+    pub steps: usize,
+}
+
+// ============================================================================
+// Forecasting Tool Input Types
+// ============================================================================
+
+/// Request for ARIMA model fitting.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ArimaRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Column name with time series values
+    #[schemars(description = "Name of the column containing the time series values.")]
+    pub column: String,
+
+    /// AR order (p)
+    #[schemars(description = "Number of autoregressive (AR) terms.")]
+    pub p: usize,
+
+    /// Differencing order (d)
+    #[schemars(description = "Number of differences to make the series stationary.")]
+    pub d: usize,
+
+    /// MA order (q)
+    #[schemars(description = "Number of moving average (MA) terms.")]
+    pub q: usize,
+}
+
+/// Request for ARIMA forecasting.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ArimaForecastRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Column name with time series values
+    #[schemars(description = "Name of the column containing the time series values.")]
+    pub column: String,
+
+    /// AR order (p)
+    #[schemars(description = "Number of autoregressive (AR) terms.")]
+    pub p: usize,
+
+    /// Differencing order (d)
+    #[schemars(description = "Number of differences to make the series stationary.")]
+    pub d: usize,
+
+    /// MA order (q)
+    #[schemars(description = "Number of moving average (MA) terms.")]
+    pub q: usize,
+
+    /// Forecast horizon
+    #[schemars(description = "Number of periods to forecast ahead.")]
+    pub horizon: usize,
+}
+
+/// Request for MSTL decomposition.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct MstlRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Column name with time series values
+    #[schemars(description = "Name of the column containing the time series values.")]
+    pub column: String,
+
+    /// Seasonal periods
+    #[schemars(description = "Seasonal periods to extract (e.g., [7, 365] for daily data with weekly and yearly seasonality).")]
+    pub periods: Vec<usize>,
 }
 
 // ============================================================================
@@ -214,7 +463,7 @@ impl AnalyticsServer {
     }
 
     /// Load a dataset from a file.
-    #[tool(description = "Load a dataset from a file. Supports CSV and Parquet formats. Returns dataset information including dimensions and column types.")]
+    #[tool(description = "Load a dataset from a file. Supports CSV, Parquet, Excel (xlsx, xls, xlsb, ods), Stata (dta), and SAS (sas7bdat) formats. Returns dataset information including dimensions and column types.")]
     async fn load_dataset(
         &self,
         Parameters(request): Parameters<LoadDatasetRequest>,
@@ -406,6 +655,73 @@ impl AnalyticsServer {
         Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
     }
 
+    /// Run regression diagnostics.
+    #[tool(description = "Run comprehensive regression diagnostics. Tests include: Jarque-Bera (normality), Breusch-Pagan (heteroskedasticity), Durbin-Watson (autocorrelation), VIF (multicollinearity), and condition number.")]
+    async fn regression_diagnostics(
+        &self,
+        Parameters(request): Parameters<DiagnosticsRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let result = match run_diagnostics(dataset, &request.formula) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Diagnostics failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+    }
+
+    /// Run OLS with clustered standard errors.
+    #[tool(description = "Run OLS regression with clustered standard errors. Supports one-way (firm, state) or two-way (firm + time) clustering. Essential for panel data with correlated errors.")]
+    async fn regression_clustered(
+        &self,
+        Parameters(request): Parameters<OlsClusteredRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let result = match run_ols_clustered(
+            dataset,
+            &request.formula,
+            &request.cluster1,
+            request.cluster2.as_deref(),
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Clustered regression failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+    }
+
     // ========================================================================
     // Econometrics Tools
     // ========================================================================
@@ -472,6 +788,37 @@ impl AnalyticsServer {
         Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
     }
 
+    /// Run Hausman specification test.
+    #[tool(description = "Run Hausman specification test to choose between Fixed Effects and Random Effects. Tests H0: RE is consistent. If p-value < 0.05, use Fixed Effects.")]
+    async fn hausman_test(
+        &self,
+        Parameters(request): Parameters<HausmanRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let result = match run_hausman_test(dataset, &request.formula, &request.entity_var) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Hausman test failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+    }
+
     /// Run IV/2SLS regression.
     #[tool(description = "Run Instrumental Variables (2SLS) regression. Use when an explanatory variable is endogenous (correlated with the error term). Requires valid instruments.")]
     async fn iv_2sls(
@@ -497,6 +844,46 @@ impl AnalyticsServer {
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
                     "IV/2SLS estimation failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+    }
+
+    /// Run first-stage diagnostics for IV/2SLS.
+    #[tool(description = "Run first-stage diagnostics to test instrument strength. Reports F-statistic (F > 10 suggests strong instruments), R-squared, and coefficient estimates. Essential before running 2SLS.")]
+    async fn iv_first_stage(
+        &self,
+        Parameters(request): Parameters<FirstStageRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let instruments: Vec<&str> = request.instruments.iter().map(|s| s.as_str()).collect();
+        let controls: Option<Vec<&str>> = request.controls.as_ref()
+            .map(|c| c.iter().map(|s| s.as_str()).collect());
+
+        let result = match run_first_stage_diagnostics(
+            dataset,
+            &request.endogenous_var,
+            &instruments,
+            controls.as_deref(),
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "First-stage diagnostics failed: {}",
                     e
                 ))]));
             }
@@ -535,6 +922,393 @@ impl AnalyticsServer {
 
         Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
     }
+
+    // ========================================================================
+    // Discrete Choice Models
+    // ========================================================================
+
+    /// Run Logit (logistic) regression.
+    #[tool(description = "Run Logit (logistic) regression for binary outcomes. Uses MLE with Newton-Raphson. Dependent variable must be 0/1.")]
+    async fn logit(
+        &self,
+        Parameters(request): Parameters<LogitRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let result = match run_logit(dataset, &request.formula) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Logit estimation failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+    }
+
+    /// Run Probit regression.
+    #[tool(description = "Run Probit regression for binary outcomes. Uses MLE with Newton-Raphson. Dependent variable must be 0/1.")]
+    async fn probit(
+        &self,
+        Parameters(request): Parameters<ProbitRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let result = match run_probit(dataset, &request.formula) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Probit estimation failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+    }
+
+    // ========================================================================
+    // Time Series Models
+    // ========================================================================
+
+    /// Run VAR (Vector Autoregression) model.
+    #[tool(description = "Run Vector Autoregression (VAR) model for multivariate time series. Returns coefficients, residual covariance, AIC, and BIC.")]
+    async fn ts_var(
+        &self,
+        Parameters(request): Parameters<VarRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let columns: Vec<&str> = request.columns.iter().map(|s| s.as_str()).collect();
+
+        let result = match run_var(dataset, &columns, request.lags) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "VAR estimation failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+    }
+
+    /// Run VARMA (Vector ARMA) model.
+    #[tool(description = "Run VARMA(p,q) model using Hannan-Rissanen estimation. Combines autoregressive and moving average components for multivariate time series.")]
+    async fn ts_varma(
+        &self,
+        Parameters(request): Parameters<VarmaRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let columns: Vec<&str> = request.columns.iter().map(|s| s.as_str()).collect();
+
+        let result = match run_varma(dataset, &columns, request.p, request.q) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "VARMA estimation failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+    }
+
+    /// Run VECM (Vector Error Correction Model).
+    #[tool(description = "Run VECM using Johansen Maximum Likelihood. For cointegrated I(1) time series. Returns cointegration vectors (beta), adjustment speeds (alpha), and eigenvalues.")]
+    async fn ts_vecm(
+        &self,
+        Parameters(request): Parameters<VecmRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let columns: Vec<&str> = request.columns.iter().map(|s| s.as_str()).collect();
+
+        let result = match run_vecm(dataset, &columns, request.lags, request.rank) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "VECM estimation failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+    }
+
+    /// Compute VAR Impulse Response Functions.
+    #[tool(description = "Compute Impulse Response Functions (IRF) from a VAR model. Shows how variables respond to shocks over time using Cholesky orthogonalization.")]
+    async fn ts_var_irf(
+        &self,
+        Parameters(request): Parameters<VarIrfRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let columns: Vec<&str> = request.columns.iter().map(|s| s.as_str()).collect();
+
+        let result = match run_var_irf(dataset, &columns, request.lags, request.steps) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "VAR IRF computation failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+    }
+
+    // ========================================================================
+    // Forecasting Models
+    // ========================================================================
+
+    /// Fit an ARIMA model.
+    #[tool(description = "Fit an ARIMA(p,d,q) model to a univariate time series. Returns AR/MA coefficients, residuals, AIC, and model diagnostics.")]
+    async fn ts_arima_fit(
+        &self,
+        Parameters(request): Parameters<ArimaRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let result = match run_arima(dataset, &request.column, request.p, request.d, request.q) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "ARIMA fitting failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        // Format result
+        let output = format!(
+            "ARIMA({},{},{}) Model Results\n\
+             ==============================\n\
+             Column: {}\n\
+             Observations: {}\n\n\
+             AR Coefficients (phi): {:?}\n\
+             MA Coefficients (theta): {:?}\n\
+             Intercept: {:.6}\n\n\
+             Sum of Squared Residuals: {:.4}\n\
+             AIC: {:.4}",
+            result.p, result.d, result.q,
+            result.column,
+            result.n_obs,
+            result.ar_coeffs,
+            result.ma_coeffs,
+            result.intercept,
+            result.ssr,
+            result.aic
+        );
+
+        Ok(CallToolResult::success(vec![Content::text(output)]))
+    }
+
+    /// Forecast using an ARIMA model.
+    #[tool(description = "Forecast future values using an ARIMA(p,d,q) model. Fits the model and generates h-step ahead forecasts.")]
+    async fn ts_arima_forecast(
+        &self,
+        Parameters(request): Parameters<ArimaForecastRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let result = match forecast_arima(
+            dataset,
+            &request.column,
+            request.p,
+            request.d,
+            request.q,
+            request.horizon,
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "ARIMA forecasting failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        // Format result
+        let mut output = format!(
+            "ARIMA Forecast Results\n\
+             ======================\n\
+             Column: {}\n\
+             Horizon: {} periods\n\n\
+             Forecasted Values:\n",
+            result.column, result.horizon
+        );
+
+        for (i, val) in result.forecast.iter().enumerate() {
+            output.push_str(&format!("  t+{}: {:.4}\n", i + 1, val));
+        }
+
+        Ok(CallToolResult::success(vec![Content::text(output)]))
+    }
+
+    /// Run MSTL decomposition.
+    #[tool(description = "Perform MSTL (Multiple Seasonal-Trend decomposition using LOESS) on a time series. Extracts trend, seasonal components, and residuals.")]
+    async fn ts_mstl(
+        &self,
+        Parameters(request): Parameters<MstlRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let result = match run_mstl(dataset, &request.column, &request.periods) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "MSTL decomposition failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        // Format result with summary statistics
+        let trend_mean: f64 = result.trend.iter().sum::<f64>() / result.trend.len() as f64;
+        let resid_var: f64 = result.residuals.iter().map(|r| r * r).sum::<f64>() / result.residuals.len() as f64;
+
+        let mut output = format!(
+            "MSTL Decomposition Results\n\
+             ==========================\n\
+             Column: {}\n\
+             Observations: {}\n\
+             Seasonal Periods: {:?}\n\n\
+             Component Statistics:\n\
+             - Trend mean: {:.4}\n\
+             - Residual variance: {:.4}\n",
+            result.column,
+            result.n_obs,
+            result.periods,
+            trend_mean,
+            resid_var
+        );
+
+        // Show first few values of each component
+        let show_n = 5.min(result.n_obs);
+        output.push_str(&format!("\nFirst {} values:\n", show_n));
+        output.push_str("  Trend: [");
+        for (i, val) in result.trend.iter().take(show_n).enumerate() {
+            if i > 0 { output.push_str(", "); }
+            output.push_str(&format!("{:.2}", val));
+        }
+        output.push_str("]\n");
+
+        for (idx, seasonal) in result.seasonal.iter().enumerate() {
+            output.push_str(&format!("  Seasonal (period {}): [", result.periods[idx]));
+            for (i, val) in seasonal.iter().take(show_n).enumerate() {
+                if i > 0 { output.push_str(", "); }
+                output.push_str(&format!("{:.2}", val));
+            }
+            output.push_str("]\n");
+        }
+
+        output.push_str("  Residuals: [");
+        for (i, val) in result.residuals.iter().take(show_n).enumerate() {
+            if i > 0 { output.push_str(", "); }
+            output.push_str(&format!("{:.2}", val));
+        }
+        output.push_str("]\n");
+
+        Ok(CallToolResult::success(vec![Content::text(output)]))
+    }
 }
 
 // ============================================================================
@@ -557,9 +1331,15 @@ impl ServerHandler for AnalyticsServer {
                  Use 'load_dataset' to load a CSV or Parquet file. \
                  Then use 'describe_dataset' for summary statistics, \
                  'compute_correlation' for correlations, 'regression_ols' \
-                 for linear regression, 'panel_fixed_effects' or 'panel_random_effects' \
-                 for panel data, 'iv_2sls' for instrumental variables, or \
-                 'diff_in_diff' for difference-in-differences causal analysis."
+                 for linear regression, 'regression_diagnostics' for model validation, \
+                 'panel_fixed_effects' or 'panel_random_effects' for panel data, \
+                 'hausman_test' to choose between FE/RE, 'iv_2sls' for instrumental \
+                 variables, 'diff_in_diff' for difference-in-differences, \
+                 'logit' or 'probit' for binary outcomes, \
+                 'ts_var' for VAR models, 'ts_varma' for VARMA models, \
+                 'ts_vecm' for cointegration analysis, 'ts_var_irf' for impulse responses, \
+                 'ts_arima_fit' for ARIMA modeling, 'ts_arima_forecast' for forecasting, \
+                 or 'ts_mstl' for seasonal decomposition."
                     .to_string(),
             ),
         }

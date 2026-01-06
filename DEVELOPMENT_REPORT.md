@@ -1,13 +1,23 @@
 # prompt2analytics Development Report
 
 **Date:** January 6, 2026
-**Status:** Phase 2 (Econometrics Core) In Progress
+**Status:** Phase 2 (Econometrics Core) ~85% Complete
 
 ---
 
 ## Executive Summary
 
-Phase 1 of the prompt2analytics development plan has been completed, and significant progress has been made on Phase 2. The econometrics module is now functional with panel data estimators (Fixed Effects, Random Effects), instrumental variables (2SLS), and difference-in-differences. The codebase has been consolidated to use the `greeners` library for all regression/econometrics functionality.
+Phase 1 of the prompt2analytics development plan has been completed, and Phase 2 is now substantially complete (~85%). The econometrics module includes:
+- Panel data estimators (Fixed Effects, Random Effects)
+- Hausman specification test
+- Instrumental variables (2SLS)
+- Difference-in-differences
+- Regression diagnostics (Jarque-Bera, Breusch-Pagan, Durbin-Watson, VIF)
+- Clustered standard errors (one-way and two-way)
+- Discrete choice models (Logit, Probit)
+- **Time series: VAR, VARMA, VECM models with Impulse Response Functions**
+
+The codebase uses the `greeners` library for all regression/econometrics functionality.
 
 ---
 
@@ -41,21 +51,29 @@ From the original plan:
 
 ---
 
-## Phase 2: Econometrics & Time Series — 🔄 IN PROGRESS (~40%)
+## Phase 2: Econometrics & Time Series — 🔄 ~85% COMPLETE
 
 | Deliverable | Status | Planned Crate |
 |-------------|--------|---------------|
 | Fixed Effects (FE) estimation | ✅ Complete | greeners |
 | Random Effects (RE) estimation | ✅ Complete | greeners |
-| Hausman test | ❌ | greeners |
-| Two-way clustering | ❌ | greeners |
+| Hausman test | ✅ Complete | greeners |
+| Two-way clustering | ✅ Complete | greeners |
+| One-way clustering | ✅ Complete | greeners |
 | 2SLS (Instrumental Variables) | ✅ Complete | greeners |
 | First-stage diagnostics | ❌ | greeners |
 | Difference-in-Differences | ✅ Complete | greeners |
+| Regression diagnostics | ✅ Complete | greeners |
+| Logit (logistic regression) | ✅ Complete | greeners |
+| Probit regression | ✅ Complete | greeners |
 | Event study plots | ❌ | greeners + plotters |
 | ARIMA modeling | ❌ | augurs |
 | MSTL decomposition | ❌ | augurs |
 | Changepoint detection | ❌ | augurs |
+| VAR model | ✅ Complete | greeners |
+| VARMA model | ✅ Complete | greeners |
+| VECM (Johansen cointegration) | ✅ Complete | greeners |
+| Impulse Response Functions | ✅ Complete | greeners |
 | Robust Standard Errors (HC1-4) | ✅ Complete | greeners (built-in) |
 | Excel file support | ❌ | calamine |
 | Stata (.dta) support | ❌ | polars_readstat |
@@ -68,6 +86,7 @@ From the original plan:
 **Panel Data Estimators:**
 - Fixed Effects (within estimator) with entity demeaning
 - Random Effects (GLS/Swamy-Arora) estimation
+- Hausman specification test (choose between FE/RE)
 - Automatic entity ID mapping from string/integer columns
 
 **Instrumental Variables:**
@@ -80,6 +99,29 @@ From the original plan:
 - Treatment effect (ATT) with standard errors
 - Group means for parallel trends assessment
 
+**Regression Diagnostics:**
+- Jarque-Bera test (normality of residuals)
+- Breusch-Pagan test (heteroskedasticity)
+- Durbin-Watson test (autocorrelation)
+- Variance Inflation Factor (multicollinearity)
+- Condition number (multicollinearity)
+
+**Clustered Standard Errors:**
+- One-way clustering (e.g., by firm, state)
+- Two-way clustering (e.g., firm + time)
+
+**Discrete Choice Models:**
+- Logit (logistic regression) via MLE
+- Probit regression via MLE
+- McFadden's Pseudo R-squared
+
+**Multivariate Time Series:**
+- VAR (Vector Autoregression) with lag selection via AIC/BIC
+- VARMA (Vector ARMA) via Hannan-Rissanen two-step estimation
+- VECM (Vector Error Correction Model) via Johansen ML
+- Impulse Response Functions (IRF) with Cholesky orthogonalization
+- Cointegration vectors (beta) and adjustment speeds (alpha)
+
 ---
 
 ## Phase 2b: ML Toolkit Extension — ❌ NOT STARTED
@@ -89,7 +131,7 @@ From the original plan:
 | K-means clustering | ❌ | linfa-clustering |
 | DBSCAN | ❌ | linfa-clustering |
 | Hierarchical clustering | ❌ | linfa-clustering |
-| Logistic regression | ❌ | linfa-logistic |
+| Logistic regression | ✅ Complete | greeners (Logit) |
 | Random Forest | ❌ | smartcore |
 | SVM | ❌ | linfa-svm |
 | PCA | ❌ | linfa-reduction |
@@ -144,13 +186,13 @@ From the original plan:
 | Phase | Status | Completion |
 |-------|--------|------------|
 | Phase 1: Foundation (MVP Core) | ✅ Complete | 100% |
-| Phase 2: Econometrics & Time Series | 🔄 In Progress | ~40% |
+| Phase 2: Econometrics & Time Series | 🔄 In Progress | ~85% |
 | Phase 2b: ML Toolkit Extension | ❌ Not Started | 0% |
 | Phase 3: Desktop Application | ❌ Not Started | 0% |
 | Phase 4: LLM Integration | ❌ Not Started | 0% |
 | Phase 5: Advanced Features | ❌ Not Started | 0% |
 
-**Overall Progress: ~25%** (Phase 1 complete, Phase 2 partially complete)
+**Overall Progress: ~40%** (Phase 1 complete, Phase 2 substantially complete)
 
 ---
 
@@ -159,7 +201,7 @@ From the original plan:
 **Dependencies (current versions):**
 - `polars` 0.46 — DataFrame operations
 - `rmcp` 0.8 — MCP SDK with tool macros
-- `greeners` 1.3 — Econometrics (OLS, Panel, IV, DiD)
+- `greeners` 1.3 — Econometrics (OLS, Panel, IV, DiD, Logit, Probit, Diagnostics)
 - `ndarray` 0.17 — Numerical arrays (pinned to match greeners)
 - `statrs` 0.18 — Statistical distributions
 
@@ -172,8 +214,10 @@ From the original plan:
 - Newey-West (HAC) standard errors
 - Clustered standard errors (one-way and two-way)
 - Better integration with panel/IV/DiD estimators
+- Discrete choice models (Logit/Probit)
+- Comprehensive regression diagnostics
 
-**MCP Tools Exposed (10 total):**
+**MCP Tools Exposed (20 total):**
 ```
 ┌─────────────────────────┬──────────────────────────────────────────────────────────────┐
 │ Tool                    │ Description                                                  │
@@ -183,11 +227,20 @@ From the original plan:
 │ describe_dataset        │ Summary statistics (count, mean, std, quartiles)             │
 │ head_dataset            │ Preview first N rows                                         │
 │ compute_correlation     │ Pearson correlation matrix for numeric columns               │
-│ regression_ols          │ OLS regression with robust SEs                               │
+│ regression_ols          │ OLS regression with robust SEs (HC1)                         │
+│ regression_diagnostics  │ Model validation (JB, BP, DW, VIF, condition number)         │
+│ regression_clustered    │ OLS with one-way or two-way clustered SEs                    │
 │ panel_fixed_effects     │ Fixed Effects panel regression                               │
 │ panel_random_effects    │ Random Effects (GLS) panel regression                        │
+│ hausman_test            │ Specification test: FE vs RE                                 │
 │ iv_2sls                 │ Instrumental Variables / 2SLS regression                     │
 │ diff_in_diff            │ Difference-in-Differences causal estimation                  │
+│ logit                   │ Logistic regression (binary outcomes)                        │
+│ probit                  │ Probit regression (binary outcomes)                          │
+│ ts_var                  │ Vector Autoregression (VAR) model                            │
+│ ts_varma                │ VARMA(p,q) via Hannan-Rissanen                               │
+│ ts_vecm                 │ Vector Error Correction Model (Johansen ML)                  │
+│ ts_var_irf              │ VAR Impulse Response Functions                               │
 └─────────────────────────┴──────────────────────────────────────────────────────────────┘
 ```
 
@@ -198,6 +251,7 @@ From the original plan:
 ```
 prompt2analytics/
 ├── Cargo.toml                          # Workspace root
+├── .gitignore                          # Git ignore rules
 ├── .mcp.json                           # MCP server config for Claude Code
 ├── CLAUDE.md                           # Development guidance
 ├── DEVELOPMENT_REPORT.md               # This file
@@ -217,20 +271,23 @@ prompt2analytics/
     │       │   └── correlation.rs
     │       ├── regression/
     │       │   ├── mod.rs
-    │       │   └── ols.rs              # Now uses greeners
-    │       ├── econometrics/           # NEW
+    │       │   ├── ols.rs              # OLS + clustered SEs
+    │       │   └── diagnostics.rs      # NEW: Regression diagnostics
+    │       ├── econometrics/
     │       │   ├── mod.rs
     │       │   ├── convert.rs          # Polars ↔ greeners conversion
-    │       │   ├── panel.rs            # FE/RE estimators
+    │       │   ├── panel.rs            # FE/RE + Hausman test
     │       │   ├── iv.rs               # 2SLS/IV estimation
-    │       │   └── did.rs              # Difference-in-Differences
+    │       │   ├── did.rs              # Difference-in-Differences
+    │       │   ├── discrete.rs         # Logit/Probit
+    │       │   └── timeseries.rs       # VAR/VARMA/VECM/IRF
     │       └── ml/
     │           └── mod.rs              # Placeholder
     └── p2a-mcp/
         ├── Cargo.toml
         └── src/
             ├── main.rs
-            ├── server.rs               # 10 MCP tools
+            ├── server.rs               # 20 MCP tools
             └── tools/
                 └── mod.rs              # Placeholder
 ```
@@ -253,27 +310,23 @@ prompt2analytics/
 
 ## Recommended Next Steps
 
-1. **Complete Phase 2 Econometrics:**
-   - Add Hausman test for FE vs RE model selection
-   - Add first-stage diagnostics for IV (F-stat, weak instruments test)
-   - Add two-way clustering support
-
-2. **Time Series (augurs):**
-   - ARIMA modeling
+1. **Complete Phase 2 Univariate Time Series:**
+   - ARIMA modeling (augurs)
    - Seasonal decomposition (MSTL)
    - Changepoint detection
 
-3. **File Format Expansion:**
+2. **File Format Expansion:**
    - Add Excel support via `calamine`
    - Add Stata/SAS via `polars_readstat`
 
-4. **Visualization:**
+3. **Visualization:**
    - Add `plotters` for basic charts (histograms, scatter, coefficient plots)
+   - IRF plots for time series
 
-5. **Testing:**
+4. **Testing:**
    - Expand test coverage, particularly for econometrics output accuracy
    - Add integration tests with known datasets
 
-6. **Documentation:**
+5. **Documentation:**
    - Add usage examples for each MCP tool
    - Document econometric model assumptions and interpretation

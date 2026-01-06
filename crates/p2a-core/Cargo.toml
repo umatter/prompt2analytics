@@ -18,6 +18,16 @@ statrs.workspace = true
 # Econometrics
 greeners.workspace = true
 
+# Time series forecasting
+arima.workspace = true
+augurs-core.workspace = true
+augurs-mstl.workspace = true
+augurs-ets.workspace = true
+rand.workspace = true
+
+# File format support
+calamine.workspace = true
+
 # Serialization
 serde.workspace = true
 serde_json.workspace = true
