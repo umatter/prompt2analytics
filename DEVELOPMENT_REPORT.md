@@ -1,13 +1,13 @@
 # prompt2analytics Development Report
 
 **Date:** January 6, 2026
-**Status:** Phase 2b (ML & Database) ✅ COMPLETE
+**Status:** Phase 3a (Visualization) ✅ COMPLETE
 
 ---
 
 ## Executive Summary
 
-Phases 1, 2, and 2b of the prompt2analytics development plan are now complete. The analytics engine includes:
+Phases 1, 2, 2b, and 3a of the prompt2analytics development plan are now complete. The analytics engine includes:
 - Panel data estimators (Fixed Effects, Random Effects)
 - Hausman specification test
 - Instrumental variables (2SLS) with first-stage diagnostics
@@ -18,10 +18,11 @@ Phases 1, 2, and 2b of the prompt2analytics development plan are now complete. T
 - Time series: VAR, VARMA, VECM models with Impulse Response Functions
 - Univariate forecasting: ARIMA and MSTL decomposition
 - File formats: CSV, Parquet, Excel, Stata, SAS
-- **ML algorithms: K-means, DBSCAN clustering, PCA dimensionality reduction**
-- **Database connectivity: SQLite and DuckDB (query, list tables, schema)**
+- ML algorithms: K-means, DBSCAN clustering, PCA dimensionality reduction
+- Database connectivity: SQLite and DuckDB (query, list tables, schema)
+- **Visualization: Histograms, scatter plots, line charts, box plots, correlation heatmaps**
 
-The codebase uses the `greeners` library for econometrics, pure Rust implementations for ML algorithms (to avoid ndarray version conflicts), and native database drivers for SQLite/DuckDB.
+The codebase uses the `greeners` library for econometrics, pure Rust implementations for ML algorithms (to avoid ndarray version conflicts), native database drivers for SQLite/DuckDB, and `plotters` for in-memory chart generation with base64-encoded PNG output.
 
 ---
 
@@ -85,6 +86,54 @@ From the original plan:
 | SQLite connections | ✅ Complete | rusqlite 0.33 (Phase 2b) |
 | DuckDB connections | ✅ Complete | duckdb 1.2 (Phase 2b) |
 
+---
+
+## Phase 3a: Visualization — ✅ COMPLETE
+
+| Deliverable | Status | Implementation |
+|-------------|--------|----------------|
+| Histograms | ✅ Complete | plotters (in-memory PNG) |
+| Scatter plots | ✅ Complete | plotters (with correlation) |
+| Line charts | ✅ Complete | plotters (multi-series) |
+| Box plots | ✅ Complete | plotters (with quartile stats) |
+| Correlation heatmaps | ✅ Complete | plotters (blue-white-red colormap) |
+| Event study plots | ❌ Deferred | Phase 3b |
+| Coefficient plots | ❌ Deferred | Phase 3b |
+| IRF plots | ❌ Deferred | Phase 3b |
+
+### Visualization Implementation Details
+
+**Chart Generation (plotters 0.3):**
+- In-memory bitmap rendering (no file system writes)
+- Base64-encoded PNG output for MCP tool responses
+- Configurable dimensions (default: 800x600)
+- Support for custom titles, axis labels
+- Automatic axis range calculation
+
+**Histogram:**
+- Configurable bin count (default: Sturges' rule)
+- Returns bin edges, frequencies, and image
+
+**Scatter Plot:**
+- Auto-calculates Pearson correlation
+- Displays point count and correlation coefficient
+
+**Line Chart:**
+- Multi-series support (multiple Y columns)
+- Automatic color cycling for series
+- Legend display
+
+**Box Plot:**
+- Shows min, Q1, median, Q3, max for each group
+- Returns full quartile statistics
+- Handles multiple columns
+
+**Correlation Heatmap:**
+- Diverging blue-white-red colormap
+- Cell value annotations (when cells are large enough)
+- Colorbar legend
+- Optional column filtering
+
 ### Econometrics Implementation Details
 
 **Panel Data Estimators:**
@@ -142,11 +191,6 @@ From the original plan:
 | t-SNE | ❌ Deferred | Phase 3 |
 | SQLite connectivity | ✅ Complete | rusqlite 0.33 |
 | DuckDB connectivity | ✅ Complete | duckdb 1.2 |
-| Scatter plots | ❌ Deferred | Phase 3 |
-| Histograms | ❌ Deferred | Phase 3 |
-| Box plots | ❌ Deferred | Phase 3 |
-| Heatmaps | ❌ Deferred | Phase 3 |
-| Coefficient plots | ❌ Deferred | Phase 3 |
 
 ### ML Implementation Details
 
@@ -185,7 +229,7 @@ From the original plan:
 
 ---
 
-## Phase 3: Desktop Application — ❌ NOT STARTED
+## Phase 3b: Desktop Application — ❌ NOT STARTED
 
 | Deliverable | Status |
 |-------------|--------|
@@ -229,11 +273,12 @@ From the original plan:
 | Phase 1: Foundation (MVP Core) | ✅ Complete | 100% |
 | Phase 2: Econometrics & Time Series | ✅ Complete | 100% |
 | Phase 2b: ML Toolkit & Database | ✅ Complete | 100% |
-| Phase 3: Desktop Application | ❌ Not Started | 0% |
+| Phase 3a: Visualization | ✅ Complete | 100% |
+| Phase 3b: Desktop Application | ❌ Not Started | 0% |
 | Phase 4: LLM Integration | ❌ Not Started | 0% |
 | Phase 5: Advanced Features | ❌ Not Started | 0% |
 
-**Overall Progress: ~55%** (Phases 1, 2, and 2b complete)
+**Overall Progress: ~60%** (Phases 1, 2, 2b, and 3a complete)
 
 ---
 
@@ -252,6 +297,9 @@ From the original plan:
 - `rand` 0.8 — Random number generation (for ML/forecasting)
 - `rusqlite` 0.33 — SQLite database connectivity (bundled)
 - `duckdb` 1.2 — DuckDB database connectivity (bundled)
+- `plotters` 0.3 — In-memory chart generation
+- `image` 0.24 — PNG encoding
+- `base64` 0.22 — Base64 encoding for image output
 
 **System Requirements:**
 - OpenBLAS: `sudo apt-get install libopenblas-dev`
@@ -265,7 +313,7 @@ From the original plan:
 - Discrete choice models (Logit/Probit)
 - Comprehensive regression diagnostics
 
-**MCP Tools Exposed (33 total):**
+**MCP Tools Exposed (38 total):**
 ```
 ┌─────────────────────────┬──────────────────────────────────────────────────────────────┐
 │ Tool                    │ Description                                                  │
@@ -302,6 +350,11 @@ From the original plan:
 │ db_duckdb_query         │ Execute SQL query on DuckDB database                         │
 │ db_duckdb_tables        │ List tables in DuckDB database                               │
 │ db_duckdb_schema        │ Get schema for DuckDB table                                  │
+│ viz_histogram           │ Histogram for numeric column (base64 PNG)                    │
+│ viz_scatter             │ Scatter plot with correlation (base64 PNG)                   │
+│ viz_line                │ Line chart for time series (multi-series, base64 PNG)        │
+│ viz_boxplot             │ Box plot with quartile statistics (base64 PNG)               │
+│ viz_heatmap             │ Correlation heatmap (base64 PNG)                             │
 └─────────────────────────┴──────────────────────────────────────────────────────────────┘
 ```
 
@@ -351,15 +404,19 @@ prompt2analytics/
     │       │   ├── mod.rs
     │       │   ├── arima_model.rs      # ARIMA fitting and forecasting
     │       │   └── mstl.rs             # MSTL decomposition
-    │       └── ml/
+    │       ├── ml/
+    │       │   ├── mod.rs
+    │       │   ├── clustering.rs       # K-means + DBSCAN (pure Rust)
+    │       │   └── reduction.rs        # PCA (pure Rust)
+    │       └── visualization/
     │           ├── mod.rs
-    │           ├── clustering.rs       # K-means + DBSCAN (pure Rust)
-    │           └── reduction.rs        # PCA (pure Rust)
+    │           ├── charts.rs           # Histogram, scatter, line, box plots
+    │           └── heatmap.rs          # Correlation heatmap
     └── p2a-mcp/
         ├── Cargo.toml
         └── src/
             ├── main.rs
-            ├── server.rs               # 33 MCP tools
+            ├── server.rs               # 38 MCP tools
             └── tools/
                 └── mod.rs              # Placeholder
 ```
@@ -382,11 +439,11 @@ prompt2analytics/
 
 ## Recommended Next Steps
 
-1. **Visualization (Phase 3 priority):**
-   - Add `plotters` for basic charts (histograms, scatter, coefficient plots)
-   - IRF plots for time series
-   - Event study plots
-   - Heatmaps for correlation matrices
+1. **Advanced Visualization (Phase 3b):**
+   - Event study plots (dynamic DiD)
+   - Coefficient plots with confidence intervals
+   - IRF plots for VAR models
+   - Residual diagnostic plots
 
 2. **Additional ML Algorithms:**
    - Hierarchical clustering
@@ -399,14 +456,17 @@ prompt2analytics/
    - Add integration tests with known datasets
    - Test Stata/SAS file format readers with real-world files
    - Test database tools with larger databases
+   - Test visualization output with various data shapes
 
 4. **Documentation:**
    - Add usage examples for each MCP tool
    - Document econometric model assumptions and interpretation
    - Document database query patterns
+   - Document visualization options and customization
 
-5. **Phase 3 - Desktop Application:**
+5. **Phase 3b - Desktop Application:**
    - Tauri 2.0 application shell
    - Chat interface with Svelte
    - Data viewer and results panel
    - Visual query builder for databases
+   - Image preview for chart outputs

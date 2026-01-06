@@ -33,6 +33,9 @@ use p2a_core::{
     run_arima, forecast_arima, run_mstl,
     // Machine Learning
     kmeans, dbscan, pca,
+    // Visualization
+    histogram, scatter_plot, box_plot, line_chart, correlation_heatmap,
+    ChartConfig,
 };
 
 /// The main analytics server that handles MCP requests.
@@ -566,6 +569,102 @@ pub struct DuckDBSchemaRequest {
     /// Table name
     #[schemars(description = "Name of the table to get schema for.")]
     pub table_name: String,
+}
+
+// ============================================================================
+// Visualization Request Types
+// ============================================================================
+
+/// Request to generate a histogram.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct HistogramRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Column name to plot
+    #[schemars(description = "Name of the numeric column to create histogram from.")]
+    pub column: String,
+
+    /// Number of bins (optional, auto-calculated if not specified)
+    #[schemars(description = "Number of bins for the histogram. If not specified, uses Sturges' rule.")]
+    pub bins: Option<usize>,
+
+    /// Chart title (optional)
+    #[schemars(description = "Optional title for the chart.")]
+    pub title: Option<String>,
+}
+
+/// Request to generate a scatter plot.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ScatterPlotRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// X-axis column name
+    #[schemars(description = "Name of the column for X-axis values.")]
+    pub x_column: String,
+
+    /// Y-axis column name
+    #[schemars(description = "Name of the column for Y-axis values.")]
+    pub y_column: String,
+
+    /// Chart title (optional)
+    #[schemars(description = "Optional title for the chart.")]
+    pub title: Option<String>,
+}
+
+/// Request to generate a line chart.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct LineChartRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// X-axis column name
+    #[schemars(description = "Name of the column for X-axis values (e.g., time index).")]
+    pub x_column: String,
+
+    /// Y-axis column names (one or more series)
+    #[schemars(description = "Names of the columns to plot as lines (can be multiple for multi-series).")]
+    pub y_columns: Vec<String>,
+
+    /// Chart title (optional)
+    #[schemars(description = "Optional title for the chart.")]
+    pub title: Option<String>,
+}
+
+/// Request to generate a box plot.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct BoxPlotRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Column names to include in box plot
+    #[schemars(description = "Names of numeric columns to create box plots for.")]
+    pub columns: Vec<String>,
+
+    /// Chart title (optional)
+    #[schemars(description = "Optional title for the chart.")]
+    pub title: Option<String>,
+}
+
+/// Request to generate a correlation heatmap.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct HeatmapRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Column names to include (optional, uses all numeric if not specified)
+    #[schemars(description = "Names of numeric columns to include. If not specified, uses all numeric columns.")]
+    pub columns: Option<Vec<String>>,
+
+    /// Chart title (optional)
+    #[schemars(description = "Optional title for the heatmap.")]
+    pub title: Option<String>,
 }
 
 // ============================================================================
@@ -1822,6 +1921,473 @@ impl AnalyticsServer {
 
         Ok(CallToolResult::success(vec![Content::text(output)]))
     }
+
+    // ========================================================================
+    // Visualization Tools
+    // ========================================================================
+
+    /// Generate a histogram for a numeric column.
+    #[tool(description = "Generate a histogram visualization for a numeric column. Returns a base64-encoded PNG image along with bin statistics.")]
+    async fn viz_histogram(
+        &self,
+        Parameters(request): Parameters<HistogramRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        use p2a_core::polars::prelude::*;
+
+        let datasets = self.datasets.read().await;
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let df = dataset.df();
+        let col = match df.column(&request.column) {
+            Ok(c) => c,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Column '{}' not found: {}",
+                    request.column, e
+                ))]));
+            }
+        };
+
+        let values: Vec<f64> = match col.cast(&DataType::Float64) {
+            Ok(c) => match c.f64() {
+                Ok(f) => f.into_iter().filter_map(|v| v).filter(|v| v.is_finite()).collect(),
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Not a numeric column: {}",
+                        e
+                    ))]));
+                }
+            },
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Cannot convert to numeric: {}",
+                    e
+                ))]));
+            }
+        };
+
+        if values.is_empty() {
+            return Ok(CallToolResult::error(vec![Content::text(
+                "No valid numeric values in column",
+            )]));
+        }
+
+        let mut config = ChartConfig::default();
+        config.title = request.title;
+        config.x_label = Some(request.column.clone());
+        config.y_label = Some("Frequency".to_string());
+
+        match histogram(&values, request.bins, config) {
+            Ok(result) => {
+                let output = format!(
+                    "Histogram of '{}'\n{}\n\nImage (base64 PNG, {} bytes):\n{}",
+                    request.column,
+                    "=".repeat(40),
+                    result.image_base64.len(),
+                    result.image_base64
+                );
+                Ok(CallToolResult::success(vec![Content::text(output)]))
+            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
+                "Failed to generate histogram: {}",
+                e
+            ))])),
+        }
+    }
+
+    /// Generate a scatter plot for two numeric columns.
+    #[tool(description = "Generate a scatter plot visualization showing the relationship between two numeric columns. Returns a base64-encoded PNG image.")]
+    async fn viz_scatter(
+        &self,
+        Parameters(request): Parameters<ScatterPlotRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        use p2a_core::polars::prelude::*;
+
+        let datasets = self.datasets.read().await;
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let df = dataset.df();
+
+        // Extract X values
+        let x_col = match df.column(&request.x_column) {
+            Ok(c) => c,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "X column '{}' not found: {}",
+                    request.x_column, e
+                ))]));
+            }
+        };
+
+        let x_values: Vec<f64> = match x_col.cast(&DataType::Float64) {
+            Ok(c) => match c.f64() {
+                Ok(f) => f.into_iter().map(|v| v.unwrap_or(f64::NAN)).collect(),
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "X column not numeric: {}",
+                        e
+                    ))]));
+                }
+            },
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Cannot convert X to numeric: {}",
+                    e
+                ))]));
+            }
+        };
+
+        // Extract Y values
+        let y_col = match df.column(&request.y_column) {
+            Ok(c) => c,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Y column '{}' not found: {}",
+                    request.y_column, e
+                ))]));
+            }
+        };
+
+        let y_values: Vec<f64> = match y_col.cast(&DataType::Float64) {
+            Ok(c) => match c.f64() {
+                Ok(f) => f.into_iter().map(|v| v.unwrap_or(f64::NAN)).collect(),
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Y column not numeric: {}",
+                        e
+                    ))]));
+                }
+            },
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Cannot convert Y to numeric: {}",
+                    e
+                ))]));
+            }
+        };
+
+        let mut config = ChartConfig::default();
+        config.title = request.title;
+        config.x_label = Some(request.x_column.clone());
+        config.y_label = Some(request.y_column.clone());
+
+        match scatter_plot(&x_values, &y_values, config) {
+            Ok(result) => {
+                let output = format!(
+                    "Scatter Plot: {} vs {}\n{}\nPoints: {}\nCorrelation: {:.4}\n\nImage (base64 PNG, {} bytes):\n{}",
+                    request.x_column,
+                    request.y_column,
+                    "=".repeat(40),
+                    result.n_points,
+                    result.correlation.unwrap_or(f64::NAN),
+                    result.image_base64.len(),
+                    result.image_base64
+                );
+                Ok(CallToolResult::success(vec![Content::text(output)]))
+            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
+                "Failed to generate scatter plot: {}",
+                e
+            ))])),
+        }
+    }
+
+    /// Generate a line chart for time series or sequential data.
+    #[tool(description = "Generate a line chart visualization for time series or sequential data. Supports multiple Y series. Returns a base64-encoded PNG image.")]
+    async fn viz_line(
+        &self,
+        Parameters(request): Parameters<LineChartRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        use p2a_core::polars::prelude::*;
+
+        let datasets = self.datasets.read().await;
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let df = dataset.df();
+
+        // Extract X values (shared across all series)
+        let x_col = match df.column(&request.x_column) {
+            Ok(c) => c,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "X column '{}' not found: {}",
+                    request.x_column, e
+                ))]));
+            }
+        };
+
+        let x_values: Vec<f64> = match x_col.cast(&DataType::Float64) {
+            Ok(c) => match c.f64() {
+                Ok(f) => f.into_iter().map(|v| v.unwrap_or(f64::NAN)).collect(),
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "X column not numeric: {}",
+                        e
+                    ))]));
+                }
+            },
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Cannot convert X to numeric: {}",
+                    e
+                ))]));
+            }
+        };
+
+        // Extract Y series - API expects (name, x_vals, y_vals) tuples
+        let mut series: Vec<(String, Vec<f64>, Vec<f64>)> = Vec::new();
+        let mut series_names = Vec::new();
+        for y_col_name in &request.y_columns {
+            let y_col = match df.column(y_col_name) {
+                Ok(c) => c,
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Y column '{}' not found: {}",
+                        y_col_name, e
+                    ))]));
+                }
+            };
+
+            let y_values: Vec<f64> = match y_col.cast(&DataType::Float64) {
+                Ok(c) => match c.f64() {
+                    Ok(f) => f.into_iter().map(|v| v.unwrap_or(f64::NAN)).collect(),
+                    Err(e) => {
+                        return Ok(CallToolResult::error(vec![Content::text(format!(
+                            "Y column '{}' not numeric: {}",
+                            y_col_name, e
+                        ))]));
+                    }
+                },
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Cannot convert Y column '{}' to numeric: {}",
+                        y_col_name, e
+                    ))]));
+                }
+            };
+            series_names.push(y_col_name.clone());
+            series.push((y_col_name.clone(), x_values.clone(), y_values));
+        }
+
+        let mut config = ChartConfig::default();
+        config.title = request.title;
+        config.x_label = Some(request.x_column.clone());
+
+        match line_chart(&series, config) {
+            Ok(result) => {
+                let output = format!(
+                    "Line Chart\n{}\nX: {}\nSeries: {}\nPoints: {}\n\nImage (base64 PNG, {} bytes):\n{}",
+                    "=".repeat(40),
+                    request.x_column,
+                    series_names.join(", "),
+                    result.n_points,
+                    result.image_base64.len(),
+                    result.image_base64
+                );
+                Ok(CallToolResult::success(vec![Content::text(output)]))
+            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
+                "Failed to generate line chart: {}",
+                e
+            ))])),
+        }
+    }
+
+    /// Generate a box plot for comparing distributions.
+    #[tool(description = "Generate a box plot visualization comparing the distributions of one or more numeric columns. Shows median, quartiles, and outliers. Returns a base64-encoded PNG image.")]
+    async fn viz_boxplot(
+        &self,
+        Parameters(request): Parameters<BoxPlotRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        use p2a_core::polars::prelude::*;
+
+        let datasets = self.datasets.read().await;
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let df = dataset.df();
+
+        // Extract data for each column
+        let mut groups = Vec::new();
+        for col_name in &request.columns {
+            let col = match df.column(col_name) {
+                Ok(c) => c,
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Column '{}' not found: {}",
+                        col_name, e
+                    ))]));
+                }
+            };
+
+            let values: Vec<f64> = match col.cast(&DataType::Float64) {
+                Ok(c) => match c.f64() {
+                    Ok(f) => f.into_iter().filter_map(|v| v).filter(|v| v.is_finite()).collect(),
+                    Err(e) => {
+                        return Ok(CallToolResult::error(vec![Content::text(format!(
+                            "Column '{}' not numeric: {}",
+                            col_name, e
+                        ))]));
+                    }
+                },
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Cannot convert '{}' to numeric: {}",
+                        col_name, e
+                    ))]));
+                }
+            };
+            groups.push((col_name.clone(), values));
+        }
+
+        if groups.is_empty() {
+            return Ok(CallToolResult::error(vec![Content::text(
+                "No valid columns specified",
+            )]));
+        }
+
+        let mut config = ChartConfig::default();
+        config.title = request.title;
+        config.y_label = Some("Value".to_string());
+
+        match box_plot(&groups, config) {
+            Ok(result) => {
+                let mut output = format!("Box Plot\n{}\n", "=".repeat(40));
+                for stat in &result.statistics {
+                    output.push_str(&format!(
+                        "\n{}:\n  Min: {:.4}, Q1: {:.4}, Median: {:.4}, Q3: {:.4}, Max: {:.4}\n",
+                        stat.label, stat.min, stat.q1, stat.median, stat.q3, stat.max
+                    ));
+                }
+                output.push_str(&format!(
+                    "\nImage (base64 PNG, {} bytes):\n{}",
+                    result.image_base64.len(),
+                    result.image_base64
+                ));
+                Ok(CallToolResult::success(vec![Content::text(output)]))
+            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
+                "Failed to generate box plot: {}",
+                e
+            ))])),
+        }
+    }
+
+    /// Generate a correlation heatmap.
+    #[tool(description = "Generate a correlation heatmap visualization for numeric columns. Uses a diverging blue-white-red colormap. Returns a base64-encoded PNG image.")]
+    async fn viz_heatmap(
+        &self,
+        Parameters(request): Parameters<HeatmapRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        // Compute correlation matrix
+        let corr_result = match p2a_core::stats::correlation_matrix(dataset) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Failed to compute correlation: {}",
+                    e
+                ))]));
+            }
+        };
+
+        if corr_result.columns.len() < 2 {
+            return Ok(CallToolResult::error(vec![Content::text(
+                "Need at least 2 numeric columns for correlation heatmap",
+            )]));
+        }
+
+        // Filter to specified columns if provided
+        let (matrix, columns) = if let Some(ref selected_cols) = request.columns {
+            // Find indices of requested columns
+            let indices: Vec<usize> = selected_cols.iter()
+                .filter_map(|name| corr_result.columns.iter().position(|c| c == name))
+                .collect();
+
+            if indices.len() < 2 {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    "Need at least 2 valid numeric columns for correlation heatmap",
+                )]));
+            }
+
+            // Build filtered matrix
+            let filtered_matrix: Vec<Vec<f64>> = indices.iter()
+                .map(|&i| indices.iter().map(|&j| corr_result.matrix[i][j]).collect())
+                .collect();
+            let filtered_cols: Vec<String> = indices.iter()
+                .map(|&i| corr_result.columns[i].clone())
+                .collect();
+
+            (filtered_matrix, filtered_cols)
+        } else {
+            (corr_result.matrix.clone(), corr_result.columns.clone())
+        };
+
+        match correlation_heatmap(
+            &matrix,
+            &columns,
+            &columns,
+            request.title.as_deref(),
+            None,
+            None,
+        ) {
+            Ok(result) => {
+                let output = format!(
+                    "Correlation Heatmap\n{}\nVariables: {}\n\nImage (base64 PNG, {} bytes):\n{}",
+                    "=".repeat(40),
+                    columns.join(", "),
+                    result.image_base64.len(),
+                    result.image_base64
+                );
+                Ok(CallToolResult::success(vec![Content::text(output)]))
+            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
+                "Failed to generate heatmap: {}",
+                e
+            ))])),
+        }
+    }
 }
 
 /// Helper function to extract numeric columns into an ndarray matrix.
@@ -1890,7 +2456,8 @@ impl ServerHandler for AnalyticsServer {
                  'ts_var' for VAR models, 'ts_varma' for VARMA models, \
                  'ts_vecm' for cointegration analysis, 'ts_var_irf' for impulse responses, \
                  'ml_kmeans' for K-means clustering, 'ml_dbscan' for DBSCAN clustering, \
-                 or 'ml_pca' for principal component analysis."
+                 'ml_pca' for principal component analysis, or visualization tools: \
+                 'viz_histogram', 'viz_scatter', 'viz_line', 'viz_boxplot', 'viz_heatmap'."
                     .to_string(),
             ),
         }

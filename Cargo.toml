@@ -44,6 +44,13 @@ calamine = "0.32"  # Excel file reading (xlsx, xls, xlsb, ods)
 rusqlite = { version = "0.33", features = ["bundled"] }
 duckdb = { version = "1.2", features = ["bundled"] }
 
+# Visualization
+plotters = "0.3"
+image = "0.24"
+
+# Image encoding (for base64 output)
+base64 = "0.22"
+
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

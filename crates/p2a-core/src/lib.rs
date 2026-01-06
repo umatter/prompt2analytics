@@ -11,6 +11,7 @@ pub mod regression;
 pub mod econometrics;
 pub mod forecasting;
 pub mod ml;
+pub mod visualization;
 
 pub use data::{Dataset, DataLoader, DatasetInfo};
 pub use stats::{DescriptiveStats, CorrelationMatrix, correlation_matrix};
@@ -29,6 +30,11 @@ pub use forecasting::{
 pub use ml::{
     KMeansResult, DBSCANResult, PCAResult,
     kmeans, dbscan, pca, pca_transform, pca_inverse_transform,
+};
+pub use visualization::{
+    ChartConfig, HistogramResult, ScatterResult, BoxPlotResult, LineChartResult, HeatmapResult,
+    histogram, scatter_plot, box_plot, line_chart, correlation_heatmap,
+    VisualizationError,
 };
 
 /// Re-export polars for downstream use
