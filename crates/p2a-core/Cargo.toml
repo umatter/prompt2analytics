@@ -28,6 +28,10 @@ rand.workspace = true
 # File format support
 calamine.workspace = true
 
+# Database connectivity
+rusqlite.workspace = true
+duckdb.workspace = true
+
 # Serialization
 serde.workspace = true
 serde_json.workspace = true

@@ -26,6 +26,10 @@ pub use forecasting::{
     ArimaResult, ArimaForecastResult, run_arima, forecast_arima,
     MstlResult, run_mstl,
 };
+pub use ml::{
+    KMeansResult, DBSCANResult, PCAResult,
+    kmeans, dbscan, pca, pca_transform, pca_inverse_transform,
+};
 
 /// Re-export polars for downstream use
 pub use polars;

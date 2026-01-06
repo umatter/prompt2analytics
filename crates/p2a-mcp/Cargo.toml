@@ -15,6 +15,9 @@ path = "src/main.rs"
 # Core analytics engine
 p2a-core = { path = "../p2a-core" }
 
+# Numerics (for ML tools)
+ndarray.workspace = true
+
 # MCP Protocol
 rmcp.workspace = true
 schemars.workspace = true

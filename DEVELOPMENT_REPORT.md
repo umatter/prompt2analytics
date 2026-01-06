@@ -1,13 +1,13 @@
 # prompt2analytics Development Report
 
 **Date:** January 6, 2026
-**Status:** Phase 2 (Econometrics Core) ✅ COMPLETE
+**Status:** Phase 2b (ML & Database) ✅ COMPLETE
 
 ---
 
 ## Executive Summary
 
-Phase 1 and Phase 2 of the prompt2analytics development plan are now complete. The analytics engine includes:
+Phases 1, 2, and 2b of the prompt2analytics development plan are now complete. The analytics engine includes:
 - Panel data estimators (Fixed Effects, Random Effects)
 - Hausman specification test
 - Instrumental variables (2SLS) with first-stage diagnostics
@@ -18,8 +18,10 @@ Phase 1 and Phase 2 of the prompt2analytics development plan are now complete. T
 - Time series: VAR, VARMA, VECM models with Impulse Response Functions
 - Univariate forecasting: ARIMA and MSTL decomposition
 - File formats: CSV, Parquet, Excel, Stata, SAS
+- **ML algorithms: K-means, DBSCAN clustering, PCA dimensionality reduction**
+- **Database connectivity: SQLite and DuckDB (query, list tables, schema)**
 
-The codebase uses the `greeners` library for econometrics and pure Rust implementations for proprietary file formats.
+The codebase uses the `greeners` library for econometrics, pure Rust implementations for ML algorithms (to avoid ndarray version conflicts), and native database drivers for SQLite/DuckDB.
 
 ---
 
@@ -68,10 +70,10 @@ From the original plan:
 | Regression diagnostics | ✅ Complete | greeners |
 | Logit (logistic regression) | ✅ Complete | greeners |
 | Probit regression | ✅ Complete | greeners |
-| Event study plots | ❌ Deferred | Phase 2b |
+| Event study plots | ❌ Deferred | Phase 3 |
 | ARIMA modeling | ✅ Complete | arima crate |
 | MSTL decomposition | ✅ Complete | augurs-mstl |
-| Changepoint detection | ❌ Deferred | Phase 2b |
+| Changepoint detection | ❌ Deferred | Phase 3 |
 | VAR model | ✅ Complete | greeners |
 | VARMA model | ✅ Complete | greeners |
 | VECM (Johansen cointegration) | ✅ Complete | greeners |
@@ -80,8 +82,8 @@ From the original plan:
 | Excel file support | ✅ Complete | calamine |
 | Stata (.dta) support | ✅ Complete | Pure Rust (v117-119) |
 | SAS (.sas7bdat) support | ✅ Complete | Pure Rust |
-| SQLite connections | ❌ Deferred | Phase 2b |
-| DuckDB connections | ❌ Deferred | Phase 2b |
+| SQLite connections | ✅ Complete | rusqlite 0.33 (Phase 2b) |
+| DuckDB connections | ✅ Complete | duckdb 1.2 (Phase 2b) |
 
 ### Econometrics Implementation Details
 
@@ -126,23 +128,60 @@ From the original plan:
 
 ---
 
-## Phase 2b: ML Toolkit Extension — ❌ NOT STARTED
+## Phase 2b: ML Toolkit & Database — ✅ COMPLETE
 
-| Deliverable | Status | Planned Crate |
-|-------------|--------|---------------|
-| K-means clustering | ❌ | linfa-clustering |
-| DBSCAN | ❌ | linfa-clustering |
-| Hierarchical clustering | ❌ | linfa-clustering |
+| Deliverable | Status | Implementation |
+|-------------|--------|----------------|
+| K-means clustering | ✅ Complete | Pure Rust (k-means++ init) |
+| DBSCAN | ✅ Complete | Pure Rust |
+| Hierarchical clustering | ❌ Deferred | Phase 3 |
 | Logistic regression | ✅ Complete | greeners (Logit) |
-| Random Forest | ❌ | smartcore |
-| SVM | ❌ | linfa-svm |
-| PCA | ❌ | linfa-reduction |
-| t-SNE | ❌ | linfa-tsne |
-| Scatter plots | ❌ | plotters |
-| Histograms | ❌ | plotters |
-| Box plots | ❌ | plotters |
-| Heatmaps | ❌ | plotters |
-| Coefficient plots | ❌ | plotters |
+| Random Forest | ❌ Deferred | Phase 3 |
+| SVM | ❌ Deferred | Phase 3 |
+| PCA | ✅ Complete | Pure Rust |
+| t-SNE | ❌ Deferred | Phase 3 |
+| SQLite connectivity | ✅ Complete | rusqlite 0.33 |
+| DuckDB connectivity | ✅ Complete | duckdb 1.2 |
+| Scatter plots | ❌ Deferred | Phase 3 |
+| Histograms | ❌ Deferred | Phase 3 |
+| Box plots | ❌ Deferred | Phase 3 |
+| Heatmaps | ❌ Deferred | Phase 3 |
+| Coefficient plots | ❌ Deferred | Phase 3 |
+
+### ML Implementation Details
+
+**K-means Clustering:**
+- K-means++ initialization for better convergence
+- Configurable number of clusters, max iterations, and random initializations
+- Returns cluster assignments, centroids, and inertia (within-cluster sum of squares)
+- Pure Rust implementation (no linfa dependency to avoid ndarray conflicts)
+
+**DBSCAN Clustering:**
+- Density-based spatial clustering
+- Identifies outliers as noise points (cluster = -1)
+- Does not require specifying number of clusters
+- Configurable epsilon (neighborhood radius) and min_samples
+
+**PCA (Principal Component Analysis):**
+- Dimensionality reduction via eigendecomposition
+- Returns principal components, explained variance ratios, and loadings
+- Supports specifying number of components to retain
+- Pure Rust implementation using power iteration
+
+### Database Implementation Details
+
+**SQLite Support (rusqlite 0.33):**
+- `query_sqlite` — Execute SQL query, return results as DataFrame
+- `list_sqlite_tables` — List all tables in database
+- `sqlite_table_schema` — Get column names and types for a table
+- Automatic type inference (INTEGER, REAL, TEXT, BLOB)
+
+**DuckDB Support (duckdb 1.2):**
+- `query_duckdb` — Execute SQL query, return results as DataFrame
+- `list_duckdb_tables` — List all tables in database
+- `duckdb_table_schema` — Get column names and types for a table
+- `query_file_with_duckdb` — Query CSV/Parquet files directly without loading
+- Support for in-memory databases (`:memory:`)
 
 ---
 
@@ -189,12 +228,12 @@ From the original plan:
 |-------|--------|------------|
 | Phase 1: Foundation (MVP Core) | ✅ Complete | 100% |
 | Phase 2: Econometrics & Time Series | ✅ Complete | 100% |
-| Phase 2b: ML Toolkit Extension | ❌ Not Started | 0% |
+| Phase 2b: ML Toolkit & Database | ✅ Complete | 100% |
 | Phase 3: Desktop Application | ❌ Not Started | 0% |
 | Phase 4: LLM Integration | ❌ Not Started | 0% |
 | Phase 5: Advanced Features | ❌ Not Started | 0% |
 
-**Overall Progress: ~45%** (Phase 1 and Phase 2 complete)
+**Overall Progress: ~55%** (Phases 1, 2, and 2b complete)
 
 ---
 
@@ -206,11 +245,13 @@ From the original plan:
 - `greeners` 1.3 — Econometrics (OLS, Panel, IV, DiD, Logit, Probit, Diagnostics)
 - `ndarray` 0.17 — Numerical arrays (pinned to match greeners)
 - `statrs` 0.18 — Statistical distributions
-- `calamine` 0.27 — Excel file reading (xlsx, xls, xlsb, ods)
+- `calamine` 0.32 — Excel file reading (xlsx, xls, xlsb, ods)
 - `arima` 0.3 — ARIMA model fitting and forecasting
 - `augurs-mstl` 0.10 — MSTL seasonal-trend decomposition
 - `augurs-core` 0.10 — Augurs common traits
-- `rand` 0.8 — Random number generation (for forecasting)
+- `rand` 0.8 — Random number generation (for ML/forecasting)
+- `rusqlite` 0.33 — SQLite database connectivity (bundled)
+- `duckdb` 1.2 — DuckDB database connectivity (bundled)
 
 **System Requirements:**
 - OpenBLAS: `sudo apt-get install libopenblas-dev`
@@ -224,7 +265,7 @@ From the original plan:
 - Discrete choice models (Logit/Probit)
 - Comprehensive regression diagnostics
 
-**MCP Tools Exposed (24 total):**
+**MCP Tools Exposed (33 total):**
 ```
 ┌─────────────────────────┬──────────────────────────────────────────────────────────────┐
 │ Tool                    │ Description                                                  │
@@ -252,6 +293,15 @@ From the original plan:
 │ ts_arima_fit            │ ARIMA(p,d,q) model fitting                                   │
 │ ts_arima_forecast       │ ARIMA h-step ahead forecasting                               │
 │ ts_mstl                 │ MSTL seasonal-trend decomposition                            │
+│ ml_kmeans               │ K-means clustering with k-means++ initialization             │
+│ ml_dbscan               │ DBSCAN density-based clustering                              │
+│ ml_pca                  │ Principal Component Analysis                                 │
+│ db_sqlite_query         │ Execute SQL query on SQLite database                         │
+│ db_sqlite_tables        │ List tables in SQLite database                               │
+│ db_sqlite_schema        │ Get schema for SQLite table                                  │
+│ db_duckdb_query         │ Execute SQL query on DuckDB database                         │
+│ db_duckdb_tables        │ List tables in DuckDB database                               │
+│ db_duckdb_schema        │ Get schema for DuckDB table                                  │
 └─────────────────────────┴──────────────────────────────────────────────────────────────┘
 ```
 
@@ -279,7 +329,8 @@ prompt2analytics/
     │       │   ├── dataset.rs
     │       │   ├── loader.rs           # CSV, Parquet, Excel, Stata, SAS
     │       │   ├── stata.rs            # Pure Rust Stata DTA reader (v117-119)
-    │       │   └── sas.rs              # Pure Rust SAS7BDAT reader
+    │       │   ├── sas.rs              # Pure Rust SAS7BDAT reader
+    │       │   └── database.rs         # SQLite + DuckDB connectivity
     │       ├── stats/
     │       │   ├── mod.rs
     │       │   ├── descriptive.rs
@@ -301,12 +352,14 @@ prompt2analytics/
     │       │   ├── arima_model.rs      # ARIMA fitting and forecasting
     │       │   └── mstl.rs             # MSTL decomposition
     │       └── ml/
-    │           └── mod.rs              # Placeholder
+    │           ├── mod.rs
+    │           ├── clustering.rs       # K-means + DBSCAN (pure Rust)
+    │           └── reduction.rs        # PCA (pure Rust)
     └── p2a-mcp/
         ├── Cargo.toml
         └── src/
             ├── main.rs
-            ├── server.rs               # 24 MCP tools
+            ├── server.rs               # 33 MCP tools
             └── tools/
                 └── mod.rs              # Placeholder
 ```
@@ -329,30 +382,31 @@ prompt2analytics/
 
 ## Recommended Next Steps
 
-1. **Phase 2b - ML Toolkit Extension:**
-   - K-means and DBSCAN clustering (linfa-clustering)
-   - Random Forest classification (smartcore)
-   - PCA dimensionality reduction (linfa-reduction)
-
-2. **Database Connectivity:**
-   - SQLite connections (rusqlite)
-   - DuckDB connections (duckdb-rs)
-
-3. **Visualization:**
+1. **Visualization (Phase 3 priority):**
    - Add `plotters` for basic charts (histograms, scatter, coefficient plots)
    - IRF plots for time series
    - Event study plots
+   - Heatmaps for correlation matrices
 
-4. **Testing:**
+2. **Additional ML Algorithms:**
+   - Hierarchical clustering
+   - Random Forest classification (smartcore)
+   - SVM (support vector machines)
+   - t-SNE dimensionality reduction
+
+3. **Testing:**
    - Expand test coverage, particularly for econometrics output accuracy
    - Add integration tests with known datasets
    - Test Stata/SAS file format readers with real-world files
+   - Test database tools with larger databases
 
-5. **Documentation:**
+4. **Documentation:**
    - Add usage examples for each MCP tool
    - Document econometric model assumptions and interpretation
+   - Document database query patterns
 
-6. **Phase 3 - Desktop Application:**
+5. **Phase 3 - Desktop Application:**
    - Tauri 2.0 application shell
    - Chat interface with Svelte
    - Data viewer and results panel
+   - Visual query builder for databases

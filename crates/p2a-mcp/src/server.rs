@@ -16,7 +16,12 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 
 use p2a_core::{
-    data::{DataLoader, Dataset, DatasetInfo},
+    data::{
+        DataLoader, Dataset, DatasetInfo,
+        // Database connectivity
+        query_sqlite, list_sqlite_tables, sqlite_table_schema,
+        query_duckdb, list_duckdb_tables, duckdb_table_schema,
+    },
     regression::{run_ols, run_ols_clustered, run_diagnostics},
     stats::{correlation_matrix, DescriptiveStats},
     // Econometrics
@@ -26,6 +31,8 @@ use p2a_core::{
     run_var, run_varma, run_vecm, run_var_irf,
     // Forecasting
     run_arima, forecast_arima, run_mstl,
+    // Machine Learning
+    kmeans, dbscan, pca,
 };
 
 /// The main analytics server that handles MCP requests.
@@ -415,6 +422,150 @@ pub struct MstlRequest {
     /// Seasonal periods
     #[schemars(description = "Seasonal periods to extract (e.g., [7, 365] for daily data with weekly and yearly seasonality).")]
     pub periods: Vec<usize>,
+}
+
+// ============================================================================
+// Machine Learning Tool Input Types
+// ============================================================================
+
+/// Request for K-means clustering.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct KMeansRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Columns to use as features for clustering
+    #[schemars(description = "Names of the numeric columns to use as features for clustering.")]
+    pub columns: Vec<String>,
+
+    /// Number of clusters (k)
+    #[schemars(description = "Number of clusters to create.")]
+    pub k: usize,
+
+    /// Maximum iterations (optional, default: 300)
+    #[schemars(description = "Maximum number of iterations. Default is 300.")]
+    pub max_iterations: Option<usize>,
+
+    /// Number of initializations (optional, default: 10)
+    #[schemars(description = "Number of random initializations to try. Default is 10.")]
+    pub n_init: Option<usize>,
+
+    /// Random seed for reproducibility (optional)
+    #[schemars(description = "Optional random seed for reproducible results.")]
+    pub seed: Option<u64>,
+}
+
+/// Request for DBSCAN clustering.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DBSCANRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Columns to use as features for clustering
+    #[schemars(description = "Names of the numeric columns to use as features for clustering.")]
+    pub columns: Vec<String>,
+
+    /// Epsilon (neighborhood radius)
+    #[schemars(description = "Maximum distance between two samples for them to be considered in the same neighborhood.")]
+    pub eps: f64,
+
+    /// Minimum samples for core point
+    #[schemars(description = "Minimum number of samples in a neighborhood for a point to be considered a core point.")]
+    pub min_samples: usize,
+}
+
+/// Request for PCA (Principal Component Analysis).
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct PCARequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Columns to use as features
+    #[schemars(description = "Names of the numeric columns to include in PCA.")]
+    pub columns: Vec<String>,
+
+    /// Number of principal components to keep (optional)
+    #[schemars(description = "Number of principal components to keep. If not specified, keeps all components.")]
+    pub n_components: Option<usize>,
+}
+
+// ============================================================================
+// Database Tool Input Types
+// ============================================================================
+
+/// Request to query a SQLite database.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SqliteQueryRequest {
+    /// Path to the SQLite database file
+    #[schemars(description = "Path to the SQLite database file (.db, .sqlite, .sqlite3).")]
+    pub db_path: String,
+
+    /// SQL query to execute
+    #[schemars(description = "SQL query to execute (SELECT statements only recommended).")]
+    pub query: String,
+
+    /// Optional name for the resulting dataset
+    #[schemars(description = "Optional name for the resulting dataset. If not provided, a default name will be generated.")]
+    pub name: Option<String>,
+}
+
+/// Request to list tables in a SQLite database.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SqliteListTablesRequest {
+    /// Path to the SQLite database file
+    #[schemars(description = "Path to the SQLite database file.")]
+    pub db_path: String,
+}
+
+/// Request to get schema for a SQLite table.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SqliteSchemaRequest {
+    /// Path to the SQLite database file
+    #[schemars(description = "Path to the SQLite database file.")]
+    pub db_path: String,
+
+    /// Table name
+    #[schemars(description = "Name of the table to get schema for.")]
+    pub table_name: String,
+}
+
+/// Request to query a DuckDB database.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DuckDBQueryRequest {
+    /// Path to the DuckDB database file
+    #[schemars(description = "Path to the DuckDB database file (.duckdb, .db). Use ':memory:' for in-memory database.")]
+    pub db_path: String,
+
+    /// SQL query to execute
+    #[schemars(description = "SQL query to execute. DuckDB supports advanced analytics SQL.")]
+    pub query: String,
+
+    /// Optional name for the resulting dataset
+    #[schemars(description = "Optional name for the resulting dataset.")]
+    pub name: Option<String>,
+}
+
+/// Request to list tables in a DuckDB database.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DuckDBListTablesRequest {
+    /// Path to the DuckDB database file
+    #[schemars(description = "Path to the DuckDB database file.")]
+    pub db_path: String,
+}
+
+/// Request to get schema for a DuckDB table.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DuckDBSchemaRequest {
+    /// Path to the DuckDB database file
+    #[schemars(description = "Path to the DuckDB database file.")]
+    pub db_path: String,
+
+    /// Table name
+    #[schemars(description = "Name of the table to get schema for.")]
+    pub table_name: String,
 }
 
 // ============================================================================
@@ -1309,6 +1460,405 @@ impl AnalyticsServer {
 
         Ok(CallToolResult::success(vec![Content::text(output)]))
     }
+
+    // ========================================================================
+    // Machine Learning Tools
+    // ========================================================================
+
+    /// Run K-means clustering.
+    #[tool(description = "Run K-means clustering to partition data into k clusters. Uses k-means++ initialization for better convergence. Returns cluster assignments, centroids, and inertia (within-cluster sum of squares).")]
+    async fn ml_kmeans(
+        &self,
+        Parameters(request): Parameters<KMeansRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        // Extract numeric columns into ndarray
+        let data = match extract_numeric_matrix(dataset, &request.columns) {
+            Ok(d) => d,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+        };
+
+        let result = match kmeans(
+            data.view(),
+            request.k,
+            request.max_iterations,
+            None, // tolerance
+            request.n_init,
+            request.seed,
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "K-means clustering failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+    }
+
+    /// Run DBSCAN clustering.
+    #[tool(description = "Run DBSCAN (Density-Based Spatial Clustering of Applications with Noise) clustering. Finds clusters of arbitrary shape and identifies outliers as noise points. Does not require specifying number of clusters.")]
+    async fn ml_dbscan(
+        &self,
+        Parameters(request): Parameters<DBSCANRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        // Extract numeric columns into ndarray
+        let data = match extract_numeric_matrix(dataset, &request.columns) {
+            Ok(d) => d,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+        };
+
+        let result = match dbscan(data.view(), request.eps, request.min_samples) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "DBSCAN clustering failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+    }
+
+    /// Run PCA (Principal Component Analysis).
+    #[tool(description = "Run Principal Component Analysis (PCA) for dimensionality reduction. Returns principal components, explained variance ratios, and loadings. Useful for understanding data structure and reducing feature dimensionality.")]
+    async fn ml_pca(
+        &self,
+        Parameters(request): Parameters<PCARequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        // Extract numeric columns into ndarray
+        let data = match extract_numeric_matrix(dataset, &request.columns) {
+            Ok(d) => d,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+        };
+
+        let result = match pca(data.view(), request.n_components, false) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "PCA failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+    }
+
+    // ========================================================================
+    // Database Tools
+    // ========================================================================
+
+    /// Query a SQLite database and load results as a dataset.
+    #[tool(description = "Execute a SQL query against a SQLite database and load the results as a dataset. The resulting dataset can then be analyzed using other tools.")]
+    async fn db_sqlite_query(
+        &self,
+        Parameters(request): Parameters<SqliteQueryRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let result = match query_sqlite(&request.db_path, &request.query) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "SQLite query failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        // Get preview before moving dataframe
+        let preview = result.dataframe.head(Some(5));
+
+        // Create dataset from result
+        let dataset = Dataset::new(result.dataframe);
+
+        // Generate name
+        let name = request.name.unwrap_or_else(|| {
+            format!("sqlite_query_{}", std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs())
+        });
+
+        // Store dataset
+        let mut datasets = self.datasets.write().await;
+        datasets.insert(name.clone(), dataset);
+
+        let output = format!(
+            "SQLite Query Results\n\
+             ====================\n\
+             Rows returned: {}\n\
+             Columns: {}\n\n\
+             Dataset stored as: '{}'\n\n\
+             Preview (first 5 rows):\n{}",
+            result.rows,
+            result.columns.join(", "),
+            name,
+            preview
+        );
+
+        Ok(CallToolResult::success(vec![Content::text(output)]))
+    }
+
+    /// List tables in a SQLite database.
+    #[tool(description = "List all tables in a SQLite database.")]
+    async fn db_sqlite_tables(
+        &self,
+        Parameters(request): Parameters<SqliteListTablesRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let tables = match list_sqlite_tables(&request.db_path) {
+            Ok(t) => t,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Failed to list tables: {}",
+                    e
+                ))]));
+            }
+        };
+
+        if tables.is_empty() {
+            return Ok(CallToolResult::success(vec![Content::text(
+                "No tables found in database.",
+            )]));
+        }
+
+        let output = format!(
+            "Tables in SQLite database:\n\n{}",
+            tables.iter()
+                .map(|t| format!("  - {}", t))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+
+        Ok(CallToolResult::success(vec![Content::text(output)]))
+    }
+
+    /// Get schema for a SQLite table.
+    #[tool(description = "Get the schema (column names and types) for a table in a SQLite database.")]
+    async fn db_sqlite_schema(
+        &self,
+        Parameters(request): Parameters<SqliteSchemaRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let schema = match sqlite_table_schema(&request.db_path, &request.table_name) {
+            Ok(s) => s,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Failed to get schema: {}",
+                    e
+                ))]));
+            }
+        };
+
+        if schema.is_empty() {
+            return Ok(CallToolResult::success(vec![Content::text(format!(
+                "Table '{}' not found or has no columns.",
+                request.table_name
+            ))]));
+        }
+
+        let output = format!(
+            "Schema for table '{}':\n\n{}",
+            request.table_name,
+            schema.iter()
+                .map(|(name, dtype)| format!("  - {} ({})", name, dtype))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+
+        Ok(CallToolResult::success(vec![Content::text(output)]))
+    }
+
+    /// Query a DuckDB database and load results as a dataset.
+    #[tool(description = "Execute a SQL query against a DuckDB database and load the results as a dataset. DuckDB supports advanced analytics SQL including window functions, CTEs, and more.")]
+    async fn db_duckdb_query(
+        &self,
+        Parameters(request): Parameters<DuckDBQueryRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let result = match query_duckdb(&request.db_path, &request.query) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "DuckDB query failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        // Get preview before moving dataframe
+        let preview = result.dataframe.head(Some(5));
+
+        // Create dataset from result
+        let dataset = Dataset::new(result.dataframe);
+
+        // Generate name
+        let name = request.name.unwrap_or_else(|| {
+            format!("duckdb_query_{}", std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs())
+        });
+
+        // Store dataset
+        let mut datasets = self.datasets.write().await;
+        datasets.insert(name.clone(), dataset);
+
+        let output = format!(
+            "DuckDB Query Results\n\
+             ====================\n\
+             Rows returned: {}\n\
+             Columns: {}\n\n\
+             Dataset stored as: '{}'\n\n\
+             Preview (first 5 rows):\n{}",
+            result.rows,
+            result.columns.join(", "),
+            name,
+            preview
+        );
+
+        Ok(CallToolResult::success(vec![Content::text(output)]))
+    }
+
+    /// List tables in a DuckDB database.
+    #[tool(description = "List all tables in a DuckDB database.")]
+    async fn db_duckdb_tables(
+        &self,
+        Parameters(request): Parameters<DuckDBListTablesRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let tables = match list_duckdb_tables(&request.db_path) {
+            Ok(t) => t,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Failed to list tables: {}",
+                    e
+                ))]));
+            }
+        };
+
+        if tables.is_empty() {
+            return Ok(CallToolResult::success(vec![Content::text(
+                "No tables found in database.",
+            )]));
+        }
+
+        let output = format!(
+            "Tables in DuckDB database:\n\n{}",
+            tables.iter()
+                .map(|t| format!("  - {}", t))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+
+        Ok(CallToolResult::success(vec![Content::text(output)]))
+    }
+
+    /// Get schema for a DuckDB table.
+    #[tool(description = "Get the schema (column names and types) for a table in a DuckDB database.")]
+    async fn db_duckdb_schema(
+        &self,
+        Parameters(request): Parameters<DuckDBSchemaRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let schema = match duckdb_table_schema(&request.db_path, &request.table_name) {
+            Ok(s) => s,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Failed to get schema: {}",
+                    e
+                ))]));
+            }
+        };
+
+        if schema.is_empty() {
+            return Ok(CallToolResult::success(vec![Content::text(format!(
+                "Table '{}' not found or has no columns.",
+                request.table_name
+            ))]));
+        }
+
+        let output = format!(
+            "Schema for table '{}':\n\n{}",
+            request.table_name,
+            schema.iter()
+                .map(|(name, dtype)| format!("  - {} ({})", name, dtype))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+
+        Ok(CallToolResult::success(vec![Content::text(output)]))
+    }
+}
+
+/// Helper function to extract numeric columns into an ndarray matrix.
+fn extract_numeric_matrix(
+    dataset: &Dataset,
+    columns: &[String],
+) -> Result<ndarray::Array2<f64>, String> {
+    use p2a_core::polars::prelude::*;
+
+    let df = dataset.df();
+    let n_rows = df.height();
+    let n_cols = columns.len();
+
+    if columns.is_empty() {
+        return Err("At least one column must be specified".to_string());
+    }
+
+    let mut data = ndarray::Array2::zeros((n_rows, n_cols));
+
+    for (j, col_name) in columns.iter().enumerate() {
+        let col = df.column(col_name)
+            .map_err(|e| format!("Column '{}' not found: {}", col_name, e))?;
+
+        let values: Vec<f64> = col.cast(&DataType::Float64)
+            .map_err(|e| format!("Cannot convert column '{}' to numeric: {}", col_name, e))?
+            .f64()
+            .map_err(|e| format!("Column '{}' is not numeric: {}", col_name, e))?
+            .into_iter()
+            .map(|v: Option<f64>| v.unwrap_or(f64::NAN))
+            .collect();
+
+        for (i, &val) in values.iter().enumerate() {
+            data[[i, j]] = val;
+        }
+    }
+
+    Ok(data)
 }
 
 // ============================================================================
@@ -1328,7 +1878,8 @@ impl ServerHandler for AnalyticsServer {
             },
             instructions: Some(
                 "prompt2analytics is a local data analytics engine. \
-                 Use 'load_dataset' to load a CSV or Parquet file. \
+                 Use 'load_dataset' to load a CSV or Parquet file, or \
+                 'db_sqlite_query'/'db_duckdb_query' to query databases. \
                  Then use 'describe_dataset' for summary statistics, \
                  'compute_correlation' for correlations, 'regression_ols' \
                  for linear regression, 'regression_diagnostics' for model validation, \
@@ -1338,8 +1889,8 @@ impl ServerHandler for AnalyticsServer {
                  'logit' or 'probit' for binary outcomes, \
                  'ts_var' for VAR models, 'ts_varma' for VARMA models, \
                  'ts_vecm' for cointegration analysis, 'ts_var_irf' for impulse responses, \
-                 'ts_arima_fit' for ARIMA modeling, 'ts_arima_forecast' for forecasting, \
-                 or 'ts_mstl' for seasonal decomposition."
+                 'ml_kmeans' for K-means clustering, 'ml_dbscan' for DBSCAN clustering, \
+                 or 'ml_pca' for principal component analysis."
                     .to_string(),
             ),
         }

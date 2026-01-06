@@ -1,11 +1,9 @@
 //! Machine learning module.
 //!
-//! Provides clustering, classification, and dimensionality reduction.
-//! (Phase 2b - placeholder for now)
+//! Provides clustering and dimensionality reduction algorithms.
 
-// TODO: Implement in Phase 2b
-// - K-means clustering
-// - DBSCAN clustering
-// - Logistic regression
-// - Random Forest
-// - PCA
+mod clustering;
+mod reduction;
+
+pub use clustering::{kmeans, dbscan, KMeansResult, DBSCANResult};
+pub use reduction::{pca, pca_transform, pca_inverse_transform, PCAResult};
