@@ -1,0 +1,35 @@
+[package]
+name = "p2a-mcp"
+description = "MCP server for prompt2analytics - natural language data analytics"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "p2a-mcp"
+path = "src/main.rs"
+
+[dependencies]
+# Core analytics engine
+p2a-core = { path = "../p2a-core" }
+
+# MCP Protocol
+rmcp.workspace = true
+schemars.workspace = true
+
+# Async runtime
+tokio.workspace = true
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+
+# Error handling
+thiserror.workspace = true
+anyhow.workspace = true
+
+# Logging
+tracing.workspace = true
+tracing-subscriber.workspace = true

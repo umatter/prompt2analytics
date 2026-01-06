@@ -1,0 +1,32 @@
+# Build artifacts
+/target/
+
+# IDE and editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Environment and local config
+.env
+.env.local
+*.local
+
+# Logs
+*.log
+
+# Test coverage
+*.profraw
+lcov.info
+coverage/
+
+# Personal notes
+_notes/
+
+# Machine-specific MCP config (absolute paths)
+mcp-config.json

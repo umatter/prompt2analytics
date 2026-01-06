@@ -1,0 +1,44 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/p2a-core",
+    "crates/p2a-mcp",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+authors = ["prompt2analytics contributors"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/umatter/prompt2analytics"
+rust-version = "1.85"
+
+[workspace.dependencies]
+# DataFrame and data manipulation
+polars = { version = "0.46", features = ["lazy", "csv", "parquet", "dtype-full"] }
+
+# MCP Protocol
+rmcp = { version = "0.8", features = ["server", "macros", "transport-io"] }
+schemars = "1.0"
+
+# Statistics and numerics
+ndarray = "0.17"  # Must match greeners' ndarray version
+statrs = "0.18"
+
+# Econometrics
+greeners = "1.3"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Async runtime
+tokio = { version = "1.0", features = ["full"] }
+
+# Error handling
+thiserror = "2.0"
+anyhow = "1.0"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

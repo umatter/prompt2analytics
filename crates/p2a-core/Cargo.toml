@@ -1,0 +1,33 @@
+[package]
+name = "p2a-core"
+description = "Core analytics engine for prompt2analytics"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# DataFrame and data manipulation
+polars.workspace = true
+
+# Statistics and numerics
+ndarray.workspace = true
+statrs.workspace = true
+
+# Econometrics
+greeners.workspace = true
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+
+# Error handling
+thiserror.workspace = true
+anyhow.workspace = true
+
+# Logging
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

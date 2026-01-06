@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "prompt2analytics": {
+      "command": "./target/release/p2a-mcp",
+      "args": []
+    }
+  }
+}
