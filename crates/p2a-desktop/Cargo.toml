@@ -1,0 +1,46 @@
+[package]
+name = "p2a-desktop"
+description = "Tauri desktop application for prompt2analytics"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "p2a_desktop_lib"
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[[bin]]
+name = "p2a-desktop"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# Tauri
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-shell = "2"
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+
+# Async runtime
+tokio.workspace = true
+
+# Error handling
+thiserror.workspace = true
+anyhow.workspace = true
+
+# Logging
+tracing.workspace = true
+
+# Utility
+which = "7.0"
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
