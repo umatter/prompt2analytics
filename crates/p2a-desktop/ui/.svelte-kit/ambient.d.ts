@@ -41,10 +41,10 @@ declare module '$env/static/private' {
 	export const npm_node_execpath: string;
 	export const SHLVL: string;
 	export const npm_config_noproxy: string;
-	export const VIPSHOME: string;
 	export const HOME: string;
 	export const VIRTUALENVWRAPPER_PYTHON: string;
 	export const CHROME_DESKTOP: string;
+	export const OLDPWD: string;
 	export const TERM_PROGRAM_VERSION: string;
 	export const DESKTOP_SESSION: string;
 	export const NANONETS_API_KEY: string;
@@ -180,10 +180,10 @@ declare module '$env/dynamic/private' {
 		npm_node_execpath: string;
 		SHLVL: string;
 		npm_config_noproxy: string;
-		VIPSHOME: string;
 		HOME: string;
 		VIRTUALENVWRAPPER_PYTHON: string;
 		CHROME_DESKTOP: string;
+		OLDPWD: string;
 		TERM_PROGRAM_VERSION: string;
 		DESKTOP_SESSION: string;
 		NANONETS_API_KEY: string;

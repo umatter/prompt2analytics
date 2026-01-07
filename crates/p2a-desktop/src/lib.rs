@@ -1,8 +1,10 @@
 //! p2a-desktop library - Tauri desktop application for prompt2analytics.
 
 pub mod commands;
+pub mod llm;
 pub mod mcp;
 
+use llm::{HistoryStore, LlmService};
 use mcp::McpClient;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -10,13 +12,29 @@ use std::sync::Arc;
 /// Application state shared across all Tauri commands.
 pub struct AppState {
     mcp_client: Arc<McpClient>,
+    llm_service: Arc<LlmService>,
 }
 
 impl AppState {
-    /// Create new AppState with the path to the MCP binary.
-    pub fn new(mcp_binary_path: PathBuf) -> Self {
+    /// Create new AppState with the path to the MCP binary and data directory.
+    pub fn new(mcp_binary_path: PathBuf, data_dir: PathBuf) -> Self {
+        let mcp_client = Arc::new(McpClient::new(mcp_binary_path));
+
+        // Create data directory if it doesn't exist
+        std::fs::create_dir_all(&data_dir).ok();
+
+        // Initialize history store
+        let history_path = data_dir.join("conversations.db");
+        let history = Arc::new(
+            HistoryStore::new(&history_path).expect("Failed to initialize history store"),
+        );
+
+        // Initialize LLM service
+        let llm_service = Arc::new(LlmService::new(mcp_client.clone(), history));
+
         Self {
-            mcp_client: Arc::new(McpClient::new(mcp_binary_path)),
+            mcp_client,
+            llm_service,
         }
     }
 
@@ -24,6 +42,23 @@ impl AppState {
     pub fn mcp_client(&self) -> &McpClient {
         &self.mcp_client
     }
+
+    /// Get a reference to the LLM service.
+    pub fn llm_service(&self) -> &LlmService {
+        &self.llm_service
+    }
+}
+
+/// Get the application data directory.
+///
+/// Returns platform-specific data directory:
+/// - Linux: ~/.local/share/p2a-desktop
+/// - macOS: ~/Library/Application Support/p2a-desktop
+/// - Windows: %APPDATA%/p2a-desktop
+pub fn get_data_dir() -> PathBuf {
+    dirs::data_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("p2a-desktop")
 }
 
 /// Find the path to the p2a-mcp binary.

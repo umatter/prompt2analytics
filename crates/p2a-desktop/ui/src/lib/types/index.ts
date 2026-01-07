@@ -1,5 +1,8 @@
 // Type definitions for prompt2analytics desktop app
 
+// Re-export LLM types
+export * from './llm';
+
 export interface Message {
 	id: string;
 	role: 'user' | 'assistant' | 'error' | 'system';

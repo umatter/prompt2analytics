@@ -40,6 +40,18 @@ tracing.workspace = true
 
 # Utility
 which = "7.0"
+dirs = "6.0"
+
+# LLM Integration
+reqwest = { version = "0.12", features = ["json", "stream"] }
+async-openai = "0.28"
+futures = "0.3"
+async-trait = "0.1"
+
+# Conversation history persistence
+rusqlite = { workspace = true }
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1.0", features = ["v4", "serde"] }
 
 [features]
 default = ["custom-protocol"]

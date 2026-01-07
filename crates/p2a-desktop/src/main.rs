@@ -2,7 +2,7 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use p2a_desktop_lib::{find_mcp_binary, AppState};
+use p2a_desktop_lib::{find_mcp_binary, get_data_dir, AppState};
 use tauri::Manager;
 
 fn main() {
@@ -13,20 +13,33 @@ fn main() {
         std::path::PathBuf::from("p2a-mcp")
     });
 
+    // Get data directory for persistence
+    let data_dir = get_data_dir();
+
     println!("Using MCP binary: {:?}", mcp_binary);
+    println!("Using data directory: {:?}", data_dir);
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
         .setup(move |app| {
-            // Create app state with MCP client
-            let state = AppState::new(mcp_binary.clone());
+            // Create app state with MCP client and LLM service
+            let state = AppState::new(mcp_binary.clone(), data_dir.clone());
             app.manage(state);
 
-            // Spawn MCP server in background
+            // Initialize LLM service (load saved config) and spawn MCP server
             let app_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 let state: tauri::State<'_, AppState> = app_handle.state();
+
+                // Initialize LLM service with saved settings
+                if let Err(e) = state.llm_service().init().await {
+                    eprintln!("Warning: Failed to initialize LLM service: {}", e);
+                } else {
+                    println!("LLM service initialized");
+                }
+
+                // Start MCP server
                 if let Err(e) = state.mcp_client().spawn().await {
                     eprintln!("Failed to spawn MCP server: {}", e);
                 } else {
@@ -64,6 +77,19 @@ fn main() {
             p2a_desktop_lib::commands::pick_file,
             p2a_desktop_lib::commands::pick_files,
             p2a_desktop_lib::commands::pick_directory,
+            // LLM commands
+            p2a_desktop_lib::commands::send_message,
+            p2a_desktop_lib::commands::send_message_stream,
+            p2a_desktop_lib::commands::list_conversations,
+            p2a_desktop_lib::commands::get_conversation,
+            p2a_desktop_lib::commands::delete_conversation,
+            p2a_desktop_lib::commands::rename_conversation,
+            p2a_desktop_lib::commands::export_conversation,
+            p2a_desktop_lib::commands::get_llm_settings,
+            p2a_desktop_lib::commands::update_llm_settings,
+            p2a_desktop_lib::commands::check_provider,
+            p2a_desktop_lib::commands::list_provider_models,
+            p2a_desktop_lib::commands::list_provider_types,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
