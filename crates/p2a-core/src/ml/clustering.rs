@@ -1,4 +1,4 @@
-//! Clustering algorithms: K-means and DBSCAN.
+//! Clustering algorithms: K-means, DBSCAN, and Hierarchical Clustering.
 //!
 //! Pure Rust implementations using ndarray.
 
@@ -345,6 +345,453 @@ pub fn dbscan(
     })
 }
 
+/// Linkage method for hierarchical clustering.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Linkage {
+    /// Minimum distance between clusters (nearest neighbor)
+    Single,
+    /// Maximum distance between clusters (furthest neighbor)
+    Complete,
+    /// Average distance between all pairs
+    Average,
+    /// Ward's minimum variance method
+    Ward,
+}
+
+impl std::str::FromStr for Linkage {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "single" => Ok(Linkage::Single),
+            "complete" => Ok(Linkage::Complete),
+            "average" => Ok(Linkage::Average),
+            "ward" => Ok(Linkage::Ward),
+            _ => Err(format!("Unknown linkage method: {}. Use single, complete, average, or ward", s)),
+        }
+    }
+}
+
+/// Hierarchical clustering result.
+#[derive(Debug, Clone)]
+pub struct HierarchicalResult {
+    /// Cluster assignments for each point (0 to n_clusters-1)
+    pub labels: Vec<usize>,
+    /// Number of clusters
+    pub n_clusters: usize,
+    /// Linkage matrix: (cluster1, cluster2, distance, size)
+    /// Each row represents a merge step
+    pub linkage_matrix: Vec<(usize, usize, f64, usize)>,
+    /// Merge distances in order
+    pub merge_distances: Vec<f64>,
+    /// Linkage method used
+    pub linkage: String,
+}
+
+impl std::fmt::Display for HierarchicalResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "Hierarchical Clustering Results")?;
+        writeln!(f, "================================")?;
+        writeln!(f, "Number of clusters: {}", self.n_clusters)?;
+        writeln!(f, "Linkage method: {}", self.linkage)?;
+        writeln!(f)?;
+
+        // Count points per cluster
+        let mut cluster_counts: HashMap<usize, usize> = HashMap::new();
+        for &label in &self.labels {
+            *cluster_counts.entry(label).or_insert(0) += 1;
+        }
+
+        writeln!(f, "Cluster sizes:")?;
+        let mut labels_sorted: Vec<_> = cluster_counts.keys().collect();
+        labels_sorted.sort();
+        for &label in &labels_sorted {
+            writeln!(f, "  Cluster {}: {} points", label, cluster_counts[&label])?;
+        }
+
+        writeln!(f)?;
+        writeln!(f, "Dendrogram (merge history):")?;
+        writeln!(f, "  Step  Cluster1  Cluster2  Distance    Size")?;
+        for (i, &(c1, c2, dist, size)) in self.linkage_matrix.iter().enumerate() {
+            writeln!(f, "  {:4}  {:8}  {:8}  {:10.4}  {:4}", i + 1, c1, c2, dist, size)?;
+        }
+
+        Ok(())
+    }
+}
+
+/// Run hierarchical agglomerative clustering.
+///
+/// # Arguments
+/// * `data` - Input data matrix (n_samples x n_features)
+/// * `n_clusters` - Number of clusters to form (if None, returns full dendrogram)
+/// * `linkage` - Linkage method (single, complete, average, ward)
+/// * `distance_threshold` - If set, cut tree at this distance instead of n_clusters
+pub fn hierarchical(
+    data: ArrayView2<f64>,
+    n_clusters: Option<usize>,
+    linkage: Linkage,
+    distance_threshold: Option<f64>,
+) -> Result<HierarchicalResult, String> {
+    let n_samples = data.nrows();
+
+    if n_samples == 0 {
+        return Err("Cannot cluster empty data".to_string());
+    }
+    if n_samples == 1 {
+        return Ok(HierarchicalResult {
+            labels: vec![0],
+            n_clusters: 1,
+            linkage_matrix: vec![],
+            merge_distances: vec![],
+            linkage: format!("{:?}", linkage).to_lowercase(),
+        });
+    }
+
+    let target_clusters = match (n_clusters, distance_threshold) {
+        (Some(n), _) => {
+            if n == 0 || n > n_samples {
+                return Err(format!(
+                    "n_clusters must be between 1 and {} (n_samples)",
+                    n_samples
+                ));
+            }
+            Some(n)
+        }
+        (None, None) => Some(1), // Default: cluster all into one
+        (None, Some(_)) => None, // Will use distance threshold
+    };
+
+    // Compute initial pairwise distance matrix
+    let mut distances = compute_distance_matrix(&data);
+
+    // Track cluster membership: cluster_id -> indices in that cluster
+    let mut clusters: HashMap<usize, Vec<usize>> = HashMap::new();
+    for i in 0..n_samples {
+        clusters.insert(i, vec![i]);
+    }
+
+    // Active cluster IDs
+    let mut active: HashSet<usize> = (0..n_samples).collect();
+
+    // Linkage matrix storage
+    let mut linkage_matrix: Vec<(usize, usize, f64, usize)> = Vec::with_capacity(n_samples - 1);
+    let mut merge_distances: Vec<f64> = Vec::with_capacity(n_samples - 1);
+
+    let mut next_cluster_id = n_samples;
+
+    // Agglomerative clustering loop
+    while active.len() > 1 {
+        // Check if we've reached target number of clusters
+        if let Some(target) = target_clusters {
+            if active.len() <= target {
+                break;
+            }
+        }
+
+        // Find closest pair of clusters
+        let (c1, c2, min_dist) = find_closest_clusters(&active, &distances, &clusters, &data, linkage)?;
+
+        // Check distance threshold
+        if let Some(thresh) = distance_threshold {
+            if min_dist > thresh {
+                break;
+            }
+        }
+
+        // Merge clusters
+        let merged_indices: Vec<usize> = {
+            let mut merged = clusters.remove(&c1).unwrap();
+            merged.extend(clusters.remove(&c2).unwrap());
+            merged
+        };
+        let merged_size = merged_indices.len();
+
+        // Record merge
+        linkage_matrix.push((c1, c2, min_dist, merged_size));
+        merge_distances.push(min_dist);
+
+        // Update distance matrix for new cluster
+        update_distances_for_merge(
+            &mut distances,
+            &active,
+            c1,
+            c2,
+            next_cluster_id,
+            &merged_indices,
+            &clusters,
+            &data,
+            linkage,
+        );
+
+        // Update cluster tracking
+        active.remove(&c1);
+        active.remove(&c2);
+        active.insert(next_cluster_id);
+        clusters.insert(next_cluster_id, merged_indices);
+
+        next_cluster_id += 1;
+    }
+
+    // Assign final labels
+    let mut labels = vec![0usize; n_samples];
+    for (cluster_label, &cluster_id) in active.iter().enumerate() {
+        if let Some(indices) = clusters.get(&cluster_id) {
+            for &idx in indices {
+                labels[idx] = cluster_label;
+            }
+        }
+    }
+
+    Ok(HierarchicalResult {
+        labels,
+        n_clusters: active.len(),
+        linkage_matrix,
+        merge_distances,
+        linkage: format!("{:?}", linkage).to_lowercase(),
+    })
+}
+
+/// Compute initial pairwise distance matrix.
+fn compute_distance_matrix(data: &ArrayView2<f64>) -> HashMap<(usize, usize), f64> {
+    let n = data.nrows();
+    let mut distances = HashMap::new();
+
+    for i in 0..n {
+        for j in (i + 1)..n {
+            let dist = euclidean_distance_squared(&data.row(i), &data.row(j)).sqrt();
+            distances.insert((i, j), dist);
+            distances.insert((j, i), dist);
+        }
+    }
+
+    distances
+}
+
+/// Find the closest pair of clusters.
+fn find_closest_clusters(
+    active: &HashSet<usize>,
+    distances: &HashMap<(usize, usize), f64>,
+    clusters: &HashMap<usize, Vec<usize>>,
+    data: &ArrayView2<f64>,
+    linkage: Linkage,
+) -> Result<(usize, usize, f64), String> {
+    let mut min_dist = f64::INFINITY;
+    let mut best_pair = (0, 0);
+
+    let active_vec: Vec<usize> = active.iter().cloned().collect();
+
+    for i in 0..active_vec.len() {
+        for j in (i + 1)..active_vec.len() {
+            let c1 = active_vec[i];
+            let c2 = active_vec[j];
+
+            let dist = cluster_distance(c1, c2, distances, clusters, data, linkage);
+
+            if dist < min_dist {
+                min_dist = dist;
+                best_pair = (c1, c2);
+            }
+        }
+    }
+
+    if min_dist.is_infinite() {
+        return Err("Could not find valid cluster pair".to_string());
+    }
+
+    Ok((best_pair.0, best_pair.1, min_dist))
+}
+
+/// Calculate distance between two clusters based on linkage method.
+fn cluster_distance(
+    c1: usize,
+    c2: usize,
+    distances: &HashMap<(usize, usize), f64>,
+    clusters: &HashMap<usize, Vec<usize>>,
+    data: &ArrayView2<f64>,
+    linkage: Linkage,
+) -> f64 {
+    let indices1 = clusters.get(&c1).unwrap();
+    let indices2 = clusters.get(&c2).unwrap();
+
+    match linkage {
+        Linkage::Single => {
+            // Minimum distance between any pair
+            let mut min_dist = f64::INFINITY;
+            for &i in indices1 {
+                for &j in indices2 {
+                    if let Some(&d) = distances.get(&(i, j)) {
+                        min_dist = min_dist.min(d);
+                    } else {
+                        // Compute if not in cache
+                        let d = euclidean_distance_squared(&data.row(i), &data.row(j)).sqrt();
+                        min_dist = min_dist.min(d);
+                    }
+                }
+            }
+            min_dist
+        }
+        Linkage::Complete => {
+            // Maximum distance between any pair
+            let mut max_dist = 0.0f64;
+            for &i in indices1 {
+                for &j in indices2 {
+                    if let Some(&d) = distances.get(&(i, j)) {
+                        max_dist = max_dist.max(d);
+                    } else {
+                        let d = euclidean_distance_squared(&data.row(i), &data.row(j)).sqrt();
+                        max_dist = max_dist.max(d);
+                    }
+                }
+            }
+            max_dist
+        }
+        Linkage::Average => {
+            // Average distance between all pairs
+            let mut total = 0.0;
+            let mut count = 0;
+            for &i in indices1 {
+                for &j in indices2 {
+                    if let Some(&d) = distances.get(&(i, j)) {
+                        total += d;
+                    } else {
+                        total += euclidean_distance_squared(&data.row(i), &data.row(j)).sqrt();
+                    }
+                    count += 1;
+                }
+            }
+            if count > 0 {
+                total / count as f64
+            } else {
+                f64::INFINITY
+            }
+        }
+        Linkage::Ward => {
+            // Ward's minimum variance: increase in total within-cluster variance
+            let n1 = indices1.len() as f64;
+            let n2 = indices2.len() as f64;
+
+            // Compute centroids
+            let centroid1 = compute_centroid(data, indices1);
+            let centroid2 = compute_centroid(data, indices2);
+
+            // Ward distance: sqrt(2 * n1 * n2 / (n1 + n2)) * ||c1 - c2||
+            let centroid_dist = centroid1
+                .iter()
+                .zip(centroid2.iter())
+                .map(|(a, b)| (a - b).powi(2))
+                .sum::<f64>()
+                .sqrt();
+
+            ((2.0 * n1 * n2) / (n1 + n2)).sqrt() * centroid_dist
+        }
+    }
+}
+
+/// Compute centroid of a cluster.
+fn compute_centroid(data: &ArrayView2<f64>, indices: &[usize]) -> Vec<f64> {
+    let n_features = data.ncols();
+    let mut centroid = vec![0.0; n_features];
+    let n = indices.len() as f64;
+
+    for &idx in indices {
+        for (j, val) in data.row(idx).iter().enumerate() {
+            centroid[j] += val;
+        }
+    }
+
+    for val in &mut centroid {
+        *val /= n;
+    }
+
+    centroid
+}
+
+/// Update distance matrix after merging two clusters.
+#[allow(clippy::too_many_arguments)]
+fn update_distances_for_merge(
+    distances: &mut HashMap<(usize, usize), f64>,
+    active: &HashSet<usize>,
+    c1: usize,
+    c2: usize,
+    new_id: usize,
+    merged_indices: &[usize],
+    clusters: &HashMap<usize, Vec<usize>>,
+    data: &ArrayView2<f64>,
+    linkage: Linkage,
+) {
+    // For each other active cluster, compute distance to new merged cluster
+    for &other in active {
+        if other == c1 || other == c2 {
+            continue;
+        }
+
+        let other_indices = clusters.get(&other).unwrap();
+
+        let dist = match linkage {
+            Linkage::Single => {
+                let mut min_dist = f64::INFINITY;
+                for &i in merged_indices {
+                    for &j in other_indices {
+                        if let Some(&d) = distances.get(&(i, j)) {
+                            min_dist = min_dist.min(d);
+                        } else {
+                            let d = euclidean_distance_squared(&data.row(i), &data.row(j)).sqrt();
+                            min_dist = min_dist.min(d);
+                        }
+                    }
+                }
+                min_dist
+            }
+            Linkage::Complete => {
+                let mut max_dist = 0.0f64;
+                for &i in merged_indices {
+                    for &j in other_indices {
+                        if let Some(&d) = distances.get(&(i, j)) {
+                            max_dist = max_dist.max(d);
+                        } else {
+                            let d = euclidean_distance_squared(&data.row(i), &data.row(j)).sqrt();
+                            max_dist = max_dist.max(d);
+                        }
+                    }
+                }
+                max_dist
+            }
+            Linkage::Average => {
+                let mut total = 0.0;
+                let mut count = 0;
+                for &i in merged_indices {
+                    for &j in other_indices {
+                        if let Some(&d) = distances.get(&(i, j)) {
+                            total += d;
+                        } else {
+                            total += euclidean_distance_squared(&data.row(i), &data.row(j)).sqrt();
+                        }
+                        count += 1;
+                    }
+                }
+                total / count as f64
+            }
+            Linkage::Ward => {
+                let n1 = merged_indices.len() as f64;
+                let n2 = other_indices.len() as f64;
+                let centroid1 = compute_centroid(data, merged_indices);
+                let centroid2 = compute_centroid(data, other_indices);
+                let centroid_dist = centroid1
+                    .iter()
+                    .zip(centroid2.iter())
+                    .map(|(a, b)| (a - b).powi(2))
+                    .sum::<f64>()
+                    .sqrt();
+                ((2.0 * n1 * n2) / (n1 + n2)).sqrt() * centroid_dist
+            }
+        };
+
+        distances.insert((new_id, other), dist);
+        distances.insert((other, new_id), dist);
+    }
+}
+
 /// Squared Euclidean distance between two vectors.
 #[inline]
 fn euclidean_distance_squared(a: &ArrayView1<f64>, b: &ArrayView1<f64>) -> f64 {
@@ -393,5 +840,60 @@ mod tests {
         assert_eq!(result.n_clusters, 2);
         assert_eq!(result.n_noise, 1);
         assert_eq!(result.labels[5], -1); // Noise
+    }
+
+    #[test]
+    fn test_hierarchical_basic() {
+        // Simple 2D data with 2 clear clusters
+        let data = array![
+            [0.0, 0.0],
+            [0.1, 0.1],
+            [0.2, 0.0],
+            [10.0, 10.0],
+            [10.1, 10.1],
+            [10.2, 10.0],
+        ];
+
+        let result = hierarchical(data.view(), Some(2), Linkage::Ward, None).unwrap();
+
+        assert_eq!(result.labels.len(), 6);
+        assert_eq!(result.n_clusters, 2);
+
+        // Points 0-2 should be in one cluster, points 3-5 in another
+        assert_eq!(result.labels[0], result.labels[1]);
+        assert_eq!(result.labels[1], result.labels[2]);
+        assert_eq!(result.labels[3], result.labels[4]);
+        assert_eq!(result.labels[4], result.labels[5]);
+        assert_ne!(result.labels[0], result.labels[3]);
+    }
+
+    #[test]
+    fn test_hierarchical_linkage_methods() {
+        let data = array![
+            [0.0, 0.0],
+            [1.0, 0.0],
+            [5.0, 0.0],
+            [6.0, 0.0],
+        ];
+
+        // Test all linkage methods work
+        for linkage in [Linkage::Single, Linkage::Complete, Linkage::Average, Linkage::Ward] {
+            let result = hierarchical(data.view(), Some(2), linkage, None).unwrap();
+            assert_eq!(result.n_clusters, 2);
+        }
+    }
+
+    #[test]
+    fn test_hierarchical_distance_threshold() {
+        let data = array![
+            [0.0, 0.0],
+            [0.5, 0.0],
+            [10.0, 0.0],
+            [10.5, 0.0],
+        ];
+
+        // With threshold of 1.0, should get 2 clusters
+        let result = hierarchical(data.view(), None, Linkage::Single, Some(1.0)).unwrap();
+        assert_eq!(result.n_clusters, 2);
     }
 }

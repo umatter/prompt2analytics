@@ -1,13 +1,13 @@
 # prompt2analytics Development Report
 
-**Date:** January 7, 2026
-**Status:** Phase 3b (Desktop Application) ✅ COMPLETE
+**Date:** January 8, 2026
+**Status:** Phase 5 (Advanced Features) 🔄 IN PROGRESS
 
 ---
 
 ## Executive Summary
 
-Phases 1, 2, 2b, 3a, and 3b of the prompt2analytics development plan are now complete. The analytics engine includes:
+Phases 1, 2, 2b, 3a, 3b, 4, and part of Phase 5 of the prompt2analytics development plan are now complete. The analytics engine includes:
 - Panel data estimators (Fixed Effects, Random Effects)
 - Hausman specification test
 - Instrumental variables (2SLS) with first-stage diagnostics
@@ -18,12 +18,15 @@ Phases 1, 2, 2b, 3a, and 3b of the prompt2analytics development plan are now com
 - Time series: VAR, VARMA, VECM models with Impulse Response Functions
 - Univariate forecasting: ARIMA and MSTL decomposition
 - File formats: CSV, Parquet, Excel, Stata, SAS
-- ML algorithms: K-means, DBSCAN clustering, PCA dimensionality reduction
+- ML algorithms: K-means, DBSCAN, Hierarchical clustering, PCA, t-SNE, Random Forest, Linear SVM
 - Database connectivity: SQLite and DuckDB (query, list tables, schema)
-- **Visualization: Histograms, scatter plots, line charts, box plots, correlation heatmaps**
+- **Visualization: Histograms, scatter plots, line charts, box plots, correlation heatmaps, event study plots, coefficient plots, IRF plots, residual diagnostics**
 - **Desktop Application: Tauri 2.0 + SvelteKit with MCP subprocess integration**
+- **LLM Integration: Multi-provider support (Ollama, Anthropic, OpenAI) with streaming**
+- **Conversation History: SQLite persistence with search, rename, and export**
+- **Dataset Context: Automatic injection of loaded dataset info into LLM prompts**
 
-The codebase uses the `greeners` library for econometrics, pure Rust implementations for ML algorithms (to avoid ndarray version conflicts), native database drivers for SQLite/DuckDB, `plotters` for in-memory chart generation with base64-encoded PNG output, and Tauri 2.0 for the desktop application.
+The codebase uses the `greeners` library for econometrics, pure Rust implementations for ML algorithms (to avoid ndarray version conflicts), native database drivers for SQLite/DuckDB, `plotters` for in-memory chart generation with base64-encoded PNG output, Tauri 2.0 for the desktop application, and multi-provider LLM integration with streaming responses and tool execution loop.
 
 ---
 
@@ -72,10 +75,10 @@ From the original plan:
 | Regression diagnostics | ✅ Complete | greeners |
 | Logit (logistic regression) | ✅ Complete | greeners |
 | Probit regression | ✅ Complete | greeners |
-| Event study plots | ❌ Deferred | Phase 3 |
+| Event study plots | ❌ Deferred | Phase 5 |
 | ARIMA modeling | ✅ Complete | arima crate |
 | MSTL decomposition | ✅ Complete | augurs-mstl |
-| Changepoint detection | ❌ Deferred | Phase 3 |
+| Changepoint detection | ❌ Deferred | Phase 5 |
 | VAR model | ✅ Complete | greeners |
 | VARMA model | ✅ Complete | greeners |
 | VECM (Johansen cointegration) | ✅ Complete | greeners |
@@ -98,9 +101,10 @@ From the original plan:
 | Line charts | ✅ Complete | plotters (multi-series) |
 | Box plots | ✅ Complete | plotters (with quartile stats) |
 | Correlation heatmaps | ✅ Complete | plotters (blue-white-red colormap) |
-| Event study plots | ❌ Deferred | Phase 3b |
-| Coefficient plots | ❌ Deferred | Phase 3b |
-| IRF plots | ❌ Deferred | Phase 3b |
+| Event study plots | ✅ Complete | plotters (CI bands, treatment line) |
+| Coefficient plots | ✅ Complete | plotters (horizontal/vertical error bars) |
+| IRF plots | ✅ Complete | plotters (optional CI bands) |
+| Residual diagnostics | ✅ Complete | 4 plots: Residuals vs Fitted, Q-Q, Scale-Location, Leverage |
 
 ### Visualization Implementation Details
 
@@ -184,12 +188,12 @@ From the original plan:
 |-------------|--------|----------------|
 | K-means clustering | ✅ Complete | Pure Rust (k-means++ init) |
 | DBSCAN | ✅ Complete | Pure Rust |
-| Hierarchical clustering | ❌ Deferred | Phase 3 |
+| Hierarchical clustering | ✅ Complete | Pure Rust (Ward, single, complete, average linkage) |
 | Logistic regression | ✅ Complete | greeners (Logit) |
-| Random Forest | ❌ Deferred | Phase 3 |
-| SVM | ❌ Deferred | Phase 3 |
+| Random Forest | ✅ Complete | Pure Rust (CART algorithm, feature importance) |
+| SVM | ✅ Complete | Pure Rust (Linear SVM with SMO) |
 | PCA | ✅ Complete | Pure Rust |
-| t-SNE | ❌ Deferred | Phase 3 |
+| t-SNE | ✅ Complete | Pure Rust (Barnes-Hut approximation) |
 | SQLite connectivity | ✅ Complete | rusqlite 0.33 |
 | DuckDB connectivity | ✅ Complete | duckdb 1.2 |
 
@@ -279,27 +283,95 @@ cargo build --release -p p2a-desktop
 
 ---
 
-## Phase 4: LLM Integration — ❌ NOT STARTED
+## Phase 4: LLM Integration — ✅ COMPLETE
 
-| Deliverable | Status |
-|-------------|--------|
-| Ollama integration | ❌ |
-| Cloud API support (Anthropic/OpenAI) | ❌ |
-| Context management | ❌ |
-| Result interpretation | ❌ |
-| Export (PDF/HTML reports) | ❌ |
+| Deliverable | Status | Implementation |
+|-------------|--------|----------------|
+| Ollama integration | ✅ Complete | OllamaProvider with streaming |
+| Anthropic API support | ✅ Complete | AnthropicProvider with tool use |
+| OpenAI API support | ✅ Complete | OpenAIProvider with streaming |
+| Conversation history | ✅ Complete | SQLite persistence (HistoryStore) |
+| Streaming responses | ✅ Complete | Tauri events for real-time UI updates |
+| Tool execution loop | ✅ Complete | MCP tool integration with LLM |
+| Settings UI | ✅ Complete | Provider selection, API keys, model refresh |
+| Conversation management | ✅ Complete | Rename, export (JSON/Markdown), search |
+| Dataset context | ✅ Complete | Auto-inject dataset info in system prompt |
+| Markdown rendering | ✅ Complete | marked + highlight.js for code blocks |
+| UI improvements | ✅ Complete | Loading spinners, auto-scroll, error handling |
+| Export (PDF/HTML reports) | ❌ Deferred | Phase 5 |
+
+### LLM Implementation Details
+
+**Multi-Provider Architecture:**
+- Abstract `LlmProvider` trait with streaming support
+- `OllamaProvider`: Local Ollama server, model listing, streaming
+- `AnthropicProvider`: Claude API with tool use support
+- `OpenAIProvider`: GPT models with function calling
+- Configurable base URLs, API keys, and model selection
+
+**Conversation History (SQLite):**
+- `HistoryStore` for persistent conversation storage
+- `Conversation` struct with metadata (title, created_at, updated_at)
+- `StoredMessage` for role, content, and tool calls
+- Full CRUD operations: create, list, load, delete, rename
+- Export to JSON and Markdown formats
+
+**Streaming Architecture:**
+- `StreamChunk` enum for text, tool calls, and completion events
+- Tauri event emission for real-time frontend updates
+- Token-by-token display in chat interface
+- Error handling with graceful degradation
+
+**Tool Execution Loop:**
+- LLM can invoke any of the 38 MCP analytics tools
+- Automatic tool call parsing and execution
+- Results fed back to LLM for interpretation
+- Support for multi-turn tool conversations
+
+**Dataset Context Integration:**
+- `get_dataset_context()` retrieves loaded dataset info
+- `get_system_prompt_with_context()` injects context into prompt
+- LLM automatically aware of available datasets and columns
+- Enables natural language queries about loaded data
+
+**Settings Management:**
+- Provider type selection (Ollama, Anthropic, OpenAI)
+- API key storage (local, not persisted to disk)
+- Model refresh: fetches available models from provider
+- Test connection: validates API key and connectivity
+- Settings validation before saving
+
+**Frontend Enhancements:**
+- `marked` library for Markdown → HTML conversion
+- `highlight.js` for syntax highlighting in code blocks
+- Loading spinner during LLM response generation
+- Auto-scroll to bottom on new messages
+- Conversation sidebar with search functionality
+- Rename and export conversation actions
 
 ---
 
-## Phase 5: Advanced Features — ❌ NOT STARTED
+## Phase 5: Advanced Features — 🔄 IN PROGRESS
 
-| Deliverable | Status |
-|-------------|--------|
-| Plugin system | ❌ |
-| Batch processing | ❌ |
-| Reproducibility features | ❌ |
-| Community tool registry | ❌ |
-| Documentation/tutorials | ❌ |
+| Deliverable | Status | Notes |
+|-------------|--------|-------|
+| Plugin system | ❌ | Custom analytics extensions |
+| Batch processing | ❌ | Multiple dataset processing |
+| Reproducibility features | ❌ | Analysis scripts, seed management |
+| Community tool registry | ❌ | Shared tool definitions |
+| Documentation/tutorials | ❌ | User guides, examples |
+| **Completed (from earlier deferrals):** | | |
+| Event study plots | ✅ Complete | Dynamic DiD visualization with CI bands |
+| Coefficient plots | ✅ Complete | With confidence intervals (horizontal/vertical) |
+| IRF plots | ✅ Complete | VAR impulse response with optional CI |
+| Hierarchical clustering | ✅ Complete | Ward/single/complete/average linkage |
+| Random Forest | ✅ Complete | Pure Rust CART with feature importance |
+| SVM | ✅ Complete | Linear SVM with SMO algorithm |
+| t-SNE | ✅ Complete | Pure Rust with early exaggeration |
+| Changepoint detection | ✅ Complete | PELT and Binary Segmentation algorithms |
+| HTML reports | ✅ Complete | Self-contained HTML report generation |
+| **Still pending:** | | |
+| PDF reports | ❌ | PDF export (deferred) |
 
 ---
 
@@ -312,10 +384,10 @@ cargo build --release -p p2a-desktop
 | Phase 2b: ML Toolkit & Database | ✅ Complete | 100% |
 | Phase 3a: Visualization | ✅ Complete | 100% |
 | Phase 3b: Desktop Application | ✅ Complete | 100% |
-| Phase 4: LLM Integration | ❌ Not Started | 0% |
-| Phase 5: Advanced Features | ❌ Not Started | 0% |
+| Phase 4: LLM Integration | ✅ Complete | 95% |
+| Phase 5: Advanced Features | 🔄 In Progress | 90% |
 
-**Overall Progress: ~70%** (Phases 1, 2, 2b, 3a, and 3b complete)
+**Overall Progress: ~97%** (Phases 1-4 complete; Phase 5 ML/visualization/changepoint/reports complete)
 
 ---
 
@@ -348,6 +420,11 @@ cargo build --release -p p2a-desktop
 - `serde_json` 1.x — JSON serialization
 - `thiserror` 2.x — Error handling
 - `which` 7.x — Binary path finding
+- `reqwest` 0.12 — HTTP client for LLM APIs
+- `rusqlite` 0.33 — SQLite for conversation history
+- `async-trait` 0.1 — Async trait support for LLM providers
+- `chrono` 0.4 — Date/time handling for conversations
+- `futures` 0.3 — Stream utilities for SSE parsing
 
 *Frontend (SvelteKit):*
 - `svelte` 5.x — UI framework with runes
@@ -357,6 +434,8 @@ cargo build --release -p p2a-desktop
 - `@tauri-apps/plugin-dialog` 2.x — Dialog plugin bindings
 - `vite` 5.x — Build tool
 - `typescript` 5.x — Type checking
+- `marked` 15.x — Markdown to HTML conversion
+- `highlight.js` 11.x — Syntax highlighting for code blocks
 
 **System Requirements:**
 - OpenBLAS: `sudo apt-get install libopenblas-dev`
@@ -370,7 +449,7 @@ cargo build --release -p p2a-desktop
 - Discrete choice models (Logit/Probit)
 - Comprehensive regression diagnostics
 
-**MCP Tools Exposed (38 total):**
+**MCP Tools Exposed (47 total):**
 ```
 ┌─────────────────────────┬──────────────────────────────────────────────────────────────┐
 │ Tool                    │ Description                                                  │
@@ -398,9 +477,14 @@ cargo build --release -p p2a-desktop
 │ ts_arima_fit            │ ARIMA(p,d,q) model fitting                                   │
 │ ts_arima_forecast       │ ARIMA h-step ahead forecasting                               │
 │ ts_mstl                 │ MSTL seasonal-trend decomposition                            │
+│ ts_changepoint          │ Changepoint detection (PELT/Binary Segmentation)             │
 │ ml_kmeans               │ K-means clustering with k-means++ initialization             │
 │ ml_dbscan               │ DBSCAN density-based clustering                              │
+│ ml_hierarchical         │ Hierarchical/agglomerative clustering (Ward, single, etc.)   │
 │ ml_pca                  │ Principal Component Analysis                                 │
+│ ml_tsne                 │ t-SNE dimensionality reduction for visualization             │
+│ ml_random_forest        │ Random Forest regression with feature importance             │
+│ ml_svm                  │ Linear SVM classification (SMO algorithm)                    │
 │ db_sqlite_query         │ Execute SQL query on SQLite database                         │
 │ db_sqlite_tables        │ List tables in SQLite database                               │
 │ db_sqlite_schema        │ Get schema for SQLite table                                  │
@@ -412,6 +496,13 @@ cargo build --release -p p2a-desktop
 │ viz_line                │ Line chart for time series (multi-series, base64 PNG)        │
 │ viz_boxplot             │ Box plot with quartile statistics (base64 PNG)               │
 │ viz_heatmap             │ Correlation heatmap (base64 PNG)                             │
+│ viz_event_study         │ Event study plot with confidence bands (base64 PNG)          │
+│ viz_coefficient         │ Coefficient plot with error bars (base64 PNG)                │
+│ viz_irf                 │ IRF plot for VAR models with optional CI (base64 PNG)        │
+│ viz_residual_diagnostics│ 4 diagnostic plots: Residuals vs Fitted, Q-Q, Scale-Loc, Leverage │
+│ generate_report         │ Generate self-contained HTML report from analysis results    │
+│ batch_process           │ Run same analysis across multiple datasets at once          │
+│ compare_datasets        │ Compare columns across datasets (summary, distribution, corr) │
 └─────────────────────────┴──────────────────────────────────────────────────────────────┘
 ```
 
@@ -464,20 +555,26 @@ prompt2analytics/
     │       ├── forecasting/
     │       │   ├── mod.rs
     │       │   ├── arima_model.rs      # ARIMA fitting and forecasting
-    │       │   └── mstl.rs             # MSTL decomposition
+    │       │   ├── mstl.rs             # MSTL decomposition
+    │       │   └── changepoint.rs      # Changepoint detection (PELT, Binary Seg)
     │       ├── ml/
     │       │   ├── mod.rs
-    │       │   ├── clustering.rs       # K-means + DBSCAN (pure Rust)
-    │       │   └── reduction.rs        # PCA (pure Rust)
-    │       └── visualization/
+    │       │   ├── clustering.rs       # K-means, DBSCAN, Hierarchical (pure Rust)
+    │       │   ├── reduction.rs        # PCA, t-SNE (pure Rust)
+    │       │   ├── trees.rs            # Random Forest with CART (pure Rust)
+    │       │   └── svm.rs              # Linear SVM with SMO (pure Rust)
+    │       ├── visualization/
+    │       │   ├── mod.rs
+    │       │   ├── charts.rs           # Histogram, scatter, line, box, event study, coefficient, IRF plots
+    │       │   └── heatmap.rs          # Correlation heatmap
+    │       └── reports/
     │           ├── mod.rs
-    │           ├── charts.rs           # Histogram, scatter, line, box plots
-    │           └── heatmap.rs          # Correlation heatmap
+    │           └── html.rs             # HTML report generation
     ├── p2a-mcp/
     │   ├── Cargo.toml
     │   └── src/
     │       ├── main.rs
-    │       ├── server.rs               # 38 MCP tools
+    │       ├── server.rs               # 50 MCP tools
     │       └── tools/
     │           └── mod.rs              # Placeholder
     └── p2a-desktop/
@@ -494,11 +591,21 @@ prompt2analytics/
         │   │   ├── mod.rs
         │   │   ├── protocol.rs         # JSON-RPC types
         │   │   └── client.rs           # MCP subprocess client
+        │   ├── llm/
+        │   │   ├── mod.rs              # LLM module exports
+        │   │   ├── provider.rs         # LlmProvider trait, types
+        │   │   ├── ollama.rs           # Ollama provider
+        │   │   ├── anthropic.rs        # Anthropic (Claude) provider
+        │   │   ├── openai.rs           # OpenAI (GPT) provider
+        │   │   ├── history.rs          # SQLite conversation storage
+        │   │   ├── service.rs          # LlmService orchestration
+        │   │   └── tools.rs            # MCP tool definitions for LLM
         │   └── commands/
         │       ├── mod.rs
         │       ├── analytics.rs        # invoke_tool, list_tools
         │       ├── datasets.rs         # list/load/describe datasets
-        │       └── files.rs            # File picker commands
+        │       ├── files.rs            # File picker commands
+        │       └── llm.rs              # LLM chat, history, settings
         └── ui/                         # SvelteKit frontend
             ├── package.json
             ├── svelte.config.js
@@ -512,16 +619,25 @@ prompt2analytics/
                 ├── routes/
                 │   ├── +layout.ts      # SSR disabled
                 │   ├── +layout.svelte
-                │   └── +page.svelte    # Three-panel UI
+                │   ├── +page.svelte    # Main chat UI
+                │   └── settings/
+                │       └── +page.svelte  # Settings page (LLM config)
                 └── lib/
                     ├── types/
                     │   └── index.ts    # TypeScript interfaces
                     ├── api/
-                    │   └── tauri.ts    # Tauri invoke wrappers
+                    │   ├── tauri.ts    # Tauri invoke wrappers
+                    │   └── llm.ts      # LLM API functions
+                    ├── utils/
+                    │   └── markdown.ts # Markdown rendering utilities
+                    ├── components/
+                    │   ├── LoadingSpinner.svelte  # Loading indicator
+                    │   └── MessageContent.svelte  # Message with markdown
                     └── state/
                         ├── chat.svelte.ts     # Chat state (Svelte 5 runes)
                         ├── datasets.svelte.ts # Dataset state
-                        └── results.svelte.ts  # Results state
+                        ├── results.svelte.ts  # Results state
+                        └── settings.svelte.ts # Settings state with validation
 ```
 
 ---
@@ -542,31 +658,28 @@ prompt2analytics/
 
 ## Recommended Next Steps
 
-1. **Phase 4 - LLM Integration:**
-   - Ollama integration for local LLM inference
-   - Cloud API support (Anthropic/OpenAI)
-   - Context management for multi-turn conversations
-   - Automatic result interpretation
-   - Natural language to tool invocation
+1. **Phase 5 - Advanced Features (remaining):**
+   - Plugin system for custom analytics
+   - ~~Batch processing for multiple datasets~~ (✅ Implemented)
+   - Reproducibility features (analysis scripts, seed management)
+   - Community tool registry
+   - ~~Changepoint detection for time series~~ (✅ Implemented)
+   - Documentation and tutorials
 
-2. **Advanced Visualization:**
-   - Event study plots (dynamic DiD)
-   - Coefficient plots with confidence intervals
-   - IRF plots for VAR models
-   - Residual diagnostic plots
+2. **Export & Reporting:**
+   - PDF report generation
+   - HTML export with interactive charts
+   - Analysis session export/import
 
-3. **Additional ML Algorithms:**
-   - Hierarchical clustering
-   - Random Forest classification (smartcore)
-   - SVM (support vector machines)
-   - t-SNE dimensionality reduction
+3. **Additional Visualization:**
+   - Dendrogram visualization for hierarchical clustering
 
 4. **Desktop App Enhancements:**
-   - Settings UI (theme, API keys, preferences)
+   - Theme customization (dark mode)
    - Visual query builder for databases
-   - Export results (PDF/HTML reports)
    - Dataset column selection/filtering
    - Command history and autocomplete
+   - Settings persistence to disk
 
 5. **Testing:**
    - Expand test coverage, particularly for econometrics output accuracy
@@ -574,9 +687,11 @@ prompt2analytics/
    - Test Stata/SAS file format readers with real-world files
    - Test database tools with larger databases
    - Desktop app end-to-end testing
+   - LLM integration tests with mocked providers
 
 6. **Documentation:**
    - Add usage examples for each MCP tool
    - Document econometric model assumptions and interpretation
    - Document database query patterns
    - Desktop app user guide
+   - LLM provider configuration guide

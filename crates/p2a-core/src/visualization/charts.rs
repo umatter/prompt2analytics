@@ -580,6 +580,1100 @@ pub fn line_chart(
     })
 }
 
+/// Result of event study plot generation.
+pub struct EventStudyResult {
+    /// Base64-encoded PNG image
+    pub image_base64: String,
+    /// Number of time periods
+    pub n_periods: usize,
+    /// Treatment period (if identified)
+    pub treatment_period: Option<f64>,
+}
+
+impl std::fmt::Display for EventStudyResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "Event Study Plot")?;
+        writeln!(f, "================")?;
+        writeln!(f, "Time periods: {}", self.n_periods)?;
+        if let Some(t) = self.treatment_period {
+            writeln!(f, "Treatment period: {}", t)?;
+        }
+        writeln!(f)?;
+        writeln!(f, "Image (base64): {} bytes", self.image_base64.len())
+    }
+}
+
+/// Generate an event study plot showing treatment effects over time with confidence intervals.
+///
+/// # Arguments
+/// * `time` - Time periods (relative to treatment, e.g., -3, -2, -1, 0, 1, 2, 3)
+/// * `estimates` - Point estimates for each period
+/// * `ci_lower` - Lower bound of confidence interval
+/// * `ci_upper` - Upper bound of confidence interval
+/// * `config` - Chart configuration
+pub fn event_study_plot(
+    time: &[f64],
+    estimates: &[f64],
+    ci_lower: &[f64],
+    ci_upper: &[f64],
+    config: ChartConfig,
+) -> Result<EventStudyResult, VisualizationError> {
+    if time.is_empty() || estimates.is_empty() {
+        return Err(VisualizationError::InvalidData("Empty data arrays".to_string()));
+    }
+
+    let n = time.len();
+    if estimates.len() != n || ci_lower.len() != n || ci_upper.len() != n {
+        return Err(VisualizationError::InvalidData(
+            "All arrays must have the same length".to_string()
+        ));
+    }
+
+    // Filter out invalid values and collect valid points
+    let mut valid_points: Vec<(f64, f64, f64, f64)> = Vec::new();
+    for i in 0..n {
+        if time[i].is_finite() && estimates[i].is_finite()
+            && ci_lower[i].is_finite() && ci_upper[i].is_finite() {
+            valid_points.push((time[i], estimates[i], ci_lower[i], ci_upper[i]));
+        }
+    }
+
+    if valid_points.is_empty() {
+        return Err(VisualizationError::InvalidData("No valid data points".to_string()));
+    }
+
+    // Sort by time
+    valid_points.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+
+    // Calculate bounds
+    let x_min = valid_points.first().unwrap().0;
+    let x_max = valid_points.last().unwrap().0;
+    let y_min = valid_points.iter().map(|p| p.2).fold(f64::INFINITY, f64::min);
+    let y_max = valid_points.iter().map(|p| p.3).fold(f64::NEG_INFINITY, f64::max);
+
+    let x_pad = (x_max - x_min).max(1.0) * 0.1;
+    let y_pad = (y_max - y_min).max(0.1) * 0.1;
+
+    // Detect treatment period (typically 0)
+    let treatment_period = if valid_points.iter().any(|p| (p.0 - 0.0).abs() < 0.01) {
+        Some(0.0)
+    } else {
+        None
+    };
+
+    // Create image buffer
+    let mut buffer = vec![0u8; (config.width * config.height * 3) as usize];
+
+    {
+        let root = BitMapBackend::with_buffer(&mut buffer, (config.width, config.height))
+            .into_drawing_area();
+        root.fill(&WHITE).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+
+        let title = config.title.as_deref().unwrap_or("Event Study");
+        let x_label = config.x_label.as_deref().unwrap_or("Time Relative to Treatment");
+        let y_label = config.y_label.as_deref().unwrap_or("Treatment Effect");
+
+        let mut chart = ChartBuilder::on(&root)
+            .caption(title, ("sans-serif", 24))
+            .margin(10)
+            .x_label_area_size(40)
+            .y_label_area_size(60)
+            .build_cartesian_2d(
+                (x_min - x_pad)..(x_max + x_pad),
+                (y_min - y_pad)..(y_max + y_pad),
+            )
+            .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+
+        chart
+            .configure_mesh()
+            .x_desc(x_label)
+            .y_desc(y_label)
+            .draw()
+            .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+
+        // Draw horizontal zero line (dashed)
+        chart.draw_series(LineSeries::new(
+            vec![(x_min - x_pad, 0.0), (x_max + x_pad, 0.0)],
+            BLACK.stroke_width(1),
+        )).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+
+        // Draw vertical treatment line at t=0 if present
+        if treatment_period.is_some() {
+            chart.draw_series(LineSeries::new(
+                vec![(0.0, y_min - y_pad), (0.0, y_max + y_pad)],
+                RGBColor(128, 128, 128).stroke_width(1),
+            )).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+        }
+
+        // Draw confidence interval as shaded region
+        let ci_polygon: Vec<(f64, f64)> = {
+            let mut points = Vec::new();
+            // Upper bound (forward)
+            for &(t, _, _, upper) in &valid_points {
+                points.push((t, upper));
+            }
+            // Lower bound (backward)
+            for &(t, _, lower, _) in valid_points.iter().rev() {
+                points.push((t, lower));
+            }
+            points
+        };
+
+        chart.draw_series(std::iter::once(
+            Polygon::new(ci_polygon, BLUE.mix(0.2).filled())
+        )).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+
+        // Draw point estimates as line
+        let estimate_points: Vec<(f64, f64)> = valid_points.iter()
+            .map(|&(t, est, _, _)| (t, est))
+            .collect();
+
+        chart.draw_series(LineSeries::new(
+            estimate_points.clone(),
+            BLUE.stroke_width(2),
+        )).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+
+        // Draw point markers
+        chart.draw_series(
+            estimate_points.iter().map(|&(x, y)| {
+                Circle::new((x, y), 4, BLUE.filled())
+            })
+        ).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+
+        root.present().map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+    }
+
+    let image_base64 = encode_rgb_to_png_base64(&buffer, config.width, config.height)?;
+
+    Ok(EventStudyResult {
+        image_base64,
+        n_periods: valid_points.len(),
+        treatment_period,
+    })
+}
+
+/// Result of coefficient plot generation.
+pub struct CoefficientPlotResult {
+    /// Base64-encoded PNG image
+    pub image_base64: String,
+    /// Number of coefficients plotted
+    pub n_coefficients: usize,
+}
+
+impl std::fmt::Display for CoefficientPlotResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "Coefficient Plot")?;
+        writeln!(f, "================")?;
+        writeln!(f, "Coefficients: {}", self.n_coefficients)?;
+        writeln!(f)?;
+        writeln!(f, "Image (base64): {} bytes", self.image_base64.len())
+    }
+}
+
+/// Generate a coefficient plot showing regression coefficients with confidence intervals.
+///
+/// # Arguments
+/// * `names` - Variable names
+/// * `estimates` - Coefficient estimates
+/// * `ci_lower` - Lower bound of confidence interval
+/// * `ci_upper` - Upper bound of confidence interval
+/// * `config` - Chart configuration
+/// * `horizontal` - If true, draw horizontal bars (default)
+pub fn coefficient_plot(
+    names: &[String],
+    estimates: &[f64],
+    ci_lower: &[f64],
+    ci_upper: &[f64],
+    config: ChartConfig,
+    horizontal: bool,
+) -> Result<CoefficientPlotResult, VisualizationError> {
+    if names.is_empty() || estimates.is_empty() {
+        return Err(VisualizationError::InvalidData("Empty data arrays".to_string()));
+    }
+
+    let n = names.len();
+    if estimates.len() != n || ci_lower.len() != n || ci_upper.len() != n {
+        return Err(VisualizationError::InvalidData(
+            "All arrays must have the same length".to_string()
+        ));
+    }
+
+    // Collect valid coefficients
+    let mut valid_coefs: Vec<(String, f64, f64, f64)> = Vec::new();
+    for i in 0..n {
+        if estimates[i].is_finite() && ci_lower[i].is_finite() && ci_upper[i].is_finite() {
+            valid_coefs.push((names[i].clone(), estimates[i], ci_lower[i], ci_upper[i]));
+        }
+    }
+
+    if valid_coefs.is_empty() {
+        return Err(VisualizationError::InvalidData("No valid coefficients".to_string()));
+    }
+
+    // Calculate bounds
+    let x_min = valid_coefs.iter().map(|c| c.2).fold(f64::INFINITY, f64::min);
+    let x_max = valid_coefs.iter().map(|c| c.3).fold(f64::NEG_INFINITY, f64::max);
+    let x_pad = (x_max - x_min).max(0.1) * 0.1;
+
+    // Ensure zero is visible
+    let x_range_min = x_min.min(0.0) - x_pad;
+    let x_range_max = x_max.max(0.0) + x_pad;
+
+    // Create image buffer
+    let mut buffer = vec![0u8; (config.width * config.height * 3) as usize];
+
+    {
+        let root = BitMapBackend::with_buffer(&mut buffer, (config.width, config.height))
+            .into_drawing_area();
+        root.fill(&WHITE).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+
+        let title = config.title.as_deref().unwrap_or("Coefficient Plot");
+        let x_label = config.x_label.as_deref().unwrap_or("Estimate");
+
+        let n_coefs = valid_coefs.len() as f64;
+
+        if horizontal {
+            // Horizontal layout: coefficients on Y-axis, values on X-axis
+            let mut chart = ChartBuilder::on(&root)
+                .caption(title, ("sans-serif", 24))
+                .margin(10)
+                .x_label_area_size(40)
+                .y_label_area_size(120) // More space for variable names
+                .build_cartesian_2d(
+                    x_range_min..x_range_max,
+                    -0.5..(n_coefs - 0.5),
+                )
+                .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+
+            chart
+                .configure_mesh()
+                .x_desc(x_label)
+                .y_label_formatter(&|y| {
+                    let idx = y.round() as usize;
+                    valid_coefs.get(idx).map(|c| c.0.clone()).unwrap_or_default()
+                })
+                .draw()
+                .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+
+            // Draw vertical zero line
+            chart.draw_series(LineSeries::new(
+                vec![(0.0, -0.5), (0.0, n_coefs - 0.5)],
+                RGBColor(128, 128, 128).stroke_width(1),
+            )).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+
+            // Draw each coefficient with error bar
+            for (i, (_name, est, lower, upper)) in valid_coefs.iter().enumerate() {
+                let y_pos = i as f64;
+
+                // Draw error bar (horizontal line)
+                chart.draw_series(LineSeries::new(
+                    vec![(*lower, y_pos), (*upper, y_pos)],
+                    BLUE.stroke_width(2),
+                )).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+
+                // Draw caps on error bar
+                chart.draw_series(LineSeries::new(
+                    vec![(*lower, y_pos - 0.1), (*lower, y_pos + 0.1)],
+                    BLUE.stroke_width(2),
+                )).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+
+                chart.draw_series(LineSeries::new(
+                    vec![(*upper, y_pos - 0.1), (*upper, y_pos + 0.1)],
+                    BLUE.stroke_width(2),
+                )).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+
+                // Draw point estimate
+                chart.draw_series(std::iter::once(
+                    Circle::new((*est, y_pos), 5, BLUE.filled())
+                )).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+            }
+        } else {
+            // Vertical layout: coefficients on X-axis, values on Y-axis
+            let y_range_min = x_range_min; // Swap x and y ranges
+            let y_range_max = x_range_max;
+
+            let mut chart = ChartBuilder::on(&root)
+                .caption(title, ("sans-serif", 24))
+                .margin(10)
+                .x_label_area_size(60)
+                .y_label_area_size(60)
+                .build_cartesian_2d(
+                    -0.5..(n_coefs - 0.5),
+                    y_range_min..y_range_max,
+                )
+                .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+
+            chart
+                .configure_mesh()
+                .y_desc(x_label)
+                .x_label_formatter(&|x| {
+                    let idx = x.round() as usize;
+                    valid_coefs.get(idx).map(|c| c.0.clone()).unwrap_or_default()
+                })
+                .draw()
+                .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+
+            // Draw horizontal zero line
+            chart.draw_series(LineSeries::new(
+                vec![(-0.5, 0.0), (n_coefs - 0.5, 0.0)],
+                RGBColor(128, 128, 128).stroke_width(1),
+            )).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+
+            // Draw each coefficient with error bar
+            for (i, (_name, est, lower, upper)) in valid_coefs.iter().enumerate() {
+                let x_pos = i as f64;
+
+                // Draw error bar (vertical line)
+                chart.draw_series(LineSeries::new(
+                    vec![(x_pos, *lower), (x_pos, *upper)],
+                    BLUE.stroke_width(2),
+                )).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+
+                // Draw caps on error bar
+                chart.draw_series(LineSeries::new(
+                    vec![(x_pos - 0.1, *lower), (x_pos + 0.1, *lower)],
+                    BLUE.stroke_width(2),
+                )).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+
+                chart.draw_series(LineSeries::new(
+                    vec![(x_pos - 0.1, *upper), (x_pos + 0.1, *upper)],
+                    BLUE.stroke_width(2),
+                )).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+
+                // Draw point estimate
+                chart.draw_series(std::iter::once(
+                    Circle::new((x_pos, *est), 5, BLUE.filled())
+                )).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+            }
+        }
+
+        root.present().map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+    }
+
+    let image_base64 = encode_rgb_to_png_base64(&buffer, config.width, config.height)?;
+
+    Ok(CoefficientPlotResult {
+        image_base64,
+        n_coefficients: valid_coefs.len(),
+    })
+}
+
+/// Result of IRF plot generation.
+pub struct IrfPlotResult {
+    /// Base64-encoded PNG image
+    pub image_base64: String,
+    /// Number of horizons
+    pub n_horizons: usize,
+    /// Shock variable name
+    pub shock: Option<String>,
+    /// Response variable name
+    pub response: Option<String>,
+}
+
+impl std::fmt::Display for IrfPlotResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "Impulse Response Function Plot")?;
+        writeln!(f, "===============================")?;
+        writeln!(f, "Horizons: {}", self.n_horizons)?;
+        if let Some(ref shock) = self.shock {
+            writeln!(f, "Shock: {}", shock)?;
+        }
+        if let Some(ref response) = self.response {
+            writeln!(f, "Response: {}", response)?;
+        }
+        writeln!(f)?;
+        writeln!(f, "Image (base64): {} bytes", self.image_base64.len())
+    }
+}
+
+/// Generate an IRF (Impulse Response Function) plot.
+///
+/// # Arguments
+/// * `horizons` - Time horizons (0, 1, 2, ...)
+/// * `responses` - Response values at each horizon
+/// * `ci_lower` - Optional lower bound of confidence interval
+/// * `ci_upper` - Optional upper bound of confidence interval
+/// * `shock_label` - Optional label for shock variable
+/// * `response_label` - Optional label for response variable
+/// * `config` - Chart configuration
+pub fn irf_plot(
+    horizons: &[f64],
+    responses: &[f64],
+    ci_lower: Option<&[f64]>,
+    ci_upper: Option<&[f64]>,
+    shock_label: Option<&str>,
+    response_label: Option<&str>,
+    config: ChartConfig,
+) -> Result<IrfPlotResult, VisualizationError> {
+    if horizons.is_empty() || responses.is_empty() {
+        return Err(VisualizationError::InvalidData("Empty data arrays".to_string()));
+    }
+
+    if horizons.len() != responses.len() {
+        return Err(VisualizationError::InvalidData(
+            "Horizons and responses must have same length".to_string()
+        ));
+    }
+
+    let n = horizons.len();
+    let has_ci = ci_lower.is_some() && ci_upper.is_some();
+
+    if has_ci {
+        let lower = ci_lower.unwrap();
+        let upper = ci_upper.unwrap();
+        if lower.len() != n || upper.len() != n {
+            return Err(VisualizationError::InvalidData(
+                "CI arrays must have same length as horizons".to_string()
+            ));
+        }
+    }
+
+    // Collect valid points
+    let mut valid_points: Vec<(f64, f64, Option<f64>, Option<f64>)> = Vec::new();
+    for i in 0..n {
+        if horizons[i].is_finite() && responses[i].is_finite() {
+            let lower = if has_ci {
+                let l = ci_lower.unwrap()[i];
+                if l.is_finite() { Some(l) } else { None }
+            } else { None };
+            let upper = if has_ci {
+                let u = ci_upper.unwrap()[i];
+                if u.is_finite() { Some(u) } else { None }
+            } else { None };
+            valid_points.push((horizons[i], responses[i], lower, upper));
+        }
+    }
+
+    if valid_points.is_empty() {
+        return Err(VisualizationError::InvalidData("No valid data points".to_string()));
+    }
+
+    // Sort by horizon
+    valid_points.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+
+    // Calculate bounds
+    let x_min = valid_points.first().unwrap().0;
+    let x_max = valid_points.last().unwrap().0;
+
+    let mut y_min = valid_points.iter().map(|p| p.1).fold(f64::INFINITY, f64::min);
+    let mut y_max = valid_points.iter().map(|p| p.1).fold(f64::NEG_INFINITY, f64::max);
+
+    // Include CI bounds if present
+    if has_ci {
+        for p in &valid_points {
+            if let Some(l) = p.2 { y_min = y_min.min(l); }
+            if let Some(u) = p.3 { y_max = y_max.max(u); }
+        }
+    }
+
+    let x_pad = (x_max - x_min).max(1.0) * 0.05;
+    let y_pad = (y_max - y_min).max(0.1) * 0.1;
+
+    // Ensure zero is visible on y-axis
+    y_min = y_min.min(0.0);
+    y_max = y_max.max(0.0);
+
+    // Create image buffer
+    let mut buffer = vec![0u8; (config.width * config.height * 3) as usize];
+
+    {
+        let root = BitMapBackend::with_buffer(&mut buffer, (config.width, config.height))
+            .into_drawing_area();
+        root.fill(&WHITE).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+
+        let title = config.title.as_deref().unwrap_or_else(|| {
+            if shock_label.is_some() && response_label.is_some() {
+                "Impulse Response Function"
+            } else {
+                "IRF"
+            }
+        });
+        let x_label = config.x_label.as_deref().unwrap_or("Horizon");
+        let y_label = config.y_label.as_deref().unwrap_or("Response");
+
+        let mut chart = ChartBuilder::on(&root)
+            .caption(title, ("sans-serif", 24))
+            .margin(10)
+            .x_label_area_size(40)
+            .y_label_area_size(60)
+            .build_cartesian_2d(
+                (x_min - x_pad)..(x_max + x_pad),
+                (y_min - y_pad)..(y_max + y_pad),
+            )
+            .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+
+        chart
+            .configure_mesh()
+            .x_desc(x_label)
+            .y_desc(y_label)
+            .draw()
+            .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+
+        // Draw horizontal zero line
+        chart.draw_series(LineSeries::new(
+            vec![(x_min - x_pad, 0.0), (x_max + x_pad, 0.0)],
+            BLACK.stroke_width(1),
+        )).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+
+        // Draw confidence interval as shaded region if present
+        if has_ci {
+            let ci_points_with_bounds: Vec<_> = valid_points.iter()
+                .filter(|p| p.2.is_some() && p.3.is_some())
+                .collect();
+
+            if ci_points_with_bounds.len() > 1 {
+                let ci_polygon: Vec<(f64, f64)> = {
+                    let mut points = Vec::new();
+                    // Upper bound (forward)
+                    for p in &ci_points_with_bounds {
+                        points.push((p.0, p.3.unwrap()));
+                    }
+                    // Lower bound (backward)
+                    for p in ci_points_with_bounds.iter().rev() {
+                        points.push((p.0, p.2.unwrap()));
+                    }
+                    points
+                };
+
+                chart.draw_series(std::iter::once(
+                    Polygon::new(ci_polygon, BLUE.mix(0.2).filled())
+                )).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+            }
+        }
+
+        // Draw response line
+        let response_points: Vec<(f64, f64)> = valid_points.iter()
+            .map(|p| (p.0, p.1))
+            .collect();
+
+        chart.draw_series(LineSeries::new(
+            response_points.clone(),
+            BLUE.stroke_width(2),
+        )).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+
+        // Draw point markers
+        chart.draw_series(
+            response_points.iter().map(|&(x, y)| {
+                Circle::new((x, y), 4, BLUE.filled())
+            })
+        ).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+
+        root.present().map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+    }
+
+    let image_base64 = encode_rgb_to_png_base64(&buffer, config.width, config.height)?;
+
+    Ok(IrfPlotResult {
+        image_base64,
+        n_horizons: valid_points.len(),
+        shock: shock_label.map(String::from),
+        response: response_label.map(String::from),
+    })
+}
+
+/// Result of residual diagnostics plot generation.
+pub struct ResidualDiagnosticsResult {
+    /// Residuals vs Fitted values plot (base64 PNG)
+    pub residuals_vs_fitted: String,
+    /// Q-Q plot for normality (base64 PNG)
+    pub qq_plot: String,
+    /// Scale-Location plot (base64 PNG)
+    pub scale_location: String,
+    /// Residuals vs Leverage plot (base64 PNG)
+    pub residuals_vs_leverage: String,
+    /// Number of observations
+    pub n_observations: usize,
+    /// Standardized residuals
+    pub standardized_residuals: Vec<f64>,
+    /// Cook's distances
+    pub cooks_distance: Vec<f64>,
+}
+
+impl std::fmt::Display for ResidualDiagnosticsResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "Residual Diagnostics")?;
+        writeln!(f, "====================")?;
+        writeln!(f, "Observations: {}", self.n_observations)?;
+        writeln!(f)?;
+        writeln!(f, "Plots Generated:")?;
+        writeln!(f, "  - Residuals vs Fitted: {} bytes", self.residuals_vs_fitted.len())?;
+        writeln!(f, "  - Q-Q Plot: {} bytes", self.qq_plot.len())?;
+        writeln!(f, "  - Scale-Location: {} bytes", self.scale_location.len())?;
+        writeln!(f, "  - Residuals vs Leverage: {} bytes", self.residuals_vs_leverage.len())
+    }
+}
+
+/// Generate residual diagnostic plots for regression analysis.
+///
+/// Creates four diagnostic plots:
+/// 1. Residuals vs Fitted - checks linearity and homoscedasticity
+/// 2. Normal Q-Q - checks normality of residuals
+/// 3. Scale-Location - checks homoscedasticity (√|standardized residuals| vs fitted)
+/// 4. Residuals vs Leverage - identifies influential observations
+///
+/// # Arguments
+/// * `fitted` - Fitted/predicted values from the regression
+/// * `residuals` - Residual values (y - fitted)
+/// * `leverage` - Optional leverage (hat) values for each observation
+/// * `config` - Chart configuration
+pub fn residual_diagnostics(
+    fitted: &[f64],
+    residuals: &[f64],
+    leverage: Option<&[f64]>,
+    config: ChartConfig,
+) -> Result<ResidualDiagnosticsResult, VisualizationError> {
+    if fitted.is_empty() || residuals.is_empty() {
+        return Err(VisualizationError::InvalidData("Empty data arrays".to_string()));
+    }
+
+    if fitted.len() != residuals.len() {
+        return Err(VisualizationError::InvalidData(
+            "Fitted and residuals must have same length".to_string()
+        ));
+    }
+
+    let n = fitted.len();
+
+    // Filter out invalid values
+    let valid_indices: Vec<usize> = (0..n)
+        .filter(|&i| fitted[i].is_finite() && residuals[i].is_finite())
+        .collect();
+
+    if valid_indices.is_empty() {
+        return Err(VisualizationError::InvalidData("No valid data points".to_string()));
+    }
+
+    let fitted_valid: Vec<f64> = valid_indices.iter().map(|&i| fitted[i]).collect();
+    let residuals_valid: Vec<f64> = valid_indices.iter().map(|&i| residuals[i]).collect();
+
+    let n_valid = fitted_valid.len();
+
+    // Calculate standardized residuals
+    let mean_residual: f64 = residuals_valid.iter().sum::<f64>() / n_valid as f64;
+    let variance: f64 = residuals_valid.iter()
+        .map(|r| (r - mean_residual).powi(2))
+        .sum::<f64>() / (n_valid - 1) as f64;
+    let std_dev = variance.sqrt();
+
+    let standardized_residuals: Vec<f64> = if std_dev > 1e-10 {
+        residuals_valid.iter().map(|r| (r - mean_residual) / std_dev).collect()
+    } else {
+        vec![0.0; n_valid]
+    };
+
+    // Calculate or use provided leverage values
+    let leverage_valid: Vec<f64> = if let Some(lev) = leverage {
+        if lev.len() != n {
+            return Err(VisualizationError::InvalidData(
+                "Leverage must have same length as fitted".to_string()
+            ));
+        }
+        valid_indices.iter().map(|&i| lev[i]).collect()
+    } else {
+        // Simple approximation: 1/n + (x - mean(x))^2 / sum((x - mean(x))^2)
+        let mean_fitted: f64 = fitted_valid.iter().sum::<f64>() / n_valid as f64;
+        let ss_fitted: f64 = fitted_valid.iter().map(|f| (f - mean_fitted).powi(2)).sum();
+        if ss_fitted > 1e-10 {
+            fitted_valid.iter()
+                .map(|f| 1.0 / n_valid as f64 + (f - mean_fitted).powi(2) / ss_fitted)
+                .collect()
+        } else {
+            vec![1.0 / n_valid as f64; n_valid]
+        }
+    };
+
+    // Calculate Cook's distance: D_i = (r_i^2 / p) * (h_i / (1 - h_i))
+    // where p is number of parameters (approximate with 2 for simple regression)
+    let p = 2.0;
+    let cooks_distance: Vec<f64> = standardized_residuals.iter()
+        .zip(leverage_valid.iter())
+        .map(|(r, h)| {
+            let h_clamped = h.min(0.9999);
+            (r.powi(2) / p) * (h_clamped / (1.0 - h_clamped))
+        })
+        .collect();
+
+    // Generate the four diagnostic plots
+    let residuals_vs_fitted = generate_residuals_vs_fitted(&fitted_valid, &residuals_valid, &config)?;
+    let qq_plot = generate_qq_plot(&standardized_residuals, &config)?;
+    let scale_location = generate_scale_location(&fitted_valid, &standardized_residuals, &config)?;
+    let residuals_vs_leverage = generate_residuals_vs_leverage(
+        &leverage_valid, &standardized_residuals, &cooks_distance, &config
+    )?;
+
+    Ok(ResidualDiagnosticsResult {
+        residuals_vs_fitted,
+        qq_plot,
+        scale_location,
+        residuals_vs_leverage,
+        n_observations: n_valid,
+        standardized_residuals,
+        cooks_distance,
+    })
+}
+
+/// Generate Residuals vs Fitted plot.
+fn generate_residuals_vs_fitted(
+    fitted: &[f64],
+    residuals: &[f64],
+    config: &ChartConfig,
+) -> Result<String, VisualizationError> {
+    let x_min = fitted.iter().copied().fold(f64::INFINITY, f64::min);
+    let x_max = fitted.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let y_min = residuals.iter().copied().fold(f64::INFINITY, f64::min);
+    let y_max = residuals.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+
+    let x_pad = (x_max - x_min).max(0.1) * 0.05;
+    let y_pad = (y_max - y_min).max(0.1) * 0.1;
+
+    // Ensure zero is visible on y-axis
+    let y_min_adj = y_min.min(0.0) - y_pad;
+    let y_max_adj = y_max.max(0.0) + y_pad;
+
+    let mut buffer = vec![0u8; (config.width * config.height * 3) as usize];
+
+    {
+        let root = BitMapBackend::with_buffer(&mut buffer, (config.width, config.height))
+            .into_drawing_area();
+        root.fill(&WHITE).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+
+        let mut chart = ChartBuilder::on(&root)
+            .caption("Residuals vs Fitted", ("sans-serif", 24))
+            .margin(10)
+            .x_label_area_size(40)
+            .y_label_area_size(50)
+            .build_cartesian_2d(
+                (x_min - x_pad)..(x_max + x_pad),
+                y_min_adj..y_max_adj,
+            )
+            .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+
+        chart
+            .configure_mesh()
+            .x_desc("Fitted values")
+            .y_desc("Residuals")
+            .draw()
+            .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+
+        // Draw horizontal zero line
+        chart.draw_series(LineSeries::new(
+            vec![(x_min - x_pad, 0.0), (x_max + x_pad, 0.0)],
+            RGBColor(128, 128, 128).stroke_width(1),
+        )).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+
+        // Draw points
+        let points: Vec<(f64, f64)> = fitted.iter().zip(residuals.iter()).map(|(&f, &r)| (f, r)).collect();
+        chart.draw_series(
+            points.iter().map(|&(x, y)| Circle::new((x, y), 4, BLUE.mix(0.7).filled()))
+        ).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+
+        // Calculate and draw LOWESS-like smooth (simple moving average for demonstration)
+        let smoothed = calculate_smooth(&points, 0.3);
+        if smoothed.len() > 1 {
+            chart.draw_series(LineSeries::new(smoothed, RED.stroke_width(2)))
+                .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+        }
+
+        root.present().map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+    }
+
+    encode_rgb_to_png_base64(&buffer, config.width, config.height)
+}
+
+/// Generate Q-Q plot for normality check.
+fn generate_qq_plot(
+    standardized_residuals: &[f64],
+    config: &ChartConfig,
+) -> Result<String, VisualizationError> {
+    let n = standardized_residuals.len();
+
+    // Sort residuals
+    let mut sorted_residuals: Vec<f64> = standardized_residuals.to_vec();
+    sorted_residuals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+    // Calculate theoretical quantiles (standard normal)
+    let theoretical: Vec<f64> = (1..=n)
+        .map(|i| normal_quantile((i as f64 - 0.5) / n as f64))
+        .collect();
+
+    let x_min = theoretical.first().copied().unwrap_or(-3.0);
+    let x_max = theoretical.last().copied().unwrap_or(3.0);
+    let y_min = sorted_residuals.iter().copied().fold(f64::INFINITY, f64::min);
+    let y_max = sorted_residuals.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+
+    let range = (x_max - x_min).max(y_max - y_min);
+    let x_pad = range * 0.1;
+    let y_pad = range * 0.1;
+
+    let mut buffer = vec![0u8; (config.width * config.height * 3) as usize];
+
+    {
+        let root = BitMapBackend::with_buffer(&mut buffer, (config.width, config.height))
+            .into_drawing_area();
+        root.fill(&WHITE).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+
+        let mut chart = ChartBuilder::on(&root)
+            .caption("Normal Q-Q", ("sans-serif", 24))
+            .margin(10)
+            .x_label_area_size(40)
+            .y_label_area_size(50)
+            .build_cartesian_2d(
+                (x_min - x_pad)..(x_max + x_pad),
+                (y_min - y_pad)..(y_max + y_pad),
+            )
+            .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+
+        chart
+            .configure_mesh()
+            .x_desc("Theoretical Quantiles")
+            .y_desc("Standardized Residuals")
+            .draw()
+            .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+
+        // Draw reference line (y = x for standardized residuals)
+        let line_min = x_min.min(y_min);
+        let line_max = x_max.max(y_max);
+        chart.draw_series(LineSeries::new(
+            vec![(line_min, line_min), (line_max, line_max)],
+            RGBColor(128, 128, 128).stroke_width(1),
+        )).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+
+        // Draw Q-Q points
+        let points: Vec<(f64, f64)> = theoretical.iter().zip(sorted_residuals.iter())
+            .map(|(&t, &s)| (t, s))
+            .collect();
+        chart.draw_series(
+            points.iter().map(|&(x, y)| Circle::new((x, y), 4, BLUE.mix(0.7).filled()))
+        ).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+
+        root.present().map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+    }
+
+    encode_rgb_to_png_base64(&buffer, config.width, config.height)
+}
+
+/// Generate Scale-Location plot.
+fn generate_scale_location(
+    fitted: &[f64],
+    standardized_residuals: &[f64],
+    config: &ChartConfig,
+) -> Result<String, VisualizationError> {
+    // Calculate sqrt of absolute standardized residuals
+    let sqrt_abs_resid: Vec<f64> = standardized_residuals.iter()
+        .map(|r| r.abs().sqrt())
+        .collect();
+
+    let x_min = fitted.iter().copied().fold(f64::INFINITY, f64::min);
+    let x_max = fitted.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let y_max = sqrt_abs_resid.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+
+    let x_pad = (x_max - x_min).max(0.1) * 0.05;
+    let y_pad = y_max * 0.1;
+
+    let mut buffer = vec![0u8; (config.width * config.height * 3) as usize];
+
+    {
+        let root = BitMapBackend::with_buffer(&mut buffer, (config.width, config.height))
+            .into_drawing_area();
+        root.fill(&WHITE).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+
+        let mut chart = ChartBuilder::on(&root)
+            .caption("Scale-Location", ("sans-serif", 24))
+            .margin(10)
+            .x_label_area_size(40)
+            .y_label_area_size(50)
+            .build_cartesian_2d(
+                (x_min - x_pad)..(x_max + x_pad),
+                0.0..(y_max + y_pad),
+            )
+            .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+
+        chart
+            .configure_mesh()
+            .x_desc("Fitted values")
+            .y_desc("√|Standardized residuals|")
+            .draw()
+            .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+
+        // Draw points
+        let points: Vec<(f64, f64)> = fitted.iter().zip(sqrt_abs_resid.iter())
+            .map(|(&f, &r)| (f, r))
+            .collect();
+        chart.draw_series(
+            points.iter().map(|&(x, y)| Circle::new((x, y), 4, BLUE.mix(0.7).filled()))
+        ).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+
+        // Draw smooth line
+        let smoothed = calculate_smooth(&points, 0.3);
+        if smoothed.len() > 1 {
+            chart.draw_series(LineSeries::new(smoothed, RED.stroke_width(2)))
+                .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+        }
+
+        root.present().map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+    }
+
+    encode_rgb_to_png_base64(&buffer, config.width, config.height)
+}
+
+/// Generate Residuals vs Leverage plot.
+fn generate_residuals_vs_leverage(
+    leverage: &[f64],
+    standardized_residuals: &[f64],
+    cooks_distance: &[f64],
+    config: &ChartConfig,
+) -> Result<String, VisualizationError> {
+    let x_min = 0.0;
+    let x_max = leverage.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let y_min = standardized_residuals.iter().copied().fold(f64::INFINITY, f64::min);
+    let y_max = standardized_residuals.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+
+    let x_pad = x_max * 0.1;
+    let y_pad = (y_max - y_min).max(0.1) * 0.1;
+
+    // Calculate Cook's distance threshold (typically 0.5 or 1.0)
+    let cooks_threshold = 0.5;
+    let has_influential = cooks_distance.iter().any(|&c| c > cooks_threshold);
+
+    let mut buffer = vec![0u8; (config.width * config.height * 3) as usize];
+
+    {
+        let root = BitMapBackend::with_buffer(&mut buffer, (config.width, config.height))
+            .into_drawing_area();
+        root.fill(&WHITE).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+
+        let mut chart = ChartBuilder::on(&root)
+            .caption("Residuals vs Leverage", ("sans-serif", 24))
+            .margin(10)
+            .x_label_area_size(40)
+            .y_label_area_size(50)
+            .build_cartesian_2d(
+                x_min..(x_max + x_pad),
+                (y_min - y_pad)..(y_max + y_pad),
+            )
+            .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+
+        chart
+            .configure_mesh()
+            .x_desc("Leverage")
+            .y_desc("Standardized residuals")
+            .draw()
+            .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+
+        // Draw horizontal zero line
+        chart.draw_series(LineSeries::new(
+            vec![(x_min, 0.0), (x_max + x_pad, 0.0)],
+            RGBColor(128, 128, 128).stroke_width(1),
+        )).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+
+        // Draw Cook's distance contour lines (approximate)
+        if has_influential {
+            // D = r^2 * h / (p * (1-h)) => r = sqrt(D * p * (1-h) / h)
+            let p = 2.0;
+            for &d in &[0.5, 1.0] {
+                let contour_points: Vec<(f64, f64)> = (1..100)
+                    .map(|i| {
+                        let h = (i as f64) * x_max / 100.0;
+                        let h_clamped = h.max(0.01).min(0.99);
+                        let r = (d * p * (1.0 - h_clamped) / h_clamped).sqrt();
+                        (h, r)
+                    })
+                    .filter(|&(_, r)| r.is_finite() && r <= y_max + y_pad)
+                    .collect();
+
+                if contour_points.len() > 1 {
+                    chart.draw_series(LineSeries::new(
+                        contour_points.clone(),
+                        RGBColor(255, 0, 0).stroke_width(1),
+                    )).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+
+                    // Draw negative contour
+                    let neg_contour: Vec<(f64, f64)> = contour_points.iter()
+                        .map(|&(h, r)| (h, -r))
+                        .collect();
+                    chart.draw_series(LineSeries::new(
+                        neg_contour,
+                        RGBColor(255, 0, 0).stroke_width(1),
+                    )).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+                }
+            }
+        }
+
+        // Draw points (color by Cook's distance)
+        for i in 0..leverage.len() {
+            let color = if cooks_distance[i] > cooks_threshold {
+                RED
+            } else {
+                BLUE
+            };
+            chart.draw_series(std::iter::once(
+                Circle::new((leverage[i], standardized_residuals[i]), 4, color.mix(0.7).filled())
+            )).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+        }
+
+        root.present().map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+    }
+
+    encode_rgb_to_png_base64(&buffer, config.width, config.height)
+}
+
+/// Calculate a simple smoothing line (local regression approximation).
+fn calculate_smooth(points: &[(f64, f64)], span: f64) -> Vec<(f64, f64)> {
+    if points.len() < 3 {
+        return Vec::new();
+    }
+
+    let mut sorted_points = points.to_vec();
+    sorted_points.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+
+    let n = sorted_points.len();
+    let window = ((n as f64 * span) as usize).max(3).min(n);
+    let half_window = window / 2;
+
+    let mut smoothed = Vec::new();
+
+    for i in 0..n {
+        let start = if i >= half_window { i - half_window } else { 0 };
+        let end = (i + half_window + 1).min(n);
+
+        let local_points = &sorted_points[start..end];
+        let mean_x: f64 = local_points.iter().map(|p| p.0).sum::<f64>() / local_points.len() as f64;
+        let mean_y: f64 = local_points.iter().map(|p| p.1).sum::<f64>() / local_points.len() as f64;
+
+        smoothed.push((mean_x, mean_y));
+    }
+
+    // Remove duplicates in x
+    smoothed.dedup_by(|a, b| (a.0 - b.0).abs() < 1e-10);
+    smoothed
+}
+
+/// Approximation of the standard normal quantile function (inverse CDF).
+fn normal_quantile(p: f64) -> f64 {
+    // Rational approximation by Abramowitz and Stegun
+    if p <= 0.0 { return f64::NEG_INFINITY; }
+    if p >= 1.0 { return f64::INFINITY; }
+
+    let p_clamped = p.max(1e-10).min(1.0 - 1e-10);
+
+    if p_clamped < 0.5 {
+        -rational_approximation((-2.0 * p_clamped.ln()).sqrt())
+    } else {
+        rational_approximation((-2.0 * (1.0 - p_clamped).ln()).sqrt())
+    }
+}
+
+fn rational_approximation(t: f64) -> f64 {
+    let c0 = 2.515517;
+    let c1 = 0.802853;
+    let c2 = 0.010328;
+    let d1 = 1.432788;
+    let d2 = 0.189269;
+    let d3 = 0.001308;
+
+    t - (c0 + c1 * t + c2 * t * t) / (1.0 + d1 * t + d2 * t * t + d3 * t * t * t)
+}
+
 // Helper functions
 
 fn calculate_correlation(points: &[(f64, f64)]) -> Option<f64> {
@@ -685,5 +1779,27 @@ mod tests {
         let series = vec![("sin(x)".to_string(), x, y)];
         let result = line_chart(&series, ChartConfig::default()).unwrap();
         assert_eq!(result.n_series, 1);
+    }
+
+    #[test]
+    fn test_residual_diagnostics() {
+        // Generate synthetic data: y = 2*x + noise
+        let x: Vec<f64> = (0..50).map(|i| i as f64).collect();
+        let fitted: Vec<f64> = x.iter().map(|&xi| 2.0 * xi + 10.0).collect();
+        // Simulate residuals with some noise
+        let residuals: Vec<f64> = (0..50).map(|i| {
+            let noise = ((i * 7) % 11) as f64 - 5.0; // Deterministic "noise" for reproducibility
+            noise
+        }).collect();
+
+        let result = residual_diagnostics(&fitted, &residuals, None, ChartConfig::default()).unwrap();
+
+        assert_eq!(result.n_observations, 50);
+        assert!(!result.residuals_vs_fitted.is_empty());
+        assert!(!result.qq_plot.is_empty());
+        assert!(!result.scale_location.is_empty());
+        assert!(!result.residuals_vs_leverage.is_empty());
+        assert_eq!(result.standardized_residuals.len(), 50);
+        assert_eq!(result.cooks_distance.len(), 50);
     }
 }

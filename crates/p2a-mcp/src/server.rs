@@ -31,11 +31,16 @@ use p2a_core::{
     run_var, run_varma, run_vecm, run_var_irf,
     // Forecasting
     run_arima, forecast_arima, run_mstl,
+    run_changepoint, run_binary_segmentation, CostFunction,
     // Machine Learning
-    kmeans, dbscan, pca,
+    kmeans, dbscan, pca, hierarchical, tsne, random_forest, linear_svm,
+    Linkage,
     // Visualization
     histogram, scatter_plot, box_plot, line_chart, correlation_heatmap,
+    event_study_plot, coefficient_plot, irf_plot, residual_diagnostics,
     ChartConfig,
+    // Reports
+    HtmlReport, ReportSection, ReportTable,
 };
 
 /// The main analytics server that handles MCP requests.
@@ -427,6 +432,114 @@ pub struct MstlRequest {
     pub periods: Vec<usize>,
 }
 
+/// Request for changepoint detection.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ChangepointRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Column name with time series values
+    #[schemars(description = "Name of the column containing the time series values.")]
+    pub column: String,
+
+    /// Penalty for adding a changepoint (optional, uses BIC if not specified)
+    #[schemars(description = "Penalty for adding a changepoint. Higher values = fewer changepoints. Default uses BIC (log(n)).")]
+    pub penalty: Option<f64>,
+
+    /// Minimum segment length between changepoints
+    #[schemars(description = "Minimum number of observations between changepoints. Default is 2.")]
+    pub min_segment_length: Option<usize>,
+
+    /// Detection method: 'pelt' or 'binary'
+    #[schemars(description = "Algorithm to use: 'pelt' (Pruned Exact Linear Time, default) or 'binary' (Binary Segmentation).")]
+    pub method: Option<String>,
+
+    /// Type of change to detect: 'mean', 'variance', or 'both'
+    #[schemars(description = "Type of change to detect: 'mean' (default), 'variance', or 'both'.")]
+    pub change_type: Option<String>,
+}
+
+// ============================================================================
+// Report Generation Tool Input Types
+// ============================================================================
+
+/// A section in the HTML report.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ReportSectionInput {
+    /// Section title
+    #[schemars(description = "Title for this section of the report.")]
+    pub title: String,
+
+    /// Content items for the section
+    #[schemars(description = "Content items to include in this section.")]
+    pub content: Vec<ReportContentInput>,
+}
+
+/// Content item for a report section.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ReportContentInput {
+    /// Type of content: 'text', 'code', 'table', 'chart', or 'stats'
+    #[schemars(description = "Type of content: 'text' (paragraph), 'code' (code block), 'table' (data table), 'chart' (base64 image), or 'stats' (key-value pairs).")]
+    pub content_type: String,
+
+    /// Text content (for text and code types)
+    #[schemars(description = "Text content for 'text' or 'code' types.")]
+    pub text: Option<String>,
+
+    /// Programming language (for code blocks)
+    #[schemars(description = "Programming language for code block syntax highlighting.")]
+    pub language: Option<String>,
+
+    /// Table headers (for table type)
+    #[schemars(description = "Column headers for table content.")]
+    pub headers: Option<Vec<String>>,
+
+    /// Table rows (for table type) - each row is a list of cell values
+    #[schemars(description = "Table rows, where each row is a list of string values.")]
+    pub rows: Option<Vec<Vec<String>>>,
+
+    /// Table caption
+    #[schemars(description = "Caption for the table.")]
+    pub caption: Option<String>,
+
+    /// Base64-encoded chart image (for chart type)
+    #[schemars(description = "Base64-encoded PNG image data for chart content.")]
+    pub image_base64: Option<String>,
+
+    /// Chart title
+    #[schemars(description = "Title for the chart.")]
+    pub chart_title: Option<String>,
+
+    /// Chart caption
+    #[schemars(description = "Caption for the chart.")]
+    pub chart_caption: Option<String>,
+
+    /// Key-value statistics (for stats type)
+    #[schemars(description = "Key-value pairs for statistics display. Format: [[key, value], ...]")]
+    pub stats: Option<Vec<Vec<String>>>,
+}
+
+/// Request to generate an HTML report.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct GenerateReportRequest {
+    /// Report title
+    #[schemars(description = "Title for the report.")]
+    pub title: String,
+
+    /// Report subtitle (optional)
+    #[schemars(description = "Optional subtitle or description for the report.")]
+    pub subtitle: Option<String>,
+
+    /// Author name (optional)
+    #[schemars(description = "Optional author name.")]
+    pub author: Option<String>,
+
+    /// Report sections
+    #[schemars(description = "Sections to include in the report.")]
+    pub sections: Vec<ReportSectionInput>,
+}
+
 // ============================================================================
 // Machine Learning Tool Input Types
 // ============================================================================
@@ -493,6 +606,126 @@ pub struct PCARequest {
     /// Number of principal components to keep (optional)
     #[schemars(description = "Number of principal components to keep. If not specified, keeps all components.")]
     pub n_components: Option<usize>,
+}
+
+/// Request for Hierarchical clustering.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct HierarchicalRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Columns to use as features for clustering
+    #[schemars(description = "Names of the numeric columns to use as features for clustering.")]
+    pub columns: Vec<String>,
+
+    /// Number of clusters to cut the dendrogram into (optional)
+    #[schemars(description = "Number of clusters to create. If not specified, uses distance_threshold.")]
+    pub n_clusters: Option<usize>,
+
+    /// Distance threshold for cutting the dendrogram (optional)
+    #[schemars(description = "Distance threshold for cutting. Used if n_clusters is not specified.")]
+    pub distance_threshold: Option<f64>,
+
+    /// Linkage method
+    #[schemars(description = "Linkage method: 'single', 'complete', 'average', or 'ward'. Default is 'ward'.")]
+    pub linkage: Option<String>,
+}
+
+/// Request for t-SNE dimensionality reduction.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct TsneRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Columns to use as features
+    #[schemars(description = "Names of the numeric columns to include in t-SNE.")]
+    pub columns: Vec<String>,
+
+    /// Number of output dimensions (default: 2)
+    #[schemars(description = "Number of output dimensions. Default is 2.")]
+    pub n_components: Option<usize>,
+
+    /// Perplexity parameter (default: 30.0)
+    #[schemars(description = "Perplexity parameter, related to number of nearest neighbors. Default is 30.")]
+    pub perplexity: Option<f64>,
+
+    /// Maximum iterations (default: 1000)
+    #[schemars(description = "Maximum number of iterations. Default is 1000.")]
+    pub max_iterations: Option<usize>,
+
+    /// Learning rate (default: 200.0)
+    #[schemars(description = "Learning rate for optimization. Default is 200.")]
+    pub learning_rate: Option<f64>,
+
+    /// Random seed for reproducibility
+    #[schemars(description = "Optional random seed for reproducible results.")]
+    pub seed: Option<u64>,
+}
+
+/// Request for Random Forest regression.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct RandomForestRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Feature column names
+    #[schemars(description = "Names of the feature columns (X variables).")]
+    pub features: Vec<String>,
+
+    /// Target column name
+    #[schemars(description = "Name of the target column (Y variable).")]
+    pub target: String,
+
+    /// Number of trees (default: 100)
+    #[schemars(description = "Number of trees in the forest. Default is 100.")]
+    pub n_trees: Option<usize>,
+
+    /// Maximum tree depth (default: 10)
+    #[schemars(description = "Maximum depth of each tree. Default is 10.")]
+    pub max_depth: Option<usize>,
+
+    /// Minimum samples to split (default: 2)
+    #[schemars(description = "Minimum samples required to split a node. Default is 2.")]
+    pub min_samples_split: Option<usize>,
+
+    /// Max features per split
+    #[schemars(description = "Max features to consider per split: 'sqrt', 'log2', 'all', or a number. Default is 'sqrt'.")]
+    pub max_features: Option<String>,
+
+    /// Random seed for reproducibility
+    #[schemars(description = "Optional random seed for reproducible results.")]
+    pub seed: Option<u64>,
+}
+
+/// Request for Linear SVM classification.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SvmRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Feature column names
+    #[schemars(description = "Names of the feature columns (X variables).")]
+    pub features: Vec<String>,
+
+    /// Target column name
+    #[schemars(description = "Name of the binary target column (Y variable). Must have exactly 2 unique values.")]
+    pub target: String,
+
+    /// Regularization parameter C (default: 1.0)
+    #[schemars(description = "Regularization parameter C. Larger values = less regularization. Default is 1.0.")]
+    pub c: Option<f64>,
+
+    /// Maximum iterations (default: 1000)
+    #[schemars(description = "Maximum number of iterations. Default is 1000.")]
+    pub max_iterations: Option<usize>,
+
+    /// Convergence tolerance (default: 1e-3)
+    #[schemars(description = "Convergence tolerance. Default is 0.001.")]
+    pub tolerance: Option<f64>,
 }
 
 // ============================================================================
@@ -665,6 +898,158 @@ pub struct HeatmapRequest {
     /// Chart title (optional)
     #[schemars(description = "Optional title for the heatmap.")]
     pub title: Option<String>,
+}
+
+/// Request to generate an event study plot.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct EventStudyRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Column name for time/period relative to treatment
+    #[schemars(description = "Column with time periods relative to treatment (e.g., -3, -2, -1, 0, 1, 2, 3).")]
+    pub time_column: String,
+
+    /// Column name for point estimates
+    #[schemars(description = "Column with coefficient estimates at each time period.")]
+    pub estimate_column: String,
+
+    /// Column name for lower confidence interval bound
+    #[schemars(description = "Column with lower bound of confidence interval.")]
+    pub ci_lower_column: String,
+
+    /// Column name for upper confidence interval bound
+    #[schemars(description = "Column with upper bound of confidence interval.")]
+    pub ci_upper_column: String,
+
+    /// Chart title (optional)
+    #[schemars(description = "Optional title for the chart.")]
+    pub title: Option<String>,
+}
+
+/// Request to generate a coefficient plot.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CoefficientPlotRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Column name for variable/coefficient names
+    #[schemars(description = "Column with variable names or coefficient labels.")]
+    pub name_column: String,
+
+    /// Column name for coefficient estimates
+    #[schemars(description = "Column with coefficient point estimates.")]
+    pub estimate_column: String,
+
+    /// Column name for lower confidence interval bound
+    #[schemars(description = "Column with lower bound of confidence interval.")]
+    pub ci_lower_column: String,
+
+    /// Column name for upper confidence interval bound
+    #[schemars(description = "Column with upper bound of confidence interval.")]
+    pub ci_upper_column: String,
+
+    /// Chart title (optional)
+    #[schemars(description = "Optional title for the chart.")]
+    pub title: Option<String>,
+
+    /// Horizontal orientation (optional, default: true)
+    #[schemars(description = "If true, draw horizontal error bars (default). If false, draw vertical.")]
+    pub horizontal: Option<bool>,
+}
+
+/// Request to generate an IRF (Impulse Response Function) plot.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct IrfPlotRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Column name for time horizon
+    #[schemars(description = "Column with time horizon (0, 1, 2, ...).")]
+    pub horizon_column: String,
+
+    /// Column name for response values
+    #[schemars(description = "Column with impulse response values.")]
+    pub response_column: String,
+
+    /// Column name for lower confidence interval bound (optional)
+    #[schemars(description = "Optional column with lower bound of confidence interval.")]
+    pub ci_lower_column: Option<String>,
+
+    /// Column name for upper confidence interval bound (optional)
+    #[schemars(description = "Optional column with upper bound of confidence interval.")]
+    pub ci_upper_column: Option<String>,
+
+    /// Label for the shock (optional)
+    #[schemars(description = "Optional label for the shock variable.")]
+    pub shock_label: Option<String>,
+
+    /// Label for the response (optional)
+    #[schemars(description = "Optional label for the response variable.")]
+    pub response_label: Option<String>,
+
+    /// Chart title (optional)
+    #[schemars(description = "Optional title for the chart.")]
+    pub title: Option<String>,
+}
+
+/// Request to generate residual diagnostic plots.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ResidualDiagnosticsRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset containing regression results.")]
+    pub dataset: String,
+
+    /// Column name for fitted/predicted values
+    #[schemars(description = "Column with fitted (predicted) values from regression.")]
+    pub fitted_column: String,
+
+    /// Column name for residual values
+    #[schemars(description = "Column with residual values (observed - fitted).")]
+    pub residuals_column: String,
+
+    /// Column name for leverage (hat) values (optional)
+    #[schemars(description = "Optional column with leverage (hat) values. If not provided, will be estimated.")]
+    pub leverage_column: Option<String>,
+}
+
+/// Request to batch process multiple datasets with the same operation.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct BatchProcessRequest {
+    /// Names/IDs of datasets to process
+    #[schemars(description = "List of dataset names to process. Each must be previously loaded.")]
+    pub datasets: Vec<String>,
+
+    /// Operation to perform on each dataset
+    #[schemars(description = "Operation to perform: 'describe' (summary stats), 'correlation' (correlation matrix), or 'ols' (regression).")]
+    pub operation: String,
+
+    /// Columns to analyze (optional, defaults to all numeric for describe/correlation)
+    #[schemars(description = "List of column names to analyze. For 'ols', first column is dependent variable.")]
+    pub columns: Option<Vec<String>>,
+
+    /// Whether to return combined summary across all datasets
+    #[schemars(description = "If true, also returns an aggregated summary across all datasets.")]
+    pub combine_results: Option<bool>,
+}
+
+/// Request to compare the same columns across multiple datasets.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CompareDatasetRequest {
+    /// Names/IDs of datasets to compare
+    #[schemars(description = "List of dataset names to compare. Each must be previously loaded.")]
+    pub datasets: Vec<String>,
+
+    /// Columns to compare
+    #[schemars(description = "List of column names to compare across datasets.")]
+    pub columns: Vec<String>,
+
+    /// Type of comparison
+    #[schemars(description = "Comparison type: 'summary' (side-by-side stats), 'correlation' (correlation differences), or 'distribution' (distribution comparison).")]
+    pub comparison_type: Option<String>,
 }
 
 // ============================================================================
@@ -1560,6 +1945,214 @@ impl AnalyticsServer {
         Ok(CallToolResult::success(vec![Content::text(output)]))
     }
 
+    /// Detect changepoints (structural breaks) in a time series.
+    #[tool(description = "Detect changepoints (structural breaks) in a time series using PELT or Binary Segmentation. Identifies points where the statistical properties (mean, variance) change significantly. Useful for regime detection, anomaly detection, and segmenting time series into homogeneous periods.")]
+    async fn ts_changepoint(
+        &self,
+        Parameters(request): Parameters<ChangepointRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        // Determine cost function
+        let cost_fn = match request.change_type.as_deref() {
+            Some("variance") => CostFunction::VarianceChange,
+            Some("both") => CostFunction::MeanAndVariance,
+            _ => CostFunction::MeanChange,
+        };
+
+        // Run detection based on method
+        let result = match request.method.as_deref() {
+            Some("binary") => {
+                match run_binary_segmentation(
+                    dataset,
+                    &request.column,
+                    Some(10), // max changepoints
+                    request.min_segment_length,
+                    request.penalty,
+                ) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        return Ok(CallToolResult::error(vec![Content::text(format!(
+                            "Changepoint detection failed: {}",
+                            e
+                        ))]));
+                    }
+                }
+            }
+            _ => {
+                match run_changepoint(
+                    dataset,
+                    &request.column,
+                    request.penalty,
+                    request.min_segment_length,
+                    cost_fn,
+                ) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        return Ok(CallToolResult::error(vec![Content::text(format!(
+                            "Changepoint detection failed: {}",
+                            e
+                        ))]));
+                    }
+                }
+            }
+        };
+
+        // Get observation count from result
+        let n_obs: usize = result.segments.iter().map(|s| s.n_points).sum();
+
+        // Format output
+        let mut output = format!(
+            "Changepoint Detection Results\n\
+             ==============================\n\
+             Column: {}\n\
+             Observations: {}\n\
+             Method: {}\n\
+             Penalty: {:.4}\n\n\
+             Changepoints Detected: {}\n",
+            request.column,
+            n_obs,
+            result.method,
+            result.penalty,
+            result.n_changepoints,
+        );
+
+        if result.n_changepoints > 0 {
+            output.push_str(&format!("Changepoint Positions: {:?}\n\n", result.changepoints));
+        } else {
+            output.push_str("\nNo changepoints detected (series appears stationary).\n\n");
+        }
+
+        output.push_str("Segment Statistics:\n");
+        for (i, seg) in result.segments.iter().enumerate() {
+            output.push_str(&format!(
+                "  Segment {}: indices [{}, {}) | n={} | mean={:.4} | variance={:.4}\n",
+                i + 1,
+                seg.start,
+                seg.end,
+                seg.n_points,
+                seg.mean,
+                seg.variance
+            ));
+        }
+
+        output.push_str(&format!("\nTotal Cost: {:.4}\n", result.total_cost));
+
+        Ok(CallToolResult::success(vec![Content::text(output)]))
+    }
+
+    // ========================================================================
+    // Report Generation Tools
+    // ========================================================================
+
+    /// Generate an HTML report from structured analysis results.
+    #[tool(description = "Generate a self-contained HTML report from analysis results. The report includes proper styling, tables, charts (as embedded images), and is suitable for sharing or printing. Returns the complete HTML document as a string.")]
+    async fn generate_report(
+        &self,
+        Parameters(request): Parameters<GenerateReportRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        // Build the report structure
+        let mut report = HtmlReport::new(&request.title);
+
+        if let Some(ref subtitle) = request.subtitle {
+            report = report.with_subtitle(subtitle);
+        }
+
+        if let Some(ref author) = request.author {
+            report = report.with_author(author);
+        }
+
+        // Process each section
+        for section_input in &request.sections {
+            let mut section = ReportSection::new(&section_input.title);
+
+            for content_input in &section_input.content {
+                match content_input.content_type.as_str() {
+                    "text" => {
+                        if let Some(ref text) = content_input.text {
+                            section.add_text(text);
+                        }
+                    }
+                    "code" => {
+                        if let Some(ref code) = content_input.text {
+                            section.add_code(code, content_input.language.as_deref());
+                        }
+                    }
+                    "table" => {
+                        if let (Some(headers), Some(rows)) = (&content_input.headers, &content_input.rows) {
+                            let mut table = ReportTable::new(headers.clone());
+                            if let Some(ref caption) = content_input.caption {
+                                table = table.with_caption(caption);
+                            }
+                            for row in rows {
+                                table.add_row(row.clone());
+                            }
+                            section.add_table(table);
+                        }
+                    }
+                    "chart" => {
+                        if let Some(ref image) = content_input.image_base64 {
+                            section.add_chart(
+                                image,
+                                content_input.chart_title.as_deref(),
+                                content_input.chart_caption.as_deref(),
+                            );
+                        }
+                    }
+                    "stats" => {
+                        if let Some(ref stats) = content_input.stats {
+                            let items: Vec<(String, String)> = stats
+                                .iter()
+                                .filter_map(|pair| {
+                                    if pair.len() >= 2 {
+                                        Some((pair[0].clone(), pair[1].clone()))
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .collect();
+                            section.add_statistics(items);
+                        }
+                    }
+                    _ => {
+                        // Unknown content type, skip
+                    }
+                }
+            }
+
+            report.add_section(section);
+        }
+
+        // Generate the HTML
+        let html = report.to_html();
+
+        // Return the HTML - it's quite long so we provide summary info
+        let summary = format!(
+            "HTML Report Generated\n\
+             =====================\n\
+             Title: {}\n\
+             Sections: {}\n\
+             HTML Length: {} characters\n\n\
+             The complete HTML report follows:\n\n{}",
+            request.title,
+            request.sections.len(),
+            html.len(),
+            html
+        );
+
+        Ok(CallToolResult::success(vec![Content::text(summary)]))
+    }
+
     // ========================================================================
     // Machine Learning Tools
     // ========================================================================
@@ -1674,6 +2267,259 @@ impl AnalyticsServer {
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
                     "PCA failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+    }
+
+    /// Run Hierarchical (Agglomerative) clustering.
+    #[tool(description = "Run Hierarchical clustering using agglomerative approach. Supports Ward, single, complete, and average linkage methods. Returns cluster assignments and dendrogram information.")]
+    async fn ml_hierarchical(
+        &self,
+        Parameters(request): Parameters<HierarchicalRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let data = match extract_numeric_matrix(dataset, &request.columns) {
+            Ok(d) => d,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+        };
+
+        let linkage_method = match request.linkage.as_deref() {
+            Some("single") => Linkage::Single,
+            Some("complete") => Linkage::Complete,
+            Some("average") => Linkage::Average,
+            Some("ward") | None => Linkage::Ward,
+            Some(other) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Unknown linkage method '{}'. Use 'single', 'complete', 'average', or 'ward'.",
+                    other
+                ))]));
+            }
+        };
+
+        let result = match hierarchical(
+            data.view(),
+            request.n_clusters,
+            linkage_method,
+            request.distance_threshold,
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Hierarchical clustering failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+    }
+
+    /// Run t-SNE dimensionality reduction.
+    #[tool(description = "Run t-SNE (t-distributed Stochastic Neighbor Embedding) for visualizing high-dimensional data in 2D or 3D. Preserves local structure while revealing clusters. Good for exploratory visualization.")]
+    async fn ml_tsne(
+        &self,
+        Parameters(request): Parameters<TsneRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let data = match extract_numeric_matrix(dataset, &request.columns) {
+            Ok(d) => d,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+        };
+
+        let result = match tsne(
+            data.view(),
+            request.n_components,
+            request.perplexity,
+            request.max_iterations,
+            request.learning_rate,
+            request.seed,
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "t-SNE failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+    }
+
+    /// Run Random Forest regression.
+    #[tool(description = "Run Random Forest regression. Ensemble of decision trees for robust predictions. Returns feature importances, out-of-bag score, and predictions.")]
+    async fn ml_random_forest(
+        &self,
+        Parameters(request): Parameters<RandomForestRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        use p2a_core::polars::prelude::*;
+
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let data = match extract_numeric_matrix(dataset, &request.features) {
+            Ok(d) => d,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+        };
+
+        // Extract target column
+        let df = dataset.df();
+        let target_col = match df.column(&request.target) {
+            Ok(c) => c,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Target column '{}' not found: {}",
+                    request.target, e
+                ))]));
+            }
+        };
+
+        let target_values: Vec<f64> = match target_col.cast(&DataType::Float64) {
+            Ok(c) => match c.f64() {
+                Ok(f) => f.into_iter().map(|v| v.unwrap_or(f64::NAN)).collect(),
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Target column not numeric: {}",
+                        e
+                    ))]));
+                }
+            },
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Cannot convert target to numeric: {}",
+                    e
+                ))]));
+            }
+        };
+
+        let target = ndarray::Array1::from_vec(target_values);
+
+        let result = match random_forest(
+            data.view(),
+            target.view(),
+            request.n_trees,
+            request.max_depth,
+            request.min_samples_split,
+            request.max_features.as_deref(),
+            request.seed,
+            Some(request.features.clone()),
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Random Forest failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+    }
+
+    /// Run Linear SVM classification.
+    #[tool(description = "Run Linear Support Vector Machine (SVM) for binary classification. Uses SMO algorithm. Returns weights, bias, support vector count, and predictions.")]
+    async fn ml_svm(
+        &self,
+        Parameters(request): Parameters<SvmRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        use p2a_core::polars::prelude::*;
+
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let data = match extract_numeric_matrix(dataset, &request.features) {
+            Ok(d) => d,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+        };
+
+        // Extract target column
+        let df = dataset.df();
+        let target_col = match df.column(&request.target) {
+            Ok(c) => c,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Target column '{}' not found: {}",
+                    request.target, e
+                ))]));
+            }
+        };
+
+        let target_values: Vec<f64> = match target_col.cast(&DataType::Float64) {
+            Ok(c) => match c.f64() {
+                Ok(f) => f.into_iter().map(|v| v.unwrap_or(f64::NAN)).collect(),
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Target column not numeric: {}",
+                        e
+                    ))]));
+                }
+            },
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Cannot convert target to numeric: {}",
+                    e
+                ))]));
+            }
+        };
+
+        let target = ndarray::Array1::from_vec(target_values);
+
+        let result = match linear_svm(
+            data.view(),
+            target.view(),
+            request.c,
+            request.max_iterations,
+            request.tolerance,
+            Some(request.features.clone()),
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "SVM failed: {}",
                     e
                 ))]));
             }
@@ -2387,6 +3233,649 @@ impl AnalyticsServer {
                 e
             ))])),
         }
+    }
+
+    /// Generate an event study plot for treatment effect visualization.
+    #[tool(description = "Generate an event study plot showing treatment effects over time with confidence intervals. Used for visualizing DiD or panel event study results. Shows point estimates with CI bands and reference lines at t=0 and y=0.")]
+    async fn viz_event_study(
+        &self,
+        Parameters(request): Parameters<EventStudyRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        use p2a_core::polars::prelude::*;
+
+        let datasets = self.datasets.read().await;
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let df = dataset.df();
+
+        // Helper to extract numeric column
+        let extract_numeric = |col_name: &str| -> Result<Vec<f64>, String> {
+            let col = df.column(col_name)
+                .map_err(|e| format!("Column '{}' not found: {}", col_name, e))?;
+            let casted = col.cast(&DataType::Float64)
+                .map_err(|e| format!("Column '{}' not numeric: {}", col_name, e))?;
+            let arr = casted.f64()
+                .map_err(|e| format!("Column '{}' error: {}", col_name, e))?;
+            Ok(arr.into_iter().map(|v| v.unwrap_or(f64::NAN)).collect())
+        };
+
+        let time = match extract_numeric(&request.time_column) {
+            Ok(v) => v,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+        };
+        let estimates = match extract_numeric(&request.estimate_column) {
+            Ok(v) => v,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+        };
+        let ci_lower = match extract_numeric(&request.ci_lower_column) {
+            Ok(v) => v,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+        };
+        let ci_upper = match extract_numeric(&request.ci_upper_column) {
+            Ok(v) => v,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+        };
+
+        let mut config = ChartConfig::default();
+        config.title = request.title;
+        config.x_label = Some("Time Relative to Treatment".to_string());
+        config.y_label = Some("Effect".to_string());
+
+        match event_study_plot(&time, &estimates, &ci_lower, &ci_upper, config) {
+            Ok(result) => {
+                let output = format!(
+                    "Event Study Plot\n{}\nPeriods: {}\n\nImage (base64 PNG, {} bytes):\n{}",
+                    "=".repeat(40),
+                    result.n_periods,
+                    result.image_base64.len(),
+                    result.image_base64
+                );
+                Ok(CallToolResult::success(vec![Content::text(output)]))
+            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
+                "Failed to generate event study plot: {}",
+                e
+            ))])),
+        }
+    }
+
+    /// Generate a coefficient plot with confidence intervals.
+    #[tool(description = "Generate a coefficient plot showing regression coefficients with confidence intervals (error bars). Useful for visualizing regression results. Shows vertical zero line for reference.")]
+    async fn viz_coefficient(
+        &self,
+        Parameters(request): Parameters<CoefficientPlotRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        use p2a_core::polars::prelude::*;
+
+        let datasets = self.datasets.read().await;
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let df = dataset.df();
+
+        // Extract name column
+        let name_col = match df.column(&request.name_column) {
+            Ok(c) => c,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Name column '{}' not found: {}", request.name_column, e
+                ))]));
+            }
+        };
+        let names: Vec<String> = match name_col.str() {
+            Ok(s) => s.into_iter().map(|v| v.unwrap_or("").to_string()).collect(),
+            Err(_) => (0..name_col.len()).map(|i| format!("Var_{}", i)).collect(),
+        };
+
+        // Helper to extract numeric column
+        let extract_numeric = |col_name: &str| -> Result<Vec<f64>, String> {
+            let col = df.column(col_name)
+                .map_err(|e| format!("Column '{}' not found: {}", col_name, e))?;
+            let casted = col.cast(&DataType::Float64)
+                .map_err(|e| format!("Column '{}' not numeric: {}", col_name, e))?;
+            let arr = casted.f64()
+                .map_err(|e| format!("Column '{}' error: {}", col_name, e))?;
+            Ok(arr.into_iter().map(|v| v.unwrap_or(f64::NAN)).collect())
+        };
+
+        let estimates = match extract_numeric(&request.estimate_column) {
+            Ok(v) => v,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+        };
+        let ci_lower = match extract_numeric(&request.ci_lower_column) {
+            Ok(v) => v,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+        };
+        let ci_upper = match extract_numeric(&request.ci_upper_column) {
+            Ok(v) => v,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+        };
+
+        let mut config = ChartConfig::default();
+        config.title = request.title;
+
+        let horizontal = request.horizontal.unwrap_or(true);
+
+        match coefficient_plot(&names, &estimates, &ci_lower, &ci_upper, config, horizontal) {
+            Ok(result) => {
+                let output = format!(
+                    "Coefficient Plot\n{}\nCoefficients: {}\nOrientation: {}\n\nImage (base64 PNG, {} bytes):\n{}",
+                    "=".repeat(40),
+                    result.n_coefficients,
+                    if horizontal { "horizontal" } else { "vertical" },
+                    result.image_base64.len(),
+                    result.image_base64
+                );
+                Ok(CallToolResult::success(vec![Content::text(output)]))
+            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
+                "Failed to generate coefficient plot: {}",
+                e
+            ))])),
+        }
+    }
+
+    /// Generate an IRF (Impulse Response Function) plot.
+    #[tool(description = "Generate an Impulse Response Function (IRF) plot from VAR models. Shows how a variable responds to a shock over time. Optionally includes confidence bands.")]
+    async fn viz_irf(
+        &self,
+        Parameters(request): Parameters<IrfPlotRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        use p2a_core::polars::prelude::*;
+
+        let datasets = self.datasets.read().await;
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let df = dataset.df();
+
+        // Helper to extract numeric column
+        let extract_numeric = |col_name: &str| -> Result<Vec<f64>, String> {
+            let col = df.column(col_name)
+                .map_err(|e| format!("Column '{}' not found: {}", col_name, e))?;
+            let casted = col.cast(&DataType::Float64)
+                .map_err(|e| format!("Column '{}' not numeric: {}", col_name, e))?;
+            let arr = casted.f64()
+                .map_err(|e| format!("Column '{}' error: {}", col_name, e))?;
+            Ok(arr.into_iter().map(|v| v.unwrap_or(f64::NAN)).collect())
+        };
+
+        let horizon = match extract_numeric(&request.horizon_column) {
+            Ok(v) => v,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+        };
+        let response = match extract_numeric(&request.response_column) {
+            Ok(v) => v,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+        };
+
+        // Extract optional CI columns
+        let ci_lower: Option<Vec<f64>> = if let Some(ref col_name) = request.ci_lower_column {
+            match extract_numeric(col_name) {
+                Ok(v) => Some(v),
+                Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+            }
+        } else {
+            None
+        };
+
+        let ci_upper: Option<Vec<f64>> = if let Some(ref col_name) = request.ci_upper_column {
+            match extract_numeric(col_name) {
+                Ok(v) => Some(v),
+                Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+            }
+        } else {
+            None
+        };
+
+        let shock_label = request.shock_label.as_deref();
+        let response_label = request.response_label.as_deref();
+        let config = ChartConfig {
+            title: request.title,
+            ..ChartConfig::default()
+        };
+
+        let has_ci = ci_lower.is_some() && ci_upper.is_some();
+
+        match irf_plot(&horizon, &response, ci_lower.as_deref(), ci_upper.as_deref(), shock_label, response_label, config) {
+            Ok(result) => {
+                let output = format!(
+                    "IRF Plot\n{}\nHorizons: {}\nHas CI bands: {}\nShock: {}\nResponse: {}\n\nImage (base64 PNG, {} bytes):\n{}",
+                    "=".repeat(40),
+                    result.n_horizons,
+                    has_ci,
+                    result.shock.as_deref().unwrap_or("unnamed"),
+                    result.response.as_deref().unwrap_or("unnamed"),
+                    result.image_base64.len(),
+                    result.image_base64
+                );
+                Ok(CallToolResult::success(vec![Content::text(output)]))
+            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
+                "Failed to generate IRF plot: {}",
+                e
+            ))])),
+        }
+    }
+
+    /// Generate residual diagnostic plots for regression model validation.
+    #[tool(description = "Generate four diagnostic plots for regression analysis: (1) Residuals vs Fitted, (2) Normal Q-Q plot, (3) Scale-Location, (4) Residuals vs Leverage. Also calculates Cook's distance for identifying influential observations. Returns four base64-encoded PNG images.")]
+    async fn viz_residual_diagnostics(
+        &self,
+        Parameters(request): Parameters<ResidualDiagnosticsRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        use p2a_core::polars::prelude::*;
+
+        let datasets = self.datasets.read().await;
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let df = dataset.df();
+
+        // Helper to extract numeric column
+        let extract_numeric = |col_name: &str| -> Result<Vec<f64>, String> {
+            let col = df.column(col_name)
+                .map_err(|e| format!("Column '{}' not found: {}", col_name, e))?;
+            let casted = col.cast(&DataType::Float64)
+                .map_err(|e| format!("Column '{}' not numeric: {}", col_name, e))?;
+            let arr = casted.f64()
+                .map_err(|e| format!("Column '{}' error: {}", col_name, e))?;
+            Ok(arr.into_iter().map(|v| v.unwrap_or(f64::NAN)).collect())
+        };
+
+        let fitted = match extract_numeric(&request.fitted_column) {
+            Ok(v) => v,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+        };
+        let residuals = match extract_numeric(&request.residuals_column) {
+            Ok(v) => v,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+        };
+
+        // Extract optional leverage column
+        let leverage: Option<Vec<f64>> = if let Some(ref col_name) = request.leverage_column {
+            match extract_numeric(col_name) {
+                Ok(v) => Some(v),
+                Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+            }
+        } else {
+            None
+        };
+
+        let config = ChartConfig::default();
+
+        match residual_diagnostics(&fitted, &residuals, leverage.as_deref(), config) {
+            Ok(result) => {
+                // Find observations with high Cook's distance
+                let high_influence: Vec<usize> = result.cooks_distance.iter()
+                    .enumerate()
+                    .filter(|(_, d)| **d > 0.5)
+                    .map(|(i, _)| i)
+                    .collect();
+
+                let output = format!(
+                    "Residual Diagnostics\n{}\n\
+                     Observations: {}\n\
+                     High influence points (Cook's D > 0.5): {}\n\n\
+                     Plot 1: Residuals vs Fitted (base64 PNG, {} bytes):\n{}\n\n\
+                     Plot 2: Normal Q-Q (base64 PNG, {} bytes):\n{}\n\n\
+                     Plot 3: Scale-Location (base64 PNG, {} bytes):\n{}\n\n\
+                     Plot 4: Residuals vs Leverage (base64 PNG, {} bytes):\n{}",
+                    "=".repeat(40),
+                    result.n_observations,
+                    if high_influence.is_empty() { "None".to_string() } else { format!("{:?}", high_influence) },
+                    result.residuals_vs_fitted.len(),
+                    result.residuals_vs_fitted,
+                    result.qq_plot.len(),
+                    result.qq_plot,
+                    result.scale_location.len(),
+                    result.scale_location,
+                    result.residuals_vs_leverage.len(),
+                    result.residuals_vs_leverage
+                );
+                Ok(CallToolResult::success(vec![Content::text(output)]))
+            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
+                "Failed to generate residual diagnostics: {}",
+                e
+            ))])),
+        }
+    }
+
+    /// Batch process multiple datasets with the same operation.
+    #[tool(description = "Run the same analysis (describe, correlation, or OLS regression) on multiple datasets at once. Useful for comparing results across datasets or processing survey waves.")]
+    async fn batch_process(
+        &self,
+        Parameters(request): Parameters<BatchProcessRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        use p2a_core::polars::prelude::*;
+
+        if request.datasets.is_empty() {
+            return Ok(CallToolResult::error(vec![Content::text(
+                "At least one dataset must be specified".to_string()
+            )]));
+        }
+
+        let datasets = self.datasets.read().await;
+        let mut results = Vec::new();
+        let mut combined_stats: Option<Vec<(String, Vec<f64>)>> = if request.combine_results.unwrap_or(false) {
+            Some(Vec::new())
+        } else {
+            None
+        };
+
+        for ds_name in &request.datasets {
+            let dataset = match datasets.get(ds_name) {
+                Some(ds) => ds,
+                None => {
+                    results.push(format!("Dataset '{}': NOT FOUND", ds_name));
+                    continue;
+                }
+            };
+
+            let df = dataset.df();
+            let result = match request.operation.to_lowercase().as_str() {
+                "describe" => {
+                    // Get summary statistics
+                    let columns: Vec<String> = if let Some(ref cols) = request.columns {
+                        cols.clone()
+                    } else {
+                        // Get all numeric columns
+                        df.get_columns().iter()
+                            .filter(|c| c.dtype().is_primitive_numeric())
+                            .map(|c| c.name().to_string())
+                            .collect()
+                    };
+
+                    let mut stats_output = format!("Dataset: {}\n", ds_name);
+                    stats_output.push_str(&format!("{:-<60}\n", ""));
+
+                    for col_name in &columns {
+                        if let Ok(col) = df.column(col_name) {
+                            if let Ok(casted) = col.cast(&DataType::Float64) {
+                                if let Ok(arr) = casted.f64() {
+                                    let values: Vec<f64> = arr.into_iter()
+                                        .filter_map(|v| v)
+                                        .collect();
+                                    if !values.is_empty() {
+                                        let n = values.len();
+                                        let sum: f64 = values.iter().sum();
+                                        let mean = sum / n as f64;
+                                        let variance: f64 = values.iter()
+                                            .map(|v| (v - mean).powi(2))
+                                            .sum::<f64>() / (n - 1).max(1) as f64;
+                                        let std_dev = variance.sqrt();
+                                        let min = values.iter().copied().fold(f64::INFINITY, f64::min);
+                                        let max = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+
+                                        stats_output.push_str(&format!(
+                                            "  {}: n={}, mean={:.4}, std={:.4}, min={:.4}, max={:.4}\n",
+                                            col_name, n, mean, std_dev, min, max
+                                        ));
+
+                                        if let Some(ref mut combined) = combined_stats {
+                                            combined.push((format!("{}:{}", ds_name, col_name), vec![n as f64, mean, std_dev, min, max]));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    stats_output
+                }
+                "correlation" => {
+                    // Get correlation matrix
+                    match correlation_matrix(dataset) {
+                        Ok(corr) => {
+                            format!("Dataset: {}\n{:?}", ds_name, corr)
+                        }
+                        Err(e) => format!("Dataset '{}': Error - {}", ds_name, e)
+                    }
+                }
+                "ols" => {
+                    // Run OLS regression
+                    if let Some(ref cols) = request.columns {
+                        if cols.len() < 2 {
+                            format!("Dataset '{}': OLS requires at least 2 columns (dependent + independent)", ds_name)
+                        } else {
+                            let y_col = &cols[0];
+                            let x_cols: Vec<&str> = cols[1..].iter().map(|s| s.as_str()).collect();
+
+                            match run_ols(dataset, y_col, &x_cols) {
+                                Ok(ols_result) => {
+                                    let mut output = format!("Dataset: {}\n{:-<60}\n", ds_name, "");
+                                    output.push_str(&format!("R²: {:.4}, Adj R²: {:.4}\n", ols_result.r_squared, ols_result.adj_r_squared));
+                                    output.push_str(&format!("F-stat: {:.4}\n", ols_result.f_statistic));
+                                    output.push_str(&format!("Intercept: {:.4}\n", ols_result.intercept));
+                                    for coef in &ols_result.coefficients {
+                                        output.push_str(&format!(
+                                            "  {}: coef={:.4}, se={:.4}, t={:.4}, p={:.4}\n",
+                                            coef.name, coef.estimate, coef.std_error, coef.t_value, coef.p_value
+                                        ));
+                                    }
+                                    output
+                                }
+                                Err(e) => format!("Dataset '{}': Error - {}", ds_name, e)
+                            }
+                        }
+                    } else {
+                        format!("Dataset '{}': OLS requires columns to be specified", ds_name)
+                    }
+                }
+                other => format!("Unknown operation: '{}'. Use 'describe', 'correlation', or 'ols'.", other)
+            };
+
+            results.push(result);
+        }
+
+        let mut output = format!("Batch Processing Results\n{}\n\n", "=".repeat(40));
+        output.push_str(&format!("Datasets processed: {}\n", request.datasets.len()));
+        output.push_str(&format!("Operation: {}\n\n", request.operation));
+
+        for result in results {
+            output.push_str(&result);
+            output.push_str("\n\n");
+        }
+
+        // Add combined summary if requested
+        if let Some(combined) = combined_stats {
+            if !combined.is_empty() {
+                output.push_str(&format!("Combined Summary\n{}\n", "-".repeat(40)));
+                for (name, stats) in combined {
+                    output.push_str(&format!(
+                        "{}: n={}, mean={:.4}, std={:.4}, min={:.4}, max={:.4}\n",
+                        name, stats[0] as usize, stats[1], stats[2], stats[3], stats[4]
+                    ));
+                }
+            }
+        }
+
+        Ok(CallToolResult::success(vec![Content::text(output)]))
+    }
+
+    /// Compare the same columns across multiple datasets.
+    #[tool(description = "Compare statistics for specific columns across multiple datasets. Useful for comparing distributions, means, and correlations between different datasets (e.g., treatment vs control, before vs after).")]
+    async fn compare_datasets(
+        &self,
+        Parameters(request): Parameters<CompareDatasetRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        use p2a_core::polars::prelude::*;
+
+        if request.datasets.len() < 2 {
+            return Ok(CallToolResult::error(vec![Content::text(
+                "At least two datasets must be specified for comparison".to_string()
+            )]));
+        }
+
+        if request.columns.is_empty() {
+            return Ok(CallToolResult::error(vec![Content::text(
+                "At least one column must be specified for comparison".to_string()
+            )]));
+        }
+
+        let datasets = self.datasets.read().await;
+        let comparison_type = request.comparison_type.as_deref().unwrap_or("summary");
+
+        let mut output = format!("Dataset Comparison\n{}\n\n", "=".repeat(40));
+        output.push_str(&format!("Datasets: {:?}\n", request.datasets));
+        output.push_str(&format!("Columns: {:?}\n", request.columns));
+        output.push_str(&format!("Comparison type: {}\n\n", comparison_type));
+
+        // Collect statistics for each dataset and column
+        let mut all_stats: HashMap<String, HashMap<String, (usize, f64, f64, f64, f64)>> = HashMap::new();
+
+        for ds_name in &request.datasets {
+            let dataset = match datasets.get(ds_name) {
+                Some(ds) => ds,
+                None => {
+                    output.push_str(&format!("Warning: Dataset '{}' not found\n", ds_name));
+                    continue;
+                }
+            };
+
+            let df = dataset.df();
+            let mut ds_stats: HashMap<String, (usize, f64, f64, f64, f64)> = HashMap::new();
+
+            for col_name in &request.columns {
+                if let Ok(col) = df.column(col_name) {
+                    if let Ok(casted) = col.cast(&DataType::Float64) {
+                        if let Ok(arr) = casted.f64() {
+                            let values: Vec<f64> = arr.into_iter()
+                                .filter_map(|v| v)
+                                .collect();
+                            if !values.is_empty() {
+                                let n = values.len();
+                                let sum: f64 = values.iter().sum();
+                                let mean = sum / n as f64;
+                                let variance: f64 = values.iter()
+                                    .map(|v| (v - mean).powi(2))
+                                    .sum::<f64>() / (n - 1).max(1) as f64;
+                                let std_dev = variance.sqrt();
+                                let min = values.iter().copied().fold(f64::INFINITY, f64::min);
+                                let max = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+                                ds_stats.insert(col_name.clone(), (n, mean, std_dev, min, max));
+                            }
+                        }
+                    }
+                }
+            }
+
+            all_stats.insert(ds_name.clone(), ds_stats);
+        }
+
+        match comparison_type {
+            "summary" => {
+                // Side-by-side comparison table
+                for col_name in &request.columns {
+                    output.push_str(&format!("\nColumn: {}\n{}\n", col_name, "-".repeat(60)));
+                    output.push_str(&format!("{:<20} {:>10} {:>12} {:>12} {:>12} {:>12}\n",
+                        "Dataset", "N", "Mean", "Std Dev", "Min", "Max"));
+                    output.push_str(&format!("{}\n", "-".repeat(80)));
+
+                    for ds_name in &request.datasets {
+                        if let Some(ds_stats) = all_stats.get(ds_name) {
+                            if let Some((n, mean, std, min, max)) = ds_stats.get(col_name) {
+                                output.push_str(&format!("{:<20} {:>10} {:>12.4} {:>12.4} {:>12.4} {:>12.4}\n",
+                                    ds_name, n, mean, std, min, max));
+                            } else {
+                                output.push_str(&format!("{:<20} Column not found or not numeric\n", ds_name));
+                            }
+                        }
+                    }
+
+                    // Calculate and show differences between first two datasets
+                    if request.datasets.len() >= 2 {
+                        let ds1 = &request.datasets[0];
+                        let ds2 = &request.datasets[1];
+                        if let (Some(stats1), Some(stats2)) = (
+                            all_stats.get(ds1).and_then(|s| s.get(col_name)),
+                            all_stats.get(ds2).and_then(|s| s.get(col_name))
+                        ) {
+                            let mean_diff = stats2.1 - stats1.1;
+                            let pct_diff = if stats1.1.abs() > 1e-10 {
+                                (mean_diff / stats1.1) * 100.0
+                            } else {
+                                f64::NAN
+                            };
+                            output.push_str(&format!("\nDifference ({} - {}): mean diff = {:.4} ({:.2}%)\n",
+                                ds2, ds1, mean_diff, pct_diff));
+                        }
+                    }
+                }
+            }
+            "distribution" => {
+                // Distribution comparison (basic)
+                for col_name in &request.columns {
+                    output.push_str(&format!("\nColumn: {} - Distribution Comparison\n{}\n", col_name, "-".repeat(60)));
+
+                    for ds_name in &request.datasets {
+                        if let Some(ds_stats) = all_stats.get(ds_name) {
+                            if let Some((n, mean, std, min, max)) = ds_stats.get(col_name) {
+                                let range = max - min;
+                                let cv = if mean.abs() > 1e-10 { std / mean.abs() } else { f64::NAN };
+                                output.push_str(&format!(
+                                    "{}: n={}, range={:.4}, CV={:.4}\n",
+                                    ds_name, n, range, cv
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+            "correlation" => {
+                // Correlation comparison (if multiple columns)
+                if request.columns.len() < 2 {
+                    output.push_str("Correlation comparison requires at least 2 columns\n");
+                } else {
+                    for ds_name in &request.datasets {
+                        if let Some(dataset) = datasets.get(ds_name) {
+                            match correlation_matrix(dataset) {
+                                Ok(corr) => {
+                                    output.push_str(&format!("\n{}\n{:?}\n", ds_name, corr));
+                                }
+                                Err(e) => {
+                                    output.push_str(&format!("\n{}: Error - {}\n", ds_name, e));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {
+                output.push_str(&format!("Unknown comparison type: '{}'. Use 'summary', 'distribution', or 'correlation'.\n", comparison_type));
+            }
+        }
+
+        Ok(CallToolResult::success(vec![Content::text(output)]))
     }
 }
 

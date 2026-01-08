@@ -7,7 +7,9 @@ mod heatmap;
 
 pub use charts::{
     histogram, scatter_plot, box_plot, line_chart,
+    event_study_plot, coefficient_plot, irf_plot, residual_diagnostics,
     ChartConfig, HistogramResult, ScatterResult, BoxPlotResult, LineChartResult,
+    EventStudyResult, CoefficientPlotResult, IrfPlotResult, ResidualDiagnosticsResult,
 };
 pub use heatmap::{correlation_heatmap, HeatmapResult};
 
