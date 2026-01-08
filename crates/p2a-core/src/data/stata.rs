@@ -439,11 +439,297 @@ pub fn load_stata(path: impl AsRef<Path>) -> Result<DataFrame, StataError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Cursor;
 
     #[test]
     fn test_stata_type_from_code() {
         assert!(matches!(StataType::from_code(65530), Ok(StataType::Byte)));
         assert!(matches!(StataType::from_code(65526), Ok(StataType::Double)));
         assert!(matches!(StataType::from_code(100), Ok(StataType::Str(100))));
+    }
+
+    /// Generate a minimal valid Stata DTA version 118 file.
+    fn create_test_dta_file() -> Vec<u8> {
+        let mut buf = Vec::new();
+
+        // === Header section ===
+        buf.extend_from_slice(b"<stata_dta>");
+        buf.extend_from_slice(b"<header>");
+        buf.extend_from_slice(b"<release>118</release>");
+        buf.extend_from_slice(b"<byteorder>LSF</byteorder>");  // Little-endian
+        // Track position BEFORE <K> - the reader seeks to offsets[1] then scans for <K>
+        let before_k_offset = buf.len() as u64;
+        buf.extend_from_slice(b"<K>");
+        buf.extend_from_slice(&2u16.to_le_bytes());  // 2 variables
+        buf.extend_from_slice(b"</K>");
+        buf.extend_from_slice(b"<N>");
+        buf.extend_from_slice(&3u64.to_le_bytes());  // 3 observations
+        buf.extend_from_slice(b"</N>");
+        buf.extend_from_slice(b"<label>");
+        buf.extend_from_slice(&0u16.to_le_bytes());  // No label
+        buf.extend_from_slice(b"</label>");
+        buf.extend_from_slice(b"<timestamp>");
+        buf.extend_from_slice(&0u8.to_le_bytes());  // No timestamp
+        buf.extend_from_slice(b"</timestamp>");
+        buf.extend_from_slice(b"</header>");
+
+        // === Map section (14 offsets) ===
+        buf.extend_from_slice(b"<map>");
+
+        // Placeholder offsets - will be filled in
+        let offset_placeholder_pos = buf.len();
+        for _ in 0..14 {
+            buf.extend_from_slice(&0u64.to_le_bytes());
+        }
+        buf.extend_from_slice(b"</map>");
+
+        // === Variable types section ===
+        let var_types_offset = buf.len() as u64;
+        buf.extend_from_slice(b"<variable_types>");
+        buf.extend_from_slice(&65526u16.to_le_bytes());  // Double
+        buf.extend_from_slice(&65526u16.to_le_bytes());  // Double
+        buf.extend_from_slice(b"</variable_types>");
+
+        // === Variable names section ===
+        let varnames_offset = buf.len() as u64;
+        buf.extend_from_slice(b"<varnames>");
+        // Version 118 uses 129-byte names
+        let mut name1 = vec![0u8; 129];
+        name1[..2].copy_from_slice(b"x1");
+        buf.extend_from_slice(&name1);
+        let mut name2 = vec![0u8; 129];
+        name2[..2].copy_from_slice(b"x2");
+        buf.extend_from_slice(&name2);
+        buf.extend_from_slice(b"</varnames>");
+
+        // === Sortlist section ===
+        buf.extend_from_slice(b"<sortlist>");
+        buf.extend_from_slice(&[0u16; 3].iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<u8>>());
+        buf.extend_from_slice(b"</sortlist>");
+
+        // === Formats section ===
+        buf.extend_from_slice(b"<formats>");
+        // 57-byte format strings for version 118
+        let mut fmt1 = vec![0u8; 57];
+        fmt1[..6].copy_from_slice(b"%10.0g");
+        buf.extend_from_slice(&fmt1);
+        let mut fmt2 = vec![0u8; 57];
+        fmt2[..6].copy_from_slice(b"%10.0g");
+        buf.extend_from_slice(&fmt2);
+        buf.extend_from_slice(b"</formats>");
+
+        // === Value label names section ===
+        buf.extend_from_slice(b"<value_label_names>");
+        // 129-byte value label names
+        buf.extend_from_slice(&vec![0u8; 129 * 2]);
+        buf.extend_from_slice(b"</value_label_names>");
+
+        // === Variable labels section ===
+        buf.extend_from_slice(b"<variable_labels>");
+        // 321-byte variable labels for version 118
+        buf.extend_from_slice(&vec![0u8; 321 * 2]);
+        buf.extend_from_slice(b"</variable_labels>");
+
+        // === Characteristics section ===
+        buf.extend_from_slice(b"<characteristics>");
+        buf.extend_from_slice(b"</characteristics>");
+
+        // === Data section ===
+        let data_offset = buf.len() as u64;
+        buf.extend_from_slice(b"<data>");
+        // 3 observations, 2 doubles each
+        // Row 1: 1.0, 2.0
+        buf.extend_from_slice(&1.0f64.to_le_bytes());
+        buf.extend_from_slice(&2.0f64.to_le_bytes());
+        // Row 2: 3.0, 4.0
+        buf.extend_from_slice(&3.0f64.to_le_bytes());
+        buf.extend_from_slice(&4.0f64.to_le_bytes());
+        // Row 3: 5.0, 6.0
+        buf.extend_from_slice(&5.0f64.to_le_bytes());
+        buf.extend_from_slice(&6.0f64.to_le_bytes());
+        buf.extend_from_slice(b"</data>");
+
+        // === Strls section (empty) ===
+        buf.extend_from_slice(b"<strls>");
+        buf.extend_from_slice(b"</strls>");
+
+        // === Value labels section (empty) ===
+        buf.extend_from_slice(b"<value_labels>");
+        buf.extend_from_slice(b"</value_labels>");
+
+        // === End ===
+        buf.extend_from_slice(b"</stata_dta>");
+
+        // Now go back and fill in the map offsets
+        // The reader: seeks to offsets[1], scans forward for <K>, then <N>, then <variable_types>, etc.
+        // offsets[5] is used to seek before scanning for <data>
+        let offsets: [u64; 14] = [
+            0,                    // 0: stata_dta
+            before_k_offset,      // 1: position before <K> tag
+            var_types_offset,     // 2: variable_types (unused by reader)
+            0,                    // 3: sortlist
+            0,                    // 4: formats
+            data_offset,          // 5: data - reader seeks here, then scans for <data>
+            0,                    // 6: strls
+            0,                    // 7: value_labels
+            0, 0, 0, 0, 0,        // 8-12: reserved
+            buf.len() as u64,     // 13: end of file
+        ];
+
+        // Write offsets to the map section
+        let mut offset_buf = Vec::new();
+        for offset in &offsets {
+            offset_buf.extend_from_slice(&offset.to_le_bytes());
+        }
+        buf[offset_placeholder_pos..offset_placeholder_pos + 112].copy_from_slice(&offset_buf);
+
+        buf
+    }
+
+    #[test]
+    fn test_read_synthetic_dta() {
+        let dta_bytes = create_test_dta_file();
+        let cursor = Cursor::new(dta_bytes);
+        let reader = StataReader::new(cursor).expect("Failed to create reader");
+
+        assert_eq!(reader.n_vars, 2);
+        assert_eq!(reader.n_obs, 3);
+        assert_eq!(reader.variables.len(), 2);
+        assert_eq!(reader.variables[0].name, "x1");
+        assert_eq!(reader.variables[1].name, "x2");
+
+        let df = reader.read_to_dataframe().expect("Failed to read dataframe");
+
+        assert_eq!(df.height(), 3);
+        assert_eq!(df.width(), 2);
+
+        // Check values
+        let x1 = df.column("x1").unwrap().f64().unwrap();
+        let x2 = df.column("x2").unwrap().f64().unwrap();
+
+        assert_eq!(x1.get(0), Some(1.0));
+        assert_eq!(x1.get(1), Some(3.0));
+        assert_eq!(x1.get(2), Some(5.0));
+        assert_eq!(x2.get(0), Some(2.0));
+        assert_eq!(x2.get(1), Some(4.0));
+        assert_eq!(x2.get(2), Some(6.0));
+    }
+
+    #[test]
+    fn test_stata_invalid_magic() {
+        let invalid_data = b"Not a valid Stata file";
+        let cursor = Cursor::new(invalid_data.to_vec());
+        let result = StataReader::new(cursor);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_stata_missing_values() {
+        // Create a DTA file with missing values
+        let mut buf = Vec::new();
+
+        buf.extend_from_slice(b"<stata_dta>");
+        buf.extend_from_slice(b"<header>");
+        buf.extend_from_slice(b"<release>118</release>");
+        buf.extend_from_slice(b"<byteorder>LSF</byteorder>");
+        // Track position before <K>
+        let before_k_offset = buf.len() as u64;
+        buf.extend_from_slice(b"<K>");
+        buf.extend_from_slice(&1u16.to_le_bytes());  // 1 variable
+        buf.extend_from_slice(b"</K>");
+        buf.extend_from_slice(b"<N>");
+        buf.extend_from_slice(&2u64.to_le_bytes());  // 2 observations
+        buf.extend_from_slice(b"</N>");
+        buf.extend_from_slice(b"<label>");
+        buf.extend_from_slice(&0u16.to_le_bytes());
+        buf.extend_from_slice(b"</label>");
+        buf.extend_from_slice(b"<timestamp>");
+        buf.extend_from_slice(&0u8.to_le_bytes());
+        buf.extend_from_slice(b"</timestamp>");
+        buf.extend_from_slice(b"</header>");
+
+        // Map
+        buf.extend_from_slice(b"<map>");
+        let offset_pos = buf.len();
+        for _ in 0..14 {
+            buf.extend_from_slice(&0u64.to_le_bytes());
+        }
+        buf.extend_from_slice(b"</map>");
+
+        // Variable types
+        let var_types_offset = buf.len() as u64;
+        buf.extend_from_slice(b"<variable_types>");
+        buf.extend_from_slice(&65526u16.to_le_bytes());  // Double
+        buf.extend_from_slice(b"</variable_types>");
+
+        // Variable names
+        buf.extend_from_slice(b"<varnames>");
+        let mut name = vec![0u8; 129];
+        name[..3].copy_from_slice(b"val");
+        buf.extend_from_slice(&name);
+        buf.extend_from_slice(b"</varnames>");
+
+        // Sortlist
+        buf.extend_from_slice(b"<sortlist>");
+        buf.extend_from_slice(&[0u16; 2].iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<u8>>());
+        buf.extend_from_slice(b"</sortlist>");
+
+        // Formats
+        buf.extend_from_slice(b"<formats>");
+        let mut fmt = vec![0u8; 57];
+        fmt[..6].copy_from_slice(b"%10.0g");
+        buf.extend_from_slice(&fmt);
+        buf.extend_from_slice(b"</formats>");
+
+        // Value label names
+        buf.extend_from_slice(b"<value_label_names>");
+        buf.extend_from_slice(&vec![0u8; 129]);
+        buf.extend_from_slice(b"</value_label_names>");
+
+        // Variable labels
+        buf.extend_from_slice(b"<variable_labels>");
+        buf.extend_from_slice(&vec![0u8; 321]);
+        buf.extend_from_slice(b"</variable_labels>");
+
+        // Characteristics
+        buf.extend_from_slice(b"<characteristics>");
+        buf.extend_from_slice(b"</characteristics>");
+
+        // Data
+        let data_offset = buf.len() as u64;
+        buf.extend_from_slice(b"<data>");
+        // Row 1: valid value
+        buf.extend_from_slice(&42.0f64.to_le_bytes());
+        // Row 2: Stata missing value (NaN pattern > 8.988e307)
+        buf.extend_from_slice(&f64::NAN.to_le_bytes());
+        buf.extend_from_slice(b"</data>");
+
+        // Strls
+        buf.extend_from_slice(b"<strls>");
+        buf.extend_from_slice(b"</strls>");
+
+        // Value labels
+        buf.extend_from_slice(b"<value_labels>");
+        buf.extend_from_slice(b"</value_labels>");
+
+        buf.extend_from_slice(b"</stata_dta>");
+
+        // Fill map - offsets[1] must point BEFORE <K>
+        let offsets: [u64; 14] = [
+            0, before_k_offset, var_types_offset, 0, 0, data_offset, 0, 0, 0, 0, 0, 0, 0, buf.len() as u64
+        ];
+        let mut offset_buf = Vec::new();
+        for offset in &offsets {
+            offset_buf.extend_from_slice(&offset.to_le_bytes());
+        }
+        buf[offset_pos..offset_pos + 112].copy_from_slice(&offset_buf);
+
+        let cursor = Cursor::new(buf);
+        let reader = StataReader::new(cursor).expect("Failed to create reader");
+        let df = reader.read_to_dataframe().expect("Failed to read dataframe");
+
+        let col = df.column("val").unwrap().f64().unwrap();
+        assert_eq!(col.get(0), Some(42.0));
+        assert_eq!(col.get(1), None);  // Missing value should be null
     }
 }

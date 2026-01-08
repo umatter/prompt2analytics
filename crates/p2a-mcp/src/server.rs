@@ -22,7 +22,7 @@ use p2a_core::{
         query_sqlite, list_sqlite_tables, sqlite_table_schema,
         query_duckdb, list_duckdb_tables, duckdb_table_schema,
     },
-    regression::{run_ols, run_ols_clustered, run_diagnostics},
+    regression::{run_ols, run_ols_clustered, run_diagnostics, CovarianceType},
     stats::{correlation_matrix, DescriptiveStats},
     // Econometrics
     run_fixed_effects, run_random_effects, run_hausman_test, run_iv2sls, run_did,
@@ -121,9 +121,13 @@ pub struct DiagnosticsRequest {
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
     pub dataset: String,
 
-    /// R-style formula (e.g., "y ~ x1 + x2")
-    #[schemars(description = "R-style formula specifying the model (e.g., 'y ~ x1 + x2').")]
-    pub formula: String,
+    /// Dependent variable (Y) column name
+    #[schemars(description = "Name of the dependent variable (Y) column.")]
+    pub y: String,
+
+    /// Independent variables (X) column names
+    #[schemars(description = "Names of the independent variable (X) columns.")]
+    pub x: Vec<String>,
 }
 
 /// Request for OLS with clustered standard errors.
@@ -133,9 +137,13 @@ pub struct OlsClusteredRequest {
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
     pub dataset: String,
 
-    /// R-style formula (e.g., "y ~ x1 + x2")
-    #[schemars(description = "R-style formula specifying the model (e.g., 'y ~ x1 + x2').")]
-    pub formula: String,
+    /// Dependent variable (Y) column name
+    #[schemars(description = "Name of the dependent variable (Y) column.")]
+    pub y: String,
+
+    /// Independent variables (X) column names
+    #[schemars(description = "Names of the independent variable (X) columns.")]
+    pub x: Vec<String>,
 
     /// First cluster dimension column (e.g., "firm_id")
     #[schemars(description = "Column name for first clustering dimension (e.g., 'firm_id').")]
@@ -157,9 +165,13 @@ pub struct PanelFERequest {
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
     pub dataset: String,
 
-    /// R-style formula (e.g., "y ~ x1 + x2")
-    #[schemars(description = "R-style formula specifying the model (e.g., 'y ~ x1 + x2').")]
-    pub formula: String,
+    /// Dependent variable (Y) column name
+    #[schemars(description = "Name of the dependent variable (Y) column.")]
+    pub y: String,
+
+    /// Independent variables (X) column names
+    #[schemars(description = "Names of the independent variable (X) columns.")]
+    pub x: Vec<String>,
 
     /// Entity/individual identifier column
     #[schemars(description = "Column name for entity/individual identifier (e.g., 'firm_id', 'person_id').")]
@@ -173,9 +185,13 @@ pub struct PanelRERequest {
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
     pub dataset: String,
 
-    /// R-style formula (e.g., "y ~ x1 + x2")
-    #[schemars(description = "R-style formula specifying the model (e.g., 'y ~ x1 + x2').")]
-    pub formula: String,
+    /// Dependent variable (Y) column name
+    #[schemars(description = "Name of the dependent variable (Y) column.")]
+    pub y: String,
+
+    /// Independent variables (X) column names
+    #[schemars(description = "Names of the independent variable (X) columns.")]
+    pub x: Vec<String>,
 
     /// Entity/individual identifier column
     #[schemars(description = "Column name for entity/individual identifier (e.g., 'firm_id', 'person_id').")]
@@ -189,9 +205,13 @@ pub struct HausmanRequest {
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
     pub dataset: String,
 
-    /// R-style formula (e.g., "y ~ x1 + x2")
-    #[schemars(description = "R-style formula specifying the model (e.g., 'y ~ x1 + x2').")]
-    pub formula: String,
+    /// Dependent variable (Y) column name
+    #[schemars(description = "Name of the dependent variable (Y) column.")]
+    pub y: String,
+
+    /// Independent variables (X) column names
+    #[schemars(description = "Names of the independent variable (X) columns.")]
+    pub x: Vec<String>,
 
     /// Entity/individual identifier column
     #[schemars(description = "Column name for entity/individual identifier (e.g., 'firm_id', 'person_id').")]
@@ -205,13 +225,21 @@ pub struct IV2SLSRequest {
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
     pub dataset: String,
 
-    /// Endogenous model formula (e.g., "y ~ x1 + x2 + endog_var")
-    #[schemars(description = "Formula for the structural equation (e.g., 'wage ~ experience + education').")]
-    pub endog_formula: String,
+    /// Dependent variable (Y) column name
+    #[schemars(description = "Name of the dependent variable (Y) column.")]
+    pub y: String,
 
-    /// Instrument formula (e.g., "endog_var ~ z1 + z2")
-    #[schemars(description = "Formula for instruments (e.g., 'education ~ parents_edu + distance_to_college').")]
-    pub instrument_formula: String,
+    /// Exogenous independent variables
+    #[schemars(description = "Names of exogenous independent variable columns (not instrumented).")]
+    pub x_exog: Vec<String>,
+
+    /// Endogenous variable to be instrumented
+    #[schemars(description = "Names of endogenous variables that need instruments.")]
+    pub x_endog: Vec<String>,
+
+    /// Instrumental variables
+    #[schemars(description = "Names of instrument columns (excluded from structural equation).")]
+    pub instruments: Vec<String>,
 
     /// Use robust standard errors
     #[schemars(description = "Whether to use heteroskedasticity-robust standard errors. Default is true.")]
@@ -265,9 +293,13 @@ pub struct LogitRequest {
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
     pub dataset: String,
 
-    /// R-style formula (e.g., "y ~ x1 + x2")
-    #[schemars(description = "R-style formula specifying the model (e.g., 'outcome ~ treatment + control_var').")]
-    pub formula: String,
+    /// Dependent variable (Y) column name (must be binary 0/1)
+    #[schemars(description = "Name of the dependent variable (Y) column. Must be binary (0/1).")]
+    pub y: String,
+
+    /// Independent variables (X) column names
+    #[schemars(description = "Names of the independent variable (X) columns.")]
+    pub x: Vec<String>,
 }
 
 /// Request for Probit regression.
@@ -277,9 +309,13 @@ pub struct ProbitRequest {
     #[schemars(description = "Name or ID of a previously loaded dataset.")]
     pub dataset: String,
 
-    /// R-style formula (e.g., "y ~ x1 + x2")
-    #[schemars(description = "R-style formula specifying the model (e.g., 'outcome ~ treatment + control_var').")]
-    pub formula: String,
+    /// Dependent variable (Y) column name (must be binary 0/1)
+    #[schemars(description = "Name of the dependent variable (Y) column. Must be binary (0/1).")]
+    pub y: String,
+
+    /// Independent variables (X) column names
+    #[schemars(description = "Names of the independent variable (X) columns.")]
+    pub x: Vec<String>,
 }
 
 // ============================================================================
@@ -1340,7 +1376,7 @@ impl AnalyticsServer {
 
         let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
 
-        let result = match run_ols(dataset, &request.y, &x_refs) {
+        let result = match run_ols(dataset, &request.y, &x_refs, true, CovarianceType::HC1) {
             Ok(r) => r,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -1371,7 +1407,9 @@ impl AnalyticsServer {
             }
         };
 
-        let result = match run_diagnostics(dataset, &request.formula) {
+        let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
+
+        let result = match run_diagnostics(dataset, &request.y, &x_refs) {
             Ok(r) => r,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -1402,9 +1440,12 @@ impl AnalyticsServer {
             }
         };
 
+        let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
+
         let result = match run_ols_clustered(
             dataset,
-            &request.formula,
+            &request.y,
+            &x_refs,
             &request.cluster1,
             request.cluster2.as_deref(),
         ) {
@@ -1442,7 +1483,9 @@ impl AnalyticsServer {
             }
         };
 
-        let result = match run_fixed_effects(dataset, &request.formula, &request.entity_var) {
+        let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
+
+        let result = match run_fixed_effects(dataset, &request.y, &x_refs, &request.entity_var) {
             Ok(r) => r,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -1473,7 +1516,9 @@ impl AnalyticsServer {
             }
         };
 
-        let result = match run_random_effects(dataset, &request.formula, &request.entity_var) {
+        let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
+
+        let result = match run_random_effects(dataset, &request.y, &x_refs, &request.entity_var) {
             Ok(r) => r,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -1504,7 +1549,9 @@ impl AnalyticsServer {
             }
         };
 
-        let result = match run_hausman_test(dataset, &request.formula, &request.entity_var) {
+        let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
+
+        let result = match run_hausman_test(dataset, &request.y, &x_refs, &request.entity_var) {
             Ok(r) => r,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -1536,8 +1583,11 @@ impl AnalyticsServer {
         };
 
         let robust = request.robust.unwrap_or(true);
+        let x_exog_refs: Vec<&str> = request.x_exog.iter().map(|s| s.as_str()).collect();
+        let x_endog_refs: Vec<&str> = request.x_endog.iter().map(|s| s.as_str()).collect();
+        let instruments_refs: Vec<&str> = request.instruments.iter().map(|s| s.as_str()).collect();
 
-        let result = match run_iv2sls(dataset, &request.endog_formula, &request.instrument_formula, robust) {
+        let result = match run_iv2sls(dataset, &request.y, &x_exog_refs, &x_endog_refs, &instruments_refs, robust) {
             Ok(r) => r,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -1608,7 +1658,7 @@ impl AnalyticsServer {
             }
         };
 
-        let result = match run_did(dataset, &request.dep_var, &request.treatment_var, &request.post_var) {
+        let result = match run_did(dataset, &request.dep_var, &request.treatment_var, &request.post_var, None) {
             Ok(r) => r,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -1643,7 +1693,9 @@ impl AnalyticsServer {
             }
         };
 
-        let result = match run_logit(dataset, &request.formula) {
+        let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
+
+        let result = match run_logit(dataset, &request.y, &x_refs) {
             Ok(r) => r,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -1674,7 +1726,9 @@ impl AnalyticsServer {
             }
         };
 
-        let result = match run_probit(dataset, &request.formula) {
+        let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
+
+        let result = match run_probit(dataset, &request.y, &x_refs) {
             Ok(r) => r,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -3803,12 +3857,11 @@ impl AnalyticsServer {
                             let y_col = &cols[0];
                             let x_cols: Vec<&str> = cols[1..].iter().map(|s| s.as_str()).collect();
 
-                            match run_ols(dataset, y_col, &x_cols) {
+                            match run_ols(dataset, y_col, &x_cols, true, CovarianceType::HC1) {
                                 Ok(ols_result) => {
                                     let mut output = format!("Dataset: {}\n{:-<60}\n", ds_name, "");
                                     output.push_str(&format!("R²: {:.4}, Adj R²: {:.4}\n", ols_result.r_squared, ols_result.adj_r_squared));
                                     output.push_str(&format!("F-stat: {:.4}\n", ols_result.f_statistic));
-                                    output.push_str(&format!("Intercept: {:.4}\n", ols_result.intercept));
                                     for coef in &ols_result.coefficients {
                                         output.push_str(&format!(
                                             "  {}: coef={:.4}, se={:.4}, t={:.4}, p={:.4}\n",

@@ -526,10 +526,241 @@ pub fn load_sas(path: impl AsRef<Path>) -> Result<DataFrame, SasError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Cursor;
 
     #[test]
     fn test_magic_number() {
         assert_eq!(SAS_MAGIC.len(), 32);
         assert_eq!(SAS_MAGIC[12], 0xc2);
+    }
+
+    #[test]
+    fn test_sas_invalid_magic() {
+        let invalid_data = b"Not a valid SAS file - this is just random text";
+        let cursor = Cursor::new(invalid_data.to_vec());
+        let result = SasReader::new(cursor);
+        assert!(result.is_err());
+        match result {
+            Err(SasError::InvalidFormat(msg)) => assert!(msg.contains("magic")),
+            _ => panic!("Expected InvalidFormat error"),
+        }
+    }
+
+    #[test]
+    fn test_sas_truncated_magic() {
+        // Less than 32 bytes
+        let short_data = vec![0u8; 16];
+        let cursor = Cursor::new(short_data);
+        let result = SasReader::new(cursor);
+        assert!(result.is_err());
+    }
+
+    /// Create a minimal valid SAS7BDAT file (32-bit, little-endian).
+    /// This is a highly simplified structure for testing basic parsing.
+    fn create_minimal_sas_file() -> Vec<u8> {
+        let header_length: usize = 8192;  // Standard SAS header
+        let page_size: usize = 4096;      // Single page size
+        let page_count: usize = 2;        // Metadata + data page
+
+        let mut buf = vec![0u8; header_length + page_size * page_count];
+
+        // === Header (first 8192 bytes) ===
+        // Magic number at offset 0
+        buf[0..32].copy_from_slice(&SAS_MAGIC);
+
+        // Alignment byte at offset 32 (0x00 = 32-bit)
+        buf[32] = 0x00;
+
+        // Align2 byte at offset 35
+        buf[35] = 0x00;
+
+        // Endianness at offset 37 (0x01 = little-endian)
+        buf[37] = 0x01;
+
+        // Platform (unused, but let's set it)
+        buf[39] = b'1';  // Unix
+
+        // Header length at offset 196 (32-bit, no alignment adjustment)
+        let header_len_offset = 196;
+        buf[header_len_offset..header_len_offset + 4].copy_from_slice(&(header_length as i32).to_le_bytes());
+
+        // Page size at offset 200
+        let page_size_offset = 200;
+        buf[page_size_offset..page_size_offset + 4].copy_from_slice(&(page_size as i32).to_le_bytes());
+
+        // Page count at offset 204 (32-bit format)
+        let page_count_offset = 204;
+        buf[page_count_offset..page_count_offset + 4].copy_from_slice(&(page_count as i32).to_le_bytes());
+
+        // === First page (metadata page) at offset header_length ===
+        let page0_offset = header_length;
+
+        // Page type at offset 16 (for 32-bit): 0 = metadata page
+        buf[page0_offset + 16..page0_offset + 18].copy_from_slice(&0i16.to_le_bytes());
+
+        // Subheader count at offset 18
+        buf[page0_offset + 18..page0_offset + 20].copy_from_slice(&4i16.to_le_bytes());  // 4 subheaders
+
+        // Page header size for 32-bit is 24 bytes
+        // Subheader pointer size for 32-bit is 12 bytes
+
+        // === Subheader pointers (start at page0_offset + 24) ===
+        let sh_ptr_base = page0_offset + 24;
+
+        // Subheader 1: Row size subheader
+        // Offset within page (relative to page start)
+        let sh1_offset: i32 = 72;  // After 4 subheader pointers (24 + 4*12 = 72)
+        buf[sh_ptr_base..sh_ptr_base + 4].copy_from_slice(&sh1_offset.to_le_bytes());
+        // Length
+        buf[sh_ptr_base + 4..sh_ptr_base + 8].copy_from_slice(&32i32.to_le_bytes());
+
+        // Subheader 2: Column size subheader
+        let sh2_offset: i32 = 104;
+        buf[sh_ptr_base + 12..sh_ptr_base + 16].copy_from_slice(&sh2_offset.to_le_bytes());
+        buf[sh_ptr_base + 16..sh_ptr_base + 20].copy_from_slice(&24i32.to_le_bytes());
+
+        // Subheader 3: Column name subheader
+        let sh3_offset: i32 = 128;
+        buf[sh_ptr_base + 24..sh_ptr_base + 28].copy_from_slice(&sh3_offset.to_le_bytes());
+        buf[sh_ptr_base + 28..sh_ptr_base + 32].copy_from_slice(&40i32.to_le_bytes());
+
+        // Subheader 4: Column attributes subheader
+        let sh4_offset: i32 = 168;
+        buf[sh_ptr_base + 36..sh_ptr_base + 40].copy_from_slice(&sh4_offset.to_le_bytes());
+        buf[sh_ptr_base + 40..sh_ptr_base + 44].copy_from_slice(&36i32.to_le_bytes());
+
+        // === Row size subheader (F7F7F7F7) ===
+        let row_sh_base = page0_offset + sh1_offset as usize;
+        buf[row_sh_base..row_sh_base + 4].copy_from_slice(&ROW_SIZE_SIGNATURE);
+        // Row length at offset 20 (32-bit)
+        let row_length: i32 = 16;  // 2 doubles = 16 bytes per row
+        buf[row_sh_base + 20..row_sh_base + 24].copy_from_slice(&row_length.to_le_bytes());
+        // Row count at offset 24
+        let row_count: i32 = 3;  // 3 rows
+        buf[row_sh_base + 24..row_sh_base + 28].copy_from_slice(&row_count.to_le_bytes());
+
+        // === Column size subheader (F6F6F6F6) ===
+        let col_sh_base = page0_offset + sh2_offset as usize;
+        buf[col_sh_base..col_sh_base + 4].copy_from_slice(&COL_SIZE_SIGNATURE);
+        // Column count at offset 8
+        let col_count: i32 = 2;
+        buf[col_sh_base + 8..col_sh_base + 12].copy_from_slice(&col_count.to_le_bytes());
+
+        // === Column name subheader (FFFFFFFF) ===
+        let name_sh_base = page0_offset + sh3_offset as usize;
+        buf[name_sh_base..name_sh_base + 4].copy_from_slice(&COL_NAME_SIGNATURE);
+        // Base offset for names is 8 + int_size*2 = 8 + 4*2 = 16
+        // Entry size is 8 bytes
+        // We have 2 columns
+
+        // === Column attributes subheader (FCFFFFFF) ===
+        let attr_sh_base = page0_offset + sh4_offset as usize;
+        buf[attr_sh_base..attr_sh_base + 4].copy_from_slice(&COL_ATTR_SIGNATURE);
+        // Base offset is 12 for 32-bit
+        // Each attribute entry is 12 bytes for 32-bit
+
+        // Column 1: offset=0, width=8, type=1 (numeric)
+        let attr1_base = attr_sh_base + 12;
+        buf[attr1_base..attr1_base + 4].copy_from_slice(&0i32.to_le_bytes());  // offset
+        buf[attr1_base + 4..attr1_base + 8].copy_from_slice(&8i32.to_le_bytes());  // width
+        buf[attr1_base + 8] = 1;  // type = numeric
+
+        // Column 2: offset=8, width=8, type=1 (numeric)
+        let attr2_base = attr_sh_base + 24;
+        buf[attr2_base..attr2_base + 4].copy_from_slice(&8i32.to_le_bytes());  // offset
+        buf[attr2_base + 4..attr2_base + 8].copy_from_slice(&8i32.to_le_bytes());  // width
+        buf[attr2_base + 8] = 1;  // type = numeric
+
+        // === Second page (data page) at offset header_length + page_size ===
+        let page1_offset = header_length + page_size;
+
+        // Page type at offset 16: 256 = data page
+        buf[page1_offset + 16..page1_offset + 18].copy_from_slice(&256i16.to_le_bytes());
+
+        // Block count (number of rows in this page) at offset 20
+        buf[page1_offset + 20..page1_offset + 22].copy_from_slice(&3i16.to_le_bytes());
+
+        // Data starts at offset 24 (page_header_size for 32-bit)
+        let data_base = page1_offset + 24;
+
+        // Row 1: 1.0, 2.0
+        buf[data_base..data_base + 8].copy_from_slice(&1.0f64.to_le_bytes());
+        buf[data_base + 8..data_base + 16].copy_from_slice(&2.0f64.to_le_bytes());
+
+        // Row 2: 3.0, 4.0
+        buf[data_base + 16..data_base + 24].copy_from_slice(&3.0f64.to_le_bytes());
+        buf[data_base + 24..data_base + 32].copy_from_slice(&4.0f64.to_le_bytes());
+
+        // Row 3: 5.0, 6.0
+        buf[data_base + 32..data_base + 40].copy_from_slice(&5.0f64.to_le_bytes());
+        buf[data_base + 40..data_base + 48].copy_from_slice(&6.0f64.to_le_bytes());
+
+        buf
+    }
+
+    #[test]
+    fn test_read_synthetic_sas_header() {
+        let sas_bytes = create_minimal_sas_file();
+        let cursor = Cursor::new(sas_bytes);
+        let reader = SasReader::new(cursor).expect("Failed to create SAS reader");
+
+        // Verify header parsing
+        assert_eq!(reader.is_64bit, false);
+        assert_eq!(reader.byte_order, ByteOrder::LittleEndian);
+        assert_eq!(reader.header_length, 8192);
+        assert_eq!(reader.page_size, 4096);
+        assert_eq!(reader.page_count, 2);
+        assert_eq!(reader.row_length, 16);
+        assert_eq!(reader.row_count, 3);
+        assert_eq!(reader.columns.len(), 2);
+    }
+
+    #[test]
+    fn test_read_synthetic_sas_data() {
+        let sas_bytes = create_minimal_sas_file();
+        let cursor = Cursor::new(sas_bytes);
+        let reader = SasReader::new(cursor).expect("Failed to create SAS reader");
+        let df = reader.read_to_dataframe().expect("Failed to read dataframe");
+
+        assert_eq!(df.height(), 3);
+        assert_eq!(df.width(), 2);
+
+        // Get columns by index since names are auto-generated
+        let columns: Vec<_> = df.get_columns().iter().collect();
+        assert_eq!(columns.len(), 2);
+
+        // First column should have values 1.0, 3.0, 5.0
+        let col1 = columns[0].f64().unwrap();
+        assert_eq!(col1.get(0), Some(1.0));
+        assert_eq!(col1.get(1), Some(3.0));
+        assert_eq!(col1.get(2), Some(5.0));
+
+        // Second column should have values 2.0, 4.0, 6.0
+        let col2 = columns[1].f64().unwrap();
+        assert_eq!(col2.get(0), Some(2.0));
+        assert_eq!(col2.get(1), Some(4.0));
+        assert_eq!(col2.get(2), Some(6.0));
+    }
+
+    #[test]
+    fn test_sas_endianness_detection_little() {
+        // Test little-endian (default)
+        let sas_bytes = create_minimal_sas_file();
+        let cursor = Cursor::new(sas_bytes);
+        let reader = SasReader::new(cursor).expect("Failed to create reader");
+        assert_eq!(reader.byte_order, ByteOrder::LittleEndian);
+    }
+
+    #[test]
+    fn test_sas_column_types() {
+        // Verify that column type detection works
+        let sas_bytes = create_minimal_sas_file();
+        let cursor = Cursor::new(sas_bytes);
+        let reader = SasReader::new(cursor).expect("Failed to create reader");
+
+        // Verify we have 2 numeric columns
+        assert_eq!(reader.columns.len(), 2);
+        assert_eq!(reader.columns[0].col_type, ColumnType::Numeric);
+        assert_eq!(reader.columns[1].col_type, ColumnType::Numeric);
     }
 }

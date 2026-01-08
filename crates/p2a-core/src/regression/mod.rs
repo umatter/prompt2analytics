@@ -5,5 +5,11 @@
 mod ols;
 mod diagnostics;
 
-pub use ols::{OlsResult, OlsCoefficient, OlsClusteredResult, run_ols, run_ols_clustered};
-pub use diagnostics::{DiagnosticsResult, run_diagnostics};
+pub use ols::{
+    OlsResult, OlsCoefficient, OlsClusteredResult, CovarianceType,
+    run_ols, run_ols_clustered,
+};
+pub use diagnostics::{
+    DiagnosticsResult, TestResult, DurbinWatsonResult, VifResult, AutocorrelationType,
+    run_diagnostics,
+};

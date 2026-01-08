@@ -15,8 +15,11 @@ polars.workspace = true
 ndarray.workspace = true
 statrs.workspace = true
 
-# Econometrics
-greeners.workspace = true
+# Linear algebra (pure Rust)
+faer.workspace = true
+
+# Parallel computation
+rayon.workspace = true
 
 # Time series forecasting
 arima.workspace = true

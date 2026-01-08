@@ -5,6 +5,12 @@
 //! This crate provides the data loading, statistical analysis, and machine learning
 //! functionality that powers the MCP server.
 
+// Foundation modules (pure Rust implementations)
+pub mod linalg;
+pub mod traits;
+pub mod errors;
+
+// Feature modules
 pub mod data;
 pub mod stats;
 pub mod regression;
@@ -13,6 +19,11 @@ pub mod forecasting;
 pub mod ml;
 pub mod visualization;
 pub mod reports;
+
+// Re-export foundational types
+pub use errors::{EconError, EconResult, EstimationWarning};
+pub use traits::{LinearEstimator, SignificanceLevel};
+pub use linalg::{DesignMatrix, DesignError};
 
 pub use data::{Dataset, DataLoader, DatasetInfo};
 pub use stats::{DescriptiveStats, CorrelationMatrix, correlation_matrix};

@@ -26,7 +26,7 @@ Phases 1, 2, 2b, 3a, 3b, 4, and part of Phase 5 of the prompt2analytics developm
 - **Conversation History: SQLite persistence with search, rename, and export**
 - **Dataset Context: Automatic injection of loaded dataset info into LLM prompts**
 
-The codebase uses the `greeners` library for econometrics, pure Rust implementations for ML algorithms (to avoid ndarray version conflicts), native database drivers for SQLite/DuckDB, `plotters` for in-memory chart generation with base64-encoded PNG output, Tauri 2.0 for the desktop application, and multi-provider LLM integration with streaming responses and tool execution loop.
+The codebase uses **pure Rust implementations** for all econometrics (OLS, panel data, IV, DiD, discrete choice, time series), ML algorithms, native database drivers for SQLite/DuckDB, `plotters` for in-memory chart generation with base64-encoded PNG output, Tauri 2.0 for the desktop application, and multi-provider LLM integration with streaming responses and tool execution loop.
 
 ---
 
@@ -64,26 +64,26 @@ From the original plan:
 
 | Deliverable | Status | Implementation |
 |-------------|--------|----------------|
-| Fixed Effects (FE) estimation | ✅ Complete | greeners |
-| Random Effects (RE) estimation | ✅ Complete | greeners |
-| Hausman test | ✅ Complete | greeners |
-| Two-way clustering | ✅ Complete | greeners |
-| One-way clustering | ✅ Complete | greeners |
-| 2SLS (Instrumental Variables) | ✅ Complete | greeners |
-| First-stage diagnostics | ✅ Complete | greeners |
-| Difference-in-Differences | ✅ Complete | greeners |
-| Regression diagnostics | ✅ Complete | greeners |
-| Logit (logistic regression) | ✅ Complete | greeners |
-| Probit regression | ✅ Complete | greeners |
+| Fixed Effects (FE) estimation | ✅ Complete | Pure Rust (within-group demeaning) |
+| Random Effects (RE) estimation | ✅ Complete | Pure Rust (GLS/quasi-demeaning) |
+| Hausman test | ✅ Complete | Pure Rust (FE vs RE specification) |
+| Two-way clustering | ✅ Complete | Pure Rust (Cameron-Gelbach-Miller) |
+| One-way clustering | ✅ Complete | Pure Rust |
+| 2SLS (Instrumental Variables) | ✅ Complete | Pure Rust |
+| First-stage diagnostics | ✅ Complete | Pure Rust (F-stat, partial R²) |
+| Difference-in-Differences | ✅ Complete | Pure Rust |
+| Regression diagnostics | ✅ Complete | Pure Rust (JB, BP, DW, VIF) |
+| Logit (logistic regression) | ✅ Complete | Pure Rust (Newton-Raphson MLE) |
+| Probit regression | ✅ Complete | Pure Rust (Newton-Raphson MLE) |
 | Event study plots | ❌ Deferred | Phase 5 |
 | ARIMA modeling | ✅ Complete | arima crate |
 | MSTL decomposition | ✅ Complete | augurs-mstl |
 | Changepoint detection | ❌ Deferred | Phase 5 |
-| VAR model | ✅ Complete | greeners |
-| VARMA model | ✅ Complete | greeners |
-| VECM (Johansen cointegration) | ✅ Complete | greeners |
-| Impulse Response Functions | ✅ Complete | greeners |
-| Robust Standard Errors (HC1-4) | ✅ Complete | greeners (built-in) |
+| VAR model | ✅ Complete | Pure Rust (OLS per equation) |
+| VARMA model | ✅ Complete | Pure Rust (Hannan-Rissanen) |
+| VECM (Johansen cointegration) | ✅ Complete | Pure Rust (Johansen ML) |
+| Impulse Response Functions | ✅ Complete | Pure Rust (Cholesky orthogonalization) |
+| Robust Standard Errors (HC0-HC3) | ✅ Complete | Pure Rust |
 | Excel file support | ✅ Complete | calamine |
 | Stata (.dta) support | ✅ Complete | Pure Rust (v117-119) |
 | SAS (.sas7bdat) support | ✅ Complete | Pure Rust |
@@ -141,21 +141,30 @@ From the original plan:
 
 ### Econometrics Implementation Details
 
+All econometrics are implemented in **pure Rust** using `ndarray` for matrix operations, `faer` for linear algebra (Cholesky, matrix inverse), and `statrs` for statistical distributions.
+
+**OLS Regression:**
+- Column-based API (y_col, x_cols) instead of formula parsing
+- Robust standard errors: HC0, HC1, HC2, HC3 (heteroskedasticity-consistent)
+- Clustered standard errors: one-way and two-way (Cameron-Gelbach-Miller)
+- Full output: coefficients, SE, t-values, p-values, R², adjusted R², F-statistic
+
 **Panel Data Estimators:**
 - Fixed Effects (within estimator) with entity demeaning
-- Random Effects (GLS/Swamy-Arora) estimation
+- Random Effects (GLS with quasi-demeaning, theta estimation)
 - Hausman specification test (choose between FE/RE)
 - Automatic entity ID mapping from string/integer columns
 
 **Instrumental Variables:**
-- Two-Stage Least Squares (2SLS)
-- Support for multiple instruments
+- Two-Stage Least Squares (2SLS) with separate exogenous/endogenous regressors
+- First-stage diagnostics: F-statistic, partial R², instrument strength
 - Robust standard errors option
 
 **Causal Inference:**
 - Difference-in-Differences (canonical 2x2)
 - Treatment effect (ATT) with standard errors
 - Group means for parallel trends assessment
+- Optional control variables
 
 **Regression Diagnostics:**
 - Jarque-Bera test (normality of residuals)
@@ -164,17 +173,14 @@ From the original plan:
 - Variance Inflation Factor (multicollinearity)
 - Condition number (multicollinearity)
 
-**Clustered Standard Errors:**
-- One-way clustering (e.g., by firm, state)
-- Two-way clustering (e.g., firm + time)
-
 **Discrete Choice Models:**
-- Logit (logistic regression) via MLE
-- Probit regression via MLE
+- Logit (logistic regression) via Newton-Raphson MLE
+- Probit regression via Newton-Raphson MLE
 - McFadden's Pseudo R-squared
+- Marginal effects at means
 
 **Multivariate Time Series:**
-- VAR (Vector Autoregression) with lag selection via AIC/BIC
+- VAR (Vector Autoregression) via OLS equation-by-equation
 - VARMA (Vector ARMA) via Hannan-Rissanen two-step estimation
 - VECM (Vector Error Correction Model) via Johansen ML
 - Impulse Response Functions (IRF) with Cholesky orthogonalization
@@ -189,7 +195,7 @@ From the original plan:
 | K-means clustering | ✅ Complete | Pure Rust (k-means++ init) |
 | DBSCAN | ✅ Complete | Pure Rust |
 | Hierarchical clustering | ✅ Complete | Pure Rust (Ward, single, complete, average linkage) |
-| Logistic regression | ✅ Complete | greeners (Logit) |
+| Logistic regression | ✅ Complete | Pure Rust (Newton-Raphson MLE) |
 | Random Forest | ✅ Complete | Pure Rust (CART algorithm, feature importance) |
 | SVM | ✅ Complete | Pure Rust (Linear SVM with SMO) |
 | PCA | ✅ Complete | Pure Rust |
@@ -401,9 +407,9 @@ cargo build --release -p p2a-desktop
 *Core Analytics (p2a-core, p2a-mcp):*
 - `polars` 0.46 — DataFrame operations
 - `rmcp` 0.8 — MCP SDK with tool macros
-- `greeners` 1.3 — Econometrics (OLS, Panel, IV, DiD, Logit, Probit, Diagnostics)
-- `ndarray` 0.17 — Numerical arrays (pinned to match greeners)
-- `statrs` 0.18 — Statistical distributions
+- `ndarray` 0.16 — Numerical arrays for matrix operations
+- `faer` 0.22 — High-performance linear algebra (Cholesky, matrix inverse)
+- `statrs` 0.18 — Statistical distributions (t, F, chi-squared, normal)
 - `calamine` 0.32 — Excel file reading (xlsx, xls, xlsb, ods)
 - `arima` 0.3 — ARIMA model fitting and forecasting
 - `augurs-mstl` 0.10 — MSTL seasonal-trend decomposition
@@ -443,14 +449,22 @@ cargo build --release -p p2a-desktop
 **System Requirements:**
 - OpenBLAS: `sudo apt-get install libopenblas-dev`
 
-**Major Change:** Replaced `linfa` + `linfa-linear` with `greeners` for all regression functionality. This provides:
-- Unified econometrics library
-- Built-in robust standard errors (HC1-HC4)
-- Newey-West (HAC) standard errors
-- Clustered standard errors (one-way and two-way)
-- Better integration with panel/IV/DiD estimators
-- Discrete choice models (Logit/Probit)
-- Comprehensive regression diagnostics
+**Major Change:** All econometrics implemented in **pure Rust** (no external econometrics library). This provides:
+- Full control over implementation details
+- Column-based API (y_col, x_cols) instead of R-style formula parsing
+- Robust standard errors (HC0, HC1, HC2, HC3)
+- Clustered standard errors (one-way and two-way via Cameron-Gelbach-Miller)
+- Panel data estimators (Fixed Effects, Random Effects, Hausman test)
+- Instrumental Variables (2SLS) with first-stage diagnostics
+- Difference-in-Differences estimation
+- Discrete choice models (Logit/Probit via Newton-Raphson MLE)
+- Multivariate time series (VAR, VARMA, VECM with IRF)
+- Comprehensive regression diagnostics (Jarque-Bera, Breusch-Pagan, Durbin-Watson, VIF)
+
+**Architecture:** The econometrics implementation uses a modular design:
+- `linalg/` — Matrix operations (X'X, X'y, Cholesky, safe inverse) and design matrices
+- `traits/` — `LinearEstimator` trait for common regression output interface
+- `errors.rs` — Unified error types (`EconError`, `EconResult`)
 
 **MCP Tools Exposed (55 total):**
 ```
@@ -537,6 +551,14 @@ prompt2analytics/
     │   ├── tests/data/test.xlsx        # Excel test data
     │   └── src/
     │       ├── lib.rs
+    │       ├── errors.rs               # EconError, EconResult types
+    │       ├── linalg/                 # Linear algebra utilities
+    │       │   ├── mod.rs
+    │       │   ├── matrix_ops.rs       # X'X, X'y, Cholesky, safe inverse (via faer)
+    │       │   └── design.rs           # DesignMatrix, demeaning, quasi-demeaning
+    │       ├── traits/                 # Common traits
+    │       │   ├── mod.rs
+    │       │   └── estimator.rs        # LinearEstimator trait, p-value helpers
     │       ├── data/
     │       │   ├── mod.rs
     │       │   ├── dataset.rs
@@ -550,15 +572,14 @@ prompt2analytics/
     │       │   └── correlation.rs
     │       ├── regression/
     │       │   ├── mod.rs
-    │       │   ├── ols.rs              # OLS + clustered SEs
-    │       │   └── diagnostics.rs      # Regression diagnostics
+    │       │   ├── ols.rs              # OLS + robust SEs (HC0-HC3) + clustered SEs
+    │       │   └── diagnostics.rs      # JB, BP, DW, VIF, condition number
     │       ├── econometrics/
     │       │   ├── mod.rs
-    │       │   ├── convert.rs          # Polars ↔ greeners conversion
     │       │   ├── panel.rs            # FE/RE + Hausman test
     │       │   ├── iv.rs               # 2SLS/IV + first-stage diagnostics
     │       │   ├── did.rs              # Difference-in-Differences
-    │       │   ├── discrete.rs         # Logit/Probit
+    │       │   ├── discrete.rs         # Logit/Probit (Newton-Raphson MLE)
     │       │   └── timeseries.rs       # VAR/VARMA/VECM/IRF
     │       ├── forecasting/
     │       │   ├── mod.rs
@@ -656,11 +677,11 @@ prompt2analytics/
 
 2. **rmcp version:** Using 0.8 instead of planned 0.12. The SDK uses different versioning than anticipated. Key syntax: `Parameters<T>` wrapper for tool parameters.
 
-3. **Replaced linfa with greeners:** Originally planned to use linfa for OLS and greeners for econometrics. Due to ndarray version conflicts (linfa needs 0.15, greeners needs 0.17), consolidated all regression to greeners.
+3. **Pure Rust econometrics:** Originally planned to use external libraries (linfa, greeners). Implemented all econometrics in pure Rust to avoid dependency conflicts and gain full control over the API design. Uses `faer` for linear algebra operations.
 
 4. **JSON support deferred:** Polars 0.46 removed `JsonReader` — JSON loading not currently supported (CSV and Parquet work).
 
-5. **OpenBLAS required:** greeners depends on ndarray-linalg which requires OpenBLAS/LAPACK for matrix operations.
+5. **Column-based API:** Instead of R-style formula parsing (e.g., "y ~ x1 + x2"), uses explicit column names (y_col, x_cols). This is simpler and more explicit for MCP tool integration.
 
 ---
 
