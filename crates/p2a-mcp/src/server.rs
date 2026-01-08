@@ -48,6 +48,8 @@ use p2a_core::{
 pub struct AnalyticsServer {
     /// Currently loaded datasets, keyed by a unique ID
     datasets: Arc<RwLock<HashMap<String, Dataset>>>,
+    /// Global random seed for ML reproducibility
+    global_seed: Arc<RwLock<Option<u64>>>,
     /// Tool router for handling tool calls
     tool_router: ToolRouter<Self>,
 }
@@ -1052,6 +1054,66 @@ pub struct CompareDatasetRequest {
     pub comparison_type: Option<String>,
 }
 
+/// Request to export the current analysis session.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ExportSessionRequest {
+    /// Path to save the session file
+    #[schemars(description = "File path to save the session (JSON format). If not provided, returns session data as string.")]
+    pub file_path: Option<String>,
+
+    /// Whether to include dataset data (default: true)
+    #[schemars(description = "Include full dataset data. If false, only metadata and file paths are saved.")]
+    pub include_data: Option<bool>,
+}
+
+/// Request to import a previously exported session.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ImportSessionRequest {
+    /// Path to the session file to import
+    #[schemars(description = "File path to the session JSON file to import.")]
+    pub file_path: String,
+
+    /// Whether to merge with existing session (default: false, replaces)
+    #[schemars(description = "If true, merges with existing datasets instead of replacing.")]
+    pub merge: Option<bool>,
+}
+
+/// Request to set the global random seed for ML reproducibility.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SetSeedRequest {
+    /// The random seed value
+    #[schemars(description = "The random seed value. Set to null/omit to clear the global seed.")]
+    pub seed: Option<u64>,
+}
+
+/// Request to get the current global seed.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct GetSeedRequest {}
+
+/// Request to visualize hierarchical clustering results as a dendrogram.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DendrogramRequest {
+    /// Linkage matrix from hierarchical clustering (JSON array of arrays)
+    #[schemars(description = "Linkage matrix from hierarchical clustering. Array of [cluster1, cluster2, distance, size] tuples.")]
+    pub linkage_matrix: Vec<Vec<f64>>,
+
+    /// Optional labels for leaf nodes
+    #[schemars(description = "Optional labels for leaf nodes (original samples). If not provided, uses indices.")]
+    pub labels: Option<Vec<String>>,
+
+    /// Chart width
+    #[schemars(description = "Width of the chart in pixels (default: 800).")]
+    pub width: Option<u32>,
+
+    /// Chart height
+    #[schemars(description = "Height of the chart in pixels (default: 600).")]
+    pub height: Option<u32>,
+
+    /// Chart title
+    #[schemars(description = "Title for the dendrogram (default: 'Dendrogram').")]
+    pub title: Option<String>,
+}
+
 // ============================================================================
 // Tool Router Implementation
 // ============================================================================
@@ -1062,6 +1124,7 @@ impl AnalyticsServer {
     pub fn new() -> Self {
         Self {
             datasets: Arc::new(RwLock::new(HashMap::new())),
+            global_seed: Arc::new(RwLock::new(None)),
             tool_router: Self::tool_router(),
         }
     }
@@ -2181,13 +2244,17 @@ impl AnalyticsServer {
             Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
         };
 
+        // Use per-tool seed if provided, otherwise fall back to global seed
+        let global_seed = self.global_seed.read().await;
+        let seed = request.seed.or(*global_seed);
+
         let result = match kmeans(
             data.view(),
             request.k,
             request.max_iterations,
             None, // tolerance
             request.n_init,
-            request.seed,
+            seed,
         ) {
             Ok(r) => r,
             Err(e) => {
@@ -2352,13 +2419,17 @@ impl AnalyticsServer {
             Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
         };
 
+        // Use per-tool seed if provided, otherwise fall back to global seed
+        let global_seed = self.global_seed.read().await;
+        let seed = request.seed.or(*global_seed);
+
         let result = match tsne(
             data.view(),
             request.n_components,
             request.perplexity,
             request.max_iterations,
             request.learning_rate,
-            request.seed,
+            seed,
         ) {
             Ok(r) => r,
             Err(e) => {
@@ -2429,6 +2500,10 @@ impl AnalyticsServer {
 
         let target = ndarray::Array1::from_vec(target_values);
 
+        // Use per-tool seed if provided, otherwise fall back to global seed
+        let global_seed = self.global_seed.read().await;
+        let seed = request.seed.or(*global_seed);
+
         let result = match random_forest(
             data.view(),
             target.view(),
@@ -2436,7 +2511,7 @@ impl AnalyticsServer {
             request.max_depth,
             request.min_samples_split,
             request.max_features.as_deref(),
-            request.seed,
+            seed,
             Some(request.features.clone()),
         ) {
             Ok(r) => r,
@@ -3571,6 +3646,64 @@ impl AnalyticsServer {
         }
     }
 
+    /// Generate a dendrogram visualization from hierarchical clustering results.
+    #[tool(description = "Generate a dendrogram (tree diagram) from hierarchical clustering results. Shows how clusters are merged at each level with merge distances. Takes a linkage matrix from hierarchical clustering output.")]
+    async fn viz_dendrogram(
+        &self,
+        Parameters(request): Parameters<DendrogramRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        use p2a_core::dendrogram;
+
+        // Convert linkage matrix from Vec<Vec<f64>> to Vec<(usize, usize, f64, usize)>
+        let linkage: Vec<(usize, usize, f64, usize)> = request.linkage_matrix
+            .iter()
+            .filter_map(|row| {
+                if row.len() >= 4 {
+                    Some((row[0] as usize, row[1] as usize, row[2], row[3] as usize))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        if linkage.is_empty() {
+            return Ok(CallToolResult::error(vec![Content::text(
+                "Invalid linkage matrix: must be array of [cluster1, cluster2, distance, size] tuples".to_string()
+            )]));
+        }
+
+        let config = ChartConfig {
+            width: request.width.unwrap_or(800),
+            height: request.height.unwrap_or(600),
+            title: request.title,
+            x_label: None,
+            y_label: Some("Distance".to_string()),
+        };
+
+        match dendrogram(&linkage, request.labels.as_deref(), config) {
+            Ok(result) => {
+                let output = format!(
+                    "Dendrogram\n{}\n\
+                     Samples: {}\n\
+                     Merge steps: {}\n\
+                     Max distance: {:.4}\n\n\
+                     Image (base64 PNG, {} bytes):\n{}",
+                    "=".repeat(40),
+                    result.n_samples,
+                    result.n_merges,
+                    result.max_distance,
+                    result.image_base64.len(),
+                    result.image_base64
+                );
+                Ok(CallToolResult::success(vec![Content::text(output)]))
+            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
+                "Failed to generate dendrogram: {}",
+                e
+            ))])),
+        }
+    }
+
     /// Batch process multiple datasets with the same operation.
     #[tool(description = "Run the same analysis (describe, correlation, or OLS regression) on multiple datasets at once. Useful for comparing results across datasets or processing survey waves.")]
     async fn batch_process(
@@ -3874,6 +4007,273 @@ impl AnalyticsServer {
                 output.push_str(&format!("Unknown comparison type: '{}'. Use 'summary', 'distribution', or 'correlation'.\n", comparison_type));
             }
         }
+
+        Ok(CallToolResult::success(vec![Content::text(output)]))
+    }
+
+    /// Export the current analysis session to a JSON file.
+    #[tool(description = "Export the current session including all loaded datasets and their metadata. Can save to file or return as string. Useful for saving your analysis state to resume later.")]
+    async fn export_session(
+        &self,
+        Parameters(request): Parameters<ExportSessionRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        use p2a_core::polars::prelude::*;
+        use std::fs;
+
+        let datasets = self.datasets.read().await;
+        let include_data = request.include_data.unwrap_or(true);
+
+        let mut session_data = serde_json::Map::new();
+        session_data.insert("version".to_string(), serde_json::json!("1.0"));
+        session_data.insert("created_at".to_string(), serde_json::json!(chrono::Utc::now().to_rfc3339()));
+
+        let mut datasets_json = serde_json::Map::new();
+        for (name, dataset) in datasets.iter() {
+            let df = dataset.df();
+            let mut ds_info = serde_json::Map::new();
+
+            // Save schema
+            let schema: Vec<serde_json::Value> = df.get_columns()
+                .iter()
+                .map(|col| {
+                    serde_json::json!({
+                        "name": col.name().to_string(),
+                        "dtype": format!("{:?}", col.dtype())
+                    })
+                })
+                .collect();
+            ds_info.insert("schema".to_string(), serde_json::json!(schema));
+            ds_info.insert("n_rows".to_string(), serde_json::json!(df.height()));
+            ds_info.insert("n_cols".to_string(), serde_json::json!(df.width()));
+
+            if include_data {
+                // Serialize actual data
+                let mut columns_data = serde_json::Map::new();
+                for col in df.get_columns() {
+                    let col_name = col.name().to_string();
+                    let values: Vec<serde_json::Value> = (0..col.len())
+                        .map(|i| {
+                            match col.get(i) {
+                                Ok(av) => match av {
+                                    AnyValue::Null => serde_json::Value::Null,
+                                    AnyValue::Boolean(b) => serde_json::json!(b),
+                                    AnyValue::Int8(v) => serde_json::json!(v),
+                                    AnyValue::Int16(v) => serde_json::json!(v),
+                                    AnyValue::Int32(v) => serde_json::json!(v),
+                                    AnyValue::Int64(v) => serde_json::json!(v),
+                                    AnyValue::UInt8(v) => serde_json::json!(v),
+                                    AnyValue::UInt16(v) => serde_json::json!(v),
+                                    AnyValue::UInt32(v) => serde_json::json!(v),
+                                    AnyValue::UInt64(v) => serde_json::json!(v),
+                                    AnyValue::Float32(v) => serde_json::json!(v),
+                                    AnyValue::Float64(v) => serde_json::json!(v),
+                                    AnyValue::String(s) => serde_json::json!(s),
+                                    _ => serde_json::json!(format!("{:?}", av)),
+                                },
+                                Err(_) => serde_json::Value::Null,
+                            }
+                        })
+                        .collect();
+                    columns_data.insert(col_name, serde_json::json!(values));
+                }
+                ds_info.insert("data".to_string(), serde_json::json!(columns_data));
+            }
+
+            datasets_json.insert(name.clone(), serde_json::json!(ds_info));
+        }
+        session_data.insert("datasets".to_string(), serde_json::json!(datasets_json));
+
+        let json_output = serde_json::to_string_pretty(&session_data)
+            .map_err(|e| McpError::internal_error(format!("JSON serialization failed: {}", e), None))?;
+
+        if let Some(file_path) = request.file_path {
+            fs::write(&file_path, &json_output)
+                .map_err(|e| McpError::internal_error(format!("Failed to write session file: {}", e), None))?;
+
+            Ok(CallToolResult::success(vec![Content::text(format!(
+                "Session exported successfully to: {}\n\
+                 Datasets saved: {}\n\
+                 Include data: {}",
+                file_path,
+                datasets.len(),
+                include_data
+            ))]))
+        } else {
+            Ok(CallToolResult::success(vec![Content::text(format!(
+                "Session Export\n{}\n\
+                 Datasets: {}\n\n{}",
+                "=".repeat(40),
+                datasets.len(),
+                json_output
+            ))]))
+        }
+    }
+
+    /// Import a previously exported analysis session.
+    #[tool(description = "Import a previously exported session from a JSON file. Can merge with existing session or replace it. Restores all datasets with their original names.")]
+    async fn import_session(
+        &self,
+        Parameters(request): Parameters<ImportSessionRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        use p2a_core::polars::prelude::*;
+        use std::fs;
+
+        let json_content = fs::read_to_string(&request.file_path)
+            .map_err(|e| McpError::internal_error(format!("Failed to read session file: {}", e), None))?;
+
+        let session: serde_json::Value = serde_json::from_str(&json_content)
+            .map_err(|e| McpError::internal_error(format!("Invalid JSON: {}", e), None))?;
+
+        let datasets_obj = session.get("datasets")
+            .and_then(|v| v.as_object())
+            .ok_or_else(|| McpError::internal_error("Invalid session format: missing 'datasets' field", None))?;
+
+        let merge = request.merge.unwrap_or(false);
+        let mut datasets = self.datasets.write().await;
+
+        if !merge {
+            datasets.clear();
+        }
+
+        let mut imported_count = 0;
+        let mut errors = Vec::new();
+
+        for (name, ds_info) in datasets_obj {
+            let ds_obj = match ds_info.as_object() {
+                Some(obj) => obj,
+                None => {
+                    errors.push(format!("{}: invalid format", name));
+                    continue;
+                }
+            };
+
+            // Check if we have data to restore
+            if let Some(data) = ds_obj.get("data").and_then(|v| v.as_object()) {
+                // Reconstruct DataFrame from stored columns
+                let mut columns_vec: Vec<Column> = Vec::new();
+
+                for (col_name, values) in data {
+                    if let Some(arr) = values.as_array() {
+                        // Try to determine column type from first non-null value
+                        let first_non_null = arr.iter().find(|v| !v.is_null());
+
+                        let series: Series = match first_non_null {
+                            Some(serde_json::Value::Number(n)) if n.is_f64() => {
+                                let vals: Vec<Option<f64>> = arr.iter()
+                                    .map(|v| v.as_f64())
+                                    .collect();
+                                Series::new(col_name.into(), vals)
+                            }
+                            Some(serde_json::Value::Number(_)) => {
+                                let vals: Vec<Option<i64>> = arr.iter()
+                                    .map(|v| v.as_i64())
+                                    .collect();
+                                Series::new(col_name.into(), vals)
+                            }
+                            Some(serde_json::Value::Bool(_)) => {
+                                let vals: Vec<Option<bool>> = arr.iter()
+                                    .map(|v| v.as_bool())
+                                    .collect();
+                                Series::new(col_name.into(), vals)
+                            }
+                            _ => {
+                                // Default to string
+                                let vals: Vec<Option<String>> = arr.iter()
+                                    .map(|v| {
+                                        if v.is_null() { None }
+                                        else if let Some(s) = v.as_str() { Some(s.to_string()) }
+                                        else { Some(v.to_string()) }
+                                    })
+                                    .collect();
+                                Series::new(col_name.into(), vals)
+                            }
+                        };
+                        columns_vec.push(series.into());
+                    }
+                }
+
+                if !columns_vec.is_empty() {
+                    match DataFrame::new(columns_vec) {
+                        Ok(df) => {
+                            let dataset = p2a_core::Dataset::new(df);
+                            datasets.insert(name.clone(), dataset);
+                            imported_count += 1;
+                        }
+                        Err(e) => {
+                            errors.push(format!("{}: DataFrame error - {}", name, e));
+                        }
+                    }
+                } else {
+                    errors.push(format!("{}: no column data found", name));
+                }
+            } else {
+                errors.push(format!("{}: no data field (metadata-only session)", name));
+            }
+        }
+
+        let mut output = format!(
+            "Session Import\n{}\n\
+             File: {}\n\
+             Mode: {}\n\
+             Datasets imported: {}\n",
+            "=".repeat(40),
+            request.file_path,
+            if merge { "merge" } else { "replace" },
+            imported_count
+        );
+
+        if !errors.is_empty() {
+            output.push_str(&format!("\nErrors:\n{}", errors.join("\n")));
+        }
+
+        Ok(CallToolResult::success(vec![Content::text(output)]))
+    }
+
+    /// Set the global random seed for ML reproducibility.
+    #[tool(description = "Set a global random seed for ML operations (kmeans, random_forest, tsne). When set, ML tools will use this seed as a fallback if no per-tool seed is specified. Clear by calling with no seed value.")]
+    async fn set_seed(
+        &self,
+        Parameters(request): Parameters<SetSeedRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let mut global_seed = self.global_seed.write().await;
+        *global_seed = request.seed;
+
+        match request.seed {
+            Some(seed) => Ok(CallToolResult::success(vec![Content::text(format!(
+                "Global random seed set to: {}\n\
+                 This seed will be used by ML tools (kmeans, random_forest, tsne) unless overridden per-tool.",
+                seed
+            ))])),
+            None => Ok(CallToolResult::success(vec![Content::text(
+                "Global random seed cleared. ML tools will use random initialization unless a per-tool seed is specified.".to_string()
+            )])),
+        }
+    }
+
+    /// Get the current global random seed.
+    #[tool(description = "Get the current global random seed setting and list which ML tools support seeded reproducibility.")]
+    async fn get_seed(
+        &self,
+        Parameters(_request): Parameters<GetSeedRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let global_seed = self.global_seed.read().await;
+
+        let seed_status = match *global_seed {
+            Some(seed) => format!("Current global seed: {}", seed),
+            None => "No global seed set (using random initialization)".to_string(),
+        };
+
+        let output = format!(
+            "Seed Management\n{}\n\
+             {}\n\n\
+             ML tools supporting reproducibility:\n\
+             - ml_kmeans: Uses seed for centroid initialization\n\
+             - ml_random_forest: Uses seed for bootstrap sampling and feature selection\n\
+             - ml_tsne: Uses seed for initial embedding\n\n\
+             Per-tool seeds override the global seed.",
+            "=".repeat(40),
+            seed_status
+        );
 
         Ok(CallToolResult::success(vec![Content::text(output)]))
     }

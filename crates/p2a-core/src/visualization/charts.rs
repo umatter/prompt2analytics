@@ -1751,6 +1751,264 @@ fn encode_rgb_to_png_base64(rgb_buffer: &[u8], width: u32, height: u32) -> Resul
     Ok(BASE64.encode(&png_data))
 }
 
+/// Result from dendrogram visualization
+#[derive(Debug, Clone)]
+pub struct DendrogramResult {
+    /// Base64-encoded PNG image
+    pub image_base64: String,
+    /// Number of original samples
+    pub n_samples: usize,
+    /// Number of merges shown
+    pub n_merges: usize,
+    /// Maximum merge distance
+    pub max_distance: f64,
+}
+
+/// Create a dendrogram visualization from hierarchical clustering linkage matrix.
+///
+/// # Arguments
+/// * `linkage_matrix` - Vec of (cluster1_idx, cluster2_idx, distance, size) tuples
+/// * `labels` - Optional labels for leaf nodes (original samples)
+/// * `config` - Chart configuration
+///
+/// # Returns
+/// DendrogramResult with the base64-encoded image
+pub fn dendrogram(
+    linkage_matrix: &[(usize, usize, f64, usize)],
+    labels: Option<&[String]>,
+    config: ChartConfig,
+) -> Result<DendrogramResult, VisualizationError> {
+    if linkage_matrix.is_empty() {
+        return Err(VisualizationError::InvalidData(
+            "Linkage matrix is empty".to_string(),
+        ));
+    }
+
+    let n_merges = linkage_matrix.len();
+    let n_samples = n_merges + 1;
+
+    let max_distance = linkage_matrix
+        .iter()
+        .map(|(_, _, d, _)| *d)
+        .fold(0.0_f64, |a, b| a.max(b));
+
+    let width = config.width;
+    let height = config.height;
+    let title = config.title.unwrap_or_else(|| "Dendrogram".to_string());
+
+    // Create drawing area
+    let mut buffer = vec![0u8; (width * height * 3) as usize];
+    {
+        let root = BitMapBackend::with_buffer(&mut buffer, (width, height))
+            .into_drawing_area();
+        root.fill(&WHITE)
+            .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+
+        let margin_left = 80;
+        let margin_right = 40;
+        let margin_top = 60;
+        let margin_bottom = 100;
+
+        let plot_width = width as i32 - margin_left - margin_right;
+        let plot_height = height as i32 - margin_top - margin_bottom;
+
+        // Draw title
+        root.draw(&Text::new(
+            title,
+            (width as i32 / 2, 20),
+            ("sans-serif", 20).into_font().color(&BLACK),
+        ))
+        .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+
+        // Calculate leaf positions (x-coordinates for each original sample)
+        // We need to determine the order of leaves in the dendrogram
+        let leaf_order = compute_leaf_order(linkage_matrix, n_samples);
+
+        // Map each sample to its x position
+        let mut leaf_x: Vec<f64> = vec![0.0; n_samples];
+        for (pos, &sample_idx) in leaf_order.iter().enumerate() {
+            leaf_x[sample_idx] = pos as f64;
+        }
+
+        // Track cluster positions: each cluster has (x_center, y_height)
+        // First n_samples are original samples at height 0
+        let mut cluster_pos: Vec<(f64, f64)> = Vec::with_capacity(n_samples + n_merges);
+        for i in 0..n_samples {
+            cluster_pos.push((leaf_x[i], 0.0));
+        }
+
+        // Process merges and record positions of new clusters
+        for (c1, c2, dist, _size) in linkage_matrix.iter() {
+            let (x1, _y1) = cluster_pos[*c1];
+            let (x2, _y2) = cluster_pos[*c2];
+            let new_x = (x1 + x2) / 2.0;
+            cluster_pos.push((new_x, *dist));
+        }
+
+        // Scaling functions
+        let x_scale = |x: f64| -> i32 {
+            margin_left + ((x / (n_samples - 1) as f64) * plot_width as f64) as i32
+        };
+        let y_scale = |y: f64| -> i32 {
+            margin_top + plot_height - ((y / max_distance) * plot_height as f64) as i32
+        };
+
+        // Draw the dendrogram links
+        for (i, (c1, c2, dist, _size)) in linkage_matrix.iter().enumerate() {
+            let (x1, y1) = cluster_pos[*c1];
+            let (x2, y2) = cluster_pos[*c2];
+            let new_cluster_idx = n_samples + i;
+            let (_, new_y) = cluster_pos[new_cluster_idx];
+
+            // Draw U-shaped connector:
+            // Vertical line from c1 to merge height
+            root.draw(&PathElement::new(
+                vec![
+                    (x_scale(x1), y_scale(y1)),
+                    (x_scale(x1), y_scale(new_y)),
+                ],
+                &BLUE,
+            ))
+            .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+
+            // Vertical line from c2 to merge height
+            root.draw(&PathElement::new(
+                vec![
+                    (x_scale(x2), y_scale(y2)),
+                    (x_scale(x2), y_scale(new_y)),
+                ],
+                &BLUE,
+            ))
+            .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+
+            // Horizontal line connecting c1 and c2 at merge height
+            root.draw(&PathElement::new(
+                vec![
+                    (x_scale(x1), y_scale(*dist)),
+                    (x_scale(x2), y_scale(*dist)),
+                ],
+                &BLUE,
+            ))
+            .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+        }
+
+        // Draw leaf labels
+        for (pos, &sample_idx) in leaf_order.iter().enumerate() {
+            let label = if let Some(lbls) = labels {
+                if sample_idx < lbls.len() {
+                    lbls[sample_idx].clone()
+                } else {
+                    format!("{}", sample_idx)
+                }
+            } else {
+                format!("{}", sample_idx)
+            };
+
+            let x = x_scale(pos as f64);
+            let y = y_scale(0.0) + 15;
+
+            // Rotate labels if too many samples
+            if n_samples > 20 {
+                // Draw rotated text (approximate with vertical positioning)
+                for (char_idx, c) in label.chars().take(8).enumerate() {
+                    root.draw(&Text::new(
+                        c.to_string(),
+                        (x - 3, y + char_idx as i32 * 10),
+                        ("sans-serif", 9).into_font().color(&BLACK),
+                    ))
+                    .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+                }
+            } else {
+                root.draw(&Text::new(
+                    label,
+                    (x - 10, y),
+                    ("sans-serif", 10).into_font().color(&BLACK),
+                ))
+                .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+            }
+        }
+
+        // Draw y-axis (distance scale)
+        root.draw(&PathElement::new(
+            vec![
+                (margin_left, margin_top),
+                (margin_left, margin_top + plot_height),
+            ],
+            &BLACK,
+        ))
+        .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+
+        // Y-axis label
+        root.draw(&Text::new(
+            "Distance",
+            (15, margin_top + plot_height / 2),
+            ("sans-serif", 12).into_font().color(&BLACK),
+        ))
+        .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+
+        // Y-axis ticks
+        let n_ticks = 5;
+        for i in 0..=n_ticks {
+            let dist = (i as f64 / n_ticks as f64) * max_distance;
+            let y = y_scale(dist);
+
+            root.draw(&PathElement::new(
+                vec![(margin_left - 5, y), (margin_left, y)],
+                &BLACK,
+            ))
+            .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+
+            root.draw(&Text::new(
+                format!("{:.2}", dist),
+                (margin_left - 45, y - 5),
+                ("sans-serif", 10).into_font().color(&BLACK),
+            ))
+            .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+        }
+
+        root.present()
+            .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+    }
+
+    let image_base64 = encode_rgb_to_png_base64(&buffer, width, height)?;
+
+    Ok(DendrogramResult {
+        image_base64,
+        n_samples,
+        n_merges,
+        max_distance,
+    })
+}
+
+/// Compute the optimal leaf ordering for dendrogram visualization.
+/// Returns the order in which leaves should be placed (left to right).
+fn compute_leaf_order(linkage_matrix: &[(usize, usize, f64, usize)], n_samples: usize) -> Vec<usize> {
+    // Build a tree structure from linkage matrix
+    // Each cluster has left and right children (or is a leaf)
+
+    let n_merges = linkage_matrix.len();
+
+    // For each cluster, store its leaves in order
+    let mut cluster_leaves: Vec<Vec<usize>> = Vec::with_capacity(n_samples + n_merges);
+
+    // Initialize leaves (original samples)
+    for i in 0..n_samples {
+        cluster_leaves.push(vec![i]);
+    }
+
+    // Process merges
+    for (c1, c2, _, _) in linkage_matrix.iter() {
+        let left_leaves = cluster_leaves[*c1].clone();
+        let right_leaves = cluster_leaves[*c2].clone();
+        let mut merged = left_leaves;
+        merged.extend(right_leaves);
+        cluster_leaves.push(merged);
+    }
+
+    // The last cluster contains all leaves in order
+    cluster_leaves.last().cloned().unwrap_or_else(|| (0..n_samples).collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1801,5 +2059,30 @@ mod tests {
         assert!(!result.residuals_vs_leverage.is_empty());
         assert_eq!(result.standardized_residuals.len(), 50);
         assert_eq!(result.cooks_distance.len(), 50);
+    }
+
+    #[test]
+    fn test_dendrogram() {
+        // Create a simple linkage matrix for 4 samples
+        // Format: (cluster1, cluster2, distance, size)
+        let linkage_matrix = vec![
+            (0, 1, 1.0, 2),   // Merge samples 0 and 1 -> cluster 4
+            (2, 3, 1.5, 2),   // Merge samples 2 and 3 -> cluster 5
+            (4, 5, 3.0, 4),   // Merge clusters 4 and 5 -> cluster 6
+        ];
+
+        let labels = vec![
+            "A".to_string(),
+            "B".to_string(),
+            "C".to_string(),
+            "D".to_string(),
+        ];
+
+        let result = dendrogram(&linkage_matrix, Some(&labels), ChartConfig::default()).unwrap();
+
+        assert_eq!(result.n_samples, 4);
+        assert_eq!(result.n_merges, 3);
+        assert!((result.max_distance - 3.0).abs() < 1e-10);
+        assert!(!result.image_base64.is_empty());
     }
 }

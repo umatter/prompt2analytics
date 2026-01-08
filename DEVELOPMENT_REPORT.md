@@ -1,7 +1,7 @@
 # prompt2analytics Development Report
 
 **Date:** January 8, 2026
-**Status:** Phase 5 (Advanced Features) 🔄 IN PROGRESS
+**Status:** Phase 5 (Advanced Features) ✅ COMPLETE
 
 ---
 
@@ -351,27 +351,30 @@ cargo build --release -p p2a-desktop
 
 ---
 
-## Phase 5: Advanced Features — 🔄 IN PROGRESS
+## Phase 5: Advanced Features — ✅ COMPLETE
 
 | Deliverable | Status | Notes |
 |-------------|--------|-------|
-| Plugin system | ❌ | Custom analytics extensions |
-| Batch processing | ❌ | Multiple dataset processing |
-| Reproducibility features | ❌ | Analysis scripts, seed management |
-| Community tool registry | ❌ | Shared tool definitions |
-| Documentation/tutorials | ❌ | User guides, examples |
-| **Completed (from earlier deferrals):** | | |
 | Event study plots | ✅ Complete | Dynamic DiD visualization with CI bands |
 | Coefficient plots | ✅ Complete | With confidence intervals (horizontal/vertical) |
 | IRF plots | ✅ Complete | VAR impulse response with optional CI |
+| Residual diagnostics | ✅ Complete | 4 plots: Residuals vs Fitted, Q-Q, Scale-Location, Leverage |
 | Hierarchical clustering | ✅ Complete | Ward/single/complete/average linkage |
 | Random Forest | ✅ Complete | Pure Rust CART with feature importance |
 | SVM | ✅ Complete | Linear SVM with SMO algorithm |
 | t-SNE | ✅ Complete | Pure Rust with early exaggeration |
 | Changepoint detection | ✅ Complete | PELT and Binary Segmentation algorithms |
 | HTML reports | ✅ Complete | Self-contained HTML report generation |
-| **Still pending:** | | |
-| PDF reports | ❌ | PDF export (deferred) |
+| Dendrogram visualization | ✅ Complete | Tree visualization for hierarchical clustering |
+| Batch processing | ✅ Complete | Run same analysis across multiple datasets |
+| Dataset comparison | ✅ Complete | Compare columns across datasets (summary, distribution, corr) |
+| Session export/import | ✅ Complete | Save/restore analysis sessions to JSON |
+| Seed management | ✅ Complete | Global seed for ML reproducibility |
+| **Deferred to future releases:** | | |
+| Plugin system | ❌ | Custom analytics extensions |
+| Community tool registry | ❌ | Shared tool definitions |
+| PDF reports | ❌ | PDF export |
+| Documentation/tutorials | ❌ | User guides, examples |
 
 ---
 
@@ -385,9 +388,9 @@ cargo build --release -p p2a-desktop
 | Phase 3a: Visualization | ✅ Complete | 100% |
 | Phase 3b: Desktop Application | ✅ Complete | 100% |
 | Phase 4: LLM Integration | ✅ Complete | 95% |
-| Phase 5: Advanced Features | 🔄 In Progress | 90% |
+| Phase 5: Advanced Features | ✅ Complete | 100% |
 
-**Overall Progress: ~97%** (Phases 1-4 complete; Phase 5 ML/visualization/changepoint/reports complete)
+**Overall Progress: ~99%** (All planned phases complete; optional features deferred to future releases)
 
 ---
 
@@ -449,7 +452,7 @@ cargo build --release -p p2a-desktop
 - Discrete choice models (Logit/Probit)
 - Comprehensive regression diagnostics
 
-**MCP Tools Exposed (47 total):**
+**MCP Tools Exposed (55 total):**
 ```
 ┌─────────────────────────┬──────────────────────────────────────────────────────────────┐
 │ Tool                    │ Description                                                  │
@@ -500,9 +503,14 @@ cargo build --release -p p2a-desktop
 │ viz_coefficient         │ Coefficient plot with error bars (base64 PNG)                │
 │ viz_irf                 │ IRF plot for VAR models with optional CI (base64 PNG)        │
 │ viz_residual_diagnostics│ 4 diagnostic plots: Residuals vs Fitted, Q-Q, Scale-Loc, Leverage │
+│ viz_dendrogram          │ Dendrogram (tree diagram) for hierarchical clustering        │
 │ generate_report         │ Generate self-contained HTML report from analysis results    │
-│ batch_process           │ Run same analysis across multiple datasets at once          │
+│ batch_process           │ Run same analysis across multiple datasets at once           │
 │ compare_datasets        │ Compare columns across datasets (summary, distribution, corr) │
+│ export_session          │ Export current session (datasets) to JSON file               │
+│ import_session          │ Import previously exported session from JSON file            │
+│ set_seed                │ Set global random seed for ML reproducibility                │
+│ get_seed                │ Get current global seed and list supported ML tools          │
 └─────────────────────────┴──────────────────────────────────────────────────────────────┘
 ```
 
@@ -574,7 +582,7 @@ prompt2analytics/
     │   ├── Cargo.toml
     │   └── src/
     │       ├── main.rs
-    │       ├── server.rs               # 50 MCP tools
+    │       ├── server.rs               # 55 MCP tools
     │       └── tools/
     │           └── mod.rs              # Placeholder
     └── p2a-desktop/
@@ -658,30 +666,20 @@ prompt2analytics/
 
 ## Recommended Next Steps
 
-1. **Phase 5 - Advanced Features (remaining):**
+1. **Future Enhancements (optional):**
    - Plugin system for custom analytics
-   - ~~Batch processing for multiple datasets~~ (✅ Implemented)
-   - Reproducibility features (analysis scripts, seed management)
    - Community tool registry
-   - ~~Changepoint detection for time series~~ (✅ Implemented)
+   - PDF report generation
    - Documentation and tutorials
 
-2. **Export & Reporting:**
-   - PDF report generation
-   - HTML export with interactive charts
-   - Analysis session export/import
-
-3. **Additional Visualization:**
-   - Dendrogram visualization for hierarchical clustering
-
-4. **Desktop App Enhancements:**
+2. **Desktop App Enhancements:**
    - Theme customization (dark mode)
    - Visual query builder for databases
    - Dataset column selection/filtering
    - Command history and autocomplete
    - Settings persistence to disk
 
-5. **Testing:**
+3. **Testing:**
    - Expand test coverage, particularly for econometrics output accuracy
    - Add integration tests with known datasets
    - Test Stata/SAS file format readers with real-world files
@@ -689,7 +687,7 @@ prompt2analytics/
    - Desktop app end-to-end testing
    - LLM integration tests with mocked providers
 
-6. **Documentation:**
+4. **Documentation:**
    - Add usage examples for each MCP tool
    - Document econometric model assumptions and interpretation
    - Document database query patterns

@@ -38,9 +38,9 @@ pub use ml::{
 };
 pub use visualization::{
     ChartConfig, HistogramResult, ScatterResult, BoxPlotResult, LineChartResult, HeatmapResult,
-    EventStudyResult, CoefficientPlotResult, IrfPlotResult, ResidualDiagnosticsResult,
+    EventStudyResult, CoefficientPlotResult, IrfPlotResult, ResidualDiagnosticsResult, DendrogramResult,
     histogram, scatter_plot, box_plot, line_chart, correlation_heatmap,
-    event_study_plot, coefficient_plot, irf_plot, residual_diagnostics,
+    event_study_plot, coefficient_plot, irf_plot, residual_diagnostics, dendrogram,
     VisualizationError,
 };
 pub use reports::{

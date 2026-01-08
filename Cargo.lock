@@ -4282,6 +4282,7 @@ name = "p2a-mcp"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "ndarray 0.17.1",
  "p2a-core",
  "rmcp",

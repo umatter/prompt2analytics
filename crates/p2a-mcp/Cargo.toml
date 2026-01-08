@@ -36,3 +36,6 @@ anyhow.workspace = true
 # Logging
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+# Time
+chrono = "0.4"
