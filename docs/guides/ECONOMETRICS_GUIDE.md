@@ -6,6 +6,7 @@ This guide explains the assumptions underlying each econometric method in prompt
 - [OLS Regression](#ols-regression)
 - [Robust Standard Errors](#robust-standard-errors)
 - [Panel Data Models](#panel-data-models)
+- [High-Dimensional Fixed Effects](#high-dimensional-fixed-effects)
 - [Instrumental Variables](#instrumental-variables)
 - [Difference-in-Differences](#difference-in-differences)
 - [Discrete Choice Models](#discrete-choice-models)
@@ -153,6 +154,107 @@ yᵢₜ = α + Xᵢₜβ + uᵢ + εᵢₜ
 |---------|----------|
 | < 0.05 | Reject H0 → Use Fixed Effects |
 | ≥ 0.05 | Fail to reject → Random Effects is acceptable |
+
+---
+
+## High-Dimensional Fixed Effects
+
+### The Challenge
+
+When you have multiple categorical variables to control for (e.g., firm, year, industry), creating dummy variables becomes infeasible:
+- 10,000 firms × 20 years = 200,000 dummy variables
+- Memory and computation issues
+- Standard panel FE only handles one dimension
+
+### Solution: Method of Alternating Projections (MAP)
+
+HDFE uses the **Method of Alternating Projections** to efficiently "demean" data across multiple dimensions without creating dummies.
+
+**Algorithm**:
+```
+repeat until convergence:
+    for each fixed effect dimension:
+        subtract group means from data
+```
+
+### Model
+
+```
+yᵢₜⱼ = Xᵢₜⱼβ + αᵢ + γₜ + δⱼ + εᵢₜⱼ
+```
+
+Where:
+- αᵢ = firm fixed effects
+- γₜ = time fixed effects
+- δⱼ = industry fixed effects
+- All FE terms are "absorbed" (not estimated, but removed from variation)
+
+### Using HDFE
+
+```
+panel_hdfe dataset:panel y:outcome x:treatment,control fe:firm,year,industry
+```
+
+**Parameters**:
+- `fe`: List of columns to absorb as fixed effects
+- `tolerance`: Convergence threshold (default: 1e-8)
+- `max_iterations`: Maximum MAP iterations (default: 10000)
+- `se_type`: Standard error type ('standard', 'hc0'-'hc3')
+
+### Interpreting Output
+
+| Statistic | Interpretation |
+|-----------|----------------|
+| Coefficient (β) | Effect of X on Y, controlling for all absorbed FE |
+| Within R² | Variance explained after removing FE |
+| Iterations | Number of demeaning passes (higher = slower convergence) |
+| Convergence | Final change in demeaned values (should be < tolerance) |
+| DF Absorbed | Degrees of freedom consumed by FE |
+
+### Degrees of Freedom
+
+For multi-way FE, degrees of freedom are adjusted:
+```
+df_residual = n - k - (Σ levels for each FE) + (redundant terms)
+```
+
+The redundant terms account for the fact that the grand mean is absorbed multiple times.
+
+### Key Assumptions
+
+1. **Strict exogeneity**: E(εᵢₜ|Xᵢ₁, ..., Xᵢₜ, αᵢ, γₜ, ...) = 0
+2. **Sufficient within-group variation**: After removing FE, X must still vary
+3. **No perfect multicollinearity**: X cannot be perfectly explained by FE combinations
+
+### Common Issues
+
+**Collinearity after demeaning**: If X is constant within FE groups:
+```
+# BAD: Same X values for all firms in each year
+x = [1, 2, 3, 4] for firm A
+x = [1, 2, 3, 4] for firm B  ← After year demeaning, X becomes 0!
+
+# GOOD: Different patterns across firms
+x = [1, 3, 2, 5] for firm A
+x = [2, 1, 4, 3] for firm B
+```
+
+**Singleton observations**: Observations that are the only one in their FE cell provide no identifying variation.
+
+### When to Use HDFE
+
+| Situation | Recommended Method |
+|-----------|-------------------|
+| One FE dimension | `panel_fixed_effects` |
+| Two+ FE dimensions | `panel_hdfe` |
+| Very large FE dimensions (>1000 levels) | `panel_hdfe` |
+| Need to absorb industry, region, etc. | `panel_hdfe` |
+
+### References
+
+- Gaure, S. (2013). "lfe: Linear Group Fixed Effects". *The R Journal*, 5(2), 104-117.
+- Guimarães, P. & Portugal, P. (2010). "A Simple Feasible Procedure to Fit Models with High-Dimensional Fixed Effects". *Stata Journal*, 10(4), 628-649.
+- Correia, S. (2017). "Linear Models with Multi-Way Fixed Effects: An Efficient and Feasible Estimator". Working Paper.
 
 ---
 
@@ -358,7 +460,8 @@ R² = 1 - (Log-Likelihood / Log-Likelihood_null)
 |-----------|-------------------|
 | Cross-sectional, exogenous X | OLS with robust SEs |
 | Cross-sectional, endogenous X | IV/2SLS |
-| Panel, time-invariant confounders | Fixed Effects |
+| Panel, one FE dimension | Fixed Effects |
+| Panel, multiple FE dimensions | HDFE |
 | Panel, random unobserved effects | Random Effects |
 | Before/after treatment + control | Difference-in-Differences |
 | Binary outcome | Logit or Probit |

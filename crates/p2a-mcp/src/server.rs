@@ -27,6 +27,7 @@ use p2a_core::{
     // Econometrics
     run_fixed_effects, run_random_effects, run_hausman_test, run_iv2sls, run_did,
     run_logit, run_probit, run_first_stage_diagnostics,
+    run_hdfe, HdfeConfig,
     // Time series
     run_var, run_varma, run_vecm, run_var_irf,
     // Forecasting
@@ -316,6 +317,38 @@ pub struct ProbitRequest {
     /// Independent variables (X) column names
     #[schemars(description = "Names of the independent variable (X) columns.")]
     pub x: Vec<String>,
+}
+
+/// Request for High-Dimensional Fixed Effects (HDFE) regression.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct PanelHdfeRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Dependent variable (Y) column name
+    #[schemars(description = "Name of the dependent variable (Y) column.")]
+    pub y: String,
+
+    /// Independent variables (X) column names
+    #[schemars(description = "Names of the independent variable (X) columns.")]
+    pub x: Vec<String>,
+
+    /// Fixed effect columns to absorb
+    #[schemars(description = "Column names for fixed effects to absorb (e.g., ['firm_id', 'year']). Supports multiple dimensions.")]
+    pub fe: Vec<String>,
+
+    /// Convergence tolerance for MAP algorithm
+    #[schemars(description = "Convergence tolerance for the Method of Alternating Projections. Default is 1e-8.")]
+    pub tolerance: Option<f64>,
+
+    /// Maximum iterations for MAP algorithm
+    #[schemars(description = "Maximum iterations for the demeaning algorithm. Default is 10000.")]
+    pub max_iterations: Option<usize>,
+
+    /// Standard error type
+    #[schemars(description = "Standard error type: 'standard', 'hc0', 'hc1' (default), 'hc2', or 'hc3'.")]
+    pub se_type: Option<String>,
 }
 
 // ============================================================================
@@ -1733,6 +1766,62 @@ impl AnalyticsServer {
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
                     "Probit estimation failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+    }
+
+    /// Run High-Dimensional Fixed Effects regression with multiple absorbed FE.
+    #[tool(description = "Run High-Dimensional Fixed Effects (HDFE) regression with multiple absorbed fixed effects (e.g., firm + year + industry). Uses the Method of Alternating Projections (MAP) for efficient estimation. Equivalent to R's lfe::felm() or Stata's reghdfe.")]
+    async fn panel_hdfe(
+        &self,
+        Parameters(request): Parameters<PanelHdfeRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
+        let fe_refs: Vec<&str> = request.fe.iter().map(|s| s.as_str()).collect();
+
+        // Build config from optional parameters
+        let config = HdfeConfig {
+            tolerance: request.tolerance.unwrap_or(1e-8),
+            max_iterations: request.max_iterations.unwrap_or(10000),
+            accelerate: true,
+        };
+
+        // Parse SE type
+        let cov_type = match request.se_type.as_deref() {
+            Some("standard") => CovarianceType::Standard,
+            Some("hc0") => CovarianceType::HC0,
+            Some("hc1") | None => CovarianceType::HC1,
+            Some("hc2") => CovarianceType::HC2,
+            Some("hc3") => CovarianceType::HC3,
+            Some(other) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Unknown SE type '{}'. Use 'standard', 'hc0', 'hc1', 'hc2', or 'hc3'.",
+                    other
+                ))]));
+            }
+        };
+
+        let result = match run_hdfe(dataset, &request.y, &x_refs, &fe_refs, Some(config), cov_type) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "HDFE estimation failed: {}",
                     e
                 ))]));
             }

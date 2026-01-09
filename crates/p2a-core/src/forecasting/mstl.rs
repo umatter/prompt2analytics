@@ -74,18 +74,27 @@ pub fn run_mstl(
 
     // Extract the MSTL result containing the decomposition
     let decomposition = fitted.fit();
+    let n = values.len();
 
-    // Get trend component (convert from f32 to f64)
-    let trend: Vec<f64> = decomposition.trend().iter().map(|&x| x as f64).collect();
+    // Get trend component (augurs uses f32 internally, convert to f64)
+    // Pre-allocate for efficiency
+    let trend_f32 = decomposition.trend();
+    let mut trend = Vec::with_capacity(n);
+    trend.extend(trend_f32.iter().map(|&x| x as f64));
 
-    // Get seasonal components (convert from Vec<f32> to Vec<f64>)
-    let seasonal: Vec<Vec<f64>> = decomposition.seasonal()
-        .iter()
-        .map(|s| s.iter().map(|&x| x as f64).collect())
-        .collect();
+    // Get seasonal components - pre-allocate outer vec
+    let seasonal_f32 = decomposition.seasonal();
+    let mut seasonal = Vec::with_capacity(seasonal_f32.len());
+    for s in seasonal_f32 {
+        let mut season = Vec::with_capacity(n);
+        season.extend(s.iter().map(|&x| x as f64));
+        seasonal.push(season);
+    }
 
-    // Get residuals (convert from f32 to f64)
-    let residuals: Vec<f64> = decomposition.remainder().iter().map(|&x| x as f64).collect();
+    // Get residuals
+    let remainder_f32 = decomposition.remainder();
+    let mut residuals = Vec::with_capacity(n);
+    residuals.extend(remainder_f32.iter().map(|&x| x as f64));
 
     Ok(MstlResult {
         column: column.to_string(),

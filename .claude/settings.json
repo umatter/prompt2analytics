@@ -1,0 +1,36 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo test:*)",
+      "Bash(cargo build:*)",
+      "Bash(cargo check:*)",
+      "Bash(cargo run:*)",
+      "WebSearch",
+      "WebFetch(domain:docs.rs)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:arxiv.org)",
+      "WebFetch(domain:cran.r-project.org)",
+      "WebFetch(domain:www.stata.com)",
+      "WebFetch(domain:www.statsmodels.org)",
+      "WebFetch(domain:en.wikipedia.org)",
+      "mcp__deepwiki__ask_question",
+      "mcp__deepwiki__read_wiki_structure",
+      "mcp__deepwiki__read_wiki_contents"
+    ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if echo \"$CLAUDE_TOOL_INPUT\" | grep -q 'p2a-core.*\\.rs'; then cd /home/umatter/Dropbox/tools/prompt2analytics && cargo check -p p2a-core 2>&1 | head -30; fi",
+            "timeout": 60000
+          }
+        ]
+      }
+    ]
+  }
+}

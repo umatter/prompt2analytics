@@ -34,6 +34,7 @@ pub use econometrics::{
     DiDResult, run_did,
     DiscreteResult, run_logit, run_probit,
     VarResult, VarmaResult, VecmResult, VarIrfResult, run_var, run_varma, run_vecm, run_var_irf,
+    HdfeResult, HdfeConfig, FactorInfo, run_hdfe,
 };
 pub use forecasting::{
     ArimaResult, ArimaForecastResult, run_arima, forecast_arima,
