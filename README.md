@@ -1,6 +1,9 @@
 # prompt2analytics
 
-A comprehensive analytics toolkit exposing econometrics, machine learning, and visualization capabilities through the Model Context Protocol (MCP). Includes a desktop application with LLM integration for natural language data analysis.
+A comprehensive analytics toolkit exposing econometrics, machine learning, and visualization capabilities through multiple interfaces:
+- **CLI (`p2a`)**: Direct command-line execution for scripted workflows
+- **MCP Server**: Model Context Protocol integration for AI assistants
+- **Desktop App**: Tauri application with LLM-powered natural language analysis
 
 ## Features
 
@@ -32,6 +35,12 @@ A comprehensive analytics toolkit exposing econometrics, machine learning, and v
 - **Files**: CSV, Parquet, Excel (.xlsx/.xls), Stata (.dta), SAS (.sas7bdat)
 - **Databases**: SQLite, DuckDB (with direct file querying)
 
+### Command-Line Interface
+- Full access to all analytics via `p2a` binary
+- Session recording for reproducibility
+- Script export for sharing and automation
+- JSON output format for programmatic use
+
 ### Desktop Application
 - Tauri 2.0 + SvelteKit interface
 - Multi-provider LLM integration (Ollama, Anthropic, OpenAI)
@@ -59,6 +68,9 @@ brew install openblas
 git clone https://github.com/yourusername/prompt2analytics.git
 cd prompt2analytics
 
+# Build the CLI
+cargo build --release -p p2a-cli
+
 # Build the MCP server
 cargo build --release -p p2a-mcp
 
@@ -67,7 +79,56 @@ cd crates/p2a-desktop/ui && npm install && cd ../../..
 cargo build --release -p p2a-desktop
 ```
 
+The CLI binary will be at `target/release/p2a`.
+
 ## Usage
+
+### CLI (`p2a`)
+
+The `p2a` command provides direct access to all analytics functions:
+
+```bash
+# Load a dataset
+p2a --session analysis.json data load /path/to/data.csv --name mydata
+
+# View data summary
+p2a --session analysis.json data describe mydata
+
+# Run OLS regression with robust standard errors
+p2a --session analysis.json reg ols mydata -y price -x sqft bedrooms bathrooms --robust hc1
+
+# Run clustered standard errors regression
+p2a --session analysis.json reg clustered mydata -y outcome -x treatment control --cluster firm_id
+
+# Panel fixed effects
+p2a --session analysis.json panel fe mydata -y revenue -x employees --entity firm_id
+
+# Time series ARIMA with forecasting
+p2a --session analysis.json ts arima mydata --col sales -p 1 -d 1 -q 1 --horizon 12
+
+# K-means clustering
+p2a --session analysis.json ml kmeans mydata --cols x1 x2 x3 -k 3
+
+# Create visualizations
+p2a --session analysis.json viz scatter mydata --x income --y spending -o scatter.png
+p2a --session analysis.json viz histogram mydata --col price -o hist.png
+
+# Export session to reproducible bash script
+p2a script export analysis.json -o analysis.sh
+```
+
+**Command categories:**
+- `data` - Load, list, describe, preview datasets
+- `reg` - OLS, clustered SEs, diagnostics
+- `panel` - Fixed effects, random effects, Hausman test, HDFE
+- `causal` - IV/2SLS, difference-in-differences
+- `discrete` - Logit, probit
+- `ts` - ARIMA, MSTL, VAR
+- `ml` - K-means, PCA
+- `viz` - Histograms, scatter plots, line charts
+- `script` - Export/run reproducible scripts
+
+**Output formats:** `--output text` (default), `--output json`, `--output table`
 
 ### MCP Server
 
@@ -132,6 +193,11 @@ prompt2analytics/
 │   │   ├── linalg/        # Matrix operations (via faer)
 │   │   ├── traits/        # LinearEstimator trait
 │   │   └── errors.rs      # Error types
+│   ├── p2a-cli/           # CLI binary (`p2a`)
+│   │   ├── commands/      # Subcommand implementations
+│   │   ├── session.rs     # Session recording
+│   │   ├── script.rs      # Bash script generation
+│   │   └── output.rs      # Output formatting
 │   ├── p2a-mcp/           # MCP server (55 tools)
 │   └── p2a-desktop/       # Tauri desktop application
 │       ├── src/           # Rust backend

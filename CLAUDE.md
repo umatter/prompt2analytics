@@ -4,9 +4,10 @@ This file provides context and guidance for AI assistants working on this codeba
 
 ## Project Overview
 
-prompt2analytics is a Rust-based analytics toolkit that exposes econometrics, ML, and visualization capabilities through the Model Context Protocol (MCP). It consists of three crates:
+prompt2analytics is a Rust-based analytics toolkit that exposes econometrics, ML, and visualization capabilities through multiple interfaces. It consists of four crates:
 
 - **p2a-core**: Core analytics library (all algorithms)
+- **p2a-cli**: Command-line interface (`p2a` binary) for direct analytics execution
 - **p2a-mcp**: MCP server exposing 55 tools
 - **p2a-desktop**: Tauri desktop application with LLM integration
 
@@ -140,6 +141,109 @@ pub enum CovarianceType {
 }
 ```
 
+## CLI (p2a-cli)
+
+### Command Structure
+
+The CLI uses clap with hierarchical subcommands:
+
+```
+p2a [OPTIONS] <COMMAND>
+  data       Data loading and inspection
+  reg        Regression analysis
+  panel      Panel data econometrics
+  causal     Causal inference (IV, DiD)
+  discrete   Discrete choice models
+  ts         Time series analysis
+  ml         Machine learning
+  viz        Visualization
+  script     Session/script management
+```
+
+### Adding a New Command
+
+1. Create or modify the appropriate command module in `commands/`
+2. Add the subcommand enum variant with clap attributes
+3. Implement the execute function
+
+Example in `commands/regression.rs`:
+```rust
+#[derive(Subcommand)]
+pub enum RegressionCommands {
+    /// Ordinary Least Squares regression
+    Ols {
+        dataset: String,
+        #[arg(short = 'y', long)]
+        dep_var: String,
+        #[arg(short = 'x', long, num_args = 1..)]
+        indep_vars: Vec<String>,
+        #[arg(long, default_value = "true")]
+        intercept: bool,
+        #[arg(short, long, default_value = "hc1")]
+        robust: RobustSE,
+    },
+}
+```
+
+### Session Management
+
+The CLI maintains session state for dataset persistence across commands:
+```rust
+pub struct SessionManager {
+    session_path: PathBuf,
+    session: Session,
+    datasets: HashMap<String, Dataset>,
+}
+```
+
+Use `--session <file>` to record commands for reproducibility.
+
+### Data Extraction Patterns
+
+**For regression-type functions** (use Dataset directly):
+```rust
+let x_cols: Vec<&str> = indep_vars.iter().map(|s| s.as_str()).collect();
+run_ols(ds, dep_var, &x_cols, intercept, cov_type)
+```
+
+**For ML functions** (need ArrayView2):
+```rust
+fn extract_columns_as_array(dataset: &Dataset, cols: &[String]) -> Result<Array2<f64>, String> {
+    let df = dataset.df();
+    let mut data = Vec::new();
+    for row_idx in 0..df.height() {
+        for col_name in cols {
+            let value = df.column(col_name)?.f64()?.get(row_idx)?;
+            data.push(value);
+        }
+    }
+    Array2::from_shape_vec((n_rows, n_cols), data)
+}
+
+// Then use: kmeans(data.view(), k, ...)
+```
+
+**For visualization** (need raw Vec<f64>):
+```rust
+fn extract_column(dataset: &Dataset, col: &str) -> Result<Vec<f64>, String> {
+    let column = dataset.df().column(col)?;
+    Ok(column.f64()?.into_no_null_iter().collect())
+}
+
+// Then use: histogram(&data, bins, config)
+```
+
+### Output Formatting
+
+Results support multiple output formats via `OutputFormat`:
+```rust
+match format {
+    OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&json)?),
+    OutputFormat::Table => /* use tabled */,
+    OutputFormat::Text => /* formatted text */,
+}
+```
+
 ## MCP Server (p2a-mcp)
 
 ### Adding a New Tool
@@ -224,8 +328,20 @@ let df = df! {
 
 ## Files to Know
 
+### p2a-core
 - `crates/p2a-core/src/regression/ols.rs` - Main OLS implementation
 - `crates/p2a-core/src/linalg/matrix_ops.rs` - Core linear algebra
 - `crates/p2a-core/src/traits/estimator.rs` - LinearEstimator trait
+
+### p2a-cli
+- `crates/p2a-cli/src/main.rs` - CLI entry point and command routing
+- `crates/p2a-cli/src/commands/` - Subcommand implementations
+- `crates/p2a-cli/src/session.rs` - Session recording for reproducibility
+- `crates/p2a-cli/src/output.rs` - Output formatting (text, JSON, table)
+
+### p2a-mcp
 - `crates/p2a-mcp/src/server.rs` - All 55 MCP tool definitions
+
+### Documentation
 - `DEVELOPMENT_REPORT.md` - Detailed development history and status
+- `docs/cli-reference.md` - CLI command reference
