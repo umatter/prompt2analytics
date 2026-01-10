@@ -1,0 +1,42 @@
+[package]
+name = "p2a-cli"
+description = "Command-line interface for prompt2analytics"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "p2a"
+path = "src/main.rs"
+
+[dependencies]
+# Core analytics library
+p2a-core = { path = "../p2a-core" }
+
+# CLI framework
+clap = { version = "4.5", features = ["derive", "env", "string"] }
+
+# Data handling
+polars.workspace = true
+ndarray = "0.16"
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+base64 = "0.22"
+
+# Time handling
+chrono = { version = "0.4", features = ["serde"] }
+
+# UUID generation
+uuid = { version = "1.0", features = ["v4"] }
+
+# Output formatting
+tabled = "0.17"
+colored = "2.1"
+
+# Error handling
+thiserror.workspace = true
+anyhow.workspace = true
