@@ -10,7 +10,7 @@ mod session;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
-use commands::{data, regression, panel, causal, discrete, timeseries, ml, viz, script};
+use commands::{data, munge, regression, panel, causal, discrete, timeseries, ml, viz, script};
 use session::SessionManager;
 
 /// p2a - Analytics from the command line
@@ -40,6 +40,10 @@ pub enum Commands {
     /// Data loading and inspection
     #[command(subcommand)]
     Data(data::DataCommands),
+
+    /// Data munging (filter, join, reshape, clean, aggregate)
+    #[command(subcommand)]
+    Munge(munge::MungeCommands),
 
     /// Regression analysis
     #[command(subcommand, visible_alias = "reg")]
@@ -87,6 +91,7 @@ fn main() -> anyhow::Result<()> {
     // Execute the command
     let result = match &cli.command {
         Commands::Data(cmd) => data::execute(cmd, &cli.output, session_manager.as_mut()),
+        Commands::Munge(cmd) => munge::execute(cmd, &cli.output, session_manager.as_mut()),
         Commands::Regression(cmd) => regression::execute(cmd, &cli.output, session_manager.as_mut()),
         Commands::Panel(cmd) => panel::execute(cmd, &cli.output, session_manager.as_mut()),
         Commands::Causal(cmd) => causal::execute(cmd, &cli.output, session_manager.as_mut()),

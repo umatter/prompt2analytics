@@ -21,6 +21,23 @@ use p2a_core::{
         // Database connectivity
         query_sqlite, list_sqlite_tables, sqlite_table_schema,
         query_duckdb, list_duckdb_tables, duckdb_table_schema,
+        // Data munging
+        munging::{
+            // Transform operations
+            filter, select, drop_columns, rename, mutate, sort, sample,
+            MutateExpr, ArithOp,
+            // Clean operations
+            drop_na, fill_na, deduplicate, FillStrategy,
+            // Join operations
+            left_join, right_join, inner_join, full_join, concat,
+            // Aggregate operations
+            group_by, value_counts, AggFn, AggSpec,
+            // Reshape operations
+            pivot, melt,
+            // Feature engineering
+            lag, lead, diff, pct_change, standardize, normalize, bin, one_hot_encode,
+            BinStrategy,
+        },
     },
     regression::{run_ols, run_ols_clustered, run_diagnostics, CovarianceType},
     stats::{correlation_matrix, DescriptiveStats},
@@ -1288,6 +1305,478 @@ pub struct DendrogramRequest {
 }
 
 // ============================================================================
+// Data Munging Tool Input Types
+// ============================================================================
+
+/// Request to filter rows in a dataset.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct FilterDatasetRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of the dataset to filter.")]
+    pub dataset: String,
+
+    /// Column to filter on
+    #[schemars(description = "Name of the column to filter on.")]
+    pub column: String,
+
+    /// Comparison operator
+    #[schemars(description = "Comparison operator: 'eq', 'ne', 'gt', 'ge', 'lt', 'le', 'contains', 'starts_with', 'ends_with'.")]
+    pub op: String,
+
+    /// Value to compare against
+    #[schemars(description = "Value to compare against (as string, will be parsed based on column type).")]
+    pub value: String,
+
+    /// Optional name for the resulting dataset
+    #[schemars(description = "Optional name for the filtered result. If not provided, overwrites the source dataset.")]
+    pub result_name: Option<String>,
+}
+
+/// Request to select columns from a dataset.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SelectColumnsRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of the dataset.")]
+    pub dataset: String,
+
+    /// Columns to select
+    #[schemars(description = "List of column names to keep.")]
+    pub columns: Vec<String>,
+
+    /// Optional name for the resulting dataset
+    #[schemars(description = "Optional name for the result. If not provided, overwrites the source dataset.")]
+    pub result_name: Option<String>,
+}
+
+/// Request to drop columns from a dataset.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DropColumnsRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of the dataset.")]
+    pub dataset: String,
+
+    /// Columns to drop
+    #[schemars(description = "List of column names to drop.")]
+    pub columns: Vec<String>,
+
+    /// Optional name for the resulting dataset
+    #[schemars(description = "Optional name for the result. If not provided, overwrites the source dataset.")]
+    pub result_name: Option<String>,
+}
+
+/// Request to rename columns in a dataset.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct RenameColumnsRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of the dataset.")]
+    pub dataset: String,
+
+    /// Mapping of old names to new names
+    #[schemars(description = "Mapping of old column names to new names as pairs: [[\"old1\", \"new1\"], [\"old2\", \"new2\"]].")]
+    pub renames: Vec<Vec<String>>,
+
+    /// Optional name for the resulting dataset
+    #[schemars(description = "Optional name for the result. If not provided, overwrites the source dataset.")]
+    pub result_name: Option<String>,
+}
+
+/// Request to sort a dataset.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SortDatasetRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of the dataset.")]
+    pub dataset: String,
+
+    /// Columns to sort by
+    #[schemars(description = "List of column names to sort by.")]
+    pub by: Vec<String>,
+
+    /// Sort in descending order
+    #[schemars(description = "If true, sort in descending order. Default is ascending.")]
+    pub descending: Option<bool>,
+
+    /// Optional name for the resulting dataset
+    #[schemars(description = "Optional name for the result. If not provided, overwrites the source dataset.")]
+    pub result_name: Option<String>,
+}
+
+/// Request to join two datasets.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct JoinDatasetsRequest {
+    /// Name/ID of the left dataset
+    #[schemars(description = "Name or ID of the left dataset.")]
+    pub left: String,
+
+    /// Name/ID of the right dataset
+    #[schemars(description = "Name or ID of the right dataset.")]
+    pub right: String,
+
+    /// Columns to join on (from left dataset)
+    #[schemars(description = "Column names from the left dataset to join on.")]
+    pub left_on: Vec<String>,
+
+    /// Columns to join on (from right dataset)
+    #[schemars(description = "Column names from the right dataset to join on. If not provided, uses left_on.")]
+    pub right_on: Option<Vec<String>>,
+
+    /// Type of join
+    #[schemars(description = "Join type: 'left', 'right', 'inner', or 'full'. Default is 'left'.")]
+    pub join_type: Option<String>,
+
+    /// Suffix for duplicate column names
+    #[schemars(description = "Suffix to add to duplicate column names from the right dataset. Default is '_right'.")]
+    pub suffix: Option<String>,
+
+    /// Optional name for the resulting dataset
+    #[schemars(description = "Optional name for the joined result.")]
+    pub result_name: Option<String>,
+}
+
+/// Request to concatenate datasets.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ConcatDatasetsRequest {
+    /// Names/IDs of datasets to concatenate
+    #[schemars(description = "List of dataset names to concatenate vertically (row-bind).")]
+    pub datasets: Vec<String>,
+
+    /// Optional name for the resulting dataset
+    #[schemars(description = "Optional name for the concatenated result.")]
+    pub result_name: Option<String>,
+}
+
+/// Request to group and aggregate a dataset.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct GroupByRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of the dataset.")]
+    pub dataset: String,
+
+    /// Columns to group by
+    #[schemars(description = "Column names to group by.")]
+    pub by: Vec<String>,
+
+    /// Aggregation specifications
+    #[schemars(description = "Aggregation specs as [[\"column\", \"function\"], ...]. Functions: 'count', 'sum', 'mean', 'median', 'min', 'max', 'std', 'var', 'first', 'last'.")]
+    pub aggs: Vec<Vec<String>>,
+
+    /// Optional name for the resulting dataset
+    #[schemars(description = "Optional name for the grouped result.")]
+    pub result_name: Option<String>,
+}
+
+/// Request to compute value counts for a column.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ValueCountsRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of the dataset.")]
+    pub dataset: String,
+
+    /// Column to count values in
+    #[schemars(description = "Column name to compute value counts for.")]
+    pub column: String,
+
+    /// Whether to normalize to percentages
+    #[schemars(description = "If true, return percentages instead of counts.")]
+    pub normalize: Option<bool>,
+
+    /// Optional name for the resulting dataset
+    #[schemars(description = "Optional name for the result.")]
+    pub result_name: Option<String>,
+}
+
+/// Request to pivot a dataset from long to wide format.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct PivotDatasetRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of the dataset.")]
+    pub dataset: String,
+
+    /// Index columns (will remain as rows)
+    #[schemars(description = "Column names to use as index (will remain as rows).")]
+    pub index: Vec<String>,
+
+    /// Column whose values become new column names
+    #[schemars(description = "Column whose values become new column names.")]
+    pub on: String,
+
+    /// Column containing values to fill the new columns
+    #[schemars(description = "Column containing values to fill the new columns.")]
+    pub values: String,
+
+    /// Optional name for the resulting dataset
+    #[schemars(description = "Optional name for the pivoted result.")]
+    pub result_name: Option<String>,
+}
+
+/// Request to melt a dataset from wide to long format.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct MeltDatasetRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of the dataset.")]
+    pub dataset: String,
+
+    /// ID columns to keep as-is
+    #[schemars(description = "Column names to keep as identifier variables.")]
+    pub id_vars: Vec<String>,
+
+    /// Value columns to unpivot
+    #[schemars(description = "Column names to unpivot into rows.")]
+    pub value_vars: Vec<String>,
+
+    /// Name for the variable column
+    #[schemars(description = "Name for the new variable column. Default is 'variable'.")]
+    pub variable_name: Option<String>,
+
+    /// Name for the value column
+    #[schemars(description = "Name for the new value column. Default is 'value'.")]
+    pub value_name: Option<String>,
+
+    /// Optional name for the resulting dataset
+    #[schemars(description = "Optional name for the melted result.")]
+    pub result_name: Option<String>,
+}
+
+/// Request to drop rows with null values.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DropNaRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of the dataset.")]
+    pub dataset: String,
+
+    /// Columns to check for nulls
+    #[schemars(description = "Column names to check for nulls. If not provided, checks all columns.")]
+    pub columns: Option<Vec<String>>,
+
+    /// How to drop rows
+    #[schemars(description = "How to drop: 'any' (drop if any null) or 'all' (drop only if all null). Default is 'any'.")]
+    pub how: Option<String>,
+
+    /// Optional name for the resulting dataset
+    #[schemars(description = "Optional name for the result.")]
+    pub result_name: Option<String>,
+}
+
+/// Request to fill null values.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct FillNaRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of the dataset.")]
+    pub dataset: String,
+
+    /// Columns to fill nulls in
+    #[schemars(description = "Column names to fill nulls in. If not provided, fills all columns.")]
+    pub columns: Option<Vec<String>>,
+
+    /// Fill strategy
+    #[schemars(description = "Fill strategy: 'mean', 'median', 'mode', 'forward', 'backward', or a constant value.")]
+    pub strategy: String,
+
+    /// Optional name for the resulting dataset
+    #[schemars(description = "Optional name for the result.")]
+    pub result_name: Option<String>,
+}
+
+/// Request to remove duplicate rows.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DeduplicateRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of the dataset.")]
+    pub dataset: String,
+
+    /// Columns to check for duplicates
+    #[schemars(description = "Column names to check for duplicates. If not provided, checks all columns.")]
+    pub columns: Option<Vec<String>>,
+
+    /// Which duplicate to keep
+    #[schemars(description = "Which duplicate to keep: 'first', 'last', or 'none'. Default is 'first'.")]
+    pub keep: Option<String>,
+
+    /// Optional name for the resulting dataset
+    #[schemars(description = "Optional name for the result.")]
+    pub result_name: Option<String>,
+}
+
+/// Request to create lag or lead columns.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct LagLeadRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of the dataset.")]
+    pub dataset: String,
+
+    /// Column to shift
+    #[schemars(description = "Column name to create lag/lead for.")]
+    pub column: String,
+
+    /// Number of periods to shift
+    #[schemars(description = "Number of periods to shift. Positive for lag, negative for lead (or use 'direction').")]
+    pub periods: i64,
+
+    /// Direction: 'lag' or 'lead'
+    #[schemars(description = "Direction: 'lag' (shift forward) or 'lead' (shift backward). Default is 'lag'.")]
+    pub direction: Option<String>,
+
+    /// Columns to group by (for panel data)
+    #[schemars(description = "Optional group-by columns for panel data (e.g., ['firm_id']).")]
+    pub group_by: Option<Vec<String>>,
+
+    /// Optional name for the resulting dataset
+    #[schemars(description = "Optional name for the result.")]
+    pub result_name: Option<String>,
+}
+
+/// Request to standardize or normalize columns.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct StandardizeRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of the dataset.")]
+    pub dataset: String,
+
+    /// Columns to transform
+    #[schemars(description = "Column names to standardize/normalize.")]
+    pub columns: Vec<String>,
+
+    /// Method: 'standardize' or 'normalize'
+    #[schemars(description = "Method: 'standardize' (z-score) or 'normalize' (0-1 range). Default is 'standardize'.")]
+    pub method: Option<String>,
+
+    /// Optional name for the resulting dataset
+    #[schemars(description = "Optional name for the result.")]
+    pub result_name: Option<String>,
+}
+
+/// Request to bin a continuous variable.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct BinColumnRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of the dataset.")]
+    pub dataset: String,
+
+    /// Column to bin
+    #[schemars(description = "Column name to bin.")]
+    pub column: String,
+
+    /// Binning strategy
+    #[schemars(description = "Binning strategy: 'uniform' (equal width), 'quantile' (equal frequency), or 'custom'.")]
+    pub strategy: String,
+
+    /// Number of bins or custom breaks
+    #[schemars(description = "Number of bins (for uniform/quantile) or list of break points (for custom).")]
+    pub bins: Vec<f64>,
+
+    /// Optional labels for bins
+    #[schemars(description = "Optional labels for the bins.")]
+    pub labels: Option<Vec<String>>,
+
+    /// Optional name for the resulting dataset
+    #[schemars(description = "Optional name for the result.")]
+    pub result_name: Option<String>,
+}
+
+/// Request to one-hot encode a categorical column.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct OneHotEncodeRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of the dataset.")]
+    pub dataset: String,
+
+    /// Column to encode
+    #[schemars(description = "Categorical column name to one-hot encode.")]
+    pub column: String,
+
+    /// Whether to drop the first category
+    #[schemars(description = "If true, drop first category to avoid multicollinearity. Default is false.")]
+    pub drop_first: Option<bool>,
+
+    /// Optional name for the resulting dataset
+    #[schemars(description = "Optional name for the result.")]
+    pub result_name: Option<String>,
+}
+
+/// Request to compute differences or percent changes.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DiffRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of the dataset.")]
+    pub dataset: String,
+
+    /// Column to compute differences for
+    #[schemars(description = "Column name to compute differences for.")]
+    pub column: String,
+
+    /// Number of periods
+    #[schemars(description = "Number of periods for difference. Default is 1.")]
+    pub periods: Option<i64>,
+
+    /// Type of difference
+    #[schemars(description = "Type: 'diff' (absolute difference) or 'pct_change' (percent change). Default is 'diff'.")]
+    pub diff_type: Option<String>,
+
+    /// Columns to group by (for panel data)
+    #[schemars(description = "Optional group-by columns for panel data.")]
+    pub group_by: Option<Vec<String>>,
+
+    /// Optional name for the resulting dataset
+    #[schemars(description = "Optional name for the result.")]
+    pub result_name: Option<String>,
+}
+
+/// Request to sample rows from a dataset.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SampleDatasetRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of the dataset.")]
+    pub dataset: String,
+
+    /// Number of rows to sample
+    #[schemars(description = "Number of rows to sample.")]
+    pub n: usize,
+
+    /// Whether to sample with replacement
+    #[schemars(description = "If true, sample with replacement. Default is false.")]
+    pub replace: Option<bool>,
+
+    /// Random seed for reproducibility
+    #[schemars(description = "Random seed for reproducible sampling.")]
+    pub seed: Option<u64>,
+
+    /// Optional name for the resulting dataset
+    #[schemars(description = "Optional name for the result.")]
+    pub result_name: Option<String>,
+}
+
+/// Request to create a new column by computation.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct MutateColumnRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of the dataset.")]
+    pub dataset: String,
+
+    /// Name for the new column
+    #[schemars(description = "Name for the new column.")]
+    pub new_column: String,
+
+    /// Expression type
+    #[schemars(description = "Expression type: 'arithmetic' (e.g., col1 + col2), 'function' (e.g., log(col)), or 'constant'.")]
+    pub expr_type: String,
+
+    /// Left operand (column name for arithmetic)
+    #[schemars(description = "Left operand: column name for arithmetic, column for function, or constant value.")]
+    pub left: String,
+
+    /// Operator (for arithmetic: '+', '-', '*', '/')
+    #[schemars(description = "Operator for arithmetic: '+', '-', '*', '/'. For function: function name ('log', 'exp', 'sqrt', 'abs', 'square').")]
+    pub operator: Option<String>,
+
+    /// Right operand (column name for arithmetic)
+    #[schemars(description = "Right operand: column name for arithmetic expressions.")]
+    pub right: Option<String>,
+
+    /// Optional name for the resulting dataset
+    #[schemars(description = "Optional name for the result.")]
+    pub result_name: Option<String>,
+}
+
+// ============================================================================
 // Tool Router Implementation
 // ============================================================================
 
@@ -1679,6 +2168,311 @@ impl AnalyticsServer {
                     "required": ["database", "query"]
                 }),
             },
+            // Data munging tools
+            ToolDefinition {
+                name: "munge_filter".to_string(),
+                description: "Filter rows in a dataset based on a condition. Supports operators: eq, ne, gt, ge, lt, le, contains, startswith, endswith.".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "dataset": {"type": "string", "description": "Name of the dataset to filter"},
+                        "column": {"type": "string", "description": "Column to filter on"},
+                        "operator": {"type": "string", "description": "Comparison operator (eq, ne, gt, ge, lt, le, contains, startswith, endswith)"},
+                        "value": {"type": "string", "description": "Value to compare against"},
+                        "output_name": {"type": "string", "description": "Optional name for the resulting dataset"}
+                    },
+                    "required": ["dataset", "column", "operator", "value"]
+                }),
+            },
+            ToolDefinition {
+                name: "munge_select".to_string(),
+                description: "Select specific columns from a dataset.".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "dataset": {"type": "string", "description": "Name of the dataset"},
+                        "columns": {"type": "array", "items": {"type": "string"}, "description": "Columns to select"},
+                        "output_name": {"type": "string", "description": "Optional name for the resulting dataset"}
+                    },
+                    "required": ["dataset", "columns"]
+                }),
+            },
+            ToolDefinition {
+                name: "munge_drop_columns".to_string(),
+                description: "Drop columns from a dataset.".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "dataset": {"type": "string", "description": "Name of the dataset"},
+                        "columns": {"type": "array", "items": {"type": "string"}, "description": "Columns to drop"},
+                        "output_name": {"type": "string", "description": "Optional name for the resulting dataset"}
+                    },
+                    "required": ["dataset", "columns"]
+                }),
+            },
+            ToolDefinition {
+                name: "munge_rename".to_string(),
+                description: "Rename columns in a dataset.".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "dataset": {"type": "string", "description": "Name of the dataset"},
+                        "renames": {"type": "object", "additionalProperties": {"type": "string"}, "description": "Map of old names to new names"},
+                        "output_name": {"type": "string", "description": "Optional name for the resulting dataset"}
+                    },
+                    "required": ["dataset", "renames"]
+                }),
+            },
+            ToolDefinition {
+                name: "munge_sort".to_string(),
+                description: "Sort a dataset by one or more columns.".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "dataset": {"type": "string", "description": "Name of the dataset"},
+                        "columns": {"type": "array", "items": {"type": "string"}, "description": "Columns to sort by"},
+                        "descending": {"type": "boolean", "description": "Sort in descending order (default: false)"},
+                        "output_name": {"type": "string", "description": "Optional name for the resulting dataset"}
+                    },
+                    "required": ["dataset", "columns"]
+                }),
+            },
+            ToolDefinition {
+                name: "munge_mutate".to_string(),
+                description: "Create a new column or modify an existing one using an expression. Supports arithmetic operations on columns.".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "dataset": {"type": "string", "description": "Name of the dataset"},
+                        "new_column": {"type": "string", "description": "Name of the new column"},
+                        "expression": {"type": "string", "description": "Expression type: 'copy', 'constant', 'add', 'subtract', 'multiply', 'divide'"},
+                        "left": {"type": "string", "description": "Left operand (column name or constant value)"},
+                        "right": {"type": "string", "description": "Right operand (column name, for arithmetic operations)"},
+                        "output_name": {"type": "string", "description": "Optional name for the resulting dataset"}
+                    },
+                    "required": ["dataset", "new_column", "expression", "left"]
+                }),
+            },
+            ToolDefinition {
+                name: "munge_sample".to_string(),
+                description: "Take a random sample of rows from a dataset.".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "dataset": {"type": "string", "description": "Name of the dataset"},
+                        "n": {"type": "integer", "description": "Number of rows to sample"},
+                        "with_replacement": {"type": "boolean", "description": "Sample with replacement (default: false)"},
+                        "seed": {"type": "integer", "description": "Optional random seed for reproducibility"},
+                        "output_name": {"type": "string", "description": "Optional name for the resulting dataset"}
+                    },
+                    "required": ["dataset", "n"]
+                }),
+            },
+            ToolDefinition {
+                name: "munge_join".to_string(),
+                description: "Join two datasets on key columns. Supports left, right, inner, and full outer joins.".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "left_dataset": {"type": "string", "description": "Name of the left dataset"},
+                        "right_dataset": {"type": "string", "description": "Name of the right dataset"},
+                        "on": {"type": "array", "items": {"type": "string"}, "description": "Columns to join on"},
+                        "right_on": {"type": "array", "items": {"type": "string"}, "description": "Right key columns if different from left"},
+                        "join_type": {"type": "string", "description": "Join type: left, right, inner, full (default: left)"},
+                        "suffix": {"type": "string", "description": "Suffix for duplicate column names (default: _right)"},
+                        "output_name": {"type": "string", "description": "Optional name for the resulting dataset"}
+                    },
+                    "required": ["left_dataset", "right_dataset", "on"]
+                }),
+            },
+            ToolDefinition {
+                name: "munge_concat".to_string(),
+                description: "Concatenate multiple datasets vertically (row-bind).".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "datasets": {"type": "array", "items": {"type": "string"}, "description": "Names of datasets to concatenate"},
+                        "output_name": {"type": "string", "description": "Optional name for the resulting dataset"}
+                    },
+                    "required": ["datasets"]
+                }),
+            },
+            ToolDefinition {
+                name: "munge_group_by".to_string(),
+                description: "Group dataset by columns and compute aggregations (sum, mean, count, min, max, std, var, first, last, median).".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "dataset": {"type": "string", "description": "Name of the dataset"},
+                        "by": {"type": "array", "items": {"type": "string"}, "description": "Columns to group by"},
+                        "aggs": {"type": "array", "items": {"type": "object"}, "description": "Aggregation specs: [{column, function}]"},
+                        "output_name": {"type": "string", "description": "Optional name for the resulting dataset"}
+                    },
+                    "required": ["dataset", "by", "aggs"]
+                }),
+            },
+            ToolDefinition {
+                name: "munge_value_counts".to_string(),
+                description: "Count occurrences of unique values in a column.".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "dataset": {"type": "string", "description": "Name of the dataset"},
+                        "column": {"type": "string", "description": "Column to count values in"},
+                        "output_name": {"type": "string", "description": "Optional name for the resulting dataset"}
+                    },
+                    "required": ["dataset", "column"]
+                }),
+            },
+            ToolDefinition {
+                name: "munge_pivot".to_string(),
+                description: "Pivot a dataset from long to wide format.".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "dataset": {"type": "string", "description": "Name of the dataset"},
+                        "index": {"type": "array", "items": {"type": "string"}, "description": "Columns to use as index (row identifiers)"},
+                        "on": {"type": "string", "description": "Column whose values become new column names"},
+                        "values": {"type": "string", "description": "Column containing values to fill the new columns"},
+                        "output_name": {"type": "string", "description": "Optional name for the resulting dataset"}
+                    },
+                    "required": ["dataset", "index", "on", "values"]
+                }),
+            },
+            ToolDefinition {
+                name: "munge_melt".to_string(),
+                description: "Melt a dataset from wide to long format (unpivot).".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "dataset": {"type": "string", "description": "Name of the dataset"},
+                        "id_vars": {"type": "array", "items": {"type": "string"}, "description": "Columns to keep as identifiers"},
+                        "value_vars": {"type": "array", "items": {"type": "string"}, "description": "Columns to unpivot into rows"},
+                        "variable_name": {"type": "string", "description": "Name for the variable column (default: variable)"},
+                        "value_name": {"type": "string", "description": "Name for the value column (default: value)"},
+                        "output_name": {"type": "string", "description": "Optional name for the resulting dataset"}
+                    },
+                    "required": ["dataset", "id_vars", "value_vars"]
+                }),
+            },
+            ToolDefinition {
+                name: "munge_drop_na".to_string(),
+                description: "Drop rows with missing values.".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "dataset": {"type": "string", "description": "Name of the dataset"},
+                        "columns": {"type": "array", "items": {"type": "string"}, "description": "Columns to check for NA (all if not specified)"},
+                        "how": {"type": "string", "description": "How to drop: 'any' or 'all' (default: any)"},
+                        "output_name": {"type": "string", "description": "Optional name for the resulting dataset"}
+                    },
+                    "required": ["dataset"]
+                }),
+            },
+            ToolDefinition {
+                name: "munge_fill_na".to_string(),
+                description: "Fill missing values using a strategy (mean, median, constant, forward, backward, zero).".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "dataset": {"type": "string", "description": "Name of the dataset"},
+                        "columns": {"type": "array", "items": {"type": "string"}, "description": "Columns to fill (all if not specified)"},
+                        "strategy": {"type": "string", "description": "Fill strategy: mean, median, constant, forward, backward, zero"},
+                        "constant_value": {"type": "number", "description": "Value to use for constant strategy"},
+                        "output_name": {"type": "string", "description": "Optional name for the resulting dataset"}
+                    },
+                    "required": ["dataset", "strategy"]
+                }),
+            },
+            ToolDefinition {
+                name: "munge_deduplicate".to_string(),
+                description: "Remove duplicate rows from a dataset.".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "dataset": {"type": "string", "description": "Name of the dataset"},
+                        "subset": {"type": "array", "items": {"type": "string"}, "description": "Columns to consider for duplicates (all if not specified)"},
+                        "keep": {"type": "string", "description": "Which duplicate to keep: 'first', 'last', or 'none' (default: first)"},
+                        "output_name": {"type": "string", "description": "Optional name for the resulting dataset"}
+                    },
+                    "required": ["dataset"]
+                }),
+            },
+            ToolDefinition {
+                name: "munge_lag_lead".to_string(),
+                description: "Create lag or lead of a column (shift values forward or backward).".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "dataset": {"type": "string", "description": "Name of the dataset"},
+                        "column": {"type": "string", "description": "Column to lag or lead"},
+                        "periods": {"type": "integer", "description": "Number of periods to shift"},
+                        "operation": {"type": "string", "description": "Operation: 'lag' or 'lead'"},
+                        "group_by": {"type": "array", "items": {"type": "string"}, "description": "Optional group by columns for panel data"},
+                        "output_name": {"type": "string", "description": "Optional name for the resulting dataset"}
+                    },
+                    "required": ["dataset", "column", "periods", "operation"]
+                }),
+            },
+            ToolDefinition {
+                name: "munge_diff".to_string(),
+                description: "Compute difference or percentage change of a column.".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "dataset": {"type": "string", "description": "Name of the dataset"},
+                        "column": {"type": "string", "description": "Column to difference"},
+                        "periods": {"type": "integer", "description": "Number of periods for differencing (default: 1)"},
+                        "pct_change": {"type": "boolean", "description": "Compute percentage change instead of difference (default: false)"},
+                        "output_name": {"type": "string", "description": "Optional name for the resulting dataset"}
+                    },
+                    "required": ["dataset", "column"]
+                }),
+            },
+            ToolDefinition {
+                name: "munge_standardize".to_string(),
+                description: "Standardize (z-score) or normalize (0-1) columns.".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "dataset": {"type": "string", "description": "Name of the dataset"},
+                        "columns": {"type": "array", "items": {"type": "string"}, "description": "Columns to standardize"},
+                        "method": {"type": "string", "description": "Method: 'standardize' (z-score) or 'normalize' (0-1)"},
+                        "output_name": {"type": "string", "description": "Optional name for the resulting dataset"}
+                    },
+                    "required": ["dataset", "columns"]
+                }),
+            },
+            ToolDefinition {
+                name: "munge_bin".to_string(),
+                description: "Bin a continuous column into discrete categories.".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "dataset": {"type": "string", "description": "Name of the dataset"},
+                        "column": {"type": "string", "description": "Column to bin"},
+                        "strategy": {"type": "string", "description": "Binning strategy: 'equal_width', 'quantile', or 'custom'"},
+                        "n_bins": {"type": "integer", "description": "Number of bins for equal_width or quantile strategies"},
+                        "breaks": {"type": "array", "items": {"type": "number"}, "description": "Custom bin edges for custom strategy"},
+                        "output_name": {"type": "string", "description": "Optional name for the resulting dataset"}
+                    },
+                    "required": ["dataset", "column", "strategy"]
+                }),
+            },
+            ToolDefinition {
+                name: "munge_one_hot_encode".to_string(),
+                description: "One-hot encode a categorical column into dummy variables.".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "dataset": {"type": "string", "description": "Name of the dataset"},
+                        "column": {"type": "string", "description": "Column to one-hot encode"},
+                        "drop_first": {"type": "boolean", "description": "Drop first category to avoid multicollinearity (default: false)"},
+                        "output_name": {"type": "string", "description": "Optional name for the resulting dataset"}
+                    },
+                    "required": ["dataset", "column"]
+                }),
+            },
         ]
     }
 
@@ -1900,6 +2694,154 @@ impl AnalyticsServer {
                     .map_err(|e| format!("Invalid arguments: {}", e))?;
                 session_server
                     .db_duckdb_query(Parameters(req))
+                    .await
+            }
+            // Data munging tools
+            "munge_filter" => {
+                let req: FilterDatasetRequest = serde_json::from_value(arguments)
+                    .map_err(|e| format!("Invalid arguments: {}", e))?;
+                session_server
+                    .munge_filter(Parameters(req))
+                    .await
+            }
+            "munge_select" => {
+                let req: SelectColumnsRequest = serde_json::from_value(arguments)
+                    .map_err(|e| format!("Invalid arguments: {}", e))?;
+                session_server
+                    .munge_select(Parameters(req))
+                    .await
+            }
+            "munge_drop_columns" => {
+                let req: DropColumnsRequest = serde_json::from_value(arguments)
+                    .map_err(|e| format!("Invalid arguments: {}", e))?;
+                session_server
+                    .munge_drop_columns(Parameters(req))
+                    .await
+            }
+            "munge_rename" => {
+                let req: RenameColumnsRequest = serde_json::from_value(arguments)
+                    .map_err(|e| format!("Invalid arguments: {}", e))?;
+                session_server
+                    .munge_rename(Parameters(req))
+                    .await
+            }
+            "munge_sort" => {
+                let req: SortDatasetRequest = serde_json::from_value(arguments)
+                    .map_err(|e| format!("Invalid arguments: {}", e))?;
+                session_server
+                    .munge_sort(Parameters(req))
+                    .await
+            }
+            "munge_mutate" => {
+                let req: MutateColumnRequest = serde_json::from_value(arguments)
+                    .map_err(|e| format!("Invalid arguments: {}", e))?;
+                session_server
+                    .munge_mutate(Parameters(req))
+                    .await
+            }
+            "munge_sample" => {
+                let req: SampleDatasetRequest = serde_json::from_value(arguments)
+                    .map_err(|e| format!("Invalid arguments: {}", e))?;
+                session_server
+                    .munge_sample(Parameters(req))
+                    .await
+            }
+            "munge_join" => {
+                let req: JoinDatasetsRequest = serde_json::from_value(arguments)
+                    .map_err(|e| format!("Invalid arguments: {}", e))?;
+                session_server
+                    .munge_join(Parameters(req))
+                    .await
+            }
+            "munge_concat" => {
+                let req: ConcatDatasetsRequest = serde_json::from_value(arguments)
+                    .map_err(|e| format!("Invalid arguments: {}", e))?;
+                session_server
+                    .munge_concat(Parameters(req))
+                    .await
+            }
+            "munge_group_by" => {
+                let req: GroupByRequest = serde_json::from_value(arguments)
+                    .map_err(|e| format!("Invalid arguments: {}", e))?;
+                session_server
+                    .munge_group_by(Parameters(req))
+                    .await
+            }
+            "munge_value_counts" => {
+                let req: ValueCountsRequest = serde_json::from_value(arguments)
+                    .map_err(|e| format!("Invalid arguments: {}", e))?;
+                session_server
+                    .munge_value_counts(Parameters(req))
+                    .await
+            }
+            "munge_pivot" => {
+                let req: PivotDatasetRequest = serde_json::from_value(arguments)
+                    .map_err(|e| format!("Invalid arguments: {}", e))?;
+                session_server
+                    .munge_pivot(Parameters(req))
+                    .await
+            }
+            "munge_melt" => {
+                let req: MeltDatasetRequest = serde_json::from_value(arguments)
+                    .map_err(|e| format!("Invalid arguments: {}", e))?;
+                session_server
+                    .munge_melt(Parameters(req))
+                    .await
+            }
+            "munge_drop_na" => {
+                let req: DropNaRequest = serde_json::from_value(arguments)
+                    .map_err(|e| format!("Invalid arguments: {}", e))?;
+                session_server
+                    .munge_drop_na(Parameters(req))
+                    .await
+            }
+            "munge_fill_na" => {
+                let req: FillNaRequest = serde_json::from_value(arguments)
+                    .map_err(|e| format!("Invalid arguments: {}", e))?;
+                session_server
+                    .munge_fill_na(Parameters(req))
+                    .await
+            }
+            "munge_deduplicate" => {
+                let req: DeduplicateRequest = serde_json::from_value(arguments)
+                    .map_err(|e| format!("Invalid arguments: {}", e))?;
+                session_server
+                    .munge_deduplicate(Parameters(req))
+                    .await
+            }
+            "munge_lag_lead" => {
+                let req: LagLeadRequest = serde_json::from_value(arguments)
+                    .map_err(|e| format!("Invalid arguments: {}", e))?;
+                session_server
+                    .munge_lag_lead(Parameters(req))
+                    .await
+            }
+            "munge_diff" => {
+                let req: DiffRequest = serde_json::from_value(arguments)
+                    .map_err(|e| format!("Invalid arguments: {}", e))?;
+                session_server
+                    .munge_diff(Parameters(req))
+                    .await
+            }
+            "munge_standardize" => {
+                let req: StandardizeRequest = serde_json::from_value(arguments)
+                    .map_err(|e| format!("Invalid arguments: {}", e))?;
+                session_server
+                    .munge_standardize(Parameters(req))
+                    .await
+            }
+            "munge_bin" => {
+                let req: BinColumnRequest = serde_json::from_value(arguments)
+                    .map_err(|e| format!("Invalid arguments: {}", e))?;
+                session_server
+                    .munge_bin(Parameters(req))
+                    .await
+            }
+            "munge_one_hot_encode" => {
+                let req: OneHotEncodeRequest = serde_json::from_value(arguments)
+                    .map_err(|e| format!("Invalid arguments: {}", e))?;
+                session_server
+                    .munge_one_hot_encode(Parameters(req))
                     .await
             }
             _ => {
@@ -5021,6 +5963,1129 @@ impl AnalyticsServer {
         }
 
         Ok(CallToolResult::success(vec![Content::text(output)]))
+    }
+
+    // ========================================================================
+    // Data Munging Tools
+    // ========================================================================
+
+    /// Filter rows in a dataset based on a condition.
+    #[tool(description = "Filter rows in a dataset based on a column condition. Supports operators: 'eq', 'ne', 'gt', 'ge', 'lt', 'le', 'contains', 'starts_with', 'ends_with'. The value is parsed based on the column type.")]
+    async fn munge_filter(
+        &self,
+        Parameters(request): Parameters<FilterDatasetRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let result = match filter(dataset, &request.column, &request.op, &request.value) {
+            Ok(ds) => ds,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Filter failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        let result_name = request.result_name.unwrap_or_else(|| request.dataset.clone());
+        let n_rows = result.nrows();
+        let n_cols = result.ncols();
+
+        drop(datasets);
+        let mut datasets = self.datasets.write().await;
+        datasets.insert(result_name.clone(), result);
+
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Filtered dataset saved as '{}' ({} rows, {} columns)",
+            result_name, n_rows, n_cols
+        ))]))
+    }
+
+    /// Select specific columns from a dataset.
+    #[tool(description = "Select (keep) specific columns from a dataset, dropping all others.")]
+    async fn munge_select(
+        &self,
+        Parameters(request): Parameters<SelectColumnsRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let cols: Vec<&str> = request.columns.iter().map(|s| s.as_str()).collect();
+        let result = match select(dataset, &cols) {
+            Ok(ds) => ds,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Select failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        let result_name = request.result_name.unwrap_or_else(|| request.dataset.clone());
+        let n_rows = result.nrows();
+        let n_cols = result.ncols();
+
+        drop(datasets);
+        let mut datasets = self.datasets.write().await;
+        datasets.insert(result_name.clone(), result);
+
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Selected {} columns, saved as '{}' ({} rows)",
+            n_cols, result_name, n_rows
+        ))]))
+    }
+
+    /// Drop columns from a dataset.
+    #[tool(description = "Drop (remove) specific columns from a dataset.")]
+    async fn munge_drop_columns(
+        &self,
+        Parameters(request): Parameters<DropColumnsRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let cols: Vec<&str> = request.columns.iter().map(|s| s.as_str()).collect();
+        let result = match drop_columns(dataset, &cols) {
+            Ok(ds) => ds,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Drop columns failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        let result_name = request.result_name.unwrap_or_else(|| request.dataset.clone());
+        let n_rows = result.nrows();
+        let n_cols = result.ncols();
+
+        drop(datasets);
+        let mut datasets = self.datasets.write().await;
+        datasets.insert(result_name.clone(), result);
+
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Dropped {} columns, saved as '{}' ({} rows, {} columns remaining)",
+            request.columns.len(), result_name, n_rows, n_cols
+        ))]))
+    }
+
+    /// Rename columns in a dataset.
+    #[tool(description = "Rename columns in a dataset. Provide pairs of [old_name, new_name].")]
+    async fn munge_rename(
+        &self,
+        Parameters(request): Parameters<RenameColumnsRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let renames: Vec<(&str, &str)> = request.renames.iter()
+            .filter_map(|pair| {
+                if pair.len() >= 2 {
+                    Some((pair[0].as_str(), pair[1].as_str()))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        let result = match rename(dataset, &renames) {
+            Ok(ds) => ds,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Rename failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        let result_name = request.result_name.unwrap_or_else(|| request.dataset.clone());
+
+        drop(datasets);
+        let mut datasets = self.datasets.write().await;
+        datasets.insert(result_name.clone(), result);
+
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Renamed {} columns, saved as '{}'",
+            renames.len(), result_name
+        ))]))
+    }
+
+    /// Sort a dataset by one or more columns.
+    #[tool(description = "Sort a dataset by one or more columns in ascending or descending order.")]
+    async fn munge_sort(
+        &self,
+        Parameters(request): Parameters<SortDatasetRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let by_cols: Vec<&str> = request.by.iter().map(|s| s.as_str()).collect();
+        let descending = request.descending.unwrap_or(false);
+        let descending_flags: Vec<bool> = vec![descending; by_cols.len()];
+
+        let result = match sort(dataset, &by_cols, &descending_flags) {
+            Ok(ds) => ds,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Sort failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        let result_name = request.result_name.unwrap_or_else(|| request.dataset.clone());
+        let n_rows = result.nrows();
+
+        drop(datasets);
+        let mut datasets = self.datasets.write().await;
+        datasets.insert(result_name.clone(), result);
+
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Sorted by {:?} ({}), saved as '{}' ({} rows)",
+            request.by,
+            if descending { "descending" } else { "ascending" },
+            result_name,
+            n_rows
+        ))]))
+    }
+
+    /// Join two datasets on key columns.
+    #[tool(description = "Join two datasets on key columns. Supports 'left', 'right', 'inner', and 'full' join types.")]
+    async fn munge_join(
+        &self,
+        Parameters(request): Parameters<JoinDatasetsRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let left_ds = match datasets.get(&request.left) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Left dataset '{}' not found.",
+                    request.left
+                ))]));
+            }
+        };
+
+        let right_ds = match datasets.get(&request.right) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Right dataset '{}' not found.",
+                    request.right
+                ))]));
+            }
+        };
+
+        let left_on: Vec<&str> = request.left_on.iter().map(|s| s.as_str()).collect();
+        let right_on_vec: Option<Vec<&str>> = request.right_on.as_ref()
+            .map(|v| v.iter().map(|s| s.as_str()).collect());
+        let right_on: Option<&[&str]> = right_on_vec.as_deref();
+        let suffix: Option<&str> = request.suffix.as_deref();
+
+        let join_type = request.join_type.as_deref().unwrap_or("left");
+        let result = match join_type {
+            "left" => left_join(left_ds, right_ds, &left_on, right_on, suffix),
+            "right" => right_join(left_ds, right_ds, &left_on, right_on, suffix),
+            "inner" => inner_join(left_ds, right_ds, &left_on, right_on, suffix),
+            "full" => full_join(left_ds, right_ds, &left_on, right_on, suffix),
+            _ => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Unknown join type: '{}'. Use 'left', 'right', 'inner', or 'full'.",
+                    join_type
+                ))]));
+            }
+        };
+
+        let result = match result {
+            Ok(ds) => ds,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Join failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        let result_name = request.result_name.unwrap_or_else(|| format!("{}_{}", request.left, request.right));
+        let n_rows = result.nrows();
+        let n_cols = result.ncols();
+
+        drop(datasets);
+        let mut datasets = self.datasets.write().await;
+        datasets.insert(result_name.clone(), result);
+
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "{} join completed, saved as '{}' ({} rows, {} columns)",
+            join_type, result_name, n_rows, n_cols
+        ))]))
+    }
+
+    /// Concatenate multiple datasets vertically.
+    #[tool(description = "Concatenate (row-bind) multiple datasets vertically. All datasets must have the same columns.")]
+    async fn munge_concat(
+        &self,
+        Parameters(request): Parameters<ConcatDatasetsRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let mut ds_list: Vec<&Dataset> = Vec::new();
+        for name in &request.datasets {
+            match datasets.get(name) {
+                Some(ds) => ds_list.push(ds),
+                None => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Dataset '{}' not found.",
+                        name
+                    ))]));
+                }
+            }
+        }
+
+        let result = match concat(&ds_list) {
+            Ok(ds) => ds,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Concat failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        let result_name = request.result_name.unwrap_or_else(|| "concatenated".to_string());
+        let n_rows = result.nrows();
+        let n_cols = result.ncols();
+
+        drop(datasets);
+        let mut datasets = self.datasets.write().await;
+        datasets.insert(result_name.clone(), result);
+
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Concatenated {} datasets, saved as '{}' ({} rows, {} columns)",
+            request.datasets.len(), result_name, n_rows, n_cols
+        ))]))
+    }
+
+    /// Group by columns and compute aggregations.
+    #[tool(description = "Group a dataset by columns and compute aggregations. Supported functions: 'count', 'sum', 'mean', 'median', 'min', 'max', 'std', 'var', 'first', 'last'.")]
+    async fn munge_group_by(
+        &self,
+        Parameters(request): Parameters<GroupByRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let by_cols: Vec<&str> = request.by.iter().map(|s| s.as_str()).collect();
+
+        // Parse aggregation specs
+        let mut agg_specs: Vec<AggSpec> = Vec::new();
+        for spec in &request.aggs {
+            if spec.len() >= 2 {
+                let col = &spec[0];
+                let func_str = spec[1].to_lowercase();
+                let agg_fn = match func_str.as_str() {
+                    "count" => AggFn::Count,
+                    "sum" => AggFn::Sum,
+                    "mean" => AggFn::Mean,
+                    "median" => AggFn::Median,
+                    "min" => AggFn::Min,
+                    "max" => AggFn::Max,
+                    "std" => AggFn::Std,
+                    "var" => AggFn::Var,
+                    "first" => AggFn::First,
+                    "last" => AggFn::Last,
+                    _ => {
+                        return Ok(CallToolResult::error(vec![Content::text(format!(
+                            "Unknown aggregation function: '{}'. Use: count, sum, mean, median, min, max, std, var, first, last.",
+                            func_str
+                        ))]));
+                    }
+                };
+                agg_specs.push(AggSpec::new(col, agg_fn));
+            }
+        }
+
+        if agg_specs.is_empty() {
+            return Ok(CallToolResult::error(vec![Content::text(
+                "At least one aggregation spec is required. Format: [[\"column\", \"function\"], ...]".to_string()
+            )]));
+        }
+
+        let result = match group_by(dataset, &by_cols, &agg_specs) {
+            Ok(ds) => ds,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Group by failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        let result_name = request.result_name.unwrap_or_else(|| format!("{}_grouped", request.dataset));
+        let n_rows = result.nrows();
+        let n_cols = result.ncols();
+
+        drop(datasets);
+        let mut datasets = self.datasets.write().await;
+        datasets.insert(result_name.clone(), result);
+
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Grouped by {:?} with {} aggregations, saved as '{}' ({} groups, {} columns)",
+            request.by, agg_specs.len(), result_name, n_rows, n_cols
+        ))]))
+    }
+
+    /// Compute value counts for a column.
+    #[tool(description = "Compute frequency counts for unique values in a column. Optionally normalize to percentages.")]
+    async fn munge_value_counts(
+        &self,
+        Parameters(request): Parameters<ValueCountsRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let result = match value_counts(dataset, &request.column) {
+            Ok(ds) => ds,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Value counts failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        let result_name = request.result_name.unwrap_or_else(|| format!("{}_value_counts", request.column));
+        let n_rows = result.nrows();
+
+        // Format output for display
+        let mut output = format!(
+            "Value Counts for '{}'\n{}\n",
+            request.column, "=".repeat(40)
+        );
+
+        // Show first few rows
+        let show_n = 10.min(n_rows);
+        output.push_str(&format!("Showing top {} of {} unique values:\n\n", show_n, n_rows));
+
+        let df = result.df();
+        for i in 0..show_n {
+            let val_col = df.column(&request.column).ok();
+            let count_col = df.column("count").ok();
+
+            if let (Some(v), Some(c)) = (val_col, count_col) {
+                if let (Ok(val), Ok(cnt)) = (v.get(i), c.get(i)) {
+                    output.push_str(&format!("  {:?}: {}\n", val, cnt));
+                }
+            }
+        }
+
+        drop(datasets);
+        let mut datasets = self.datasets.write().await;
+        datasets.insert(result_name.clone(), result);
+
+        output.push_str(&format!("\nFull result saved as '{}'", result_name));
+
+        Ok(CallToolResult::success(vec![Content::text(output)]))
+    }
+
+    /// Pivot a dataset from long to wide format.
+    #[tool(description = "Pivot a dataset from long to wide format. Index columns remain as rows, 'on' column values become new column names, and 'values' column fills those columns.")]
+    async fn munge_pivot(
+        &self,
+        Parameters(request): Parameters<PivotDatasetRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let index: Vec<&str> = request.index.iter().map(|s| s.as_str()).collect();
+
+        let result = match pivot(dataset, &index, &request.on, &request.values) {
+            Ok(ds) => ds,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Pivot failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        let result_name = request.result_name.unwrap_or_else(|| format!("{}_pivoted", request.dataset));
+        let n_rows = result.nrows();
+        let n_cols = result.ncols();
+
+        drop(datasets);
+        let mut datasets = self.datasets.write().await;
+        datasets.insert(result_name.clone(), result);
+
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Pivoted to wide format, saved as '{}' ({} rows, {} columns)",
+            result_name, n_rows, n_cols
+        ))]))
+    }
+
+    /// Melt a dataset from wide to long format.
+    #[tool(description = "Melt a dataset from wide to long format. ID variables remain as-is, value variables are unpivoted into rows.")]
+    async fn munge_melt(
+        &self,
+        Parameters(request): Parameters<MeltDatasetRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let id_vars: Vec<&str> = request.id_vars.iter().map(|s| s.as_str()).collect();
+        let value_vars: Vec<&str> = request.value_vars.iter().map(|s| s.as_str()).collect();
+        let variable_name = request.variable_name.as_deref().unwrap_or("variable");
+        let value_name = request.value_name.as_deref().unwrap_or("value");
+
+        let result = match melt(dataset, &id_vars, &value_vars, variable_name, value_name) {
+            Ok(ds) => ds,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Melt failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        let result_name = request.result_name.unwrap_or_else(|| format!("{}_melted", request.dataset));
+        let n_rows = result.nrows();
+        let n_cols = result.ncols();
+
+        drop(datasets);
+        let mut datasets = self.datasets.write().await;
+        datasets.insert(result_name.clone(), result);
+
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Melted to long format, saved as '{}' ({} rows, {} columns)",
+            result_name, n_rows, n_cols
+        ))]))
+    }
+
+    /// Drop rows with null values.
+    #[tool(description = "Drop rows containing null values. Use 'any' to drop if any column is null, 'all' to drop only if all columns are null.")]
+    async fn munge_drop_na(
+        &self,
+        Parameters(request): Parameters<DropNaRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let columns: Option<Vec<&str>> = request.columns.as_ref()
+            .map(|v| v.iter().map(|s| s.as_str()).collect());
+        let how = request.how.as_deref().unwrap_or("any");
+
+        let orig_rows = dataset.nrows();
+        let result = match drop_na(dataset, columns.as_deref(), how) {
+            Ok(ds) => ds,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Drop NA failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        let result_name = request.result_name.unwrap_or_else(|| request.dataset.clone());
+        let n_rows = result.nrows();
+        let dropped = orig_rows - n_rows;
+
+        drop(datasets);
+        let mut datasets = self.datasets.write().await;
+        datasets.insert(result_name.clone(), result);
+
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Dropped {} rows with null values, saved as '{}' ({} rows remaining)",
+            dropped, result_name, n_rows
+        ))]))
+    }
+
+    /// Fill null values using a strategy.
+    #[tool(description = "Fill null values using a strategy: 'mean', 'median', 'mode', 'forward', 'backward', or a constant value.")]
+    async fn munge_fill_na(
+        &self,
+        Parameters(request): Parameters<FillNaRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let columns: Option<Vec<&str>> = request.columns.as_ref()
+            .map(|v| v.iter().map(|s| s.as_str()).collect());
+
+        let strategy = match request.strategy.to_lowercase().as_str() {
+            "mean" => FillStrategy::Mean,
+            "median" => FillStrategy::Median,
+            "forward" => FillStrategy::Forward,
+            "backward" => FillStrategy::Backward,
+            "zero" => FillStrategy::Zero,
+            val => {
+                // Try to use as a constant value string
+                FillStrategy::Constant(val.to_string())
+            }
+        };
+
+        let result = match fill_na(dataset, columns.as_deref(), strategy) {
+            Ok(ds) => ds,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Fill NA failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        let result_name = request.result_name.unwrap_or_else(|| request.dataset.clone());
+
+        drop(datasets);
+        let mut datasets = self.datasets.write().await;
+        datasets.insert(result_name.clone(), result);
+
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Filled null values with strategy '{}', saved as '{}'",
+            request.strategy, result_name
+        ))]))
+    }
+
+    /// Remove duplicate rows.
+    #[tool(description = "Remove duplicate rows from a dataset. Specify which duplicate to keep: 'first', 'last', or 'none'.")]
+    async fn munge_deduplicate(
+        &self,
+        Parameters(request): Parameters<DeduplicateRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let columns: Option<Vec<&str>> = request.columns.as_ref()
+            .map(|v| v.iter().map(|s| s.as_str()).collect());
+        let keep = request.keep.as_deref().unwrap_or("first");
+
+        let orig_rows = dataset.nrows();
+        let result = match deduplicate(dataset, columns.as_deref(), keep) {
+            Ok(ds) => ds,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Deduplicate failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        let result_name = request.result_name.unwrap_or_else(|| request.dataset.clone());
+        let n_rows = result.nrows();
+        let removed = orig_rows - n_rows;
+
+        drop(datasets);
+        let mut datasets = self.datasets.write().await;
+        datasets.insert(result_name.clone(), result);
+
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Removed {} duplicate rows, saved as '{}' ({} rows remaining)",
+            removed, result_name, n_rows
+        ))]))
+    }
+
+    /// Create lag or lead columns for time series data.
+    #[tool(description = "Create lag or lead columns for time series or panel data. Lag shifts values forward (past values), lead shifts values backward (future values).")]
+    async fn munge_lag_lead(
+        &self,
+        Parameters(request): Parameters<LagLeadRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let periods = request.periods.unsigned_abs() as usize;
+        let group_by_cols: Option<Vec<&str>> = request.group_by.as_ref()
+            .map(|v| v.iter().map(|s| s.as_str()).collect());
+
+        let direction = request.direction.as_deref().unwrap_or("lag");
+        let result = match direction {
+            "lag" => lag(dataset, &request.column, periods, group_by_cols.as_deref()),
+            "lead" => lead(dataset, &request.column, periods, group_by_cols.as_deref()),
+            _ => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Unknown direction: '{}'. Use 'lag' or 'lead'.",
+                    direction
+                ))]));
+            }
+        };
+
+        let result = match result {
+            Ok(ds) => ds,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Lag/lead failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        let result_name = request.result_name.unwrap_or_else(|| request.dataset.clone());
+        let new_col = format!("{}_{}{}", request.column, direction, periods);
+
+        drop(datasets);
+        let mut datasets = self.datasets.write().await;
+        datasets.insert(result_name.clone(), result);
+
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Created '{}' column, saved as '{}'",
+            new_col, result_name
+        ))]))
+    }
+
+    /// Standardize or normalize columns.
+    #[tool(description = "Standardize (z-score) or normalize (0-1 range) numeric columns. Standardize subtracts mean and divides by std. Normalize scales to [0, 1].")]
+    async fn munge_standardize(
+        &self,
+        Parameters(request): Parameters<StandardizeRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let cols: Vec<&str> = request.columns.iter().map(|s| s.as_str()).collect();
+        let method = request.method.as_deref().unwrap_or("standardize");
+
+        let result = match method {
+            "standardize" => standardize(dataset, &cols),
+            "normalize" => normalize(dataset, &cols),
+            _ => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Unknown method: '{}'. Use 'standardize' or 'normalize'.",
+                    method
+                ))]));
+            }
+        };
+
+        let result = match result {
+            Ok(ds) => ds,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "{} failed: {}",
+                    method, e
+                ))]));
+            }
+        };
+
+        let result_name = request.result_name.unwrap_or_else(|| request.dataset.clone());
+
+        drop(datasets);
+        let mut datasets = self.datasets.write().await;
+        datasets.insert(result_name.clone(), result);
+
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Applied {} to {} columns, saved as '{}'",
+            method, request.columns.len(), result_name
+        ))]))
+    }
+
+    /// Bin a continuous variable into discrete categories.
+    #[tool(description = "Bin a continuous variable into discrete categories. Strategies: 'uniform' (equal width), 'quantile' (equal frequency), or 'custom' (specify break points).")]
+    async fn munge_bin(
+        &self,
+        Parameters(request): Parameters<BinColumnRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let strategy = match request.strategy.to_lowercase().as_str() {
+            "uniform" | "equal_width" => {
+                let n_bins = request.bins.first().map(|&v| v as usize).unwrap_or(5);
+                BinStrategy::EqualWidth(n_bins)
+            }
+            "quantile" => {
+                let n_bins = request.bins.first().map(|&v| v as usize).unwrap_or(5);
+                BinStrategy::Quantile(n_bins)
+            }
+            "custom" => {
+                BinStrategy::Custom(request.bins.clone())
+            }
+            _ => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Unknown strategy: '{}'. Use 'uniform', 'quantile', or 'custom'.",
+                    request.strategy
+                ))]));
+            }
+        };
+
+        let labels = request.labels.as_ref().map(|v| v.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+
+        let result = match bin(dataset, &request.column, strategy, labels.as_deref()) {
+            Ok(ds) => ds,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Bin failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        let result_name = request.result_name.unwrap_or_else(|| request.dataset.clone());
+
+        drop(datasets);
+        let mut datasets = self.datasets.write().await;
+        datasets.insert(result_name.clone(), result);
+
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Binned '{}' using {} strategy, saved as '{}'",
+            request.column, request.strategy, result_name
+        ))]))
+    }
+
+    /// One-hot encode a categorical column.
+    #[tool(description = "One-hot encode a categorical column, creating binary indicator columns for each category. Use drop_first=true to avoid multicollinearity in regression.")]
+    async fn munge_one_hot_encode(
+        &self,
+        Parameters(request): Parameters<OneHotEncodeRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let drop_first = request.drop_first.unwrap_or(false);
+
+        let result = match one_hot_encode(dataset, &request.column, drop_first) {
+            Ok(ds) => ds,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "One-hot encode failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        let result_name = request.result_name.unwrap_or_else(|| request.dataset.clone());
+        let n_cols = result.ncols();
+
+        drop(datasets);
+        let mut datasets = self.datasets.write().await;
+        datasets.insert(result_name.clone(), result);
+
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "One-hot encoded '{}' (drop_first={}), saved as '{}' ({} total columns)",
+            request.column, drop_first, result_name, n_cols
+        ))]))
+    }
+
+    /// Compute differences or percent changes.
+    #[tool(description = "Compute differences or percent changes for a column. Useful for time series and panel data analysis.")]
+    async fn munge_diff(
+        &self,
+        Parameters(request): Parameters<DiffRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let periods = request.periods.unwrap_or(1) as usize;
+        let diff_type = request.diff_type.as_deref().unwrap_or("diff");
+
+        let result = match diff_type {
+            "diff" => diff(dataset, &request.column, periods),
+            "pct_change" => pct_change(dataset, &request.column, periods),
+            _ => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Unknown diff type: '{}'. Use 'diff' or 'pct_change'.",
+                    diff_type
+                ))]));
+            }
+        };
+
+        let result = match result {
+            Ok(ds) => ds,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Diff/pct_change failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        let result_name = request.result_name.unwrap_or_else(|| request.dataset.clone());
+        let new_col = format!("{}_{}{}", request.column, diff_type, periods);
+
+        drop(datasets);
+        let mut datasets = self.datasets.write().await;
+        datasets.insert(result_name.clone(), result);
+
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Created '{}' column, saved as '{}'",
+            new_col, result_name
+        ))]))
+    }
+
+    /// Sample rows from a dataset.
+    #[tool(description = "Randomly sample rows from a dataset. Useful for creating training/test splits or working with large datasets.")]
+    async fn munge_sample(
+        &self,
+        Parameters(request): Parameters<SampleDatasetRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let replace = request.replace.unwrap_or(false);
+        let seed = request.seed;
+
+        let result = match sample(dataset, Some(request.n), None, replace, seed) {
+            Ok(ds) => ds,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Sample failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        let result_name = request.result_name.unwrap_or_else(|| format!("{}_sample", request.dataset));
+        let n_rows = result.nrows();
+
+        drop(datasets);
+        let mut datasets = self.datasets.write().await;
+        datasets.insert(result_name.clone(), result);
+
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Sampled {} rows (replace={}), saved as '{}'",
+            n_rows, replace, result_name
+        ))]))
+    }
+
+    /// Create a new column by computation.
+    #[tool(description = "Create a new column by applying arithmetic operations or functions. Supports: arithmetic (+, -, *, /), functions (log, exp, sqrt, abs, square), or constant values.")]
+    async fn munge_mutate(
+        &self,
+        Parameters(request): Parameters<MutateColumnRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let expr = match request.expr_type.as_str() {
+            "arithmetic" => {
+                let op = match request.operator.as_deref() {
+                    Some("+") => ArithOp::Add,
+                    Some("-") => ArithOp::Sub,
+                    Some("*") => ArithOp::Mul,
+                    Some("/") => ArithOp::Div,
+                    Some(other) => {
+                        return Ok(CallToolResult::error(vec![Content::text(format!(
+                            "Unknown operator: '{}'. Use '+', '-', '*', or '/'.",
+                            other
+                        ))]));
+                    }
+                    None => {
+                        return Ok(CallToolResult::error(vec![Content::text(
+                            "Arithmetic expressions require an 'operator' field.".to_string()
+                        )]));
+                    }
+                };
+
+                let right = request.right.as_deref().ok_or_else(|| {
+                    McpError::invalid_request("Arithmetic expressions require a 'right' field", None)
+                })?;
+
+                MutateExpr::Arithmetic(request.left.clone(), op, right.to_string())
+            }
+            "function" => {
+                let func = request.operator.as_deref().unwrap_or("log");
+                MutateExpr::Function(func.to_string(), request.left.clone())
+            }
+            "constant" => {
+                MutateExpr::Constant(request.left.clone())
+            }
+            other => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Unknown expression type: '{}'. Use 'arithmetic', 'function', or 'constant'.",
+                    other
+                ))]));
+            }
+        };
+
+        let result = match mutate(dataset, &request.new_column, expr) {
+            Ok(ds) => ds,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Mutate failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        let result_name = request.result_name.unwrap_or_else(|| request.dataset.clone());
+
+        drop(datasets);
+        let mut datasets = self.datasets.write().await;
+        datasets.insert(result_name.clone(), result);
+
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Created column '{}', saved as '{}'",
+            request.new_column, result_name
+        ))]))
     }
 
     /// Export the current analysis session to a JSON file.

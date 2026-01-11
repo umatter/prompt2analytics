@@ -10,6 +10,7 @@ rust-version.workspace = true
 [dependencies]
 # DataFrame and data manipulation
 polars.workspace = true
+polars-ops.workspace = true
 
 # Statistics and numerics
 ndarray.workspace = true

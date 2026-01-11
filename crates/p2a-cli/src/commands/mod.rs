@@ -1,6 +1,7 @@
 //! Command implementations for the p2a CLI
 
 pub mod data;
+pub mod munge;
 pub mod regression;
 pub mod panel;
 pub mod causal;
