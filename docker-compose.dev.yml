@@ -1,0 +1,58 @@
+# Docker Compose development override
+# Usage: docker compose -f docker-compose.yml -f docker-compose.dev.yml up
+#
+# Features:
+# - Volume mounts for hot reload
+# - Development commands
+# - Exposed debug ports
+
+services:
+  # Backend with cargo-watch for hot reload
+  backend:
+    build:
+      context: .
+      dockerfile: docker/backend.Dockerfile
+      target: builder
+    volumes:
+      - ./crates/p2a-core:/app/crates/p2a-core:cached
+      - ./crates/p2a-mcp:/app/crates/p2a-mcp:cached
+      - cargo-cache:/usr/local/cargo/registry
+      - target-cache:/app/target
+    command: >
+      sh -c "cargo install cargo-watch 2>/dev/null || true &&
+             cargo watch -x 'run -p p2a-mcp --features full -- --transport http --host 0.0.0.0 --port 8080'"
+    environment:
+      - RUST_LOG=debug
+      - RUST_BACKTRACE=1
+    # Remove health check in dev (cargo-watch needs time to rebuild)
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 60s
+      timeout: 30s
+      start_period: 120s
+      retries: 5
+
+  # Frontend with Next.js dev server
+  frontend:
+    build:
+      context: .
+      dockerfile: docker/frontend.Dockerfile
+      target: deps
+    volumes:
+      - ./p2a-web:/app:cached
+      - node-modules:/app/node_modules
+    command: npm run dev
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8080
+      - WATCHPACK_POLLING=true
+    depends_on:
+      - backend
+    # Less strict dependency in dev mode
+    # depends_on:
+    #   backend:
+    #     condition: service_started
+
+volumes:
+  cargo-cache:
+  target-cache:
+  node-modules:

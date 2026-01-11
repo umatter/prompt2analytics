@@ -1,0 +1,71 @@
+# Docker Compose for prompt2analytics
+# Usage:
+#   docker compose up --build              # Build and run all services
+#   docker compose --profile with-ollama up --build  # Include local Ollama LLM
+#   docker compose down                    # Stop all services
+
+services:
+  # Rust backend (p2a-mcp with HTTP transport)
+  backend:
+    build:
+      context: .
+      dockerfile: docker/backend.Dockerfile
+    container_name: p2a-backend
+    ports:
+      - "8080:8080"
+    environment:
+      - RUST_LOG=info
+      - RUST_BACKTRACE=1
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 5s
+      retries: 3
+    networks:
+      - p2a-network
+
+  # Next.js frontend (p2a-web)
+  frontend:
+    build:
+      context: .
+      dockerfile: docker/frontend.Dockerfile
+    container_name: p2a-frontend
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://backend:8080
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - p2a-network
+
+  # Optional: Local LLM with Ollama
+  # Activate with: docker compose --profile with-ollama up
+  ollama:
+    image: ollama/ollama:latest
+    container_name: p2a-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    environment:
+      - OLLAMA_HOST=0.0.0.0
+    profiles:
+      - with-ollama
+    restart: unless-stopped
+    networks:
+      - p2a-network
+    # Note: After starting, pull a model with:
+    # docker exec p2a-ollama ollama pull llama3.2
+
+networks:
+  p2a-network:
+    driver: bridge
+
+volumes:
+  ollama_data:
+    driver: local

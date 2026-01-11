@@ -1198,6 +1198,596 @@ impl AnalyticsServer {
         }
     }
 
+    /// Create a new AnalyticsServer with existing dataset storage.
+    /// Used for HTTP transport where each session has its own dataset store.
+    #[cfg(feature = "http")]
+    pub fn with_session(session: &crate::session::Session) -> Self {
+        Self {
+            datasets: session.datasets.clone(),
+            global_seed: session.global_seed.clone(),
+            tool_router: Self::tool_router(),
+        }
+    }
+
+    /// List available tools for HTTP API discovery.
+    #[cfg(feature = "http")]
+    pub fn list_tools(&self) -> Vec<crate::transport::http::ToolDefinition> {
+        use crate::transport::http::ToolDefinition;
+
+        // Tool definitions with their descriptions and input schemas
+        // This is a static list matching the #[tool] definitions
+        vec![
+            // Data management tools
+            ToolDefinition {
+                name: "list_datasets".to_string(),
+                description: "List all currently loaded datasets with their basic information (name, dimensions, column types).".to_string(),
+                input_schema: serde_json::json!({"type": "object", "properties": {}}),
+            },
+            ToolDefinition {
+                name: "load_dataset".to_string(),
+                description: "Load a dataset from a file. Supports CSV, Parquet, Excel, Stata, and SAS formats.".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "Path to the data file"},
+                        "name": {"type": "string", "description": "Optional name for the dataset"}
+                    },
+                    "required": ["path"]
+                }),
+            },
+            ToolDefinition {
+                name: "describe_dataset".to_string(),
+                description: "Compute descriptive statistics for all columns in a dataset.".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "dataset": {"type": "string", "description": "Name of the dataset"}
+                    },
+                    "required": ["dataset"]
+                }),
+            },
+            ToolDefinition {
+                name: "head_dataset".to_string(),
+                description: "Show the first N rows of a dataset.".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "dataset": {"type": "string", "description": "Name of the dataset"},
+                        "n": {"type": "integer", "description": "Number of rows (default: 5)"}
+                    },
+                    "required": ["dataset"]
+                }),
+            },
+            ToolDefinition {
+                name: "compute_correlation".to_string(),
+                description: "Compute correlation matrix for numeric columns.".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "dataset": {"type": "string", "description": "Name of the dataset"}
+                    },
+                    "required": ["dataset"]
+                }),
+            },
+            // Regression tools
+            ToolDefinition {
+                name: "regression_ols".to_string(),
+                description: "Run OLS regression with robust standard errors (HC0-HC3).".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "dataset": {"type": "string"},
+                        "y": {"type": "string", "description": "Dependent variable"},
+                        "x": {"type": "array", "items": {"type": "string"}, "description": "Independent variables"}
+                    },
+                    "required": ["dataset", "y", "x"]
+                }),
+            },
+            ToolDefinition {
+                name: "regression_diagnostics".to_string(),
+                description: "Run regression diagnostics (Jarque-Bera, Breusch-Pagan, Durbin-Watson, VIF).".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "dataset": {"type": "string"},
+                        "y": {"type": "string"},
+                        "x": {"type": "array", "items": {"type": "string"}}
+                    },
+                    "required": ["dataset", "y", "x"]
+                }),
+            },
+            ToolDefinition {
+                name: "regression_clustered".to_string(),
+                description: "Run OLS with clustered standard errors.".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "dataset": {"type": "string"},
+                        "y": {"type": "string"},
+                        "x": {"type": "array", "items": {"type": "string"}},
+                        "cluster1": {"type": "string"},
+                        "cluster2": {"type": "string"}
+                    },
+                    "required": ["dataset", "y", "x", "cluster1"]
+                }),
+            },
+            // Panel econometrics
+            ToolDefinition {
+                name: "panel_fixed_effects".to_string(),
+                description: "Run fixed effects panel regression.".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "dataset": {"type": "string"},
+                        "y": {"type": "string"},
+                        "x": {"type": "array", "items": {"type": "string"}},
+                        "entity_col": {"type": "string"},
+                        "time_col": {"type": "string"}
+                    },
+                    "required": ["dataset", "y", "x", "entity_col"]
+                }),
+            },
+            ToolDefinition {
+                name: "panel_random_effects".to_string(),
+                description: "Run random effects panel regression.".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "dataset": {"type": "string"},
+                        "y": {"type": "string"},
+                        "x": {"type": "array", "items": {"type": "string"}},
+                        "entity_col": {"type": "string"}
+                    },
+                    "required": ["dataset", "y", "x", "entity_col"]
+                }),
+            },
+            ToolDefinition {
+                name: "panel_hdfe".to_string(),
+                description: "Run high-dimensional fixed effects regression.".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "dataset": {"type": "string"},
+                        "y": {"type": "string"},
+                        "x": {"type": "array", "items": {"type": "string"}},
+                        "fe": {"type": "array", "items": {"type": "string"}}
+                    },
+                    "required": ["dataset", "y", "x", "fe"]
+                }),
+            },
+            ToolDefinition {
+                name: "hausman_test".to_string(),
+                description: "Perform Hausman test for FE vs RE specification.".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "dataset": {"type": "string"},
+                        "y": {"type": "string"},
+                        "x": {"type": "array", "items": {"type": "string"}},
+                        "entity_col": {"type": "string"}
+                    },
+                    "required": ["dataset", "y", "x", "entity_col"]
+                }),
+            },
+            // Causal inference
+            ToolDefinition {
+                name: "iv_2sls".to_string(),
+                description: "Run two-stage least squares regression.".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "dataset": {"type": "string"},
+                        "y": {"type": "string"},
+                        "endogenous": {"type": "array", "items": {"type": "string"}},
+                        "instruments": {"type": "array", "items": {"type": "string"}},
+                        "exogenous": {"type": "array", "items": {"type": "string"}}
+                    },
+                    "required": ["dataset", "y", "endogenous", "instruments"]
+                }),
+            },
+            ToolDefinition {
+                name: "iv_first_stage".to_string(),
+                description: "Run first-stage diagnostics for IV regression.".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "dataset": {"type": "string"},
+                        "endogenous": {"type": "string"},
+                        "instruments": {"type": "array", "items": {"type": "string"}},
+                        "exogenous": {"type": "array", "items": {"type": "string"}}
+                    },
+                    "required": ["dataset", "endogenous", "instruments"]
+                }),
+            },
+            ToolDefinition {
+                name: "diff_in_diff".to_string(),
+                description: "Run difference-in-differences analysis.".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "dataset": {"type": "string"},
+                        "y": {"type": "string"},
+                        "treatment_col": {"type": "string"},
+                        "time_col": {"type": "string"},
+                        "treatment_time": {"type": "number"}
+                    },
+                    "required": ["dataset", "y", "treatment_col", "time_col", "treatment_time"]
+                }),
+            },
+            // Discrete choice
+            ToolDefinition {
+                name: "logit".to_string(),
+                description: "Run logistic regression.".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "dataset": {"type": "string"},
+                        "y": {"type": "string"},
+                        "x": {"type": "array", "items": {"type": "string"}}
+                    },
+                    "required": ["dataset", "y", "x"]
+                }),
+            },
+            ToolDefinition {
+                name: "probit".to_string(),
+                description: "Run probit regression.".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "dataset": {"type": "string"},
+                        "y": {"type": "string"},
+                        "x": {"type": "array", "items": {"type": "string"}}
+                    },
+                    "required": ["dataset", "y", "x"]
+                }),
+            },
+            // Time series
+            ToolDefinition {
+                name: "ts_var".to_string(),
+                description: "Estimate Vector Autoregression model.".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "dataset": {"type": "string"},
+                        "columns": {"type": "array", "items": {"type": "string"}},
+                        "lags": {"type": "integer"}
+                    },
+                    "required": ["dataset", "columns", "lags"]
+                }),
+            },
+            ToolDefinition {
+                name: "ts_arima_fit".to_string(),
+                description: "Fit ARIMA model to time series.".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "dataset": {"type": "string"},
+                        "column": {"type": "string"},
+                        "p": {"type": "integer"},
+                        "d": {"type": "integer"},
+                        "q": {"type": "integer"}
+                    },
+                    "required": ["dataset", "column", "p", "d", "q"]
+                }),
+            },
+            // Machine learning
+            ToolDefinition {
+                name: "ml_kmeans".to_string(),
+                description: "Run K-means clustering.".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "dataset": {"type": "string"},
+                        "columns": {"type": "array", "items": {"type": "string"}},
+                        "k": {"type": "integer"}
+                    },
+                    "required": ["dataset", "columns", "k"]
+                }),
+            },
+            ToolDefinition {
+                name: "ml_pca".to_string(),
+                description: "Run Principal Component Analysis.".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "dataset": {"type": "string"},
+                        "columns": {"type": "array", "items": {"type": "string"}},
+                        "n_components": {"type": "integer"}
+                    },
+                    "required": ["dataset", "columns"]
+                }),
+            },
+            // Visualization
+            ToolDefinition {
+                name: "viz_histogram".to_string(),
+                description: "Create a histogram plot.".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "dataset": {"type": "string"},
+                        "column": {"type": "string"},
+                        "bins": {"type": "integer"}
+                    },
+                    "required": ["dataset", "column"]
+                }),
+            },
+            ToolDefinition {
+                name: "viz_scatter".to_string(),
+                description: "Create a scatter plot.".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "dataset": {"type": "string"},
+                        "x": {"type": "string"},
+                        "y": {"type": "string"}
+                    },
+                    "required": ["dataset", "x", "y"]
+                }),
+            },
+            ToolDefinition {
+                name: "viz_line".to_string(),
+                description: "Create a line chart.".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "dataset": {"type": "string"},
+                        "x": {"type": "string"},
+                        "y": {"type": "string"}
+                    },
+                    "required": ["dataset", "x", "y"]
+                }),
+            },
+            ToolDefinition {
+                name: "viz_heatmap".to_string(),
+                description: "Create a correlation heatmap.".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "dataset": {"type": "string"}
+                    },
+                    "required": ["dataset"]
+                }),
+            },
+            // Database tools
+            ToolDefinition {
+                name: "db_sqlite_query".to_string(),
+                description: "Execute SQL query on SQLite database.".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "database": {"type": "string"},
+                        "query": {"type": "string"},
+                        "name": {"type": "string"}
+                    },
+                    "required": ["database", "query"]
+                }),
+            },
+            ToolDefinition {
+                name: "db_duckdb_query".to_string(),
+                description: "Execute SQL query on DuckDB database.".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "database": {"type": "string"},
+                        "query": {"type": "string"},
+                        "name": {"type": "string"}
+                    },
+                    "required": ["database", "query"]
+                }),
+            },
+        ]
+    }
+
+    /// Call a tool by name with session context (for HTTP transport).
+    /// This creates a session-scoped server and dispatches the tool call.
+    #[cfg(feature = "http")]
+    pub async fn call_tool_with_session(
+        &self,
+        tool_name: &str,
+        arguments: serde_json::Value,
+        session: &crate::session::Session,
+    ) -> Result<crate::transport::http::ToolResult, String> {
+        use crate::transport::http::{ContentItem, ToolResult};
+
+        // Create a session-scoped server instance that shares the session's datasets
+        let session_server = Self::with_session(session);
+
+        // Helper to convert CallToolResult to our ToolResult
+        fn convert_result(call_result: CallToolResult) -> ToolResult {
+            let is_error = call_result.is_error.unwrap_or(false);
+            let content: Vec<ContentItem> = call_result
+                .content
+                .into_iter()
+                .filter_map(|c| {
+                    // Content in rmcp is an Annotated<RawContent>
+                    // We need to access the inner raw content
+                    match &c.raw {
+                        RawContent::Text(text_content) => Some(ContentItem::Text {
+                            text: text_content.text.clone(),
+                        }),
+                        RawContent::Image(img) => Some(ContentItem::Image {
+                            data: img.data.clone(),
+                            mime_type: img.mime_type.clone(),
+                        }),
+                        _ => None,
+                    }
+                })
+                .collect();
+
+            let error = if is_error {
+                content.first().and_then(|c| {
+                    if let ContentItem::Text { text } = c {
+                        Some(text.clone())
+                    } else {
+                        None
+                    }
+                })
+            } else {
+                None
+            };
+
+            ToolResult {
+                success: !is_error,
+                content,
+                error,
+            }
+        }
+
+        // Parse arguments and dispatch to the appropriate tool method
+        // For now, we support a subset of the most commonly used tools
+        let result = match tool_name {
+            "list_datasets" => session_server.list_datasets().await,
+            "load_dataset" => {
+                let req: LoadDatasetRequest = serde_json::from_value(arguments)
+                    .map_err(|e| format!("Invalid arguments: {}", e))?;
+                session_server
+                    .load_dataset(Parameters(req))
+                    .await
+            }
+            "describe_dataset" => {
+                let req: DescribeDatasetRequest = serde_json::from_value(arguments)
+                    .map_err(|e| format!("Invalid arguments: {}", e))?;
+                session_server
+                    .describe_dataset(Parameters(req))
+                    .await
+            }
+            "head_dataset" => {
+                let req: HeadDatasetRequest = serde_json::from_value(arguments)
+                    .map_err(|e| format!("Invalid arguments: {}", e))?;
+                session_server
+                    .head_dataset(Parameters(req))
+                    .await
+            }
+            "compute_correlation" => {
+                let req: CorrelationRequest = serde_json::from_value(arguments)
+                    .map_err(|e| format!("Invalid arguments: {}", e))?;
+                session_server
+                    .compute_correlation(Parameters(req))
+                    .await
+            }
+            "regression_ols" => {
+                let req: OlsRequest = serde_json::from_value(arguments)
+                    .map_err(|e| format!("Invalid arguments: {}", e))?;
+                session_server
+                    .regression_ols(Parameters(req))
+                    .await
+            }
+            "regression_diagnostics" => {
+                let req: DiagnosticsRequest = serde_json::from_value(arguments)
+                    .map_err(|e| format!("Invalid arguments: {}", e))?;
+                session_server
+                    .regression_diagnostics(Parameters(req))
+                    .await
+            }
+            "panel_fixed_effects" => {
+                let req: PanelFERequest = serde_json::from_value(arguments)
+                    .map_err(|e| format!("Invalid arguments: {}", e))?;
+                session_server
+                    .panel_fixed_effects(Parameters(req))
+                    .await
+            }
+            "panel_random_effects" => {
+                let req: PanelRERequest = serde_json::from_value(arguments)
+                    .map_err(|e| format!("Invalid arguments: {}", e))?;
+                session_server
+                    .panel_random_effects(Parameters(req))
+                    .await
+            }
+            "iv_2sls" => {
+                let req: IV2SLSRequest = serde_json::from_value(arguments)
+                    .map_err(|e| format!("Invalid arguments: {}", e))?;
+                session_server
+                    .iv_2sls(Parameters(req))
+                    .await
+            }
+            "diff_in_diff" => {
+                let req: DiDRequest = serde_json::from_value(arguments)
+                    .map_err(|e| format!("Invalid arguments: {}", e))?;
+                session_server
+                    .diff_in_diff(Parameters(req))
+                    .await
+            }
+            "logit" => {
+                let req: LogitRequest = serde_json::from_value(arguments)
+                    .map_err(|e| format!("Invalid arguments: {}", e))?;
+                session_server
+                    .logit(Parameters(req))
+                    .await
+            }
+            "probit" => {
+                let req: ProbitRequest = serde_json::from_value(arguments)
+                    .map_err(|e| format!("Invalid arguments: {}", e))?;
+                session_server
+                    .probit(Parameters(req))
+                    .await
+            }
+            "ml_kmeans" => {
+                let req: KMeansRequest = serde_json::from_value(arguments)
+                    .map_err(|e| format!("Invalid arguments: {}", e))?;
+                session_server
+                    .ml_kmeans(Parameters(req))
+                    .await
+            }
+            "ml_pca" => {
+                let req: PCARequest = serde_json::from_value(arguments)
+                    .map_err(|e| format!("Invalid arguments: {}", e))?;
+                session_server
+                    .ml_pca(Parameters(req))
+                    .await
+            }
+            "viz_histogram" => {
+                let req: HistogramRequest = serde_json::from_value(arguments)
+                    .map_err(|e| format!("Invalid arguments: {}", e))?;
+                session_server
+                    .viz_histogram(Parameters(req))
+                    .await
+            }
+            "viz_scatter" => {
+                let req: ScatterPlotRequest = serde_json::from_value(arguments)
+                    .map_err(|e| format!("Invalid arguments: {}", e))?;
+                session_server
+                    .viz_scatter(Parameters(req))
+                    .await
+            }
+            "viz_line" => {
+                let req: LineChartRequest = serde_json::from_value(arguments)
+                    .map_err(|e| format!("Invalid arguments: {}", e))?;
+                session_server
+                    .viz_line(Parameters(req))
+                    .await
+            }
+            "viz_heatmap" => {
+                let req: HeatmapRequest = serde_json::from_value(arguments)
+                    .map_err(|e| format!("Invalid arguments: {}", e))?;
+                session_server
+                    .viz_heatmap(Parameters(req))
+                    .await
+            }
+            "db_sqlite_query" => {
+                let req: SqliteQueryRequest = serde_json::from_value(arguments)
+                    .map_err(|e| format!("Invalid arguments: {}", e))?;
+                session_server
+                    .db_sqlite_query(Parameters(req))
+                    .await
+            }
+            "db_duckdb_query" => {
+                let req: DuckDBQueryRequest = serde_json::from_value(arguments)
+                    .map_err(|e| format!("Invalid arguments: {}", e))?;
+                session_server
+                    .db_duckdb_query(Parameters(req))
+                    .await
+            }
+            _ => {
+                return Err(format!("Unknown tool: {}", tool_name));
+            }
+        };
+
+        match result {
+            Ok(call_result) => Ok(convert_result(call_result)),
+            Err(e) => Err(format!("Tool execution failed: {:?}", e)),
+        }
+    }
+
     /// List all currently loaded datasets.
     #[tool(description = "List all currently loaded datasets with their basic information (name, dimensions, column types).")]
     async fn list_datasets(&self) -> Result<CallToolResult, McpError> {

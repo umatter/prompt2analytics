@@ -1,0 +1,64 @@
+# Git
+.git/
+.gitignore
+
+# Rust build artifacts
+target/
+**/*.rs.bk
+Cargo.lock.bak
+
+# Node.js
+node_modules/
+.next/
+.npm/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# IDE and editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Documentation and notes
+*.md
+docs/
+_notes/
+_resources/
+
+# Testing and validation
+tests/
+validation/
+performance/
+e2e/
+
+# Claude/AI assistant
+.claude/
+
+# Environment files (be careful with secrets)
+.env
+.env.local
+.env.*.local
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Build artifacts
+dist/
+build/
+
+# Playwright
+playwright-report/
+test-results/
+
+# Desktop and CLI app source (but keep Cargo.toml for workspace resolution)
+crates/p2a-desktop/src/
+crates/p2a-desktop/ui/
+crates/p2a-cli/src/
