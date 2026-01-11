@@ -235,6 +235,52 @@ cargo test -p p2a-core
 cargo doc --no-deps --open
 ```
 
+## Docker Deployment
+
+Docker is provided for **deployment** rather than development. For active development, use native tools (`cargo run`, `npm run dev`) for faster iteration.
+
+### Quick Start
+
+```bash
+# Build and run all services
+docker compose up --build
+
+# Or run in detached mode
+docker compose up --build -d
+```
+
+This starts:
+- **Backend** (p2a-mcp): http://localhost:8080
+- **Frontend** (p2a-web): http://localhost:3000
+
+### With Local LLM (Ollama)
+
+```bash
+# Include Ollama for local LLM support
+docker compose --profile with-ollama up --build
+```
+
+### Health Check
+
+```bash
+curl http://localhost:8080/health   # Backend
+curl http://localhost:3000          # Frontend
+```
+
+### Development Recommendation
+
+For development, run services natively:
+
+```bash
+# Terminal 1: Backend
+cargo run -p p2a-mcp --features full -- --transport http --host 127.0.0.1 --port 8080
+
+# Terminal 2: Frontend
+cd p2a-web && npm run dev
+```
+
+This provides faster rebuilds and hot module replacement.
+
 ## Technical Details
 
 - **Matrix Operations**: Uses `faer` for high-performance linear algebra (Cholesky decomposition, matrix inverse)
