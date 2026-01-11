@@ -105,6 +105,9 @@ When implementing a new method:
 | Hausman Test | [hausman.md](econometrics/hausman.md) | Pending |
 | IV/2SLS | [iv_2sls.md](econometrics/iv_2sls.md) | Pending |
 | Diff-in-Diff | [did.md](econometrics/did.md) | Pending |
+| IPW Treatment Effects | [treatment_ipw.md](econometrics/treatment_ipw.md) | Pending |
+| Doubly Robust (AIPW) | [treatment_aipw.md](econometrics/treatment_aipw.md) | Pending |
+| Mediation Analysis | [mediation.md](econometrics/mediation.md) | Pending |
 | Logit | [logit.md](econometrics/logit.md) | Pending |
 | Probit | [probit.md](econometrics/probit.md) | Pending |
 | HDFE | [hdfe.md](econometrics/hdfe.md) | **Complete** |

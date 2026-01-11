@@ -28,6 +28,10 @@ use p2a_core::{
     run_fixed_effects, run_random_effects, run_hausman_test, run_iv2sls, run_did,
     run_logit, run_probit, run_first_stage_diagnostics,
     run_hdfe, HdfeConfig,
+    // Treatment effects
+    run_ipw_treatment, run_doubly_robust, IpwConfig, DoublyRobustConfig, Estimand, DRMethod,
+    // Mediation analysis
+    run_mediation_analysis, MediationConfig,
     // Time series
     run_var, run_varma, run_vecm, run_var_irf,
     // Forecasting
@@ -285,6 +289,106 @@ pub struct DiDRequest {
     /// Post-treatment period indicator column (0/1)
     #[schemars(description = "Column indicating post-treatment period (1 = post, 0 = pre).")]
     pub post_var: String,
+}
+
+/// Request for Inverse Probability Weighting (IPW) treatment effect estimation.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct IpwRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Outcome variable column name
+    #[schemars(description = "Name of the outcome variable column.")]
+    pub outcome: String,
+
+    /// Treatment indicator column (0/1)
+    #[schemars(description = "Column indicating treatment status (1 = treated, 0 = control). Must be binary.")]
+    pub treatment: String,
+
+    /// Covariate columns for propensity score model
+    #[schemars(description = "Names of covariate columns to include in propensity score model.")]
+    pub covariates: Vec<String>,
+
+    /// Estimand: 'ate' (Average Treatment Effect) or 'att' (Average Treatment Effect on Treated)
+    #[schemars(description = "Treatment effect estimand: 'ate' for Average Treatment Effect (default), 'att' for Average Treatment Effect on Treated.")]
+    pub estimand: Option<String>,
+
+    /// Trimming threshold for extreme propensity scores
+    #[schemars(description = "Trim observations with propensity scores below trim or above 1-trim. Default is 0.05.")]
+    pub trim: Option<f64>,
+
+    /// Number of bootstrap replications for standard errors
+    #[schemars(description = "Number of bootstrap replications for standard error estimation. Default is 999.")]
+    pub bootstrap: Option<usize>,
+}
+
+/// Request for Doubly Robust (AIPW) treatment effect estimation.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DoublyRobustRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Outcome variable column name
+    #[schemars(description = "Name of the outcome variable column.")]
+    pub outcome: String,
+
+    /// Treatment indicator column (0/1)
+    #[schemars(description = "Column indicating treatment status (1 = treated, 0 = control). Must be binary.")]
+    pub treatment: String,
+
+    /// Covariate columns for propensity score and outcome models
+    #[schemars(description = "Names of covariate columns to include in both propensity score and outcome models.")]
+    pub covariates: Vec<String>,
+
+    /// Estimation method: 'aipw' (default), 'ipw', or 'regression'
+    #[schemars(description = "Estimation method: 'aipw' for Augmented IPW (default, doubly robust), 'ipw' for IPW only, 'regression' for outcome regression only.")]
+    pub method: Option<String>,
+
+    /// Estimand: 'ate' (Average Treatment Effect) or 'att' (Average Treatment Effect on Treated)
+    #[schemars(description = "Treatment effect estimand: 'ate' for Average Treatment Effect (default), 'att' for Average Treatment Effect on Treated.")]
+    pub estimand: Option<String>,
+
+    /// Trimming threshold for extreme propensity scores
+    #[schemars(description = "Trim observations with propensity scores below trim or above 1-trim. Default is 0.05.")]
+    pub trim: Option<f64>,
+
+    /// Number of bootstrap replications for standard errors
+    #[schemars(description = "Number of bootstrap replications for standard error estimation. Default is 999.")]
+    pub bootstrap: Option<usize>,
+}
+
+/// Request for Causal Mediation Analysis.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct MediationRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Outcome variable column name
+    #[schemars(description = "Name of the outcome variable column.")]
+    pub outcome: String,
+
+    /// Treatment indicator column (0/1)
+    #[schemars(description = "Column indicating treatment status (1 = treated, 0 = control). Must be binary.")]
+    pub treatment: String,
+
+    /// Mediator variable column name
+    #[schemars(description = "Name of the mediator variable column - the intermediate variable through which treatment may affect the outcome.")]
+    pub mediator: String,
+
+    /// Covariate columns for propensity score models
+    #[schemars(description = "Names of covariate columns for adjustment in propensity score models.")]
+    pub covariates: Vec<String>,
+
+    /// Trimming threshold for extreme propensity scores
+    #[schemars(description = "Trim observations with propensity scores below trim or above 1-trim. Default is 0.05.")]
+    pub trim: Option<f64>,
+
+    /// Number of bootstrap replications for standard errors
+    #[schemars(description = "Number of bootstrap replications for standard error estimation. Default is 999.")]
+    pub bootstrap: Option<usize>,
 }
 
 /// Request for Logit regression.
@@ -1707,6 +1811,27 @@ impl AnalyticsServer {
                     .diff_in_diff(Parameters(req))
                     .await
             }
+            "treatment_ipw" => {
+                let req: IpwRequest = serde_json::from_value(arguments)
+                    .map_err(|e| format!("Invalid arguments: {}", e))?;
+                session_server
+                    .treatment_ipw(Parameters(req))
+                    .await
+            }
+            "treatment_doubly_robust" => {
+                let req: DoublyRobustRequest = serde_json::from_value(arguments)
+                    .map_err(|e| format!("Invalid arguments: {}", e))?;
+                session_server
+                    .treatment_doubly_robust(Parameters(req))
+                    .await
+            }
+            "mediation_analysis" => {
+                let req: MediationRequest = serde_json::from_value(arguments)
+                    .map_err(|e| format!("Invalid arguments: {}", e))?;
+                session_server
+                    .mediation_analysis(Parameters(req))
+                    .await
+            }
             "logit" => {
                 let req: LogitRequest = serde_json::from_value(arguments)
                     .map_err(|e| format!("Invalid arguments: {}", e))?;
@@ -2286,6 +2411,161 @@ impl AnalyticsServer {
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
                     "DiD estimation failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+    }
+
+    // ========================================================================
+    // Treatment Effect Estimation
+    // ========================================================================
+
+    /// Run IPW treatment effect estimation.
+    #[tool(description = "Estimate Average Treatment Effect (ATE) or Average Treatment Effect on Treated (ATT) using Inverse Probability Weighting. Uses propensity scores to create pseudo-populations that balance covariates between treatment groups. Returns effect estimate with bootstrap standard errors and confidence intervals.")]
+    async fn treatment_ipw(
+        &self,
+        Parameters(request): Parameters<IpwRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let cov_refs: Vec<&str> = request.covariates.iter().map(|s| s.as_str()).collect();
+
+        // Parse estimand
+        let estimand = match request.estimand.as_deref() {
+            Some("att") | Some("ATT") => Estimand::ATT,
+            _ => Estimand::ATE,
+        };
+
+        let config = IpwConfig {
+            trim: request.trim.unwrap_or(0.05),
+            estimand,
+            bootstrap: request.bootstrap.unwrap_or(999),
+            normalized: true,
+            seed: None,
+        };
+
+        let result = match run_ipw_treatment(dataset, &request.outcome, &request.treatment, &cov_refs, config) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "IPW estimation failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+    }
+
+    /// Run Doubly Robust (AIPW) treatment effect estimation.
+    #[tool(description = "Estimate treatment effects using Augmented IPW (doubly robust). Combines propensity score weighting with outcome regression. Consistent if either the propensity model OR the outcome model is correctly specified. Returns effect estimate with bootstrap standard errors and model fit diagnostics.")]
+    async fn treatment_doubly_robust(
+        &self,
+        Parameters(request): Parameters<DoublyRobustRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let cov_refs: Vec<&str> = request.covariates.iter().map(|s| s.as_str()).collect();
+
+        // Parse method
+        let method = match request.method.as_deref() {
+            Some("ipw") | Some("IPW") => DRMethod::IPW,
+            Some("regression") | Some("reg") => DRMethod::Regression,
+            _ => DRMethod::AIPW,
+        };
+
+        // Parse estimand
+        let estimand = match request.estimand.as_deref() {
+            Some("att") | Some("ATT") => Estimand::ATT,
+            _ => Estimand::ATE,
+        };
+
+        let config = DoublyRobustConfig {
+            method,
+            trim: request.trim.unwrap_or(0.05),
+            estimand,
+            bootstrap: request.bootstrap.unwrap_or(999),
+            seed: None,
+        };
+
+        let result = match run_doubly_robust(dataset, &request.outcome, &request.treatment, &cov_refs, config) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Doubly robust estimation failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+    }
+
+    // ========================================================================
+    // Causal Mediation Analysis
+    // ========================================================================
+
+    /// Run causal mediation analysis.
+    #[tool(description = "Perform causal mediation analysis to decompose treatment effects into direct and indirect (mediated) effects. Uses IPW-based identification following Huber (2014). Returns Natural Direct Effect (NDE), Natural Indirect Effect (NIE), proportion mediated, and bootstrap inference.")]
+    async fn mediation_analysis(
+        &self,
+        Parameters(request): Parameters<MediationRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let cov_refs: Vec<&str> = request.covariates.iter().map(|s| s.as_str()).collect();
+
+        let config = MediationConfig {
+            bootstrap: request.bootstrap.unwrap_or(999),
+            trim: request.trim.unwrap_or(0.05),
+            seed: None,
+        };
+
+        let result = match run_mediation_analysis(
+            dataset,
+            &request.outcome,
+            &request.treatment,
+            &request.mediator,
+            &cov_refs,
+            config,
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Mediation analysis failed: {}",
                     e
                 ))]));
             }

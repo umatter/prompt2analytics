@@ -35,6 +35,12 @@ pub use econometrics::{
     DiscreteResult, run_logit, run_probit,
     VarResult, VarmaResult, VecmResult, VarIrfResult, run_var, run_varma, run_vecm, run_var_irf,
     HdfeResult, HdfeConfig, FactorInfo, run_hdfe,
+    // Treatment effects
+    Estimand, DRMethod, IpwConfig, DoublyRobustConfig,
+    PropensityScoreSummary, IpwResult, DoublyRobustResult,
+    run_ipw_treatment, run_doubly_robust,
+    // Mediation analysis
+    MediationConfig, MediationResult, run_mediation_analysis,
 };
 pub use forecasting::{
     ArimaResult, ArimaForecastResult, run_arima, forecast_arima,

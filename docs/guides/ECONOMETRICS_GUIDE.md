@@ -10,6 +10,8 @@ This guide explains the assumptions underlying each econometric method in prompt
 - [Instrumental Variables](#instrumental-variables)
 - [Difference-in-Differences](#difference-in-differences)
 - [Discrete Choice Models](#discrete-choice-models)
+- [Treatment Effect Estimation](#treatment-effect-estimation)
+- [Causal Mediation Analysis](#causal-mediation-analysis)
 - [Regression Diagnostics](#regression-diagnostics)
 
 ---
@@ -391,6 +393,304 @@ R² = 1 - (Log-Likelihood / Log-Likelihood_null)
 
 ---
 
+## Treatment Effect Estimation
+
+These methods estimate causal treatment effects in observational studies where treatment assignment is not random.
+
+### Inverse Probability Weighting (IPW)
+
+**The Problem**: In observational data, treated and control groups differ systematically. Simple comparisons are biased.
+
+**Solution**: Weight observations by inverse of treatment probability to create "pseudo-populations" where treatment is independent of covariates.
+
+**Propensity Score**:
+```
+p(X) = P(D=1|X)
+```
+Estimated using logistic regression of treatment D on covariates X.
+
+**Estimands**:
+
+| Estimand | Description | Weight (Treated) | Weight (Control) |
+|----------|-------------|------------------|------------------|
+| ATE | Average Treatment Effect (population) | 1/p(X) | 1/(1-p(X)) |
+| ATT | Average Treatment Effect on Treated | 1 | p(X)/(1-p(X)) |
+
+**Normalized (Hajek) Estimator**:
+```
+ATE = Σ[w₁·Y] / Σ[w₁] - Σ[w₀·Y] / Σ[w₀]
+```
+Uses normalized weights that sum to 1, providing more stable estimates.
+
+**Trimming**: Extreme propensity scores (near 0 or 1) create unstable weights. Trim observations with p(X) < trim or p(X) > 1-trim.
+
+**Key Assumptions**:
+1. **Unconfoundedness (Selection on Observables)**: Treatment assignment independent of potential outcomes conditional on X
+   ```
+   (Y(0), Y(1)) ⊥ D | X
+   ```
+2. **Positivity (Common Support)**: All units have positive probability of treatment
+   ```
+   0 < P(D=1|X) < 1 for all X
+   ```
+3. **Correct Propensity Model**: Logit model for p(X) is correctly specified
+
+**Usage**:
+```
+treatment_ipw dataset:data outcome:earnings treatment:training
+    covariates:age,education,experience estimand:ate trim:0.05
+```
+
+**Interpreting Output**:
+
+| Statistic | Interpretation |
+|-----------|----------------|
+| Effect | Estimated treatment effect (ATE or ATT) |
+| Std Error | Bootstrap standard error |
+| 95% CI | Confidence interval from bootstrap distribution |
+| p-value | Two-sided test of H0: effect = 0 |
+| n_obs | Observations after trimming |
+| n_trimmed | Observations removed due to extreme propensity scores |
+| PS Mean (Treated/Control) | Propensity score diagnostics |
+
+### Doubly Robust Estimation (AIPW)
+
+**The Problem**: IPW is consistent only if propensity model is correct. Outcome regression is consistent only if outcome model is correct.
+
+**Solution**: Augmented IPW (AIPW) combines both, achieving consistency if **either** model is correct.
+
+**AIPW Estimator**:
+```
+τ_AIPW = (1/n) Σ [
+    μ̂₁(X) - μ̂₀(X)
+    + D/p̂(X) · (Y - μ̂₁(X))
+    - (1-D)/(1-p̂(X)) · (Y - μ̂₀(X))
+]
+```
+
+Where:
+- μ̂₁(X) = predicted outcome if treated (from OLS on treated group)
+- μ̂₀(X) = predicted outcome if control (from OLS on control group)
+- p̂(X) = estimated propensity score
+
+**Methods Available**:
+
+| Method | Description | Consistency Requires |
+|--------|-------------|---------------------|
+| AIPW | Doubly robust (default) | Either PS or outcome model correct |
+| IPW | Inverse probability weighting only | Correct propensity score model |
+| Regression | Outcome regression only | Correct outcome model |
+
+**Usage**:
+```
+treatment_doubly_robust dataset:data outcome:wages treatment:job_training
+    covariates:education,age,prior_wages method:aipw estimand:att
+```
+
+**Why Doubly Robust?**:
+- More efficient than IPW when both models are correct
+- Provides insurance against model misspecification
+- Standard approach in modern causal inference
+
+**Interpreting Output**:
+
+| Statistic | Interpretation |
+|-----------|----------------|
+| Effect | Estimated treatment effect |
+| Method | Estimation method used (AIPW/IPW/Regression) |
+| Outcome R² (Treated) | Fit of outcome model for treated |
+| Outcome R² (Control) | Fit of outcome model for control |
+
+**Key Considerations**:
+1. **Overlap**: Check propensity score distributions for treated/control overlap
+2. **Model Specification**: Include relevant confounders in both models
+3. **Sample Size**: Requires sufficient observations in both treatment groups
+4. **Bootstrap**: Used for inference to account for two-step estimation
+
+### Choosing Between Methods
+
+| Situation | Recommended Method |
+|-----------|-------------------|
+| Large sample, good overlap | AIPW (doubly robust) |
+| Simple setting, trust PS model | IPW |
+| Many covariates, complex relationships | AIPW |
+| Need insurance against misspecification | AIPW |
+| Limited overlap (many extreme PS) | Consider trimming, matching, or different design |
+
+### Common Pitfalls
+
+1. **Unmeasured Confounding**: These methods cannot address unobserved confounders
+2. **Poor Overlap**: Extreme propensity scores indicate lack of common support
+3. **Model Misspecification**: Neither method corrects for both models being wrong
+4. **Positivity Violations**: If some covariate patterns only appear in one group
+5. **Post-Treatment Variables**: Don't include variables affected by treatment
+
+### References
+
+- Horvitz, D.G. & Thompson, D.J. (1952). "A Generalization of Sampling Without Replacement from a Finite Universe." *JASA*, 47(260), 663-685.
+- Robins, J.M., Rotnitzky, A. & Zhao, L.P. (1994). "Estimation of Regression Coefficients When Some Regressors Are Not Always Observed." *JASA*, 89(427), 846-866.
+- Bang, H. & Robins, J.M. (2005). "Doubly Robust Estimation in Missing Data and Causal Inference Models." *Biometrics*, 61(4), 962-973.
+- Lunceford, J.K. & Davidian, M. (2004). "Stratification and Weighting Via the Propensity Score in Estimation of Causal Treatment Effects." *Statistics in Medicine*, 23, 2937-2960.
+
+---
+
+## Causal Mediation Analysis
+
+Mediation analysis decomposes the total treatment effect into the portion that operates through a specific mediator variable and the portion that operates through other pathways.
+
+### The Mediation Framework
+
+Consider a treatment D affecting outcome Y potentially through a mediator M:
+
+```
+D ─────────────────────────────────► Y    (Direct Effect)
+│                                    ▲
+│           D ──► M ──► Y           │
+└───────────► M ──────────────────────┘    (Indirect Effect)
+```
+
+**Total Effect (ATE)**: Overall effect of treatment on outcome
+```
+ATE = E[Y(1,M(1))] - E[Y(0,M(0))]
+```
+
+**Natural Direct Effect (NDE)**: Effect of treatment NOT operating through the mediator
+```
+NDE = E[Y(1,M(0))] - E[Y(0,M(0))]
+```
+This measures what would happen if we changed treatment status but kept the mediator at its control level.
+
+**Natural Indirect Effect (NIE)**: Effect of treatment operating THROUGH the mediator
+```
+NIE = E[Y(1,M(1))] - E[Y(1,M(0))]
+```
+This measures the effect of the mediator change induced by treatment.
+
+**Decomposition**:
+```
+ATE = NDE + NIE
+```
+
+**Proportion Mediated**: Fraction of total effect explained by the mediator
+```
+% Mediated = NIE / ATE
+```
+
+### IPW-Based Identification
+
+prompt2analytics uses the inverse probability weighting approach of Huber (2014):
+
+1. **Propensity Score p(D=1|X)**: Probability of treatment given covariates
+2. **Extended Propensity Score p(D=1|M,X)**: Probability of treatment given mediator and covariates
+3. **Reweighting**: Control observations are reweighted to have the mediator distribution that would have occurred under treatment
+
+This approach:
+- Does not require parametric models for the mediator or outcome
+- Provides consistent estimates under the identification assumptions
+- Works with continuous or discrete mediators
+
+### Key Assumptions
+
+1. **Sequential Ignorability**:
+   - Treatment assignment is ignorable given covariates: (Y(d,m), M(d)) ⊥ D | X
+   - Mediator is ignorable given treatment and covariates: Y(d,m) ⊥ M | D, X
+
+2. **No Treatment-Mediator Confounding by Treatment**: No unobserved variables that are affected by treatment and affect both mediator and outcome
+
+3. **Positivity**: All covariate values have positive probability of all treatment-mediator combinations
+   - p(D=1|X) > 0 and p(D=0|X) > 0
+   - p(D=1|M,X) > 0 and p(D=0|M,X) > 0
+
+4. **Correct Propensity Models**: Logistic models for propensity scores are correctly specified
+
+### Usage
+
+```
+mediation_analysis dataset:data outcome:wages treatment:training
+    mediator:job_skills covariates:age,education trim:0.05 bootstrap:999
+```
+
+**Parameters**:
+- `outcome`: Outcome variable Y
+- `treatment`: Binary treatment indicator (0/1)
+- `mediator`: Mediator variable M
+- `covariates`: Confounders to adjust for
+- `trim`: Remove observations with extreme propensity scores (default: 0.05)
+- `bootstrap`: Number of bootstrap replications for inference (default: 999)
+
+### Interpreting Output
+
+| Statistic | Interpretation |
+|-----------|----------------|
+| Total Effect (ATE) | Overall causal effect of treatment on outcome |
+| Direct Effect (NDE) | Effect bypassing the mediator |
+| Indirect Effect (NIE) | Effect through the mediator |
+| Proportion Mediated | NIE / ATE (what fraction is mediated) |
+| Std Error | Bootstrap standard error |
+| 95% CI | Percentile confidence interval |
+| p-value | Two-sided test of H0: effect = 0 |
+| n_obs | Observations used after trimming |
+| n_trimmed | Observations removed due to extreme propensity scores |
+
+### Example Interpretation
+
+Suppose you're studying the effect of job training on wages:
+- **Treatment**: Job training program (D = 1 if trained)
+- **Mediator**: Job skills score (M)
+- **Outcome**: Wages (Y)
+
+Results:
+```
+Total Effect:     $2,500/year (p < 0.01)
+Direct Effect:    $1,500/year (p < 0.05)
+Indirect Effect:  $1,000/year (p < 0.05)
+Proportion Med:   40%
+```
+
+**Interpretation**:
+- Training increases wages by $2,500/year on average
+- $1,500 (60%) comes from direct effects (e.g., signaling, network effects)
+- $1,000 (40%) comes through improved job skills
+- Both pathways are statistically significant
+
+### Common Issues
+
+1. **Extreme Propensity Scores**: If many observations are trimmed, the positivity assumption may be violated. Consider:
+   - Reducing the covariate set
+   - Using a different trimming threshold
+   - Reconsidering the causal model
+
+2. **Confounded Mediator**: If there are unobserved variables affecting both M and Y, the indirect effect is biased. Solutions:
+   - Include additional confounders
+   - Use sensitivity analysis
+   - Consider instrumental variable approaches for mediation
+
+3. **Post-Treatment Confounding**: Don't adjust for variables that are affected by treatment and affect the mediator
+
+4. **Proportion Mediated Issues**:
+   - Can be > 100% if direct and indirect effects have opposite signs
+   - Unstable when total effect is small
+   - Not well-defined when total effect is zero
+
+### When to Use Mediation Analysis
+
+| Situation | Recommended |
+|-----------|-------------|
+| Want to understand treatment mechanisms | Yes |
+| Planning to intervene on mediator directly | Yes |
+| Mediator is post-treatment variable | Yes (that's the point) |
+| Strong confounding of mediator-outcome | Consider alternatives |
+| Only care about total effect | Use standard treatment effects |
+
+### References
+
+- Huber, M. (2014). "Identifying Causal Mechanisms (Primarily) Based on Inverse Probability Weighting." *Journal of Applied Econometrics*, 29, 920-943.
+- Imai, K., Keele, L., & Tingley, D. (2010). "A General Approach to Causal Mediation Analysis." *Psychological Methods*, 15(4), 309-334.
+- VanderWeele, T.J. (2015). *Explanation in Causal Inference: Methods for Mediation and Interaction*. Oxford University Press.
+- Pearl, J. (2001). "Direct and Indirect Effects." *Proceedings of the 17th Conference on Uncertainty in Artificial Intelligence*, 411-420.
+
+---
+
 ## Regression Diagnostics
 
 ### Jarque-Bera Test (Normality)
@@ -467,6 +767,10 @@ R² = 1 - (Log-Likelihood / Log-Likelihood_null)
 | Binary outcome | Logit or Probit |
 | Clustered data | Clustered SEs |
 | Time series correlation | Newey-West SEs |
+| Observational treatment effect | IPW or Doubly Robust (AIPW) |
+| Selection on observables | IPW (simple) or AIPW (robust) |
+| Understand treatment mechanisms | Causal Mediation Analysis |
+| Decompose direct/indirect effects | Causal Mediation Analysis |
 
 ---
 

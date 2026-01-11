@@ -21,6 +21,9 @@ This directory contains validation documentation for econometric methods.
 | Method | File | p2a Function | Reference |
 |--------|------|--------------|-----------|
 | Diff-in-Diff | [did.md](did.md) | `run_did()` | Manual calculation |
+| IPW Treatment Effects | [treatment_ipw.md](treatment_ipw.md) | `run_ipw_treatment()` | R `causalweight::treatweight()` |
+| Doubly Robust (AIPW) | [treatment_aipw.md](treatment_aipw.md) | `run_doubly_robust()` | R `causalweight`, `AIPW` |
+| Mediation Analysis | [mediation.md](mediation.md) | `run_mediation_analysis()` | R `causalweight::medweight()` |
 
 ### Discrete Choice
 | Method | File | p2a Function | Reference |
