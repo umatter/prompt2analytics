@@ -20,7 +20,7 @@ if (script_dir == "") script_dir <- "."
 setwd(script_dir)
 
 # Check required packages
-required_packages <- c("microbenchmark", "sandwich", "plm", "lfe")
+required_packages <- c("microbenchmark", "sandwich", "plm", "lfe", "data.table", "dplyr", "tidyr")
 optional_packages <- c("forecast", "dbscan", "changepoint")
 
 cat("Checking required packages...\n")
@@ -48,7 +48,8 @@ scripts <- c(
   "benchmark_regression.R",
   "benchmark_econometrics.R",
   "benchmark_ml.R",
-  "benchmark_forecasting.R"
+  "benchmark_forecasting.R",
+  "benchmark_munging.R"
 )
 
 for (script in scripts) {

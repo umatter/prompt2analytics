@@ -21,6 +21,7 @@ use p2a_core::{
         // Database connectivity
         query_sqlite, list_sqlite_tables, sqlite_table_schema,
         query_duckdb, list_duckdb_tables, duckdb_table_schema,
+        query_file_with_duckdb,
         // Data munging
         munging::{
             // Transform operations
@@ -994,6 +995,22 @@ pub struct DuckDBSchemaRequest {
     /// Table name
     #[schemars(description = "Name of the table to get schema for.")]
     pub table_name: String,
+}
+
+/// Request to query a file (Parquet, CSV) using DuckDB SQL.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DuckDBFileQueryRequest {
+    /// Path to the data file (Parquet or CSV)
+    #[schemars(description = "Path to the data file (.parquet, .csv). DuckDB can query these files directly with SQL.")]
+    pub file_path: String,
+
+    /// SQL query to execute
+    #[schemars(description = "SQL query to execute. Use {file} as placeholder for the file path. Example: 'SELECT * FROM {file} WHERE amount > 100'")]
+    pub query: String,
+
+    /// Optional name for the resulting dataset
+    #[schemars(description = "Optional name for the resulting dataset. If not provided, one will be generated.")]
+    pub name: Option<String>,
 }
 
 // ============================================================================
@@ -2168,6 +2185,19 @@ impl AnalyticsServer {
                     "required": ["database", "query"]
                 }),
             },
+            ToolDefinition {
+                name: "db_query_file".to_string(),
+                description: "Execute SQL query directly on a Parquet or CSV file using DuckDB. Use {file} as placeholder for the file path.".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "file_path": {"type": "string", "description": "Path to the Parquet or CSV file"},
+                        "query": {"type": "string", "description": "SQL query with {file} placeholder for the file path"},
+                        "name": {"type": "string", "description": "Optional name for the resulting dataset"}
+                    },
+                    "required": ["file_path", "query"]
+                }),
+            },
             // Data munging tools
             ToolDefinition {
                 name: "munge_filter".to_string(),
@@ -2694,6 +2724,13 @@ impl AnalyticsServer {
                     .map_err(|e| format!("Invalid arguments: {}", e))?;
                 session_server
                     .db_duckdb_query(Parameters(req))
+                    .await
+            }
+            "db_query_file" => {
+                let req: DuckDBFileQueryRequest = serde_json::from_value(arguments)
+                    .map_err(|e| format!("Invalid arguments: {}", e))?;
+                session_server
+                    .db_query_file(Parameters(req))
                     .await
             }
             // Data munging tools
@@ -4793,6 +4830,58 @@ impl AnalyticsServer {
                 .map(|(name, dtype)| format!("  - {} ({})", name, dtype))
                 .collect::<Vec<_>>()
                 .join("\n")
+        );
+
+        Ok(CallToolResult::success(vec![Content::text(output)]))
+    }
+
+    /// Query a Parquet or CSV file directly using DuckDB SQL.
+    #[tool(description = "Execute a SQL query directly on a Parquet or CSV file using DuckDB. This is powerful for filtering, aggregating, or joining large files before loading them as datasets. Use {file} as a placeholder for the file path in your query.")]
+    async fn db_query_file(
+        &self,
+        Parameters(request): Parameters<DuckDBFileQueryRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let result = match query_file_with_duckdb(&request.file_path, &request.query) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "DuckDB file query failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        // Get preview before moving dataframe
+        let preview = result.dataframe.head(Some(5));
+
+        // Convert to Dataset
+        let dataset = Dataset::new(result.dataframe);
+
+        // Generate name
+        let name = request.name.unwrap_or_else(|| {
+            format!("file_query_{}", std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs())
+        });
+
+        // Store in datasets
+        let mut datasets = self.datasets.write().await;
+        datasets.insert(name.clone(), dataset);
+
+        let output = format!(
+            "DuckDB File Query Results\n\
+             =========================\n\
+             File: {}\n\
+             Rows returned: {}\n\
+             Columns: {}\n\n\
+             Dataset stored as: '{}'\n\n\
+             Preview (first 5 rows):\n{}",
+            request.file_path,
+            result.rows,
+            result.columns.join(", "),
+            name,
+            preview
         );
 
         Ok(CallToolResult::success(vec![Content::text(output)]))
