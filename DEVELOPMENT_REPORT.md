@@ -1,7 +1,7 @@
 # prompt2analytics Development Report
 
-**Date:** January 9, 2026
-**Status:** Phase 5 (Advanced Features) ✅ COMPLETE + Validation & Performance Framework
+**Date:** January 12, 2026
+**Status:** Phase 6.4 (Smart Suggestions) ✅ COMPLETE
 
 ---
 
@@ -329,7 +329,7 @@ cargo build --release -p p2a-desktop
 - Error handling with graceful degradation
 
 **Tool Execution Loop:**
-- LLM can invoke any of the 38 MCP analytics tools
+- LLM can invoke any of the 100 MCP analytics tools
 - Automatic tool call parsing and execution
 - Results fed back to LLM for interpretation
 - Support for multi-turn tool conversations
@@ -466,7 +466,7 @@ cargo build --release -p p2a-desktop
 - `traits/` — `LinearEstimator` trait for common regression output interface
 - `errors.rs` — Unified error types (`EconError`, `EconResult`)
 
-**MCP Tools Exposed (55 total):**
+**MCP Tools Exposed (58 total):**
 ```
 ┌─────────────────────────┬──────────────────────────────────────────────────────────────┐
 │ Tool                    │ Description                                                  │
@@ -475,6 +475,9 @@ cargo build --release -p p2a-desktop
 │ load_dataset            │ Load CSV/Parquet/Excel/Stata/SAS file into session           │
 │ describe_dataset        │ Summary statistics (count, mean, std, quartiles)             │
 │ head_dataset            │ Preview first N rows                                         │
+│ data_quality_profile    │ Comprehensive quality profile for LLM-assisted cleaning      │
+│ preview_cleaning        │ Preview cleaning operation before applying (sample changes)  │
+│ verify_cleaning         │ Compare before/after datasets to verify cleaning results     │
 │ compute_correlation     │ Pearson correlation matrix for numeric columns               │
 │ regression_ols          │ OLS regression with robust SEs (HC1)                         │
 │ regression_diagnostics  │ Model validation (JB, BP, DW, VIF, condition number)         │
@@ -619,7 +622,7 @@ prompt2analytics/
     │   ├── Cargo.toml
     │   └── src/
     │       ├── main.rs
-    │       ├── server.rs               # 55 MCP tools
+    │       ├── server.rs               # 101 MCP tools
     │       └── tools/
     │           └── mod.rs              # Placeholder
     └── p2a-desktop/
@@ -915,3 +918,276 @@ The `implement_metrics` workflow now includes **Phase 6: Validation & Benchmarki
 - `.claude/commands/implement_metrics.md` — Added Phase 6
 - `.claude/agents/econometrics-implementer.md` — Added validation checklist
 - `.claude/skills/validation-benchmarking/SKILL.md` — New skill
+
+---
+
+## Phase 6: LLM-Assisted Data Cleaning — ✅ COMPLETE
+
+A new capability for interactive, verified data cleaning workflows powered by LLM assistance with built-in validation checkpoints.
+
+### Vision
+
+Enable LLM-driven data cleaning where each step is:
+- **Inspected** — Automated data quality profiling
+- **Diagnosed** — LLM identifies issues from profile
+- **Proposed** — LLM suggests cleaning operation
+- **Previewed** — Sample of what would change
+- **Validated** — Verify assumptions/preconditions
+- **Applied** — Execute with rollback point
+- **Verified** — Compare before/after metrics
+
+### Phase 6.1: Quality Profiling (Foundation) — ✅ COMPLETE
+
+| Deliverable | Status | Implementation |
+|-------------|--------|----------------|
+| DataQualityProfile struct | ✅ Complete | Pure Rust |
+| ColumnProfile with statistics | ✅ Complete | Per-column analysis |
+| DataIssue enum (issue types) | ✅ Complete | Automated detection |
+| NumericStats (outliers, bounds) | ✅ Complete | Statistical analysis |
+| StringStats (patterns, encoding) | ✅ Complete | String analysis |
+| `data_quality_profile` MCP tool | ✅ Complete | MCP integration (tool #56) |
+
+**Key Types:**
+
+```rust
+pub struct DataQualityProfile {
+    pub columns: Vec<ColumnProfile>,
+    pub row_count: usize,
+    pub duplicate_rows: usize,
+    pub completeness_score: f64,  // % non-null
+}
+
+pub struct ColumnProfile {
+    pub name: String,
+    pub dtype: String,
+    pub null_count: usize,
+    pub null_pct: f64,
+    pub unique_count: usize,
+    pub unique_pct: f64,
+    pub numeric_stats: Option<NumericStats>,
+    pub string_stats: Option<StringStats>,
+    pub issues: Vec<DataIssue>,
+}
+
+pub enum DataIssue {
+    HighNullRate { column: String, pct: f64 },
+    PossibleDuplicates { columns: Vec<String>, count: usize },
+    MixedTypes { column: String, examples: Vec<String> },
+    OutlierValues { column: String, count: usize, bounds: (f64, f64) },
+    InconsistentFormat { column: String, patterns: Vec<String> },
+    WhitespaceIssues { column: String, count: usize },
+    EncodingIssues { column: String, examples: Vec<String> },
+}
+```
+
+### Phase 6.2: Preview & Verification — ✅ COMPLETE
+
+| Deliverable | Status | Implementation |
+|-------------|--------|----------------|
+| CleaningResult with verification | ✅ Complete | Wraps cleaning ops |
+| VerificationReport struct | ✅ Complete | Before/after metrics |
+| ChangeExample (sample changes) | ✅ Complete | Show what changed |
+| QualityDelta (metric changes) | ✅ Complete | Quality comparison |
+| CleaningPreview struct | ✅ Complete | Pre-execution preview |
+| CleaningOperation enum | ✅ Complete | 8 operation types |
+| `preview_cleaning` MCP tool | ✅ Complete | MCP integration (tool #57) |
+| `verify_cleaning` MCP tool | ✅ Complete | MCP integration (tool #58) |
+
+**Key Types:**
+
+```rust
+pub struct CleaningResult {
+    pub dataset: Dataset,
+    pub operation: String,
+    pub verification: VerificationReport,
+    pub rollback_id: String,
+}
+
+pub struct VerificationReport {
+    pub rows_before: usize,
+    pub rows_after: usize,
+    pub rows_modified: usize,
+    pub rows_removed: usize,
+    pub sample_changes: Vec<ChangeExample>,
+    pub quality_delta: QualityDelta,
+    pub warnings: Vec<String>,
+}
+```
+
+### Phase 6.3: Session Management — ✅ COMPLETE
+
+| Deliverable | Status | Implementation |
+|-------------|--------|----------------|
+| CleaningSession struct | ✅ Complete | Session state with checkpoints |
+| Rollback points | ✅ Complete | Full dataset snapshots at each checkpoint |
+| Session persistence | ✅ Complete | In-memory with checkpoint history |
+| Audit trail | ✅ Complete | OperationRecord tracks all operations |
+| `cleaning_session_start` MCP tool | ✅ Complete | Begin session with initial checkpoint |
+| `cleaning_session_status` MCP tool | ✅ Complete | Check session progress |
+| `list_cleaning_sessions` MCP tool | ✅ Complete | List all active sessions |
+| `cleaning_session_apply` MCP tool | ✅ Complete | Apply operations within session |
+| `cleaning_rollback` MCP tool | ✅ Complete | Undo to any checkpoint |
+| `cleaning_session_checkpoints` MCP tool | ✅ Complete | List all checkpoints |
+
+**Implementation Details:**
+
+```rust
+// Core session management types (cleaning_session.rs)
+pub struct CleaningSession {
+    pub id: String,
+    pub dataset_name: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub current_checkpoint: usize,
+    checkpoints: Vec<SessionCheckpoint>,
+    pub audit_trail: Vec<OperationRecord>,
+    pub metadata: HashMap<String, String>,
+}
+
+pub struct SessionCheckpoint {
+    pub id: String,
+    pub index: usize,
+    pub created_at: DateTime<Utc>,
+    pub description: String,
+    dataset: Dataset,  // Full snapshot
+    pub quality_profile: DataQualityProfile,
+}
+
+pub struct OperationRecord {
+    pub id: String,
+    pub timestamp: DateTime<Utc>,
+    pub operation_type: String,
+    pub description: String,
+    pub parameters: HashMap<String, String>,
+    pub checkpoint_before: usize,
+    pub checkpoint_after: Option<usize>,
+    pub success: bool,
+    pub error: Option<String>,
+    pub verification: Option<VerificationReportSummary>,
+}
+```
+
+**Key Features:**
+- Each session maintains a checkpoint history with full dataset snapshots
+- Automatic checkpoint creation on successful operations
+- Rollback to any previous checkpoint (not just the last one)
+- Quality profile comparison between checkpoints
+- Complete audit trail with timestamps and parameters
+- 10 unit tests covering all session operations
+
+### Phase 6.4: Smart Suggestions — ✅ COMPLETE
+
+| Deliverable | Status | Implementation |
+|-------------|--------|----------------|
+| Pattern recognition | ✅ Complete | Maps DataIssue types to cleaning operations |
+| Suggestion engine | ✅ Complete | Priority-ranked CleaningSuggestion objects |
+| Suggestion parameters | ✅ Complete | Operation-specific parameters for each suggestion |
+| Impact estimation | ✅ Complete | Rows affected, completeness change |
+| `suggest_cleaning` MCP tool | ✅ Complete | Proactive suggestions with filtering |
+
+**Implementation Details:**
+
+```rust
+// Core suggestion types (suggestion.rs)
+pub struct CleaningSuggestion {
+    pub id: String,
+    pub title: String,
+    pub description: String,
+    pub addresses_issue: String,
+    pub priority: SuggestionPriority,  // Low, Medium, High, Critical
+    pub category: CleaningCategory,     // MissingValues, Deduplication, etc.
+    pub columns: Option<Vec<String>>,
+    pub operation: String,              // "trim", "fill_na", "deduplicate", etc.
+    pub parameters: SuggestionParameters,
+    pub estimated_impact: EstimatedImpact,
+    pub reasoning: String,
+    pub considerations: Vec<String>,
+}
+
+pub struct SuggestionReport {
+    pub suggestions: Vec<CleaningSuggestion>,
+    pub issues_analyzed: usize,
+    pub dataset_summary: DatasetSummary,
+    pub overall_recommendation: String,
+}
+```
+
+**Pattern Recognition:**
+- HighNullRate → fill_na with median (numeric) or mode (string)
+- WhitespaceIssues → trim (high priority)
+- EmptyStrings → replace with null
+- OutlierValues → filter or review
+- DuplicateRows → deduplicate
+- InconsistentFormat → standardize
+- ConstantColumn → drop_column
+- MixedTypes → cast
+
+**Key Features:**
+- Automatic operation parameter inference (fill value, strategy)
+- Impact estimation (rows affected, completeness change)
+- Reasoning explains why each suggestion is made
+- Considerations list risks and alternatives
+- 9 unit tests covering all suggestion types
+
+### Example Interaction Flow
+
+```
+User: "Clean this sales data"
+
+LLM: [calls data_quality_profile]
+     "I've analyzed your dataset. Here are the issues I found:
+      1. 'email' column: 15% have whitespace issues
+      2. 'price' column: 3 outliers > $10,000
+      3. 'date' column: mixed formats (MM/DD/YYYY and YYYY-MM-DD)
+      4. 12 duplicate rows based on order_id
+
+      I recommend we address these in order. Start with whitespace?"
+
+User: "Yes, fix the emails"
+
+LLM: [calls preview_cleaning with trim operation, sample=5]
+     "Here's what the email cleaning would do:
+
+      | Row | Before              | After            |
+      |-----|---------------------|------------------|
+      | 23  | ' john@test.com '   | 'john@test.com'  |
+      | 45  | 'jane@test.com  '   | 'jane@test.com'  |
+
+      This will modify 1,847 rows. Proceed?"
+
+User: "Yes"
+
+LLM: [calls apply_cleaning_verified]
+     "✓ Email cleaning complete.
+
+      Verification:
+      - Rows modified: 1,847
+      - Email uniqueness preserved
+      - Quality score: 84% → 87%
+
+      Next issue: Price outliers?"
+```
+
+### Files Created
+
+```
+crates/p2a-core/src/data/
+├── quality.rs          # ✅ DataQualityProfile, ColumnProfile, DataIssue
+├── verification.rs     # ✅ VerificationReport, CleaningResult, preview_cleaning
+├── cleaning_session.rs # ✅ CleaningSession with rollback and audit trail
+└── suggestion.rs       # ✅ CleaningSuggestion, SuggestionReport, generate_suggestions
+
+crates/p2a-mcp/src/server.rs  # ✅ 10 new tools for LLM-assisted cleaning
+```
+
+**New MCP Tools (Phase 6):**
+1. `data_quality_profile` - Generate comprehensive quality analysis
+2. `preview_cleaning` - Preview operation before applying
+3. `verify_cleaning` - Verify operation after applying
+4. `cleaning_session_start` - Start a new cleaning session
+5. `cleaning_session_status` - Check session progress
+6. `list_cleaning_sessions` - List all active sessions
+7. `cleaning_session_apply` - Apply operation within session
+8. `cleaning_rollback` - Rollback to previous checkpoint
+9. `cleaning_session_checkpoints` - List all checkpoints
+10. `suggest_cleaning` - Generate smart cleaning suggestions

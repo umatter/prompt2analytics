@@ -58,6 +58,10 @@ anyhow.workspace = true
 # Logging
 tracing.workspace = true
 
+# Session management
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1.0", features = ["v4", "serde"] }
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 criterion.workspace = true
