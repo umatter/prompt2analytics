@@ -23,6 +23,7 @@
 
 use ndarray::{Array1, Array2};
 use polars::prelude::*;
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -811,6 +812,126 @@ fn get_outcome(
 // Optimization
 // ═══════════════════════════════════════════════════════════════════════════════
 
+/// Precomputed data for H matrix computation (thread-safe, read-only after creation).
+///
+/// Precomputes structures that allow O(j²) H matrix construction instead of O(j²k).
+/// Since X0 doesn't change during V optimization, we can precompute:
+/// - outer_products[m] = X0[m,:]' * X0[m,:] for each predictor m
+/// - x0_x1[m][i] = X0[m,i] * X1[m] for the c vector
+struct QpPrecomputed {
+    /// Outer products per predictor: outer_products[m][i,l] = X0[m,i] * X0[m,l]
+    outer_products: Vec<Array2<f64>>,
+    /// X0 * X1 products per predictor: x0_x1[m][i] = X0[m,i] * X1[m]
+    x0_x1_products: Vec<Array1<f64>>,
+    /// Number of donors
+    j: usize,
+    /// Number of predictors
+    k: usize,
+}
+
+impl QpPrecomputed {
+    /// Create precomputed data from X0 and X1.
+    fn new(x0: &Array2<f64>, x1: &Array1<f64>) -> Self {
+        let k = x0.nrows();
+        let j = x0.ncols();
+
+        // Precompute outer products for each predictor dimension
+        let mut outer_products = Vec::with_capacity(k);
+        let mut x0_x1_products = Vec::with_capacity(k);
+
+        for m in 0..k {
+            // outer_products[m][i,l] = X0[m,i] * X0[m,l]
+            let mut outer = Array2::zeros((j, j));
+            let mut x0_x1 = Array1::zeros(j);
+
+            for i in 0..j {
+                let x0_mi = x0[[m, i]];
+                // Exploit symmetry: only compute upper triangle
+                for l in i..j {
+                    let val = x0_mi * x0[[m, l]];
+                    outer[[i, l]] = val;
+                    outer[[l, i]] = val;
+                }
+                x0_x1[i] = x0_mi * x1[m];
+            }
+
+            outer_products.push(outer);
+            x0_x1_products.push(x0_x1);
+        }
+
+        QpPrecomputed {
+            outer_products,
+            x0_x1_products,
+            j,
+            k,
+        }
+    }
+}
+
+/// Working buffers for QP solving (one per thread).
+struct QpWorkspace {
+    h_buffer: Array2<f64>,
+    c_buffer: Array1<f64>,
+}
+
+impl QpWorkspace {
+    fn new(j: usize) -> Self {
+        QpWorkspace {
+            h_buffer: Array2::zeros((j, j)),
+            c_buffer: Array1::zeros(j),
+        }
+    }
+
+    /// Build H and c matrices using precomputed data and given V weights.
+    fn build_h_and_c<'a>(
+        &'a mut self,
+        precomputed: &QpPrecomputed,
+        v: &Array1<f64>,
+    ) -> (&'a Array2<f64>, &'a Array1<f64>) {
+        let j = precomputed.j;
+
+        // Reset buffers
+        self.h_buffer.fill(0.0);
+        self.c_buffer.fill(0.0);
+
+        // H = Σ_m V[m] * outer_products[m]
+        // c = -Σ_m V[m] * x0_x1[m]
+        for m in 0..precomputed.k {
+            let vm = v[m];
+            if vm.abs() < 1e-12 {
+                continue; // Skip near-zero weights
+            }
+
+            // Add weighted outer product to H
+            let outer = &precomputed.outer_products[m];
+            for i in 0..j {
+                for l in 0..j {
+                    self.h_buffer[[i, l]] += vm * outer[[i, l]];
+                }
+            }
+
+            // Add weighted x0_x1 to c
+            let x0_x1 = &precomputed.x0_x1_products[m];
+            for i in 0..j {
+                self.c_buffer[i] -= vm * x0_x1[i];
+            }
+        }
+
+        // Add regularization for numerical stability
+        for i in 0..j {
+            self.h_buffer[[i, i]] += 1e-8;
+        }
+
+        (&self.h_buffer, &self.c_buffer)
+    }
+
+    /// Solve for unit weights W using precomputed data.
+    fn solve(&mut self, precomputed: &QpPrecomputed, v: &Array1<f64>) -> EconResult<Array1<f64>> {
+        let (h, c) = self.build_h_and_c(precomputed, v);
+        solve_simplex_constrained_qp(h, c, precomputed.j)
+    }
+}
+
 /// Optimize V (predictor weights) and W (unit weights).
 ///
 /// Uses nested optimization:
@@ -851,41 +972,80 @@ fn optimize_synth_weights(
         return Ok((v, w, 0, loss));
     }
 
-    // Data-driven V optimization using coordinate descent / Nelder-Mead style
+    // Create precomputed QP data for efficient repeated solves
+    let precomputed = QpPrecomputed::new(&data.x0, &data.x1);
+    let j = precomputed.j;
+
+    // Initial solve with starting V
+    let mut workspace = QpWorkspace::new(j);
     let mut best_v = v.clone();
-    let mut best_w = solve_weights_qp(&data.x0, &data.x1, &v)?;
+    let mut best_w = workspace.solve(&precomputed, &v)?;
     let mut best_loss = calculate_v_loss(data, &best_w);
 
     let mut iterations = 0;
 
-    // Simple coordinate descent for V optimization
+    // Track loss at start of each outer iteration for convergence check
+    let mut loss_at_iter_start = best_loss;
+    let convergence_threshold = tolerance * 10.0; // Relative improvement threshold
+
+    // Parallel coordinate descent for V optimization
+    // Generate all (dimension, delta) candidates to evaluate in parallel
+    let deltas: [f64; 6] = [0.1, -0.1, 0.05, -0.05, 0.01, -0.01];
+
     for iter in 0..max_iter {
         iterations = iter + 1;
-        let mut improved = false;
 
-        for i in 0..k {
-            // Try increasing and decreasing this V component
-            for delta in &[0.1, -0.1, 0.05, -0.05, 0.01, -0.01] {
+        // Evaluate all coordinate directions in parallel
+        // Each thread gets its own workspace but shares the precomputed data
+        let candidates: Vec<(usize, f64)> = (0..k)
+            .flat_map(|i| deltas.iter().map(move |&d| (i, d)))
+            .collect();
+
+        // Parallel evaluation of all candidates
+        let results: Vec<(f64, Array1<f64>, Array1<f64>)> = candidates
+            .par_iter()
+            .filter_map(|&(dim, delta)| {
+                // Build candidate V vector
                 let mut v_new = best_v.clone();
-                v_new[i] = (v_new[i] + delta).max(0.001);
+                v_new[dim] = (v_new[dim] + delta).max(0.001);
 
                 // Normalize
                 let sum: f64 = v_new.sum();
+                if sum <= 0.0 {
+                    return None;
+                }
                 v_new.mapv_inplace(|x| x / sum);
 
-                // Solve for W with new V
-                if let Ok(w_new) = solve_weights_qp(&data.x0, &data.x1, &v_new) {
-                    let loss_new = calculate_v_loss(data, &w_new);
+                // Each thread creates its own workspace
+                let mut local_workspace = QpWorkspace::new(j);
 
-                    if loss_new < best_loss - tolerance {
-                        best_v = v_new;
-                        best_w = w_new;
-                        best_loss = loss_new;
-                        improved = true;
-                    }
-                }
+                // Solve QP for this candidate
+                let w_new = local_workspace.solve(&precomputed, &v_new).ok()?;
+                let loss_new = calculate_v_loss(data, &w_new);
+
+                Some((loss_new, v_new, w_new))
+            })
+            .collect();
+
+        // Find the best result among all candidates
+        let mut improved = false;
+        for (loss_new, v_new, w_new) in results {
+            if loss_new < best_loss - tolerance {
+                best_v = v_new;
+                best_w = w_new;
+                best_loss = loss_new;
+                improved = true;
             }
         }
+
+        // Check for convergence based on relative improvement this iteration
+        if iter > 5 {
+            let relative_improvement = (loss_at_iter_start - best_loss) / loss_at_iter_start.max(1e-10);
+            if relative_improvement < convergence_threshold && relative_improvement >= 0.0 {
+                break; // Converged - improvements too small to continue
+            }
+        }
+        loss_at_iter_start = best_loss;
 
         if !improved {
             break;
@@ -899,18 +1059,24 @@ fn optimize_synth_weights(
 ///
 /// This is the objective function for V optimization.
 /// Loss = (1/T₀) Σₜ (Z₁ₜ - Z₀ₜ W)²
+///
+/// Uses vectorized operations for better performance:
+/// - z0.dot(w) computes all synthetic values in one SIMD-optimized operation
+/// - Element-wise subtraction and squaring are also vectorized
 fn calculate_v_loss(data: &SynthData, w: &Array1<f64>) -> f64 {
     let t0 = data.z1.len();
-    let mut sse = 0.0;
-
-    for t in 0..t0 {
-        let z1_t = data.z1[t];
-        let synthetic_t: f64 = (0..data.donor_units.len())
-            .map(|j| w[j] * data.z0[[t, j]])
-            .sum();
-        let error = z1_t - synthetic_t;
-        sse += error * error;
+    if t0 == 0 {
+        return 0.0;
     }
+
+    // Vectorized computation: synthetic = Z₀ × W (T0 × J) · (J × 1) = (T0 × 1)
+    let synthetic = data.z0.dot(w);
+
+    // Vectorized error computation: errors = z1 - synthetic
+    let errors = &data.z1 - &synthetic;
+
+    // Vectorized SSE: sum of squared errors
+    let sse: f64 = errors.iter().map(|&e| e * e).sum();
 
     sse / t0 as f64
 }
@@ -1229,51 +1395,56 @@ fn run_placebo_inference(
         f64::INFINITY
     };
 
-    // Run placebo for each donor unit
+    // Run placebo for each donor unit IN PARALLEL
+    // Each placebo test is independent, making this embarrassingly parallel
+    let donor_ratios: Vec<(String, f64)> = units
+        .par_iter()
+        .filter(|unit| *unit != &config.treated_unit)
+        .filter_map(|donor_unit| {
+            // Run synth with this donor as treated
+            let placebo_config = SynthConfig {
+                treated_unit: donor_unit.clone(),
+                run_placebos: false,
+                ..config.clone()
+            };
+
+            run_synthetic_control(
+                dataset,
+                outcome,
+                unit_col,
+                time_col,
+                predictors,
+                placebo_config,
+            )
+            .ok()
+            .map(|placebo_result| {
+                let rmspe_pre = placebo_result.pre_treatment_rmspe;
+                let rmspe_post = if !placebo_result.treatment_effects.is_empty() {
+                    let mse: f64 = placebo_result
+                        .treatment_effects
+                        .iter()
+                        .map(|te| te.effect * te.effect)
+                        .sum::<f64>()
+                        / placebo_result.treatment_effects.len() as f64;
+                    mse.sqrt()
+                } else {
+                    0.0
+                };
+
+                let ratio = if rmspe_pre > 1e-10 {
+                    rmspe_post / rmspe_pre
+                } else {
+                    f64::INFINITY
+                };
+
+                (donor_unit.clone(), ratio)
+            })
+        })
+        .collect();
+
+    // Combine treated unit ratio with donor ratios
     let mut rmspe_ratios: Vec<(String, f64)> = vec![(config.treated_unit.clone(), treated_ratio)];
-
-    for donor_unit in &units {
-        if donor_unit == &config.treated_unit {
-            continue;
-        }
-
-        // Run synth with this donor as treated
-        let placebo_config = SynthConfig {
-            treated_unit: donor_unit.clone(),
-            run_placebos: false,
-            ..config.clone()
-        };
-
-        if let Ok(placebo_result) = run_synthetic_control(
-            dataset,
-            outcome,
-            unit_col,
-            time_col,
-            predictors,
-            placebo_config,
-        ) {
-            let rmspe_pre = placebo_result.pre_treatment_rmspe;
-            let rmspe_post = if !placebo_result.treatment_effects.is_empty() {
-                let mse: f64 = placebo_result
-                    .treatment_effects
-                    .iter()
-                    .map(|te| te.effect * te.effect)
-                    .sum::<f64>()
-                    / placebo_result.treatment_effects.len() as f64;
-                mse.sqrt()
-            } else {
-                0.0
-            };
-
-            let ratio = if rmspe_pre > 1e-10 {
-                rmspe_post / rmspe_pre
-            } else {
-                f64::INFINITY
-            };
-
-            rmspe_ratios.push((donor_unit.clone(), ratio));
-        }
-    }
+    rmspe_ratios.extend(donor_ratios);
 
     // Sort by ratio (descending)
     rmspe_ratios.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
