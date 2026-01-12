@@ -109,7 +109,14 @@ p2a causal iv <DATASET> -y <DEP_VAR> --exog <EXOG_VARS...> --endog <ENDOG_VARS..
 
 # Difference-in-differences
 p2a causal did <DATASET> -y <DEP_VAR> --treat <TREAT_COL> --post <POST_COL>
+
+# Synthetic Control Method (Abadie et al.)
+p2a causal synth <DATASET> -y <OUTCOME> --unit <UNIT_COL> --time <TIME_COL> \
+    --treated <TREATED_UNIT> --treatment-time <TIME> -p <PREDICTORS...> \
+    [--v-method <METHOD>] [--placebos]
 ```
+
+**V-method options:** `datadriven` (default), `equal`
 
 **Examples:**
 ```bash
@@ -118,6 +125,14 @@ p2a causal iv mydata -y wage --exog experience --endog education --instruments p
 
 # DiD estimation
 p2a causal did mydata -y outcome --treat treated --post post_treatment
+
+# Synthetic control (California tobacco study style)
+p2a causal synth smoking -y cigsale --unit state --time year --treated California \
+    --treatment-time 1988 -p lnincome retprice
+
+# Synthetic control with placebo tests for inference
+p2a causal synth mydata -y gdp --unit country --time year --treated Germany \
+    --treatment-time 1990 -p exports imports --placebos
 ```
 
 ### Discrete Choice Commands

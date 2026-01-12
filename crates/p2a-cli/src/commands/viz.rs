@@ -19,7 +19,7 @@ pub enum VizCommands {
         col: String,
 
         /// Output file path
-        #[arg(short, long)]
+        #[arg(short = 'f', long = "file")]
         output: PathBuf,
 
         /// Number of bins
@@ -45,7 +45,7 @@ pub enum VizCommands {
         y_col: String,
 
         /// Output file path
-        #[arg(short, long)]
+        #[arg(short = 'f', long = "file")]
         output: PathBuf,
 
         /// Chart title
@@ -67,7 +67,7 @@ pub enum VizCommands {
         y_col: String,
 
         /// Output file path
-        #[arg(short, long)]
+        #[arg(short = 'f', long = "file")]
         output: PathBuf,
 
         /// Chart title
@@ -240,6 +240,7 @@ fn execute_scatter(
                 height: 600,
                 x_label: Some(x_col.to_string()),
                 y_label: Some(y_col.to_string()),
+                ..Default::default()
             };
 
             // scatter_plot(x, y, config)
@@ -315,6 +316,7 @@ fn execute_line(
                 height: 600,
                 x_label: Some(x_col.to_string()),
                 y_label: Some(y_col.to_string()),
+                ..Default::default()
             };
 
             // line_chart takes series: &[(String, Vec<f64>, Vec<f64>)]

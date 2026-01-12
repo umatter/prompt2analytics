@@ -12,6 +12,12 @@ pub struct ChartConfig {
     pub title: Option<String>,
     pub x_label: Option<String>,
     pub y_label: Option<String>,
+    /// Font size for chart title (default: 32)
+    pub title_font_size: u32,
+    /// Font size for axis labels (default: 20)
+    pub label_font_size: u32,
+    /// Font size for tick labels (default: 16)
+    pub tick_font_size: u32,
 }
 
 impl Default for ChartConfig {
@@ -22,6 +28,9 @@ impl Default for ChartConfig {
             title: None,
             x_label: None,
             y_label: None,
+            title_font_size: 32,
+            label_font_size: 20,
+            tick_font_size: 16,
         }
     }
 }
@@ -120,10 +129,10 @@ pub fn histogram(
         let y_range = 0u32..(max_count + max_count / 10 + 1);
 
         let mut chart = ChartBuilder::on(&root)
-            .caption(title, ("sans-serif", 24))
-            .margin(10)
-            .x_label_area_size(40)
-            .y_label_area_size(50)
+            .caption(title, ("sans-serif", config.title_font_size))
+            .margin(15)
+            .x_label_area_size(50)
+            .y_label_area_size(60)
             .build_cartesian_2d(x_range, y_range)
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
@@ -131,6 +140,8 @@ pub fn histogram(
             .configure_mesh()
             .x_desc(x_label)
             .y_desc(y_label)
+            .label_style(("sans-serif", config.tick_font_size))
+            .axis_desc_style(("sans-serif", config.label_font_size))
             .draw()
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
@@ -239,7 +250,7 @@ pub fn scatter_plot(
         let y_label = config.y_label.as_deref().unwrap_or("Y");
 
         let mut chart = ChartBuilder::on(&root)
-            .caption(title, ("sans-serif", 24))
+            .caption(title, ("sans-serif", config.title_font_size))
             .margin(10)
             .x_label_area_size(40)
             .y_label_area_size(50)
@@ -253,6 +264,8 @@ pub fn scatter_plot(
             .configure_mesh()
             .x_desc(x_label)
             .y_desc(y_label)
+            .label_style(("sans-serif", config.tick_font_size))
+            .axis_desc_style(("sans-serif", config.label_font_size))
             .draw()
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
@@ -362,7 +375,7 @@ pub fn box_plot(
         let n_groups = labels.len() as f64;
 
         let mut chart = ChartBuilder::on(&root)
-            .caption(title, ("sans-serif", 24))
+            .caption(title, ("sans-serif", config.title_font_size))
             .margin(10)
             .x_label_area_size(40)
             .y_label_area_size(50)
@@ -525,7 +538,7 @@ pub fn line_chart(
         let y_label = config.y_label.as_deref().unwrap_or("Y");
 
         let mut chart = ChartBuilder::on(&root)
-            .caption(title, ("sans-serif", 24))
+            .caption(title, ("sans-serif", config.title_font_size))
             .margin(10)
             .x_label_area_size(40)
             .y_label_area_size(50)
@@ -539,6 +552,8 @@ pub fn line_chart(
             .configure_mesh()
             .x_desc(x_label)
             .y_desc(y_label)
+            .label_style(("sans-serif", config.tick_font_size))
+            .axis_desc_style(("sans-serif", config.label_font_size))
             .draw()
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
@@ -674,7 +689,7 @@ pub fn event_study_plot(
         let y_label = config.y_label.as_deref().unwrap_or("Treatment Effect");
 
         let mut chart = ChartBuilder::on(&root)
-            .caption(title, ("sans-serif", 24))
+            .caption(title, ("sans-serif", config.title_font_size))
             .margin(10)
             .x_label_area_size(40)
             .y_label_area_size(60)
@@ -688,6 +703,8 @@ pub fn event_study_plot(
             .configure_mesh()
             .x_desc(x_label)
             .y_desc(y_label)
+            .label_style(("sans-serif", config.tick_font_size))
+            .axis_desc_style(("sans-serif", config.label_font_size))
             .draw()
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
@@ -835,7 +852,7 @@ pub fn coefficient_plot(
         if horizontal {
             // Horizontal layout: coefficients on Y-axis, values on X-axis
             let mut chart = ChartBuilder::on(&root)
-                .caption(title, ("sans-serif", 24))
+                .caption(title, ("sans-serif", config.title_font_size))
                 .margin(10)
                 .x_label_area_size(40)
                 .y_label_area_size(120) // More space for variable names
@@ -893,7 +910,7 @@ pub fn coefficient_plot(
             let y_range_max = x_range_max;
 
             let mut chart = ChartBuilder::on(&root)
-                .caption(title, ("sans-serif", 24))
+                .caption(title, ("sans-serif", config.title_font_size))
                 .margin(10)
                 .x_label_area_size(60)
                 .y_label_area_size(60)
@@ -1092,7 +1109,7 @@ pub fn irf_plot(
         let y_label = config.y_label.as_deref().unwrap_or("Response");
 
         let mut chart = ChartBuilder::on(&root)
-            .caption(title, ("sans-serif", 24))
+            .caption(title, ("sans-serif", config.title_font_size))
             .margin(10)
             .x_label_area_size(40)
             .y_label_area_size(60)
@@ -1106,6 +1123,8 @@ pub fn irf_plot(
             .configure_mesh()
             .x_desc(x_label)
             .y_desc(y_label)
+            .label_style(("sans-serif", config.tick_font_size))
+            .axis_desc_style(("sans-serif", config.label_font_size))
             .draw()
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 

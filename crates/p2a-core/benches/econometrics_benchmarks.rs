@@ -6,6 +6,7 @@ use criterion::{criterion_group, criterion_main, Criterion, BenchmarkId};
 use p2a_core::{
     Dataset, run_fixed_effects, run_hdfe, run_logit, run_probit,
     run_ipw_treatment, run_doubly_robust, run_mediation_analysis,
+    run_synthetic_control, SynthConfig, PredictorSpec, TimeAggregation, VOptimization,
     IpwConfig, DoublyRobustConfig, MediationConfig, Estimand, DRMethod,
 };
 use p2a_core::regression::CovarianceType;
@@ -137,6 +138,129 @@ fn generate_mediation_data(n: usize, seed: u64) -> Dataset {
     }.expect("Failed to create DataFrame");
 
     Dataset::new(df)
+}
+
+/// Generate synthetic control panel data
+fn generate_synth_data(n_donors: usize, n_periods: usize, treatment_time: i64, seed: u64) -> Dataset {
+    let mut rng = ChaCha8Rng::seed_from_u64(seed);
+
+    let mut units = Vec::new();
+    let mut times = Vec::new();
+    let mut outcomes = Vec::new();
+    let mut x1_vals = Vec::new();
+
+    // Generate donor data
+    for d in 0..n_donors {
+        let donor_trend = rng.gen_range(-0.3..0.3);
+        let donor_level = rng.gen_range(8.0..12.0);
+
+        for t in 1..=n_periods {
+            units.push(format!("D{}", d + 1));
+            times.push(t as i64);
+            let outcome = donor_level + (t as f64) * donor_trend + rng.gen_range(-0.5..0.5);
+            outcomes.push(outcome);
+            x1_vals.push(rng.gen_range(0.0..10.0));
+        }
+    }
+
+    // Generate treated unit (combination of first few donors + treatment effect)
+    let treated_level = 10.0;
+    let treated_trend = 0.1;
+    for t in 1..=n_periods {
+        units.push("Treated".to_string());
+        times.push(t as i64);
+        let base = treated_level + (t as f64) * treated_trend + rng.gen_range(-0.3..0.3);
+        let treatment_effect = if t as i64 >= treatment_time { 3.0 } else { 0.0 };
+        outcomes.push(base + treatment_effect);
+        x1_vals.push(5.0 + rng.gen_range(-1.0..1.0));
+    }
+
+    let df = df! {
+        "unit" => units,
+        "time" => times,
+        "outcome" => outcomes,
+        "x1" => x1_vals,
+    }.expect("Failed to create DataFrame");
+
+    Dataset::new(df)
+}
+
+fn synth_benchmark(c: &mut Criterion) {
+    let mut group = c.benchmark_group("SyntheticControl");
+
+    // Small: 5 donors, 10 periods
+    {
+        let dataset = generate_synth_data(5, 10, 6, 42);
+        let predictors = vec![
+            PredictorSpec::with_window("outcome", 1, 5),
+        ];
+        let config = SynthConfig {
+            treated_unit: "Treated".to_string(),
+            treatment_time: 6,
+            v_method: VOptimization::DataDriven,
+            optimization_window: None,
+            run_placebos: false,
+            tolerance: 1e-6,
+            max_iter: 1000,
+            weight_threshold: 1e-4,
+        };
+
+        group.bench_with_input(BenchmarkId::new("no_placebos", "5x10"), &(dataset, predictors, config), |b, (data, preds, cfg)| {
+            b.iter(|| {
+                run_synthetic_control(data, "outcome", "unit", "time", preds, cfg.clone())
+            });
+        });
+    }
+
+    // Medium: 15 donors, 20 periods
+    {
+        let dataset = generate_synth_data(15, 20, 12, 42);
+        let predictors = vec![
+            PredictorSpec::with_window("outcome", 1, 11),
+        ];
+        let config = SynthConfig {
+            treated_unit: "Treated".to_string(),
+            treatment_time: 12,
+            v_method: VOptimization::DataDriven,
+            optimization_window: None,
+            run_placebos: false,
+            tolerance: 1e-6,
+            max_iter: 1000,
+            weight_threshold: 1e-4,
+        };
+
+        group.bench_with_input(BenchmarkId::new("no_placebos", "15x20"), &(dataset, predictors, config), |b, (data, preds, cfg)| {
+            b.iter(|| {
+                run_synthetic_control(data, "outcome", "unit", "time", preds, cfg.clone())
+            });
+        });
+    }
+
+    // Medium with placebos: 10 donors, 15 periods
+    {
+        let dataset = generate_synth_data(10, 15, 8, 42);
+        let predictors = vec![
+            PredictorSpec::with_window("outcome", 1, 7),
+        ];
+        let config = SynthConfig {
+            treated_unit: "Treated".to_string(),
+            treatment_time: 8,
+            v_method: VOptimization::DataDriven,
+            optimization_window: None,
+            run_placebos: true,
+            tolerance: 1e-6,
+            max_iter: 1000,
+            weight_threshold: 1e-4,
+        };
+
+        group.bench_with_input(BenchmarkId::new("with_placebos", "10x15"), &(dataset, predictors, config), |b, (data, preds, cfg)| {
+            b.iter(|| {
+                run_synthetic_control(data, "outcome", "unit", "time", preds, cfg.clone())
+            });
+        });
+    }
+
+    group.finish();
 }
 
 fn fixed_effects_benchmark(c: &mut Criterion) {
@@ -284,6 +408,7 @@ criterion_group!(
     probit_benchmark,
     ipw_benchmark,
     doubly_robust_benchmark,
-    mediation_benchmark
+    mediation_benchmark,
+    synth_benchmark
 );
 criterion_main!(benches);

@@ -41,6 +41,9 @@ pub use econometrics::{
     run_ipw_treatment, run_doubly_robust,
     // Mediation analysis
     MediationConfig, MediationResult, run_mediation_analysis,
+    // Synthetic control
+    SynthConfig, SynthResult, PredictorSpec, PredictorBalance, TimeEffect,
+    PlaceboResults, VOptimization, TimeAggregation, run_synthetic_control,
 };
 pub use forecasting::{
     ArimaResult, ArimaForecastResult, run_arima, forecast_arima,

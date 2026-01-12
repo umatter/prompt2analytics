@@ -1,0 +1,26 @@
+{
+  "id": "0b6b32d4-3b70-4fa7-93cf-494197a74e4f",
+  "title": null,
+  "created_at": "2026-01-12T14:12:22.827856651Z",
+  "updated_at": "2026-01-12T14:12:22.831149966Z",
+  "working_dir": "/home/umatter/Dropbox/tools/prompt2analytics",
+  "datasets": {
+    "benchmarks": {
+      "name": "benchmarks",
+      "source_path": "/home/umatter/Dropbox/tools/prompt2analytics/paper/code/comparison_data.csv",
+      "format": "csv",
+      "nrows": 18,
+      "columns": [
+        "category",
+        "method",
+        "n",
+        "r_median_us",
+        "rust_median_us",
+        "speedup"
+      ],
+      "loaded_at": "2026-01-12T14:12:22.831149263Z"
+    }
+  },
+  "commands": [],
+  "version": "0.1.0"
+}

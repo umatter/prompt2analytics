@@ -288,6 +288,34 @@ This provides faster rebuilds and hot module replacement.
 - **DataFrames**: Uses `polars` for efficient data manipulation
 - **MCP Protocol**: Uses `rmcp` SDK for Model Context Protocol implementation
 
+## Paper
+
+The `paper/` directory contains materials for a Journal of Statistical Software (JSS) article:
+
+```
+paper/
+├── article.tex       # Main manuscript (LaTeX)
+├── article.pdf       # Compiled paper
+├── references.bib    # Bibliography (66+ entries)
+├── Makefile          # Build: make, make clean
+├── code/             # Benchmark analysis scripts
+│   └── analyze_benchmarks.sh  # Generate benchmark figures
+├── figures/          # Figures and logo
+│   └── jsslogo.jpg
+└── style/            # JSS LaTeX style files
+    ├── jss.cls       # JSS document class
+    ├── jss.bst       # JSS BibTeX style
+    └── jss.pdf       # JSS style manual (author guidelines)
+```
+
+Build the paper with `make` in the `paper/` directory (requires pdfLaTeX and BibTeX).
+
+To generate benchmark figures (requires p2a CLI and jq):
+```bash
+cd paper/code
+./analyze_benchmarks.sh
+```
+
 ## License
 
 MIT

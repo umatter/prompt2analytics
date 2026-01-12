@@ -1,7 +1,7 @@
 //! Session recording and management for reproducibility
 
 use chrono::{DateTime, Utc};
-use p2a_core::Dataset;
+use p2a_core::{Dataset, DataLoader};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -120,6 +120,19 @@ impl Default for Session {
     }
 }
 
+/// Reload a dataset from its source file
+fn reload_dataset(meta: &DatasetMeta) -> anyhow::Result<Dataset> {
+    let df = match meta.format.as_str() {
+        "csv" => DataLoader::load_csv(&meta.source_path)?,
+        "parquet" => DataLoader::load_parquet(&meta.source_path)?,
+        "xlsx" | "xls" | "xlsb" => DataLoader::load_excel(&meta.source_path, None)?,
+        "dta" => DataLoader::load_stata(&meta.source_path)?,
+        "sas7bdat" => DataLoader::load_sas(&meta.source_path)?,
+        fmt => anyhow::bail!("Unsupported format for reload: {}", fmt),
+    };
+    Ok(Dataset::new(df))
+}
+
 /// Manages session state during CLI execution
 pub struct SessionManager {
     /// Path to the session file
@@ -135,16 +148,30 @@ pub struct SessionManager {
 impl SessionManager {
     /// Create a new session manager, loading existing session if file exists
     pub fn new(path: PathBuf) -> anyhow::Result<Self> {
-        let session = if path.exists() {
-            Session::load(&path)?
+        let (session, datasets) = if path.exists() {
+            let session = Session::load(&path)?;
+
+            // Reload datasets from their original source files
+            let mut datasets = HashMap::new();
+            for (name, meta) in &session.datasets {
+                match reload_dataset(meta) {
+                    Ok(ds) => {
+                        datasets.insert(name.clone(), ds);
+                    }
+                    Err(e) => {
+                        eprintln!("Warning: Could not reload dataset '{}': {}", name, e);
+                    }
+                }
+            }
+            (session, datasets)
         } else {
-            Session::new()
+            (Session::new(), HashMap::new())
         };
 
         Ok(Self {
             path,
             session,
-            datasets: HashMap::new(),
+            datasets,
             command_start: None,
         })
     }

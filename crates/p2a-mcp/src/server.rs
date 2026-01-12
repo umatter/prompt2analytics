@@ -62,6 +62,8 @@ use p2a_core::{
     run_ipw_treatment, run_doubly_robust, IpwConfig, DoublyRobustConfig, Estimand, DRMethod,
     // Mediation analysis
     run_mediation_analysis, MediationConfig,
+    // Synthetic control
+    run_synthetic_control, SynthConfig, PredictorSpec, TimeAggregation, VOptimization,
     // Time series
     run_var, run_varma, run_vecm, run_var_irf,
     // Forecasting
@@ -595,6 +597,82 @@ pub struct MediationRequest {
     /// Number of bootstrap replications for standard errors
     #[schemars(description = "Number of bootstrap replications for standard error estimation. Default is 999.")]
     pub bootstrap: Option<usize>,
+}
+
+/// Predictor specification for synthetic control.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SynthPredictorSpec {
+    /// Column name of the predictor variable
+    #[schemars(description = "Column name of the predictor variable.")]
+    pub column: String,
+
+    /// How to aggregate the predictor over time
+    #[schemars(description = "Aggregation method: 'mean' (default), 'first', 'last', or 'sum'.")]
+    pub aggregation: Option<String>,
+
+    /// Optional time window (start, end) for aggregation
+    #[schemars(description = "Time window for predictor aggregation as [start, end]. If omitted, uses all pre-treatment periods.")]
+    pub time_window: Option<(i64, i64)>,
+}
+
+/// Request for Synthetic Control Method.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SyntheticControlRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded panel dataset.")]
+    pub dataset: String,
+
+    /// Outcome variable column name
+    #[schemars(description = "Name of the outcome variable column.")]
+    pub outcome: String,
+
+    /// Unit identifier column name
+    #[schemars(description = "Name of the column identifying units (e.g., 'state', 'country').")]
+    pub unit_col: String,
+
+    /// Time period column name
+    #[schemars(description = "Name of the column identifying time periods (must be integer, e.g., 'year').")]
+    pub time_col: String,
+
+    /// Name/ID of the treated unit
+    #[schemars(description = "Name or ID of the treated unit (must match values in unit_col).")]
+    pub treated_unit: String,
+
+    /// Treatment time (first post-treatment period)
+    #[schemars(description = "First post-treatment period (treatment starts at or after this time).")]
+    pub treatment_time: i64,
+
+    /// Predictor specifications
+    #[schemars(description = "List of predictor specifications. Can be column names (strings) or detailed specs with aggregation and time windows.")]
+    pub predictors: Vec<SynthPredictorSpec>,
+
+    /// V matrix optimization method
+    #[schemars(description = "Method for predictor importance weights: 'datadriven' (default), 'equal', or 'custom'.")]
+    pub v_method: Option<String>,
+
+    /// Custom V weights (if v_method is 'custom')
+    #[schemars(description = "Custom predictor weights (only used if v_method is 'custom'). Must sum to 1.")]
+    pub custom_v_weights: Option<Vec<f64>>,
+
+    /// Whether to run placebo tests for inference
+    #[schemars(description = "Whether to run placebo tests for inference. Default is false (can be slow with many units).")]
+    pub run_placebos: Option<bool>,
+
+    /// Optimization window (start, end)
+    #[schemars(description = "Time window for optimization [start, end]. If omitted, uses all pre-treatment periods.")]
+    pub optimization_window: Option<(i64, i64)>,
+
+    /// Convergence tolerance
+    #[schemars(description = "Tolerance for optimization convergence. Default is 1e-6.")]
+    pub tolerance: Option<f64>,
+
+    /// Maximum iterations for V optimization
+    #[schemars(description = "Maximum iterations for V optimization. Default is 1000.")]
+    pub max_iter: Option<usize>,
+
+    /// Minimum weight threshold for output
+    #[schemars(description = "Minimum weight to display in output (for readability). Default is 0.001.")]
+    pub weight_threshold: Option<f64>,
 }
 
 /// Request for Logit regression.
@@ -4622,6 +4700,97 @@ impl AnalyticsServer {
     }
 
     // ========================================================================
+    // Synthetic Control Method
+    // ========================================================================
+
+    /// Run Synthetic Control Method for comparative case studies.
+    #[tool(description = "Run Synthetic Control Method for comparative case studies with a single treated unit. \
+        Creates a weighted combination of control (donor) units to construct a synthetic counterfactual. \
+        Developed by Abadie, Diamond, and Hainmueller (2010). \
+        Returns unit weights, predictor balance, treatment effects at each post-treatment period, \
+        and optional placebo-based inference (p-values).")]
+    async fn synthetic_control(
+        &self,
+        Parameters(request): Parameters<SyntheticControlRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        // Convert predictor specs
+        let predictors: Vec<PredictorSpec> = request
+            .predictors
+            .iter()
+            .map(|spec| {
+                let aggregation = match spec.aggregation.as_deref() {
+                    Some("first") => TimeAggregation::First,
+                    Some("last") => TimeAggregation::Last,
+                    Some("sum") => TimeAggregation::Sum,
+                    _ => TimeAggregation::Mean, // default
+                };
+                PredictorSpec {
+                    column: spec.column.clone(),
+                    aggregation,
+                    time_window: spec.time_window,
+                }
+            })
+            .collect();
+
+        // Convert V optimization method
+        let v_method = match request.v_method.as_deref() {
+            Some("equal") => VOptimization::Equal,
+            Some("custom") => {
+                if let Some(weights) = &request.custom_v_weights {
+                    VOptimization::Custom(weights.clone())
+                } else {
+                    return Ok(CallToolResult::error(vec![Content::text(
+                        "custom_v_weights must be provided when v_method is 'custom'".to_string(),
+                    )]));
+                }
+            }
+            _ => VOptimization::DataDriven, // default
+        };
+
+        let config = SynthConfig {
+            treatment_time: request.treatment_time,
+            treated_unit: request.treated_unit.clone(),
+            optimization_window: request.optimization_window,
+            v_method,
+            tolerance: request.tolerance.unwrap_or(1e-6),
+            max_iter: request.max_iter.unwrap_or(1000),
+            run_placebos: request.run_placebos.unwrap_or(false),
+            weight_threshold: request.weight_threshold.unwrap_or(0.001),
+        };
+
+        let result = match run_synthetic_control(
+            dataset,
+            &request.outcome,
+            &request.unit_col,
+            &request.time_col,
+            &predictors,
+            config,
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Synthetic control failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+    }
+
+    // ========================================================================
     // Discrete Choice Models
     // ========================================================================
 
@@ -6790,6 +6959,7 @@ impl AnalyticsServer {
             title: request.title,
             x_label: None,
             y_label: Some("Distance".to_string()),
+            ..Default::default()
         };
 
         match dendrogram(&linkage, request.labels.as_deref(), config) {

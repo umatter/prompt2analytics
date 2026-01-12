@@ -21,7 +21,7 @@ setwd(script_dir)
 
 # Check required packages
 required_packages <- c("microbenchmark", "sandwich", "plm", "lfe", "data.table", "dplyr", "tidyr", "stringi", "stringr")
-optional_packages <- c("forecast", "dbscan", "changepoint")
+optional_packages <- c("forecast", "dbscan", "changepoint", "Synth", "tidysynth", "quadprog")
 
 cat("Checking required packages...\n")
 missing <- required_packages[!sapply(required_packages, requireNamespace, quietly = TRUE)]
@@ -50,7 +50,8 @@ scripts <- c(
   "benchmark_ml.R",
   "benchmark_forecasting.R",
   "benchmark_munging.R",
-  "benchmark_string.R"
+  "benchmark_string.R",
+  "benchmark_synth.R"
 )
 
 for (script in scripts) {

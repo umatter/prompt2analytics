@@ -20,8 +20,8 @@ use session::SessionManager;
 #[command(propagate_version = true)]
 pub struct Cli {
     /// Output format: text, json, or table
-    #[arg(short, long, global = true, default_value = "text")]
-    pub output: output::OutputFormat,
+    #[arg(short = 'F', long = "format", global = true, default_value = "text")]
+    pub format: output::OutputFormat,
 
     /// Session file for recording commands (enables reproducibility)
     #[arg(long, global = true)]
@@ -90,16 +90,16 @@ fn main() -> anyhow::Result<()> {
 
     // Execute the command
     let result = match &cli.command {
-        Commands::Data(cmd) => data::execute(cmd, &cli.output, session_manager.as_mut()),
-        Commands::Munge(cmd) => munge::execute(cmd, &cli.output, session_manager.as_mut()),
-        Commands::Regression(cmd) => regression::execute(cmd, &cli.output, session_manager.as_mut()),
-        Commands::Panel(cmd) => panel::execute(cmd, &cli.output, session_manager.as_mut()),
-        Commands::Causal(cmd) => causal::execute(cmd, &cli.output, session_manager.as_mut()),
-        Commands::Discrete(cmd) => discrete::execute(cmd, &cli.output, session_manager.as_mut()),
-        Commands::Timeseries(cmd) => timeseries::execute(cmd, &cli.output, session_manager.as_mut()),
-        Commands::MachineLearning(cmd) => ml::execute(cmd, &cli.output, session_manager.as_mut()),
-        Commands::Visualize(cmd) => viz::execute(cmd, &cli.output, session_manager.as_mut()),
-        Commands::Script(cmd) => script::execute(cmd, &cli.output),
+        Commands::Data(cmd) => data::execute(cmd, &cli.format, session_manager.as_mut()),
+        Commands::Munge(cmd) => munge::execute(cmd, &cli.format, session_manager.as_mut()),
+        Commands::Regression(cmd) => regression::execute(cmd, &cli.format, session_manager.as_mut()),
+        Commands::Panel(cmd) => panel::execute(cmd, &cli.format, session_manager.as_mut()),
+        Commands::Causal(cmd) => causal::execute(cmd, &cli.format, session_manager.as_mut()),
+        Commands::Discrete(cmd) => discrete::execute(cmd, &cli.format, session_manager.as_mut()),
+        Commands::Timeseries(cmd) => timeseries::execute(cmd, &cli.format, session_manager.as_mut()),
+        Commands::MachineLearning(cmd) => ml::execute(cmd, &cli.format, session_manager.as_mut()),
+        Commands::Visualize(cmd) => viz::execute(cmd, &cli.format, session_manager.as_mut()),
+        Commands::Script(cmd) => script::execute(cmd, &cli.format),
     };
 
     // Save session if recording

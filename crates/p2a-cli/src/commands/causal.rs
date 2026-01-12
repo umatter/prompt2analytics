@@ -1,7 +1,10 @@
 //! Causal inference commands
 
 use clap::Subcommand;
-use p2a_core::{run_iv2sls, run_did};
+use p2a_core::{
+    run_iv2sls, run_did,
+    run_synthetic_control, SynthConfig, PredictorSpec, VOptimization,
+};
 
 use crate::output::{format_regression_results, print_error, OutputFormat};
 use crate::session::SessionManager;
@@ -51,6 +54,44 @@ pub enum CausalCommands {
         #[arg(short = 'x', long, num_args = 0..)]
         controls: Vec<String>,
     },
+
+    /// Synthetic Control Method (Abadie et al.)
+    Synth {
+        /// Dataset name
+        dataset: String,
+
+        /// Outcome variable column
+        #[arg(short = 'y', long)]
+        outcome: String,
+
+        /// Unit identifier column (e.g., "state", "country")
+        #[arg(long)]
+        unit: String,
+
+        /// Time period column (must be integer)
+        #[arg(long)]
+        time: String,
+
+        /// Name/ID of the treated unit
+        #[arg(long)]
+        treated: String,
+
+        /// Treatment time (first post-treatment period)
+        #[arg(long)]
+        treatment_time: i64,
+
+        /// Predictor columns (will use pre-treatment mean for matching)
+        #[arg(short = 'p', long, num_args = 1..)]
+        predictors: Vec<String>,
+
+        /// V optimization method: "datadriven" (default), "equal"
+        #[arg(long, default_value = "datadriven")]
+        v_method: String,
+
+        /// Run placebo tests for inference
+        #[arg(long)]
+        placebos: bool,
+    },
 }
 
 pub fn execute(
@@ -73,6 +114,20 @@ pub fn execute(
             post,
             controls,
         } => execute_did(dataset, outcome, treat, post, controls, format, session),
+        CausalCommands::Synth {
+            dataset,
+            outcome,
+            unit,
+            time,
+            treated,
+            treatment_time,
+            predictors,
+            v_method,
+            placebos,
+        } => execute_synth(
+            dataset, outcome, unit, time, treated, *treatment_time,
+            predictors, v_method, *placebos, format, session
+        ),
     }
 }
 
@@ -232,6 +287,111 @@ fn execute_did(
                 }
                 Err(e) => {
                     print_error(&format!("DiD failed: {}", e), format);
+                }
+            }
+        }
+        None => {
+            print_error(&format!("Dataset '{}' not found", dataset_name), format);
+        }
+    }
+    Ok(())
+}
+
+fn execute_synth(
+    dataset_name: &str,
+    outcome: &str,
+    unit_col: &str,
+    time_col: &str,
+    treated_unit: &str,
+    treatment_time: i64,
+    predictors: &[String],
+    v_method: &str,
+    run_placebos: bool,
+    format: &OutputFormat,
+    session: Option<&mut SessionManager>,
+) -> anyhow::Result<()> {
+    let dataset = match session {
+        Some(mgr) => mgr.get_dataset(dataset_name),
+        None => {
+            print_error(
+                "No session active. Use --session <file> to enable dataset storage.",
+                format,
+            );
+            return Ok(());
+        }
+    };
+
+    match dataset {
+        Some(ds) => {
+            // Build predictor specs (using pre-treatment mean for all)
+            let predictor_specs: Vec<PredictorSpec> = predictors
+                .iter()
+                .map(|col| PredictorSpec::new(col))
+                .collect();
+
+            // Parse V optimization method
+            let v_opt = match v_method.to_lowercase().as_str() {
+                "equal" => VOptimization::Equal,
+                _ => VOptimization::DataDriven,
+            };
+
+            let config = SynthConfig {
+                treated_unit: treated_unit.to_string(),
+                treatment_time,
+                optimization_window: None,
+                v_method: v_opt,
+                tolerance: 1e-6,
+                max_iter: 1000,
+                run_placebos,
+                weight_threshold: 0.001,
+            };
+
+            match run_synthetic_control(ds, outcome, unit_col, time_col, &predictor_specs, config) {
+                Ok(result) => {
+                    match format {
+                        OutputFormat::Json => {
+                            let json = serde_json::json!({
+                                "method": "Synthetic Control",
+                                "treated_unit": result.treated_unit,
+                                "treatment_time": result.treatment_time,
+                                "unit_weights": result.unit_weights,
+                                "predictor_balance": result.predictor_balance.iter().map(|b| {
+                                    serde_json::json!({
+                                        "predictor": b.predictor,
+                                        "treated_value": b.treated_value,
+                                        "synthetic_value": b.synthetic_value,
+                                        "percent_diff": b.percent_diff,
+                                    })
+                                }).collect::<Vec<_>>(),
+                                "pre_treatment_mspe": result.pre_treatment_mspe,
+                                "pre_treatment_rmspe": result.pre_treatment_rmspe,
+                                "treatment_effects": result.treatment_effects.iter().map(|e| {
+                                    serde_json::json!({
+                                        "time": e.time,
+                                        "actual": e.actual,
+                                        "synthetic": e.synthetic,
+                                        "effect": e.effect,
+                                    })
+                                }).collect::<Vec<_>>(),
+                                "average_effect": result.average_effect,
+                                "cumulative_effect": result.cumulative_effect,
+                                "placebo_results": result.placebo_results.as_ref().map(|p| {
+                                    serde_json::json!({
+                                        "treated_rank": p.treated_rank,
+                                        "p_value": p.p_value,
+                                        "n_units": p.n_units,
+                                    })
+                                }),
+                            });
+                            println!("{}", serde_json::to_string_pretty(&json)?);
+                        }
+                        _ => {
+                            println!("{}", result);
+                        }
+                    }
+                }
+                Err(e) => {
+                    print_error(&format!("Synthetic Control failed: {}", e), format);
                 }
             }
         }

@@ -9,6 +9,7 @@ This guide explains the assumptions underlying each econometric method in prompt
 - [High-Dimensional Fixed Effects](#high-dimensional-fixed-effects)
 - [Instrumental Variables](#instrumental-variables)
 - [Difference-in-Differences](#difference-in-differences)
+- [Synthetic Control Method](#synthetic-control-method)
 - [Discrete Choice Models](#discrete-choice-models)
 - [Treatment Effect Estimation](#treatment-effect-estimation)
 - [Causal Mediation Analysis](#causal-mediation-analysis)
@@ -334,6 +335,221 @@ ATT = (Y₁₁ - Y₁₀) - (Y₀₁ - Y₀₀)
 2. **Anticipation effects**: Treatment affects behavior before official start
 3. **Spillovers**: Treatment affects control group
 4. **Heterogeneous timing**: Use staggered DiD methods
+
+---
+
+## Synthetic Control Method
+
+The Synthetic Control Method (SCM) is a data-driven approach for comparative case studies with a single treated unit, developed by Abadie, Diamond, and Hainmueller.
+
+### The Problem
+
+When studying the effect of an intervention on a single unit (state, country, firm):
+- Cannot use standard treatment-control comparison
+- Parallel trends assumption may be too strong
+- Need a principled way to construct a counterfactual
+
+### Solution: Synthetic Control
+
+Construct a **weighted combination** of untreated (donor) units that best matches the treated unit's pre-treatment characteristics.
+
+**Key Insight**: A weighted average of donors can better approximate the treated unit than any single donor.
+
+### Mathematical Formulation
+
+**Setup**:
+- J+1 units: unit 1 is treated, units 2,...,J+1 are donors
+- T time periods, treatment occurs at T₀
+- Y_{jt} = outcome for unit j at time t
+- X_j = predictor vector for unit j (pre-treatment characteristics)
+
+**Optimization Problem**:
+
+Find weights W* = (w₂, ..., w_{J+1}) that minimize:
+
+```
+||X₁ - X₀W||_V = √[(X₁ - X₀W)' V (X₁ - X₀W)]
+```
+
+Subject to:
+- w_j ≥ 0 for all j (non-negative weights)
+- Σw_j = 1 (weights sum to 1)
+
+Where:
+- X₁ = treated unit predictors (k × 1)
+- X₀ = donor predictors (k × J)
+- V = diagonal matrix of predictor importance weights
+
+**Nested Optimization**:
+
+1. **Outer loop**: Optimize V to minimize pre-treatment MSPE:
+   ```
+   V* = argmin_V Σ_{t<T₀} (Y_{1t} - Σ_j w_j*(V) Y_{jt})²
+   ```
+
+2. **Inner loop**: For given V, solve constrained QP for W:
+   ```
+   W*(V) = argmin_W (X₁ - X₀W)' V (X₁ - X₀W)
+   ```
+
+### Treatment Effect Estimation
+
+The estimated treatment effect at time t > T₀ is:
+
+```
+τ_t = Y_{1t} - Σ_j w_j* Y_{jt}
+     = Actual - Synthetic
+```
+
+**Average Effect**: Mean of τ_t over all post-treatment periods
+
+**Cumulative Effect**: Sum of τ_t over all post-treatment periods
+
+### Usage
+
+```
+synthetic_control dataset:panel outcome:gdp unit_col:country time_col:year
+    treated_unit:Germany treatment_time:1990
+    predictors:gdp_lag,population,trade_openness run_placebos:true
+```
+
+**Parameters**:
+- `outcome`: Outcome variable
+- `unit_col`: Column identifying units
+- `time_col`: Column identifying time periods
+- `treated_unit`: Name/ID of the treated unit
+- `treatment_time`: First post-treatment period
+- `predictors`: Pre-treatment characteristics to match on
+- `run_placebos`: Whether to run placebo tests for inference
+
+### Predictor Specification
+
+Predictors can be aggregated in different ways:
+
+| Aggregation | Description |
+|-------------|-------------|
+| Mean | Average over pre-treatment periods (default) |
+| First | First observation |
+| Last | Last observation |
+| Sum | Sum over periods |
+
+Time windows allow focusing on specific pre-treatment periods:
+```
+PredictorSpec::with_window("gdp", 1980, 1985)  // Mean of GDP from 1980-1985
+```
+
+### V Matrix Optimization
+
+| Method | Description | When to Use |
+|--------|-------------|-------------|
+| DataDriven | Minimize pre-treatment MSPE | Default; most flexible |
+| Equal | Equal weights for all predictors | When all predictors equally important |
+| Custom | User-specified weights | Expert knowledge of predictor importance |
+
+### Interpreting Output
+
+| Statistic | Interpretation |
+|-----------|----------------|
+| Unit Weights | Which donors contribute to the synthetic control |
+| Predictor Balance | How well synthetic matches treated on predictors |
+| Pre-Treatment RMSPE | Fit quality; lower is better |
+| Treatment Effects | Effect at each post-treatment period |
+| Average Effect | Mean effect over all post-periods |
+| Cumulative Effect | Total accumulated effect |
+
+### Inference: Placebo Tests
+
+Since SCM is designed for a single treated unit, standard inference doesn't apply. Instead, use **placebo tests**:
+
+1. Apply SCM to each donor unit as if it were treated
+2. Compute RMSPE ratio for each unit:
+   ```
+   Ratio = Post-Treatment RMSPE / Pre-Treatment RMSPE
+   ```
+3. Rank all units by their ratios
+4. **P-value** = Rank of treated unit / Total units
+
+**Interpretation**:
+- Large ratio → Large effect relative to fit quality
+- If treated unit has highest ratio → Effect is significant
+- P-value = 1/N if treated has highest ratio
+
+### Key Assumptions
+
+1. **No Anticipation**: Treated unit doesn't change behavior before treatment
+
+2. **No Interference (SUTVA)**: Treatment of one unit doesn't affect donors
+
+3. **Convex Hull**: Treated unit's characteristics lie within the range of donors
+   - *Violation sign*: All weight on one unit, or poor predictor balance
+
+4. **Sufficient Pre-Treatment Fit**: Low pre-treatment RMSPE
+   - *Rule of thumb*: RMSPE should be small relative to outcome scale
+
+5. **Common Shocks**: All units affected by same aggregate shocks
+   - Ensures donors provide valid counterfactual
+
+### Diagnostics and Warnings
+
+| Issue | Warning | Action |
+|-------|---------|--------|
+| High weight concentration | One donor has >90% weight | Check predictor choice |
+| Poor predictor balance | Large % difference | Add/modify predictors |
+| Few non-zero weights | Only 1 donor significant | May indicate extrapolation |
+| Non-convergence | Max iterations reached | Increase max_iter |
+| Low post/pre RMSPE ratio | Treated unit ranks low in placebo | Effect may not be significant |
+
+### Example
+
+**California's Tobacco Control Program** (Classic example from Abadie et al. 2010):
+
+```
+# California implemented Proposition 99 in 1988
+# Outcome: Per-capita cigarette sales
+
+synthetic_control dataset:tobacco outcome:cigsale unit_col:state time_col:year
+    treated_unit:California treatment_time:1989
+    predictors:cigsale,retprice,income,age15to24,beer run_placebos:true
+```
+
+**Expected results**:
+- Synthetic California is ~weighted average of Utah, Nevada, Montana, etc.
+- Pre-1989: Synthetic closely tracks actual California
+- Post-1989: Gap opens → estimated effect of tobacco control
+
+### Comparison: SCM vs Difference-in-Differences
+
+| Aspect | DiD | Synthetic Control |
+|--------|-----|-------------------|
+| Treated units | Multiple allowed | Designed for single unit |
+| Control selection | Simple comparison group | Optimized weighted average |
+| Parallel trends | Assumed | Constructed via matching |
+| Inference | Standard | Placebo-based |
+| When to use | Multiple treated, similar trends | Single treated unit, aggregate data |
+
+### Common Pitfalls
+
+1. **Extrapolation**: If treated unit is outside donor range, synthetic will be poor
+   - Check: All weights > 0, good predictor balance
+
+2. **Overfitting Pre-Treatment**: Perfect pre-treatment fit may not predict well
+   - Solution: Use subset of pre-periods for optimization
+
+3. **Too Few Donors**: Need enough donors for good synthetic
+   - Rule of thumb: At least 5-10 comparable donors
+
+4. **Treatment Spillovers**: If treatment affects donors, bias results
+   - Solution: Remove affected donors from pool
+
+5. **Choosing Predictors**: Include variables that predict outcome
+   - Don't include post-treatment variables
+   - Include lagged outcomes (e.g., outcome in years T₀-1, T₀-2)
+
+### References
+
+- Abadie, A. & Gardeazabal, J. (2003). "The Economic Costs of Conflict: A Case Study of the Basque Country." *American Economic Review*, 93(1), 112-132.
+- Abadie, A., Diamond, A., & Hainmueller, J. (2010). "Synthetic Control Methods for Comparative Case Studies: Estimating the Effect of California's Tobacco Control Program." *JASA*, 105(490), 493-505.
+- Abadie, A. (2021). "Using Synthetic Controls: Feasibility, Data Requirements, and Methodological Aspects." *Journal of Economic Literature*, 59(2), 391-425.
 
 ---
 
@@ -764,6 +980,7 @@ Proportion Med:   40%
 | Panel, multiple FE dimensions | HDFE |
 | Panel, random unobserved effects | Random Effects |
 | Before/after treatment + control | Difference-in-Differences |
+| Single treated unit, case study | Synthetic Control Method |
 | Binary outcome | Logit or Probit |
 | Clustered data | Clustered SEs |
 | Time series correlation | Newey-West SEs |
