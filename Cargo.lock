@@ -4801,6 +4801,7 @@ dependencies = [
  "jsonwebtoken",
  "ndarray",
  "p2a-core",
+ "polars",
  "reqwest",
  "rmcp",
  "schemars 1.2.0",

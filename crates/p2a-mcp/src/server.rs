@@ -9055,3 +9055,259 @@ impl ServerHandler for AnalyticsServer {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use p2a_core::data::Dataset;
+    use polars::prelude::df;
+    use rmcp::model::RawContent;
+
+    /// Helper to create a server with a pre-loaded dataset
+    async fn server_with_dataset(name: &str, dataset: Dataset) -> AnalyticsServer {
+        let server = AnalyticsServer::new();
+        server.datasets.write().await.insert(name.to_string(), dataset);
+        server
+    }
+
+    /// Helper to extract text from Content (Annotated<RawContent>)
+    fn get_text_content(content: &Content) -> Option<String> {
+        match &content.raw {
+            RawContent::Text(text_content) => Some(text_content.text.clone()),
+            _ => None,
+        }
+    }
+
+    // =========================================================================
+    // Phase 6: LLM-Assisted Data Cleaning Tests
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_data_quality_profile() {
+        let test_df = df! {
+            "id" => [1, 2, 3, 4, 5],
+            "name" => ["Alice", "Bob", "  Charlie  ", "Diana", "Eve"],
+            "score" => [Some(85.5), Some(90.0), None, Some(92.0), Some(88.0)],
+        }.unwrap();
+
+        let server = server_with_dataset("test", Dataset::new(test_df)).await;
+
+        let request = DataQualityProfileRequest {
+            dataset: "test".to_string(),
+        };
+
+        let result = server.data_quality_profile(Parameters(request)).await.unwrap();
+
+        // Should return success with profile info
+        assert!(!result.is_error.unwrap_or(false));
+        let text = get_text_content(&result.content[0]).expect("Expected text content");
+        assert!(text.contains("Dataset Quality Profile"));
+        assert!(text.contains("Rows: 5"));
+        assert!(text.contains("Columns: 3"));
+    }
+
+    #[tokio::test]
+    async fn test_preview_cleaning_trim() {
+        let test_df = df! {
+            "email" => ["  alice@test.com", "bob@test.com  ", " charlie@test.com "],
+        }.unwrap();
+
+        let server = server_with_dataset("test", Dataset::new(test_df)).await;
+
+        let request = PreviewCleaningRequest {
+            dataset: "test".to_string(),
+            operation: "trim".to_string(),
+            columns: Some(vec!["email".to_string()]),
+            strategy: None,
+            value: None,
+            old_value: None,
+            how: None,
+            keep: None,
+            operator: None,
+            filter_value: None,
+            sample_size: Some(3),
+        };
+
+        let result = server.preview_cleaning(Parameters(request)).await.unwrap();
+
+        assert!(!result.is_error.unwrap_or(false));
+        let text = get_text_content(&result.content[0]).expect("Expected text content");
+        assert!(text.contains("Cleaning Preview"));
+        assert!(text.contains("Trim")); // "Trim whitespace from columns: email"
+    }
+
+    #[tokio::test]
+    async fn test_suggest_cleaning() {
+        let test_df = df! {
+            "email" => ["  alice@test.com", "bob@test.com  ", " charlie@test.com "],
+            "value" => [Some(1.0), None, None],
+        }.unwrap();
+
+        let server = server_with_dataset("test", Dataset::new(test_df)).await;
+
+        let request = SuggestCleaningRequest {
+            dataset: "test".to_string(),
+            min_priority: None,
+            limit: None,
+        };
+
+        let result = server.suggest_cleaning(Parameters(request)).await.unwrap();
+
+        assert!(!result.is_error.unwrap_or(false));
+        let text = get_text_content(&result.content[0]).expect("Expected text content");
+        assert!(text.contains("Cleaning Suggestions"));
+        // Should suggest trimming whitespace
+        assert!(text.contains("trim") || text.contains("Trim"));
+    }
+
+    #[tokio::test]
+    async fn test_suggest_cleaning_with_priority_filter() {
+        let test_df = df! {
+            "email" => ["  alice@test.com", "bob@test.com"],
+            "value" => [Some(1.0), Some(2.0)],
+        }.unwrap();
+
+        let server = server_with_dataset("test", Dataset::new(test_df)).await;
+
+        let request = SuggestCleaningRequest {
+            dataset: "test".to_string(),
+            min_priority: Some("critical".to_string()),
+            limit: None,
+        };
+
+        let result = server.suggest_cleaning(Parameters(request)).await.unwrap();
+
+        assert!(!result.is_error.unwrap_or(false));
+        let text = get_text_content(&result.content[0]).expect("Expected text content");
+        // With only whitespace issues (high priority, not critical),
+        // filtering for critical should return fewer suggestions
+        assert!(text.contains("Cleaning Suggestions"));
+    }
+
+    #[tokio::test]
+    async fn test_cleaning_session_workflow() {
+        let test_df = df! {
+            "email" => ["  alice@test.com", "bob@test.com  ", " charlie@test.com "],
+        }.unwrap();
+
+        let server = server_with_dataset("test", Dataset::new(test_df)).await;
+
+        // 1. Start a session
+        let start_request = CleaningSessionStartRequest {
+            dataset: "test".to_string(),
+            session_name: Some("test_session".to_string()),
+        };
+
+        let result = server.cleaning_session_start(Parameters(start_request)).await.unwrap();
+        assert!(!result.is_error.unwrap_or(false));
+
+        // Extract session ID from result
+        let text = get_text_content(&result.content[0]).expect("Expected text content");
+        assert!(text.contains("Cleaning session started"));
+
+        // Parse session ID from the response
+        let session_id = text.lines()
+            .find(|line| line.contains("Session ID:"))
+            .and_then(|line| line.split(": ").nth(1))
+            .map(|s| s.trim().to_string())
+            .unwrap_or_else(|| "test_session".to_string());
+
+        // 2. Check session status
+        let status_request = CleaningSessionStatusRequest {
+            session_id: session_id.clone(),
+        };
+
+        let result = server.cleaning_session_status(Parameters(status_request)).await.unwrap();
+        assert!(!result.is_error.unwrap_or(false));
+
+        // 3. List checkpoints
+        let checkpoints_request = CleaningSessionCheckpointsRequest {
+            session_id: session_id.clone(),
+        };
+
+        let result = server.cleaning_session_checkpoints(Parameters(checkpoints_request)).await.unwrap();
+        assert!(!result.is_error.unwrap_or(false));
+        let text = get_text_content(&result.content[0]).expect("Expected text content");
+        assert!(text.contains("Session Checkpoints"));
+        assert!(text.contains("#0")); // Initial checkpoint
+    }
+
+    #[tokio::test]
+    async fn test_list_cleaning_sessions() {
+        let test_df = df! {
+            "x" => [1, 2, 3],
+        }.unwrap();
+
+        let server = server_with_dataset("test", Dataset::new(test_df)).await;
+
+        // First, list should be empty
+        let list_request = ListCleaningSessionsRequest {};
+        let result = server.list_cleaning_sessions(Parameters(list_request)).await.unwrap();
+
+        let text = get_text_content(&result.content[0]).expect("Expected text content");
+        assert!(text.contains("No active cleaning sessions"));
+
+        // Start a session
+        let start_request = CleaningSessionStartRequest {
+            dataset: "test".to_string(),
+            session_name: None,
+        };
+        server.cleaning_session_start(Parameters(start_request)).await.unwrap();
+
+        // Now list should show the session
+        let list_request = ListCleaningSessionsRequest {};
+        let result = server.list_cleaning_sessions(Parameters(list_request)).await.unwrap();
+
+        let text = get_text_content(&result.content[0]).expect("Expected text content");
+        assert!(text.contains("Active Cleaning Sessions"));
+        assert!(text.contains("test")); // Dataset name
+    }
+
+    #[tokio::test]
+    async fn test_verify_cleaning() {
+        let original_df = df! {
+            "email" => ["  alice@test.com", "bob@test.com  "],
+        }.unwrap();
+
+        let cleaned_df = df! {
+            "email" => ["alice@test.com", "bob@test.com"],
+        }.unwrap();
+
+        let server = AnalyticsServer::new();
+        {
+            let mut datasets = server.datasets.write().await;
+            datasets.insert("original".to_string(), Dataset::new(original_df));
+            datasets.insert("cleaned".to_string(), Dataset::new(cleaned_df));
+        }
+
+        let request = VerifyCleaningRequest {
+            before_dataset: "original".to_string(),
+            after_dataset: "cleaned".to_string(),
+            operation_description: "trim whitespace".to_string(),
+        };
+
+        let result = server.verify_cleaning(Parameters(request)).await.unwrap();
+
+        assert!(!result.is_error.unwrap_or(false));
+        let text = get_text_content(&result.content[0]).expect("Expected text content");
+        assert!(text.contains("Verification Report"));
+    }
+
+    #[tokio::test]
+    async fn test_suggest_cleaning_not_found() {
+        let server = AnalyticsServer::new();
+
+        let request = SuggestCleaningRequest {
+            dataset: "nonexistent".to_string(),
+            min_priority: None,
+            limit: None,
+        };
+
+        let result = server.suggest_cleaning(Parameters(request)).await.unwrap();
+
+        // Should return an error for missing dataset
+        assert!(result.is_error.unwrap_or(false));
+        let text = get_text_content(&result.content[0]).expect("Expected text content");
+        assert!(text.contains("not found"));
+    }
+}
