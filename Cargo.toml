@@ -17,8 +17,8 @@ rust-version = "1.85"
 
 [workspace.dependencies]
 # DataFrame and data manipulation
-polars = { version = "0.46", features = ["lazy", "csv", "parquet", "dtype-full", "diagonal_concat", "semi_anti_join", "cross_join", "pivot", "rows", "cum_agg", "rank"] }
-polars-ops = { version = "0.46", features = ["pivot", "rank"] }
+polars = { version = "0.46", features = ["lazy", "csv", "parquet", "dtype-full", "diagonal_concat", "semi_anti_join", "cross_join", "pivot", "rows", "cum_agg", "rank", "strings"] }
+polars-ops = { version = "0.46", features = ["pivot", "rank", "strings"] }
 
 # MCP Protocol
 rmcp = { version = "0.8", features = ["server", "macros", "transport-io"] }
@@ -33,6 +33,9 @@ faer = "0.21"
 
 # Parallel computation
 rayon = "1.10"
+
+# Regex support for string operations
+regex = "1.10"
 
 # Time series forecasting
 arima = "0.3"
@@ -75,3 +78,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Benchmarking
 criterion = { version = "0.5", features = ["html_reports"] }
 rand_chacha = "0.3"
+
+# SIMD-optimized string operations
+bytecount = { version = "0.6", features = ["runtime-dispatch-simd"] }

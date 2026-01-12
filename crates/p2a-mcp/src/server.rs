@@ -29,6 +29,10 @@ use p2a_core::{
             MutateExpr, ArithOp,
             // Clean operations
             drop_na, fill_na, deduplicate, FillStrategy,
+            trim, to_lowercase, to_uppercase, replace,
+            // Regex and string operations
+            regex_replace, regex_extract, regex_count,
+            str_split, str_concat, str_substring, str_length,
             // Join operations
             left_join, right_join, inner_join, full_join, concat,
             // Aggregate operations
@@ -1607,6 +1611,254 @@ pub struct DeduplicateRequest {
     /// Which duplicate to keep
     #[schemars(description = "Which duplicate to keep: 'first', 'last', or 'none'. Default is 'first'.")]
     pub keep: Option<String>,
+
+    /// Optional name for the resulting dataset
+    #[schemars(description = "Optional name for the result.")]
+    pub result_name: Option<String>,
+}
+
+// =============================================================================
+// STRING CLEANING REQUESTS
+// =============================================================================
+
+/// Request to trim whitespace from string columns.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct TrimRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of the dataset.")]
+    pub dataset: String,
+
+    /// Columns to trim
+    #[schemars(description = "Column names to trim. If not provided, trims all string columns.")]
+    pub columns: Option<Vec<String>>,
+
+    /// Optional name for the resulting dataset
+    #[schemars(description = "Optional name for the result.")]
+    pub result_name: Option<String>,
+}
+
+/// Request to convert a string column to lowercase.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ToLowercaseRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of the dataset.")]
+    pub dataset: String,
+
+    /// Column to convert
+    #[schemars(description = "Name of the string column to convert to lowercase.")]
+    pub column: String,
+
+    /// Optional name for the resulting dataset
+    #[schemars(description = "Optional name for the result.")]
+    pub result_name: Option<String>,
+}
+
+/// Request to convert a string column to uppercase.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ToUppercaseRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of the dataset.")]
+    pub dataset: String,
+
+    /// Column to convert
+    #[schemars(description = "Name of the string column to convert to uppercase.")]
+    pub column: String,
+
+    /// Optional name for the resulting dataset
+    #[schemars(description = "Optional name for the result.")]
+    pub result_name: Option<String>,
+}
+
+/// Request to replace exact values in a column.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ReplaceValueRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of the dataset.")]
+    pub dataset: String,
+
+    /// Column to modify
+    #[schemars(description = "Name of the column to modify.")]
+    pub column: String,
+
+    /// Value to find
+    #[schemars(description = "Exact value to search for and replace.")]
+    pub old_value: String,
+
+    /// Replacement value
+    #[schemars(description = "Value to replace matches with.")]
+    pub new_value: String,
+
+    /// Optional name for the resulting dataset
+    #[schemars(description = "Optional name for the result.")]
+    pub result_name: Option<String>,
+}
+
+/// Request to replace substrings matching a regex pattern.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct RegexReplaceRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of the dataset.")]
+    pub dataset: String,
+
+    /// Column to modify
+    #[schemars(description = "Name of the string column to modify.")]
+    pub column: String,
+
+    /// Regex pattern
+    #[schemars(description = "Regular expression pattern to match.")]
+    pub pattern: String,
+
+    /// Replacement string
+    #[schemars(description = "Replacement string. Use $1, $2, etc. for capture groups.")]
+    pub replacement: String,
+
+    /// Optional name for the resulting dataset
+    #[schemars(description = "Optional name for the result.")]
+    pub result_name: Option<String>,
+}
+
+/// Request to extract substrings matching a regex pattern.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct RegexExtractRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of the dataset.")]
+    pub dataset: String,
+
+    /// Column to extract from
+    #[schemars(description = "Name of the string column to extract from.")]
+    pub column: String,
+
+    /// Regex pattern with capture groups
+    #[schemars(description = "Regular expression pattern. Use capture groups () to specify what to extract.")]
+    pub pattern: String,
+
+    /// Name for the new column
+    #[schemars(description = "Name for the new column containing extracted values.")]
+    pub new_column: String,
+
+    /// Which capture group to extract
+    #[schemars(description = "Which capture group to extract: 0 = entire match, 1 = first group, etc. Default is 1.")]
+    pub group: Option<usize>,
+
+    /// Optional name for the resulting dataset
+    #[schemars(description = "Optional name for the result.")]
+    pub result_name: Option<String>,
+}
+
+/// Request to count regex matches in each row.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct RegexCountRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of the dataset.")]
+    pub dataset: String,
+
+    /// Column to search in
+    #[schemars(description = "Name of the string column to search in.")]
+    pub column: String,
+
+    /// Regex pattern
+    #[schemars(description = "Regular expression pattern to count matches for.")]
+    pub pattern: String,
+
+    /// Name for the new count column
+    #[schemars(description = "Name for the new column containing match counts.")]
+    pub new_column: String,
+
+    /// Optional name for the resulting dataset
+    #[schemars(description = "Optional name for the result.")]
+    pub result_name: Option<String>,
+}
+
+/// Request to split a string column into multiple columns.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct StrSplitRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of the dataset.")]
+    pub dataset: String,
+
+    /// Column to split
+    #[schemars(description = "Name of the string column to split.")]
+    pub column: String,
+
+    /// Pattern to split on
+    #[schemars(description = "Pattern to split on (regex supported). E.g., ',' or '\\s+'.")]
+    pub pattern: String,
+
+    /// Maximum number of splits
+    #[schemars(description = "Maximum number of splits. If not provided, splits on all occurrences.")]
+    pub max_splits: Option<usize>,
+
+    /// Prefix for new column names
+    #[schemars(description = "Prefix for new column names. Creates columns named prefix_0, prefix_1, etc.")]
+    pub prefix: String,
+
+    /// Optional name for the resulting dataset
+    #[schemars(description = "Optional name for the result.")]
+    pub result_name: Option<String>,
+}
+
+/// Request to concatenate multiple string columns.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct StrConcatRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of the dataset.")]
+    pub dataset: String,
+
+    /// Columns to concatenate
+    #[schemars(description = "Names of the string columns to concatenate.")]
+    pub columns: Vec<String>,
+
+    /// Name for the new column
+    #[schemars(description = "Name for the new concatenated column.")]
+    pub new_column: String,
+
+    /// Separator between values
+    #[schemars(description = "Separator to insert between values. Default is empty string.")]
+    pub separator: Option<String>,
+
+    /// Optional name for the resulting dataset
+    #[schemars(description = "Optional name for the result.")]
+    pub result_name: Option<String>,
+}
+
+/// Request to get string lengths.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct StrLengthRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of the dataset.")]
+    pub dataset: String,
+
+    /// Column to measure
+    #[schemars(description = "Name of the string column to measure lengths for.")]
+    pub column: String,
+
+    /// Name for the new length column
+    #[schemars(description = "Name for the new column containing string lengths.")]
+    pub new_column: String,
+
+    /// Optional name for the resulting dataset
+    #[schemars(description = "Optional name for the result.")]
+    pub result_name: Option<String>,
+}
+
+/// Request to extract a substring.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct StrSubstringRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of the dataset.")]
+    pub dataset: String,
+
+    /// Column to extract from
+    #[schemars(description = "Name of the string column.")]
+    pub column: String,
+
+    /// Start index
+    #[schemars(description = "Start index (0-based). Negative values count from end.")]
+    pub start: i64,
+
+    /// Length to extract
+    #[schemars(description = "Number of characters to extract. If not provided, extracts to end.")]
+    pub length: Option<usize>,
 
     /// Optional name for the resulting dataset
     #[schemars(description = "Optional name for the result.")]
@@ -6778,6 +7030,475 @@ impl AnalyticsServer {
         Ok(CallToolResult::success(vec![Content::text(format!(
             "Removed {} duplicate rows, saved as '{}' ({} rows remaining)",
             removed, result_name, n_rows
+        ))]))
+    }
+
+    // =========================================================================
+    // STRING CLEANING TOOLS
+    // =========================================================================
+
+    /// Trim whitespace from string columns.
+    #[tool(description = "Trim leading and trailing whitespace from string columns. If no columns specified, trims all string columns.")]
+    async fn str_trim(
+        &self,
+        Parameters(request): Parameters<TrimRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let columns: Option<Vec<&str>> = request.columns.as_ref()
+            .map(|v| v.iter().map(|s| s.as_str()).collect());
+
+        let result = match trim(dataset, columns.as_deref()) {
+            Ok(ds) => ds,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Trim failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        let result_name = request.result_name.unwrap_or_else(|| request.dataset.clone());
+
+        drop(datasets);
+        let mut datasets = self.datasets.write().await;
+        datasets.insert(result_name.clone(), result);
+
+        let cols_desc = request.columns
+            .as_ref()
+            .map(|c| c.join(", "))
+            .unwrap_or_else(|| "all string columns".to_string());
+
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Trimmed whitespace from {}, saved as '{}'",
+            cols_desc, result_name
+        ))]))
+    }
+
+    /// Convert string column to lowercase.
+    #[tool(description = "Convert all characters in a string column to lowercase.")]
+    async fn str_to_lowercase(
+        &self,
+        Parameters(request): Parameters<ToLowercaseRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let result = match to_lowercase(dataset, &request.column) {
+            Ok(ds) => ds,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "To lowercase failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        let result_name = request.result_name.unwrap_or_else(|| request.dataset.clone());
+
+        drop(datasets);
+        let mut datasets = self.datasets.write().await;
+        datasets.insert(result_name.clone(), result);
+
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Converted '{}' to lowercase, saved as '{}'",
+            request.column, result_name
+        ))]))
+    }
+
+    /// Convert string column to uppercase.
+    #[tool(description = "Convert all characters in a string column to uppercase.")]
+    async fn str_to_uppercase(
+        &self,
+        Parameters(request): Parameters<ToUppercaseRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let result = match to_uppercase(dataset, &request.column) {
+            Ok(ds) => ds,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "To uppercase failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        let result_name = request.result_name.unwrap_or_else(|| request.dataset.clone());
+
+        drop(datasets);
+        let mut datasets = self.datasets.write().await;
+        datasets.insert(result_name.clone(), result);
+
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Converted '{}' to uppercase, saved as '{}'",
+            request.column, result_name
+        ))]))
+    }
+
+    /// Replace exact values in a column.
+    #[tool(description = "Replace exact values in a column with a new value. For pattern-based replacement, use str_regex_replace.")]
+    async fn str_replace_value(
+        &self,
+        Parameters(request): Parameters<ReplaceValueRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let result = match replace(dataset, &request.column, &request.old_value, &request.new_value) {
+            Ok(ds) => ds,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Replace failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        let result_name = request.result_name.unwrap_or_else(|| request.dataset.clone());
+
+        drop(datasets);
+        let mut datasets = self.datasets.write().await;
+        datasets.insert(result_name.clone(), result);
+
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Replaced '{}' with '{}' in column '{}', saved as '{}'",
+            request.old_value, request.new_value, request.column, result_name
+        ))]))
+    }
+
+    // =========================================================================
+    // REGEX TOOLS
+    // =========================================================================
+
+    /// Replace substrings matching a regex pattern.
+    #[tool(description = "Replace substrings matching a regex pattern with a replacement string. Supports capture groups ($1, $2, etc.) in the replacement.")]
+    async fn str_regex_replace(
+        &self,
+        Parameters(request): Parameters<RegexReplaceRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let result = match regex_replace(dataset, &request.column, &request.pattern, &request.replacement) {
+            Ok(ds) => ds,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Regex replace failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        let result_name = request.result_name.unwrap_or_else(|| request.dataset.clone());
+
+        drop(datasets);
+        let mut datasets = self.datasets.write().await;
+        datasets.insert(result_name.clone(), result);
+
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Replaced pattern '{}' in '{}', saved as '{}'",
+            request.pattern, request.column, result_name
+        ))]))
+    }
+
+    /// Extract substrings matching a regex pattern into a new column.
+    #[tool(description = "Extract substrings matching a regex pattern into a new column. Use capture groups () to specify what to extract, or extract the whole match.")]
+    async fn str_regex_extract(
+        &self,
+        Parameters(request): Parameters<RegexExtractRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let group = request.group.unwrap_or(1);
+
+        let result = match regex_extract(dataset, &request.column, &request.pattern, &request.new_column, group) {
+            Ok(ds) => ds,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Regex extract failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        let result_name = request.result_name.unwrap_or_else(|| request.dataset.clone());
+
+        drop(datasets);
+        let mut datasets = self.datasets.write().await;
+        datasets.insert(result_name.clone(), result);
+
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Extracted pattern '{}' from '{}' into '{}', saved as '{}'",
+            request.pattern, request.column, request.new_column, result_name
+        ))]))
+    }
+
+    /// Count regex pattern matches in each row.
+    #[tool(description = "Count the number of times a regex pattern matches in each row, creating a new integer column with the counts.")]
+    async fn str_regex_count(
+        &self,
+        Parameters(request): Parameters<RegexCountRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let result = match regex_count(dataset, &request.column, &request.pattern, &request.new_column) {
+            Ok(ds) => ds,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Regex count failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        let result_name = request.result_name.unwrap_or_else(|| request.dataset.clone());
+
+        drop(datasets);
+        let mut datasets = self.datasets.write().await;
+        datasets.insert(result_name.clone(), result);
+
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Counted pattern '{}' matches from '{}' into '{}', saved as '{}'",
+            request.pattern, request.column, request.new_column, result_name
+        ))]))
+    }
+
+    // =========================================================================
+    // STRING MANIPULATION TOOLS
+    // =========================================================================
+
+    /// Split a string column into multiple columns.
+    #[tool(description = "Split a string column by a pattern (supports regex) into multiple columns named prefix_0, prefix_1, etc.")]
+    async fn str_split(
+        &self,
+        Parameters(request): Parameters<StrSplitRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let result = match str_split(dataset, &request.column, &request.pattern, request.max_splits, &request.prefix) {
+            Ok(ds) => ds,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "String split failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        let result_name = request.result_name.unwrap_or_else(|| request.dataset.clone());
+
+        drop(datasets);
+        let mut datasets = self.datasets.write().await;
+        datasets.insert(result_name.clone(), result);
+
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Split '{}' by '{}' into columns with prefix '{}', saved as '{}'",
+            request.column, request.pattern, request.prefix, result_name
+        ))]))
+    }
+
+    /// Concatenate multiple string columns.
+    #[tool(description = "Concatenate multiple string columns into a new column, optionally with a separator between values.")]
+    async fn str_concat(
+        &self,
+        Parameters(request): Parameters<StrConcatRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let columns: Vec<&str> = request.columns.iter().map(|s| s.as_str()).collect();
+        let separator = request.separator.as_deref();
+
+        let result = match str_concat(dataset, &columns, &request.new_column, separator) {
+            Ok(ds) => ds,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "String concat failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        let result_name = request.result_name.unwrap_or_else(|| request.dataset.clone());
+
+        drop(datasets);
+        let mut datasets = self.datasets.write().await;
+        datasets.insert(result_name.clone(), result);
+
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Concatenated {} columns into '{}', saved as '{}'",
+            request.columns.len(), request.new_column, result_name
+        ))]))
+    }
+
+    /// Get string lengths.
+    #[tool(description = "Create a new column containing the length (number of characters) of each string in the source column.")]
+    async fn str_length(
+        &self,
+        Parameters(request): Parameters<StrLengthRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let result = match str_length(dataset, &request.column, &request.new_column) {
+            Ok(ds) => ds,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "String length failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        let result_name = request.result_name.unwrap_or_else(|| request.dataset.clone());
+
+        drop(datasets);
+        let mut datasets = self.datasets.write().await;
+        datasets.insert(result_name.clone(), result);
+
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Created length column '{}' from '{}', saved as '{}'",
+            request.new_column, request.column, result_name
+        ))]))
+    }
+
+    /// Extract a substring from a string column.
+    #[tool(description = "Extract a substring from each string in a column. Supports negative indices to count from end.")]
+    async fn str_substring(
+        &self,
+        Parameters(request): Parameters<StrSubstringRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let result = match str_substring(dataset, &request.column, request.start, request.length) {
+            Ok(ds) => ds,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "String substring failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        let result_name = request.result_name.unwrap_or_else(|| request.dataset.clone());
+
+        drop(datasets);
+        let mut datasets = self.datasets.write().await;
+        datasets.insert(result_name.clone(), result);
+
+        let length_desc = request.length
+            .map(|l| format!(", length {}", l))
+            .unwrap_or_else(|| " to end".to_string());
+
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Extracted substring from '{}' (start: {}{}), saved as '{}'",
+            request.column, request.start, length_desc, result_name
         ))]))
     }
 

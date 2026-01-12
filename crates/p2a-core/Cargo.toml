@@ -22,6 +22,12 @@ faer.workspace = true
 # Parallel computation
 rayon.workspace = true
 
+# Regex support for string operations
+regex.workspace = true
+
+# SIMD-optimized string operations
+bytecount.workspace = true
+
 # Time series forecasting
 arima.workspace = true
 augurs-core.workspace = true
@@ -82,4 +88,8 @@ harness = false
 
 [[bench]]
 name = "munging_benchmarks"
+harness = false
+
+[[bench]]
+name = "string_benchmarks"
 harness = false

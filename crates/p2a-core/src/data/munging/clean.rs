@@ -1,6 +1,7 @@
-//! Data cleaning operations: drop_na, fill_na, deduplicate, cast, replace.
+//! Data cleaning operations: drop_na, fill_na, deduplicate, cast, replace, regex.
 
 use polars::prelude::*;
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 use super::error::{MungeError, MungeResult};
@@ -553,6 +554,9 @@ pub fn trim(dataset: &Dataset, columns: Option<&[&str]>) -> MungeResult<Dataset>
 
     let mut result_df = df.clone();
 
+    // Create a null pattern column for whitespace trimming
+    let null_pattern = Column::full_null("pattern".into(), 1, &DataType::String);
+
     for col_name in &cols_to_trim {
         let col = result_df.column(col_name)?;
         if col.dtype() != &DataType::String {
@@ -560,10 +564,8 @@ pub fn trim(dataset: &Dataset, columns: Option<&[&str]>) -> MungeResult<Dataset>
         }
 
         let ca = col.str()?;
-        let trimmed: StringChunked = ca
-            .into_iter()
-            .map(|opt| opt.map(|s| s.trim().to_string()))
-            .collect();
+        // Use vectorized strip_chars with null pattern (strips whitespace) - much faster
+        let trimmed = ca.strip_chars(&null_pattern)?;
 
         let trimmed_col = trimmed.with_name(col.name().clone()).into_column();
         result_df = result_df.drop(col_name)?;
@@ -587,10 +589,8 @@ pub fn to_lowercase(dataset: &Dataset, column: &str) -> MungeResult<Dataset> {
     }
 
     let ca = col.str()?;
-    let lowered: StringChunked = ca
-        .into_iter()
-        .map(|opt| opt.map(|s| s.to_lowercase()))
-        .collect();
+    // Use vectorized to_lowercase() - much faster than row-by-row iteration
+    let lowered: StringChunked = ca.to_lowercase();
 
     let lowered_col = lowered.with_name(col.name().clone()).into_column();
 
@@ -615,16 +615,518 @@ pub fn to_uppercase(dataset: &Dataset, column: &str) -> MungeResult<Dataset> {
     }
 
     let ca = col.str()?;
-    let uppered: StringChunked = ca
-        .into_iter()
-        .map(|opt| opt.map(|s| s.to_uppercase()))
-        .collect();
+    // Use vectorized to_uppercase() - much faster than row-by-row iteration
+    let uppered: StringChunked = ca.to_uppercase();
 
     let uppered_col = uppered.with_name(col.name().clone()).into_column();
 
     let mut result_df = df.clone();
     result_df = result_df.drop(column)?;
     result_df = result_df.with_column(uppered_col)?.clone();
+
+    Ok(Dataset::new(result_df))
+}
+
+/// Replace substrings matching a regex pattern in a string column.
+///
+/// # Arguments
+/// * `dataset` - Source dataset
+/// * `column` - Column to modify
+/// * `pattern` - Regex pattern to match
+/// * `replacement` - Replacement string (can use capture groups like $1, $2)
+///
+/// # Example
+/// ```ignore
+/// // Remove all digits from a column
+/// let cleaned = regex_replace(&dataset, "text", r"\d+", "")?;
+///
+/// // Standardize phone numbers
+/// let cleaned = regex_replace(&dataset, "phone", r"(\d{3})(\d{3})(\d{4})", "($1) $2-$3")?;
+/// ```
+pub fn regex_replace(
+    dataset: &Dataset,
+    column: &str,
+    pattern: &str,
+    replacement: &str,
+) -> MungeResult<Dataset> {
+    let df = dataset.df();
+
+    let col = df.column(column)?;
+    if col.dtype() != &DataType::String {
+        return Err(MungeError::TypeMismatch {
+            column: column.to_string(),
+            expected: "String".to_string(),
+            found: format!("{:?}", col.dtype()),
+        });
+    }
+
+    let re = Regex::new(pattern).map_err(|e| {
+        MungeError::InvalidExpression(format!("Invalid regex pattern '{}': {}", pattern, e))
+    })?;
+
+    let ca = col.str()?;
+    let replaced: StringChunked = ca
+        .into_iter()
+        .map(|opt| opt.map(|s| re.replace_all(s, replacement).to_string()))
+        .collect();
+
+    let replaced_col = replaced.with_name(col.name().clone()).into_column();
+
+    let mut result_df = df.clone();
+    result_df = result_df.drop(column)?;
+    result_df = result_df.with_column(replaced_col)?.clone();
+
+    Ok(Dataset::new(result_df))
+}
+
+/// Replace all occurrences of a regex pattern (same as regex_replace but with clearer naming).
+pub fn regex_replace_all(
+    dataset: &Dataset,
+    column: &str,
+    pattern: &str,
+    replacement: &str,
+) -> MungeResult<Dataset> {
+    regex_replace(dataset, column, pattern, replacement)
+}
+
+/// Extract substrings matching a regex pattern into a new column.
+///
+/// # Arguments
+/// * `dataset` - Source dataset
+/// * `column` - Column to extract from
+/// * `pattern` - Regex pattern with capture groups
+/// * `new_column` - Name for the new column containing extracted values
+/// * `group` - Which capture group to extract (0 = entire match, 1 = first group, etc.)
+///
+/// # Example
+/// ```ignore
+/// // Extract email domain
+/// let result = regex_extract(&dataset, "email", r"@([\w.-]+)", "domain", 1)?;
+///
+/// // Extract first number from text
+/// let result = regex_extract(&dataset, "text", r"(\d+)", "first_number", 1)?;
+/// ```
+pub fn regex_extract(
+    dataset: &Dataset,
+    column: &str,
+    pattern: &str,
+    new_column: &str,
+    group: usize,
+) -> MungeResult<Dataset> {
+    let df = dataset.df();
+
+    let col = df.column(column)?;
+    if col.dtype() != &DataType::String {
+        return Err(MungeError::TypeMismatch {
+            column: column.to_string(),
+            expected: "String".to_string(),
+            found: format!("{:?}", col.dtype()),
+        });
+    }
+
+    let re = Regex::new(pattern).map_err(|e| {
+        MungeError::InvalidExpression(format!("Invalid regex pattern '{}': {}", pattern, e))
+    })?;
+
+    let ca = col.str()?;
+    let extracted: StringChunked = ca
+        .into_iter()
+        .map(|opt| {
+            opt.and_then(|s| {
+                re.captures(s).and_then(|caps| {
+                    caps.get(group).map(|m| m.as_str().to_string())
+                })
+            })
+        })
+        .collect();
+
+    let extracted_col = extracted.with_name(new_column.into()).into_column();
+
+    let mut result_df = df.clone();
+    result_df = result_df.with_column(extracted_col)?.clone();
+
+    Ok(Dataset::new(result_df))
+}
+
+/// Extract all matches of a regex pattern into a new column (as comma-separated string).
+///
+/// # Arguments
+/// * `dataset` - Source dataset
+/// * `column` - Column to extract from
+/// * `pattern` - Regex pattern to match
+/// * `new_column` - Name for the new column containing all matches
+/// * `separator` - Separator for multiple matches (default ",")
+///
+/// # Example
+/// ```ignore
+/// // Extract all numbers from text
+/// let result = regex_extract_all(&dataset, "text", r"\d+", "numbers", Some(","))?;
+/// ```
+pub fn regex_extract_all(
+    dataset: &Dataset,
+    column: &str,
+    pattern: &str,
+    new_column: &str,
+    separator: Option<&str>,
+) -> MungeResult<Dataset> {
+    let df = dataset.df();
+
+    let col = df.column(column)?;
+    if col.dtype() != &DataType::String {
+        return Err(MungeError::TypeMismatch {
+            column: column.to_string(),
+            expected: "String".to_string(),
+            found: format!("{:?}", col.dtype()),
+        });
+    }
+
+    let re = Regex::new(pattern).map_err(|e| {
+        MungeError::InvalidExpression(format!("Invalid regex pattern '{}': {}", pattern, e))
+    })?;
+
+    let sep = separator.unwrap_or(",");
+
+    let ca = col.str()?;
+    let extracted: StringChunked = ca
+        .into_iter()
+        .map(|opt| {
+            opt.map(|s| {
+                let matches: Vec<&str> = re.find_iter(s).map(|m| m.as_str()).collect();
+                if matches.is_empty() {
+                    String::new()
+                } else {
+                    matches.join(sep)
+                }
+            })
+        })
+        .collect();
+
+    let extracted_col = extracted.with_name(new_column.into()).into_column();
+
+    let mut result_df = df.clone();
+    result_df = result_df.with_column(extracted_col)?.clone();
+
+    Ok(Dataset::new(result_df))
+}
+
+/// Count the number of matches of a regex pattern in each row.
+///
+/// # Arguments
+/// * `dataset` - Source dataset
+/// * `column` - Column to search in
+/// * `pattern` - Regex pattern to match
+/// * `new_column` - Name for the new column containing counts
+///
+/// # Example
+/// ```ignore
+/// // Count digits in each string
+/// let result = regex_count(&dataset, "text", r"\d", "digit_count")?;
+/// ```
+pub fn regex_count(
+    dataset: &Dataset,
+    column: &str,
+    pattern: &str,
+    new_column: &str,
+) -> MungeResult<Dataset> {
+    let df = dataset.df();
+
+    let col = df.column(column)?;
+    if col.dtype() != &DataType::String {
+        return Err(MungeError::TypeMismatch {
+            column: column.to_string(),
+            expected: "String".to_string(),
+            found: format!("{:?}", col.dtype()),
+        });
+    }
+
+    let re = Regex::new(pattern).map_err(|e| {
+        MungeError::InvalidExpression(format!("Invalid regex pattern '{}': {}", pattern, e))
+    })?;
+
+    let ca = col.str()?;
+    let counts: Int64Chunked = ca
+        .into_iter()
+        .map(|opt| opt.map(|s| re.find_iter(s).count() as i64))
+        .collect();
+
+    let counts_col = counts.with_name(new_column.into()).into_column();
+
+    let mut result_df = df.clone();
+    result_df = result_df.with_column(counts_col)?.clone();
+
+    Ok(Dataset::new(result_df))
+}
+
+/// Split a string column by a pattern into multiple new columns.
+///
+/// # Arguments
+/// * `dataset` - Source dataset
+/// * `column` - Column to split
+/// * `pattern` - Pattern to split on (regex or literal)
+/// * `max_splits` - Maximum number of splits (creates max_splits + 1 columns)
+/// * `prefix` - Prefix for new column names (columns named prefix_0, prefix_1, etc.)
+///
+/// # Example
+/// ```ignore
+/// // Split full name into parts
+/// let result = str_split(&dataset, "full_name", r"\s+", Some(2), "name_part")?;
+/// ```
+pub fn str_split(
+    dataset: &Dataset,
+    column: &str,
+    pattern: &str,
+    max_splits: Option<usize>,
+    prefix: &str,
+) -> MungeResult<Dataset> {
+    let df = dataset.df();
+
+    let col = df.column(column)?;
+    if col.dtype() != &DataType::String {
+        return Err(MungeError::TypeMismatch {
+            column: column.to_string(),
+            expected: "String".to_string(),
+            found: format!("{:?}", col.dtype()),
+        });
+    }
+
+    let re = Regex::new(pattern).map_err(|e| {
+        MungeError::InvalidExpression(format!("Invalid regex pattern '{}': {}", pattern, e))
+    })?;
+
+    let ca = col.str()?;
+    let n_splits = max_splits.unwrap_or(usize::MAX);
+
+    // First pass: determine how many columns we need
+    let mut max_parts = 0;
+    let splits: Vec<Vec<String>> = ca
+        .into_iter()
+        .map(|opt| {
+            let parts: Vec<String> = match opt {
+                Some(s) => {
+                    let mut parts: Vec<String> = re.splitn(s, n_splits + 1).map(|p| p.to_string()).collect();
+                    if max_splits.is_some() && parts.len() > n_splits + 1 {
+                        parts.truncate(n_splits + 1);
+                    }
+                    parts
+                }
+                None => vec![],
+            };
+            if parts.len() > max_parts {
+                max_parts = parts.len();
+            }
+            parts
+        })
+        .collect();
+
+    // Cap max_parts if max_splits was specified
+    if let Some(max) = max_splits {
+        max_parts = max_parts.min(max + 1);
+    }
+
+    // Create columns for each split part
+    let mut result_df = df.clone();
+    for i in 0..max_parts {
+        let col_name = format!("{}_{}", prefix, i);
+        let values: StringChunked = splits
+            .iter()
+            .map(|parts| parts.get(i).map(|s| s.as_str()))
+            .collect();
+        let new_col = values.with_name(col_name.into()).into_column();
+        result_df = result_df.with_column(new_col)?.clone();
+    }
+
+    Ok(Dataset::new(result_df))
+}
+
+/// Concatenate multiple string columns into one.
+///
+/// # Arguments
+/// * `dataset` - Source dataset
+/// * `columns` - Columns to concatenate
+/// * `new_column` - Name for the concatenated column
+/// * `separator` - Separator between values (default "")
+///
+/// # Example
+/// ```ignore
+/// let result = str_concat(&dataset, &["first_name", "last_name"], "full_name", Some(" "))?;
+/// ```
+pub fn str_concat(
+    dataset: &Dataset,
+    columns: &[&str],
+    new_column: &str,
+    separator: Option<&str>,
+) -> MungeResult<Dataset> {
+    let df = dataset.df();
+
+    // Validate all columns exist and are strings
+    for col_name in columns {
+        let col = df.column(col_name)?;
+        if col.dtype() != &DataType::String {
+            return Err(MungeError::TypeMismatch {
+                column: col_name.to_string(),
+                expected: "String".to_string(),
+                found: format!("{:?}", col.dtype()),
+            });
+        }
+    }
+
+    let sep = separator.unwrap_or("");
+
+    // Collect string chunked arrays for all columns
+    let string_cols: Vec<&StringChunked> = columns
+        .iter()
+        .map(|name| df.column(name).unwrap().str().unwrap())
+        .collect();
+
+    // Use vectorized hor_str_concat - much faster than row-by-row iteration
+    let concatenated = hor_str_concat(&string_cols, sep, true)?;
+
+    let concat_col = concatenated.with_name(new_column.into()).into_column();
+
+    let mut result_df = df.clone();
+    result_df = result_df.with_column(concat_col)?.clone();
+
+    Ok(Dataset::new(result_df))
+}
+
+/// Pad a string column to a fixed width.
+///
+/// # Arguments
+/// * `dataset` - Source dataset
+/// * `column` - Column to pad
+/// * `width` - Target width
+/// * `pad_char` - Character to pad with (default space)
+/// * `side` - "left" or "right" (default "left")
+pub fn str_pad(
+    dataset: &Dataset,
+    column: &str,
+    width: usize,
+    pad_char: Option<char>,
+    side: Option<&str>,
+) -> MungeResult<Dataset> {
+    let df = dataset.df();
+
+    let col = df.column(column)?;
+    if col.dtype() != &DataType::String {
+        return Err(MungeError::TypeMismatch {
+            column: column.to_string(),
+            expected: "String".to_string(),
+            found: format!("{:?}", col.dtype()),
+        });
+    }
+
+    let pad = pad_char.unwrap_or(' ');
+    let pad_side = side.unwrap_or("left");
+
+    let ca = col.str()?;
+    let padded: StringChunked = ca
+        .into_iter()
+        .map(|opt| {
+            opt.map(|s| {
+                let len = s.chars().count();
+                if len >= width {
+                    s.to_string()
+                } else {
+                    let padding: String = std::iter::repeat(pad).take(width - len).collect();
+                    match pad_side {
+                        "left" | "start" => format!("{}{}", padding, s),
+                        _ => format!("{}{}", s, padding),
+                    }
+                }
+            })
+        })
+        .collect();
+
+    let padded_col = padded.with_name(col.name().clone()).into_column();
+
+    let mut result_df = df.clone();
+    result_df = result_df.drop(column)?;
+    result_df = result_df.with_column(padded_col)?.clone();
+
+    Ok(Dataset::new(result_df))
+}
+
+/// Get substring from a string column.
+///
+/// # Arguments
+/// * `dataset` - Source dataset
+/// * `column` - Column to extract from
+/// * `start` - Start index (0-based, supports negative for from-end)
+/// * `length` - Optional length to extract
+pub fn str_substring(
+    dataset: &Dataset,
+    column: &str,
+    start: i64,
+    length: Option<usize>,
+) -> MungeResult<Dataset> {
+    let df = dataset.df();
+
+    let col = df.column(column)?;
+    if col.dtype() != &DataType::String {
+        return Err(MungeError::TypeMismatch {
+            column: column.to_string(),
+            expected: "String".to_string(),
+            found: format!("{:?}", col.dtype()),
+        });
+    }
+
+    let ca = col.str()?;
+
+    // Use vectorized str_slice() - much faster than row-by-row iteration
+    // Create scalar columns for offset and length
+    let offset_col = Column::new_scalar("offset".into(), Scalar::from(start), 1);
+    let length_col = match length {
+        Some(l) => Column::new_scalar("length".into(), Scalar::from(l as u64), 1),
+        None => Column::full_null("length".into(), 1, &DataType::UInt64),
+    };
+
+    let substr = ca.str_slice(&offset_col, &length_col)?;
+
+    let substr_col = substr.with_name(col.name().clone()).into_column();
+
+    let mut result_df = df.clone();
+    result_df = result_df.drop(column)?;
+    result_df = result_df.with_column(substr_col)?.clone();
+
+    Ok(Dataset::new(result_df))
+}
+
+/// Get the length of strings in a column (counts Unicode characters).
+///
+/// Uses SIMD-optimized `bytecount::num_chars` for fast UTF-8 character counting.
+///
+/// # Arguments
+/// * `dataset` - Source dataset
+/// * `column` - Column to measure
+/// * `new_column` - Name for the length column
+pub fn str_length(
+    dataset: &Dataset,
+    column: &str,
+    new_column: &str,
+) -> MungeResult<Dataset> {
+    let df = dataset.df();
+
+    let col = df.column(column)?;
+    if col.dtype() != &DataType::String {
+        return Err(MungeError::TypeMismatch {
+            column: column.to_string(),
+            expected: "String".to_string(),
+            found: format!("{:?}", col.dtype()),
+        });
+    }
+
+    let ca = col.str()?;
+    // Use SIMD-optimized bytecount::num_chars for fast UTF-8 character counting
+    // This is significantly faster than std chars().count() or Polars str_len_chars()
+    let lengths: Int64Chunked = ca
+        .into_iter()
+        .map(|opt| opt.map(|s| bytecount::num_chars(s.as_bytes()) as i64))
+        .collect();
+
+    let length_col = lengths.with_name(new_column.into()).into_column();
+
+    let mut result_df = df.clone();
+    result_df = result_df.with_column(length_col)?.clone();
 
     Ok(Dataset::new(result_df))
 }

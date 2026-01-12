@@ -2,6 +2,7 @@
 
 use polars::prelude::*;
 use polars::prelude::PlSmallStr;
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 use super::error::{MungeError, MungeResult};
@@ -22,6 +23,18 @@ pub enum FilterOp {
     Lt,
     /// Less than or equal to
     Le,
+    /// String contains substring
+    Contains,
+    /// String does not contain substring
+    NotContains,
+    /// String starts with prefix
+    StartsWith,
+    /// String ends with suffix
+    EndsWith,
+    /// String matches regex pattern
+    Regex,
+    /// String does not match regex pattern
+    NotRegex,
 }
 
 impl FilterOp {
@@ -34,8 +47,27 @@ impl FilterOp {
             "ge" | ">=" => Ok(FilterOp::Ge),
             "lt" | "<" => Ok(FilterOp::Lt),
             "le" | "<=" => Ok(FilterOp::Le),
+            "contains" | "like" => Ok(FilterOp::Contains),
+            "not_contains" | "notcontains" | "not contains" => Ok(FilterOp::NotContains),
+            "starts_with" | "startswith" | "starts" => Ok(FilterOp::StartsWith),
+            "ends_with" | "endswith" | "ends" => Ok(FilterOp::EndsWith),
+            "regex" | "matches" | "regexp" => Ok(FilterOp::Regex),
+            "not_regex" | "notregex" | "not_matches" => Ok(FilterOp::NotRegex),
             _ => Err(MungeError::InvalidOperator(s.to_string())),
         }
+    }
+
+    /// Check if this operator is a string-only operator
+    pub fn is_string_only(&self) -> bool {
+        matches!(
+            self,
+            FilterOp::Contains
+                | FilterOp::NotContains
+                | FilterOp::StartsWith
+                | FilterOp::EndsWith
+                | FilterOp::Regex
+                | FilterOp::NotRegex
+        )
     }
 }
 
@@ -44,12 +76,21 @@ impl FilterOp {
 /// # Arguments
 /// * `dataset` - Source dataset
 /// * `column` - Column to filter on
-/// * `op` - Comparison operator (eq, ne, gt, ge, lt, le)
+/// * `op` - Comparison operator. Supported operators:
+///   - Comparison: eq, ne, gt, ge, lt, le
+///   - String: contains, not_contains, starts_with, ends_with, regex, not_regex
 /// * `value` - Value to compare against (parsed based on column type)
 ///
 /// # Example
 /// ```ignore
+/// // Numeric filter
 /// let filtered = filter(&dataset, "age", "ge", "18")?;
+///
+/// // String contains
+/// let filtered = filter(&dataset, "name", "contains", "Smith")?;
+///
+/// // Regex filter
+/// let filtered = filter(&dataset, "email", "regex", r"^[\w.-]+@[\w.-]+\.\w+$")?;
 /// ```
 pub fn filter(dataset: &Dataset, column: &str, op: &str, value: &str) -> MungeResult<Dataset> {
     let df = dataset.df();
@@ -62,6 +103,15 @@ pub fn filter(dataset: &Dataset, column: &str, op: &str, value: &str) -> MungeRe
     let col_series = df.column(column)?;
     let dtype = col_series.dtype();
     let op = FilterOp::from_str(op)?;
+
+    // String-only operators require string columns
+    if op.is_string_only() && !matches!(dtype, DataType::String) {
+        return Err(MungeError::TypeMismatch {
+            column: column.to_string(),
+            expected: "string".to_string(),
+            found: format!("{:?}", dtype),
+        });
+    }
 
     // Build the filter expression based on column type
     // Cast to common types for comparison
@@ -139,6 +189,10 @@ fn apply_numeric_filter_i64(series: &Column, op: FilterOp, value: i64) -> MungeR
         FilterOp::Ge => ca.gt_eq(value),
         FilterOp::Lt => ca.lt(value),
         FilterOp::Le => ca.lt_eq(value),
+        // String-only operators should not reach here (caught earlier)
+        _ => return Err(MungeError::InvalidOperator(
+            "String operators not valid for numeric columns".to_string(),
+        )),
     })
 }
 
@@ -151,6 +205,9 @@ fn apply_numeric_filter_i32(series: &Column, op: FilterOp, value: i32) -> MungeR
         FilterOp::Ge => ca.gt_eq(value),
         FilterOp::Lt => ca.lt(value),
         FilterOp::Le => ca.lt_eq(value),
+        _ => return Err(MungeError::InvalidOperator(
+            "String operators not valid for numeric columns".to_string(),
+        )),
     })
 }
 
@@ -163,6 +220,9 @@ fn apply_numeric_filter_u64(series: &Column, op: FilterOp, value: u64) -> MungeR
         FilterOp::Ge => ca.gt_eq(value),
         FilterOp::Lt => ca.lt(value),
         FilterOp::Le => ca.lt_eq(value),
+        _ => return Err(MungeError::InvalidOperator(
+            "String operators not valid for numeric columns".to_string(),
+        )),
     })
 }
 
@@ -175,6 +235,9 @@ fn apply_numeric_filter_f64(series: &Column, op: FilterOp, value: f64) -> MungeR
         FilterOp::Ge => ca.gt_eq(value),
         FilterOp::Lt => ca.lt(value),
         FilterOp::Le => ca.lt_eq(value),
+        _ => return Err(MungeError::InvalidOperator(
+            "String operators not valid for numeric columns".to_string(),
+        )),
     })
 }
 
@@ -187,6 +250,42 @@ fn apply_string_filter(series: &Column, op: FilterOp, value: &str) -> MungeResul
         FilterOp::Ge => ca.gt_eq(value),
         FilterOp::Lt => ca.lt(value),
         FilterOp::Le => ca.lt_eq(value),
+        FilterOp::Contains => {
+            ca.into_iter()
+                .map(|opt| opt.map(|s| s.contains(value)))
+                .collect()
+        }
+        FilterOp::NotContains => {
+            ca.into_iter()
+                .map(|opt| opt.map(|s| !s.contains(value)))
+                .collect()
+        }
+        FilterOp::StartsWith => {
+            ca.into_iter()
+                .map(|opt| opt.map(|s| s.starts_with(value)))
+                .collect()
+        }
+        FilterOp::EndsWith => {
+            ca.into_iter()
+                .map(|opt| opt.map(|s| s.ends_with(value)))
+                .collect()
+        }
+        FilterOp::Regex => {
+            let re = Regex::new(value).map_err(|e| MungeError::InvalidExpression(
+                format!("Invalid regex pattern '{}': {}", value, e)
+            ))?;
+            ca.into_iter()
+                .map(|opt| opt.map(|s| re.is_match(s)))
+                .collect()
+        }
+        FilterOp::NotRegex => {
+            let re = Regex::new(value).map_err(|e| MungeError::InvalidExpression(
+                format!("Invalid regex pattern '{}': {}", value, e)
+            ))?;
+            ca.into_iter()
+                .map(|opt| opt.map(|s| !re.is_match(s)))
+                .collect()
+        }
     })
 }
 

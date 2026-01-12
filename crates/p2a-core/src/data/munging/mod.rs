@@ -53,6 +53,9 @@ pub use transform::{
 pub use clean::{
     drop_na, fill_na, deduplicate, cast, cast_columns,
     clip, replace, trim, to_lowercase, to_uppercase,
+    // Regex and advanced string operations
+    regex_replace, regex_replace_all, regex_extract, regex_extract_all, regex_count,
+    str_split, str_concat, str_pad, str_substring, str_length,
     FillStrategy,
 };
 
