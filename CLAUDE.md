@@ -43,6 +43,7 @@ src/
 │   ├── iv.rs           # 2SLS with first-stage diagnostics
 │   ├── did.rs          # Difference-in-Differences
 │   ├── discrete.rs     # Logit, Probit (Newton-Raphson MLE)
+│   ├── feglm.rs        # GLM with HDFE (IRLS + weighted MAP)
 │   └── timeseries.rs   # VAR, VARMA, VECM, IRF
 ```
 

@@ -79,6 +79,7 @@ From the original plan:
 | Regression diagnostics | ✅ Complete | Pure Rust (JB, BP, DW, VIF) |
 | Logit (logistic regression) | ✅ Complete | Pure Rust (Newton-Raphson MLE) |
 | Probit regression | ✅ Complete | Pure Rust (Newton-Raphson MLE) |
+| FEGLM (GLM + HDFE) | ✅ Complete | Pure Rust (IRLS + weighted MAP, Stammann 2018) |
 | Event study plots | ❌ Deferred | Phase 5 |
 | ARIMA modeling | ✅ Complete | arima crate |
 | MSTL decomposition | ✅ Complete | augurs-mstl |
@@ -182,6 +183,14 @@ All econometrics are implemented in **pure Rust** using `ndarray` for matrix ope
 - Probit regression via Newton-Raphson MLE
 - McFadden's Pseudo R-squared
 - Marginal effects at means
+
+**FEGLM (GLM with High-Dimensional Fixed Effects):**
+- Generalized Linear Models with multi-way FE absorption (Stammann 2018)
+- Supported families: Logit, Probit, Poisson, Gaussian
+- Iteratively Reweighted Least Squares (IRLS) outer loop
+- Weighted Method of Alternating Projections (MAP) for FE demeaning
+- Equivalent to R's alpaca::feglm() / fixest::feglm()
+- Applications: Gravity models with exporter/importer FE, conditional logit with individual FE
 
 **Multivariate Time Series:**
 - VAR (Vector Autoregression) via OLS equation-by-equation
@@ -470,7 +479,7 @@ cargo build --release -p p2a-desktop
 - `traits/` — `LinearEstimator` trait for common regression output interface
 - `errors.rs` — Unified error types (`EconError`, `EconResult`)
 
-**MCP Tools Exposed (61 total):**
+**MCP Tools Exposed (62 total):**
 ```
 ┌─────────────────────────┬──────────────────────────────────────────────────────────────┐
 │ Tool                    │ Description                                                  │
@@ -497,6 +506,7 @@ cargo build --release -p p2a-desktop
 │ rd_fuzzy                │ Fuzzy RD / LATE estimation with first-stage diagnostics     │
 │ logit                   │ Logistic regression (binary outcomes)                        │
 │ probit                  │ Probit regression (binary outcomes)                          │
+│ feglm                   │ GLM with high-dimensional fixed effects (IRLS + weighted MAP)│
 │ ts_var                  │ Vector Autoregression (VAR) model                            │
 │ ts_varma                │ VARMA(p,q) via Hannan-Rissanen                               │
 │ ts_vecm                 │ Vector Error Correction Model (Johansen ML)                  │
@@ -817,7 +827,7 @@ All 29+ methods are validated against reference implementations:
 | Regression | OLS, Robust SEs (HC0-HC3), Clustered SEs | `lm()`, `sandwich::vcovHC`, `sandwich::vcovCL` |
 | Panel Data | FE, RE, Hausman, HDFE | `plm::plm()`, `lfe::felm()` |
 | IV/Causal | 2SLS, DiD | `AER::ivreg()`, manual DiD |
-| Discrete Choice | Logit, Probit | `stats::glm()` |
+| Discrete Choice | Logit, Probit, FEGLM | `stats::glm()`, `alpaca::feglm()` |
 | Time Series | VAR, VARMA, VECM, IRF | `vars::VAR()`, `vars::irf()` |
 | Forecasting | ARIMA, MSTL, Changepoint | `forecast::auto.arima()`, `forecast::mstl()`, `changepoint` |
 | ML | K-means, DBSCAN, Hierarchical, PCA, t-SNE, RF, SVM | `stats::kmeans()`, `sklearn`, `stats::prcomp()` |

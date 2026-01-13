@@ -41,6 +41,19 @@ Drei Unternehmen (ACME, BETA, GAMMA) mit Quartalsdaten für 2022:
 | `financial_ratios.csv` | Berechnete Finanzkennzahlen | firm_id, year, quarter, current_ratio, quick_ratio, debt_to_equity, interest_coverage, roa, roe, gross_margin, operating_margin, net_margin, asset_turnover |
 | `stock_returns.csv` | Tägliche Aktienkursdaten | firm_id, date, open_price, close_price, high, low, volume, daily_return, market_return, excess_return |
 
+#### Unternehmens- & Mitarbeiterdaten
+
+| Datei | Beschreibung | Wichtige Variablen |
+|-------|--------------|-------------------|
+| `company_info.csv` | Unternehmensmerkmale | firm_id, company_name, industry, founded_year, headquarters, employee_count, is_public |
+| `employee_data.csv` | Mitarbeiterdaten | employee_id, firm_id, department, hire_date, salary, performance_score, education_level, is_manager |
+
+#### Makroökonomische Daten
+
+| Datei | Beschreibung | Wichtige Variablen |
+|-------|--------------|-------------------|
+| `economic_indicators.csv` | Quartalsweise Wirtschaftsindikatoren | year, quarter, gdp_growth_rate, interest_rate, inflation_rate, unemployment_rate, consumer_confidence |
+
 ## Beispielanalysen
 
 ### Jahresabschlussanalyse
@@ -56,6 +69,23 @@ Führe eine Fixed-Effects-Regression von ROE auf debt_to_equity und asset_turnov
 ### Aktienrendite-Analyse
 ```
 Berechne die Korrelation zwischen täglichen Renditen und Marktrenditen für jedes Unternehmen
+```
+
+### Multi-Table-Joins
+```
+Führe balance_sheet mit income_statement über firm_id, year und quarter zusammen,
+dann joine mit company_info um Branchenklassifikation hinzuzufügen
+```
+
+### Panel mit Wirtschaftskontrollen
+```
+Joine Unternehmensfinanzdaten mit economic_indicators über year und quarter
+um Unternehmensleistung unter verschiedenen makroökonomischen Bedingungen zu analysieren
+```
+
+### Mitarbeiteranalyse
+```
+Joine employee_data mit company_info und berechne das durchschnittliche Gehalt nach Branche
 ```
 
 ## Verwendung
@@ -86,3 +116,11 @@ Dies sind synthetische Datensätze, die für Lehrzwecke erstellt wurden. Sie die
 - Numerische Werte verwenden Punkt (.) als Dezimaltrennzeichen
 - Finanzdaten folgen Standard-Buchhaltungskonventionen
 - Paneldaten verwenden firm_id als Entity-Identifikator und year/quarter für die Zeitdimension
+
+## Verwandte Tutorials
+
+Diese Datensätze werden in den folgenden Tutorials verwendet:
+
+1. **[Grundlagen der Datenaufbereitung](../tutorials/de-CH/04-data-munging-basics.md)** - Laden, Filtern, Sortieren
+2. **[Fortgeschrittene Datenoperationen](../tutorials/de-CH/05-data-operations-intermediate.md)** - Aggregation, berechnete Spalten, grundlegende Joins
+3. **[Fortgeschrittenes Data Wrangling](../tutorials/de-CH/06-data-wrangling-advanced.md)** - Komplexe Joins, Umstrukturierung, Aufbau analytischer Panels

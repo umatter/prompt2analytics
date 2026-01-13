@@ -1,0 +1,6 @@
+firm_id,company_name,industry,founded_year,headquarters,employee_count,is_public
+ACME,ACME Corporation,Manufacturing,1985,New York,2500,true
+BETA,Beta Technologies,Technology,2005,San Francisco,850,true
+GAMMA,Gamma Industries,Diversified,1972,Chicago,4200,true
+DELTA,Delta Services,Services,2012,Austin,320,false
+EPSILON,Epsilon Retail,Retail,1998,Seattle,1100,true

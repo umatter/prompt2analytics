@@ -41,6 +41,19 @@ Three firms (ACME, BETA, GAMMA) with quarterly data for 2022:
 | `financial_ratios.csv` | Computed financial ratios | firm_id, year, quarter, current_ratio, quick_ratio, debt_to_equity, interest_coverage, roa, roe, gross_margin, operating_margin, net_margin, asset_turnover |
 | `stock_returns.csv` | Daily stock data | firm_id, date, open_price, close_price, high, low, volume, daily_return, market_return, excess_return |
 
+#### Company & Employee Data
+
+| File | Description | Key Variables |
+|------|-------------|---------------|
+| `company_info.csv` | Company characteristics | firm_id, company_name, industry, founded_year, headquarters, employee_count, is_public |
+| `employee_data.csv` | Employee records | employee_id, firm_id, department, hire_date, salary, performance_score, education_level, is_manager |
+
+#### Macroeconomic Data
+
+| File | Description | Key Variables |
+|------|-------------|---------------|
+| `economic_indicators.csv` | Quarterly economic indicators | year, quarter, gdp_growth_rate, interest_rate, inflation_rate, unemployment_rate, consumer_confidence |
+
 ## Example Analyses
 
 ### Financial Statement Analysis
@@ -56,6 +69,23 @@ Run a fixed effects regression of ROE on debt_to_equity and asset_turnover using
 ### Stock Return Analysis
 ```
 Calculate the correlation between daily returns and market returns for each firm
+```
+
+### Multi-Table Joins
+```
+Merge balance_sheet with income_statement on firm_id, year, and quarter,
+then join with company_info to add industry classification
+```
+
+### Panel with Economic Controls
+```
+Join firm financials with economic_indicators on year and quarter
+to analyze firm performance under different macroeconomic conditions
+```
+
+### Employee Analysis
+```
+Join employee_data with company_info and calculate average salary by industry
 ```
 
 ## Usage
@@ -86,3 +116,11 @@ These are synthetic datasets created for educational purposes. They are designed
 - Numeric values use period (.) as decimal separator
 - Financial data follows standard accounting conventions
 - Panel data uses firm_id as entity identifier and year/quarter for time dimension
+
+## Related Tutorials
+
+These datasets are used in the following tutorials:
+
+1. **[Data Munging Basics](../tutorials/en/04-data-munging-basics.md)** - Loading, filtering, sorting
+2. **[Intermediate Data Operations](../tutorials/en/05-data-operations-intermediate.md)** - Aggregation, calculated columns, basic joins
+3. **[Advanced Data Wrangling](../tutorials/en/06-data-wrangling-advanced.md)** - Complex joins, reshaping, building analytical panels
