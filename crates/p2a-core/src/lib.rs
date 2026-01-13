@@ -44,6 +44,9 @@ pub use econometrics::{
     // Synthetic control
     SynthConfig, SynthResult, PredictorSpec, PredictorBalance, TimeEffect,
     PlaceboResults, VOptimization, TimeAggregation, run_synthetic_control,
+    // Regression discontinuity
+    KernelType, BandwidthMethod, VceType, RdConfig, RdBandwidth,
+    RdResult, FuzzyRdResult, run_rd, rd_bandwidth, run_fuzzy_rd,
 };
 pub use forecasting::{
     ArimaResult, ArimaForecastResult, run_arima, forecast_arima,

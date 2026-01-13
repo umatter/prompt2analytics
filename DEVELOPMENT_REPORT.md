@@ -1,7 +1,7 @@
 # prompt2analytics Development Report
 
 **Date:** January 12, 2026
-**Status:** Phase 6.4 (Smart Suggestions) ✅ COMPLETE
+**Status:** Phase 6.5 (Regression Discontinuity) ✅ COMPLETE
 
 ---
 
@@ -12,6 +12,7 @@ Phases 1, 2, 2b, 3a, 3b, 4, and part of Phase 5 of the prompt2analytics developm
 - Hausman specification test
 - Instrumental variables (2SLS) with first-stage diagnostics
 - Difference-in-differences
+- Regression Discontinuity Design (Sharp and Fuzzy RD with robust bias-corrected inference)
 - Regression diagnostics (Jarque-Bera, Breusch-Pagan, Durbin-Watson, VIF)
 - Clustered standard errors (one-way and two-way)
 - Discrete choice models (Logit, Probit)
@@ -72,6 +73,9 @@ From the original plan:
 | 2SLS (Instrumental Variables) | ✅ Complete | Pure Rust |
 | First-stage diagnostics | ✅ Complete | Pure Rust (F-stat, partial R²) |
 | Difference-in-Differences | ✅ Complete | Pure Rust |
+| Regression Discontinuity (Sharp) | ✅ Complete | Pure Rust (CCT 2014 robust inference) |
+| Regression Discontinuity (Fuzzy) | ✅ Complete | Pure Rust (LATE via Wald estimator) |
+| RD Bandwidth Selection | ✅ Complete | Pure Rust (MSE/CER optimal, IK 2012) |
 | Regression diagnostics | ✅ Complete | Pure Rust (JB, BP, DW, VIF) |
 | Logit (logistic regression) | ✅ Complete | Pure Rust (Newton-Raphson MLE) |
 | Probit regression | ✅ Complete | Pure Rust (Newton-Raphson MLE) |
@@ -466,7 +470,7 @@ cargo build --release -p p2a-desktop
 - `traits/` — `LinearEstimator` trait for common regression output interface
 - `errors.rs` — Unified error types (`EconError`, `EconResult`)
 
-**MCP Tools Exposed (58 total):**
+**MCP Tools Exposed (61 total):**
 ```
 ┌─────────────────────────┬──────────────────────────────────────────────────────────────┐
 │ Tool                    │ Description                                                  │
@@ -488,6 +492,9 @@ cargo build --release -p p2a-desktop
 │ iv_2sls                 │ Instrumental Variables / 2SLS regression                     │
 │ iv_first_stage          │ First-stage diagnostics (F-stat, instrument strength)        │
 │ diff_in_diff            │ Difference-in-Differences causal estimation                  │
+│ rd_estimate             │ Sharp RD with robust bias-corrected inference                │
+│ rd_bw                   │ RD bandwidth selection (MSE/CER optimal)                     │
+│ rd_fuzzy                │ Fuzzy RD / LATE estimation with first-stage diagnostics     │
 │ logit                   │ Logistic regression (binary outcomes)                        │
 │ probit                  │ Probit regression (binary outcomes)                          │
 │ ts_var                  │ Vector Autoregression (VAR) model                            │
@@ -599,7 +606,8 @@ prompt2analytics/
     │       │   ├── iv.rs               # 2SLS/IV + first-stage diagnostics
     │       │   ├── did.rs              # Difference-in-Differences
     │       │   ├── discrete.rs         # Logit/Probit (Newton-Raphson MLE)
-    │       │   └── timeseries.rs       # VAR/VARMA/VECM/IRF
+    │       │   ├── timeseries.rs       # VAR/VARMA/VECM/IRF
+    │       │   └── rd.rs               # Regression Discontinuity (Sharp/Fuzzy RD)
     │       ├── forecasting/
     │       │   ├── mod.rs
     │       │   ├── arima_model.rs      # ARIMA fitting and forecasting
@@ -1191,3 +1199,131 @@ crates/p2a-mcp/src/server.rs  # ✅ 10 new tools for LLM-assisted cleaning
 8. `cleaning_rollback` - Rollback to previous checkpoint
 9. `cleaning_session_checkpoints` - List all checkpoints
 10. `suggest_cleaning` - Generate smart cleaning suggestions
+
+---
+
+## Phase 6.5: Regression Discontinuity Design — ✅ COMPLETE
+
+Implementation of local polynomial Regression Discontinuity (RD) estimation with robust bias-corrected confidence intervals based on Calonico, Cattaneo, Titiunik & Farrell (2014-2020) methodology.
+
+### Features Implemented
+
+| Deliverable | Status | Implementation |
+|-------------|--------|----------------|
+| Sharp RD estimation | ✅ Complete | Local polynomial with kernel weighting |
+| Fuzzy RD estimation | ✅ Complete | IV-style Wald estimator (LATE) |
+| MSE-optimal bandwidth | ✅ Complete | Imbens-Kalyanaraman (2012) formula |
+| CER-optimal bandwidth | ✅ Complete | Coverage error rate optimal |
+| Bias correction | ✅ Complete | Higher-order polynomial bias estimation |
+| Robust inference | ✅ Complete | Conventional, bias-corrected, robust CIs |
+| Kernel functions | ✅ Complete | Triangular, Epanechnikov, Uniform |
+| NN variance | ✅ Complete | Nearest-neighbor variance estimator |
+| HC variance | ✅ Complete | HC0-HC3 heteroskedasticity-consistent |
+| `rd_estimate` MCP tool | ✅ Complete | Sharp RD estimation |
+| `rd_bw` MCP tool | ✅ Complete | Bandwidth selection only |
+| `rd_fuzzy` MCP tool | ✅ Complete | Fuzzy RD (LATE) estimation |
+
+### Key Types
+
+```rust
+/// Configuration for RD estimation
+pub struct RdConfig {
+    pub p: usize,               // Polynomial order (default: 1 = local linear)
+    pub q: Option<usize>,       // Bias polynomial order (default: p+1)
+    pub h: Option<f64>,         // Main bandwidth (auto if None)
+    pub b: Option<f64>,         // Bias bandwidth (auto if None)
+    pub kernel: KernelType,     // Triangular, Epanechnikov, Uniform
+    pub bwselect: BandwidthMethod, // MseRd, MseTwo, CerRd, CerTwo
+    pub vce: VceType,           // Nn, Hc0, Hc1, Hc2, Hc3
+    pub nnmatch: usize,         // NN neighbors (default: 3)
+    pub level: f64,             // Confidence level (default: 0.95)
+}
+
+/// Result from Sharp RD estimation
+pub struct RdResult {
+    // Point estimates
+    pub tau_conventional: f64,   // Conventional RD estimate
+    pub tau_bc: f64,             // Bias-corrected estimate
+    pub tau_robust: f64,         // Robust bias-corrected estimate
+
+    // Standard errors and inference
+    pub se_robust: f64,
+    pub ci_robust: (f64, f64),
+    pub p_robust: f64,
+    pub significance: SignificanceLevel,
+
+    // Bandwidth and specification
+    pub h: f64,                  // Main bandwidth
+    pub b: f64,                  // Bias bandwidth
+    pub n_eff_left: usize,       // Effective sample left of cutoff
+    pub n_eff_right: usize,      // Effective sample right of cutoff
+    // ...
+}
+
+/// Result from Fuzzy RD estimation (LATE)
+pub struct FuzzyRdResult {
+    pub outcome: String,
+    pub treatment: String,
+    pub running_var: String,
+    pub cutoff: f64,
+
+    // Wald estimator: tau_fuzzy = tau_Y / tau_D
+    pub tau_conventional: f64,
+    pub tau_bc: f64,
+    pub tau_robust: f64,
+    pub se_robust: f64,
+    pub ci_robust: (f64, f64),
+
+    // First stage (treatment discontinuity)
+    pub first_stage_tau: f64,
+    pub first_stage_se: f64,
+    pub first_stage_f: f64,      // Effective F-statistic
+    // ...
+}
+```
+
+### Mathematical Implementation
+
+**Local Polynomial Estimator:**
+```
+β̂ = (X'WX)⁻¹ X'Wy
+
+where W = diag(K((xᵢ - c)/h))
+      K(u) = kernel function
+
+Treatment effect: τ̂ = β̂₀⁺ - β̂₀⁻
+```
+
+**MSE-Optimal Bandwidth (Imbens-Kalyanaraman 2012):**
+```
+h_MSE = C_k × [σ²(c) / (f(c) × (m''(c))²)]^(1/5) × n^(-1/5)
+```
+
+**Bias Correction:**
+```
+τ̂_bc = τ̂ - h^(p+1) × B̂
+
+where B̂ is estimated using order-q polynomial with bandwidth b
+```
+
+**Robust Inference:**
+The robust standard error accounts for both estimation error and bias estimation error, providing valid confidence intervals.
+
+### Files Created/Modified
+
+```
+crates/p2a-core/src/econometrics/
+├── mod.rs           # Added mod rd; and exports
+└── rd.rs            # NEW: ~900+ lines, full RD implementation
+
+crates/p2a-core/src/lib.rs        # Added RD re-exports
+crates/p2a-mcp/src/server.rs      # Added 3 RD tools
+docs/guides/ECONOMETRICS_GUIDE.md # Added RD documentation section
+```
+
+### References
+
+1. Calonico, Cattaneo & Titiunik (2014). "Robust Nonparametric Confidence Intervals for RD Designs". *Econometrica* 82(6): 2295-2326.
+2. Calonico, Cattaneo & Farrell (2020). "Optimal Bandwidth Choice for Robust Bias Corrected Inference in RD Designs". *Econometrics Journal* 23(2): 192-210.
+3. Imbens & Kalyanaraman (2012). "Optimal Bandwidth Choice for the RD Estimator". *Review of Economic Studies* 79(3): 933-959.
+4. R package `rdrobust` (reference implementation)

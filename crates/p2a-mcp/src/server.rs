@@ -64,6 +64,8 @@ use p2a_core::{
     run_mediation_analysis, MediationConfig,
     // Synthetic control
     run_synthetic_control, SynthConfig, PredictorSpec, TimeAggregation, VOptimization,
+    // Regression Discontinuity
+    run_rd, rd_bandwidth, run_fuzzy_rd, RdConfig, KernelType, BandwidthMethod,
     // Time series
     run_var, run_varma, run_vecm, run_var_irf,
     // Forecasting
@@ -673,6 +675,126 @@ pub struct SyntheticControlRequest {
     /// Minimum weight threshold for output
     #[schemars(description = "Minimum weight to display in output (for readability). Default is 0.001.")]
     pub weight_threshold: Option<f64>,
+}
+
+/// Request for Sharp Regression Discontinuity estimation.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct RdEstimateRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Outcome variable column name
+    #[schemars(description = "Name of the outcome variable (Y) column.")]
+    pub outcome: String,
+
+    /// Running variable column name
+    #[schemars(description = "Name of the running (forcing) variable (X) column.")]
+    pub running_var: String,
+
+    /// Cutoff value
+    #[schemars(description = "Cutoff value for the running variable. Default is 0.")]
+    pub cutoff: Option<f64>,
+
+    /// Polynomial order for estimation
+    #[schemars(description = "Polynomial order for local polynomial estimation. Default is 1 (local linear).")]
+    pub p: Option<usize>,
+
+    /// Kernel type
+    #[schemars(description = "Kernel function: 'triangular' (default), 'epanechnikov', or 'uniform'.")]
+    pub kernel: Option<String>,
+
+    /// Bandwidth selection method
+    #[schemars(description = "Bandwidth selection: 'mserd' (MSE-optimal, default), 'msetwo' (separate left/right), 'cerrd', or 'certwo'.")]
+    pub bwselect: Option<String>,
+
+    /// Main bandwidth (overrides automatic selection)
+    #[schemars(description = "Main bandwidth h for estimation. If not specified, uses automatic MSE-optimal selection.")]
+    pub h: Option<f64>,
+
+    /// Bias bandwidth (overrides automatic selection)
+    #[schemars(description = "Bias bandwidth b. Default is rho * h where rho = 1.")]
+    pub b: Option<f64>,
+
+    /// Confidence level
+    #[schemars(description = "Confidence level for intervals. Default is 0.95.")]
+    pub level: Option<f64>,
+}
+
+/// Request for RD bandwidth selection only.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct RdBandwidthRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Outcome variable column name
+    #[schemars(description = "Name of the outcome variable (Y) column.")]
+    pub outcome: String,
+
+    /// Running variable column name
+    #[schemars(description = "Name of the running (forcing) variable (X) column.")]
+    pub running_var: String,
+
+    /// Cutoff value
+    #[schemars(description = "Cutoff value for the running variable. Default is 0.")]
+    pub cutoff: Option<f64>,
+
+    /// Polynomial order
+    #[schemars(description = "Polynomial order for estimation. Default is 1.")]
+    pub p: Option<usize>,
+
+    /// Kernel type
+    #[schemars(description = "Kernel function: 'triangular' (default), 'epanechnikov', or 'uniform'.")]
+    pub kernel: Option<String>,
+
+    /// Bandwidth selection method
+    #[schemars(description = "Bandwidth selection: 'mserd' (MSE-optimal, default), 'msetwo', 'cerrd', or 'certwo'.")]
+    pub bwselect: Option<String>,
+}
+
+/// Request for Fuzzy Regression Discontinuity estimation.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct FuzzyRdRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Outcome variable column name
+    #[schemars(description = "Name of the outcome variable (Y) column.")]
+    pub outcome: String,
+
+    /// Running variable column name
+    #[schemars(description = "Name of the running (forcing) variable (X) column.")]
+    pub running_var: String,
+
+    /// Treatment indicator column name
+    #[schemars(description = "Name of the treatment indicator column (actual treatment received, 0/1).")]
+    pub treatment: String,
+
+    /// Cutoff value
+    #[schemars(description = "Cutoff value for the running variable. Default is 0.")]
+    pub cutoff: Option<f64>,
+
+    /// Polynomial order
+    #[schemars(description = "Polynomial order for estimation. Default is 1.")]
+    pub p: Option<usize>,
+
+    /// Kernel type
+    #[schemars(description = "Kernel function: 'triangular' (default), 'epanechnikov', or 'uniform'.")]
+    pub kernel: Option<String>,
+
+    /// Bandwidth selection method
+    #[schemars(description = "Bandwidth selection: 'mserd' (default), 'msetwo', 'cerrd', or 'certwo'.")]
+    pub bwselect: Option<String>,
+
+    /// Main bandwidth
+    #[schemars(description = "Main bandwidth h. If not specified, uses automatic selection.")]
+    pub h: Option<f64>,
+
+    /// Confidence level
+    #[schemars(description = "Confidence level for intervals. Default is 0.95.")]
+    pub level: Option<f64>,
 }
 
 /// Request for Logit regression.
@@ -4782,6 +4904,192 @@ impl AnalyticsServer {
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
                     "Synthetic control failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+    }
+
+    // ========================================================================
+    // Regression Discontinuity
+    // ========================================================================
+
+    /// Run Sharp Regression Discontinuity estimation.
+    #[tool(description = "Run Sharp Regression Discontinuity (RD) estimation. Implements local polynomial regression with robust bias-corrected inference following Calonico, Cattaneo & Titiunik (2014). Returns conventional, bias-corrected, and robust treatment effect estimates with confidence intervals.")]
+    async fn rd_estimate(
+        &self,
+        Parameters(request): Parameters<RdEstimateRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let cutoff = request.cutoff.unwrap_or(0.0);
+
+        // Parse kernel type
+        let kernel = match request.kernel.as_deref() {
+            Some("epanechnikov") => KernelType::Epanechnikov,
+            Some("uniform") => KernelType::Uniform,
+            _ => KernelType::Triangular, // default
+        };
+
+        // Parse bandwidth selection method
+        let bwselect = match request.bwselect.as_deref() {
+            Some("msetwo") => BandwidthMethod::MseTwo,
+            Some("cerrd") => BandwidthMethod::CerRd,
+            Some("certwo") => BandwidthMethod::CerTwo,
+            _ => BandwidthMethod::MseRd, // default
+        };
+
+        let config = RdConfig {
+            p: request.p.unwrap_or(1),
+            q: None, // auto = p + 1
+            h: request.h,
+            b: request.b,
+            kernel,
+            bwselect,
+            level: request.level.unwrap_or(0.95),
+            ..Default::default()
+        };
+
+        let result = match run_rd(dataset, &request.outcome, &request.running_var, cutoff, config) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "RD estimation failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+    }
+
+    /// Compute RD bandwidth only.
+    #[tool(description = "Compute MSE-optimal bandwidth for Regression Discontinuity estimation. Returns bandwidth values without running the full estimation. Useful for inspecting bandwidth selection before estimation.")]
+    async fn rd_bw(
+        &self,
+        Parameters(request): Parameters<RdBandwidthRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let cutoff = request.cutoff.unwrap_or(0.0);
+        let p = request.p.unwrap_or(1);
+
+        // Parse kernel type
+        let kernel = match request.kernel.as_deref() {
+            Some("epanechnikov") => KernelType::Epanechnikov,
+            Some("uniform") => KernelType::Uniform,
+            _ => KernelType::Triangular,
+        };
+
+        // Parse bandwidth selection method
+        let bwselect = match request.bwselect.as_deref() {
+            Some("msetwo") => BandwidthMethod::MseTwo,
+            Some("cerrd") => BandwidthMethod::CerRd,
+            Some("certwo") => BandwidthMethod::CerTwo,
+            _ => BandwidthMethod::MseRd,
+        };
+
+        let result = match rd_bandwidth(
+            dataset,
+            &request.outcome,
+            &request.running_var,
+            cutoff,
+            p,
+            kernel,
+            bwselect,
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "RD bandwidth selection failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+    }
+
+    /// Run Fuzzy Regression Discontinuity estimation.
+    #[tool(description = "Run Fuzzy Regression Discontinuity estimation. For cases where treatment probability (not assignment) jumps at the cutoff. Uses a Wald estimator (ratio of reduced-form to first-stage). Returns Local Average Treatment Effect (LATE).")]
+    async fn rd_fuzzy(
+        &self,
+        Parameters(request): Parameters<FuzzyRdRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let cutoff = request.cutoff.unwrap_or(0.0);
+
+        // Parse kernel type
+        let kernel = match request.kernel.as_deref() {
+            Some("epanechnikov") => KernelType::Epanechnikov,
+            Some("uniform") => KernelType::Uniform,
+            _ => KernelType::Triangular,
+        };
+
+        // Parse bandwidth selection method
+        let bwselect = match request.bwselect.as_deref() {
+            Some("msetwo") => BandwidthMethod::MseTwo,
+            Some("cerrd") => BandwidthMethod::CerRd,
+            Some("certwo") => BandwidthMethod::CerTwo,
+            _ => BandwidthMethod::MseRd,
+        };
+
+        let config = RdConfig {
+            p: request.p.unwrap_or(1),
+            q: None,
+            h: request.h,
+            b: None,
+            kernel,
+            bwselect,
+            level: request.level.unwrap_or(0.95),
+            ..Default::default()
+        };
+
+        let result = match run_fuzzy_rd(
+            dataset,
+            &request.outcome,
+            &request.running_var,
+            &request.treatment,
+            cutoff,
+            config,
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Fuzzy RD estimation failed: {}",
                     e
                 ))]));
             }

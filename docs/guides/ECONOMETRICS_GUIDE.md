@@ -10,6 +10,7 @@ This guide explains the assumptions underlying each econometric method in prompt
 - [Instrumental Variables](#instrumental-variables)
 - [Difference-in-Differences](#difference-in-differences)
 - [Synthetic Control Method](#synthetic-control-method)
+- [Regression Discontinuity Design](#regression-discontinuity-design)
 - [Discrete Choice Models](#discrete-choice-models)
 - [Treatment Effect Estimation](#treatment-effect-estimation)
 - [Causal Mediation Analysis](#causal-mediation-analysis)
@@ -550,6 +551,143 @@ synthetic_control dataset:tobacco outcome:cigsale unit_col:state time_col:year
 - Abadie, A. & Gardeazabal, J. (2003). "The Economic Costs of Conflict: A Case Study of the Basque Country." *American Economic Review*, 93(1), 112-132.
 - Abadie, A., Diamond, A., & Hainmueller, J. (2010). "Synthetic Control Methods for Comparative Case Studies: Estimating the Effect of California's Tobacco Control Program." *JASA*, 105(490), 493-505.
 - Abadie, A. (2021). "Using Synthetic Controls: Feasibility, Data Requirements, and Methodological Aspects." *Journal of Economic Literature*, 59(2), 391-425.
+
+---
+
+## Regression Discontinuity Design
+
+Regression Discontinuity Design (RDD) is a quasi-experimental method that exploits discontinuities in treatment assignment rules to estimate causal effects.
+
+### The Setup
+
+Treatment is assigned based on whether a **running variable** (X) crosses a **cutoff** (c):
+- **Sharp RD**: Treatment deterministically assigned at cutoff: D = I(X ≥ c)
+- **Fuzzy RD**: Treatment probability jumps at cutoff but not from 0 to 1
+
+### Identification Strategy
+
+**Key Insight**: Units just below and just above the cutoff are similar except for treatment status.
+
+```
+τ_RD = lim_{x→c⁺} E[Y|X=x] - lim_{x→c⁻} E[Y|X=x]
+```
+
+This is a **local average treatment effect** (LATE) for units at the cutoff.
+
+### Local Polynomial Estimation
+
+We estimate the conditional expectation on each side using **local polynomial regression**:
+
+1. Fit weighted least squares on each side:
+   ```
+   min Σᵢ [yᵢ - Σⱼ βⱼ(xᵢ - c)ʲ]² K((xᵢ - c)/h)
+   ```
+2. The treatment effect is the difference in intercepts: τ̂ = β̂₀⁺ - β̂₀⁻
+
+**Kernel Functions** weight observations by distance from cutoff:
+- **Triangular** (default): K(u) = (1 - |u|)I(|u| ≤ 1)
+- **Epanechnikov**: K(u) = 0.75(1 - u²)I(|u| ≤ 1)
+- **Uniform**: K(u) = 0.5·I(|u| ≤ 1)
+
+### Bandwidth Selection
+
+The **bandwidth** (h) controls the window around the cutoff:
+- Too small → high variance (few observations)
+- Too large → high bias (smoothing over discontinuity)
+
+**MSE-optimal bandwidth** (Imbens & Kalyanaraman 2012):
+```
+h_opt ∝ [σ² / (f(c) × (m''(c))²)]^(1/5) × n^(-1/5)
+```
+
+Balances squared bias against variance.
+
+### Robust Bias-Corrected Inference
+
+Following Calonico, Cattaneo & Titiunik (2014):
+
+1. **Conventional estimate**: Local linear (p=1) regression
+2. **Bias estimate**: Higher-order polynomial (q=p+1) with larger bandwidth
+3. **Bias-corrected estimate**: τ̂_bc = τ̂ - B̂
+4. **Robust standard errors**: Account for uncertainty in bias estimation
+
+### Usage
+
+**Sharp RD**:
+```
+rd_estimate dataset:mydata outcome:score running_var:age cutoff:65
+    kernel:triangular bwselect:mserd
+```
+
+**Parameters**:
+- `outcome`: Outcome variable (Y)
+- `running_var`: Running/forcing variable (X)
+- `cutoff`: Threshold value (default: 0)
+- `p`: Polynomial order (1=local linear, 2=local quadratic)
+- `kernel`: triangular, epanechnikov, or uniform
+- `bwselect`: mserd (MSE-optimal) or msetwo (separate left/right)
+- `h`: Main bandwidth (auto if not specified)
+- `level`: Confidence level (default: 0.95)
+
+**Fuzzy RD** (for imperfect compliance):
+```
+rd_fuzzy dataset:mydata outcome:score running_var:age treatment:enrolled
+    cutoff:65
+```
+
+Returns LATE = (reduced form effect) / (first stage effect)
+
+### Interpreting Output
+
+| Statistic | Description |
+|-----------|-------------|
+| tau_conventional | Standard local polynomial estimate |
+| tau_bc | Bias-corrected estimate |
+| tau_robust | Robust estimate (same point, different SE) |
+| se_robust | Standard error accounting for bias uncertainty |
+| ci_robust | Confidence interval for robust inference |
+| h_left, h_right | Bandwidths used for estimation |
+| n_eff_left, n_eff_right | Effective sample sizes within bandwidth |
+| p, q | Polynomial orders for estimation and bias |
+
+**Recommended**: Use **robust** estimates and confidence intervals.
+
+### Key Assumptions
+
+1. **Continuity of potential outcomes** at cutoff:
+   - E[Y(0)|X=x] and E[Y(1)|X=x] are continuous at c
+   - No other interventions occur at the threshold
+
+2. **No manipulation** of running variable:
+   - Units cannot precisely control X to select into treatment
+   - Test: Check for bunching at cutoff (McCrary test)
+
+3. **Local randomization** (stronger):
+   - Near cutoff, assignment is "as good as random"
+
+### Validity Checks
+
+1. **Covariate balance**: Baseline covariates should not jump at cutoff
+2. **Density continuity**: No bunching/manipulation of running variable
+3. **Placebo tests**: No effect at fake cutoffs
+4. **Robustness**: Stability across bandwidth choices
+
+### Common Pitfalls
+
+| Problem | Solution |
+|---------|----------|
+| Too few observations near cutoff | Consider larger bandwidth or different design |
+| Covariate imbalance at cutoff | Include covariates or reconsider design |
+| Discrete running variable | Use local randomization inference |
+| Bandwidth-sensitive results | Report range of bandwidths |
+| Weak first stage (fuzzy) | Check first-stage discontinuity |
+
+### References
+
+- Calonico, S., Cattaneo, M. D., & Titiunik, R. (2014). "Robust Nonparametric Confidence Intervals for Regression-Discontinuity Designs." *Econometrica*, 82(6), 2295-2326.
+- Calonico, S., Cattaneo, M. D., & Farrell, M. H. (2020). "Optimal Bandwidth Choice for Robust Bias Corrected Inference in RD Designs." *Econometrics Journal*, 23(2), 192-210.
+- Imbens, G. & Kalyanaraman, K. (2012). "Optimal Bandwidth Choice for the Regression Discontinuity Estimator." *Review of Economic Studies*, 79(3), 933-959.
+- Lee, D. S. & Lemieux, T. (2010). "Regression Discontinuity Designs in Economics." *Journal of Economic Literature*, 48(2), 281-355.
 
 ---
 
