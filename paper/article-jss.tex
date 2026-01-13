@@ -1,0 +1,74 @@
+\documentclass[article]{jss}
+
+%% -- LaTeX packages and custom commands ---------------------------------------
+
+%% recommended packages
+\usepackage{orcidlink,thumbpdf,lmodern}
+
+%% additional packages
+\usepackage{booktabs}
+\usepackage{amsmath,amssymb}
+\usepackage{bm}
+\usepackage{graphicx}
+
+%% custom commands
+\newcommand{\class}[1]{`\code{#1}'}
+\newcommand{\fct}[1]{\code{#1()}}
+
+
+%% -- Article metainformation (author, title, ...) -----------------------------
+
+%% TODO: Update with actual author information
+\author{First Author\\University of Somewhere}
+\Plainauthor{First Author}
+
+%% Title
+\title{\pkg{prompt2analytics}: A \proglang{Rust} Toolkit for Econometrics and Data Analytics}
+\Plaintitle{prompt2analytics: A Rust Toolkit for Econometrics and Data Analytics}
+\Shorttitle{\pkg{prompt2analytics}: Econometrics in \proglang{Rust}}
+
+%% Abstract
+\Abstract{
+  This paper introduces \pkg{prompt2analytics}, a comprehensive econometrics and
+  data analytics toolkit implemented in pure \proglang{Rust}. The software provides
+  a wide range of statistical methods including ordinary least squares regression
+  with heteroskedasticity-consistent standard errors, panel data models (fixed and
+  random effects), instrumental variables estimation, difference-in-differences,
+  discrete choice models, time series analysis, and machine learning algorithms.
+  Key design features include a pure \proglang{Rust} implementation without external
+  BLAS/LAPACK dependencies, multiple interfaces (command-line, Model Context Protocol
+  server, desktop application), and validated numerical accuracy against established
+  \proglang{R} packages. Performance benchmarks demonstrate competitive speed compared
+  to \pkg{data.table} and \pkg{dplyr} for data manipulation, and \pkg{lfe} and \pkg{plm}
+  for econometric estimation.
+}
+
+%% Keywords (at least one required)
+\Keywords{econometrics, \proglang{Rust}, regression, panel data, causal inference,
+  time series, MCP, \proglang{R}}
+\Plainkeywords{econometrics, Rust, regression, panel data, causal inference,
+  time series, MCP, R}
+
+%% Author address (TODO: Update)
+\Address{
+  First Author\\
+  Department of Economics\\
+  University of Somewhere\\
+  Address Line\\
+  City, Country\\
+  E-mail: \email{author@example.org}\\
+  URL: \url{https://example.org/}
+}
+
+\begin{document}
+
+%% Include shared content
+\input{content}
+
+%% =============================================================================
+%% BIBLIOGRAPHY
+%% =============================================================================
+
+\bibliography{references}
+
+\end{document}

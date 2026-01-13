@@ -1,42 +1,71 @@
-# Makefile for JSS paper compilation
-# Usage: make          - Build the PDF
-#        make clean    - Remove generated files
-#        make watch    - Continuous compilation (requires latexmk)
+# Makefile for prompt2analytics paper
+# Supports both JSS (journal) and arXiv (preprint) formats
+#
+# Usage:
+#   make jss      - Build JSS format (article-jss.pdf)
+#   make arxiv    - Build arXiv format (article-arxiv.pdf)
+#   make all      - Build both formats
+#   make clean    - Remove auxiliary files (keep PDFs)
+#   make cleanall - Remove everything including PDFs
 
-MAIN = article
 BIBTEX = references
 
-# Style files location
+# Style files location (for JSS)
 TEXINPUTS := .:./style:
 BSTINPUTS := .:./style:
 export TEXINPUTS BSTINPUTS
 
-# Default target
-all: $(MAIN).pdf
+.PHONY: all jss arxiv clean cleanall quick-jss quick-arxiv watch help
 
-# Full build with bibliography
-$(MAIN).pdf: $(MAIN).tex $(BIBTEX).bib style/jss.cls style/jss.bst
-	pdflatex $(MAIN)
-	bibtex $(MAIN)
-	pdflatex $(MAIN)
-	pdflatex $(MAIN)
+# Default target: build both versions
+all: jss arxiv
 
-# Quick build (no bibtex, for drafting)
-quick: $(MAIN).tex
-	pdflatex $(MAIN)
+# JSS format (for Journal of Statistical Software submission)
+jss: article-jss.pdf
+
+article-jss.pdf: article-jss.tex content.tex $(BIBTEX).bib style/jss.cls style/jss.bst
+	pdflatex -interaction=nonstopmode article-jss.tex
+	bibtex article-jss
+	pdflatex -interaction=nonstopmode article-jss.tex
+	pdflatex -interaction=nonstopmode article-jss.tex
+
+# arXiv format (for preprint submission)
+arxiv: article-arxiv.pdf
+
+article-arxiv.pdf: article-arxiv.tex content.tex $(BIBTEX).bib
+	pdflatex -interaction=nonstopmode article-arxiv.tex
+	bibtex article-arxiv
+	pdflatex -interaction=nonstopmode article-arxiv.tex
+	pdflatex -interaction=nonstopmode article-arxiv.tex
+
+# Quick builds (no bibtex, for drafting)
+quick-jss:
+	pdflatex -interaction=nonstopmode article-jss.tex
+
+quick-arxiv:
+	pdflatex -interaction=nonstopmode article-arxiv.tex
 
 # Continuous compilation with latexmk (if available)
 watch:
-	latexmk -pdf -pvc $(MAIN).tex
+	@echo "Use: latexmk -pdf -pvc article-jss.tex"
+	@echo "  or: latexmk -pdf -pvc article-arxiv.tex"
 
-# Clean generated files
+# Clean auxiliary files (keep PDFs)
 clean:
-	rm -f *.aux *.bbl *.blg *.log *.out *.pdf *.toc *.lof *.lot
-	rm -f *.fdb_latexmk *.fls *.synctex.gz
-
-# Clean but keep PDF
-mostlyclean:
 	rm -f *.aux *.bbl *.blg *.log *.out *.toc *.lof *.lot
 	rm -f *.fdb_latexmk *.fls *.synctex.gz
 
-.PHONY: all quick watch clean mostlyclean
+# Clean everything including PDFs
+cleanall: clean
+	rm -f article-jss.pdf article-arxiv.pdf article.pdf
+
+# Help
+help:
+	@echo "Available targets:"
+	@echo "  make jss        - Build JSS format (article-jss.pdf)"
+	@echo "  make arxiv      - Build arXiv format (article-arxiv.pdf)"
+	@echo "  make all        - Build both formats (default)"
+	@echo "  make quick-jss  - Quick JSS build (no bibtex)"
+	@echo "  make quick-arxiv- Quick arXiv build (no bibtex)"
+	@echo "  make clean      - Remove auxiliary files"
+	@echo "  make cleanall   - Remove all generated files including PDFs"

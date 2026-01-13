@@ -1,0 +1,92 @@
+\documentclass[11pt,a4paper]{article}
+
+%% -- LaTeX packages -----------------------------------------------------------
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+
+%% Page layout
+\usepackage[margin=1in]{geometry}
+
+%% Math and symbols
+\usepackage{amsmath,amssymb}
+\usepackage{bm}
+
+%% Tables and figures
+\usepackage{booktabs}
+\usepackage{graphicx}
+
+%% Bibliography
+\usepackage{natbib}
+\bibliographystyle{plainnat}
+
+%% Hyperlinks (load last)
+\usepackage{hyperref}
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue,
+  citecolor=blue,
+  urlcolor=blue
+}
+
+%% -- Custom commands (compatibility with JSS) ---------------------------------
+
+%% Package/software names
+\newcommand{\pkg}[1]{\textbf{#1}}
+\newcommand{\proglang}[1]{\textsf{#1}}
+\newcommand{\code}[1]{\texttt{#1}}
+\newcommand{\class}[1]{`\code{#1}'}
+\newcommand{\fct}[1]{\code{#1()}}
+\newcommand{\email}[1]{\href{mailto:#1}{\normalfont\texttt{#1}}}
+
+
+%% -- Title and authors --------------------------------------------------------
+
+\title{\pkg{prompt2analytics}: A \proglang{Rust} Toolkit for Econometrics and Data Analytics}
+
+\author{
+  First Author\thanks{Department of Economics, University of Somewhere.
+  Email: \email{author@example.org}}
+}
+
+\date{\today}
+
+
+\begin{document}
+
+\maketitle
+
+%% -- Abstract -----------------------------------------------------------------
+
+\begin{abstract}
+This paper introduces \pkg{prompt2analytics}, a comprehensive econometrics and
+data analytics toolkit implemented in pure \proglang{Rust}. The software provides
+a wide range of statistical methods including ordinary least squares regression
+with heteroskedasticity-consistent standard errors, panel data models (fixed and
+random effects), instrumental variables estimation, difference-in-differences,
+discrete choice models, time series analysis, and machine learning algorithms.
+Key design features include a pure \proglang{Rust} implementation without external
+BLAS/LAPACK dependencies, multiple interfaces (command-line, Model Context Protocol
+server, desktop application), and validated numerical accuracy against established
+\proglang{R} packages. Performance benchmarks demonstrate competitive speed compared
+to \pkg{data.table} and \pkg{dplyr} for data manipulation, and \pkg{lfe} and \pkg{plm}
+for econometric estimation.
+\end{abstract}
+
+\medskip
+\noindent\textbf{Keywords:} econometrics, Rust, regression, panel data, causal inference,
+time series, MCP, R
+
+\bigskip
+
+%% Include shared content
+\input{content}
+
+%% =============================================================================
+%% BIBLIOGRAPHY
+%% =============================================================================
+
+\bibliography{references}
+
+\end{document}
