@@ -1,0 +1,136 @@
+% prompt2analytics Lehrfolien (Deutsch/Schweiz)
+% Beamer mit Metropolis-Theme
+\documentclass[aspectratio=169]{beamer}
+\usetheme{metropolis}
+
+% Pakete
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[ngerman]{babel}  % Schweizer Deutsch
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{listings}
+\usepackage{hyperref}
+
+% Listings-Konfiguration für Code-Beispiele
+\lstset{
+    basicstyle=\ttfamily\small,
+    breaklines=true,
+    frame=single,
+    backgroundcolor=\color{gray!10}
+}
+
+% Titelinformationen
+\title{Einführung in prompt2analytics}
+\subtitle{Datenanalyse durch natürliche Sprache}
+\author{[Dozent/in]}
+\institute{[Institution]}
+\date{\today}
+
+\begin{document}
+
+% Titelfolie
+\maketitle
+
+% Inhaltsverzeichnis
+\begin{frame}{Übersicht}
+    \tableofcontents
+\end{frame}
+
+% =============================================================================
+\section{Einführung}
+% =============================================================================
+
+\begin{frame}{Was ist prompt2analytics?}
+    % TODO: Inhalt ergänzen
+    \begin{itemize}
+        \item Ein modernes Analyse-Toolkit
+        \item Natürlichsprachliche Schnittstelle für statistische Analysen
+        \item Reine Rust-Implementierung für hohe Performance
+    \end{itemize}
+\end{frame}
+
+\begin{frame}{Warum p2a verwenden?}
+    % TODO: Inhalt ergänzen
+    \begin{itemize}
+        \item Keine Programmierkenntnisse für Chat-Interface nötig
+        \item Reproduzierbare Analyse-Workflows
+        \item Professionelle Ökonometrie- und ML-Funktionen
+    \end{itemize}
+\end{frame}
+
+% =============================================================================
+\section{Erste Schritte}
+% =============================================================================
+
+\begin{frame}{Installation}
+    % TODO: Installationsanleitung ergänzen
+\end{frame}
+
+\begin{frame}{Ersten Datensatz laden}
+    % TODO: Inhalt mit Screenshots ergänzen
+\end{frame}
+
+% =============================================================================
+\section{Das Chat-Interface}
+% =============================================================================
+
+\begin{frame}{Übersicht der Web-Oberfläche}
+    % TODO: Screenshot und Beschreibung ergänzen
+\end{frame}
+
+\begin{frame}{Natürlichsprachliche Abfragen}
+    % TODO: Beispiele ergänzen
+    \begin{itemize}
+        \item «Lade die Verkaufsdaten»
+        \item «Zeig mir eine Zusammenfassung des Datensatzes»
+        \item «Führe eine Regression von Umsatz auf Werbeausgaben durch»
+    \end{itemize}
+\end{frame}
+
+\begin{frame}{Ergebnisse anzeigen}
+    % TODO: Inhalt zum Ergebnisbereich ergänzen
+\end{frame}
+
+% =============================================================================
+\section{CLI-Grundlagen}
+% =============================================================================
+
+\begin{frame}[fragile]{Befehlsstruktur}
+    % TODO: CLI-Beispiele ergänzen
+    \begin{lstlisting}
+p2a data load meinedaten.csv --name verkauf
+p2a data describe verkauf
+p2a reg ols verkauf -y umsatz -x werbung
+    \end{lstlisting}
+\end{frame}
+
+% =============================================================================
+\section{Praktische Beispiele}
+% =============================================================================
+
+\begin{frame}{Beispiel: Verkaufsanalyse}
+    % TODO: Durchgang ergänzen
+\end{frame}
+
+\begin{frame}{Beispiel: Wirtschaftsdatenanalyse}
+    % TODO: Durchgang ergänzen
+\end{frame}
+
+% =============================================================================
+\section{Zusammenfassung}
+% =============================================================================
+
+\begin{frame}{Wichtigste Punkte}
+    % TODO: Zusammenfassung ergänzen
+\end{frame}
+
+\begin{frame}{Ressourcen}
+    \begin{itemize}
+        \item Dokumentation: \url{https://github.com/yourusername/prompt2analytics}
+        \item Tutorials: Siehe Ordner \texttt{tutorials/de-CH/}
+        \item Beispieldaten: Siehe Ordner \texttt{teaching\_data/}
+    \end{itemize}
+\end{frame}
+
+\end{document}

@@ -1,0 +1,7 @@
+date,product,region,revenue,units,advertising_spend
+2023-01-15,Widget A,North,15000,150,2000
+2023-01-15,Widget B,North,8500,85,1500
+2023-01-15,Widget A,South,12000,120,1800
+2023-02-15,Widget A,North,16500,165,2200
+2023-02-15,Widget B,North,9200,92,1600
+2023-02-15,Widget A,South,13500,135,2000

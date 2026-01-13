@@ -1,0 +1,133 @@
+% prompt2analytics Teaching Slides
+% Uses Beamer with Metropolis theme
+\documentclass[aspectratio=169]{beamer}
+\usetheme{metropolis}
+
+% Packages
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{listings}
+\usepackage{hyperref}
+
+% Listings configuration for code examples
+\lstset{
+    basicstyle=\ttfamily\small,
+    breaklines=true,
+    frame=single,
+    backgroundcolor=\color{gray!10}
+}
+
+% Title information
+\title{Introduction to prompt2analytics}
+\subtitle{Data Analysis Through Natural Language}
+\author{[Instructor Name]}
+\institute{[Institution]}
+\date{\today}
+
+\begin{document}
+
+% Title slide
+\maketitle
+
+% Table of contents
+\begin{frame}{Outline}
+    \tableofcontents
+\end{frame}
+
+% =============================================================================
+\section{Introduction}
+% =============================================================================
+
+\begin{frame}{What is prompt2analytics?}
+    % TODO: Add content
+    \begin{itemize}
+        \item A modern analytics toolkit
+        \item Natural language interface to statistical analysis
+        \item Pure Rust implementation for performance
+    \end{itemize}
+\end{frame}
+
+\begin{frame}{Why Use p2a?}
+    % TODO: Add content
+    \begin{itemize}
+        \item No programming required for chat interface
+        \item Reproducible analysis workflows
+        \item Professional econometrics and ML capabilities
+    \end{itemize}
+\end{frame}
+
+% =============================================================================
+\section{Getting Started}
+% =============================================================================
+
+\begin{frame}{Installation}
+    % TODO: Add installation instructions
+\end{frame}
+
+\begin{frame}{Loading Your First Dataset}
+    % TODO: Add content with screenshots
+\end{frame}
+
+% =============================================================================
+\section{The Chat Interface}
+% =============================================================================
+
+\begin{frame}{Overview of the Web Interface}
+    % TODO: Add screenshot and description
+\end{frame}
+
+\begin{frame}{Natural Language Queries}
+    % TODO: Add examples
+    \begin{itemize}
+        \item "Load the sales data"
+        \item "Show me a summary of the dataset"
+        \item "Run a regression of revenue on advertising spend"
+    \end{itemize}
+\end{frame}
+
+\begin{frame}{Viewing Results}
+    % TODO: Add content about results panel
+\end{frame}
+
+% =============================================================================
+\section{CLI Basics}
+% =============================================================================
+
+\begin{frame}[fragile]{Command Structure}
+    % TODO: Add CLI examples
+    \begin{lstlisting}
+p2a data load mydata.csv --name sales
+p2a data describe sales
+p2a reg ols sales -y revenue -x advertising
+    \end{lstlisting}
+\end{frame}
+
+% =============================================================================
+\section{Practical Examples}
+% =============================================================================
+
+\begin{frame}{Example: Sales Analysis}
+    % TODO: Add walkthrough
+\end{frame}
+
+\begin{frame}{Example: Economic Data Analysis}
+    % TODO: Add walkthrough
+\end{frame}
+
+% =============================================================================
+\section{Summary}
+% =============================================================================
+
+\begin{frame}{Key Takeaways}
+    % TODO: Add summary points
+\end{frame}
+
+\begin{frame}{Resources}
+    \begin{itemize}
+        \item Documentation: \url{https://github.com/yourusername/prompt2analytics}
+        \item Tutorials: See \texttt{tutorials/} folder
+        \item Sample data: See \texttt{teaching\_data/} folder
+    \end{itemize}
+\end{frame}
+
+\end{document}

@@ -235,6 +235,20 @@ cargo test -p p2a-core
 cargo doc --no-deps --open
 ```
 
+### Managing Disk Space
+
+The Rust build cache (`target/`) can grow to 100GB+ during active development due to debug builds, incremental compilation, and benchmark artifacts. To reclaim disk space:
+
+```bash
+# Remove all build artifacts (will be regenerated on next build)
+cargo clean
+
+# Check current target size
+du -sh target/
+```
+
+**Tip for contributors**: Run `cargo clean` periodically, especially after switching branches or completing major features. Debug builds in `target/debug/` are the largest consumers.
+
 ## Docker Deployment
 
 Docker is provided for **deployment** rather than development. For active development, use native tools (`cargo run`, `npm run dev`) for faster iteration.
