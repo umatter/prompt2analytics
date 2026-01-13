@@ -1,0 +1,6 @@
+"test","metric","r_value","expected","tolerance"
+"logit_basic","beta_x",1.14195752209487,NA,0.3
+"poisson_gravity","beta_x",1.29153340205098,NA,0.3
+"coefficient_recovery","beta_x1",2.31829989463411,2,0.3
+"coefficient_recovery","beta_x2",-1.14361325237124,-1,0.3
+"large_panel","beta_x",1.7305325799231,1.5,0.3

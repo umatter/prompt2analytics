@@ -14,6 +14,8 @@ This document catalogs the reference implementations used to validate prompt2ana
 |---------|---------|---------------|------|
 | plm | 2.6-x | `plm()`, `pdata.frame()`, `phtest()` | [plm](https://cran.r-project.org/package=plm) |
 | lfe | 2.8-x | `felm()` | [lfe](https://cran.r-project.org/package=lfe) |
+| alpaca | 0.3-x | `feglm()` | [alpaca](https://cran.r-project.org/package=alpaca) |
+| fixest | 0.11-x | `feglm()`, `fepois()` | [fixest](https://cran.r-project.org/package=fixest) |
 | AER | 1.2-x | `ivreg()` | [AER](https://cran.r-project.org/package=AER) |
 | sandwich | 3.0-x | `vcovHC()`, `vcovCL()` | [sandwich](https://cran.r-project.org/package=sandwich) |
 | lmtest | 0.9-x | `bptest()`, `dwtest()` | [lmtest](https://cran.r-project.org/package=lmtest) |
@@ -82,7 +84,7 @@ scipy 1.11.x
 ### R
 ```r
 install.packages(c(
-  "plm", "lfe", "AER", "sandwich", "lmtest",
+  "plm", "lfe", "alpaca", "fixest", "AER", "sandwich", "lmtest",
   "vars", "forecast", "urca", "changepoint",
   "dbscan", "Rtsne", "randomForest", "e1071"
 ))
@@ -108,6 +110,7 @@ pip install statsmodels linearmodels scikit-learn arch ruptures
 | `run_logit` | R `glm(family=binomial)` | Python `statsmodels.Logit` |
 | `run_probit` | R `glm(family=binomial(probit))` | Python `statsmodels.Probit` |
 | `run_hdfe` | R `lfe::felm` | - |
+| `run_feglm` | R `alpaca::feglm` | R `fixest::feglm` |
 | `run_var` | R `vars::VAR` | Python `statsmodels.VAR` |
 | `run_varma` | R custom | Python `statsmodels` |
 | `run_vecm` | R `vars::vec2var`, `urca::ca.jo` | - |

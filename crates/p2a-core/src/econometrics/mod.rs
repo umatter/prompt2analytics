@@ -10,6 +10,7 @@ mod did;
 mod discrete;
 mod timeseries;
 mod hdfe;
+mod feglm;
 mod treatment;
 mod mediation;
 mod synth;
@@ -22,6 +23,7 @@ pub use did::{DiDResult, run_did};
 pub use discrete::{DiscreteResult, run_logit, run_probit};
 pub use timeseries::{VarResult, VarmaResult, VecmResult, VarIrfResult, run_var, run_varma, run_vecm, run_var_irf};
 pub use hdfe::{HdfeResult, HdfeConfig, FactorInfo, run_hdfe};
+pub use feglm::{GlmFamily, FeglmConfig, FeglmResult, run_feglm};
 pub use treatment::{
     Estimand, DRMethod, IpwConfig, DoublyRobustConfig,
     PropensityScoreSummary, IpwResult, DoublyRobustResult,

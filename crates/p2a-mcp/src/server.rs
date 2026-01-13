@@ -58,6 +58,8 @@ use p2a_core::{
     run_fixed_effects, run_random_effects, run_hausman_test, run_iv2sls, run_did,
     run_logit, run_probit, run_first_stage_diagnostics,
     run_hdfe, HdfeConfig,
+    // GLM with HDFE
+    run_feglm, GlmFamily, FeglmConfig,
     // Treatment effects
     run_ipw_treatment, run_doubly_robust, IpwConfig, DoublyRobustConfig, Estimand, DRMethod,
     // Mediation analysis
@@ -862,6 +864,38 @@ pub struct PanelHdfeRequest {
     /// Standard error type
     #[schemars(description = "Standard error type: 'standard', 'hc0', 'hc1' (default), 'hc2', or 'hc3'.")]
     pub se_type: Option<String>,
+}
+
+/// Request for Generalized Linear Model with High-Dimensional Fixed Effects (FEGLM).
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct FeglmRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Dependent variable (Y) column name
+    #[schemars(description = "Name of the dependent variable (Y) column. For logit/probit must be binary (0/1). For Poisson must be non-negative counts.")]
+    pub y: String,
+
+    /// Independent variables (X) column names
+    #[schemars(description = "Names of the independent variable (X) columns.")]
+    pub x: Vec<String>,
+
+    /// Fixed effect columns to absorb
+    #[schemars(description = "Column names for fixed effects to absorb (e.g., ['firm_id', 'year']). Supports multiple dimensions.")]
+    pub fe: Vec<String>,
+
+    /// GLM family
+    #[schemars(description = "GLM family: 'logit' (binomial logit, default), 'probit' (binomial probit), 'poisson' (count data), or 'gaussian' (continuous, equivalent to linear HDFE).")]
+    pub family: Option<String>,
+
+    /// Maximum IRLS iterations
+    #[schemars(description = "Maximum IRLS iterations for estimation. Default is 25.")]
+    pub max_iter: Option<usize>,
+
+    /// Convergence tolerance
+    #[schemars(description = "Convergence tolerance for coefficient changes. Default is 1e-8.")]
+    pub tolerance: Option<f64>,
 }
 
 // ============================================================================
@@ -5558,6 +5592,61 @@ impl AnalyticsServer {
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
                     "HDFE estimation failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+    }
+
+    /// Run Generalized Linear Model with High-Dimensional Fixed Effects (FEGLM).
+    #[tool(description = "Run Generalized Linear Model with high-dimensional fixed effects (FEGLM). Supports Logit, Probit, Poisson, and Gaussian families with multiple absorbed fixed effects. Uses IRLS + Method of Alternating Projections. Equivalent to R's alpaca::feglm().")]
+    async fn feglm(
+        &self,
+        Parameters(request): Parameters<FeglmRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
+        let fe_refs: Vec<&str> = request.fe.iter().map(|s| s.as_str()).collect();
+
+        // Parse family
+        let family = match request.family.as_deref() {
+            Some("logit") | None => GlmFamily::Logit,
+            Some("probit") => GlmFamily::Probit,
+            Some("poisson") => GlmFamily::Poisson,
+            Some("gaussian") => GlmFamily::Gaussian,
+            Some(other) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Unknown GLM family '{}'. Use 'logit', 'probit', 'poisson', or 'gaussian'.",
+                    other
+                ))]));
+            }
+        };
+
+        // Build config from optional parameters
+        let config = FeglmConfig {
+            max_iter: request.max_iter.unwrap_or(25),
+            tolerance: request.tolerance.unwrap_or(1e-8),
+            ..Default::default()
+        };
+
+        let result = match run_feglm(dataset, &request.y, &x_refs, &fe_refs, family, Some(config)) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "FEGLM estimation failed: {}",
                     e
                 ))]));
             }

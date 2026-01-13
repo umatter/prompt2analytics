@@ -8,6 +8,8 @@ use p2a_core::{
     run_ipw_treatment, run_doubly_robust, run_mediation_analysis,
     run_synthetic_control, SynthConfig, PredictorSpec, VOptimization,
     IpwConfig, DoublyRobustConfig, MediationConfig, Estimand, DRMethod,
+    // FEGLM
+    run_feglm, GlmFamily, FeglmConfig,
     // Survival analysis
     run_kaplan_meier, log_rank_test, run_cox_ph, run_aft, run_competing_risks,
     CoxConfig, AftConfig, TiesMethod, AftDistribution,
@@ -73,6 +75,89 @@ fn generate_binary_data(n: usize, seed: u64) -> Dataset {
         "y" => y,
         "x1" => x1,
         "x2" => x2,
+    }.expect("Failed to create DataFrame");
+
+    Dataset::new(df)
+}
+
+/// Generate synthetic binary panel data for FEGLM benchmarks
+fn generate_binary_panel_data(n_entities: usize, n_periods: usize, seed: u64) -> Dataset {
+    let mut rng = ChaCha8Rng::seed_from_u64(seed);
+    let n = n_entities * n_periods;
+
+    let entity: Vec<i64> = (1..=n_entities as i64)
+        .flat_map(|e| std::iter::repeat(e).take(n_periods))
+        .collect();
+
+    let time: Vec<i64> = (1..=n_entities)
+        .flat_map(|_| 1..=n_periods as i64)
+        .collect();
+
+    let x1: Vec<f64> = (0..n).map(|_| rng.gen_range(-1.0..1.0)).collect();
+    let x2: Vec<f64> = (0..n).map(|_| rng.gen_range(-1.0..1.0)).collect();
+
+    // Generate binary outcome with entity fixed effects
+    let y: Vec<f64> = (0..n)
+        .map(|i| {
+            let entity_effect = ((entity[i] % 5) as f64 - 2.0) * 0.5;
+            let latent = 0.8 * x1[i] + 0.5 * x2[i] + entity_effect;
+            let prob = 1.0 / (1.0 + (-latent).exp());
+            if rng.gen_range(0.0..1.0) < prob { 1.0 } else { 0.0 }
+        })
+        .collect();
+
+    let df = df! {
+        "y" => y,
+        "x1" => x1,
+        "x2" => x2,
+        "entity" => entity,
+        "time" => time,
+    }.expect("Failed to create DataFrame");
+
+    Dataset::new(df)
+}
+
+/// Generate synthetic count panel data for Poisson FEGLM benchmarks
+fn generate_count_panel_data(n_entities: usize, n_periods: usize, seed: u64) -> Dataset {
+    let mut rng = ChaCha8Rng::seed_from_u64(seed);
+    let n = n_entities * n_periods;
+
+    let entity: Vec<i64> = (1..=n_entities as i64)
+        .flat_map(|e| std::iter::repeat(e).take(n_periods))
+        .collect();
+
+    let time: Vec<i64> = (1..=n_entities)
+        .flat_map(|_| 1..=n_periods as i64)
+        .collect();
+
+    let x1: Vec<f64> = (0..n).map(|_| rng.gen_range(0.0..1.0)).collect();
+    let x2: Vec<f64> = (0..n).map(|_| rng.gen_range(0.0..1.0)).collect();
+
+    // Generate count outcome with entity fixed effects (Poisson)
+    let y: Vec<f64> = (0..n)
+        .map(|i| {
+            let entity_effect = ((entity[i] % 3) as f64) * 0.3;
+            let lambda = (1.0 + 0.5 * x1[i] + 0.3 * x2[i] + entity_effect).exp();
+            // Simple Poisson sampling via inverse transform
+            let u: f64 = rng.gen_range(0.0001..0.9999);
+            let mut k = 0.0;
+            let mut p = (-lambda).exp();
+            let mut f = p;
+            while u > f {
+                k += 1.0;
+                p *= lambda / k;
+                f += p;
+            }
+            k
+        })
+        .collect();
+
+    let df = df! {
+        "y" => y,
+        "x1" => x1,
+        "x2" => x2,
+        "entity" => entity,
+        "time" => time,
     }.expect("Failed to create DataFrame");
 
     Dataset::new(df)
@@ -325,6 +410,81 @@ fn probit_benchmark(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(n), &dataset, |b, data| {
             b.iter(|| {
                 run_probit(data, "y", &["x1", "x2"])
+            });
+        });
+    }
+
+    group.finish();
+}
+
+fn feglm_logit_benchmark(c: &mut Criterion) {
+    let mut group = c.benchmark_group("FEGLM_Logit");
+
+    // Single FE
+    for (n_entities, n_periods) in [(10, 10), (20, 20), (50, 20)] {
+        let dataset = generate_binary_panel_data(n_entities, n_periods, 42);
+        let n = n_entities * n_periods;
+
+        let config = FeglmConfig {
+            max_iter: 25,
+            tolerance: 1e-8,
+            map_max_iter: 100,
+            map_tolerance: 1e-10,
+            weight_min: 1e-10,
+            accelerate: true,
+        };
+
+        group.bench_with_input(BenchmarkId::new("single_fe", n), &dataset, |b, data| {
+            b.iter(|| {
+                run_feglm(data, "y", &["x1", "x2"], &["entity"], GlmFamily::Logit, Some(config.clone()))
+            });
+        });
+    }
+
+    // Two-way FE
+    for (n_entities, n_periods) in [(10, 10), (20, 20), (50, 20)] {
+        let dataset = generate_binary_panel_data(n_entities, n_periods, 42);
+        let n = n_entities * n_periods;
+
+        let config = FeglmConfig {
+            max_iter: 25,
+            tolerance: 1e-8,
+            map_max_iter: 100,
+            map_tolerance: 1e-10,
+            weight_min: 1e-10,
+            accelerate: true,
+        };
+
+        group.bench_with_input(BenchmarkId::new("two_way_fe", n), &dataset, |b, data| {
+            b.iter(|| {
+                run_feglm(data, "y", &["x1", "x2"], &["entity", "time"], GlmFamily::Logit, Some(config.clone()))
+            });
+        });
+    }
+
+    group.finish();
+}
+
+fn feglm_poisson_benchmark(c: &mut Criterion) {
+    let mut group = c.benchmark_group("FEGLM_Poisson");
+
+    // Two-way FE (gravity model style)
+    for (n_entities, n_periods) in [(10, 10), (20, 20), (50, 20)] {
+        let dataset = generate_count_panel_data(n_entities, n_periods, 42);
+        let n = n_entities * n_periods;
+
+        let config = FeglmConfig {
+            max_iter: 25,
+            tolerance: 1e-8,
+            map_max_iter: 100,
+            map_tolerance: 1e-10,
+            weight_min: 1e-10,
+            accelerate: true,
+        };
+
+        group.bench_with_input(BenchmarkId::new("two_way_fe", n), &dataset, |b, data| {
+            b.iter(|| {
+                run_feglm(data, "y", &["x1", "x2"], &["entity", "time"], GlmFamily::Poisson, Some(config.clone()))
             });
         });
     }
@@ -639,6 +799,10 @@ criterion_group!(
     hdfe_benchmark,
     logit_benchmark,
     probit_benchmark,
+    // FEGLM (GLM + HDFE)
+    feglm_logit_benchmark,
+    feglm_poisson_benchmark,
+    // Treatment effects
     ipw_benchmark,
     doubly_robust_benchmark,
     mediation_benchmark,

@@ -35,6 +35,8 @@ pub use econometrics::{
     DiscreteResult, run_logit, run_probit,
     VarResult, VarmaResult, VecmResult, VarIrfResult, run_var, run_varma, run_vecm, run_var_irf,
     HdfeResult, HdfeConfig, FactorInfo, run_hdfe,
+    // GLM with HDFE
+    GlmFamily, FeglmConfig, FeglmResult, run_feglm,
     // Treatment effects
     Estimand, DRMethod, IpwConfig, DoublyRobustConfig,
     PropensityScoreSummary, IpwResult, DoublyRobustResult,
