@@ -47,6 +47,11 @@ pub use econometrics::{
     // Regression discontinuity
     KernelType, BandwidthMethod, VceType, RdConfig, RdBandwidth,
     RdResult, FuzzyRdResult, run_rd, rd_bandwidth, run_fuzzy_rd,
+    // Survival analysis
+    TiesMethod, AftDistribution,
+    KaplanMeierResult, LogRankResult, CoxConfig, CoxResult, AftConfig, AftResult,
+    CumulativeIncidence, CompetingRisksResult,
+    run_kaplan_meier, log_rank_test, run_cox_ph, run_aft, run_competing_risks,
 };
 pub use forecasting::{
     ArimaResult, ArimaForecastResult, run_arima, forecast_arima,

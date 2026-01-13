@@ -112,6 +112,15 @@ When implementing a new method:
 | Probit | [probit.md](econometrics/probit.md) | Pending |
 | HDFE | [hdfe.md](econometrics/hdfe.md) | **Complete** |
 
+### Survival Analysis
+| Method | File | Status |
+|--------|------|--------|
+| Kaplan-Meier | [survival.md](econometrics/survival.md) | **Complete** |
+| Log-Rank Test | [survival.md](econometrics/survival.md) | **Complete** |
+| Cox PH | [survival.md](econometrics/survival.md) | **Complete** |
+| AFT Models | [survival.md](econometrics/survival.md) | **Complete** |
+| Competing Risks | [survival.md](econometrics/survival.md) | **Complete** |
+
 ### Time Series
 | Method | File | Status |
 |--------|------|--------|

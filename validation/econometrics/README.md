@@ -34,6 +34,15 @@ This directory contains validation documentation for econometric methods.
 ### Time Series
 See [timeseries/](timeseries/) subdirectory.
 
+### Survival Analysis
+| Method | File | p2a Function | Reference |
+|--------|------|--------------|-----------|
+| Kaplan-Meier | [survival.md](survival.md) | `run_kaplan_meier()` | R `survival::survfit()` |
+| Log-Rank Test | [survival.md](survival.md) | `log_rank_test()` | R `survival::survdiff()` |
+| Cox PH | [survival.md](survival.md) | `run_cox_ph()` | R `survival::coxph()` |
+| AFT Models | [survival.md](survival.md) | `run_aft()` | R `survival::survreg()` |
+| Competing Risks | [survival.md](survival.md) | `run_competing_risks()` | R `cmprsk::cuminc()` |
+
 ## Key Test Datasets
 
 - **Grunfeld (1958)**: Panel data for firm investment (n=200, 10 firms × 20 years)

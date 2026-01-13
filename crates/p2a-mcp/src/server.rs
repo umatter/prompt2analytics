@@ -66,6 +66,9 @@ use p2a_core::{
     run_synthetic_control, SynthConfig, PredictorSpec, TimeAggregation, VOptimization,
     // Regression Discontinuity
     run_rd, rd_bandwidth, run_fuzzy_rd, RdConfig, KernelType, BandwidthMethod,
+    // Survival Analysis
+    run_kaplan_meier, log_rank_test, run_cox_ph, run_aft, run_competing_risks,
+    CoxConfig, AftConfig, TiesMethod, AftDistribution,
     // Time series
     run_var, run_varma, run_vecm, run_var_irf,
     // Forecasting
@@ -859,6 +862,138 @@ pub struct PanelHdfeRequest {
     /// Standard error type
     #[schemars(description = "Standard error type: 'standard', 'hc0', 'hc1' (default), 'hc2', or 'hc3'.")]
     pub se_type: Option<String>,
+}
+
+// ============================================================================
+// Survival Analysis Tool Input Types
+// ============================================================================
+
+/// Request for Kaplan-Meier survival curve estimation.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct KaplanMeierRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Time-to-event column name
+    #[schemars(description = "Name of the column containing time-to-event or time-to-censoring values.")]
+    pub time: String,
+
+    /// Event indicator column name
+    #[schemars(description = "Name of the column indicating event occurrence (1=event, 0=censored).")]
+    pub event: String,
+
+    /// Optional group column for stratified analysis
+    #[schemars(description = "Optional column name for stratified analysis (e.g., 'treatment_group').")]
+    pub group: Option<String>,
+
+    /// Confidence level
+    #[schemars(description = "Confidence level for survival estimates. Default is 0.95.")]
+    pub confidence_level: Option<f64>,
+}
+
+/// Request for Log-Rank test comparing survival curves.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct LogRankRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Time-to-event column name
+    #[schemars(description = "Name of the column containing time-to-event or time-to-censoring values.")]
+    pub time: String,
+
+    /// Event indicator column name
+    #[schemars(description = "Name of the column indicating event occurrence (1=event, 0=censored).")]
+    pub event: String,
+
+    /// Group column name for comparison
+    #[schemars(description = "Name of the column defining groups to compare (e.g., 'treatment_group').")]
+    pub group: String,
+}
+
+/// Request for Cox Proportional Hazards model.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CoxPhRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Time-to-event column name
+    #[schemars(description = "Name of the column containing time-to-event or time-to-censoring values.")]
+    pub time: String,
+
+    /// Event indicator column name
+    #[schemars(description = "Name of the column indicating event occurrence (1=event, 0=censored).")]
+    pub event: String,
+
+    /// Covariate column names
+    #[schemars(description = "Names of covariate columns to include in the model.")]
+    pub covariates: Vec<String>,
+
+    /// Method for handling ties
+    #[schemars(description = "Method for handling tied event times: 'efron' (default) or 'breslow'.")]
+    pub ties_method: Option<String>,
+
+    /// Convergence tolerance
+    #[schemars(description = "Convergence tolerance for Newton-Raphson optimization. Default is 1e-9.")]
+    pub tolerance: Option<f64>,
+
+    /// Maximum iterations
+    #[schemars(description = "Maximum iterations for Newton-Raphson optimization. Default is 100.")]
+    pub max_iter: Option<usize>,
+}
+
+/// Request for Accelerated Failure Time (AFT) model.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct AftRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Time-to-event column name
+    #[schemars(description = "Name of the column containing time-to-event or time-to-censoring values.")]
+    pub time: String,
+
+    /// Event indicator column name
+    #[schemars(description = "Name of the column indicating event occurrence (1=event, 0=censored).")]
+    pub event: String,
+
+    /// Covariate column names
+    #[schemars(description = "Names of covariate columns to include in the model.")]
+    pub covariates: Vec<String>,
+
+    /// Distribution for the AFT model
+    #[schemars(description = "Distribution assumption: 'weibull' (default), 'exponential', 'lognormal', or 'loglogistic'.")]
+    pub distribution: Option<String>,
+
+    /// Convergence tolerance
+    #[schemars(description = "Convergence tolerance for optimization. Default is 1e-9.")]
+    pub tolerance: Option<f64>,
+
+    /// Maximum iterations
+    #[schemars(description = "Maximum iterations for optimization. Default is 100.")]
+    pub max_iter: Option<usize>,
+}
+
+/// Request for Competing Risks analysis (Aalen-Johansen estimator).
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CompetingRisksRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Time-to-event column name
+    #[schemars(description = "Name of the column containing time-to-event or time-to-censoring values.")]
+    pub time: String,
+
+    /// Event type column name
+    #[schemars(description = "Name of the column indicating event type (0=censored, 1=event of interest, 2=competing event, etc.).")]
+    pub event: String,
+
+    /// Confidence level
+    #[schemars(description = "Confidence level for cumulative incidence estimates. Default is 0.95.")]
+    pub confidence_level: Option<f64>,
 }
 
 // ============================================================================
@@ -5090,6 +5225,213 @@ impl AnalyticsServer {
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
                     "Fuzzy RD estimation failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+    }
+
+    // ========================================================================
+    // Survival Analysis
+    // ========================================================================
+
+    /// Run Kaplan-Meier survival curve estimation.
+    #[tool(description = "Run Kaplan-Meier survival curve estimation. Computes the non-parametric product-limit estimator with Greenwood's variance formula for confidence intervals. Optionally computes stratified curves by group. Returns survival probabilities at each event time with standard errors and confidence intervals.")]
+    async fn kaplan_meier(
+        &self,
+        Parameters(request): Parameters<KaplanMeierRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let confidence_level = request.confidence_level.unwrap_or(0.95);
+
+        let results = match run_kaplan_meier(
+            dataset,
+            &request.time,
+            &request.event,
+            request.group.as_deref(),
+            confidence_level,
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Kaplan-Meier estimation failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        // Format all results
+        let output: Vec<String> = results.iter().map(|r| r.to_string()).collect();
+        Ok(CallToolResult::success(vec![Content::text(output.join("\n\n"))]))
+    }
+
+    /// Run Log-Rank test comparing survival curves.
+    #[tool(description = "Run Log-Rank test for comparing survival curves between groups. Tests the null hypothesis that the survival functions are equal across groups. Returns chi-squared statistic, p-value, and expected/observed event counts per group.")]
+    async fn log_rank(
+        &self,
+        Parameters(request): Parameters<LogRankRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let result = match log_rank_test(dataset, &request.time, &request.event, &request.group) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Log-rank test failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+    }
+
+    /// Run Cox Proportional Hazards model.
+    #[tool(description = "Run Cox Proportional Hazards (Cox PH) regression model. Semi-parametric regression estimating covariate effects on hazard rate without assuming a baseline hazard form. Uses Newton-Raphson optimization. Returns hazard ratios, coefficients, standard errors, confidence intervals, and concordance (C-index).")]
+    async fn cox_ph(
+        &self,
+        Parameters(request): Parameters<CoxPhRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        // Parse ties method
+        let ties = match request.ties_method.as_deref() {
+            Some("breslow") => TiesMethod::Breslow,
+            _ => TiesMethod::Efron, // default
+        };
+
+        let cov_refs: Vec<&str> = request.covariates.iter().map(|s| s.as_str()).collect();
+
+        let config = CoxConfig {
+            ties,
+            tolerance: request.tolerance.unwrap_or(1e-9),
+            max_iter: request.max_iter.unwrap_or(100),
+            robust_se: false,
+        };
+
+        let result = match run_cox_ph(dataset, &request.time, &request.event, &cov_refs, Some(config)) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Cox PH estimation failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+    }
+
+    /// Run Accelerated Failure Time (AFT) model.
+    #[tool(description = "Run Accelerated Failure Time (AFT) parametric survival model. Models log(T) as a linear function of covariates. Supports Weibull, Exponential, Log-Normal, and Log-Logistic distributions. Returns regression coefficients (as acceleration factors), standard errors, shape parameters, and AIC/BIC.")]
+    async fn aft(
+        &self,
+        Parameters(request): Parameters<AftRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        // Parse distribution
+        let distribution = match request.distribution.as_deref() {
+            Some("exponential") => AftDistribution::Exponential,
+            Some("lognormal") => AftDistribution::LogNormal,
+            Some("loglogistic") => AftDistribution::LogLogistic,
+            _ => AftDistribution::Weibull, // default
+        };
+
+        let cov_refs: Vec<&str> = request.covariates.iter().map(|s| s.as_str()).collect();
+
+        let config = AftConfig {
+            distribution,
+            tolerance: request.tolerance.unwrap_or(1e-9),
+            max_iter: request.max_iter.unwrap_or(100),
+        };
+
+        let result = match run_aft(dataset, &request.time, &request.event, &cov_refs, Some(config)) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "AFT estimation failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+    }
+
+    /// Run Competing Risks analysis (Aalen-Johansen estimator).
+    #[tool(description = "Run Competing Risks analysis using the Aalen-Johansen estimator. Computes cumulative incidence functions (CIF) for multiple event types in the presence of competing risks. Properly accounts for subjects who experience a different event than the one of interest. Returns CIF curves with confidence intervals for each event type.")]
+    async fn competing_risks(
+        &self,
+        Parameters(request): Parameters<CompetingRisksRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let confidence_level = request.confidence_level.unwrap_or(0.95);
+
+        let result = match run_competing_risks(
+            dataset,
+            &request.time,
+            &request.event,
+            confidence_level,
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Competing risks analysis failed: {}",
                     e
                 ))]));
             }

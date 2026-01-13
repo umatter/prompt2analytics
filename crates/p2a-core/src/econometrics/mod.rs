@@ -14,6 +14,7 @@ mod treatment;
 mod mediation;
 mod synth;
 mod rd;
+mod survival;
 
 pub use panel::{PanelResult, HausmanResult, run_fixed_effects, run_random_effects, run_hausman_test};
 pub use iv::{IVResult, run_iv2sls, FirstStageDiagnostics, run_first_stage_diagnostics};
@@ -34,4 +35,10 @@ pub use synth::{
 pub use rd::{
     KernelType, BandwidthMethod, VceType, RdConfig, RdBandwidth,
     RdResult, FuzzyRdResult, run_rd, rd_bandwidth, run_fuzzy_rd,
+};
+pub use survival::{
+    TiesMethod, AftDistribution, KaplanMeierResult, LogRankResult,
+    CoxConfig, CoxResult, AftConfig, AftResult,
+    CumulativeIncidence, CompetingRisksResult,
+    run_kaplan_meier, log_rank_test, run_cox_ph, run_aft, run_competing_risks,
 };

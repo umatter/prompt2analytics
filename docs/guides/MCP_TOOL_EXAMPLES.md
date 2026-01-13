@@ -9,6 +9,7 @@ This guide provides usage examples for all 55 MCP tools available in prompt2anal
 - [Panel Data](#panel-data)
 - [Instrumental Variables](#instrumental-variables)
 - [Causal Inference](#causal-inference)
+- [Survival Analysis](#survival-analysis)
 - [Discrete Choice Models](#discrete-choice-models)
 - [Time Series](#time-series)
 - [Machine Learning](#machine-learning)
@@ -228,6 +229,137 @@ Difference-in-Differences estimation.
 **Interpretation:**
 - ATT = (Treated_Post - Treated_Pre) - (Control_Post - Control_Pre)
 - Assumes parallel trends: without treatment, both groups would have same trend
+
+---
+
+## Survival Analysis
+
+Survival analysis tools handle time-to-event data with censoring.
+
+### kaplan_meier
+Estimate non-parametric survival curves.
+
+```
+/kaplan_meier dataset:patients time:survival_time event:death
+/kaplan_meier dataset:patients time:survival_time event:death strata:treatment_group
+/kaplan_meier dataset:patients time:survival_time event:death confidence_level:0.95
+```
+
+**Parameters:**
+- `dataset` (required): Dataset name
+- `time` (required): Column with survival times
+- `event` (required): Binary event indicator (1=event, 0=censored)
+- `strata` (optional): Column for group stratification
+- `confidence_level` (optional): CI level (default: 0.95)
+
+**Output includes:**
+- Survival probabilities at each event time
+- Greenwood standard errors
+- Confidence intervals (log-log transformed)
+- Median survival time
+- Number at risk at each time point
+
+### log_rank_test
+Compare survival curves between groups.
+
+```
+/log_rank_test dataset:trial time:days event:death group:treatment
+```
+
+**Parameters:**
+- `dataset` (required): Dataset name
+- `time` (required): Column with survival times
+- `event` (required): Binary event indicator (1=event, 0=censored)
+- `group` (required): Column defining groups to compare
+
+**Output includes:**
+- Chi-squared statistic
+- Degrees of freedom
+- P-value
+- Observed vs expected events per group
+
+### cox_ph
+Fit Cox Proportional Hazards regression model.
+
+```
+/cox_ph dataset:patients time:survival_time event:death x:age,stage,treatment
+/cox_ph dataset:patients time:survival_time event:death x:age,stage ties:efron
+/cox_ph dataset:patients time:survival_time event:death x:age,stage robust_se:true
+```
+
+**Parameters:**
+- `dataset` (required): Dataset name
+- `time` (required): Column with survival times
+- `event` (required): Binary event indicator (1=event, 0=censored)
+- `x` (required): Comma-separated covariate columns
+- `ties` (optional): Tie handling method (`breslow` or `efron`, default: breslow)
+- `robust_se` (optional): Use robust standard errors (default: false)
+- `max_iter` (optional): Maximum Newton-Raphson iterations (default: 25)
+- `tolerance` (optional): Convergence tolerance (default: 1e-9)
+
+**Output includes:**
+- Coefficients (log hazard ratios)
+- Hazard ratios with 95% CI
+- Standard errors, z-statistics, p-values
+- Concordance (C-index)
+- Wald, Score, and Likelihood Ratio tests
+
+**Interpretation:**
+- HR > 1: Higher risk of event
+- HR < 1: Lower risk of event (protective)
+- HR = exp(coefficient)
+
+### aft
+Fit Accelerated Failure Time parametric survival model.
+
+```
+/aft dataset:patients time:survival_time event:death x:age,treatment dist:weibull
+/aft dataset:patients time:survival_time event:death x:age,treatment dist:lognormal
+/aft dataset:patients time:survival_time event:death x:age,treatment dist:exponential
+/aft dataset:patients time:survival_time event:death x:age,treatment dist:loglogistic
+```
+
+**Parameters:**
+- `dataset` (required): Dataset name
+- `time` (required): Column with survival times
+- `event` (required): Binary event indicator (1=event, 0=censored)
+- `x` (required): Comma-separated covariate columns
+- `dist` (optional): Distribution (`weibull`, `lognormal`, `exponential`, `loglogistic`; default: weibull)
+- `max_iter` (optional): Maximum iterations (default: 100)
+- `tolerance` (optional): Convergence tolerance (default: 1e-8)
+
+**Output includes:**
+- Coefficients for log(survival time)
+- Acceleration factors (exp(coefficient))
+- Scale and shape parameters
+- Standard errors, z-statistics, p-values
+- Log-likelihood, AIC, BIC
+
+**Interpretation:**
+- Acceleration factor > 1: Longer survival (slower time to event)
+- Acceleration factor < 1: Shorter survival (faster time to event)
+
+### competing_risks
+Estimate cumulative incidence functions with competing events.
+
+```
+/competing_risks dataset:patients time:time event_type:cause_of_death
+/competing_risks dataset:patients time:time event_type:cause_of_death confidence_level:0.95
+```
+
+**Parameters:**
+- `dataset` (required): Dataset name
+- `time` (required): Column with event/censoring times
+- `event_type` (required): Column with event type (0=censored, 1=event type 1, 2=event type 2, etc.)
+- `confidence_level` (optional): CI level (default: 0.95)
+
+**Output includes:**
+- Cumulative incidence functions for each event type
+- Standard errors and confidence intervals
+- Number of events by type
+
+**Use case:**
+When subjects can experience multiple types of events (e.g., death from cancer vs. death from other causes), standard Kaplan-Meier overestimates event probabilities. Competing risks properly accounts for the mutually exclusive nature of different event types.
 
 ---
 

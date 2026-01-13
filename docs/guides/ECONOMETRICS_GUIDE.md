@@ -14,6 +14,7 @@ This guide explains the assumptions underlying each econometric method in prompt
 - [Discrete Choice Models](#discrete-choice-models)
 - [Treatment Effect Estimation](#treatment-effect-estimation)
 - [Causal Mediation Analysis](#causal-mediation-analysis)
+- [Survival Analysis](#survival-analysis)
 - [Regression Diagnostics](#regression-diagnostics)
 
 ---
@@ -1045,6 +1046,353 @@ Proportion Med:   40%
 
 ---
 
+## Survival Analysis
+
+Survival analysis deals with time-to-event data where the outcome is the time until an event occurs (death, failure, recovery, etc.). A key feature is **censoring**: we may not observe the event for all subjects.
+
+### Censoring
+
+**Right Censoring** (most common): The event hasn't occurred by the end of observation
+- Subject still alive at study end
+- Subject lost to follow-up
+- Subject withdraws from study
+
+**Key Notation**:
+- T = true event time
+- C = censoring time
+- Observed: min(T, C) and event indicator δ = I(T ≤ C)
+
+### Survival and Hazard Functions
+
+**Survival Function**: Probability of surviving beyond time t
+```
+S(t) = P(T > t)
+```
+
+**Hazard Function**: Instantaneous risk of event given survival to time t
+```
+h(t) = lim_{Δt→0} P(t ≤ T < t+Δt | T ≥ t) / Δt
+```
+
+**Cumulative Hazard**:
+```
+H(t) = ∫₀ᵗ h(u) du = -log(S(t))
+```
+
+---
+
+### Kaplan-Meier Estimator
+
+A non-parametric estimator of the survival function.
+
+**Product-Limit Estimator**:
+```
+Ŝ(t) = ∏_{tᵢ ≤ t} (1 - dᵢ/nᵢ)
+```
+
+Where:
+- tᵢ = distinct event times
+- dᵢ = number of events at time tᵢ
+- nᵢ = number at risk just before tᵢ
+
+**Greenwood's Formula** (variance):
+```
+Var(Ŝ(t)) = Ŝ(t)² × Σ_{tᵢ ≤ t} dᵢ / (nᵢ × (nᵢ - dᵢ))
+```
+
+**Confidence Intervals**: Uses log-log transformation for better coverage:
+```
+CI = Ŝ(t)^{exp(±z_{α/2} × SE(log(-log(Ŝ(t)))))}
+```
+
+**Usage**:
+```rust
+run_kaplan_meier(dataset, "time", "event", Some("group"), 0.95)
+```
+
+**Interpreting Output**:
+
+| Statistic | Interpretation |
+|-----------|----------------|
+| Survival | Ŝ(t) at each distinct event time |
+| Std Error | Greenwood SE at each time |
+| CI Lower/Upper | 95% confidence interval |
+| N at Risk | Number still at risk at each time |
+| N Events | Number of events at each time |
+| Median Survival | Time when Ŝ(t) = 0.5 |
+
+**Assumptions**:
+1. **Independent censoring**: Censoring is unrelated to event risk
+2. **No informative censoring**: Censored subjects have same prognosis as those remaining
+
+---
+
+### Log-Rank Test
+
+Compares survival curves between two or more groups.
+
+**Null Hypothesis**: H₀: S₁(t) = S₂(t) = ... = Sₖ(t) for all t
+
+**Test Statistic**:
+```
+χ² = U'V⁻¹U
+```
+
+Where:
+- U = observed - expected events per group
+- V = variance-covariance matrix
+
+For two groups:
+```
+χ² = (Σ(O₁ᵢ - E₁ᵢ))² / Σ Var(O₁ᵢ)
+```
+
+**Usage**:
+```rust
+log_rank_test(dataset, "time", "event", "treatment_group")
+```
+
+**Interpreting Output**:
+
+| Statistic | Interpretation |
+|-----------|----------------|
+| Chi-squared | Test statistic |
+| df | Degrees of freedom (k-1 groups) |
+| p-value | P(χ² > observed) under H₀ |
+
+**Interpretation**:
+- p < 0.05: Significant difference in survival between groups
+- Large χ²: Greater departure from equal survival
+
+**Limitations**:
+- Sensitive to differences in middle of distribution
+- May miss differences if curves cross
+- Assumes proportional hazards
+
+---
+
+### Cox Proportional Hazards Model
+
+A semi-parametric regression model relating covariates to hazard.
+
+**Model**:
+```
+h(t|X) = h₀(t) × exp(β'X)
+```
+
+Where:
+- h₀(t) = baseline hazard (unspecified)
+- exp(β'X) = relative risk
+- β = regression coefficients
+
+**Partial Likelihood** (Cox, 1972):
+```
+L(β) = ∏ᵢ: δᵢ=1 [exp(β'xᵢ) / Σⱼ∈R(tᵢ) exp(β'xⱼ)]
+```
+
+Where R(tᵢ) is the risk set at time tᵢ.
+
+**Tie Handling**:
+
+| Method | Description | When to Use |
+|--------|-------------|-------------|
+| Breslow | Approximate, faster | Few ties (default) |
+| Efron | More accurate | Many ties |
+
+**Usage**:
+```rust
+let config = CoxConfig {
+    ties: TiesMethod::Breslow,
+    max_iter: 25,
+    tolerance: 1e-9,
+    robust_se: false,
+};
+run_cox_ph(dataset, "time", "event", &["age", "treatment"], Some(config))
+```
+
+**Interpreting Output**:
+
+| Statistic | Interpretation |
+|-----------|----------------|
+| Coefficient (β) | Log hazard ratio |
+| Hazard Ratio (exp(β)) | Multiplicative change in hazard per unit increase |
+| SE | Standard error of β |
+| z-stat | β / SE |
+| p-value | Two-sided test of H₀: β = 0 |
+| HR CI | 95% CI for hazard ratio |
+| Concordance | C-index; probability that predictions agree with observed ordering |
+| Wald/Score/LR tests | Overall model significance tests |
+
+**Example**:
+- β = 0.5 → HR = exp(0.5) = 1.65
+- Interpretation: One-unit increase in X multiplies hazard by 1.65 (65% higher risk)
+
+**Key Assumptions**:
+
+1. **Proportional Hazards**: Hazard ratios are constant over time
+   ```
+   h(t|X=1) / h(t|X=0) = exp(β) for all t
+   ```
+   - *Test*: Schoenfeld residuals, log-log plots
+   - *Violation*: Time-varying coefficients, stratification
+
+2. **Log-linear relationship**: log(h) is linear in X
+   - *Violation*: Transform covariates, use splines
+
+3. **Independent censoring**: Censoring unrelated to covariates
+
+**Diagnostics**:
+- **Concordance (C-index)**: 0.5 = random, 1.0 = perfect discrimination
+  - C > 0.7 is generally good
+- **Likelihood Ratio Test**: Compares model to null
+- **Wald Test**: Tests all coefficients = 0
+
+---
+
+### Accelerated Failure Time (AFT) Models
+
+Parametric survival models where covariates accelerate or decelerate time to event.
+
+**Model**:
+```
+log(T) = μ + β'X + σε
+```
+
+Where ε follows a specified distribution.
+
+**Interpretation**:
+- **Acceleration Factor**: exp(β)
+- exp(β) > 1: Longer survival (deceleration)
+- exp(β) < 1: Shorter survival (acceleration)
+
+**Available Distributions**:
+
+| Distribution | ε Distribution | Hazard Shape |
+|--------------|----------------|--------------|
+| Exponential | Gumbel (min) | Constant |
+| Weibull | Gumbel (min) | Monotonic increasing/decreasing |
+| Log-Normal | Normal | Non-monotonic (peak then decline) |
+| Log-Logistic | Logistic | Non-monotonic |
+
+**Usage**:
+```rust
+let config = AftConfig {
+    distribution: AftDistribution::Weibull,
+    max_iter: 100,
+    tolerance: 1e-8,
+};
+run_aft(dataset, "time", "event", &["age", "treatment"], Some(config))
+```
+
+**Interpreting Output**:
+
+| Statistic | Interpretation |
+|-----------|----------------|
+| Coefficient (β) | Effect on log(time) |
+| Acceleration Factor | exp(β); multiplier on survival time |
+| Scale (σ) | Dispersion parameter |
+| Shape | Distribution shape parameter |
+| Log-Likelihood | Model fit |
+| AIC/BIC | Model comparison (lower = better) |
+
+**Example** (Weibull with β = 0.3):
+- Acceleration factor = exp(0.3) = 1.35
+- Expected survival time multiplied by 1.35 (35% longer survival)
+
+**Choosing Distribution**:
+- **Exponential**: Constant hazard (memoryless)
+- **Weibull**: Monotonic hazard (aging effects)
+- **Log-Normal**: Hazard increases then decreases
+- **Log-Logistic**: Similar to Log-Normal, heavier tails
+
+**Model Comparison**: Use AIC/BIC to select distribution
+```
+AIC = -2 × log(L) + 2k
+BIC = -2 × log(L) + k × log(n)
+```
+
+---
+
+### Competing Risks (Aalen-Johansen)
+
+When subjects can experience one of several mutually exclusive event types.
+
+**Example**: Studying time to death where cause can be:
+- Event type 1: Cardiovascular disease
+- Event type 2: Cancer
+- Event type 0: Censored (still alive)
+
+**Cumulative Incidence Function (CIF)**:
+```
+F̂ₖ(t) = Σ_{tᵢ ≤ t} Ŝ(tᵢ₋₁) × dₖᵢ / nᵢ
+```
+
+Where:
+- Ŝ(t) = Kaplan-Meier for all-cause survival
+- dₖᵢ = events of type k at time tᵢ
+
+**Key Property**: ΣF̂ₖ(t) ≤ 1 - Ŝ(t)
+
+**Usage**:
+```rust
+run_competing_risks(dataset, "time", "event_type", 0.95)
+// event_type: 0 = censored, 1, 2, ... = event types
+```
+
+**Interpreting Output**:
+
+| Statistic | Interpretation |
+|-----------|----------------|
+| Cumulative Incidence | Probability of event k by time t |
+| SE | Standard error of CIF |
+| CI | Confidence interval for CIF |
+| N Events by Type | Number of each event type |
+
+**Why Not Use Kaplan-Meier?**
+
+Standard KM treats competing events as censoring, which:
+1. Overestimates the probability of the event of interest
+2. Assumes competing events are independent (often false)
+3. CIFs don't sum to 1 - S(t)
+
+**CIF Interpretation**:
+- CIF₁(5) = 0.15 means: 15% probability of event type 1 by year 5
+- Accounts for the "competing" nature of other event types
+
+---
+
+### Quick Reference: Survival Methods
+
+| Situation | Recommended Method |
+|-----------|-------------------|
+| Single group survival curve | Kaplan-Meier |
+| Compare survival between groups | Log-rank test |
+| Adjust for covariates | Cox PH (default) |
+| Non-proportional hazards | Stratified Cox, AFT |
+| Parametric survival model | AFT (Weibull, etc.) |
+| Multiple event types | Competing Risks (Aalen-Johansen) |
+| Time-varying covariates | Extended Cox model |
+
+### Assumptions Summary
+
+| Method | Key Assumptions |
+|--------|-----------------|
+| Kaplan-Meier | Independent censoring |
+| Log-rank | Proportional hazards |
+| Cox PH | Proportional hazards, log-linear, independent censoring |
+| AFT | Correct distribution, independent censoring |
+| Competing Risks | Independent censoring |
+
+### References
+
+- Cox, D.R. (1972). "Regression Models and Life Tables." *JRSS B*, 34:187-220.
+- Kaplan, E.L. & Meier, P. (1958). "Nonparametric Estimation from Incomplete Observations." *JASA*, 53:457-481.
+- Aalen, O.O. & Johansen, S. (1978). "An Empirical Transition Matrix." *Scandinavian J. Statistics*, 5:141-150.
+- Klein, J.P. & Moeschberger, M.L. (2003). *Survival Analysis: Techniques for Censored and Truncated Data*. Springer.
+- Therneau, T.M. & Grambsch, P.M. (2000). *Modeling Survival Data*. Springer.
+
+---
+
 ## Regression Diagnostics
 
 ### Jarque-Bera Test (Normality)
@@ -1126,6 +1474,11 @@ Proportion Med:   40%
 | Selection on observables | IPW (simple) or AIPW (robust) |
 | Understand treatment mechanisms | Causal Mediation Analysis |
 | Decompose direct/indirect effects | Causal Mediation Analysis |
+| Time-to-event (survival curve) | Kaplan-Meier |
+| Compare survival between groups | Log-Rank Test |
+| Survival with covariates | Cox Proportional Hazards |
+| Parametric survival model | AFT (Weibull, Log-Normal, etc.) |
+| Multiple competing event types | Competing Risks (Aalen-Johansen) |
 
 ---
 

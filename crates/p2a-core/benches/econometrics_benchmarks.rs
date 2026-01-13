@@ -6,8 +6,11 @@ use criterion::{criterion_group, criterion_main, Criterion, BenchmarkId};
 use p2a_core::{
     Dataset, run_fixed_effects, run_hdfe, run_logit, run_probit,
     run_ipw_treatment, run_doubly_robust, run_mediation_analysis,
-    run_synthetic_control, SynthConfig, PredictorSpec, TimeAggregation, VOptimization,
+    run_synthetic_control, SynthConfig, PredictorSpec, VOptimization,
     IpwConfig, DoublyRobustConfig, MediationConfig, Estimand, DRMethod,
+    // Survival analysis
+    run_kaplan_meier, log_rank_test, run_cox_ph, run_aft, run_competing_risks,
+    CoxConfig, AftConfig, TiesMethod, AftDistribution,
 };
 use p2a_core::regression::CovarianceType;
 use polars::prelude::*;
@@ -400,6 +403,236 @@ fn mediation_benchmark(c: &mut Criterion) {
     group.finish();
 }
 
+// ============================================================================
+// Survival Analysis Data Generators
+// ============================================================================
+
+/// Generate synthetic survival data with right-censoring
+fn generate_survival_data(n: usize, censoring_rate: f64, seed: u64) -> Dataset {
+    let mut rng = ChaCha8Rng::seed_from_u64(seed);
+
+    let mut times = Vec::with_capacity(n);
+    let mut events: Vec<f64> = Vec::with_capacity(n);
+    let mut x1 = Vec::with_capacity(n);
+    let mut x2 = Vec::with_capacity(n);
+    let mut groups = Vec::with_capacity(n);
+
+    for i in 0..n {
+        let covar1: f64 = rng.gen_range(-1.0..1.0);
+        let covar2: f64 = rng.gen_range(-1.0..1.0);
+        let group = if i < n / 2 { "A" } else { "B" };
+
+        // Generate true event time using Weibull distribution
+        // hazard: h(t) = shape * scale * t^(shape-1) * exp(beta * x)
+        let linear = 0.5 * covar1 + 0.3 * covar2 + if group == "B" { 0.5 } else { 0.0 };
+        let u: f64 = rng.gen_range(0.0001..0.9999);
+        let shape = 1.5;
+        let scale = 10.0;
+        let true_time = scale * (-u.ln()).powf(1.0 / shape) * (-linear).exp();
+
+        // Generate censoring time (exponential)
+        let censor_rate_adj = censoring_rate * 0.1 * scale;
+        let censor_time = -censor_rate_adj * rng.gen_range(0.0001_f64..0.9999).ln();
+
+        // Observed = min(event, censor)
+        if true_time < censor_time {
+            times.push(true_time);
+            events.push(1.0);
+        } else {
+            times.push(censor_time);
+            events.push(0.0);
+        }
+
+        x1.push(covar1);
+        x2.push(covar2);
+        groups.push(group.to_string());
+    }
+
+    let df = df! {
+        "time" => times,
+        "event" => events,
+        "x1" => x1,
+        "x2" => x2,
+        "group" => groups,
+    }.expect("Failed to create survival DataFrame");
+
+    Dataset::new(df)
+}
+
+/// Generate synthetic competing risks data
+fn generate_competing_risks_data(n: usize, seed: u64) -> Dataset {
+    let mut rng = ChaCha8Rng::seed_from_u64(seed);
+
+    let mut times = Vec::with_capacity(n);
+    let mut event_types: Vec<f64> = Vec::with_capacity(n);
+
+    for _ in 0..n {
+        // Generate times for each event type
+        let time1 = -10.0 * rng.gen_range(0.0001_f64..0.9999).ln(); // Event type 1
+        let time2 = -8.0 * rng.gen_range(0.0001_f64..0.9999).ln();  // Event type 2
+        let censor = -15.0 * rng.gen_range(0.0001_f64..0.9999).ln(); // Censoring
+
+        // Find which occurs first
+        let (obs_time, obs_event) = if time1 < time2 && time1 < censor {
+            (time1, 1.0) // Event type 1
+        } else if time2 < time1 && time2 < censor {
+            (time2, 2.0) // Event type 2
+        } else {
+            (censor, 0.0) // Censored
+        };
+
+        times.push(obs_time);
+        event_types.push(obs_event);
+    }
+
+    let df = df! {
+        "time" => times,
+        "event_type" => event_types,
+    }.expect("Failed to create competing risks DataFrame");
+
+    Dataset::new(df)
+}
+
+// ============================================================================
+// Survival Analysis Benchmarks
+// ============================================================================
+
+fn kaplan_meier_benchmark(c: &mut Criterion) {
+    let mut group = c.benchmark_group("KaplanMeier");
+
+    for n in [100, 500, 1000, 5000] {
+        let dataset = generate_survival_data(n, 0.3, 42);
+
+        group.bench_with_input(BenchmarkId::new("unstratified", n), &dataset, |b, data| {
+            b.iter(|| {
+                let result = run_kaplan_meier(data, "time", "event", None, 0.95);
+                std::hint::black_box(result.expect("KM should succeed"))
+            });
+        });
+
+        group.bench_with_input(BenchmarkId::new("stratified", n), &dataset, |b, data| {
+            b.iter(|| {
+                let result = run_kaplan_meier(data, "time", "event", Some("group"), 0.95);
+                std::hint::black_box(result.expect("KM should succeed"))
+            });
+        });
+    }
+
+    group.finish();
+}
+
+fn log_rank_benchmark(c: &mut Criterion) {
+    let mut group = c.benchmark_group("LogRank");
+
+    for n in [100, 500, 1000, 5000] {
+        let dataset = generate_survival_data(n, 0.3, 42);
+
+        group.bench_with_input(BenchmarkId::from_parameter(n), &dataset, |b, data| {
+            b.iter(|| {
+                let result = log_rank_test(data, "time", "event", "group");
+                std::hint::black_box(result.expect("Log-rank should succeed"))
+            });
+        });
+    }
+
+    group.finish();
+}
+
+fn cox_ph_benchmark(c: &mut Criterion) {
+    let mut group = c.benchmark_group("CoxPH");
+
+    for n in [100, 500, 1000, 2000] {
+        let dataset = generate_survival_data(n, 0.3, 42);
+
+        // Efron method (default)
+        let config_efron = CoxConfig {
+            ties: TiesMethod::Efron,
+            max_iter: 25,
+            tolerance: 1e-9,
+            robust_se: false,
+        };
+
+        group.bench_with_input(BenchmarkId::new("efron", n), &dataset, |b, data| {
+            b.iter(|| {
+                let result = run_cox_ph(data, "time", "event", &["x1", "x2"], Some(config_efron.clone()));
+                std::hint::black_box(result.expect("Cox PH should succeed"))
+            });
+        });
+
+        // Breslow method
+        let config_breslow = CoxConfig {
+            ties: TiesMethod::Breslow,
+            max_iter: 25,
+            tolerance: 1e-9,
+            robust_se: false,
+        };
+
+        group.bench_with_input(BenchmarkId::new("breslow", n), &dataset, |b, data| {
+            b.iter(|| {
+                let result = run_cox_ph(data, "time", "event", &["x1", "x2"], Some(config_breslow.clone()));
+                std::hint::black_box(result.expect("Cox PH should succeed"))
+            });
+        });
+    }
+
+    group.finish();
+}
+
+fn aft_benchmark(c: &mut Criterion) {
+    let mut group = c.benchmark_group("AFT");
+
+    for n in [100, 500, 1000, 2000] {
+        let dataset = generate_survival_data(n, 0.3, 42);
+
+        // Weibull
+        let config_weibull = AftConfig {
+            distribution: AftDistribution::Weibull,
+            tolerance: 1e-9,
+            max_iter: 100,
+        };
+
+        group.bench_with_input(BenchmarkId::new("weibull", n), &dataset, |b, data| {
+            b.iter(|| {
+                let result = run_aft(data, "time", "event", &["x1", "x2"], Some(config_weibull.clone()));
+                std::hint::black_box(result.expect("AFT should succeed"))
+            });
+        });
+
+        // Log-Normal
+        let config_lognormal = AftConfig {
+            distribution: AftDistribution::LogNormal,
+            tolerance: 1e-9,
+            max_iter: 100,
+        };
+
+        group.bench_with_input(BenchmarkId::new("lognormal", n), &dataset, |b, data| {
+            b.iter(|| {
+                let result = run_aft(data, "time", "event", &["x1", "x2"], Some(config_lognormal.clone()));
+                std::hint::black_box(result.expect("AFT should succeed"))
+            });
+        });
+    }
+
+    group.finish();
+}
+
+fn competing_risks_benchmark(c: &mut Criterion) {
+    let mut group = c.benchmark_group("CompetingRisks");
+
+    for n in [100, 500, 1000, 5000] {
+        let dataset = generate_competing_risks_data(n, 42);
+
+        group.bench_with_input(BenchmarkId::from_parameter(n), &dataset, |b, data| {
+            b.iter(|| {
+                let result = run_competing_risks(data, "time", "event_type", 0.95);
+                std::hint::black_box(result.expect("Competing risks should succeed"))
+            });
+        });
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     fixed_effects_benchmark,
@@ -409,6 +642,12 @@ criterion_group!(
     ipw_benchmark,
     doubly_robust_benchmark,
     mediation_benchmark,
-    synth_benchmark
+    synth_benchmark,
+    // Survival analysis
+    kaplan_meier_benchmark,
+    log_rank_benchmark,
+    cox_ph_benchmark,
+    aft_benchmark,
+    competing_risks_benchmark,
 );
 criterion_main!(benches);
