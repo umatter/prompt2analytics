@@ -85,3 +85,25 @@ code {
 .prose code {
   @apply bg-[hsl(var(--muted))] px-1 py-0.5 rounded;
 }
+
+/* Markdown tables */
+.prose table {
+  @apply w-full border-collapse text-sm my-4;
+}
+
+.prose th,
+.prose td {
+  @apply border border-[hsl(var(--border))] px-3 py-2 text-left;
+}
+
+.prose th {
+  @apply bg-[hsl(var(--muted))] font-semibold;
+}
+
+.prose tr:nth-child(even) {
+  @apply bg-[hsl(var(--muted))]/50;
+}
+
+.prose tbody tr:hover {
+  @apply bg-[hsl(var(--muted))];
+}

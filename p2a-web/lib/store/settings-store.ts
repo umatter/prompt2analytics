@@ -15,6 +15,7 @@ interface SettingsState {
   openaiModel: string
   temperature: number
   maxTokens: number
+  interpretResults: boolean  // Whether to have LLM interpret tool results
 
   // UI Settings
   theme: 'light' | 'dark' | 'system'
@@ -29,6 +30,7 @@ interface SettingsState {
   setOpenaiModel: (model: string) => void
   setTemperature: (temp: number) => void
   setMaxTokens: (tokens: number) => void
+  setInterpretResults: (interpret: boolean) => void
   setTheme: (theme: 'light' | 'dark' | 'system') => void
 
   // Get current provider config
@@ -48,6 +50,7 @@ export const useSettingsStore = create<SettingsState>()(
       openaiModel: 'gpt-4o',
       temperature: 0.7,
       maxTokens: 4096,
+      interpretResults: true,  // Default to ON for backward compatibility
       theme: 'system',
 
       setProvider: (provider) => set({ provider }),
@@ -59,6 +62,7 @@ export const useSettingsStore = create<SettingsState>()(
       setOpenaiModel: (model) => set({ openaiModel: model }),
       setTemperature: (temp) => set({ temperature: temp }),
       setMaxTokens: (tokens) => set({ maxTokens: tokens }),
+      setInterpretResults: (interpret) => set({ interpretResults: interpret }),
       setTheme: (theme) => set({ theme }),
 
       getProviderConfig: () => {
@@ -101,6 +105,7 @@ export const useSettingsStore = create<SettingsState>()(
         openaiModel: state.openaiModel,
         temperature: state.temperature,
         maxTokens: state.maxTokens,
+        interpretResults: state.interpretResults,
         theme: state.theme,
         // Note: API keys are not persisted by default for security
       }),

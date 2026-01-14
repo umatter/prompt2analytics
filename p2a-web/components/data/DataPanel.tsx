@@ -1,7 +1,8 @@
 'use client'
 
-import { useEffect, useCallback } from 'react'
+import { useEffect, useState, useCallback } from 'react'
 import { useDatasetsStore } from '@/lib/store/datasets-store'
+import { FileBrowser } from './FileBrowser'
 
 export function DataPanel() {
   const {
@@ -12,42 +13,37 @@ export function DataPanel() {
     error,
     loadDatasets,
     selectDataset,
-    uploadDataset,
+    loadDatasetFromPath,
     deleteDataset,
     clearError,
   } = useDatasetsStore()
+
+  const [filePath, setFilePath] = useState('')
+  const [showFileBrowser, setShowFileBrowser] = useState(false)
 
   // Load datasets on mount
   useEffect(() => {
     loadDatasets()
   }, [loadDatasets])
 
-  const handleFileChange = useCallback(
-    async (e: React.ChangeEvent<HTMLInputElement>) => {
-      const file = e.target.files?.[0]
-      if (file) {
-        await uploadDataset(file)
-        // Reset the input
-        e.target.value = ''
-      }
-    },
-    [uploadDataset]
-  )
-
-  const handleDrop = useCallback(
-    async (e: React.DragEvent) => {
+  const handleLoadDataset = useCallback(
+    async (e: React.FormEvent) => {
       e.preventDefault()
-      const file = e.dataTransfer.files[0]
-      if (file) {
-        await uploadDataset(file)
+      if (filePath.trim()) {
+        await loadDatasetFromPath(filePath.trim())
+        setFilePath('')
       }
     },
-    [uploadDataset]
+    [filePath, loadDatasetFromPath]
   )
 
-  const handleDragOver = useCallback((e: React.DragEvent) => {
-    e.preventDefault()
-  }, [])
+  const handleFileSelect = useCallback(
+    async (path: string) => {
+      setFilePath(path)
+      await loadDatasetFromPath(path)
+    },
+    [loadDatasetFromPath]
+  )
 
   return (
     <div className="p-4">
@@ -70,51 +66,53 @@ export function DataPanel() {
         </div>
       )}
 
-      {/* File Upload Area */}
-      <div className="mb-4">
-        <label
-          htmlFor="file-upload"
-          onDrop={handleDrop}
-          onDragOver={handleDragOver}
-          className={`flex flex-col items-center justify-center w-full h-32 border-2 border-dashed rounded-lg cursor-pointer transition-colors ${
-            isLoading
-              ? 'border-gray-200 bg-gray-50 cursor-not-allowed'
-              : 'border-gray-300 dark:border-gray-600 bg-gray-50 dark:bg-gray-800 hover:bg-gray-100 dark:hover:bg-gray-700'
-          }`}
-        >
-          <div className="flex flex-col items-center justify-center pt-5 pb-6">
-            {isLoading ? (
-              <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600 mb-2" />
-            ) : (
-              <svg
-                className="w-8 h-8 mb-2 text-gray-500"
-                fill="none"
-                stroke="currentColor"
-                viewBox="0 0 24 24"
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth={2}
-                  d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"
-                />
-              </svg>
-            )}
-            <p className="text-sm text-gray-500">
-              <span className="font-semibold">Click to upload</span> or drag and drop
-            </p>
-            <p className="text-xs text-gray-400">CSV, JSON, or Parquet</p>
-          </div>
-          <input
-            id="file-upload"
-            type="file"
-            className="hidden"
-            accept=".csv,.json,.parquet"
-            onChange={handleFileChange}
-            disabled={isLoading}
-          />
+      {/* File Browser Button */}
+      <button
+        onClick={() => setShowFileBrowser(true)}
+        disabled={isLoading}
+        className="w-full mb-4 flex items-center justify-center gap-2 px-4 py-3 border-2 border-dashed border-gray-300 dark:border-gray-600 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors disabled:opacity-50"
+      >
+        <svg className="w-5 h-5 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+        </svg>
+        <span className="text-sm text-gray-600 dark:text-gray-400">Browse for data files...</span>
+      </button>
+
+      {/* Or enter path manually */}
+      <form onSubmit={handleLoadDataset} className="mb-4">
+        <label htmlFor="file-path" className="block text-xs text-gray-400 mb-1">
+          Or enter path manually
         </label>
-      </div>
+        <div className="flex gap-2">
+          <input
+            id="file-path"
+            type="text"
+            value={filePath}
+            onChange={(e) => setFilePath(e.target.value)}
+            placeholder="/path/to/data.csv"
+            disabled={isLoading}
+            className="flex-1 min-w-0 px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
+          />
+          <button
+            type="submit"
+            disabled={isLoading || !filePath.trim()}
+            className="flex-shrink-0 px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {isLoading ? (
+              <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white" />
+            ) : (
+              'Load'
+            )}
+          </button>
+        </div>
+      </form>
+
+      {/* File Browser Modal */}
+      <FileBrowser
+        isOpen={showFileBrowser}
+        onClose={() => setShowFileBrowser(false)}
+        onSelect={handleFileSelect}
+      />
 
       {/* Dataset List */}
       {datasets.length === 0 ? (

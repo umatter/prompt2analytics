@@ -6928,14 +6928,17 @@ impl AnalyticsServer {
 
         match histogram(&values, request.bins, config) {
             Ok(result) => {
-                let output = format!(
-                    "Histogram of '{}'\n{}\n\nImage (base64 PNG, {} bytes):\n{}",
+                // Return text description (for LLM) and image separately (filtered out for LLM)
+                let description = format!(
+                    "Histogram of '{}' generated successfully.\nBins: {}\nData points: {}",
                     request.column,
-                    "=".repeat(40),
-                    result.image_base64.len(),
-                    result.image_base64
+                    request.bins.unwrap_or(10),
+                    values.len()
                 );
-                Ok(CallToolResult::success(vec![Content::text(output)]))
+                Ok(CallToolResult::success(vec![
+                    Content::text(description),
+                    Content::image(result.image_base64, "image/png"),
+                ]))
             }
             Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
                 "Failed to generate histogram: {}",
@@ -7030,17 +7033,17 @@ impl AnalyticsServer {
 
         match scatter_plot(&x_values, &y_values, config) {
             Ok(result) => {
-                let output = format!(
-                    "Scatter Plot: {} vs {}\n{}\nPoints: {}\nCorrelation: {:.4}\n\nImage (base64 PNG, {} bytes):\n{}",
+                let description = format!(
+                    "Scatter plot of {} vs {} generated successfully.\nPoints: {}\nCorrelation: {:.4}",
                     request.x_column,
                     request.y_column,
-                    "=".repeat(40),
                     result.n_points,
-                    result.correlation.unwrap_or(f64::NAN),
-                    result.image_base64.len(),
-                    result.image_base64
+                    result.correlation.unwrap_or(f64::NAN)
                 );
-                Ok(CallToolResult::success(vec![Content::text(output)]))
+                Ok(CallToolResult::success(vec![
+                    Content::text(description),
+                    Content::image(result.image_base64, "image/png"),
+                ]))
             }
             Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
                 "Failed to generate scatter plot: {}",
@@ -7140,16 +7143,16 @@ impl AnalyticsServer {
 
         match line_chart(&series, config) {
             Ok(result) => {
-                let output = format!(
-                    "Line Chart\n{}\nX: {}\nSeries: {}\nPoints: {}\n\nImage (base64 PNG, {} bytes):\n{}",
-                    "=".repeat(40),
+                let description = format!(
+                    "Line chart generated successfully.\nX: {}\nSeries: {}\nPoints: {}",
                     request.x_column,
                     series_names.join(", "),
-                    result.n_points,
-                    result.image_base64.len(),
-                    result.image_base64
+                    result.n_points
                 );
-                Ok(CallToolResult::success(vec![Content::text(output)]))
+                Ok(CallToolResult::success(vec![
+                    Content::text(description),
+                    Content::image(result.image_base64, "image/png"),
+                ]))
             }
             Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
                 "Failed to generate line chart: {}",
@@ -7224,19 +7227,17 @@ impl AnalyticsServer {
 
         match box_plot(&groups, config) {
             Ok(result) => {
-                let mut output = format!("Box Plot\n{}\n", "=".repeat(40));
+                let mut description = String::from("Box plot generated successfully.\n\nStatistics:");
                 for stat in &result.statistics {
-                    output.push_str(&format!(
-                        "\n{}:\n  Min: {:.4}, Q1: {:.4}, Median: {:.4}, Q3: {:.4}, Max: {:.4}\n",
+                    description.push_str(&format!(
+                        "\n{}:\n  Min: {:.4}, Q1: {:.4}, Median: {:.4}, Q3: {:.4}, Max: {:.4}",
                         stat.label, stat.min, stat.q1, stat.median, stat.q3, stat.max
                     ));
                 }
-                output.push_str(&format!(
-                    "\nImage (base64 PNG, {} bytes):\n{}",
-                    result.image_base64.len(),
-                    result.image_base64
-                ));
-                Ok(CallToolResult::success(vec![Content::text(output)]))
+                Ok(CallToolResult::success(vec![
+                    Content::text(description),
+                    Content::image(result.image_base64, "image/png"),
+                ]))
             }
             Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
                 "Failed to generate box plot: {}",
@@ -7314,14 +7315,14 @@ impl AnalyticsServer {
             None,
         ) {
             Ok(result) => {
-                let output = format!(
-                    "Correlation Heatmap\n{}\nVariables: {}\n\nImage (base64 PNG, {} bytes):\n{}",
-                    "=".repeat(40),
-                    columns.join(", "),
-                    result.image_base64.len(),
-                    result.image_base64
+                let description = format!(
+                    "Correlation heatmap generated successfully.\nVariables: {}",
+                    columns.join(", ")
                 );
-                Ok(CallToolResult::success(vec![Content::text(output)]))
+                Ok(CallToolResult::success(vec![
+                    Content::text(description),
+                    Content::image(result.image_base64, "image/png"),
+                ]))
             }
             Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
                 "Failed to generate heatmap: {}",
@@ -7386,14 +7387,14 @@ impl AnalyticsServer {
 
         match event_study_plot(&time, &estimates, &ci_lower, &ci_upper, config) {
             Ok(result) => {
-                let output = format!(
-                    "Event Study Plot\n{}\nPeriods: {}\n\nImage (base64 PNG, {} bytes):\n{}",
-                    "=".repeat(40),
-                    result.n_periods,
-                    result.image_base64.len(),
-                    result.image_base64
+                let description = format!(
+                    "Event study plot generated successfully.\nPeriods: {}",
+                    result.n_periods
                 );
-                Ok(CallToolResult::success(vec![Content::text(output)]))
+                Ok(CallToolResult::success(vec![
+                    Content::text(description),
+                    Content::image(result.image_base64, "image/png"),
+                ]))
             }
             Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
                 "Failed to generate event study plot: {}",
@@ -7468,15 +7469,15 @@ impl AnalyticsServer {
 
         match coefficient_plot(&names, &estimates, &ci_lower, &ci_upper, config, horizontal) {
             Ok(result) => {
-                let output = format!(
-                    "Coefficient Plot\n{}\nCoefficients: {}\nOrientation: {}\n\nImage (base64 PNG, {} bytes):\n{}",
-                    "=".repeat(40),
+                let description = format!(
+                    "Coefficient plot generated successfully.\nCoefficients: {}\nOrientation: {}",
                     result.n_coefficients,
-                    if horizontal { "horizontal" } else { "vertical" },
-                    result.image_base64.len(),
-                    result.image_base64
+                    if horizontal { "horizontal" } else { "vertical" }
                 );
-                Ok(CallToolResult::success(vec![Content::text(output)]))
+                Ok(CallToolResult::success(vec![
+                    Content::text(description),
+                    Content::image(result.image_base64, "image/png"),
+                ]))
             }
             Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
                 "Failed to generate coefficient plot: {}",
@@ -7556,17 +7557,17 @@ impl AnalyticsServer {
 
         match irf_plot(&horizon, &response, ci_lower.as_deref(), ci_upper.as_deref(), shock_label, response_label, config) {
             Ok(result) => {
-                let output = format!(
-                    "IRF Plot\n{}\nHorizons: {}\nHas CI bands: {}\nShock: {}\nResponse: {}\n\nImage (base64 PNG, {} bytes):\n{}",
-                    "=".repeat(40),
+                let description = format!(
+                    "IRF plot generated successfully.\nHorizons: {}\nHas CI bands: {}\nShock: {}\nResponse: {}",
                     result.n_horizons,
                     has_ci,
                     result.shock.as_deref().unwrap_or("unnamed"),
-                    result.response.as_deref().unwrap_or("unnamed"),
-                    result.image_base64.len(),
-                    result.image_base64
+                    result.response.as_deref().unwrap_or("unnamed")
                 );
-                Ok(CallToolResult::success(vec![Content::text(output)]))
+                Ok(CallToolResult::success(vec![
+                    Content::text(description),
+                    Content::image(result.image_base64, "image/png"),
+                ]))
             }
             Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
                 "Failed to generate IRF plot: {}",
@@ -7637,27 +7638,21 @@ impl AnalyticsServer {
                     .map(|(i, _)| i)
                     .collect();
 
-                let output = format!(
-                    "Residual Diagnostics\n{}\n\
+                let description = format!(
+                    "Residual diagnostics generated (4 plots).\n\
                      Observations: {}\n\
-                     High influence points (Cook's D > 0.5): {}\n\n\
-                     Plot 1: Residuals vs Fitted (base64 PNG, {} bytes):\n{}\n\n\
-                     Plot 2: Normal Q-Q (base64 PNG, {} bytes):\n{}\n\n\
-                     Plot 3: Scale-Location (base64 PNG, {} bytes):\n{}\n\n\
-                     Plot 4: Residuals vs Leverage (base64 PNG, {} bytes):\n{}",
-                    "=".repeat(40),
+                     High influence points (Cook's D > 0.5): {}\n\
+                     Plots: Residuals vs Fitted, Normal Q-Q, Scale-Location, Residuals vs Leverage",
                     result.n_observations,
-                    if high_influence.is_empty() { "None".to_string() } else { format!("{:?}", high_influence) },
-                    result.residuals_vs_fitted.len(),
-                    result.residuals_vs_fitted,
-                    result.qq_plot.len(),
-                    result.qq_plot,
-                    result.scale_location.len(),
-                    result.scale_location,
-                    result.residuals_vs_leverage.len(),
-                    result.residuals_vs_leverage
+                    if high_influence.is_empty() { "None".to_string() } else { format!("{:?}", high_influence) }
                 );
-                Ok(CallToolResult::success(vec![Content::text(output)]))
+                Ok(CallToolResult::success(vec![
+                    Content::text(description),
+                    Content::image(result.residuals_vs_fitted, "image/png"),
+                    Content::image(result.qq_plot, "image/png"),
+                    Content::image(result.scale_location, "image/png"),
+                    Content::image(result.residuals_vs_leverage, "image/png"),
+                ]))
             }
             Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
                 "Failed to generate residual diagnostics: {}",
@@ -7703,20 +7698,16 @@ impl AnalyticsServer {
 
         match dendrogram(&linkage, request.labels.as_deref(), config) {
             Ok(result) => {
-                let output = format!(
-                    "Dendrogram\n{}\n\
-                     Samples: {}\n\
-                     Merge steps: {}\n\
-                     Max distance: {:.4}\n\n\
-                     Image (base64 PNG, {} bytes):\n{}",
-                    "=".repeat(40),
+                let description = format!(
+                    "Dendrogram generated successfully.\nSamples: {}\nMerge steps: {}\nMax distance: {:.4}",
                     result.n_samples,
                     result.n_merges,
-                    result.max_distance,
-                    result.image_base64.len(),
-                    result.image_base64
+                    result.max_distance
                 );
-                Ok(CallToolResult::success(vec![Content::text(output)]))
+                Ok(CallToolResult::success(vec![
+                    Content::text(description),
+                    Content::image(result.image_base64, "image/png"),
+                ]))
             }
             Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
                 "Failed to generate dendrogram: {}",

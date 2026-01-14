@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
     routing::{delete, get, post},
@@ -93,7 +93,9 @@ fn create_router(state: AppState, config: &ServerConfig) -> Router {
         // Tool discovery
         .route("/api/tools", get(list_tools))
         // Tool execution
-        .route("/api/tools/{name}", post(call_tool));
+        .route("/api/tools/{name}", post(call_tool))
+        // File browser
+        .route("/api/files", get(list_files));
 
     // Add WebSocket route if feature is enabled
     #[cfg(feature = "websocket")]
@@ -103,7 +105,9 @@ fn create_router(state: AppState, config: &ServerConfig) -> Router {
     #[cfg(feature = "llm")]
     let router = router
         .route("/api/llm/chat", post(llm_chat))
-        .route("/api/llm/models", get(llm_list_models));
+        .route("/api/llm/chat/stream", post(llm_chat_stream))
+        .route("/api/llm/models", get(llm_list_models))
+        .route("/api/llm/env-keys", get(llm_env_keys));
 
     router
         // Add middleware
@@ -283,6 +287,108 @@ async fn list_tools(State(state): State<AppState>) -> impl IntoResponse {
     Json(ApiResponse::success(tools))
 }
 
+/// Query params for file listing.
+#[derive(Debug, Deserialize)]
+pub struct ListFilesQuery {
+    /// Directory path to list (defaults to home directory)
+    pub path: Option<String>,
+}
+
+/// File entry in directory listing.
+#[derive(Debug, Serialize)]
+pub struct FileEntry {
+    pub name: String,
+    pub path: String,
+    pub is_dir: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
+}
+
+/// Response for file listing.
+#[derive(Debug, Serialize)]
+pub struct ListFilesResponse {
+    pub path: String,
+    pub parent: Option<String>,
+    pub entries: Vec<FileEntry>,
+}
+
+/// List files in a directory.
+async fn list_files(Query(query): Query<ListFilesQuery>) -> impl IntoResponse {
+    use std::path::PathBuf;
+
+    // Default to home directory
+    let path = match &query.path {
+        Some(p) if !p.is_empty() => PathBuf::from(p),
+        _ => dirs::home_dir().unwrap_or_else(|| PathBuf::from("/")),
+    };
+
+    // Read directory
+    let entries = match std::fs::read_dir(&path) {
+        Ok(read_dir) => {
+            let mut entries: Vec<FileEntry> = read_dir
+                .filter_map(|entry| {
+                    let entry = entry.ok()?;
+                    let metadata = entry.metadata().ok()?;
+                    let name = entry.file_name().to_string_lossy().to_string();
+
+                    // Skip hidden files
+                    if name.starts_with('.') {
+                        return None;
+                    }
+
+                    let is_dir = metadata.is_dir();
+
+                    // Filter to only show directories and supported data files
+                    if !is_dir {
+                        let ext = name.split('.').last().unwrap_or("").to_lowercase();
+                        if !["csv", "parquet", "json", "xlsx", "xls", "dta", "sas7bdat"].contains(&ext.as_str()) {
+                            return None;
+                        }
+                    }
+
+                    Some(FileEntry {
+                        name,
+                        path: entry.path().to_string_lossy().to_string(),
+                        is_dir,
+                        size: if is_dir { None } else { Some(metadata.len()) },
+                    })
+                })
+                .collect();
+
+            // Sort: directories first, then files, both alphabetically
+            entries.sort_by(|a, b| {
+                match (a.is_dir, b.is_dir) {
+                    (true, false) => std::cmp::Ordering::Less,
+                    (false, true) => std::cmp::Ordering::Greater,
+                    _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+                }
+            });
+
+            entries
+        }
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::<ListFilesResponse>::error(format!(
+                    "Cannot read directory: {}",
+                    e
+                ))),
+            );
+        }
+    };
+
+    let parent = path.parent().map(|p| p.to_string_lossy().to_string());
+
+    (
+        StatusCode::OK,
+        Json(ApiResponse::success(ListFilesResponse {
+            path: path.to_string_lossy().to_string(),
+            parent,
+            entries,
+        })),
+    )
+}
+
 /// Call a tool.
 async fn call_tool(
     State(state): State<AppState>,
@@ -331,7 +437,7 @@ mod llm_handlers {
     use super::*;
     use crate::llm::{
         get_mcp_tool_definitions, get_system_prompt, LlmProvider, Message, OllamaProvider,
-        ProviderConfig, ProviderType, ToolExecutor,
+        OpenAIProvider, ProviderConfig, ProviderType, ToolExecutor,
     };
     use crate::session::Session;
 
@@ -344,6 +450,13 @@ mod llm_handlers {
         pub provider: Option<ProviderConfig>,
         #[serde(default)]
         pub history: Vec<Message>,
+        /// Whether to have the LLM interpret tool results (default: true)
+        #[serde(default = "default_interpret")]
+        pub interpret: bool,
+    }
+
+    fn default_interpret() -> bool {
+        true
     }
 
     /// Response for LLM chat.
@@ -378,11 +491,15 @@ mod llm_handlers {
             name: &str,
             arguments: serde_json::Value,
         ) -> Result<String, String> {
-            match self
+            tracing::info!(tool = %name, "Executing tool");
+            let start = std::time::Instant::now();
+            let result = self
                 .server
                 .call_tool_with_session(name, arguments, &self.session)
-                .await
-            {
+                .await;
+            let elapsed = start.elapsed();
+            tracing::info!(tool = %name, elapsed_ms = %elapsed.as_millis(), "Tool execution completed");
+            match result {
                 Ok(result) => {
                     // Convert tool result to string
                     let content = result
@@ -402,12 +519,33 @@ mod llm_handlers {
     }
 
     /// Create a provider from config (defaults to Ollama).
+    /// If no API key is provided, checks for environment variables:
+    /// - OPENAI_API_KEY for OpenAI
+    /// - ANTHROPIC_API_KEY for Anthropic
     fn create_provider(config: Option<ProviderConfig>) -> Box<dyn LlmProvider> {
-        let config = config.unwrap_or_default();
+        let mut config = config.unwrap_or_default();
+
+        // Fill in API key from environment variable if not provided
+        if config.api_key.is_none() || config.api_key.as_ref().map(|k| k.is_empty()).unwrap_or(false) {
+            let env_key = match config.provider_type {
+                ProviderType::OpenAI => std::env::var("OPENAI_API_KEY").ok(),
+                ProviderType::Anthropic => std::env::var("ANTHROPIC_API_KEY").ok(),
+                ProviderType::Ollama => None, // Ollama doesn't need an API key
+            };
+            if env_key.is_some() {
+                tracing::info!(
+                    provider = %config.provider_type,
+                    "Using API key from environment variable"
+                );
+                config.api_key = env_key;
+            }
+        }
+
         match config.provider_type {
             ProviderType::Ollama => Box::new(OllamaProvider::new(config)),
-            // TODO: Add Anthropic and OpenAI providers
-            _ => Box::new(OllamaProvider::new(config)),
+            ProviderType::OpenAI => Box::new(OpenAIProvider::new(config)),
+            // TODO: Add Anthropic provider
+            ProviderType::Anthropic => Box::new(OllamaProvider::new(config)),
         }
     }
 
@@ -444,24 +582,35 @@ mod llm_handlers {
         let tool_executor = SessionToolExecutor::new(state.server.clone(), session);
         let tools = get_mcp_tool_definitions();
 
+        tracing::info!(provider = %provider.provider_type(), num_tools = %tools.len(), "Starting LLM chat");
+
         // Build message history
         let mut messages = vec![Message::system(get_system_prompt())];
         messages.extend(request.history);
         messages.push(Message::user(request.message));
 
         // Execute chat
-        match provider
-            .chat(&messages, &tools, &tool_executor)
-            .await
-        {
-            Ok(response) => (
-                StatusCode::OK,
-                Json(ApiResponse::success(LlmChatResponse { message: response })),
-            ),
-            Err(e) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ApiResponse::error(e.to_string())),
-            ),
+        let start = std::time::Instant::now();
+        let result = provider
+            .chat(&messages, &tools, &tool_executor, request.interpret)
+            .await;
+        let elapsed = start.elapsed();
+
+        match result {
+            Ok(response) => {
+                tracing::info!(elapsed_ms = %elapsed.as_millis(), "LLM chat completed successfully");
+                (
+                    StatusCode::OK,
+                    Json(ApiResponse::success(LlmChatResponse { message: response })),
+                )
+            }
+            Err(e) => {
+                tracing::error!(error = %e, elapsed_ms = %elapsed.as_millis(), "LLM chat failed");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ApiResponse::error(e.to_string())),
+                )
+            }
         }
     }
 
@@ -485,7 +634,248 @@ mod llm_handlers {
             ),
         }
     }
+
+    /// Response for env keys check.
+    #[derive(Debug, Serialize)]
+    pub struct EnvKeysResponse {
+        pub openai: bool,
+        pub anthropic: bool,
+    }
+
+    /// Check which API keys are available from environment variables.
+    pub async fn llm_env_keys() -> impl IntoResponse {
+        let openai = std::env::var("OPENAI_API_KEY")
+            .map(|k| !k.is_empty())
+            .unwrap_or(false);
+        let anthropic = std::env::var("ANTHROPIC_API_KEY")
+            .map(|k| !k.is_empty())
+            .unwrap_or(false);
+
+        (
+            StatusCode::OK,
+            Json(ApiResponse::success(EnvKeysResponse { openai, anthropic })),
+        )
+    }
+
+    /// Progress event for streaming chat.
+    #[derive(Debug, Clone, Serialize)]
+    #[serde(tag = "type", rename_all = "snake_case")]
+    pub enum ProgressEvent {
+        Status { message: String },
+        ToolStart { tool: String },
+        ToolEnd { tool: String, elapsed_ms: u64 },
+        /// Tool result with images (for viz tools)
+        ToolResult { tool: String, images: Vec<ImageData> },
+        Content { text: String },
+        Done { message: Message },
+        Error { error: String },
+    }
+
+    /// Image data for tool results.
+    #[derive(Debug, Clone, Serialize)]
+    pub struct ImageData {
+        pub data: String,
+        pub mime_type: String,
+    }
+
+    /// Streaming tool executor that sends progress events.
+    pub struct StreamingToolExecutor {
+        server: Arc<crate::server::AnalyticsServer>,
+        session: Arc<Session>,
+        sender: tokio::sync::mpsc::Sender<ProgressEvent>,
+    }
+
+    impl StreamingToolExecutor {
+        pub fn new(
+            server: Arc<crate::server::AnalyticsServer>,
+            session: Arc<Session>,
+            sender: tokio::sync::mpsc::Sender<ProgressEvent>,
+        ) -> Self {
+            Self { server, session, sender }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ToolExecutor for StreamingToolExecutor {
+        async fn execute(
+            &self,
+            name: &str,
+            arguments: serde_json::Value,
+        ) -> Result<String, String> {
+            // Send tool start event
+            let _ = self.sender.send(ProgressEvent::ToolStart {
+                tool: name.to_string()
+            }).await;
+
+            tracing::info!(tool = %name, "Executing tool");
+            let start = std::time::Instant::now();
+            let result = self
+                .server
+                .call_tool_with_session(name, arguments, &self.session)
+                .await;
+            let elapsed = start.elapsed();
+
+            // Send tool end event
+            let _ = self.sender.send(ProgressEvent::ToolEnd {
+                tool: name.to_string(),
+                elapsed_ms: elapsed.as_millis() as u64,
+            }).await;
+
+            tracing::info!(tool = %name, elapsed_ms = %elapsed.as_millis(), "Tool execution completed");
+            match result {
+                Ok(result) => {
+                    // Extract images and send them as a separate event
+                    let images: Vec<ImageData> = result
+                        .content
+                        .iter()
+                        .filter_map(|item| match item {
+                            ContentItem::Image { data, mime_type } => Some(ImageData {
+                                data: data.clone(),
+                                mime_type: mime_type.clone(),
+                            }),
+                            _ => None,
+                        })
+                        .collect();
+
+                    // If there are images, send them to the frontend
+                    if !images.is_empty() {
+                        let _ = self.sender.send(ProgressEvent::ToolResult {
+                            tool: name.to_string(),
+                            images,
+                        }).await;
+                    }
+
+                    // Return text content only (without base64) for the LLM
+                    let content = result
+                        .content
+                        .iter()
+                        .map(|item| match item {
+                            ContentItem::Text { text } => text.clone(),
+                            ContentItem::Image { .. } => "[Image output - displayed in UI]".to_string(),
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    Ok(content)
+                }
+                Err(e) => Err(e),
+            }
+        }
+    }
+
+    /// Streaming LLM chat endpoint using Server-Sent Events.
+    pub async fn llm_chat_stream(
+        State(state): State<AppState>,
+        Json(request): Json<LlmChatRequest>,
+    ) -> axum::response::sse::Sse<impl futures::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>> {
+        use crate::llm::StreamChunk;
+        use tokio::sync::mpsc;
+
+        let (tx, mut rx) = mpsc::channel::<ProgressEvent>(100);
+
+        // Spawn the chat task
+        let state_clone = state.clone();
+        let tx_clone = tx.clone();
+        tokio::spawn(async move {
+            // Send initial status
+            let _ = tx_clone.send(ProgressEvent::Status {
+                message: "Starting analysis...".to_string()
+            }).await;
+
+            tracing::info!(interpret = %request.interpret, "LLM chat request received");
+
+            // Get the session
+            let session = match state_clone.session_manager.get_session(&request.session_id).await {
+                Ok(s) => s,
+                Err(crate::session::SessionError::NotFound) => {
+                    let _ = tx_clone.send(ProgressEvent::Error {
+                        error: "Session not found".to_string()
+                    }).await;
+                    return;
+                }
+                Err(e) => {
+                    let _ = tx_clone.send(ProgressEvent::Error {
+                        error: e.to_string()
+                    }).await;
+                    return;
+                }
+            };
+
+            // Create provider and streaming tool executor
+            let provider = create_provider(request.provider);
+            let tool_executor = StreamingToolExecutor::new(
+                state_clone.server.clone(),
+                session,
+                tx_clone.clone(),
+            );
+            let tools = get_mcp_tool_definitions();
+
+            let _ = tx_clone.send(ProgressEvent::Status {
+                message: format!("Connecting to {} LLM...", provider.provider_type())
+            }).await;
+
+            // Build message history
+            let mut messages = vec![Message::system(get_system_prompt())];
+            messages.extend(request.history);
+            messages.push(Message::user(request.message));
+
+            // Create streaming callback that forwards content chunks
+            let tx_for_callback = tx_clone.clone();
+            let stream_callback: Box<dyn Fn(StreamChunk) + Send + Sync> = Box::new(move |chunk| {
+                match chunk {
+                    StreamChunk::Text { content } => {
+                        // Use try_send for non-blocking send from sync callback
+                        let _ = tx_for_callback.try_send(ProgressEvent::Content { text: content });
+                    }
+                    StreamChunk::Done => {
+                        // Done is handled separately after chat_stream returns
+                    }
+                    StreamChunk::Error { message } => {
+                        let _ = tx_for_callback.try_send(ProgressEvent::Error { error: message });
+                    }
+                    StreamChunk::ToolCall { .. } | StreamChunk::ToolResult { .. } => {
+                        // Tool events are handled by StreamingToolExecutor
+                    }
+                }
+            });
+
+            // Execute streaming chat
+            match provider.chat_stream(&messages, &tools, &tool_executor, request.interpret, stream_callback).await {
+                Ok(response) => {
+                    // Debug: check if content has newlines
+                    let has_newlines = response.content.contains('\n');
+                    let content_preview: String = response.content.chars().take(300).collect();
+                    tracing::info!(
+                        has_newlines = has_newlines,
+                        content_preview = %content_preview,
+                        "Sending Done event with message content"
+                    );
+                    let _ = tx_clone.send(ProgressEvent::Done { message: response }).await;
+                }
+                Err(e) => {
+                    let _ = tx_clone.send(ProgressEvent::Error {
+                        error: e.to_string()
+                    }).await;
+                }
+            }
+        });
+
+        // Create SSE stream from receiver
+        let stream = async_stream::stream! {
+            while let Some(event) = rx.recv().await {
+                let data = serde_json::to_string(&event).unwrap_or_default();
+                yield Ok(axum::response::sse::Event::default().data(data));
+
+                // Stop after Done or Error
+                if matches!(event, ProgressEvent::Done { .. } | ProgressEvent::Error { .. }) {
+                    break;
+                }
+            }
+        };
+
+        axum::response::sse::Sse::new(stream)
+            .keep_alive(axum::response::sse::KeepAlive::default())
+    }
 }
 
 #[cfg(feature = "llm")]
-use llm_handlers::{llm_chat, llm_list_models};
+use llm_handlers::{llm_chat, llm_chat_stream, llm_env_keys, llm_list_models};

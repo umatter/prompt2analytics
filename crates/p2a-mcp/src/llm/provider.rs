@@ -219,19 +219,27 @@ pub trait LlmProvider: Send + Sync {
     async fn list_models(&self) -> Result<Vec<String>, LlmError>;
 
     /// Send a message and get a complete response (with tool execution loop).
+    ///
+    /// When `interpret` is true (default), the LLM will interpret and synthesize tool results.
+    /// When `interpret` is false, tool results are returned directly without LLM interpretation.
     async fn chat(
         &self,
         messages: &[Message],
         tools: &[ToolDefinition],
         tool_executor: &dyn ToolExecutor,
+        interpret: bool,
     ) -> Result<Message, LlmError>;
 
     /// Send a message and stream the response.
+    ///
+    /// When `interpret` is true (default), the LLM will interpret and synthesize tool results.
+    /// When `interpret` is false, tool results are returned directly without LLM interpretation.
     async fn chat_stream(
         &self,
         messages: &[Message],
         tools: &[ToolDefinition],
         tool_executor: &dyn ToolExecutor,
+        interpret: bool,
         callback: Box<dyn Fn(StreamChunk) + Send + Sync>,
     ) -> Result<Message, LlmError>;
 }

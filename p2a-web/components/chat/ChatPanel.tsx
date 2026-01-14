@@ -6,13 +6,13 @@ import { MessageList } from './MessageList'
 import { ChatInput } from './ChatInput'
 
 export function ChatPanel() {
-  const { messages, isProcessing, error } = useChatStore()
+  const { messages, isProcessing, status, error } = useChatStore()
   const messagesEndRef = useRef<HTMLDivElement>(null)
 
-  // Auto-scroll to bottom when new messages arrive
+  // Auto-scroll to bottom when new messages arrive or status changes
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [messages])
+  }, [messages, status])
 
   return (
     <div className="flex flex-col h-full">
@@ -27,7 +27,7 @@ export function ChatPanel() {
         {isProcessing && (
           <div className="flex items-center gap-2 text-gray-500 mt-4">
             <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-blue-600"></div>
-            <span>Analyzing...</span>
+            <span className="font-medium">{status || 'Processing...'}</span>
           </div>
         )}
 

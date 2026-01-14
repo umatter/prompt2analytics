@@ -99,12 +99,16 @@ impl OllamaProvider {
     }
 
     /// Execute the tool calling loop until the LLM produces a final response.
+    ///
+    /// When `interpret` is true, the loop continues until the LLM produces a final text response.
+    /// When `interpret` is false, the loop returns raw tool output after the first tool execution.
     async fn execute_tool_loop(
         &self,
         messages: &mut Vec<Message>,
         tools: &[ToolDefinition],
         tool_executor: &dyn ToolExecutor,
         max_iterations: usize,
+        interpret: bool,
     ) -> Result<Message, LlmError> {
         let mut iterations = 0;
 
@@ -127,18 +131,33 @@ impl OllamaProvider {
 
                     // Execute each tool and collect results
                     let mut tool_results = Vec::new();
+                    let mut tool_outputs = Vec::new();
                     for tc in tool_calls {
                         let result = tool_executor.execute(&tc.name, tc.arguments.clone()).await;
                         let is_error = result.is_err();
+                        let content = result.unwrap_or_else(|e| format!("Error: {}", e));
+                        tool_outputs.push(format!("**{}**:\n{}", tc.name, content));
                         tool_results.push(ToolResult {
                             tool_call_id: tc.id.clone(),
-                            content: result.unwrap_or_else(|e| format!("Error: {}", e)),
+                            content,
                             is_error,
                         });
                     }
 
                     // Add tool results as a new message
-                    messages.push(Message::tool_result(tool_results));
+                    messages.push(Message::tool_result(tool_results.clone()));
+
+                    // If interpret is false, return raw tool output without calling LLM again
+                    if !interpret {
+                        tracing::info!("interpret=false, returning raw tool output without LLM interpretation");
+                        return Ok(Message {
+                            role: MessageRole::Assistant,
+                            content: tool_outputs.join("\n\n"),
+                            tool_calls: Some(tool_calls.clone()),
+                            tool_results: Some(tool_results),
+                        });
+                    }
+                    tracing::info!("interpret=true, continuing to LLM for interpretation");
 
                     // Continue the loop to get the next response
                     continue;
@@ -351,9 +370,10 @@ impl LlmProvider for OllamaProvider {
         messages: &[Message],
         tools: &[ToolDefinition],
         tool_executor: &dyn ToolExecutor,
+        interpret: bool,
     ) -> Result<Message, LlmError> {
         let mut conversation = messages.to_vec();
-        self.execute_tool_loop(&mut conversation, tools, tool_executor, 10)
+        self.execute_tool_loop(&mut conversation, tools, tool_executor, 10, interpret)
             .await
     }
 
@@ -362,6 +382,7 @@ impl LlmProvider for OllamaProvider {
         messages: &[Message],
         tools: &[ToolDefinition],
         tool_executor: &dyn ToolExecutor,
+        interpret: bool,
         callback: Box<dyn Fn(StreamChunk) + Send + Sync>,
     ) -> Result<Message, LlmError> {
         let mut conversation = messages.to_vec();
@@ -389,13 +410,15 @@ impl LlmProvider for OllamaProvider {
 
                     // Execute each tool and collect results
                     let mut tool_results = Vec::new();
+                    let mut tool_outputs = Vec::new();
                     for tc in tool_calls {
                         let result = tool_executor.execute(&tc.name, tc.arguments.clone()).await;
+                        let content = result
+                            .clone()
+                            .unwrap_or_else(|e| format!("Error: {}", e));
                         let tool_result = ToolResult {
                             tool_call_id: tc.id.clone(),
-                            content: result
-                                .clone()
-                                .unwrap_or_else(|e| format!("Error: {}", e)),
+                            content: content.clone(),
                             is_error: result.is_err(),
                         };
 
@@ -404,11 +427,22 @@ impl LlmProvider for OllamaProvider {
                             tool_result: tool_result.clone(),
                         });
 
+                        tool_outputs.push(format!("**{}**:\n{}", tc.name, content));
                         tool_results.push(tool_result);
                     }
 
                     // Add tool results as a new message
-                    conversation.push(Message::tool_result(tool_results));
+                    conversation.push(Message::tool_result(tool_results.clone()));
+
+                    // If interpret is false, return raw tool output without calling LLM again
+                    if !interpret {
+                        return Ok(Message {
+                            role: MessageRole::Assistant,
+                            content: tool_outputs.join("\n\n"),
+                            tool_calls: Some(tool_calls.clone()),
+                            tool_results: Some(tool_results),
+                        });
+                    }
 
                     // Continue the loop
                     continue;

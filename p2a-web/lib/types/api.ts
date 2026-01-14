@@ -71,6 +71,7 @@ export interface LlmChatRequest {
   message: string
   provider?: ProviderConfig
   history?: Message[]
+  interpret?: boolean  // Whether to have LLM interpret tool results (default: true)
 }
 
 export interface LlmChatResponse {

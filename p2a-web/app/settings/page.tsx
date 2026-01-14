@@ -1,8 +1,9 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import Link from 'next/link'
 import { useSettingsStore } from '@/lib/store/settings-store'
+import { api } from '@/lib/api/client'
 
 export default function SettingsPage() {
   const {
@@ -15,6 +16,7 @@ export default function SettingsPage() {
     openaiModel,
     temperature,
     maxTokens,
+    interpretResults,
     theme,
     setProvider,
     setOllamaBaseUrl,
@@ -25,11 +27,26 @@ export default function SettingsPage() {
     setOpenaiModel,
     setTemperature,
     setMaxTokens,
+    setInterpretResults,
     setTheme,
   } = useSettingsStore()
 
   const [showAnthropicKey, setShowAnthropicKey] = useState(false)
   const [showOpenaiKey, setShowOpenaiKey] = useState(false)
+  const [envKeys, setEnvKeys] = useState<{ openai: boolean; anthropic: boolean } | null>(null)
+
+  // Check for environment API keys on mount
+  useEffect(() => {
+    api.checkEnvKeys()
+      .then((result) => {
+        if (result.success && result.data) {
+          setEnvKeys(result.data)
+        }
+      })
+      .catch(() => {
+        // Silently ignore - env keys feature just won't be available
+      })
+  }, [])
 
   return (
     <div className="min-h-screen bg-gray-50 dark:bg-gray-900">
@@ -102,13 +119,23 @@ export default function SettingsPage() {
             {provider === 'anthropic' && (
               <div className="space-y-4 pt-4 border-t">
                 <div>
-                  <label className="block text-sm font-medium mb-2">API Key</label>
+                  <div className="flex items-center gap-2 mb-2">
+                    <label className="block text-sm font-medium">API Key</label>
+                    {envKeys?.anthropic && (
+                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200">
+                        <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20">
+                          <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
+                        </svg>
+                        ENV
+                      </span>
+                    )}
+                  </div>
                   <div className="relative">
                     <input
                       type={showAnthropicKey ? 'text' : 'password'}
                       value={anthropicApiKey}
                       onChange={(e) => setAnthropicApiKey(e.target.value)}
-                      placeholder="sk-ant-..."
+                      placeholder={envKeys?.anthropic ? 'Using ANTHROPIC_API_KEY from environment' : 'sk-ant-...'}
                       className="w-full px-3 py-2 pr-10 border rounded-lg bg-white dark:bg-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
                     />
                     <button
@@ -129,7 +156,9 @@ export default function SettingsPage() {
                     </button>
                   </div>
                   <p className="text-xs text-gray-500 mt-1">
-                    Your Anthropic API key (not stored permanently)
+                    {envKeys?.anthropic
+                      ? 'Leave empty to use environment variable, or enter a key to override'
+                      : 'Your Anthropic API key (not stored permanently)'}
                   </p>
                 </div>
                 <div>
@@ -152,13 +181,23 @@ export default function SettingsPage() {
             {provider === 'openai' && (
               <div className="space-y-4 pt-4 border-t">
                 <div>
-                  <label className="block text-sm font-medium mb-2">API Key</label>
+                  <div className="flex items-center gap-2 mb-2">
+                    <label className="block text-sm font-medium">API Key</label>
+                    {envKeys?.openai && (
+                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200">
+                        <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20">
+                          <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
+                        </svg>
+                        ENV
+                      </span>
+                    )}
+                  </div>
                   <div className="relative">
                     <input
                       type={showOpenaiKey ? 'text' : 'password'}
                       value={openaiApiKey}
                       onChange={(e) => setOpenaiApiKey(e.target.value)}
-                      placeholder="sk-..."
+                      placeholder={envKeys?.openai ? 'Using OPENAI_API_KEY from environment' : 'sk-...'}
                       className="w-full px-3 py-2 pr-10 border rounded-lg bg-white dark:bg-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
                     />
                     <button
@@ -179,7 +218,9 @@ export default function SettingsPage() {
                     </button>
                   </div>
                   <p className="text-xs text-gray-500 mt-1">
-                    Your OpenAI API key (not stored permanently)
+                    {envKeys?.openai
+                      ? 'Leave empty to use environment variable, or enter a key to override'
+                      : 'Your OpenAI API key (not stored permanently)'}
                   </p>
                 </div>
                 <div>
@@ -236,6 +277,33 @@ export default function SettingsPage() {
                 Maximum number of tokens in the response
               </p>
             </div>
+          </div>
+        </section>
+
+        {/* AI Behavior */}
+        <section className="bg-white dark:bg-gray-800 rounded-lg border p-6">
+          <h2 className="text-lg font-semibold mb-4">AI Behavior</h2>
+          <div className="flex items-center justify-between">
+            <div className="flex-1">
+              <label className="block text-sm font-medium">Interpret Results</label>
+              <p className="text-xs text-gray-500 mt-1">
+                When ON, the AI interprets and explains analysis results. When OFF, raw tool outputs are returned faster.
+              </p>
+            </div>
+            <button
+              onClick={() => setInterpretResults(!interpretResults)}
+              className={`relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 ${
+                interpretResults ? 'bg-blue-600' : 'bg-gray-200 dark:bg-gray-600'
+              }`}
+              role="switch"
+              aria-checked={interpretResults}
+            >
+              <span
+                className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${
+                  interpretResults ? 'translate-x-5' : 'translate-x-0'
+                }`}
+              />
+            </button>
           </div>
         </section>
 

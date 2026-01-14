@@ -1,7 +1,17 @@
 import { create } from 'zustand'
 import { immer } from 'zustand/middleware/immer'
 import { api } from '@/lib/api/client'
+import { useSessionStore } from './session-store'
 import type { DatasetInfo } from '@/lib/types/api'
+
+// Helper to ensure session exists before API calls
+async function ensureSession(): Promise<boolean> {
+  const sessionStore = useSessionStore.getState()
+  if (!sessionStore.isInitialized) {
+    await sessionStore.initSession()
+  }
+  return useSessionStore.getState().isInitialized
+}
 
 interface DatasetsState {
   datasets: DatasetInfo[]
@@ -17,7 +27,7 @@ interface DatasetsState {
   // Actions
   loadDatasets: () => Promise<void>
   selectDataset: (name: string) => Promise<void>
-  uploadDataset: (file: File, name?: string) => Promise<void>
+  loadDatasetFromPath: (path: string, name?: string) => Promise<void>
   deleteDataset: (name: string) => Promise<void>
   clearError: () => void
 }
@@ -35,6 +45,16 @@ export const useDatasetsStore = create<DatasetsState>()(
         state.isLoading = true
         state.error = null
       })
+
+      // Ensure session exists
+      const hasSession = await ensureSession()
+      if (!hasSession) {
+        set((state) => {
+          state.error = 'Failed to initialize session'
+          state.isLoading = false
+        })
+        return
+      }
 
       try {
         const response = await api.listDatasets()
@@ -64,6 +84,16 @@ export const useDatasetsStore = create<DatasetsState>()(
         state.error = null
       })
 
+      // Ensure session exists
+      const hasSession = await ensureSession()
+      if (!hasSession) {
+        set((state) => {
+          state.error = 'Failed to initialize session'
+          state.isLoading = false
+        })
+        return
+      }
+
       try {
         const response = await api.describeDataset(name)
         if (response.success && response.data) {
@@ -90,28 +120,29 @@ export const useDatasetsStore = create<DatasetsState>()(
       }
     },
 
-    uploadDataset: async (file: File, name?: string) => {
+    loadDatasetFromPath: async (path: string, name?: string) => {
       set((state) => {
         state.isLoading = true
         state.error = null
       })
 
-      const datasetName = name || file.name.replace(/\.[^.]+$/, '')
+      // Ensure session exists
+      const hasSession = await ensureSession()
+      if (!hasSession) {
+        set((state) => {
+          state.error = 'Failed to initialize session'
+          state.isLoading = false
+        })
+        return
+      }
+
+      // Extract dataset name from path if not provided
+      const datasetName = name || path.split('/').pop()?.replace(/\.[^.]+$/, '') || 'dataset'
 
       try {
-        // Read file content
-        const content = await file.text()
-
-        // Determine format from extension
-        const extension = file.name.split('.').pop()?.toLowerCase()
-        const format = extension === 'json' ? 'json' : extension === 'parquet' ? 'parquet' : 'csv'
-
-        // For now, we'll use the tool call endpoint to load the dataset
-        // In a full implementation, we'd have a dedicated upload endpoint
         const response = await api.callTool('load_dataset', {
-          path: `data:${format};base64,${btoa(content)}`, // Using data URL for inline content
+          path,
           name: datasetName,
-          format,
         })
 
         if (response.success) {
@@ -123,13 +154,13 @@ export const useDatasetsStore = create<DatasetsState>()(
           })
         } else {
           set((state) => {
-            state.error = response.error || 'Failed to upload dataset'
+            state.error = response.error || 'Failed to load dataset'
             state.isLoading = false
           })
         }
       } catch (err) {
         set((state) => {
-          state.error = err instanceof Error ? err.message : 'Upload failed'
+          state.error = err instanceof Error ? err.message : 'Load failed'
           state.isLoading = false
         })
       }
@@ -140,6 +171,16 @@ export const useDatasetsStore = create<DatasetsState>()(
         state.isLoading = true
         state.error = null
       })
+
+      // Ensure session exists
+      const hasSession = await ensureSession()
+      if (!hasSession) {
+        set((state) => {
+          state.error = 'Failed to initialize session'
+          state.isLoading = false
+        })
+        return
+      }
 
       try {
         const response = await api.callTool('drop_dataset', { name })

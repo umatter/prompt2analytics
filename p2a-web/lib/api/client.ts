@@ -30,14 +30,22 @@ class ApiClient {
     endpoint: string,
     options?: RequestInit
   ): Promise<ApiResponse<T>> {
-    const response = await fetch(`${API_BASE}${endpoint}`, {
-      ...options,
-      headers: {
-        'Content-Type': 'application/json',
-        ...options?.headers,
-      },
-    })
-    return response.json()
+    try {
+      const response = await fetch(`${API_BASE}${endpoint}`, {
+        ...options,
+        headers: {
+          'Content-Type': 'application/json',
+          ...options?.headers,
+        },
+      })
+      if (!response.ok) {
+        const text = await response.text()
+        return { success: false, error: text || `HTTP ${response.status}` }
+      }
+      return response.json()
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : 'Network error' }
+    }
   }
 
   // Health check
@@ -92,7 +100,8 @@ class ApiClient {
   async chat(
     message: string,
     history: Message[] = [],
-    provider?: ProviderConfig
+    provider?: ProviderConfig,
+    signal?: AbortSignal
   ): Promise<ApiResponse<LlmChatResponse>> {
     if (!this.sessionId) {
       return { success: false, error: 'No session initialized' }
@@ -106,12 +115,18 @@ class ApiClient {
     return this.fetch('/api/llm/chat', {
       method: 'POST',
       body: JSON.stringify(request),
+      signal,
     })
   }
 
   // LLM models
   async listModels(): Promise<ApiResponse<LlmModelsResponse>> {
     return this.fetch('/api/llm/models')
+  }
+
+  // Check which API keys are available from environment variables
+  async checkEnvKeys(): Promise<ApiResponse<{ openai: boolean; anthropic: boolean }>> {
+    return this.fetch('/api/llm/env-keys')
   }
 
   // Dataset operations (via tool calls)
@@ -121,27 +136,50 @@ class ApiClient {
       // Parse the tool result content
       const textContent = result.data.content.find((c) => c.type === 'text')
       if (textContent?.text) {
-        try {
-          const datasets = JSON.parse(textContent.text)
-          return { success: true, data: { datasets } }
-        } catch {
+        // Check if "No datasets" message
+        if (textContent.text.includes('No datasets currently loaded')) {
           return { success: true, data: { datasets: [] } }
         }
+        // Parse the markdown response: "- **name**: N rows x M columns"
+        const datasets: Array<{ name: string; row_count: number; column_count: number }> = []
+        const regex = /- \*\*(.+?)\*\*: (\d+) rows x (\d+) columns/g
+        let match
+        while ((match = regex.exec(textContent.text)) !== null) {
+          datasets.push({
+            name: match[1],
+            row_count: parseInt(match[2], 10),
+            column_count: parseInt(match[3], 10),
+          })
+        }
+        return { success: true, data: { datasets } }
       }
     }
     return { success: false, error: result.error || 'Failed to list datasets' }
   }
 
   async describeDataset(name: string): Promise<ApiResponse<DescribeDatasetResponse>> {
-    const result = await this.callTool('describe_dataset', { name })
+    const result = await this.callTool('describe_dataset', { dataset: name })
     if (result.success && result.data) {
       const textContent = result.data.content.find((c) => c.type === 'text')
       if (textContent?.text) {
-        try {
-          const info = JSON.parse(textContent.text)
-          return { success: true, data: info }
-        } catch {
-          return { success: false, error: 'Failed to parse dataset info' }
+        // Parse markdown response: "Dataset: N rows x M columns" and column names
+        const text = textContent.text
+        const dimMatch = text.match(/Dataset: (\d+) rows x (\d+) columns/)
+        const columns: string[] = []
+        const colRegex = /Column: (\w+)/g
+        let colMatch
+        while ((colMatch = colRegex.exec(text)) !== null) {
+          columns.push(colMatch[1])
+        }
+        if (dimMatch) {
+          return {
+            success: true,
+            data: {
+              row_count: parseInt(dimMatch[1], 10),
+              column_count: parseInt(dimMatch[2], 10),
+              columns,
+            },
+          }
         }
       }
     }

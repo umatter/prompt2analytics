@@ -4,10 +4,12 @@
 //! server-side tool execution for HTTP/WebSocket clients.
 
 mod ollama;
+mod openai;
 mod provider;
 mod tools;
 
 pub use ollama::OllamaProvider;
+pub use openai::OpenAIProvider;
 pub use provider::{
     LlmError, LlmProvider, Message, MessageRole, ProviderConfig, ProviderType, StreamChunk,
     ToolCall, ToolDefinition, ToolExecutor, ToolResult,
