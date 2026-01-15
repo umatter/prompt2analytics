@@ -3,6 +3,7 @@ import { immer } from 'zustand/middleware/immer'
 import { api } from '@/lib/api/client'
 import { useSettingsStore } from './settings-store'
 import { useSessionStore } from './session-store'
+import { useCommandHistoryStore } from './command-history-store'
 import type { Message, ToolCall, ContentItem } from '@/lib/types/api'
 
 export interface ImageData {
@@ -360,6 +361,18 @@ export const useChatStore = create<ChatState>()(
                     break
                   case 'done':
                     clearTimeout(timeoutId)
+                    // Record tool calls for script export
+                    if (event.message.tool_calls && event.message.tool_calls.length > 0) {
+                      const commandHistoryStore = useCommandHistoryStore.getState()
+                      for (const toolCall of event.message.tool_calls) {
+                        commandHistoryStore.addCommand({
+                          timestamp: new Date(),
+                          toolName: toolCall.name,
+                          arguments: toolCall.arguments || {},
+                          success: true,
+                        })
+                      }
+                    }
                     if (streamingMessageId) {
                       // Finalize the streaming message with additional data
                       set((state) => {

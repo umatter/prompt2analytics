@@ -2,6 +2,7 @@
 
 use clap::Subcommand;
 use p2a_core::{run_fixed_effects, run_random_effects, run_hausman_test, run_hdfe};
+use p2a_core::{run_feglm, GlmFamily};
 use p2a_core::regression::CovarianceType;
 
 use crate::output::{format_regression_results, print_error, OutputFormat};
@@ -80,6 +81,28 @@ pub enum PanelCommands {
         #[arg(long, num_args = 1..)]
         fe: Vec<String>,
     },
+
+    /// Fixed Effects GLM (logit, probit, poisson with HDFE)
+    Feglm {
+        /// Dataset name
+        dataset: String,
+
+        /// Dependent variable column
+        #[arg(short = 'y', long)]
+        dep_var: String,
+
+        /// Independent variable columns
+        #[arg(short = 'x', long, num_args = 1..)]
+        indep_vars: Vec<String>,
+
+        /// Fixed effect columns
+        #[arg(long, num_args = 1..)]
+        fe: Vec<String>,
+
+        /// GLM family: "logit" (default), "probit", "poisson", "gaussian"
+        #[arg(long, default_value = "logit")]
+        family: String,
+    },
 }
 
 pub fn execute(
@@ -112,6 +135,13 @@ pub fn execute(
             indep_vars,
             fe,
         } => execute_hdfe(dataset, dep_var, indep_vars, fe, format, session),
+        PanelCommands::Feglm {
+            dataset,
+            dep_var,
+            indep_vars,
+            fe,
+            family,
+        } => execute_feglm(dataset, dep_var, indep_vars, fe, family, format, session),
     }
 }
 
@@ -408,6 +438,102 @@ fn execute_hdfe(
         None => {
             print_error(&format!("Dataset '{}' not found", dataset_name), format);
         }
+    }
+    Ok(())
+}
+
+fn execute_feglm(
+    dataset_name: &str,
+    dep_var: &str,
+    indep_vars: &[String],
+    fe_cols: &[String],
+    family_str: &str,
+    format: &OutputFormat,
+    session: Option<&mut SessionManager>,
+) -> anyhow::Result<()> {
+    let dataset = match session {
+        Some(mgr) => mgr.get_dataset(dataset_name),
+        None => {
+            print_error("No session active. Use --session <file>.", format);
+            return Ok(());
+        }
+    };
+
+    match dataset {
+        Some(ds) => {
+            let x_cols: Vec<&str> = indep_vars.iter().map(|s| s.as_str()).collect();
+            let fe_refs: Vec<&str> = fe_cols.iter().map(|s| s.as_str()).collect();
+
+            let family = match family_str.to_lowercase().as_str() {
+                "probit" => GlmFamily::Probit,
+                "poisson" => GlmFamily::Poisson,
+                "gaussian" => GlmFamily::Gaussian,
+                _ => GlmFamily::Logit,
+            };
+
+            match run_feglm(ds, dep_var, &x_cols, &fe_refs, family, None) {
+                Ok(result) => {
+                    match format {
+                        OutputFormat::Json => {
+                            let json = serde_json::json!({
+                                "method": format!("FEGLM ({})", result.family),
+                                "family": format!("{:?}", result.family),
+                                "dep_var": result.dep_var,
+                                "variables": result.variables,
+                                "coefficients": result.coefficients,
+                                "std_errors": result.std_errors,
+                                "z_stats": result.z_stats,
+                                "p_values": result.p_values,
+                                "n_obs": result.n_obs,
+                                "log_likelihood": result.log_likelihood,
+                                "deviance": result.deviance,
+                                "fe_dimensions": result.fe_dimensions,
+                                "fe_counts": result.fe_counts,
+                                "converged": result.converged,
+                                "iterations": result.iterations,
+                            });
+                            println!("{}", serde_json::to_string_pretty(&json)?);
+                        }
+                        _ => {
+                            println!("\nFEGLM: {} with Fixed Effects", result.family);
+                            println!("{}", "=".repeat(60));
+
+                            println!("\nCoefficients:");
+                            println!("{:<20} {:>12} {:>12} {:>10} {:>10}",
+                                "Variable", "Coef", "Std Err", "z", "P>|z|");
+                            println!("{}", "-".repeat(66));
+
+                            for (i, var) in result.variables.iter().enumerate() {
+                                let sig = if result.p_values[i] < 0.001 { "***" }
+                                         else if result.p_values[i] < 0.01 { "**" }
+                                         else if result.p_values[i] < 0.05 { "*" }
+                                         else if result.p_values[i] < 0.1 { "." }
+                                         else { "" };
+                                println!("{:<20} {:>12.6} {:>12.6} {:>10.4} {:>9.4} {}",
+                                    var, result.coefficients[i], result.std_errors[i],
+                                    result.z_stats[i], result.p_values[i], sig);
+                            }
+
+                            println!("\n---");
+                            println!("Signif. codes: 0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1 ' ' 1");
+
+                            println!("\nModel Info:");
+                            println!("  Observations: {}", result.n_obs);
+                            println!("  Log-Likelihood: {:.4}", result.log_likelihood);
+                            println!("  Deviance: {:.4}", result.deviance);
+                            println!("  Converged: {} ({} iterations)", result.converged, result.iterations);
+
+                            println!("\nFixed Effects:");
+                            for (dim, count) in result.fe_dimensions.iter().zip(&result.fe_counts) {
+                                println!("  {}: {} levels", dim, count);
+                            }
+                        }
+                    }
+                }
+                Err(e) => print_error(&format!("FEGLM failed: {}", e), format),
+            }
+        }
+        None => print_error(&format!("Dataset '{}' not found", dataset_name), format),
     }
     Ok(())
 }

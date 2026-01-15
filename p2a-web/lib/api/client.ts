@@ -141,7 +141,7 @@ class ApiClient {
           return { success: true, data: { datasets: [] } }
         }
         // Parse the markdown response: "- **name**: N rows x M columns"
-        const datasets: Array<{ name: string; row_count: number; column_count: number }> = []
+        const datasets: Array<{ name: string; row_count: number; column_count: number; columns: string[] }> = []
         const regex = /- \*\*(.+?)\*\*: (\d+) rows x (\d+) columns/g
         let match
         while ((match = regex.exec(textContent.text)) !== null) {
@@ -149,6 +149,7 @@ class ApiClient {
             name: match[1],
             row_count: parseInt(match[2], 10),
             column_count: parseInt(match[3], 10),
+            columns: [], // Column names not available in list response
           })
         }
         return { success: true, data: { datasets } }
@@ -175,9 +176,11 @@ class ApiClient {
           return {
             success: true,
             data: {
+              name,
               row_count: parseInt(dimMatch[1], 10),
               column_count: parseInt(dimMatch[2], 10),
               columns,
+              dtypes: {}, // dtypes not available in describe response
             },
           }
         }

@@ -110,8 +110,8 @@ p2a --session analysis.json ts arima mydata --col sales -p 1 -d 1 -q 1 --horizon
 p2a --session analysis.json ml kmeans mydata --cols x1 x2 x3 -k 3
 
 # Create visualizations
-p2a --session analysis.json viz scatter mydata --x income --y spending -o scatter.png
-p2a --session analysis.json viz histogram mydata --col price -o hist.png
+p2a --session analysis.json viz scatter mydata -x income -y spending -f scatter.png
+p2a --session analysis.json viz histogram mydata --col price -f hist.png
 
 # Export session to reproducible bash script
 p2a script export analysis.json -o analysis.sh
@@ -125,7 +125,7 @@ p2a script export analysis.json -o analysis.sh
 - `discrete` - Logit, probit
 - `ts` - ARIMA, MSTL, VAR
 - `ml` - K-means, PCA
-- `viz` - Histograms, scatter plots, line charts
+- `viz` - Histograms, scatter plots, line charts, box plots, heatmaps, coefficient plots, residual diagnostics, dendrograms, event study plots, IRF plots
 - `script` - Export/run reproducible scripts
 
 **Output formats:** `--output text` (default), `--output json`, `--output table`

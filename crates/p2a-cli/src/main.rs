@@ -10,7 +10,7 @@ mod session;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
-use commands::{data, munge, regression, panel, causal, discrete, timeseries, ml, viz, script};
+use commands::{data, munge, regression, panel, causal, discrete, timeseries, survival, ml, viz, script};
 use session::SessionManager;
 
 /// p2a - Analytics from the command line
@@ -65,6 +65,10 @@ pub enum Commands {
     #[command(subcommand, visible_alias = "ts")]
     Timeseries(timeseries::TimeseriesCommands),
 
+    /// Survival analysis
+    #[command(subcommand)]
+    Survival(survival::SurvivalCommands),
+
     /// Machine learning
     #[command(subcommand, visible_alias = "ml")]
     MachineLearning(ml::MlCommands),
@@ -97,6 +101,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Causal(cmd) => causal::execute(cmd, &cli.format, session_manager.as_mut()),
         Commands::Discrete(cmd) => discrete::execute(cmd, &cli.format, session_manager.as_mut()),
         Commands::Timeseries(cmd) => timeseries::execute(cmd, &cli.format, session_manager.as_mut()),
+        Commands::Survival(cmd) => survival::execute(cmd, &cli.format, session_manager.as_mut()),
         Commands::MachineLearning(cmd) => ml::execute(cmd, &cli.format, session_manager.as_mut()),
         Commands::Visualize(cmd) => viz::execute(cmd, &cli.format, session_manager.as_mut()),
         Commands::Script(cmd) => script::execute(cmd, &cli.format),

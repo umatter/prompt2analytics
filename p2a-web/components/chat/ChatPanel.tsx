@@ -4,9 +4,10 @@ import { useRef, useEffect } from 'react'
 import { useChatStore, type ChatMessage } from '@/lib/store/chat-store'
 import { MessageList } from './MessageList'
 import { ChatInput } from './ChatInput'
+import { ExportScriptButton } from '../export/ExportScriptButton'
 
 export function ChatPanel() {
-  const { messages, isProcessing, status, error } = useChatStore()
+  const { messages, isProcessing, status, error, clearMessages } = useChatStore()
   const messagesEndRef = useRef<HTMLDivElement>(null)
 
   // Auto-scroll to bottom when new messages arrive or status changes
@@ -16,6 +17,30 @@ export function ChatPanel() {
 
   return (
     <div className="flex flex-col h-full">
+      {/* Header with actions */}
+      <div className="flex items-center justify-between px-4 py-2 border-b bg-gray-50 dark:bg-gray-900/50">
+        <h2 className="text-sm font-medium text-gray-600 dark:text-gray-400">Chat</h2>
+        <div className="flex items-center gap-2">
+          <ExportScriptButton />
+          {messages.length > 0 && (
+            <button
+              onClick={() => {
+                if (confirm('Clear all messages?')) {
+                  clearMessages()
+                }
+              }}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-sm text-gray-600 hover:bg-gray-200 dark:hover:bg-gray-700 rounded-lg transition-colors"
+              title="Clear chat messages"
+            >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+              </svg>
+              Clear
+            </button>
+          )}
+        </div>
+      </div>
+
       {/* Messages area */}
       <div className="flex-1 overflow-y-auto p-4">
         {messages.length === 0 ? (

@@ -47,3 +47,7 @@ paper/*.nav
 paper/*.snm
 paper/*.vrb
 _resources/literature/
+
+
+# other
+docs/DIOXUS_MIGRATION_FEASIBILITY.md

@@ -4,6 +4,10 @@ use clap::Subcommand;
 use p2a_core::{
     run_iv2sls, run_did,
     run_synthetic_control, SynthConfig, PredictorSpec, VOptimization,
+    run_ipw_treatment, run_doubly_robust, run_mediation_analysis,
+    run_rd, run_fuzzy_rd,
+    IpwConfig, DoublyRobustConfig, MediationConfig, RdConfig,
+    Estimand, DRMethod, KernelType, BandwidthMethod, VceType,
 };
 
 use crate::output::{format_regression_results, print_error, OutputFormat};
@@ -92,6 +96,156 @@ pub enum CausalCommands {
         #[arg(long)]
         placebos: bool,
     },
+
+    /// Inverse Probability Weighting treatment effect
+    Ipw {
+        /// Dataset name
+        dataset: String,
+
+        /// Outcome variable column
+        #[arg(short = 'y', long)]
+        outcome: String,
+
+        /// Treatment indicator column
+        #[arg(short = 't', long)]
+        treatment: String,
+
+        /// Covariate columns
+        #[arg(short = 'x', long, num_args = 1..)]
+        covariates: Vec<String>,
+
+        /// Estimand: "ate" (default) or "att"
+        #[arg(long, default_value = "ate")]
+        estimand: String,
+
+        /// Trimming threshold for propensity scores (default: 0.05)
+        #[arg(long, default_value = "0.05")]
+        trim: f64,
+
+        /// Number of bootstrap replications (default: 999)
+        #[arg(long, default_value = "999")]
+        bootstrap: usize,
+    },
+
+    /// Doubly robust treatment effect (AIPW)
+    DoublyRobust {
+        /// Dataset name
+        dataset: String,
+
+        /// Outcome variable column
+        #[arg(short = 'y', long)]
+        outcome: String,
+
+        /// Treatment indicator column
+        #[arg(short = 't', long)]
+        treatment: String,
+
+        /// Covariate columns
+        #[arg(short = 'x', long, num_args = 1..)]
+        covariates: Vec<String>,
+
+        /// Method: "aipw" (default), "ipw", or "regression"
+        #[arg(long, default_value = "aipw")]
+        method: String,
+
+        /// Estimand: "ate" (default) or "att"
+        #[arg(long, default_value = "ate")]
+        estimand: String,
+
+        /// Trimming threshold (default: 0.05)
+        #[arg(long, default_value = "0.05")]
+        trim: f64,
+
+        /// Number of bootstrap replications (default: 999)
+        #[arg(long, default_value = "999")]
+        bootstrap: usize,
+    },
+
+    /// Causal mediation analysis
+    Mediation {
+        /// Dataset name
+        dataset: String,
+
+        /// Outcome variable column
+        #[arg(short = 'y', long)]
+        outcome: String,
+
+        /// Treatment indicator column
+        #[arg(short = 't', long)]
+        treatment: String,
+
+        /// Mediator variable column
+        #[arg(short = 'm', long)]
+        mediator: String,
+
+        /// Covariate columns
+        #[arg(short = 'x', long, num_args = 0..)]
+        covariates: Vec<String>,
+
+        /// Number of bootstrap replications (default: 999)
+        #[arg(long, default_value = "999")]
+        bootstrap: usize,
+    },
+
+    /// Regression Discontinuity (sharp design)
+    Rd {
+        /// Dataset name
+        dataset: String,
+
+        /// Outcome variable column
+        #[arg(short = 'y', long)]
+        outcome: String,
+
+        /// Running variable column
+        #[arg(short = 'r', long)]
+        running: String,
+
+        /// Cutoff value
+        #[arg(short = 'c', long)]
+        cutoff: f64,
+
+        /// Polynomial order (default: 1 = local linear)
+        #[arg(short = 'p', long, default_value = "1")]
+        poly_order: usize,
+
+        /// Kernel: "triangular" (default), "uniform", "epanechnikov"
+        #[arg(long, default_value = "triangular")]
+        kernel: String,
+
+        /// Bandwidth selection: "mserd" (default), "msetwo", "cerrd"
+        #[arg(long, default_value = "mserd")]
+        bwselect: String,
+    },
+
+    /// Fuzzy Regression Discontinuity
+    FuzzyRd {
+        /// Dataset name
+        dataset: String,
+
+        /// Outcome variable column
+        #[arg(short = 'y', long)]
+        outcome: String,
+
+        /// Running variable column
+        #[arg(short = 'r', long)]
+        running: String,
+
+        /// Treatment indicator column
+        #[arg(short = 't', long)]
+        treatment: String,
+
+        /// Cutoff value
+        #[arg(short = 'c', long)]
+        cutoff: f64,
+
+        /// Polynomial order (default: 1)
+        #[arg(short = 'p', long, default_value = "1")]
+        poly_order: usize,
+
+        /// Kernel: "triangular" (default), "uniform", "epanechnikov"
+        #[arg(long, default_value = "triangular")]
+        kernel: String,
+    },
 }
 
 pub fn execute(
@@ -128,6 +282,51 @@ pub fn execute(
             dataset, outcome, unit, time, treated, *treatment_time,
             predictors, v_method, *placebos, format, session
         ),
+        CausalCommands::Ipw {
+            dataset,
+            outcome,
+            treatment,
+            covariates,
+            estimand,
+            trim,
+            bootstrap,
+        } => execute_ipw(dataset, outcome, treatment, covariates, estimand, *trim, *bootstrap, format, session),
+        CausalCommands::DoublyRobust {
+            dataset,
+            outcome,
+            treatment,
+            covariates,
+            method,
+            estimand,
+            trim,
+            bootstrap,
+        } => execute_dr(dataset, outcome, treatment, covariates, method, estimand, *trim, *bootstrap, format, session),
+        CausalCommands::Mediation {
+            dataset,
+            outcome,
+            treatment,
+            mediator,
+            covariates,
+            bootstrap,
+        } => execute_mediation(dataset, outcome, treatment, mediator, covariates, *bootstrap, format, session),
+        CausalCommands::Rd {
+            dataset,
+            outcome,
+            running,
+            cutoff,
+            poly_order,
+            kernel,
+            bwselect,
+        } => execute_rd(dataset, outcome, running, *cutoff, *poly_order, kernel, bwselect, format, session),
+        CausalCommands::FuzzyRd {
+            dataset,
+            outcome,
+            running,
+            treatment,
+            cutoff,
+            poly_order,
+            kernel,
+        } => execute_fuzzy_rd(dataset, outcome, running, treatment, *cutoff, *poly_order, kernel, format, session),
     }
 }
 
@@ -398,6 +597,383 @@ fn execute_synth(
         None => {
             print_error(&format!("Dataset '{}' not found", dataset_name), format);
         }
+    }
+    Ok(())
+}
+
+fn execute_ipw(
+    dataset_name: &str,
+    outcome: &str,
+    treatment: &str,
+    covariates: &[String],
+    estimand: &str,
+    trim: f64,
+    bootstrap: usize,
+    format: &OutputFormat,
+    session: Option<&mut SessionManager>,
+) -> anyhow::Result<()> {
+    let dataset = match session {
+        Some(mgr) => mgr.get_dataset(dataset_name),
+        None => {
+            print_error("No session active. Use --session <file>.", format);
+            return Ok(());
+        }
+    };
+
+    match dataset {
+        Some(ds) => {
+            let cov_refs: Vec<&str> = covariates.iter().map(|s| s.as_str()).collect();
+            let est = match estimand.to_lowercase().as_str() {
+                "att" => Estimand::ATT,
+                _ => Estimand::ATE,
+            };
+            let config = IpwConfig {
+                estimand: est,
+                trim,
+                bootstrap,
+                normalized: true,
+                seed: None,
+            };
+
+            match run_ipw_treatment(ds, outcome, treatment, &cov_refs, config) {
+                Ok(result) => {
+                    match format {
+                        OutputFormat::Json => {
+                            let json = serde_json::json!({
+                                "method": "IPW Treatment Effect",
+                                "estimand": format!("{:?}", result.estimand),
+                                "effect": result.effect,
+                                "std_error": result.std_error,
+                                "ci_lower": result.ci_lower,
+                                "ci_upper": result.ci_upper,
+                                "t_stat": result.t_stat,
+                                "p_value": result.p_value,
+                                "n_obs": result.n_obs,
+                                "n_treated": result.n_treated,
+                                "n_control": result.n_control,
+                            });
+                            println!("{}", serde_json::to_string_pretty(&json)?);
+                        }
+                        _ => {
+                            println!("\nIPW Treatment Effect ({:?})", result.estimand);
+                            println!("{}", "=".repeat(50));
+                            println!("Effect: {:.6}", result.effect);
+                            println!("Std Error: {:.6}", result.std_error);
+                            println!("95% CI: [{:.6}, {:.6}]", result.ci_lower, result.ci_upper);
+                            println!("t-stat: {:.4}, p-value: {:.4}", result.t_stat, result.p_value);
+                            println!("N: {} (treated: {}, control: {})", result.n_obs, result.n_treated, result.n_control);
+                        }
+                    }
+                }
+                Err(e) => print_error(&format!("IPW failed: {}", e), format),
+            }
+        }
+        None => print_error(&format!("Dataset '{}' not found", dataset_name), format),
+    }
+    Ok(())
+}
+
+fn execute_dr(
+    dataset_name: &str,
+    outcome: &str,
+    treatment: &str,
+    covariates: &[String],
+    method: &str,
+    estimand: &str,
+    trim: f64,
+    bootstrap: usize,
+    format: &OutputFormat,
+    session: Option<&mut SessionManager>,
+) -> anyhow::Result<()> {
+    let dataset = match session {
+        Some(mgr) => mgr.get_dataset(dataset_name),
+        None => {
+            print_error("No session active. Use --session <file>.", format);
+            return Ok(());
+        }
+    };
+
+    match dataset {
+        Some(ds) => {
+            let cov_refs: Vec<&str> = covariates.iter().map(|s| s.as_str()).collect();
+            let est = match estimand.to_lowercase().as_str() {
+                "att" => Estimand::ATT,
+                _ => Estimand::ATE,
+            };
+            let dr_method = match method.to_lowercase().as_str() {
+                "ipw" => DRMethod::IPW,
+                "regression" => DRMethod::Regression,
+                _ => DRMethod::AIPW,
+            };
+            let config = DoublyRobustConfig {
+                method: dr_method,
+                estimand: est,
+                trim,
+                bootstrap,
+                seed: None,
+            };
+
+            match run_doubly_robust(ds, outcome, treatment, &cov_refs, config) {
+                Ok(result) => {
+                    match format {
+                        OutputFormat::Json => {
+                            let json = serde_json::json!({
+                                "method": format!("{:?}", result.method),
+                                "estimand": format!("{:?}", result.estimand),
+                                "effect": result.effect,
+                                "std_error": result.std_error,
+                                "ci_lower": result.ci_lower,
+                                "ci_upper": result.ci_upper,
+                                "t_stat": result.t_stat,
+                                "p_value": result.p_value,
+                                "n_obs": result.n_obs,
+                            });
+                            println!("{}", serde_json::to_string_pretty(&json)?);
+                        }
+                        _ => {
+                            println!("\nDoubly Robust Treatment Effect ({:?}, {:?})", result.method, result.estimand);
+                            println!("{}", "=".repeat(50));
+                            println!("Effect: {:.6}", result.effect);
+                            println!("Std Error: {:.6}", result.std_error);
+                            println!("95% CI: [{:.6}, {:.6}]", result.ci_lower, result.ci_upper);
+                            println!("t-stat: {:.4}, p-value: {:.4}", result.t_stat, result.p_value);
+                            println!("N: {}", result.n_obs);
+                        }
+                    }
+                }
+                Err(e) => print_error(&format!("Doubly robust failed: {}", e), format),
+            }
+        }
+        None => print_error(&format!("Dataset '{}' not found", dataset_name), format),
+    }
+    Ok(())
+}
+
+fn execute_mediation(
+    dataset_name: &str,
+    outcome: &str,
+    treatment: &str,
+    mediator: &str,
+    covariates: &[String],
+    bootstrap: usize,
+    format: &OutputFormat,
+    session: Option<&mut SessionManager>,
+) -> anyhow::Result<()> {
+    let dataset = match session {
+        Some(mgr) => mgr.get_dataset(dataset_name),
+        None => {
+            print_error("No session active. Use --session <file>.", format);
+            return Ok(());
+        }
+    };
+
+    match dataset {
+        Some(ds) => {
+            let cov_refs: Vec<&str> = covariates.iter().map(|s| s.as_str()).collect();
+            let config = MediationConfig {
+                bootstrap,
+                trim: 0.05,
+                seed: None,
+            };
+
+            match run_mediation_analysis(ds, outcome, treatment, mediator, &cov_refs, config) {
+                Ok(result) => {
+                    match format {
+                        OutputFormat::Json => {
+                            let json = serde_json::json!({
+                                "method": "Causal Mediation Analysis",
+                                "total_effect": result.total_effect,
+                                "direct_effect": result.direct_effect,
+                                "indirect_effect": result.indirect_effect,
+                                "proportion_mediated": result.proportion_mediated,
+                                "se_total": result.se_total,
+                                "se_direct": result.se_direct,
+                                "se_indirect": result.se_indirect,
+                                "p_total": result.p_total,
+                                "p_direct": result.p_direct,
+                                "p_indirect": result.p_indirect,
+                                "n_obs": result.n_obs,
+                            });
+                            println!("{}", serde_json::to_string_pretty(&json)?);
+                        }
+                        _ => {
+                            println!("\nCausal Mediation Analysis");
+                            println!("{}", "=".repeat(50));
+                            println!("Total Effect (ATE): {:.6} (SE: {:.6}, p: {:.4})",
+                                result.total_effect, result.se_total, result.p_total);
+                            println!("Direct Effect (NDE): {:.6} (SE: {:.6}, p: {:.4})",
+                                result.direct_effect, result.se_direct, result.p_direct);
+                            println!("Indirect Effect (NIE): {:.6} (SE: {:.6}, p: {:.4})",
+                                result.indirect_effect, result.se_indirect, result.p_indirect);
+                            println!("Proportion Mediated: {:.2}%", result.proportion_mediated * 100.0);
+                            println!("N: {}", result.n_obs);
+                        }
+                    }
+                }
+                Err(e) => print_error(&format!("Mediation analysis failed: {}", e), format),
+            }
+        }
+        None => print_error(&format!("Dataset '{}' not found", dataset_name), format),
+    }
+    Ok(())
+}
+
+fn execute_rd(
+    dataset_name: &str,
+    outcome: &str,
+    running: &str,
+    cutoff: f64,
+    poly_order: usize,
+    kernel: &str,
+    bwselect: &str,
+    format: &OutputFormat,
+    session: Option<&mut SessionManager>,
+) -> anyhow::Result<()> {
+    let dataset = match session {
+        Some(mgr) => mgr.get_dataset(dataset_name),
+        None => {
+            print_error("No session active. Use --session <file>.", format);
+            return Ok(());
+        }
+    };
+
+    match dataset {
+        Some(ds) => {
+            let kern = match kernel.to_lowercase().as_str() {
+                "uniform" => KernelType::Uniform,
+                "epanechnikov" => KernelType::Epanechnikov,
+                _ => KernelType::Triangular,
+            };
+            let bw = match bwselect.to_lowercase().as_str() {
+                "msetwo" => BandwidthMethod::MseTwo,
+                "cerrd" => BandwidthMethod::CerRd,
+                _ => BandwidthMethod::MseRd,
+            };
+            let config = RdConfig {
+                p: poly_order,
+                q: None,
+                h: None,
+                b: None,
+                rho: 1.0,
+                kernel: kern,
+                bwselect: bw,
+                vce: VceType::Nn,
+                nnmatch: 3,
+                level: 0.95,
+                scaleregul: 1.0,
+            };
+
+            match run_rd(ds, outcome, running, cutoff, config) {
+                Ok(result) => {
+                    match format {
+                        OutputFormat::Json => {
+                            let json = serde_json::json!({
+                                "method": "Sharp RD",
+                                "outcome": result.outcome,
+                                "running_var": result.running_var,
+                                "cutoff": result.cutoff,
+                                "tau_robust": result.tau_robust,
+                                "se_robust": result.se_robust,
+                                "p_robust": result.p_robust,
+                                "ci_robust": result.ci_robust,
+                                "n_left": result.n_left,
+                                "n_right": result.n_right,
+                                "h_left": result.h_left,
+                                "h_right": result.h_right,
+                            });
+                            println!("{}", serde_json::to_string_pretty(&json)?);
+                        }
+                        _ => {
+                            println!("\nRegression Discontinuity Estimation");
+                            println!("{}", "=".repeat(50));
+                            println!("Outcome: {}, Running var: {}", result.outcome, result.running_var);
+                            println!("Cutoff: {:.4}", result.cutoff);
+                            println!("\nRobust RD Estimate: {:.6}", result.tau_robust);
+                            println!("Std Error: {:.6}", result.se_robust);
+                            println!("p-value: {:.4}", result.p_robust);
+                            println!("95% CI: [{:.6}, {:.6}]", result.ci_robust.0, result.ci_robust.1);
+                            println!("\nN left: {}, N right: {}", result.n_left, result.n_right);
+                            println!("Bandwidth h: left={:.4}, right={:.4}", result.h_left, result.h_right);
+                        }
+                    }
+                }
+                Err(e) => print_error(&format!("RD estimation failed: {}", e), format),
+            }
+        }
+        None => print_error(&format!("Dataset '{}' not found", dataset_name), format),
+    }
+    Ok(())
+}
+
+fn execute_fuzzy_rd(
+    dataset_name: &str,
+    outcome: &str,
+    running: &str,
+    treatment: &str,
+    cutoff: f64,
+    poly_order: usize,
+    kernel: &str,
+    format: &OutputFormat,
+    session: Option<&mut SessionManager>,
+) -> anyhow::Result<()> {
+    let dataset = match session {
+        Some(mgr) => mgr.get_dataset(dataset_name),
+        None => {
+            print_error("No session active. Use --session <file>.", format);
+            return Ok(());
+        }
+    };
+
+    match dataset {
+        Some(ds) => {
+            let kern = match kernel.to_lowercase().as_str() {
+                "uniform" => KernelType::Uniform,
+                "epanechnikov" => KernelType::Epanechnikov,
+                _ => KernelType::Triangular,
+            };
+            let config = RdConfig {
+                p: poly_order,
+                q: None,
+                h: None,
+                b: None,
+                rho: 1.0,
+                kernel: kern,
+                bwselect: BandwidthMethod::MseRd,
+                vce: VceType::Nn,
+                nnmatch: 3,
+                level: 0.95,
+                scaleregul: 1.0,
+            };
+
+            match run_fuzzy_rd(ds, outcome, running, treatment, cutoff, config) {
+                Ok(result) => {
+                    match format {
+                        OutputFormat::Json => {
+                            let json = serde_json::json!({
+                                "method": "Fuzzy RD",
+                                "tau_fuzzy": result.tau_fuzzy,
+                                "se_fuzzy": result.se_fuzzy,
+                                "p_fuzzy": result.p_fuzzy,
+                                "ci_fuzzy": result.ci_fuzzy,
+                                "treatment": result.treatment,
+                            });
+                            println!("{}", serde_json::to_string_pretty(&json)?);
+                        }
+                        _ => {
+                            println!("\nFuzzy Regression Discontinuity Estimation");
+                            println!("{}", "=".repeat(50));
+                            println!("Treatment: {}", result.treatment);
+                            println!("\nFuzzy RD Estimate (LATE): {:.6}", result.tau_fuzzy);
+                            println!("Std Error: {:.6}", result.se_fuzzy);
+                            println!("p-value: {:.4}", result.p_fuzzy);
+                            println!("95% CI: [{:.6}, {:.6}]", result.ci_fuzzy.0, result.ci_fuzzy.1);
+                        }
+                    }
+                }
+                Err(e) => print_error(&format!("Fuzzy RD estimation failed: {}", e), format),
+            }
+        }
+        None => print_error(&format!("Dataset '{}' not found", dataset_name), format),
     }
     Ok(())
 }

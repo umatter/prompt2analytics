@@ -1,10 +1,48 @@
-# Development Guidance for prompt2analytics
+# CLAUDE.md
 
-This file provides context and guidance for AI assistants working on this codebase.
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Build Commands
+
+```bash
+# Build all crates
+cargo build
+
+# Build individual crates
+cargo build -p p2a-core
+cargo build -p p2a-cli
+cargo build -p p2a-mcp
+cargo build -p p2a-desktop
+
+# Release builds
+cargo build --release -p p2a-cli        # CLI binary at target/release/p2a
+cargo build --release -p p2a-mcp        # MCP server at target/release/p2a-mcp
+
+# Run tests
+cargo test                              # All tests
+cargo test -p p2a-core                  # Core library tests only
+cargo test -p p2a-mcp                   # MCP server tests only
+cargo test test_name                    # Run specific test by name
+
+# Run CLI
+cargo run -p p2a-cli -- <args>
+
+# Run MCP server (HTTP mode for development)
+cargo run -p p2a-mcp --features full -- --transport http --host 127.0.0.1 --port 8080
+
+# Desktop app (requires npm install in ui/ first)
+cd crates/p2a-desktop/ui && npm install && cd ../../..
+cargo run -p p2a-desktop
+
+# Build documentation
+cargo doc --no-deps --open
+```
 
 ## Project Overview
 
-prompt2analytics is a Rust-based analytics toolkit that exposes econometrics, ML, and visualization capabilities through multiple interfaces. It consists of four crates:
+## Project Overview
+
+prompt2analytics is a Rust workspace (edition 2024, requires Rust 1.85+) exposing econometrics, ML, and visualization through multiple interfaces:
 
 - **p2a-core**: Core analytics library (all algorithms)
 - **p2a-cli**: Command-line interface (`p2a` binary) for direct analytics execution
@@ -327,22 +365,11 @@ let df = df! {
 4. **Serde serialization**: Use `#[serde(skip)]` for large internal matrices in result structs
 5. **Error handling**: Use `EconError` for econometric errors, `McpError` for MCP errors
 
-## Files to Know
+## Key Files
 
-### p2a-core
 - `crates/p2a-core/src/regression/ols.rs` - Main OLS implementation
-- `crates/p2a-core/src/linalg/matrix_ops.rs` - Core linear algebra
-- `crates/p2a-core/src/traits/estimator.rs` - LinearEstimator trait
-
-### p2a-cli
-- `crates/p2a-cli/src/main.rs` - CLI entry point and command routing
-- `crates/p2a-cli/src/commands/` - Subcommand implementations
-- `crates/p2a-cli/src/session.rs` - Session recording for reproducibility
-- `crates/p2a-cli/src/output.rs` - Output formatting (text, JSON, table)
-
-### p2a-mcp
-- `crates/p2a-mcp/src/server.rs` - All 55 MCP tool definitions
-
-### Documentation
-- `DEVELOPMENT_REPORT.md` - Detailed development history and status
-- `docs/cli-reference.md` - CLI command reference
+- `crates/p2a-core/src/linalg/matrix_ops.rs` - Core linear algebra (xtx, xty, safe_inverse)
+- `crates/p2a-core/src/traits/estimator.rs` - LinearEstimator trait and p-value helpers
+- `crates/p2a-mcp/src/server.rs` - All 55+ MCP tool definitions
+- `crates/p2a-cli/src/commands/` - CLI subcommand implementations
+- `DEVELOPMENT_REPORT.md` - Detailed development history and current status

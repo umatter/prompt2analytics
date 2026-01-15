@@ -7,6 +7,7 @@ pub mod panel;
 pub mod causal;
 pub mod discrete;
 pub mod timeseries;
+pub mod survival;
 pub mod ml;
 pub mod viz;
 pub mod script;

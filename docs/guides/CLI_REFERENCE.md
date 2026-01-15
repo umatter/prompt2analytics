@@ -199,20 +199,65 @@ p2a ml pca customers --cols var1 var2 var3 var4 var5 --n-components 3
 
 ```bash
 # Histogram
-p2a viz histogram <DATASET> --col <COL> -o <OUTPUT> [--bins <N>] [--title <TITLE>]
+p2a viz histogram <DATASET> --col <COL> -f <OUTPUT> [--bins <N>] [--title <TITLE>]
 
 # Scatter plot
-p2a viz scatter <DATASET> --x <X_COL> --y <Y_COL> -o <OUTPUT> [--title <TITLE>]
+p2a viz scatter <DATASET> -x <X_COL> -y <Y_COL> -f <OUTPUT> [--title <TITLE>]
 
 # Line chart
-p2a viz line <DATASET> --x <X_COL> --y <Y_COL> -o <OUTPUT> [--title <TITLE>]
+p2a viz line <DATASET> -x <X_COL> -y <Y_COL> -f <OUTPUT> [--title <TITLE>]
+
+# Box plot
+p2a viz box <DATASET> -y <VALUE_COL> [-g <GROUP_COL>] -f <OUTPUT> [--title <TITLE>]
+
+# Correlation heatmap
+p2a viz heatmap <DATASET> --cols <COLS...> -f <OUTPUT> [--title <TITLE>]
+
+# Coefficient plot (forest plot from regression)
+p2a viz coefplot <DATASET> -y <DEP_VAR> -x <INDEP_VARS...> -f <OUTPUT> [--conf-level <N>] [--title <TITLE>]
+
+# Residual diagnostic plots
+p2a viz residuals <DATASET> -y <DEP_VAR> -x <INDEP_VARS...> -f <OUTPUT> [--title <TITLE>]
+
+# Dendrogram (hierarchical clustering)
+p2a viz dendrogram <DATASET> --cols <COLS...> -f <OUTPUT> [--linkage <METHOD>] [--title <TITLE>]
+
+# Event study plot
+p2a viz event-study <DATASET> --time-col <COL> --estimate-col <COL> --ci-lower-col <COL> --ci-upper-col <COL> -f <OUTPUT> [--title <TITLE>]
+
+# Impulse response function plot
+p2a viz irf <DATASET> --horizon-col <COL> --response-col <COL> [--ci-lower-col <COL>] [--ci-upper-col <COL>] -f <OUTPUT> [--title <TITLE>]
 ```
+
+**Linkage methods:** `single`, `complete`, `average`, `ward` (default)
 
 **Examples:**
 ```bash
-p2a viz histogram mydata --col price -o price_dist.png --bins 50
-p2a viz scatter mydata --x income --y spending -o scatter.png --title "Income vs Spending"
-p2a viz line timeseries --x date --y value -o trend.png
+# Basic distribution plots
+p2a viz histogram mydata --col price -f price_dist.png --bins 50
+p2a viz scatter mydata -x income -y spending -f scatter.png --title "Income vs Spending"
+p2a viz line timeseries -x date -y value -f trend.png
+
+# Box plot by category
+p2a viz box sales -y revenue -g region -f revenue_by_region.png
+
+# Correlation heatmap for selected variables
+p2a viz heatmap mydata --cols price sqft bedrooms bathrooms -f correlations.png
+
+# Coefficient plot from regression results
+p2a viz coefplot mydata -y price -x sqft bedrooms bathrooms -f coef_plot.png --conf-level 0.95
+
+# Residual diagnostics (creates 4 plots: main, _qq, _scale_location, _leverage)
+p2a viz residuals mydata -y price -x sqft bedrooms -f residual_diag.png
+
+# Dendrogram for clustering analysis
+p2a viz dendrogram customers --cols spending income age -f dendrogram.png --linkage ward
+
+# Event study plot (pre-prepared coefficient data)
+p2a viz event-study event_coeffs --time-col period --estimate-col coef --ci-lower-col ci_lo --ci-upper-col ci_hi -f event_study.png
+
+# IRF plot from VAR analysis
+p2a viz irf irf_data --horizon-col h --response-col response --ci-lower-col lower --ci-upper-col upper -f irf.png
 ```
 
 ### Script Commands
@@ -263,7 +308,7 @@ p2a --session my_analysis.json data load data.csv --name mydata
 # All subsequent commands with same session file are recorded
 p2a --session my_analysis.json data describe mydata
 p2a --session my_analysis.json reg ols mydata -y y -x x1 x2
-p2a --session my_analysis.json viz scatter mydata --x x1 --y y -o plot.png
+p2a --session my_analysis.json viz scatter mydata -x x1 -y y -f plot.png
 
 # Export to bash script
 p2a script export my_analysis.json -o my_analysis.sh
