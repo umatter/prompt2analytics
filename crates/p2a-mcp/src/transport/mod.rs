@@ -10,6 +10,9 @@ pub mod http;
 #[cfg(feature = "websocket")]
 pub mod websocket;
 
+#[cfg(all(feature = "http", feature = "db"))]
+pub mod conversation;
+
 use crate::config::ServerConfig;
 
 /// Transport error types.

@@ -1,0 +1,13 @@
+{
+  "name": "p2a-dioxus",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "css:build": "npx @tailwindcss/cli -i ./src/input.css -o ./assets/styles.css --minify",
+    "css:watch": "npx @tailwindcss/cli -i ./src/input.css -o ./assets/styles.css --watch"
+  },
+  "devDependencies": {
+    "@tailwindcss/cli": "^4.0.0",
+    "tailwindcss": "^4.0.0"
+  }
+}

@@ -318,7 +318,7 @@ pub fn explode(dataset: &Dataset, column: &str) -> MungeResult<Dataset> {
     let result = df
         .clone()
         .lazy()
-        .explode([col(column)])
+        .explode(cols([column]))
         .collect()
         .map_err(|e| MungeError::ReshapeError(e.to_string()))?;
 

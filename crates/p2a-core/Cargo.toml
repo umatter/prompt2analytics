@@ -44,6 +44,7 @@ duckdb.workspace = true
 
 # Visualization
 plotters.workspace = true
+plotlars.workspace = true
 image.workspace = true
 base64.workspace = true
 

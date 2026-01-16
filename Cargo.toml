@@ -5,6 +5,7 @@ members = [
     "crates/p2a-mcp",
     "crates/p2a-desktop",
     "crates/p2a-cli",
+    "crates/p2a-dioxus",
 ]
 
 [workspace.package]
@@ -17,8 +18,8 @@ rust-version = "1.85"
 
 [workspace.dependencies]
 # DataFrame and data manipulation
-polars = { version = "0.46", features = ["lazy", "csv", "parquet", "dtype-full", "diagonal_concat", "semi_anti_join", "cross_join", "pivot", "rows", "cum_agg", "rank", "strings"] }
-polars-ops = { version = "0.46", features = ["pivot", "rank", "strings"] }
+polars = { version = "0.52", features = ["lazy", "csv", "parquet", "dtype-full", "diagonal_concat", "semi_anti_join", "cross_join", "pivot", "rows", "cum_agg", "rank", "strings", "timezones", "dtype-datetime", "dtype-date", "dtype-time", "dtype-duration"] }
+polars-ops = { version = "0.52", features = ["pivot", "rank", "strings"] }
 
 # MCP Protocol
 rmcp = { version = "0.8", features = ["server", "macros", "transport-io"] }
@@ -29,7 +30,7 @@ ndarray = "0.16"
 statrs = "0.18"
 
 # Linear algebra (pure Rust, no external BLAS dependency)
-faer = "0.21"
+faer = "0.22"
 
 # Parallel computation
 rayon = "1.10"
@@ -55,6 +56,7 @@ duckdb = { version = "1.2", features = ["bundled"] }
 
 # Visualization
 plotters = "0.3"
+plotlars = "0.11"
 image = "0.24"
 
 # Image encoding (for base64 output)

@@ -345,11 +345,13 @@ pub fn hconcat(datasets: &[&Dataset]) -> MungeResult<Dataset> {
 /// let combos = cross_join(&products, &stores, Some("_store"))?;
 /// ```
 pub fn cross_join(left: &Dataset, right: &Dataset, suffix: Option<&str>) -> MungeResult<Dataset> {
+    use polars_ops::frame::join::MaintainOrderJoin;
+
     let suffix_str: PlSmallStr = suffix.unwrap_or("_right").into();
 
     let result = left
         .df()
-        .cross_join(right.df(), Some(suffix_str), None)
+        .cross_join(right.df(), Some(suffix_str), None, MaintainOrderJoin::None)
         .map_err(|e| MungeError::JoinError(format!("Cross join failed: {}", e)))?;
 
     Ok(Dataset::new(result))

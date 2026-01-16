@@ -66,6 +66,11 @@ pub struct CliArgs {
     /// Maximum number of concurrent sessions
     #[arg(long, default_value = "100", env = "P2A_MAX_SESSIONS")]
     pub max_sessions: usize,
+
+    /// Database path for persistence (when db feature is enabled)
+    #[cfg(feature = "db")]
+    #[arg(long, env = "P2A_DB_PATH")]
+    pub db_path: Option<String>,
 }
 
 /// Server configuration derived from CLI args and environment.
@@ -86,6 +91,9 @@ pub struct HttpConfig {
     pub addr: SocketAddr,
     pub cors_permissive: bool,
     pub cors_origins: Vec<String>,
+    /// Database path for persistence (None = in-memory)
+    #[cfg(feature = "db")]
+    pub db_path: Option<String>,
 }
 
 /// Session management configuration.
@@ -115,6 +123,8 @@ impl ServerConfig {
                     .expect("Invalid host:port"),
                 cors_permissive: args.cors_permissive,
                 cors_origins: args.cors_origins,
+                #[cfg(feature = "db")]
+                db_path: args.db_path,
             },
             session: SessionConfig {
                 ttl_minutes: args.session_ttl_minutes,
@@ -138,6 +148,8 @@ impl Default for ServerConfig {
                 addr: "127.0.0.1:8080".parse().unwrap(),
                 cors_permissive: false,
                 cors_origins: vec![],
+                #[cfg(feature = "db")]
+                db_path: None,
             },
             session: SessionConfig {
                 ttl_minutes: 60,

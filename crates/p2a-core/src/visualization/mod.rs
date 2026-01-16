@@ -1,9 +1,22 @@
 //! Visualization module for creating charts and plots.
 //!
-//! Generates PNG images encoded as base64 strings for MCP output.
+//! This module provides two types of visualizations:
+//! - **Static charts** (via `plotters`): Generate PNG images encoded as base64 strings
+//! - **Interactive charts** (via `plotlars`): Generate HTML with embedded Plotly.js
+//!
+//! Use static charts when you need:
+//! - Lightweight output for embedding
+//! - No JavaScript dependencies
+//! - Consistent rendering across all environments
+//!
+//! Use interactive charts when you need:
+//! - Zoom, pan, and hover capabilities
+//! - Interactive exploration of data
+//! - HTML output for web display
 
 mod charts;
 mod heatmap;
+pub mod interactive;
 
 pub use charts::{
     histogram, scatter_plot, box_plot, line_chart,
@@ -13,6 +26,10 @@ pub use charts::{
     DendrogramResult,
 };
 pub use heatmap::{correlation_heatmap, HeatmapResult};
+pub use interactive::{
+    scatter_interactive, histogram_interactive, line_interactive,
+    InteractiveConfig, InteractivePlotResult,
+};
 
 use thiserror::Error;
 

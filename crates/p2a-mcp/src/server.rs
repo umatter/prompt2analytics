@@ -116,6 +116,22 @@ pub struct LoadDatasetRequest {
     pub name: Option<String>,
 }
 
+/// Request to upload and load a dataset from base64-encoded content.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct UploadDatasetRequest {
+    /// Base64-encoded file content
+    #[schemars(description = "The file content encoded as base64")]
+    pub content: String,
+
+    /// Original filename (used to determine format and default name)
+    #[schemars(description = "Original filename including extension (e.g., 'data.csv')")]
+    pub filename: String,
+
+    /// Optional name/identifier for the dataset
+    #[schemars(description = "Optional name to identify this dataset. If not provided, the filename will be used.")]
+    pub name: Option<String>,
+}
+
 /// Request to describe a loaded dataset.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct DescribeDatasetRequest {
@@ -1666,6 +1682,70 @@ pub struct HeatmapRequest {
     pub title: Option<String>,
 }
 
+/// Request to generate an interactive scatter plot (HTML/Plotly output).
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ScatterInteractiveRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// X-axis column name
+    #[schemars(description = "Name of the column for X-axis values.")]
+    pub x_column: String,
+
+    /// Y-axis column name
+    #[schemars(description = "Name of the column for Y-axis values.")]
+    pub y_column: String,
+
+    /// Group column for separate traces (optional)
+    #[schemars(description = "Optional column for grouping data points into separate traces with different colors.")]
+    pub group_column: Option<String>,
+
+    /// Chart title (optional)
+    #[schemars(description = "Optional title for the chart.")]
+    pub title: Option<String>,
+}
+
+/// Request to generate an interactive histogram (HTML/Plotly output).
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct HistogramInteractiveRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Column name to plot
+    #[schemars(description = "Name of the numeric column to create histogram from.")]
+    pub column: String,
+
+    /// Group column for separate traces (optional)
+    #[schemars(description = "Optional column for grouping data into separate overlaid histograms.")]
+    pub group_column: Option<String>,
+
+    /// Chart title (optional)
+    #[schemars(description = "Optional title for the chart.")]
+    pub title: Option<String>,
+}
+
+/// Request to generate an interactive line chart (HTML/Plotly output).
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct LineInteractiveRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// X-axis column name
+    #[schemars(description = "Name of the column for X-axis values (e.g., time index).")]
+    pub x_column: String,
+
+    /// Y-axis column name
+    #[schemars(description = "Name of the column for Y-axis values.")]
+    pub y_column: String,
+
+    /// Chart title (optional)
+    #[schemars(description = "Optional title for the chart.")]
+    pub title: Option<String>,
+}
+
 /// Request to generate an event study plot.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct EventStudyRequest {
@@ -2653,6 +2733,19 @@ impl AnalyticsServer {
                 }),
             },
             ToolDefinition {
+                name: "upload_dataset".to_string(),
+                description: "Upload and load a dataset from base64-encoded file content. Use this when the file is selected via browser file picker.".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "content": {"type": "string", "description": "Base64-encoded file content"},
+                        "filename": {"type": "string", "description": "Original filename with extension (e.g., 'data.csv')"},
+                        "name": {"type": "string", "description": "Optional name for the dataset"}
+                    },
+                    "required": ["content", "filename"]
+                }),
+            },
+            ToolDefinition {
                 name: "describe_dataset".to_string(),
                 description: "Compute descriptive statistics for all columns in a dataset.".to_string(),
                 input_schema: serde_json::json!({
@@ -2974,6 +3067,50 @@ impl AnalyticsServer {
                         "dataset": {"type": "string"}
                     },
                     "required": ["dataset"]
+                }),
+            },
+            // Interactive Visualization tools (HTML/Plotly output)
+            ToolDefinition {
+                name: "viz_scatter_interactive".to_string(),
+                description: "Create an interactive scatter plot (HTML with Plotly.js).".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "dataset": {"type": "string"},
+                        "x_column": {"type": "string"},
+                        "y_column": {"type": "string"},
+                        "group_column": {"type": "string"},
+                        "title": {"type": "string"}
+                    },
+                    "required": ["dataset", "x_column", "y_column"]
+                }),
+            },
+            ToolDefinition {
+                name: "viz_histogram_interactive".to_string(),
+                description: "Create an interactive histogram (HTML with Plotly.js).".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "dataset": {"type": "string"},
+                        "column": {"type": "string"},
+                        "group_column": {"type": "string"},
+                        "title": {"type": "string"}
+                    },
+                    "required": ["dataset", "column"]
+                }),
+            },
+            ToolDefinition {
+                name: "viz_line_interactive".to_string(),
+                description: "Create an interactive line chart (HTML with Plotly.js).".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "dataset": {"type": "string"},
+                        "x_column": {"type": "string"},
+                        "y_column": {"type": "string"},
+                        "title": {"type": "string"}
+                    },
+                    "required": ["dataset", "x_column", "y_column"]
                 }),
             },
             // Database tools
@@ -3390,6 +3527,13 @@ impl AnalyticsServer {
                     .load_dataset(Parameters(req))
                     .await
             }
+            "upload_dataset" => {
+                let req: UploadDatasetRequest = serde_json::from_value(arguments)
+                    .map_err(|e| format!("Invalid arguments: {}", e))?;
+                session_server
+                    .upload_dataset(Parameters(req))
+                    .await
+            }
             "describe_dataset" => {
                 let req: DescribeDatasetRequest = serde_json::from_value(arguments)
                     .map_err(|e| format!("Invalid arguments: {}", e))?;
@@ -3549,6 +3693,27 @@ impl AnalyticsServer {
                     .map_err(|e| format!("Invalid arguments: {}", e))?;
                 session_server
                     .viz_heatmap(Parameters(req))
+                    .await
+            }
+            "viz_scatter_interactive" => {
+                let req: ScatterInteractiveRequest = serde_json::from_value(arguments)
+                    .map_err(|e| format!("Invalid arguments: {}", e))?;
+                session_server
+                    .viz_scatter_interactive(Parameters(req))
+                    .await
+            }
+            "viz_histogram_interactive" => {
+                let req: HistogramInteractiveRequest = serde_json::from_value(arguments)
+                    .map_err(|e| format!("Invalid arguments: {}", e))?;
+                session_server
+                    .viz_histogram_interactive(Parameters(req))
+                    .await
+            }
+            "viz_line_interactive" => {
+                let req: LineInteractiveRequest = serde_json::from_value(arguments)
+                    .map_err(|e| format!("Invalid arguments: {}", e))?;
+                session_server
+                    .viz_line_interactive(Parameters(req))
                     .await
             }
             "db_sqlite_query" => {
@@ -3798,6 +3963,106 @@ impl AnalyticsServer {
 
         let result = format!(
             "Successfully loaded dataset '{}'\n\n\
+             Dimensions: {} rows x {} columns\n\n\
+             Columns:\n{}",
+            id,
+            info.nrows,
+            info.ncols,
+            info.columns
+                .iter()
+                .map(|c| format!(
+                    "  - {} ({}): {} nulls ({:.1}%)",
+                    c.name,
+                    c.dtype,
+                    c.null_count,
+                    if info.nrows > 0 {
+                        (c.null_count as f64 / info.nrows as f64) * 100.0
+                    } else {
+                        0.0
+                    }
+                ))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+
+        Ok(CallToolResult::success(vec![Content::text(result)]))
+    }
+
+    /// Upload and load a dataset from base64-encoded content.
+    #[tool(description = "Upload and load a dataset from base64-encoded file content. Use this when the file is selected via browser file picker.")]
+    async fn upload_dataset(
+        &self,
+        Parameters(request): Parameters<UploadDatasetRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
+
+        // Decode base64 content
+        let file_bytes = match STANDARD.decode(&request.content) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Failed to decode base64 content: {}",
+                    e
+                ))]));
+            }
+        };
+
+        // Create temp directory if it doesn't exist
+        let temp_dir = std::env::temp_dir().join("p2a_uploads");
+        if let Err(e) = std::fs::create_dir_all(&temp_dir) {
+            return Ok(CallToolResult::error(vec![Content::text(format!(
+                "Failed to create temp directory: {}",
+                e
+            ))]));
+        }
+
+        // Generate unique filename
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let temp_filename = format!("{}_{}", timestamp, request.filename);
+        let temp_path = temp_dir.join(&temp_filename);
+
+        // Write file to temp location
+        if let Err(e) = std::fs::write(&temp_path, &file_bytes) {
+            return Ok(CallToolResult::error(vec![Content::text(format!(
+                "Failed to write temp file: {}",
+                e
+            ))]));
+        }
+
+        // Load the dataset
+        let dataset = match DataLoader::load(&temp_path) {
+            Ok(ds) => ds,
+            Err(e) => {
+                // Clean up temp file on error
+                let _ = std::fs::remove_file(&temp_path);
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Failed to load dataset: {}",
+                    e
+                ))]));
+            }
+        };
+
+        // Generate an ID for the dataset
+        let id = request.name.unwrap_or_else(|| {
+            std::path::Path::new(&request.filename)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("dataset")
+                .to_string()
+        });
+
+        // Get info before moving
+        let info: DatasetInfo = (&dataset).into();
+
+        // Store the dataset
+        let mut datasets = self.datasets.write().await;
+        datasets.insert(id.clone(), dataset);
+
+        let result = format!(
+            "Successfully uploaded and loaded dataset '{}'\n\n\
              Dimensions: {} rows x {} columns\n\n\
              Columns:\n{}",
             id,
@@ -7331,6 +7596,162 @@ impl AnalyticsServer {
         }
     }
 
+    /// Generate an interactive scatter plot with Plotly.js.
+    #[tool(description = "Generate an interactive scatter plot visualization using Plotly.js. Returns HTML that can be saved to a file and opened in a browser. Supports grouping data by a categorical column for colored traces. Interactive features include zoom, pan, and hover.")]
+    async fn viz_scatter_interactive(
+        &self,
+        Parameters(request): Parameters<ScatterInteractiveRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        use p2a_core::visualization::{scatter_interactive, InteractiveConfig};
+
+        let datasets = self.datasets.read().await;
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let config = InteractiveConfig {
+            title: request.title.clone(),
+            x_label: Some(request.x_column.clone()),
+            y_label: Some(request.y_column.clone()),
+            ..Default::default()
+        };
+
+        match scatter_interactive(
+            dataset.df(),
+            &request.x_column,
+            &request.y_column,
+            request.group_column.as_deref(),
+            config,
+        ) {
+            Ok(result) => {
+                let description = format!(
+                    "Interactive scatter plot generated successfully.\nX: {}\nY: {}\nPoints: {}\n\nHTML output ({} bytes) - save to a .html file and open in browser.",
+                    request.x_column,
+                    request.y_column,
+                    result.n_points,
+                    result.html.len()
+                );
+                Ok(CallToolResult::success(vec![
+                    Content::text(description),
+                    Content::text(format!("```html\n{}\n```", result.html)),
+                ]))
+            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
+                "Failed to generate interactive scatter plot: {}",
+                e
+            ))])),
+        }
+    }
+
+    /// Generate an interactive histogram with Plotly.js.
+    #[tool(description = "Generate an interactive histogram visualization using Plotly.js. Returns HTML that can be saved to a file and opened in a browser. Supports grouping data by a categorical column for overlaid histograms. Interactive features include zoom, pan, and hover.")]
+    async fn viz_histogram_interactive(
+        &self,
+        Parameters(request): Parameters<HistogramInteractiveRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        use p2a_core::visualization::{histogram_interactive, InteractiveConfig};
+
+        let datasets = self.datasets.read().await;
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let config = InteractiveConfig {
+            title: request.title.clone(),
+            x_label: Some(request.column.clone()),
+            y_label: Some("Frequency".to_string()),
+            ..Default::default()
+        };
+
+        match histogram_interactive(
+            dataset.df(),
+            &request.column,
+            request.group_column.as_deref(),
+            config,
+        ) {
+            Ok(result) => {
+                let description = format!(
+                    "Interactive histogram generated successfully.\nColumn: {}\nPoints: {}\n\nHTML output ({} bytes) - save to a .html file and open in browser.",
+                    request.column,
+                    result.n_points,
+                    result.html.len()
+                );
+                Ok(CallToolResult::success(vec![
+                    Content::text(description),
+                    Content::text(format!("```html\n{}\n```", result.html)),
+                ]))
+            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
+                "Failed to generate interactive histogram: {}",
+                e
+            ))])),
+        }
+    }
+
+    /// Generate an interactive line chart with Plotly.js.
+    #[tool(description = "Generate an interactive line chart visualization using Plotly.js. Returns HTML that can be saved to a file and opened in a browser. Interactive features include zoom, pan, and hover.")]
+    async fn viz_line_interactive(
+        &self,
+        Parameters(request): Parameters<LineInteractiveRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        use p2a_core::visualization::{line_interactive, InteractiveConfig};
+
+        let datasets = self.datasets.read().await;
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let config = InteractiveConfig {
+            title: request.title.clone(),
+            x_label: Some(request.x_column.clone()),
+            y_label: Some(request.y_column.clone()),
+            ..Default::default()
+        };
+
+        match line_interactive(
+            dataset.df(),
+            &request.x_column,
+            &request.y_column,
+            config,
+        ) {
+            Ok(result) => {
+                let description = format!(
+                    "Interactive line chart generated successfully.\nX: {}\nY: {}\nPoints: {}\n\nHTML output ({} bytes) - save to a .html file and open in browser.",
+                    request.x_column,
+                    request.y_column,
+                    result.n_points,
+                    result.html.len()
+                );
+                Ok(CallToolResult::success(vec![
+                    Content::text(description),
+                    Content::text(format!("```html\n{}\n```", result.html)),
+                ]))
+            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
+                "Failed to generate interactive line chart: {}",
+                e
+            ))])),
+        }
+    }
+
     /// Generate an event study plot for treatment effect visualization.
     #[tool(description = "Generate an event study plot showing treatment effects over time with confidence intervals. Used for visualizing DiD or panel event study results. Shows point estimates with CI bands and reference lines at t=0 and y=0.")]
     async fn viz_event_study(
@@ -9948,8 +10369,10 @@ impl ServerHandler for AnalyticsServer {
                  'ts_var' for VAR models, 'ts_varma' for VARMA models, \
                  'ts_vecm' for cointegration analysis, 'ts_var_irf' for impulse responses, \
                  'ml_kmeans' for K-means clustering, 'ml_dbscan' for DBSCAN clustering, \
-                 'ml_pca' for principal component analysis, or visualization tools: \
-                 'viz_histogram', 'viz_scatter', 'viz_line', 'viz_boxplot', 'viz_heatmap'."
+                 'ml_pca' for principal component analysis, visualization tools: \
+                 'viz_histogram', 'viz_scatter', 'viz_line', 'viz_boxplot', 'viz_heatmap' (static PNG), \
+                 or interactive tools: 'viz_scatter_interactive', 'viz_histogram_interactive', \
+                 'viz_line_interactive' (HTML/Plotly.js output)."
                     .to_string(),
             ),
         }

@@ -8,6 +8,10 @@ use p2a_core::{
     dendrogram, event_study_plot, irf_plot,
     hierarchical, Linkage, run_ols,
 };
+use p2a_core::visualization::{
+    scatter_interactive, histogram_interactive, line_interactive,
+    InteractiveConfig,
+};
 use p2a_core::regression::CovarianceType;
 use p2a_core::traits::LinearEstimator;
 use std::path::PathBuf;
@@ -260,6 +264,76 @@ pub enum VizCommands {
         #[arg(long)]
         title: Option<String>,
     },
+
+    /// Create an interactive scatter plot (HTML output with Plotly)
+    ScatterInteractive {
+        /// Dataset name
+        dataset: String,
+
+        /// X-axis column
+        #[arg(short = 'x', long)]
+        x_col: String,
+
+        /// Y-axis column
+        #[arg(short = 'y', long)]
+        y_col: String,
+
+        /// Group column for separate traces (optional)
+        #[arg(short = 'g', long)]
+        group_col: Option<String>,
+
+        /// Output HTML file path
+        #[arg(short = 'f', long = "file")]
+        output: PathBuf,
+
+        /// Chart title
+        #[arg(long)]
+        title: Option<String>,
+    },
+
+    /// Create an interactive histogram (HTML output with Plotly)
+    HistogramInteractive {
+        /// Dataset name
+        dataset: String,
+
+        /// Column to plot
+        #[arg(long)]
+        col: String,
+
+        /// Group column for separate traces (optional)
+        #[arg(short = 'g', long)]
+        group_col: Option<String>,
+
+        /// Output HTML file path
+        #[arg(short = 'f', long = "file")]
+        output: PathBuf,
+
+        /// Chart title
+        #[arg(long)]
+        title: Option<String>,
+    },
+
+    /// Create an interactive line plot (HTML output with Plotly)
+    LineInteractive {
+        /// Dataset name
+        dataset: String,
+
+        /// X-axis column
+        #[arg(short = 'x', long)]
+        x_col: String,
+
+        /// Y-axis column
+        #[arg(short = 'y', long)]
+        y_col: String,
+
+        /// Output HTML file path
+        #[arg(short = 'f', long = "file")]
+        output: PathBuf,
+
+        /// Chart title
+        #[arg(long)]
+        title: Option<String>,
+    },
 }
 
 /// Extract a column from a Dataset as Vec<f64>
@@ -365,6 +439,28 @@ pub fn execute(
             output,
             title,
         } => execute_irf(dataset, horizon_col, response_col, ci_lower_col.as_deref(), ci_upper_col.as_deref(), shock_label.as_deref(), response_label.as_deref(), output, title.as_deref(), format, session),
+        VizCommands::ScatterInteractive {
+            dataset,
+            x_col,
+            y_col,
+            group_col,
+            output,
+            title,
+        } => execute_scatter_interactive(dataset, x_col, y_col, group_col.as_deref(), output, title.as_deref(), format, session),
+        VizCommands::HistogramInteractive {
+            dataset,
+            col,
+            group_col,
+            output,
+            title,
+        } => execute_histogram_interactive(dataset, col, group_col.as_deref(), output, title.as_deref(), format, session),
+        VizCommands::LineInteractive {
+            dataset,
+            x_col,
+            y_col,
+            output,
+            title,
+        } => execute_line_interactive(dataset, x_col, y_col, output, title.as_deref(), format, session),
     }
 }
 
@@ -1196,6 +1292,124 @@ fn execute_irf(
                     }
                 }
                 Err(e) => print_error(&format!("IRF plot failed: {}", e), format),
+            }
+        }
+        None => print_error(&format!("Dataset '{}' not found", dataset_name), format),
+    }
+    Ok(())
+}
+
+fn execute_scatter_interactive(
+    dataset_name: &str,
+    x_col: &str,
+    y_col: &str,
+    group_col: Option<&str>,
+    output: &PathBuf,
+    title: Option<&str>,
+    format: &OutputFormat,
+    session: Option<&mut SessionManager>,
+) -> anyhow::Result<()> {
+    let dataset = match session {
+        Some(mgr) => mgr.get_dataset(dataset_name),
+        None => {
+            print_error("No session active. Use --session <file> to enable dataset storage.", format);
+            return Ok(());
+        }
+    };
+
+    match dataset {
+        Some(ds) => {
+            let config = InteractiveConfig {
+                title: title.map(|s| s.to_string()),
+                x_label: Some(x_col.to_string()),
+                y_label: Some(y_col.to_string()),
+                ..Default::default()
+            };
+
+            match scatter_interactive(ds.df(), x_col, y_col, group_col, config) {
+                Ok(result) => {
+                    std::fs::write(output, &result.html)?;
+                    print_message(&format!("Interactive scatter plot saved to: {}", output.display()), format);
+                }
+                Err(e) => print_error(&format!("Scatter plot failed: {}", e), format),
+            }
+        }
+        None => print_error(&format!("Dataset '{}' not found", dataset_name), format),
+    }
+    Ok(())
+}
+
+fn execute_histogram_interactive(
+    dataset_name: &str,
+    col: &str,
+    group_col: Option<&str>,
+    output: &PathBuf,
+    title: Option<&str>,
+    format: &OutputFormat,
+    session: Option<&mut SessionManager>,
+) -> anyhow::Result<()> {
+    let dataset = match session {
+        Some(mgr) => mgr.get_dataset(dataset_name),
+        None => {
+            print_error("No session active. Use --session <file> to enable dataset storage.", format);
+            return Ok(());
+        }
+    };
+
+    match dataset {
+        Some(ds) => {
+            let config = InteractiveConfig {
+                title: title.map(|s| s.to_string()),
+                x_label: Some(col.to_string()),
+                y_label: Some("Frequency".to_string()),
+                ..Default::default()
+            };
+
+            match histogram_interactive(ds.df(), col, group_col, config) {
+                Ok(result) => {
+                    std::fs::write(output, &result.html)?;
+                    print_message(&format!("Interactive histogram saved to: {}", output.display()), format);
+                }
+                Err(e) => print_error(&format!("Histogram failed: {}", e), format),
+            }
+        }
+        None => print_error(&format!("Dataset '{}' not found", dataset_name), format),
+    }
+    Ok(())
+}
+
+fn execute_line_interactive(
+    dataset_name: &str,
+    x_col: &str,
+    y_col: &str,
+    output: &PathBuf,
+    title: Option<&str>,
+    format: &OutputFormat,
+    session: Option<&mut SessionManager>,
+) -> anyhow::Result<()> {
+    let dataset = match session {
+        Some(mgr) => mgr.get_dataset(dataset_name),
+        None => {
+            print_error("No session active. Use --session <file> to enable dataset storage.", format);
+            return Ok(());
+        }
+    };
+
+    match dataset {
+        Some(ds) => {
+            let config = InteractiveConfig {
+                title: title.map(|s| s.to_string()),
+                x_label: Some(x_col.to_string()),
+                y_label: Some(y_col.to_string()),
+                ..Default::default()
+            };
+
+            match line_interactive(ds.df(), x_col, y_col, config) {
+                Ok(result) => {
+                    std::fs::write(output, &result.html)?;
+                    print_message(&format!("Interactive line plot saved to: {}", output.display()), format);
+                }
+                Err(e) => print_error(&format!("Line plot failed: {}", e), format),
             }
         }
         None => print_error(&format!("Dataset '{}' not found", dataset_name), format),

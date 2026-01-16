@@ -34,6 +34,10 @@ cargo run -p p2a-mcp --features full -- --transport http --host 127.0.0.1 --port
 cd crates/p2a-desktop/ui && npm install && cd ../../..
 cargo run -p p2a-desktop
 
+# Dioxus web app (experimental)
+cd crates/p2a-dioxus && dx serve           # Dev server with hot reload
+cd crates/p2a-dioxus && dx build           # Production build
+
 # Build documentation
 cargo doc --no-deps --open
 ```
@@ -46,8 +50,9 @@ prompt2analytics is a Rust workspace (edition 2024, requires Rust 1.85+) exposin
 
 - **p2a-core**: Core analytics library (all algorithms)
 - **p2a-cli**: Command-line interface (`p2a` binary) for direct analytics execution
-- **p2a-mcp**: MCP server exposing 55 tools
+- **p2a-mcp**: MCP server exposing 55+ tools
 - **p2a-desktop**: Tauri desktop application with LLM integration
+- **p2a-dioxus**: Pure Rust web frontend (experimental, compiles to WASM)
 
 ## Architecture Principles
 
@@ -83,6 +88,10 @@ src/
 │   ├── discrete.rs     # Logit, Probit (Newton-Raphson MLE)
 │   ├── feglm.rs        # GLM with HDFE (IRLS + weighted MAP)
 │   └── timeseries.rs   # VAR, VARMA, VECM, IRF
+├── visualization/
+│   ├── charts.rs       # Static charts (plotters) - PNG output
+│   ├── heatmap.rs      # Correlation heatmaps
+│   └── interactive.rs  # Interactive charts (plotlars/Plotly) - HTML output
 ```
 
 ### API Design
@@ -262,7 +271,7 @@ fn extract_columns_as_array(dataset: &Dataset, cols: &[String]) -> Result<Array2
 // Then use: kmeans(data.view(), k, ...)
 ```
 
-**For visualization** (need raw Vec<f64>):
+**For static visualization** (need raw Vec<f64>):
 ```rust
 fn extract_column(dataset: &Dataset, col: &str) -> Result<Vec<f64>, String> {
     let column = dataset.df().column(col)?;
@@ -270,6 +279,22 @@ fn extract_column(dataset: &Dataset, col: &str) -> Result<Vec<f64>, String> {
 }
 
 // Then use: histogram(&data, bins, config)
+```
+
+**For interactive visualization** (pass DataFrame directly):
+```rust
+use p2a_core::visualization::{scatter_interactive, InteractiveConfig};
+
+let config = InteractiveConfig {
+    title: Some("My Plot".to_string()),
+    x_label: Some("X Axis".to_string()),
+    y_label: Some("Y Axis".to_string()),
+    ..Default::default()
+};
+
+// Pass DataFrame directly - plotlars handles extraction
+let result = scatter_interactive(dataset.df(), "x_col", "y_col", Some("group_col"), config)?;
+// result.html contains full HTML page with embedded Plotly.js
 ```
 
 ### Output Formatting
@@ -314,6 +339,69 @@ let dataset = datasets.get(&request.dataset)
     .ok_or_else(|| McpError::invalid_request("Dataset not found", None))?;
 ```
 
+### Database Layer (SurrealDB)
+
+The `db/` module provides persistent storage via embedded SurrealDB (RocksDB backend):
+
+```
+src/db/
+├── mod.rs           # Module exports
+├── connection.rs    # Database connection management
+├── models.rs        # Data models (Session, Conversation, Message, Settings)
+├── conversations.rs # Conversation CRUD operations
+└── sessions.rs      # Session persistence
+```
+
+**Key Models:**
+```rust
+// Uses SurrealDB native types for proper serialization
+pub struct Conversation {
+    pub id: surrealdb::RecordId,
+    pub session_id: surrealdb::RecordId,
+    pub title: String,
+    pub created_at: surrealdb::sql::Datetime,
+    pub updated_at: surrealdb::sql::Datetime,
+    pub is_archived: bool,
+}
+
+pub struct ConversationMessage {
+    pub id: surrealdb::RecordId,
+    pub conversation_id: surrealdb::RecordId,
+    pub role: String,  // "user" or "assistant"
+    pub content: String,
+    pub created_at: surrealdb::sql::Datetime,
+}
+```
+
+**Database Operations:**
+```rust
+// Initialize database (creates tables if not exist)
+let db = Database::new("~/.p2a/data").await?;
+
+// Conversation CRUD
+db.create_conversation(session_id, title).await?;
+db.list_conversations(session_id).await?;
+db.update_conversation_title(id, title).await?;
+db.delete_conversation(id).await?;
+
+// Message operations
+db.add_message(conversation_id, role, content).await?;
+db.get_messages(conversation_id).await?;
+db.clear_messages(conversation_id).await?;
+```
+
+**Important Notes:**
+- Use `surrealdb::sql::Datetime` for timestamps (not chrono types)
+- Use `surrealdb::RecordId` for IDs (not String)
+- For datetime updates, use raw SurrealQL with `time::now()`:
+```rust
+self.db()
+    .query("UPDATE conversations SET updated_at = time::now() WHERE id = $id")
+    .bind(("id", RecordId::from(("conversations", id))))
+    .await?;
+```
+- The `id_string()` helper strips Unicode angle brackets from RecordId keys
+
 ## Desktop Application (p2a-desktop)
 
 ### Architecture
@@ -330,6 +418,102 @@ Three providers implemented:
 - `OpenAIProvider` - GPT models
 
 All implement the `LlmProvider` trait with streaming support.
+
+## Dioxus Web App (p2a-dioxus)
+
+### Overview
+
+Experimental pure Rust web frontend using Dioxus 0.7, compiling to WebAssembly. Communicates with p2a-mcp HTTP backend.
+
+### Architecture
+
+```
+p2a-dioxus/
+├── src/
+│   ├── main.rs           # Entry point
+│   ├── app.rs            # Root App component (sidebar + chat layout)
+│   ├── api/              # Backend communication
+│   │   ├── client.rs     # HTTP client with conversation endpoints
+│   │   ├── sse.rs        # SSE streaming for LLM chat
+│   │   └── types.rs      # Request/response types (including Conversation)
+│   ├── state/            # State management (Dioxus signals)
+│   │   ├── chat.rs       # Messages, history navigation
+│   │   ├── conversation.rs # Conversation list and selection
+│   │   ├── session.rs    # Session lifecycle
+│   │   └── settings.rs   # Provider config (localStorage)
+│   ├── components/       # UI components
+│   │   ├── chat_panel.rs # Main chat interface (integrated with conversations)
+│   │   ├── conversation_sidebar.rs # Conversation list with CRUD
+│   │   ├── chat_input.rs # Input with keyboard shortcuts
+│   │   ├── message.rs    # Message with markdown
+│   │   ├── message_list.rs # Auto-scrolling list
+│   │   ├── tool_call.rs  # Expandable tool display
+│   │   └── settings_modal.rs # Provider configuration
+│   └── utils/
+│       └── markdown.rs   # Markdown to RSX (pulldown-cmark)
+└── assets/
+    └── styles.css        # Tailwind-like CSS
+```
+
+### Key Dependencies
+
+- `dioxus` 0.7 - UI framework with web feature
+- `reqwest` - HTTP client (WASM-compatible)
+- `pulldown-cmark` - Markdown parsing
+- `gloo-storage` - localStorage for settings persistence
+- `chrono` + `uuid` - Timestamps and IDs
+
+### Running
+
+```bash
+# Terminal 1: Backend
+cargo run -p p2a-mcp --features full -- --transport http --port 8080 --cors-permissive
+
+# Terminal 2: Dioxus dev server
+cd crates/p2a-dioxus && dx serve
+```
+
+### State Management
+
+Uses Dioxus signals and context providers:
+```rust
+let chat_state = use_context::<Signal<ChatState>>();
+chat_state.write().add_user_message(&message);
+```
+
+**Global State (provided in App):**
+- `SessionState` - Backend session ID and loaded datasets
+- `ChatState` - Current messages, streaming state, prompt history
+- `ConversationState` - Conversation list and current selection
+- `Settings` - LLM provider configuration
+
+**ConversationState:**
+```rust
+pub struct ConversationState {
+    pub conversations: Vec<Conversation>,
+    pub current_conversation_id: Option<String>,
+    pub current_messages: Vec<ConversationMessage>,
+    pub is_loading: bool,
+    pub is_operating: bool,
+    pub error: Option<String>,
+}
+
+// Methods for API operations
+state.load_conversations(session_id).await?;
+state.create_conversation(session_id, title).await?;
+state.update_conversation_title(id, title).await?;
+state.delete_conversation(id).await?;
+state.load_messages(conversation_id).await?;
+state.add_message(conversation_id, role, content).await?;
+```
+
+**ChatMessage Conversion:**
+```rust
+// Convert persisted message to UI message
+let chat_msg = ChatMessage::from_conversation_message(&conversation_message);
+```
+
+Settings persist to localStorage via `gloo-storage`.
 
 ## Testing
 
@@ -360,16 +544,28 @@ let df = df! {
 ## Important Notes
 
 1. **ndarray version**: Pinned to 0.16 for compatibility with faer
-2. **polars version**: Using 0.46; `is_numeric()` was removed, use custom dtype checking
+2. **polars version**: Using 0.52; `is_numeric()` was removed, use custom dtype checking
 3. **No formula parsing**: Use column names directly, not R-style formulas
 4. **Serde serialization**: Use `#[serde(skip)]` for large internal matrices in result structs
 5. **Error handling**: Use `EconError` for econometric errors, `McpError` for MCP errors
+6. **Visualization**: Two types available:
+   - Static (plotters): `histogram()`, `scatter_plot()`, etc. - returns base64 PNG
+   - Interactive (plotlars/Plotly): `scatter_interactive()`, etc. - returns HTML
 
 ## Key Files
 
 - `crates/p2a-core/src/regression/ols.rs` - Main OLS implementation
 - `crates/p2a-core/src/linalg/matrix_ops.rs` - Core linear algebra (xtx, xty, safe_inverse)
 - `crates/p2a-core/src/traits/estimator.rs` - LinearEstimator trait and p-value helpers
+- `crates/p2a-core/src/visualization/interactive.rs` - Interactive charts (plotlars/Plotly)
 - `crates/p2a-mcp/src/server.rs` - All 55+ MCP tool definitions
+- `crates/p2a-mcp/src/db/` - SurrealDB persistence layer
+- `crates/p2a-mcp/src/db/conversations.rs` - Conversation CRUD operations
+- `crates/p2a-mcp/src/db/models.rs` - Database models with SurrealDB types
 - `crates/p2a-cli/src/commands/` - CLI subcommand implementations
+- `crates/p2a-dioxus/src/components/chat_panel.rs` - Main Dioxus chat interface
+- `crates/p2a-dioxus/src/components/conversation_sidebar.rs` - Conversation list UI
+- `crates/p2a-dioxus/src/state/conversation.rs` - Conversation state management
+- `crates/p2a-dioxus/src/api/client.rs` - API client with conversation endpoints
+- `crates/p2a-dioxus/src/api/sse.rs` - SSE streaming for Dioxus
 - `DEVELOPMENT_REPORT.md` - Detailed development history and current status

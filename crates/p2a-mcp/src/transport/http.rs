@@ -44,6 +44,32 @@ pub async fn start_http_transport(config: &ServerConfig) -> TransportResult<()> 
         session_manager,
     };
 
+    // Create persistent session manager if db feature is enabled
+    #[cfg(feature = "db")]
+    let persistent_manager = {
+        let db_path = config.http.db_path.as_deref();
+        match crate::persistent_session::PersistentSessionManager::new(
+            db_path,
+            config.session.max_sessions,
+            config.session.ttl_minutes,
+        )
+        .await
+        {
+            Ok(manager) => {
+                tracing::info!("Database persistence enabled");
+                Some(Arc::new(manager))
+            }
+            Err(e) => {
+                tracing::warn!("Failed to initialize database, running without persistence: {}", e);
+                None
+            }
+        }
+    };
+
+    #[cfg(feature = "db")]
+    let app = create_router(state, config, persistent_manager);
+
+    #[cfg(not(feature = "db"))]
     let app = create_router(state, config);
 
     let addr = config.http.addr;
@@ -61,7 +87,35 @@ pub async fn start_http_transport(config: &ServerConfig) -> TransportResult<()> 
 }
 
 /// Create the axum router with all routes.
+#[cfg(feature = "db")]
+fn create_router(
+    state: AppState,
+    config: &ServerConfig,
+    persistent_manager: Option<Arc<crate::persistent_session::PersistentSessionManager>>,
+) -> Router {
+    let router = create_base_router(state, config);
+
+    // Add conversation routes if persistent manager is available
+    let router = if let Some(manager) = persistent_manager {
+        let conv_state = super::conversation::ConversationState {
+            session_manager: manager,
+        };
+        router.nest("/api", super::conversation::conversation_routes(conv_state))
+    } else {
+        router
+    };
+
+    router
+}
+
+/// Create the axum router with all routes (without db feature).
+#[cfg(not(feature = "db"))]
 fn create_router(state: AppState, config: &ServerConfig) -> Router {
+    create_base_router(state, config)
+}
+
+/// Create the base router with core routes.
+fn create_base_router(state: AppState, config: &ServerConfig) -> Router {
     let cors = if config.http.cors_permissive {
         CorsLayer::new()
             .allow_origin(Any)

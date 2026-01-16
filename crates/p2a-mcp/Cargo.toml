@@ -60,12 +60,16 @@ clap = { version = "4.5", features = ["derive", "env"] }
 # UUID for session IDs
 uuid = { version = "1.11", features = ["v4"] }
 
+# Database persistence (optional)
+surrealdb = { version = "2.4", features = ["kv-rocksdb", "kv-mem"], optional = true }
+
 # JWT authentication (optional)
 jsonwebtoken = { version = "9.3", optional = true }
 
 # LLM integration (optional)
 async-trait = { version = "0.1", optional = true }
 reqwest = { version = "0.12", features = ["json", "stream"], optional = true }
+base64.workspace = true
 
 [dev-dependencies]
 polars.workspace = true
@@ -76,4 +80,5 @@ http = ["axum", "tower", "tower-http", "tokio-stream", "futures", "dirs", "async
 websocket = ["http", "tokio-tungstenite"]
 auth = ["jsonwebtoken"]
 llm = ["async-trait", "reqwest", "futures"]
-full = ["http", "websocket", "auth", "llm"]
+db = ["surrealdb"]
+full = ["http", "websocket", "auth", "llm", "db"]

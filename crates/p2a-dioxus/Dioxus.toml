@@ -1,0 +1,25 @@
+[application]
+name = "p2a-dioxus"
+default_platform = "web"
+out_dir = "dist"
+asset_dir = "assets"
+
+[web.app]
+title = "prompt2analytics"
+
+[web.watcher]
+index_on_404 = true
+watch_path = ["src", "assets"]
+
+[web.resource.dev]
+style = ["assets/styles.css"]
+
+[web.resource.release]
+style = ["assets/styles.css"]
+
+[web.wasm_opt]
+level = "4"
+
+[bundle]
+identifier = "io.github.prompt2analytics"
+publisher = "prompt2analytics"

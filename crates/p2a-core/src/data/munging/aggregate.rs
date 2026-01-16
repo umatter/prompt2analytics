@@ -232,7 +232,7 @@ pub fn value_counts(dataset: &Dataset, column: &str) -> MungeResult<Dataset> {
 
     // The result is a struct column, we need to unnest it
     let unnested = result
-        .unnest([column])
+        .unnest([column], None)
         .map_err(|e| MungeError::AggregationError(e.to_string()))?;
 
     Ok(Dataset::new(unnested))
