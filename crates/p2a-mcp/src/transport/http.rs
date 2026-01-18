@@ -28,6 +28,9 @@ pub struct AppState {
     pub server: Arc<AnalyticsServer>,
     /// Session manager for multi-user support
     pub session_manager: Arc<SessionManager>,
+    /// Persistent session manager for database operations (optional)
+    #[cfg(feature = "db")]
+    pub persistent_manager: Option<Arc<crate::persistent_session::PersistentSessionManager>>,
 }
 
 /// Start the HTTP transport.
@@ -38,11 +41,6 @@ pub async fn start_http_transport(config: &ServerConfig) -> TransportResult<()> 
     session_manager.clone().start_cleanup_task(10);
 
     let server = Arc::new(AnalyticsServer::new());
-
-    let state = AppState {
-        server,
-        session_manager,
-    };
 
     // Create persistent session manager if db feature is enabled
     #[cfg(feature = "db")]
@@ -64,6 +62,19 @@ pub async fn start_http_transport(config: &ServerConfig) -> TransportResult<()> 
                 None
             }
         }
+    };
+
+    #[cfg(feature = "db")]
+    let state = AppState {
+        server,
+        session_manager,
+        persistent_manager: persistent_manager.clone(),
+    };
+
+    #[cfg(not(feature = "db"))]
+    let state = AppState {
+        server,
+        session_manager,
     };
 
     #[cfg(feature = "db")]
@@ -507,6 +518,9 @@ mod llm_handlers {
         /// Whether to have the LLM interpret tool results (default: true)
         #[serde(default = "default_interpret")]
         pub interpret: bool,
+        /// Optional conversation ID for persistence
+        #[serde(default)]
+        pub conversation_id: Option<String>,
     }
 
     fn default_interpret() -> bool {
@@ -737,6 +751,18 @@ mod llm_handlers {
         server: Arc<crate::server::AnalyticsServer>,
         session: Arc<Session>,
         sender: tokio::sync::mpsc::Sender<ProgressEvent>,
+        /// Database connection for persistence (optional)
+        #[cfg(feature = "db")]
+        db: Option<Arc<crate::db::DbConnection>>,
+        /// Conversation ID for tool call persistence
+        #[cfg(feature = "db")]
+        conversation_id: Option<String>,
+        /// Message ID for tool call association
+        #[cfg(feature = "db")]
+        message_id: Option<String>,
+        /// Session ID for dataset metadata persistence
+        #[cfg(feature = "db")]
+        session_id: Option<String>,
     }
 
     impl StreamingToolExecutor {
@@ -745,7 +771,150 @@ mod llm_handlers {
             session: Arc<Session>,
             sender: tokio::sync::mpsc::Sender<ProgressEvent>,
         ) -> Self {
-            Self { server, session, sender }
+            Self {
+                server,
+                session,
+                sender,
+                #[cfg(feature = "db")]
+                db: None,
+                #[cfg(feature = "db")]
+                conversation_id: None,
+                #[cfg(feature = "db")]
+                message_id: None,
+                #[cfg(feature = "db")]
+                session_id: None,
+            }
+        }
+
+        #[cfg(feature = "db")]
+        pub fn with_persistence(
+            mut self,
+            db: Arc<crate::db::DbConnection>,
+            conversation_id: String,
+            message_id: String,
+            session_id: String,
+        ) -> Self {
+            self.db = Some(db);
+            self.conversation_id = Some(conversation_id);
+            self.message_id = Some(message_id);
+            self.session_id = Some(session_id);
+            self
+        }
+
+        /// Capture dataset metadata after successful load_dataset or upload_dataset
+        #[cfg(feature = "db")]
+        async fn capture_dataset_metadata(
+            db: Arc<crate::db::DbConnection>,
+            session_id: &str,
+            tool_name: &str,
+            arguments: &serde_json::Value,
+            result_text: &str,
+        ) {
+            use std::path::PathBuf;
+
+            // Parse result to extract dataset info
+            // Format: "Successfully loaded dataset 'name'\n\nDimensions: X rows x Y columns\n\nColumns:..."
+            let dataset_name = result_text
+                .lines()
+                .next()
+                .and_then(|line| {
+                    let start = line.find('\'')?;
+                    let end = line.rfind('\'')?;
+                    if start < end {
+                        Some(line[start + 1..end].to_string())
+                    } else {
+                        None
+                    }
+                });
+
+            let dimensions = result_text
+                .lines()
+                .find(|line| line.starts_with("Dimensions:"))
+                .and_then(|line| {
+                    // "Dimensions: X rows x Y columns"
+                    let parts: Vec<&str> = line.split_whitespace().collect();
+                    if parts.len() >= 5 {
+                        let rows = parts[1].parse::<i32>().ok()?;
+                        let cols = parts[4].parse::<i32>().ok()?;
+                        Some((rows, cols))
+                    } else {
+                        None
+                    }
+                });
+
+            // Extract column names from "Columns:" section
+            let columns_start = result_text.find("Columns:");
+            let column_names: Vec<String> = if let Some(start) = columns_start {
+                result_text[start..]
+                    .lines()
+                    .skip(1) // Skip "Columns:" line
+                    .filter(|line| line.trim().starts_with('-'))
+                    .filter_map(|line| {
+                        // "  - column_name (dtype): X nulls (Y%)"
+                        let trimmed = line.trim().trim_start_matches('-').trim();
+                        let paren_pos = trimmed.find('(')?;
+                        Some(trimmed[..paren_pos].trim().to_string())
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+
+            // Get source path and file metadata
+            let source_path = arguments
+                .get("path")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+
+            let file_size_bytes = source_path
+                .as_ref()
+                .and_then(|p| std::fs::metadata(p).ok())
+                .map(|m| m.len() as i64);
+
+            // Determine source type
+            let source_type = if tool_name == "upload_dataset" {
+                arguments
+                    .get("filename")
+                    .and_then(|v| v.as_str())
+                    .map(|f| PathBuf::from(f))
+                    .and_then(|p| p.extension().map(|e| e.to_string_lossy().to_string()))
+                    .unwrap_or_else(|| "unknown".to_string())
+            } else {
+                source_path
+                    .as_ref()
+                    .map(|p| PathBuf::from(p))
+                    .and_then(|p| p.extension().map(|e| e.to_string_lossy().to_string()))
+                    .unwrap_or_else(|| "unknown".to_string())
+            };
+
+            // Build and save metadata
+            if let (Some(name), Some((rows, cols))) = (dataset_name, dimensions) {
+                let mut meta = crate::db::DatasetMeta::new(
+                    session_id.to_string(),
+                    name.clone(),
+                    source_type,
+                    rows,
+                    cols,
+                    column_names,
+                );
+                meta.source_path = source_path;
+                meta.file_size_bytes = file_size_bytes;
+
+                match db.save_dataset_meta(&meta).await {
+                    Ok(_) => {
+                        tracing::info!(
+                            dataset = %name,
+                            session_id = %session_id,
+                            "Captured dataset metadata"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to save dataset metadata: {}", e);
+                    }
+                }
+            } else {
+                tracing::debug!("Could not parse dataset info from result, skipping metadata capture");
+            }
         }
     }
 
@@ -761,6 +930,41 @@ mod llm_handlers {
                 tool: name.to_string()
             }).await;
 
+            // Create tool call record in DB if persistence is enabled
+            #[cfg(feature = "db")]
+            let tool_call_id = if let (Some(db), Some(conv_id), Some(msg_id)) =
+                (&self.db, &self.conversation_id, &self.message_id)
+            {
+                let tool_call = crate::db::ToolCall::new(
+                    msg_id.clone(),
+                    conv_id.clone(),
+                    name.to_string(),
+                    serde_json::to_string(&arguments).unwrap_or_default(),
+                );
+                let tc_id = tool_call.id_string();
+
+                // Mark as running
+                let mut running_tool_call = tool_call;
+                running_tool_call.status = crate::db::ToolCallStatus::Running;
+
+                match db.create_tool_call(&running_tool_call).await {
+                    Ok(_) => {
+                        tracing::debug!(tool_call_id = %tc_id, "Created tool call record");
+                        Some(tc_id)
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to create tool call record: {}", e);
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
+            // Clone arguments for potential metadata capture later
+            #[cfg(feature = "db")]
+            let args_for_metadata = arguments.clone();
+
             tracing::info!(tool = %name, "Executing tool");
             let start = std::time::Instant::now();
             let result = self
@@ -768,6 +972,7 @@ mod llm_handlers {
                 .call_tool_with_session(name, arguments, &self.session)
                 .await;
             let elapsed = start.elapsed();
+            let duration_ms = elapsed.as_millis() as i32;
 
             // Send tool end event
             let _ = self.sender.send(ProgressEvent::ToolEnd {
@@ -776,8 +981,45 @@ mod llm_handlers {
             }).await;
 
             tracing::info!(tool = %name, elapsed_ms = %elapsed.as_millis(), "Tool execution completed");
+
             match result {
                 Ok(result) => {
+                    // Update tool call record with success
+                    #[cfg(feature = "db")]
+                    if let (Some(db), Some(tc_id)) = (&self.db, &tool_call_id) {
+                        let result_str = result
+                            .content
+                            .iter()
+                            .filter_map(|item| match item {
+                                ContentItem::Text { text } => Some(text.clone()),
+                                ContentItem::Image { .. } => None,
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        // Truncate result if too long (max 10KB)
+                        let truncated_result = if result_str.len() > 10240 {
+                            format!("{}...[truncated]", &result_str[..10240])
+                        } else {
+                            result_str.clone()
+                        };
+                        if let Err(e) = db.complete_tool_call(tc_id, &truncated_result, duration_ms).await {
+                            tracing::warn!("Failed to update tool call record: {}", e);
+                        }
+
+                        // Capture dataset metadata for load_dataset and upload_dataset
+                        if (name == "load_dataset" || name == "upload_dataset") && result.error.is_none() {
+                            if let Some(session_id) = &self.session_id {
+                                Self::capture_dataset_metadata(
+                                    db.clone(),
+                                    session_id,
+                                    name,
+                                    &args_for_metadata,
+                                    &result_str,
+                                ).await;
+                            }
+                        }
+                    }
+
                     // Extract images and send them as a separate event
                     let images: Vec<ImageData> = result
                         .content
@@ -811,7 +1053,16 @@ mod llm_handlers {
                         .join("\n");
                     Ok(content)
                 }
-                Err(e) => Err(e),
+                Err(e) => {
+                    // Update tool call record with error
+                    #[cfg(feature = "db")]
+                    if let (Some(db), Some(tc_id)) = (&self.db, &tool_call_id) {
+                        if let Err(db_err) = db.fail_tool_call(tc_id, &e, duration_ms).await {
+                            tracing::warn!("Failed to update tool call record: {}", db_err);
+                        }
+                    }
+                    Err(e)
+                }
             }
         }
     }
@@ -835,7 +1086,7 @@ mod llm_handlers {
                 message: "Starting analysis...".to_string()
             }).await;
 
-            tracing::info!(interpret = %request.interpret, "LLM chat request received");
+            tracing::info!(interpret = %request.interpret, conversation_id = ?request.conversation_id, "LLM chat request received");
 
             // Get the session
             let session = match state_clone.session_manager.get_session(&request.session_id).await {
@@ -854,13 +1105,48 @@ mod llm_handlers {
                 }
             };
 
+            // Create placeholder assistant message if persistence is enabled
+            #[cfg(feature = "db")]
+            let (db_connection, message_id) = if let (Some(pm), Some(conv_id)) =
+                (&state_clone.persistent_manager, &request.conversation_id)
+            {
+                // Create placeholder message
+                match pm.db().add_message(conv_id, "assistant", "").await {
+                    Ok(msg) => {
+                        let msg_id = msg.id_string();
+                        tracing::debug!(message_id = %msg_id, "Created placeholder assistant message");
+                        (Some(pm.db().clone()), Some(msg_id))
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to create placeholder message: {}", e);
+                        (None, None)
+                    }
+                }
+            } else {
+                (None, None)
+            };
+
             // Create provider and streaming tool executor
             let provider = create_provider(request.provider);
-            let tool_executor = StreamingToolExecutor::new(
+            let mut tool_executor = StreamingToolExecutor::new(
                 state_clone.server.clone(),
                 session,
                 tx_clone.clone(),
             );
+
+            // Add persistence context if available
+            #[cfg(feature = "db")]
+            if let (Some(db), Some(conv_id), Some(msg_id)) =
+                (db_connection.clone(), &request.conversation_id, &message_id)
+            {
+                tool_executor = tool_executor.with_persistence(
+                    db,
+                    conv_id.clone(),
+                    msg_id.clone(),
+                    request.session_id.clone(),
+                );
+            }
+
             let tools = get_mcp_tool_definitions();
 
             let _ = tx_clone.send(ProgressEvent::Status {
@@ -895,6 +1181,16 @@ mod llm_handlers {
             // Execute streaming chat
             match provider.chat_stream(&messages, &tools, &tool_executor, request.interpret, stream_callback).await {
                 Ok(response) => {
+                    // Update message content in database if persistence is enabled
+                    #[cfg(feature = "db")]
+                    if let (Some(db), Some(msg_id)) = (&db_connection, &message_id) {
+                        if let Err(e) = db.update_message_content(&msg_id, &response.content).await {
+                            tracing::warn!("Failed to update message content: {}", e);
+                        } else {
+                            tracing::debug!(message_id = %msg_id, "Updated assistant message content");
+                        }
+                    }
+
                     // Debug: check if content has newlines
                     let has_newlines = response.content.contains('\n');
                     let content_preview: String = response.content.chars().take(300).collect();
@@ -906,6 +1202,13 @@ mod llm_handlers {
                     let _ = tx_clone.send(ProgressEvent::Done { message: response }).await;
                 }
                 Err(e) => {
+                    // Update message with error content if persistence is enabled
+                    #[cfg(feature = "db")]
+                    if let (Some(db), Some(msg_id)) = (&db_connection, &message_id) {
+                        let error_content = format!("[Error: {}]", e);
+                        let _ = db.update_message_content(&msg_id, &error_content).await;
+                    }
+
                     let _ = tx_clone.send(ProgressEvent::Error {
                         error: e.to_string()
                     }).await;

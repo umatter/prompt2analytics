@@ -240,6 +240,37 @@ impl DbConnection {
         Ok(messages)
     }
 
+    /// Update the content of an existing message
+    pub async fn update_message_content(
+        &self,
+        message_id: &str,
+        content: &str,
+    ) -> Result<Message, DbError> {
+        let msg_id_owned = message_id.to_string();
+        let mut result = self
+            .db()
+            .query("UPDATE messages SET content = $content WHERE id = $id RETURN AFTER")
+            .bind(("id", RecordId::from(("messages", msg_id_owned.as_str()))))
+            .bind(("content", content.to_string()))
+            .await?;
+
+        let updated: Option<Message> = result.take(0)?;
+
+        if let Some(msg) = &updated {
+            // Update conversation metadata with new preview
+            self.update_conversation_after_message(&msg.conversation_id, content)
+                .await?;
+        }
+
+        updated.ok_or_else(|| DbError::NotFound(format!("Message not found: {}", message_id)))
+    }
+
+    /// Get a message by ID
+    pub async fn get_message(&self, message_id: &str) -> Result<Message, DbError> {
+        let msg: Option<Message> = self.db().select(("messages", message_id)).await?;
+        msg.ok_or_else(|| DbError::NotFound(format!("Message not found: {}", message_id)))
+    }
+
     /// Delete all messages in a conversation
     pub async fn clear_messages(&self, conversation_id: &str) -> Result<u32, DbError> {
         let conv_id_owned = conversation_id.to_string();

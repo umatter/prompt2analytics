@@ -85,7 +85,7 @@ pub fn MessageList() -> Element {
 /// Quick suggestion chip
 #[component]
 fn QuickSuggestion(text: String) -> Element {
-    let chat_state = use_context::<Signal<ChatState>>();
+    let _chat_state = use_context::<Signal<ChatState>>();
     let text_clone = text.clone();
 
     rsx! {

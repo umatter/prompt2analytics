@@ -1,7 +1,10 @@
-//! Settings state management with localStorage persistence
+//! Settings state management with platform-agnostic persistence
+//!
+//! - Web: Uses localStorage via gloo_storage
+//! - Native: Uses file-based storage in config directory
 
 use crate::api::ProviderConfig;
-use gloo_storage::{LocalStorage, Storage};
+use crate::platform::{create_storage, StorageBackend};
 use serde::{Deserialize, Serialize};
 
 /// Storage key for settings
@@ -79,11 +82,12 @@ impl Default for Settings {
 }
 
 impl Settings {
-    /// Load settings from localStorage
+    /// Load settings from platform-appropriate storage
     pub fn load() -> Self {
-        match LocalStorage::get::<Self>(SETTINGS_KEY) {
+        let storage = create_storage();
+        match storage.get::<Self>(SETTINGS_KEY) {
             Ok(settings) => {
-                tracing::info!("Loaded settings from localStorage");
+                tracing::info!("Loaded settings from storage");
                 settings
             }
             Err(e) => {
@@ -93,12 +97,13 @@ impl Settings {
         }
     }
 
-    /// Save settings to localStorage
+    /// Save settings to platform-appropriate storage
     pub fn save(&self) {
-        if let Err(e) = LocalStorage::set(SETTINGS_KEY, self) {
+        let storage = create_storage();
+        if let Err(e) = storage.set(SETTINGS_KEY, self) {
             tracing::error!("Failed to save settings: {}", e);
         } else {
-            tracing::info!("Settings saved to localStorage");
+            tracing::info!("Settings saved to storage");
         }
     }
 

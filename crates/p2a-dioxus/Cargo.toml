@@ -4,27 +4,91 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
-description = "Dioxus web frontend for prompt2analytics"
+description = "Dioxus cross-platform frontend for prompt2analytics"
+
+[features]
+# Default: no features - use dx CLI for proper feature selection
+# For web: dx serve (auto-selects web target)
+# For desktop: dx serve --platform desktop (or --features desktop)
+default = []
+
+# Web platform (WASM + browser APIs)
+web = [
+    "dioxus/web",
+    "dioxus/launch",
+    "gloo-storage",
+    "gloo-timers",
+    "web-sys",
+    "wasm-bindgen",
+    "wasm-bindgen-futures",
+    "js-sys",
+    "tracing-wasm",
+    "chrono/wasmbind",
+    "uuid/js",
+]
+
+# Desktop platform (native with window)
+desktop = [
+    "dioxus/desktop",
+    "dioxus/launch",
+    "reqwest/stream",
+    "tokio",
+    "tracing-subscriber",
+    "dirs",
+]
+
+# Mobile platform (iOS/Android)
+mobile = [
+    "dioxus/mobile",
+    "dioxus/launch",
+    "reqwest/stream",
+    "tokio",
+    "tracing-subscriber",
+    "dirs",
+]
 
 [dependencies]
-# Dioxus framework
-dioxus = { version = "0.7", features = ["web"] }
+# Dioxus framework - base features, platform selected via features
+# Note: "macro" enables rsx!, "html" enables HTML elements, "hooks/signals" for state
+dioxus = { version = "0.7", default-features = false, features = ["macro", "html", "hooks", "signals"] }
 
-# HTTP client with streaming support
+# HTTP client - always needed, but streaming only on native
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
 
 # Async utilities
 futures = "0.3"
-wasm-bindgen-futures = "0.4"
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
+# Markdown parsing
+pulldown-cmark = "0.12"
+
+# Date/time - base features, wasmbind added via web feature
+chrono = { version = "0.4", features = ["serde"] }
+
+# UUID generation - base features, js added via web feature
+uuid = { version = "1.0", features = ["v4"] }
+
+# Logging - always use tracing
+tracing = "0.1"
+
+# Image encoding
+base64.workspace = true
+
+# ============================================================================
+# Web-only dependencies (optional)
+# ============================================================================
+
+# Browser localStorage
+gloo-storage = { version = "0.3", optional = true }
+
+# Browser timers
+gloo-timers = { version = "0.3", optional = true }
+
 # Browser APIs
-gloo-storage = "0.3"
-gloo-timers = "0.3"
-web-sys = { version = "0.3", features = [
+web-sys = { version = "0.3", optional = true, features = [
     "Window",
     "Document",
     "Element",
@@ -45,19 +109,24 @@ web-sys = { version = "0.3", features = [
     "Blob",
     "TextDecoder",
 ] }
-wasm-bindgen = "0.2"
-js-sys = "0.3"
 
-# Markdown parsing
-pulldown-cmark = "0.12"
+# WASM bindings
+wasm-bindgen = { version = "0.2", optional = true }
+wasm-bindgen-futures = { version = "0.4", optional = true }
+js-sys = { version = "0.3", optional = true }
 
-# Date/time
-chrono = { version = "0.4", features = ["serde", "wasmbind"] }
+# WASM logging
+tracing-wasm = { version = "0.2", optional = true }
 
-# UUID generation
-uuid = { version = "1.0", features = ["v4", "js"] }
+# ============================================================================
+# Native-only dependencies (optional)
+# ============================================================================
 
-# Logging
-tracing = "0.1"
-tracing-wasm = "0.2"
-base64.workspace = true
+# Async runtime for native
+tokio = { version = "1.0", features = ["full"], optional = true }
+
+# Native logging
+tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
+
+# User directories for config storage
+dirs = { version = "6.0", optional = true }

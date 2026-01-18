@@ -14,8 +14,8 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::db::{Conversation, ConversationWithMessages, Message, Settings};
-use crate::persistent_session::{PersistentSessionError, PersistentSessionManager};
+use crate::db::{Conversation, ConversationWithMessages, DatasetMeta, Message, Settings, ToolCall};
+use crate::persistent_session::{PersistentSessionError, PersistentSessionManager, ReloadResult};
 
 /// Shared state for conversation routes.
 #[derive(Clone)]
@@ -37,9 +37,15 @@ pub fn conversation_routes(state: ConversationState) -> Router {
         .route("/conversations/{id}/messages", get(get_messages))
         .route("/conversations/{id}/messages", post(add_message))
         .route("/conversations/{id}/messages", delete(clear_messages))
+        // Tool calls
+        .route("/conversations/{id}/tool-calls", get(get_conversation_tool_calls))
+        .route("/messages/{id}/tool-calls", get(get_message_tool_calls))
         // Settings
         .route("/sessions/{session_id}/settings", get(get_settings))
         .route("/sessions/{session_id}/settings", put(update_settings))
+        // Datasets
+        .route("/sessions/{session_id}/datasets", get(list_session_datasets))
+        .route("/sessions/{session_id}/datasets/reload", post(reload_session_datasets))
         // Database health
         .route("/db/health", get(db_health))
         .route("/db/stats", get(db_stats))
@@ -352,6 +358,70 @@ async fn db_stats(State(state): State<ConversationState>) -> impl IntoResponse {
         Err(e) => {
             let (status, json) = error_response(e);
             (status, Json(ApiResponse::<crate::db::DbStats>::error(json.0.error.unwrap_or_default())))
+        }
+    }
+}
+
+// =============================================================================
+// Tool Call Routes
+// =============================================================================
+
+/// Get tool calls for a conversation.
+async fn get_conversation_tool_calls(
+    State(state): State<ConversationState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    match state.session_manager.get_tool_calls_for_conversation(&id).await {
+        Ok(tool_calls) => (StatusCode::OK, Json(ApiResponse::success(tool_calls))),
+        Err(e) => {
+            let (status, json) = error_response(e);
+            (status, Json(ApiResponse::<Vec<ToolCall>>::error(json.0.error.unwrap_or_default())))
+        }
+    }
+}
+
+/// Get tool calls for a specific message.
+async fn get_message_tool_calls(
+    State(state): State<ConversationState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    match state.session_manager.get_tool_calls_for_message(&id).await {
+        Ok(tool_calls) => (StatusCode::OK, Json(ApiResponse::success(tool_calls))),
+        Err(e) => {
+            let (status, json) = error_response(e);
+            (status, Json(ApiResponse::<Vec<ToolCall>>::error(json.0.error.unwrap_or_default())))
+        }
+    }
+}
+
+// =============================================================================
+// Dataset Routes
+// =============================================================================
+
+/// List all dataset metadata for a session.
+async fn list_session_datasets(
+    State(state): State<ConversationState>,
+    Path(session_id): Path<String>,
+) -> impl IntoResponse {
+    match state.session_manager.get_datasets_for_session(&session_id).await {
+        Ok(datasets) => (StatusCode::OK, Json(ApiResponse::success(datasets))),
+        Err(e) => {
+            let (status, json) = error_response(e);
+            (status, Json(ApiResponse::<Vec<DatasetMeta>>::error(json.0.error.unwrap_or_default())))
+        }
+    }
+}
+
+/// Reload all datasets for a session from their original source paths.
+async fn reload_session_datasets(
+    State(state): State<ConversationState>,
+    Path(session_id): Path<String>,
+) -> impl IntoResponse {
+    match state.session_manager.reload_session_datasets(&session_id).await {
+        Ok(result) => (StatusCode::OK, Json(ApiResponse::success(result))),
+        Err(e) => {
+            let (status, json) = error_response(e);
+            (status, Json(ApiResponse::<ReloadResult>::error(json.0.error.unwrap_or_default())))
         }
     }
 }

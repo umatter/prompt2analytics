@@ -392,12 +392,10 @@ fn find_item_end(events: &[Event]) -> usize {
 fn render_table_content(events: &[Event]) -> Vec<Element> {
     let mut elements: Vec<Element> = Vec::new();
     let mut idx = 0;
-    let mut in_head = false;
 
     while idx < events.len() {
         match &events[idx] {
             Event::Start(Tag::TableHead) => {
-                in_head = true;
                 let end_idx = find_table_section_end(&events[idx..], TagEnd::TableHead);
                 let rows = render_table_rows(&events[idx + 1..idx + end_idx], true);
                 elements.push(rsx! {
@@ -406,9 +404,8 @@ fn render_table_content(events: &[Event]) -> Vec<Element> {
                     }
                 });
                 idx += end_idx + 1;
-                in_head = false;
             }
-            Event::Start(Tag::TableRow) if !in_head => {
+            Event::Start(Tag::TableRow) => {
                 // Body rows
                 let end_idx = find_table_section_end(&events[idx..], TagEnd::TableRow);
                 let cells = render_table_cells(&events[idx + 1..idx + end_idx], false);

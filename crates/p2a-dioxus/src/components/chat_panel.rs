@@ -1,15 +1,10 @@
 //! Main chat panel component
 
 use dioxus::prelude::*;
-use wasm_bindgen::JsValue;
 
-use crate::api::{api, stream_chat, StreamEvent};
+use crate::api::{api, stream_chat, PersistedToolCall, StreamEvent};
 use crate::components::{ChatInput, MessageList, SettingsModal};
-use crate::state::{ChatMessage, ChatState, ConversationState, SessionState, Settings};
-
-fn log(msg: &str) {
-    web_sys::console::log_1(&JsValue::from_str(msg));
-}
+use crate::state::{ChatMessage, ChatState, ConversationState, SessionState, Settings, ToolCallInfo};
 
 /// Chat panel component - main chat interface
 #[component]
@@ -33,20 +28,54 @@ pub fn ChatPanel() -> Element {
 
         // If the conversation changed, load its messages
         if current_conv_id != last_id {
-            if let Some(ref conv_id) = current_conv_id {
+            if let Some(conv_id) = current_conv_id.clone() {
                 let messages = conv_state.current_messages.clone();
                 let mut chat = chat_state;
+                let conv_id_for_async = conv_id.clone();
 
-                // Clear existing messages and load from conversation
+                // Clear existing messages first
                 chat.write().clear_messages();
 
-                // Convert conversation messages to chat messages
-                for msg in messages {
-                    let chat_msg = ChatMessage::from_conversation_message(&msg);
+                // Convert conversation messages to chat messages (without tool calls first)
+                for msg in messages.iter() {
+                    let chat_msg = ChatMessage::from_conversation_message(msg);
                     chat.write().messages.push(chat_msg);
                 }
 
-                last_loaded_conv_id.set(current_conv_id.clone());
+                last_loaded_conv_id.set(current_conv_id);
+
+                // Load tool calls asynchronously and attach them to messages
+                spawn(async move {
+                    let client = api();
+                    match client.get_conversation_tool_calls(&conv_id_for_async).await {
+                        Ok(tool_calls) => {
+                            if !tool_calls.is_empty() {
+                                tracing::debug!("[ChatPanel] Loaded {} tool calls", tool_calls.len());
+
+                                // Group tool calls by message_id
+                                let mut tool_calls_by_message: std::collections::HashMap<String, Vec<PersistedToolCall>> =
+                                    std::collections::HashMap::new();
+                                for tc in tool_calls {
+                                    tool_calls_by_message
+                                        .entry(tc.message_id.clone())
+                                        .or_default()
+                                        .push(tc);
+                                }
+
+                                // Update messages with their tool calls
+                                let mut chat_write = chat.write();
+                                for msg in chat_write.messages.iter_mut() {
+                                    if let Some(tcs) = tool_calls_by_message.get(&msg.id) {
+                                        msg.tool_calls = tcs.iter().map(ToolCallInfo::from).collect();
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!("[ChatPanel] Failed to load tool calls: {}", e);
+                        }
+                    }
+                });
             } else {
                 // No conversation selected, clear chat
                 chat_state.write().clear_messages();
@@ -64,33 +93,33 @@ pub fn ChatPanel() -> Element {
 
     // Handle send message
     let handle_send = move |message: String| {
-        log(&format!("[ChatPanel] handle_send called with: {}", message));
+        tracing::debug!("[ChatPanel] handle_send called with: {}", message);
         let mut session = session_state;
         let mut chat = chat_state;
         let mut conv = conversation_state;
         let settings = settings;
 
         spawn(async move {
-            log("[ChatPanel] spawn started");
+            tracing::debug!("[ChatPanel] spawn started");
 
             // Check if we already have a session ID (without holding write guard across await)
             let existing_id = session.read().session_id.clone();
 
             let session_id = if let Some(id) = existing_id {
-                log(&format!("[ChatPanel] Using existing session: {}", id));
+                tracing::debug!("[ChatPanel] Using existing session: {}", id);
                 id
             } else {
                 // Create new session - do the async work first, then update state
-                log("[ChatPanel] Creating new session");
+                tracing::debug!("[ChatPanel] Creating new session");
                 let state = session.read().clone();
                 match state.initialize().await {
                     Ok(id) => {
-                        log(&format!("[ChatPanel] Created session: {}", id));
+                        tracing::debug!("[ChatPanel] Created session: {}", id);
                         session.write().set_session_id(id.clone());
                         id
                     }
                     Err(e) => {
-                        log(&format!("[ChatPanel] Session error: {}", e));
+                        tracing::error!("[ChatPanel] Session error: {}", e);
                         chat.write().set_error(Some(format!("Session error: {}", e)));
                         return;
                     }
@@ -114,7 +143,7 @@ pub fn ChatPanel() -> Element {
                             id
                         }
                         Err(e) => {
-                            log(&format!("[ChatPanel] Failed to create conversation: {}", e));
+                            tracing::warn!("[ChatPanel] Failed to create conversation: {}", e);
                             // Continue without persistence
                             String::new()
                         }
@@ -123,7 +152,7 @@ pub fn ChatPanel() -> Element {
             };
 
             // Start processing
-            log("[ChatPanel] Starting processing");
+            tracing::debug!("[ChatPanel] Starting processing");
             chat.write().start_processing();
             chat.write().add_user_message(&message);
             chat.write().add_streaming_message();
@@ -135,7 +164,7 @@ pub fn ChatPanel() -> Element {
                 spawn(async move {
                     let client = api();
                     if let Err(e) = client.add_message(&conv_id, "user", &msg).await {
-                        log(&format!("[ChatPanel] Failed to persist user message: {}", e));
+                        tracing::warn!("[ChatPanel] Failed to persist user message: {}", e);
                     }
                 });
             }
@@ -145,7 +174,7 @@ pub fn ChatPanel() -> Element {
             let provider_config = settings.read().to_provider_config();
             let interpret = settings.read().interpret_results;
 
-            log("[ChatPanel] Calling stream_chat");
+            tracing::debug!("[ChatPanel] Calling stream_chat");
 
             // Clone conversation_id for the closure
             let conv_id_for_done = conversation_id.clone();
@@ -158,8 +187,9 @@ pub fn ChatPanel() -> Element {
                 history,
                 provider_config,
                 interpret,
+                Some(conversation_id.clone()),
                 |event| {
-                    log(&format!("[ChatPanel] Got event: {:?}", std::mem::discriminant(&event)));
+                    tracing::debug!("[ChatPanel] Got event: {:?}", std::mem::discriminant(&event));
                     match event {
                         StreamEvent::Content { text } => {
                             chat.write().append_content(&text);
@@ -190,7 +220,7 @@ pub fn ChatPanel() -> Element {
                                 spawn(async move {
                                     let client = api();
                                     if let Err(e) = client.add_message(&conv_id, "assistant", &content).await {
-                                        log(&format!("[ChatPanel] Failed to persist assistant message: {}", e));
+                                        tracing::warn!("[ChatPanel] Failed to persist assistant message: {}", e);
                                     }
                                 });
                             }
@@ -203,14 +233,14 @@ pub fn ChatPanel() -> Element {
             )
             .await;
 
-            log(&format!("[ChatPanel] stream_chat returned: {:?}", result.is_ok()));
+            tracing::debug!("[ChatPanel] stream_chat returned: {:?}", result.is_ok());
             if let Err(e) = result {
-                log(&format!("[ChatPanel] Stream error: {}", e));
-                chat.write().set_error(Some(e));
+                tracing::error!("[ChatPanel] Stream error: {}", e);
+                chat.write().set_error(Some(e.to_string()));
             }
 
             chat.write().stop_processing();
-            log("[ChatPanel] Processing stopped");
+            tracing::debug!("[ChatPanel] Processing stopped");
         });
     };
 

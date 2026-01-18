@@ -2,6 +2,7 @@
 
 use clap::Subcommand;
 use p2a_core::{Dataset, DataLoader};
+use p2a_core::simulation::{generate_random_data, ColumnSpec, Distribution};
 use polars::prelude::*;
 use std::path::PathBuf;
 
@@ -38,6 +39,26 @@ pub enum DataCommands {
         #[arg(short, long, default_value = "10")]
         n: usize,
     },
+
+    /// Generate random data with specified distributions
+    Generate {
+        /// Number of rows to generate
+        #[arg(short = 'n', long, default_value = "100")]
+        rows: usize,
+
+        /// Name to assign to the generated dataset
+        #[arg(short = 'd', long, default_value = "generated")]
+        name: String,
+
+        /// Column specifications in JSON format
+        /// Example: '[{"name": "x", "distribution": {"type": "normal", "mean": 0, "std": 1}}]'
+        #[arg(short, long)]
+        columns: String,
+
+        /// Random seed for reproducibility
+        #[arg(short, long)]
+        seed: Option<u64>,
+    },
 }
 
 pub fn execute(
@@ -52,6 +73,9 @@ pub fn execute(
         DataCommands::List => execute_list(format, session),
         DataCommands::Describe { dataset } => execute_describe(dataset, format, session),
         DataCommands::Head { dataset, n } => execute_head(dataset, *n, format, session),
+        DataCommands::Generate { rows, name, columns, seed } => {
+            execute_generate(*rows, name, columns, *seed, format, session)
+        }
     }
 }
 
@@ -255,5 +279,118 @@ fn execute_head(
             print_error(&format!("Dataset '{}' not found", dataset_name), format);
         }
     }
+    Ok(())
+}
+
+/// Column spec input for JSON parsing
+#[derive(serde::Deserialize)]
+struct ColumnSpecInput {
+    name: String,
+    distribution: serde_json::Value,
+}
+
+fn execute_generate(
+    n_rows: usize,
+    name: &str,
+    columns_json: &str,
+    seed: Option<u64>,
+    format: &OutputFormat,
+    session: Option<&mut SessionManager>,
+) -> anyhow::Result<()> {
+    // Parse the columns JSON
+    let col_inputs: Vec<ColumnSpecInput> = match serde_json::from_str(columns_json) {
+        Ok(cols) => cols,
+        Err(e) => {
+            print_error(
+                &format!(
+                    "Invalid columns JSON: {}\n\n\
+                     Expected format: '[{{\"name\": \"col1\", \"distribution\": {{\"type\": \"normal\", \"mean\": 0, \"std\": 1}}}}]'\n\n\
+                     Available distribution types:\n\
+                     - uniform: {{\"type\": \"uniform\", \"min\": 0.0, \"max\": 1.0}}\n\
+                     - normal: {{\"type\": \"normal\", \"mean\": 0.0, \"std\": 1.0}}\n\
+                     - binomial: {{\"type\": \"binomial\", \"n\": 10, \"p\": 0.5}}\n\
+                     - poisson: {{\"type\": \"poisson\", \"lambda\": 5.0}}\n\
+                     - exponential: {{\"type\": \"exponential\", \"rate\": 1.0}}\n\
+                     - bernoulli: {{\"type\": \"bernoulli\", \"p\": 0.5}}\n\
+                     - categorical: {{\"type\": \"categorical\", \"categories\": [\"A\", \"B\", \"C\"]}}\n\
+                     - uniform_int: {{\"type\": \"uniform_int\", \"min\": 1, \"max\": 10}}\n\
+                     - sequence: {{\"type\": \"sequence\", \"start\": 1}}\n\
+                     - constant: {{\"type\": \"constant\", \"value\": 42.0}}\n\
+                     - constant_string: {{\"type\": \"constant_string\", \"value\": \"text\"}}",
+                    e
+                ),
+                format,
+            );
+            return Ok(());
+        }
+    };
+
+    // Convert to ColumnSpec
+    let mut columns: Vec<ColumnSpec> = Vec::with_capacity(col_inputs.len());
+    for col_input in col_inputs {
+        let dist: Distribution = match serde_json::from_value(col_input.distribution) {
+            Ok(d) => d,
+            Err(e) => {
+                print_error(
+                    &format!("Invalid distribution for column '{}': {}", col_input.name, e),
+                    format,
+                );
+                return Ok(());
+            }
+        };
+        columns.push(ColumnSpec::new(&col_input.name, dist));
+    }
+
+    if columns.is_empty() {
+        print_error("At least one column specification is required", format);
+        return Ok(());
+    }
+
+    // Generate the data
+    let dataset = match generate_random_data(n_rows, columns, seed) {
+        Ok(ds) => ds,
+        Err(e) => {
+            print_error(&format!("Failed to generate data: {}", e), format);
+            return Ok(());
+        }
+    };
+
+    let df = dataset.df();
+    let nrows = df.height();
+    let ncols = df.width();
+    let col_names: Vec<String> = df
+        .get_column_names()
+        .into_iter()
+        .map(|s| s.to_string())
+        .collect();
+
+    // Register with session if available
+    if let Some(mgr) = session {
+        mgr.store_dataset(name.to_string(), dataset);
+    }
+
+    // Output success message
+    match format {
+        OutputFormat::Json => {
+            let json = serde_json::json!({
+                "name": name,
+                "rows": nrows,
+                "columns": ncols,
+                "column_names": col_names,
+                "seed": seed,
+            });
+            println!("{}", serde_json::to_string_pretty(&json)?);
+        }
+        _ => {
+            println!("Generated random dataset '{}'", name);
+            println!("  Rows: {}", nrows);
+            println!("  Columns: {}", ncols);
+            println!("  Column names: {}", col_names.join(", "));
+            if let Some(s) = seed {
+                println!("  Seed: {}", s);
+            }
+        }
+    }
+
     Ok(())
 }

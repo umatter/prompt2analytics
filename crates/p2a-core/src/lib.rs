@@ -19,6 +19,7 @@ pub mod forecasting;
 pub mod ml;
 pub mod visualization;
 pub mod reports;
+pub mod simulation;
 
 // Re-export foundational types
 pub use errors::{EconError, EconResult, EstimationWarning};
@@ -76,6 +77,9 @@ pub use visualization::{
 };
 pub use reports::{
     HtmlReport, ReportSection, ReportTable, ReportContent, generate_html_report,
+};
+pub use simulation::{
+    generate_random_data, ColumnSpec, Distribution, GenerationError,
 };
 
 /// Re-export polars for downstream use

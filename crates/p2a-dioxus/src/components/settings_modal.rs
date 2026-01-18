@@ -1,6 +1,7 @@
 //! Settings modal component for configuring LLM provider
 
 use dioxus::prelude::*;
+use dioxus::events::FormData;
 
 use crate::api::ApiClient;
 use crate::state::settings::{Provider, Settings};
@@ -129,15 +130,14 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
     // Handle file selection from browser file picker
     let handle_file_select = move |evt: Event<FormData>| {
         let files = evt.files();
-        if let Some(file_data) = files.first() {
-            let file_name = file_data.name();
+        if let Some(file) = files.into_iter().next() {
+            let file_name = file.name();
             selected_file_name.set(Some(file_name.clone()));
             load_status.set(Some("Reading file...".to_string()));
             load_error.set(None);
 
-            let file_data = file_data.clone();
             spawn(async move {
-                match file_data.read_bytes().await {
+                match file.read_bytes().await {
                     Ok(bytes) => {
                         use base64::{Engine as _, engine::general_purpose::STANDARD};
                         let base64_content = STANDARD.encode(&bytes);
@@ -145,7 +145,7 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
                         load_status.set(Some(format!("Selected: {}", file_name)));
                     }
                     Err(e) => {
-                        load_error.set(Some(format!("Failed to read file: {:?}", e)));
+                        load_error.set(Some(format!("Failed to read file: {}", e)));
                         load_status.set(None);
                     }
                 }

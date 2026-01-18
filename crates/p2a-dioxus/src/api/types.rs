@@ -114,6 +114,9 @@ pub struct LlmChatRequest {
     pub history: Option<Vec<Message>>,
     #[serde(default = "default_interpret")]
     pub interpret: bool,
+    /// Optional conversation ID for persistence
+    #[serde(default)]
+    pub conversation_id: Option<String>,
 }
 
 fn default_interpret() -> bool {
@@ -240,4 +243,76 @@ pub struct UpdateConversationRequest {
 pub struct AddMessageRequest {
     pub role: String,
     pub content: String,
+}
+
+// === Persisted Tool Call types ===
+
+/// Persisted tool call (from database)
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PersistedToolCall {
+    pub id: String,
+    pub message_id: String,
+    pub conversation_id: String,
+    pub tool_name: String,
+    pub arguments: String,
+    #[serde(default)]
+    pub result: Option<String>,
+    #[serde(default)]
+    pub error: Option<String>,
+    pub status: String,
+    pub started_at: String,
+    #[serde(default)]
+    pub completed_at: Option<String>,
+    #[serde(default)]
+    pub duration_ms: Option<i32>,
+}
+
+// === Dataset Metadata types ===
+
+/// Dataset metadata for persistence
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DatasetMeta {
+    pub id: String,
+    pub session_id: String,
+    pub name: String,
+    #[serde(default)]
+    pub source_path: Option<String>,
+    pub source_type: String,
+    pub row_count: i32,
+    pub column_count: i32,
+    pub column_names: Vec<String>,
+    pub loaded_at: String,
+    #[serde(default)]
+    pub file_size_bytes: Option<i64>,
+}
+
+/// Result of reloading session datasets
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ReloadResult {
+    /// Names of successfully reloaded datasets
+    pub succeeded: Vec<String>,
+    /// Datasets that failed to reload
+    pub failed: Vec<ReloadFailure>,
+    /// Datasets that were skipped
+    pub skipped: Vec<ReloadSkip>,
+}
+
+/// A dataset that failed to reload
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReloadFailure {
+    /// Dataset name
+    pub name: String,
+    /// Original source path
+    pub source_path: String,
+    /// Error message
+    pub error: String,
+}
+
+/// A dataset that was skipped during reload
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReloadSkip {
+    /// Dataset name
+    pub name: String,
+    /// Reason for skipping
+    pub reason: String,
 }

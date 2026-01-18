@@ -3,8 +3,7 @@
 A comprehensive analytics toolkit exposing econometrics, machine learning, and visualization capabilities through multiple interfaces:
 - **CLI (`p2a`)**: Direct command-line execution for scripted workflows
 - **MCP Server**: Model Context Protocol integration for AI assistants
-- **Desktop App**: Tauri application with LLM-powered natural language analysis
-- **Web App (Dioxus)**: Pure Rust web frontend (experimental prototype)
+- **Dioxus App**: Cross-platform frontend (web, desktop, mobile) with LLM-powered natural language analysis
 
 ## Features
 
@@ -43,10 +42,10 @@ A comprehensive analytics toolkit exposing econometrics, machine learning, and v
 - Script export for sharing and automation
 - JSON output format for programmatic use
 
-### Desktop Application
-- Tauri 2.0 + SvelteKit interface
+### Dioxus Cross-Platform App
+- Pure Rust frontend compiled to WASM (web) or native (desktop/mobile)
 - Multi-provider LLM integration (Ollama, Anthropic, OpenAI)
-- Conversation history with SQLite persistence
+- Conversation history with SurrealDB persistence
 - Natural language data analysis
 
 ## Installation
@@ -76,9 +75,13 @@ cargo build --release -p p2a-cli
 # Build the MCP server
 cargo build --release -p p2a-mcp
 
-# Build the desktop application (optional)
-cd crates/p2a-desktop/ui && npm install && cd ../../..
-cargo build --release -p p2a-desktop
+# Build the Dioxus app (web - requires dioxus-cli)
+cargo install dioxus-cli
+rustup target add wasm32-unknown-unknown
+cd crates/p2a-dioxus && dx build --release && cd ../..
+
+# Build the Dioxus app (desktop)
+cd crates/p2a-dioxus && dx build --release --platform desktop && cd ../..
 ```
 
 The CLI binary will be at `target/release/p2a`.
@@ -151,43 +154,35 @@ The MCP server exposes 55 analytics tools via the Model Context Protocol. Config
 }
 ```
 
-### Desktop Application
+### Dioxus App (Web, Desktop, Mobile)
 
-```bash
-./target/release/p2a-desktop
-```
-
-The desktop app provides:
-- **Chat Panel**: Natural language interface to analytics tools
-- **Data Panel**: Load and preview datasets
-- **Results Panel**: View analysis results and visualizations
-
-### Dioxus Web App (Experimental)
-
-A pure Rust web frontend built with Dioxus 0.7, compiling to WebAssembly:
+A cross-platform frontend built with Dioxus 0.7:
 
 ```bash
 # Install Dioxus CLI (if not already installed)
 cargo install dioxus-cli
 
-# Install WASM target
+# Install WASM target for web builds
 rustup target add wasm32-unknown-unknown
 
 # Start backend in one terminal
 cargo run -p p2a-mcp --features full -- --transport http --port 8080 --cors-permissive
 
-# Start Dioxus dev server in another terminal
+# Start Dioxus dev server (web) in another terminal
 cd crates/p2a-dioxus
 dx serve
+
+# Or run as desktop app
+dx serve --platform desktop
 ```
 
-Open http://localhost:8080 in your browser. Features:
+Open http://localhost:8080 in your browser (web) or the native window (desktop). Features:
 - Chat interface with streaming LLM responses
 - Support for Ollama, Anthropic, and OpenAI providers
 - **Conversation management**: Create, rename, archive, and delete conversations
 - **Persistent history**: Messages are saved to SurrealDB backend
 - **Sidebar UI**: Collapsible conversation list with search
-- Settings persistence via localStorage
+- Settings persistence (localStorage on web, file-based on native)
 - Tool call display with expandable details
 - Markdown rendering for assistant messages
 
@@ -265,15 +260,16 @@ prompt2analytics/
 │   │   │       ├── models.rs      # Data models
 │   │   │       ├── conversations.rs # Conversation CRUD
 │   │   │       └── sessions.rs    # Session persistence
-│   ├── p2a-desktop/       # Tauri desktop application
-│   │   ├── src/           # Rust backend
-│   │   └── ui/            # SvelteKit frontend
-│   └── p2a-dioxus/        # Dioxus web app (experimental)
-│       ├── src/           # Pure Rust frontend (WASM)
+│   └── p2a-dioxus/        # Cross-platform Dioxus app (web/desktop/mobile)
+│       ├── src/           # Pure Rust frontend
 │       │   ├── api/       # HTTP client and SSE streaming
 │       │   │   ├── client.rs  # API client with conversation endpoints
 │       │   │   ├── sse.rs     # Server-sent events for streaming
 │       │   │   └── types.rs   # Request/response types
+│       │   ├── platform/  # Platform abstractions
+│       │   │   ├── storage.rs   # Storage (localStorage/file)
+│       │   │   ├── http.rs      # HTTP (fetch/reqwest)
+│       │   │   └── streaming.rs # SSE streaming
 │       │   ├── components/# UI components
 │       │   │   ├── chat_panel.rs    # Main chat interface
 │       │   │   ├── conversation_sidebar.rs # Conversation list
@@ -338,12 +334,12 @@ du -sh target/
 
 ## Docker Deployment
 
-Docker is provided for **deployment** rather than development. For active development, use native tools (`cargo run`, `npm run dev`) for faster iteration.
+Docker is provided for **deployment** rather than development. For active development, use native tools (`cargo run`, `dx serve`) for faster iteration.
 
 ### Quick Start
 
 ```bash
-# Build and run all services
+# Build and run the backend
 docker compose up --build
 
 # Or run in detached mode
@@ -352,7 +348,6 @@ docker compose up --build -d
 
 This starts:
 - **Backend** (p2a-mcp): http://localhost:8080
-- **Frontend** (p2a-web): http://localhost:3000
 
 ### With Local LLM (Ollama)
 
@@ -365,7 +360,6 @@ docker compose --profile with-ollama up --build
 
 ```bash
 curl http://localhost:8080/health   # Backend
-curl http://localhost:3000          # Frontend
 ```
 
 ### Development Recommendation
@@ -374,10 +368,13 @@ For development, run services natively:
 
 ```bash
 # Terminal 1: Backend
-cargo run -p p2a-mcp --features full -- --transport http --host 127.0.0.1 --port 8080
+cargo run -p p2a-mcp --features full -- --transport http --host 127.0.0.1 --port 8080 --cors-permissive
 
-# Terminal 2: Frontend
-cd p2a-web && npm run dev
+# Terminal 2: Frontend (web)
+cd crates/p2a-dioxus && dx serve
+
+# Or for desktop
+cd crates/p2a-dioxus && dx serve --platform desktop
 ```
 
 This provides faster rebuilds and hot module replacement.

@@ -317,6 +317,152 @@ impl PersistentSessionManager {
     pub fn db(&self) -> &Arc<DbConnection> {
         &self.db
     }
+
+    // ==================== Tool Call Operations ====================
+
+    /// Get tool calls for a conversation.
+    pub async fn get_tool_calls_for_conversation(
+        &self,
+        conversation_id: &str,
+    ) -> Result<Vec<crate::db::ToolCall>, PersistentSessionError> {
+        Ok(self.db.get_tool_calls_for_conversation(conversation_id).await?)
+    }
+
+    /// Get tool calls for a specific message.
+    pub async fn get_tool_calls_for_message(
+        &self,
+        message_id: &str,
+    ) -> Result<Vec<crate::db::ToolCall>, PersistentSessionError> {
+        Ok(self.db.get_tool_calls_for_message(message_id).await?)
+    }
+
+    // ==================== Dataset Meta Operations ====================
+
+    /// Get all dataset metadata for a session.
+    pub async fn get_datasets_for_session(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<crate::db::DatasetMeta>, PersistentSessionError> {
+        Ok(self.db.get_datasets_for_session(session_id).await?)
+    }
+
+    /// Save dataset metadata.
+    pub async fn save_dataset_meta(
+        &self,
+        meta: &crate::db::DatasetMeta,
+    ) -> Result<crate::db::DatasetMeta, PersistentSessionError> {
+        Ok(self.db.save_dataset_meta(meta).await?)
+    }
+
+    /// Reload datasets for a session from their original source paths.
+    pub async fn reload_session_datasets(
+        &self,
+        session_id: &str,
+    ) -> Result<ReloadResult, PersistentSessionError> {
+        use p2a_core::DataLoader;
+        use std::path::PathBuf;
+
+        // Get the session (to load datasets into)
+        let session = self.get_session(session_id).await?;
+        let mut datasets = session.datasets.write().await;
+
+        // Get all dataset metadata for this session
+        let metas = self.db.get_datasets_for_session(session_id).await?;
+
+        let mut result = ReloadResult::default();
+
+        for meta in metas {
+            // Skip if no source path (e.g., uploaded datasets without file path)
+            let source_path = match &meta.source_path {
+                Some(path) => path.clone(),
+                None => {
+                    result.skipped.push(ReloadSkip {
+                        name: meta.name.clone(),
+                        reason: "No source path stored".to_string(),
+                    });
+                    continue;
+                }
+            };
+
+            // Check if file exists
+            let path = PathBuf::from(&source_path);
+            if !path.exists() {
+                result.failed.push(ReloadFailure {
+                    name: meta.name.clone(),
+                    source_path: source_path.clone(),
+                    error: "File not found".to_string(),
+                });
+                continue;
+            }
+
+            // Try to load the dataset
+            match DataLoader::load(&path) {
+                Ok(dataset) => {
+                    datasets.insert(meta.name.clone(), dataset);
+                    result.succeeded.push(meta.name.clone());
+                    tracing::info!(
+                        dataset = %meta.name,
+                        path = %source_path,
+                        "Reloaded dataset from file"
+                    );
+                }
+                Err(e) => {
+                    result.failed.push(ReloadFailure {
+                        name: meta.name.clone(),
+                        source_path: source_path.clone(),
+                        error: e.to_string(),
+                    });
+                    tracing::warn!(
+                        dataset = %meta.name,
+                        path = %source_path,
+                        error = %e,
+                        "Failed to reload dataset"
+                    );
+                }
+            }
+        }
+
+        tracing::info!(
+            session_id = %session_id,
+            succeeded = result.succeeded.len(),
+            failed = result.failed.len(),
+            skipped = result.skipped.len(),
+            "Dataset reload completed"
+        );
+
+        Ok(result)
+    }
+}
+
+/// Result of reloading session datasets.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct ReloadResult {
+    /// Names of successfully reloaded datasets
+    pub succeeded: Vec<String>,
+    /// Datasets that failed to reload
+    pub failed: Vec<ReloadFailure>,
+    /// Datasets that were skipped
+    pub skipped: Vec<ReloadSkip>,
+}
+
+/// A dataset that failed to reload.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ReloadFailure {
+    /// Dataset name
+    pub name: String,
+    /// Original source path
+    pub source_path: String,
+    /// Error message
+    pub error: String,
+}
+
+/// A dataset that was skipped during reload.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ReloadSkip {
+    /// Dataset name
+    pub name: String,
+    /// Reason for skipping
+    pub reason: String,
 }
 
 /// Errors from persistent session management.

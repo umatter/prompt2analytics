@@ -1,11 +1,10 @@
 [application]
-name = "p2a-dioxus"
+name = "prompt2analytics"
 default_platform = "web"
-out_dir = "dist"
-asset_dir = "assets"
 
 [web.app]
 title = "prompt2analytics"
+out_dir = "dist/web"
 
 [web.watcher]
 index_on_404 = true
@@ -19,6 +18,30 @@ style = ["assets/styles.css"]
 
 [web.wasm_opt]
 level = "4"
+
+[desktop]
+out_dir = "dist/desktop"
+
+[desktop.window]
+title = "prompt2analytics"
+width = 1200
+height = 800
+resizable = true
+decorations = true
+
+[mobile.ios]
+out_dir = "dist/ios"
+
+[mobile.ios.app]
+bundle_identifier = "io.github.prompt2analytics"
+title = "prompt2analytics"
+
+[mobile.android]
+out_dir = "dist/android"
+
+[mobile.android.app]
+package = "io.github.prompt2analytics"
+title = "prompt2analytics"
 
 [bundle]
 identifier = "io.github.prompt2analytics"

@@ -1,13 +1,8 @@
 //! Chat input component with keyboard handling
 
 use dioxus::prelude::*;
-use wasm_bindgen::JsValue;
 
 use crate::state::ChatState;
-
-fn log(msg: &str) {
-    web_sys::console::log_1(&JsValue::from_str(msg));
-}
 
 /// ChatInput component - textarea with send button
 #[component]
@@ -18,7 +13,7 @@ pub fn ChatInput(on_send: EventHandler<String>) -> Element {
     let is_processing = chat_state.read().is_processing;
 
     // Debug log on every render
-    log(&format!("[ChatInput] Render, is_processing: {}", is_processing));
+    tracing::debug!("[ChatInput] Render, is_processing: {}", is_processing);
 
     // Handle key events
     let handle_keydown = move |evt: Event<KeyboardData>| {
@@ -65,16 +60,16 @@ pub fn ChatInput(on_send: EventHandler<String>) -> Element {
 
     // Handle send button click
     let handle_send = move |_| {
-        log(&format!("[ChatInput] Send clicked, is_processing: {}", is_processing));
+        tracing::debug!("[ChatInput] Send clicked, is_processing: {}", is_processing);
         let value = textarea_value.read().clone();
-        log(&format!("[ChatInput] Value: '{}', empty: {}", value, value.trim().is_empty()));
+        tracing::debug!("[ChatInput] Value: '{}', empty: {}", value, value.trim().is_empty());
         if !value.trim().is_empty() && !is_processing {
-            log("[ChatInput] Calling on_send");
+            tracing::debug!("[ChatInput] Calling on_send");
             on_send.call(value.clone());
             textarea_value.set(String::new());
             chat_state.write().reset_history_index();
         } else {
-            log("[ChatInput] Skipped send - empty or processing");
+            tracing::debug!("[ChatInput] Skipped send - empty or processing");
         }
     };
 

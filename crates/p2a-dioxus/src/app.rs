@@ -2,7 +2,7 @@
 
 use dioxus::prelude::*;
 
-use crate::components::{ChatPanel, ConversationSidebar};
+use crate::components::{ChatPanel, ConversationSidebar, DatasetSidebar};
 use crate::state::{ChatState, ConversationState, SessionState, Settings};
 
 /// Root application component
@@ -16,6 +16,7 @@ pub fn App() -> Element {
 
     // Sidebar visibility state
     let mut sidebar_visible = use_signal(|| true);
+    let mut dataset_sidebar_visible = use_signal(|| true);
 
     // Provide state to all child components via context
     use_context_provider(|| session_state);
@@ -37,6 +38,12 @@ pub fn App() -> Element {
     let handle_toggle_sidebar = move |_| {
         let current = *sidebar_visible.read();
         sidebar_visible.set(!current);
+    };
+
+    // Handle dataset sidebar toggle
+    let handle_toggle_dataset_sidebar = move |_| {
+        let current = *dataset_sidebar_visible.read();
+        dataset_sidebar_visible.set(!current);
     };
 
     rsx! {
@@ -92,8 +99,59 @@ pub fn App() -> Element {
 
             // Main chat area
             div {
-                class: "flex-1 min-w-0",
-                ChatPanel {}
+                class: "flex-1 min-w-0 flex",
+                // Chat panel
+                div {
+                    class: "flex-1 min-w-0",
+                    ChatPanel {}
+                }
+
+                // Dataset sidebar toggle button (visible when sidebar is hidden)
+                if !*dataset_sidebar_visible.read() {
+                    button {
+                        class: "absolute right-2 top-4 z-50 p-2 bg-white dark:bg-gray-800 rounded-lg shadow-lg border border-gray-200 dark:border-gray-700 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors",
+                        onclick: handle_toggle_dataset_sidebar,
+                        title: "Show Datasets",
+                        svg {
+                            class: "w-5 h-5 text-gray-600 dark:text-gray-300",
+                            fill: "none",
+                            stroke: "currentColor",
+                            view_box: "0 0 24 24",
+                            path {
+                                stroke_linecap: "round",
+                                stroke_linejoin: "round",
+                                stroke_width: "2",
+                                d: "M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4"
+                            }
+                        }
+                    }
+                }
+
+                // Dataset sidebar
+                if *dataset_sidebar_visible.read() {
+                    div {
+                        class: "w-72 flex-shrink-0 relative",
+                        // Close sidebar button
+                        button {
+                            class: "absolute left-2 top-4 z-10 p-1.5 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-700 rounded transition-colors",
+                            onclick: handle_toggle_dataset_sidebar,
+                            title: "Hide Datasets",
+                            svg {
+                                class: "w-4 h-4",
+                                fill: "none",
+                                stroke: "currentColor",
+                                view_box: "0 0 24 24",
+                                path {
+                                    stroke_linecap: "round",
+                                    stroke_linejoin: "round",
+                                    stroke_width: "2",
+                                    d: "M13 5l7 7-7 7M5 5l7 7-7 7"
+                                }
+                            }
+                        }
+                        DatasetSidebar {}
+                    }
+                }
             }
         }
     }

@@ -3,7 +3,6 @@ resolver = "2"
 members = [
     "crates/p2a-core",
     "crates/p2a-mcp",
-    "crates/p2a-desktop",
     "crates/p2a-cli",
     "crates/p2a-dioxus",
 ]
@@ -44,8 +43,9 @@ augurs-core = "0.10"
 augurs-mstl = "0.10"
 augurs-ets = { version = "0.10", features = ["mstl"] }
 
-# Random number generation (for ARIMA forecasting)
+# Random number generation (for ARIMA forecasting and simulation)
 rand = "0.8"
+rand_distr = "0.4"
 
 # File format support
 calamine = "0.32"  # Excel file reading (xlsx, xls, xlsb, ods)

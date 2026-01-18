@@ -1,10 +1,10 @@
 //! HTTP client for communicating with p2a-mcp backend
+//!
+//! Uses platform abstraction to work on web (fetch API) and native (reqwest)
 
 use super::types::*;
+use crate::platform::{create_http_client, HttpClient};
 use serde::Deserialize;
-use wasm_bindgen::prelude::*;
-use wasm_bindgen_futures::JsFuture;
-use web_sys::{Request, RequestInit, RequestMode, Response};
 
 /// Default API base URL
 const DEFAULT_BASE_URL: &str = "http://localhost:8080";
@@ -42,8 +42,14 @@ impl ApiClient {
         T: for<'de> serde::Deserialize<'de>,
     {
         let url = format!("{}{}", self.base_url, endpoint);
-        let response = self.fetch(&url, "GET", None).await?;
-        self.parse_response(response).await
+        let client = create_http_client();
+        let response = client.get(&url).await.map_err(|e| e.to_string())?;
+
+        if !response.is_ok() {
+            return Err(format!("HTTP error: {}", response.status));
+        }
+
+        serde_json::from_str(&response.body).map_err(|e| format!("JSON parse error: {}", e))
     }
 
     /// Perform a POST request with JSON body
@@ -54,71 +60,27 @@ impl ApiClient {
     {
         let url = format!("{}{}", self.base_url, endpoint);
         let body_json = serde_json::to_string(body).map_err(|e| e.to_string())?;
-        let response = self.fetch(&url, "POST", Some(&body_json)).await?;
-        self.parse_response(response).await
+        let client = create_http_client();
+        let response = client.post(&url, &body_json).await.map_err(|e| e.to_string())?;
+
+        if !response.is_ok() {
+            return Err(format!("HTTP error: {}", response.status));
+        }
+
+        serde_json::from_str(&response.body).map_err(|e| format!("JSON parse error: {}", e))
     }
 
     /// Perform a DELETE request
     async fn delete(&self, endpoint: &str) -> Result<(), String> {
         let url = format!("{}{}", self.base_url, endpoint);
-        let _response = self.fetch(&url, "DELETE", None).await?;
+        let client = create_http_client();
+        let response = client.delete(&url).await.map_err(|e| e.to_string())?;
+
+        if !response.is_ok() {
+            return Err(format!("HTTP error: {}", response.status));
+        }
+
         Ok(())
-    }
-
-    /// Internal fetch implementation using web-sys
-    async fn fetch(
-        &self,
-        url: &str,
-        method: &str,
-        body: Option<&str>,
-    ) -> Result<Response, String> {
-        let opts = RequestInit::new();
-        opts.set_method(method);
-        opts.set_mode(RequestMode::Cors);
-
-        if let Some(body_str) = body {
-            opts.set_body(&JsValue::from_str(body_str));
-        }
-
-        let request = Request::new_with_str_and_init(url, &opts).map_err(|e| format!("{e:?}"))?;
-
-        request
-            .headers()
-            .set("Content-Type", "application/json")
-            .map_err(|e| format!("{e:?}"))?;
-
-        let window = web_sys::window().ok_or("No window object")?;
-        let resp_value = JsFuture::from(window.fetch_with_request(&request))
-            .await
-            .map_err(|e| format!("Fetch error: {e:?}"))?;
-
-        let response: Response = resp_value
-            .dyn_into()
-            .map_err(|_| "Response is not a Response object")?;
-
-        if !response.ok() {
-            return Err(format!(
-                "HTTP error: {} {}",
-                response.status(),
-                response.status_text()
-            ));
-        }
-
-        Ok(response)
-    }
-
-    /// Parse JSON response
-    async fn parse_response<T>(&self, response: Response) -> Result<ApiResponse<T>, String>
-    where
-        T: for<'de> serde::Deserialize<'de>,
-    {
-        let text = JsFuture::from(response.text().map_err(|e| format!("{e:?}"))?)
-            .await
-            .map_err(|e| format!("Failed to get response text: {e:?}"))?;
-
-        let text_str = text.as_string().ok_or("Response is not a string")?;
-
-        serde_json::from_str(&text_str).map_err(|e| format!("JSON parse error: {e}"))
     }
 
     // === Session endpoints ===
@@ -202,15 +164,14 @@ impl ApiClient {
     /// Check server health
     pub async fn health(&self) -> Result<HealthResponse, String> {
         let url = format!("{}/health", self.base_url);
-        let response = self.fetch(&url, "GET", None).await?;
+        let client = create_http_client();
+        let response = client.get(&url).await.map_err(|e| e.to_string())?;
 
-        let text = JsFuture::from(response.text().map_err(|e| format!("{e:?}"))?)
-            .await
-            .map_err(|e| format!("Failed to get response text: {e:?}"))?;
+        if !response.is_ok() {
+            return Err(format!("HTTP error: {}", response.status));
+        }
 
-        let text_str = text.as_string().ok_or("Response is not a string")?;
-
-        serde_json::from_str(&text_str).map_err(|e| format!("JSON parse error: {e}"))
+        serde_json::from_str(&response.body).map_err(|e| format!("JSON parse error: {}", e))
     }
 
     /// Get the base URL for SSE streaming
@@ -393,6 +354,85 @@ impl ApiClient {
                 .data
                 .map(|d| d.deleted_count)
                 .ok_or_else(|| "No count in response".to_string())
+        } else {
+            Err(response.error.unwrap_or_else(|| "Unknown error".to_string()))
+        }
+    }
+
+    // === Tool Call History endpoints ===
+
+    /// Get all tool calls for a conversation
+    pub async fn get_conversation_tool_calls(
+        &self,
+        conversation_id: &str,
+    ) -> Result<Vec<PersistedToolCall>, String> {
+        let response: ApiResponse<Vec<PersistedToolCall>> = self
+            .get(&format!("/api/conversations/{conversation_id}/tool-calls"))
+            .await?;
+
+        if response.success {
+            response
+                .data
+                .ok_or_else(|| "No tool calls in response".to_string())
+        } else {
+            Err(response.error.unwrap_or_else(|| "Unknown error".to_string()))
+        }
+    }
+
+    /// Get tool calls for a specific message
+    pub async fn get_message_tool_calls(
+        &self,
+        message_id: &str,
+    ) -> Result<Vec<PersistedToolCall>, String> {
+        let response: ApiResponse<Vec<PersistedToolCall>> = self
+            .get(&format!("/api/messages/{message_id}/tool-calls"))
+            .await?;
+
+        if response.success {
+            response
+                .data
+                .ok_or_else(|| "No tool calls in response".to_string())
+        } else {
+            Err(response.error.unwrap_or_else(|| "Unknown error".to_string()))
+        }
+    }
+
+    // === Dataset Metadata endpoints ===
+
+    /// List all dataset metadata for a session
+    pub async fn list_session_datasets(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<DatasetMeta>, String> {
+        let response: ApiResponse<Vec<DatasetMeta>> = self
+            .get(&format!("/api/sessions/{session_id}/datasets"))
+            .await?;
+
+        if response.success {
+            response
+                .data
+                .ok_or_else(|| "No datasets in response".to_string())
+        } else {
+            Err(response.error.unwrap_or_else(|| "Unknown error".to_string()))
+        }
+    }
+
+    /// Reload all datasets for a session from their original source paths
+    pub async fn reload_session_datasets(
+        &self,
+        session_id: &str,
+    ) -> Result<ReloadResult, String> {
+        let response: ApiResponse<ReloadResult> = self
+            .post(
+                &format!("/api/sessions/{session_id}/datasets/reload"),
+                &serde_json::json!({}),
+            )
+            .await?;
+
+        if response.success {
+            response
+                .data
+                .ok_or_else(|| "No reload result in response".to_string())
         } else {
             Err(response.error.unwrap_or_else(|| "Unknown error".to_string()))
         }

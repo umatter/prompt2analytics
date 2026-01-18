@@ -85,6 +85,8 @@ use p2a_core::{
     ChartConfig,
     // Reports
     HtmlReport, ReportSection, ReportTable,
+    // Simulation
+    simulation::{generate_random_data, ColumnSpec, Distribution},
 };
 
 /// The main analytics server that handles MCP requests.
@@ -1933,6 +1935,38 @@ pub struct SetSeedRequest {
 /// Request to get the current global seed.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct GetSeedRequest {}
+
+/// Column specification for random data generation.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ColumnSpecInput {
+    /// Name of the column
+    #[schemars(description = "Name of the column to generate.")]
+    pub name: String,
+
+    /// Distribution type and parameters
+    #[schemars(description = "Distribution specification. Must include 'type' field and distribution-specific parameters.")]
+    pub distribution: serde_json::Value,
+}
+
+/// Request to generate random data.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct GenerateRandomDataRequest {
+    /// Number of rows to generate
+    #[schemars(description = "Number of rows to generate.")]
+    pub n_rows: usize,
+
+    /// Column specifications
+    #[schemars(description = "Array of column specifications. Each must have 'name' and 'distribution' fields. Distribution types: 'uniform' (min, max), 'normal' (mean, std), 'binomial' (n, p), 'poisson' (lambda), 'exponential' (rate), 'bernoulli' (p), 'categorical' (categories, optional weights), 'uniform_int' (min, max), 'sequence' (start), 'constant' (value), 'constant_string' (value).")]
+    pub columns: Vec<ColumnSpecInput>,
+
+    /// Random seed for reproducibility
+    #[schemars(description = "Optional random seed for reproducible results.")]
+    pub seed: Option<u64>,
+
+    /// Name to assign to the generated dataset
+    #[schemars(description = "Name to assign to the generated dataset. Defaults to 'generated'.")]
+    pub name: Option<String>,
+}
 
 /// Request to visualize hierarchical clustering results as a dendrogram.
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -10297,6 +10331,88 @@ impl AnalyticsServer {
              Per-tool seeds override the global seed.",
             "=".repeat(40),
             seed_status
+        );
+
+        Ok(CallToolResult::success(vec![Content::text(output)]))
+    }
+
+    /// Generate random data with specified distributions.
+    #[tool(description = "Generate a random dataset with specified columns and distributions. Supports: uniform (min, max), normal (mean, std), binomial (n, p), poisson (lambda), exponential (rate), bernoulli (p), categorical (categories, optional weights), uniform_int (min, max), sequence (start), constant (value), constant_string (value). Example column: {\"name\": \"x\", \"distribution\": {\"type\": \"normal\", \"mean\": 0, \"std\": 1}}")]
+    async fn generate_random_data(
+        &self,
+        Parameters(request): Parameters<GenerateRandomDataRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        // Parse column specifications
+        let mut columns: Vec<ColumnSpec> = Vec::with_capacity(request.columns.len());
+
+        for col_input in &request.columns {
+            let dist: Distribution = match serde_json::from_value(col_input.distribution.clone()) {
+                Ok(d) => d,
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Invalid distribution specification for column '{}': {}\n\n\
+                         Expected format: {{\"type\": \"distribution_name\", ...params}}\n\
+                         Available types:\n\
+                         - uniform: {{\"type\": \"uniform\", \"min\": 0.0, \"max\": 1.0}}\n\
+                         - normal: {{\"type\": \"normal\", \"mean\": 0.0, \"std\": 1.0}}\n\
+                         - binomial: {{\"type\": \"binomial\", \"n\": 10, \"p\": 0.5}}\n\
+                         - poisson: {{\"type\": \"poisson\", \"lambda\": 5.0}}\n\
+                         - exponential: {{\"type\": \"exponential\", \"rate\": 1.0}}\n\
+                         - bernoulli: {{\"type\": \"bernoulli\", \"p\": 0.5}}\n\
+                         - categorical: {{\"type\": \"categorical\", \"categories\": [\"A\", \"B\", \"C\"], \"weights\": [0.5, 0.3, 0.2]}}\n\
+                         - uniform_int: {{\"type\": \"uniform_int\", \"min\": 1, \"max\": 10}}\n\
+                         - sequence: {{\"type\": \"sequence\", \"start\": 1}}\n\
+                         - constant: {{\"type\": \"constant\", \"value\": 42.0}}\n\
+                         - constant_string: {{\"type\": \"constant_string\", \"value\": \"text\"}}",
+                        col_input.name, e
+                    ))]));
+                }
+            };
+
+            columns.push(ColumnSpec::new(&col_input.name, dist));
+        }
+
+        // Use per-tool seed if provided, otherwise fall back to global seed
+        let global_seed = self.global_seed.read().await;
+        let seed = request.seed.or(*global_seed);
+
+        // Generate the data
+        let dataset = match generate_random_data(request.n_rows, columns, seed) {
+            Ok(ds) => ds,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Failed to generate random data: {}", e
+                ))]));
+            }
+        };
+
+        // Get dataset info
+        let n_rows = dataset.df().height();
+        let n_cols = dataset.df().width();
+        let col_names: Vec<String> = dataset.df().get_column_names().into_iter().map(|s| s.to_string()).collect();
+
+        // Determine dataset name
+        let name = request.name.unwrap_or_else(|| "generated".to_string());
+
+        // Store the dataset
+        let mut datasets = self.datasets.write().await;
+        datasets.insert(name.clone(), dataset);
+
+        let output = format!(
+            "Random Dataset Generated\n{}\n\
+             Name: {}\n\
+             Rows: {}\n\
+             Columns: {}\n\
+             Column names: {}\n\
+             Seed: {}\n\n\
+             The dataset '{}' is now available for analysis.",
+            "=".repeat(40),
+            name,
+            n_rows,
+            n_cols,
+            col_names.join(", "),
+            seed.map(|s| s.to_string()).unwrap_or_else(|| "random".to_string()),
+            name
         );
 
         Ok(CallToolResult::success(vec![Content::text(output)]))

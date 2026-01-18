@@ -1,6 +1,6 @@
 //! Chat state management
 
-use crate::api::{ConversationMessage, Message, ToolCall};
+use crate::api::{ConversationMessage, Message, PersistedToolCall, ToolCall};
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
@@ -80,11 +80,26 @@ impl ChatMessage {
             id: msg.id.clone(),
             role: msg.role.clone(),
             content: msg.content.clone(),
-            tool_calls: Vec::new(), // Tool calls aren't stored in conversation messages
+            tool_calls: Vec::new(), // Tool calls will be loaded separately
             images: Vec::new(),
             is_streaming: false,
             timestamp,
         }
+    }
+
+    /// Create a chat message from a persisted conversation message with tool calls
+    pub fn from_conversation_message_with_tools(
+        msg: &ConversationMessage,
+        tool_calls: &[PersistedToolCall],
+    ) -> Self {
+        let mut chat_msg = Self::from_conversation_message(msg);
+        chat_msg.tool_calls = tool_calls.iter().map(ToolCallInfo::from).collect();
+        chat_msg
+    }
+
+    /// Set tool calls on this message
+    pub fn set_tool_calls(&mut self, tool_calls: Vec<ToolCallInfo>) {
+        self.tool_calls = tool_calls;
     }
 }
 
@@ -113,6 +128,32 @@ impl From<&ToolCall> for ToolCallInfo {
             arguments: tc.arguments.clone(),
             result: None,
             success: None,
+            is_expanded: false,
+        }
+    }
+}
+
+impl From<&PersistedToolCall> for ToolCallInfo {
+    fn from(tc: &PersistedToolCall) -> Self {
+        // Parse arguments from string
+        let arguments = serde_json::from_str(&tc.arguments).unwrap_or(serde_json::Value::Null);
+
+        // Determine success from status
+        let success = match tc.status.as_str() {
+            "success" => Some(true),
+            "error" => Some(false),
+            _ => None,
+        };
+
+        // Use result or error as the result text
+        let result = tc.result.clone().or_else(|| tc.error.clone());
+
+        Self {
+            id: tc.id.clone(),
+            name: tc.tool_name.clone(),
+            arguments,
+            result,
+            success,
             is_expanded: false,
         }
     }

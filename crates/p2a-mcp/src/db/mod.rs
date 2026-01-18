@@ -33,8 +33,10 @@
 
 mod connection;
 mod conversations;
+mod dataset_meta;
 mod models;
 mod sessions;
+mod tool_calls;
 
 #[cfg(test)]
 mod tests;

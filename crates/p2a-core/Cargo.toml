@@ -34,6 +34,7 @@ augurs-core.workspace = true
 augurs-mstl.workspace = true
 augurs-ets.workspace = true
 rand.workspace = true
+rand_distr.workspace = true
 
 # File format support
 calamine.workspace = true
