@@ -46,3 +46,26 @@ title = "prompt2analytics"
 [bundle]
 identifier = "io.github.prompt2analytics"
 publisher = "prompt2analytics"
+# App icons (PNG files work for most platforms, ICO/ICNS for better Windows/macOS support)
+icon = ["assets/icons/32x32.png", "assets/icons/128x128.png", "assets/icons/256x256.png", "assets/icons/512x512.png"]
+
+# Bundle resources (CSS, images, etc.)
+resources = ["assets/*"]
+
+# Short description shown in package managers
+short_description = "AI-powered analytics platform with natural language interface"
+
+# Long description for detailed package info
+long_description = """
+prompt2analytics is a comprehensive analytics platform that combines:
+- Econometric analysis (OLS, panel data, IV, DiD)
+- Machine learning (clustering, classification, regression)
+- Interactive visualizations
+- Natural language interface powered by LLMs
+"""
+
+# App category for platform app stores/launchers
+category = "Science"
+
+# Copyright notice
+copyright = "Copyright (c) 2024-2025 prompt2analytics contributors"

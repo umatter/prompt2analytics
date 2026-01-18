@@ -11,16 +11,20 @@ pub fn MessageList() -> Element {
     // Get chat state from context
     let chat_state = use_context::<Signal<ChatState>>();
 
-    // Reference for scrolling
-    let mut scroll_ref = use_signal(|| None::<web_sys::Element>);
+    // Reference for scrolling using Dioxus's platform-agnostic MountedData
+    let mut scroll_element: Signal<Option<std::rc::Rc<MountedData>>> = use_signal(|| None);
 
     // Auto-scroll to bottom when messages change
-    let _messages_len = chat_state.read().messages.len();
+    let messages_len = chat_state.read().messages.len();
     use_effect(move || {
-        if let Some(ref element) = *scroll_ref.read() {
-            let options = web_sys::ScrollIntoViewOptions::new();
-            options.set_behavior(web_sys::ScrollBehavior::Smooth);
-            element.scroll_into_view_with_scroll_into_view_options(&options);
+        // Depend on messages_len to re-run when messages change
+        let _ = messages_len;
+        if let Some(ref mounted) = *scroll_element.read() {
+            // Use Dioxus's platform-agnostic scroll_to
+            let mounted = mounted.clone();
+            spawn(async move {
+                let _ = mounted.scroll_to(ScrollBehavior::Smooth).await;
+            });
         }
     });
 
@@ -70,10 +74,10 @@ pub fn MessageList() -> Element {
                         }
                     }
 
-                    // Scroll anchor
+                    // Scroll anchor - use platform-agnostic onmounted
                     div {
                         onmounted: move |event| {
-                            scroll_ref.set(Some(event.data().downcast::<web_sys::Element>().unwrap().clone()));
+                            scroll_element.set(Some(event.data().clone()));
                         }
                     }
                 }

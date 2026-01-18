@@ -27,7 +27,7 @@ web = [
     "uuid/js",
 ]
 
-# Desktop platform (native with window)
+# Desktop platform (native with window + embedded backend)
 desktop = [
     "dioxus/desktop",
     "dioxus/launch",
@@ -35,9 +35,10 @@ desktop = [
     "tokio",
     "tracing-subscriber",
     "dirs",
+    "p2a-mcp",
 ]
 
-# Mobile platform (iOS/Android)
+# Mobile platform (iOS/Android + embedded backend)
 mobile = [
     "dioxus/mobile",
     "dioxus/launch",
@@ -45,6 +46,7 @@ mobile = [
     "tokio",
     "tracing-subscriber",
     "dirs",
+    "p2a-mcp",
 ]
 
 [dependencies]
@@ -130,3 +132,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = tr
 
 # User directories for config storage
 dirs = { version = "6.0", optional = true }
+
+# Embedded backend for desktop/mobile (not needed for web)
+p2a-mcp = { path = "../p2a-mcp", features = ["embedded"], optional = true }

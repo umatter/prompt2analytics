@@ -99,7 +99,7 @@ pub async fn start_http_transport(config: &ServerConfig) -> TransportResult<()> 
 
 /// Create the axum router with all routes.
 #[cfg(feature = "db")]
-fn create_router(
+pub fn create_router(
     state: AppState,
     config: &ServerConfig,
     persistent_manager: Option<Arc<crate::persistent_session::PersistentSessionManager>>,
@@ -121,7 +121,7 @@ fn create_router(
 
 /// Create the axum router with all routes (without db feature).
 #[cfg(not(feature = "db"))]
-fn create_router(state: AppState, config: &ServerConfig) -> Router {
+pub fn create_router(state: AppState, config: &ServerConfig) -> Router {
     create_base_router(state, config)
 }
 

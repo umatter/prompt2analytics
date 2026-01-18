@@ -7,6 +7,10 @@ authors.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+[lib]
+name = "p2a_mcp"
+path = "src/lib.rs"
+
 [[bin]]
 name = "p2a-mcp"
 path = "src/main.rs"
@@ -82,3 +86,5 @@ auth = ["jsonwebtoken"]
 llm = ["async-trait", "reqwest", "futures"]
 db = ["surrealdb"]
 full = ["http", "websocket", "auth", "llm", "db"]
+# Embedded feature for desktop/mobile apps - includes everything needed for standalone operation
+embedded = ["http", "llm", "db"]
