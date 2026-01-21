@@ -1,0 +1,54 @@
+# Build artifacts
+/target/
+
+# IDE and editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Environment and local config
+.env
+.env.local
+*.local
+
+# Logs
+*.log
+
+# Test coverage
+*.profraw
+lcov.info
+coverage/
+
+# Personal notes
+_notes/
+
+# Machine-specific MCP config (absolute paths)
+mcp-config.json
+
+# LaTeX intermediate files
+paper/*.aux
+paper/*.bbl
+paper/*.blg
+paper/*.fdb_latexmk
+paper/*.fls
+paper/*.log
+paper/*.out
+paper/*.synctex.gz
+paper/*.toc
+paper/*.lof
+paper/*.lot
+paper/*.nav
+paper/*.snm
+paper/*.vrb
+_resources/literature/
+
+
+# other
+docs/DIOXUS_MIGRATION_FEASIBILITY.md
+ideas.md
