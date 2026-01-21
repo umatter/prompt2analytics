@@ -53,7 +53,42 @@ use p2a_core::{
         },
     },
     regression::{run_ols, run_ols_clustered, run_diagnostics, CovarianceType},
-    stats::{correlation_matrix, DescriptiveStats},
+    stats::{
+        correlation_matrix, DescriptiveStats, run_one_way_anova, run_two_way_anova,
+        one_sample_t_test, two_sample_t_test, paired_t_test, Alternative,
+        // ACF/PACF/CCF
+        run_acf, run_pacf, run_ccf, AcfType, CcfType,
+        // Chi-squared tests
+        run_chisq_gof, run_chisq_independence,
+        // MANOVA, Tukey HSD, and Bartlett test
+        run_manova, run_tukey_hsd, run_bartlett_test,
+        // Mood test
+        mood_test,
+        // Kruskal-Wallis test
+        run_kruskal_test,
+        // Friedman test
+        run_friedman_test,
+        // Welch's one-way ANOVA
+        run_oneway_test,
+        // McNemar's test
+        mcnemar_test,
+        // Spectral density estimation
+        run_spectrum, run_spectrum_ar, SpectrumConfig,
+        // Box-Pierce and Ljung-Box tests
+        run_box_test, BoxTestType,
+        // Phillips-Perron unit root test
+        run_pp_test,
+        // Pairwise t-tests and Wilcoxon tests
+        run_pairwise_t_test, run_pairwise_wilcox_test, PValueAdjustMethod,
+        // Quade test
+        run_quade_test,
+        // Cochran-Mantel-Haenszel test
+        run_mantelhaen_test, CmhAlternative,
+        // Exact Poisson test
+        poisson_test, PoissonAlternative,
+        // Mahalanobis distance
+        mahalanobis, run_mahalanobis, MahalanobisResult,
+    },
     // Econometrics
     run_fixed_effects, run_random_effects, run_hausman_test, run_iv2sls, run_did,
     run_logit, run_probit, run_first_stage_diagnostics,
@@ -76,6 +111,11 @@ use p2a_core::{
     // Forecasting
     run_arima, forecast_arima, run_mstl,
     run_changepoint, run_binary_segmentation, CostFunction,
+    run_holt_winters, holt_winters_forecast, SeasonalType,
+    ar, ArConfig, ArMethod, ArResult,
+    decompose, DecomposeConfig, DecomposeType, DecomposeResult,
+    // Kalman filter and StructTS
+    struct_ts, StructTsConfig, StructTsType, StructTsResult,
     // Machine Learning
     kmeans, dbscan, pca, hierarchical, tsne, random_forest, linear_svm,
     Linkage,
@@ -336,6 +376,686 @@ pub struct CorrelationRequest {
     pub dataset: String,
 }
 
+/// Request for one-way ANOVA.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct OneWayAnovaRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Response variable column name
+    #[schemars(description = "Name of the response (dependent) variable column. Must be numeric.")]
+    pub response: String,
+
+    /// Factor (grouping) variable column name
+    #[schemars(description = "Name of the factor (grouping) variable column. Groups observations for comparison.")]
+    pub factor: String,
+}
+
+/// Request for two-way ANOVA.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct TwoWayAnovaRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Response variable column name
+    #[schemars(description = "Name of the response (dependent) variable column. Must be numeric.")]
+    pub response: String,
+
+    /// First factor variable column name
+    #[schemars(description = "Name of the first factor variable column (e.g., 'treatment').")]
+    pub factor_a: String,
+
+    /// Second factor variable column name
+    #[schemars(description = "Name of the second factor variable column (e.g., 'block').")]
+    pub factor_b: String,
+
+    /// Whether to include interaction term
+    #[schemars(description = "Whether to include the interaction term (factor_a × factor_b). Default is true.")]
+    pub interaction: Option<bool>,
+}
+
+/// Request for MANOVA (Multivariate Analysis of Variance).
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ManovaRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Response variable column names (must have at least 2)
+    #[schemars(description = "Names of the response (dependent) variable columns. Must be numeric. MANOVA requires at least 2 response variables.")]
+    pub response_vars: Vec<String>,
+
+    /// Factor (grouping) variable column name
+    #[schemars(description = "Name of the factor (grouping) variable column. Groups observations for comparison.")]
+    pub factor: String,
+
+    /// Which test statistic to emphasize (default: Pillai)
+    #[schemars(description = "Test statistic to use: 'pillai' (default, most robust), 'wilks' (most popular), 'hotelling' (Hotelling-Lawley), or 'roy' (Roy's largest root). All four are always computed.")]
+    pub test: Option<String>,
+}
+
+/// Request for Tukey's HSD (Honest Significant Differences) test.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct TukeyHsdRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Response variable column name
+    #[schemars(description = "Name of the response (dependent) variable column. Must be numeric.")]
+    pub response: String,
+
+    /// Factor (grouping) variable column name
+    #[schemars(description = "Name of the factor (grouping) variable column. Defines groups to compare.")]
+    pub factor: String,
+
+    /// Confidence level (default: 0.95)
+    #[schemars(description = "Confidence level for intervals (default: 0.95). Common values: 0.90, 0.95, 0.99.")]
+    pub conf_level: Option<f64>,
+}
+
+/// Request for Bartlett's test of homogeneity of variances.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct BartlettTestRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Response variable column name
+    #[schemars(description = "Name of the response (numeric) variable column.")]
+    pub response: String,
+
+    /// Factor (grouping) variable column name
+    #[schemars(description = "Name of the factor (grouping) variable column.")]
+    pub factor: String,
+}
+
+/// Request for Mood's two-sample test of scale.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct MoodTestRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// First sample column name
+    #[schemars(description = "Name of the first sample column (numeric).")]
+    pub x: String,
+
+    /// Second sample column name
+    #[schemars(description = "Name of the second sample column (numeric).")]
+    pub y: String,
+
+    /// Alternative hypothesis direction
+    #[schemars(description = "Alternative hypothesis: 'two.sided' (default), 'greater', or 'less'. For 'greater': scale of x > scale of y.")]
+    pub alternative: Option<String>,
+}
+
+/// Request for Kruskal-Wallis rank sum test.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct KruskalWallisRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Value column name
+    #[schemars(description = "Name of the numeric column containing the values to compare across groups.")]
+    pub value: String,
+
+    /// Group column name
+    #[schemars(description = "Name of the column containing group labels/factors.")]
+    pub group: String,
+}
+
+/// Request for McNemar's chi-squared test.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct McnemarTestRequest {
+    /// Upper-right cell (b) of the 2x2 table
+    #[schemars(description = "The count in the upper-right cell (row 1, column 2) of the 2x2 table. Represents discordant pairs where first classifier is positive and second is negative.")]
+    pub b: u64,
+
+    /// Lower-left cell (c) of the 2x2 table
+    #[schemars(description = "The count in the lower-left cell (row 2, column 1) of the 2x2 table. Represents discordant pairs where first classifier is negative and second is positive.")]
+    pub c: u64,
+
+    /// Apply continuity correction
+    #[schemars(description = "If true (default), apply Yates' continuity correction. Set to false for the uncorrected version.")]
+    pub correct: Option<bool>,
+}
+
+/// Request for Welch's one-way ANOVA test.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct OnewayTestRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Value column name
+    #[schemars(description = "Name of the numeric column containing the values to compare across groups.")]
+    pub value: String,
+
+    /// Group column name
+    #[schemars(description = "Name of the column containing group labels/factors.")]
+    pub group: String,
+
+    /// Assume equal variances
+    #[schemars(description = "If true, use standard ANOVA assuming equal variances. If false (default), use Welch's ANOVA.")]
+    pub var_equal: Option<bool>,
+}
+
+/// Request for Friedman rank sum test.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct FriedmanTestRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Value column name
+    #[schemars(description = "Name of the numeric column containing the measured values.")]
+    pub value: String,
+
+    /// Treatment/group column name
+    #[schemars(description = "Name of the column containing treatment/group labels.")]
+    pub treatment: String,
+
+    /// Block/subject column name
+    #[schemars(description = "Name of the column containing block/subject identifiers.")]
+    pub block: String,
+}
+
+/// Request for Quade test.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct QuadeTestRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Value column name
+    #[schemars(description = "Name of the numeric column containing the measured values.")]
+    pub value: String,
+
+    /// Treatment/group column name
+    #[schemars(description = "Name of the column containing treatment/group labels.")]
+    pub treatment: String,
+
+    /// Block/subject column name
+    #[schemars(description = "Name of the column containing block/subject identifiers.")]
+    pub block: String,
+}
+
+/// Request for Cochran-Mantel-Haenszel test.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct MantelhaenTestRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Row variable column name (binary factor)
+    #[schemars(description = "Name of the column containing the row variable (must have exactly 2 levels, e.g., 'exposed'/'unexposed').")]
+    pub row_var: String,
+
+    /// Column variable column name (binary factor)
+    #[schemars(description = "Name of the column containing the column variable (must have exactly 2 levels, e.g., 'disease'/'healthy').")]
+    pub col_var: String,
+
+    /// Stratum variable column name
+    #[schemars(description = "Name of the column containing stratum identifiers (e.g., 'hospital', 'study_site').")]
+    pub stratum_var: String,
+
+    /// Continuity correction
+    #[schemars(description = "Whether to apply Yates' continuity correction. Default: true.")]
+    pub correct: Option<bool>,
+
+    /// Alternative hypothesis
+    #[schemars(description = "Direction of alternative hypothesis: 'two.sided' (default), 'greater', or 'less'.")]
+    pub alternative: Option<String>,
+}
+
+/// Request for exact Poisson test.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct PoissonTestRequest {
+    /// Number of events (one or two values)
+    #[schemars(description = "Number of events. For one-sample test: single value. For two-sample rate comparison: two values [x1, x2].")]
+    pub x: Vec<u64>,
+
+    /// Time base (one or two values)
+    #[schemars(description = "Time base(s) or exposure(s). Must match length of x. For one-sample: single value. For two-sample: two values [t1, t2].")]
+    pub t: Vec<f64>,
+
+    /// Hypothesized rate or rate ratio
+    #[schemars(description = "Hypothesized rate (one-sample) or rate ratio (two-sample). Default: 1.0.")]
+    pub r: Option<f64>,
+
+    /// Alternative hypothesis
+    #[schemars(description = "Direction of alternative hypothesis: 'two.sided' (default), 'greater', or 'less'.")]
+    pub alternative: Option<String>,
+
+    /// Confidence level
+    #[schemars(description = "Confidence level for the interval. Default: 0.95.")]
+    pub conf_level: Option<f64>,
+}
+
+/// Request for t-test.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct TTestRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// First variable column name
+    #[schemars(description = "Name of the first variable column (must be numeric).")]
+    pub x: String,
+
+    /// Second variable column name (optional)
+    #[schemars(description = "Name of the second variable column for two-sample or paired tests. Omit for one-sample test.")]
+    pub y: Option<String>,
+
+    /// Hypothesized mean or difference
+    #[schemars(description = "Null hypothesis value (default: 0). For one-sample: hypothesized mean. For two-sample: hypothesized difference.")]
+    pub mu: Option<f64>,
+
+    /// Alternative hypothesis direction
+    #[schemars(description = "Alternative hypothesis: 'two.sided' (default), 'greater', or 'less'.")]
+    pub alternative: Option<String>,
+
+    /// Paired test flag
+    #[schemars(description = "If true, perform a paired t-test. Requires both x and y columns. Default: false.")]
+    pub paired: Option<bool>,
+
+    /// Equal variances assumption
+    #[schemars(description = "For two-sample tests: if true, assume equal variances (Student's t); if false (default), use Welch's t-test.")]
+    pub var_equal: Option<bool>,
+
+    /// Confidence level
+    #[schemars(description = "Confidence level for the interval (default: 0.95).")]
+    pub conf_level: Option<f64>,
+}
+
+/// Request for pairwise t-tests with multiple comparison correction.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct PairwiseTTestRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Response variable column name
+    #[schemars(description = "Name of the numeric response variable column.")]
+    pub response: String,
+
+    /// Grouping factor column name
+    #[schemars(description = "Name of the grouping factor column (can be string or numeric).")]
+    pub factor: String,
+
+    /// P-value adjustment method
+    #[schemars(description = "Method for adjusting p-values: 'holm' (default), 'bonferroni', 'hochberg', 'hommel', 'BH' (Benjamini-Hochberg FDR), 'BY', or 'none'.")]
+    pub p_adjust_method: Option<String>,
+
+    /// Use pooled standard deviation
+    #[schemars(description = "If true, use pooled SD from all groups (Student's); if false (default), use Welch's t-test for each pair.")]
+    pub pool_sd: Option<bool>,
+
+    /// Alternative hypothesis direction
+    #[schemars(description = "Alternative hypothesis: 'two.sided' (default), 'greater', or 'less'.")]
+    pub alternative: Option<String>,
+}
+
+/// Request for pairwise Wilcoxon rank sum tests with multiple comparison correction.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct PairwiseWilcoxRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Response variable column name
+    #[schemars(description = "Name of the numeric response variable column.")]
+    pub response: String,
+
+    /// Grouping factor column name
+    #[schemars(description = "Name of the grouping factor column (can be string or numeric).")]
+    pub factor: String,
+
+    /// P-value adjustment method
+    #[schemars(description = "Method for adjusting p-values: 'holm' (default), 'bonferroni', 'hochberg', 'hommel', 'BH' (Benjamini-Hochberg FDR), 'BY', or 'none'.")]
+    pub p_adjust_method: Option<String>,
+
+    /// Alternative hypothesis direction
+    #[schemars(description = "Alternative hypothesis: 'two.sided' (default), 'greater', or 'less'.")]
+    pub alternative: Option<String>,
+
+    /// Use exact p-value computation
+    #[schemars(description = "If true, compute exact p-values (slow for large samples); if false, use normal approximation; if not specified, auto-decide based on sample size.")]
+    pub exact: Option<bool>,
+}
+
+/// Request for Wilcoxon rank sum / signed rank test.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct WilcoxonTestRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// First variable column name
+    #[schemars(description = "Name of the first variable column (must be numeric).")]
+    pub x: String,
+
+    /// Second variable column name (optional)
+    #[schemars(description = "Name of the second variable column for two-sample or paired tests. Omit for one-sample signed rank test.")]
+    pub y: Option<String>,
+
+    /// Hypothesized location shift
+    #[schemars(description = "Null hypothesis value (default: 0). For one-sample: hypothesized median. For two-sample: hypothesized location shift.")]
+    pub mu: Option<f64>,
+
+    /// Alternative hypothesis direction
+    #[schemars(description = "Alternative hypothesis: 'two.sided' (default), 'greater', or 'less'.")]
+    pub alternative: Option<String>,
+
+    /// Paired test flag
+    #[schemars(description = "If true with two samples, perform paired signed rank test. If false (default), perform rank sum test.")]
+    pub paired: Option<bool>,
+
+    /// Use exact p-value calculation
+    #[schemars(description = "If true, compute exact p-value (only for small samples without ties). If omitted, automatically decides based on sample size.")]
+    pub exact: Option<bool>,
+
+    /// Apply continuity correction
+    #[schemars(description = "If true (default), apply continuity correction to normal approximation.")]
+    pub correct: Option<bool>,
+
+    /// Compute confidence interval
+    #[schemars(description = "If true, compute confidence interval and location estimate. Default: false.")]
+    pub conf_int: Option<bool>,
+
+    /// Confidence level
+    #[schemars(description = "Confidence level for the interval (default: 0.95).")]
+    pub conf_level: Option<f64>,
+}
+
+/// Request for chi-squared goodness-of-fit test.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ChiSquaredGofRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Column name with categorical values to count
+    #[schemars(description = "Name of the categorical column. Counts of each unique value will be tested.")]
+    pub column: String,
+
+    /// Expected probabilities (optional)
+    #[schemars(
+        description = "Expected probabilities for each category. Must sum to 1.0. If omitted, uniform distribution is assumed."
+    )]
+    pub probs: Option<Vec<f64>>,
+}
+
+/// Request for chi-squared test of independence.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ChiSquaredIndependenceRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Row variable column name
+    #[schemars(description = "Name of the column for rows of the contingency table.")]
+    pub row_var: String,
+
+    /// Column variable column name
+    #[schemars(description = "Name of the column for columns of the contingency table.")]
+    pub col_var: String,
+
+    /// Apply Yates' continuity correction
+    #[schemars(
+        description = "If true and table is 2×2, apply Yates' continuity correction. Default: true."
+    )]
+    pub correct: Option<bool>,
+}
+
+/// Request for Fisher's exact test.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct FisherExactRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Row variable column name
+    #[schemars(description = "Name of the column for rows of the 2×2 table. Must have exactly 2 unique values.")]
+    pub row_var: String,
+
+    /// Column variable column name
+    #[schemars(description = "Name of the column for columns of the 2×2 table. Must have exactly 2 unique values.")]
+    pub col_var: String,
+
+    /// Alternative hypothesis
+    #[schemars(
+        description = "Alternative hypothesis: 'two.sided' (default), 'greater', or 'less'. One-sided tests compare odds ratio to 1."
+    )]
+    pub alternative: Option<String>,
+
+    /// Confidence level
+    #[schemars(
+        description = "Confidence level for odds ratio confidence interval (e.g., 0.95). If omitted, CI is not computed."
+    )]
+    pub conf_level: Option<f64>,
+}
+
+/// Request for Shapiro-Wilk normality test.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ShapiroWilkRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Column to test for normality
+    #[schemars(description = "Name of the numeric column to test for normality.")]
+    pub column: String,
+}
+
+/// Request for Kolmogorov-Smirnov test.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct KsTestRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// First variable column name
+    #[schemars(description = "Name of the first variable column (must be numeric).")]
+    pub x: String,
+
+    /// Second variable column name (optional)
+    #[schemars(description = "Name of the second variable column for two-sample test. Omit for one-sample test against a theoretical distribution.")]
+    pub y: Option<String>,
+
+    /// Theoretical distribution for one-sample test
+    #[schemars(description = "For one-sample test: distribution to test against. Options: 'normal' (default), 'uniform', 'exponential'. Ignored for two-sample test.")]
+    pub distribution: Option<String>,
+
+    /// Mean parameter for normal distribution
+    #[schemars(description = "Mean parameter for normal distribution (default: 0). Only used when distribution='normal'.")]
+    pub mean: Option<f64>,
+
+    /// Standard deviation parameter for normal distribution
+    #[schemars(description = "Standard deviation parameter for normal distribution (default: 1). Only used when distribution='normal'.")]
+    pub sd: Option<f64>,
+
+    /// Lower bound for uniform distribution
+    #[schemars(description = "Lower bound for uniform distribution (default: 0). Only used when distribution='uniform'.")]
+    pub a: Option<f64>,
+
+    /// Upper bound for uniform distribution
+    #[schemars(description = "Upper bound for uniform distribution (default: 1). Only used when distribution='uniform'.")]
+    pub b: Option<f64>,
+
+    /// Rate parameter for exponential distribution
+    #[schemars(description = "Rate parameter for exponential distribution (default: 1). Only used when distribution='exponential'.")]
+    pub rate: Option<f64>,
+
+    /// Alternative hypothesis direction
+    #[schemars(description = "Alternative hypothesis: 'two.sided' (default), 'greater', or 'less'. For two-sample: 'greater' means CDF of x is not below CDF of y (x is stochastically greater).")]
+    pub alternative: Option<String>,
+}
+
+/// Request for autocorrelation function (ACF).
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct AcfRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Time series column name
+    #[schemars(description = "Name of the numeric time series column.")]
+    pub column: String,
+
+    /// Maximum lag
+    #[schemars(description = "Maximum lag to compute. Default: min(10*log10(n), n-1).")]
+    pub lag_max: Option<usize>,
+
+    /// Type of ACF
+    #[schemars(description = "Type of autocorrelation: 'correlation' (default), 'covariance', or 'partial' (PACF).")]
+    pub acf_type: Option<String>,
+}
+
+/// Request for cross-correlation function (CCF).
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CcfRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// First time series column name
+    #[schemars(description = "Name of the first (X) numeric time series column.")]
+    pub x: String,
+
+    /// Second time series column name
+    #[schemars(description = "Name of the second (Y) numeric time series column.")]
+    pub y: String,
+
+    /// Maximum lag
+    #[schemars(description = "Maximum lag to compute (in both directions). Default: min(10*log10(n), n-1).")]
+    pub lag_max: Option<usize>,
+}
+
+/// Request for spectral density estimation.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SpectrumRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Time series column name
+    #[schemars(description = "Name of the numeric time series column.")]
+    pub column: String,
+
+    /// Smoothing spans (Daniell kernel widths)
+    #[schemars(description = "Vector of odd integers for modified Daniell smoothers, e.g., [3,3] or [5,5,5]. If omitted, returns raw periodogram. Multiple values are convolved for more smoothing.")]
+    pub spans: Option<Vec<usize>>,
+
+    /// Taper proportion
+    #[schemars(description = "Proportion of data to taper at ends using split cosine bell (0 to 0.5). Default: 0.1. Reduces spectral leakage.")]
+    pub taper: Option<f64>,
+
+    /// Whether to detrend
+    #[schemars(description = "Whether to remove linear trend before computing spectrum. Default: true.")]
+    pub detrend: Option<bool>,
+
+    /// Method for spectrum estimation
+    #[schemars(description = "Estimation method: 'pgram' (periodogram, default) or 'ar' (autoregressive). AR method fits an AR model and computes its theoretical spectrum.")]
+    pub method: Option<String>,
+
+    /// AR order (for method='ar')
+    #[schemars(description = "AR model order for method='ar'. If omitted, order is selected by AIC.")]
+    pub ar_order: Option<usize>,
+}
+
+/// Request for Box-Pierce or Ljung-Box test.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct BoxTestRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Time series column name
+    #[schemars(description = "Name of the numeric time series column to test for autocorrelation.")]
+    pub column: String,
+
+    /// Number of lags
+    #[schemars(description = "Number of autocorrelation lags to include in the test statistic. Default: 1. Common choices: 10 for short series, 20 for longer series.")]
+    pub lag: Option<usize>,
+
+    /// Test type
+    #[schemars(description = "Test type: 'ljung-box' (default, better finite-sample properties) or 'box-pierce' (simpler, classic version).")]
+    pub test_type: Option<String>,
+
+    /// Degrees of freedom adjustment
+    #[schemars(description = "Number of parameters already estimated (subtract from df). When testing ARMA(p,q) residuals, set fitdf = p + q for proper df adjustment. Default: 0.")]
+    pub fitdf: Option<usize>,
+}
+
+/// Request for Phillips-Perron unit root test.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct PPTestRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Time series column name
+    #[schemars(description = "Name of the numeric time series column to test for unit root.")]
+    pub column: String,
+
+    /// Use short truncation lag
+    #[schemars(description = "Whether to use short truncation lag formula: trunc(4*(n/100)^0.25). If false, uses long formula: trunc(12*(n/100)^0.25). Default: true.")]
+    pub lshort: Option<bool>,
+}
+
+/// Request for factor analysis.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct FactorAnalysisRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Variable columns to include in factor analysis
+    #[schemars(description = "Names of the numeric columns to include in factor analysis. Should have at least n_factors + 1 variables.")]
+    pub columns: Vec<String>,
+
+    /// Number of factors to extract
+    #[schemars(description = "Number of factors to extract. Must be between 1 and (number of variables - 1). Rule of thumb: fewer factors that explain most variance.")]
+    pub n_factors: usize,
+
+    /// Rotation method
+    #[schemars(description = "Factor rotation method: 'varimax' (default, orthogonal), 'promax' (oblique, allows correlated factors), or 'none'.")]
+    pub rotation: Option<String>,
+
+    /// Factor scores method
+    #[schemars(description = "Method for computing factor scores: 'none' (default), 'regression' (Thomson's method), or 'bartlett' (weighted least squares).")]
+    pub scores: Option<String>,
+}
+
+/// Request for canonical correlation analysis.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CancorRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// First set of variables (X)
+    #[schemars(description = "Names of the columns for the first set of variables (X). These are the 'predictor' or 'input' variables.")]
+    pub x_columns: Vec<String>,
+
+    /// Second set of variables (Y)
+    #[schemars(description = "Names of the columns for the second set of variables (Y). These are the 'response' or 'output' variables.")]
+    pub y_columns: Vec<String>,
+
+    /// Whether to center X variables
+    #[schemars(description = "Whether to center X variables by subtracting column means. Default: true.")]
+    pub xcenter: Option<bool>,
+
+    /// Whether to center Y variables
+    #[schemars(description = "Whether to center Y variables by subtracting column means. Default: true.")]
+    pub ycenter: Option<bool>,
+}
+
 /// Request for OLS regression.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct OlsRequest {
@@ -390,6 +1110,66 @@ pub struct OlsClusteredRequest {
     /// Second cluster dimension column (optional, for two-way clustering)
     #[schemars(description = "Optional column for second clustering dimension (e.g., 'year'). If provided, two-way clustering is used.")]
     pub cluster2: Option<String>,
+}
+
+/// Request for nonlinear least squares regression.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct NlsRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Dependent variable (Y) column name
+    #[schemars(description = "Name of the dependent variable (Y) column.")]
+    pub y: String,
+
+    /// Independent variable (X) column name
+    #[schemars(description = "Name of the independent variable (X) column.")]
+    pub x: String,
+
+    /// Model type to fit
+    #[schemars(description = "Nonlinear model to fit: 'exponential_decay' (y = a*exp(-b*x) + c), 'exponential_growth' (y = a*exp(b*x)), 'michaelis_menten' (y = Vmax*x/(Km+x)), 'logistic' (y = K/(1+exp(-r*(x-x0)))), 'power' (y = a*x^b), 'asymptotic' (y = a - b*exp(-c*x)).")]
+    pub model: String,
+
+    /// Starting values for parameters
+    #[schemars(description = "Initial parameter values. For exponential_decay: [a, b, c]. For exponential_growth: [a, b]. For michaelis_menten: [Vmax, Km]. For logistic: [K, r, x0]. For power: [a, b]. For asymptotic: [a, b, c].")]
+    pub start: Vec<f64>,
+
+    /// Algorithm to use
+    #[schemars(description = "Optimization algorithm: 'levenberg_marquardt' (default, more robust) or 'gauss_newton' (faster but may not converge).")]
+    pub algorithm: Option<String>,
+
+    /// Maximum iterations
+    #[schemars(description = "Maximum number of iterations (default: 200).")]
+    pub max_iter: Option<usize>,
+}
+
+/// Request for LOESS (local polynomial regression) smoothing.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct LoessRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Dependent variable (Y) column name
+    #[schemars(description = "Name of the dependent variable (Y) column to smooth.")]
+    pub y: String,
+
+    /// Independent variable (X) column name
+    #[schemars(description = "Name of the independent variable (X) column.")]
+    pub x: String,
+
+    /// Smoothing parameter (span)
+    #[schemars(description = "Smoothing parameter controlling neighborhood size. Range (0,1] uses proportion of data; >1 uses all points. Default: 0.75. Smaller = more wiggly, larger = smoother.")]
+    pub span: Option<f64>,
+
+    /// Polynomial degree (1=linear, 2=quadratic)
+    #[schemars(description = "Degree of local polynomial: 1 (linear) or 2 (quadratic, default). Quadratic captures curvature better at boundaries.")]
+    pub degree: Option<usize>,
+
+    /// Use robust fitting
+    #[schemars(description = "Use robust fitting with iterative reweighting to downweight outliers. Default: false (gaussian family). Set true for 'symmetric' family.")]
+    pub robust: Option<bool>,
 }
 
 // ============================================================================
@@ -1226,6 +2006,130 @@ pub struct ChangepointRequest {
     /// Type of change to detect: 'mean', 'variance', or 'both'
     #[schemars(description = "Type of change to detect: 'mean' (default), 'variance', or 'both'.")]
     pub change_type: Option<String>,
+}
+
+/// Request for Holt-Winters exponential smoothing.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct HoltWintersRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Column name with time series values
+    #[schemars(description = "Name of the column containing the time series values.")]
+    pub column: String,
+
+    /// Seasonal period
+    #[schemars(description = "Number of observations per seasonal cycle (e.g., 12 for monthly data with yearly seasonality, 4 for quarterly).")]
+    pub period: usize,
+
+    /// Seasonal type
+    #[schemars(description = "Type of seasonality: 'additive' (default) for constant seasonal variation, 'multiplicative' for proportional variation.")]
+    pub seasonal: Option<String>,
+
+    /// Level smoothing parameter alpha (0-1)
+    #[schemars(description = "Smoothing parameter for the level component (0-1). If not specified, will be optimized.")]
+    pub alpha: Option<f64>,
+
+    /// Trend smoothing parameter beta (0-1)
+    #[schemars(description = "Smoothing parameter for the trend component (0-1). If not specified, will be optimized.")]
+    pub beta: Option<f64>,
+
+    /// Seasonal smoothing parameter gamma (0-1)
+    #[schemars(description = "Smoothing parameter for the seasonal component (0-1). If not specified, will be optimized.")]
+    pub gamma: Option<f64>,
+
+    /// Forecast horizon (optional)
+    #[schemars(description = "Number of periods to forecast ahead. If specified, returns forecasts in addition to fitted values.")]
+    pub horizon: Option<usize>,
+}
+
+/// Request for AR (autoregressive) model fitting.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ArModelRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Column name with time series values
+    #[schemars(description = "Name of the column containing the time series values.")]
+    pub column: String,
+
+    /// Use AIC for order selection
+    #[schemars(description = "Whether to use AIC for automatic order selection. Default: true.")]
+    pub aic: Option<bool>,
+
+    /// Maximum order to consider
+    #[schemars(description = "Maximum AR order to consider. Default: min(n-1, 10*log10(n)).")]
+    pub order_max: Option<usize>,
+
+    /// Specific order to use
+    #[schemars(description = "Specific AR order to fit. If provided with aic=false, uses this exact order.")]
+    pub order: Option<usize>,
+
+    /// Fitting method
+    #[schemars(description = "Method for fitting: 'yule-walker' (default), 'burg', or 'ols'.")]
+    pub method: Option<String>,
+
+    /// Demean the series
+    #[schemars(description = "Whether to remove the mean before fitting. Default: true.")]
+    pub demean: Option<bool>,
+}
+
+/// Request for classical seasonal decomposition.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DecomposeRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Column name with time series values
+    #[schemars(description = "Name of the column containing the time series values.")]
+    pub column: String,
+
+    /// Seasonal period
+    #[schemars(description = "Number of observations per seasonal cycle (e.g., 12 for monthly data with yearly seasonality, 4 for quarterly).")]
+    pub period: usize,
+
+    /// Decomposition type
+    #[schemars(description = "Type of decomposition: 'additive' (default, Y = Trend + Seasonal + Random) or 'multiplicative' (Y = Trend × Seasonal × Random).")]
+    pub decompose_type: Option<String>,
+}
+
+/// Request for structural time series model fitting.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct StructTsRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Column name with time series values
+    #[schemars(description = "Name of the column containing the time series values.")]
+    pub column: String,
+
+    /// Model type
+    #[schemars(description = "Type of structural model: 'level' (local level/random walk + noise), 'trend' (local linear trend), or 'bsm' (basic structural model with seasonality).")]
+    pub model_type: Option<String>,
+
+    /// Seasonal period (for BSM only)
+    #[schemars(description = "Seasonal period for BSM model (e.g., 12 for monthly data with yearly seasonality). Required for 'bsm' type.")]
+    pub period: Option<usize>,
+}
+
+/// Request for Mahalanobis distance computation.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct MahalanobisRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Column names to use as variables
+    #[schemars(description = "Names of the columns to use as variables for computing Mahalanobis distance.")]
+    pub columns: Vec<String>,
+
+    /// Optional center vector
+    #[schemars(description = "Optional center vector. If not provided, uses column means.")]
+    pub center: Option<Vec<f64>>,
 }
 
 // ============================================================================
@@ -2710,6 +3614,142 @@ pub struct MutateColumnRequest {
     /// Optional name for the resulting dataset
     #[schemars(description = "Optional name for the result.")]
     pub result_name: Option<String>,
+}
+
+/// Request for correlation test.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CorTestRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// First variable column name
+    #[schemars(description = "Name of the first numeric variable column.")]
+    pub x: String,
+
+    /// Second variable column name
+    #[schemars(description = "Name of the second numeric variable column.")]
+    pub y: String,
+
+    /// Correlation method
+    #[schemars(description = "Correlation method: 'pearson' (default), 'spearman' (rank), or 'kendall' (tau).")]
+    pub method: Option<String>,
+
+    /// Alternative hypothesis
+    #[schemars(description = "Alternative hypothesis: 'two.sided' (default), 'greater', or 'less'.")]
+    pub alternative: Option<String>,
+
+    /// Confidence level
+    #[schemars(description = "Confidence level for the interval (0-1). Default: 0.95.")]
+    pub conf_level: Option<f64>,
+}
+
+/// Request for power analysis of t-test.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct PowerTTestRequest {
+    /// Sample size (per group for two-sample)
+    #[schemars(description = "Sample size per group. Leave None to solve for required sample size.")]
+    pub n: Option<f64>,
+
+    /// True difference in means
+    #[schemars(description = "True difference in means (effect size in original units). Leave None to solve for detectable effect.")]
+    pub delta: Option<f64>,
+
+    /// Standard deviation
+    #[schemars(description = "Standard deviation. Default: 1 (use d = delta/sd as standardized effect size).")]
+    pub sd: Option<f64>,
+
+    /// Significance level
+    #[schemars(description = "Significance level (Type I error rate). Default: 0.05.")]
+    pub sig_level: Option<f64>,
+
+    /// Power
+    #[schemars(description = "Power (1 - Type II error rate). Leave None to solve for power. Common target: 0.80.")]
+    pub power: Option<f64>,
+
+    /// Type of t-test
+    #[schemars(description = "Type of t-test: 'two.sample' (default), 'one.sample', or 'paired'.")]
+    pub test_type: Option<String>,
+
+    /// Alternative hypothesis
+    #[schemars(description = "Alternative hypothesis: 'two.sided' (default) or 'one.sided'.")]
+    pub alternative: Option<String>,
+}
+
+/// Request for power analysis of proportion test.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct PowerPropTestRequest {
+    /// Sample size per group
+    #[schemars(description = "Sample size per group. Leave None to solve for required sample size.")]
+    pub n: Option<f64>,
+
+    /// Proportion in group 1
+    #[schemars(description = "Proportion in first group (0-1).")]
+    pub p1: Option<f64>,
+
+    /// Proportion in group 2
+    #[schemars(description = "Proportion in second group (0-1). Leave None to solve for detectable difference.")]
+    pub p2: Option<f64>,
+
+    /// Significance level
+    #[schemars(description = "Significance level (Type I error rate). Default: 0.05.")]
+    pub sig_level: Option<f64>,
+
+    /// Power
+    #[schemars(description = "Power (1 - Type II error rate). Leave None to solve for power. Common target: 0.80.")]
+    pub power: Option<f64>,
+
+    /// Alternative hypothesis
+    #[schemars(description = "Alternative hypothesis: 'two.sided' (default) or 'one.sided'.")]
+    pub alternative: Option<String>,
+}
+
+/// Request for power analysis of ANOVA test.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct PowerAnovaTestRequest {
+    /// Number of groups
+    #[schemars(description = "Number of groups. Leave None to solve for minimum groups.")]
+    pub groups: Option<usize>,
+
+    /// Sample size per group
+    #[schemars(description = "Sample size per group. Leave None to solve for required sample size.")]
+    pub n: Option<f64>,
+
+    /// Between-group variance
+    #[schemars(description = "Between-group variance (variance of group means).")]
+    pub between_var: Option<f64>,
+
+    /// Within-group variance
+    #[schemars(description = "Within-group variance (variance within each group). Default: 1.")]
+    pub within_var: Option<f64>,
+
+    /// Significance level
+    #[schemars(description = "Significance level (Type I error rate). Default: 0.05.")]
+    pub sig_level: Option<f64>,
+
+    /// Power
+    #[schemars(description = "Power (1 - Type II error rate). Leave None to solve for power. Common target: 0.80.")]
+    pub power: Option<f64>,
+}
+
+/// Request for trend test in proportions.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct PropTrendTestRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Column with number of successes per group
+    #[schemars(description = "Name of column containing number of successes in each group.")]
+    pub successes: String,
+
+    /// Column with number of trials per group
+    #[schemars(description = "Name of column containing number of trials in each group.")]
+    pub trials: String,
+
+    /// Optional scores for the trend
+    #[schemars(description = "Optional scores for each group. If omitted, uses 1, 2, 3, ... (equally spaced).")]
+    pub scores: Option<Vec<f64>>,
 }
 
 // ============================================================================
@@ -4819,6 +5859,3014 @@ impl AnalyticsServer {
         ))]))
     }
 
+    // ========================================================================
+    // ANOVA Tools
+    // ========================================================================
+
+    /// Run one-way ANOVA.
+    #[tool(description = "Run one-way Analysis of Variance (ANOVA) to test whether means differ across groups. Returns F-statistic, p-value, effect sizes (eta-squared, omega-squared), and group statistics. Use when comparing a continuous response variable across 2+ categorical groups.")]
+    async fn anova_one_way(
+        &self,
+        Parameters(request): Parameters<OneWayAnovaRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let result = match run_one_way_anova(dataset, &request.response, &request.factor) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "One-way ANOVA failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+    }
+
+    /// Run two-way ANOVA.
+    #[tool(description = "Run two-way Analysis of Variance (ANOVA) to test effects of two factors and their interaction on a response variable. Returns F-statistics and p-values for each factor and the interaction term. Use for factorial experimental designs.")]
+    async fn anova_two_way(
+        &self,
+        Parameters(request): Parameters<TwoWayAnovaRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let interaction = request.interaction.unwrap_or(true);
+
+        let result = match run_two_way_anova(
+            dataset,
+            &request.response,
+            &request.factor_a,
+            &request.factor_b,
+            interaction,
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Two-way ANOVA failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+    }
+
+    /// Run MANOVA (Multivariate Analysis of Variance).
+    #[tool(description = "Run Multivariate Analysis of Variance (MANOVA) to test whether group means differ across multiple response variables simultaneously. Returns four test statistics: Wilks' Lambda (most popular), Pillai's Trace (most robust, default), Hotelling-Lawley Trace, and Roy's Largest Root. Each with approximate F-statistic and p-value. Use when you have 2+ continuous response variables and want to test group differences while accounting for correlations between responses.")]
+    async fn anova_manova(
+        &self,
+        Parameters(request): Parameters<ManovaRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        // Validate at least 2 response variables
+        if request.response_vars.len() < 2 {
+            return Ok(CallToolResult::error(vec![Content::text(
+                "MANOVA requires at least 2 response variables.".to_string()
+            )]));
+        }
+
+        // Convert Vec<String> to Vec<&str>
+        let response_refs: Vec<&str> = request.response_vars.iter().map(|s| s.as_str()).collect();
+
+        let result = match run_manova(dataset, &response_refs, &request.factor) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "MANOVA failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        // Build response with all four test statistics
+        let output = serde_json::json!({
+            "n_obs": result.n_obs,
+            "n_groups": result.n_groups,
+            "n_responses": result.n_responses,
+            "response_vars": result.response_vars,
+            "factor_var": result.factor_var,
+            "df_hypothesis": result.df_hypothesis,
+            "df_error": result.df_error,
+            "eigenvalues": result.eigenvalues,
+            "tests": {
+                "pillai": {
+                    "statistic": result.pillai.statistic,
+                    "f_value": result.pillai.f_value,
+                    "df1": result.pillai.df1,
+                    "df2": result.pillai.df2,
+                    "p_value": result.pillai.p_value,
+                    "is_exact": result.pillai.is_exact
+                },
+                "wilks": {
+                    "statistic": result.wilks.statistic,
+                    "f_value": result.wilks.f_value,
+                    "df1": result.wilks.df1,
+                    "df2": result.wilks.df2,
+                    "p_value": result.wilks.p_value,
+                    "is_exact": result.wilks.is_exact
+                },
+                "hotelling_lawley": {
+                    "statistic": result.hotelling_lawley.statistic,
+                    "f_value": result.hotelling_lawley.f_value,
+                    "df1": result.hotelling_lawley.df1,
+                    "df2": result.hotelling_lawley.df2,
+                    "p_value": result.hotelling_lawley.p_value,
+                    "is_exact": result.hotelling_lawley.is_exact
+                },
+                "roy": {
+                    "statistic": result.roy.statistic,
+                    "f_value": result.roy.f_value,
+                    "df1": result.roy.df1,
+                    "df2": result.roy.df2,
+                    "p_value": result.roy.p_value,
+                    "is_exact": result.roy.is_exact,
+                    "note": "Roy's test p-value is a lower bound"
+                }
+            },
+            "group_means": result.group_means,
+            "group_sizes": result.group_sizes,
+            "grand_mean": result.grand_mean,
+            "interpretation": format!(
+                "Pillai's Trace = {:.4} (F = {:.2}, p = {:.4}). {}",
+                result.pillai.statistic,
+                result.pillai.f_value,
+                result.pillai.p_value,
+                if result.pillai.p_value < 0.05 {
+                    "Groups differ significantly on the combined response variables."
+                } else {
+                    "No significant difference between groups on combined response variables."
+                }
+            )
+        });
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&output).unwrap_or_else(|_| format!("{:?}", result))
+        )]))
+    }
+
+    /// Run Tukey's HSD (Honest Significant Differences) test.
+    #[tool(description = "Run Tukey's HSD post-hoc test after one-way ANOVA to perform pairwise comparisons between all group means. Controls for family-wise error rate using the Studentized range distribution. Returns: difference in means, confidence interval, and adjusted p-value for each pair. Use this after finding a significant ANOVA result to identify which specific groups differ.")]
+    async fn anova_tukey_hsd(
+        &self,
+        Parameters(request): Parameters<TukeyHsdRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let conf_level = request.conf_level.unwrap_or(0.95);
+
+        // Validate confidence level
+        if conf_level <= 0.0 || conf_level >= 1.0 {
+            return Ok(CallToolResult::error(vec![Content::text(
+                "Confidence level must be between 0 and 1 (e.g., 0.95 for 95% CI).".to_string()
+            )]));
+        }
+
+        let (anova, tukey) = match run_tukey_hsd(dataset, &request.response, &request.factor, conf_level) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Tukey HSD failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        // Build comparisons array
+        let comparisons: Vec<serde_json::Value> = tukey.comparisons.iter().map(|c| {
+            serde_json::json!({
+                "group1": c.group1,
+                "group2": c.group2,
+                "diff": c.diff,
+                "ci_lower": c.ci_lower,
+                "ci_upper": c.ci_upper,
+                "p_adj": c.p_adj,
+                "significant": c.p_adj < (1.0 - conf_level)
+            })
+        }).collect();
+
+        let output = serde_json::json!({
+            "method": "Tukey HSD (Honest Significant Differences)",
+            "response_var": tukey.response_var,
+            "factor_var": tukey.factor_var,
+            "conf_level": tukey.conf_level,
+            "n_groups": tukey.n_groups,
+            "df": tukey.df,
+            "mse": tukey.mse,
+            "anova_summary": {
+                "f_statistic": anova.f_statistic,
+                "p_value": anova.p_value,
+                "significant": anova.p_value < 0.05
+            },
+            "comparisons": comparisons,
+            "interpretation": format!(
+                "{} pairwise comparisons at {:.0}% family-wise confidence level. {} pairs show significant differences (p < {:.2}).",
+                comparisons.len(),
+                conf_level * 100.0,
+                comparisons.iter().filter(|c| c["significant"].as_bool().unwrap_or(false)).count(),
+                1.0 - conf_level
+            )
+        });
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&output).unwrap_or_else(|_| format!("{:?}", tukey))
+        )]))
+    }
+
+    /// Run Bartlett's test for homogeneity of variances.
+    #[tool(description = "Run Bartlett's test for homogeneity of variances across groups. Tests H₀: all group variances are equal. Suitable for checking the equal variance assumption before ANOVA. Note: Sensitive to non-normality; use Levene's test if data may be non-normal. Returns: K-squared statistic, df, p-value, and group-wise variance estimates.")]
+    async fn hypothesis_bartlett_test(
+        &self,
+        Parameters(request): Parameters<BartlettTestRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let result = match run_bartlett_test(dataset, &request.response, &request.factor) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Bartlett test failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        // Build group statistics array
+        let group_stats: Vec<serde_json::Value> = result.group_stats.iter().map(|gs| {
+            serde_json::json!({
+                "group": gs.group,
+                "n": gs.n,
+                "variance": gs.variance,
+                "std_dev": gs.std_dev
+            })
+        }).collect();
+
+        let output = serde_json::json!({
+            "method": "Bartlett's Test for Homogeneity of Variances",
+            "statistic": result.statistic,
+            "statistic_name": "K-squared",
+            "df": result.df,
+            "p_value": result.p_value,
+            "significance": result.significance.to_string(),
+            "n_groups": result.n_groups,
+            "n_obs": result.n_obs,
+            "pooled_variance": result.pooled_variance,
+            "group_statistics": group_stats,
+            "hypothesis": {
+                "null": "All group variances are equal",
+                "alternative": "At least two group variances differ"
+            },
+            "conclusion": if result.p_value < 0.05 {
+                "Reject H₀: Variances are significantly different across groups."
+            } else {
+                "Fail to reject H₀: No significant difference in variances across groups."
+            },
+            "note": "Bartlett's test is sensitive to non-normality. If data are non-normal, consider using Levene's test instead."
+        });
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&output).unwrap_or_else(|_| format!("{:?}", result))
+        )]))
+    }
+
+    /// Run Mood's two-sample test of scale.
+    #[tool(description = "Run Mood's two-sample test for comparing scale parameters between two independent samples. Tests H₀: scale ratio = 1 (equal scales) using squared rank deviations from the mean rank. Non-parametric alternative to F-test for variance comparison. Handles ties using Mielke (1967) variance correction. Returns Z-statistic, p-value, and sample sizes. Related tests: var_test (parametric), ansari.test (another rank-based scale test), bartlett_test (k-sample variances).")]
+    async fn hypothesis_mood_test(
+        &self,
+        Parameters(request): Parameters<MoodTestRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        // Extract x values
+        let x_series = match dataset.df().column(&request.x) {
+            Ok(s) => s,
+            Err(_) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Column '{}' not found in dataset.",
+                    request.x
+                ))]));
+            }
+        };
+        let x: Vec<f64> = match x_series.f64() {
+            Ok(ca) => ca.into_no_null_iter().collect(),
+            Err(_) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Column '{}' must be numeric.",
+                    request.x
+                ))]));
+            }
+        };
+
+        // Extract y values
+        let y_series = match dataset.df().column(&request.y) {
+            Ok(s) => s,
+            Err(_) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Column '{}' not found in dataset.",
+                    request.y
+                ))]));
+            }
+        };
+        let y: Vec<f64> = match y_series.f64() {
+            Ok(ca) => ca.into_no_null_iter().collect(),
+            Err(_) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Column '{}' must be numeric.",
+                    request.y
+                ))]));
+            }
+        };
+
+        let alternative = match request.alternative.as_deref() {
+            Some("greater") | Some("gt") => Alternative::Greater,
+            Some("less") | Some("lt") => Alternative::Less,
+            _ => Alternative::TwoSided,
+        };
+
+        let result = match mood_test(&x, &y, alternative) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Mood test failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        let alt_description = match result.alternative {
+            Alternative::TwoSided => "true ratio of scales is not equal to 1",
+            Alternative::Greater => "true ratio of scales is greater than 1 (x more spread than y)",
+            Alternative::Less => "true ratio of scales is less than 1 (x less spread than y)",
+        };
+
+        let output = serde_json::json!({
+            "method": "Mood two-sample test of scale",
+            "statistic": result.statistic,
+            "statistic_name": "T (sum of squared rank deviations)",
+            "z_score": result.z_score,
+            "p_value": result.p_value,
+            "significance": result.significance.to_string(),
+            "n_x": result.n_x,
+            "n_y": result.n_y,
+            "n_total": result.n_total,
+            "has_ties": result.has_ties,
+            "hypothesis": {
+                "null": "Scale ratio = 1 (equal scale parameters)",
+                "alternative": alt_description
+            },
+            "conclusion": if result.p_value < 0.05 {
+                "Reject H₀: Scales are significantly different between the two samples."
+            } else {
+                "Fail to reject H₀: No significant difference in scales between samples."
+            },
+            "references": {
+                "method": "Conover (1971), Practical Nonparametric Statistics, pp. 234-235",
+                "ties": "Mielke (1967), Technometrics 9(2):312-314"
+            }
+        });
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&output).unwrap_or_else(|_| format!("{:?}", result))
+        )]))
+    }
+
+    /// Run Kruskal-Wallis rank sum test.
+    #[tool(description = "Run Kruskal-Wallis rank sum test - the non-parametric alternative to one-way ANOVA. Tests whether samples from two or more groups have the same median. Uses chi-squared approximation with tie correction. Returns H statistic, degrees of freedom, p-value, and rank statistics per group.")]
+    async fn hypothesis_kruskal_wallis(
+        &self,
+        Parameters(request): Parameters<KruskalWallisRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let result = match run_kruskal_test(dataset, &request.value, &request.group) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Kruskal-Wallis test failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        // Build group statistics
+        let group_stats: Vec<serde_json::Value> = result
+            .group_names
+            .iter()
+            .zip(result.group_sizes.iter())
+            .zip(result.rank_sums.iter())
+            .zip(result.mean_ranks.iter())
+            .map(|(((name, size), rank_sum), mean_rank)| {
+                serde_json::json!({
+                    "group": name,
+                    "n": size,
+                    "rank_sum": rank_sum,
+                    "mean_rank": mean_rank
+                })
+            })
+            .collect();
+
+        let output = serde_json::json!({
+            "method": "Kruskal-Wallis rank sum test",
+            "statistic": result.statistic,
+            "statistic_name": "H (chi-squared approximation)",
+            "df": result.df,
+            "p_value": result.p_value,
+            "n_groups": result.n_groups,
+            "n_total": result.n_total,
+            "has_ties": result.has_ties,
+            "tie_correction": result.tie_correction,
+            "group_statistics": group_stats,
+            "hypothesis": {
+                "null": "All groups have the same median",
+                "alternative": "At least one group has a different median"
+            },
+            "conclusion": if result.p_value < 0.05 {
+                "Reject H₀: Significant difference in medians across groups."
+            } else {
+                "Fail to reject H₀: No significant difference in medians."
+            },
+            "references": {
+                "method": "Kruskal & Wallis (1952), JASA 47(260):583-621",
+                "text": "Hollander & Wolfe (1973), Nonparametric Statistical Methods, pp. 115-120"
+            }
+        });
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&output).unwrap_or_else(|_| format!("{:?}", result))
+        )]))
+    }
+
+    /// Run Friedman rank sum test.
+    #[tool(description = "Run Friedman rank sum test for unreplicated blocked data. Non-parametric alternative to one-way repeated measures ANOVA. Tests whether treatments have equal effects across blocks. Returns Q statistic, degrees of freedom, p-value, and rank statistics per treatment.")]
+    async fn hypothesis_friedman(
+        &self,
+        Parameters(request): Parameters<FriedmanTestRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let result = match run_friedman_test(dataset, &request.value, &request.treatment, &request.block) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Friedman test failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        // Build treatment statistics
+        let treatment_stats: Vec<serde_json::Value> = result
+            .treatment_names
+            .iter()
+            .zip(result.rank_sums.iter())
+            .zip(result.mean_ranks.iter())
+            .map(|((name, rank_sum), mean_rank)| {
+                serde_json::json!({
+                    "treatment": name,
+                    "rank_sum": rank_sum,
+                    "mean_rank": mean_rank
+                })
+            })
+            .collect();
+
+        let output = serde_json::json!({
+            "method": "Friedman rank sum test",
+            "statistic": result.statistic,
+            "statistic_name": "Q (chi-squared approximation)",
+            "df": result.df,
+            "p_value": result.p_value,
+            "n_blocks": result.n_blocks,
+            "n_treatments": result.n_treatments,
+            "has_ties": result.has_ties,
+            "tie_correction": result.tie_correction,
+            "treatment_statistics": treatment_stats,
+            "hypothesis": {
+                "null": "All treatments have the same effect",
+                "alternative": "At least one treatment has a different effect"
+            },
+            "conclusion": if result.p_value < 0.05 {
+                "Reject H₀: Significant difference in treatment effects."
+            } else {
+                "Fail to reject H₀: No significant difference in treatment effects."
+            },
+            "references": {
+                "method": "Friedman (1937), JASA 32(200):675-701",
+                "text": "Hollander & Wolfe (1973), Nonparametric Statistical Methods, pp. 139-146"
+            }
+        });
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&output).unwrap_or_else(|_| format!("{:?}", result))
+        )]))
+    }
+
+    /// Run Quade test for unreplicated blocked data.
+    ///
+    /// Similar to Friedman test but uses a different weighting scheme that can be
+    /// more powerful when block effects vary considerably. Weights blocks by their
+    /// range and uses an F distribution for the test statistic.
+    #[tool(description = "Run Quade test for unreplicated blocked data. Similar to Friedman test but uses weighted rankings based on block ranges, making it more powerful when block effects vary. Returns F statistic, degrees of freedom, p-value, and treatment statistics. Requires complete blocks (one observation per treatment per block).")]
+    async fn hypothesis_quade(
+        &self,
+        Parameters(request): Parameters<QuadeTestRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let result = match run_quade_test(dataset, &request.value, &request.treatment, &request.block) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Quade test failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        // Build treatment statistics
+        let treatment_stats: Vec<serde_json::Value> = result
+            .treatment_names
+            .iter()
+            .zip(result.treatment_sums.iter())
+            .zip(result.mean_weighted_ranks.iter())
+            .map(|((name, sum), mean_rank)| {
+                serde_json::json!({
+                    "treatment": name,
+                    "weighted_rank_sum": sum,
+                    "mean_weighted_rank": mean_rank
+                })
+            })
+            .collect();
+
+        let output = serde_json::json!({
+            "method": "Quade test",
+            "statistic": result.statistic,
+            "statistic_name": "F",
+            "df1": result.df1,
+            "df2": result.df2,
+            "p_value": result.p_value,
+            "n_blocks": result.n_blocks,
+            "n_treatments": result.n_treatments,
+            "a_statistic": result.a_statistic,
+            "b_statistic": result.b_statistic,
+            "block_ranges": result.block_ranges,
+            "treatment_statistics": treatment_stats,
+            "hypothesis": {
+                "null": "All treatments have the same effect",
+                "alternative": "At least one treatment has a different effect"
+            },
+            "conclusion": if result.p_value < 0.05 {
+                "Reject H₀: Significant difference in treatment effects."
+            } else {
+                "Fail to reject H₀: No significant difference in treatment effects."
+            },
+            "references": {
+                "method": "Quade (1979), JASA 74(367):680-683",
+                "text": "Conover (1999), Practical Nonparametric Statistics, pp. 373-380"
+            }
+        });
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&output).unwrap_or_else(|_| format!("{:?}", result))
+        )]))
+    }
+
+    /// Run Cochran-Mantel-Haenszel test for stratified 2×2 tables.
+    ///
+    /// Tests whether there is a conditional association between two binary variables
+    /// while controlling for a stratification variable.
+    #[tool(description = "Run Cochran-Mantel-Haenszel test for conditional independence in stratified 2×2 tables. Tests whether two binary variables are associated while controlling for a third (stratum) variable. Returns CMH chi-squared statistic, p-value, common odds ratio estimate with confidence interval, and per-stratum statistics.")]
+    async fn hypothesis_mantelhaen(
+        &self,
+        Parameters(request): Parameters<MantelhaenTestRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let correct = request.correct.unwrap_or(true);
+
+        let alternative = match request.alternative.as_deref() {
+            Some("greater") => CmhAlternative::Greater,
+            Some("less") => CmhAlternative::Less,
+            _ => CmhAlternative::TwoSided,
+        };
+
+        let result = match run_mantelhaen_test(
+            dataset,
+            &request.row_var,
+            &request.col_var,
+            &request.stratum_var,
+            correct,
+            alternative,
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Cochran-Mantel-Haenszel test failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        // Build per-stratum statistics
+        let stratum_stats: Vec<serde_json::Value> = result
+            .stratum_stats
+            .iter()
+            .map(|s| {
+                serde_json::json!({
+                    "stratum": s.stratum,
+                    "counts": {
+                        "a": s.counts[0],
+                        "b": s.counts[1],
+                        "c": s.counts[2],
+                        "d": s.counts[3]
+                    },
+                    "n": s.n,
+                    "expected_a": s.expected_a,
+                    "variance_a": s.variance_a,
+                    "odds_ratio": s.odds_ratio
+                })
+            })
+            .collect();
+
+        let alt_desc = match result.alternative {
+            CmhAlternative::TwoSided => "true common odds ratio is not equal to 1",
+            CmhAlternative::Greater => "true common odds ratio is greater than 1",
+            CmhAlternative::Less => "true common odds ratio is less than 1",
+        };
+
+        let output = serde_json::json!({
+            "method": result.test_name,
+            "statistic": result.statistic,
+            "statistic_name": "Mantel-Haenszel X-squared",
+            "df": result.df,
+            "p_value": result.p_value,
+            "n_strata": result.n_strata,
+            "total_n": result.total_n,
+            "common_odds_ratio": result.common_odds_ratio,
+            "odds_ratio_ci": {
+                "lower": result.odds_ratio_ci.0,
+                "upper": result.odds_ratio_ci.1,
+                "conf_level": 0.95
+            },
+            "continuity_correction": result.continuity_correction,
+            "stratum_statistics": stratum_stats,
+            "hypothesis": {
+                "null": "Row and column variables are conditionally independent given stratum",
+                "alternative": alt_desc
+            },
+            "conclusion": if result.p_value < 0.05 {
+                "Reject H₀: Significant conditional association between variables."
+            } else {
+                "Fail to reject H₀: No significant conditional association detected."
+            },
+            "references": {
+                "method": "Cochran (1954), Biometrics 10(4):417-451; Mantel & Haenszel (1959), JNCI 22(4):719-748",
+                "variance": "Robins et al. (1986) for odds ratio CI"
+            }
+        });
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&output).unwrap_or_else(|_| format!("{:?}", result))
+        )]))
+    }
+
+    /// Run exact Poisson test.
+    #[tool(description = "Run exact Poisson test for rate parameters. One-sample test: tests whether the rate equals a hypothesized value. Two-sample test: compares the ratio of two rates. Returns test statistic, p-value, rate estimate (or ratio), and confidence interval.")]
+    async fn hypothesis_poisson(
+        &self,
+        Parameters(request): Parameters<PoissonTestRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let r = request.r.unwrap_or(1.0);
+        let conf_level = request.conf_level.unwrap_or(0.95);
+
+        let alternative = match request.alternative.as_deref() {
+            Some("greater") => PoissonAlternative::Greater,
+            Some("less") => PoissonAlternative::Less,
+            _ => PoissonAlternative::TwoSided,
+        };
+
+        let result = match poisson_test(&request.x, &request.t, r, alternative, conf_level) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Poisson test failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        let alt_desc = match result.alternative {
+            PoissonAlternative::TwoSided => {
+                if result.n_samples == 1 {
+                    format!("true event rate is not equal to {:.4}", result.null_value)
+                } else {
+                    format!("true rate ratio is not equal to {:.4}", result.null_value)
+                }
+            }
+            PoissonAlternative::Greater => {
+                if result.n_samples == 1 {
+                    format!("true event rate is greater than {:.4}", result.null_value)
+                } else {
+                    format!("true rate ratio is greater than {:.4}", result.null_value)
+                }
+            }
+            PoissonAlternative::Less => {
+                if result.n_samples == 1 {
+                    format!("true event rate is less than {:.4}", result.null_value)
+                } else {
+                    format!("true rate ratio is less than {:.4}", result.null_value)
+                }
+            }
+        };
+
+        let estimate_name = if result.n_samples == 1 { "event rate" } else { "rate ratio" };
+
+        let output = serde_json::json!({
+            "method": result.method,
+            "statistic": result.statistic,
+            "statistic_name": if result.n_samples == 1 { "number of events" } else { "count1" },
+            "expected": result.parameter,
+            "p_value": result.p_value,
+            "estimate": {
+                "name": estimate_name,
+                "value": result.estimate
+            },
+            "confidence_interval": {
+                "lower": result.conf_int.0,
+                "upper": result.conf_int.1,
+                "conf_level": result.conf_level
+            },
+            "n_samples": result.n_samples,
+            "hypothesis": {
+                "null": if result.n_samples == 1 {
+                    format!("event rate = {:.4}", result.null_value)
+                } else {
+                    format!("rate ratio = {:.4}", result.null_value)
+                },
+                "alternative": alt_desc
+            },
+            "conclusion": if result.p_value < 0.05 {
+                if result.n_samples == 1 {
+                    "Reject H₀: Event rate significantly differs from hypothesized value."
+                } else {
+                    "Reject H₀: Rate ratio significantly differs from hypothesized value."
+                }
+            } else {
+                if result.n_samples == 1 {
+                    "Fail to reject H₀: No significant difference from hypothesized rate."
+                } else {
+                    "Fail to reject H₀: No significant difference in rates."
+                }
+            },
+            "references": "Przyborowski & Wilenski (1940), Biometrika 31(3/4):313-323"
+        });
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&output).unwrap_or_else(|_| format!("{:?}", result))
+        )]))
+    }
+
+    /// Run Welch's one-way ANOVA test.
+    #[tool(description = "Run Welch's one-way ANOVA test - compares means of multiple groups without assuming equal variances. This is more robust than standard ANOVA when variances differ. Returns F statistic, numerator and denominator degrees of freedom, p-value, and group statistics.")]
+    async fn hypothesis_oneway(
+        &self,
+        Parameters(request): Parameters<OnewayTestRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let var_equal = request.var_equal.unwrap_or(false);
+
+        let result = match run_oneway_test(dataset, &request.value, &request.group, var_equal) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Welch's ANOVA failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        // Build group statistics
+        let group_stats: Vec<serde_json::Value> = result
+            .group_names
+            .iter()
+            .zip(result.group_sizes.iter())
+            .zip(result.group_means.iter())
+            .zip(result.group_variances.iter())
+            .map(|(((name, size), mean), variance)| {
+                serde_json::json!({
+                    "group": name,
+                    "n": size,
+                    "mean": mean,
+                    "variance": variance,
+                    "std_dev": variance.sqrt()
+                })
+            })
+            .collect();
+
+        let method = if result.var_equal {
+            "One-way analysis of means"
+        } else {
+            "One-way analysis of means (not assuming equal variances)"
+        };
+
+        let output = serde_json::json!({
+            "method": method,
+            "statistic": result.statistic,
+            "statistic_name": "F",
+            "df_numerator": result.df_num,
+            "df_denominator": result.df_denom,
+            "p_value": result.p_value,
+            "n_groups": result.n_groups,
+            "n_total": result.n_total,
+            "var_equal": result.var_equal,
+            "group_statistics": group_stats,
+            "hypothesis": {
+                "null": "All groups have the same mean",
+                "alternative": "At least one group has a different mean"
+            },
+            "conclusion": if result.p_value < 0.05 {
+                "Reject H₀: Significant difference in means across groups."
+            } else {
+                "Fail to reject H₀: No significant difference in means."
+            },
+            "references": {
+                "method": "Welch (1951), Biometrika 38(3/4):330-336"
+            }
+        });
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&output).unwrap_or_else(|_| format!("{:?}", result))
+        )]))
+    }
+
+    /// Run McNemar's chi-squared test.
+    #[tool(description = "Run McNemar's chi-squared test for paired nominal data. Tests symmetry in a 2x2 contingency table. Commonly used for comparing two classifiers or before/after studies. Only requires the discordant cells (b and c).")]
+    async fn hypothesis_mcnemar(
+        &self,
+        Parameters(request): Parameters<McnemarTestRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let correct = request.correct.unwrap_or(true);
+
+        let result = match mcnemar_test(request.b, request.c, correct) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "McNemar test failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        let method = if result.continuity_correction {
+            "McNemar's Chi-squared test with continuity correction"
+        } else {
+            "McNemar's Chi-squared test"
+        };
+
+        let output = serde_json::json!({
+            "method": method,
+            "statistic": result.statistic,
+            "statistic_name": "Chi-squared",
+            "df": result.df,
+            "p_value": result.p_value,
+            "b": result.b,
+            "c": result.c,
+            "n_discordant": result.n_discordant,
+            "continuity_correction": result.continuity_correction,
+            "hypothesis": {
+                "null": "P(b) = P(c) (marginal homogeneity)",
+                "alternative": "P(b) ≠ P(c)"
+            },
+            "conclusion": if result.p_value < 0.05 {
+                "Reject H₀: Significant asymmetry in the contingency table."
+            } else {
+                "Fail to reject H₀: No significant asymmetry detected."
+            },
+            "references": {
+                "method": "McNemar (1947), Psychometrika 12(2):153-157",
+                "correction": "Edwards (1948), Psychometrika 13(3):185-187"
+            }
+        });
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&output).unwrap_or_else(|_| format!("{:?}", result))
+        )]))
+    }
+
+    /// Run t-test for comparing means.
+    #[tool(description = "Run Student's t-test for comparing means. Supports: (1) One-sample t-test: compare sample mean to hypothesized value, (2) Two-sample t-test: compare means between two groups (Welch's by default), (3) Paired t-test: compare matched pairs. Returns t-statistic, p-value, confidence interval, and effect estimate.")]
+    async fn hypothesis_t_test(
+        &self,
+        Parameters(request): Parameters<TTestRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        // Extract x values
+        let x_series = match dataset.df().column(&request.x) {
+            Ok(s) => s,
+            Err(_) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Column '{}' not found in dataset.",
+                    request.x
+                ))]));
+            }
+        };
+        let x: Vec<f64> = match x_series.f64() {
+            Ok(ca) => ca.into_no_null_iter().collect(),
+            Err(_) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Column '{}' must be numeric.",
+                    request.x
+                ))]));
+            }
+        };
+
+        let mu = request.mu.unwrap_or(0.0);
+        let alternative = match request.alternative.as_deref() {
+            Some("greater") | Some("gt") => Alternative::Greater,
+            Some("less") | Some("lt") => Alternative::Less,
+            _ => Alternative::TwoSided,
+        };
+        let paired = request.paired.unwrap_or(false);
+        let var_equal = request.var_equal.unwrap_or(false);
+        let conf_level = request.conf_level.unwrap_or(0.95);
+
+        let result = match &request.y {
+            Some(y_col) => {
+                // Extract y values
+                let y_series = match dataset.df().column(y_col) {
+                    Ok(s) => s,
+                    Err(_) => {
+                        return Ok(CallToolResult::error(vec![Content::text(format!(
+                            "Column '{}' not found in dataset.",
+                            y_col
+                        ))]));
+                    }
+                };
+                let y: Vec<f64> = match y_series.f64() {
+                    Ok(ca) => ca.into_no_null_iter().collect(),
+                    Err(_) => {
+                        return Ok(CallToolResult::error(vec![Content::text(format!(
+                            "Column '{}' must be numeric.",
+                            y_col
+                        ))]));
+                    }
+                };
+
+                if paired {
+                    paired_t_test(&x, &y, mu, alternative, conf_level)
+                } else {
+                    two_sample_t_test(&x, &y, mu, alternative, var_equal, conf_level)
+                }
+            }
+            None => {
+                if paired {
+                    return Ok(CallToolResult::error(vec![Content::text(
+                        "Paired t-test requires both x and y columns.".to_string()
+                    )]));
+                }
+                one_sample_t_test(&x, mu, alternative, conf_level)
+            }
+        };
+
+        match result {
+            Ok(r) => Ok(CallToolResult::success(vec![Content::text(r.to_string())])),
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
+                "t-test failed: {}",
+                e
+            ))])),
+        }
+    }
+
+    /// Run pairwise t-tests between all group levels.
+    ///
+    /// Performs pairwise comparisons using t-tests with correction for multiple testing.
+    /// Commonly used as a post-hoc analysis after ANOVA to identify which specific groups differ.
+    ///
+    /// References:
+    /// - R `stats::pairwise.t.test`: https://stat.ethz.ch/R-manual/R-devel/library/stats/html/pairwise.t.test.html
+    /// - Holm, S. (1979). "A Simple Sequentially Rejective Multiple Test Procedure". Scand. J. Stat., 6(2), 65-70.
+    /// - Benjamini, Y. & Hochberg, Y. (1995). "Controlling the False Discovery Rate". JRSS-B, 57(1), 289-300.
+    #[tool(description = "Run pairwise t-tests between all group levels with p-value adjustment for multiple comparisons. Post-hoc analysis after ANOVA. Options: pool_sd=true uses pooled variance (Student's), false uses Welch's (default). Adjustment methods: 'holm' (default, FWER), 'bonferroni', 'hochberg', 'hommel', 'BH' (FDR), 'BY', 'none'. Returns matrix of adjusted p-values for all pairs.")]
+    async fn hypothesis_pairwise_t_test(
+        &self,
+        Parameters(request): Parameters<PairwiseTTestRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        // Parse p-value adjustment method
+        let p_adjust_method = match request.p_adjust_method.as_deref() {
+            Some(m) => match PValueAdjustMethod::from_str(m) {
+                Some(method) => method,
+                None => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Invalid p-value adjustment method '{}'. Use 'holm', 'bonferroni', 'hochberg', 'hommel', 'BH', 'BY', or 'none'.",
+                        m
+                    ))]));
+                }
+            },
+            None => PValueAdjustMethod::Holm,
+        };
+
+        // Parse alternative hypothesis
+        let alternative = match request.alternative.as_deref() {
+            Some(alt) => match Alternative::from_str(alt) {
+                Some(a) => a,
+                None => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Invalid alternative '{}'. Use 'two.sided', 'greater', or 'less'.",
+                        alt
+                    ))]));
+                }
+            },
+            None => Alternative::TwoSided,
+        };
+
+        let pool_sd = request.pool_sd.unwrap_or(false);
+
+        match run_pairwise_t_test(
+            dataset,
+            &request.response,
+            &request.factor,
+            pool_sd,
+            alternative,
+            p_adjust_method,
+        ) {
+            Ok(result) => {
+                // Build JSON output with p-value matrix
+                let k = result.group_names.len();
+                let mut p_matrix: Vec<Vec<Option<f64>>> = vec![vec![None; k]; k];
+                for i in 1..k {
+                    for j in 0..i {
+                        p_matrix[i][j] = Some(result.p_values_adj[result.index(i, j)]);
+                    }
+                }
+
+                let output = serde_json::json!({
+                    "test": result.test_name,
+                    "p_adjust_method": result.p_adjust_method.name(),
+                    "pool_sd": result.pool_sd,
+                    "alternative": format!("{:?}", result.alternative).to_lowercase(),
+                    "group_names": result.group_names,
+                    "group_sizes": result.group_sizes,
+                    "group_means": result.group_means,
+                    "n_comparisons": result.n_comparisons,
+                    "pooled_sd": result.pooled_sd,
+                    "p_values_adjusted": p_matrix,
+                    "p_values_raw": result.p_values_raw,
+                    "t_statistics": result.t_statistics,
+                    "degrees_of_freedom": result.df,
+                    "interpretation": {
+                        "how_to_read": "p_values_adjusted is a lower-triangular matrix. Row i, column j gives the adjusted p-value for comparing group_names[i] vs group_names[j].",
+                        "significance": "p < 0.05 indicates significant difference between groups at 5% level."
+                    },
+                    "references": {
+                        "method": "R stats::pairwise.t.test",
+                        "p_adjust": format!("{} adjustment for multiple comparisons", result.p_adjust_method.name())
+                    }
+                });
+
+                Ok(CallToolResult::success(vec![Content::text(
+                    serde_json::to_string_pretty(&output).unwrap_or_else(|_| result.to_string())
+                )]))
+            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
+                "Pairwise t-test failed: {}",
+                e
+            ))])),
+        }
+    }
+
+    /// Run pairwise Wilcoxon rank sum tests between all group levels.
+    ///
+    /// Non-parametric alternative to pairwise t-tests for comparing group distributions
+    /// without assuming normality. Commonly used after Kruskal-Wallis test.
+    ///
+    /// References:
+    /// - R `stats::pairwise.wilcox.test`: https://stat.ethz.ch/R-manual/R-devel/library/stats/html/pairwise.wilcox.test.html
+    /// - Mann, H. B. & Whitney, D. R. (1947). "On a Test of Whether one of Two Random Variables
+    ///   is Stochastically Larger than the Other". Annals of Mathematical Statistics, 18(1), 50-60.
+    #[tool(description = "Run pairwise Wilcoxon rank sum tests between all group levels with p-value adjustment. Non-parametric post-hoc analysis after Kruskal-Wallis test. Does not assume normality. Adjustment methods: 'holm' (default, FWER), 'bonferroni', 'hochberg', 'hommel', 'BH' (FDR), 'BY', 'none'. Returns matrix of adjusted p-values for all pairs.")]
+    async fn hypothesis_pairwise_wilcox(
+        &self,
+        Parameters(request): Parameters<PairwiseWilcoxRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        // Parse p-value adjustment method
+        let p_adjust_method = match request.p_adjust_method.as_deref() {
+            Some(m) => match PValueAdjustMethod::from_str(m) {
+                Some(method) => method,
+                None => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Invalid p-value adjustment method '{}'. Use 'holm', 'bonferroni', 'hochberg', 'hommel', 'BH', 'BY', or 'none'.",
+                        m
+                    ))]));
+                }
+            },
+            None => PValueAdjustMethod::Holm,
+        };
+
+        // Parse alternative hypothesis
+        let alternative = match request.alternative.as_deref() {
+            Some(alt) => match Alternative::from_str(alt) {
+                Some(a) => a,
+                None => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Invalid alternative '{}'. Use 'two.sided', 'greater', or 'less'.",
+                        alt
+                    ))]));
+                }
+            },
+            None => Alternative::TwoSided,
+        };
+
+        match run_pairwise_wilcox_test(
+            dataset,
+            &request.response,
+            &request.factor,
+            alternative,
+            p_adjust_method,
+            request.exact,
+        ) {
+            Ok(result) => {
+                // Build JSON output with p-value matrix
+                let k = result.group_names.len();
+                let mut p_matrix: Vec<Vec<Option<f64>>> = vec![vec![None; k]; k];
+                for i in 1..k {
+                    for j in 0..i {
+                        p_matrix[i][j] = Some(result.p_values_adj[result.index(i, j)]);
+                    }
+                }
+
+                let output = serde_json::json!({
+                    "test": result.test_name,
+                    "p_adjust_method": result.p_adjust_method.name(),
+                    "alternative": format!("{:?}", result.alternative).to_lowercase(),
+                    "group_names": result.group_names,
+                    "group_sizes": result.group_sizes,
+                    "group_medians": result.group_medians,
+                    "n_comparisons": result.n_comparisons,
+                    "exact": result.exact,
+                    "p_values_adjusted": p_matrix,
+                    "p_values_raw": result.p_values_raw,
+                    "w_statistics": result.w_statistics,
+                    "warning": result.warning,
+                    "interpretation": {
+                        "how_to_read": "p_values_adjusted is a lower-triangular matrix. Row i, column j gives the adjusted p-value for comparing group_names[i] vs group_names[j].",
+                        "significance": "p < 0.05 indicates significant difference in location between groups at 5% level."
+                    },
+                    "references": {
+                        "method": "R stats::pairwise.wilcox.test",
+                        "p_adjust": format!("{} adjustment for multiple comparisons", result.p_adjust_method.name())
+                    }
+                });
+
+                Ok(CallToolResult::success(vec![Content::text(
+                    serde_json::to_string_pretty(&output).unwrap_or_else(|_| result.to_string())
+                )]))
+            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
+                "Pairwise Wilcoxon test failed: {}",
+                e
+            ))])),
+        }
+    }
+
+    /// Run Wilcoxon rank sum or signed rank test.
+    ///
+    /// References:
+    /// - Wilcoxon, F. (1945). "Individual Comparisons by Ranking Methods".
+    ///   Biometrics Bulletin, 1(6), 80-83.
+    /// - Mann, H. B. & Whitney, D. R. (1947). "On a Test of Whether one of Two
+    ///   Random Variables is Stochastically Larger than the Other".
+    ///   Annals of Mathematical Statistics, 18(1), 50-60.
+    /// - R `stats::wilcox.test`: https://stat.ethz.ch/R-manual/R-devel/library/stats/html/wilcox.test.html
+    #[tool(description = "Run Wilcoxon non-parametric test for location. Supports: (1) One-sample signed rank test: test if median differs from hypothesized value, (2) Two-sample rank sum test (Mann-Whitney U): compare distributions between two groups, (3) Paired signed rank test: compare matched pairs. Does not assume normality. Returns W/V statistic, p-value, and optionally confidence interval and location estimate.")]
+    async fn hypothesis_wilcoxon(
+        &self,
+        Parameters(request): Parameters<WilcoxonTestRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        use p2a_core::stats::wilcoxon::{wilcoxon_test, WilcoxonConfig};
+
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        // Parse alternative hypothesis
+        let alternative = match request.alternative.as_deref() {
+            Some(alt) => match Alternative::from_str(alt) {
+                Some(a) => a,
+                None => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Invalid alternative '{}'. Use 'two.sided', 'greater', or 'less'.",
+                        alt
+                    ))]));
+                }
+            },
+            None => Alternative::TwoSided,
+        };
+
+        let mu = request.mu.unwrap_or(0.0);
+        let paired = request.paired.unwrap_or(false);
+        let config = WilcoxonConfig {
+            exact: request.exact,
+            correct: request.correct.unwrap_or(true),
+            conf_int: request.conf_int.unwrap_or(false),
+            conf_level: request.conf_level.unwrap_or(0.95),
+        };
+
+        match wilcoxon_test(
+            dataset,
+            &request.x,
+            request.y.as_deref(),
+            mu,
+            alternative,
+            paired,
+            &config,
+        ) {
+            Ok(result) => {
+                // Build JSON output
+                let mut json_output = serde_json::json!({
+                    "test": result.test_name,
+                    "statistic": result.statistic,
+                    "p_value": result.p_value,
+                    "significance": result.significance.to_string(),
+                    "alternative": format!("{:?}", result.alternative).to_lowercase(),
+                    "null_value": result.null_value,
+                    "exact": result.exact,
+                    "continuity_correction": result.continuity_correction,
+                    "n1": result.n,
+                });
+
+                if let Some(n2) = result.n_2 {
+                    json_output["n2"] = serde_json::json!(n2);
+                }
+                if let Some(u) = result.u_statistic {
+                    json_output["u_statistic"] = serde_json::json!(u);
+                }
+                if let Some(z) = result.z_score {
+                    json_output["z_score"] = serde_json::json!(z);
+                }
+                if let Some(est) = result.estimate {
+                    json_output["estimate"] = serde_json::json!(est);
+                }
+                if let (Some(cl), Some(lo), Some(hi)) = (result.conf_level, result.conf_int_lower, result.conf_int_upper) {
+                    json_output["confidence_interval"] = serde_json::json!({
+                        "level": cl,
+                        "lower": lo,
+                        "upper": hi
+                    });
+                }
+                if result.n_ties > 0 {
+                    json_output["n_ties"] = serde_json::json!(result.n_ties);
+                }
+                if let Some(ref warn) = result.warning {
+                    json_output["warning"] = serde_json::json!(warn);
+                }
+
+                Ok(CallToolResult::success(vec![Content::text(format!(
+                    "{}\n\n{}",
+                    result,
+                    serde_json::to_string_pretty(&json_output).unwrap_or_default()
+                ))]))
+            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
+                "Wilcoxon test failed: {}",
+                e
+            ))])),
+        }
+    }
+
+    // ========================================================================
+    // Chi-Squared Tests
+    // ========================================================================
+
+    /// Run chi-squared goodness-of-fit test.
+    ///
+    /// References:
+    /// - Pearson, K. (1900). "On the criterion that a given system of deviations from
+    ///   the probable in the case of a correlated system of variables is such that it
+    ///   can be reasonably supposed to have arisen from random sampling".
+    /// - R `stats::chisq.test`: https://stat.ethz.ch/R-manual/R-devel/library/stats/html/chisq.test.html
+    #[tool(description = "Run Pearson's chi-squared goodness-of-fit test to check if observed category frequencies match expected probabilities. Tests H₀: observed frequencies follow the expected distribution. Returns chi-squared statistic, p-value, degrees of freedom, and residuals. Use for categorical data to test if a distribution is uniform or matches specific probabilities.")]
+    async fn hypothesis_chisq_gof(
+        &self,
+        Parameters(request): Parameters<ChiSquaredGofRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let probs: Option<Vec<f64>> = request.probs;
+        let probs_ref: Option<&[f64]> = probs.as_deref();
+
+        match run_chisq_gof(dataset, &request.column, probs_ref) {
+            Ok(result) => {
+                // Convert to JSON for structured output
+                let json_output = serde_json::json!({
+                    "test": result.test_name,
+                    "statistic": result.statistic,
+                    "df": result.df,
+                    "p_value": result.p_value,
+                    "significance": result.significance.to_string(),
+                    "observed": result.observed,
+                    "expected": result.expected,
+                    "residuals": result.residuals,
+                    "n_categories": result.observed.len(),
+                });
+                Ok(CallToolResult::success(vec![Content::text(
+                    serde_json::to_string_pretty(&json_output).unwrap(),
+                )]))
+            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
+                "Chi-squared goodness-of-fit test failed: {}",
+                e
+            ))])),
+        }
+    }
+
+    /// Run chi-squared test of independence.
+    ///
+    /// References:
+    /// - Pearson, K. (1900). "On the criterion that a given system of deviations..."
+    /// - Yates, F. (1934). "Contingency tables involving small numbers and the χ² test".
+    /// - R `stats::chisq.test`: https://stat.ethz.ch/R-manual/R-devel/library/stats/html/chisq.test.html
+    #[tool(description = "Run Pearson's chi-squared test of independence to check if two categorical variables are independent. Creates a contingency table from two columns and tests H₀: row and column variables are independent. For 2×2 tables, Yates' continuity correction is applied by default. Returns chi-squared statistic, p-value, degrees of freedom, expected values, and residuals.")]
+    async fn hypothesis_chisq_independence(
+        &self,
+        Parameters(request): Parameters<ChiSquaredIndependenceRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let correct = request.correct.unwrap_or(true);
+
+        match run_chisq_independence(dataset, &request.row_var, &request.col_var, correct) {
+            Ok(result) => {
+                // Convert to JSON for structured output
+                let json_output = serde_json::json!({
+                    "test": result.test_name,
+                    "statistic": result.statistic,
+                    "df": result.df,
+                    "p_value": result.p_value,
+                    "significance": result.significance.to_string(),
+                    "n_rows": result.n_rows,
+                    "n_cols": result.n_cols,
+                    "observed": result.observed,
+                    "expected": result.expected,
+                    "residuals": result.residuals,
+                    "std_residuals": result.std_residuals,
+                    "yates_correction": result.yates_correction,
+                });
+                Ok(CallToolResult::success(vec![Content::text(
+                    serde_json::to_string_pretty(&json_output).unwrap(),
+                )]))
+            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
+                "Chi-squared test of independence failed: {}",
+                e
+            ))])),
+        }
+    }
+
+    /// Fisher's exact test for 2×2 contingency tables.
+    ///
+    /// References:
+    /// - Fisher, R. A. (1935). "The logic of inductive inference".
+    ///   Journal of the Royal Statistical Society, 98(1), 39-82.
+    /// - R `stats::fisher.test`: https://stat.ethz.ch/R-manual/R-devel/library/stats/html/fisher.test.html
+    #[tool(description = "Run Fisher's exact test for a 2×2 contingency table. Tests independence between two binary categorical variables using exact probability calculations (hypergeometric distribution). More accurate than chi-squared test for small samples. Returns p-value, odds ratio, and optionally a confidence interval. Use when expected cell counts are small (<5) or when exact p-values are needed.")]
+    async fn hypothesis_fisher_exact(
+        &self,
+        Parameters(request): Parameters<FisherExactRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        use p2a_core::stats::fisher::{run_fisher_test, FisherAlternative};
+
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        // Parse alternative hypothesis
+        let alternative = match request.alternative.as_deref() {
+            Some("greater") => FisherAlternative::Greater,
+            Some("less") => FisherAlternative::Less,
+            Some("two.sided") | None => FisherAlternative::TwoSided,
+            Some(other) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Invalid alternative '{}'. Must be 'two.sided', 'greater', or 'less'.",
+                    other
+                ))]));
+            }
+        };
+
+        match run_fisher_test(dataset, &request.row_var, &request.col_var, alternative, request.conf_level) {
+            Ok(result) => {
+                // Convert to JSON for structured output
+                let mut json_output = serde_json::json!({
+                    "test": result.test_name,
+                    "p_value": result.p_value,
+                    "significance": result.significance.to_string(),
+                    "alternative": result.alternative.to_string(),
+                    "odds_ratio": result.odds_ratio,
+                    "table": {
+                        "a": result.table[0],
+                        "b": result.table[1],
+                        "c": result.table[2],
+                        "d": result.table[3],
+                    },
+                    "row_totals": result.row_totals,
+                    "col_totals": result.col_totals,
+                    "n": result.n,
+                    "prob_observed": result.prob_observed,
+                });
+
+                // Add CI if computed
+                if let (Some((lo, hi)), Some(level)) = (result.odds_ratio_ci, result.conf_level) {
+                    json_output["odds_ratio_ci"] = serde_json::json!({
+                        "lower": lo,
+                        "upper": hi,
+                        "conf_level": level,
+                    });
+                }
+
+                Ok(CallToolResult::success(vec![Content::text(
+                    serde_json::to_string_pretty(&json_output).unwrap(),
+                )]))
+            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
+                "Fisher's exact test failed: {}",
+                e
+            ))])),
+        }
+    }
+
+    /// Shapiro-Wilk test for normality.
+    ///
+    /// References:
+    /// - Shapiro, S. S. & Wilk, M. B. (1965). "An analysis of variance test for normality
+    ///   (complete samples)". Biometrika, 52(3-4), 591-611.
+    /// - Royston, P. (1995). "Remark AS R94: A remark on Algorithm AS 181: The W-test
+    ///   for normality". Journal of the Royal Statistical Society Series C, 44(4), 547-551.
+    /// - R `stats::shapiro.test`: https://stat.ethz.ch/R-manual/R-devel/library/stats/html/shapiro.test.html
+    #[tool(description = "Run the Shapiro-Wilk test for normality. Tests the null hypothesis that a sample came from a normally distributed population. Returns W statistic (values close to 1 indicate normality) and p-value. Sample size must be between 3 and 5000. A small p-value (e.g., < 0.05) suggests data is not normally distributed.")]
+    async fn hypothesis_shapiro_wilk(
+        &self,
+        Parameters(request): Parameters<ShapiroWilkRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        use p2a_core::stats::shapiro::run_shapiro_wilk;
+
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        match run_shapiro_wilk(dataset, &request.column) {
+            Ok(result) => {
+                let json_output = serde_json::json!({
+                    "test": result.test_name,
+                    "w_statistic": result.w_statistic,
+                    "p_value": result.p_value,
+                    "significance": result.significance.to_string(),
+                    "n": result.n,
+                    "reject_normality": result.reject_normality,
+                    "interpretation": if result.reject_normality {
+                        "Evidence against normality (reject H₀ at α = 0.05)"
+                    } else {
+                        "No evidence against normality (fail to reject H₀ at α = 0.05)"
+                    }
+                });
+                Ok(CallToolResult::success(vec![Content::text(
+                    serde_json::to_string_pretty(&json_output).unwrap(),
+                )]))
+            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
+                "Shapiro-Wilk test failed: {}",
+                e
+            ))])),
+        }
+    }
+
+    /// Kolmogorov-Smirnov test for comparing distributions.
+    ///
+    /// References:
+    /// - Kolmogorov, A. N. (1933). "Sulla determinazione empirica di una legge di distribuzione".
+    ///   Giornale dell'Istituto Italiano degli Attuari, 4, 83-91.
+    /// - Smirnov, N. V. (1939). "On the estimation of the discrepancy between empirical curves
+    ///   of distribution for two independent samples". Bulletin of Moscow University, 2(2), 3-16.
+    /// - R `stats::ks.test`: https://stat.ethz.ch/R-manual/R-devel/library/stats/html/ks.test.html
+    #[tool(description = "Run the Kolmogorov-Smirnov test. Two-sample test: Tests if two samples come from the same distribution. One-sample test: Tests if a sample comes from a specified theoretical distribution (normal, uniform, exponential). Returns D statistic (maximum absolute difference between CDFs) and p-value. A small p-value suggests the distributions differ.")]
+    async fn hypothesis_ks_test(
+        &self,
+        Parameters(request): Parameters<KsTestRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        use p2a_core::stats::ks::{ks_test_one_sample, ks_test_two_sample, TheoreticalDistribution};
+
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        // Parse alternative hypothesis
+        let alternative = match request.alternative.as_deref() {
+            Some(alt) => match Alternative::from_str(alt) {
+                Some(a) => a,
+                None => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Invalid alternative '{}'. Use 'two.sided', 'greater', or 'less'.",
+                        alt
+                    ))]));
+                }
+            },
+            None => Alternative::TwoSided,
+        };
+
+        let df = dataset.df();
+
+        // Extract x values
+        let x_series = match df.column(&request.x) {
+            Ok(s) => s,
+            Err(_) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Column '{}' not found in dataset.", request.x
+                ))]));
+            }
+        };
+        let x: Vec<f64> = match x_series.f64() {
+            Ok(ca) => ca.into_no_null_iter().collect(),
+            Err(_) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Column '{}' is not numeric.", request.x
+                ))]));
+            }
+        };
+
+        let result = if let Some(y_col) = &request.y {
+            // Two-sample test
+            let y_series = match df.column(y_col) {
+                Ok(s) => s,
+                Err(_) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Column '{}' not found in dataset.", y_col
+                    ))]));
+                }
+            };
+            let y: Vec<f64> = match y_series.f64() {
+                Ok(ca) => ca.into_no_null_iter().collect(),
+                Err(_) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Column '{}' is not numeric.", y_col
+                    ))]));
+                }
+            };
+
+            ks_test_two_sample(&x, &y, alternative)
+        } else {
+            // One-sample test
+            let distribution = match request.distribution.as_deref() {
+                Some("uniform") => {
+                    let a = request.a.unwrap_or(0.0);
+                    let b = request.b.unwrap_or(1.0);
+                    TheoreticalDistribution::UniformParams { a, b }
+                }
+                Some("exponential") => {
+                    let rate = request.rate.unwrap_or(1.0);
+                    TheoreticalDistribution::Exponential { rate }
+                }
+                _ => {
+                    // Default to normal
+                    let mean = request.mean.unwrap_or(0.0);
+                    let sd = request.sd.unwrap_or(1.0);
+                    if (mean - 0.0).abs() < 1e-10 && (sd - 1.0).abs() < 1e-10 {
+                        TheoreticalDistribution::Normal
+                    } else {
+                        TheoreticalDistribution::NormalParams { mean, sd }
+                    }
+                }
+            };
+
+            ks_test_one_sample(&x, distribution, alternative)
+        };
+
+        match result {
+            Ok(result) => {
+                let alt_description = match alternative {
+                    Alternative::TwoSided => "two-sided",
+                    Alternative::Greater => "greater (CDF of x not below CDF of y)",
+                    Alternative::Less => "less (CDF of x not above CDF of y)",
+                };
+
+                let mut json_output = serde_json::json!({
+                    "test": result.test_name,
+                    "statistic_D": result.statistic,
+                    "p_value": result.p_value,
+                    "significance": result.significance.to_string(),
+                    "alternative": alt_description,
+                    "exact": result.exact,
+                    "n": result.n,
+                    "reject_null": result.reject_null,
+                    "interpretation": if result.reject_null {
+                        "Evidence that distributions differ (reject H₀ at α = 0.05)"
+                    } else {
+                        "No evidence that distributions differ (fail to reject H₀ at α = 0.05)"
+                    }
+                });
+
+                if let Some(n2) = result.n_2 {
+                    json_output["n_2"] = serde_json::json!(n2);
+                }
+
+                Ok(CallToolResult::success(vec![Content::text(
+                    serde_json::to_string_pretty(&json_output).unwrap(),
+                )]))
+            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
+                "Kolmogorov-Smirnov test failed: {}",
+                e
+            ))])),
+        }
+    }
+
+    // ========================================================================
+    // Correlation Test
+    // ========================================================================
+
+    /// Test for association between paired samples using correlation.
+    ///
+    /// References:
+    /// - Fisher, R. A. (1915). "Frequency distribution of the values of the correlation
+    ///   coefficient in samples from an indefinitely large population". Biometrika, 10(4), 507-521.
+    /// - Kendall, M. G. (1938). "A new measure of rank correlation". Biometrika, 30(1-2), 81-93.
+    /// - R `stats::cor.test`: https://stat.ethz.ch/R-manual/R-devel/library/stats/html/cor.test.html
+    #[tool(description = "Test for association between paired samples using Pearson, Spearman, or Kendall correlation. Returns correlation coefficient, test statistic, p-value, and confidence interval (for Pearson). Pearson measures linear association; Spearman and Kendall measure monotonic association and are robust to outliers.")]
+    async fn hypothesis_cor_test(
+        &self,
+        Parameters(request): Parameters<CorTestRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        use p2a_core::stats::cortest::{run_cor_test, CorrelationMethod};
+
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        // Extract columns using Polars
+        let df = dataset.df();
+        let x: Vec<f64> = match df.column(&request.x) {
+            Ok(col) => match col.f64() {
+                Ok(ca) => ca.into_no_null_iter().collect(),
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Column '{}' is not numeric: {}",
+                        request.x, e
+                    ))]));
+                }
+            },
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Column '{}' not found: {}",
+                    request.x, e
+                ))]));
+            }
+        };
+
+        let y: Vec<f64> = match df.column(&request.y) {
+            Ok(col) => match col.f64() {
+                Ok(ca) => ca.into_no_null_iter().collect(),
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Column '{}' is not numeric: {}",
+                        request.y, e
+                    ))]));
+                }
+            },
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Column '{}' not found: {}",
+                    request.y, e
+                ))]));
+            }
+        };
+
+        let method = request.method.as_deref().unwrap_or("pearson");
+        let alternative = request.alternative.as_deref().unwrap_or("two.sided");
+        let conf_level = request.conf_level.unwrap_or(0.95);
+
+        match run_cor_test(&x, &y, method, alternative, conf_level) {
+            Ok(result) => {
+                let mut json_output = serde_json::json!({
+                    "test": result.method_name,
+                    "estimate": result.estimate,
+                    "estimate_name": result.estimate_name,
+                    "statistic": result.statistic,
+                    "statistic_name": result.statistic_name,
+                    "p_value": result.p_value,
+                    "alternative": format!("{:?}", result.alternative),
+                    "n": result.n,
+                    "null_value": result.null_value,
+                    "conf_level": result.conf_level,
+                    "interpretation": if result.p_value < 0.05 {
+                        format!("Significant {} correlation (p < 0.05)",
+                            if result.estimate > 0.0 { "positive" } else { "negative" })
+                    } else {
+                        "No significant correlation (p >= 0.05)".to_string()
+                    }
+                });
+
+                if let Some(df) = result.df {
+                    json_output["df"] = serde_json::json!(df);
+                }
+
+                if let (Some(low), Some(high)) = (result.conf_low, result.conf_high) {
+                    json_output["confidence_interval"] = serde_json::json!({
+                        "lower": low,
+                        "upper": high,
+                        "conf_level": result.conf_level,
+                    });
+                }
+
+                Ok(CallToolResult::success(vec![Content::text(
+                    serde_json::to_string_pretty(&json_output).unwrap(),
+                )]))
+            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
+                "Correlation test failed: {}",
+                e
+            ))])),
+        }
+    }
+
+    // ========================================================================
+    // Power Analysis Tools
+    // ========================================================================
+
+    /// Power analysis for t-tests.
+    ///
+    /// References:
+    /// - Cohen, J. (1988). Statistical Power Analysis for the Behavioral Sciences (2nd ed.).
+    /// - R `stats::power.t.test`: https://stat.ethz.ch/R-manual/R-devel/library/stats/html/power.t.test.html
+    #[tool(description = "Compute power or sample size for t-tests. Given 4 of {n, delta, sd, sig_level, power}, computes the 5th. Use for study design to determine required sample size for desired power, or to compute power for a given sample size. Supports one-sample, two-sample, and paired t-tests.")]
+    async fn power_t_test(
+        &self,
+        Parameters(request): Parameters<PowerTTestRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        use p2a_core::stats::power::{power_t_test, TTestType, PowerAlternative};
+
+        // Parse test type
+        let test_type = match request.test_type.as_deref() {
+            Some("one.sample") | Some("one_sample") | Some("onesample") => TTestType::OneSample,
+            Some("paired") => TTestType::Paired,
+            _ => TTestType::TwoSample,
+        };
+
+        // Parse alternative
+        let alternative = match request.alternative.as_deref() {
+            Some("one.sided") | Some("one_sided") | Some("onesided") => PowerAlternative::OneSided,
+            _ => PowerAlternative::TwoSided,
+        };
+
+        match power_t_test(
+            request.n,
+            request.delta,
+            request.sd,
+            request.sig_level,
+            request.power,
+            test_type,
+            alternative,
+        ) {
+            Ok(result) => {
+                let json_output = serde_json::json!({
+                    "method": result.method,
+                    "n": result.n,
+                    "delta": result.delta,
+                    "sd": result.sd,
+                    "sig_level": result.sig_level,
+                    "power": result.power,
+                    "alternative": format!("{:?}", result.alternative),
+                    "test_type": format!("{:?}", result.test_type),
+                    "note": result.note,
+                    "effect_size_d": result.delta / result.sd,
+                    "interpretation": format!(
+                        "With n={:.0} per group, effect d={:.3}, and α={:.3}, power is {:.1}%",
+                        result.n, result.delta / result.sd, result.sig_level, result.power * 100.0
+                    )
+                });
+
+                Ok(CallToolResult::success(vec![Content::text(
+                    serde_json::to_string_pretty(&json_output).unwrap(),
+                )]))
+            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
+                "Power analysis failed: {}",
+                e
+            ))])),
+        }
+    }
+
+    /// Power analysis for proportion tests.
+    ///
+    /// References:
+    /// - Cohen, J. (1988). Statistical Power Analysis for the Behavioral Sciences (2nd ed.).
+    /// - R `stats::power.prop.test`: https://stat.ethz.ch/R-manual/R-devel/library/stats/html/power.prop.test.html
+    #[tool(description = "Compute power or sample size for two-sample proportion tests. Given 4 of {n, p1, p2, sig_level, power}, computes the 5th. Use for study design comparing proportions between two groups.")]
+    async fn power_prop_test(
+        &self,
+        Parameters(request): Parameters<PowerPropTestRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        use p2a_core::stats::power::{power_prop_test, PowerAlternative};
+
+        // Parse alternative
+        let alternative = match request.alternative.as_deref() {
+            Some("one.sided") | Some("one_sided") | Some("onesided") => PowerAlternative::OneSided,
+            _ => PowerAlternative::TwoSided,
+        };
+
+        // p1 is required
+        let p1 = match request.p1 {
+            Some(p) => p,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    "p1 (proportion in first group) is required".to_string()
+                )]));
+            }
+        };
+
+        match power_prop_test(
+            request.n,
+            p1,
+            request.p2,
+            request.sig_level,
+            request.power,
+            alternative,
+        ) {
+            Ok(result) => {
+                // Compute Cohen's h effect size for display
+                let h = 2.0 * (result.p1.sqrt().asin() - result.p2.sqrt().asin());
+
+                let json_output = serde_json::json!({
+                    "method": result.method,
+                    "n": result.n,
+                    "p1": result.p1,
+                    "p2": result.p2,
+                    "sig_level": result.sig_level,
+                    "power": result.power,
+                    "alternative": format!("{:?}", result.alternative),
+                    "effect_size_h": h,
+                    "note": result.note,
+                    "interpretation": format!(
+                        "With n={:.0} per group, comparing p1={:.3} vs p2={:.3}, power is {:.1}%",
+                        result.n, result.p1, result.p2, result.power * 100.0
+                    )
+                });
+
+                Ok(CallToolResult::success(vec![Content::text(
+                    serde_json::to_string_pretty(&json_output).unwrap(),
+                )]))
+            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
+                "Power analysis failed: {}",
+                e
+            ))])),
+        }
+    }
+
+    /// Power analysis for one-way ANOVA.
+    ///
+    /// References:
+    /// - Cohen, J. (1988). Statistical Power Analysis for the Behavioral Sciences (2nd ed.).
+    /// - R `stats::power.anova.test`: https://stat.ethz.ch/R-manual/R-devel/library/stats/html/power.anova.test.html
+    #[tool(description = "Compute power or sample size for balanced one-way ANOVA. Given 4 of {groups, n, between_var, within_var, sig_level, power}, computes the 5th. Use for study design comparing means across multiple groups.")]
+    async fn power_anova_test(
+        &self,
+        Parameters(request): Parameters<PowerAnovaTestRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        use p2a_core::stats::power::power_anova_test;
+
+        // groups is required and must be >= 2
+        let groups = match request.groups {
+            Some(g) if g >= 2 => g,
+            Some(g) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "groups must be at least 2, got {}",
+                    g
+                ))]));
+            }
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    "groups (number of groups) is required".to_string()
+                )]));
+            }
+        };
+
+        // between_var is required
+        let between_var = match request.between_var {
+            Some(v) => v,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    "between_var (between-group variance) is required".to_string()
+                )]));
+            }
+        };
+
+        // within_var defaults to 1.0
+        let within_var = request.within_var.unwrap_or(1.0);
+
+        match power_anova_test(
+            groups,
+            request.n,
+            between_var,
+            within_var,
+            request.sig_level,
+            request.power,
+        ) {
+            Ok(result) => {
+                // Compute Cohen's f effect size for display
+                let f = (result.between_var / result.within_var).sqrt();
+
+                let json_output = serde_json::json!({
+                    "method": result.method,
+                    "groups": result.groups,
+                    "n": result.n,
+                    "between_var": result.between_var,
+                    "within_var": result.within_var,
+                    "sig_level": result.sig_level,
+                    "power": result.power,
+                    "effect_size_f": f,
+                    "note": result.note,
+                    "interpretation": format!(
+                        "With {} groups, n={:.0} per group, and f={:.3}, power is {:.1}%",
+                        result.groups, result.n, f, result.power * 100.0
+                    )
+                });
+
+                Ok(CallToolResult::success(vec![Content::text(
+                    serde_json::to_string_pretty(&json_output).unwrap(),
+                )]))
+            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
+                "Power analysis failed: {}",
+                e
+            ))])),
+        }
+    }
+
+    // ========================================================================
+    // Trend Test for Proportions
+    // ========================================================================
+
+    /// Cochran-Armitage test for trend in proportions.
+    ///
+    /// References:
+    /// - Cochran, W. G. (1954). "Some methods for strengthening the common chi-squared tests".
+    ///   Biometrics, 10(4), 417-451.
+    /// - Armitage, P. (1955). "Tests for linear trends in proportions and frequencies".
+    ///   Biometrics, 11(3), 375-386.
+    /// - R `stats::prop.trend.test`: https://stat.ethz.ch/R-manual/R-devel/library/stats/html/prop.trend.test.html
+    #[tool(description = "Test for trend in proportions across ordered groups (Cochran-Armitage test). Tests whether proportions increase or decrease linearly with group scores. Commonly used in dose-response studies. Returns chi-squared statistic with 1 df and p-value.")]
+    async fn hypothesis_prop_trend_test(
+        &self,
+        Parameters(request): Parameters<PropTrendTestRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        use p2a_core::stats::proptrendtest::run_prop_trend_test;
+
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        // Extract successes column as usize
+        let df = dataset.df();
+        let successes: Vec<usize> = match df.column(&request.successes) {
+            Ok(col) => {
+                // Try to cast to u64 first, then i64
+                if let Ok(ca) = col.u64() {
+                    ca.into_no_null_iter().map(|v| v as usize).collect()
+                } else if let Ok(ca) = col.i64() {
+                    ca.into_no_null_iter().map(|v| v as usize).collect()
+                } else if let Ok(ca) = col.f64() {
+                    ca.into_no_null_iter().map(|v| v as usize).collect()
+                } else {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Column '{}' must be numeric (integers)",
+                        request.successes
+                    ))]));
+                }
+            },
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Column '{}' not found: {}",
+                    request.successes, e
+                ))]));
+            }
+        };
+
+        // Extract trials column as usize
+        let trials: Vec<usize> = match df.column(&request.trials) {
+            Ok(col) => {
+                if let Ok(ca) = col.u64() {
+                    ca.into_no_null_iter().map(|v| v as usize).collect()
+                } else if let Ok(ca) = col.i64() {
+                    ca.into_no_null_iter().map(|v| v as usize).collect()
+                } else if let Ok(ca) = col.f64() {
+                    ca.into_no_null_iter().map(|v| v as usize).collect()
+                } else {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Column '{}' must be numeric (integers)",
+                        request.trials
+                    ))]));
+                }
+            },
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Column '{}' not found: {}",
+                    request.trials, e
+                ))]));
+            }
+        };
+
+        match run_prop_trend_test(
+            &successes,
+            &trials,
+            request.scores.clone(),
+        ) {
+            Ok(result) => {
+                let json_output = serde_json::json!({
+                    "test": result.method,
+                    "statistic": result.statistic,
+                    "df": result.df,
+                    "p_value": result.p_value,
+                    "scores": result.scores,
+                    "n_groups": result.n_groups,
+                    "interpretation": if result.p_value < 0.05 {
+                        "Significant trend in proportions (p < 0.05)"
+                    } else {
+                        "No significant trend in proportions (p >= 0.05)"
+                    }
+                });
+
+                Ok(CallToolResult::success(vec![Content::text(
+                    serde_json::to_string_pretty(&json_output).unwrap(),
+                )]))
+            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
+                "Trend test failed: {}",
+                e
+            ))])),
+        }
+    }
+
+    /// Compute autocorrelation function (ACF) or partial autocorrelation function (PACF).
+    ///
+    /// References:
+    /// - Box, G. E. P., Jenkins, G. M., Reinsel, G. C., & Ljung, G. M. (2015).
+    ///   Time Series Analysis: Forecasting and Control (5th ed.). Wiley.
+    /// - R `stats::acf`: https://stat.ethz.ch/R-manual/R-devel/library/stats/html/acf.html
+    #[tool(description = "Compute autocorrelation function (ACF), autocovariance, or partial autocorrelation function (PACF) for a time series. ACF measures correlation between observations at different lags. PACF measures correlation after removing effects of intermediate lags - useful for identifying AR order. Returns values for lags 0 to lag_max with 95% confidence bounds.")]
+    async fn timeseries_acf(
+        &self,
+        Parameters(request): Parameters<AcfRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        // Parse ACF type
+        let acf_type = match request.acf_type.as_deref() {
+            Some("covariance") | Some("cov") => AcfType::Covariance,
+            Some("partial") | Some("pacf") => AcfType::Partial,
+            _ => AcfType::Correlation,
+        };
+
+        // For PACF, use the dedicated function
+        if matches!(acf_type, AcfType::Partial) {
+            match run_pacf(dataset, &request.column, request.lag_max) {
+                Ok(result) => {
+                    // Convert to JSON for structured output
+                    let json_output = serde_json::json!({
+                        "type": "Partial Autocorrelation (PACF)",
+                        "series": request.column,
+                        "n_obs": result.n_obs,
+                        "lags": result.lags,
+                        "values": result.values,
+                        "confidence_bound_95": result.confidence_bound,
+                        "interpretation": format!(
+                            "Values outside ±{:.4} are significant at 5% level. PACF cuts off after lag p for AR(p) process.",
+                            result.confidence_bound
+                        )
+                    });
+                    Ok(CallToolResult::success(vec![Content::text(format!(
+                        "{}\n\nJSON:\n{}",
+                        result,
+                        serde_json::to_string_pretty(&json_output).unwrap_or_default()
+                    ))]))
+                }
+                Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
+                    "PACF computation failed: {}",
+                    e
+                ))])),
+            }
+        } else {
+            match run_acf(dataset, &request.column, request.lag_max, acf_type) {
+                Ok(result) => {
+                    let type_str = match acf_type {
+                        AcfType::Correlation => "Autocorrelation (ACF)",
+                        AcfType::Covariance => "Autocovariance (ACVF)",
+                        AcfType::Partial => "Partial Autocorrelation (PACF)",
+                    };
+                    let json_output = serde_json::json!({
+                        "type": type_str,
+                        "series": request.column,
+                        "n_obs": result.n_obs,
+                        "lags": result.lags,
+                        "values": result.values,
+                        "confidence_bound_95": result.confidence_bound,
+                        "interpretation": if matches!(acf_type, AcfType::Correlation) {
+                            format!(
+                                "Values outside ±{:.4} are significant at 5% level. ACF tails off for AR, cuts off for MA.",
+                                result.confidence_bound.unwrap_or(0.0)
+                            )
+                        } else {
+                            "Autocovariance values (not normalized). Divide by ACVF(0) to get ACF.".to_string()
+                        }
+                    });
+                    Ok(CallToolResult::success(vec![Content::text(format!(
+                        "{}\n\nJSON:\n{}",
+                        result,
+                        serde_json::to_string_pretty(&json_output).unwrap_or_default()
+                    ))]))
+                }
+                Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
+                    "ACF computation failed: {}",
+                    e
+                ))])),
+            }
+        }
+    }
+
+    /// Compute cross-correlation function (CCF) between two time series.
+    ///
+    /// References:
+    /// - Box, G. E. P., Jenkins, G. M., Reinsel, G. C., & Ljung, G. M. (2015).
+    ///   Time Series Analysis: Forecasting and Control (5th ed.). Wiley.
+    /// - R `stats::ccf`: https://stat.ethz.ch/R-manual/R-devel/library/stats/html/acf.html
+    #[tool(description = "Compute cross-correlation function (CCF) between two time series. CCF at lag k estimates correlation between x_{t+k} and y_t. Positive lag k means x leads y; negative lag means y leads x. Useful for identifying lead-lag relationships between variables.")]
+    async fn timeseries_ccf(
+        &self,
+        Parameters(request): Parameters<CcfRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        match run_ccf(dataset, &request.x, &request.y, request.lag_max, CcfType::Correlation) {
+            Ok(result) => {
+                // Find the lag with maximum absolute correlation
+                let max_idx = result
+                    .values
+                    .iter()
+                    .enumerate()
+                    .max_by(|(_, a), (_, b)| a.abs().partial_cmp(&b.abs()).unwrap())
+                    .map(|(i, _)| i)
+                    .unwrap_or(0);
+                let max_lag = result.lags[max_idx];
+                let max_ccf = result.values[max_idx];
+
+                let lead_lag_interpretation = if max_lag > 0 {
+                    format!("{} leads {} by {} periods", request.x, request.y, max_lag)
+                } else if max_lag < 0 {
+                    format!("{} leads {} by {} periods", request.y, request.x, -max_lag)
+                } else {
+                    format!("{} and {} are contemporaneously correlated", request.x, request.y)
+                };
+
+                let json_output = serde_json::json!({
+                    "type": "Cross-Correlation (CCF)",
+                    "x_series": request.x,
+                    "y_series": request.y,
+                    "n_obs": result.n_obs,
+                    "lags": result.lags,
+                    "values": result.values,
+                    "confidence_bound_95": result.confidence_bound,
+                    "max_correlation": {
+                        "lag": max_lag,
+                        "value": max_ccf,
+                        "interpretation": lead_lag_interpretation
+                    }
+                });
+                Ok(CallToolResult::success(vec![Content::text(format!(
+                    "{}\n\nJSON:\n{}",
+                    result,
+                    serde_json::to_string_pretty(&json_output).unwrap_or_default()
+                ))]))
+            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
+                "CCF computation failed: {}",
+                e
+            ))])),
+        }
+    }
+
+    /// Estimate spectral density of a time series.
+    ///
+    /// References:
+    /// - Priestley, M. B. (1981). *Spectral Analysis and Time Series*. Academic Press.
+    /// - R `stats::spectrum`: https://stat.ethz.ch/R-manual/R-devel/library/stats/html/spectrum.html
+    #[tool(description = "Estimate spectral density (power spectrum) of a time series. Returns spectral density at Fourier frequencies showing how variance is distributed across frequency components. Methods: 'pgram' (periodogram with optional smoothing) or 'ar' (AR model-based). Use spans parameter for smoothing raw periodogram (e.g., spans=[3,3] for moderate smoothing). Peak frequency reveals dominant cyclical patterns.")]
+    async fn timeseries_spectrum(
+        &self,
+        Parameters(request): Parameters<SpectrumRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        // Determine method
+        let method = request.method.as_deref().unwrap_or("pgram");
+
+        let result = match method.to_lowercase().as_str() {
+            "ar" | "autoregressive" => {
+                match run_spectrum_ar(dataset, &request.column, request.ar_order, None) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        return Ok(CallToolResult::error(vec![Content::text(format!(
+                            "AR spectral estimation failed: {}",
+                            e
+                        ))]));
+                    }
+                }
+            }
+            _ => {
+                // Periodogram method
+                let config = SpectrumConfig {
+                    spans: request.spans.clone(),
+                    taper: request.taper.unwrap_or(0.1),
+                    detrend: request.detrend.unwrap_or(true),
+                    demean: false,
+                    pad_ratio: 0.0,
+                };
+
+                match run_spectrum(dataset, &request.column, config) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        return Ok(CallToolResult::error(vec![Content::text(format!(
+                            "Spectral estimation failed: {}",
+                            e
+                        ))]));
+                    }
+                }
+            }
+        };
+
+        // Get peak frequency info
+        let (peak_freq, peak_spec) = result.peak_frequency().unwrap_or((0.0, 0.0));
+        let peak_period = if peak_freq > 0.0 { 1.0 / peak_freq } else { f64::INFINITY };
+
+        // Compute confidence interval multipliers
+        let (ci_lower_mult, ci_upper_mult) = result.confidence_multipliers(0.95);
+
+        let json_output = serde_json::json!({
+            "type": format!("Spectral Density ({})", result.method),
+            "series": request.column,
+            "n_obs": result.n_obs,
+            "n_used": result.n_used,
+            "bandwidth": result.bandwidth,
+            "degrees_of_freedom": result.df,
+            "taper": result.taper,
+            "detrend": result.detrend,
+            "spans": result.kernel_spans,
+            "n_frequencies": result.freq.len(),
+            "frequency_range": [
+                result.freq.first().copied().unwrap_or(0.0),
+                result.freq.last().copied().unwrap_or(0.5)
+            ],
+            "peak": {
+                "frequency": peak_freq,
+                "period": peak_period,
+                "spectral_density": peak_spec,
+                "interpretation": format!(
+                    "Dominant cycle at frequency {:.4} (period = {:.1} time units)",
+                    peak_freq, peak_period
+                )
+            },
+            "confidence_interval_95": {
+                "multiplier_lower": ci_lower_mult,
+                "multiplier_upper": ci_upper_mult,
+                "interpretation": "Multiply spectral estimate by these values for 95% CI"
+            },
+            // Include first/last few frequency-spectrum pairs
+            "spectrum_sample": {
+                "first_5": result.freq.iter().take(5).zip(result.spec.iter().take(5))
+                    .map(|(&f, &s)| serde_json::json!({"freq": f, "spec": s}))
+                    .collect::<Vec<_>>(),
+                "last_5": result.freq.iter().rev().take(5).rev().zip(result.spec.iter().rev().take(5).rev())
+                    .map(|(&f, &s)| serde_json::json!({"freq": f, "spec": s}))
+                    .collect::<Vec<_>>()
+            }
+        });
+
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "{}\n\nJSON:\n{}",
+            result,
+            serde_json::to_string_pretty(&json_output).unwrap_or_default()
+        ))]))
+    }
+
+    /// Run Box-Pierce or Ljung-Box test for autocorrelation.
+    ///
+    /// References:
+    /// - Box, G. E. P. & Pierce, D. A. (1970). "Distribution of residual correlations in ARIMA models." JASA, 65, 1509-1526.
+    /// - Ljung, G. M. & Box, G. E. P. (1978). "On a measure of lack of fit in time series models." Biometrika, 65, 297-303.
+    #[tool(description = "Test for autocorrelation in a time series using Box-Pierce or Ljung-Box test. Tests H₀: no autocorrelation up to specified lag. Commonly used to check whether ARIMA residuals are white noise. Ljung-Box (default) has better finite-sample properties. For ARMA(p,q) residuals, set fitdf=p+q to adjust degrees of freedom. Returns: X-squared statistic, df, p-value, and sample autocorrelations.")]
+    async fn timeseries_box_test(
+        &self,
+        Parameters(request): Parameters<BoxTestRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        // Parse test type
+        let test_type = match request.test_type.as_deref() {
+            Some("box-pierce") | Some("Box-Pierce") | Some("boxpierce") => BoxTestType::BoxPierce,
+            _ => BoxTestType::LjungBox, // Default
+        };
+
+        let fitdf = request.fitdf.unwrap_or(0);
+
+        let result = match run_box_test(
+            dataset,
+            &request.column,
+            request.lag,
+            test_type,
+            fitdf,
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Box test failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        let json_output = serde_json::json!({
+            "test_type": result.test_type.to_string(),
+            "series": request.column,
+            "statistic": result.statistic,
+            "df": result.df,
+            "p_value": result.p_value,
+            "significance": result.significance.to_string(),
+            "n_obs": result.n_obs,
+            "lag": result.lag,
+            "fitdf": result.fitdf,
+            "autocorrelations": result.autocorrelations,
+            "interpretation": if result.p_value < 0.05 {
+                format!(
+                    "Reject H₀ (p={:.4}): Significant autocorrelation detected at the 5% level. The series is not white noise.",
+                    result.p_value
+                )
+            } else {
+                format!(
+                    "Fail to reject H₀ (p={:.4}): No significant autocorrelation detected. The series is consistent with white noise.",
+                    result.p_value
+                )
+            }
+        });
+
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "{}\n\nJSON:\n{}",
+            result,
+            serde_json::to_string_pretty(&json_output).unwrap_or_default()
+        ))]))
+    }
+
+    /// Run Phillips-Perron unit root test.
+    ///
+    /// References:
+    /// - Phillips, P. C. B. & Perron, P. (1988). "Testing for a Unit Root in Time Series Regression." Biometrika, 75(2), 335-346.
+    /// - Banerjee, A., Dolado, J. J., Galbraith, J. W., & Hendry, D. (1993). Co-integration, Error Correction, and the Econometric Analysis of Non-Stationary Data. Oxford University Press.
+    #[tool(description = "Test for unit root in a time series using the Phillips-Perron test. Tests H₀: series has unit root (non-stationary) vs H₁: series is stationary. Uses Newey-West long-run variance estimator with Bartlett weights for serial correlation correction. Similar to ADF test but makes non-parametric correction. Returns: Z(τ) statistic, truncation lag, p-value, and diagnostics.")]
+    async fn timeseries_pp_test(
+        &self,
+        Parameters(request): Parameters<PPTestRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let lshort = request.lshort.unwrap_or(true);
+
+        let result = match run_pp_test(dataset, &request.column, lshort) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Phillips-Perron test failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        let json_output = serde_json::json!({
+            "test": "Phillips-Perron",
+            "series": request.column,
+            "statistic": result.statistic,
+            "truncation_lag": result.truncation_lag,
+            "p_value": result.p_value,
+            "significance": result.significance.to_string(),
+            "n_obs": result.n_obs,
+            "lshort": result.lshort,
+            "gamma_hat": result.gamma_hat,
+            "t_statistic": result.t_statistic,
+            "sigma_squared": result.sigma_squared,
+            "lambda_squared": result.lambda_squared,
+            "interpretation": if result.p_value < 0.05 {
+                format!(
+                    "Reject H₀ (p={:.4}): Evidence of stationarity at the 5% level. The series likely does not have a unit root.",
+                    result.p_value
+                )
+            } else {
+                format!(
+                    "Fail to reject H₀ (p={:.4}): No significant evidence against unit root. The series may be non-stationary.",
+                    result.p_value
+                )
+            },
+            "recommendation": if result.p_value < 0.05 {
+                "Series appears stationary. Can proceed with standard time series methods."
+            } else {
+                "Series may have unit root. Consider differencing (Δy = y_t - y_{t-1}) before analysis."
+            }
+        });
+
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "{}\n\nJSON:\n{}",
+            result,
+            serde_json::to_string_pretty(&json_output).unwrap_or_default()
+        ))]))
+    }
+
+    /// Maximum Likelihood Factor Analysis.
+    ///
+    /// # References
+    ///
+    /// - Jöreskog, K. G. (1967). "Some Contributions to Maximum Likelihood Factor Analysis".
+    ///   Psychometrika, 32, 443-482.
+    /// - Kaiser, H. F. (1958). "The varimax criterion for analytic rotation in factor analysis".
+    ///   Psychometrika, 23, 187-200.
+    #[tool(description = "Run Maximum Likelihood Factor Analysis to identify latent factors underlying observed variables. Models correlation structure as x = Λf + e where Λ is the loadings matrix, f are factor scores, and e is error. Returns loadings matrix, uniquenesses (specific variances), communalities (variance explained per variable), variance proportions, chi-squared goodness-of-fit test, and optionally factor scores. Supports varimax (orthogonal) and promax (oblique) rotation.")]
+    async fn multivariate_factanal(
+        &self,
+        Parameters(request): Parameters<FactorAnalysisRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        use p2a_core::stats::factanal::{run_factanal, RotationMethod, ScoresMethod};
+
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        // Parse rotation method
+        let rotation = match request.rotation.as_deref() {
+            Some("none") => RotationMethod::None,
+            Some("promax") => RotationMethod::Promax,
+            Some("varimax") | None => RotationMethod::Varimax,
+            Some(other) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Invalid rotation method '{}'. Use 'varimax', 'promax', or 'none'.",
+                    other
+                ))]));
+            }
+        };
+
+        // Parse scores method
+        let scores = match request.scores.as_deref() {
+            Some("regression") => ScoresMethod::Regression,
+            Some("bartlett") => ScoresMethod::Bartlett,
+            Some("none") | None => ScoresMethod::None,
+            Some(other) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Invalid scores method '{}'. Use 'none', 'regression', or 'bartlett'.",
+                    other
+                ))]));
+            }
+        };
+
+        // Convert columns to &str
+        let col_refs: Vec<&str> = request.columns.iter().map(|s| s.as_str()).collect();
+
+        let result = match run_factanal(dataset, &col_refs, request.n_factors, rotation, scores) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Factor analysis failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        // Format loadings matrix for display
+        let var_names: Vec<String> = result.var_names.clone().unwrap_or_else(|| {
+            (0..result.n_vars).map(|i| format!("Var{}", i + 1)).collect()
+        });
+
+        let mut loadings_display = Vec::new();
+        for i in 0..result.n_vars {
+            let mut row = serde_json::json!({
+                "variable": var_names[i].clone()
+            });
+            for j in 0..result.n_factors {
+                row[format!("Factor{}", j + 1)] = serde_json::json!(result.loadings[[i, j]]);
+            }
+            row["communality"] = serde_json::json!(result.communalities[i]);
+            row["uniqueness"] = serde_json::json!(result.uniquenesses[i]);
+            loadings_display.push(row);
+        }
+
+        // Build JSON output
+        let mut json_output = serde_json::json!({
+            "n_obs": result.n_obs,
+            "n_vars": result.n_vars,
+            "n_factors": result.n_factors,
+            "converged": result.converged,
+            "iterations": result.iterations,
+            "loadings": loadings_display,
+            "variance_proportions": result.variance_proportions.to_vec(),
+            "cumulative_variance": result.cumulative_variance.to_vec(),
+            "chi_squared_test": {
+                "statistic": result.chi_squared,
+                "df": result.df,
+                "p_value": result.p_value,
+                "interpretation": if result.p_value > 0.05 {
+                    format!("The {} factor model adequately explains the correlations (p={:.4}).", result.n_factors, result.p_value)
+                } else {
+                    format!("The {} factor model may not fully explain the correlations (p={:.4}). Consider adding more factors.", result.n_factors, result.p_value)
+                }
+            }
+        });
+
+        // Add factor correlations for promax
+        if let Some(ref phi) = result.factor_correlation {
+            let mut factor_corr = Vec::new();
+            for i in 0..result.n_factors {
+                let mut row = serde_json::Map::new();
+                for j in 0..result.n_factors {
+                    row.insert(format!("Factor{}", j + 1), serde_json::json!(phi[[i, j]]));
+                }
+                factor_corr.push(serde_json::Value::Object(row));
+            }
+            json_output["factor_correlations"] = serde_json::json!(factor_corr);
+        }
+
+        // Add scores summary if computed
+        if let Some(ref scores) = result.scores {
+            json_output["scores_computed"] = serde_json::json!(true);
+            json_output["scores_shape"] = serde_json::json!({
+                "n_obs": scores.nrows(),
+                "n_factors": scores.ncols()
+            });
+        }
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&json_output).unwrap_or_default()
+        )]))
+    }
+
+    /// Canonical Correlation Analysis.
+    ///
+    /// # References
+    ///
+    /// - Hotelling, H. (1936). "Relations Between Two Sets of Variates".
+    ///   Biometrika, 28(3/4), 321-377.
+    #[tool(description = "Run Canonical Correlation Analysis (CCA) to find linear combinations of two sets of variables that have maximum correlation with each other. Returns canonical correlations (in decreasing order), coefficients for X variables (xcoef), and coefficients for Y variables (ycoef). The canonical variates are X*xcoef and Y*ycoef. Useful for multivariate dimensionality reduction, identifying relationships between variable sets, and understanding shared variance.")]
+    async fn multivariate_cancor(
+        &self,
+        Parameters(request): Parameters<CancorRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        use p2a_core::stats::cancor::run_cancor;
+
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let xcenter = request.xcenter.unwrap_or(true);
+        let ycenter = request.ycenter.unwrap_or(true);
+
+        // Convert columns to &str
+        let x_refs: Vec<&str> = request.x_columns.iter().map(|s| s.as_str()).collect();
+        let y_refs: Vec<&str> = request.y_columns.iter().map(|s| s.as_str()).collect();
+
+        let result = match run_cancor(dataset, &x_refs, &y_refs, xcenter, ycenter) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Canonical correlation analysis failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        // Format X coefficients for display
+        let x_names: Vec<String> = result.x_names.clone().unwrap_or_else(|| {
+            (0..result.n_x_vars).map(|i| format!("X{}", i + 1)).collect()
+        });
+        let mut xcoef_display = Vec::new();
+        for i in 0..result.n_x_vars {
+            let mut row = serde_json::json!({
+                "variable": x_names[i].clone()
+            });
+            for j in 0..result.n_canonical {
+                row[format!("CC{}", j + 1)] = serde_json::json!(result.xcoef[[i, j]]);
+            }
+            xcoef_display.push(row);
+        }
+
+        // Format Y coefficients for display
+        let y_names: Vec<String> = result.y_names.clone().unwrap_or_else(|| {
+            (0..result.n_y_vars).map(|i| format!("Y{}", i + 1)).collect()
+        });
+        let mut ycoef_display = Vec::new();
+        for i in 0..result.n_y_vars {
+            let mut row = serde_json::json!({
+                "variable": y_names[i].clone()
+            });
+            for j in 0..result.n_canonical {
+                row[format!("CC{}", j + 1)] = serde_json::json!(result.ycoef[[i, j]]);
+            }
+            ycoef_display.push(row);
+        }
+
+        // Build JSON output
+        let json_output = serde_json::json!({
+            "n_obs": result.n_obs,
+            "n_x_vars": result.n_x_vars,
+            "n_y_vars": result.n_y_vars,
+            "n_canonical": result.n_canonical,
+            "canonical_correlations": result.cor.to_vec(),
+            "squared_correlations": result.squared_correlations().to_vec(),
+            "x_coefficients": xcoef_display,
+            "y_coefficients": ycoef_display,
+            "x_center": result.xcenter.to_vec(),
+            "y_center": result.ycenter.to_vec(),
+            "interpretation": {
+                "first_correlation": format!(
+                    "The first canonical correlation is {:.4}, meaning {:.1}% of the variance in the first canonical variate of Y is explained by the first canonical variate of X.",
+                    result.cor[0],
+                    result.cor[0] * result.cor[0] * 100.0
+                ),
+                "total_canonical_pairs": format!(
+                    "There are {} canonical correlation pairs (min of {} X variables and {} Y variables).",
+                    result.n_canonical, result.n_x_vars, result.n_y_vars
+                )
+            }
+        });
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&json_output).unwrap_or_default()
+        )]))
+    }
+
+    /// Compute Mahalanobis distance.
+    ///
+    /// # References
+    ///
+    /// - Mahalanobis, P. C. (1936). "On the generalized distance in statistics".
+    ///   Proceedings of the National Institute of Sciences (Calcutta), 2, 49–55.
+    #[tool(description = "Compute squared Mahalanobis distance for each observation. The Mahalanobis distance measures how far each observation is from the center of the distribution, accounting for correlations between variables. Useful for outlier detection, multivariate normality assessment, and cluster analysis. Returns squared distances (D²) which follow a chi-squared distribution with p degrees of freedom under multivariate normality.")]
+    async fn multivariate_mahalanobis(
+        &self,
+        Parameters(request): Parameters<MahalanobisRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let col_refs: Vec<&str> = request.columns.iter().map(|s| s.as_str()).collect();
+        let center = request.center.as_ref().map(|c| c.as_slice());
+
+        let result = match run_mahalanobis(dataset, &col_refs, center, None) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Mahalanobis distance computation failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        // Compute summary statistics
+        let n = result.distances.len();
+        let mean_dist = result.distances.iter().sum::<f64>() / n as f64;
+        let max_dist = result.distances.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let min_dist = result.distances.iter().cloned().fold(f64::INFINITY, f64::min);
+
+        // Chi-squared critical value for outlier detection (df = p, alpha = 0.05)
+        let p = result.n_vars;
+        let chi_sq_95 = p as f64 * 2.7; // Rough approximation for chi-squared 95th percentile
+
+        // Count potential outliers
+        let n_outliers = result.distances.iter().filter(|&&d| d > chi_sq_95).count();
+
+        // Build JSON output
+        let json_output = serde_json::json!({
+            "n_obs": result.n_obs,
+            "n_vars": result.n_vars,
+            "center": result.center,
+            "summary": {
+                "mean_distance": format!("{:.4}", mean_dist),
+                "min_distance": format!("{:.4}", min_dist),
+                "max_distance": format!("{:.4}", max_dist),
+            },
+            "outlier_detection": {
+                "chi_squared_threshold_95": format!("{:.4}", chi_sq_95),
+                "n_potential_outliers": n_outliers,
+                "note": format!("Under multivariate normality, D² ~ χ²({})", p)
+            },
+            "first_10_distances": result.distances.iter()
+                .take(10)
+                .enumerate()
+                .map(|(i, &d)| serde_json::json!({
+                    "observation": i + 1,
+                    "distance_squared": format!("{:.4}", d),
+                    "potential_outlier": d > chi_sq_95
+                }))
+                .collect::<Vec<_>>(),
+            "interpretation": format!(
+                "Computed Mahalanobis distances for {} observations with {} variables. {} observations exceed the χ²({}) 95th percentile threshold of {:.2}, suggesting they may be multivariate outliers.",
+                n, p, n_outliers, p, chi_sq_95
+            ),
+            "references": "Mahalanobis, P. C. (1936). On the generalized distance in statistics."
+        });
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&json_output).unwrap_or_default()
+        )]))
+    }
+
     /// Run OLS regression.
     #[tool(description = "Run Ordinary Least Squares (OLS) regression. Returns coefficients, standard errors, t-values, p-values, R-squared, and F-statistic.")]
     async fn regression_ols(
@@ -4922,6 +8970,213 @@ impl AnalyticsServer {
         };
 
         Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+    }
+
+    /// Run nonlinear least squares regression.
+    #[tool(description = "Fit a nonlinear regression model using Levenberg-Marquardt algorithm. Supports common models: exponential decay/growth, Michaelis-Menten kinetics, logistic growth, power law, asymptotic. Returns parameter estimates, standard errors, t-values, and convergence info.")]
+    async fn regression_nls(
+        &self,
+        Parameters(request): Parameters<NlsRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        use p2a_core::regression::{
+            nls, NlsConfig, NlsAlgorithm,
+            model_exponential_decay, model_exponential_growth,
+            model_michaelis_menten, model_logistic_growth,
+            model_power, model_asymptotic,
+        };
+        use p2a_core::linalg::design::DesignMatrix;
+        use ndarray::Array1;
+
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        // Extract x and y columns
+        let x = match DesignMatrix::extract_column(dataset.df(), &request.x) {
+            Ok(col) => col,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Failed to extract X column '{}': {:?}",
+                    request.x, e
+                ))]));
+            }
+        };
+
+        let y = match DesignMatrix::extract_column(dataset.df(), &request.y) {
+            Ok(col) => col,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Failed to extract Y column '{}': {:?}",
+                    request.y, e
+                ))]));
+            }
+        };
+
+        // Parse model type and get function + param names
+        let (model_fn, param_names): (fn(&Array1<f64>, &Array1<f64>) -> f64, Vec<&str>) =
+            match request.model.to_lowercase().as_str() {
+                "exponential_decay" | "exp_decay" => {
+                    if request.start.len() != 3 {
+                        return Ok(CallToolResult::error(vec![Content::text(
+                            "exponential_decay requires 3 starting values: [a, b, c] for y = a*exp(-b*x) + c"
+                        )]));
+                    }
+                    (model_exponential_decay, vec!["a", "b", "c"])
+                }
+                "exponential_growth" | "exp_growth" => {
+                    if request.start.len() != 2 {
+                        return Ok(CallToolResult::error(vec![Content::text(
+                            "exponential_growth requires 2 starting values: [a, b] for y = a*exp(b*x)"
+                        )]));
+                    }
+                    (model_exponential_growth, vec!["a", "b"])
+                }
+                "michaelis_menten" | "mm" => {
+                    if request.start.len() != 2 {
+                        return Ok(CallToolResult::error(vec![Content::text(
+                            "michaelis_menten requires 2 starting values: [Vmax, Km] for y = Vmax*x/(Km+x)"
+                        )]));
+                    }
+                    (model_michaelis_menten, vec!["Vmax", "Km"])
+                }
+                "logistic" | "logistic_growth" => {
+                    if request.start.len() != 3 {
+                        return Ok(CallToolResult::error(vec![Content::text(
+                            "logistic requires 3 starting values: [K, r, x0] for y = K/(1+exp(-r*(x-x0)))"
+                        )]));
+                    }
+                    (model_logistic_growth, vec!["K", "r", "x0"])
+                }
+                "power" => {
+                    if request.start.len() != 2 {
+                        return Ok(CallToolResult::error(vec![Content::text(
+                            "power requires 2 starting values: [a, b] for y = a*x^b"
+                        )]));
+                    }
+                    (model_power, vec!["a", "b"])
+                }
+                "asymptotic" => {
+                    if request.start.len() != 3 {
+                        return Ok(CallToolResult::error(vec![Content::text(
+                            "asymptotic requires 3 starting values: [a, b, c] for y = a - b*exp(-c*x)"
+                        )]));
+                    }
+                    (model_asymptotic, vec!["a", "b", "c"])
+                }
+                _ => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Unknown model '{}'. Supported: exponential_decay, exponential_growth, michaelis_menten, logistic, power, asymptotic",
+                        request.model
+                    ))]));
+                }
+            };
+
+        // Parse algorithm
+        let algorithm = match request.algorithm.as_deref() {
+            Some("gauss_newton") | Some("gn") => NlsAlgorithm::GaussNewton,
+            Some("levenberg_marquardt") | Some("lm") | None => NlsAlgorithm::LevenbergMarquardt,
+            Some(other) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Unknown algorithm '{}'. Supported: levenberg_marquardt (default), gauss_newton",
+                    other
+                ))]));
+            }
+        };
+
+        let config = NlsConfig {
+            algorithm,
+            max_iter: request.max_iter.unwrap_or(200),
+            ..Default::default()
+        };
+
+        let start = Array1::from_vec(request.start);
+
+        let result = match nls(&x, &y, model_fn, &start, &param_names, config) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "NLS fitting failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+    }
+
+    /// Run LOESS (local polynomial regression) smoothing.
+    #[tool(description = "Fit a LOESS (LOcally Estimated Scatterplot Smoothing) model. LOESS fits local polynomial regressions at each point, weighted by distance from the target point using tricubic weights. Useful for non-parametric trend estimation, data smoothing, and exploring nonlinear relationships. Returns fitted values, residuals, R-squared, and equivalent number of parameters.")]
+    async fn regression_loess(
+        &self,
+        Parameters(request): Parameters<LoessRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        use p2a_core::regression::{run_loess, LoessConfig};
+
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let span = request.span.unwrap_or(0.75);
+        let degree = request.degree.unwrap_or(2);
+        let robust = request.robust.unwrap_or(false);
+
+        // Validate parameters
+        if span <= 0.0 {
+            return Ok(CallToolResult::error(vec![Content::text(
+                "span must be positive".to_string()
+            )]));
+        }
+        if degree > 2 {
+            return Ok(CallToolResult::error(vec![Content::text(
+                "degree must be 0, 1, or 2".to_string()
+            )]));
+        }
+
+        let result = match run_loess(dataset, &request.y, &request.x, span, degree, robust) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "LOESS fitting failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        // Build JSON output for LLM
+        let output = serde_json::json!({
+            "method": "LOESS",
+            "span": result.span,
+            "degree": result.degree,
+            "family": if result.robust { "symmetric" } else { "gaussian" },
+            "n_obs": result.n_obs,
+            "equivalent_number_parameters": result.enp,
+            "residual_sum_squares": result.rss,
+            "residual_standard_error": result.residual_se,
+            "r_squared": result.r_squared,
+            "robust_iterations": result.robust_iterations,
+            "fitted_values": result.fitted,
+            "residuals": result.residuals,
+        });
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&output).unwrap_or_else(|_| result.to_string())
+        )]))
     }
 
     // ========================================================================
@@ -6379,6 +10634,469 @@ impl AnalyticsServer {
         output.push_str(&format!("\nTotal Cost: {:.4}\n", result.total_cost));
 
         Ok(CallToolResult::success(vec![Content::text(output)]))
+    }
+
+    /// Holt-Winters exponential smoothing for time series forecasting.
+    ///
+    /// # References
+    ///
+    /// - Holt, C. C. (1957). "Forecasting Trends and Seasonal by Exponentially Weighted Averages".
+    ///   ONR Memorandum 52/1957, Carnegie Institute of Technology.
+    /// - Winters, P. R. (1960). "Forecasting Sales by Exponentially Weighted Moving Averages".
+    ///   Management Science, 6(3), 324-342.
+    /// - Hyndman, R. J. & Athanasopoulos, G. (2021). "Forecasting: Principles and Practice" (3rd ed).
+    ///   OTexts. https://otexts.com/fpp3/
+    #[tool(description = "Fit Holt-Winters exponential smoothing model to a time series with trend and seasonality. Supports both additive (constant seasonal variation) and multiplicative (proportional variation) seasonality. Automatically optimizes smoothing parameters (alpha, beta, gamma) if not provided. Can generate forecasts for future periods. Returns fitted values, residuals, optimized parameters, and seasonal coefficients.")]
+    async fn ts_holt_winters(
+        &self,
+        Parameters(request): Parameters<HoltWintersRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        // Parse seasonal type
+        let seasonal = match request.seasonal.as_deref() {
+            Some("multiplicative") | Some("Multiplicative") | Some("mult") => SeasonalType::Multiplicative,
+            _ => SeasonalType::Additive,
+        };
+
+        // Run Holt-Winters
+        let result = match run_holt_winters(
+            dataset,
+            &request.column,
+            request.period,
+            seasonal,
+            request.alpha,
+            request.beta,
+            request.gamma,
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Holt-Winters fitting failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        // Format output
+        let seasonal_type_str = match result.seasonal_type {
+            SeasonalType::Additive => "Additive",
+            SeasonalType::Multiplicative => "Multiplicative",
+        };
+
+        let mut output = format!(
+            "Holt-Winters Exponential Smoothing Results\n\
+             ==========================================\n\
+             Column: {}\n\
+             Observations: {}\n\
+             Seasonal Period: {}\n\
+             Seasonal Type: {}\n\n\
+             Optimized Smoothing Parameters:\n\
+             - Alpha (level): {:.6}\n\
+             - Beta (trend): {}\n\
+             - Gamma (seasonal): {}\n\n\
+             Sum of Squared Errors: {:.4}\n\n\
+             Final Coefficients:\n\
+             - Level: {:.6}\n\
+             - Trend: {}\n",
+            result.column.as_deref().unwrap_or(&request.column),
+            result.n_obs,
+            result.period,
+            seasonal_type_str,
+            result.alpha,
+            result.beta.map_or("N/A".to_string(), |v| format!("{:.6}", v)),
+            result.gamma.map_or("N/A".to_string(), |v| format!("{:.6}", v)),
+            result.sse,
+            result.coefficients.level,
+            result.coefficients.trend.map_or("N/A".to_string(), |v| format!("{:.6}", v)),
+        );
+
+        // Add seasonal coefficients
+        if let Some(ref seasonal_coeffs) = result.coefficients.seasonal {
+            output.push_str(&format!("- Seasonal coefficients: {:?}\n", seasonal_coeffs));
+        }
+
+        // If forecast horizon was requested, generate forecasts
+        if let Some(horizon) = request.horizon {
+            if horizon > 0 {
+                match holt_winters_forecast(&result, horizon) {
+                    Ok(forecasts) => {
+                        output.push_str(&format!("\nForecasts ({} periods ahead):\n", horizon));
+                        for (i, val) in forecasts.iter().enumerate() {
+                            output.push_str(&format!("  t+{}: {:.4}\n", i + 1, val));
+                        }
+                    }
+                    Err(e) => {
+                        output.push_str(&format!("\nForecast generation failed: {}\n", e));
+                    }
+                }
+            }
+        }
+
+        // Show first few fitted values and residuals
+        let show_n = 5.min(result.n_obs);
+        output.push_str(&format!("\nFirst {} values:\n", show_n));
+        output.push_str("  Fitted: [");
+        for (i, val) in result.fitted.iter().take(show_n).enumerate() {
+            if i > 0 { output.push_str(", "); }
+            output.push_str(&format!("{:.4}", val));
+        }
+        output.push_str("...]\n");
+
+        output.push_str("  Residuals: [");
+        for (i, val) in result.residuals.iter().take(show_n).enumerate() {
+            if i > 0 { output.push_str(", "); }
+            output.push_str(&format!("{:.4}", val));
+        }
+        output.push_str("...]\n");
+
+        Ok(CallToolResult::success(vec![Content::text(output)]))
+    }
+
+    /// Fit an autoregressive (AR) model to time series data.
+    #[tool(description = "Fit an autoregressive model to time series data with automatic order selection via AIC. Supports Yule-Walker (default), Burg, and OLS methods. Returns AR coefficients, prediction variance, AIC values, partial autocorrelations, and residuals.")]
+    async fn timeseries_ar(
+        &self,
+        Parameters(request): Parameters<ArModelRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        // Extract time series column
+        let column = dataset.df().column(&request.column).map_err(|e| {
+            McpError::invalid_request(
+                format!("Column '{}' not found: {}", request.column, e),
+                None,
+            )
+        })?;
+
+        let x: Vec<f64> = column
+            .f64()
+            .map_err(|e| McpError::invalid_request(format!("Column must be numeric: {}", e), None))?
+            .into_no_null_iter()
+            .collect();
+
+        // Parse method
+        let method = match request.method.as_deref() {
+            Some("burg") | Some("Burg") => ArMethod::Burg,
+            Some("ols") | Some("OLS") => ArMethod::Ols,
+            _ => ArMethod::YuleWalker,
+        };
+
+        // Build config
+        let config = ArConfig {
+            aic: request.aic.unwrap_or(true),
+            order_max: request.order_max,
+            order: request.order,
+            method,
+            demean: request.demean.unwrap_or(true),
+        };
+
+        // Fit AR model
+        let result = match ar(&x, config) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "AR model fitting failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        // Build output
+        let method_str = match result.method {
+            ArMethod::YuleWalker => "Yule-Walker",
+            ArMethod::Burg => "Burg",
+            ArMethod::Ols => "OLS",
+        };
+
+        let output = serde_json::json!({
+            "method": format!("AR({}) via {}", result.order, method_str),
+            "order": result.order,
+            "ar_coefficients": result.ar,
+            "prediction_variance": result.var_pred,
+            "x_mean": result.x_mean,
+            "n_obs": result.n_obs,
+            "partial_acf": result.partial_acf,
+            "aic_relative": result.aic,
+            "interpretation": {
+                "order_selected": if request.aic.unwrap_or(true) {
+                    format!("Order {} selected by AIC minimization", result.order)
+                } else {
+                    format!("Order {} specified by user", result.order)
+                },
+                "coefficients": format!(
+                    "AR model: x_t = {:.4} + {} + ε_t",
+                    result.x_mean,
+                    result.ar.iter().enumerate()
+                        .map(|(i, c)| format!("{:.4}*x_{{t-{}}}", c, i + 1))
+                        .collect::<Vec<_>>().join(" + ")
+                )
+            },
+            "references": "Brockwell & Davis (1991), Time Series: Theory and Methods"
+        });
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&output).unwrap_or_else(|_| format!("{:?}", result))
+        )]))
+    }
+
+    /// Perform classical seasonal decomposition by moving averages.
+    #[tool(description = "Decompose a time series into trend, seasonal, and random components using moving averages. Implements R's decompose() function. Supports additive (Y = T + S + R) and multiplicative (Y = T × S × R) decomposition.")]
+    async fn timeseries_decompose(
+        &self,
+        Parameters(request): Parameters<DecomposeRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        // Extract time series column
+        let column = dataset.df().column(&request.column).map_err(|e| {
+            McpError::invalid_request(
+                format!("Column '{}' not found: {}", request.column, e),
+                None,
+            )
+        })?;
+
+        let x: Vec<f64> = column
+            .f64()
+            .map_err(|e| McpError::invalid_request(format!("Column must be numeric: {}", e), None))?
+            .into_no_null_iter()
+            .collect();
+
+        // Parse decomposition type
+        let decompose_type = match request.decompose_type.as_deref() {
+            Some("multiplicative") | Some("mult") => DecomposeType::Multiplicative,
+            _ => DecomposeType::Additive,
+        };
+
+        // Run decomposition
+        let result = match decompose(&x, request.period, DecomposeConfig {
+            decompose_type,
+            filter: None,
+        }) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Decomposition failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        // Calculate statistics for output
+        let valid_trend: Vec<f64> = result.trend.iter().filter(|t| !t.is_nan()).copied().collect();
+        let valid_random: Vec<f64> = result.random.iter().filter(|r| !r.is_nan()).copied().collect();
+
+        let trend_mean = if valid_trend.is_empty() {
+            f64::NAN
+        } else {
+            valid_trend.iter().sum::<f64>() / valid_trend.len() as f64
+        };
+
+        let random_var = if valid_random.is_empty() {
+            f64::NAN
+        } else {
+            let mean = valid_random.iter().sum::<f64>() / valid_random.len() as f64;
+            valid_random.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / valid_random.len() as f64
+        };
+
+        // Build JSON output
+        let output = serde_json::json!({
+            "method": "Classical Decomposition by Moving Averages",
+            "decompose_type": match decompose_type {
+                DecomposeType::Additive => "additive",
+                DecomposeType::Multiplicative => "multiplicative",
+            },
+            "period": result.period,
+            "n_obs": result.n_obs,
+            "summary": {
+                "trend_mean": format!("{:.4}", trend_mean),
+                "seasonal_range": format!("[{:.4}, {:.4}]",
+                    result.figure.iter().cloned().fold(f64::INFINITY, f64::min),
+                    result.figure.iter().cloned().fold(f64::NEG_INFINITY, f64::max)),
+                "random_variance": format!("{:.4}", random_var),
+            },
+            "seasonal_figure": result.figure.iter()
+                .enumerate()
+                .map(|(i, &v)| serde_json::json!({
+                    "period_index": i + 1,
+                    "value": format!("{:.4}", v)
+                }))
+                .collect::<Vec<_>>(),
+            "components_sample": {
+                "first_5_trend": result.trend.iter().take(5)
+                    .map(|&v| if v.is_nan() { "NA".to_string() } else { format!("{:.4}", v) })
+                    .collect::<Vec<_>>(),
+                "first_5_seasonal": result.seasonal.iter().take(5)
+                    .map(|&v| format!("{:.4}", v))
+                    .collect::<Vec<_>>(),
+                "first_5_random": result.random.iter().take(5)
+                    .map(|&v| if v.is_nan() { "NA".to_string() } else { format!("{:.4}", v) })
+                    .collect::<Vec<_>>(),
+            },
+            "interpretation": match decompose_type {
+                DecomposeType::Additive => "Additive model: Original = Trend + Seasonal + Random. Seasonal effects are constant over time.",
+                DecomposeType::Multiplicative => "Multiplicative model: Original = Trend × Seasonal × Random. Seasonal effects are proportional to the level.",
+            },
+            "notes": "Trend component has NA values at the boundaries (first and last period/2 observations).",
+            "references": "Kendall, M. (1976). Time Series. Charles Griffin."
+        });
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&output).unwrap_or_else(|_| format!("{:?}", result))
+        )]))
+    }
+
+    /// Fit a structural time series model.
+    #[tool(description = "Fit a structural time series model by maximum likelihood using the Kalman filter. Supports: 'level' (local level/random walk + noise, equivalent to ARIMA(0,1,1)), 'trend' (local linear trend, equivalent to ARIMA(0,2,2)), and 'bsm' (basic structural model with level, trend, and seasonality). Returns variance parameters, smoothed components, fitted values, residuals, log-likelihood, AIC, and BIC.")]
+    async fn timeseries_structts(
+        &self,
+        Parameters(request): Parameters<StructTsRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        // Extract time series column
+        let column = dataset.df().column(&request.column).map_err(|e| {
+            McpError::invalid_request(
+                format!("Column '{}' not found: {}", request.column, e),
+                None,
+            )
+        })?;
+
+        let y: Vec<f64> = column
+            .f64()
+            .map_err(|e| McpError::invalid_request(format!("Column must be numeric: {}", e), None))?
+            .into_no_null_iter()
+            .collect();
+
+        // Parse model type
+        let model_type = match request.model_type.as_deref() {
+            Some("trend") | Some("Trend") => StructTsType::Trend,
+            Some("bsm") | Some("BSM") => StructTsType::BSM,
+            _ => StructTsType::Level,
+        };
+
+        // Validate period for BSM
+        if model_type == StructTsType::BSM && request.period.is_none() {
+            return Ok(CallToolResult::error(vec![Content::text(
+                "BSM model requires a period parameter (e.g., 12 for monthly data)"
+            )]));
+        }
+
+        // Run StructTS
+        let result = match struct_ts(&y, StructTsConfig {
+            model_type,
+            period: request.period,
+            ..Default::default()
+        }) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "StructTS fitting failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        // Build JSON output
+        let mut coef_json = serde_json::json!({
+            "level_variance": format!("{:.6}", result.coef.level),
+            "observation_variance": format!("{:.6}", result.coef.epsilon),
+        });
+
+        if let Some(slope_var) = result.coef.slope {
+            coef_json["slope_variance"] = serde_json::json!(format!("{:.6}", slope_var));
+        }
+        if let Some(seasonal_var) = result.coef.seasonal {
+            coef_json["seasonal_variance"] = serde_json::json!(format!("{:.6}", seasonal_var));
+        }
+
+        let model_type_str = match result.model_type {
+            StructTsType::Level => "level",
+            StructTsType::Trend => "trend",
+            StructTsType::BSM => "bsm",
+        };
+
+        let output = serde_json::json!({
+            "method": "Structural Time Series Model",
+            "model_type": model_type_str,
+            "n_obs": result.n_obs,
+            "n_params": result.n_params,
+            "converged": result.converged,
+            "variance_coefficients": coef_json,
+            "fit_statistics": {
+                "log_likelihood": format!("{:.4}", result.log_likelihood),
+                "aic": format!("{:.4}", result.aic),
+                "bic": format!("{:.4}", result.bic),
+            },
+            "components_sample": {
+                "first_5_level": result.level.iter().take(5)
+                    .map(|&v| format!("{:.4}", v))
+                    .collect::<Vec<_>>(),
+                "first_5_slope": result.slope.as_ref().map(|s|
+                    s.iter().take(5).map(|&v| format!("{:.4}", v)).collect::<Vec<_>>()
+                ),
+                "first_5_seasonal": result.seasonal.as_ref().map(|s|
+                    s.iter().take(5).map(|&v| format!("{:.4}", v)).collect::<Vec<_>>()
+                ),
+            },
+            "residual_summary": {
+                "mean": format!("{:.4}", result.residuals.iter().sum::<f64>() / result.n_obs as f64),
+                "std": format!("{:.4}", {
+                    let mean = result.residuals.iter().sum::<f64>() / result.n_obs as f64;
+                    (result.residuals.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / (result.n_obs - 1) as f64).sqrt()
+                }),
+            },
+            "interpretation": match result.model_type {
+                StructTsType::Level => "Local level model: Y_t = μ_t + ε_t where μ_t follows a random walk. Equivalent to ARIMA(0,1,1).",
+                StructTsType::Trend => "Local linear trend model: Y_t = μ_t + ε_t where μ_t has time-varying level and slope. Equivalent to ARIMA(0,2,2).",
+                StructTsType::BSM => "Basic Structural Model: Y_t = μ_t + γ_t + ε_t with level, slope, and seasonal components.",
+            },
+            "references": "Harvey, A. C. (1990). Forecasting, Structural Time Series Models and the Kalman Filter."
+        });
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&output).unwrap_or_else(|_| format!("{:?}", result))
+        )]))
     }
 
     // ========================================================================

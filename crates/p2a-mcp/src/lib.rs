@@ -19,7 +19,9 @@ use std::sync::Arc;
 use tokio::sync::oneshot;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-pub use config::{HttpConfig, ServerConfig, SessionConfig, TransportType};
+#[cfg(feature = "http")]
+pub use config::HttpConfig;
+pub use config::{ServerConfig, SessionConfig, TransportType};
 pub use server::AnalyticsServer;
 pub use session::SessionManager;
 

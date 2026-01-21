@@ -15,6 +15,7 @@ polars-ops.workspace = true
 # Statistics and numerics
 ndarray.workspace = true
 statrs.workspace = true
+r_mathlib.workspace = true
 
 # Linear algebra (pure Rust)
 faer.workspace = true
@@ -33,6 +34,7 @@ arima.workspace = true
 augurs-core.workspace = true
 augurs-mstl.workspace = true
 augurs-ets.workspace = true
+stlrs.workspace = true
 rand.workspace = true
 rand_distr.workspace = true
 
@@ -62,6 +64,9 @@ tracing.workspace = true
 
 # Quadratic programming solver
 quadprog.workspace = true
+
+# FFT for spectral analysis
+rustfft.workspace = true
 
 # Session management
 chrono = { version = "0.4", features = ["serde"] }
@@ -105,4 +110,16 @@ harness = false
 
 [[bench]]
 name = "benchmark_n10000"
+harness = false
+
+[[bench]]
+name = "multivariate_benchmarks"
+harness = false
+
+[[bench]]
+name = "hypothesis_benchmarks"
+harness = false
+
+[[bench]]
+name = "new_methods_benchmarks"
 harness = false

@@ -260,9 +260,9 @@ The user has provided: $ARGUMENTS
    - **R/Python code** for reproduction
    - **Results comparison table** with tolerances
    - **Link to Rust test functions**
-   - **Performance comparison section** (see 6c below)
+   - **Performance comparison section** (filled in Phase 7)
 
-**Template** (see existing files like `validation/econometrics/hdfe.md`):
+**Template** (see existing files like `validation/stats/hypothesis_tests.md`):
 ```markdown
 # Validation: [Method Name]
 
@@ -318,60 +318,237 @@ The user has provided: $ARGUMENTS
    criterion_group!(benches, [method]_benchmark);
    ```
 
-2. Run: `cargo bench -p p2a-core -- [method_name]`
-3. Save baseline results to `performance/results/`
+2. **Note**: Benchmarks will be executed in Phase 7.
 
-#### 6c. R Performance Comparison (MANDATORY)
+#### 6c. Create R Benchmark Script (MANDATORY)
 
 **Every method MUST include a performance comparison against R.**
 
-1. **Create R benchmark script** in `performance/benchmarks/[method]_r_benchmark.R`:
+1. **Create R benchmark script** in `performance/comparisons/r_comparison/benchmark_[method].R`:
    ```r
+   #!/usr/bin/env Rscript
    # [Method Name] R Benchmark
+   # Compares R implementation performance against p2a Rust
+
    library(microbenchmark)
    library(package_name)
+
+   set.seed(42)
 
    # Benchmark at different dataset sizes
    sizes <- c(100, 1000, 10000, 100000)
 
-   results <- data.frame(
-     size = integer(),
-     time_ms = numeric()
-   )
+   cat("=== [Method Name] R Benchmarks ===\n")
 
    for (n in sizes) {
-     set.seed(42)
-     # Generate data of size n...
+     # Generate data of size n (matching Rust benchmark DGP)
+     # ...
 
-     timing <- microbenchmark(
+     bm <- microbenchmark(
        function_name(...),
-       times = 10
+       times = 100,
+       unit = "microseconds"
      )
 
-     results <- rbind(results, data.frame(
-       size = n,
-       time_ms = median(timing$time) / 1e6  # Convert to ms
-     ))
+     med <- median(bm$time) / 1000  # Convert to microseconds
+     cat(sprintf("  n=%d: %.2f us (median)\n", n, med))
    }
-
-   print(results)
-   write.csv(results, "performance/results/[method]_r_times.csv")
    ```
 
-2. **Run R benchmark**: `Rscript performance/benchmarks/[method]_r_benchmark.R`
-
-3. **Document comparison** in validation file:
-   - Include table with Rust vs R execution times
-   - Calculate speedup factor (R_time / Rust_time)
-   - Note any memory usage differences if significant
-
-4. **Expected outcome**: Rust implementation should typically be 5-50x faster than R for compute-intensive methods
+2. **Note**: R benchmarks will be executed in Phase 7.
 
 #### 6d. Update Indexes
 
 1. Add entry to `validation/README.md` method index (mark as "Complete")
 2. Add entry to `validation/reference_implementations.md` if new package used
 3. Update `performance/reports/[category]_performance.md` with benchmark results
+
+---
+
+### Phase 7: Automatic Execution & Verification (MANDATORY - DO NOT SKIP)
+
+**This phase MUST be executed automatically at the end of every implementation.**
+
+#### 7a. Run All Rust Tests
+
+```bash
+# Run validation tests for the new method
+cargo test -p p2a-core -- test_validate_[method] --nocapture
+```
+
+**Verify**: All `test_validate_*` tests pass. If any fail, fix the implementation before proceeding.
+
+#### 7b. Run Rust Benchmarks
+
+```bash
+# Run Criterion benchmarks for the new method
+cargo bench -p p2a-core -- [method_name]
+```
+
+**Capture the output** and extract timing results for each dataset size.
+
+#### 7c. Run R Benchmarks
+
+```bash
+# Run R performance benchmarks
+Rscript performance/comparisons/r_comparison/benchmark_[method].R
+```
+
+**If R or microbenchmark is not available**, use `system.time()` as fallback:
+```r
+# Fallback without microbenchmark
+for (n in c(100, 1000, 10000, 100000)) {
+  timing <- system.time(replicate(50, { function_name(...) }))
+  cat(sprintf("n=%d: %.2f ms (median of 50)\n", n, timing["elapsed"] * 1000 / 50))
+}
+```
+
+#### 7d. Update Validation Document with Actual Results
+
+1. **Fill in the Performance Comparison table** in `validation/[category]/[method].md`:
+   - Insert actual Rust benchmark times (from 7b)
+   - Insert actual R benchmark times (from 7c)
+   - Calculate speedup factor: `Speedup = R_time / Rust_time`
+
+2. **Example filled table**:
+   ```markdown
+   ## Performance Comparison
+
+   | Dataset Size | Rust (µs) | R (µs) | Speedup |
+   |--------------|-----------|--------|---------|
+   | n=100        | 5.5       | 550    | ~100x   |
+   | n=1,000      | 10.7      | 800    | ~75x    |
+   | n=10,000     | 52        | 1000   | ~19x    |
+   | n=100,000    | 249       | 2000   | ~8x     |
+   ```
+
+#### 7e. Performance Evaluation & Re-Optimization (MANDATORY)
+
+**The Rust implementation MUST be clearly faster than R. If not, optimization is required.**
+
+1. **Evaluate Performance Results**:
+   After recording benchmark results, check if Rust is **at least 2x faster than R** for the majority of dataset sizes (especially n=1,000 and n=10,000 which are typical use cases).
+
+   ```
+   PERFORMANCE EVALUATION
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   | Dataset Size | Rust (µs) | R (µs) | Speedup | Status        |
+   |--------------|-----------|--------|---------|---------------|
+   | n=100        | ???       | ???    | ???x    | ✅/⚠️/❌      |
+   | n=1,000      | ???       | ???    | ???x    | ✅/⚠️/❌      |
+   | n=10,000     | ???       | ???    | ???x    | ✅/⚠️/❌      |
+   | n=100,000    | ???       | ???    | ???x    | ✅/⚠️/❌      |
+
+   Status Key:
+   ✅ PASS: Speedup >= 2x (Rust clearly faster)
+   ⚠️ MARGINAL: Speedup 1x-2x (acceptable but could be improved)
+   ❌ FAIL: Speedup < 1x (Rust is SLOWER than R - MUST FIX)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   ```
+
+2. **If ANY size shows ❌ FAIL (Rust slower than R), MANDATORY re-optimization**:
+
+   **Step 2a: Identify Bottlenecks**
+   - Profile the implementation to find hot spots
+   - Common issues:
+     - Unnecessary allocations (use `Vec::with_capacity`, reuse buffers)
+     - Redundant matrix operations (cache intermediate results)
+     - Inefficient loops (use iterators, SIMD via `ndarray`)
+     - Poor cache locality (restructure data access patterns)
+     - Using `safe_inverse` when Cholesky solve is faster
+
+   **Step 2b: Apply Optimizations**
+   - Refactor the hot code paths
+   - Consider:
+     - Using `faer` directly for linear algebra (often 2-10x faster than ndarray)
+     - Pre-computing reusable matrices (X'X, X'y)
+     - Avoiding repeated column extractions from DataFrame
+     - Using `rayon` for data-parallel operations on large datasets
+     - Reducing function call overhead for inner loops
+
+   **Step 2c: Re-benchmark After Optimization**
+   ```bash
+   # Re-run Rust benchmarks
+   cargo bench -p p2a-core -- [method]
+   ```
+
+   **Step 2d: Compare Again**
+   - Update the performance table with new Rust times
+   - If still showing ❌ FAIL, repeat Steps 2a-2c
+   - Document what optimizations were applied
+
+3. **Optimization Iteration Log**:
+   Track optimization attempts in the validation document:
+   ```markdown
+   ## Optimization History
+
+   ### Iteration 1 (Initial Implementation)
+   - n=10,000: Rust 150µs, R 120µs (0.8x - SLOWER)
+   - Issue identified: Repeated DataFrame column extraction
+
+   ### Iteration 2
+   - Applied: Pre-extract columns to ndarray before computation
+   - n=10,000: Rust 45µs, R 120µs (2.7x - PASS)
+   ```
+
+4. **Minimum Performance Requirements**:
+   - **n=1,000**: Rust MUST be at least **1.5x faster** than R
+   - **n=10,000**: Rust MUST be at least **2x faster** than R
+   - **n=100,000**: Rust SHOULD be at least **3x faster** than R (large data is Rust's strength)
+
+   If these minimums cannot be achieved after 3 optimization iterations:
+   - Document the fundamental reason (e.g., R uses highly optimized C/Fortran backend)
+   - File an issue for future optimization
+   - Proceed only if implementation is at least **not slower** than R
+
+5. **Exit Criteria for This Phase**:
+   ```
+   ✅ ALL of the following must be true to proceed:
+   - [ ] No dataset size shows Rust SLOWER than R
+   - [ ] At least 2 of 4 dataset sizes show >= 2x speedup
+   - [ ] n=10,000 shows >= 1.5x speedup (typical use case)
+   - [ ] Optimization attempts documented if any were needed
+   ```
+
+#### 7f. Final Verification Checklist
+
+Before marking implementation as complete, verify ALL items:
+
+```
+VALIDATION & PERFORMANCE VERIFICATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+[RUN] cargo test -p p2a-core -- test_validate_[method]
+      Result: ✅ All tests passing / ❌ Tests failing
+
+[RUN] cargo bench -p p2a-core -- [method]
+      Result: ✅ Benchmarks recorded / ❌ Benchmark errors
+
+[RUN] Rscript performance/comparisons/r_comparison/benchmark_[method].R
+      Result: ✅ R times recorded / ❌ R script failed
+
+[CHECK] Performance Requirements (Phase 7e)
+      - [ ] No dataset size shows Rust SLOWER than R
+      - [ ] At least 2 of 4 dataset sizes show >= 2x speedup
+      - [ ] n=10,000 shows >= 1.5x speedup
+      - [ ] If optimizations needed: documented in validation doc
+
+[CHECK] validation/[category]/[method].md
+      - [ ] Performance table has actual numbers (not placeholders)
+      - [ ] Speedup factors calculated
+      - [ ] All test cases documented with results
+      - [ ] Optimization history documented (if applicable)
+
+[CHECK] docs/discovery/implementation_queue.json
+      - [ ] Method status updated to "completed"
+      - [ ] rust_functions field populated
+      - [ ] mcp_tools field populated
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+```
+
+**IMPORTANT**: Implementation is NOT complete until:
+1. Phase 7 executes successfully
+2. Rust is demonstrably faster than R (Phase 7e requirements met)
+3. If Rust was initially slower, optimizations have been applied and re-benchmarked
 
 ---
 
@@ -400,15 +577,27 @@ After completing all phases, verify ALL items are complete:
 
 ### Benchmarks (Phase 6b-c)
 - [ ] Criterion benchmark added to `crates/p2a-core/benches/`
-- [ ] R benchmark script created in `performance/benchmarks/`
-- [ ] R benchmark executed and times recorded
-- [ ] Speedup factor calculated and documented
-- [ ] Results saved to `performance/results/`
+- [ ] R benchmark script created in `performance/comparisons/r_comparison/`
 
 ### Index Updates (Phase 6d)
 - [ ] `validation/README.md` index updated (marked "Complete")
 - [ ] `validation/reference_implementations.md` updated if new package
 - [ ] `performance/reports/[category]_performance.md` updated with benchmark results
+
+### Automatic Execution (Phase 7) - MANDATORY
+- [ ] `cargo test -p p2a-core -- test_validate_[method]` executed and passing
+- [ ] `cargo bench -p p2a-core -- [method]` executed and times recorded
+- [ ] R benchmark script executed and times recorded
+- [ ] Validation document updated with actual performance numbers
+- [ ] Speedup factors calculated and documented
+- [ ] Implementation queue status updated to "completed"
+
+### Performance Evaluation (Phase 7e) - MANDATORY
+- [ ] Rust is NOT slower than R for any dataset size
+- [ ] At least 2 of 4 dataset sizes show >= 2x speedup over R
+- [ ] n=10,000 shows at least 1.5x speedup over R
+- [ ] If initially slower: optimizations applied and re-benchmarked
+- [ ] Optimization history documented (if optimizations were needed)
 
 ---
 
@@ -459,6 +648,7 @@ After completing all phases, verify ALL items are complete:
 - **R Validation**: Every method MUST be validated against R with matching results
 - **Benchmarks**: Every method MUST have Criterion benchmarks
 - **R Comparison**: Every method MUST include performance comparison vs R
+- **Performance**: Rust MUST be faster than R — if not, optimize until it is
 
 ### Implementation Standards
 - **Check first**: ALWAYS run Phase 0 before any implementation work
@@ -484,10 +674,21 @@ For EVERY new econometric method, the following artifacts MUST be delivered:
 | 4b | Rust validation tests | `test_validate_*` in implementation file |
 | 6a | Validation document | `validation/[category]/[method].md` |
 | 6b | Criterion benchmark | `crates/p2a-core/benches/` |
-| 6c | R benchmark script | `performance/benchmarks/[method]_r_benchmark.R` |
+| 6c | R benchmark script | `performance/comparisons/r_comparison/benchmark_[method].R` |
+| 7a-d | **Executed tests** | `cargo test` output showing all pass |
+| 7b | **Executed Rust benchmarks** | `cargo bench` output with timing results |
+| 7c | **Executed R benchmarks** | R script output with timing results |
+| 7d | **Updated validation doc** | Performance table with actual numbers |
+| 7e | **Performance evaluation** | Rust faster than R verified |
+| 7e | **Optimization (if needed)** | Re-benchmarked until Rust >= R performance |
 
-**Implementation is NOT complete until all items in the checklist are verified.**
+**Implementation is NOT complete until:**
+1. **Phase 7a-d executes successfully** with all benchmarks recorded
+2. **Phase 7e confirms Rust is faster than R** (no dataset size shows Rust slower)
+3. **If Rust was initially slower**, optimizations applied and re-benchmarked until performance requirements met
 
 ---
 
 **BEGIN by running Phase 0: Check for existing implementations.**
+
+**END by running Phase 7: Execute all tests and benchmarks, update validation document with actual results.**

@@ -113,6 +113,9 @@ pub enum EconError {
 
     #[error("Internal error: {0}")]
     Internal(String),
+
+    #[error("Computation error: {0}")]
+    Computation(String),
 }
 
 /// Warnings that don't prevent estimation but should be noted.

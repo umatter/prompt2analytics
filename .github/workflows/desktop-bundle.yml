@@ -1,0 +1,172 @@
+name: Bundle Desktop App
+
+on:
+  push:
+    tags:
+      - 'v*'  # Trigger on version tags like v1.0.0
+  workflow_dispatch:  # Allow manual trigger
+    inputs:
+      version:
+        description: 'Version number (e.g., 1.0.0)'
+        required: false
+        default: 'dev'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux - builds .deb, .rpm, .appimage
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            package_types: "deb appimage"
+            artifact_name: linux
+
+          # Windows - builds .msi, .exe installer
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            package_types: "msi"
+            artifact_name: windows
+
+          # macOS Intel
+          - os: macos-13
+            target: x86_64-apple-darwin
+            package_types: "macos dmg"
+            artifact_name: macos-intel
+
+          # macOS Apple Silicon
+          - os: macos-14
+            target: aarch64-apple-darwin
+            package_types: "macos dmg"
+            artifact_name: macos-arm64
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-action@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      # Linux-specific: Install GTK and other dependencies
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgtk-3-dev \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libssl-dev \
+            libxdo-dev \
+            libglib2.0-dev \
+            libcairo2-dev \
+            libpango1.0-dev \
+            libgdk-pixbuf2.0-dev \
+            libatk1.0-dev
+
+      # Windows-specific: Install WebView2
+      - name: Install Windows dependencies
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          # WebView2 is usually pre-installed on Windows 10/11
+          # This is a fallback for CI environments
+          $WebView2InstallerUrl = "https://go.microsoft.com/fwlink/p/?LinkId=2124703"
+          Invoke-WebRequest -Uri $WebView2InstallerUrl -OutFile "$env:TEMP\MicrosoftEdgeWebview2Setup.exe"
+          Start-Process -FilePath "$env:TEMP\MicrosoftEdgeWebview2Setup.exe" -Args "/silent /install" -Wait
+
+      # Install Dioxus CLI
+      - name: Install Dioxus CLI
+        run: cargo install dioxus-cli
+
+      # Build the desktop bundle
+      - name: Bundle Desktop App
+        working-directory: crates/p2a-dioxus
+        shell: bash
+        run: |
+          # Build package types as separate arguments
+          PACKAGE_ARGS=""
+          for pkg in ${{ matrix.package_types }}; do
+            PACKAGE_ARGS="$PACKAGE_ARGS --package-types $pkg"
+          done
+
+          dx bundle --platform desktop --release $PACKAGE_ARGS
+
+      # Collect and upload artifacts
+      - name: Upload artifacts (Linux)
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: prompt2analytics-${{ matrix.artifact_name }}
+          path: |
+            crates/p2a-dioxus/target/dx/prompt2analytics/bundle/**/*.deb
+            crates/p2a-dioxus/target/dx/prompt2analytics/bundle/**/*.AppImage
+            crates/p2a-dioxus/target/dx/prompt2analytics/bundle/**/*.rpm
+          if-no-files-found: warn
+
+      - name: Upload artifacts (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: prompt2analytics-${{ matrix.artifact_name }}
+          path: |
+            crates/p2a-dioxus/target/dx/prompt2analytics/bundle/**/*.msi
+            crates/p2a-dioxus/target/dx/prompt2analytics/bundle/**/*.exe
+          if-no-files-found: warn
+
+      - name: Upload artifacts (macOS)
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: prompt2analytics-${{ matrix.artifact_name }}
+          path: |
+            crates/p2a-dioxus/target/dx/prompt2analytics/bundle/**/*.dmg
+            crates/p2a-dioxus/target/dx/prompt2analytics/bundle/**/*.app
+          if-no-files-found: warn
+
+  # Create GitHub Release with all artifacts
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Display structure
+        run: ls -R artifacts
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: artifacts/**/*
+          generate_release_notes: true
+          draft: true  # Review before publishing
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

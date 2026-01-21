@@ -27,6 +27,7 @@ schemars = "1.0"
 # Statistics and numerics
 ndarray = "0.16"
 statrs = "0.18"
+r_mathlib = "0.2"
 
 # Linear algebra (pure Rust, no external BLAS dependency)
 faer = "0.22"
@@ -42,6 +43,7 @@ arima = "0.3"
 augurs-core = "0.10"
 augurs-mstl = "0.10"
 augurs-ets = { version = "0.10", features = ["mstl"] }
+stlrs = "0.3"
 
 # Random number generation (for ARIMA forecasting and simulation)
 rand = "0.8"
@@ -86,3 +88,6 @@ bytecount = { version = "0.6", features = ["runtime-dispatch-simd"] }
 
 # Quadratic programming solver (pure Rust, Goldfarb-Idnani algorithm)
 quadprog = "0.0.1"
+
+# FFT for spectral analysis (O(n log n) instead of O(n²))
+rustfft = "6.2"
