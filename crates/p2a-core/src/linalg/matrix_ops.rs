@@ -149,18 +149,50 @@ pub fn condition_number(m: &ArrayView2<f64>) -> Result<f64, LinalgError> {
 
 /// Safe matrix inverse with pseudoinverse fallback.
 /// Returns the regular inverse if well-conditioned, otherwise uses pseudoinverse.
+///
+/// Optimized to avoid redundant condition number computation.
 pub fn safe_inverse(m: &ArrayView2<f64>) -> Result<(Array2<f64>, Option<f64>), LinalgError> {
-    let cond = condition_number(m)?;
+    let (rows, cols) = m.dim();
+    if rows != cols {
+        return Err(LinalgError::NotSquare { rows, cols });
+    }
 
-    if cond < CONDITION_THRESHOLD {
-        // Well-conditioned: use regular inverse
-        let inv = matrix_inverse(m)?;
-        Ok((inv, None))
-    } else {
+    let mat = ndarray_to_faer(m);
+
+    // Try Cholesky first (faster for symmetric positive definite matrices like X'X)
+    if let Ok(chol) = mat.llt(faer::Side::Lower) {
+        // Solve for inverse: A * A^{-1} = I
+        let n = rows;
+        let mut identity = Mat::<f64>::zeros(n, n);
+        for i in 0..n {
+            identity[(i, i)] = 1.0;
+        }
+        let inv = chol.solve(&identity);
+        return Ok((faer_to_ndarray(&inv), None));
+    }
+
+    // Cholesky failed - matrix might not be positive definite
+    // Fall back to LU decomposition with condition number check
+    let lu = mat.full_piv_lu();
+
+    // Create identity matrix to solve for inverse
+    let n = rows;
+    let mut identity = Mat::<f64>::zeros(n, n);
+    for i in 0..n {
+        identity[(i, i)] = 1.0;
+    }
+
+    let inv = lu.solve(&identity);
+
+    // Check condition number only if Cholesky failed (non-positive-definite case)
+    let cond = condition_number(m)?;
+    if cond > CONDITION_THRESHOLD {
         // Ill-conditioned: use pseudoinverse and return warning
         let pinv = pseudoinverse(m)?;
-        Ok((pinv, Some(cond)))
+        return Ok((pinv, Some(cond)));
     }
+
+    Ok((faer_to_ndarray(&inv), None))
 }
 
 /// Cholesky decomposition: M = L * L^T
@@ -248,18 +280,17 @@ pub fn matmul(a: &ArrayView2<f64>, b: &ArrayView2<f64>) -> Result<Array2<f64>, L
 }
 
 /// Compute X'X (X transpose times X)
+/// Uses ndarray's native dot product for better performance on larger matrices.
 pub fn xtx(x: &ArrayView2<f64>) -> Array2<f64> {
-    let mat = ndarray_to_faer(x);
-    let result = mat.transpose() * &mat;
-    faer_to_ndarray(&result)
+    // ndarray's .t() returns a transposed view (no copy)
+    // and .dot() is optimized for matrix multiplication
+    x.t().dot(x)
 }
 
 /// Compute X'y (X transpose times y)
+/// Uses ndarray's native dot product for better performance.
 pub fn xty(x: &ArrayView2<f64>, y: &Array1<f64>) -> Array1<f64> {
-    let mat = ndarray_to_faer(x);
-    let col_y = Col::<f64>::from_fn(y.len(), |i| y[i]);
-    let result = mat.transpose() * &col_y;
-    faer_col_to_ndarray(&result)
+    x.t().dot(y)
 }
 
 /// Compute (X'X)^{-1} with optional condition number warning

@@ -111,7 +111,7 @@ pub use stats::{
     SplineResult, SplineMethod, ApproxResult, ApproxMethod, ApproxRule,
 };
 pub use regression::{
-    OlsResult, run_ols, run_ols_clustered, DiagnosticsResult, run_diagnostics,
+    OlsResult, run_ols, run_ols_raw, run_ols_clustered, DiagnosticsResult, run_diagnostics,
     // Nonlinear least squares
     NlsResult, NlsConfig, NlsAlgorithm, nls, nls_multi, run_nls, run_nls_with_config,
     model_exponential_decay, model_exponential_growth, model_michaelis_menten,
