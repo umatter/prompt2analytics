@@ -1,0 +1,299 @@
+%% =============================================================================
+%% COMPARISON AND VALIDATION
+%% =============================================================================
+
+\section{Comparison and validation} \label{sec:comparison}
+
+This section compares \pkg{prompt2analytics} against established \proglang{R}
+packages in terms of both performance and numerical accuracy. We demonstrate
+that the \proglang{Rust} implementation achieves substantial speedups while
+matching reference implementations to high precision.
+
+%% -----------------------------------------------------------------------------
+\subsection{Methodology} \label{sec:comparison-methodology}
+
+\subsubsection{Benchmark and validation framework}
+
+Performance and validation comparisons follow a standardized framework:
+
+\begin{enumerate}
+  \item \textbf{Reference selection}: For each method, we identify the canonical
+    \proglang{R} implementation used in the econometrics literature
+    (Table~\ref{tab:reference-packages}).
+
+  \item \textbf{Data generating processes}: All benchmark datasets are generated
+    synthetically using identical specifications in both languages, with fixed
+    random seeds (seed = 42) for reproducibility. For regression benchmarks:
+    \begin{equation}
+      y_i = \beta_0 + \beta_1 x_{1i} + \beta_2 x_{2i} + \varepsilon_i, \quad
+      \varepsilon_i \sim \mathcal{N}(0, \sigma^2)
+    \end{equation}
+    Real datasets with published results (Longley, Grunfeld) are used for
+    numerical validation.
+
+  \item \textbf{Benchmark execution}: Each method is executed 50--100 times.
+    The \pkg{microbenchmark} package \citep{microbenchmark} handles warmup
+    and garbage collection in \proglang{R}. \proglang{Rust} benchmarks use
+    Criterion \citep{criterion} for automatic warmup and outlier detection.
+
+  \item \textbf{Precision thresholds}: Numerical tolerance varies by sample
+    size: $10^{-6}$ for coefficients in small samples ($n < 100$), tightening
+    to $10^{-10}$ for large samples ($n > 1{,}000$).
+\end{enumerate}
+
+\subsubsection{Reference implementations}
+
+Table~\ref{tab:reference-packages} lists the \proglang{R} packages used for
+both performance comparison and numerical validation.
+
+\begin{table}[htbp]
+\centering
+\caption{Reference \proglang{R} packages for comparison and validation}
+\label{tab:reference-packages}
+\begin{tabular}{llll}
+\toprule
+Category & Package & Functions & Validation dataset \\
+\midrule
+Regression & stats & \fct{lm} & Longley \\
+Robust SEs & sandwich & \fct{vcovHC} & Synthetic \\
+Panel data & plm & \fct{plm}, \fct{phtest} & Grunfeld \\
+HDFE & lfe & \fct{felm} & Grunfeld \\
+Discrete choice & stats & \fct{glm} & Synthetic \\
+Clustering & stats & \fct{kmeans}, \fct{hclust} & Synthetic \\
+PCA & stats & \fct{prcomp} & Synthetic \\
+Time series & forecast & \fct{Arima}, \fct{mstl} & Synthetic \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsubsection{Hardware environment}
+
+All benchmarks are executed on identical hardware: Intel Core i7-1260P
+processor with 62GB RAM running Linux 6.17.9. \proglang{R} 4.5.2 uses
+OpenBLAS; \proglang{Rust} 1.92.0 uses release builds with LTO enabled.
+
+%% -----------------------------------------------------------------------------
+\subsection{Performance comparison} \label{sec:performance-results}
+
+The benchmark suite covers approximately 75 method configurations across
+regression, panel econometrics, discrete choice, machine learning, and
+forecasting. Table~\ref{tab:benchmark-coverage} summarizes coverage.
+
+\begin{table}[htbp]
+\centering
+\caption{Methods included in the performance benchmark suite}
+\label{tab:benchmark-coverage}
+\begin{tabular}{llp{6cm}}
+\toprule
+Category & Count & Methods \\
+\midrule
+Regression/Statistics & 40 & OLS, robust SEs (HC0--HC3), diagnostics, ANOVA, t-tests, chi-squared, Fisher exact, NLS, LOESS, Wilcoxon, Shapiro-Wilk, KS tests \\
+\addlinespace
+Econometrics & 15 & Panel FE/RE, HDFE, logit, probit, FEGLM, IPW, AIPW, survival analysis \\
+\addlinespace
+Machine Learning & 4 & K-means, DBSCAN, hierarchical clustering, PCA \\
+\addlinespace
+Forecasting & 16 & ARIMA, MSTL, Holt-Winters, structural time series, Kalman filter \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsubsection{Regression benchmarks}
+
+Table~\ref{tab:regression-benchmarks} shows timing results for OLS with and
+without heteroskedasticity-consistent standard errors. \pkg{prompt2analytics}
+demonstrates substantial speedups, particularly for robust standard errors.
+
+\begin{table}[htbp]
+\centering
+\caption{Regression benchmark results (median time in $\mu$s)}
+\label{tab:regression-benchmarks}
+\begin{tabular}{lrrrrr}
+\toprule
+Method & $n$ & \proglang{R} & \pkg{p2a} & Speedup \\
+\midrule
+OLS & 100 & 812 & 42 & 19.3$\times$ \\
+OLS & 1,000 & 963 & 119 & 8.1$\times$ \\
+OLS & 10,000 & 2,181 & 450 & 4.8$\times$ \\
+\midrule
+OLS + HC1 & 100 & 2,279 & 171 & 13.3$\times$ \\
+OLS + HC1 & 1,000 & 4,113 & 595 & 6.9$\times$ \\
+OLS + HC1 & 10,000 & 25,224 & 4,200 & 6.0$\times$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsubsection{Panel data and machine learning benchmarks}
+
+Fixed effects estimation and clustering show similar performance advantages
+(Tables~\ref{tab:panel-benchmarks}--\ref{tab:ml-benchmarks}).
+
+\begin{table}[htbp]
+\centering
+\caption{Panel data benchmark results (median time in $\mu$s)}
+\label{tab:panel-benchmarks}
+\begin{tabular}{lrrrr}
+\toprule
+Method & $n$ & \pkg{plm} & \pkg{p2a} & Speedup \\
+\midrule
+Fixed Effects & 100 & 4,901 & 285 & 17.2$\times$ \\
+Fixed Effects & 1,000 & 6,388 & 612 & 10.4$\times$ \\
+Fixed Effects & 5,000 & 11,296 & 2,450 & 4.6$\times$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[htbp]
+\centering
+\caption{Machine learning benchmark results (median time in $\mu$s)}
+\label{tab:ml-benchmarks}
+\begin{tabular}{lrrrr}
+\toprule
+Method & $n$ & \proglang{R} & \pkg{p2a} & Speedup \\
+\midrule
+K-Means ($k=3$) & 1,000 & 1,274 & 185 & 6.9$\times$ \\
+PCA & 1,000 & 246 & 78 & 3.2$\times$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsubsection{Overall performance}
+
+Figure~\ref{fig:benchmark-boxplots} compares execution times across all
+benchmarked methods. Figure~\ref{fig:speedup-histogram} shows the distribution
+of speedup factors.
+
+\begin{figure}[htbp]
+\centering
+\IfFileExists{figures/benchmark_boxplots.png}{%
+  \includegraphics[width=\textwidth]{figures/benchmark_boxplots}%
+}{%
+  \fbox{\parbox{\textwidth}{\centering\vspace{2cm}%
+    [Figure: benchmark\_boxplots.png]\vspace{2cm}}}%
+}
+\caption{Execution time comparison between \proglang{R} (blue) and
+\pkg{prompt2analytics} (orange) at $n = 10{,}000$. Y-axis uses log scale.}
+\label{fig:benchmark-boxplots}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\IfFileExists{figures/benchmark_speedup_hist.png}{%
+  \includegraphics[width=0.8\textwidth]{figures/benchmark_speedup_hist}%
+}{%
+  \fbox{\parbox{0.8\textwidth}{\centering\vspace{2cm}%
+    [Figure: benchmark\_speedup\_hist.png]\vspace{2cm}}}%
+}
+\caption{Distribution of speedup factors across all benchmarked methods.}
+\label{fig:speedup-histogram}
+\end{figure}
+
+Performance advantages stem from \proglang{Rust}'s ownership model reducing
+heap allocations, SIMD vectorization in the \pkg{faer} linear algebra library,
+elimination of interpreter overhead, and a column-based API avoiding formula
+parsing. Speedup factors decrease with sample size as matrix operations
+dominate, which are similarly optimized in both languages.
+
+%% -----------------------------------------------------------------------------
+\subsection{Numerical validation} \label{sec:validation-results}
+
+Beyond performance, numerical accuracy is essential. We validate all methods
+against reference implementations to high precision.
+
+\subsubsection{OLS validation}
+
+OLS is validated against the Longley dataset \citep{Longley:1967}, a classic
+benchmark for numerical accuracy due to high multicollinearity.
+
+\begin{table}[htbp]
+\centering
+\caption{OLS validation: Longley dataset ($n = 16$, $k = 6$)}
+\label{tab:validation-ols}
+\begin{tabular}{lrrr}
+\toprule
+Coefficient & \proglang{R} \fct{lm} & \pkg{prompt2analytics} & Difference \\
+\midrule
+(Intercept) & $-3482.259$ & $-3482.259$ & $< 10^{-8}$ \\
+GNP.deflator & $0.01506$ & $0.01506$ & $< 10^{-8}$ \\
+GNP & $-0.03582$ & $-0.03582$ & $< 10^{-8}$ \\
+Unemployed & $-0.02020$ & $-0.02020$ & $< 10^{-8}$ \\
+Armed.Forces & $-0.01033$ & $-0.01033$ & $< 10^{-8}$ \\
+Population & $-0.05110$ & $-0.05110$ & $< 10^{-8}$ \\
+Year & $1.82915$ & $1.82915$ & $< 10^{-8}$ \\
+\midrule
+$R^2$ & $0.9955$ & $0.9955$ & $< 10^{-4}$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsubsection{Robust standard errors}
+
+Heteroskedasticity-consistent standard errors (HC0--HC3) match the
+\pkg{sandwich} package \citep{Zeileis:2004} to $< 10^{-8}$ precision
+for HC0/HC1 and $< 10^{-8}$ for HC2/HC3 (reflecting differences in
+leverage computation).
+
+\subsubsection{Panel data validation}
+
+Fixed and random effects estimators are validated against \pkg{plm}
+\citep{Croissant+Millo:2008} using the Grunfeld dataset.
+
+\begin{table}[htbp]
+\centering
+\caption{Panel FE validation: Grunfeld dataset}
+\label{tab:validation-fe}
+\begin{tabular}{lrrr}
+\toprule
+Statistic & \proglang{R} \pkg{plm} & \pkg{prompt2analytics} & Difference \\
+\midrule
+$\beta_{\text{value}}$ & $0.110124$ & $0.110124$ & $< 10^{-6}$ \\
+$\beta_{\text{capital}}$ & $0.310065$ & $0.310065$ & $< 10^{-6}$ \\
+Within $R^2$ & $0.7668$ & $0.7668$ & $< 10^{-4}$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Two-way HDFE using the MAP algorithm \citep{Gaure:2013} matches \pkg{lfe}
+to $< 10^{-5}$ precision.
+
+\subsubsection{Validation coverage}
+
+Table~\ref{tab:validation-summary} summarizes validation test coverage.
+All tests are integrated into continuous integration and can be run via
+\code{cargo test -p p2a-core -- test\_validate}.
+
+\begin{table}[htbp]
+\centering
+\caption{Validation test coverage by category}
+\label{tab:validation-summary}
+\begin{tabular}{lccc}
+\toprule
+Category & Methods & Tests & Reference packages \\
+\midrule
+Regression & 4 & 12 & stats, sandwich \\
+Panel data & 4 & 8 & plm, lfe \\
+Causal inference & 3 & 6 & AER \\
+Discrete choice & 2 & 4 & stats \\
+Time series & 5 & 10 & vars, forecast \\
+Machine learning & 7 & 14 & stats \\
+Statistical tests & 20+ & 40+ & stats \\
+\midrule
+\textbf{Total} & \textbf{51+} & \textbf{106+} & \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+%% -----------------------------------------------------------------------------
+\subsection{Known differences} \label{sec:known-differences}
+
+A small number of intentional differences exist:
+
+\begin{itemize}
+  \item \textbf{Default robust SE}: \pkg{prompt2analytics} defaults to HC1
+    (matching Stata), while \pkg{sandwich} defaults to HC3.
+  \item \textbf{Panel $R^2$}: We report within $R^2$ by default for FE models.
+  \item \textbf{Convergence tolerance}: Iterative methods use $10^{-8}$ default.
+\end{itemize}
+
+These differences are documented and do not affect statistical inference validity.
+

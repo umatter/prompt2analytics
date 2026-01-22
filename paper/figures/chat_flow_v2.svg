@@ -1,0 +1,180 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 750 520" width="750" height="520">
+  <defs>
+    <style>
+      .title { font-family: 'Helvetica Neue', Arial, sans-serif; font-size: 16px; font-weight: 600; fill: #333; }
+      .header { font-family: 'Helvetica Neue', Arial, sans-serif; font-size: 13px; font-weight: 600; fill: #333; }
+      .label { font-family: 'Helvetica Neue', Arial, sans-serif; font-size: 11px; fill: #333; }
+      .sublabel { font-family: 'Helvetica Neue', Arial, sans-serif; font-size: 10px; fill: #666; }
+      .zone-label { font-family: 'Helvetica Neue', Arial, sans-serif; font-size: 10px; fill: #666; }
+      .step { font-family: 'Helvetica Neue', Arial, sans-serif; font-size: 10px; fill: #fff; font-weight: 700; }
+      .message { font-family: 'Helvetica Neue', Arial, sans-serif; font-size: 10px; fill: #555; font-style: italic; }
+      .mono { font-family: 'Monaco', 'Consolas', monospace; font-size: 10px; fill: #333; }
+    </style>
+    <!-- Larger arrow markers -->
+    <marker id="arrow-black" markerWidth="12" markerHeight="12" refX="10" refY="4" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,8 L10,4 z" fill="#333"/>
+    </marker>
+    <marker id="arrow-cyan" markerWidth="12" markerHeight="12" refX="10" refY="4" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,8 L10,4 z" fill="#0097A7"/>
+    </marker>
+    <marker id="arrow-orange" markerWidth="12" markerHeight="12" refX="10" refY="4" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,8 L10,4 z" fill="#E65100"/>
+    </marker>
+    <marker id="arrow-gray" markerWidth="12" markerHeight="12" refX="10" refY="4" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,8 L10,4 z" fill="#888"/>
+    </marker>
+  </defs>
+
+  <!-- Background -->
+  <rect width="750" height="520" fill="#fff"/>
+
+  <!-- Title -->
+  <text x="375" y="28" text-anchor="middle" class="title">Chat Interaction Flow</text>
+
+  <!-- Zone backgrounds -->
+  <rect x="95" y="45" width="195" height="420" fill="#E0F7FA" fill-opacity="0.3" stroke="none"/>
+  <rect x="290" y="45" width="420" height="420" fill="#FFF3E0" fill-opacity="0.3" stroke="none"/>
+
+  <!-- Zone labels -->
+  <text x="192" y="60" text-anchor="middle" class="zone-label" fill="#0097A7">CLOUD (or local Ollama)</text>
+  <text x="500" y="60" text-anchor="middle" class="zone-label" fill="#E65100">LOCAL COMPUTATION</text>
+
+  <!-- Divider -->
+  <line x1="290" y1="45" x2="290" y2="465" stroke="#bbb" stroke-width="1" stroke-dasharray="5,5"/>
+
+  <!-- ==================== COLUMN HEADERS ==================== -->
+
+  <!-- User icon -->
+  <g transform="translate(50, 85)">
+    <circle cx="0" cy="-10" r="8" fill="none" stroke="#333" stroke-width="2"/>
+    <path d="M-14,14 Q0,2 14,14" fill="none" stroke="#333" stroke-width="2"/>
+    <text x="0" y="35" text-anchor="middle" class="header">User</text>
+  </g>
+
+  <!-- LLM icon -->
+  <g transform="translate(195, 85)">
+    <rect x="-14" y="-14" width="28" height="20" rx="10" fill="#E0F7FA" stroke="#0097A7" stroke-width="2"/>
+    <circle cx="-5" cy="-4" r="2.5" fill="#0097A7"/>
+    <circle cx="5" cy="-4" r="2.5" fill="#0097A7"/>
+    <text x="0" y="35" text-anchor="middle" class="header" fill="#0097A7">LLM</text>
+  </g>
+
+  <!-- MCP icon -->
+  <g transform="translate(380, 85)">
+    <rect x="-18" y="-14" width="36" height="12" rx="2" fill="none" stroke="#666" stroke-width="2"/>
+    <rect x="-18" y="2" width="36" height="12" rx="2" fill="none" stroke="#666" stroke-width="2"/>
+    <circle cx="12" cy="-8" r="3" fill="#0097A7"/>
+    <circle cx="12" cy="8" r="3" fill="#0097A7"/>
+    <text x="0" y="35" text-anchor="middle" class="header">MCP</text>
+  </g>
+
+  <!-- p2a-core icon -->
+  <g transform="translate(530, 85)">
+    <rect x="-18" y="-14" width="36" height="28" rx="4" fill="none" stroke="#E65100" stroke-width="2"/>
+    <line x1="-12" y1="-6" x2="12" y2="-6" stroke="#E65100" stroke-width="1.5"/>
+    <line x1="-12" y1="0" x2="12" y2="0" stroke="#E65100" stroke-width="1.5"/>
+    <line x1="-12" y1="6" x2="6" y2="6" stroke="#E65100" stroke-width="1.5"/>
+    <text x="0" y="35" text-anchor="middle" class="header" fill="#E65100">p2a-core</text>
+  </g>
+
+  <!-- Data icon -->
+  <g transform="translate(670, 85)">
+    <ellipse cx="0" cy="-12" rx="16" ry="6" fill="none" stroke="#333" stroke-width="2"/>
+    <path d="M-16,-12 L-16,10 Q0,22 16,10 L16,-12" fill="none" stroke="#333" stroke-width="2"/>
+    <text x="0" y="35" text-anchor="middle" class="header">Data</text>
+  </g>
+
+  <!-- Vertical lifelines (lighter, behind everything) -->
+  <line x1="50" y1="135" x2="50" y2="455" stroke="#ddd" stroke-width="1" stroke-dasharray="4,4"/>
+  <line x1="195" y1="135" x2="195" y2="455" stroke="#b2ebf2" stroke-width="1" stroke-dasharray="4,4"/>
+  <line x1="380" y1="135" x2="380" y2="455" stroke="#ddd" stroke-width="1" stroke-dasharray="4,4"/>
+  <line x1="530" y1="135" x2="530" y2="455" stroke="#ffe0b2" stroke-width="1" stroke-dasharray="4,4"/>
+  <line x1="670" y1="135" x2="670" y2="455" stroke="#ddd" stroke-width="1" stroke-dasharray="4,4"/>
+
+  <!-- ==================== SEQUENCE STEPS ==================== -->
+
+  <!-- Step 1: User to LLM -->
+  <g transform="translate(0, 155)">
+    <line x1="60" y1="0" x2="182" y2="0" stroke="#333" stroke-width="2" marker-end="url(#arrow-black)"/>
+    <rect x="25" y="-12" width="24" height="24" rx="12" fill="#333"/>
+    <text x="37" y="5" text-anchor="middle" class="step">1</text>
+    <text x="122" y="-10" text-anchor="middle" class="message">"Run OLS on sales data"</text>
+  </g>
+
+  <!-- LLM processing box -->
+  <g transform="translate(140, 185)">
+    <rect x="0" y="0" width="110" height="38" rx="4" fill="#E0F7FA" stroke="#0097A7" stroke-width="1.5"/>
+    <text x="55" y="16" text-anchor="middle" class="label" fill="#0097A7">Interprets intent</text>
+    <text x="55" y="30" text-anchor="middle" class="sublabel" fill="#0097A7">Selects: run_ols</text>
+  </g>
+
+  <!-- Step 2: LLM to MCP -->
+  <g transform="translate(0, 245)">
+    <line x1="208" y1="0" x2="367" y2="0" stroke="#0097A7" stroke-width="2" marker-end="url(#arrow-cyan)"/>
+    <rect x="170" y="-12" width="24" height="24" rx="12" fill="#0097A7"/>
+    <text x="182" y="5" text-anchor="middle" class="step">2</text>
+    <text x="288" y="-10" text-anchor="middle" class="mono">tool: run_ols</text>
+    <text x="288" y="18" text-anchor="middle" class="sublabel">params: {dataset, y, x}</text>
+  </g>
+
+  <!-- Step 3: MCP to Core -->
+  <g transform="translate(0, 295)">
+    <line x1="393" y1="0" x2="517" y2="0" stroke="#E65100" stroke-width="2" marker-end="url(#arrow-orange)"/>
+    <rect x="355" y="-12" width="24" height="24" rx="12" fill="#666"/>
+    <text x="367" y="5" text-anchor="middle" class="step">3</text>
+    <text x="455" y="-10" text-anchor="middle" class="label" fill="#E65100">Execute method</text>
+  </g>
+
+  <!-- Step 4: Core to Data -->
+  <g transform="translate(0, 335)">
+    <line x1="543" y1="0" x2="657" y2="0" stroke="#333" stroke-width="2" marker-end="url(#arrow-black)"/>
+    <rect x="505" y="-12" width="24" height="24" rx="12" fill="#E65100"/>
+    <text x="517" y="5" text-anchor="middle" class="step">4</text>
+    <text x="600" y="-10" text-anchor="middle" class="label">Load data</text>
+  </g>
+
+  <!-- Data returns matrices -->
+  <g transform="translate(0, 360)">
+    <line x1="657" y1="0" x2="543" y2="0" stroke="#888" stroke-width="1.5" stroke-dasharray="6,3" marker-end="url(#arrow-gray)"/>
+    <text x="600" y="-8" text-anchor="middle" class="sublabel">matrices</text>
+  </g>
+
+  <!-- Computation box -->
+  <g transform="translate(475, 375)">
+    <rect x="0" y="0" width="110" height="38" rx="4" fill="#FFF3E0" stroke="#E65100" stroke-width="1.5"/>
+    <text x="55" y="16" text-anchor="middle" class="label" fill="#E65100">Rust compute</text>
+    <text x="55" y="30" text-anchor="middle" class="sublabel" fill="#E65100">X'X, b, SE, p-val</text>
+  </g>
+
+  <!-- Step 5: Core returns to MCP -->
+  <g transform="translate(0, 425)">
+    <line x1="517" y1="0" x2="393" y2="0" stroke="#888" stroke-width="1.5" stroke-dasharray="6,3" marker-end="url(#arrow-gray)"/>
+    <rect x="530" y="-12" width="24" height="24" rx="12" fill="#E65100"/>
+    <text x="542" y="5" text-anchor="middle" class="step">5</text>
+    <text x="455" y="-10" text-anchor="middle" class="sublabel">OlsResult (JSON)</text>
+  </g>
+
+  <!-- Step 6: MCP to LLM -->
+  <g transform="translate(0, 455)">
+    <line x1="367" y1="0" x2="208" y2="0" stroke="#888" stroke-width="1.5" stroke-dasharray="6,3" marker-end="url(#arrow-gray)"/>
+    <rect x="380" y="-12" width="24" height="24" rx="12" fill="#666"/>
+    <text x="392" y="5" text-anchor="middle" class="step">6</text>
+    <text x="288" y="-10" text-anchor="middle" class="sublabel">coefficients, stats</text>
+  </g>
+
+  <!-- Step 7: LLM to User -->
+  <g transform="translate(0, 485)">
+    <line x1="182" y1="0" x2="63" y2="0" stroke="#888" stroke-width="1.5" stroke-dasharray="6,3" marker-end="url(#arrow-gray)"/>
+    <rect x="195" y="-12" width="24" height="24" rx="12" fill="#0097A7"/>
+    <text x="207" y="5" text-anchor="middle" class="step">7</text>
+    <text x="122" y="-10" text-anchor="middle" class="message">"b1 = 0.42, p &lt; 0.01..."</text>
+  </g>
+
+  <!-- ==================== KEY CALLOUT ==================== -->
+  <g transform="translate(545, 475)">
+    <rect x="0" y="0" width="185" height="38" rx="4" fill="#FCE4EC" stroke="#C2185B" stroke-width="2"/>
+    <text x="92" y="16" text-anchor="middle" class="label" fill="#C2185B" font-weight="600">Bulk data stays local</text>
+    <text x="92" y="30" text-anchor="middle" class="sublabel" fill="#C2185B">Only prompts + results via LLM</text>
+  </g>
+</svg>

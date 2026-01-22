@@ -1,0 +1,141 @@
+%% =============================================================================
+%% DESIGN PHILOSOPHY
+%% =============================================================================
+
+\section{Design philosophy} \label{sec:design}
+
+Traditional statistical software requires users to learn domain-specific syntax:
+\proglang{R} formulas, \proglang{Stata} commands, or \proglang{Python} APIs.
+This creates a barrier where the user must translate their analytical intent
+into software-specific instructions. \pkg{prompt2analytics} inverts this
+relationship: users describe their goals in natural language, and the system
+determines the appropriate statistical method.
+
+\subsection{Chat-first analytics}
+
+The central design principle is what we term \emph{chat-first analytics}:
+the primary interface is conversational rather than programmatic. A user
+might request ``estimate the effect of education on wages, controlling for
+experience and industry, with robust standard errors'' without specifying
+whether this requires OLS, fixed effects, or instrumental variables. The
+system interprets the request, selects appropriate methods, executes the
+analysis, and returns results with natural language explanation.
+
+This approach offers several advantages. First, it lowers the barrier to
+entry for users unfamiliar with econometric software conventions. Second,
+it allows domain experts to focus on their research questions rather than
+implementation details. Third, it enables exploratory analysis through
+dialogue---users can refine their analysis iteratively based on results
+and suggestions from the system.
+
+The chat-first paradigm does not replace statistical expertise. Users
+must still understand their data, formulate sensible research questions,
+and interpret results critically. The system assists with method selection
+and execution, not with research design or causal identification.
+
+\subsection{LLM as method selector}
+
+Large language models serve as the interpretive layer between user intent
+and statistical execution. When a user submits a query, the LLM:
+\begin{enumerate}
+  \item Parses the natural language request to identify the analytical goal
+  \item Considers the available data structure and variables
+  \item Selects appropriate statistical methods from the available toolkit
+  \item Generates structured tool calls with correct parameters
+  \item Interprets results and formulates a response
+\end{enumerate}
+
+This design leverages the LLM's strength---natural language understanding
+and reasoning about method appropriateness---while delegating numerical
+computation to specialized, verified implementations. The LLM never performs
+statistical calculations directly; it orchestrates calls to the analytics
+engine.
+
+\subsection{Why Rust}
+
+The choice of \proglang{Rust} as the implementation language reflects
+several design priorities:
+
+\paragraph{Performance.}
+\proglang{Rust} compiles to native code with performance comparable to
+\proglang{C} and \proglang{C++}. For computationally intensive operations
+like high-dimensional fixed effects estimation or bootstrap inference,
+this provides substantial speedups over interpreted languages.
+
+\paragraph{Memory safety.}
+\proglang{Rust}'s ownership system guarantees memory safety at compile
+time without garbage collection. This eliminates entire classes of bugs
+(buffer overflows, use-after-free, data races) that can cause crashes or
+incorrect results in numerical software.
+
+\paragraph{Modern tooling.}
+The \proglang{Rust} ecosystem provides high-quality libraries for
+data manipulation (\pkg{polars}), numerical arrays (\pkg{ndarray}),
+linear algebra (\pkg{faer}), and statistical distributions (\pkg{statrs}).
+The \pkg{cargo} package manager ensures reproducible builds and
+dependency management.
+
+\paragraph{Deployment flexibility.}
+A single \proglang{Rust} codebase compiles to standalone binaries for
+multiple platforms, WebAssembly for browser deployment, and shared
+libraries for integration with other languages. This enables the same
+analytics engine to power CLI tools, desktop applications, and web
+interfaces.
+
+\subsection{MCP as the bridge}
+
+The Model Context Protocol (MCP) provides the communication layer between
+LLMs and the analytics engine \citep{MCP:2024}. MCP defines a standardized
+way for language models to discover available tools, invoke them with
+structured parameters, and receive structured results.
+
+Each statistical method is exposed as an MCP tool with a defined schema
+specifying required and optional parameters. For example, the OLS tool
+accepts a dataset identifier, dependent variable, independent variables,
+and options for robust standard errors. The LLM generates tool calls
+conforming to this schema, and the MCP server routes them to the
+appropriate \proglang{Rust} implementation.
+
+This architecture decouples the language understanding layer from the
+computation layer. The LLM can be swapped (Claude, GPT, Ollama) without
+changing the analytics engine. Conversely, the statistical implementations
+can be updated or extended without modifying the LLM integration.
+
+\subsection{Data locality}
+
+A key design principle is that bulk data processing occurs locally.
+When a dataset is loaded, only metadata is transmitted to the LLM:
+column names, data types, row counts, and null percentages. The LLM
+uses this schema information to formulate appropriate tool calls.
+Statistical computations---matrix operations, parameter estimation,
+inference---execute entirely on the local machine, with only aggregated
+results (coefficients, standard errors, test statistics) returned
+through the LLM.
+
+However, users should be aware that certain exploratory tools transmit
+sample data when explicitly requested. Data preview commands return
+actual row values, and data quality profiling may include frequent
+values from categorical columns. Users working with sensitive data
+should avoid requesting such previews when using cloud-hosted LLMs,
+or deploy a local model via Ollama to eliminate external transmission
+entirely.%
+\footnote{Local LLM deployment via Ollama ensures complete data isolation.
+Moreover, the chat-first architecture makes local models more viable:
+selecting among pre-implemented statistical methods is a far simpler task
+than generating correct statistical code from scratch, enabling smaller
+models to function effectively as method selectors.}
+The same interface and analytics engine function identically
+with local or cloud-hosted models.
+
+\subsection{Implemented methods}
+
+The analytics engine implements standard econometric methods across several
+categories: regression analysis (OLS with HC0--HC3 robust and clustered
+standard errors), panel data models (fixed effects, random effects, Hausman
+test, high-dimensional fixed effects), instrumental variables (2SLS with
+first-stage diagnostics), causal inference (difference-in-differences,
+treatment effects), discrete choice models (logit, probit), and time series
+analysis (ARIMA, VAR, VECM, seasonal decomposition). Full documentation
+of all methods, including mathematical specifications and implementation
+details, is available in the package documentation.
+

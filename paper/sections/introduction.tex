@@ -1,0 +1,57 @@
+%% =============================================================================
+%% INTRODUCTION
+%% =============================================================================
+
+\section{Introduction} \label{sec:intro}
+
+The statistical software landscape for econometrics has long been dominated by
+\proglang{R} \citep{R}, \proglang{Stata}, and increasingly \proglang{Python}.
+\proglang{R} in particular has developed a rich ecosystem for econometric analysis,
+as documented by \cite{Zeileis+Koenker:2008} and more recently by
+\cite{Michelaki+Tsagris:2025}, who provide a systematic overview of 207
+econometrics-related \proglang{R} packages. The \pkg{AER} package
+\citep{Kleiber+Zeileis:2008, AER} has become a standard reference for applied
+econometrics in \proglang{R}. Alternative ecosystems have emerged in
+\proglang{Julia} with \pkg{Econometrics.jl} \citep{Santiago-Calderon:2020}
+and in \proglang{MATLAB} with dedicated toolboxes for panel data analysis
+\citep{Alvarez+Barbero+Zofio:2017}. Comparative studies suggest that compiled
+languages offer substantial performance advantages for computationally intensive
+econometric applications \citep{Aruoba+Fernandez-Villaverde:2015,
+Duarte+Duarte+Fonseca+Montecinos:2020}.
+
+While these environments offer mature, well-tested implementations of econometric
+methods, they present challenges for deployment in production systems, particularly
+those requiring high performance, memory safety, or integration with modern AI
+systems. Moreover, numerical accuracy remains a concern across statistical software
+platforms, as documented in a series of papers by McCullough and colleagues
+\citep{McCullough:1997, McCullough+Vinod:1999, McCullough:1999b}, who demonstrated
+that users cannot safely assume their software is numerically accurate without
+verification.
+
+The \proglang{Rust} programming language has emerged as a compelling platform for
+scientific computing, combining the performance characteristics of compiled
+languages like \proglang{C++} with memory safety guarantees enforced at compile
+time \citep{Rust}. The \proglang{Rust} data science ecosystem has matured rapidly,
+with \pkg{polars} providing high-performance DataFrame operations \citep{polars},
+Apache Arrow \pkg{DataFusion} enabling fast analytical query processing
+\citep{Lamb+etal:2024}, and \pkg{linfa} \citep{linfa} offering machine learning
+algorithms inspired by \proglang{Python}'s \pkg{scikit-learn}. However, a gap
+remains: no comprehensive econometrics library exists for \proglang{Rust}.
+
+\pkg{prompt2analytics} addresses this gap by providing a comprehensive econometrics
+toolkit implemented in pure \proglang{Rust}. The software is built on \pkg{polars}
+\citep{polars} for DataFrame operations, \pkg{ndarray} \citep{ndarray} for
+n-dimensional arrays, \pkg{faer} \citep{faer} for linear algebra, and \pkg{statrs}
+\citep{statrs} for statistical distributions.
+
+The library provides a pure \proglang{Rust} implementation of regression, panel
+data, instrumental variables, discrete choice, and time series methods.
+Heteroskedasticity-consistent standard errors (HC0--HC3) follow the formulations
+of \cite{White:1980} and \cite{MacKinnon+White:1985}, while high-dimensional
+fixed effects estimation implements the alternating projections algorithm of
+\cite{Gaure:2013}. A distinguishing feature is the integration with large
+language models through the Model Context Protocol \citep{MCP:2024}, enabling
+natural language interfaces to statistical analysis while keeping all data
+processing local. The software is accessible through a command-line interface
+and a desktop application. All implementations are validated against reference
+\proglang{R} packages to ensure numerical accuracy.

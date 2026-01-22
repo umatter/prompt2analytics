@@ -40,6 +40,16 @@
 \newcommand{\fct}[1]{\code{#1()}}
 \newcommand{\email}[1]{\href{mailto:#1}{\normalfont\texttt{#1}}}
 
+%% Code/output environments (JSS-compatible)
+\usepackage{fancyvrb}
+\DefineVerbatimEnvironment{Code}{Verbatim}{fontsize=\small,frame=single}
+\DefineVerbatimEnvironment{Sinput}{Verbatim}{fontsize=\small,formatcom=\color{blue}}
+\DefineVerbatimEnvironment{Soutput}{Verbatim}{fontsize=\small}
+\usepackage{xcolor}
+
+%% Auto-generated output inclusion (styled like Soutput)
+\newcommand{\CliOutput}[1]{\VerbatimInput[fontsize=\small]{#1}}
+
 
 %% -- Title and authors --------------------------------------------------------
 
@@ -81,7 +91,7 @@ time series, MCP, R
 \bigskip
 
 %% Include shared content
-\input{content}
+\input{paper}
 
 %% =============================================================================
 %% BIBLIOGRAPHY

@@ -1,0 +1,346 @@
+%% =============================================================================
+%% EXAMPLES - DRAFT
+%% =============================================================================
+%% This is a draft of the Examples section for the JSS paper.
+%% TODO: Validate all outputs by running actual commands/sessions.
+
+\section{Examples} \label{sec:examples}
+
+This section demonstrates practical usage of \pkg{prompt2analytics} through
+two interfaces: the natural language chat interface powered by large language
+models, and the command-line interface for scripted workflows. Both interfaces
+access the same underlying \proglang{Rust} analytics engine, offering users
+flexibility in how they interact with the software.
+
+We use two datasets throughout this section:
+\begin{itemize}
+  \item The Grunfeld investment data \citep{Baltagi:2013}, a classic panel
+    dataset with 200 observations (10 firms over 20 years) containing firm
+    investment, market value, and capital stock.
+  \item A simulated cross-sectional dataset demonstrating basic regression
+    analysis with heteroskedasticity.
+\end{itemize}
+
+
+%% -----------------------------------------------------------------------------
+\subsection{Chat interface} \label{sec:examples-chat}
+
+The chat interface enables natural language interaction with the analytics
+engine. Users describe their analysis goals in plain language, and the LLM
+translates these requests into structured tool calls executed by the MCP server.
+This interface is particularly valuable for exploratory data analysis and for
+users less familiar with programming syntax.
+
+\subsubsection{Loading and exploring data}
+
+A typical session begins by loading data and examining its structure:
+
+\begin{Sinput}
+User: Load the Grunfeld investment dataset from grunfeld.csv and show me
+      what's in it.
+\end{Sinput}
+
+\begin{Soutput}
+I'll load the dataset and describe its contents.
+
+**Dataset loaded: grunfeld**
+- Rows: 200
+- Columns: 5
+
+| Column  | Type    | Description                        |
+|---------|---------|-----------------------------------|
+| firm    | Integer | Firm identifier (1-10)            |
+| year    | Integer | Year (1935-1954)                  |
+| inv     | Float64 | Gross investment                  |
+| value   | Float64 | Market value of firm              |
+| capital | Float64 | Stock of plant and equipment      |
+
+This is a balanced panel dataset with 10 firms observed over 20 years,
+commonly used to demonstrate panel data methods.
+\end{Soutput}
+
+\subsubsection{OLS regression with robust standard errors}
+
+Cross-sectional regression with heteroskedasticity-consistent standard errors:
+
+\begin{Sinput}
+User: Run a regression of investment on market value and capital stock.
+      Use robust standard errors.
+\end{Sinput}
+
+\begin{Soutput}
+Running OLS regression with HC1 robust standard errors...
+
+**OLS Regression Results**
+Dependent variable: inv
+
+| Variable    |    Coef |  Std Err |      t | P>|t| |
+|-------------|--------:|---------:|-------:|------:|
+| (Intercept) | -42.714 |   11.575 | -3.690 | 0.000 |
+| value       |   0.116 |    0.007 | 16.967 | 0.000 |
+| capital     |   0.231 |    0.049 |  4.721 | 0.000 |
+
+R-squared: 0.812
+Adj. R-squared: 0.810
+Observations: 200
+Standard errors: HC1 (heteroskedasticity-robust)
+
+Both market value and capital stock are highly significant predictors of
+investment. A $1 million increase in market value is associated with
+approximately $116,000 more investment, holding capital constant.
+\end{Soutput}
+
+\subsubsection{Panel data: Fixed effects estimation}
+
+For panel data, users can request fixed effects estimation in natural language:
+
+\begin{Sinput}
+User: The data has a panel structure. Run a fixed effects regression
+      controlling for firm-specific effects.
+\end{Sinput}
+
+\begin{Soutput}
+Running within-transformation fixed effects estimation...
+
+**Fixed Effects (Within) Estimation**
+Dependent variable: inv
+Entity fixed effects: firm (10 levels)
+
+| Variable |    Coef |  Std Err |      t | P>|t| |
+|----------|--------:|---------:|-------:|------:|
+| value    |   0.110 |    0.012 |  9.288 | 0.000 |
+| capital  |   0.310 |    0.017 | 17.867 | 0.000 |
+
+R-squared (within): 0.767
+Observations: 200
+Groups: 10
+F-statistic: 309.01 (p-value: 0.000)
+
+After controlling for time-invariant firm characteristics, the coefficient
+on capital increases from 0.23 to 0.31, suggesting that pooled OLS
+underestimated the effect of capital stock on investment.
+\end{Soutput}
+
+\subsubsection{Model comparison: Hausman test}
+
+Users can request specification tests without knowing the technical details:
+
+\begin{Sinput}
+User: Should I use fixed effects or random effects for this analysis?
+\end{Sinput}
+
+\begin{Soutput}
+I'll run a Hausman test to help determine the appropriate specification.
+
+**Hausman Test Results**
+H0: Random Effects is consistent and efficient
+H1: Fixed Effects is consistent; Random Effects is inconsistent
+
+Chi-squared statistic: 0.0003
+Degrees of freedom: 2
+P-value: 0.9999
+
+**Recommendation**: Random Effects
+
+The test strongly fails to reject the null hypothesis, suggesting that
+the random effects estimator is both consistent and efficient. The
+near-zero chi-squared statistic indicates virtually no systematic
+difference between the FE and RE coefficient estimates.
+\end{Soutput}
+
+\subsubsection{High-dimensional fixed effects}
+
+For datasets with multiple categorical dimensions, users can request
+multi-way fixed effects:
+
+\begin{Sinput}
+User: Control for both firm and year fixed effects in the regression.
+\end{Sinput}
+
+\begin{Soutput}
+Running two-way fixed effects using alternating projections...
+
+**High-Dimensional Fixed Effects Estimation**
+Dependent variable: inv
+Fixed effects: firm (10 levels), year (20 levels)
+
+| Variable |    Coef |  Std Err |      t | P>|t| |
+|----------|--------:|---------:|-------:|------:|
+| value    |   0.118 |    0.019 |  6.137 | 0.000 |
+| capital  |   0.358 |    0.054 |  6.579 | 0.000 |
+
+R-squared (within): 0.720
+Observations: 200
+F-statistic: 217.44 (p-value: 0.000)
+\end{Soutput}
+
+\subsubsection{Regression diagnostics}
+
+Users can request diagnostic tests using natural language:
+
+\begin{Sinput}
+User: Check the regression assumptions for the OLS model.
+\end{Sinput}
+
+\begin{Soutput}
+Running regression diagnostics...
+
+**Jarque-Bera Test (Normality of residuals)**
+Statistic: 89.57
+P-value: 0.000
+Conclusion: Residuals deviate significantly from normality.
+
+**Breusch-Pagan Test (Heteroskedasticity)**
+Statistic: 55.25
+P-value: 0.000
+Conclusion: Evidence of heteroskedasticity; robust SEs recommended.
+
+**Durbin-Watson Statistic (Autocorrelation)**
+Statistic: 0.358
+Interpretation: Positive autocorrelation detected (expected in panel data).
+
+**Variance Inflation Factors**
+value: 1.31
+capital: 1.31
+No multicollinearity detected (VIF < 5).
+\end{Soutput}
+
+
+%% -----------------------------------------------------------------------------
+\subsection{Command-line interface} \label{sec:examples-cli}
+
+The command-line interface provides programmatic access for scripted workflows,
+batch processing, and integration with other tools. Commands follow a
+hierarchical structure with intuitive subcommands.
+
+\subsubsection{Session-based workflow}
+
+The CLI uses sessions to maintain state across commands. All commands that
+work with datasets require an active session:
+
+\begin{Sinput}
+# Start a session and load data
+p2a --session analysis.json data load grunfeld.csv --name grunfeld
+
+# Verify the data loaded correctly
+p2a --session analysis.json data describe grunfeld
+
+# Preview first rows
+p2a --session analysis.json data head grunfeld --n 5
+\end{Sinput}
+
+Output from \code{data describe}:
+\CliOutput{generated/cli_data_describe.tex}
+
+\subsubsection{OLS regression}
+
+Basic regression with robust standard errors:
+
+\begin{Sinput}
+p2a --session analysis.json reg ols grunfeld \
+    -y inv -x value capital --robust hc1
+\end{Sinput}
+
+\CliOutput{generated/cli_ols.tex}
+
+\subsubsection{Panel data estimation}
+
+Fixed effects estimation with firm-level clustering:
+
+\begin{Sinput}
+# Fixed effects
+p2a --session analysis.json panel fe grunfeld \
+    -y inv -x value capital --entity firm
+
+# Random effects for comparison
+p2a --session analysis.json panel re grunfeld \
+    -y inv -x value capital --entity firm
+
+# Hausman test
+p2a --session analysis.json panel hausman grunfeld \
+    -y inv -x value capital --entity firm
+\end{Sinput}
+
+The fixed effects output:
+\CliOutput{generated/cli_fe.tex}
+
+\subsubsection{High-dimensional fixed effects}
+
+Two-way fixed effects using the alternating projections algorithm:
+
+\begin{Sinput}
+p2a --session analysis.json panel hdfe grunfeld \
+    -y inv -x value capital --fe firm year
+\end{Sinput}
+
+\CliOutput{generated/cli_hdfe.tex}
+
+\subsubsection{Statistical hypothesis tests}
+
+The CLI provides access to the full suite of statistical tests:
+
+\begin{Sinput}
+# Shapiro-Wilk normality test on residuals (via diagnostics)
+p2a --session analysis.json reg diagnostics grunfeld \
+    -y inv -x value capital
+
+# Generate data and run a t-test
+p2a --session analysis.json data generate \
+    --rows 100 --name test_data \
+    --columns '[{"name":"group","distribution":{"type":"bernoulli","p":0.5}},
+                {"name":"value","distribution":{"type":"normal","mean":10,"std":2}}]'
+\end{Sinput}
+
+\subsubsection{JSON output for programmatic use}
+
+All commands support JSON output for integration with other tools:
+
+\begin{Sinput}
+p2a --session analysis.json -F json reg ols grunfeld \
+    -y inv -x value capital --robust hc1
+\end{Sinput}
+
+\CliOutput{generated/cli_ols_json.tex}
+
+\subsubsection{Reproducible scripts}
+
+Sessions can be exported to standalone bash scripts:
+
+\begin{Sinput}
+p2a script export analysis.json -o reproduce.sh
+\end{Sinput}
+
+This generates a self-contained script that recreates the entire analysis,
+facilitating reproducibility and sharing.
+
+
+%% -----------------------------------------------------------------------------
+\subsection{Comparison with R} \label{sec:examples-comparison}
+
+For reference, the equivalent \proglang{R} code for the fixed effects
+estimation is:
+
+\begin{Sinput}
+library(plm)
+data("Grunfeld", package = "plm")
+
+# Fixed effects model
+fe_model <- plm(inv ~ value + capital,
+                data = Grunfeld,
+                index = c("firm", "year"),
+                model = "within")
+summary(fe_model)
+
+# Two-way fixed effects
+fe_twoway <- plm(inv ~ value + capital,
+                 data = Grunfeld,
+                 index = c("firm", "year"),
+                 model = "within",
+                 effect = "twoways")
+summary(fe_twoway)
+\end{Sinput}
+
+The \pkg{prompt2analytics} implementation produces numerically equivalent
+results (see Section~\ref{sec:comparison}), while offering the conversational
+interface that enables users unfamiliar with \proglang{R} syntax to perform
+the same analyses through natural language.
