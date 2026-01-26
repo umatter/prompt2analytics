@@ -798,6 +798,304 @@ fn euclidean_distance_squared(a: &ArrayView1<f64>, b: &ArrayView1<f64>) -> f64 {
     a.iter().zip(b.iter()).map(|(x, y)| (x - y).powi(2)).sum()
 }
 
+// =============================================================================
+// cutree - Cut hierarchical clustering tree
+// =============================================================================
+
+use serde::{Deserialize, Serialize};
+
+/// Result of cutting a hierarchical clustering tree.
+///
+/// # References
+///
+/// - R stats::cutree documentation
+///   Source: https://stat.ethz.ch/R-manual/R-devel/library/stats/html/cutree.html
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CutreeResult {
+    /// Cluster assignments for each observation (1-indexed, like R).
+    /// If multiple k or h values were provided, this is for the first k/h.
+    pub labels: Vec<usize>,
+    /// Number of clusters formed
+    pub k: usize,
+    /// The height at which the tree was cut (if h was used)
+    pub cut_height: Option<f64>,
+    /// Number of observations
+    pub n: usize,
+    /// If multiple k values were given, this contains all assignments (one column per k)
+    pub labels_matrix: Option<Vec<Vec<usize>>>,
+    /// The k values used (if multiple)
+    pub k_values: Option<Vec<usize>>,
+}
+
+impl std::fmt::Display for CutreeResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "cutree Results")?;
+        writeln!(f, "==============")?;
+        writeln!(f, "Number of observations: {}", self.n)?;
+        writeln!(f, "Number of clusters: {}", self.k)?;
+        if let Some(h) = self.cut_height {
+            writeln!(f, "Cut height: {:.6}", h)?;
+        }
+        writeln!(f)?;
+
+        // Count cluster sizes
+        let mut cluster_counts: HashMap<usize, usize> = HashMap::new();
+        for &label in &self.labels {
+            *cluster_counts.entry(label).or_insert(0) += 1;
+        }
+
+        writeln!(f, "Cluster sizes:")?;
+        let mut labels_sorted: Vec<_> = cluster_counts.keys().cloned().collect();
+        labels_sorted.sort();
+        for label in labels_sorted {
+            writeln!(f, "  Cluster {}: {} observations", label, cluster_counts[&label])?;
+        }
+
+        if let Some(ref k_vals) = self.k_values {
+            writeln!(f)?;
+            writeln!(f, "Multiple k values requested: {:?}", k_vals)?;
+        }
+
+        Ok(())
+    }
+}
+
+/// Cut a hierarchical clustering tree into groups.
+///
+/// Given a `HierarchicalResult` from `hierarchical()`, this function divides
+/// the tree by specifying the desired number of groups (`k`) or the cut height (`h`).
+///
+/// # Arguments
+/// * `hclust` - A hierarchical clustering result from `hierarchical()`
+/// * `k` - Number of groups to form (mutually exclusive with `h` unless both given, then `k` takes priority)
+/// * `h` - Height at which to cut the tree
+///
+/// # Returns
+/// * `CutreeResult` containing cluster assignments
+///
+/// # Algorithm
+///
+/// The function traverses the linkage matrix (merge history) to reconstruct
+/// which observations belong to which cluster at the desired cut level.
+///
+/// # References
+///
+/// - R stats::cutree documentation
+pub fn cutree(
+    hclust: &HierarchicalResult,
+    k: Option<usize>,
+    h: Option<f64>,
+) -> Result<CutreeResult, String> {
+    if k.is_none() && h.is_none() {
+        return Err("Must specify either k (number of clusters) or h (cut height)".to_string());
+    }
+
+    // Get number of original observations
+    let n = hclust.labels.len();
+
+    if n == 0 {
+        return Err("Empty clustering result".to_string());
+    }
+
+    // If k is specified, use it; otherwise use h to determine k
+    let target_k = if let Some(k_val) = k {
+        if k_val == 0 || k_val > n {
+            return Err(format!("k must be between 1 and {} (number of observations)", n));
+        }
+        k_val
+    } else if let Some(h_val) = h {
+        // Determine k from height: count how many merges happen below height h
+        // n - (number of merges at or below h) = k
+        let merges_below_h = hclust.merge_distances.iter().filter(|&&d| d <= h_val).count();
+        let computed_k = n - merges_below_h;
+        if computed_k == 0 {
+            n // All merges above h means n clusters
+        } else {
+            computed_k
+        }
+    } else {
+        unreachable!()
+    };
+
+    // Cut the tree to get target_k clusters
+    let labels = cut_at_k(hclust, target_k, n)?;
+
+    // Determine cut height if cutting by k
+    let cut_height = if k.is_some() && !hclust.merge_distances.is_empty() {
+        // The cut height is the distance at which we would have target_k clusters
+        // This is the (n - target_k)th merge distance (0-indexed)
+        let merge_idx = n.saturating_sub(target_k);
+        if merge_idx > 0 && merge_idx <= hclust.merge_distances.len() {
+            Some(hclust.merge_distances[merge_idx - 1])
+        } else {
+            None
+        }
+    } else {
+        h
+    };
+
+    Ok(CutreeResult {
+        labels,
+        k: target_k,
+        cut_height,
+        n,
+        labels_matrix: None,
+        k_values: None,
+    })
+}
+
+/// Cut a hierarchical clustering tree at multiple k values.
+///
+/// # Arguments
+/// * `hclust` - A hierarchical clustering result
+/// * `k_values` - Vector of k values to cut at
+///
+/// # Returns
+/// * `CutreeResult` with labels_matrix containing assignments for each k
+pub fn cutree_multiple_k(
+    hclust: &HierarchicalResult,
+    k_values: &[usize],
+) -> Result<CutreeResult, String> {
+    if k_values.is_empty() {
+        return Err("k_values cannot be empty".to_string());
+    }
+
+    let n = hclust.labels.len();
+    let mut labels_matrix: Vec<Vec<usize>> = Vec::with_capacity(k_values.len());
+
+    for &k in k_values {
+        if k == 0 || k > n {
+            return Err(format!("k must be between 1 and {} (number of observations)", n));
+        }
+        let labels = cut_at_k(hclust, k, n)?;
+        labels_matrix.push(labels);
+    }
+
+    // Use first k's labels as the primary result
+    let first_labels = labels_matrix[0].clone();
+    let first_k = k_values[0];
+
+    Ok(CutreeResult {
+        labels: first_labels,
+        k: first_k,
+        cut_height: None,
+        n,
+        labels_matrix: Some(labels_matrix),
+        k_values: Some(k_values.to_vec()),
+    })
+}
+
+/// Internal function to cut tree at a specific k.
+fn cut_at_k(hclust: &HierarchicalResult, target_k: usize, n: usize) -> Result<Vec<usize>, String> {
+    if target_k == n {
+        // Each point is its own cluster
+        return Ok((1..=n).collect());
+    }
+
+    if target_k == 1 {
+        // All points in one cluster
+        return Ok(vec![1; n]);
+    }
+
+    // Build union-find structure by replaying merges up to the point
+    // where we have target_k clusters
+    let mut parent: Vec<usize> = (0..n).collect();
+    let mut rank: Vec<usize> = vec![0; n];
+
+    fn find(parent: &mut [usize], x: usize) -> usize {
+        if parent[x] != x {
+            parent[x] = find(parent, parent[x]);
+        }
+        parent[x]
+    }
+
+    fn union(parent: &mut [usize], rank: &mut [usize], x: usize, y: usize) {
+        let px = find(parent, x);
+        let py = find(parent, y);
+        if px == py {
+            return;
+        }
+        if rank[px] < rank[py] {
+            parent[px] = py;
+        } else if rank[px] > rank[py] {
+            parent[py] = px;
+        } else {
+            parent[py] = px;
+            rank[px] += 1;
+        }
+    }
+
+    // We need to map cluster IDs in linkage_matrix back to original observations
+    // The linkage matrix uses IDs: 0..n are original observations,
+    // n, n+1, ... are newly formed clusters from merges
+
+    // Map: cluster_id -> set of original observation indices
+    let mut cluster_members: HashMap<usize, Vec<usize>> = HashMap::new();
+    for i in 0..n {
+        cluster_members.insert(i, vec![i]);
+    }
+
+    // Perform merges until we have target_k clusters
+    let num_merges_needed = n - target_k;
+
+    for (merge_idx, &(c1, c2, _dist, _size)) in hclust.linkage_matrix.iter().enumerate() {
+        if merge_idx >= num_merges_needed {
+            break;
+        }
+
+        // Get members of c1 and c2
+        let members1 = cluster_members.remove(&c1).unwrap_or_default();
+        let members2 = cluster_members.remove(&c2).unwrap_or_default();
+
+        // Union in union-find
+        if !members1.is_empty() && !members2.is_empty() {
+            union(&mut parent, &mut rank, members1[0], members2[0]);
+            // Union all members
+            for &m in &members1[1..] {
+                union(&mut parent, &mut rank, members1[0], m);
+            }
+            for &m in &members2 {
+                union(&mut parent, &mut rank, members1[0], m);
+            }
+        }
+
+        // New cluster ID
+        let new_id = n + merge_idx;
+        let mut new_members = members1;
+        new_members.extend(members2);
+        cluster_members.insert(new_id, new_members);
+    }
+
+    // Extract final cluster assignments
+    // Find root for each observation
+    let mut labels = vec![0usize; n];
+    for i in 0..n {
+        labels[i] = find(&mut parent, i);
+    }
+
+    // Renumber clusters to be 1-indexed consecutive integers
+    let unique_roots: HashSet<usize> = labels.iter().cloned().collect();
+    let mut root_to_label: HashMap<usize, usize> = HashMap::new();
+    for (idx, &root) in unique_roots.iter().enumerate() {
+        root_to_label.insert(root, idx + 1); // 1-indexed
+    }
+
+    for label in &mut labels {
+        *label = root_to_label[label];
+    }
+
+    Ok(labels)
+}
+
+/// Convenience function to run cutree.
+pub fn run_cutree(
+    hclust: &HierarchicalResult,
+    k: Option<usize>,
+    h: Option<f64>,
+) -> Result<CutreeResult, String> {
+    cutree(hclust, k, h)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -895,5 +1193,160 @@ mod tests {
         // With threshold of 1.0, should get 2 clusters
         let result = hierarchical(data.view(), None, Linkage::Single, Some(1.0)).unwrap();
         assert_eq!(result.n_clusters, 2);
+    }
+
+    // =========================================================================
+    // cutree tests
+    // =========================================================================
+
+    #[test]
+    fn test_cutree_basic() {
+        // Create hierarchical clustering result first
+        let data = array![
+            [0.0, 0.0],
+            [0.1, 0.1],
+            [0.2, 0.0],
+            [10.0, 10.0],
+            [10.1, 10.1],
+            [10.2, 10.0],
+        ];
+
+        // Get full dendrogram (cluster down to 1 cluster)
+        let hclust = hierarchical(data.view(), Some(1), Linkage::Ward, None).unwrap();
+
+        // Cut into 2 clusters
+        let cut_result = cutree(&hclust, Some(2), None).unwrap();
+
+        assert_eq!(cut_result.n, 6);
+        assert_eq!(cut_result.k, 2);
+        assert_eq!(cut_result.labels.len(), 6);
+
+        // Points 0-2 should be in same cluster, points 3-5 in another
+        assert_eq!(cut_result.labels[0], cut_result.labels[1]);
+        assert_eq!(cut_result.labels[1], cut_result.labels[2]);
+        assert_eq!(cut_result.labels[3], cut_result.labels[4]);
+        assert_eq!(cut_result.labels[4], cut_result.labels[5]);
+        assert_ne!(cut_result.labels[0], cut_result.labels[3]);
+    }
+
+    #[test]
+    fn test_cutree_k_equals_n() {
+        let data = array![
+            [0.0, 0.0],
+            [1.0, 0.0],
+            [2.0, 0.0],
+        ];
+
+        let hclust = hierarchical(data.view(), Some(1), Linkage::Single, None).unwrap();
+
+        // Cut into n clusters (each point is its own cluster)
+        let cut_result = cutree(&hclust, Some(3), None).unwrap();
+
+        assert_eq!(cut_result.k, 3);
+        // All labels should be different
+        assert_ne!(cut_result.labels[0], cut_result.labels[1]);
+        assert_ne!(cut_result.labels[1], cut_result.labels[2]);
+        assert_ne!(cut_result.labels[0], cut_result.labels[2]);
+    }
+
+    #[test]
+    fn test_cutree_k_equals_1() {
+        let data = array![
+            [0.0, 0.0],
+            [1.0, 0.0],
+            [2.0, 0.0],
+        ];
+
+        let hclust = hierarchical(data.view(), Some(1), Linkage::Single, None).unwrap();
+
+        // Cut into 1 cluster (all points together)
+        let cut_result = cutree(&hclust, Some(1), None).unwrap();
+
+        assert_eq!(cut_result.k, 1);
+        // All labels should be the same
+        assert_eq!(cut_result.labels[0], cut_result.labels[1]);
+        assert_eq!(cut_result.labels[1], cut_result.labels[2]);
+    }
+
+    #[test]
+    fn test_cutree_by_height() {
+        let data = array![
+            [0.0, 0.0],
+            [0.5, 0.0],
+            [10.0, 0.0],
+            [10.5, 0.0],
+        ];
+
+        let hclust = hierarchical(data.view(), Some(1), Linkage::Single, None).unwrap();
+
+        // Cut at height 1.0 should give 2 clusters (close pairs merge but far pairs don't)
+        let cut_result = cutree(&hclust, None, Some(1.0)).unwrap();
+
+        assert_eq!(cut_result.k, 2);
+        assert!(cut_result.cut_height.is_some());
+    }
+
+    #[test]
+    fn test_cutree_multiple_k() {
+        let data = array![
+            [0.0, 0.0],
+            [1.0, 0.0],
+            [2.0, 0.0],
+            [10.0, 0.0],
+        ];
+
+        let hclust = hierarchical(data.view(), Some(1), Linkage::Single, None).unwrap();
+
+        let cut_result = cutree_multiple_k(&hclust, &[1, 2, 3, 4]).unwrap();
+
+        assert!(cut_result.labels_matrix.is_some());
+        let matrix = cut_result.labels_matrix.unwrap();
+        assert_eq!(matrix.len(), 4);
+
+        // k=1: all same label
+        assert!(matrix[0].iter().all(|&x| x == matrix[0][0]));
+
+        // k=4: all different labels
+        let k4_unique: HashSet<_> = matrix[3].iter().collect();
+        assert_eq!(k4_unique.len(), 4);
+    }
+
+    #[test]
+    fn test_cutree_validation() {
+        let data = array![
+            [0.0, 0.0],
+            [1.0, 0.0],
+        ];
+
+        let hclust = hierarchical(data.view(), Some(1), Linkage::Single, None).unwrap();
+
+        // k=0 should fail
+        let result = cutree(&hclust, Some(0), None);
+        assert!(result.is_err());
+
+        // k > n should fail
+        let result = cutree(&hclust, Some(10), None);
+        assert!(result.is_err());
+
+        // Neither k nor h should fail
+        let result = cutree(&hclust, None, None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_cutree_display() {
+        let data = array![
+            [0.0, 0.0],
+            [1.0, 0.0],
+            [10.0, 0.0],
+        ];
+
+        let hclust = hierarchical(data.view(), Some(1), Linkage::Single, None).unwrap();
+        let cut_result = cutree(&hclust, Some(2), None).unwrap();
+
+        let display = format!("{}", cut_result);
+        assert!(display.contains("cutree Results"));
+        assert!(display.contains("Number of observations: 3"));
+        assert!(display.contains("Number of clusters: 2"));
     }
 }

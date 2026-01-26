@@ -6677,6 +6677,7 @@ name = "p2a-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "approx 0.5.1",
  "arima",
  "augurs-core",
  "augurs-ets",

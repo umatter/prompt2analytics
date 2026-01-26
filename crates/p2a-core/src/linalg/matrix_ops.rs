@@ -249,9 +249,42 @@ pub fn matmul(a: &ArrayView2<f64>, b: &ArrayView2<f64>) -> Result<Array2<f64>, L
 
 /// Compute X'X (X transpose times X)
 pub fn xtx(x: &ArrayView2<f64>) -> Array2<f64> {
-    let mat = ndarray_to_faer(x);
-    let result = mat.transpose() * &mat;
-    faer_to_ndarray(&result)
+    // Use pure ndarray for small matrices to avoid conversion overhead
+    let k = x.ncols();
+    if k <= 20 {
+        x.t().dot(x)
+    } else {
+        // Use faer for larger matrices where BLAS benefits outweigh conversion cost
+        let mat = ndarray_to_faer(x);
+        let result = mat.transpose() * &mat;
+        faer_to_ndarray(&result)
+    }
+}
+
+/// Fast inverse using Cholesky decomposition.
+/// Use this for positive definite matrices (like X'X) where we don't need
+/// condition number checks. Much faster than safe_inverse for small matrices.
+pub fn cholesky_inverse(m: &ArrayView2<f64>) -> Result<Array2<f64>, LinalgError> {
+    let (rows, cols) = m.dim();
+    if rows != cols {
+        return Err(LinalgError::NotSquare { rows, cols });
+    }
+
+    let mat = ndarray_to_faer(m);
+
+    // Use Cholesky decomposition (L * L^T = M)
+    let chol = mat.llt(faer::Side::Lower).map_err(|_| LinalgError::CholeskyFailed)?;
+
+    // Solve for inverse: M^{-1} = (L * L^T)^{-1} = L^{-T} * L^{-1}
+    // We solve M * X = I for X
+    let n = rows;
+    let mut identity = Mat::<f64>::zeros(n, n);
+    for i in 0..n {
+        identity[(i, i)] = 1.0;
+    }
+
+    let inv = chol.solve(&identity);
+    Ok(faer_to_ndarray(&inv))
 }
 
 /// Compute X'y (X transpose times y)

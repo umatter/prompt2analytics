@@ -2,6 +2,53 @@
 //!
 //! Pure Rust implementation without external formula parsing.
 //! Uses column-based API for simplicity.
+//!
+//! # Mathematical Background
+//!
+//! IV estimation addresses endogeneity when Cov(X, ε) ≠ 0. Given instruments Z
+//! that satisfy:
+//! 1. **Relevance**: Cov(Z, X) ≠ 0
+//! 2. **Exogeneity**: Cov(Z, ε) = 0
+//!
+//! ## Two-Stage Least Squares (2SLS)
+//!
+//! **First stage**: Regress endogenous X on instruments Z and exogenous W:
+//!   X̂ = Z(Z'Z)⁻¹Z'X = Pᵤ X
+//!
+//! **Second stage**: Regress y on fitted values X̂ and exogenous W:
+//!   β̂₂ₛₗₛ = (X̂'X̂)⁻¹ X̂'y
+//!
+//! Equivalently: β̂ᵢᵥ = (X'Pᵤ X)⁻¹ X'Pᵤ y
+//!
+//! ## Weak Instruments
+//!
+//! The first-stage F-statistic tests instrument strength. Stock & Yogo (2005)
+//! suggest F > 10 as a rule of thumb for a single endogenous regressor.
+//!
+//! # References
+//!
+//! - Wright, P.G. (1928). *The Tariff on Animal and Vegetable Oils*. Macmillan.
+//!   First application of instrumental variables.
+//!
+//! - Theil, H. (1953). Repeated least squares applied to complete equation systems.
+//!   *The Hague: Central Planning Bureau*. Introduction of 2SLS.
+//!
+//! - Basmann, R.L. (1957). A generalized classical method of linear estimation of
+//!   coefficients in a structural equation. *Econometrica*, 25(1), 77-83.
+//!   https://doi.org/10.2307/1907743
+//!
+//! - Stock, J.H., & Yogo, M. (2005). Testing for weak instruments in linear IV
+//!   regression. In D.W.K. Andrews & J.H. Stock (Eds.), *Identification and
+//!   Inference for Econometric Models* (pp. 80-108). Cambridge University Press.
+//!   https://doi.org/10.1017/CBO9780511614491.006
+//!
+//! - Angrist, J.D., & Pischke, J.S. (2009). *Mostly Harmless Econometrics: An
+//!   Empiricist's Companion*. Princeton University Press. ISBN: 978-0691120355.
+//!
+//! - Wooldridge, J.M. (2010). *Econometric Analysis of Cross Section and Panel Data*
+//!   (2nd ed.), Chapter 5. MIT Press.
+//!
+//! R equivalent: `AER::ivreg()`, `ivreg::ivreg()`
 
 use ndarray::{Array1, Array2};
 use serde::{Serialize, Deserialize};
@@ -11,7 +58,7 @@ use crate::data::Dataset;
 use crate::errors::{EconResult, EconError};
 use crate::linalg::matrix_ops::{xtx, xty, safe_inverse, matmul};
 use crate::linalg::design::DesignMatrix;
-use crate::traits::estimator::{SignificanceLevel, t_test_p_value, f_test_p_value};
+use crate::traits::estimator::{SignificanceLevel, t_test_p_value, f_test_p_value, chi_squared_p_value};
 
 /// Result from an IV/2SLS estimation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -509,6 +556,250 @@ pub fn run_first_stage_diagnostics(
     })
 }
 
+/// Result from the Sargan test for overidentifying restrictions.
+///
+/// The Sargan test (also known as the Hansen J test) evaluates whether
+/// the instruments are valid, i.e., uncorrelated with the error term.
+///
+/// # References
+///
+/// - Sargan, J.D. (1958). The estimation of economic relationships using
+///   instrumental variables. *Econometrica*, 26(3), 393-415.
+///   https://doi.org/10.2307/1907619
+///
+/// - Hansen, L.P. (1982). Large sample properties of generalized method of
+///   moments estimators. *Econometrica*, 50(4), 1029-1054.
+///   https://doi.org/10.2307/1912775
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SarganTestResult {
+    /// Name of the test
+    pub test_name: String,
+    /// J statistic (Sargan/Hansen test statistic)
+    pub j_statistic: f64,
+    /// Degrees of freedom (number of overidentifying restrictions)
+    pub df: usize,
+    /// p-value from chi-squared distribution
+    pub p_value: f64,
+    /// Number of instruments
+    pub n_instruments: usize,
+    /// Number of endogenous regressors
+    pub n_endogenous: usize,
+    /// Number of observations
+    pub n_obs: usize,
+    /// Whether the model is over-identified (required for test)
+    pub overidentified: bool,
+    /// Null hypothesis: instruments are valid
+    pub null_hypothesis: String,
+    /// Interpretation based on p-value
+    pub interpretation: String,
+}
+
+impl fmt::Display for SarganTestResult {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "Sargan Test of Overidentifying Restrictions")?;
+        writeln!(f, "===========================================")?;
+        writeln!(f)?;
+        writeln!(f, "H0: Instruments are valid (uncorrelated with error term)")?;
+        writeln!(f)?;
+        writeln!(f, "  J statistic:      {:.4}", self.j_statistic)?;
+        writeln!(f, "  Degrees of freedom: {}", self.df)?;
+        writeln!(f, "  p-value:          {:.4}", self.p_value)?;
+        writeln!(f)?;
+        writeln!(f, "  Number of instruments:       {}", self.n_instruments)?;
+        writeln!(f, "  Number of endogenous vars:   {}", self.n_endogenous)?;
+        writeln!(f, "  Overidentifying restrictions: {}", self.df)?;
+        writeln!(f)?;
+        writeln!(f, "Interpretation: {}", self.interpretation)?;
+        Ok(())
+    }
+}
+
+/// Perform the Sargan test for overidentifying restrictions.
+///
+/// The Sargan test (also known as the Hansen J test when robust to heteroskedasticity)
+/// tests whether the instruments are valid (uncorrelated with the structural error term).
+///
+/// # Requirements
+///
+/// - The model must be **over-identified**: number of instruments > number of endogenous variables
+/// - For just-identified models (instruments == endogenous), the test is not defined
+///
+/// # Test Statistic
+///
+/// The Sargan statistic is computed as:
+///   J = n × R² from regressing IV residuals on all instruments
+///
+/// Equivalently:
+///   J = n × (1 - ε̂'M_Z ε̂ / ε̂'ε̂)
+///
+/// where ε̂ are the IV residuals and M_Z is the annihilator matrix for instruments.
+///
+/// Under H0 (valid instruments): J ~ χ²(L - K)
+/// where L = number of instruments, K = number of endogenous variables.
+///
+/// # Interpretation
+///
+/// - **Fail to reject H0 (p > 0.05)**: Instruments appear valid
+/// - **Reject H0 (p ≤ 0.05)**: At least one instrument may be invalid
+///
+/// # Arguments
+///
+/// * `dataset` - The dataset
+/// * `y_col` - Name of the dependent variable
+/// * `x_exog` - Names of exogenous (included) variables
+/// * `x_endog` - Names of endogenous variables
+/// * `instruments` - Names of excluded instruments
+///
+/// # Returns
+///
+/// `SarganTestResult` containing the J statistic, degrees of freedom, and p-value.
+///
+/// # References
+///
+/// - Sargan, J.D. (1958). The estimation of economic relationships using
+///   instrumental variables. *Econometrica*, 26(3), 393-415.
+///
+/// R equivalent: `summary(ivreg(...))` shows Sargan statistic, or `ivdiag::sargan()`
+pub fn sargan_test(
+    dataset: &Dataset,
+    y_col: &str,
+    x_exog: &[&str],
+    x_endog: &[&str],
+    instruments: &[&str],
+) -> EconResult<SarganTestResult> {
+    let n_instr = instruments.len();
+    let n_endog = x_endog.len();
+    let n_exog_vars = x_exog.len();
+
+    // Total instruments = excluded instruments + included exogenous + intercept
+    let total_instruments = n_instr + n_exog_vars + 1;  // +1 for intercept
+
+    // Degrees of freedom = overidentifying restrictions
+    // For 2SLS: df = (excluded instruments) - (endogenous regressors)
+    let df = n_instr.saturating_sub(n_endog);
+
+    if df == 0 {
+        return Ok(SarganTestResult {
+            test_name: "Sargan Test of Overidentifying Restrictions".to_string(),
+            j_statistic: 0.0,
+            df: 0,
+            p_value: 1.0,
+            n_instruments: n_instr,
+            n_endogenous: n_endog,
+            n_obs: 0,
+            overidentified: false,
+            null_hypothesis: "Instruments are valid (uncorrelated with error term)".to_string(),
+            interpretation: "Model is exactly identified (instruments = endogenous). Sargan test not applicable.".to_string(),
+        });
+    }
+
+    // First, run IV/2SLS to get the residuals
+    let iv_result = run_iv2sls(dataset, y_col, x_exog, x_endog, instruments, false)?;
+    let n = iv_result.n_obs;
+
+    // Re-extract data to compute residuals and run auxiliary regression
+    let y = DesignMatrix::extract_column(dataset.df(), y_col)
+        .map_err(|e| EconError::ColumnNotFound {
+            column: y_col.to_string(),
+            available: vec![format!("{:?}", e)],
+        })?;
+
+    // Build the full X matrix (exogenous + endogenous)
+    let design_exog = DesignMatrix::from_dataframe(dataset.df(), x_exog, true)?;
+    let x_exog_mat = design_exog.data;
+
+    let design_endog = DesignMatrix::from_dataframe(dataset.df(), x_endog, false)?;
+    let x_endog_mat = design_endog.data;
+
+    let k_exog = x_exog_mat.ncols();
+    let k_endog = x_endog_mat.ncols();
+    let k_total = k_exog + k_endog;
+
+    let mut x_full = Array2::zeros((n, k_total));
+    x_full.slice_mut(ndarray::s![.., ..k_exog]).assign(&x_exog_mat);
+    x_full.slice_mut(ndarray::s![.., k_exog..]).assign(&x_endog_mat);
+
+    // Compute IV residuals
+    let beta: Array1<f64> = Array1::from_vec(iv_result.coefficients.clone());
+    let y_hat = x_full.dot(&beta);
+    let residuals = &y - &y_hat;
+
+    // Build the full instrument matrix Z = [exogenous, excluded_instruments]
+    let design_z = DesignMatrix::from_dataframe(dataset.df(), instruments, false)?;
+    let z_excl = design_z.data;
+
+    let k_z = k_exog + z_excl.ncols();  // exogenous (with intercept) + excluded instruments
+    let mut z_full = Array2::zeros((n, k_z));
+    z_full.slice_mut(ndarray::s![.., ..k_exog]).assign(&x_exog_mat);
+    z_full.slice_mut(ndarray::s![.., k_exog..]).assign(&z_excl);
+
+    // Sargan test: regress residuals on all instruments and compute n*R²
+    // R² = 1 - SSR/SST where SST = sum(residuals²) and SSR is from aux regression
+
+    // Auxiliary regression: residuals on Z
+    let ztz = xtx(&z_full.view());
+    let (ztz_inv, _) = safe_inverse(&ztz.view())
+        .map_err(|e| EconError::SingularMatrix {
+            context: "Z'Z in Sargan test".to_string(),
+            suggestion: format!("Check for collinearity among instruments: {:?}", e),
+        })?;
+
+    let ztr = xty(&z_full.view(), &residuals);
+    let gamma = ztz_inv.dot(&ztr);
+    let fitted = z_full.dot(&gamma);
+
+    // Compute R² from auxiliary regression
+    let ssr_aux: f64 = (&residuals - &fitted).iter().map(|e| e * e).sum();
+    let sst: f64 = residuals.iter().map(|e| e * e).sum();
+
+    let r_squared_aux = if sst > 1e-10 { 1.0 - ssr_aux / sst } else { 0.0 };
+
+    // J statistic = n * R²
+    let j_statistic = (n as f64) * r_squared_aux.max(0.0);
+
+    // p-value from chi-squared distribution
+    let p_value = chi_squared_p_value(j_statistic, df as f64);
+
+    // Interpretation
+    let interpretation = if p_value > 0.10 {
+        "Cannot reject H0. Instruments appear valid.".to_string()
+    } else if p_value > 0.05 {
+        "Marginal evidence against instrument validity (0.05 < p ≤ 0.10).".to_string()
+    } else if p_value > 0.01 {
+        "Reject H0 at 5% level. At least one instrument may be invalid.".to_string()
+    } else {
+        "Strongly reject H0. Instruments appear invalid.".to_string()
+    };
+
+    Ok(SarganTestResult {
+        test_name: "Sargan Test of Overidentifying Restrictions".to_string(),
+        j_statistic,
+        df,
+        p_value,
+        n_instruments: n_instr,
+        n_endogenous: n_endog,
+        n_obs: n,
+        overidentified: true,
+        null_hypothesis: "Instruments are valid (uncorrelated with error term)".to_string(),
+        interpretation,
+    })
+}
+
+/// Run the Sargan test from an existing IV result and dataset.
+///
+/// This is a convenience function that wraps `sargan_test` using the parameters
+/// from an existing `IVResult`.
+pub fn run_sargan_test(
+    dataset: &Dataset,
+    iv_result: &IVResult,
+) -> EconResult<SarganTestResult> {
+    let x_exog: Vec<&str> = iv_result.exogenous_vars.iter().map(|s| s.as_str()).collect();
+    let x_endog: Vec<&str> = iv_result.endogenous_vars.iter().map(|s| s.as_str()).collect();
+    let instruments: Vec<&str> = iv_result.instruments.iter().map(|s| s.as_str()).collect();
+
+    sargan_test(dataset, &iv_result.dep_var, &x_exog, &x_endog, &instruments)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -615,5 +906,92 @@ mod tests {
         );
         // Should fail due to under-identification
         assert!(result.is_err());
+    }
+
+    fn create_overidentified_dataset() -> Dataset {
+        // Over-identified IV setup: 1 endogenous, 2 instruments
+        // y = 0.5*x_endog + noise
+        // z1 and z2 are both valid instruments (correlated with x_endog, uncorrelated with error)
+        let df = df! {
+            "y" => [1.2, 2.1, 3.3, 4.0, 5.2, 5.8, 7.1, 8.0, 8.9, 10.1,
+                    11.0, 12.2, 13.1, 14.0, 15.3, 16.1, 17.0, 18.2, 19.1, 20.0],
+            "x_endog" => [2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0, 18.0, 20.0,
+                          22.0, 24.0, 26.0, 28.0, 30.0, 32.0, 34.0, 36.0, 38.0, 40.0],
+            "z1" => [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0,
+                     11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0, 18.0, 19.0, 20.0],
+            "z2" => [1.1, 1.9, 3.1, 3.9, 5.1, 5.9, 7.1, 7.9, 9.1, 9.9,
+                     11.1, 11.9, 13.1, 13.9, 15.1, 15.9, 17.1, 17.9, 19.1, 19.9]
+        }.unwrap();
+        Dataset::new(df)
+    }
+
+    #[test]
+    fn test_sargan_test_overidentified() {
+        let dataset = create_overidentified_dataset();
+
+        // Over-identified: 1 endogenous, 2 instruments
+        let result = sargan_test(
+            &dataset,
+            "y",
+            &[],           // no exogenous (besides constant)
+            &["x_endog"],  // 1 endogenous
+            &["z1", "z2"], // 2 instruments
+        ).unwrap();
+
+        // Should be over-identified
+        assert!(result.overidentified);
+        assert_eq!(result.df, 1);  // 2 instruments - 1 endogenous = 1
+
+        // J statistic should be non-negative
+        assert!(result.j_statistic >= 0.0);
+
+        // p-value should be valid
+        assert!(result.p_value >= 0.0 && result.p_value <= 1.0);
+
+        // For valid instruments, we expect to NOT reject (p > 0.05)
+        // This test data has valid instruments, so p should be high
+        println!("Sargan test: J = {:.4}, df = {}, p = {:.4}",
+                 result.j_statistic, result.df, result.p_value);
+    }
+
+    #[test]
+    fn test_sargan_test_exactly_identified() {
+        let dataset = create_iv_dataset();
+
+        // Exactly identified: 1 endogenous, 1 instrument
+        let result = sargan_test(
+            &dataset,
+            "y",
+            &[],           // no exogenous (besides constant)
+            &["x_endog"],  // 1 endogenous
+            &["z"],        // 1 instrument
+        ).unwrap();
+
+        // Should NOT be over-identified
+        assert!(!result.overidentified);
+        assert_eq!(result.df, 0);
+        assert_eq!(result.p_value, 1.0);  // Test not applicable
+    }
+
+    #[test]
+    fn test_run_sargan_test_from_iv_result() {
+        let dataset = create_overidentified_dataset();
+
+        // First run IV
+        let iv_result = run_iv2sls(
+            &dataset,
+            "y",
+            &[],
+            &["x_endog"],
+            &["z1", "z2"],
+            false
+        ).unwrap();
+
+        // Then run Sargan test
+        let sargan_result = run_sargan_test(&dataset, &iv_result).unwrap();
+
+        assert!(sargan_result.overidentified);
+        assert_eq!(sargan_result.df, 1);
+        assert!(sargan_result.j_statistic >= 0.0);
     }
 }

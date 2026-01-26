@@ -1,0 +1,16 @@
+"method","n","time_ms"
+"neighbors",100,1.7061965
+"moran_test",100,0.094295
+"lm_tests",100,2.655928
+"lagsarlm",100,2.834476
+"errorsarlm",100,3.3084895
+"neighbors",400,7.539179
+"moran_test",400,0.8388635
+"lm_tests",400,163.953452
+"lagsarlm",400,118.2182325
+"errorsarlm",400,125.5139305
+"neighbors",1024,52.2871755
+"moran_test",1024,12.485673
+"lm_tests",1024,2652.564145
+"lagsarlm",1024,1815.457171
+"errorsarlm",1024,1805.9363105

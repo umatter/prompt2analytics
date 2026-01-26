@@ -40,6 +40,14 @@ pub mod power;
 pub mod proptrendtest;
 pub mod robust;
 pub mod spline;
+pub mod weighted;
+pub mod mauchly;
+pub mod medpolish;
+pub mod isoreg;
+pub mod loglin;
+pub mod constroptim;
+pub mod secontrast;
+pub mod modeltables;
 
 pub use descriptive::{DescriptiveStats, ColumnStats};
 pub use correlation::{correlation_matrix, CorrelationMatrix};
@@ -194,4 +202,40 @@ pub use robust::{
 pub use spline::{
     spline, splinefun, approx, approxfun,
     SplineResult, SplineMethod, ApproxResult, ApproxMethod, ApproxRule,
+};
+pub use weighted::{
+    weighted_mean, run_weighted_mean,
+    cov_wt, cov_wt_from_slice, run_cov_wt,
+    CovWtResult, CovWtMethod, CovWtCenter,
+};
+pub use mauchly::{
+    mauchly_test, mauchly_test_from_slice, run_mauchly_test,
+    MauchlyResult,
+};
+pub use medpolish::{
+    medpolish, medpolish_array, run_medpolish,
+    MedpolishResult,
+};
+pub use isoreg::{
+    isoreg, isoreg_y, isoreg_predict, run_isoreg,
+    IsoregResult,
+};
+pub use loglin::{
+    loglin, loglin_independence, loglin_saturated, run_loglin,
+    LoglinResult,
+};
+pub use constroptim::{
+    constr_optim, run_constr_optim,
+    ConstrOptimResult, ConstrOptimConfig, OptimMethod,
+};
+pub use secontrast::{
+    se_contrast, se_contrast_single, estimate_contrast,
+    contrast_t_statistic, contrast_p_value,
+    generate_contrasts, run_se_contrast,
+    SeContrastResult, ContrastType,
+};
+pub use modeltables::{
+    model_tables, model_tables_means, model_tables_effects,
+    model_tables_two_way, run_model_tables, format_model_tables,
+    ModelTablesResult, TwoWayModelTablesResult, ModelTablesSE, TableType,
 };

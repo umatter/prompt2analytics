@@ -16,6 +16,8 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 
 use p2a_core::{
+    // Traits
+    LinearEstimator,
     data::{
         DataLoader, Dataset, DatasetInfo,
         // Database connectivity
@@ -52,7 +54,27 @@ use p2a_core::{
             BinStrategy,
         },
     },
-    regression::{run_ols, run_ols_clustered, run_diagnostics, CovarianceType},
+    regression::{
+        run_ols, run_ols_clustered, run_diagnostics, CovarianceType,
+        // Breusch-Godfrey test for serial correlation
+        bg_test, BgTestType,
+        // Ramsey's RESET test
+        reset_test, ResetType,
+        // Wald test for nested model comparison
+        wald_test,
+        // HAC (Newey-West) standard errors
+        run_vcov_hac,
+        // Bootstrap covariance estimation
+        run_vcov_bootstrap, BootstrapType,
+        // Driscoll-Kraay panel-robust standard errors
+        run_vcov_driscoll_kraay,
+        // Quantile regression
+        run_quantreg, quantreg_multi,
+        // Tukey's resistant line
+        run_line, LineResult,
+        // SuperSmoother
+        supsmu, SupsmuResult,
+    },
     stats::{
         correlation_matrix, DescriptiveStats, run_one_way_anova, run_two_way_anova,
         one_sample_t_test, two_sample_t_test, paired_t_test, Alternative,
@@ -88,26 +110,118 @@ use p2a_core::{
         poisson_test, PoissonAlternative,
         // Mahalanobis distance
         mahalanobis, run_mahalanobis, MahalanobisResult,
+        // Median polish
+        run_medpolish, MedpolishResult,
+        // Isotonic regression
+        isoreg, run_isoreg, IsoregResult,
+        // Log-linear models
+        loglin, loglin_independence, run_loglin, LoglinResult,
+        // Model tables
+        run_model_tables, model_tables, ModelTablesResult, TwoWayModelTablesResult, TableType,
+        // Standard errors for contrasts
+        se_contrast, SeContrastResult, ContrastType, generate_contrasts,
+        // Weighted statistics
+        weighted_mean, run_weighted_mean,
+        cov_wt, run_cov_wt, CovWtResult,
+        // Mauchly's sphericity test
+        run_mauchly_test, MauchlyResult,
+        // Constrained optimization
+        ConstrOptimResult, ConstrOptimConfig, OptimMethod,
     },
+    // Toeplitz matrix construction
+    toeplitz, toeplitz_asymmetric, toeplitz_to_vec,
+    // Stepwise regression
+    step, run_step, StepResult, StepConfig, StepDirection,
     // Econometrics
     run_fixed_effects, run_random_effects, run_hausman_test, run_iv2sls, run_did,
-    run_logit, run_probit, run_first_stage_diagnostics,
+    run_staggered_did, StaggeredDidConfig, ComparisonGroup, AttEstimationMethod,
+    // Goodman-Bacon decomposition
+    bacon_decomp, BaconDecompResult, ComparisonType, BaconComponent,
+    // Extended TWFE (Wooldridge)
+    run_etwfe, EtwfeConfig, EtwfeResult, ControlGroup as EtwfeControlGroup,
+    run_logit, run_probit, run_first_stage_diagnostics, sargan_test,
+    // Marginal Treatment Effects (MTE) for IV analysis
+    run_ivmte, ivmte, IVMTEConfig, IVMTEResult, MTEEstimand, PropensityModel,
+    // Balke-Pearl bounds for nonparametric IV
+    run_bp_bounds, BPBoundsConfig, BPBoundsResult,
+    // Panel GLS (FGLS)
+    PanelGlsResult, PanelGlsModel, run_panel_gls,
+    // Arellano-Bond / System GMM
+    run_gmm, run_arellano_bond, GmmConfig, GmmTransform, GmmStep, GmmResult,
+    // Variable Coefficients Model (pvcm) and Mean Group (pmg)
+    run_pvcm, run_pmg, PvcmResult, PvcmType,
+    // General GMM (Hansen 1982)
+    run_gmm_iv, GeneralGmmConfig, GeneralGmmResult, GmmMethod, GmmVcov,
+    // Multinomial and ordered logit/probit
+    run_multinom, run_ordered_logit, run_ordered_probit,
+    // McFadden conditional logit (mlogit)
+    run_mlogit, MlogitResult,
+    // Mixed logit / random parameters logit (gmnl, mixl)
+    run_mixed_logit, run_gmnl, MixedLogitConfig, MixedLogitResult,
+    RandomDistribution, RandomParameterSpec,
+    // Negative binomial and zero-inflated models
+    run_negbin, run_zip, run_zinb,
+    // Hurdle models
+    run_hurdle, HurdleType, HurdleResult,
+    // Harvey-Collier test for linearity
+    harvey_collier_test, HarveyCollierResult,
     run_hdfe, HdfeConfig,
     // GLM with HDFE
     run_feglm, GlmFamily, FeglmConfig,
+    // Panel unit root tests
+    run_panel_unit_root, PanelUnitRootTest, PanelUnitRootConfig, PanelModel,
+    // Spatial econometrics
+    Neighbors, NeighborMethod, SpatialWeights, WeightStyle,
+    moran_test, geary_test, spatial_lm_tests, MoranAlternative,
+    run_sar, run_sem, SarConfig, SemConfig,
+    // Spatial GMM with heteroscedasticity robustness (sphet)
+    run_sphet, sphet, SphetConfig, SphetModel, SphetSE,
+    // Spatial probit models
+    run_sar_probit, run_sem_probit, SpatialProbitConfig, SpatialProbitModel,
+    // Spatial panel data models (splm)
+    run_spml, run_spgm, SpmlConfig, SpgmConfig,
+    SpatialPanelModel, SpatialPanelEffect, SpatialErrorType,
+    SpgmMethod, SpgmMoments,
     // Treatment effects
     run_ipw_treatment, run_doubly_robust, IpwConfig, DoublyRobustConfig, Estimand, DRMethod,
+    // CBPS (Covariate Balancing Propensity Score)
+    run_cbps, CbpsConfig, CbpsMethod,
+    // WeightIt (Flexible inverse probability weighting)
+    weightit, entropy_balance, WeightItConfig, WeightMethod, WeightEstimand,
+    // MatchIt (Propensity Score Matching)
+    match_it, nearest_neighbor_match, cem_match, full_match, subclass_match,
+    MatchMethod, DistanceMethod, MatchResult,
+    // twang (GBM propensity score estimation)
+    run_twang, TwangConfig, StopMethod, TwangEstimand,
+    // SBW (Stable Balancing Weights)
+    sbw, run_sbw, SBWConfig, SBWEstimand, SBWResult,
+    // TMLE (Targeted Maximum Likelihood Estimation)
+    run_tmle, tmle, TmleConfig, TmleResult, QModel, GModel,
+    // C-TMLE (Collaborative TMLE with data-adaptive covariate selection)
+    ctmle, run_ctmle, CTmleConfig, CTmleResult, CTmleQModel, StoppingRule, SelectionOrder,
+    // Regression Standardization / G-computation (stdReg)
+    run_stdreg, StdRegConfig, StdRegModel, StdRegEstimand, SEMethod,
     // Mediation analysis
     run_mediation_analysis, MediationConfig,
+    // Natural Effect Models (medflex)
+    run_medflex_dataset, MedflexConfig, MedflexResult, EffectScale,
     // Synthetic control
     run_synthetic_control, SynthConfig, PredictorSpec, TimeAggregation, VOptimization,
+    // Generalized synthetic control
+    run_gsynth, GsynthConfig, GsynthEstimator, GsynthForce,
+    // Synthetic Control with Prediction Intervals (SCPI)
+    run_scpi, SCPIConfig, SCPIConstraint, VarianceMethod,
     // Regression Discontinuity
-    run_rd, rd_bandwidth, run_fuzzy_rd, RdConfig, KernelType, BandwidthMethod,
+    run_rd, rd_bandwidth, run_fuzzy_rd, RdConfig, KernelType, BandwidthMethod, VceType,
+    // Multi-cutoff RD (rdmulti)
+    run_rd_multi_dataset, RdMultiConfig, RdMultiBandwidth, PoolingWeights, RdMultiResult,
     // Survival Analysis
     run_kaplan_meier, log_rank_test, run_cox_ph, run_aft, run_competing_risks,
     CoxConfig, AftConfig, TiesMethod, AftDistribution,
     // Time series
     run_var, run_varma, run_vecm, run_var_irf,
+    // Granger causality test
+    granger_test, run_granger_test, granger_test_bidirectional,
     // Forecasting
     run_arima, forecast_arima, run_mstl,
     run_changepoint, run_binary_segmentation, CostFunction,
@@ -116,9 +230,36 @@ use p2a_core::{
     decompose, DecomposeConfig, DecomposeType, DecomposeResult,
     // Kalman filter and StructTS
     struct_ts, StructTsConfig, StructTsType, StructTsResult,
+    // Cumulative periodogram
+    cpgram, CpgramResult,
+    // GARCH (volatility modeling)
+    garch, garch_forecast, GarchConfig, GarchResult,
+    // CausalImpact (Bayesian Structural Time Series)
+    causal_impact, run_causal_impact, CausalImpactConfig, CausalImpactResult,
+    // Time series utilities (aliased to avoid collision with munging)
+    lag as ts_lag, LagResult,
+    embed, EmbedResult,
+    diffinv, DiffinvResult,
+    filter as ts_filter, FilterResult, FilterMethod, FilterSides,
+    window as ts_window, WindowResult,
+    arma_acf, ArmaAcfResult,
+    arma_to_ma, ArmaToMaResult,
+    acf_to_ar, Acf2ArResult,
+    arima_sim, ArimaSimResult,
+    runmed, RunmedResult, EndRule,
     // Machine Learning
     kmeans, dbscan, pca, hierarchical, tsne, random_forest, linear_svm,
+    cmdscale, cmdscale_from_data, CmdscaleResult,
+    cutree, CutreeResult, HierarchicalResult,
     Linkage,
+    // Projection Pursuit Regression
+    ppr, PprResult, PprConfig, SmoothingMethod,
+    // Causal Forests (Wager & Athey 2018)
+    run_causal_forest, CausalForestConfig, CausalForestResult,
+    // BART-based Causal Inference (bartCause style)
+    run_bart_causal, BartCausalConfig, BartCausalResult,
+    // Treatment Effect Heterogeneity Testing (hettx)
+    run_hettx_dataset, HetTxConfig, HetTestStat, EffectEstimationMethod,
     // Visualization
     histogram, scatter_plot, box_plot, line_chart, correlation_heatmap,
     event_study_plot, coefficient_plot, irf_plot, residual_diagnostics,
@@ -136,6 +277,8 @@ pub struct AnalyticsServer {
     datasets: Arc<RwLock<HashMap<String, Dataset>>>,
     /// Active cleaning sessions, keyed by session ID
     cleaning_sessions: Arc<RwLock<HashMap<String, CleaningSession>>>,
+    /// Spatial weights matrices, keyed by a unique ID
+    spatial_weights: Arc<RwLock<HashMap<String, SpatialWeights>>>,
     /// Global random seed for ML reproducibility
     global_seed: Arc<RwLock<Option<u64>>>,
     /// Tool router for handling tool calls
@@ -1088,6 +1231,154 @@ pub struct DiagnosticsRequest {
     pub x: Vec<String>,
 }
 
+/// Request for Breusch-Godfrey test for serial correlation.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct BgTestRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Dependent variable (Y) column name
+    #[schemars(description = "Name of the dependent variable (Y) column.")]
+    pub y: String,
+
+    /// Independent variables (X) column names
+    #[schemars(description = "Names of the independent variable (X) columns.")]
+    pub x: Vec<String>,
+
+    /// Order of serial correlation to test (default: 1)
+    #[schemars(description = "Maximum lag order for serial correlation test. Default is 1 (first-order).")]
+    pub order: Option<usize>,
+
+    /// Test statistic type: 'chisq' (default) or 'f'
+    #[schemars(description = "Type of test statistic: 'chisq' for chi-squared (asymptotic) or 'f' for F-test (finite sample correction). Default: 'chisq'.")]
+    pub test_type: Option<String>,
+
+    /// Fill value for initial lagged residuals (default: 0.0)
+    #[schemars(description = "Value to fill for initial lagged residuals before enough observations exist. Default: 0.0.")]
+    pub fill: Option<f64>,
+}
+
+/// Request for Ramsey's RESET test for functional form.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ResetTestRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Dependent variable (Y) column name
+    #[schemars(description = "Name of the dependent variable (Y) column.")]
+    pub y: String,
+
+    /// Independent variables (X) column names
+    #[schemars(description = "Names of the independent variable (X) columns.")]
+    pub x: Vec<String>,
+
+    /// Powers to test (default: [2, 3])
+    #[schemars(description = "Powers to use for augmentation. Default: [2, 3] tests for quadratic and cubic terms.")]
+    pub powers: Option<Vec<usize>>,
+
+    /// Type of augmentation: 'fitted' (default), 'regressor', or 'princomp'
+    #[schemars(description = "Type of augmentation: 'fitted' (powers of fitted values, default), 'regressor' (powers of regressors), or 'princomp' (powers of first principal component).")]
+    pub reset_type: Option<String>,
+}
+
+/// Request for Wald test comparing nested models.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct WaldTestRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Dependent variable (Y) column name
+    #[schemars(description = "Name of the dependent variable (Y) column.")]
+    pub y: String,
+
+    /// Independent variables for the unrestricted (full) model
+    #[schemars(description = "Column names for the unrestricted (full) model. Must be a superset of restricted model variables.")]
+    pub x_unrestricted: Vec<String>,
+
+    /// Independent variables for the restricted (null) model
+    #[schemars(description = "Column names for the restricted (null) model. Must be a subset of unrestricted model variables.")]
+    pub x_restricted: Vec<String>,
+
+    /// Use F-test (default: true) or Chi-squared test
+    #[schemars(description = "If true (default), use F-test. If false, use Chi-squared test. F-test is more common for finite samples.")]
+    pub use_f_test: Option<bool>,
+}
+
+/// Request for Harvey-Collier test for linearity.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct HarveyCollierRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Dependent variable (Y) column name
+    #[schemars(description = "Name of the dependent variable (Y) column.")]
+    pub y: String,
+
+    /// Independent variables (X) column names
+    #[schemars(description = "Names of the independent variable (X) columns.")]
+    pub x: Vec<String>,
+}
+
+/// Request for HAC (Newey-West) standard errors.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct HacRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Dependent variable (Y) column name
+    #[schemars(description = "Name of the dependent variable (Y) column.")]
+    pub y: String,
+
+    /// Independent variables (X) column names
+    #[schemars(description = "Names of the independent variable (X) columns.")]
+    pub x: Vec<String>,
+
+    /// Bandwidth (number of lags). Default: automatic Newey-West selection
+    #[schemars(description = "Number of lags for HAC estimation. If not provided, uses automatic Newey-West bandwidth: floor(4 * (n/100)^(2/9)).")]
+    pub bandwidth: Option<usize>,
+
+    /// Kernel type: 'bartlett' (default), 'parzen', 'qs', 'truncated', 'tukey-hanning'
+    #[schemars(description = "Kernel function for weighting lags: 'bartlett' (Newey-West, default), 'parzen', 'qs' (quadratic spectral), 'truncated', or 'tukey-hanning'.")]
+    pub kernel: Option<String>,
+
+    /// Whether to use VAR(1) prewhitening (default: false)
+    #[schemars(description = "Apply VAR(1) prewhitening before HAC estimation. Default: false.")]
+    pub prewhiten: Option<bool>,
+}
+
+/// Request for bootstrap covariance estimation (vcovBS).
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct BootstrapCovRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Dependent variable (Y) column name
+    #[schemars(description = "Name of the dependent variable (Y) column.")]
+    pub y: String,
+
+    /// Independent variables (X) column names
+    #[schemars(description = "Names of the independent variable (X) columns.")]
+    pub x: Vec<String>,
+
+    /// Number of bootstrap replications (default: 999)
+    #[schemars(description = "Number of bootstrap replications. Default: 999. More replications give more precise SE estimates.")]
+    pub n_boot: Option<usize>,
+
+    /// Bootstrap type: 'pairs' (default), 'residual', or 'wild'
+    #[schemars(description = "Bootstrap method: 'pairs' (xy, most robust), 'residual' (assumes homoskedasticity), 'wild' (Rademacher weights, robust to heteroskedasticity).")]
+    pub bootstrap_type: Option<String>,
+
+    /// Random seed for reproducibility
+    #[schemars(description = "Random seed for reproducibility. If not provided, uses entropy.")]
+    pub seed: Option<u64>,
+}
+
 /// Request for OLS with clustered standard errors.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct OlsClusteredRequest {
@@ -1110,6 +1401,154 @@ pub struct OlsClusteredRequest {
     /// Second cluster dimension column (optional, for two-way clustering)
     #[schemars(description = "Optional column for second clustering dimension (e.g., 'year'). If provided, two-way clustering is used.")]
     pub cluster2: Option<String>,
+}
+
+/// Request for Driscoll-Kraay panel-robust standard errors.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DriscollKraayRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded panel dataset.")]
+    pub dataset: String,
+
+    /// Dependent variable (Y) column name
+    #[schemars(description = "Name of the dependent variable (Y) column.")]
+    pub y: String,
+
+    /// Independent variables (X) column names
+    #[schemars(description = "Names of the independent variable (X) columns.")]
+    pub x: Vec<String>,
+
+    /// Time period identifier column
+    #[schemars(description = "Column containing time period identifiers (e.g., 'year', 'quarter'). Used to aggregate scores within periods.")]
+    pub time_col: String,
+
+    /// Bandwidth for HAC kernel (optional)
+    #[schemars(description = "Bandwidth for HAC kernel. Default uses Newey-West rule: floor(T^0.25). Higher values allow for more serial correlation.")]
+    pub bandwidth: Option<usize>,
+
+    /// Kernel type for HAC
+    #[schemars(description = "HAC kernel: 'bartlett' (default), 'parzen', 'qs', 'truncated', 'tukey-hanning'.")]
+    pub kernel: Option<String>,
+}
+
+/// Request for quantile regression.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct QuantRegRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Dependent variable (Y) column name
+    #[schemars(description = "Name of the dependent variable (Y) column.")]
+    pub y: String,
+
+    /// Independent variables (X) column names
+    #[schemars(description = "Names of the independent variable (X) columns.")]
+    pub x: Vec<String>,
+
+    /// Quantile (tau) to estimate (0-1)
+    #[schemars(description = "Quantile to estimate. Must be between 0 and 1. Common values: 0.25 (first quartile), 0.5 (median), 0.75 (third quartile). Default: 0.5 (median regression).")]
+    pub tau: Option<f64>,
+
+    /// Multiple quantiles to estimate
+    #[schemars(description = "Optional: estimate multiple quantiles at once (e.g., [0.25, 0.5, 0.75] for quartiles). If provided, 'tau' is ignored.")]
+    pub taus: Option<Vec<f64>>,
+}
+
+/// Request for sensitivity analysis for unmeasured confounding (sensemakr).
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SensemakrRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Outcome variable (Y) column name
+    #[schemars(description = "Name of the outcome variable (Y) column.")]
+    pub y: String,
+
+    /// Treatment variable column name
+    #[schemars(description = "Name of the treatment variable whose coefficient will be analyzed for sensitivity.")]
+    pub treatment: String,
+
+    /// Control covariate column names
+    #[schemars(description = "Names of the control covariate columns. These are conditioned on when assessing confounding.")]
+    pub covariates: Vec<String>,
+
+    /// Benchmark covariates for bounding (optional)
+    #[schemars(description = "Covariate names to use as benchmarks. Their partial R² provides intuition about confounding magnitude.")]
+    pub benchmark_covariates: Option<Vec<String>>,
+
+    /// Multiplier for treatment benchmark partial R² (kd)
+    #[schemars(description = "Multiplier applied to benchmark partial R² with treatment. E.g., kd=2 assumes confounder is twice as strong. Default: 1.0.")]
+    pub kd: Option<f64>,
+
+    /// Multiplier for outcome benchmark partial R² (ky)
+    #[schemars(description = "Multiplier applied to benchmark partial R² with outcome. Default: same as kd.")]
+    pub ky: Option<f64>,
+
+    /// Proportion of effect to reduce (q)
+    #[schemars(description = "Proportion of the effect to explain away. q=1 (default) means nullify; q=0.5 means reduce by half.")]
+    pub q: Option<f64>,
+
+    /// Significance level for RV_alpha
+    #[schemars(description = "Significance level for robustness value calculation. Default: 0.05.")]
+    pub alpha: Option<f64>,
+
+    /// Generate contour plot data
+    #[schemars(description = "Whether to generate data for sensitivity contour plots. Default: false.")]
+    pub contour_data: Option<bool>,
+}
+
+/// Request for E-value sensitivity analysis for unmeasured confounding.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct EValueRequest {
+    /// Type of effect measure
+    #[schemars(description = "Type of effect measure: 'rr' (risk ratio), 'or' (odds ratio), 'hr' (hazard ratio), 'smd' (standardized mean difference), 'rd' (risk difference).")]
+    pub effect_type: String,
+
+    /// Point estimate of the effect
+    #[schemars(description = "Point estimate of the effect measure (e.g., RR=2.5, OR=3.0, SMD=0.5).")]
+    pub point: f64,
+
+    /// Lower bound of 95% confidence interval
+    #[schemars(description = "Lower bound of the 95% confidence interval. Optional but recommended.")]
+    pub ci_lower: Option<f64>,
+
+    /// Upper bound of 95% confidence interval
+    #[schemars(description = "Upper bound of the 95% confidence interval. Optional but recommended.")]
+    pub ci_upper: Option<f64>,
+
+    /// Standard error (for SMD)
+    #[schemars(description = "Standard error of the estimate. Required for SMD if CI not provided.")]
+    pub se: Option<f64>,
+
+    /// Whether outcome is rare (for OR/HR)
+    #[schemars(description = "Whether the outcome is rare (<15% prevalence). If true, OR/HR used as RR approximation. If false, sqrt transformation applied. Default: true for OR/HR.")]
+    pub rare: Option<bool>,
+
+    /// Baseline risk (for RD)
+    #[schemars(description = "Baseline risk (probability in unexposed group), required for risk difference. Must be between 0 and 1.")]
+    pub baseline_risk: Option<f64>,
+}
+
+/// Request for average marginal effects computation.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct MarginalEffectsRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Dependent variable (Y) column name
+    #[schemars(description = "Name of the dependent variable (Y) column.")]
+    pub y: String,
+
+    /// Independent variable column names
+    #[schemars(description = "Names of the independent variable columns.")]
+    pub x: Vec<String>,
+
+    /// Model type
+    #[schemars(description = "Model type for marginal effects: 'ols' (linear regression), 'logit' (logistic regression), 'probit' (probit regression). Default: 'ols'.")]
+    pub model: Option<String>,
 }
 
 /// Request for nonlinear least squares regression.
@@ -1236,6 +1675,502 @@ pub struct HausmanRequest {
     pub entity_var: String,
 }
 
+/// Request for Arellano-Bond / System GMM dynamic panel estimation.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct GmmRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Dependent variable (Y) column name
+    #[schemars(description = "Name of the dependent variable (Y) column.")]
+    pub y: String,
+
+    /// Independent variables (X) column names
+    #[schemars(description = "Names of the independent variable (X) columns. Include lagged dependent variable if desired.")]
+    pub x: Vec<String>,
+
+    /// Entity/individual identifier column
+    #[schemars(description = "Column name for entity/individual identifier (e.g., 'firm_id', 'person_id').")]
+    pub entity_var: String,
+
+    /// Time period identifier column
+    #[schemars(description = "Column name for time period identifier (e.g., 'year', 'quarter').")]
+    pub time_var: String,
+
+    /// Number of lags of the dependent variable to include
+    #[schemars(description = "Number of lags of Y to use as regressors. Default: 1.")]
+    pub lags: Option<usize>,
+
+    /// Transformation type: 'difference' (Arellano-Bond 1991) or 'system' (Blundell-Bond 1998)
+    #[schemars(description = "Transformation: 'difference' for Arellano-Bond, 'system' for Blundell-Bond. Default: 'difference'.")]
+    pub transform: Option<String>,
+
+    /// Estimation step: 'onestep' or 'twostep'
+    #[schemars(description = "Estimation step: 'onestep' or 'twostep'. Two-step is more efficient. Default: 'twostep'.")]
+    pub step: Option<String>,
+
+    /// Maximum lag for instruments
+    #[schemars(description = "Maximum lag of Y to use as instruments. None means all available lags. Default: None.")]
+    pub max_lag: Option<usize>,
+
+    /// Minimum lag for instruments
+    #[schemars(description = "Minimum lag of Y to use as instruments (must be >= 2). Default: 2.")]
+    pub min_lag: Option<usize>,
+
+    /// Collapse instruments to reduce count
+    #[schemars(description = "If true, collapse instruments to reduce instrument count and avoid overfitting. Default: false.")]
+    pub collapse: Option<bool>,
+
+    /// Use robust standard errors
+    #[schemars(description = "Use robust (Windmeijer-corrected for two-step) standard errors. Default: true.")]
+    pub robust: Option<bool>,
+}
+
+/// Request for general GMM IV estimation (Hansen 1982).
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct GeneralGmmIvRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Dependent variable (Y) column name
+    #[schemars(description = "Name of the dependent (outcome) variable column.")]
+    pub y: String,
+
+    /// Endogenous/exogenous regressors (X) column names
+    #[schemars(description = "Names of the regressor columns (both endogenous and exogenous).")]
+    pub x: Vec<String>,
+
+    /// Instruments (Z) column names
+    #[schemars(description = "Names of the instrument columns. Should include exogenous regressors plus additional instruments. Must have at least as many instruments as regressors.")]
+    pub z: Vec<String>,
+
+    /// GMM estimation method
+    #[schemars(description = "Estimation method: 'twostep' (default), 'iterative', or 'cue' (continuously updated).")]
+    pub method: Option<String>,
+
+    /// Variance-covariance type
+    #[schemars(description = "Vcov type: 'hac' (default, robust to serial correlation), 'iid', or 'fixed'.")]
+    pub vcov: Option<String>,
+
+    /// HAC kernel type
+    #[schemars(description = "Kernel for HAC weighting: 'bartlett' (default), 'parzen', 'qs', 'truncated'.")]
+    pub kernel: Option<String>,
+
+    /// HAC bandwidth
+    #[schemars(description = "Bandwidth for HAC estimation. None for automatic selection.")]
+    pub bandwidth: Option<usize>,
+}
+
+/// Request for Panel GLS (Feasible Generalized Least Squares) estimation.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct PanelGlsRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Dependent variable (Y) column name
+    #[schemars(description = "Name of the dependent variable (Y) column.")]
+    pub y: String,
+
+    /// Independent variables (X) column names
+    #[schemars(description = "Names of the independent variable (X) columns.")]
+    pub x: Vec<String>,
+
+    /// Entity/individual identifier column
+    #[schemars(description = "Column name for entity/individual identifier (e.g., 'firm_id', 'person_id').")]
+    pub entity_var: String,
+
+    /// Time period identifier column
+    #[schemars(description = "Column name for time period identifier (e.g., 'year', 'quarter').")]
+    pub time_var: String,
+
+    /// Model type: 'fe' (fixed effects), 'pooling', or 'fd' (first difference)
+    #[schemars(description = "Model type: 'fe' for fixed effects GLS (default), 'pooling' for pooled GLS, 'fd' for first-difference GLS.")]
+    pub model: Option<String>,
+}
+
+/// Request for Variable Coefficients Model (PVCM).
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct PvcmRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded panel dataset.")]
+    pub dataset: String,
+
+    /// Dependent variable (Y) column name
+    #[schemars(description = "Name of the dependent variable (Y) column.")]
+    pub y: String,
+
+    /// Independent variables (X) column names
+    #[schemars(description = "Names of the independent variable (X) columns.")]
+    pub x: Vec<String>,
+
+    /// Entity/individual identifier column
+    #[schemars(description = "Column name for entity/individual identifier (e.g., 'firm_id', 'person_id').")]
+    pub entity_var: String,
+
+    /// Model type: 'within' or 'random'
+    #[schemars(description = "Model type: 'within' for separate OLS per entity (default), 'random' for Swamy (1970) GLS estimator.")]
+    pub model: Option<String>,
+}
+
+/// Request for panel unit root tests.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct PanelUnitRootRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded panel dataset.")]
+    pub dataset: String,
+
+    /// Variable to test for unit root
+    #[schemars(description = "Name of the variable column to test for unit root.")]
+    pub variable: String,
+
+    /// Unit/entity identifier column
+    #[schemars(description = "Column name for panel unit identifier (e.g., 'country', 'firm_id').")]
+    pub unit_col: String,
+
+    /// Time period column
+    #[schemars(description = "Column name for time period identifier (e.g., 'year', 'quarter').")]
+    pub time_col: String,
+
+    /// Test type
+    #[schemars(description = "Test type: 'llc' (Levin-Lin-Chu, default), 'ips' (Im-Pesaran-Shin), 'fisher' (Maddala-Wu), 'hadri' (stationarity null).")]
+    pub test: Option<String>,
+
+    /// Model specification
+    #[schemars(description = "Model: 'intercept' (default, individual intercepts), 'trend' (intercepts + trends), 'none' (no deterministics).")]
+    pub model: Option<String>,
+
+    /// Number of lags
+    #[schemars(description = "Number of lags for ADF-type regressions. None for automatic selection.")]
+    pub lags: Option<usize>,
+}
+
+// ============================================================================
+// Spatial Econometrics Request Types
+// ============================================================================
+
+/// Request for creating spatial neighbors.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SpatialNeighborsRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Column containing longitude or x coordinate
+    #[schemars(description = "Column name for longitude or x coordinate.")]
+    pub x_coord: String,
+
+    /// Column containing latitude or y coordinate
+    #[schemars(description = "Column name for latitude or y coordinate.")]
+    pub y_coord: String,
+
+    /// Neighbor method: 'knn' (default), 'distance', or 'distance_longlat'
+    #[schemars(description = "Method for defining neighbors: 'knn' (k-nearest neighbors, default), 'distance' (within distance), 'distance_longlat' (great-circle distance for lon/lat).")]
+    pub method: Option<String>,
+
+    /// Number of neighbors for knn method
+    #[schemars(description = "Number of nearest neighbors (for 'knn' method). Default is 5.")]
+    pub k: Option<usize>,
+
+    /// Maximum distance (for distance-based methods)
+    #[schemars(description = "Maximum distance threshold (for 'distance' or 'distance_longlat' methods). Units are in coordinate units or kilometers for longlat.")]
+    pub d_max: Option<f64>,
+
+    /// Minimum distance (for distance-based methods)
+    #[schemars(description = "Minimum distance threshold (for 'distance' methods). Default is 0.")]
+    pub d_min: Option<f64>,
+
+    /// Name to store the spatial weights under
+    #[schemars(description = "Name to store the spatial weights for later use. If not provided, uses dataset name + '_weights'.")]
+    pub weights_name: Option<String>,
+
+    /// Weight style
+    #[schemars(description = "Weight style: 'W' or 'row' (row-standardized, default), 'B' (binary), 'C' (global standardized), 'U' (unstandardized).")]
+    pub style: Option<String>,
+}
+
+/// Request for Moran's I test for spatial autocorrelation.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct MoranTestRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Variable to test for spatial autocorrelation
+    #[schemars(description = "Name of the variable column to test for spatial autocorrelation.")]
+    pub variable: String,
+
+    /// Name of stored spatial weights
+    #[schemars(description = "Name of previously created spatial weights (from spatial_neighbors tool).")]
+    pub weights: String,
+
+    /// Alternative hypothesis
+    #[schemars(description = "Alternative hypothesis: 'greater' (positive autocorrelation, default), 'less' (negative), 'two.sided'.")]
+    pub alternative: Option<String>,
+}
+
+/// Request for spatial LM tests.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SpatialLmTestRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Dependent variable (Y) column name
+    #[schemars(description = "Name of the dependent variable (Y) column.")]
+    pub y: String,
+
+    /// Independent variables (X) column names
+    #[schemars(description = "Names of the independent variable (X) columns.")]
+    pub x: Vec<String>,
+
+    /// Name of stored spatial weights
+    #[schemars(description = "Name of previously created spatial weights (from spatial_neighbors tool).")]
+    pub weights: String,
+}
+
+/// Request for Spatial Autoregressive (SAR) model.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SarModelRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Dependent variable (Y) column name
+    #[schemars(description = "Name of the dependent variable (Y) column.")]
+    pub y: String,
+
+    /// Independent variables (X) column names
+    #[schemars(description = "Names of the independent variable (X) columns.")]
+    pub x: Vec<String>,
+
+    /// Name of stored spatial weights
+    #[schemars(description = "Name of previously created spatial weights (from spatial_neighbors tool).")]
+    pub weights: String,
+
+    /// Spatial Durbin model (include WX)
+    #[schemars(description = "If true, estimates Spatial Durbin Model (SDM) which includes spatially lagged covariates (WX). Default is false.")]
+    pub durbin: Option<bool>,
+
+    /// Compute spatial impacts
+    #[schemars(description = "If true, computes direct, indirect, and total spatial impacts. Default is true.")]
+    pub compute_impacts: Option<bool>,
+}
+
+/// Request for Spatial Error Model (SEM).
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SemModelRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Dependent variable (Y) column name
+    #[schemars(description = "Name of the dependent variable (Y) column.")]
+    pub y: String,
+
+    /// Independent variables (X) column names
+    #[schemars(description = "Names of the independent variable (X) columns.")]
+    pub x: Vec<String>,
+
+    /// Name of stored spatial weights
+    #[schemars(description = "Name of previously created spatial weights (from spatial_neighbors tool).")]
+    pub weights: String,
+}
+
+/// Request for Spatial GMM with Heteroscedasticity Robustness (sphet).
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SphetRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Dependent variable (Y) column name
+    #[schemars(description = "Name of the dependent variable (Y) column.")]
+    pub y: String,
+
+    /// Independent variables (X) column names
+    #[schemars(description = "Names of the independent variable (X) columns.")]
+    pub x: Vec<String>,
+
+    /// Name of stored spatial weights
+    #[schemars(description = "Name of previously created spatial weights (from spatial_neighbors tool).")]
+    pub weights: String,
+
+    /// Model type: 'lag' (SAR), 'error' (SEM), or 'sarar' (both)
+    #[schemars(description = "Model type: 'lag' for SAR (y=lambda*Wy+Xb+e), 'error' for SEM (y=Xb+u, u=rho*Wu+e), or 'sarar' for combined. Default is 'lag'.")]
+    pub model: Option<String>,
+
+    /// Standard error type: 'robust', 'hac', or 'standard'
+    #[schemars(description = "Standard error type: 'robust' for heteroscedasticity-robust (Kelejian-Prucha 2010), 'hac' for HAC (Kelejian-Prucha 2007), or 'standard' for homoscedastic. Default is 'robust'.")]
+    pub se_type: Option<String>,
+
+    /// HAC kernel type (for se_type='hac')
+    #[schemars(description = "HAC kernel: 'bartlett', 'parzen', 'quadratic_spectral', 'tukey_hanning', or 'truncated'. Default is 'bartlett'.")]
+    pub kernel: Option<String>,
+
+    /// HAC bandwidth (for se_type='hac')
+    #[schemars(description = "Bandwidth for HAC estimation. If not specified, uses automatic bandwidth selection.")]
+    pub bandwidth: Option<usize>,
+
+    /// Instrument order (default 2)
+    #[schemars(description = "Order of spatial lag instruments [X, WX, W^2X, ...]. Default is 2.")]
+    pub instrument_order: Option<usize>,
+}
+
+/// Request for SAR Probit model (spatial lag probit).
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SarProbitRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Binary dependent variable (Y) column name
+    #[schemars(description = "Name of the binary dependent variable (Y) column (0/1 values).")]
+    pub y: String,
+
+    /// Independent variables (X) column names
+    #[schemars(description = "Names of the independent variable (X) columns.")]
+    pub x: Vec<String>,
+
+    /// Name of stored spatial weights
+    #[schemars(description = "Name of previously created spatial weights (from spatial_neighbors tool).")]
+    pub weights: String,
+
+    /// Number of MCMC draws
+    #[schemars(description = "Number of MCMC draws after burn-in. Default is 1000.")]
+    pub n_draws: Option<usize>,
+
+    /// Burn-in draws
+    #[schemars(description = "Number of burn-in draws to discard. Default is 200.")]
+    pub burn_in: Option<usize>,
+
+    /// Compute spatial impacts
+    #[schemars(description = "If true, computes direct, indirect, and total spatial impacts. Default is true.")]
+    pub compute_impacts: Option<bool>,
+
+    /// Random seed
+    #[schemars(description = "Random seed for reproducibility. Optional.")]
+    pub seed: Option<u64>,
+}
+
+/// Request for SEM Probit model (spatial error probit).
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SemProbitRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Binary dependent variable (Y) column name
+    #[schemars(description = "Name of the binary dependent variable (Y) column (0/1 values).")]
+    pub y: String,
+
+    /// Independent variables (X) column names
+    #[schemars(description = "Names of the independent variable (X) columns.")]
+    pub x: Vec<String>,
+
+    /// Name of stored spatial weights
+    #[schemars(description = "Name of previously created spatial weights (from spatial_neighbors tool).")]
+    pub weights: String,
+
+    /// Number of MCMC draws
+    #[schemars(description = "Number of MCMC draws after burn-in. Default is 1000.")]
+    pub n_draws: Option<usize>,
+
+    /// Burn-in draws
+    #[schemars(description = "Number of burn-in draws to discard. Default is 200.")]
+    pub burn_in: Option<usize>,
+
+    /// Random seed
+    #[schemars(description = "Random seed for reproducibility. Optional.")]
+    pub seed: Option<u64>,
+}
+
+/// Request for Spatial Panel ML estimation (spml).
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SpmlRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset containing panel data.")]
+    pub dataset: String,
+
+    /// Dependent variable (Y) column name
+    #[schemars(description = "Name of the dependent variable (Y) column.")]
+    pub y: String,
+
+    /// Independent variables (X) column names
+    #[schemars(description = "Names of the independent variable (X) columns.")]
+    pub x: Vec<String>,
+
+    /// Entity identifier column
+    #[schemars(description = "Name of the entity/cross-sectional identifier column.")]
+    pub entity_col: String,
+
+    /// Time identifier column
+    #[schemars(description = "Name of the time period identifier column.")]
+    pub time_col: String,
+
+    /// Name of stored spatial weights
+    #[schemars(description = "Name of previously created spatial weights (from spatial_neighbors tool). Must match number of cross-sectional entities.")]
+    pub weights: String,
+
+    /// Panel model type
+    #[schemars(description = "Panel model type: 'within' (fixed effects, default), 'random' (random effects), or 'pooling' (no effects).")]
+    pub model: Option<String>,
+
+    /// Include spatial lag
+    #[schemars(description = "If true, includes spatial lag of dependent variable (rho*W*y). Default is false.")]
+    pub lag: Option<bool>,
+
+    /// Spatial error type
+    #[schemars(description = "Spatial error specification: 'none' (default), 'baltagi' (Baltagi-type), or 'kkp' (Kapoor-Kelejian-Prucha type).")]
+    pub spatial_error: Option<String>,
+
+    /// Effect type
+    #[schemars(description = "Effect type: 'individual' (default), 'time', or 'twoways'.")]
+    pub effect: Option<String>,
+}
+
+/// Request for Spatial Panel GMM estimation (spgm).
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SpgmRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset containing panel data.")]
+    pub dataset: String,
+
+    /// Dependent variable (Y) column name
+    #[schemars(description = "Name of the dependent variable (Y) column.")]
+    pub y: String,
+
+    /// Independent variables (X) column names
+    #[schemars(description = "Names of the independent variable (X) columns.")]
+    pub x: Vec<String>,
+
+    /// Entity identifier column
+    #[schemars(description = "Name of the entity/cross-sectional identifier column.")]
+    pub entity_col: String,
+
+    /// Time identifier column
+    #[schemars(description = "Name of the time period identifier column.")]
+    pub time_col: String,
+
+    /// Name of stored spatial weights
+    #[schemars(description = "Name of previously created spatial weights (from spatial_neighbors tool).")]
+    pub weights: String,
+
+    /// Estimation method
+    #[schemars(description = "GMM estimation method: 'w2sls' (within/fixed effects, default), 'g2sls' (GLS random effects), 'b2sls' (between), or 'ec2sls' (Baltagi EC2SLS).")]
+    pub method: Option<String>,
+
+    /// Include spatial lag
+    #[schemars(description = "If true, includes spatial lag of dependent variable (uses IV/GMM for identification). Default is false.")]
+    pub lag: Option<bool>,
+
+    /// Include spatial error
+    #[schemars(description = "If true, includes spatially correlated error term. Default is true.")]
+    pub spatial_error: Option<bool>,
+}
+
 /// Request for IV/2SLS regression.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct IV2SLSRequest {
@@ -1284,6 +2219,113 @@ pub struct FirstStageRequest {
     pub controls: Option<Vec<String>>,
 }
 
+/// Request for Sargan test of overidentifying restrictions.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SarganTestRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Dependent variable (Y) column name
+    #[schemars(description = "Name of the dependent variable (Y) column.")]
+    pub y: String,
+
+    /// Exogenous independent variables
+    #[schemars(description = "Names of exogenous independent variable columns (not instrumented). May be empty.")]
+    pub x_exog: Vec<String>,
+
+    /// Endogenous variable to be instrumented
+    #[schemars(description = "Names of endogenous variables that need instruments.")]
+    pub x_endog: Vec<String>,
+
+    /// Instrumental variables
+    #[schemars(description = "Names of instrument columns. Must exceed number of endogenous variables for test to be valid.")]
+    pub instruments: Vec<String>,
+}
+
+/// Request for Balke-Pearl bounds on the Average Causal Effect (ACE).
+///
+/// Balke-Pearl bounds provide sharp nonparametric bounds on the causal effect
+/// using instrumental variables without assuming parametric models.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct BPBoundsRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Instrument column (binary 0/1)
+    #[schemars(description = "Name of the binary instrument column (Z). Example: randomized treatment assignment.")]
+    pub instrument: String,
+
+    /// Treatment column (binary 0/1)
+    #[schemars(description = "Name of the binary treatment received column (D). Example: actual treatment uptake.")]
+    pub treatment: String,
+
+    /// Outcome column (binary 0/1)
+    #[schemars(description = "Name of the binary outcome column (Y). Example: recovery status.")]
+    pub outcome: String,
+
+    /// Assume monotonicity (no defiers)
+    #[schemars(description = "Whether to assume monotonicity (no defiers). If true, bounds tighten but assumption may be violated. Default is false.")]
+    pub monotonicity: Option<bool>,
+
+    /// Compute bootstrap confidence intervals
+    #[schemars(description = "Whether to compute bootstrap confidence intervals for the bounds. Default is true.")]
+    pub bootstrap_ci: Option<bool>,
+
+    /// Number of bootstrap replications
+    #[schemars(description = "Number of bootstrap replications for confidence intervals. Default is 1000.")]
+    pub n_bootstrap: Option<usize>,
+
+    /// Confidence level (1 - alpha)
+    #[schemars(description = "Confidence level for intervals. Default is 0.95 (95% CI).")]
+    pub confidence_level: Option<f64>,
+
+    /// Random seed for reproducibility
+    #[schemars(description = "Optional random seed for bootstrap reproducibility.")]
+    pub seed: Option<u64>,
+}
+
+/// Request for Marginal Treatment Effects (MTE) estimation.
+///
+/// The MTE framework (Heckman & Vytlacil 2005) connects IV estimation to a
+/// choice-theoretic model of treatment selection, revealing heterogeneity
+/// in treatment effects.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct IVMTERequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Outcome variable (Y) column name
+    #[schemars(description = "Name of the outcome variable (Y) column.")]
+    pub y: String,
+
+    /// Treatment indicator column (binary 0/1)
+    #[schemars(description = "Name of the binary treatment indicator column (D = 0 or 1).")]
+    pub d: String,
+
+    /// Instrument column name
+    #[schemars(description = "Name of the instrumental variable (Z) column that affects treatment but not outcome directly.")]
+    pub z: String,
+
+    /// Covariate columns (optional)
+    #[schemars(description = "Optional covariate column names to include in the second stage.")]
+    pub x: Option<Vec<String>>,
+
+    /// Polynomial degree for MTE curve
+    #[schemars(description = "Polynomial degree for MTE approximation. Higher degrees allow more flexible MTE shapes but may overfit. Default is 2.")]
+    pub mte_degree: Option<usize>,
+
+    /// Propensity score model type
+    #[schemars(description = "Propensity score model: 'probit' (default), 'logit', or 'linear'. Probit is standard in the MTE literature.")]
+    pub propensity_model: Option<String>,
+
+    /// Number of grid points for MTE curve
+    #[schemars(description = "Number of grid points for evaluating MTE curve. Default is 100.")]
+    pub n_grid: Option<usize>,
+}
+
 /// Request for Difference-in-Differences estimation.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct DiDRequest {
@@ -1302,6 +2344,110 @@ pub struct DiDRequest {
     /// Post-treatment period indicator column (0/1)
     #[schemars(description = "Column indicating post-treatment period (1 = post, 0 = pre).")]
     pub post_var: String,
+}
+
+/// Request for Callaway-Sant'Anna staggered DiD estimation.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct StaggeredDiDRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded panel dataset.")]
+    pub dataset: String,
+
+    /// Outcome variable column name
+    #[schemars(description = "Name of the outcome variable column.")]
+    pub outcome: String,
+
+    /// Treatment timing column
+    #[schemars(description = "Column indicating when each unit was first treated (period number). Use 0 or negative for never-treated units.")]
+    pub treatment_time: String,
+
+    /// Time period column
+    #[schemars(description = "Column containing the time period identifier (e.g., year, quarter).")]
+    pub time_col: String,
+
+    /// Unit identifier column
+    #[schemars(description = "Column containing the unit/individual identifier (e.g., state_id, firm_id).")]
+    pub unit_col: String,
+
+    /// Covariate columns (optional)
+    #[schemars(description = "Optional covariates for conditional parallel trends assumption.")]
+    pub covariates: Option<Vec<String>>,
+
+    /// Comparison group strategy
+    #[schemars(description = "Comparison group: 'never_treated' (default) uses only never-treated units, 'not_yet_treated' uses units not yet treated by that period.")]
+    pub comparison_group: Option<String>,
+
+    /// Estimation method
+    #[schemars(description = "Estimation method: 'outcome_regression' (default), 'ipw', or 'doubly_robust'.")]
+    pub estimation_method: Option<String>,
+
+    /// Base period relative to treatment
+    #[schemars(description = "Base period for pre-treatment comparison, relative to g. Default is -1 (one period before treatment).")]
+    pub base_period: Option<i32>,
+
+    /// Number of bootstrap replications
+    #[schemars(description = "Number of bootstrap replications for standard errors. Default is 999.")]
+    pub bootstrap: Option<usize>,
+}
+
+/// Request for Goodman-Bacon decomposition of staggered DiD.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct BaconDecompRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded panel dataset with staggered treatment.")]
+    pub dataset: String,
+
+    /// Outcome variable column name
+    #[schemars(description = "Name of the outcome variable column.")]
+    pub outcome: String,
+
+    /// Unit identifier column
+    #[schemars(description = "Column containing the unit/individual identifier (e.g., state_id, firm_id).")]
+    pub unit_col: String,
+
+    /// Time period column
+    #[schemars(description = "Column containing the time period identifier (e.g., year, quarter).")]
+    pub time_col: String,
+
+    /// Treatment indicator column
+    #[schemars(description = "Binary treatment indicator column (0 = untreated, 1 = treated). Should be 0 before treatment and 1 after for each unit.")]
+    pub treatment_col: String,
+}
+
+/// Request for Extended Two-Way Fixed Effects (ETWFE) estimation.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct EtwfeRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded panel dataset.")]
+    pub dataset: String,
+
+    /// Outcome variable column name
+    #[schemars(description = "Name of the outcome variable column.")]
+    pub outcome: String,
+
+    /// Unit identifier column
+    #[schemars(description = "Column containing the unit/individual identifier (e.g., state_id, firm_id).")]
+    pub unit_col: String,
+
+    /// Time period column
+    #[schemars(description = "Column containing the time period identifier (e.g., year, quarter).")]
+    pub time_col: String,
+
+    /// Treatment indicator column
+    #[schemars(description = "Column indicating treatment status (1 = currently treated, 0 = not treated). Binary indicator.")]
+    pub treatment: String,
+
+    /// First treatment period column
+    #[schemars(description = "Column indicating when each unit was first treated (period number). Use 0 for never-treated units.")]
+    pub first_treat: String,
+
+    /// Control variables (optional)
+    #[schemars(description = "Optional control variable columns.")]
+    pub controls: Option<Vec<String>>,
+
+    /// Control group strategy
+    #[schemars(description = "Control group: 'notyet' (default) uses not-yet-treated units, 'never' uses only never-treated units.")]
+    pub cgroup: Option<String>,
 }
 
 /// Request for Inverse Probability Weighting (IPW) treatment effect estimation.
@@ -1372,6 +2518,378 @@ pub struct DoublyRobustRequest {
     pub bootstrap: Option<usize>,
 }
 
+/// Request for Double/Debiased Machine Learning (DoubleML) estimation.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DoubleMLRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Outcome variable column name
+    #[schemars(description = "Name of the outcome variable column (Y).")]
+    pub outcome: String,
+
+    /// Treatment variable column name
+    #[schemars(description = "Name of the treatment variable column (D). Can be continuous or binary.")]
+    pub treatment: String,
+
+    /// Covariate columns for nuisance model estimation
+    #[schemars(description = "Names of covariate columns (X) for nuisance model estimation.")]
+    pub covariates: Vec<String>,
+
+    /// Model type: 'plr' (Partially Linear Regression, default) or 'irm' (Interactive Regression Model)
+    #[schemars(description = "DML model type: 'plr' for Partially Linear Regression (default, Y = theta*D + g(X) + eps), 'irm' for Interactive Regression Model (binary treatment, heterogeneous effects).")]
+    pub model_type: Option<String>,
+
+    /// Number of cross-fitting folds (default: 5)
+    #[schemars(description = "Number of folds for cross-fitting. Default is 5. Must be at least 2.")]
+    pub n_folds: Option<usize>,
+
+    /// Random seed for reproducible fold splits
+    #[schemars(description = "Random seed for reproducible cross-fitting splits. If omitted, uses random seed.")]
+    pub seed: Option<u64>,
+
+    /// Trimming threshold for propensity scores (IRM only)
+    #[schemars(description = "Trim propensity scores to [trim, 1-trim] for IRM model. Default is 0.01.")]
+    pub trim: Option<f64>,
+}
+
+/// Request for Covariate Balancing Propensity Score (CBPS) estimation.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CbpsRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Treatment indicator column (0/1)
+    #[schemars(description = "Column indicating treatment status (1 = treated, 0 = control). Must be binary.")]
+    pub treatment: String,
+
+    /// Covariate columns for propensity score model
+    #[schemars(description = "Names of covariate columns to include in propensity score model.")]
+    pub covariates: Vec<String>,
+
+    /// CBPS method: 'exact' (default), 'over', or 'just'
+    #[schemars(description = "CBPS method: 'exact' for exact balance (default, overidentified), 'over' for over-balanced, 'just' for just-identified (standard logit).")]
+    pub method: Option<String>,
+
+    /// Standardized difference threshold for balance
+    #[schemars(description = "Threshold for standardized difference to consider a covariate balanced. Default is 0.1.")]
+    pub balance_threshold: Option<f64>,
+}
+
+/// Request for flexible inverse probability weighting (WeightIt).
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct WeightItRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Treatment indicator column (0/1)
+    #[schemars(description = "Column indicating treatment status (1 = treated, 0 = control). Must be binary.")]
+    pub treatment: String,
+
+    /// Covariate columns for balance
+    #[schemars(description = "Names of covariate columns to balance between treatment groups.")]
+    pub covariates: Vec<String>,
+
+    /// Weighting method: 'logistic' (default), 'entropy', 'energy', or 'stable'
+    #[schemars(description = "Weighting method: 'logistic' (standard PS, default), 'entropy' (entropy balancing), 'energy' (energy distance), 'stable' (stable weights).")]
+    pub method: Option<String>,
+
+    /// Target estimand: 'ate' (default), 'att', or 'atc'
+    #[schemars(description = "Target estimand: 'ate' (average treatment effect, default), 'att' (on treated), 'atc' (on control).")]
+    pub estimand: Option<String>,
+
+    /// Whether to stabilize weights
+    #[schemars(description = "Whether to stabilize weights by multiplying by marginal treatment probability. Default is false.")]
+    pub stabilize: Option<bool>,
+
+    /// Trimming quantile for extreme weights
+    #[schemars(description = "Quantile for trimming extreme weights (e.g., 0.99 trims at 1st and 99th percentile). Default is 1.0 (no trimming).")]
+    pub trim_quantile: Option<f64>,
+}
+
+/// Request for entropy balancing.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct EntropyBalanceRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Treatment indicator column (0/1)
+    #[schemars(description = "Column indicating treatment status (1 = treated, 0 = control). Must be binary.")]
+    pub treatment: String,
+
+    /// Covariate columns for balance
+    #[schemars(description = "Names of covariate columns to balance exactly on means.")]
+    pub covariates: Vec<String>,
+
+    /// Optional target means (defaults to treated group means for ATT)
+    #[schemars(description = "Optional target means for covariates. If not provided, uses treated group means (ATT).")]
+    pub target_means: Option<Vec<f64>>,
+}
+
+/// Request for stable balancing weights (SBW).
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SBWRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Treatment indicator column (0/1)
+    #[schemars(description = "Column indicating treatment status (1 = treated, 0 = control). Must be binary.")]
+    pub treatment: String,
+
+    /// Covariate columns for balance
+    #[schemars(description = "Names of covariate columns to balance between treatment groups.")]
+    pub covariates: Vec<String>,
+
+    /// Target estimand: 'att' (default), 'ate', or 'atc'
+    #[schemars(description = "Target estimand: 'att' (effect on treated, default), 'ate' (average treatment effect), 'atc' (effect on control).")]
+    pub estimand: Option<String>,
+
+    /// Balance tolerance for approximate balance (0 = exact balance)
+    #[schemars(description = "Tolerance for approximate balance. 0 means exact balance (default), positive values allow some deviation.")]
+    pub balance_tol: Option<f64>,
+
+    /// Minimum weight allowed (default 0 for non-negativity)
+    #[schemars(description = "Minimum weight allowed. Default is 0 (non-negativity constraint).")]
+    pub min_weight: Option<f64>,
+
+    /// Penalty parameter for approximate balance (higher = stricter balance)
+    #[schemars(description = "Penalty parameter for approximate balance. Higher values enforce stricter balance. Default is 1000.")]
+    pub balance_penalty: Option<f64>,
+}
+
+/// Request for twang GBM propensity score estimation.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct TwangRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Treatment indicator column (0/1)
+    #[schemars(description = "Column indicating treatment status (1 = treated, 0 = control). Must be binary.")]
+    pub treatment: String,
+
+    /// Covariate columns for propensity model
+    #[schemars(description = "Names of covariate columns to include in the GBM propensity score model.")]
+    pub covariates: Vec<String>,
+
+    /// Stopping rule: 'es.mean' (default), 'es.max', 'ks.mean', 'ks.max'
+    #[schemars(description = "Stopping rule for selecting optimal iterations: 'es.mean' (mean standardized effect size, default), 'es.max' (max effect size), 'ks.mean' (mean KS statistic), 'ks.max' (max KS statistic).")]
+    pub stop_method: Option<String>,
+
+    /// Target estimand: 'att' (default), 'ate', or 'atc'
+    #[schemars(description = "Target estimand: 'att' (effect on treated, default), 'ate' (average treatment effect), 'atc' (effect on control).")]
+    pub estimand: Option<String>,
+
+    /// Maximum number of boosting iterations (default: 3000)
+    #[schemars(description = "Maximum number of gradient boosting iterations. Default is 3000.")]
+    pub n_trees: Option<usize>,
+
+    /// Learning rate / shrinkage (default: 0.01)
+    #[schemars(description = "Learning rate for gradient boosting. Smaller values need more iterations but often give better results. Default is 0.01.")]
+    pub shrinkage: Option<f64>,
+
+    /// Balance threshold for early stopping (default: 0.1)
+    #[schemars(description = "Balance threshold below which to stop early. Default is 0.1.")]
+    pub balance_threshold: Option<f64>,
+}
+
+/// Request for propensity score matching (MatchIt).
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct MatchItRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Treatment indicator column (0/1)
+    #[schemars(description = "Column indicating treatment status (1 = treated, 0 = control). Must be binary.")]
+    pub treatment: String,
+
+    /// Covariate columns for matching
+    #[schemars(description = "Names of covariate columns to use for matching.")]
+    pub covariates: Vec<String>,
+
+    /// Matching method: 'nearest' (default), 'cem', 'full', or 'subclass'
+    #[schemars(description = "Matching method: 'nearest' (nearest neighbor, default), 'cem' (coarsened exact matching), 'full' (full/optimal matching), 'subclass' (propensity score subclassification).")]
+    pub method: Option<String>,
+
+    /// Distance metric: 'logit' (default), 'probit', 'mahalanobis', or 'euclidean'
+    #[schemars(description = "Distance metric: 'logit' (propensity score via logit, default), 'probit', 'mahalanobis', 'euclidean'.")]
+    pub distance: Option<String>,
+
+    /// Matching ratio (1:k matching, default k=1)
+    #[schemars(description = "For nearest neighbor: number of controls per treated unit (1:k matching). Default is 1.")]
+    pub ratio: Option<usize>,
+
+    /// Caliper width (in SD of propensity score)
+    #[schemars(description = "For nearest neighbor: maximum distance for a valid match, in SD of propensity score. Default is no caliper.")]
+    pub caliper: Option<f64>,
+
+    /// Whether to sample with replacement
+    #[schemars(description = "For nearest neighbor: whether to sample controls with replacement. Default is false.")]
+    pub replace: Option<bool>,
+
+    /// Number of subclasses for subclassification
+    #[schemars(description = "For subclassification: number of subclasses to create. Default is 5.")]
+    pub n_subclasses: Option<usize>,
+}
+
+/// Request for Targeted Maximum Likelihood Estimation (TMLE).
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct TmleRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Outcome variable column name
+    #[schemars(description = "Name of the outcome variable column. Can be binary or continuous.")]
+    pub outcome: String,
+
+    /// Treatment indicator column (0/1)
+    #[schemars(description = "Column indicating treatment status (1 = treated, 0 = control). Must be binary.")]
+    pub treatment: String,
+
+    /// Covariate columns for propensity score and outcome models
+    #[schemars(description = "Names of covariate columns to include in both propensity score and outcome models.")]
+    pub covariates: Vec<String>,
+
+    /// Outcome model type: 'logistic' (default) or 'linear'
+    #[schemars(description = "Outcome model type: 'logistic' for binary outcomes (default), 'linear' for continuous outcomes.")]
+    pub q_model: Option<String>,
+
+    /// Lower bound for propensity score truncation
+    #[schemars(description = "Lower bound for propensity score truncation. Default is 0.01.")]
+    pub ps_lower: Option<f64>,
+
+    /// Upper bound for propensity score truncation
+    #[schemars(description = "Upper bound for propensity score truncation. Default is 0.99.")]
+    pub ps_upper: Option<f64>,
+}
+
+/// Request for Collaborative Targeted Maximum Likelihood Estimation (C-TMLE).
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CTmleRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Outcome variable column name
+    #[schemars(description = "Name of the outcome variable column. Can be binary or continuous.")]
+    pub outcome: String,
+
+    /// Treatment indicator column (0/1)
+    #[schemars(description = "Column indicating treatment status (1 = treated, 0 = control). Must be binary.")]
+    pub treatment: String,
+
+    /// Covariate columns (candidates for propensity score selection)
+    #[schemars(description = "Names of candidate covariate columns. C-TMLE will select which ones to include in the propensity score model via cross-validation.")]
+    pub covariates: Vec<String>,
+
+    /// Outcome model type: 'logistic' (default) or 'linear'
+    #[schemars(description = "Outcome model type: 'logistic' for binary outcomes (default), 'linear' for continuous outcomes.")]
+    pub q_model: Option<String>,
+
+    /// Number of cross-validation folds (default: 5)
+    #[schemars(description = "Number of cross-validation folds for covariate selection. Default is 5.")]
+    pub n_folds: Option<usize>,
+
+    /// Maximum number of covariates to select (optional)
+    #[schemars(description = "Maximum number of covariates to include in propensity score model. Default is no limit.")]
+    pub max_covariates: Option<usize>,
+
+    /// Stopping rule: 'cv_minimum' (default), 'one_se', or 'max_covariates'
+    #[schemars(description = "Stopping rule for selection: 'cv_minimum' (stop at minimum CV risk, default), 'one_se' (one-standard-error rule for parsimony), 'max_covariates' (use max_covariates parameter).")]
+    pub stopping_rule: Option<String>,
+
+    /// Lower bound for propensity score truncation (default: 0.025)
+    #[schemars(description = "Lower bound for propensity score truncation. Default is 0.025.")]
+    pub ps_lower: Option<f64>,
+
+    /// Upper bound for propensity score truncation (default: 0.975)
+    #[schemars(description = "Upper bound for propensity score truncation. Default is 0.975.")]
+    pub ps_upper: Option<f64>,
+}
+
+/// Request for Longitudinal Targeted Maximum Likelihood Estimation (LTMLE).
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct LtmleRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Outcome column names at each time point (chronological order)
+    #[schemars(description = "Names of outcome variable columns at each time point. For survival outcomes, only the last time point may have the actual outcome; earlier can be zeros.")]
+    pub outcomes: Vec<String>,
+
+    /// Treatment column names at each time point (chronological order)
+    #[schemars(description = "Names of treatment indicator columns at each time point. Must be binary (0 or 1).")]
+    pub treatments: Vec<String>,
+
+    /// Covariate column names at each time point (chronological order, comma-separated within each time point)
+    #[schemars(description = "Names of covariate columns at each time point. Each element is a comma-separated list of column names for that time point.")]
+    pub covariates: Vec<String>,
+
+    /// Outcome model type: 'linear' (default) or 'logistic'
+    #[schemars(description = "Outcome model type: 'linear' for continuous outcomes (default), 'logistic' for binary outcomes.")]
+    pub q_model: Option<String>,
+
+    /// Lower bound for propensity score truncation
+    #[schemars(description = "Lower bound for propensity score truncation. Default is 0.01.")]
+    pub ps_lower: Option<f64>,
+
+    /// Upper bound for propensity score truncation
+    #[schemars(description = "Upper bound for propensity score truncation. Default is 0.99.")]
+    pub ps_upper: Option<f64>,
+}
+
+/// Request for Regression Standardization (G-computation).
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct StdRegRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Outcome variable column name
+    #[schemars(description = "Name of the outcome variable column. Can be continuous or binary.")]
+    pub outcome: String,
+
+    /// Treatment indicator column (0/1)
+    #[schemars(description = "Column indicating treatment status (1 = treated, 0 = control). Must be binary.")]
+    pub treatment: String,
+
+    /// Covariate columns for the outcome model
+    #[schemars(description = "Names of covariate columns to include in the outcome model.")]
+    pub covariates: Vec<String>,
+
+    /// Outcome model type: 'linear' (default), 'logistic', or 'poisson'
+    #[schemars(description = "Outcome model type: 'linear' for continuous outcomes (default), 'logistic' for binary outcomes, 'poisson' for count outcomes.")]
+    pub model_type: Option<String>,
+
+    /// Estimand: 'ate' (default), 'att', 'atc', or 'levels'
+    #[schemars(description = "Target estimand: 'ate' (Average Treatment Effect, default), 'att' (ATT on Treated), 'atc' (ATC on Controls), 'levels' (E[Y(1)] and E[Y(0)] separately).")]
+    pub estimand: Option<String>,
+
+    /// SE method: 'bootstrap' (default), 'delta', or 'sandwich'
+    #[schemars(description = "Standard error method: 'bootstrap' (default, recommended), 'delta' (analytical), 'sandwich' (robust).")]
+    pub se_method: Option<String>,
+
+    /// Number of bootstrap replications (if using bootstrap SE)
+    #[schemars(description = "Number of bootstrap replications for SE estimation. Default is 999.")]
+    pub n_bootstrap: Option<usize>,
+
+    /// Whether to include treatment-covariate interactions
+    #[schemars(description = "Include treatment-covariate interactions in outcome model. Default is false.")]
+    pub interactions: Option<bool>,
+
+    /// Confidence level (e.g., 0.95 for 95% CI)
+    #[schemars(description = "Confidence level for intervals. Default is 0.95.")]
+    pub confidence_level: Option<f64>,
+}
+
 /// Request for Causal Mediation Analysis.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct MediationRequest {
@@ -1402,6 +2920,46 @@ pub struct MediationRequest {
     /// Number of bootstrap replications for standard errors
     #[schemars(description = "Number of bootstrap replications for standard error estimation. Default is 999.")]
     pub bootstrap: Option<usize>,
+}
+
+/// Request for Natural Effect Models (medflex) mediation analysis.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct NaturalEffectsRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Outcome variable column name
+    #[schemars(description = "Name of the outcome variable column (continuous).")]
+    pub outcome: String,
+
+    /// Treatment indicator column (0/1)
+    #[schemars(description = "Column indicating treatment status (1 = treated, 0 = control). Typically binary.")]
+    pub treatment: String,
+
+    /// Mediator variable column name
+    #[schemars(description = "Name of the mediator variable column - the intermediate variable through which treatment may affect the outcome.")]
+    pub mediator: String,
+
+    /// Confounder columns for adjustment
+    #[schemars(description = "Names of confounder columns for adjustment in mediator and outcome models. Can be empty.")]
+    pub confounders: Option<Vec<String>>,
+
+    /// Whether to include treatment-mediator interaction
+    #[schemars(description = "Include treatment-mediator interaction term in outcome model. Default is true. Set to false for simple product-of-coefficients decomposition.")]
+    pub allow_interaction: Option<bool>,
+
+    /// Number of bootstrap replications for standard errors
+    #[schemars(description = "Number of bootstrap replications for confidence intervals. Default is 1000. Set to 0 to use delta method instead.")]
+    pub n_bootstrap: Option<usize>,
+
+    /// Confidence level for intervals
+    #[schemars(description = "Confidence level for intervals (e.g., 0.95 for 95% CI). Default is 0.95.")]
+    pub confidence_level: Option<f64>,
+
+    /// Effect scale (difference, ratio, odds_ratio)
+    #[schemars(description = "Scale for reporting effects: 'difference' (default for continuous outcomes), 'ratio' (for log-link), 'odds_ratio' (for logit).")]
+    pub scale: Option<String>,
 }
 
 /// Predictor specification for synthetic control.
@@ -1477,6 +3035,114 @@ pub struct SyntheticControlRequest {
 
     /// Minimum weight threshold for output
     #[schemars(description = "Minimum weight to display in output (for readability). Default is 0.001.")]
+    pub weight_threshold: Option<f64>,
+}
+
+/// Request for Generalized Synthetic Control (gsynth) estimation.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct GsynthRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded panel dataset.")]
+    pub dataset: String,
+
+    /// Outcome variable column name
+    #[schemars(description = "Name of the outcome variable column (Y).")]
+    pub outcome: String,
+
+    /// Treatment indicator column name
+    #[schemars(description = "Name of the treatment indicator column (D, binary 0/1). Treatment can start at different times for different units.")]
+    pub treatment: String,
+
+    /// Unit identifier column name
+    #[schemars(description = "Name of the column identifying units (e.g., 'state', 'country').")]
+    pub unit_col: String,
+
+    /// Time period column name
+    #[schemars(description = "Name of the column identifying time periods (must be numeric).")]
+    pub time_col: String,
+
+    /// Covariate columns
+    #[schemars(description = "Optional list of covariate column names to include in the model.")]
+    pub covariates: Option<Vec<String>>,
+
+    /// Number of factors (0 for auto-selection via CV)
+    #[schemars(description = "Number of latent factors. Use 0 with cross_validate=true for automatic selection. Default is 2.")]
+    pub n_factors: Option<usize>,
+
+    /// Whether to cross-validate factor selection
+    #[schemars(description = "Whether to select number of factors via cross-validation. Default is false.")]
+    pub cross_validate: Option<bool>,
+
+    /// Maximum factors to consider in CV
+    #[schemars(description = "Maximum number of factors to consider during cross-validation. Default is 5.")]
+    pub max_factors: Option<usize>,
+
+    /// Estimator type
+    #[schemars(description = "Estimator: 'ife' (interactive fixed effects, default) or 'mc' (matrix completion).")]
+    pub estimator: Option<String>,
+
+    /// Fixed effects specification
+    #[schemars(description = "Fixed effects: 'none', 'unit' (default), 'time', or 'twoWay'.")]
+    pub force: Option<String>,
+
+    /// Whether to compute bootstrap standard errors
+    #[schemars(description = "Whether to compute bootstrap standard errors. Default is false.")]
+    pub bootstrap_se: Option<bool>,
+
+    /// Number of bootstrap iterations
+    #[schemars(description = "Number of bootstrap iterations for standard errors. Default is 500.")]
+    pub n_bootstrap: Option<usize>,
+}
+
+/// Request for Synthetic Control with Prediction Intervals (SCPI).
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ScpiRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded panel dataset.")]
+    pub dataset: String,
+
+    /// Outcome variable column name
+    #[schemars(description = "Name of the outcome variable column (Y).")]
+    pub outcome: String,
+
+    /// Unit identifier column name
+    #[schemars(description = "Name of the column identifying units (e.g., 'state', 'country').")]
+    pub unit_col: String,
+
+    /// Time period column name
+    #[schemars(description = "Name of the column identifying time periods (must be numeric).")]
+    pub time_col: String,
+
+    /// Treated unit identifier
+    #[schemars(description = "Identifier of the treated unit (must match a value in unit_col).")]
+    pub treated_unit: String,
+
+    /// Treatment time period
+    #[schemars(description = "First post-treatment time period (treatment starts at this time).")]
+    pub treatment_time: i64,
+
+    /// Constraint type
+    #[schemars(description = "Weight constraint: 'simplex' (default, sum=1, non-negative), 'lasso', 'ridge', or 'lasso_simplex'.")]
+    pub constraint: Option<String>,
+
+    /// Lambda for Lasso/Ridge constraints
+    #[schemars(description = "Regularization parameter for Lasso or Ridge constraints. Default is 0.1.")]
+    pub lambda: Option<f64>,
+
+    /// Significance level
+    #[schemars(description = "Significance level for prediction intervals. Default is 0.05 (95% PI).")]
+    pub alpha: Option<f64>,
+
+    /// Variance estimation method
+    #[schemars(description = "Out-of-sample variance method: 'subgaussian' (default, more conservative), 'gaussian', 'loo_cv', or 'kfold_cv'.")]
+    pub variance_method: Option<String>,
+
+    /// Number of CV folds
+    #[schemars(description = "Number of folds for K-fold cross-validation (if variance_method='kfold_cv'). Default is 5.")]
+    pub cv_folds: Option<usize>,
+
+    /// Minimum weight threshold
+    #[schemars(description = "Minimum weight to report in output (for sparsity). Default is 0.001.")]
     pub weight_threshold: Option<f64>,
 }
 
@@ -1600,6 +3266,62 @@ pub struct FuzzyRdRequest {
     pub level: Option<f64>,
 }
 
+/// Request for Multi-Cutoff Regression Discontinuity estimation.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct RdMultiRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Outcome variable column name
+    #[schemars(description = "Name of the outcome variable (Y) column.")]
+    pub outcome: String,
+
+    /// Running variable column name
+    #[schemars(description = "Name of the running (forcing) variable (X) column.")]
+    pub running_var: String,
+
+    /// Cutoff values
+    #[schemars(description = "List of cutoff values c1, c2, ..., cJ for the running variable.")]
+    pub cutoffs: Vec<f64>,
+
+    /// Cutoff assignment column (optional)
+    #[schemars(description = "Column indicating which cutoff each observation belongs to (0, 1, ...). If not specified, observations are assigned to the nearest cutoff.")]
+    pub cutoff_col: Option<String>,
+
+    /// Whether to compute pooled estimate
+    #[schemars(description = "Whether to compute a pooled treatment effect across all cutoffs. Default is true.")]
+    pub pooled: Option<bool>,
+
+    /// Pooling weight scheme
+    #[schemars(description = "Weighting scheme for pooling: 'sample_size' (default), 'inverse_variance', or 'equal'.")]
+    pub pooling_weights: Option<String>,
+
+    /// Bandwidth specification
+    #[schemars(description = "Bandwidth specification: single value for global bandwidth, or omit for per-cutoff optimal.")]
+    pub bandwidth: Option<f64>,
+
+    /// Per-cutoff bandwidths
+    #[schemars(description = "List of bandwidths for each cutoff. Must match length of cutoffs if specified.")]
+    pub bandwidths: Option<Vec<f64>>,
+
+    /// Polynomial order for estimation
+    #[schemars(description = "Polynomial order for local polynomial estimation. Default is 1 (local linear).")]
+    pub p: Option<usize>,
+
+    /// Kernel type
+    #[schemars(description = "Kernel function: 'triangular' (default), 'epanechnikov', or 'uniform'.")]
+    pub kernel: Option<String>,
+
+    /// Whether to test for heterogeneity
+    #[schemars(description = "Whether to perform a chi-squared test for heterogeneous effects across cutoffs. Default is true.")]
+    pub test_heterogeneity: Option<bool>,
+
+    /// Confidence level
+    #[schemars(description = "Confidence level for intervals. Default is 0.95.")]
+    pub level: Option<f64>,
+}
+
 /// Request for Logit regression.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct LogitRequest {
@@ -1630,6 +3352,188 @@ pub struct ProbitRequest {
     /// Independent variables (X) column names
     #[schemars(description = "Names of the independent variable (X) columns.")]
     pub x: Vec<String>,
+}
+
+/// Request for multinomial logit regression.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct MultinomRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Dependent variable (Y) column name (categorical outcome)
+    #[schemars(description = "Name of the categorical dependent variable (Y) column.")]
+    pub y: String,
+
+    /// Independent variables (X) column names
+    #[schemars(description = "Names of the independent variable (X) columns.")]
+    pub x: Vec<String>,
+
+    /// Reference category (optional)
+    #[schemars(description = "Reference category for the model. If not specified, the first category (alphabetically) is used.")]
+    pub reference: Option<String>,
+}
+
+/// Request for McFadden's conditional logit (mlogit) model.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct MlogitRequest {
+    /// Name/ID of the dataset (in long format)
+    #[schemars(description = "Name or ID of a dataset in long format (one row per individual-alternative combination).")]
+    pub dataset: String,
+
+    /// Column identifying choice situations (individuals)
+    #[schemars(description = "Column name identifying each choice situation (individual chooser).")]
+    pub choice_id: String,
+
+    /// Column identifying alternatives
+    #[schemars(description = "Column name identifying alternatives (e.g., 'car', 'bus', 'train').")]
+    pub alt_id: String,
+
+    /// Column with binary choice indicator (1 = chosen)
+    #[schemars(description = "Column with binary choice indicator (1 if alternative is chosen, 0 otherwise).")]
+    pub choice: String,
+
+    /// Alternative-specific variables (generic coefficients)
+    #[schemars(description = "Alternative-specific variables that vary across alternatives (e.g., 'price', 'time'). These get generic coefficients (same β across all alternatives).")]
+    pub alt_specific: Vec<String>,
+
+    /// Individual-specific variables (alternative-specific coefficients)
+    #[schemars(description = "Individual-specific variables that are constant across alternatives (e.g., 'income', 'age'). These get alternative-specific coefficients (different γⱼ for each alternative vs reference).")]
+    #[serde(default)]
+    pub ind_specific: Vec<String>,
+
+    /// Reference alternative (optional)
+    #[schemars(description = "Reference alternative for identification. Default: first alternative (alphabetically).")]
+    pub reference: Option<String>,
+}
+
+/// Request for mixed logit (random parameters logit) estimation.
+/// Covers both gmnl and mixl R packages.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct MixedLogitRequest {
+    /// Name/ID of the dataset (in long format)
+    #[schemars(description = "Name or ID of a dataset in long format (one row per individual-alternative combination).")]
+    pub dataset: String,
+
+    /// Column identifying choice situations (individuals)
+    #[schemars(description = "Column name identifying each choice situation (individual chooser).")]
+    pub choice_id: String,
+
+    /// Column identifying alternatives
+    #[schemars(description = "Column name identifying alternatives (e.g., 'car', 'bus', 'train').")]
+    pub alt_id: String,
+
+    /// Column with binary choice indicator (1 = chosen)
+    #[schemars(description = "Column with binary choice indicator (1 if alternative is chosen, 0 otherwise).")]
+    pub choice: String,
+
+    /// Variables to include in the model
+    #[schemars(description = "Variable columns to include in the choice model.")]
+    pub variables: Vec<String>,
+
+    /// Variables with random coefficients
+    #[schemars(description = "Variable names that should have random (mixed) coefficients. If not specified, all variables are random.")]
+    pub random_vars: Option<Vec<String>>,
+
+    /// Distribution for random parameters
+    #[schemars(description = "Distribution for random parameters: 'normal' (default), 'lognormal', 'triangular', 'uniform'.")]
+    pub distribution: Option<String>,
+
+    /// Number of simulation draws
+    #[schemars(description = "Number of simulation draws for MSL estimation. Default: 500. Higher values improve accuracy but increase computation time.")]
+    pub n_draws: Option<usize>,
+
+    /// Use Halton sequences (quasi-random)
+    #[schemars(description = "Use Halton quasi-random sequences instead of pseudo-random draws. Default: true. Improves accuracy.")]
+    pub halton: Option<bool>,
+}
+
+/// Request for ordered logit/probit regression.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct OrderedRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Dependent variable (Y) column name (ordered categorical outcome)
+    #[schemars(description = "Name of the ordered categorical dependent variable (Y) column.")]
+    pub y: String,
+
+    /// Independent variables (X) column names
+    #[schemars(description = "Names of the independent variable (X) columns.")]
+    pub x: Vec<String>,
+
+    /// Model type: "logit" (default) or "probit"
+    #[schemars(description = "Model type: 'logit' (default) or 'probit'.")]
+    pub model_type: Option<String>,
+}
+
+/// Request for negative binomial regression.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct NegBinRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Dependent variable (Y) column name (count data)
+    #[schemars(description = "Name of the count dependent variable (Y) column.")]
+    pub y: String,
+
+    /// Independent variables (X) column names
+    #[schemars(description = "Names of the independent variable (X) columns.")]
+    pub x: Vec<String>,
+
+    /// Initial theta (dispersion) parameter
+    #[schemars(description = "Optional initial theta (dispersion) parameter. If not specified, estimated from data.")]
+    pub init_theta: Option<f64>,
+}
+
+/// Request for zero-inflated models.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ZeroInflRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Dependent variable (Y) column name (count data with excess zeros)
+    #[schemars(description = "Name of the count dependent variable (Y) column.")]
+    pub y: String,
+
+    /// Independent variables (X) column names for count model
+    #[schemars(description = "Names of the independent variable (X) columns for the count model.")]
+    pub x: Vec<String>,
+
+    /// Independent variables (Z) column names for zero-inflation model
+    #[schemars(description = "Names of the variables for the zero-inflation model. If not specified, uses intercept only.")]
+    pub z: Option<Vec<String>>,
+
+    /// Model type: "poisson" (default) or "negbin"
+    #[schemars(description = "Distribution for count model: 'poisson' (default) or 'negbin'.")]
+    pub dist: Option<String>,
+}
+
+/// Request for hurdle model (two-part model for count data with zero inflation).
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct HurdleModelRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Dependent variable (Y) column name (count data with zeros)
+    #[schemars(description = "Name of the count dependent variable (Y) column.")]
+    pub y: String,
+
+    /// Independent variables (X) column names for count model
+    #[schemars(description = "Names of the independent variable (X) columns for the count model.")]
+    pub x: Vec<String>,
+
+    /// Independent variables (Z) column names for binary (hurdle) model
+    #[schemars(description = "Names of the variables for the binary hurdle model. If not specified, uses same as x.")]
+    pub z: Option<Vec<String>>,
+
+    /// Model type: "poisson" (default) or "negbin"
+    #[schemars(description = "Distribution for count model: 'poisson' (default) or 'negbin'.")]
+    pub dist: Option<String>,
 }
 
 /// Request for High-Dimensional Fixed Effects (HDFE) regression.
@@ -1848,6 +3752,26 @@ pub struct VarRequest {
     pub lags: usize,
 }
 
+/// Request for Granger causality test.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct GrangerRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Dependent variable (the "caused" variable)
+    #[schemars(description = "Name of the dependent variable column - the variable being predicted (the 'caused' variable).")]
+    pub dependent: String,
+
+    /// Potential causing variable
+    #[schemars(description = "Name of the potential causing variable column - tests whether this variable helps predict the dependent variable.")]
+    pub cause: String,
+
+    /// Number of lags (optional, default: automatic selection)
+    #[schemars(description = "Number of lags to include in the test. Default: automatic selection using Schwert's rule.")]
+    pub lags: Option<usize>,
+}
+
 /// Request for VARMA (Vector ARMA) model.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct VarmaRequest {
@@ -1962,6 +3886,30 @@ pub struct ArimaForecastRequest {
     /// Forecast horizon
     #[schemars(description = "Number of periods to forecast ahead.")]
     pub horizon: usize,
+}
+
+/// Request for GARCH model fitting (volatility modeling).
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct GarchRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Column name with return series
+    #[schemars(description = "Name of the column containing returns (e.g., stock returns, percentage changes).")]
+    pub column: String,
+
+    /// ARCH order (p) - default 1
+    #[schemars(description = "Number of ARCH (lagged squared residual) terms. Default: 1.")]
+    pub p: Option<usize>,
+
+    /// GARCH order (q) - default 1
+    #[schemars(description = "Number of GARCH (lagged variance) terms. Default: 1.")]
+    pub q: Option<usize>,
+
+    /// Include mean in model - default true
+    #[schemars(description = "Whether to include a mean term in the model. Default: true.")]
+    pub include_mean: Option<bool>,
 }
 
 /// Request for MSTL decomposition.
@@ -2116,6 +4064,54 @@ pub struct StructTsRequest {
     pub period: Option<usize>,
 }
 
+/// Request for CausalImpact analysis (Bayesian Structural Time Series for causal inference).
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CausalImpactRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Column name with response variable (outcome)
+    #[schemars(description = "Name of the column containing the response variable to analyze.")]
+    pub response_col: String,
+
+    /// Column name with time index
+    #[schemars(description = "Name of the column containing the time index (must be integer-like: integers, dates as days since epoch, etc.).")]
+    pub time_col: String,
+
+    /// Start of pre-intervention period (inclusive)
+    #[schemars(description = "Start time value of the pre-intervention period (inclusive). This is the period used to train the model.")]
+    pub pre_period_start: i64,
+
+    /// End of pre-intervention period (inclusive)
+    #[schemars(description = "End time value of the pre-intervention period (inclusive).")]
+    pub pre_period_end: i64,
+
+    /// Start of post-intervention period (inclusive)
+    #[schemars(description = "Start time value of the post-intervention period (inclusive). This is when the intervention occurs.")]
+    pub post_period_start: i64,
+
+    /// End of post-intervention period (inclusive)
+    #[schemars(description = "End time value of the post-intervention period (inclusive).")]
+    pub post_period_end: i64,
+
+    /// Optional control series columns
+    #[schemars(description = "Optional names of columns to use as control time series. These should be correlated with the response but unaffected by the intervention.")]
+    pub control_cols: Option<Vec<String>>,
+
+    /// Significance level (default 0.05)
+    #[schemars(description = "Significance level for credible intervals. Default: 0.05 (95% credible intervals).")]
+    pub alpha: Option<f64>,
+
+    /// Include trend component
+    #[schemars(description = "Whether to include a trend component in the model. Default: false.")]
+    pub include_trend: Option<bool>,
+
+    /// Seasonal period
+    #[schemars(description = "If the data has seasonality, specify the period (e.g., 12 for monthly data with yearly seasonality).")]
+    pub seasonal_period: Option<usize>,
+}
+
 /// Request for Mahalanobis distance computation.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct MahalanobisRequest {
@@ -2130,6 +4126,74 @@ pub struct MahalanobisRequest {
     /// Optional center vector
     #[schemars(description = "Optional center vector. If not provided, uses column means.")]
     pub center: Option<Vec<f64>>,
+}
+
+/// Request for median polish (robust two-way decomposition).
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct MedpolishRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Column names to use as the matrix
+    #[schemars(description = "Names of the numeric columns to use as the matrix for median polish. The columns become the columns of the matrix, and each row of the dataset becomes a row of the matrix.")]
+    pub columns: Vec<String>,
+
+    /// Convergence tolerance
+    #[schemars(description = "Convergence tolerance (default: 0.01). Iteration stops when the proportional reduction in sum of absolute residuals is less than this value.")]
+    pub eps: Option<f64>,
+
+    /// Maximum iterations
+    #[schemars(description = "Maximum number of iterations (default: 10).")]
+    pub max_iter: Option<usize>,
+
+    /// Handle missing values
+    #[schemars(description = "Whether to remove NaN values when computing medians (default: false). If false, the function fails if NaN values are present.")]
+    pub na_rm: Option<bool>,
+}
+
+/// Request for isotonic regression.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct IsoregRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Column for x values (predictor)
+    #[schemars(description = "Name of the column to use as x (predictor). If not provided, uses row index.")]
+    pub x_column: Option<String>,
+
+    /// Column for y values (response)
+    #[schemars(description = "Name of the column to use as y (response variable).")]
+    pub y_column: String,
+}
+
+/// Request for log-linear model fitting.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct LoglinRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset containing contingency table data.")]
+    pub dataset: String,
+
+    /// Count column
+    #[schemars(description = "Name of the column containing the cell counts.")]
+    pub count_column: String,
+
+    /// Factor columns that define the contingency table dimensions
+    #[schemars(description = "Names of the factor columns that define the contingency table dimensions.")]
+    pub factor_columns: Vec<String>,
+
+    /// Model margins to fit
+    #[schemars(description = "Margins to fit in the model. Each margin is a list of factor indices (0-based). For example, [[0,1], [1,2]] fits the (0,1) and (1,2) two-way interactions. If not specified, fits an independence model (all main effects only).")]
+    pub margins: Option<Vec<Vec<usize>>>,
+
+    /// Convergence tolerance
+    #[schemars(description = "Convergence tolerance for IPF algorithm (default: 0.1).")]
+    pub eps: Option<f64>,
+
+    /// Maximum iterations
+    #[schemars(description = "Maximum iterations for IPF algorithm (default: 20).")]
+    pub max_iter: Option<usize>,
 }
 
 // ============================================================================
@@ -2336,6 +4400,50 @@ pub struct TsneRequest {
     pub seed: Option<u64>,
 }
 
+/// Request for Classical Multidimensional Scaling (cmdscale).
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CmdscaleRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Columns to use for computing distances
+    #[schemars(description = "Names of the numeric columns to include. Euclidean distances will be computed from these columns.")]
+    pub columns: Vec<String>,
+
+    /// Number of output dimensions (default: 2)
+    #[schemars(description = "Number of dimensions in the output configuration. Default is 2.")]
+    pub k: Option<usize>,
+
+    /// Whether input is already a distance matrix
+    #[schemars(description = "Set to true if the input columns represent a distance matrix. Default is false (data is converted to distances).")]
+    pub is_distance_matrix: Option<bool>,
+}
+
+/// Request for cutting a hierarchical clustering tree (cutree).
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CutreeRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Columns to use for hierarchical clustering
+    #[schemars(description = "Names of the numeric columns to cluster.")]
+    pub columns: Vec<String>,
+
+    /// Number of clusters to form
+    #[schemars(description = "Number of clusters to cut the tree into. Takes priority over cut_height.")]
+    pub k: Option<usize>,
+
+    /// Height at which to cut the tree
+    #[schemars(description = "Height (distance threshold) at which to cut the dendrogram. Ignored if k is specified.")]
+    pub cut_height: Option<f64>,
+
+    /// Linkage method for hierarchical clustering
+    #[schemars(description = "Linkage method: 'single', 'complete', 'average', or 'ward'. Default is 'ward'.")]
+    pub linkage: Option<String>,
+}
+
 /// Request for Random Forest regression.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct RandomForestRequest {
@@ -2398,6 +4506,562 @@ pub struct SvmRequest {
     /// Convergence tolerance (default: 1e-3)
     #[schemars(description = "Convergence tolerance. Default is 0.001.")]
     pub tolerance: Option<f64>,
+}
+
+/// Request for Causal Forest estimation (Wager & Athey 2018).
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CausalForestRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Outcome column name
+    #[schemars(description = "Name of the outcome variable (Y).")]
+    pub outcome: String,
+
+    /// Treatment column name
+    #[schemars(description = "Name of the binary treatment variable (W). Must be 0/1.")]
+    pub treatment: String,
+
+    /// Covariate column names
+    #[schemars(description = "Names of the covariate columns (X variables).")]
+    pub covariates: Vec<String>,
+
+    /// Number of trees (default: 2000)
+    #[schemars(description = "Number of trees in the forest. Default is 2000.")]
+    pub n_trees: Option<usize>,
+
+    /// Minimum node size (default: 5)
+    #[schemars(description = "Minimum number of observations in each leaf. Default is 5.")]
+    pub min_node_size: Option<usize>,
+
+    /// Maximum tree depth (default: 10)
+    #[schemars(description = "Maximum depth of each tree. Default is 10.")]
+    pub max_depth: Option<usize>,
+
+    /// Use honest splitting (default: true)
+    #[schemars(description = "Whether to use honest splitting (separate data for tree structure and estimation). Default is true.")]
+    pub honesty: Option<bool>,
+
+    /// Random seed for reproducibility
+    #[schemars(description = "Optional random seed for reproducible results.")]
+    pub seed: Option<u64>,
+}
+
+/// Request for BART-based Causal Inference (bartCause style).
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct BartCausalRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Outcome column name
+    #[schemars(description = "Name of the outcome variable (Y).")]
+    pub outcome: String,
+
+    /// Treatment column name
+    #[schemars(description = "Name of the binary treatment variable (W). Must be 0/1.")]
+    pub treatment: String,
+
+    /// Covariate column names
+    #[schemars(description = "Names of the covariate columns (X variables).")]
+    pub covariates: Vec<String>,
+
+    /// Number of trees per response surface (default: 200)
+    #[schemars(description = "Number of trees in each response surface ensemble. Default is 200.")]
+    pub n_trees: Option<usize>,
+
+    /// Maximum tree depth (default: 4)
+    #[schemars(description = "Maximum depth of each tree. Default is 4 (BART uses shallow trees).")]
+    pub max_depth: Option<usize>,
+
+    /// Number of bootstrap samples for uncertainty (default: 100)
+    #[schemars(description = "Number of bootstrap samples for confidence intervals. Default is 100.")]
+    pub n_bootstrap: Option<usize>,
+
+    /// Include propensity score as covariate (default: false)
+    #[schemars(description = "Whether to include estimated propensity score as a covariate. Default is false.")]
+    pub include_propensity: Option<bool>,
+
+    /// Random seed for reproducibility
+    #[schemars(description = "Optional random seed for reproducible results.")]
+    pub seed: Option<u64>,
+}
+
+/// Request for Treatment Effect Heterogeneity Test (hettx).
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct HetTxRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Outcome column name
+    #[schemars(description = "Name of the outcome variable (Y).")]
+    pub outcome: String,
+
+    /// Treatment column name
+    #[schemars(description = "Name of the binary treatment indicator (0/1).")]
+    pub treatment: String,
+
+    /// Covariate column names
+    #[schemars(description = "Names of covariate columns for matching and decomposition.")]
+    pub covariates: Vec<String>,
+
+    /// Number of permutations (default: 1000)
+    #[schemars(description = "Number of permutations for Fisherian inference. Default is 1000.")]
+    pub n_permutations: Option<usize>,
+
+    /// Test statistic type (default: 'variance')
+    #[schemars(description = "Test statistic: 'variance' (default), 'range', 'iqr', or 'mad'.")]
+    pub test_statistic: Option<String>,
+
+    /// Whether to decompose heterogeneity (default: true)
+    #[schemars(description = "Whether to decompose heterogeneity into systematic and idiosyncratic components. Default is true.")]
+    pub decompose: Option<bool>,
+
+    /// Effect estimation method (default: 'matching')
+    #[schemars(description = "Method for estimating individual effects: 'matching' (default), 'regression', or 'stratified'.")]
+    pub effect_method: Option<String>,
+
+    /// Number of nearest neighbors for matching (default: 3)
+    #[schemars(description = "Number of nearest neighbors for matching-based imputation. Default is 3.")]
+    pub n_neighbors: Option<usize>,
+
+    /// Random seed for reproducibility
+    #[schemars(description = "Optional random seed for reproducible results.")]
+    pub seed: Option<u64>,
+}
+
+/// Request for Projection Pursuit Regression (PPR).
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct PprRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Feature column names
+    #[schemars(description = "Names of the feature columns (X variables).")]
+    pub features: Vec<String>,
+
+    /// Target column name
+    #[schemars(description = "Name of the target column (Y variable).")]
+    pub target: String,
+
+    /// Number of terms (default: 1)
+    #[schemars(description = "Number of terms in the PPR model. Default is 1.")]
+    pub nterms: Option<usize>,
+
+    /// Maximum terms to consider (default: nterms)
+    #[schemars(description = "Maximum terms to consider during forward selection. Default is nterms.")]
+    pub max_terms: Option<usize>,
+
+    /// Smoothing method
+    #[schemars(description = "Smoothing method for ridge functions: 'supsmu' (default), 'spline', or 'gcvspline'.")]
+    pub sm_method: Option<String>,
+
+    /// Bass parameter for supsmu (0-10)
+    #[schemars(description = "Bass parameter for supsmu smoothing (0-10). Higher = smoother. Default is 0.")]
+    pub bass: Option<f64>,
+}
+
+/// Request for SuperSmoother (supsmu).
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SupsmuRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// X column name
+    #[schemars(description = "Name of the predictor column (X variable).")]
+    pub x: String,
+
+    /// Y column name
+    #[schemars(description = "Name of the response column (Y variable).")]
+    pub y: String,
+
+    /// Optional weight column
+    #[schemars(description = "Optional name of the weight column.")]
+    pub weights: Option<String>,
+
+    /// Span parameter (0-1)
+    #[schemars(description = "Fixed span fraction (0-1). If not specified, cross-validation selects optimal span.")]
+    pub span: Option<f64>,
+
+    /// Bass parameter for smoothness (0-10)
+    #[schemars(description = "Bass parameter controlling smoothness (0-10). Higher = smoother. Default is 0.")]
+    pub bass: Option<f64>,
+
+    /// Periodic boundary conditions
+    #[schemars(description = "Whether to treat x as periodic on [0, 1]. Default is false.")]
+    pub periodic: Option<bool>,
+}
+
+/// Request for Tukey's resistant line (line).
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct LineRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// X column name
+    #[schemars(description = "Name of the predictor column (X variable).")]
+    pub x: String,
+
+    /// Y column name
+    #[schemars(description = "Name of the response column (Y variable).")]
+    pub y: String,
+
+    /// Number of polishing iterations
+    #[schemars(description = "Number of polishing iterations. Default is 1.")]
+    pub iter: Option<usize>,
+}
+
+/// Request for cumulative periodogram (cpgram).
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CpgramRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Time series column name
+    #[schemars(description = "Name of the time series column.")]
+    pub column: String,
+
+    /// Taper proportion
+    #[schemars(description = "Proportion of data to taper at each end (0.0-0.5). Default is 0.1.")]
+    pub taper: Option<f64>,
+}
+
+/// Request for Toeplitz matrix construction.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ToeplitzRequest {
+    /// First column (and row for symmetric matrix)
+    #[schemars(description = "Values for the first column. For a symmetric matrix, this is also the first row.")]
+    pub column: Vec<f64>,
+
+    /// First row (optional, for asymmetric matrix)
+    #[schemars(description = "Values for the first row. If not specified, creates a symmetric matrix using column values.")]
+    pub row: Option<Vec<f64>>,
+}
+
+/// Request for model tables from ANOVA.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ModelTablesRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Response column
+    #[schemars(description = "Name of the response column (Y variable).")]
+    pub response: String,
+
+    /// Factor column(s) for ANOVA
+    #[schemars(description = "Name of the factor column for one-way ANOVA, or list of two factor columns for two-way ANOVA.")]
+    pub factors: Vec<String>,
+
+    /// Type of table
+    #[schemars(description = "Type of table: 'means' (default) or 'effects' (deviations from grand mean).")]
+    pub table_type: Option<String>,
+
+    /// Whether to compute standard errors
+    #[schemars(description = "Whether to compute standard errors. Default is true.")]
+    pub se: Option<bool>,
+}
+
+/// Request for standard errors of contrasts (se.contrast).
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SeContrastRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Response column
+    #[schemars(description = "Name of the response column (Y variable).")]
+    pub response: String,
+
+    /// Factor column for ANOVA
+    #[schemars(description = "Name of the factor column for one-way ANOVA.")]
+    pub factor: String,
+
+    /// Contrast coefficients
+    #[schemars(description = "Contrast coefficients. Each inner array is one contrast (must sum to 0).")]
+    pub contrasts: Option<Vec<Vec<f64>>>,
+
+    /// Contrast type (if contrasts not provided)
+    #[schemars(description = "Type of contrasts to generate: 'treatment', 'helmert', 'sum', or 'poly'. Only used if contrasts not provided.")]
+    pub contrast_type: Option<String>,
+}
+
+/// Request for weighted mean.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct WeightedMeanRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Column to compute weighted mean of
+    #[schemars(description = "Name of the numeric column to compute weighted mean.")]
+    pub column: String,
+
+    /// Weight column
+    #[schemars(description = "Name of the weight column.")]
+    pub weights: String,
+
+    /// Whether to remove NA values
+    #[schemars(description = "Whether to remove NA values before computation. Default is true.")]
+    pub na_rm: Option<bool>,
+}
+
+/// Request for weighted covariance matrix.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CovWtRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Columns to compute covariance for
+    #[schemars(description = "Names of the numeric columns to include in the covariance matrix.")]
+    pub columns: Vec<String>,
+
+    /// Weight column
+    #[schemars(description = "Name of the weight column.")]
+    pub weights: String,
+
+    /// Whether to center the data
+    #[schemars(description = "Whether to center the data (subtract weighted mean). Default is true.")]
+    pub center: Option<bool>,
+
+    /// Covariance method
+    #[schemars(description = "Method for computing covariance: 'unbiased' (default) or 'ml'.")]
+    pub method: Option<String>,
+}
+
+/// Request for Mauchly's sphericity test.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct MauchlyTestRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Columns for repeated measures
+    #[schemars(description = "Names of columns representing repeated measures (at least 3 required).")]
+    pub columns: Vec<String>,
+}
+
+/// Request for stepwise model selection.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct StepRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Response variable
+    #[schemars(description = "Name of the response column (Y variable).")]
+    pub response: String,
+
+    /// All candidate predictors
+    #[schemars(description = "Names of all candidate predictor columns.")]
+    pub predictors: Vec<String>,
+
+    /// Direction of stepwise selection
+    #[schemars(description = "Direction: 'both' (default), 'forward', or 'backward'.")]
+    pub direction: Option<String>,
+
+    /// Selection criterion
+    #[schemars(description = "Selection criterion: 'aic' (default) or 'bic'.")]
+    pub criterion: Option<String>,
+}
+
+/// Request for time series lag operation.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct LagRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Column to lag
+    #[schemars(description = "Name of the time series column to lag.")]
+    pub column: String,
+
+    /// Number of lags
+    #[schemars(description = "Number of positions to lag. Positive = shift back, negative = shift forward. Default is 1.")]
+    pub k: Option<i32>,
+}
+
+/// Request for time series embedding.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct EmbedRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Column to embed
+    #[schemars(description = "Name of the time series column to embed.")]
+    pub column: String,
+
+    /// Embedding dimension
+    #[schemars(description = "Number of columns in the embedding matrix (lag dimension).")]
+    pub dimension: usize,
+}
+
+/// Request for inverse differencing.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DiffinvRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Column containing differences
+    #[schemars(description = "Name of the column containing differenced values.")]
+    pub column: String,
+
+    /// Initial values for integration
+    #[schemars(description = "Initial values to start the cumulative sum.")]
+    pub xi: Option<Vec<f64>>,
+
+    /// Difference lag
+    #[schemars(description = "Lag for differencing. Default is 1.")]
+    pub lag: Option<usize>,
+
+    /// Number of differences to invert
+    #[schemars(description = "Number of times differencing was applied. Default is 1.")]
+    pub differences: Option<usize>,
+}
+
+/// Request for linear filtering.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct FilterRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Column to filter
+    #[schemars(description = "Name of the time series column to filter.")]
+    pub column: String,
+
+    /// Filter coefficients
+    #[schemars(description = "Filter coefficients for convolution or recursive filtering.")]
+    pub filter: Vec<f64>,
+
+    /// Filter method
+    #[schemars(description = "Method: 'convolution' (default) or 'recursive'.")]
+    pub method: Option<String>,
+
+    /// Sides for convolution
+    #[schemars(description = "For convolution: 1 (past only) or 2 (centered, default).")]
+    pub sides: Option<usize>,
+}
+
+/// Request for time series window extraction.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct WindowRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Column to extract window from
+    #[schemars(description = "Name of the time series column.")]
+    pub column: String,
+
+    /// Start index (0-based)
+    #[schemars(description = "Start index (0-based, inclusive). If not specified, starts from beginning.")]
+    pub start: Option<usize>,
+
+    /// End index (0-based)
+    #[schemars(description = "End index (0-based, exclusive). If not specified, goes to end.")]
+    pub end: Option<usize>,
+}
+
+/// Request for theoretical ARMA ACF.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ArmaAcfRequest {
+    /// AR coefficients
+    #[schemars(description = "Autoregressive coefficients (phi). Empty for MA-only model.")]
+    pub ar: Option<Vec<f64>>,
+
+    /// MA coefficients
+    #[schemars(description = "Moving average coefficients (theta). Empty for AR-only model.")]
+    pub ma: Option<Vec<f64>>,
+
+    /// Maximum lag
+    #[schemars(description = "Maximum lag for ACF computation. Default is 10.")]
+    pub lag_max: Option<usize>,
+
+    /// Whether to compute PACF
+    #[schemars(description = "If true, compute partial ACF instead of ACF. Default is false.")]
+    pub pacf: Option<bool>,
+}
+
+/// Request for ARMA to MA conversion.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ArmaToMaRequest {
+    /// AR coefficients
+    #[schemars(description = "Autoregressive coefficients (phi).")]
+    pub ar: Option<Vec<f64>>,
+
+    /// MA coefficients
+    #[schemars(description = "Moving average coefficients (theta).")]
+    pub ma: Option<Vec<f64>>,
+
+    /// Number of MA coefficients to compute
+    #[schemars(description = "Number of MA (psi) weights to compute. Default is 10.")]
+    pub lag_max: Option<usize>,
+}
+
+/// Request for ACF to AR conversion.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct Acf2ArRequest {
+    /// ACF values
+    #[schemars(description = "Autocorrelation function values starting at lag 1.")]
+    pub acf: Vec<f64>,
+}
+
+/// Request for ARIMA simulation.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ArimaSimRequest {
+    /// Number of observations to simulate
+    #[schemars(description = "Number of observations to simulate.")]
+    pub n: usize,
+
+    /// AR coefficients
+    #[schemars(description = "Autoregressive coefficients.")]
+    pub ar: Option<Vec<f64>>,
+
+    /// MA coefficients
+    #[schemars(description = "Moving average coefficients.")]
+    pub ma: Option<Vec<f64>>,
+
+    /// Differencing order
+    #[schemars(description = "Order of differencing. Default is 0.")]
+    pub d: Option<usize>,
+
+    /// Innovation standard deviation
+    #[schemars(description = "Standard deviation of innovations. Default is 1.0.")]
+    pub sd: Option<f64>,
+
+    /// Random seed
+    #[schemars(description = "Random seed for reproducibility.")]
+    pub seed: Option<u64>,
+}
+
+/// Request for running median smoothing.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct RunmedRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Column to smooth
+    #[schemars(description = "Name of the column to apply running median.")]
+    pub column: String,
+
+    /// Window width
+    #[schemars(description = "Width of the median window (must be odd).")]
+    pub k: usize,
+
+    /// End rule
+    #[schemars(description = "How to handle ends: 'keep' (default), 'constant', or 'median'.")]
+    pub endrule: Option<String>,
 }
 
 // ============================================================================
@@ -3763,6 +6427,7 @@ impl AnalyticsServer {
         Self {
             datasets: Arc::new(RwLock::new(HashMap::new())),
             cleaning_sessions: Arc::new(RwLock::new(HashMap::new())),
+            spatial_weights: Arc::new(RwLock::new(HashMap::new())),
             global_seed: Arc::new(RwLock::new(None)),
             tool_router: Self::tool_router(),
         }
@@ -3775,6 +6440,7 @@ impl AnalyticsServer {
         Self {
             datasets: session.datasets.clone(),
             cleaning_sessions: Arc::new(RwLock::new(HashMap::new())),
+            spatial_weights: Arc::new(RwLock::new(HashMap::new())),
             global_seed: session.global_seed.clone(),
             tool_router: Self::tool_router(),
         }
@@ -3964,6 +6630,28 @@ impl AnalyticsServer {
                     "required": ["dataset", "y", "x", "entity_col"]
                 }),
             },
+            ToolDefinition {
+                name: "panel_gmm".to_string(),
+                description: "Run Arellano-Bond or System GMM for dynamic panel data models.".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "dataset": {"type": "string"},
+                        "y": {"type": "string"},
+                        "x": {"type": "array", "items": {"type": "string"}},
+                        "entity_var": {"type": "string"},
+                        "time_var": {"type": "string"},
+                        "lags": {"type": "integer", "default": 1},
+                        "transform": {"type": "string", "enum": ["difference", "system"], "default": "difference"},
+                        "step": {"type": "string", "enum": ["onestep", "twostep"], "default": "twostep"},
+                        "max_lag": {"type": "integer"},
+                        "min_lag": {"type": "integer", "default": 2},
+                        "collapse": {"type": "boolean", "default": false},
+                        "robust": {"type": "boolean", "default": true}
+                    },
+                    "required": ["dataset", "y", "x", "entity_var", "time_var"]
+                }),
+            },
             // Causal inference
             ToolDefinition {
                 name: "iv_2sls".to_string(),
@@ -3992,6 +6680,21 @@ impl AnalyticsServer {
                         "exogenous": {"type": "array", "items": {"type": "string"}}
                     },
                     "required": ["dataset", "endogenous", "instruments"]
+                }),
+            },
+            ToolDefinition {
+                name: "iv_sargan_test".to_string(),
+                description: "Run Sargan test of overidentifying restrictions for IV/2SLS. Tests whether instruments are valid (uncorrelated with the error term). Requires more instruments than endogenous variables.".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "dataset": {"type": "string", "description": "Name of the dataset"},
+                        "y": {"type": "string", "description": "Dependent variable name"},
+                        "x_exog": {"type": "array", "items": {"type": "string"}, "description": "Exogenous variables (may be empty)"},
+                        "x_endog": {"type": "array", "items": {"type": "string"}, "description": "Endogenous variables to be instrumented"},
+                        "instruments": {"type": "array", "items": {"type": "string"}, "description": "Instrumental variables (must exceed x_endog count)"}
+                    },
+                    "required": ["dataset", "y", "x_endog", "instruments"]
                 }),
             },
             ToolDefinition {
@@ -4088,6 +6791,35 @@ impl AnalyticsServer {
                         "dataset": {"type": "string"},
                         "columns": {"type": "array", "items": {"type": "string"}},
                         "n_components": {"type": "integer"}
+                    },
+                    "required": ["dataset", "columns"]
+                }),
+            },
+            ToolDefinition {
+                name: "ml_cmdscale".to_string(),
+                description: "Classical Multidimensional Scaling for embedding distances into Euclidean space.".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "dataset": {"type": "string"},
+                        "columns": {"type": "array", "items": {"type": "string"}},
+                        "k": {"type": "integer"},
+                        "is_distance_matrix": {"type": "boolean"}
+                    },
+                    "required": ["dataset", "columns"]
+                }),
+            },
+            ToolDefinition {
+                name: "ml_cutree".to_string(),
+                description: "Cut hierarchical clustering dendrogram into groups.".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "dataset": {"type": "string"},
+                        "columns": {"type": "array", "items": {"type": "string"}},
+                        "k": {"type": "integer"},
+                        "cut_height": {"type": "number"},
+                        "linkage": {"type": "string"}
                     },
                     "required": ["dataset", "columns"]
                 }),
@@ -4678,6 +7410,13 @@ impl AnalyticsServer {
                     .panel_random_effects(Parameters(req))
                     .await
             }
+            "panel_gmm" => {
+                let req: GmmRequest = serde_json::from_value(arguments)
+                    .map_err(|e| format!("Invalid arguments: {}", e))?;
+                session_server
+                    .panel_gmm(Parameters(req))
+                    .await
+            }
             "iv_2sls" => {
                 let req: IV2SLSRequest = serde_json::from_value(arguments)
                     .map_err(|e| format!("Invalid arguments: {}", e))?;
@@ -4706,11 +7445,46 @@ impl AnalyticsServer {
                     .treatment_doubly_robust(Parameters(req))
                     .await
             }
+            "treatment_tmle" => {
+                let req: TmleRequest = serde_json::from_value(arguments)
+                    .map_err(|e| format!("Invalid arguments: {}", e))?;
+                session_server
+                    .treatment_tmle(Parameters(req))
+                    .await
+            }
+            "collaborative_tmle" => {
+                let req: CTmleRequest = serde_json::from_value(arguments)
+                    .map_err(|e| format!("Invalid arguments: {}", e))?;
+                session_server
+                    .collaborative_tmle(Parameters(req))
+                    .await
+            }
+            "ltmle" => {
+                let req: LtmleRequest = serde_json::from_value(arguments)
+                    .map_err(|e| format!("Invalid arguments: {}", e))?;
+                session_server
+                    .ltmle(Parameters(req))
+                    .await
+            }
+            "regression_standardization" => {
+                let req: StdRegRequest = serde_json::from_value(arguments)
+                    .map_err(|e| format!("Invalid arguments: {}", e))?;
+                session_server
+                    .regression_standardization(Parameters(req))
+                    .await
+            }
             "mediation_analysis" => {
                 let req: MediationRequest = serde_json::from_value(arguments)
                     .map_err(|e| format!("Invalid arguments: {}", e))?;
                 session_server
                     .mediation_analysis(Parameters(req))
+                    .await
+            }
+            "natural_effects_mediation" => {
+                let req: NaturalEffectsRequest = serde_json::from_value(arguments)
+                    .map_err(|e| format!("Invalid arguments: {}", e))?;
+                session_server
+                    .natural_effects_mediation(Parameters(req))
                     .await
             }
             "logit" => {
@@ -4727,6 +7501,34 @@ impl AnalyticsServer {
                     .probit(Parameters(req))
                     .await
             }
+            "multinom" => {
+                let req: MultinomRequest = serde_json::from_value(arguments)
+                    .map_err(|e| format!("Invalid arguments: {}", e))?;
+                session_server
+                    .multinom(Parameters(req))
+                    .await
+            }
+            "ordered_model" => {
+                let req: OrderedRequest = serde_json::from_value(arguments)
+                    .map_err(|e| format!("Invalid arguments: {}", e))?;
+                session_server
+                    .ordered_model(Parameters(req))
+                    .await
+            }
+            "negbin" => {
+                let req: NegBinRequest = serde_json::from_value(arguments)
+                    .map_err(|e| format!("Invalid arguments: {}", e))?;
+                session_server
+                    .negbin(Parameters(req))
+                    .await
+            }
+            "zeroinfl" => {
+                let req: ZeroInflRequest = serde_json::from_value(arguments)
+                    .map_err(|e| format!("Invalid arguments: {}", e))?;
+                session_server
+                    .zeroinfl(Parameters(req))
+                    .await
+            }
             "ml_kmeans" => {
                 let req: KMeansRequest = serde_json::from_value(arguments)
                     .map_err(|e| format!("Invalid arguments: {}", e))?;
@@ -4739,6 +7541,20 @@ impl AnalyticsServer {
                     .map_err(|e| format!("Invalid arguments: {}", e))?;
                 session_server
                     .ml_pca(Parameters(req))
+                    .await
+            }
+            "ml_cmdscale" => {
+                let req: CmdscaleRequest = serde_json::from_value(arguments)
+                    .map_err(|e| format!("Invalid arguments: {}", e))?;
+                session_server
+                    .ml_cmdscale(Parameters(req))
+                    .await
+            }
+            "ml_cutree" => {
+                let req: CutreeRequest = serde_json::from_value(arguments)
+                    .map_err(|e| format!("Invalid arguments: {}", e))?;
+                session_server
+                    .ml_cutree(Parameters(req))
                     .await
             }
             "viz_histogram" => {
@@ -8867,6 +11683,419 @@ impl AnalyticsServer {
         )]))
     }
 
+    /// Run Tukey's Median Polish for robust two-way decomposition.
+    ///
+    /// # References
+    ///
+    /// - Tukey, J. W. (1977). Exploratory Data Analysis. Addison-Wesley.
+    #[tool(description = "Run Tukey's Median Polish for robust two-way decomposition of a matrix. Fits an additive model (constant + row effects + column effects + residuals) iteratively using medians instead of means, making it resistant to outliers. Returns the overall effect, row effects, column effects, and residuals. Useful for exploratory data analysis of two-way tables.")]
+    async fn descriptive_medpolish(
+        &self,
+        Parameters(request): Parameters<MedpolishRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        // Extract the columns as a matrix (Vec<Vec<f64>>)
+        let df = dataset.df();
+        let n_rows = df.height();
+
+        if request.columns.is_empty() {
+            return Ok(CallToolResult::error(vec![Content::text(
+                "No columns specified for median polish. Provide at least 2 columns."
+            )]));
+        }
+
+        // Build the matrix from columns
+        let mut matrix: Vec<Vec<f64>> = Vec::with_capacity(n_rows);
+        for row_idx in 0..n_rows {
+            let mut row_values: Vec<f64> = Vec::with_capacity(request.columns.len());
+            for col_name in &request.columns {
+                let col = match df.column(col_name) {
+                    Ok(c) => c,
+                    Err(_) => {
+                        return Ok(CallToolResult::error(vec![Content::text(format!(
+                            "Column '{}' not found in dataset.", col_name
+                        ))]));
+                    }
+                };
+                let val = match col.f64() {
+                    Ok(ca) => ca.get(row_idx).unwrap_or(f64::NAN),
+                    Err(_) => {
+                        return Ok(CallToolResult::error(vec![Content::text(format!(
+                            "Column '{}' is not numeric.", col_name
+                        ))]));
+                    }
+                };
+                row_values.push(val);
+            }
+            matrix.push(row_values);
+        }
+
+        let na_rm = request.na_rm.unwrap_or(false);
+
+        let result = match run_medpolish(&matrix, request.eps, request.max_iter, na_rm) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Median polish failed: {}", e
+                ))]));
+            }
+        };
+
+        // Build JSON output
+        let json_output = serde_json::json!({
+            "overall": format!("{:.6}", result.overall),
+            "row_effects": result.row.iter()
+                .enumerate()
+                .map(|(i, &r)| serde_json::json!({
+                    "row": i + 1,
+                    "effect": format!("{:.6}", r)
+                }))
+                .collect::<Vec<_>>(),
+            "column_effects": request.columns.iter()
+                .zip(result.col.iter())
+                .map(|(name, &c)| serde_json::json!({
+                    "column": name,
+                    "effect": format!("{:.6}", c)
+                }))
+                .collect::<Vec<_>>(),
+            "dimensions": {
+                "n_rows": result.n_rows,
+                "n_cols": result.n_cols
+            },
+            "convergence": {
+                "converged": result.converged,
+                "iterations": result.iterations,
+                "final_sum_abs_residuals": format!("{:.6}", result.final_sum)
+            },
+            "residuals_summary": {
+                "max_abs_residual": format!("{:.6}", result.residuals.iter()
+                    .flat_map(|row| row.iter())
+                    .map(|r| r.abs())
+                    .fold(0.0f64, f64::max)),
+                "sum_abs_residuals": format!("{:.6}", result.final_sum)
+            },
+            "interpretation": format!(
+                "Median polish decomposed a {}×{} matrix into: overall={:.4}, {} row effects, {} column effects. {} after {} iterations. The additive model is: value = overall + row_effect + column_effect + residual.",
+                result.n_rows, result.n_cols, result.overall,
+                result.n_rows, result.n_cols,
+                if result.converged { "Converged" } else { "Did not converge" },
+                result.iterations
+            ),
+            "references": "Tukey, J. W. (1977). Exploratory Data Analysis. Addison-Wesley."
+        });
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&json_output).unwrap_or_default()
+        )]))
+    }
+
+    /// Run isotonic regression (monotonic constraint).
+    #[tool(description = "Run isotonic (monotonically increasing) least squares regression using the Pool Adjacent Violators Algorithm (PAVA). Returns piecewise constant fitted values that are monotonically non-decreasing. Useful for calibration, dose-response modeling, and trend analysis where monotonicity is assumed.")]
+    async fn descriptive_isoreg(
+        &self,
+        Parameters(request): Parameters<IsoregRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        use p2a_core::polars::prelude::*;
+
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let df = dataset.df();
+
+        // Extract y column
+        let y_col = match df.column(&request.y_column) {
+            Ok(c) => c,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Y column '{}' not found: {}", request.y_column, e
+                ))]));
+            }
+        };
+
+        let y: Vec<f64> = match y_col.cast(&DataType::Float64) {
+            Ok(c) => match c.f64() {
+                Ok(f) => f.into_no_null_iter().collect(),
+                Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Y column not numeric: {}", e
+                ))])),
+            },
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!(
+                "Cannot cast Y column: {}", e
+            ))])),
+        };
+
+        // Extract or generate x
+        let x: Vec<f64> = if let Some(ref x_col_name) = request.x_column {
+            let x_col = match df.column(x_col_name) {
+                Ok(c) => c,
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "X column '{}' not found: {}", x_col_name, e
+                    ))]));
+                }
+            };
+            match x_col.cast(&DataType::Float64) {
+                Ok(c) => match c.f64() {
+                    Ok(f) => f.into_no_null_iter().collect(),
+                    Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "X column not numeric: {}", e
+                    ))])),
+                },
+                Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Cannot cast X column: {}", e
+                ))])),
+            }
+        } else {
+            // Use row index as x
+            (1..=y.len()).map(|i| i as f64).collect()
+        };
+
+        let result = match isoreg(&x, &y) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Isotonic regression failed: {}", e
+                ))]));
+            }
+        };
+
+        // Build JSON output
+        let json_output = serde_json::json!({
+            "n_observations": result.n,
+            "n_knots": result.i_knots.len(),
+            "was_sorted": result.is_ordered,
+            "knots": result.i_knots.iter().map(|&k| serde_json::json!({
+                "index": k,
+                "x": result.x[k],
+                "fitted": result.yf[k]
+            })).collect::<Vec<_>>(),
+            "fitted_values": &result.yf[..result.n.min(50)],
+            "note": if result.n > 50 { Some(format!("Showing first 50 of {} fitted values", result.n)) } else { None },
+            "interpretation": format!(
+                "Isotonic regression on {} observations produced {} knots (level changes). The fitted values are monotonically non-decreasing and minimize squared error subject to this constraint.",
+                result.n, result.i_knots.len()
+            ),
+            "references": "Barlow et al. (1972). Statistical Inference Under Order Restrictions."
+        });
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&json_output).unwrap_or_default()
+        )]))
+    }
+
+    /// Fit log-linear model to contingency table.
+    #[tool(description = "Fit a log-linear model to a contingency table using Iterative Proportional Fitting (IPF). Tests associations among categorical variables. Returns likelihood ratio test (G²), Pearson chi-squared, degrees of freedom, and p-values. Use for analyzing multidimensional contingency tables and testing independence or conditional independence hypotheses.")]
+    async fn stats_loglin(
+        &self,
+        Parameters(request): Parameters<LoglinRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        use p2a_core::polars::prelude::*;
+        use std::collections::HashMap;
+
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let df = dataset.df();
+
+        // Extract count column
+        let count_col = match df.column(&request.count_column) {
+            Ok(c) => c,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Count column '{}' not found: {}", request.count_column, e
+                ))]));
+            }
+        };
+
+        let counts: Vec<f64> = match count_col.cast(&DataType::Float64) {
+            Ok(c) => match c.f64() {
+                Ok(f) => f.into_no_null_iter().collect(),
+                Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Count column not numeric: {}", e
+                ))])),
+            },
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!(
+                "Cannot cast count column: {}", e
+            ))])),
+        };
+
+        // Extract factor columns and determine dimensions
+        let mut factor_levels: Vec<Vec<String>> = Vec::new();
+        let mut factor_data: Vec<Vec<usize>> = Vec::new();
+
+        for col_name in &request.factor_columns {
+            let col = match df.column(col_name) {
+                Ok(c) => c,
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Factor column '{}' not found: {}", col_name, e
+                    ))]));
+                }
+            };
+
+            // Get unique levels by casting to string series
+            let str_col = match col.cast(&DataType::String) {
+                Ok(c) => c,
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Cannot cast factor column '{}' to string: {}", col_name, e
+                    ))]));
+                }
+            };
+
+            let unique_col = match str_col.unique() {
+                Ok(c) => c,
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Error getting unique values for '{}': {}", col_name, e
+                    ))]));
+                }
+            };
+
+            let levels: Vec<String> = match unique_col.str() {
+                Ok(s) => s.into_no_null_iter().map(|v| v.to_string()).collect(),
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Error reading unique levels: {}", e
+                    ))]));
+                }
+            };
+
+            // Map values to indices
+            let level_map: HashMap<String, usize> = levels.iter()
+                .enumerate()
+                .map(|(i, s)| (s.clone(), i))
+                .collect();
+
+            // Get string values and map to indices
+            let str_series = match str_col.str() {
+                Ok(s) => s,
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Cannot read string series: {}", e
+                    ))]));
+                }
+            };
+
+            let indices: Vec<usize> = str_series.into_no_null_iter()
+                .map(|v| *level_map.get(v).unwrap_or(&0))
+                .collect();
+
+            factor_levels.push(levels);
+            factor_data.push(indices);
+        }
+
+        // Build dimensions
+        let dimensions: Vec<usize> = factor_levels.iter().map(|l| l.len()).collect();
+
+        // Build flattened contingency table
+        let n_cells: usize = dimensions.iter().product();
+        let mut table = vec![0.0; n_cells];
+
+        for (i, &count) in counts.iter().enumerate() {
+            // Compute cell index from factor indices
+            let mut cell_idx = 0;
+            let mut multiplier = 1;
+            for dim_idx in (0..factor_data.len()).rev() {
+                cell_idx += factor_data[dim_idx][i] * multiplier;
+                multiplier *= dimensions[dim_idx];
+            }
+            if cell_idx < n_cells {
+                table[cell_idx] += count;
+            }
+        }
+
+        // Determine margins
+        let margins = if let Some(m) = request.margins {
+            m
+        } else {
+            // Default: independence model (main effects only)
+            (0..dimensions.len()).map(|i| vec![i]).collect()
+        };
+
+        let result = match loglin(&table, &dimensions, &margins, request.eps, request.max_iter) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Log-linear model fitting failed: {}", e
+                ))]));
+            }
+        };
+
+        // Build JSON output
+        let json_output = serde_json::json!({
+            "model": {
+                "margins": result.margins,
+                "factor_columns": request.factor_columns,
+                "dimensions": result.dimensions,
+                "factor_levels": factor_levels,
+                "n_cells": result.n_cells,
+                "total_count": result.total
+            },
+            "goodness_of_fit": {
+                "likelihood_ratio_test": {
+                    "statistic": format!("{:.4}", result.lrt),
+                    "df": result.df,
+                    "p_value": format!("{:.4}", result.p_value_lrt)
+                },
+                "pearson_chi_squared": {
+                    "statistic": format!("{:.4}", result.pearson),
+                    "df": result.df,
+                    "p_value": format!("{:.4}", result.p_value_pearson)
+                }
+            },
+            "convergence": {
+                "converged": result.converged,
+                "iterations": result.n_iter
+            },
+            "interpretation": format!(
+                "Log-linear model with margins {:?} on a {} table. G²={:.2}, df={}, p={:.4}. {}",
+                result.margins,
+                result.dimensions.iter().map(|d| d.to_string()).collect::<Vec<_>>().join("×"),
+                result.lrt, result.df, result.p_value_lrt,
+                if result.p_value_lrt >= 0.05 {
+                    "The model fits adequately (p≥0.05)."
+                } else {
+                    "The model does not fit well (p<0.05); consider adding interaction terms."
+                }
+            ),
+            "references": "Haberman (1972). Algorithm AS 51; Agresti (2002). Categorical Data Analysis."
+        });
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&json_output).unwrap_or_default()
+        )]))
+    }
+
     /// Run OLS regression.
     #[tool(description = "Run Ordinary Least Squares (OLS) regression. Returns coefficients, standard errors, t-values, p-values, R-squared, and F-statistic.")]
     async fn regression_ols(
@@ -8925,6 +12154,498 @@ impl AnalyticsServer {
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
                     "Diagnostics failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+    }
+
+    /// Run Breusch-Godfrey test for serial correlation.
+    #[tool(description = "Breusch-Godfrey test for higher-order serial correlation in regression residuals. More general than Durbin-Watson as it: (1) tests for AR(p) or MA(p) correlation, (2) allows lagged dependent variables as regressors, (3) is valid regardless of regressor properties. Returns LM statistic and p-value.")]
+    async fn regression_bgtest(
+        &self,
+        Parameters(request): Parameters<BgTestRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
+        let order = request.order.unwrap_or(1);
+        let fill = request.fill.unwrap_or(0.0);
+
+        let test_type = match request.test_type.as_deref() {
+            Some(t) => BgTestType::from_str(t).unwrap_or(BgTestType::Chisq),
+            None => BgTestType::Chisq,
+        };
+
+        let result = match bg_test(dataset, &request.y, &x_refs, order, test_type, fill) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Breusch-Godfrey test failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+    }
+
+    /// Run Ramsey's RESET test for functional form.
+    #[tool(description = "Ramsey's RESET test for functional form misspecification. Tests whether nonlinear terms (powers of fitted values) should be added to the model. Significant result suggests the linear model is misspecified and nonlinear terms may be needed.")]
+    async fn regression_resettest(
+        &self,
+        Parameters(request): Parameters<ResetTestRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
+        let powers = request.powers.unwrap_or_else(|| vec![2, 3]);
+
+        let reset_type_enum = match request.reset_type.as_deref() {
+            Some(t) => ResetType::from_str(t).unwrap_or(ResetType::Fitted),
+            None => ResetType::Fitted,
+        };
+
+        let result = match reset_test(dataset, &request.y, &x_refs, &powers, reset_type_enum) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "RESET test failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+    }
+
+    /// Wald test for comparing nested linear models.
+    #[tool(description = "Wald test (F-test) for comparing nested linear models. Tests whether variables excluded from the restricted model are jointly significant. Common uses: testing joint significance of multiple coefficients, testing nested model hypotheses, comparing model specifications.")]
+    async fn regression_waldtest(
+        &self,
+        Parameters(request): Parameters<WaldTestRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let x_unrestricted_refs: Vec<&str> = request.x_unrestricted.iter().map(|s| s.as_str()).collect();
+        let x_restricted_refs: Vec<&str> = request.x_restricted.iter().map(|s| s.as_str()).collect();
+        let use_f_test = request.use_f_test.unwrap_or(true);
+
+        let result = match wald_test(
+            dataset,
+            &request.y,
+            &x_unrestricted_refs,
+            &x_restricted_refs,
+            use_f_test,
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Wald test failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+    }
+
+    /// Harvey-Collier test for linearity using recursive residuals.
+    #[tool(description = "Harvey-Collier test for detecting departure from linearity. Uses recursive residuals to test whether the mean of one-step-ahead forecast errors differs from zero. A significant result suggests convex or concave functional misspecification - the linear model may need polynomial terms. Equivalent to R's lmtest::harvtest().")]
+    async fn regression_harvtest(
+        &self,
+        Parameters(request): Parameters<HarveyCollierRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
+
+        let result = match harvey_collier_test(dataset, &request.y, &x_refs) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Harvey-Collier test failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+    }
+
+    /// HAC (Newey-West) standard errors for time series regression.
+    #[tool(description = "Compute HAC (Heteroskedasticity and Autocorrelation Consistent) standard errors using the Newey-West estimator. Essential for time series regression where errors may be both heteroskedastic and autocorrelated. Supports multiple kernel functions and automatic bandwidth selection.")]
+    async fn regression_hac(
+        &self,
+        Parameters(request): Parameters<HacRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
+        let prewhiten = request.prewhiten.unwrap_or(false);
+
+        let result = match run_vcov_hac(
+            dataset,
+            &request.y,
+            &x_refs,
+            request.bandwidth,
+            request.kernel.as_deref(),
+            prewhiten,
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "HAC estimation failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+    }
+
+    /// Bootstrap covariance estimation (vcovBS).
+    #[tool(description = "Compute bootstrap covariance matrix and standard errors for OLS regression. Supports pairs bootstrap (most robust, resamples observations), residual bootstrap (assumes homoskedasticity), and wild bootstrap (robust to heteroskedasticity). Useful when asymptotic standard errors may be unreliable.")]
+    async fn regression_bootstrap_cov(
+        &self,
+        Parameters(request): Parameters<BootstrapCovRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
+
+        let result = match run_vcov_bootstrap(
+            dataset,
+            &request.y,
+            &x_refs,
+            request.n_boot,
+            request.bootstrap_type.as_deref(),
+            request.seed,
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Bootstrap covariance estimation failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+    }
+
+    /// Driscoll-Kraay panel-robust standard errors.
+    #[tool(description = "Compute Driscoll-Kraay (1998) panel-robust standard errors. Robust to arbitrary cross-sectional correlation (spatial dependence) and serial correlation in panel data. Aggregates score vectors by time period and applies Newey-West HAC correction. Best for panels with large T (many time periods). Returns coefficient estimates with panel-robust SEs, t-stats, and p-values.")]
+    async fn regression_driscoll_kraay(
+        &self,
+        Parameters(request): Parameters<DriscollKraayRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
+
+        let result = match run_vcov_driscoll_kraay(
+            dataset,
+            &request.y,
+            &x_refs,
+            &request.time_col,
+            request.bandwidth,
+            request.kernel.as_deref(),
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Driscoll-Kraay estimation failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+    }
+
+    /// Quantile regression.
+    #[tool(description = "Run quantile regression to estimate conditional quantiles instead of conditional means. Useful when the relationship varies across the distribution, or when the error distribution is non-Gaussian. Can estimate single quantile (tau) or multiple quantiles simultaneously.")]
+    async fn regression_quantreg(
+        &self,
+        Parameters(request): Parameters<QuantRegRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
+
+        // Handle multiple quantiles or single quantile
+        if let Some(taus) = &request.taus {
+            // Multiple quantiles
+            let results = match quantreg_multi(dataset, &request.y, &x_refs, taus) {
+                Ok(r) => r,
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Quantile regression failed: {}",
+                        e
+                    ))]));
+                }
+            };
+
+            // Format all results
+            let output: String = results.iter()
+                .map(|r| format!("{}", r))
+                .collect::<Vec<_>>()
+                .join("\n---\n");
+
+            Ok(CallToolResult::success(vec![Content::text(output)]))
+        } else {
+            // Single quantile
+            let tau = request.tau.unwrap_or(0.5);
+            let result = match run_quantreg(dataset, &request.y, &x_refs, tau) {
+                Ok(r) => r,
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Quantile regression failed: {}",
+                        e
+                    ))]));
+                }
+            };
+
+            Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        }
+    }
+
+    /// Sensitivity analysis for unmeasured confounding (sensemakr).
+    #[tool(description = "Run sensitivity analysis for unmeasured confounding (Cinelli & Hazlett 2020). Computes robustness value (RV) - the minimum confounding strength needed to nullify the treatment effect. Key outputs: (1) Partial R²: how much variance treatment explains in outcome, (2) RV_q: confounding needed to reduce effect by q%, (3) RV_alpha: confounding needed to make effect insignificant, (4) Benchmark bounds: adjusted estimates under various confounding scenarios. Essential for causal inference to assess how robust findings are to unmeasured confounding.")]
+    async fn sensemakr(
+        &self,
+        Parameters(request): Parameters<SensemakrRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        use p2a_core::regression::{run_sensemakr, generate_contour_data, run_ols, CovarianceType};
+
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let covariate_refs: Vec<&str> = request.covariates.iter().map(|s| s.as_str()).collect();
+        let benchmark_refs: Option<Vec<&str>> = request.benchmark_covariates.as_ref()
+            .map(|v| v.iter().map(|s| s.as_str()).collect());
+
+        let q = request.q.unwrap_or(1.0);
+        let alpha = request.alpha.unwrap_or(0.05);
+
+        let mut result = match run_sensemakr(
+            dataset,
+            &request.y,
+            &request.treatment,
+            &covariate_refs,
+            benchmark_refs.as_deref(),
+            request.kd,
+            request.ky,
+            q,
+            alpha,
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Sensitivity analysis failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        // Generate contour data if requested
+        if request.contour_data.unwrap_or(false) {
+            // Re-run OLS to get the result for contour generation
+            let mut x_cols: Vec<&str> = vec![request.treatment.as_str()];
+            x_cols.extend(covariate_refs.iter());
+
+            if let Ok(ols_result) = run_ols(dataset, &request.y, &x_cols, true, CovarianceType::HC1) {
+                if let Ok(contour) = generate_contour_data(&ols_result, &request.treatment, Some(20), Some(0.5)) {
+                    result.contour_data = Some(contour);
+                }
+            }
+        }
+
+        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+    }
+
+    /// E-value sensitivity analysis for unmeasured confounding.
+    #[tool(description = "Compute E-values for sensitivity analysis to unmeasured confounding (VanderWeele & Ding 2017). The E-value is the minimum strength of association that an unmeasured confounder would need with both treatment and outcome to fully explain away an observed effect. Supports risk ratios (RR), odds ratios (OR), hazard ratios (HR), standardized mean differences (SMD), and risk differences (RD). A large E-value means considerable confounding would be needed to explain away the effect. Returns E-value for point estimate and confidence interval limit closest to null.")]
+    async fn evalue(
+        &self,
+        Parameters(request): Parameters<EValueRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        use p2a_core::regression::{evalue_rr_ci, evalue_or, evalue_hr, evalue_smd, evalue_rd};
+
+        let effect_type = request.effect_type.to_lowercase();
+
+        let result = match effect_type.as_str() {
+            "rr" | "risk_ratio" | "riskratio" => {
+                evalue_rr_ci(request.point, request.ci_lower, request.ci_upper)
+            }
+            "or" | "odds_ratio" | "oddsratio" => {
+                let rare = request.rare.unwrap_or(true);
+                evalue_or(request.point, request.ci_lower, request.ci_upper, rare)
+            }
+            "hr" | "hazard_ratio" | "hazardratio" => {
+                let rare = request.rare.unwrap_or(true);
+                evalue_hr(request.point, request.ci_lower, request.ci_upper, rare)
+            }
+            "smd" | "standardized_mean_difference" => {
+                evalue_smd(request.point, request.se)
+            }
+            "rd" | "risk_difference" | "riskdifference" => {
+                let baseline = request.baseline_risk.ok_or_else(|| {
+                    McpError::invalid_params(
+                        "baseline_risk is required for risk difference",
+                        None,
+                    )
+                })?;
+                evalue_rd(request.point, baseline, request.se)
+            }
+            _ => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Unknown effect type '{}'. Valid types: rr, or, hr, smd, rd",
+                    request.effect_type
+                ))]));
+            }
+        };
+
+        match result {
+            Ok(r) => Ok(CallToolResult::success(vec![Content::text(r.to_string())])),
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
+                "E-value calculation failed: {}",
+                e
+            ))])),
+        }
+    }
+
+    /// Compute average marginal effects from regression models.
+    #[tool(description = "Compute average marginal effects (AME) from regression models. For OLS, marginal effects equal coefficients. For Logit/Probit, effects are averaged across observations accounting for nonlinearity. Returns effects, standard errors, z-values, p-values, and confidence intervals.")]
+    async fn marginal_effects(
+        &self,
+        Parameters(request): Parameters<MarginalEffectsRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        use p2a_core::regression::{marginal_effects, ModelType};
+
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
+
+        let model_type = match request.model.as_deref().unwrap_or("ols") {
+            "ols" | "linear" => ModelType::Ols,
+            "logit" | "logistic" => ModelType::Logit,
+            "probit" => ModelType::Probit,
+            other => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Unknown model type '{}'. Supported: 'ols', 'logit', 'probit'.",
+                    other
+                ))]));
+            }
+        };
+
+        let result = match marginal_effects(dataset, &request.y, &x_refs, model_type) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Marginal effects computation failed: {}",
                     e
                 ))]));
             }
@@ -9282,6 +13003,319 @@ impl AnalyticsServer {
         Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
     }
 
+    /// Run Variable Coefficients Model (PVCM) for heterogeneous panels.
+    #[tool(description = "Run Variable Coefficients Model (PVCM) for heterogeneous panel data. Allows slope coefficients to vary across entities. Two modes: 'within' runs separate OLS per entity, 'random' (Swamy 1970) computes a GLS weighted average. Also computes homogeneity test for coefficient equality.")]
+    async fn panel_pvcm(
+        &self,
+        Parameters(request): Parameters<PvcmRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
+
+        let model_type = match request.model.as_deref() {
+            Some("random") | Some("Random") => PvcmType::Random,
+            _ => PvcmType::Within,
+        };
+
+        let result = match run_pvcm(dataset, &request.y, &x_refs, &request.entity_var, model_type) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "PVCM estimation failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+    }
+
+    /// Run Mean Group (PMG) estimator for heterogeneous panels.
+    #[tool(description = "Run Mean Group (MG) estimator (Pesaran & Smith 1995) for heterogeneous panel data. Computes simple average of individual-specific OLS estimates across entities. Equivalent to PVCM with 'within' model type.")]
+    async fn panel_pmg(
+        &self,
+        Parameters(request): Parameters<PvcmRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
+
+        let result = match run_pmg(dataset, &request.y, &x_refs, &request.entity_var) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "PMG estimation failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+    }
+
+    /// Run Arellano-Bond / System GMM dynamic panel estimation.
+    #[tool(description = "Run Arellano-Bond (difference GMM) or Blundell-Bond (system GMM) estimation for dynamic panel data models. Handles endogeneity of lagged dependent variables using lagged levels/differences as instruments. Reports Sargan test for overidentifying restrictions and AR(1)/AR(2) tests for serial correlation.")]
+    async fn panel_gmm(
+        &self,
+        Parameters(request): Parameters<GmmRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
+        let lags = request.lags.unwrap_or(1);
+
+        // Parse transform type
+        let transform = match request.transform.as_deref() {
+            Some("system") | Some("System") => GmmTransform::System,
+            _ => GmmTransform::Difference, // Default
+        };
+
+        // Parse step type
+        let step = match request.step.as_deref() {
+            Some("onestep") | Some("OneStep") | Some("one") | Some("1") => GmmStep::OneStep,
+            _ => GmmStep::TwoStep, // Default
+        };
+
+        let config = GmmConfig {
+            transform,
+            step,
+            max_lag: request.max_lag,
+            min_lag: request.min_lag.unwrap_or(2),
+            collapse: request.collapse.unwrap_or(false),
+            robust: request.robust.unwrap_or(true),
+        };
+
+        let result: GmmResult = match run_gmm(
+            dataset,
+            &request.y,
+            &x_refs,
+            &request.entity_var,
+            &request.time_var,
+            lags,
+            Some(config),
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "GMM estimation failed: {}",
+                    e
+                ))]));
+            }
+        };
+        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+    }
+
+    /// Run general GMM IV estimation (Hansen 1982).
+    #[tool(description = "Run general GMM (Generalized Method of Moments) IV estimation following Hansen (1982). Estimates parameters using moment conditions E[z(y - xβ)] = 0. Supports two-step, iterative, and CUE estimation with HAC weighting. Reports J-test for overidentifying restrictions. Use for IV estimation when you have more instruments than endogenous variables.")]
+    async fn gmm_iv(
+        &self,
+        Parameters(request): Parameters<GeneralGmmIvRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
+        let z_refs: Vec<&str> = request.z.iter().map(|s| s.as_str()).collect();
+
+        // Parse method
+        let method = match request.method.as_deref() {
+            Some("iterative") | Some("Iterative") => GmmMethod::Iterative,
+            Some("cue") | Some("CUE") => GmmMethod::CUE,
+            _ => GmmMethod::TwoStep, // Default
+        };
+
+        // Parse vcov type
+        let vcov = match request.vcov.as_deref() {
+            Some("iid") | Some("IID") => GmmVcov::IID,
+            Some("fixed") | Some("Fixed") => GmmVcov::Fixed,
+            _ => GmmVcov::HAC, // Default
+        };
+
+        // Parse kernel
+        use p2a_core::regression::HacKernel;
+        let kernel = match request.kernel.as_deref() {
+            Some("parzen") | Some("Parzen") => HacKernel::Parzen,
+            Some("qs") | Some("quadratic_spectral") => HacKernel::QuadraticSpectral,
+            Some("truncated") | Some("Truncated") => HacKernel::Truncated,
+            Some("tukey") | Some("tukey_hanning") => HacKernel::TukeyHanning,
+            _ => HacKernel::Bartlett, // Default
+        };
+
+        let config = GeneralGmmConfig {
+            method,
+            vcov,
+            kernel,
+            bandwidth: request.bandwidth,
+            ..Default::default()
+        };
+
+        let result: GeneralGmmResult = match run_gmm_iv(
+            dataset,
+            &request.y,
+            &x_refs,
+            &z_refs,
+            Some(config),
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "GMM IV estimation failed: {}",
+                    e
+                ))]));
+            }
+        };
+        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+    }
+
+    /// Run Panel GLS (Feasible Generalized Least Squares) estimation.
+    #[tool(description = "Run Panel GLS (Feasible Generalized Least Squares) for panel data with heteroskedasticity and/or cross-sectional correlation. Supports fixed effects GLS, pooled GLS, and first-difference GLS. More efficient than standard FE/RE when error structure is known.")]
+    async fn panel_gls(
+        &self,
+        Parameters(request): Parameters<PanelGlsRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
+
+        // Parse model type
+        let model = match request.model.as_deref() {
+            Some("pooling") | Some("Pooling") | Some("pool") => Some(PanelGlsModel::Pooling),
+            Some("fd") | Some("FD") | Some("first_difference") | Some("firstdifference") => {
+                Some(PanelGlsModel::FirstDifference)
+            }
+            Some("fe") | Some("FE") | Some("fixed_effects") | Some("fixedeffects") => {
+                Some(PanelGlsModel::FixedEffects)
+            }
+            _ => None, // Default to FixedEffects
+        };
+
+        let result: PanelGlsResult = match run_panel_gls(
+            dataset,
+            &request.y,
+            &x_refs,
+            &request.entity_var,
+            &request.time_var,
+            model,
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Panel GLS estimation failed: {}",
+                    e
+                ))]));
+            }
+        };
+        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+    }
+
+    /// Run panel unit root tests.
+    #[tool(description = "Run panel unit root tests to test for stationarity in panel data. Supports LLC (Levin-Lin-Chu), IPS (Im-Pesaran-Shin), Fisher/Maddala-Wu, and Hadri tests. Panel tests have more power than univariate tests by exploiting cross-sectional variation. LLC assumes common unit root, IPS allows heterogeneous roots, Hadri tests null of stationarity.")]
+    async fn panel_unit_root(
+        &self,
+        Parameters(request): Parameters<PanelUnitRootRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        // Parse test type
+        let test_type = match request.test.as_deref() {
+            Some("ips") | Some("IPS") | Some("im_pesaran_shin") => PanelUnitRootTest::IPS,
+            Some("fisher") | Some("Fisher") | Some("maddala_wu") => PanelUnitRootTest::Fisher,
+            Some("hadri") | Some("Hadri") => PanelUnitRootTest::Hadri,
+            _ => PanelUnitRootTest::LLC, // Default
+        };
+
+        // Parse model type
+        let model = match request.model.as_deref() {
+            Some("none") | Some("None") => PanelModel::None,
+            Some("trend") | Some("Trend") => PanelModel::Trend,
+            _ => PanelModel::Intercept, // Default
+        };
+
+        let config = PanelUnitRootConfig {
+            test_type,
+            model,
+            lags: request.lags,
+            max_lags: None,
+        };
+
+        let result = match run_panel_unit_root(
+            dataset,
+            &request.variable,
+            &request.unit_col,
+            &request.time_col,
+            config,
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Panel unit root test failed: {}",
+                    e
+                ))]));
+            }
+        };
+        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+    }
+
     /// Run IV/2SLS regression.
     #[tool(description = "Run Instrumental Variables (2SLS) regression. Use when an explanatory variable is endogenous (correlated with the error term). Requires valid instruments.")]
     async fn iv_2sls(
@@ -9358,6 +13392,210 @@ impl AnalyticsServer {
         Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
     }
 
+    /// Run Sargan test of overidentifying restrictions for IV/2SLS.
+    #[tool(description = "Run Sargan test of overidentifying restrictions for IV/2SLS. Tests whether instruments are valid (uncorrelated with error term). H0: instruments are valid. Rejection suggests at least one invalid instrument. Requires more instruments than endogenous variables.")]
+    async fn iv_sargan_test(
+        &self,
+        Parameters(request): Parameters<SarganTestRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let x_exog: Vec<&str> = request.x_exog.iter().map(|s| s.as_str()).collect();
+        let x_endog: Vec<&str> = request.x_endog.iter().map(|s| s.as_str()).collect();
+        let instruments: Vec<&str> = request.instruments.iter().map(|s| s.as_str()).collect();
+
+        let result = match sargan_test(dataset, &request.y, &x_exog, &x_endog, &instruments) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Sargan test failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+    }
+
+    /// Compute Balke-Pearl bounds on the Average Causal Effect (ACE).
+    #[tool(description = "Compute Balke-Pearl bounds for nonparametric IV analysis. Provides sharp bounds on the Average Causal Effect (ACE) without parametric assumptions. All three variables (instrument Z, treatment D, outcome Y) must be binary (0/1). Returns bounds with optional bootstrap confidence intervals. Also reports the Wald (standard IV) estimate for comparison. Use monotonicity=true if you can assume no defiers (instrument only affects treatment in one direction).")]
+    async fn bp_bounds(
+        &self,
+        Parameters(request): Parameters<BPBoundsRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        use p2a_core::linalg::design::DesignMatrix;
+
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        // Extract instrument variable (Z)
+        let z = match DesignMatrix::extract_column(dataset.df(), &request.instrument) {
+            Ok(col) => col,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Failed to extract instrument variable '{}': {:?}",
+                    request.instrument, e
+                ))]));
+            }
+        };
+
+        // Extract treatment variable (D)
+        let d = match DesignMatrix::extract_column(dataset.df(), &request.treatment) {
+            Ok(col) => col,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Failed to extract treatment variable '{}': {:?}",
+                    request.treatment, e
+                ))]));
+            }
+        };
+
+        // Extract outcome variable (Y)
+        let y = match DesignMatrix::extract_column(dataset.df(), &request.outcome) {
+            Ok(col) => col,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Failed to extract outcome variable '{}': {:?}",
+                    request.outcome, e
+                ))]));
+            }
+        };
+
+        // Convert confidence level to alpha
+        let alpha = 1.0 - request.confidence_level.unwrap_or(0.95);
+
+        // Build config
+        let config = BPBoundsConfig {
+            monotonicity: request.monotonicity.unwrap_or(false),
+            bootstrap_ci: request.bootstrap_ci.unwrap_or(true),
+            n_bootstrap: request.n_bootstrap.unwrap_or(1000),
+            alpha,
+            seed: request.seed,
+        };
+
+        // Run Balke-Pearl bounds
+        let result = match run_bp_bounds(&z.view(), &d.view(), &y.view(), config) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Balke-Pearl bounds failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+    }
+
+    /// Estimate Marginal Treatment Effects (MTE) using instrumental variables.
+    #[tool(description = "Estimate Marginal Treatment Effects (MTE) using the Heckman-Vytlacil framework. MTE reveals heterogeneity in treatment effects across the distribution of unobserved resistance to treatment. Returns MTE curve, ATE, ATT, ATU, and LATE estimates. The MTE framework shows how different IV estimands are weighted averages of the MTE curve, providing deeper insight into treatment effect heterogeneity than standard IV/2SLS.")]
+    async fn iv_mte(
+        &self,
+        Parameters(request): Parameters<IVMTERequest>,
+    ) -> Result<CallToolResult, McpError> {
+        use p2a_core::linalg::design::DesignMatrix;
+
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        // Extract outcome variable
+        let y = match DesignMatrix::extract_column(dataset.df(), &request.y) {
+            Ok(col) => col,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Failed to extract outcome variable '{}': {:?}",
+                    request.y, e
+                ))]));
+            }
+        };
+
+        // Extract treatment variable
+        let d = match DesignMatrix::extract_column(dataset.df(), &request.d) {
+            Ok(col) => col,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Failed to extract treatment variable '{}': {:?}",
+                    request.d, e
+                ))]));
+            }
+        };
+
+        // Extract instrument variable
+        let z = match DesignMatrix::extract_column(dataset.df(), &request.z) {
+            Ok(col) => col,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Failed to extract instrument variable '{}': {:?}",
+                    request.z, e
+                ))]));
+            }
+        };
+
+        // Parse propensity model
+        let propensity_model = match request.propensity_model.as_deref() {
+            Some("logit") => PropensityModel::Logit,
+            Some("linear") => PropensityModel::Linear,
+            _ => PropensityModel::Probit, // default
+        };
+
+        // Build config
+        let config = IVMTEConfig {
+            mte_degree: request.mte_degree.unwrap_or(2),
+            n_grid: request.n_grid.unwrap_or(100),
+            propensity_model,
+            ..Default::default()
+        };
+
+        // Note: Covariates are not currently supported in the array-based API
+        // TODO: Add covariate support when needed
+
+        let result = match run_ivmte(
+            &y.view(),
+            &d.view(),
+            &z.view(),
+            None, // covariates
+            config,
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "MTE estimation failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+    }
+
     /// Run Difference-in-Differences estimation.
     #[tool(description = "Run Difference-in-Differences (DiD) estimation. Estimates causal treatment effects by comparing treated vs control groups before and after treatment.")]
     async fn diff_in_diff(
@@ -9381,6 +13619,168 @@ impl AnalyticsServer {
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
                     "DiD estimation failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+    }
+
+    /// Run Callaway-Sant'Anna staggered difference-in-differences.
+    #[tool(description = "Estimate causal effects with staggered treatment adoption using Callaway-Sant'Anna (2021) method. Handles multiple time periods, heterogeneous treatment timing, and dynamic treatment effects. Returns group-time ATTs, event study plots, and overall ATT with pre-trend tests.")]
+    async fn staggered_did(
+        &self,
+        Parameters(request): Parameters<StaggeredDiDRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        // Parse comparison group
+        let comparison_group = match request.comparison_group.as_deref() {
+            Some("not_yet_treated") | Some("notyet") => ComparisonGroup::NotYetTreated,
+            _ => ComparisonGroup::NeverTreated,
+        };
+
+        // Parse estimation method
+        let estimation_method = match request.estimation_method.as_deref() {
+            Some("ipw") => AttEstimationMethod::IPW,
+            Some("doubly_robust") | Some("dr") | Some("aipw") => AttEstimationMethod::DoublyRobust,
+            _ => AttEstimationMethod::OutcomeRegression,
+        };
+
+        // Build config
+        let config = StaggeredDidConfig {
+            comparison_group,
+            estimation_method,
+            base_period: request.base_period.unwrap_or(-1),
+            bootstrap: request.bootstrap.unwrap_or(999),
+            ..Default::default()
+        };
+
+        // Parse covariates
+        let cov_refs: Option<Vec<&str>> = request.covariates.as_ref().map(|v| {
+            v.iter().map(|s| s.as_str()).collect()
+        });
+
+        let result = match run_staggered_did(
+            dataset,
+            &request.outcome,
+            &request.treatment_time,
+            &request.time_col,
+            &request.unit_col,
+            cov_refs.as_deref(),
+            config,
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Staggered DiD estimation failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+    }
+
+    /// Perform Goodman-Bacon decomposition for staggered DiD.
+    #[tool(description = "Decompose a two-way fixed effects (TWFE) DiD estimate into weighted 2x2 comparisons using Goodman-Bacon (2021) decomposition. Reveals which comparisons (treated vs. never-treated, treated vs. not-yet-treated, later vs. earlier treated) contribute to the overall estimate and with what weights. Essential for understanding potential biases from 'forbidden' comparisons when treatment effects are heterogeneous over time.")]
+    async fn bacon_decomp(
+        &self,
+        Parameters(request): Parameters<BaconDecompRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let result = match bacon_decomp(
+            dataset,
+            &request.outcome,
+            &request.unit_col,
+            &request.time_col,
+            &request.treatment_col,
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Goodman-Bacon decomposition failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+    }
+
+    /// Run Extended Two-Way Fixed Effects (ETWFE) estimation.
+    #[tool(description = "Estimate treatment effects using Extended TWFE (Wooldridge 2021, 2023). Addresses heterogeneous treatment effects in staggered DiD by estimating saturated cohort-by-time interactions. Returns cohort-time ATT estimates, event study by relative time, cohort averages, and overall ATT. Robust to treatment effect heterogeneity across cohorts and over time.")]
+    async fn etwfe(
+        &self,
+        Parameters(request): Parameters<EtwfeRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        // Parse control group
+        let cgroup = match request.cgroup.as_deref() {
+            Some("never") => EtwfeControlGroup::Never,
+            _ => EtwfeControlGroup::NotYet,
+        };
+
+        // Build config
+        let config = EtwfeConfig {
+            tref: None,
+            gref: None,
+            cgroup,
+            anticipation: 0,
+        };
+
+        // Parse controls
+        let control_refs: Option<Vec<&str>> = request.controls.as_ref().map(|v| {
+            v.iter().map(|s| s.as_str()).collect()
+        });
+
+        let result = match run_etwfe(
+            dataset,
+            &request.outcome,
+            &request.unit_col,
+            &request.time_col,
+            &request.treatment,
+            &request.first_treat,
+            control_refs.as_deref(),
+            Some(config),
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "ETWFE estimation failed: {}",
                     e
                 ))]));
             }
@@ -9494,6 +13894,781 @@ impl AnalyticsServer {
         Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
     }
 
+
+    /// Run Double/Debiased Machine Learning (DoubleML) estimation.
+    #[tool(description = "Estimate causal treatment effects using Double/Debiased Machine Learning. Uses Neyman-orthogonal score functions and K-fold cross-fitting to achieve root-n consistent and asymptotically normal estimates. Supports Partially Linear Regression (PLR: Y = theta*D + g(X) + eps) and Interactive Regression Model (IRM: binary treatment with heterogeneous effects). Returns treatment effect estimate with influence function-based standard errors and diagnostic information.")]
+    async fn treatment_double_ml(
+        &self,
+        Parameters(request): Parameters<DoubleMLRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        use p2a_core::econometrics::{
+            run_double_ml, DoubleMLConfig, DMLModelType, TreatmentType,
+        };
+
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        // Extract data columns
+        let df = dataset.df();
+
+        // Extract outcome (Y)
+        let y_col = df.column(&request.outcome).map_err(|_| {
+            McpError::invalid_request(
+                format!("Outcome column '{}' not found", request.outcome),
+                None,
+            )
+        })?;
+        let y_vec: Vec<f64> = y_col
+            .f64()
+            .map_err(|_| {
+                McpError::invalid_request(
+                    format!("Outcome column '{}' must be numeric", request.outcome),
+                    None,
+                )
+            })?
+            .iter()
+            .filter_map(|v| v)
+            .collect();
+
+        // Extract treatment (D)
+        let d_col = df.column(&request.treatment).map_err(|_| {
+            McpError::invalid_request(
+                format!("Treatment column '{}' not found", request.treatment),
+                None,
+            )
+        })?;
+        let d_vec: Vec<f64> = d_col
+            .f64()
+            .map_err(|_| {
+                McpError::invalid_request(
+                    format!("Treatment column '{}' must be numeric", request.treatment),
+                    None,
+                )
+            })?
+            .iter()
+            .filter_map(|v| v)
+            .collect();
+
+        // Extract covariates (X)
+        let n = y_vec.len();
+        let p = request.covariates.len();
+        let mut x_data = Vec::with_capacity(n * p);
+
+        for col_name in &request.covariates {
+            let col = df.column(col_name).map_err(|_| {
+                McpError::invalid_request(format!("Covariate column '{}' not found", col_name), None)
+            })?;
+            let col_f64 = col.f64().map_err(|_| {
+                McpError::invalid_request(
+                    format!("Covariate column '{}' must be numeric", col_name),
+                    None,
+                )
+            })?;
+            for v in col_f64.iter() {
+                x_data.push(v.unwrap_or(0.0));
+            }
+        }
+
+        // Convert to ndarray
+        use ndarray::{Array1, Array2};
+        let y = Array1::from(y_vec);
+        let d = Array1::from(d_vec);
+
+        // Reshape X: we collected column-wise, need to transpose
+        let x_col_major = Array2::from_shape_vec((n, p), {
+            // Reorganize from column-major to row-major
+            let mut row_major = vec![0.0; n * p];
+            for j in 0..p {
+                for i in 0..n {
+                    row_major[i * p + j] = x_data[j * n + i];
+                }
+            }
+            row_major
+        })
+        .map_err(|e| McpError::internal_error(format!("Failed to create covariate matrix: {}", e), None))?;
+
+        // Parse model type
+        let model_type = match request.model_type.as_deref() {
+            Some("irm") | Some("IRM") | Some("interactive") => DMLModelType::IRM,
+            _ => DMLModelType::PLR,
+        };
+
+        // Determine treatment type for IRM
+        let is_binary = d.iter().all(|&di| (di - 0.0).abs() < 1e-10 || (di - 1.0).abs() < 1e-10);
+        let treatment_type = if is_binary {
+            TreatmentType::Binary
+        } else {
+            TreatmentType::Continuous
+        };
+
+        let config = DoubleMLConfig {
+            n_folds: request.n_folds.unwrap_or(5),
+            model_type,
+            treatment_type,
+            seed: request.seed,
+            trim: request.trim.unwrap_or(0.01),
+            ..Default::default()
+        };
+
+        let result = match run_double_ml(&y.view(), &d.view(), &x_col_major.view(), config) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Double ML estimation failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+    }
+
+    /// Run Covariate Balancing Propensity Score (CBPS) estimation.
+    #[tool(description = "Estimate propensity scores using Covariate Balancing Propensity Score (CBPS). Unlike standard logistic regression, CBPS uses GMM to simultaneously estimate propensity scores AND achieve covariate balance. Returns propensity scores, IPW weights, balance diagnostics before and after weighting, and J-test for overidentification.")]
+    async fn treatment_cbps(
+        &self,
+        Parameters(request): Parameters<CbpsRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let cov_refs: Vec<&str> = request.covariates.iter().map(|s| s.as_str()).collect();
+
+        // Parse method
+        let method = match request.method.as_deref() {
+            Some("over") | Some("overbalance") => CbpsMethod::OverBalance,
+            Some("just") | Some("justified") | Some("logit") => CbpsMethod::JustIdentified,
+            _ => CbpsMethod::ExactBalance,
+        };
+
+        let config = CbpsConfig {
+            method,
+            balance_threshold: request.balance_threshold.unwrap_or(0.1),
+            tolerance: 1e-8,
+            max_iter: 100,
+        };
+
+        let result = match run_cbps(dataset, &request.treatment, &cov_refs, Some(config)) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "CBPS estimation failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+    }
+
+    /// Compute flexible inverse probability weights using multiple methods.
+    #[tool(description = "Compute balancing weights for causal inference using WeightIt. Supports multiple methods: 'logistic' (standard propensity score), 'entropy' (entropy balancing for exact mean balance), 'energy' (energy distance minimization), 'stable' (stable balancing weights). Returns weights, balance diagnostics before/after, and effective sample size (ESS). Low ESS indicates high weight variability.")]
+    async fn treatment_weightit(
+        &self,
+        Parameters(request): Parameters<WeightItRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let cov_refs: Vec<&str> = request.covariates.iter().map(|s| s.as_str()).collect();
+
+        // Parse weighting method
+        let method = match request.method.as_deref() {
+            Some("entropy") | Some("ebal") => WeightMethod::Entropy,
+            Some("energy") => WeightMethod::Energy,
+            Some("stable") | Some("sbw") => WeightMethod::Stable,
+            _ => WeightMethod::Logistic,
+        };
+
+        // Parse estimand
+        let estimand = match request.estimand.as_deref() {
+            Some("att") | Some("ATT") => WeightEstimand::ATT,
+            Some("atc") | Some("ATC") => WeightEstimand::ATC,
+            _ => WeightEstimand::ATE,
+        };
+
+        let config = WeightItConfig {
+            method,
+            estimand,
+            intercept: true,
+            stabilize: request.stabilize.unwrap_or(false),
+            trim_quantile: request.trim_quantile.unwrap_or(1.0),
+            max_iter: 200,
+            tolerance: 1e-8,
+        };
+
+        let result = match weightit(dataset, &request.treatment, &cov_refs, config) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "WeightIt estimation failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+    }
+
+    /// Run entropy balancing for exact covariate mean balance.
+    #[tool(description = "Compute entropy balancing weights (Hainmueller 2012). Reweights the control group to achieve exact mean balance on specified covariates with the treated group. Minimizes entropy (KL divergence) from uniform weights subject to balance constraints. Useful when exact balance is needed for bias reduction. Returns weights, balance table, and effective sample size.")]
+    async fn treatment_entropy_balance(
+        &self,
+        Parameters(request): Parameters<EntropyBalanceRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let cov_refs: Vec<&str> = request.covariates.iter().map(|s| s.as_str()).collect();
+
+        let result = match entropy_balance(dataset, &request.treatment, &cov_refs, request.target_means.as_deref()) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Entropy balancing failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+    }
+
+    /// Compute stable balancing weights for causal inference.
+    #[tool(description = "Compute Stable Balancing Weights (SBW) using quadratic programming (Zubizarreta 2015). Directly optimizes for covariate balance rather than modeling the propensity score. Finds weights that minimize variance while achieving exact or approximate balance on covariate means. Advantages: directly targets balance (not propensity score fit), provides stable weights with lower variance than IPW, handles approximate balance when exact is infeasible. Returns weights, balance diagnostics before/after, effective sample size, and optimization details.")]
+    async fn treatment_sbw(
+        &self,
+        Parameters(request): Parameters<SBWRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let cov_refs: Vec<&str> = request.covariates.iter().map(|s| s.as_str()).collect();
+
+        // Parse estimand
+        let estimand = match request.estimand.as_deref() {
+            Some("ate") | Some("ATE") => SBWEstimand::ATE,
+            Some("atc") | Some("ATC") => SBWEstimand::ATC,
+            _ => SBWEstimand::ATT,
+        };
+
+        let config = SBWConfig {
+            estimand,
+            balance_tol: request.balance_tol.unwrap_or(0.0),
+            min_weight: request.min_weight.unwrap_or(0.0),
+            normalize_to_n: true,
+            max_iter: 1000,
+            tolerance: 1e-8,
+            balance_penalty: request.balance_penalty.unwrap_or(1000.0),
+        };
+
+        let result = match sbw(dataset, &request.treatment, &cov_refs, config) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Stable Balancing Weights estimation failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+    }
+
+    /// Run twang GBM propensity score estimation.
+    #[tool(description = "Estimate propensity scores using Gradient Boosted Machine (GBM) with automatic tuning for covariate balance (twang). Unlike logistic regression, twang uses machine learning and automatically selects the optimal number of iterations based on balance metrics (standardized effect sizes or KS statistics). Particularly useful when you need good balance across many covariates. Returns propensity scores, IPW weights, optimal iteration number, and balance diagnostics before/after weighting.")]
+    async fn treatment_twang(
+        &self,
+        Parameters(request): Parameters<TwangRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let cov_refs: Vec<&str> = request.covariates.iter().map(|s| s.as_str()).collect();
+
+        // Parse stopping rule
+        let stop_method = match request.stop_method.as_deref() {
+            Some("es.max") | Some("esmax") | Some("ESMax") => StopMethod::ESMax,
+            Some("ks.mean") | Some("ksmean") | Some("KSMean") => StopMethod::KSMean,
+            Some("ks.max") | Some("ksmax") | Some("KSMax") => StopMethod::KSMax,
+            _ => StopMethod::ESMean,
+        };
+
+        // Parse estimand
+        let estimand = match request.estimand.as_deref() {
+            Some("ate") | Some("ATE") => TwangEstimand::ATE,
+            Some("atc") | Some("ATC") => TwangEstimand::ATC,
+            _ => TwangEstimand::ATT,
+        };
+
+        let config = TwangConfig {
+            n_trees: request.n_trees.unwrap_or(3000),
+            shrinkage: request.shrinkage.unwrap_or(0.01),
+            stop_method,
+            estimand,
+            balance_threshold: request.balance_threshold.unwrap_or(0.1),
+            min_iterations: 100,
+            interaction_depth: 1,
+            min_node_size: 10,
+        };
+
+        let result = match run_twang(dataset, &request.treatment, &cov_refs, Some(config)) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "twang estimation failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+    }
+
+    /// Run propensity score matching (MatchIt) for causal inference.
+    #[tool(description = "Perform propensity score matching to create balanced comparison groups for causal inference. Methods: 'nearest' (nearest neighbor matching on propensity score), 'cem' (coarsened exact matching on covariate bins), 'full' (optimal full matching), 'subclass' (propensity score subclassification). Returns matched sample with weights, balance diagnostics (standardized mean differences, variance ratios, KS statistics) before and after matching. Low SMD (<0.1) indicates good balance.")]
+    async fn propensity_matching(
+        &self,
+        Parameters(request): Parameters<MatchItRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let cov_refs: Vec<&str> = request.covariates.iter().map(|s| s.as_str()).collect();
+
+        // Parse matching method
+        let method = match request.method.as_deref() {
+            Some("cem") | Some("CEM") | Some("coarsened") => MatchMethod::CoarsenedExact {
+                cutpoints: None,
+                n_bins: Some(4),
+            },
+            Some("full") | Some("optimal") => MatchMethod::Full {
+                min_ratio: 0.5,
+                max_ratio: 2.0,
+            },
+            Some("subclass") | Some("stratify") => MatchMethod::Subclass {
+                n_subclasses: request.n_subclasses.unwrap_or(5),
+            },
+            _ => MatchMethod::NearestNeighbor {
+                ratio: request.ratio.unwrap_or(1),
+                caliper: request.caliper,
+                replace: request.replace.unwrap_or(false),
+            },
+        };
+
+        // Parse distance metric
+        let distance = match request.distance.as_deref() {
+            Some("probit") | Some("Probit") => Some(DistanceMethod::Probit),
+            Some("mahalanobis") | Some("Mahalanobis") => Some(DistanceMethod::Mahalanobis),
+            Some("euclidean") | Some("Euclidean") => Some(DistanceMethod::Euclidean),
+            _ => Some(DistanceMethod::Logit),
+        };
+
+        let result: MatchResult = match match_it(dataset, &request.treatment, &cov_refs, method, distance) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Propensity score matching failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        Ok(CallToolResult::success(vec![Content::text(format!("{}", result))]))
+    }
+
+    /// Run Targeted Maximum Likelihood Estimation (TMLE) for causal inference.
+    #[tool(description = "Estimate Average Treatment Effect (ATE) using TMLE - a doubly robust, semiparametric efficient estimator. TMLE uses a targeting step to optimize the bias-variance tradeoff for the ATE. More efficient than standard AIPW due to the fluctuation model. Returns ATE estimate with influence curve-based standard errors and confidence intervals.")]
+    async fn treatment_tmle(
+        &self,
+        Parameters(request): Parameters<TmleRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let cov_refs: Vec<&str> = request.covariates.iter().map(|s| s.as_str()).collect();
+
+        // Parse outcome model type
+        let q_model = match request.q_model.as_deref() {
+            Some("linear") | Some("Linear") | Some("continuous") => QModel::Linear,
+            _ => QModel::Logistic,
+        };
+
+        // Propensity score truncation bounds
+        let ps_lower = request.ps_lower.unwrap_or(0.01);
+        let ps_upper = request.ps_upper.unwrap_or(0.99);
+
+        let config = TmleConfig {
+            q_model,
+            g_model: GModel::Logistic,
+            truncate_ps: (ps_lower, ps_upper),
+            max_iter: 100,
+            tolerance: 1e-8,
+        };
+
+        let result = match tmle(dataset, &request.outcome, &request.treatment, &cov_refs, config) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "TMLE estimation failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+    }
+
+    /// Run Collaborative Targeted Maximum Likelihood Estimation (C-TMLE) for causal inference.
+    #[tool(description = "Estimate Average Treatment Effect (ATE) using C-TMLE - extends TMLE with data-adaptive covariate selection for the propensity score model. Uses cross-validation to select which covariates to include, reducing finite-sample bias from including too many covariates while maintaining double robustness. Returns ATE estimate, selected covariates, selection path with CV criterion at each step, and influence curve-based standard errors.")]
+    async fn collaborative_tmle(
+        &self,
+        Parameters(request): Parameters<CTmleRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let cov_refs: Vec<&str> = request.covariates.iter().map(|s| s.as_str()).collect();
+
+        // Parse outcome model type
+        let q_model = match request.q_model.as_deref() {
+            Some("linear") | Some("Linear") | Some("continuous") => CTmleQModel::Linear,
+            _ => CTmleQModel::Logistic,
+        };
+
+        // Parse stopping rule
+        let stopping_rule = match request.stopping_rule.as_deref() {
+            Some("one_se") | Some("OneSE") | Some("1se") => StoppingRule::OneSE,
+            Some("max_covariates") | Some("MaxCovariates") => {
+                StoppingRule::MaxCovariates(request.max_covariates.unwrap_or(10))
+            }
+            _ => StoppingRule::CVMinimum, // default
+        };
+
+        // Propensity score truncation bounds
+        let ps_lower = request.ps_lower.unwrap_or(0.025);
+        let ps_upper = request.ps_upper.unwrap_or(0.975);
+
+        let config = CTmleConfig {
+            n_folds: request.n_folds.unwrap_or(5),
+            max_covariates: request.max_covariates,
+            stopping_rule,
+            order: SelectionOrder::Forward,
+            q_model,
+            gbound: (ps_lower, ps_upper),
+            ..Default::default()
+        };
+
+        let result = match ctmle(dataset, &request.outcome, &request.treatment, &cov_refs, config) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "C-TMLE estimation failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+    }
+
+    /// Run Longitudinal Targeted Maximum Likelihood Estimation (LTMLE) for time-varying treatments.
+    #[tool(description = "Estimate causal effects of time-varying treatments using Longitudinal TMLE. LTMLE extends standard TMLE to longitudinal settings with multiple time points where treatments and confounders vary over time. Uses sequential regression (g-computation) combined with a targeting step at each time point to achieve double robustness. Estimates E[Y^{always treat}] - E[Y^{never treat}] under static intervention regimes. Returns ATE estimate, counterfactual means, influence curve-based standard errors, and diagnostics.")]
+    async fn ltmle(
+        &self,
+        Parameters(request): Parameters<LtmleRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        use p2a_core::econometrics::{run_ltmle, LtmleConfig, LtmleData, LtmleQModel};
+
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        // Validate inputs
+        let t_max = request.outcomes.len();
+        if t_max < 2 {
+            return Ok(CallToolResult::error(vec![Content::text(
+                "LTMLE requires at least 2 time points. For single time point, use standard TMLE."
+            )]));
+        }
+        if request.treatments.len() != t_max || request.covariates.len() != t_max {
+            return Ok(CallToolResult::error(vec![Content::text(format!(
+                "Number of time points must be consistent: outcomes={}, treatments={}, covariates={}",
+                request.outcomes.len(),
+                request.treatments.len(),
+                request.covariates.len()
+            ))]));
+        }
+
+        // Extract data from dataset
+        let df = dataset.df();
+        let n = df.height();
+
+        // Extract outcomes at each time point
+        let mut outcomes: Vec<ndarray::Array1<f64>> = Vec::with_capacity(t_max);
+        for col_name in &request.outcomes {
+            let col = match df.column(col_name) {
+                Ok(c) => c,
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Column '{}' not found: {}",
+                        col_name, e
+                    ))]));
+                }
+            };
+            let values: Vec<f64> = col.f64()
+                .map_err(|e| McpError::invalid_request(format!("Column '{}' must be numeric: {}", col_name, e), None))?
+                .into_no_null_iter()
+                .collect();
+            outcomes.push(ndarray::Array1::from_vec(values));
+        }
+
+        // Extract treatments at each time point
+        let mut treatments: Vec<ndarray::Array1<f64>> = Vec::with_capacity(t_max);
+        for col_name in &request.treatments {
+            let col = match df.column(col_name) {
+                Ok(c) => c,
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Column '{}' not found: {}",
+                        col_name, e
+                    ))]));
+                }
+            };
+            let values: Vec<f64> = col.f64()
+                .map_err(|e| McpError::invalid_request(format!("Column '{}' must be numeric: {}", col_name, e), None))?
+                .into_no_null_iter()
+                .collect();
+            treatments.push(ndarray::Array1::from_vec(values));
+        }
+
+        // Extract covariates at each time point
+        let mut covariates: Vec<ndarray::Array2<f64>> = Vec::with_capacity(t_max);
+        for cov_list in &request.covariates {
+            // Parse comma-separated covariate names
+            let cov_names: Vec<&str> = cov_list.split(',').map(|s| s.trim()).collect();
+            let k = cov_names.len();
+
+            let mut cov_data = Vec::with_capacity(n * k);
+            for row_idx in 0..n {
+                for col_name in &cov_names {
+                    let col = match df.column(*col_name) {
+                        Ok(c) => c,
+                        Err(e) => {
+                            return Ok(CallToolResult::error(vec![Content::text(format!(
+                                "Column '{}' not found: {}",
+                                col_name, e
+                            ))]));
+                        }
+                    };
+                    let value = col.f64()
+                        .map_err(|e| McpError::invalid_request(format!("Column '{}' must be numeric: {}", col_name, e), None))?
+                        .get(row_idx)
+                        .unwrap_or(f64::NAN);
+                    cov_data.push(value);
+                }
+            }
+
+            let cov_array = ndarray::Array2::from_shape_vec((n, k), cov_data)
+                .map_err(|e| McpError::invalid_request(format!("Failed to create covariate matrix: {}", e), None))?;
+            covariates.push(cov_array);
+        }
+
+        // Create LTMLE data structure
+        let data = match LtmleData::new(outcomes, treatments, covariates) {
+            Ok(d) => d,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Invalid LTMLE data: {}",
+                    e
+                ))]));
+            }
+        };
+
+        // Parse configuration
+        let q_model = match request.q_model.as_deref() {
+            Some("logistic") | Some("Logistic") | Some("binary") => LtmleQModel::Logistic,
+            _ => LtmleQModel::Linear,
+        };
+
+        let ps_lower = request.ps_lower.unwrap_or(0.01);
+        let ps_upper = request.ps_upper.unwrap_or(0.99);
+
+        let config = LtmleConfig {
+            q_model,
+            gbounds: (ps_lower, ps_upper),
+            ..Default::default()
+        };
+
+        let result = match run_ltmle(&data, config) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "LTMLE estimation failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+    }
+
+    /// Run Regression Standardization (G-computation) for causal effect estimation.
+    #[tool(description = "Estimate causal effects using regression standardization (G-computation/parametric g-formula). Fits an outcome model and averages predictions under different treatment values over the covariate distribution. Supports ATE (Average Treatment Effect), ATT (on Treated), ATC (on Controls). Returns effect estimate, potential outcomes E[Y(1)] and E[Y(0)], confidence intervals, and for binary outcomes: risk ratio, odds ratio, and NNT.")]
+    async fn regression_standardization(
+        &self,
+        Parameters(request): Parameters<StdRegRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let cov_refs: Vec<&str> = request.covariates.iter().map(|s| s.as_str()).collect();
+
+        // Parse model type
+        let model_type = match request.model_type.as_deref() {
+            Some("logistic") | Some("Logistic") | Some("binary") => StdRegModel::Logistic,
+            Some("poisson") | Some("Poisson") | Some("count") => StdRegModel::Poisson,
+            _ => StdRegModel::Linear,
+        };
+
+        // Parse estimand
+        let estimand = match request.estimand.as_deref() {
+            Some("att") | Some("ATT") => StdRegEstimand::ATT,
+            Some("atc") | Some("ATC") => StdRegEstimand::ATC,
+            Some("levels") | Some("Levels") => StdRegEstimand::Levels,
+            _ => StdRegEstimand::ATE,
+        };
+
+        // Parse SE method
+        let se_method = match request.se_method.as_deref() {
+            Some("delta") | Some("Delta") => SEMethod::Delta,
+            Some("sandwich") | Some("Sandwich") | Some("robust") => SEMethod::Sandwich,
+            _ => SEMethod::Bootstrap,
+        };
+
+        let config = StdRegConfig {
+            model_type,
+            estimand,
+            se_method,
+            n_bootstrap: request.n_bootstrap.unwrap_or(999),
+            confidence_level: request.confidence_level.unwrap_or(0.95),
+            include_interactions: request.interactions.unwrap_or(false),
+            seed: None,
+            max_iter: 100,
+            tolerance: 1e-8,
+        };
+
+        let result = match run_stdreg(dataset, &request.outcome, &request.treatment, &cov_refs, config) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Regression standardization failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+    }
+
     // ========================================================================
     // Causal Mediation Analysis
     // ========================================================================
@@ -9536,6 +14711,70 @@ impl AnalyticsServer {
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
                     "Mediation analysis failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+    }
+
+    /// Run Natural Effect Models for mediation analysis with treatment-mediator interactions.
+    #[tool(description = "Perform Natural Effect Models (medflex) mediation analysis that allows for \
+        treatment-mediator interactions. Decomposes total effect into Natural Direct Effect (NDE) and \
+        Natural Indirect Effect (NIE) using the regression-based approach of Lange, Vansteelandt, & Bekaert (2012). \
+        Unlike IPW-based mediation, this method uses regression models for both mediator and outcome, \
+        with optional A*M interaction terms. Returns effect estimates, bootstrap CIs, and model diagnostics.")]
+    async fn natural_effects_mediation(
+        &self,
+        Parameters(request): Parameters<NaturalEffectsRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let conf_refs: Vec<&str> = request.confounders
+            .as_ref()
+            .map(|v| v.iter().map(|s| s.as_str()).collect())
+            .unwrap_or_default();
+
+        // Parse effect scale
+        let scale = match request.scale.as_deref() {
+            Some("ratio") => EffectScale::Ratio,
+            Some("odds_ratio") | Some("odds") => EffectScale::OddsRatio,
+            _ => EffectScale::Difference,
+        };
+
+        let n_bootstrap = request.n_bootstrap.unwrap_or(1000);
+        let config = MedflexConfig {
+            allow_interaction: request.allow_interaction.unwrap_or(true),
+            bootstrap_ci: n_bootstrap > 0,
+            n_bootstrap,
+            confidence_level: request.confidence_level.unwrap_or(0.95),
+            scale,
+            seed: None,
+        };
+
+        let result: MedflexResult = match run_medflex_dataset(
+            dataset,
+            &request.outcome,
+            &request.treatment,
+            &request.mediator,
+            &conf_refs,
+            config,
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Natural effects mediation analysis failed: {}",
                     e
                 ))]));
             }
@@ -9633,6 +14872,284 @@ impl AnalyticsServer {
         };
 
         Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+    }
+
+    // ========================================================================
+    // Generalized Synthetic Control
+    // ========================================================================
+
+    /// Run Generalized Synthetic Control (gsynth) for panel data with multiple treated units.
+    #[tool(description = "Run Generalized Synthetic Control Method for causal inference with interactive fixed effects. \
+        Unlike traditional synthetic control (single treated unit), gsynth handles multiple treated units with staggered adoption. \
+        Uses Interactive Fixed Effects (IFE) to model: Y_it = α_i + λ_i'f_t + X_it'β + τ_it·D_it + ε_it. \
+        Factors f_t and loadings λ_i capture unobserved confounders. Developed by Xu (2017). \
+        Returns ATT (average treatment effect on treated), unit-level effects, factor structure, and optional bootstrap inference.")]
+    async fn gsynth(
+        &self,
+        Parameters(request): Parameters<GsynthRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        // Parse estimator
+        let estimator = match request.estimator.as_deref() {
+            Some("mc") => GsynthEstimator::MatrixCompletion,
+            _ => GsynthEstimator::Ife, // default
+        };
+
+        // Parse force (fixed effects)
+        let force = match request.force.as_deref() {
+            Some("none") => GsynthForce::None,
+            Some("time") => GsynthForce::Time,
+            Some("twoWay") | Some("twoway") | Some("two_way") => GsynthForce::TwoWay,
+            _ => GsynthForce::Unit, // default
+        };
+
+        let config = GsynthConfig {
+            n_factors: request.n_factors.unwrap_or(2),
+            cross_validate: request.cross_validate.unwrap_or(false),
+            max_factors: request.max_factors.unwrap_or(5),
+            estimator,
+            force,
+            bootstrap_se: request.bootstrap_se.unwrap_or(false),
+            n_bootstrap: request.n_bootstrap.unwrap_or(500),
+            ..Default::default()
+        };
+
+        let cov_refs: Vec<&str> = request
+            .covariates
+            .as_ref()
+            .map(|v| v.iter().map(|s| s.as_str()).collect())
+            .unwrap_or_default();
+
+        let result = match run_gsynth(
+            dataset,
+            &request.outcome,
+            &request.treatment,
+            &request.unit_col,
+            &request.time_col,
+            &cov_refs,
+            config,
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Generalized synthetic control (gsynth) failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+    }
+
+    // ========================================================================
+    // Synthetic Control with Prediction Intervals (SCPI)
+    // ========================================================================
+
+    /// Run Synthetic Control with Prediction Intervals (SCPI).
+    #[tool(description = "Run Synthetic Control with Prediction Intervals (SCPI) for causal inference. \
+        Extends the classic synthetic control method (Abadie et al. 2010) with proper uncertainty quantification \
+        through prediction intervals that account for both in-sample and out-of-sample variance. \
+        Supports multiple constraint types: simplex (classic SC), lasso (sparse), ridge (shrinkage), or lasso_simplex (sparse with sum=1). \
+        Developed by Cattaneo, Feng & Titiunik (2021) in JASA. \
+        Returns donor weights, treatment effects with prediction intervals, variance decomposition, and pre-treatment fit statistics.")]
+    async fn scpi(
+        &self,
+        Parameters(request): Parameters<ScpiRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        use ndarray::{Array1, Array2};
+
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let df = dataset.df();
+
+        // Extract unique units and times
+        let units: Vec<String> = match df.column(&request.unit_col) {
+            Ok(col) => match col.str() {
+                Ok(str_col) => str_col
+                    .into_iter()
+                    .filter_map(|s| s.map(|s| s.to_string()))
+                    .collect::<std::collections::HashSet<_>>()
+                    .into_iter()
+                    .collect(),
+                Err(_) => {
+                    return Ok(CallToolResult::error(vec![Content::text(
+                        format!("Unit column '{}' must be string type", request.unit_col)
+                    )]));
+                }
+            },
+            Err(_) => {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    format!("Unit column '{}' not found", request.unit_col)
+                )]));
+            }
+        };
+
+        let mut times: Vec<i64> = match df.column(&request.time_col) {
+            Ok(col) => match col.i64() {
+                Ok(int_col) => int_col
+                    .into_iter()
+                    .filter_map(|t| t)
+                    .collect::<std::collections::HashSet<_>>()
+                    .into_iter()
+                    .collect(),
+                Err(_) => {
+                    return Ok(CallToolResult::error(vec![Content::text(
+                        format!("Time column '{}' must be integer type", request.time_col)
+                    )]));
+                }
+            },
+            Err(_) => {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    format!("Time column '{}' not found", request.time_col)
+                )]));
+            }
+        };
+        times.sort();
+
+        // Validate treated unit exists
+        if !units.contains(&request.treated_unit) {
+            return Ok(CallToolResult::error(vec![Content::text(format!(
+                "Treated unit '{}' not found in data. Available units: {:?}",
+                request.treated_unit,
+                units.iter().take(10).collect::<Vec<_>>()
+            ))]));
+        }
+
+        // Find treatment period index
+        let treatment_idx = match times.iter().position(|&t| t == request.treatment_time) {
+            Some(idx) => idx,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Treatment time {} not found in data. Available times: {:?}",
+                    request.treatment_time,
+                    times.iter().take(20).collect::<Vec<_>>()
+                ))]));
+            }
+        };
+
+        // Build treated series and donor matrix
+        let n_times = times.len();
+        let donor_units: Vec<String> = units.iter().filter(|u| *u != &request.treated_unit).cloned().collect();
+        let n_donors = donor_units.len();
+
+        // Helper function to get value for unit at time
+        let get_value = |df: &polars::frame::DataFrame, outcome: &str, unit_col: &str, time_col: &str, unit: &str, time: i64| -> Result<f64, String> {
+            let unit_mask = df.column(unit_col).map_err(|e| e.to_string())?
+                .str().map_err(|_| "Unit column not string".to_string())?
+                .equal(unit);
+            let time_mask = df.column(time_col).map_err(|e| e.to_string())?
+                .i64().map_err(|_| "Time column not int".to_string())?
+                .equal(time);
+            let combined = &unit_mask & &time_mask;
+            let filtered = df.filter(&combined).map_err(|e| e.to_string())?;
+            if filtered.height() == 0 {
+                return Err(format!("No data for unit '{}' at time {}", unit, time));
+            }
+            let val = filtered.column(outcome).map_err(|e| e.to_string())?
+                .f64().map_err(|_| "Outcome not numeric".to_string())?
+                .get(0).ok_or_else(|| "Missing value".to_string())?;
+            Ok(val)
+        };
+
+        // Extract outcome values for treated unit
+        let mut treated_values = Array1::zeros(n_times);
+        for (t_idx, &time) in times.iter().enumerate() {
+            match get_value(df, &request.outcome, &request.unit_col, &request.time_col, &request.treated_unit, time) {
+                Ok(v) => treated_values[t_idx] = v,
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Error extracting treated unit data: {}", e
+                    ))]));
+                }
+            }
+        }
+
+        // Extract donor matrix
+        let mut donor_matrix = Array2::zeros((n_times, n_donors));
+        for (d_idx, donor) in donor_units.iter().enumerate() {
+            for (t_idx, &time) in times.iter().enumerate() {
+                match get_value(df, &request.outcome, &request.unit_col, &request.time_col, donor, time) {
+                    Ok(v) => donor_matrix[[t_idx, d_idx]] = v,
+                    Err(e) => {
+                        return Ok(CallToolResult::error(vec![Content::text(format!(
+                            "Error extracting donor unit '{}' data: {}", donor, e
+                        ))]));
+                    }
+                }
+            }
+        }
+
+        // Parse constraint type
+        let lambda = request.lambda.unwrap_or(0.1);
+        let constraint = match request.constraint.as_deref() {
+            Some("lasso") => SCPIConstraint::Lasso { lambda },
+            Some("ridge") => SCPIConstraint::Ridge { lambda },
+            Some("lasso_simplex") => SCPIConstraint::LassoSimplex { lambda },
+            _ => SCPIConstraint::Simplex, // default
+        };
+
+        // Parse variance method
+        let variance_method = match request.variance_method.as_deref() {
+            Some("gaussian") => VarianceMethod::Gaussian,
+            Some("loo_cv") => VarianceMethod::LooCv,
+            Some("kfold_cv") => VarianceMethod::KFoldCv,
+            _ => VarianceMethod::Subgaussian, // default
+        };
+
+        let config = SCPIConfig {
+            constraint,
+            alpha: request.alpha.unwrap_or(0.05),
+            variance_method,
+            cv_folds: request.cv_folds.unwrap_or(5),
+            weight_threshold: request.weight_threshold.unwrap_or(0.001),
+            ..Default::default()
+        };
+
+        let result = match run_scpi(
+            &treated_values.view(),
+            &donor_matrix.view(),
+            treatment_idx,
+            config,
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "SCPI estimation failed: {}", e
+                ))]));
+            }
+        };
+
+        // Format output with donor unit names
+        let mut output = format!("{}\n", result);
+        output.push_str("\nDonor Unit Names (for non-zero weights):\n");
+        for (idx, weight) in &result.nonzero_weights {
+            if let Some(name) = donor_units.get(*idx) {
+                output.push_str(&format!("  {}: {:.4}\n", name, weight));
+            }
+        }
+
+        Ok(CallToolResult::success(vec![Content::text(output)]))
     }
 
     // ========================================================================
@@ -9813,6 +15330,92 @@ impl AnalyticsServer {
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
                     "Fuzzy RD estimation failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+    }
+
+    /// Run Multi-Cutoff Regression Discontinuity estimation.
+    #[tool(description = "Run Multi-Cutoff Regression Discontinuity (rdmulti) estimation. Handles RD designs with multiple cutoffs (different thresholds) sharing the same running variable. Estimates cutoff-specific effects and optionally pools them into a single weighted estimate. Includes a heterogeneity test for whether effects differ across cutoffs. Reference: Cattaneo, Titiunik & Vazquez-Bare (2020).")]
+    async fn rd_multi(
+        &self,
+        Parameters(request): Parameters<RdMultiRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        if request.cutoffs.is_empty() {
+            return Ok(CallToolResult::error(vec![Content::text(
+                "At least one cutoff value must be specified in 'cutoffs'."
+            )]));
+        }
+
+        // Parse kernel type
+        let kernel = match request.kernel.as_deref() {
+            Some("epanechnikov") => KernelType::Epanechnikov,
+            Some("uniform") => KernelType::Uniform,
+            _ => KernelType::Triangular,
+        };
+
+        // Parse pooling weights
+        let pooling_weights = match request.pooling_weights.as_deref() {
+            Some("inverse_variance") | Some("iv") => PoolingWeights::InverseVariance,
+            Some("equal") => PoolingWeights::Equal,
+            _ => PoolingWeights::SampleSize,
+        };
+
+        // Determine bandwidth specification
+        let bandwidth = if let Some(bws) = &request.bandwidths {
+            if bws.len() != request.cutoffs.len() {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Number of bandwidths ({}) must match number of cutoffs ({})",
+                    bws.len(), request.cutoffs.len()
+                ))]));
+            }
+            RdMultiBandwidth::PerCutoff(bws.clone())
+        } else if let Some(h) = request.bandwidth {
+            RdMultiBandwidth::Global(h)
+        } else {
+            RdMultiBandwidth::PerCutoffOptimal
+        };
+
+        let config = RdMultiConfig {
+            cutoffs: request.cutoffs.clone(),
+            bandwidth,
+            kernel,
+            p: request.p.unwrap_or(1),
+            q: None,
+            pooled: request.pooled.unwrap_or(true),
+            pooling_weights,
+            bwselect: BandwidthMethod::MseRd,
+            vce: VceType::default(),
+            level: request.level.unwrap_or(0.95),
+            test_heterogeneity: request.test_heterogeneity.unwrap_or(true),
+        };
+
+        let result: RdMultiResult = match run_rd_multi_dataset(
+            dataset,
+            &request.outcome,
+            &request.running_var,
+            request.cutoff_col.as_deref(),
+            config,
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Multi-cutoff RD estimation failed: {}",
                     e
                 ))]));
             }
@@ -10098,6 +15701,307 @@ impl AnalyticsServer {
         Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
     }
 
+    /// Run multinomial logit regression for unordered categorical outcomes.
+    #[tool(description = "Run multinomial logit regression for unordered categorical outcomes with 3+ categories. Uses MLE with Newton-Raphson. Equivalent to R's nnet::multinom().")]
+    async fn multinom(
+        &self,
+        Parameters(request): Parameters<MultinomRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
+        let reference = request.reference.as_deref();
+
+        let result = match run_multinom(dataset, &request.y, &x_refs, reference) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Multinomial logit estimation failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+    }
+
+    /// Run McFadden's conditional logit (mlogit) for discrete choice analysis.
+    #[tool(description = "Run McFadden's conditional logit (mlogit) for discrete choice analysis. Supports both alternative-specific variables (with generic coefficients) and individual-specific variables (with alternative-specific coefficients). Data must be in long format with one row per individual-alternative combination. Equivalent to R's mlogit::mlogit().")]
+    async fn mlogit(
+        &self,
+        Parameters(request): Parameters<MlogitRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let alt_specific_refs: Vec<&str> = request.alt_specific.iter().map(|s| s.as_str()).collect();
+        let ind_specific_refs: Vec<&str> = request.ind_specific.iter().map(|s| s.as_str()).collect();
+        let reference = request.reference.as_deref();
+
+        let result = match run_mlogit(
+            dataset,
+            &request.choice_id,
+            &request.alt_id,
+            &request.choice,
+            &alt_specific_refs,
+            &ind_specific_refs,
+            reference,
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Conditional logit (mlogit) estimation failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+    }
+
+    /// Run mixed logit (random parameters logit) for discrete choice with preference heterogeneity.
+    #[tool(description = "Run mixed logit (random parameters logit) for discrete choice models with heterogeneous preferences. Allows coefficients to vary across individuals according to specified distributions (normal, lognormal, triangular, uniform). Uses Maximum Simulated Likelihood (MSL) with Halton sequences. Equivalent to R's gmnl::gmnl() or mixl::mixl().")]
+    async fn mixed_logit(
+        &self,
+        Parameters(request): Parameters<MixedLogitRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let var_refs: Vec<&str> = request.variables.iter().map(|s| s.as_str()).collect();
+
+        // Parse distribution
+        let dist = match request.distribution.as_deref() {
+            Some("lognormal") | Some("log-normal") => RandomDistribution::LogNormal,
+            Some("triangular") => RandomDistribution::Triangular,
+            Some("uniform") => RandomDistribution::Uniform,
+            Some("fixed") => RandomDistribution::Fixed,
+            _ => RandomDistribution::Normal,
+        };
+
+        // Convert random_vars to refs
+        let random_refs: Option<Vec<&str>> = request.random_vars.as_ref().map(|v| {
+            v.iter().map(|s| s.as_str()).collect()
+        });
+
+        // Build config
+        let config = MixedLogitConfig {
+            n_draws: request.n_draws.unwrap_or(500),
+            halton: request.halton.unwrap_or(true),
+            max_iter: 200,
+            tolerance: 1e-6,
+            seed: Some(42),
+        };
+
+        let result = match run_gmnl(
+            dataset,
+            &request.choice_id,
+            &request.alt_id,
+            &request.choice,
+            &var_refs,
+            random_refs.as_deref(),
+            Some(dist),
+            Some(config),
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Mixed logit estimation failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+    }
+
+    /// Run ordered logit/probit regression for ordinal outcomes.
+    #[tool(description = "Run ordered logit or probit regression (proportional odds model) for ordered categorical outcomes. Estimates threshold (cut-point) parameters. Equivalent to R's MASS::polr().")]
+    async fn ordered_model(
+        &self,
+        Parameters(request): Parameters<OrderedRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
+        let model_type = request.model_type.as_deref().unwrap_or("logit");
+
+        let result = match model_type.to_lowercase().as_str() {
+            "logit" => run_ordered_logit(dataset, &request.y, &x_refs),
+            "probit" => run_ordered_probit(dataset, &request.y, &x_refs),
+            _ => {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    "Invalid model_type. Use 'logit' or 'probit'.".to_string()
+                )]));
+            }
+        };
+
+        match result {
+            Ok(r) => Ok(CallToolResult::success(vec![Content::text(r.to_string())])),
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
+                "Ordered {} estimation failed: {}",
+                model_type, e
+            ))])),
+        }
+    }
+
+    /// Run negative binomial regression for count data with overdispersion.
+    #[tool(description = "Run negative binomial regression for count data with overdispersion (variance > mean). Estimates dispersion parameter (theta). Equivalent to R's MASS::glm.nb().")]
+    async fn negbin(
+        &self,
+        Parameters(request): Parameters<NegBinRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
+
+        let result = match run_negbin(dataset, &request.y, &x_refs, request.init_theta) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Negative binomial estimation failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+    }
+
+    /// Run zero-inflated regression for count data with excess zeros.
+    #[tool(description = "Run zero-inflated Poisson or negative binomial regression for count data with excess zeros. Models both the zero-inflation probability and the count process. Equivalent to R's pscl::zeroinfl().")]
+    async fn zeroinfl(
+        &self,
+        Parameters(request): Parameters<ZeroInflRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
+        let z_refs: Option<Vec<&str>> = request.z.as_ref()
+            .map(|zz| zz.iter().map(|s| s.as_str()).collect());
+        let z_slice: Option<&[&str]> = z_refs.as_deref();
+        let dist = request.dist.as_deref().unwrap_or("poisson");
+
+        let result = match dist.to_lowercase().as_str() {
+            "poisson" => run_zip(dataset, &request.y, &x_refs, z_slice),
+            "negbin" | "negbinom" => run_zinb(dataset, &request.y, &x_refs, z_slice),
+            _ => {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    "Invalid dist. Use 'poisson' or 'negbin'.".to_string()
+                )]));
+            }
+        };
+
+        match result {
+            Ok(r) => Ok(CallToolResult::success(vec![Content::text(r.to_string())])),
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
+                "Zero-inflated {} estimation failed: {}",
+                dist, e
+            ))])),
+        }
+    }
+
+    /// Run hurdle model for count data with excess zeros.
+    #[tool(description = "Run a hurdle model (two-part model) for count data with excess zeros. The hurdle model separates the zero vs. positive decision (binary logit) from the count magnitude (truncated Poisson or negative binomial). Unlike zero-inflated models, hurdle assumes all zeros come from the binary part. Equivalent to R's pscl::hurdle().")]
+    async fn hurdle_model(
+        &self,
+        Parameters(request): Parameters<HurdleModelRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
+        let z_refs: Option<Vec<&str>> = request.z.as_ref()
+            .map(|zz| zz.iter().map(|s| s.as_str()).collect());
+        let z_slice: Option<&[&str]> = z_refs.as_deref();
+        let dist = request.dist.as_deref().unwrap_or("poisson");
+
+        let model_type = match dist.to_lowercase().as_str() {
+            "poisson" => HurdleType::Poisson,
+            "negbin" | "negbinom" => HurdleType::NegBin,
+            _ => {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    "Invalid dist. Use 'poisson' or 'negbin'.".to_string()
+                )]));
+            }
+        };
+
+        match run_hurdle(dataset, &request.y, &x_refs, z_slice, model_type) {
+            Ok(r) => Ok(CallToolResult::success(vec![Content::text(r.to_string())])),
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
+                "Hurdle {} estimation failed: {}",
+                dist, e
+            ))])),
+        }
+    }
+
     /// Run High-Dimensional Fixed Effects regression with multiple absorbed FE.
     #[tool(description = "Run High-Dimensional Fixed Effects (HDFE) regression with multiple absorbed fixed effects (e.g., firm + year + industry). Uses the Method of Alternating Projections (MAP) for efficient estimation. Equivalent to R's lfe::felm() or Stata's reghdfe.")]
     async fn panel_hdfe(
@@ -10210,6 +16114,1212 @@ impl AnalyticsServer {
     }
 
     // ========================================================================
+    // Spatial Econometrics
+    // ========================================================================
+
+    /// Create spatial neighbors and weights from coordinates.
+    #[tool(description = "Create spatial neighbors and weights matrix from coordinate data. Supports k-nearest neighbors (knn), distance-based neighbors, and great-circle distance for lon/lat coordinates. The resulting weights are stored for use with spatial tests and models (Moran's I, SAR, SEM). Equivalent to R's spdep::knearneigh() + nb2listw() or dnearneigh() + nb2listw().")]
+    async fn spatial_neighbors(
+        &self,
+        Parameters(request): Parameters<SpatialNeighborsRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let df = dataset.df();
+
+        // Extract coordinates
+        let x_series = match df.column(&request.x_coord) {
+            Ok(s) => s,
+            Err(_) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Coordinate column '{}' not found in dataset.",
+                    request.x_coord
+                ))]));
+            }
+        };
+        let y_series = match df.column(&request.y_coord) {
+            Ok(s) => s,
+            Err(_) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Coordinate column '{}' not found in dataset.",
+                    request.y_coord
+                ))]));
+            }
+        };
+
+        let x_vals: Vec<f64> = match x_series.f64() {
+            Ok(ca) => ca.into_no_null_iter().collect(),
+            Err(_) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Column '{}' must be numeric.",
+                    request.x_coord
+                ))]));
+            }
+        };
+        let y_vals: Vec<f64> = match y_series.f64() {
+            Ok(ca) => ca.into_no_null_iter().collect(),
+            Err(_) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Column '{}' must be numeric.",
+                    request.y_coord
+                ))]));
+            }
+        };
+
+        let coords: Vec<(f64, f64)> = x_vals.into_iter().zip(y_vals.into_iter()).collect();
+        let n = coords.len();
+
+        // Create neighbors based on method
+        let method = request.method.as_deref().unwrap_or("knn");
+        let neighbors = match method {
+            "knn" => {
+                let k = request.k.unwrap_or(5);
+                Neighbors::from_knn(&coords, k)
+            }
+            "distance" => {
+                let d_max = request.d_max.unwrap_or(1.0);
+                let d_min = request.d_min.unwrap_or(0.0);
+                Neighbors::from_distance(&coords, d_min, d_max)
+            }
+            "distance_longlat" | "longlat" => {
+                let d_max = request.d_max.unwrap_or(100.0); // km
+                let d_min = request.d_min.unwrap_or(0.0);
+                Neighbors::from_distance_longlat(&coords, d_min, d_max)
+            }
+            other => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Unknown neighbor method '{}'. Use 'knn', 'distance', or 'distance_longlat'.",
+                    other
+                ))]));
+            }
+        };
+
+        // Determine weight style
+        let style = match request.style.as_deref() {
+            Some("B") | Some("binary") => WeightStyle::Binary,
+            Some("C") | Some("global") => WeightStyle::GlobalStd,
+            Some("U") | Some("unstandardized") => WeightStyle::Binary, // Closest approximation
+            _ => WeightStyle::RowStd, // Default: row-standardized
+        };
+
+        // Create spatial weights
+        let weights = SpatialWeights::from_neighbors(&neighbors, style);
+
+        // Get stats from neighbors before we lose access to it
+        let avg_neighbors = neighbors.avg_neighbors();
+        let has_isolates = neighbors.has_isolates();
+        let n_isolates = neighbors.isolates().len();
+        let is_symmetric = neighbors.is_symmetric();
+
+        // Store the weights
+        let weights_name = request.weights_name
+            .unwrap_or_else(|| format!("{}_weights", request.dataset));
+
+        drop(datasets);
+        let mut spatial_weights = self.spatial_weights.write().await;
+        spatial_weights.insert(weights_name.clone(), weights);
+
+        let mut output = format!(
+            "Spatial Weights Created: '{}'\n\
+             ========================\n\
+             Observations: {}\n\
+             Method: {}\n\
+             Style: {:?}\n\
+             Average neighbors: {:.2}\n\
+             Symmetric: {}\n",
+            weights_name,
+            n,
+            method,
+            style,
+            avg_neighbors,
+            is_symmetric
+        );
+
+        if has_isolates {
+            output.push_str(&format!(
+                "\nWarning: {} observation(s) have no neighbors (isolates).\n",
+                n_isolates
+            ));
+        }
+
+        Ok(CallToolResult::success(vec![Content::text(output)]))
+    }
+
+    /// Run Moran's I test for spatial autocorrelation.
+    #[tool(description = "Run Moran's I test for spatial autocorrelation on a variable. Tests whether nearby observations tend to have similar values (positive autocorrelation) or dissimilar values (negative autocorrelation). Requires spatial weights created with 'spatial_neighbors'. Equivalent to R's spdep::moran.test().")]
+    async fn moran_test(
+        &self,
+        Parameters(request): Parameters<MoranTestRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let spatial_weights = self.spatial_weights.read().await;
+        let listw = match spatial_weights.get(&request.weights) {
+            Some(w) => w,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Spatial weights '{}' not found. Use 'spatial_neighbors' first to create weights.",
+                    request.weights
+                ))]));
+            }
+        };
+
+        // Extract variable
+        let df = dataset.df();
+        let var_series = match df.column(&request.variable) {
+            Ok(s) => s,
+            Err(_) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Variable '{}' not found in dataset.",
+                    request.variable
+                ))]));
+            }
+        };
+        let x_vec: Vec<f64> = match var_series.f64() {
+            Ok(ca) => ca.into_no_null_iter().collect(),
+            Err(_) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Variable '{}' must be numeric.",
+                    request.variable
+                ))]));
+            }
+        };
+        let x = ndarray::Array1::from_vec(x_vec);
+
+        // Parse alternative
+        let alternative = match request.alternative.as_deref() {
+            Some("less") | Some("negative") => MoranAlternative::Less,
+            Some("two.sided") | Some("two-sided") => MoranAlternative::TwoSided,
+            _ => MoranAlternative::Greater, // Default: positive autocorrelation
+        };
+
+        match moran_test(&x, listw, alternative) {
+            Ok(result) => {
+                let output = format!(
+                    "Moran's I Test for Spatial Autocorrelation\n\
+                     ==========================================\n\
+                     Variable: {}\n\
+                     Moran I statistic: {:.6}\n\
+                     Expected I: {:.6}\n\
+                     Variance: {:.6}\n\
+                     Z-score: {:.4}\n\
+                     P-value: {:.6}\n\
+                     Alternative: {:?}\n\n\
+                     Interpretation:\n\
+                     - I > E[I]: positive spatial autocorrelation (clustering)\n\
+                     - I < E[I]: negative spatial autocorrelation (dispersion)\n\
+                     - I ≈ E[I]: random spatial pattern",
+                    request.variable,
+                    result.statistic,
+                    result.expectation,
+                    result.variance,
+                    result.z_score,
+                    result.p_value,
+                    alternative
+                );
+                Ok(CallToolResult::success(vec![Content::text(output)]))
+            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
+                "Moran's I test failed: {}",
+                e
+            ))])),
+        }
+    }
+
+    /// Run spatial LM tests to choose between SAR and SEM models.
+    #[tool(description = "Run Lagrange Multiplier tests for spatial dependence. Tests for spatial lag (SAR) vs spatial error (SEM) dependence in OLS residuals. Includes robust versions that account for the presence of the other form of spatial dependence. Use to decide between SAR and SEM models. Equivalent to R's spdep::lm.LMtests().")]
+    async fn spatial_lm_tests_tool(
+        &self,
+        Parameters(request): Parameters<SpatialLmTestRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let mut spatial_weights_map = self.spatial_weights.write().await;
+        let listw = match spatial_weights_map.get_mut(&request.weights) {
+            Some(w) => w,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Spatial weights '{}' not found. Use 'spatial_neighbors' first to create weights.",
+                    request.weights
+                ))]));
+            }
+        };
+
+        let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
+
+        // Run OLS to get residuals
+        let ols_result = match run_ols(dataset, &request.y, &x_refs, true, CovarianceType::Standard) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "OLS estimation failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        // Build design matrix with intercept
+        let df = dataset.df();
+        let n = df.height();
+        let k = request.x.len() + 1; // +1 for intercept
+
+        let mut x_mat = ndarray::Array2::<f64>::zeros((n, k));
+        for i in 0..n {
+            x_mat[[i, 0]] = 1.0; // Intercept
+        }
+        for (j, col_name) in request.x.iter().enumerate() {
+            let col = match df.column(col_name) {
+                Ok(c) => c,
+                Err(_) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Column '{}' not found.",
+                        col_name
+                    ))]));
+                }
+            };
+            let col_f64 = match col.f64() {
+                Ok(c) => c,
+                Err(_) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Column '{}' must be numeric.",
+                        col_name
+                    ))]));
+                }
+            };
+            for (i, val) in col_f64.into_no_null_iter().enumerate() {
+                x_mat[[i, j + 1]] = val;
+            }
+        }
+
+        match spatial_lm_tests(ols_result.residuals(), &x_mat, listw) {
+            Ok(result) => {
+                let output = format!(
+                    "Spatial Lagrange Multiplier Tests\n\
+                     ==================================\n\
+                     Dependent variable: {}\n\n\
+                     LM tests for spatial dependence:\n\
+                     --------------------------------\n\
+                     LM-Lag (ρ):     statistic = {:.4}, df = {}, p-value = {:.6}\n\
+                     LM-Error (λ):   statistic = {:.4}, df = {}, p-value = {:.6}\n\n\
+                     Robust LM tests (controlling for the other):\n\
+                     --------------------------------------------\n\
+                     RLM-Lag:        statistic = {:.4}, df = {}, p-value = {:.6}\n\
+                     RLM-Error:      statistic = {:.4}, df = {}, p-value = {:.6}\n\n\
+                     Joint SARMA test:\n\
+                     -----------------\n\
+                     LM-SARMA:       statistic = {:.4}, df = {}, p-value = {:.6}\n\n\
+                     Decision Rule:\n\
+                     - Both LM tests significant: use robust versions\n\
+                     - Only RLM-Lag significant: use SAR model (lagsarlm)\n\
+                     - Only RLM-Error significant: use SEM model (errorsarlm)\n\
+                     - Both robust tests significant: use SARAR model",
+                    request.y,
+                    result.lm_lag.statistic, result.lm_lag.df, result.lm_lag.p_value,
+                    result.lm_error.statistic, result.lm_error.df, result.lm_error.p_value,
+                    result.rlm_lag.statistic, result.rlm_lag.df, result.rlm_lag.p_value,
+                    result.rlm_error.statistic, result.rlm_error.df, result.rlm_error.p_value,
+                    result.lm_sarma.statistic, result.lm_sarma.df, result.lm_sarma.p_value
+                );
+                Ok(CallToolResult::success(vec![Content::text(output)]))
+            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
+                "Spatial LM tests failed: {}",
+                e
+            ))])),
+        }
+    }
+
+    /// Run Spatial Autoregressive Lag (SAR) model.
+    #[tool(description = "Run Spatial Autoregressive Lag (SAR) model: y = ρWy + Xβ + ε. Estimates spatial lag parameter ρ via maximum likelihood. Use when there is substantive spatial interaction (e.g., neighbors' outcomes affect own outcome). Optionally estimates Spatial Durbin Model (SDM) with spatially lagged covariates. Equivalent to R's spatialreg::lagsarlm().")]
+    async fn sar_model(
+        &self,
+        Parameters(request): Parameters<SarModelRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let mut spatial_weights = self.spatial_weights.write().await;
+        let listw = match spatial_weights.get_mut(&request.weights) {
+            Some(w) => w,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Spatial weights '{}' not found. Use 'spatial_neighbors' first to create weights.",
+                    request.weights
+                ))]));
+            }
+        };
+
+        let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
+
+        let config = SarConfig {
+            durbin: request.durbin.unwrap_or(false),
+            compute_impacts: request.compute_impacts.unwrap_or(true),
+            ..Default::default()
+        };
+
+        match run_sar(dataset, &request.y, &x_refs, listw, config) {
+            Ok(result) => {
+                let model_type = if result.is_durbin { "Spatial Durbin Model (SDM)" } else { "Spatial Lag Model (SAR)" };
+
+                let mut output = format!(
+                    "{}\n{}\n\
+                     y = ρWy + Xβ + ε\n\n\
+                     Spatial autoregressive coefficient (ρ):\n\
+                     ---------------------------------------\n\
+                     Estimate: {:.6}\n\
+                     Std.Error: {:.6}\n\
+                     Z-value: {:.4}\n\
+                     P-value: {:.6}\n\n\
+                     Regression Coefficients:\n\
+                     ------------------------\n",
+                    model_type,
+                    "=".repeat(model_type.len()),
+                    result.rho,
+                    result.rho_se,
+                    result.rho_z,
+                    result.rho_p
+                );
+
+                for (i, name) in result.coef_names.iter().enumerate() {
+                    output.push_str(&format!(
+                        "{:15} {:>12.6} {:>10.6} {:>10.4} {:>10.6}\n",
+                        name,
+                        result.coefficients[i],
+                        result.std_errors[i],
+                        result.z_values[i],
+                        result.p_values[i]
+                    ));
+                }
+
+                output.push_str(&format!(
+                    "\nModel Statistics:\n\
+                     -----------------\n\
+                     Log-Likelihood: {:.4}\n\
+                     AIC: {:.4}\n\
+                     BIC: {:.4}\n\
+                     Sigma²: {:.6}\n\
+                     N: {}\n",
+                    result.log_likelihood,
+                    result.aic,
+                    result.bic,
+                    result.sigma2,
+                    result.n_obs
+                ));
+
+                // Add impacts if computed
+                if let Some(impacts) = &result.impacts {
+                    output.push_str("\nSpatial Impacts:\n");
+                    output.push_str("----------------\n");
+                    output.push_str(&format!("{:15} {:>12} {:>12} {:>12}\n", "Variable", "Direct", "Indirect", "Total"));
+                    for (i, name) in impacts.var_names.iter().enumerate() {
+                        output.push_str(&format!(
+                            "{:15} {:>12.6} {:>12.6} {:>12.6}\n",
+                            name,
+                            impacts.direct[i],
+                            impacts.indirect[i],
+                            impacts.total[i]
+                        ));
+                    }
+                    output.push_str("\nNote: Direct = own effect, Indirect = spillover effects from neighbors");
+                }
+
+                Ok(CallToolResult::success(vec![Content::text(output)]))
+            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
+                "SAR model estimation failed: {}",
+                e
+            ))])),
+        }
+    }
+
+    /// Run Spatial Error Model (SEM).
+    #[tool(description = "Run Spatial Error Model (SEM): y = Xβ + u, where u = λWu + ε. Estimates spatial error parameter λ via maximum likelihood. Use when spatial dependence is in the error term (nuisance dependence, e.g., omitted spatially correlated variables). Equivalent to R's spatialreg::errorsarlm().")]
+    async fn sem_model(
+        &self,
+        Parameters(request): Parameters<SemModelRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let mut spatial_weights = self.spatial_weights.write().await;
+        let listw = match spatial_weights.get_mut(&request.weights) {
+            Some(w) => w,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Spatial weights '{}' not found. Use 'spatial_neighbors' first to create weights.",
+                    request.weights
+                ))]));
+            }
+        };
+
+        let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
+
+        let config = SemConfig::default();
+
+        match run_sem(dataset, &request.y, &x_refs, listw, config) {
+            Ok(result) => {
+                let mut output = format!(
+                    "Spatial Error Model (SEM)\n\
+                     =========================\n\
+                     y = Xβ + u, where u = λWu + ε\n\n\
+                     Spatial error coefficient (λ):\n\
+                     ------------------------------\n\
+                     Estimate: {:.6}\n\
+                     Std.Error: {:.6}\n\
+                     Z-value: {:.4}\n\
+                     P-value: {:.6}\n\n\
+                     Regression Coefficients:\n\
+                     ------------------------\n\
+                     {:15} {:>12} {:>10} {:>10} {:>10}\n",
+                    result.lambda,
+                    result.lambda_se,
+                    result.lambda_z,
+                    result.lambda_p,
+                    "Variable", "Estimate", "Std.Err", "Z-value", "P-value"
+                );
+
+                for (i, name) in result.coef_names.iter().enumerate() {
+                    output.push_str(&format!(
+                        "{:15} {:>12.6} {:>10.6} {:>10.4} {:>10.6}\n",
+                        name,
+                        result.coefficients[i],
+                        result.std_errors[i],
+                        result.z_values[i],
+                        result.p_values[i]
+                    ));
+                }
+
+                output.push_str(&format!(
+                    "\nModel Statistics:\n\
+                     -----------------\n\
+                     Log-Likelihood: {:.4}\n\
+                     AIC: {:.4}\n\
+                     BIC: {:.4}\n\
+                     Sigma²: {:.6}\n\
+                     N: {}\n\n\
+                     Note: SEM coefficients have their usual interpretation\n\
+                     (no spatial multiplier effects unlike SAR)",
+                    result.log_likelihood,
+                    result.aic,
+                    result.bic,
+                    result.sigma2,
+                    result.n_obs
+                ));
+
+                Ok(CallToolResult::success(vec![Content::text(output)]))
+            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
+                "SEM model estimation failed: {}",
+                e
+            ))])),
+        }
+    }
+
+    /// Run Spatial GMM with heteroscedasticity robustness (sphet).
+    #[tool(description = "Run spatial regression via GMM with heteroscedasticity-robust estimation. Implements the Kelejian-Prucha (1998, 1999, 2010) GMM estimator that is robust to heteroscedasticity of unknown form. Supports SAR (lag), SEM (error), and SARAR (combined) models. Unlike ML estimation, GMM does not require normally distributed errors. Returns heteroscedasticity-robust or HAC standard errors. Equivalent to R's sphet::spreg() and sphet::gstslshet().")]
+    async fn sphet_model(
+        &self,
+        Parameters(request): Parameters<SphetRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let spatial_weights = self.spatial_weights.read().await;
+        let listw = match spatial_weights.get(&request.weights) {
+            Some(w) => w,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Spatial weights '{}' not found. Use 'spatial_neighbors' first to create weights.",
+                    request.weights
+                ))]));
+            }
+        };
+
+        let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
+
+        // Parse model type
+        let model = match request.model.as_deref() {
+            Some("error") | Some("sem") => SphetModel::SpatialError,
+            Some("sarar") | Some("both") | Some("combined") => SphetModel::SARAR,
+            _ => SphetModel::SpatialLag, // Default: lag/SAR
+        };
+
+        // Parse SE type
+        let se_type = match request.se_type.as_deref() {
+            Some("hac") | Some("HAC") => SphetSE::HAC,
+            Some("standard") | Some("homoscedastic") => SphetSE::Standard,
+            _ => SphetSE::Robust, // Default: robust
+        };
+
+        // Parse HAC kernel
+        use p2a_core::regression::HacKernel;
+        let kernel = match request.kernel.as_deref() {
+            Some("parzen") => HacKernel::Parzen,
+            Some("quadratic_spectral") | Some("qs") => HacKernel::QuadraticSpectral,
+            Some("tukey_hanning") | Some("tukey") => HacKernel::TukeyHanning,
+            Some("truncated") => HacKernel::Truncated,
+            _ => HacKernel::Bartlett, // Default
+        };
+
+        let config = SphetConfig {
+            model,
+            het: true,
+            se_type,
+            kernel,
+            bandwidth: request.bandwidth,
+            instrument_order: request.instrument_order.unwrap_or(2),
+            ..Default::default()
+        };
+
+        match run_sphet(dataset, &request.y, &x_refs, listw, config) {
+            Ok(result) => {
+                let model_name = match result.model_type {
+                    SphetModel::SpatialLag => "Spatial Lag (SAR) - GMM",
+                    SphetModel::SpatialError => "Spatial Error (SEM) - GMM",
+                    SphetModel::SARAR => "SARAR (Lag + Error) - GMM",
+                };
+
+                let mut output = format!(
+                    "{}\n{}\n\
+                     Heteroscedasticity-robust GMM estimation (Kelejian-Prucha)\n\
+                     Standard errors: {}\n\n",
+                    model_name,
+                    "=".repeat(model_name.len()),
+                    result.se_type
+                );
+
+                // Spatial parameters
+                if let (Some(lambda), Some(se), Some(z), Some(p)) =
+                    (result.lambda, result.lambda_se, result.lambda_z, result.lambda_p)
+                {
+                    output.push_str(&format!(
+                        "Spatial lag coefficient (lambda):\n\
+                         ---------------------------------\n\
+                         Estimate: {:.6}\n\
+                         Std.Error: {:.6}\n\
+                         Z-value: {:.4}\n\
+                         P-value: {:.6}\n\n",
+                        lambda, se, z, p
+                    ));
+                }
+
+                if let (Some(rho), Some(se), Some(z), Some(p)) =
+                    (result.rho, result.rho_se, result.rho_z, result.rho_p)
+                {
+                    output.push_str(&format!(
+                        "Spatial error coefficient (rho):\n\
+                         --------------------------------\n\
+                         Estimate: {:.6}\n\
+                         Std.Error: {:.6}\n\
+                         Z-value: {:.4}\n\
+                         P-value: {:.6}\n\n",
+                        rho, se, z, p
+                    ));
+                }
+
+                output.push_str("Regression Coefficients:\n");
+                output.push_str("------------------------\n");
+                output.push_str(&format!(
+                    "{:15} {:>12} {:>10} {:>10} {:>10}\n",
+                    "Variable", "Estimate", "Std.Err", "Z-value", "P-value"
+                ));
+
+                for (i, name) in result.coef_names.iter().enumerate() {
+                    output.push_str(&format!(
+                        "{:15} {:>12.6} {:>10.6} {:>10.4} {:>10.6}\n",
+                        name,
+                        result.coefficients[i],
+                        result.std_errors[i],
+                        result.z_values[i],
+                        result.p_values[i]
+                    ));
+                }
+
+                output.push_str(&format!(
+                    "\nModel Statistics:\n\
+                     -----------------\n\
+                     Sigma²: {:.6}\n\
+                     N: {}\n\
+                     df: {}\n\
+                     Iterations: {}\n\
+                     Converged: {}\n\n\
+                     Note: GMM estimation is robust to heteroscedasticity of unknown form.\n\
+                     Unlike ML, it does not require normally distributed errors.",
+                    result.sigma2,
+                    result.n_obs,
+                    result.df,
+                    result.iterations,
+                    result.converged
+                ));
+
+                Ok(CallToolResult::success(vec![Content::text(output)]))
+            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
+                "Spatial GMM estimation failed: {}",
+                e
+            ))])),
+        }
+    }
+
+    /// Run SAR Probit model (spatial lag probit for binary outcomes).
+    #[tool(description = "Run Spatial Autoregressive (SAR) Probit model for binary dependent variables: y* = rho*W*y* + X*beta + epsilon, y = 1(y* > 0). Estimates spatial lag parameter rho via Bayesian MCMC with data augmentation. Use when binary outcomes have substantive spatial interaction (e.g., neighbor's choices affect own choice). Returns posterior means, credible intervals, and spatial impacts (direct, indirect, total effects). Equivalent to R's spatialprobit::sarprobit().")]
+    async fn sar_probit_model(
+        &self,
+        Parameters(request): Parameters<SarProbitRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let mut spatial_weights = self.spatial_weights.write().await;
+        let listw = match spatial_weights.get_mut(&request.weights) {
+            Some(w) => w,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Spatial weights '{}' not found. Use 'spatial_neighbors' first to create weights.",
+                    request.weights
+                ))]));
+            }
+        };
+
+        let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
+
+        let config = SpatialProbitConfig {
+            n_draws: request.n_draws.unwrap_or(1000),
+            burn_in: request.burn_in.unwrap_or(200),
+            compute_impacts: request.compute_impacts.unwrap_or(true),
+            seed: request.seed,
+            ..Default::default()
+        };
+
+        match run_sar_probit(dataset, &request.y, &x_refs, listw, config) {
+            Ok(result) => {
+                let mut output = format!(
+                    "SAR Probit Model (Bayesian MCMC)\n\
+                     ================================\n\
+                     y* = rho*W*y* + X*beta + epsilon, y = 1(y* > 0)\n\n\
+                     Spatial lag coefficient (rho):\n\
+                     ------------------------------\n\
+                     Posterior Mean: {:.6}\n\
+                     Posterior SD: {:.6}\n\
+                     Z-value: {:.4}\n\
+                     P-value: {:.6}\n\
+                     95% Credible Interval: ({:.4}, {:.4})\n\n\
+                     Regression Coefficients (Posterior):\n\
+                     ------------------------------------\n\
+                     {:15} {:>12} {:>10} {:>10} {:>10}\n",
+                    result.rho,
+                    result.rho_se,
+                    result.rho_z,
+                    result.rho_p,
+                    result.credible_interval_rho(0.95).0,
+                    result.credible_interval_rho(0.95).1,
+                    "Variable", "Mean", "Std.Dev", "Z-value", "P-value"
+                );
+
+                for (i, name) in result.coef_names.iter().enumerate() {
+                    let ci = result.credible_interval_beta(i, 0.95);
+                    output.push_str(&format!(
+                        "{:15} {:>12.6} {:>10.6} {:>10.4} {:>10.6}\n",
+                        name,
+                        result.coefficients[i],
+                        result.std_errors[i],
+                        result.z_values[i],
+                        result.p_values[i]
+                    ));
+                }
+
+                output.push_str(&format!(
+                    "\nModel Statistics:\n\
+                     -----------------\n\
+                     Log-Likelihood: {:.4}\n\
+                     Log Marginal Likelihood (approx): {:.4}\n\
+                     DIC: {:.4}\n\
+                     Pseudo R-squared: {:.4}\n\
+                     Percent Correctly Predicted: {:.2}%\n\
+                     N: {} (Y=1: {})\n\
+                     MCMC Draws: {}, Acceptance Rate: {:.2}%\n",
+                    result.log_likelihood,
+                    result.log_marginal_likelihood,
+                    result.dic,
+                    result.pseudo_r_squared,
+                    result.pcp,
+                    result.n_obs,
+                    result.n_positive,
+                    result.n_draws,
+                    result.acceptance_rate * 100.0
+                ));
+
+                if let Some(impacts) = &result.impacts {
+                    output.push_str("\nSpatial Marginal Effects (Probability Scale):\n");
+                    output.push_str("--------------------------------------------\n");
+                    output.push_str(&format!(
+                        "{:15} {:>12} {:>12} {:>12}\n",
+                        "Variable", "Direct", "Indirect", "Total"
+                    ));
+                    for (i, name) in impacts.var_names.iter().enumerate() {
+                        output.push_str(&format!(
+                            "{:15} {:>12.6} {:>12.6} {:>12.6}\n",
+                            name,
+                            impacts.direct[i],
+                            impacts.indirect[i],
+                            impacts.total[i]
+                        ));
+                    }
+                    output.push_str(&format!(
+                        "{:15} ({:>10.6}) ({:>10.6}) ({:>10.6})\n",
+                        "Std.Errors",
+                        impacts.direct_se[0],
+                        impacts.indirect_se[0],
+                        impacts.total_se[0]
+                    ));
+                    output.push_str("\nNote: Direct = own probability effect, Indirect = spillover from neighbors");
+                }
+
+                Ok(CallToolResult::success(vec![Content::text(output)]))
+            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
+                "SAR Probit estimation failed: {}",
+                e
+            ))])),
+        }
+    }
+
+    /// Run SEM Probit model (spatial error probit for binary outcomes).
+    #[tool(description = "Run Spatial Error (SEM) Probit model for binary dependent variables: y* = X*beta + u, u = lambda*W*u + epsilon, y = 1(y* > 0). Estimates spatial error parameter lambda via Bayesian MCMC. Use when binary outcomes have spatially correlated unobserved factors (nuisance spatial dependence). Equivalent to R's spatialprobit::semprobit().")]
+    async fn sem_probit_model(
+        &self,
+        Parameters(request): Parameters<SemProbitRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let mut spatial_weights = self.spatial_weights.write().await;
+        let listw = match spatial_weights.get_mut(&request.weights) {
+            Some(w) => w,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Spatial weights '{}' not found. Use 'spatial_neighbors' first to create weights.",
+                    request.weights
+                ))]));
+            }
+        };
+
+        let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
+
+        let config = SpatialProbitConfig {
+            n_draws: request.n_draws.unwrap_or(1000),
+            burn_in: request.burn_in.unwrap_or(200),
+            compute_impacts: false, // SEM doesn't have spatial multiplier impacts
+            seed: request.seed,
+            ..Default::default()
+        };
+
+        match run_sem_probit(dataset, &request.y, &x_refs, listw, config) {
+            Ok(result) => {
+                let mut output = format!(
+                    "SEM Probit Model (Bayesian MCMC)\n\
+                     ================================\n\
+                     y* = X*beta + u, u = lambda*W*u + epsilon, y = 1(y* > 0)\n\n\
+                     Spatial error coefficient (lambda):\n\
+                     -----------------------------------\n\
+                     Posterior Mean: {:.6}\n\
+                     Posterior SD: {:.6}\n\
+                     Z-value: {:.4}\n\
+                     P-value: {:.6}\n\
+                     95% Credible Interval: ({:.4}, {:.4})\n\n\
+                     Regression Coefficients (Posterior):\n\
+                     ------------------------------------\n\
+                     {:15} {:>12} {:>10} {:>10} {:>10}\n",
+                    result.rho, // lambda stored in rho field
+                    result.rho_se,
+                    result.rho_z,
+                    result.rho_p,
+                    result.credible_interval_rho(0.95).0,
+                    result.credible_interval_rho(0.95).1,
+                    "Variable", "Mean", "Std.Dev", "Z-value", "P-value"
+                );
+
+                for (i, name) in result.coef_names.iter().enumerate() {
+                    output.push_str(&format!(
+                        "{:15} {:>12.6} {:>10.6} {:>10.4} {:>10.6}\n",
+                        name,
+                        result.coefficients[i],
+                        result.std_errors[i],
+                        result.z_values[i],
+                        result.p_values[i]
+                    ));
+                }
+
+                output.push_str(&format!(
+                    "\nModel Statistics:\n\
+                     -----------------\n\
+                     Log-Likelihood: {:.4}\n\
+                     Log Marginal Likelihood (approx): {:.4}\n\
+                     DIC: {:.4}\n\
+                     Pseudo R-squared: {:.4}\n\
+                     Percent Correctly Predicted: {:.2}%\n\
+                     N: {} (Y=1: {})\n\
+                     MCMC Draws: {}, Acceptance Rate: {:.2}%\n\n\
+                     Note: SEM Probit coefficients have their usual interpretation\n\
+                     (marginal effect = beta * phi(X'beta) at mean, no spatial multiplier)",
+                    result.log_likelihood,
+                    result.log_marginal_likelihood,
+                    result.dic,
+                    result.pseudo_r_squared,
+                    result.pcp,
+                    result.n_obs,
+                    result.n_positive,
+                    result.n_draws,
+                    result.acceptance_rate * 100.0
+                ));
+
+                Ok(CallToolResult::success(vec![Content::text(output)]))
+            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
+                "SEM Probit estimation failed: {}",
+                e
+            ))])),
+        }
+    }
+
+    /// Run Spatial Panel ML model (spml).
+    #[tool(description = "Run spatial panel data model via Maximum Likelihood. Combines panel data methods (fixed/random effects) with spatial dependence (lag and/or error). Supports: (1) Spatial lag panel models: y = rho*W*y + X*beta + alpha + e, (2) Spatial error panel models: y = X*beta + alpha + u, u = lambda*W*u + e, (3) Combined spatial lag and error. Equivalent to R's splm::spml(). Reference: Millo & Piras (2012), JSS.")]
+    async fn spatial_panel_ml(
+        &self,
+        Parameters(request): Parameters<SpmlRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let mut spatial_weights = self.spatial_weights.write().await;
+        let listw = match spatial_weights.get_mut(&request.weights) {
+            Some(w) => w,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Spatial weights '{}' not found. Use 'spatial_neighbors' first to create weights.",
+                    request.weights
+                ))]));
+            }
+        };
+
+        let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
+
+        // Parse model type
+        let model = match request.model.as_deref() {
+            Some("random") | Some("re") => SpatialPanelModel::Random,
+            Some("pooling") | Some("pool") | Some("pooled") => SpatialPanelModel::Pooling,
+            _ => SpatialPanelModel::Within, // Default: fixed effects
+        };
+
+        // Parse effect type
+        let effect = match request.effect.as_deref() {
+            Some("time") => SpatialPanelEffect::Time,
+            Some("twoways") | Some("twoway") | Some("both") => SpatialPanelEffect::TwoWays,
+            _ => SpatialPanelEffect::Individual, // Default
+        };
+
+        // Parse spatial error type
+        let spatial_error = match request.spatial_error.as_deref() {
+            Some("baltagi") | Some("b") | Some("sem") => SpatialErrorType::Baltagi,
+            Some("kkp") | Some("sem2") => SpatialErrorType::KKP,
+            _ => SpatialErrorType::None,
+        };
+
+        let config = SpmlConfig {
+            model,
+            effect,
+            lag: request.lag.unwrap_or(false),
+            spatial_error,
+            ..Default::default()
+        };
+
+        match run_spml(dataset, &request.y, &x_refs, &request.entity_col, &request.time_col, listw, config) {
+            Ok(result) => {
+                let mut output = format!(
+                    "Spatial Panel Model (ML)\n\
+                     ========================\n\
+                     Model: {}  Effect: {}\n\
+                     Spatial Lag: {}  Spatial Error: {}\n\
+                     Observations: {}  Entities: {}  Time periods: {}\n\
+                     Log-Likelihood: {:.4}  AIC: {:.4}  BIC: {:.4}\n\n",
+                    result.model,
+                    result.effect,
+                    result.has_lag,
+                    result.spatial_error,
+                    result.n_obs,
+                    result.n_entities,
+                    result.n_time,
+                    result.log_likelihood,
+                    result.aic,
+                    result.bic
+                );
+
+                // Spatial parameters
+                if let Some(rho) = result.rho {
+                    output.push_str(&format!(
+                        "Spatial lag coefficient (rho):\n\
+                         ------------------------------\n\
+                         Estimate: {:.6}  SE: {:.6}  Z: {:.4}  P: {:.4}\n\n",
+                        rho,
+                        result.rho_se.unwrap_or(0.0),
+                        result.rho_z.unwrap_or(0.0),
+                        result.rho_p.unwrap_or(1.0)
+                    ));
+                }
+
+                if let Some(lambda) = result.lambda {
+                    output.push_str(&format!(
+                        "Spatial error coefficient (lambda):\n\
+                         -----------------------------------\n\
+                         Estimate: {:.6}  SE: {:.6}  Z: {:.4}  P: {:.4}\n\n",
+                        lambda,
+                        result.lambda_se.unwrap_or(0.0),
+                        result.lambda_z.unwrap_or(0.0),
+                        result.lambda_p.unwrap_or(1.0)
+                    ));
+                }
+
+                output.push_str(&format!(
+                    "Regression Coefficients:\n\
+                     ------------------------\n\
+                     {:20} {:>12} {:>10} {:>10} {:>10}\n",
+                    "Variable", "Estimate", "Std.Err", "Z-value", "P-value"
+                ));
+
+                for (i, name) in result.coef_names.iter().enumerate() {
+                    output.push_str(&format!(
+                        "{:20} {:>12.6} {:>10.6} {:>10.4} {:>10.4}{}\n",
+                        name,
+                        result.coefficients[i],
+                        result.std_errors[i],
+                        result.z_values[i],
+                        result.p_values[i],
+                        result.significance[i].stars()
+                    ));
+                }
+
+                // Variance components
+                output.push_str("\nVariance Components:\n");
+                if let Some(sigma_mu) = result.variance.sigma_mu {
+                    output.push_str(&format!("  sigma_mu (individual): {:.6}\n", sigma_mu));
+                }
+                output.push_str(&format!("  sigma_epsilon (error): {:.6}\n", result.variance.sigma_epsilon));
+
+                Ok(CallToolResult::success(vec![Content::text(output)]))
+            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
+                "Spatial panel ML estimation failed: {}",
+                e
+            ))])),
+        }
+    }
+
+    /// Run Spatial Panel GMM model (spgm).
+    #[tool(description = "Run spatial panel data model via Generalized Method of Moments. Uses IV/GMM estimation for spatial lag models and moment conditions for spatial error. More robust to non-normality than ML. Methods: w2sls (fixed effects), g2sls (random effects GLS), b2sls (between), ec2sls (Baltagi's EC2SLS). Equivalent to R's splm::spgm(). Reference: Kapoor, Kelejian & Prucha (2007).")]
+    async fn spatial_panel_gmm(
+        &self,
+        Parameters(request): Parameters<SpgmRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let mut spatial_weights = self.spatial_weights.write().await;
+        let listw = match spatial_weights.get_mut(&request.weights) {
+            Some(w) => w,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Spatial weights '{}' not found. Use 'spatial_neighbors' first to create weights.",
+                    request.weights
+                ))]));
+            }
+        };
+
+        let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
+
+        // Parse method
+        let method = match request.method.as_deref() {
+            Some("g2sls") | Some("gls") | Some("random") => SpgmMethod::G2sls,
+            Some("b2sls") | Some("between") => SpgmMethod::B2sls,
+            Some("ec2sls") | Some("baltagi") => SpgmMethod::Ec2sls,
+            _ => SpgmMethod::W2sls, // Default: within/fixed effects
+        };
+
+        let config = SpgmConfig {
+            method,
+            lag: request.lag.unwrap_or(false),
+            spatial_error: request.spatial_error.unwrap_or(true),
+            ..Default::default()
+        };
+
+        match run_spgm(dataset, &request.y, &x_refs, &request.entity_col, &request.time_col, listw, config) {
+            Ok(result) => {
+                let mut output = format!(
+                    "Spatial Panel Model (GMM)\n\
+                     =========================\n\
+                     Method: {}\n\
+                     Spatial Lag: {}  Spatial Error: {}\n\
+                     Observations: {}  Entities: {}  Time periods: {}\n\
+                     Instruments: {}\n\n",
+                    result.method,
+                    result.has_lag,
+                    result.has_spatial_error,
+                    result.n_obs,
+                    result.n_entities,
+                    result.n_time,
+                    result.n_instruments
+                );
+
+                // Spatial parameters
+                if let Some(rho) = result.rho {
+                    output.push_str(&format!(
+                        "Spatial lag coefficient (rho): {:.6}\n\n",
+                        rho
+                    ));
+                }
+                if let Some(lambda) = result.lambda {
+                    output.push_str(&format!(
+                        "Spatial error coefficient (lambda): {:.6}\n\n",
+                        lambda
+                    ));
+                }
+
+                output.push_str(&format!(
+                    "Regression Coefficients:\n\
+                     ------------------------\n\
+                     {:20} {:>12} {:>10} {:>10} {:>10}\n",
+                    "Variable", "Estimate", "Std.Err", "Z-value", "P-value"
+                ));
+
+                for (i, name) in result.coef_names.iter().enumerate() {
+                    output.push_str(&format!(
+                        "{:20} {:>12.6} {:>10.6} {:>10.4} {:>10.4}{}\n",
+                        name,
+                        result.coefficients[i],
+                        result.std_errors[i],
+                        result.z_values[i],
+                        result.p_values[i],
+                        result.significance[i].stars()
+                    ));
+                }
+
+                // Sargan test
+                if let (Some(stat), Some(p), Some(df)) = (result.sargan_stat, result.sargan_p, result.sargan_df) {
+                    output.push_str(&format!(
+                        "\nSargan test for overidentifying restrictions:\n\
+                         chi2({}) = {:.4}, p-value = {:.4}\n",
+                        df, stat, p
+                    ));
+                }
+
+                // Variance components
+                output.push_str(&format!("\nResidual variance (sigma2): {:.6}\n", result.sigma2));
+                if let Some(sigma2_mu) = result.sigma2_mu {
+                    output.push_str(&format!("Individual variance (sigma2_mu): {:.6}\n", sigma2_mu));
+                }
+
+                Ok(CallToolResult::success(vec![Content::text(output)]))
+            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
+                "Spatial panel GMM estimation failed: {}",
+                e
+            ))])),
+        }
+    }
+
+    // ========================================================================
     // Time Series Models
     // ========================================================================
 
@@ -10238,6 +17348,42 @@ impl AnalyticsServer {
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
                     "VAR estimation failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+    }
+
+    /// Granger causality test.
+    #[tool(description = "Test Granger causality between two time series variables. Tests whether lagged values of 'cause' help predict 'dependent' after controlling for lagged 'dependent'. Uses F-test comparing restricted (y lags only) vs unrestricted (y and x lags) models.")]
+    async fn ts_granger(
+        &self,
+        Parameters(request): Parameters<GrangerRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let result = match request.lags {
+            Some(lags) => granger_test(dataset, &request.dependent, &request.cause, lags),
+            None => run_granger_test(dataset, &request.dependent, &request.cause),
+        };
+
+        let result = match result {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Granger causality test failed: {}",
                     e
                 ))]));
             }
@@ -10451,6 +17597,53 @@ impl AnalyticsServer {
         }
 
         Ok(CallToolResult::success(vec![Content::text(output)]))
+    }
+
+    /// Fit a GARCH model for volatility modeling.
+    #[tool(description = "Fit a GARCH(p,q) model for time-varying volatility. Estimates the conditional variance equation: σ²_t = ω + Σα_i ε²_{t-i} + Σβ_j σ²_{t-j}. Reports persistence, unconditional variance, and half-life of volatility shocks.")]
+    async fn ts_garch_fit(
+        &self,
+        Parameters(request): Parameters<GarchRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        // Extract column data
+        let col = dataset.df().column(&request.column)
+            .map_err(|e| McpError::invalid_request(format!("Column error: {}", e), None))?;
+
+        let data: Vec<f64> = col.f64()
+            .map_err(|e| McpError::invalid_request(format!("Column must be numeric: {}", e), None))?
+            .into_no_null_iter()
+            .collect();
+
+        let config = GarchConfig {
+            p: request.p.unwrap_or(1),
+            q: request.q.unwrap_or(1),
+            include_mean: request.include_mean.unwrap_or(true),
+            ..Default::default()
+        };
+
+        let result = match garch(&data, Some(config)) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "GARCH fitting failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
     }
 
     /// Run MSTL decomposition.
@@ -11099,6 +18292,128 @@ impl AnalyticsServer {
         )]))
     }
 
+    /// CausalImpact analysis using Bayesian Structural Time Series.
+    #[tool(description = "Estimate the causal effect of an intervention using Bayesian Structural Time Series (BSTS). Uses pre-intervention data to build a counterfactual prediction, then compares with observed post-intervention data to estimate the causal effect. Optionally uses control time series that are correlated with the response but unaffected by the intervention. Returns cumulative/average effects with credible intervals and Bayesian p-value.")]
+    async fn causal_impact_analysis(
+        &self,
+        Parameters(request): Parameters<CausalImpactRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        // Build config
+        let config = CausalImpactConfig {
+            pre_period: (request.pre_period_start, request.pre_period_end),
+            post_period: (request.post_period_start, request.post_period_end),
+            control_series: request.control_cols,
+            alpha: request.alpha.unwrap_or(0.05),
+            seasonal_period: request.seasonal_period,
+            include_trend: request.include_trend.unwrap_or(false),
+            ..Default::default()
+        };
+
+        // Run CausalImpact
+        let result = match causal_impact(dataset, &request.response_col, &request.time_col, config) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "CausalImpact analysis failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        // Build output
+        let output = serde_json::json!({
+            "method": "CausalImpact (Bayesian Structural Time Series)",
+            "periods": {
+                "pre_period": {
+                    "start": request.pre_period_start,
+                    "end": request.pre_period_end,
+                    "n_obs": result.model.n_pre,
+                },
+                "post_period": {
+                    "start": request.post_period_start,
+                    "end": request.post_period_end,
+                    "n_obs": result.model.n_post,
+                },
+            },
+            "summary": {
+                "average_effect": {
+                    "estimate": format!("{:.4}", result.summary.average_effect),
+                    "ci_lower": format!("{:.4}", result.summary.average_effect_lower),
+                    "ci_upper": format!("{:.4}", result.summary.average_effect_upper),
+                },
+                "cumulative_effect": {
+                    "estimate": format!("{:.4}", result.summary.cumulative_effect),
+                    "ci_lower": format!("{:.4}", result.summary.cumulative_effect_lower),
+                    "ci_upper": format!("{:.4}", result.summary.cumulative_effect_upper),
+                },
+                "relative_effect": {
+                    "estimate": format!("{:.2}%", result.summary.relative_effect * 100.0),
+                    "ci_lower": format!("{:.2}%", result.summary.relative_effect_lower * 100.0),
+                    "ci_upper": format!("{:.2}%", result.summary.relative_effect_upper * 100.0),
+                },
+                "p_value": format!("{:.4}", result.summary.p_value),
+                "significant": result.summary.significant,
+                "alpha": result.summary.alpha,
+            },
+            "inference": {
+                "prob_positive_effect": format!("{:.4}", result.inference.prob_positive),
+                "prob_negative_effect": format!("{:.4}", result.inference.prob_negative),
+                "expected_effect": format!("{:.4}", result.inference.expected_effect),
+                "effect_sd": format!("{:.4}", result.inference.effect_sd),
+                "null_rejected": result.inference.null_rejected,
+            },
+            "model": {
+                "level_variance": format!("{:.6}", result.model.level_variance),
+                "slope_variance": result.model.slope_variance.map(|v| format!("{:.6}", v)),
+                "seasonal_variance": result.model.seasonal_variance.map(|v| format!("{:.6}", v)),
+                "observation_variance": format!("{:.6}", result.model.observation_variance),
+                "regression_coefficients": result.model.regression_coefficients,
+                "control_names": result.model.control_names,
+                "log_likelihood": format!("{:.4}", result.model.log_likelihood),
+                "aic": format!("{:.4}", result.model.aic),
+                "bic": format!("{:.4}", result.model.bic),
+            },
+            "interpretation": if result.summary.significant {
+                format!(
+                    "The intervention had a statistically significant effect (p = {:.4}). \
+                    The cumulative effect over the post-period was {:.2} [{:.2}, {:.2}], \
+                    representing a {:.1}% change from what would have occurred without intervention.",
+                    result.summary.p_value,
+                    result.summary.cumulative_effect,
+                    result.summary.cumulative_effect_lower,
+                    result.summary.cumulative_effect_upper,
+                    result.summary.relative_effect * 100.0
+                )
+            } else {
+                format!(
+                    "The intervention did not have a statistically significant effect at alpha = {} (p = {:.4}). \
+                    While the estimated cumulative effect was {:.2}, this is within the range of natural variation \
+                    expected without intervention.",
+                    result.summary.alpha,
+                    result.summary.p_value,
+                    result.summary.cumulative_effect
+                )
+            },
+            "references": "Brodersen et al. (2015). Inferring causal impact using Bayesian structural time series models. Annals of Applied Statistics, 9(1), 247-274."
+        });
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&output).unwrap_or_else(|_| format!("{:?}", result))
+        )]))
+    }
+
     // ========================================================================
     // Report Generation Tools
     // ========================================================================
@@ -11428,6 +18743,157 @@ impl AnalyticsServer {
         Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
     }
 
+    /// Run Classical Multidimensional Scaling (cmdscale).
+    #[tool(description = "Classical Multidimensional Scaling (cmdscale) for embedding distances into Euclidean space. Takes a data matrix and computes a low-dimensional configuration that preserves pairwise Euclidean distances. Returns point coordinates and goodness-of-fit measures. Useful for visualizing similarity/dissimilarity data.")]
+    async fn ml_cmdscale(
+        &self,
+        Parameters(request): Parameters<CmdscaleRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let data = match extract_numeric_matrix(dataset, &request.columns) {
+            Ok(d) => d,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+        };
+
+        let k = request.k;
+        let is_dist = request.is_distance_matrix.unwrap_or(false);
+
+        let result = if is_dist {
+            // Input is already a distance matrix
+            let n = data.nrows();
+            if data.ncols() != n {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Distance matrix must be square. Got {} rows x {} cols.",
+                    n, data.ncols()
+                ))]));
+            }
+            // Convert to nested Vec
+            let dist: Vec<Vec<f64>> = (0..n)
+                .map(|i| data.row(i).to_vec())
+                .collect();
+            cmdscale(&dist, k, Some(true), None)
+        } else {
+            // Compute Euclidean distances from data
+            cmdscale_from_data(data.view(), k)
+        };
+
+        match result {
+            Ok(r) => {
+                // Format output as JSON for better LLM consumption
+                let output = serde_json::json!({
+                    "n_points": r.n,
+                    "k_dimensions": r.k,
+                    "gof": {
+                        "gof1_positive_eigenvalues": r.gof[0],
+                        "gof2_k_eigenvalues": r.gof[1]
+                    },
+                    "eigenvalues": &r.eig[..r.k.min(10)],
+                    "configuration": &r.points[..r.n.min(20)],
+                    "note": if r.n > 20 { Some(format!("Showing first 20 of {} points", r.n)) } else { None }
+                });
+                Ok(CallToolResult::success(vec![Content::text(
+                    serde_json::to_string_pretty(&output).unwrap_or_else(|_| r.to_string())
+                )]))
+            }
+            Err(e) => {
+                Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Classical MDS (cmdscale) failed: {}",
+                    e
+                ))]))
+            }
+        }
+    }
+
+    /// Cut a hierarchical clustering tree into groups.
+    #[tool(description = "Cut a hierarchical clustering dendrogram into groups (cutree). First performs hierarchical clustering, then cuts the resulting tree at a specified number of clusters (k) or height. Returns cluster assignments for each observation. Useful for extracting cluster memberships from a dendrogram.")]
+    async fn ml_cutree(
+        &self,
+        Parameters(request): Parameters<CutreeRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let data = match extract_numeric_matrix(dataset, &request.columns) {
+            Ok(d) => d,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+        };
+
+        // Parse linkage method
+        let linkage_method = match request.linkage.as_deref() {
+            Some("single") => Linkage::Single,
+            Some("complete") => Linkage::Complete,
+            Some("average") => Linkage::Average,
+            Some("ward") | None => Linkage::Ward,
+            Some(other) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Unknown linkage method '{}'. Use 'single', 'complete', 'average', or 'ward'.",
+                    other
+                ))]));
+            }
+        };
+
+        // First, perform hierarchical clustering to get full dendrogram
+        let hclust = match hierarchical(data.view(), Some(1), linkage_method, None) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Hierarchical clustering failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        // Then cut the tree
+        let result = match cutree(&hclust, request.k, request.cut_height) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "cutree failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        // Format output as JSON
+        let mut cluster_counts: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+        for &label in &result.labels {
+            *cluster_counts.entry(label).or_insert(0) += 1;
+        }
+
+        let output = serde_json::json!({
+            "n_observations": result.n,
+            "n_clusters": result.k,
+            "cut_height": result.cut_height,
+            "cluster_assignments": &result.labels[..result.n.min(100)],
+            "cluster_sizes": cluster_counts,
+            "note": if result.n > 100 { Some(format!("Showing first 100 of {} assignments", result.n)) } else { None }
+        });
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&output).unwrap_or_else(|_| result.to_string())
+        )]))
+    }
+
     /// Run Random Forest regression.
     #[tool(description = "Run Random Forest regression. Ensemble of decision trees for robust predictions. Returns feature importances, out-of-bag score, and predictions.")]
     async fn ml_random_forest(
@@ -11511,6 +18977,265 @@ impl AnalyticsServer {
         Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
     }
 
+    /// Run Causal Forest for heterogeneous treatment effects (Wager & Athey 2018).
+    #[tool(description = "Causal Forest estimates heterogeneous treatment effects (CATE) using random forests adapted for causal inference. Key features: honest splitting (separate data for tree structure vs estimation), local centering, bootstrap variance estimation. Returns: CATE estimates for each unit, ATE with confidence interval, variable importance showing which covariates drive treatment effect heterogeneity. Based on R package 'grf'.")]
+    async fn ml_causal_forest(
+        &self,
+        Parameters(request): Parameters<CausalForestRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        // Use per-tool seed if provided, otherwise fall back to global seed
+        let global_seed = self.global_seed.read().await;
+        let seed = request.seed.or(*global_seed);
+
+        let result = match run_causal_forest(
+            dataset,
+            &request.outcome,
+            &request.treatment,
+            request.covariates.clone(),
+            request.n_trees,
+            request.min_node_size,
+            request.honesty,
+            request.max_depth,
+            seed,
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Causal Forest failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        // Create a summary JSON output
+        let output = serde_json::json!({
+            "ate": result.ate,
+            "ate_se": result.ate_se,
+            "ate_t_stat": result.ate_t_stat,
+            "ate_p_value": result.ate_p_value,
+            "ate_ci_lower": result.ate_ci_lower,
+            "ate_ci_upper": result.ate_ci_upper,
+            "ate_significance": result.ate_significance.stars(),
+            "n_obs": result.n_obs,
+            "n_trees": result.n_trees,
+            "oob_error": result.oob_error,
+            "variable_importance": result.variable_importance,
+            "cate_summary": {
+                "min": result.predictions.iter().cloned().fold(f64::INFINITY, f64::min),
+                "max": result.predictions.iter().cloned().fold(f64::NEG_INFINITY, f64::max),
+                "mean": result.predictions.iter().sum::<f64>() / result.predictions.len() as f64,
+            },
+            "config": {
+                "honesty": result.config.honesty,
+                "min_node_size": result.config.min_node_size,
+                "max_depth": result.config.max_depth,
+            }
+        });
+
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "{}\n\nJSON Summary:\n{}",
+            result.to_string(),
+            serde_json::to_string_pretty(&output).unwrap_or_default()
+        ))]))
+    }
+
+    /// Run BART-based causal inference for heterogeneous treatment effects (bartCause style).
+    #[tool(description = "BART Causal estimates heterogeneous treatment effects using Bayesian Additive Regression Trees methodology. Fits separate response surfaces for treated and control groups, then computes CATE = E[Y|T=1,X] - E[Y|T=0,X]. Uses bootstrap for uncertainty quantification. Returns: ATE with confidence interval, CATE estimates for each unit, variable importance for treatment effect heterogeneity. Simplified frequentist approximation to R's bartCause package.")]
+    async fn ml_bart_causal(
+        &self,
+        Parameters(request): Parameters<BartCausalRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        // Use per-tool seed if provided, otherwise fall back to global seed
+        let global_seed = self.global_seed.read().await;
+        let seed = request.seed.or(*global_seed);
+
+        let result = match run_bart_causal(
+            dataset,
+            &request.outcome,
+            &request.treatment,
+            request.covariates.clone(),
+            request.n_trees,
+            request.max_depth,
+            request.n_bootstrap,
+            request.include_propensity,
+            seed,
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "BART Causal failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        // Create a summary JSON output
+        let output = serde_json::json!({
+            "ate": result.ate,
+            "ate_se": result.ate_se,
+            "ate_t_stat": result.ate_t_stat,
+            "ate_p_value": result.ate_p_value,
+            "ate_ci_lower": result.ate_ci_lower,
+            "ate_ci_upper": result.ate_ci_upper,
+            "ate_significance": result.ate_significance.stars(),
+            "n_obs": result.n_obs,
+            "n_treated": result.n_treated,
+            "n_control": result.n_control,
+            "n_trees": result.n_trees,
+            "n_bootstrap": result.n_bootstrap,
+            "variable_importance": result.variable_importance,
+            "cate_summary": {
+                "min": result.cate.iter().cloned().fold(f64::INFINITY, f64::min),
+                "max": result.cate.iter().cloned().fold(f64::NEG_INFINITY, f64::max),
+                "mean": result.cate.iter().sum::<f64>() / result.cate.len() as f64,
+            },
+            "config": {
+                "include_propensity": result.config.include_propensity,
+                "max_depth": result.config.max_depth,
+                "min_node_size": result.config.min_node_size,
+            }
+        });
+
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "{}\n\nJSON Summary:\n{}",
+            result.to_string(),
+            serde_json::to_string_pretty(&output).unwrap_or_default()
+        ))]))
+    }
+
+
+    /// Run Treatment Effect Heterogeneity Test (hettx).
+    #[tool(description = "Test for treatment effect heterogeneity using Fisherian randomization inference. Tests H0: all individual treatment effects are equal (tau_i = tau). Returns permutation p-value, estimated individual effects, ATE, and optionally decomposes heterogeneity into systematic (explained by covariates) and idiosyncratic components. Based on R package 'hettx' by Ding, Feller & Miratrix.")]
+    async fn heterogeneity_test(
+        &self,
+        Parameters(request): Parameters<HetTxRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        // Use per-tool seed if provided, otherwise fall back to global seed
+        let global_seed = self.global_seed.read().await;
+        let seed = request.seed.or(*global_seed);
+
+        // Parse test statistic
+        let test_statistic = match request.test_statistic.as_deref() {
+            Some("range") => HetTestStat::Range,
+            Some("iqr") => HetTestStat::IQR,
+            Some("mad") => HetTestStat::MeanAbsDeviation,
+            _ => HetTestStat::Variance,
+        };
+
+        // Parse effect estimation method
+        let effect_method = match request.effect_method.as_deref() {
+            Some("regression") | Some("reg") => EffectEstimationMethod::Regression,
+            Some("stratified") | Some("strat") => EffectEstimationMethod::Stratified,
+            _ => EffectEstimationMethod::Matching,
+        };
+
+        let config = HetTxConfig {
+            n_permutations: request.n_permutations.unwrap_or(1000),
+            test_statistic,
+            decompose: request.decompose.unwrap_or(true),
+            effect_method,
+            n_neighbors: request.n_neighbors.unwrap_or(3),
+            seed,
+            compute_importance: true,
+        };
+
+        let cov_refs: Vec<&str> = request.covariates.iter().map(|s| s.as_str()).collect();
+
+        let result = match run_hettx_dataset(
+            dataset,
+            &request.outcome,
+            &request.treatment,
+            &cov_refs,
+            config,
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Heterogeneity test failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        // Create JSON summary
+        let mut output = serde_json::json!({
+            "test_statistic": result.test_statistic,
+            "test_statistic_type": format!("{}", result.test_statistic_type),
+            "p_value": result.p_value,
+            "significance": result.significance.stars(),
+            "ate": result.ate,
+            "ate_se": result.ate_se,
+            "n_obs": result.n_obs,
+            "n_treated": result.n_treated,
+            "n_control": result.n_control,
+            "n_permutations": result.n_permutations,
+            "effect_summary": {
+                "min": result.effect_summary.min,
+                "p10": result.effect_summary.p10,
+                "p25": result.effect_summary.p25,
+                "median": result.effect_summary.median,
+                "p75": result.effect_summary.p75,
+                "p90": result.effect_summary.p90,
+                "max": result.effect_summary.max,
+                "std_dev": result.effect_summary.std_dev,
+            }
+        });
+
+        // Add decomposition if available
+        if let Some(ref decomp) = result.decomposition {
+            output["decomposition"] = serde_json::json!({
+                "total_variance": decomp.total_variance,
+                "systematic_variance": decomp.systematic_variance,
+                "idiosyncratic_variance": decomp.idiosyncratic_variance,
+                "r_squared": decomp.r_squared,
+                "systematic_p_value": decomp.systematic_p_value,
+                "idiosyncratic_p_value": decomp.idiosyncratic_p_value,
+                "covariate_importance": decomp.covariate_importance,
+            });
+        }
+
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "{}\n\nJSON Summary:\n{}",
+            result.to_string(),
+            serde_json::to_string_pretty(&output).unwrap_or_default()
+        ))]))
+    }
     /// Run Linear SVM classification.
     #[tool(description = "Run Linear Support Vector Machine (SVM) for binary classification. Uses SMO algorithm. Returns weights, bias, support vector count, and predictions.")]
     async fn ml_svm(
@@ -11586,6 +19311,1298 @@ impl AnalyticsServer {
         };
 
         Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+    }
+
+    /// Run Projection Pursuit Regression (PPR).
+    #[tool(description = "Projection Pursuit Regression (PPR) - a dimension reduction regression that fits models of the form y = sum(f_k(alpha_k' * x)). Finds optimal projection directions and ridge functions. Returns projection directions, coefficients, fitted values, and goodness-of-fit metrics. Useful for non-linear regression when relationships are complex.")]
+    async fn ml_ppr(
+        &self,
+        Parameters(request): Parameters<PprRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        use p2a_core::polars::prelude::*;
+
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let data = match extract_numeric_matrix(dataset, &request.features) {
+            Ok(d) => d,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+        };
+
+        // Extract target column
+        let df = dataset.df();
+        let target_col = match df.column(&request.target) {
+            Ok(c) => c,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Target column '{}' not found: {}",
+                    request.target, e
+                ))]));
+            }
+        };
+
+        let target_values: Vec<f64> = match target_col.cast(&DataType::Float64) {
+            Ok(c) => match c.f64() {
+                Ok(f) => f.into_iter().map(|v| v.unwrap_or(f64::NAN)).collect(),
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Target column not numeric: {}",
+                        e
+                    ))]));
+                }
+            },
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Cannot convert target to numeric: {}",
+                    e
+                ))]));
+            }
+        };
+
+        // Parse smoothing method
+        let sm_method = match request.sm_method.as_deref() {
+            Some("spline") => SmoothingMethod::Spline,
+            Some("gcvspline") => SmoothingMethod::GcvSpline,
+            Some("supsmu") | None => SmoothingMethod::Supsmu,
+            Some(other) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Unknown smoothing method '{}'. Use 'supsmu', 'spline', or 'gcvspline'.",
+                    other
+                ))]));
+            }
+        };
+
+        let config = PprConfig {
+            nterms: request.nterms.unwrap_or(1),
+            max_terms: request.max_terms.unwrap_or(request.nterms.unwrap_or(1)),
+            sm_method,
+            bass: request.bass.unwrap_or(0.0),
+            ..Default::default()
+        };
+
+        let result = match ppr(data.view(), &target_values, None, config) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "PPR failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        // Format output
+        let output = serde_json::json!({
+            "nterms": result.nterms,
+            "n_observations": result.n,
+            "n_predictors": result.p,
+            "projection_directions": result.alpha,
+            "ridge_coefficients": result.beta,
+            "gof_rss": result.gofn,
+            "fitted_values_sample": &result.fitted[..result.n.min(20)],
+            "residuals_sample": &result.residuals[..result.n.min(20)],
+            "note": if result.n > 20 { Some(format!("Showing first 20 of {} fitted values", result.n)) } else { None }
+        });
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&output).unwrap_or_else(|_| format!("{:?}", result))
+        )]))
+    }
+
+    /// Run Friedman's SuperSmoother (supsmu).
+    #[tool(description = "Friedman's SuperSmoother - adaptive local regression smoother that automatically selects optimal bandwidth at each point via cross-validation. Uses three candidate spans (0.05n, 0.2n, 0.5n) and chooses the best one per-point. Returns smoothed values. Ideal for non-parametric trend estimation.")]
+    async fn regression_supsmu(
+        &self,
+        Parameters(request): Parameters<SupsmuRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        use p2a_core::polars::prelude::*;
+
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let df = dataset.df();
+
+        // Extract x column
+        let x_col = match df.column(&request.x) {
+            Ok(c) => c,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "X column '{}' not found: {}",
+                    request.x, e
+                ))]));
+            }
+        };
+
+        let x_values: Vec<f64> = match x_col.cast(&DataType::Float64) {
+            Ok(c) => match c.f64() {
+                Ok(f) => f.into_iter().map(|v| v.unwrap_or(f64::NAN)).collect(),
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "X column not numeric: {}",
+                        e
+                    ))]));
+                }
+            },
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Cannot convert X to numeric: {}",
+                    e
+                ))]));
+            }
+        };
+
+        // Extract y column
+        let y_col = match df.column(&request.y) {
+            Ok(c) => c,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Y column '{}' not found: {}",
+                    request.y, e
+                ))]));
+            }
+        };
+
+        let y_values: Vec<f64> = match y_col.cast(&DataType::Float64) {
+            Ok(c) => match c.f64() {
+                Ok(f) => f.into_iter().map(|v| v.unwrap_or(f64::NAN)).collect(),
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Y column not numeric: {}",
+                        e
+                    ))]));
+                }
+            },
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Cannot convert Y to numeric: {}",
+                    e
+                ))]));
+            }
+        };
+
+        // Extract optional weights
+        let weights: Option<Vec<f64>> = if let Some(ref wt_col) = request.weights {
+            let w_col = match df.column(wt_col) {
+                Ok(c) => c,
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Weight column '{}' not found: {}",
+                        wt_col, e
+                    ))]));
+                }
+            };
+            match w_col.cast(&DataType::Float64) {
+                Ok(c) => match c.f64() {
+                    Ok(f) => Some(f.into_iter().map(|v| v.unwrap_or(1.0)).collect()),
+                    Err(_) => None,
+                },
+                Err(_) => None,
+            }
+        } else {
+            None
+        };
+
+        let result = match supsmu(
+            &x_values,
+            &y_values,
+            weights.as_deref(),
+            request.span,
+            request.periodic.unwrap_or(false),
+            request.bass.unwrap_or(0.0),
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "SuperSmoother failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        // Format output
+        let output = serde_json::json!({
+            "n_unique_points": result.n,
+            "bass": result.bass,
+            "periodic": result.periodic,
+            "x_sample": &result.x[..result.n.min(20)],
+            "y_smoothed_sample": &result.y[..result.n.min(20)],
+            "note": if result.n > 20 { Some(format!("Showing first 20 of {} points", result.n)) } else { None }
+        });
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&output).unwrap_or_else(|_| format!("{:?}", result))
+        )]))
+    }
+
+    /// Fit Tukey's resistant line.
+    #[tool(description = "Tukey's resistant line - robust regression using medians instead of means, making it resistant to outliers. Divides data into three groups and uses group medians to determine slope and intercept. Returns coefficients, fitted values, and residuals.")]
+    async fn regression_line(
+        &self,
+        Parameters(request): Parameters<LineRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        use p2a_core::polars::prelude::*;
+
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let df = dataset.df();
+
+        // Extract x column
+        let x_col = match df.column(&request.x) {
+            Ok(c) => c,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "X column '{}' not found: {}",
+                    request.x, e
+                ))]));
+            }
+        };
+
+        let x_values: Vec<f64> = match x_col.cast(&DataType::Float64) {
+            Ok(c) => match c.f64() {
+                Ok(f) => f.into_iter().map(|v| v.unwrap_or(f64::NAN)).collect(),
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "X column not numeric: {}",
+                        e
+                    ))]));
+                }
+            },
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Cannot convert X to numeric: {}",
+                    e
+                ))]));
+            }
+        };
+
+        // Extract y column
+        let y_col = match df.column(&request.y) {
+            Ok(c) => c,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Y column '{}' not found: {}",
+                    request.y, e
+                ))]));
+            }
+        };
+
+        let y_values: Vec<f64> = match y_col.cast(&DataType::Float64) {
+            Ok(c) => match c.f64() {
+                Ok(f) => f.into_iter().map(|v| v.unwrap_or(f64::NAN)).collect(),
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Y column not numeric: {}",
+                        e
+                    ))]));
+                }
+            },
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Cannot convert Y to numeric: {}",
+                    e
+                ))]));
+            }
+        };
+
+        let result = match run_line(&x_values, &y_values, request.iter) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Tukey's line failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        // Format output
+        let output = serde_json::json!({
+            "n_observations": result.n,
+            "iterations": result.iter,
+            "coefficients": {
+                "intercept": result.intercept,
+                "slope": result.slope
+            },
+            "fitted_sample": &result.fitted[..result.n.min(20)],
+            "residuals_sample": &result.residuals[..result.n.min(20)],
+            "note": if result.n > 20 { Some(format!("Showing first 20 of {} values", result.n)) } else { None }
+        });
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&output).unwrap_or_else(|_| format!("{:?}", result))
+        )]))
+    }
+
+    /// Compute cumulative periodogram for white noise test.
+    #[tool(description = "Cumulative periodogram (cpgram) - diagnostic tool for testing if a time series is white noise. Plots cumulative sum of periodogram ordinates. For white noise, should follow a uniform distribution. Returns cumulative periodogram, confidence bands, and Kolmogorov-Smirnov test for white noise.")]
+    async fn timeseries_cpgram(
+        &self,
+        Parameters(request): Parameters<CpgramRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        use p2a_core::polars::prelude::*;
+
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let df = dataset.df();
+
+        // Extract time series column
+        let col = match df.column(&request.column) {
+            Ok(c) => c,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Column '{}' not found: {}",
+                    request.column, e
+                ))]));
+            }
+        };
+
+        let values: Vec<f64> = match col.cast(&DataType::Float64) {
+            Ok(c) => match c.f64() {
+                Ok(f) => f.into_iter().filter_map(|v| v).collect(),
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Column not numeric: {}",
+                        e
+                    ))]));
+                }
+            },
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Cannot convert column to numeric: {}",
+                    e
+                ))]));
+            }
+        };
+
+        let result = match cpgram(&values, request.taper) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Cumulative periodogram failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        // Format output
+        let output = serde_json::json!({
+            "n_observations": result.n,
+            "taper": result.taper,
+            "white_noise_test": {
+                "is_white_noise": result.is_white_noise,
+                "ks_statistic": result.ks_statistic,
+                "ks_p_value": result.ks_p_value,
+                "max_deviation": result.max_deviation
+            },
+            "freq_sample": &result.freq[..result.freq.len().min(20)],
+            "cpgram_sample": &result.cpgram[..result.cpgram.len().min(20)],
+            "note": if result.freq.len() > 20 { Some(format!("Showing first 20 of {} frequencies", result.freq.len())) } else { None }
+        });
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&output).unwrap_or_else(|_| format!("{:?}", result))
+        )]))
+    }
+
+    /// Construct a Toeplitz matrix.
+    #[tool(description = "Construct a Toeplitz matrix - a matrix with constant values along each diagonal. Useful for autocorrelation matrices, circulant matrices, and time series analysis. Can create symmetric or asymmetric Toeplitz matrices.")]
+    async fn linalg_toeplitz(
+        &self,
+        Parameters(request): Parameters<ToeplitzRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let result = if let Some(ref row) = request.row {
+            // Asymmetric Toeplitz matrix
+            match toeplitz_asymmetric(&request.column, row) {
+                Ok(mat) => toeplitz_to_vec(&mat),
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Toeplitz matrix construction failed: {}",
+                        e
+                    ))]));
+                }
+            }
+        } else {
+            // Symmetric Toeplitz matrix
+            match toeplitz(&request.column) {
+                Ok(mat) => toeplitz_to_vec(&mat),
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Toeplitz matrix construction failed: {}",
+                        e
+                    ))]));
+                }
+            }
+        };
+
+        let output = serde_json::json!({
+            "dimensions": [result.len(), if result.is_empty() { 0 } else { result[0].len() }],
+            "symmetric": request.row.is_none(),
+            "matrix": result
+        });
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&output).unwrap_or_else(|_| format!("{:?}", result))
+        )]))
+    }
+
+    /// Compute model tables from ANOVA.
+    #[tool(description = "Compute model tables (means or effects) from one-way or two-way ANOVA. Returns tables of group means or effects (deviations from grand mean) along with standard errors. Useful for post-hoc analysis of ANOVA results.")]
+    async fn stats_model_tables(
+        &self,
+        Parameters(request): Parameters<ModelTablesRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        use p2a_core::polars::prelude::*;
+
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let table_type = match request.table_type.as_deref() {
+            Some("effects") => TableType::Effects,
+            Some("means") | None => TableType::Means,
+            Some(other) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Unknown table type '{}'. Use 'means' or 'effects'.",
+                    other
+                ))]));
+            }
+        };
+
+        let compute_se = request.se.unwrap_or(true);
+
+        if request.factors.len() == 1 {
+            // One-way ANOVA
+            let anova = match run_one_way_anova(dataset, &request.response, &request.factors[0]) {
+                Ok(a) => a,
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "One-way ANOVA failed: {}",
+                        e
+                    ))]));
+                }
+            };
+
+            let result = match model_tables(&anova, table_type, compute_se) {
+                Ok(r) => r,
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Model tables failed: {}",
+                        e
+                    ))]));
+                }
+            };
+
+            let output = serde_json::json!({
+                "table_type": result.table_type,
+                "grand_mean": result.grand_mean,
+                "groups": result.group_names,
+                "values": result.values,
+                "n": result.n,
+                "se": result.se,
+                "mse": result.mse,
+                "df_mse": result.df_mse
+            });
+
+            Ok(CallToolResult::success(vec![Content::text(
+                serde_json::to_string_pretty(&output).unwrap_or_else(|_| format!("{:?}", result))
+            )]))
+        } else if request.factors.len() == 2 {
+            // Two-way ANOVA
+            let anova = match run_two_way_anova(dataset, &request.response, &request.factors[0], &request.factors[1], true) {
+                Ok(a) => a,
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Two-way ANOVA failed: {}",
+                        e
+                    ))]));
+                }
+            };
+
+            let output = serde_json::json!({
+                "table_type": if table_type == TableType::Means { "means" } else { "effects" },
+                "grand_mean": anova.grand_mean,
+                "factor_a": anova.factor_a,
+                "factor_b": anova.factor_b,
+                "factor_a_effects": {
+                    "ss": anova.ss_a,
+                    "df": anova.df_a,
+                    "ms": anova.ms_a,
+                    "f": anova.f_a,
+                    "p": anova.p_a
+                },
+                "factor_b_effects": {
+                    "ss": anova.ss_b,
+                    "df": anova.df_b,
+                    "ms": anova.ms_b,
+                    "f": anova.f_b,
+                    "p": anova.p_b
+                },
+                "interaction": anova.ss_ab.map(|ss| serde_json::json!({
+                    "ss": ss,
+                    "df": anova.df_ab,
+                    "ms": anova.ms_ab,
+                    "f": anova.f_ab,
+                    "p": anova.p_ab
+                })),
+                "mse": anova.ms_error,
+                "df_error": anova.df_error,
+                "note": "Two-way model tables computed from ANOVA results"
+            });
+
+            Ok(CallToolResult::success(vec![Content::text(
+                serde_json::to_string_pretty(&output).unwrap_or_else(|_| format!("{:?}", anova))
+            )]))
+        } else {
+            Ok(CallToolResult::error(vec![Content::text(
+                "Model tables requires 1 factor (one-way) or 2 factors (two-way)."
+            )]))
+        }
+    }
+
+    /// Compute standard errors for contrasts in ANOVA.
+    #[tool(description = "Compute standard errors for linear contrasts in ANOVA. A contrast is a linear combination of group means where coefficients sum to zero. Can specify custom contrasts or generate standard ones (treatment, Helmert, sum, polynomial). Returns SE for each contrast.")]
+    async fn stats_se_contrast(
+        &self,
+        Parameters(request): Parameters<SeContrastRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        // Run one-way ANOVA first
+        let anova = match run_one_way_anova(dataset, &request.response, &request.factor) {
+            Ok(a) => a,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "One-way ANOVA failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        let k = anova.groups.len();
+
+        // Get contrasts - either from request or generate
+        let contrasts = if let Some(ref c) = request.contrasts {
+            c.clone()
+        } else {
+            // Generate standard contrasts
+            let contrast_type = match request.contrast_type.as_deref() {
+                Some("treatment") => ContrastType::Treatment,
+                Some("helmert") => ContrastType::Helmert,
+                Some("sum") => ContrastType::Sum,
+                Some("poly") => ContrastType::Poly,
+                None => ContrastType::Treatment, // Default
+                Some(other) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Unknown contrast type '{}'. Use 'treatment', 'helmert', 'sum', or 'poly'.",
+                        other
+                    ))]));
+                }
+            };
+            generate_contrasts(k, contrast_type)
+        };
+
+        let result = match se_contrast(&anova, &contrasts) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "SE contrast computation failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        let output = serde_json::json!({
+            "n_contrasts": result.se.len(),
+            "group_names": result.group_names,
+            "contrasts": result.contrasts,
+            "standard_errors": result.se,
+            "mse": result.mse,
+            "df_mse": result.df_mse
+        });
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&output).unwrap_or_else(|_| format!("{:?}", result))
+        )]))
+    }
+
+    /// Compute weighted mean.
+    #[tool(description = "Compute the weighted arithmetic mean: sum(w*x) / sum(w). Useful when observations have different importance or frequency weights.")]
+    async fn stats_weighted_mean(
+        &self,
+        Parameters(request): Parameters<WeightedMeanRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        use p2a_core::polars::prelude::*;
+
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found.", request.dataset
+                ))]));
+            }
+        };
+
+        let df = dataset.df();
+
+        let values: Vec<f64> = match df.column(&request.column) {
+            Ok(c) => match c.cast(&DataType::Float64) {
+                Ok(c) => c.f64().unwrap().into_iter().filter_map(|v| v).collect(),
+                Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!("Column not numeric: {}", e))])),
+            },
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!("Column not found: {}", e))])),
+        };
+
+        let weights: Vec<f64> = match df.column(&request.weights) {
+            Ok(c) => match c.cast(&DataType::Float64) {
+                Ok(c) => c.f64().unwrap().into_iter().filter_map(|v| v).collect(),
+                Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!("Weights not numeric: {}", e))])),
+            },
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!("Weight column not found: {}", e))])),
+        };
+
+        let result = match weighted_mean(&values, &weights, true) {
+            Ok(r) => r,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!("Weighted mean failed: {}", e))])),
+        };
+
+        let output = serde_json::json!({
+            "weighted_mean": result,
+            "n": values.len(),
+            "sum_weights": weights.iter().sum::<f64>()
+        });
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&output).unwrap()
+        )]))
+    }
+
+    /// Compute weighted covariance matrix.
+    #[tool(description = "Compute weighted covariance matrix and optionally weighted means. Uses frequency or probability weights to weight observations differently.")]
+    async fn stats_cov_wt(
+        &self,
+        Parameters(request): Parameters<CovWtRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found.", request.dataset
+                ))]));
+            }
+        };
+
+        let data = match extract_numeric_matrix(dataset, &request.columns) {
+            Ok(d) => d,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+        };
+
+        use p2a_core::polars::prelude::*;
+        let df = dataset.df();
+        let weights: Vec<f64> = match df.column(&request.weights) {
+            Ok(c) => match c.cast(&DataType::Float64) {
+                Ok(c) => c.f64().unwrap().into_iter().filter_map(|v| v).collect(),
+                Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!("Weights not numeric: {}", e))])),
+            },
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!("Weight column not found: {}", e))])),
+        };
+
+        // Flatten matrix to row-major slice
+        let n_rows = data.nrows();
+        let n_cols = data.ncols();
+        let flat_data: Vec<f64> = data.iter().copied().collect();
+
+        let method_str = request.method.as_deref();
+        let result = match run_cov_wt(&flat_data, n_rows, n_cols, Some(&weights), false, method_str) {
+            Ok(r) => r,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!("cov.wt failed: {}", e))])),
+        };
+
+        let output = serde_json::json!({
+            "cov": result.cov,
+            "center": result.center,
+            "n_obs": result.n_obs,
+            "wt_sum": result.wt.iter().sum::<f64>()
+        });
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&output).unwrap()
+        )]))
+    }
+
+    /// Mauchly's test for sphericity.
+    #[tool(description = "Mauchly's test for sphericity - tests whether the variances of differences between repeated measures are equal. Required assumption for repeated measures ANOVA. Returns test statistic, p-value, and Greenhouse-Geisser/Huynh-Feldt epsilon corrections.")]
+    async fn stats_mauchly_test(
+        &self,
+        Parameters(request): Parameters<MauchlyTestRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found.", request.dataset
+                ))]));
+            }
+        };
+
+        let data = match extract_numeric_matrix(dataset, &request.columns) {
+            Ok(d) => d,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+        };
+
+        // Flatten to row-major and call run_mauchly_test
+        let n_rows = data.nrows();
+        let n_cols = data.ncols();
+        let flat_data: Vec<f64> = data.iter().copied().collect();
+
+        let result = match run_mauchly_test(&flat_data, n_rows, n_cols) {
+            Ok(r) => r,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!("Mauchly's test failed: {}", e))])),
+        };
+
+        let output = serde_json::json!({
+            "w_statistic": result.w,
+            "chi_squared": result.chi_squared,
+            "p_value": result.p_value,
+            "df": result.df,
+            "sphericity_violated": result.p_value < 0.05,
+            "epsilon_corrections": {
+                "greenhouse_geisser": result.epsilon_gg,
+                "huynh_feldt": result.epsilon_hf,
+                "lower_bound": result.epsilon_lb
+            },
+            "n_subjects": result.n,
+            "n_conditions": result.p_levels
+        });
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&output).unwrap()
+        )]))
+    }
+
+    /// Stepwise model selection.
+    #[tool(description = "Stepwise regression model selection using AIC or BIC. Can perform forward selection, backward elimination, or both. Returns the best model and selection history.")]
+    async fn regression_step(
+        &self,
+        Parameters(request): Parameters<StepRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found.", request.dataset
+                ))]));
+            }
+        };
+
+        let direction_str = request.direction.as_deref().unwrap_or("both");
+        let use_bic = request.criterion.as_deref() == Some("bic");
+
+        // For stepwise, scope_lower is empty (no forced variables), scope_upper is all predictors
+        let scope_lower: Vec<&str> = vec![];
+        let scope_upper: Vec<&str> = request.predictors.iter().map(|s| s.as_str()).collect();
+
+        let result = match run_step(dataset, &request.response, &scope_lower, &scope_upper, direction_str, use_bic, true) {
+            Ok(r) => r,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!("Stepwise selection failed: {}", e))])),
+        };
+
+        let output = serde_json::json!({
+            "final_model": {
+                "variables": result.final_variables,
+                "criterion": result.criterion_name,
+                "k": result.k
+            },
+            "initial_variables": result.initial_variables,
+            "direction": format!("{}", result.direction),
+            "n_steps": result.n_steps,
+            "steps": result.steps.iter().map(|s| serde_json::json!({
+                "step": s.step,
+                "action": s.action,
+                "variables": s.variables,
+                "df": s.df,
+                "rss": s.rss,
+                "criterion": s.criterion
+            })).collect::<Vec<_>>()
+        });
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&output).unwrap()
+        )]))
+    }
+
+    /// Lag a time series.
+    #[tool(description = "Shift a time series by k positions. Positive k shifts values backward (lag), negative k shifts forward (lead). Returns the lagged series with NA padding.")]
+    async fn timeseries_lag(
+        &self,
+        Parameters(request): Parameters<LagRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        use p2a_core::polars::prelude::*;
+
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found.", request.dataset
+                ))]));
+            }
+        };
+
+        let df = dataset.df();
+        let values: Vec<f64> = match df.column(&request.column) {
+            Ok(c) => match c.cast(&DataType::Float64) {
+                Ok(c) => c.f64().unwrap().into_iter().map(|v| v.unwrap_or(f64::NAN)).collect(),
+                Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!("Column not numeric: {}", e))])),
+            },
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!("Column not found: {}", e))])),
+        };
+
+        let k = request.k.unwrap_or(1);
+        let result = match ts_lag(&values, k) {
+            Ok(r) => r,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!("Lag failed: {}", e))])),
+        };
+
+        let output = serde_json::json!({
+            "lag": k,
+            "n": result.values.len(),
+            "values_sample": &result.values[..result.values.len().min(20)],
+            "note": if result.values.len() > 20 { Some(format!("Showing first 20 of {} values", result.values.len())) } else { None }
+        });
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&output).unwrap()
+        )]))
+    }
+
+    /// Embed a time series into a matrix.
+    #[tool(description = "Create a lag embedding matrix from a time series. Each row contains consecutive values, useful for building AR models or phase space reconstruction.")]
+    async fn timeseries_embed(
+        &self,
+        Parameters(request): Parameters<EmbedRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        use p2a_core::polars::prelude::*;
+
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found.", request.dataset
+                ))]));
+            }
+        };
+
+        let df = dataset.df();
+        let values: Vec<f64> = match df.column(&request.column) {
+            Ok(c) => match c.cast(&DataType::Float64) {
+                Ok(c) => c.f64().unwrap().into_iter().map(|v| v.unwrap_or(f64::NAN)).collect(),
+                Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!("Column not numeric: {}", e))])),
+            },
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!("Column not found: {}", e))])),
+        };
+
+        let result = match embed(&values, request.dimension) {
+            Ok(r) => r,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!("Embedding failed: {}", e))])),
+        };
+
+        let output = serde_json::json!({
+            "dimension": result.dimension,
+            "n_rows": result.n_rows,
+            "matrix_sample": &result.matrix[..result.n_rows.min(10)]
+        });
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&output).unwrap()
+        )]))
+    }
+
+    /// Inverse of differencing.
+    #[tool(description = "Compute the inverse of differencing (cumulative sum). Reconstructs the original series from differences given initial values.")]
+    async fn timeseries_diffinv(
+        &self,
+        Parameters(request): Parameters<DiffinvRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        use p2a_core::polars::prelude::*;
+
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found.", request.dataset
+                ))]));
+            }
+        };
+
+        let df = dataset.df();
+        let values: Vec<f64> = match df.column(&request.column) {
+            Ok(c) => match c.cast(&DataType::Float64) {
+                Ok(c) => c.f64().unwrap().into_iter().map(|v| v.unwrap_or(f64::NAN)).collect(),
+                Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!("Column not numeric: {}", e))])),
+            },
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!("Column not found: {}", e))])),
+        };
+
+        let xi = request.xi.as_deref();
+        let lag_val = request.lag.unwrap_or(1);
+        let differences = request.differences.unwrap_or(1);
+
+        let result = match diffinv(&values, lag_val, differences, xi) {
+            Ok(r) => r,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!("diffinv failed: {}", e))])),
+        };
+
+        let output = serde_json::json!({
+            "n": result.values.len(),
+            "lag": lag_val,
+            "values_sample": &result.values[..result.values.len().min(20)],
+            "note": if result.values.len() > 20 { Some(format!("Showing first 20 of {} values", result.values.len())) } else { None }
+        });
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&output).unwrap()
+        )]))
+    }
+
+    /// Linear filtering of time series.
+    #[tool(description = "Apply a linear filter to a time series using convolution or recursive filtering. Useful for smoothing, differencing, or implementing ARMA models.")]
+    async fn timeseries_filter(
+        &self,
+        Parameters(request): Parameters<FilterRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        use p2a_core::polars::prelude::*;
+
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found.", request.dataset
+                ))]));
+            }
+        };
+
+        let df = dataset.df();
+        let values: Vec<f64> = match df.column(&request.column) {
+            Ok(c) => match c.cast(&DataType::Float64) {
+                Ok(c) => c.f64().unwrap().into_iter().map(|v| v.unwrap_or(f64::NAN)).collect(),
+                Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!("Column not numeric: {}", e))])),
+            },
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!("Column not found: {}", e))])),
+        };
+
+        let method = match request.method.as_deref() {
+            Some("recursive") => FilterMethod::Recursive,
+            Some("convolution") | None => FilterMethod::Convolution,
+            Some(other) => return Ok(CallToolResult::error(vec![Content::text(format!(
+                "Unknown method '{}'. Use 'convolution' or 'recursive'.", other
+            ))])),
+        };
+
+        let sides = match request.sides {
+            Some(1) => FilterSides::One,
+            Some(2) | None => FilterSides::Two,
+            Some(other) => return Ok(CallToolResult::error(vec![Content::text(format!(
+                "Invalid sides '{}'. Use 1 (one-sided) or 2 (two-sided).", other
+            ))])),
+        };
+
+        let result = match ts_filter(&values, &request.filter, method, sides, None) {
+            Ok(r) => r,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!("Filter failed: {}", e))])),
+        };
+
+        let output = serde_json::json!({
+            "n": result.values.len(),
+            "method": format!("{:?}", method),
+            "filter_length": request.filter.len(),
+            "values_sample": &result.values[..result.values.len().min(20)],
+            "note": if result.values.len() > 20 { Some(format!("Showing first 20 of {} values", result.values.len())) } else { None }
+        });
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&output).unwrap()
+        )]))
+    }
+
+    /// Extract a window from time series.
+    #[tool(description = "Extract a contiguous window (subset) from a time series by specifying start and end indices.")]
+    async fn timeseries_window(
+        &self,
+        Parameters(request): Parameters<WindowRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        use p2a_core::polars::prelude::*;
+
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found.", request.dataset
+                ))]));
+            }
+        };
+
+        let df = dataset.df();
+        let values: Vec<f64> = match df.column(&request.column) {
+            Ok(c) => match c.cast(&DataType::Float64) {
+                Ok(c) => c.f64().unwrap().into_iter().map(|v| v.unwrap_or(f64::NAN)).collect(),
+                Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!("Column not numeric: {}", e))])),
+            },
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!("Column not found: {}", e))])),
+        };
+
+        let result = match ts_window(&values, request.start, request.end) {
+            Ok(r) => r,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!("Window extraction failed: {}", e))])),
+        };
+
+        let output = serde_json::json!({
+            "start": result.start,
+            "end": result.end,
+            "n": result.values.len(),
+            "values": result.values
+        });
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&output).unwrap()
+        )]))
+    }
+
+    /// Compute theoretical ACF for ARMA model.
+    #[tool(description = "Compute the theoretical autocorrelation function (ACF) or partial ACF for an ARMA(p,q) model given AR and MA coefficients.")]
+    async fn timeseries_arma_acf(
+        &self,
+        Parameters(request): Parameters<ArmaAcfRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let ar = request.ar.unwrap_or_default();
+        let ma = request.ma.unwrap_or_default();
+        let lag_max = request.lag_max.unwrap_or(10);
+        let pacf = request.pacf.unwrap_or(false);
+
+        let result = match arma_acf(&ar, &ma, lag_max, pacf) {
+            Ok(r) => r,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!("ARMAacf failed: {}", e))])),
+        };
+
+        let output = serde_json::json!({
+            "type": if pacf { "PACF" } else { "ACF" },
+            "ar_order": ar.len(),
+            "ma_order": ma.len(),
+            "lag_max": lag_max,
+            "values": result.values,
+            "lags": result.lags
+        });
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&output).unwrap()
+        )]))
+    }
+
+    /// Convert ARMA to MA (psi weights).
+    #[tool(description = "Convert ARMA model to its infinite MA representation (psi weights). The psi weights show the impulse response function of the model.")]
+    async fn timeseries_arma_to_ma(
+        &self,
+        Parameters(request): Parameters<ArmaToMaRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let ar = request.ar.unwrap_or_default();
+        let ma = request.ma.unwrap_or_default();
+        let lag_max = request.lag_max.unwrap_or(10);
+
+        let result = match arma_to_ma(&ar, &ma, lag_max) {
+            Ok(r) => r,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!("ARMAtoMA failed: {}", e))])),
+        };
+
+        let output = serde_json::json!({
+            "ar_order": ar.len(),
+            "ma_order": ma.len(),
+            "n_weights": result.psi.len(),
+            "psi_weights": result.psi
+        });
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&output).unwrap()
+        )]))
+    }
+
+    /// Convert ACF to AR coefficients.
+    #[tool(description = "Compute AR coefficients from autocorrelation function using the Yule-Walker equations. Also returns partial autocorrelations.")]
+    async fn timeseries_acf_to_ar(
+        &self,
+        Parameters(request): Parameters<Acf2ArRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let result = match acf_to_ar(&request.acf) {
+            Ok(r) => r,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!("acf2AR failed: {}", e))])),
+        };
+
+        let output = serde_json::json!({
+            "max_order": result.max_order,
+            "ar_matrix": result.ar_matrix,
+            "partial_acf": result.pacf,
+            "acf": result.acf
+        });
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&output).unwrap()
+        )]))
+    }
+
+    /// Simulate from ARIMA model.
+    #[tool(description = "Simulate a time series from an ARIMA(p,d,q) model. Generates random innovations and applies the ARMA recursion with optional differencing.")]
+    async fn timeseries_arima_sim(
+        &self,
+        Parameters(request): Parameters<ArimaSimRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let ar = request.ar.unwrap_or_default();
+        let ma = request.ma.unwrap_or_default();
+        let d = request.d.unwrap_or(0);
+
+        let result = match arima_sim(&ar, &ma, d, request.n, None, None, request.seed) {
+            Ok(r) => r,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!("arima.sim failed: {}", e))])),
+        };
+
+        let output = serde_json::json!({
+            "n": result.values.len(),
+            "model": {
+                "ar": result.ar,
+                "d": result.d,
+                "ma": result.ma
+            },
+            "n_start": result.n_start,
+            "values_sample": &result.values[..result.values.len().min(50)],
+            "note": if result.values.len() > 50 { Some(format!("Showing first 50 of {} values", result.values.len())) } else { None }
+        });
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&output).unwrap()
+        )]))
+    }
+
+    /// Running median smoothing.
+    #[tool(description = "Apply running median smoother to a time series. More robust to outliers than running mean. Uses Tukey's median polish for the smoothing.")]
+    async fn timeseries_runmed(
+        &self,
+        Parameters(request): Parameters<RunmedRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        use p2a_core::polars::prelude::*;
+
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found.", request.dataset
+                ))]));
+            }
+        };
+
+        let df = dataset.df();
+        let values: Vec<f64> = match df.column(&request.column) {
+            Ok(c) => match c.cast(&DataType::Float64) {
+                Ok(c) => c.f64().unwrap().into_iter().map(|v| v.unwrap_or(f64::NAN)).collect(),
+                Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!("Column not numeric: {}", e))])),
+            },
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!("Column not found: {}", e))])),
+        };
+
+        let endrule = match request.endrule.as_deref() {
+            Some("constant") => EndRule::Constant,
+            Some("median") => EndRule::Median,
+            Some("keep") | None => EndRule::Keep,
+            Some(other) => return Ok(CallToolResult::error(vec![Content::text(format!(
+                "Unknown endrule '{}'. Use 'keep', 'constant', or 'median'.", other
+            ))])),
+        };
+
+        let result = match runmed(&values, request.k, endrule) {
+            Ok(r) => r,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!("runmed failed: {}", e))])),
+        };
+
+        let output = serde_json::json!({
+            "n": result.n_obs,
+            "k": result.k,
+            "endrule": format!("{:?}", result.endrule),
+            "values_sample": &result.values[..result.values.len().min(20)],
+            "note": if result.values.len() > 20 { Some(format!("Showing first 20 of {} values", result.values.len())) } else { None }
+        });
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&output).unwrap()
+        )]))
     }
 
     // ========================================================================

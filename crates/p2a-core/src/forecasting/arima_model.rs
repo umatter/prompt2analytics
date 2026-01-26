@@ -1,4 +1,45 @@
 //! ARIMA (AutoRegressive Integrated Moving Average) modeling.
+//!
+//! Provides ARIMA(p,d,q) model fitting and forecasting for univariate time series.
+//!
+//! # Mathematical Background
+//!
+//! An ARIMA(p,d,q) model combines:
+//! - **AR(p)**: p autoregressive terms: φ₁yₜ₋₁ + φ₂yₜ₋₂ + ... + φₚyₜ₋ₚ
+//! - **I(d)**: d differences to achieve stationarity
+//! - **MA(q)**: q moving average terms: θ₁εₜ₋₁ + θ₂εₜ₋₂ + ... + θqεₜ₋q
+//!
+//! The general form (after differencing) is:
+//!
+//! φ(B)(1-B)ᵈ yₜ = θ(B) εₜ
+//!
+//! where B is the backshift operator, φ(B) is the AR polynomial,
+//! and θ(B) is the MA polynomial.
+//!
+//! ## Stationarity and Invertibility
+//!
+//! For a valid ARIMA model:
+//! - AR polynomial roots must lie outside the unit circle (stationarity)
+//! - MA polynomial roots must lie outside the unit circle (invertibility)
+//!
+//! # References
+//!
+//! - Box, G.E.P., & Jenkins, G.M. (1970). *Time Series Analysis: Forecasting and
+//!   Control*. Holden-Day. The foundational work on ARIMA modeling.
+//!
+//! - Box, G.E.P., Jenkins, G.M., Reinsel, G.C., & Ljung, G.M. (2015). *Time Series
+//!   Analysis: Forecasting and Control* (5th ed.). Wiley. ISBN: 978-1118675021.
+//!
+//! - Hyndman, R.J., & Athanasopoulos, G. (2021). *Forecasting: Principles and
+//!   Practice* (3rd ed.). OTexts. https://otexts.com/fpp3/
+//!
+//! - Brockwell, P.J., & Davis, R.A. (1991). *Time Series: Theory and Methods*
+//!   (2nd ed.). Springer. ISBN: 978-0387974293.
+//!
+//! - Shumway, R.H., & Stoffer, D.S. (2017). *Time Series Analysis and Its
+//!   Applications* (4th ed.). Springer. ISBN: 978-3319524511.
+//!
+//! R equivalent: `stats::arima()`, `forecast::auto.arima()`
 
 use anyhow::{anyhow, Result};
 use rand::SeedableRng;

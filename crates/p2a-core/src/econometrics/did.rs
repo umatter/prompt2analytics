@@ -2,6 +2,53 @@
 //!
 //! Pure Rust implementation without external formula parsing.
 //! Uses column-based API for simplicity.
+//!
+//! # Mathematical Background
+//!
+//! DiD estimates causal effects by comparing changes over time between
+//! treatment and control groups:
+//!
+//! ## Basic 2×2 DiD
+//!
+//! For outcome Y, treatment D, and post-treatment period T:
+//!
+//! ATT = E[Y₁ - Y₀ | D=1] = (Ȳ_treated,post - Ȳ_treated,pre) - (Ȳ_control,post - Ȳ_control,pre)
+//!
+//! ## Regression Specification
+//!
+//! yᵢₜ = α + β₁Dᵢ + β₂Tₜ + **δ(Dᵢ × Tₜ)** + εᵢₜ
+//!
+//! The coefficient **δ** is the DiD estimator (ATT under parallel trends).
+//!
+//! ## Key Assumptions
+//!
+//! 1. **Parallel trends**: Absent treatment, treated and control groups would
+//!    have followed parallel outcome trajectories
+//! 2. **No anticipation**: Treatment doesn't affect outcomes before implementation
+//! 3. **SUTVA**: No spillovers between units
+//!
+//! # References
+//!
+//! - Ashenfelter, O., & Card, D. (1985). Using the longitudinal structure of
+//!   earnings to estimate the effect of training programs. *Review of Economics
+//!   and Statistics*, 67(4), 648-660. https://doi.org/10.2307/1924810
+//!
+//! - Card, D., & Krueger, A.B. (1994). Minimum wages and employment: A case study
+//!   of the fast-food industry in New Jersey and Pennsylvania. *American Economic
+//!   Review*, 84(4), 772-793. Classic DiD application.
+//!
+//! - Angrist, J.D., & Pischke, J.S. (2009). *Mostly Harmless Econometrics: An
+//!   Empiricist's Companion*, Chapter 5. Princeton University Press.
+//!
+//! - Cunningham, S. (2021). *Causal Inference: The Mixtape*. Yale University Press.
+//!   https://mixtape.scunning.com/ Chapter on Difference-in-Differences.
+//!
+//! - Roth, J., Sant'Anna, P.H.C., Bilinski, A., & Poe, J. (2023). What's trending
+//!   in difference-in-differences? A synthesis of the recent econometrics literature.
+//!   *Journal of Econometrics*, 235(2), 2218-2244.
+//!   https://doi.org/10.1016/j.jeconom.2023.03.008
+//!
+//! R equivalent: Manual implementation or packages like `did`, `fixest::feols()`
 
 use ndarray::{Array1, Array2};
 use serde::{Serialize, Deserialize};

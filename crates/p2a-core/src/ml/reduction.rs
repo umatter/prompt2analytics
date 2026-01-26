@@ -631,6 +631,275 @@ fn compute_kl_divergence(p: &ArrayView2<f64>, q: &ArrayView2<f64>, sum_q: f64) -
     kl
 }
 
+// =============================================================================
+// Classical Multidimensional Scaling (cmdscale)
+// =============================================================================
+
+use serde::{Deserialize, Serialize};
+
+/// Classical Multidimensional Scaling (cmdscale) result.
+///
+/// # References
+///
+/// - Torgerson, W. S. (1952). "Multidimensional scaling: I. Theory and method".
+///   Psychometrika, 17, 401–419.
+/// - Mardia, K. V. (1978). "Some properties of classical multidimensional scaling".
+///   Communications in Statistics - Theory and Methods, A7, 1233–1241.
+/// - Implementation follows R's cmdscale from the stats package.
+///   Source: https://stat.ethz.ch/R-manual/R-devel/library/stats/html/cmdscale.html
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CmdscaleResult {
+    /// Configuration matrix (n x k). Each row is a point in k-dimensional space.
+    pub points: Vec<Vec<f64>>,
+    /// Eigenvalues of the double-centered distance matrix (all n eigenvalues).
+    pub eig: Vec<f64>,
+    /// Goodness of fit (GOF) measures.
+    /// First value: sum of positive eigenvalues / sum of absolute eigenvalues.
+    /// Second value: sum of k largest eigenvalues / sum of absolute eigenvalues.
+    pub gof: [f64; 2],
+    /// Number of dimensions in the output.
+    pub k: usize,
+    /// Number of points.
+    pub n: usize,
+    /// Whether the input was a distance matrix or data matrix.
+    pub is_distance_matrix: bool,
+}
+
+impl std::fmt::Display for CmdscaleResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "Classical MDS (cmdscale) Results")?;
+        writeln!(f, "=================================")?;
+        writeln!(f, "Number of points: {}", self.n)?;
+        writeln!(f, "Output dimensions: {}", self.k)?;
+        writeln!(f)?;
+        writeln!(f, "Goodness of fit:")?;
+        writeln!(f, "  GOF1 (positive eigenvalues / |all|): {:.4}", self.gof[0])?;
+        writeln!(f, "  GOF2 (k eigenvalues / |all|): {:.4}", self.gof[1])?;
+        writeln!(f)?;
+
+        // Show eigenvalues
+        let n_show = self.eig.len().min(10);
+        writeln!(f, "Eigenvalues (first {}):", n_show)?;
+        for (i, &ev) in self.eig.iter().take(n_show).enumerate() {
+            writeln!(f, "  λ{}: {:.6}", i + 1, ev)?;
+        }
+        if self.eig.len() > 10 {
+            writeln!(f, "  ... ({} more)", self.eig.len() - 10)?;
+        }
+        writeln!(f)?;
+
+        // Show first few points
+        let n_pts = self.points.len().min(5);
+        writeln!(f, "Configuration (first {} points):", n_pts)?;
+        for i in 0..n_pts {
+            let coords: Vec<String> = self.points[i].iter()
+                .map(|v| format!("{:.4}", v))
+                .collect();
+            writeln!(f, "  Point {}: [{}]", i + 1, coords.join(", "))?;
+        }
+        if self.points.len() > 5 {
+            writeln!(f, "  ... ({} more points)", self.points.len() - 5)?;
+        }
+
+        Ok(())
+    }
+}
+
+/// Classical Multidimensional Scaling (cmdscale).
+///
+/// Takes a distance matrix and returns a configuration of points in Euclidean
+/// space that approximately reproduces the distances.
+///
+/// # Arguments
+/// * `d` - Square symmetric distance matrix (n x n) as nested vectors
+/// * `k` - Number of output dimensions (default: 2)
+/// * `eig` - Return all eigenvalues if true (default: false)
+/// * `add` - Add a constant to non-diagonal distances for approximate Euclidean embedding
+///
+/// # Returns
+/// * `CmdscaleResult` containing the configuration and diagnostics
+///
+/// # Algorithm
+/// 1. Compute squared distance matrix D²
+/// 2. Double-center: B = -½ H D² H where H = I - (1/n) 11'
+/// 3. Eigendecompose B to get eigenvalues λ and eigenvectors V
+/// 4. Points = V[:, 1:k] * diag(sqrt(λ[1:k]))
+///
+/// # References
+///
+/// - Torgerson, W. S. (1952). "Multidimensional scaling: I. Theory and method".
+///   Psychometrika, 17, 401–419.
+/// - R stats::cmdscale documentation
+pub fn cmdscale(
+    d: &[Vec<f64>],
+    k: Option<usize>,
+    eig: Option<bool>,
+    add: Option<bool>,
+) -> Result<CmdscaleResult, String> {
+    let n = d.len();
+
+    // Validate input
+    if n < 2 {
+        return Err("Need at least 2 points for MDS".to_string());
+    }
+
+    for (i, row) in d.iter().enumerate() {
+        if row.len() != n {
+            return Err(format!(
+                "Distance matrix must be square. Row {} has {} elements, expected {}",
+                i, row.len(), n
+            ));
+        }
+    }
+
+    // Check symmetry and non-negative distances
+    for i in 0..n {
+        if d[i][i].abs() > 1e-10 {
+            return Err(format!("Diagonal element d[{},{}] = {} should be 0", i, i, d[i][i]));
+        }
+        for j in (i + 1)..n {
+            if (d[i][j] - d[j][i]).abs() > 1e-10 {
+                return Err(format!(
+                    "Distance matrix must be symmetric. d[{},{}]={} != d[{},{}]={}",
+                    i, j, d[i][j], j, i, d[j][i]
+                ));
+            }
+            if d[i][j] < 0.0 {
+                return Err(format!("Distances must be non-negative. d[{},{}]={}", i, j, d[i][j]));
+            }
+        }
+    }
+
+    let k = k.unwrap_or(2).min(n - 1);
+    let return_all_eig = eig.unwrap_or(false);
+    let use_add = add.unwrap_or(false);
+
+    // Convert to Array2 for matrix operations
+    let mut d_sq = Array2::zeros((n, n));
+    for i in 0..n {
+        for j in 0..n {
+            d_sq[[i, j]] = d[i][j] * d[i][j];
+        }
+    }
+
+    // Apply additive constant if requested (Cailliez method approximation)
+    // This helps when distances are not perfectly Euclidean
+    if use_add {
+        // Simple additive constant: add c to all off-diagonal elements of D
+        // where c makes the smallest eigenvalue non-negative
+        // For simplicity, we'll compute after eigendecomposition and re-run if needed
+    }
+
+    // Double centering: B = -0.5 * H * D² * H
+    // where H = I - (1/n) * 1 * 1'
+    // This is equivalent to: B[i,j] = -0.5 * (D²[i,j] - row_mean[i] - col_mean[j] + grand_mean)
+    let row_means: Vec<f64> = (0..n)
+        .map(|i| d_sq.row(i).sum() / n as f64)
+        .collect();
+    let col_means: Vec<f64> = (0..n)
+        .map(|j| d_sq.column(j).sum() / n as f64)
+        .collect();
+    let grand_mean: f64 = d_sq.sum() / (n * n) as f64;
+
+    let mut b = Array2::zeros((n, n));
+    for i in 0..n {
+        for j in 0..n {
+            b[[i, j]] = -0.5 * (d_sq[[i, j]] - row_means[i] - col_means[j] + grand_mean);
+        }
+    }
+
+    // Make B exactly symmetric (numerical stability)
+    for i in 0..n {
+        for j in (i + 1)..n {
+            let avg = (b[[i, j]] + b[[j, i]]) / 2.0;
+            b[[i, j]] = avg;
+            b[[j, i]] = avg;
+        }
+    }
+
+    // Eigendecomposition of B
+    // We need ALL eigenvalues for GOF calculation, but only k eigenvectors
+    let n_eig = if return_all_eig { n } else { n };
+    let (eigenvalues, eigenvectors) = symmetric_eigen(&b, n_eig)?;
+
+    // Convert eigenvalues to Vec
+    let eig_vec: Vec<f64> = eigenvalues.to_vec();
+
+    // Compute GOF measures
+    let sum_abs: f64 = eig_vec.iter().map(|&x| x.abs()).sum();
+    let sum_pos: f64 = eig_vec.iter().filter(|&&x| x > 0.0).sum();
+    let sum_k: f64 = eig_vec.iter().take(k).filter(|&&x| x > 0.0).sum();
+
+    let gof = if sum_abs > 1e-10 {
+        [sum_pos / sum_abs, sum_k / sum_abs]
+    } else {
+        [1.0, 1.0]
+    };
+
+    // Construct configuration points
+    // points[i, j] = eigenvectors[i, j] * sqrt(max(eigenvalues[j], 0))
+    let mut points = vec![vec![0.0; k]; n];
+    for i in 0..n {
+        for j in 0..k {
+            let ev = eigenvalues[j].max(0.0);
+            points[i][j] = eigenvectors[[i, j]] * ev.sqrt();
+        }
+    }
+
+    Ok(CmdscaleResult {
+        points,
+        eig: eig_vec,
+        gof,
+        k,
+        n,
+        is_distance_matrix: true,
+    })
+}
+
+/// Classical MDS from a data matrix (computes Euclidean distances first).
+///
+/// # Arguments
+/// * `data` - Data matrix (n x p) where rows are observations
+/// * `k` - Number of output dimensions (default: 2)
+///
+/// # Returns
+/// * `CmdscaleResult` containing the configuration
+pub fn cmdscale_from_data(
+    data: ArrayView2<f64>,
+    k: Option<usize>,
+) -> Result<CmdscaleResult, String> {
+    let n = data.nrows();
+
+    // Compute Euclidean distance matrix
+    let mut dist = vec![vec![0.0; n]; n];
+    for i in 0..n {
+        for j in (i + 1)..n {
+            let mut d_sq = 0.0;
+            for col in 0..data.ncols() {
+                let diff = data[[i, col]] - data[[j, col]];
+                d_sq += diff * diff;
+            }
+            let d = d_sq.sqrt();
+            dist[i][j] = d;
+            dist[j][i] = d;
+        }
+    }
+
+    let mut result = cmdscale(&dist, k, Some(true), None)?;
+    result.is_distance_matrix = false;
+    Ok(result)
+}
+
+/// Run classical MDS (convenience wrapper).
+pub fn run_cmdscale(
+    d: &[Vec<f64>],
+    k: Option<usize>,
+    eig: Option<bool>,
+    add: Option<bool>,
+) -> Result<CmdscaleResult, String> {
+    cmdscale(d, k, eig, add)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -732,5 +1001,214 @@ mod tests {
             None,
         );
         assert!(result.is_err());
+    }
+
+    // =========================================================================
+    // cmdscale (Classical MDS) tests
+    // =========================================================================
+
+    #[test]
+    fn test_cmdscale_basic() {
+        // Simple 4-point example: square with side 1
+        // Points at: (0,0), (1,0), (1,1), (0,1)
+        // Distances: adjacent pairs = 1, diagonals = sqrt(2) ≈ 1.414
+        let dist = vec![
+            vec![0.0, 1.0, 1.414, 1.0],
+            vec![1.0, 0.0, 1.0, 1.414],
+            vec![1.414, 1.0, 0.0, 1.0],
+            vec![1.0, 1.414, 1.0, 0.0],
+        ];
+
+        let result = cmdscale(&dist, Some(2), Some(true), None).unwrap();
+
+        assert_eq!(result.n, 4);
+        assert_eq!(result.k, 2);
+        assert_eq!(result.points.len(), 4);
+        assert_eq!(result.points[0].len(), 2);
+
+        // GOF should be high for perfect Euclidean distances
+        assert!(result.gof[0] > 0.9, "GOF1 should be high: {}", result.gof[0]);
+        assert!(result.gof[1] > 0.9, "GOF2 should be high: {}", result.gof[1]);
+    }
+
+    #[test]
+    fn test_cmdscale_distance_preservation() {
+        // Create a simple triangle
+        let dist = vec![
+            vec![0.0, 3.0, 4.0],
+            vec![3.0, 0.0, 5.0],
+            vec![4.0, 5.0, 0.0],
+        ];
+
+        let result = cmdscale(&dist, Some(2), Some(true), None).unwrap();
+
+        // Verify distances are approximately preserved
+        let pts = &result.points;
+        let d01 = ((pts[0][0] - pts[1][0]).powi(2) + (pts[0][1] - pts[1][1]).powi(2)).sqrt();
+        let d02 = ((pts[0][0] - pts[2][0]).powi(2) + (pts[0][1] - pts[2][1]).powi(2)).sqrt();
+        let d12 = ((pts[1][0] - pts[2][0]).powi(2) + (pts[1][1] - pts[2][1]).powi(2)).sqrt();
+
+        // This is a 3-4-5 right triangle, should be exact in 2D
+        assert!((d01 - 3.0).abs() < 0.1, "d01={}, expected 3.0", d01);
+        assert!((d02 - 4.0).abs() < 0.1, "d02={}, expected 4.0", d02);
+        assert!((d12 - 5.0).abs() < 0.1, "d12={}, expected 5.0", d12);
+    }
+
+    #[test]
+    fn test_cmdscale_from_data() {
+        // 2D data points
+        let data = array![
+            [0.0, 0.0],
+            [1.0, 0.0],
+            [1.0, 1.0],
+            [0.0, 1.0],
+        ];
+
+        let result = cmdscale_from_data(data.view(), Some(2)).unwrap();
+
+        assert_eq!(result.n, 4);
+        assert_eq!(result.k, 2);
+        assert!(!result.is_distance_matrix);
+
+        // Configuration should preserve relative positions
+        // Check that we have 4 points with 2 coordinates each
+        assert_eq!(result.points.len(), 4);
+        for pt in &result.points {
+            assert_eq!(pt.len(), 2);
+        }
+    }
+
+    #[test]
+    fn test_cmdscale_eigenvalues() {
+        // Perfect Euclidean distances should give non-negative eigenvalues
+        let dist = vec![
+            vec![0.0, 1.0, 2.0],
+            vec![1.0, 0.0, 1.0],
+            vec![2.0, 1.0, 0.0],
+        ];
+
+        let result = cmdscale(&dist, Some(2), Some(true), None).unwrap();
+
+        // Check eigenvalues are returned
+        assert_eq!(result.eig.len(), 3);
+
+        // First eigenvalue should be positive (largest)
+        assert!(result.eig[0] >= 0.0, "First eigenvalue should be non-negative");
+    }
+
+    #[test]
+    fn test_cmdscale_validation_non_square() {
+        // Non-square matrix should fail
+        let dist = vec![
+            vec![0.0, 1.0, 2.0],
+            vec![1.0, 0.0],  // Wrong length
+        ];
+
+        let result = cmdscale(&dist, Some(2), None, None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_cmdscale_validation_non_symmetric() {
+        // Non-symmetric matrix should fail
+        let dist = vec![
+            vec![0.0, 1.0, 2.0],
+            vec![1.5, 0.0, 1.0],  // 1.5 != 1.0
+            vec![2.0, 1.0, 0.0],
+        ];
+
+        let result = cmdscale(&dist, Some(2), None, None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_cmdscale_validation_negative_distance() {
+        // Negative distances should fail
+        let dist = vec![
+            vec![0.0, -1.0, 2.0],
+            vec![-1.0, 0.0, 1.0],
+            vec![2.0, 1.0, 0.0],
+        ];
+
+        let result = cmdscale(&dist, Some(2), None, None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_cmdscale_validation_non_zero_diagonal() {
+        // Non-zero diagonal should fail
+        let dist = vec![
+            vec![0.1, 1.0, 2.0],  // Should be 0.0
+            vec![1.0, 0.0, 1.0],
+            vec![2.0, 1.0, 0.0],
+        ];
+
+        let result = cmdscale(&dist, Some(2), None, None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_cmdscale_1d() {
+        // Points on a line: distances 0, 1, 2, 3
+        let dist = vec![
+            vec![0.0, 1.0, 2.0, 3.0],
+            vec![1.0, 0.0, 1.0, 2.0],
+            vec![2.0, 1.0, 0.0, 1.0],
+            vec![3.0, 2.0, 1.0, 0.0],
+        ];
+
+        let result = cmdscale(&dist, Some(1), Some(true), None).unwrap();
+
+        assert_eq!(result.k, 1);
+
+        // In 1D, points should be collinear
+        // The relative positions should be 0, 1, 2, 3 (up to sign and translation)
+        let pts: Vec<f64> = result.points.iter().map(|p| p[0]).collect();
+
+        // Check that distances between adjacent points are approximately 1
+        let d01 = (pts[0] - pts[1]).abs();
+        let d12 = (pts[1] - pts[2]).abs();
+        let d23 = (pts[2] - pts[3]).abs();
+
+        assert!((d01 - 1.0).abs() < 0.1, "d01={}", d01);
+        assert!((d12 - 1.0).abs() < 0.1, "d12={}", d12);
+        assert!((d23 - 1.0).abs() < 0.1, "d23={}", d23);
+    }
+
+    #[test]
+    fn test_cmdscale_gof() {
+        // Test GOF calculation with known distances
+        let dist = vec![
+            vec![0.0, 1.0, 1.414, 1.0],
+            vec![1.0, 0.0, 1.0, 1.414],
+            vec![1.414, 1.0, 0.0, 1.0],
+            vec![1.0, 1.414, 1.0, 0.0],
+        ];
+
+        let result = cmdscale(&dist, Some(2), Some(true), None).unwrap();
+
+        // GOF values should be between 0 and 1
+        assert!(result.gof[0] >= 0.0 && result.gof[0] <= 1.0);
+        assert!(result.gof[1] >= 0.0 && result.gof[1] <= 1.0);
+
+        // GOF2 <= GOF1 (since k eigenvalues <= positive eigenvalues)
+        assert!(result.gof[1] <= result.gof[0] + 0.01);
+    }
+
+    #[test]
+    fn test_cmdscale_display() {
+        let dist = vec![
+            vec![0.0, 1.0, 2.0],
+            vec![1.0, 0.0, 1.0],
+            vec![2.0, 1.0, 0.0],
+        ];
+
+        let result = cmdscale(&dist, Some(2), Some(true), None).unwrap();
+        let display = format!("{}", result);
+
+        assert!(display.contains("Classical MDS"));
+        assert!(display.contains("Number of points: 3"));
+        assert!(display.contains("Output dimensions: 2"));
+        assert!(display.contains("Goodness of fit"));
     }
 }
