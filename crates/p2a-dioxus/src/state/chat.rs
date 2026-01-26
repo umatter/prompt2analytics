@@ -241,9 +241,33 @@ impl ChatState {
                 last.content = msg.content;
                 last.is_streaming = false;
 
-                // Update tool calls
+                // Update tool calls from backend response (has full details)
+                // This replaces the streaming-tracked tool calls with the authoritative ones
                 if let Some(calls) = msg.tool_calls {
-                    last.tool_calls = calls.iter().map(ToolCallInfo::from).collect::<Vec<_>>();
+                    let new_calls: Vec<ToolCallInfo> = calls.iter().map(|tc| {
+                        ToolCallInfo {
+                            id: tc.id.clone(),
+                            name: tc.name.clone(),
+                            arguments: tc.arguments.clone(),
+                            result: None, // Will be filled from tool_results if present
+                            success: Some(true), // If we got them in Done, they succeeded
+                            is_expanded: false,
+                        }
+                    }).collect();
+
+                    // If we have tool results, match them to tool calls
+                    if let Some(ref results) = msg.tool_results {
+                        let mut final_calls = new_calls;
+                        for tc in final_calls.iter_mut() {
+                            if let Some(result) = results.iter().find(|r| r.tool_call_id == tc.id) {
+                                tc.result = Some(result.content.clone());
+                                tc.success = Some(!result.is_error);
+                            }
+                        }
+                        last.tool_calls = final_calls;
+                    } else {
+                        last.tool_calls = new_calls;
+                    }
                 }
             }
         }
@@ -286,17 +310,44 @@ impl ChatState {
         self.active_tool = None;
     }
 
-    /// Set active tool call
-    pub fn set_active_tool(&mut self, name: String) {
+    /// Set active tool call and add to current message's tool calls
+    pub fn set_active_tool(&mut self, name: String, arguments: serde_json::Value) {
         self.active_tool = Some(ActiveToolCall {
-            name,
+            name: name.clone(),
             started_at: Utc::now(),
         });
+
+        // Add a pending tool call to the current streaming message
+        if let Some(last) = self.messages.last_mut() {
+            if last.is_streaming {
+                // Only add if not already present (avoid duplicates on re-renders)
+                if !last.tool_calls.iter().any(|tc| tc.name == name && tc.success.is_none()) {
+                    last.tool_calls.push(ToolCallInfo {
+                        id: uuid::Uuid::new_v4().to_string(),
+                        name,
+                        arguments,
+                        result: None,
+                        success: None, // None means still running
+                        is_expanded: false,
+                    });
+                }
+            }
+        }
     }
 
-    /// Clear active tool call
-    pub fn clear_active_tool(&mut self) {
-        self.active_tool = None;
+    /// Clear active tool call and mark it as complete with result
+    pub fn clear_active_tool(&mut self, result: Option<String>) {
+        if let Some(active) = self.active_tool.take() {
+            // Mark the tool call as successful in the current message
+            if let Some(last) = self.messages.last_mut() {
+                if last.is_streaming {
+                    if let Some(tc) = last.tool_calls.iter_mut().find(|tc| tc.name == active.name && tc.success.is_none()) {
+                        tc.success = Some(true);
+                        tc.result = result;
+                    }
+                }
+            }
+        }
     }
 
     /// Navigate history up (older messages)
@@ -339,28 +390,22 @@ impl ChatState {
         self.history_index = -1;
     }
 
-    /// Build message history for API request
+    /// Build message history for API request.
+    ///
+    /// Note: We intentionally exclude tool_calls from the history because OpenAI
+    /// requires that every assistant message with tool_calls must be followed by
+    /// tool result messages. Since we don't persist tool results, we just include
+    /// the plain text content of each message.
     pub fn build_history(&self) -> Vec<Message> {
         self.messages
             .iter()
             .filter(|m| !m.is_streaming)
+            .filter(|m| m.role == "user" || m.role == "assistant")
+            .filter(|m| !m.content.is_empty())
             .map(|m| Message {
                 role: m.role.clone(),
                 content: m.content.clone(),
-                tool_calls: if m.tool_calls.is_empty() {
-                    None
-                } else {
-                    Some(
-                        m.tool_calls
-                            .iter()
-                            .map(|tc| crate::api::types::ToolCall {
-                                id: tc.id.clone(),
-                                name: tc.name.clone(),
-                                arguments: tc.arguments.clone(),
-                            })
-                            .collect(),
-                    )
-                },
+                tool_calls: None,
                 tool_results: None,
             })
             .collect()

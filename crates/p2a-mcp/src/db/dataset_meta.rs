@@ -1,6 +1,7 @@
 //! Dataset metadata CRUD operations
 
 use surrealdb::RecordId;
+use tracing;
 
 use super::connection::{DbConnection, DbError};
 use super::models::DatasetMeta;
@@ -10,38 +11,93 @@ impl DbConnection {
 
     /// Save dataset metadata (upsert based on session_id + name)
     pub async fn save_dataset_meta(&self, meta: &DatasetMeta) -> Result<DatasetMeta, DbError> {
+        tracing::info!(
+            session_id = %meta.session_id,
+            name = %meta.name,
+            column_names_to_save = ?meta.column_names,
+            column_names_len = meta.column_names.len(),
+            "[DB_SAVE_META] Starting save_dataset_meta"
+        );
+
         // Check if a dataset with the same name exists in this session
         let existing = self
             .get_dataset_meta(&meta.session_id, &meta.name)
             .await?;
 
         if let Some(existing_meta) = existing {
+            tracing::info!(
+                existing_id = %existing_meta.id_string(),
+                existing_column_names = ?existing_meta.column_names,
+                "[DB_SAVE_META] Found existing record, will update"
+            );
+
             // Update existing record
+            let update_content = DatasetMeta {
+                id: existing_meta.id.clone(),
+                session_id: meta.session_id.clone(),
+                name: meta.name.clone(),
+                source_path: meta.source_path.clone(),
+                source_type: meta.source_type.clone(),
+                row_count: meta.row_count,
+                column_count: meta.column_count,
+                column_names: meta.column_names.clone(),
+                loaded_at: meta.loaded_at.clone(),
+                file_size_bytes: meta.file_size_bytes,
+            };
+
+            tracing::info!(
+                update_column_names = ?update_content.column_names,
+                update_column_names_len = update_content.column_names.len(),
+                "[DB_SAVE_META] Content being sent to UPDATE"
+            );
+
             let result: Option<DatasetMeta> = self
                 .db()
                 .update(("dataset_meta", existing_meta.id_string().as_str()))
-                .content(DatasetMeta {
-                    id: existing_meta.id.clone(),
-                    session_id: meta.session_id.clone(),
-                    name: meta.name.clone(),
-                    source_path: meta.source_path.clone(),
-                    source_type: meta.source_type.clone(),
-                    row_count: meta.row_count,
-                    column_count: meta.column_count,
-                    column_names: meta.column_names.clone(),
-                    loaded_at: meta.loaded_at.clone(),
-                    file_size_bytes: meta.file_size_bytes,
-                })
+                .content(update_content)
                 .await?;
+
+            match &result {
+                Some(updated) => {
+                    tracing::info!(
+                        updated_id = %updated.id_string(),
+                        updated_column_names = ?updated.column_names,
+                        updated_column_names_len = updated.column_names.len(),
+                        "[DB_SAVE_META] UPDATE returned successfully"
+                    );
+                }
+                None => {
+                    tracing::error!("[DB_SAVE_META] UPDATE returned None!");
+                }
+            }
 
             result.ok_or_else(|| DbError::Query("Failed to update dataset meta".to_string()))
         } else {
+            tracing::info!(
+                new_id = %meta.id_string(),
+                "[DB_SAVE_META] No existing record, will create new"
+            );
+
             // Create new record
             let created: Option<DatasetMeta> = self
                 .db()
                 .create(meta.id.clone())
                 .content(meta.clone())
                 .await?;
+
+            match &created {
+                Some(new_meta) => {
+                    tracing::info!(
+                        created_id = %new_meta.id_string(),
+                        created_column_names = ?new_meta.column_names,
+                        created_column_names_len = new_meta.column_names.len(),
+                        "[DB_SAVE_META] CREATE returned successfully"
+                    );
+                }
+                None => {
+                    tracing::error!("[DB_SAVE_META] CREATE returned None!");
+                }
+            }
 
             created.ok_or_else(|| DbError::Query("Failed to create dataset meta".to_string()))
         }
@@ -52,6 +108,11 @@ impl DbConnection {
         &self,
         session_id: &str,
     ) -> Result<Vec<DatasetMeta>, DbError> {
+        tracing::info!(
+            session_id = %session_id,
+            "[DB_GET_DATASETS] Querying datasets for session"
+        );
+
         let session_id_owned = session_id.to_string();
         let mut result = self
             .db()
@@ -60,6 +121,23 @@ impl DbConnection {
             .await?;
 
         let datasets: Vec<DatasetMeta> = result.take(0)?;
+
+        tracing::info!(
+            num_datasets = datasets.len(),
+            "[DB_GET_DATASETS] Query returned datasets"
+        );
+
+        for (idx, ds) in datasets.iter().enumerate() {
+            tracing::info!(
+                idx = idx,
+                id = %ds.id_string(),
+                name = %ds.name,
+                column_names = ?ds.column_names,
+                column_names_len = ds.column_names.len(),
+                "[DB_GET_DATASETS] Dataset record from SurrealDB"
+            );
+        }
+
         Ok(datasets)
     }
 
@@ -69,6 +147,12 @@ impl DbConnection {
         session_id: &str,
         name: &str,
     ) -> Result<Option<DatasetMeta>, DbError> {
+        tracing::debug!(
+            session_id = %session_id,
+            name = %name,
+            "[DB_GET_META] Looking up specific dataset"
+        );
+
         let session_id_owned = session_id.to_string();
         let name_owned = name.to_string();
         let mut result = self
@@ -79,7 +163,23 @@ impl DbConnection {
             .await?;
 
         let datasets: Vec<DatasetMeta> = result.take(0)?;
-        Ok(datasets.into_iter().next())
+        let found = datasets.into_iter().next();
+
+        match &found {
+            Some(meta) => {
+                tracing::debug!(
+                    id = %meta.id_string(),
+                    column_names = ?meta.column_names,
+                    column_names_len = meta.column_names.len(),
+                    "[DB_GET_META] Found dataset"
+                );
+            }
+            None => {
+                tracing::debug!("[DB_GET_META] Dataset not found");
+            }
+        }
+
+        Ok(found)
     }
 
     /// Get a dataset meta by ID

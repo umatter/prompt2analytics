@@ -3,6 +3,7 @@
 use dioxus::prelude::*;
 
 use crate::api::{api, DatasetMeta, ReloadResult};
+use crate::components::{DatasetInspectorModal, P2aIconMinimal};
 use crate::state::SessionState;
 
 /// Dataset sidebar component
@@ -14,10 +15,15 @@ pub fn DatasetSidebar() -> Element {
     let mut is_reloading = use_signal(|| false);
     let mut error = use_signal(|| None::<String>);
     let mut reload_result = use_signal(|| None::<ReloadResult>);
+    let mut selected_dataset = use_signal(|| None::<DatasetMeta>);
 
-    // Load datasets when session changes
+    // Load datasets when session changes or refresh is triggered
     use_effect(move || {
-        let session_id = session_state.read().session_id.clone();
+        let state = session_state.read();
+        let session_id = state.session_id.clone();
+        let _refresh_counter = state.datasets_refresh_counter; // Track this to trigger re-runs
+        drop(state);
+
         if let Some(sid) = session_id {
             spawn(async move {
                 is_loading.set(true);
@@ -72,16 +78,19 @@ pub fn DatasetSidebar() -> Element {
     let result = reload_result.read().clone();
 
     rsx! {
-        div { class: "h-full flex flex-col bg-white dark:bg-gray-800 border-l border-gray-200 dark:border-gray-700",
-            // Header
-            div { class: "p-4 border-b border-gray-200 dark:border-gray-700",
-                div { class: "flex items-center justify-between",
-                    h2 { class: "text-lg font-semibold text-gray-900 dark:text-white",
-                        "Datasets"
+        div { class: "h-full flex flex-col bg-white dark:bg-gray-900 border-l border-gray-300 dark:border-gray-800",
+            // Header - fixed height matching ChatPanel
+            div { class: "flex-shrink-0 h-16 px-6 border-b border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-gray-900",
+                div { class: "h-full w-full flex items-center justify-between",
+                    div { class: "flex items-center gap-2",
+                        P2aIconMinimal { size: 20.0 }
+                        h1 { class: "text-xl font-bold text-gray-900 dark:text-white",
+                            "Datasets"
+                        }
                     }
                     // Reload button
                     button {
-                        class: "p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors disabled:opacity-50",
+                        class: "p-2 rounded-lg hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors disabled:opacity-50",
                         disabled: reloading || datasets_list.is_empty(),
                         title: "Reload all datasets from source files",
                         onclick: reload_datasets,
@@ -133,7 +142,7 @@ pub fn DatasetSidebar() -> Element {
 
                 // Reload result display
                 if let Some(ref res) = result {
-                    div { class: "mb-4 p-3 rounded-lg bg-blue-50 dark:bg-blue-900/30 text-sm",
+                    div { class: "mb-4 p-3 rounded-lg bg-teal-50 dark:bg-teal-900/30 text-sm",
                         if !res.succeeded.is_empty() {
                             div { class: "text-green-700 dark:text-green-400 mb-1",
                                 "Reloaded: {res.succeeded.join(\", \")}"
@@ -176,9 +185,9 @@ pub fn DatasetSidebar() -> Element {
                     }
                 } else if datasets_list.is_empty() {
                     // Empty state
-                    div { class: "text-center py-8 text-gray-500 dark:text-gray-400",
+                    div { class: "text-center py-8 px-2 text-gray-500 dark:text-gray-400",
                         svg {
-                            class: "w-12 h-12 mx-auto mb-3 text-gray-300 dark:text-gray-600",
+                            class: "w-8 h-8 mx-auto mb-3 text-gray-300 dark:text-gray-600",
                             fill: "none",
                             stroke: "currentColor",
                             view_box: "0 0 24 24",
@@ -189,15 +198,31 @@ pub fn DatasetSidebar() -> Element {
                                 d: "M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4"
                             }
                         }
-                        p { "No datasets loaded" }
-                        p { class: "text-sm mt-1", "Load a dataset using the chat" }
+                        p { class: "break-words", "No datasets loaded" }
+                        p { class: "text-sm mt-1 break-words", "Load a dataset using the chat" }
                     }
                 } else {
                     // Dataset list
                     div { class: "space-y-3",
                         for dataset in datasets_list.iter() {
-                            DatasetCard { key: "{dataset.id}", dataset: dataset.clone() }
+                            DatasetCard {
+                                key: "{dataset.id}",
+                                dataset: dataset.clone(),
+                                on_inspect: move |ds: DatasetMeta| {
+                                    selected_dataset.set(Some(ds));
+                                }
+                            }
                         }
+                    }
+                }
+            }
+
+            // Dataset Inspector Modal
+            if let Some(ref ds) = *selected_dataset.read() {
+                DatasetInspectorModal {
+                    dataset: ds.clone(),
+                    on_close: move |_| {
+                        selected_dataset.set(None);
                     }
                 }
             }
@@ -209,6 +234,7 @@ pub fn DatasetSidebar() -> Element {
 #[derive(Props, Clone, PartialEq)]
 struct DatasetCardProps {
     dataset: DatasetMeta,
+    on_inspect: EventHandler<DatasetMeta>,
 }
 
 /// Individual dataset card
@@ -217,6 +243,7 @@ fn DatasetCard(props: DatasetCardProps) -> Element {
     let mut is_expanded = use_signal(|| false);
     let expanded = *is_expanded.read();
     let dataset = &props.dataset;
+    let dataset_for_inspect = props.dataset.clone();
 
     // Format file size
     let file_size = dataset.file_size_bytes.map(|bytes| {
@@ -230,10 +257,10 @@ fn DatasetCard(props: DatasetCardProps) -> Element {
     });
 
     rsx! {
-        div { class: "rounded-lg border border-gray-200 dark:border-gray-700 overflow-hidden",
+        div { class: "rounded-lg border border-gray-300 dark:border-gray-700 overflow-hidden bg-white dark:bg-gray-800",
             // Header
             button {
-                class: "w-full px-3 py-2 flex items-center justify-between bg-gray-50 dark:bg-gray-700/50 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors",
+                class: "w-full px-3 py-2 flex items-center justify-between bg-gray-50 dark:bg-gray-800 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors",
                 onclick: move |_| {
                     let current = *is_expanded.read();
                     is_expanded.set(!current);
@@ -241,7 +268,7 @@ fn DatasetCard(props: DatasetCardProps) -> Element {
                 div { class: "flex items-center gap-2 min-w-0",
                     // Database icon
                     svg {
-                        class: "w-4 h-4 text-blue-500 flex-shrink-0",
+                        class: "w-4 h-4 text-teal-500 flex-shrink-0",
                         fill: "none",
                         stroke: "currentColor",
                         view_box: "0 0 24 24",
@@ -274,7 +301,7 @@ fn DatasetCard(props: DatasetCardProps) -> Element {
 
             // Details (expandable)
             if expanded {
-                div { class: "px-3 py-2 text-sm border-t border-gray-200 dark:border-gray-600 bg-white dark:bg-gray-800",
+                div { class: "px-3 py-2 text-sm border-t border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800",
                     // Dimensions
                     div { class: "flex items-center gap-2 mb-1",
                         span { class: "text-gray-500 dark:text-gray-400", "Size:" }
@@ -321,7 +348,7 @@ fn DatasetCard(props: DatasetCardProps) -> Element {
                                 for col in dataset.column_names.iter().take(10) {
                                     span {
                                         key: "{col}",
-                                        class: "px-1.5 py-0.5 text-xs bg-gray-100 dark:bg-gray-700 rounded text-gray-700 dark:text-gray-300",
+                                        class: "px-1.5 py-0.5 text-xs bg-gray-200 dark:bg-gray-700 rounded text-gray-700 dark:text-gray-300",
                                         "{col}"
                                     }
                                 }
@@ -331,6 +358,33 @@ fn DatasetCard(props: DatasetCardProps) -> Element {
                                     }
                                 }
                             }
+                        }
+                    }
+
+                    // Inspect button
+                    div { class: "mt-3 pt-2 border-t border-gray-100 dark:border-gray-700",
+                        button {
+                            class: "w-full px-3 py-1.5 text-xs font-medium text-teal-700 dark:text-teal-300 bg-teal-50 dark:bg-teal-900/30 rounded-lg hover:bg-teal-100 dark:hover:bg-teal-900/50 transition-colors flex items-center justify-center gap-1.5",
+                            onclick: {
+                                let dataset = dataset_for_inspect.clone();
+                                move |evt: Event<MouseData>| {
+                                    evt.stop_propagation();
+                                    props.on_inspect.call(dataset.clone());
+                                }
+                            },
+                            svg {
+                                class: "w-3.5 h-3.5",
+                                fill: "none",
+                                stroke: "currentColor",
+                                view_box: "0 0 24 24",
+                                path {
+                                    stroke_linecap: "round",
+                                    stroke_linejoin: "round",
+                                    stroke_width: "2",
+                                    d: "M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"
+                                }
+                            }
+                            "View Details"
                         }
                     }
                 }

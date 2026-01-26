@@ -58,7 +58,7 @@ build/
 playwright-report/
 test-results/
 
-# Desktop and CLI app source (but keep Cargo.toml for workspace resolution)
-crates/p2a-desktop/src/
-crates/p2a-desktop/ui/
+# CLI and Dioxus app source (but keep Cargo.toml for workspace resolution)
 crates/p2a-cli/src/
+crates/p2a-dioxus/src/
+crates/p2a-dioxus/assets/

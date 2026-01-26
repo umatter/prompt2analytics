@@ -12,7 +12,7 @@ cargo build
 cargo build -p p2a-core
 cargo build -p p2a-cli
 cargo build -p p2a-mcp
-cargo build -p p2a-desktop
+cargo build -p p2a-dioxus
 
 # Release builds
 cargo build --release -p p2a-cli        # CLI binary at target/release/p2a
@@ -30,13 +30,10 @@ cargo run -p p2a-cli -- <args>
 # Run MCP server (HTTP mode for development)
 cargo run -p p2a-mcp --features full -- --transport http --host 127.0.0.1 --port 8080
 
-# Desktop app (requires npm install in ui/ first)
-cd crates/p2a-desktop/ui && npm install && cd ../../..
-cargo run -p p2a-desktop
-
-# Dioxus web app (experimental)
-cd crates/p2a-dioxus && dx serve           # Dev server with hot reload
-cd crates/p2a-dioxus && dx build           # Production build
+# Dioxus app (web and desktop)
+cd crates/p2a-dioxus && dx serve                      # Web dev server with hot reload
+cd crates/p2a-dioxus && dx serve --platform desktop   # Desktop app
+cd crates/p2a-dioxus && dx build --release            # Production web build
 
 # Build documentation
 cargo doc --no-deps --open
@@ -51,8 +48,7 @@ prompt2analytics is a Rust workspace (edition 2024, requires Rust 1.85+) exposin
 - **p2a-core**: Core analytics library (all algorithms)
 - **p2a-cli**: Command-line interface (`p2a` binary) for direct analytics execution
 - **p2a-mcp**: MCP server exposing 55+ tools
-- **p2a-desktop**: Tauri desktop application with LLM integration
-- **p2a-dioxus**: Pure Rust web frontend (experimental, compiles to WASM)
+- **p2a-dioxus**: Cross-platform GUI (web via WASM, desktop via native)
 
 ## Architecture Principles
 
@@ -330,6 +326,18 @@ async fn my_tool(&self, #[tool(aggr)] request: MyToolRequest) -> Result<String, 
 }
 ```
 
+### Key Tools
+
+**`create_dataset`** - Creates a dataset from inline CSV content (for generated/test data):
+```rust
+#[derive(Deserialize, JsonSchema)]
+pub struct CreateDatasetRequest {
+    pub name: String,
+    pub csv_content: String,  // e.g., "x,y\n1,2\n3,4"
+}
+```
+Uses `DataLoader::from_csv_string()` internally. The LLM system prompt instructs it to use this tool when asked to generate pseudo/test data.
+
 ### Session State
 
 The MCP server maintains a `DatasetStore` for loaded datasets:
@@ -402,28 +410,11 @@ self.db()
 ```
 - The `id_string()` helper strips Unicode angle brackets from RecordId keys
 
-## Desktop Application (p2a-desktop)
-
-### Architecture
-
-- **Backend**: Rust/Tauri spawns p2a-mcp as subprocess
-- **Frontend**: SvelteKit with Svelte 5 runes
-- **Communication**: JSON-RPC 2.0 over stdin/stdout
-
-### LLM Integration
-
-Three providers implemented:
-- `OllamaProvider` - Local Ollama server
-- `AnthropicProvider` - Claude API
-- `OpenAIProvider` - GPT models
-
-All implement the `LlmProvider` trait with streaming support.
-
-## Dioxus Web App (p2a-dioxus)
+## Dioxus App (p2a-dioxus)
 
 ### Overview
 
-Experimental pure Rust web frontend using Dioxus 0.7, compiling to WebAssembly. Communicates with p2a-mcp HTTP backend.
+Cross-platform GUI using Dioxus 0.7, compiling to WebAssembly (web) or native (desktop). Communicates with p2a-mcp HTTP backend.
 
 ### Architecture
 
@@ -482,10 +473,64 @@ chat_state.write().add_user_message(&message);
 ```
 
 **Global State (provided in App):**
-- `SessionState` - Backend session ID and loaded datasets
-- `ChatState` - Current messages, streaming state, prompt history
+- `SessionState` - Backend session ID, loaded datasets, refresh counter
+- `ChatState` - Current messages, streaming state, prompt history, tool calls
 - `ConversationState` - Conversation list and current selection
-- `Settings` - LLM provider configuration
+- `Settings` - LLM provider configuration (with env var detection)
+
+### Tool Call Display
+
+The frontend displays tool calls with full transparency:
+- **"Rust Analytics" indicator**: Shows at the top of assistant messages when tools were called
+- **Tool chips**: List of tool names in a compact horizontal format
+- **Expandable cards**: Click to see arguments and results
+
+Tool calls are tracked during streaming via SSE events:
+```rust
+// Backend sends these events:
+ProgressEvent::ToolStart { tool: String, arguments: serde_json::Value }
+ProgressEvent::ToolEnd { tool: String, elapsed_ms: u64, result: Option<String> }
+
+// Frontend tracks them in ChatMessage:
+pub struct ToolCallInfo {
+    pub name: String,
+    pub arguments: serde_json::Value,
+    pub result: Option<String>,
+    pub success: Option<bool>,  // None = running, Some(true) = success
+}
+```
+
+### Dataset Sidebar Refresh
+
+The dataset sidebar auto-refreshes after tool execution:
+```rust
+// In SessionState:
+pub datasets_refresh_counter: u32,
+
+pub fn trigger_datasets_refresh(&mut self) {
+    self.datasets_refresh_counter = self.datasets_refresh_counter.wrapping_add(1);
+}
+
+// Called after chat completes in ChatPanel:
+session.write().trigger_datasets_refresh();
+
+// DatasetSidebar watches this counter via use_effect
+```
+
+### Environment Variable Detection
+
+On desktop, Settings automatically detects API keys from environment:
+```rust
+#[cfg(not(target_arch = "wasm32"))]
+fn populate_from_env(&mut self) {
+    if let Ok(key) = std::env::var("OPENAI_API_KEY") {
+        self.openai_api_key = key;
+    }
+    if let Ok(key) = std::env::var("ANTHROPIC_API_KEY") {
+        self.anthropic_api_key = key;
+    }
+}
+```
 
 **ConversationState:**
 ```rust
@@ -558,14 +603,22 @@ let df = df! {
 - `crates/p2a-core/src/linalg/matrix_ops.rs` - Core linear algebra (xtx, xty, safe_inverse)
 - `crates/p2a-core/src/traits/estimator.rs` - LinearEstimator trait and p-value helpers
 - `crates/p2a-core/src/visualization/interactive.rs` - Interactive charts (plotlars/Plotly)
-- `crates/p2a-mcp/src/server.rs` - All 55+ MCP tool definitions
+- `crates/p2a-mcp/src/server.rs` - All 55+ MCP tool definitions (including create_dataset)
+- `crates/p2a-mcp/src/transport/http.rs` - HTTP transport with SSE streaming events
+- `crates/p2a-mcp/src/llm/tools.rs` - LLM tool definitions and system prompt
 - `crates/p2a-mcp/src/db/` - SurrealDB persistence layer
 - `crates/p2a-mcp/src/db/conversations.rs` - Conversation CRUD operations
 - `crates/p2a-mcp/src/db/models.rs` - Database models with SurrealDB types
 - `crates/p2a-cli/src/commands/` - CLI subcommand implementations
 - `crates/p2a-dioxus/src/components/chat_panel.rs` - Main Dioxus chat interface
+- `crates/p2a-dioxus/src/components/message.rs` - Message display with tool call indicator
+- `crates/p2a-dioxus/src/components/tool_call.rs` - Expandable tool call card
+- `crates/p2a-dioxus/src/components/dataset_sidebar.rs` - Dataset list with refresh
 - `crates/p2a-dioxus/src/components/conversation_sidebar.rs` - Conversation list UI
-- `crates/p2a-dioxus/src/state/conversation.rs` - Conversation state management
+- `crates/p2a-dioxus/src/state/chat.rs` - Chat state with tool call tracking
+- `crates/p2a-dioxus/src/state/session.rs` - Session state with dataset refresh counter
+- `crates/p2a-dioxus/src/state/settings.rs` - Settings with env var detection
 - `crates/p2a-dioxus/src/api/client.rs` - API client with conversation endpoints
 - `crates/p2a-dioxus/src/api/sse.rs` - SSE streaming for Dioxus
+- `crates/p2a-dioxus/src/api/types.rs` - API types including StreamEvent
 - `DEVELOPMENT_REPORT.md` - Detailed development history and current status

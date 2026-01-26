@@ -184,6 +184,7 @@ async fn run_http_server_with_shutdown(
     #[cfg(feature = "db")]
     let persistent_manager = {
         let db_path = config.http.db_path.as_deref();
+        tracing::info!("Initializing database with path: {:?}", db_path);
         match crate::persistent_session::PersistentSessionManager::new(
             db_path,
             config.session.max_sessions,
@@ -192,12 +193,12 @@ async fn run_http_server_with_shutdown(
         .await
         {
             Ok(manager) => {
-                tracing::info!("Database persistence enabled");
+                tracing::info!("Database persistence enabled - conversation routes will be available");
                 Some(Arc::new(manager))
             }
             Err(e) => {
-                tracing::warn!(
-                    "Failed to initialize database, running without persistence: {}",
+                tracing::error!(
+                    "Failed to initialize database, running WITHOUT persistence (conversations disabled): {}",
                     e
                 );
                 None

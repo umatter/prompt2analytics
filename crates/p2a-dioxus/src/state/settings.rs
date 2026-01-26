@@ -2,13 +2,37 @@
 //!
 //! - Web: Uses localStorage via gloo_storage
 //! - Native: Uses file-based storage in config directory
+//!
+//! On native platforms (desktop/mobile), API keys are also read from environment
+//! variables (OPENAI_API_KEY, ANTHROPIC_API_KEY) if not already set.
 
 use crate::api::ProviderConfig;
-use crate::platform::{create_storage, StorageBackend};
+use crate::platform::{create_storage, is_native, StorageBackend};
 use serde::{Deserialize, Serialize};
 
 /// Storage key for settings
 const SETTINGS_KEY: &str = "p2a-settings";
+
+/// Theme preference
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Theme {
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+impl Theme {
+    /// Get display name
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Theme::System => "System",
+            Theme::Light => "Light",
+            Theme::Dark => "Dark",
+        }
+    }
+}
 
 /// Provider types supported
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -39,6 +63,10 @@ impl Provider {
 /// Application settings
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
+    /// Theme preference
+    #[serde(default)]
+    pub theme: Theme,
+
     /// Current provider
     pub provider: Provider,
 
@@ -67,6 +95,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            theme: Theme::System,
             provider: Provider::Ollama,
             ollama_base_url: "http://localhost:11434".to_string(),
             ollama_model: "llama3.2".to_string(),
@@ -82,10 +111,11 @@ impl Default for Settings {
 }
 
 impl Settings {
-    /// Load settings from platform-appropriate storage
+    /// Load settings from platform-appropriate storage.
+    /// On native platforms, also checks environment variables for API keys.
     pub fn load() -> Self {
         let storage = create_storage();
-        match storage.get::<Self>(SETTINGS_KEY) {
+        let mut settings = match storage.get::<Self>(SETTINGS_KEY) {
             Ok(settings) => {
                 tracing::info!("Loaded settings from storage");
                 settings
@@ -94,7 +124,63 @@ impl Settings {
                 tracing::info!("No saved settings found, using defaults: {}", e);
                 Self::default()
             }
+        };
+
+        // On native platforms, populate API keys from environment variables if not set
+        if is_native() {
+            settings.populate_from_env();
         }
+
+        settings
+    }
+
+    /// Populate API keys from environment variables if not already set.
+    /// This only works on native platforms (desktop/mobile).
+    #[cfg(not(target_arch = "wasm32"))]
+    fn populate_from_env(&mut self) {
+        tracing::info!("Checking environment variables for API keys...");
+
+        // Check OPENAI_API_KEY
+        if self.openai_api_key.is_empty() {
+            match std::env::var("OPENAI_API_KEY") {
+                Ok(key) if !key.is_empty() => {
+                    tracing::info!("Detected OPENAI_API_KEY from environment ({} chars)", key.len());
+                    self.openai_api_key = key;
+                }
+                Ok(_) => {
+                    tracing::info!("OPENAI_API_KEY env var is empty");
+                }
+                Err(e) => {
+                    tracing::info!("OPENAI_API_KEY not found in environment: {}", e);
+                }
+            }
+        } else {
+            tracing::info!("OPENAI_API_KEY already set in settings, skipping env check");
+        }
+
+        // Check ANTHROPIC_API_KEY
+        if self.anthropic_api_key.is_empty() {
+            match std::env::var("ANTHROPIC_API_KEY") {
+                Ok(key) if !key.is_empty() => {
+                    tracing::info!("Detected ANTHROPIC_API_KEY from environment ({} chars)", key.len());
+                    self.anthropic_api_key = key;
+                }
+                Ok(_) => {
+                    tracing::info!("ANTHROPIC_API_KEY env var is empty");
+                }
+                Err(e) => {
+                    tracing::info!("ANTHROPIC_API_KEY not found in environment: {}", e);
+                }
+            }
+        } else {
+            tracing::info!("ANTHROPIC_API_KEY already set in settings, skipping env check");
+        }
+    }
+
+    /// No-op on web platform
+    #[cfg(target_arch = "wasm32")]
+    fn populate_from_env(&mut self) {
+        // Environment variables not available on web
     }
 
     /// Save settings to platform-appropriate storage

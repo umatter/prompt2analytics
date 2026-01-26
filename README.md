@@ -182,8 +182,11 @@ Open http://localhost:8080 in your browser (web) or the native window (desktop).
 - **Conversation management**: Create, rename, archive, and delete conversations
 - **Persistent history**: Messages are saved to SurrealDB backend
 - **Sidebar UI**: Collapsible conversation list with search
+- **Dataset sidebar**: Live view of loaded datasets with metadata
 - Settings persistence (localStorage on web, file-based on native)
-- Tool call display with expandable details
+- **Environment variable detection**: Automatically detects `OPENAI_API_KEY` and `ANTHROPIC_API_KEY`
+- **Tool call transparency**: "Rust Analytics" indicator shows which tools were called
+- Tool call display with expandable details (arguments and results)
 - Markdown rendering for assistant messages
 
 ### Persistence Layer (SurrealDB)
@@ -208,6 +211,11 @@ Features:
 Load a dataset:
 ```
 /load_dataset path:/path/to/data.csv
+```
+
+Create an inline dataset (useful for quick tests or generated data):
+```
+/create_dataset name:test_data csv_content:"x,y\n1,2\n2,4\n3,6\n4,8"
 ```
 
 Run OLS regression:
@@ -289,7 +297,7 @@ prompt2analytics/
 
 | Category | Tools |
 |----------|-------|
-| Data | `load_dataset`, `list_datasets`, `describe_dataset`, `head_dataset` |
+| Data | `load_dataset`, `create_dataset`, `list_datasets`, `describe_dataset`, `head_dataset` |
 | Statistics | `compute_correlation` |
 | Regression | `regression_ols`, `regression_diagnostics`, `regression_clustered` |
 | Panel | `panel_fixed_effects`, `panel_random_effects`, `hausman_test` |

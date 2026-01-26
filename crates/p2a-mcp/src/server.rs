@@ -174,6 +174,18 @@ pub struct UploadDatasetRequest {
     pub name: Option<String>,
 }
 
+/// Request to create a dataset from inline CSV content.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CreateDatasetRequest {
+    /// Name/identifier for the dataset
+    #[schemars(description = "Name to identify this dataset (e.g., 'my_data')")]
+    pub name: String,
+
+    /// CSV content as plain text
+    #[schemars(description = "CSV content with headers in first row (e.g., 'x,y\\n1,2\\n3,4')")]
+    pub csv_content: String,
+}
+
 /// Request to describe a loaded dataset.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct DescribeDatasetRequest {
@@ -3820,6 +3832,18 @@ impl AnalyticsServer {
                 }),
             },
             ToolDefinition {
+                name: "create_dataset".to_string(),
+                description: "Create a dataset from inline CSV content. Use this to create datasets on-the-fly from generated or inline data without needing a file.".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string", "description": "Name for the dataset (e.g., 'my_data')"},
+                        "csv_content": {"type": "string", "description": "CSV content as plain text with headers in first row (e.g., 'x,y\\n1,2\\n3,4')"}
+                    },
+                    "required": ["name", "csv_content"]
+                }),
+            },
+            ToolDefinition {
                 name: "describe_dataset".to_string(),
                 description: "Compute descriptive statistics for all columns in a dataset.".to_string(),
                 input_schema: serde_json::json!({
@@ -4608,6 +4632,13 @@ impl AnalyticsServer {
                     .upload_dataset(Parameters(req))
                     .await
             }
+            "create_dataset" => {
+                let req: CreateDatasetRequest = serde_json::from_value(arguments)
+                    .map_err(|e| format!("Invalid arguments: {}", e))?;
+                session_server
+                    .create_dataset(Parameters(req))
+                    .await
+            }
             "describe_dataset" => {
                 let req: DescribeDatasetRequest = serde_json::from_value(arguments)
                     .map_err(|e| format!("Invalid arguments: {}", e))?;
@@ -5140,6 +5171,60 @@ impl AnalyticsServer {
              Dimensions: {} rows x {} columns\n\n\
              Columns:\n{}",
             id,
+            info.nrows,
+            info.ncols,
+            info.columns
+                .iter()
+                .map(|c| format!(
+                    "  - {} ({}): {} nulls ({:.1}%)",
+                    c.name,
+                    c.dtype,
+                    c.null_count,
+                    if info.nrows > 0 {
+                        (c.null_count as f64 / info.nrows as f64) * 100.0
+                    } else {
+                        0.0
+                    }
+                ))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+
+        Ok(CallToolResult::success(vec![Content::text(result)]))
+    }
+
+    /// Create a dataset from inline CSV content.
+    #[tool(description = "Create a dataset from inline CSV content. Use this to create datasets on-the-fly from generated or inline data without needing a file.")]
+    async fn create_dataset(
+        &self,
+        Parameters(request): Parameters<CreateDatasetRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        // Parse CSV content using the DataLoader
+        let df = match DataLoader::from_csv_string(&request.csv_content) {
+            Ok(df) => df,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Failed to parse CSV content: {}",
+                    e
+                ))]));
+            }
+        };
+
+        // Create dataset
+        let dataset = Dataset::new(df);
+
+        // Get info before storing
+        let info: DatasetInfo = (&dataset).into();
+
+        // Store the dataset
+        let mut datasets = self.datasets.write().await;
+        datasets.insert(request.name.clone(), dataset);
+
+        let result = format!(
+            "Successfully created dataset '{}' from inline CSV\n\n\
+             Dimensions: {} rows x {} columns\n\n\
+             Columns:\n{}",
+            request.name,
             info.nrows,
             info.ncols,
             info.columns

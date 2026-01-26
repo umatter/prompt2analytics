@@ -3,6 +3,7 @@
 //! Provides functions for creating interactive HTML charts from Polars DataFrames.
 
 use super::VisualizationError;
+use super::colors::PLOTLY_PALETTE;
 use plotlars::{Histogram, LinePlot, Plot, Rgb, ScatterPlot};
 use polars::prelude::*;
 
@@ -56,6 +57,14 @@ fn to_rgb_colors(colors: &[(u8, u8, u8)]) -> Vec<Rgb> {
     colors.iter().map(|(r, g, b)| Rgb(*r, *g, *b)).collect()
 }
 
+// Get colors to use (custom or brand palette)
+fn get_colors(custom_colors: &Option<Vec<(u8, u8, u8)>>) -> Vec<Rgb> {
+    match custom_colors {
+        Some(colors) => to_rgb_colors(colors),
+        None => to_rgb_colors(&PLOTLY_PALETTE.to_vec()),
+    }
+}
+
 /// Create an interactive scatter plot from a DataFrame.
 ///
 /// # Arguments
@@ -79,10 +88,11 @@ pub fn scatter_interactive(
     }
 
     let n_points = df.height();
+    let colors = get_colors(&config.colors);
 
     // Build the plot using chained method calls
-    let plot = match (group_col, &config.title, &config.x_label, &config.y_label, &config.colors) {
-        (Some(gc), Some(title), Some(xl), Some(yl), Some(colors)) => {
+    let plot = match (group_col, &config.title, &config.x_label, &config.y_label) {
+        (Some(gc), Some(title), Some(xl), Some(yl)) => {
             ScatterPlot::builder()
                 .data(df)
                 .x(x_col)
@@ -91,38 +101,29 @@ pub fn scatter_interactive(
                 .plot_title(title)
                 .x_title(xl)
                 .y_title(yl)
-                .colors(to_rgb_colors(colors))
+                .colors(colors)
                 .build()
         }
-        (Some(gc), Some(title), Some(xl), Some(yl), None) => {
+        (Some(gc), Some(title), _, _) => {
             ScatterPlot::builder()
                 .data(df)
                 .x(x_col)
                 .y(y_col)
                 .group(gc)
                 .plot_title(title)
-                .x_title(xl)
-                .y_title(yl)
+                .colors(colors)
                 .build()
         }
-        (Some(gc), Some(title), _, _, _) => {
+        (Some(gc), None, _, _) => {
             ScatterPlot::builder()
                 .data(df)
                 .x(x_col)
                 .y(y_col)
                 .group(gc)
-                .plot_title(title)
+                .colors(colors)
                 .build()
         }
-        (Some(gc), None, _, _, _) => {
-            ScatterPlot::builder()
-                .data(df)
-                .x(x_col)
-                .y(y_col)
-                .group(gc)
-                .build()
-        }
-        (None, Some(title), Some(xl), Some(yl), Some(colors)) => {
+        (None, Some(title), Some(xl), Some(yl)) => {
             ScatterPlot::builder()
                 .data(df)
                 .x(x_col)
@@ -130,32 +131,24 @@ pub fn scatter_interactive(
                 .plot_title(title)
                 .x_title(xl)
                 .y_title(yl)
-                .colors(to_rgb_colors(colors))
+                .colors(colors)
                 .build()
         }
-        (None, Some(title), Some(xl), Some(yl), None) => {
+        (None, Some(title), _, _) => {
             ScatterPlot::builder()
                 .data(df)
                 .x(x_col)
                 .y(y_col)
                 .plot_title(title)
-                .x_title(xl)
-                .y_title(yl)
+                .colors(colors)
                 .build()
         }
-        (None, Some(title), _, _, _) => {
+        (None, None, _, _) => {
             ScatterPlot::builder()
                 .data(df)
                 .x(x_col)
                 .y(y_col)
-                .plot_title(title)
-                .build()
-        }
-        (None, None, _, _, _) => {
-            ScatterPlot::builder()
-                .data(df)
-                .x(x_col)
-                .y(y_col)
+                .colors(colors)
                 .build()
         }
     };

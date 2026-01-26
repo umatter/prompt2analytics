@@ -15,6 +15,7 @@
 //! - HTML output for web display
 
 mod charts;
+pub mod colors;
 mod heatmap;
 pub mod interactive;
 
@@ -29,6 +30,11 @@ pub use heatmap::{correlation_heatmap, HeatmapResult};
 pub use interactive::{
     scatter_interactive, histogram_interactive, line_interactive,
     InteractiveConfig, InteractivePlotResult,
+};
+pub use colors::{
+    BRAND_ORANGE, BRAND_CYAN, BRAND_TEAL, BRAND_ORANGE_LIGHT, BRAND_TEAL_DARK, BRAND_ORANGE_DARK,
+    BRAND_SLATE, CHART_PALETTE, PLOTLY_PALETTE, DEFAULT_SERIES_COLOR, SECONDARY_COLOR,
+    OUTLIER_COLOR, TREND_LINE_COLOR,
 };
 
 use thiserror::Error;

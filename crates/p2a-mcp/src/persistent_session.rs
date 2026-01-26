@@ -78,6 +78,33 @@ impl PersistentSessionManager {
         Ok(id)
     }
 
+    /// Register an existing session ID in the database.
+    /// This is used when a session was created by the in-memory SessionManager
+    /// and we need to persist it for conversation support.
+    pub async fn register_session(
+        &self,
+        session_id: &str,
+        user_id: Option<String>,
+    ) -> Result<(), PersistentSessionError> {
+        // Check if session already exists in DB
+        if let Ok(Some(_)) = self.db.get_session(session_id).await {
+            tracing::debug!(session_id = %session_id, "Session already registered in database");
+            return Ok(());
+        }
+
+        // Create DB record for the session
+        let db_session = DbSession::new(session_id.to_string(), user_id.clone());
+        self.db.upsert_session(&db_session).await?;
+
+        // Also store in our in-memory cache
+        let session = Arc::new(Session::new(session_id.to_string(), user_id));
+        let mut sessions = self.sessions.write().await;
+        sessions.insert(session_id.to_string(), session);
+
+        tracing::info!(session_id = %session_id, "Registered existing session in database");
+        Ok(())
+    }
+
     /// Get a session by ID, loading from DB if not in memory.
     pub async fn get_session(
         &self,

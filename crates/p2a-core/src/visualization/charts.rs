@@ -1,6 +1,9 @@
 //! Chart generation: histograms, scatter plots, box plots, line charts.
 
 use super::{VisualizationError, DEFAULT_WIDTH, DEFAULT_HEIGHT};
+use super::colors::{
+    CHART_PALETTE, DEFAULT_SERIES_COLOR, OUTLIER_COLOR, TREND_LINE_COLOR,
+};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use plotters::prelude::*;
 
@@ -151,7 +154,7 @@ pub fn histogram(
             let x1 = x0 + bin_width;
 
             chart.draw_series(std::iter::once(
-                Rectangle::new([(x0, 0), (x1, count)], BLUE.mix(0.7).filled())
+                Rectangle::new([(x0, 0), (x1, count)], DEFAULT_SERIES_COLOR.mix(0.7).filled())
             )).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
         }
 
@@ -273,7 +276,7 @@ pub fn scatter_plot(
         chart
             .draw_series(
                 points.iter().map(|(xi, yi)| {
-                    Circle::new((*xi, *yi), 4, BLUE.mix(0.7).filled())
+                    Circle::new((*xi, *yi), 4, DEFAULT_SERIES_COLOR.mix(0.7).filled())
                 }),
             )
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
@@ -405,7 +408,7 @@ pub fn box_plot(
             // Draw box (Q1 to Q3)
             chart.draw_series(std::iter::once(Rectangle::new(
                 [(x_left, stat.q1), (x_right, stat.q3)],
-                BLUE.mix(0.5).filled(),
+                DEFAULT_SERIES_COLOR.mix(0.5).filled(),
             ))).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
             // Draw box border
@@ -446,7 +449,7 @@ pub fn box_plot(
             // Draw outliers
             chart.draw_series(
                 stat.outliers.iter().map(|&outlier| {
-                    Circle::new((x_center, outlier), 3, RED.filled())
+                    Circle::new((x_center, outlier), 3, OUTLIER_COLOR.filled())
                 })
             ).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
         }
@@ -522,8 +525,8 @@ pub fn line_chart(
     let x_pad = (x_max - x_min).max(0.1) * 0.05;
     let y_pad = (y_max - y_min).max(0.1) * 0.05;
 
-    // Colors for multiple series
-    let colors = [BLUE, RED, GREEN, MAGENTA, CYAN, BLACK];
+    // Colors for multiple series (brand palette)
+    let colors = CHART_PALETTE;
 
     // Create image buffer
     let mut buffer = vec![0u8; (config.width * config.height * 3) as usize];
@@ -737,7 +740,7 @@ pub fn event_study_plot(
         };
 
         chart.draw_series(std::iter::once(
-            Polygon::new(ci_polygon, BLUE.mix(0.2).filled())
+            Polygon::new(ci_polygon, DEFAULT_SERIES_COLOR.mix(0.2).filled())
         )).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
         // Draw point estimates as line
@@ -747,13 +750,13 @@ pub fn event_study_plot(
 
         chart.draw_series(LineSeries::new(
             estimate_points.clone(),
-            BLUE.stroke_width(2),
+            DEFAULT_SERIES_COLOR.stroke_width(2),
         )).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
         // Draw point markers
         chart.draw_series(
             estimate_points.iter().map(|&(x, y)| {
-                Circle::new((x, y), 4, BLUE.filled())
+                Circle::new((x, y), 4, DEFAULT_SERIES_COLOR.filled())
             })
         ).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
@@ -885,23 +888,23 @@ pub fn coefficient_plot(
                 // Draw error bar (horizontal line)
                 chart.draw_series(LineSeries::new(
                     vec![(*lower, y_pos), (*upper, y_pos)],
-                    BLUE.stroke_width(2),
+                    DEFAULT_SERIES_COLOR.stroke_width(2),
                 )).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
                 // Draw caps on error bar
                 chart.draw_series(LineSeries::new(
                     vec![(*lower, y_pos - 0.1), (*lower, y_pos + 0.1)],
-                    BLUE.stroke_width(2),
+                    DEFAULT_SERIES_COLOR.stroke_width(2),
                 )).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
                 chart.draw_series(LineSeries::new(
                     vec![(*upper, y_pos - 0.1), (*upper, y_pos + 0.1)],
-                    BLUE.stroke_width(2),
+                    DEFAULT_SERIES_COLOR.stroke_width(2),
                 )).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
                 // Draw point estimate
                 chart.draw_series(std::iter::once(
-                    Circle::new((*est, y_pos), 5, BLUE.filled())
+                    Circle::new((*est, y_pos), 5, DEFAULT_SERIES_COLOR.filled())
                 )).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
             }
         } else {
@@ -943,23 +946,23 @@ pub fn coefficient_plot(
                 // Draw error bar (vertical line)
                 chart.draw_series(LineSeries::new(
                     vec![(x_pos, *lower), (x_pos, *upper)],
-                    BLUE.stroke_width(2),
+                    DEFAULT_SERIES_COLOR.stroke_width(2),
                 )).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
                 // Draw caps on error bar
                 chart.draw_series(LineSeries::new(
                     vec![(x_pos - 0.1, *lower), (x_pos + 0.1, *lower)],
-                    BLUE.stroke_width(2),
+                    DEFAULT_SERIES_COLOR.stroke_width(2),
                 )).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
                 chart.draw_series(LineSeries::new(
                     vec![(x_pos - 0.1, *upper), (x_pos + 0.1, *upper)],
-                    BLUE.stroke_width(2),
+                    DEFAULT_SERIES_COLOR.stroke_width(2),
                 )).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
                 // Draw point estimate
                 chart.draw_series(std::iter::once(
-                    Circle::new((x_pos, *est), 5, BLUE.filled())
+                    Circle::new((x_pos, *est), 5, DEFAULT_SERIES_COLOR.filled())
                 )).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
             }
         }
@@ -1155,7 +1158,7 @@ pub fn irf_plot(
                 };
 
                 chart.draw_series(std::iter::once(
-                    Polygon::new(ci_polygon, BLUE.mix(0.2).filled())
+                    Polygon::new(ci_polygon, DEFAULT_SERIES_COLOR.mix(0.2).filled())
                 )).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
             }
         }
@@ -1167,13 +1170,13 @@ pub fn irf_plot(
 
         chart.draw_series(LineSeries::new(
             response_points.clone(),
-            BLUE.stroke_width(2),
+            DEFAULT_SERIES_COLOR.stroke_width(2),
         )).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
         // Draw point markers
         chart.draw_series(
             response_points.iter().map(|&(x, y)| {
-                Circle::new((x, y), 4, BLUE.filled())
+                Circle::new((x, y), 4, DEFAULT_SERIES_COLOR.filled())
             })
         ).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
@@ -1383,13 +1386,13 @@ fn generate_residuals_vs_fitted(
         // Draw points
         let points: Vec<(f64, f64)> = fitted.iter().zip(residuals.iter()).map(|(&f, &r)| (f, r)).collect();
         chart.draw_series(
-            points.iter().map(|&(x, y)| Circle::new((x, y), 4, BLUE.mix(0.7).filled()))
+            points.iter().map(|&(x, y)| Circle::new((x, y), 4, DEFAULT_SERIES_COLOR.mix(0.7).filled()))
         ).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
         // Calculate and draw LOWESS-like smooth (simple moving average for demonstration)
         let smoothed = calculate_smooth(&points, 0.3);
         if smoothed.len() > 1 {
-            chart.draw_series(LineSeries::new(smoothed, RED.stroke_width(2)))
+            chart.draw_series(LineSeries::new(smoothed, TREND_LINE_COLOR.stroke_width(2)))
                 .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
         }
 
@@ -1462,7 +1465,7 @@ fn generate_qq_plot(
             .map(|(&t, &s)| (t, s))
             .collect();
         chart.draw_series(
-            points.iter().map(|&(x, y)| Circle::new((x, y), 4, BLUE.mix(0.7).filled()))
+            points.iter().map(|&(x, y)| Circle::new((x, y), 4, DEFAULT_SERIES_COLOR.mix(0.7).filled()))
         ).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
         root.present().map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
@@ -1519,13 +1522,13 @@ fn generate_scale_location(
             .map(|(&f, &r)| (f, r))
             .collect();
         chart.draw_series(
-            points.iter().map(|&(x, y)| Circle::new((x, y), 4, BLUE.mix(0.7).filled()))
+            points.iter().map(|&(x, y)| Circle::new((x, y), 4, DEFAULT_SERIES_COLOR.mix(0.7).filled()))
         ).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
         // Draw smooth line
         let smoothed = calculate_smooth(&points, 0.3);
         if smoothed.len() > 1 {
-            chart.draw_series(LineSeries::new(smoothed, RED.stroke_width(2)))
+            chart.draw_series(LineSeries::new(smoothed, TREND_LINE_COLOR.stroke_width(2)))
                 .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
         }
 
@@ -1603,7 +1606,7 @@ fn generate_residuals_vs_leverage(
                 if contour_points.len() > 1 {
                     chart.draw_series(LineSeries::new(
                         contour_points.clone(),
-                        RGBColor(255, 0, 0).stroke_width(1),
+                        OUTLIER_COLOR.stroke_width(1),
                     )).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
                     // Draw negative contour
@@ -1612,7 +1615,7 @@ fn generate_residuals_vs_leverage(
                         .collect();
                     chart.draw_series(LineSeries::new(
                         neg_contour,
-                        RGBColor(255, 0, 0).stroke_width(1),
+                        OUTLIER_COLOR.stroke_width(1),
                     )).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
                 }
             }
@@ -1621,9 +1624,9 @@ fn generate_residuals_vs_leverage(
         // Draw points (color by Cook's distance)
         for i in 0..leverage.len() {
             let color = if cooks_distance[i] > cooks_threshold {
-                RED
+                OUTLIER_COLOR
             } else {
-                BLUE
+                DEFAULT_SERIES_COLOR
             };
             chart.draw_series(std::iter::once(
                 Circle::new((leverage[i], standardized_residuals[i]), 4, color.mix(0.7).filled())
@@ -1886,7 +1889,7 @@ pub fn dendrogram(
                     (x_scale(x1), y_scale(y1)),
                     (x_scale(x1), y_scale(new_y)),
                 ],
-                &BLUE,
+                &DEFAULT_SERIES_COLOR,
             ))
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
@@ -1896,7 +1899,7 @@ pub fn dendrogram(
                     (x_scale(x2), y_scale(y2)),
                     (x_scale(x2), y_scale(new_y)),
                 ],
-                &BLUE,
+                &DEFAULT_SERIES_COLOR,
             ))
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
@@ -1906,7 +1909,7 @@ pub fn dendrogram(
                     (x_scale(x1), y_scale(*dist)),
                     (x_scale(x2), y_scale(*dist)),
                 ],
-                &BLUE,
+                &DEFAULT_SERIES_COLOR,
             ))
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
         }

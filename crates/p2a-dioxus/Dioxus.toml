@@ -28,6 +28,13 @@ width = 1200
 height = 800
 resizable = true
 decorations = true
+icon = "assets/icons/p2a-icon-256.png"
+
+[desktop.resource.dev]
+style = ["assets/styles.css"]
+
+[desktop.resource.release]
+style = ["assets/styles.css"]
 
 [mobile.ios]
 out_dir = "dist/ios"
@@ -47,7 +54,7 @@ title = "prompt2analytics"
 identifier = "io.github.prompt2analytics"
 publisher = "prompt2analytics"
 # App icons (PNG files work for most platforms, ICO/ICNS for better Windows/macOS support)
-icon = ["assets/icons/32x32.png", "assets/icons/128x128.png", "assets/icons/256x256.png", "assets/icons/512x512.png"]
+icon = ["assets/icons/p2a-icon-32.png", "assets/icons/p2a-icon-128.png", "assets/icons/p2a-icon-256.png", "assets/icons/p2a-icon-512.png"]
 
 # Bundle resources (CSS, images, etc.)
 resources = ["assets/*"]

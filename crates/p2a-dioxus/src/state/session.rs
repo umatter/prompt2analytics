@@ -23,6 +23,8 @@ pub struct SessionState {
     pub error: Option<String>,
     /// Currently loaded datasets
     pub loaded_datasets: Vec<DatasetInfo>,
+    /// Counter to trigger dataset sidebar refresh (increment after tool execution)
+    pub datasets_refresh_counter: u32,
 }
 
 impl Default for SessionState {
@@ -40,7 +42,13 @@ impl SessionState {
             is_loading: false,
             error: None,
             loaded_datasets: Vec::new(),
+            datasets_refresh_counter: 0,
         }
+    }
+
+    /// Trigger a refresh of the datasets sidebar
+    pub fn trigger_datasets_refresh(&mut self) {
+        self.datasets_refresh_counter = self.datasets_refresh_counter.wrapping_add(1);
     }
 
     /// Initialize the session by creating a new one with the backend

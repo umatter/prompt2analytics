@@ -2,14 +2,23 @@
 
 use dioxus::prelude::*;
 
-use crate::components::Message;
-use crate::state::ChatState;
+use crate::components::{Message, P2aBadge};
+use crate::state::{ChatState, Settings, Theme};
+
+/// Props for MessageList
+#[derive(Props, Clone, PartialEq)]
+pub struct MessageListProps {
+    /// Callback when a quick suggestion is clicked
+    #[props(default)]
+    pub on_suggestion: Option<EventHandler<String>>,
+}
 
 /// MessageList component - displays all messages with auto-scroll
 #[component]
-pub fn MessageList() -> Element {
+pub fn MessageList(props: MessageListProps) -> Element {
     // Get chat state from context
     let chat_state = use_context::<Signal<ChatState>>();
+    let settings = use_context::<Signal<Settings>>();
 
     // Reference for scrolling using Dioxus's platform-agnostic MountedData
     let mut scroll_element: Signal<Option<std::rc::Rc<MountedData>>> = use_signal(|| None);
@@ -31,42 +40,57 @@ pub fn MessageList() -> Element {
     let messages = chat_state.read().messages.clone();
 
     rsx! {
-        div { class: "px-4 py-6",
+        div { class: "py-6 h-full",
             if messages.is_empty() {
-                // Empty state
-                div { class: "flex flex-col items-center justify-center min-h-[400px] text-center",
-                    // Icon
-                    div { class: "w-16 h-16 mb-4 rounded-full bg-gray-100 dark:bg-gray-700 flex items-center justify-center",
-                        svg {
-                            class: "w-8 h-8 text-gray-400",
-                            fill: "none",
-                            stroke: "currentColor",
-                            view_box: "0 0 24 24",
-                            path {
-                                stroke_linecap: "round",
-                                stroke_linejoin: "round",
-                                stroke_width: "1.5",
-                                d: "M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"
+                // Empty state with welcome animation - centered in full container
+                div { class: "flex flex-col items-center justify-center min-h-[400px] h-full text-center mx-auto",
+                    // Brand badge
+                    div { class: "mb-6",
+                        P2aBadge { width: 150.0 }
+                    }
+                    // Welcome image - theme-aware
+                    // For System theme, default to light (media queries will handle actual display)
+                    div { class: "mb-4",
+                        match settings.read().theme {
+                            Theme::Dark => rsx! {
+                                img {
+                                    src: asset!("/assets/welcome-dark.png"),
+                                    alt: "Welcome",
+                                    class: "w-auto h-auto max-w-[360px]"
+                                }
+                            },
+                            _ => rsx! {
+                                img {
+                                    src: asset!("/assets/welcome-light.png"),
+                                    alt: "Welcome",
+                                    class: "w-auto h-auto max-w-[360px]"
+                                }
                             }
                         }
                     }
-                    h3 { class: "text-lg font-medium text-gray-900 dark:text-white mb-1",
-                        "No messages yet"
-                    }
                     p { class: "text-sm text-gray-500 dark:text-gray-400 max-w-sm",
-                        "Start a conversation to get help with your data analysis. Try asking about loading a dataset or running a regression."
+                        "Start a conversation to get help with your data analysis."
                     }
 
                     // Quick suggestions
                     div { class: "mt-6 flex flex-wrap gap-2 justify-center",
-                        QuickSuggestion { text: "Load a CSV file" }
-                        QuickSuggestion { text: "Explain OLS regression" }
-                        QuickSuggestion { text: "What tools are available?" }
+                        QuickSuggestion {
+                            text: "Create a sample dataset with x and y",
+                            on_click: props.on_suggestion.clone()
+                        }
+                        QuickSuggestion {
+                            text: "Explain OLS regression",
+                            on_click: props.on_suggestion.clone()
+                        }
+                        QuickSuggestion {
+                            text: "What tools are available?",
+                            on_click: props.on_suggestion.clone()
+                        }
                     }
                 }
             } else {
                 // Message list
-                div { class: "space-y-2",
+                div { class: "space-y-2 px-4",
                     for message in messages.iter() {
                         Message {
                             key: "{message.id}",
@@ -86,19 +110,27 @@ pub fn MessageList() -> Element {
     }
 }
 
+/// Props for QuickSuggestion
+#[derive(Props, Clone, PartialEq)]
+struct QuickSuggestionProps {
+    text: String,
+    #[props(default)]
+    on_click: Option<EventHandler<String>>,
+}
+
 /// Quick suggestion chip
 #[component]
-fn QuickSuggestion(text: String) -> Element {
-    let _chat_state = use_context::<Signal<ChatState>>();
-    let text_clone = text.clone();
+fn QuickSuggestion(props: QuickSuggestionProps) -> Element {
+    let text = props.text.clone();
+    let text_for_click = props.text.clone();
 
     rsx! {
         button {
-            class: "px-3 py-1.5 text-sm text-gray-600 dark:text-gray-300 bg-gray-100 dark:bg-gray-700 rounded-full hover:bg-gray-200 dark:hover:bg-gray-600 transition-colors",
+            class: "px-3 py-1.5 text-sm text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-full cursor-pointer shadow-sm transition-all duration-150 hover:border-orange-500 hover:bg-orange-50 hover:text-orange-700 hover:shadow-md dark:hover:bg-orange-900/30 dark:hover:text-orange-300 active:scale-95 active:shadow-none active:bg-orange-100 dark:active:bg-orange-900/50",
             onclick: move |_| {
-                // This would ideally trigger sending the message
-                // For now, just log it
-                tracing::info!("Quick suggestion clicked: {}", text_clone);
+                if let Some(ref handler) = props.on_click {
+                    handler.call(text_for_click.clone());
+                }
             },
             "{text}"
         }

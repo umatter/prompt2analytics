@@ -39,6 +39,9 @@ pub trait HttpClient {
     /// Perform a POST request with JSON body
     async fn post(&self, url: &str, body: &str) -> Result<HttpResponse, HttpError>;
 
+    /// Perform a PUT request with JSON body
+    async fn put(&self, url: &str, body: &str) -> Result<HttpResponse, HttpError>;
+
     /// Perform a DELETE request
     async fn delete(&self, url: &str) -> Result<HttpResponse, HttpError>;
 
@@ -149,6 +152,11 @@ mod web {
                 .await
         }
 
+        async fn put(&self, url: &str, body: &str) -> Result<HttpResponse, HttpError> {
+            self.fetch_internal(url, "PUT", Some(body), &HashMap::new())
+                .await
+        }
+
         async fn delete(&self, url: &str) -> Result<HttpResponse, HttpError> {
             self.fetch_internal(url, "DELETE", None, &HashMap::new())
                 .await
@@ -215,6 +223,25 @@ mod native {
             let response = self
                 .client
                 .post(url)
+                .header("Content-Type", "application/json")
+                .body(body.to_string())
+                .send()
+                .await
+                .map_err(|e| HttpError(format!("Request failed: {}", e)))?;
+
+            let status = response.status().as_u16();
+            let body = response
+                .text()
+                .await
+                .map_err(|e| HttpError(format!("Failed to read response: {}", e)))?;
+
+            Ok(HttpResponse { status, body })
+        }
+
+        async fn put(&self, url: &str, body: &str) -> Result<HttpResponse, HttpError> {
+            let response = self
+                .client
+                .put(url)
                 .header("Content-Type", "application/json")
                 .body(body.to_string())
                 .send()

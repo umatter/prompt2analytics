@@ -13,6 +13,7 @@ use axum::{
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
+use tracing;
 
 use crate::db::{Conversation, ConversationWithMessages, DatasetMeta, Message, Settings, ToolCall};
 use crate::persistent_session::{PersistentSessionError, PersistentSessionManager, ReloadResult};
@@ -79,6 +80,125 @@ impl<T: Serialize> ApiResponse<T> {
             success: false,
             data: None,
             error: Some(message.into()),
+        }
+    }
+}
+
+// =============================================================================
+// API Response DTOs (for serialization without SurrealDB types)
+// =============================================================================
+
+/// Dataset metadata for API responses (converts RecordId to String)
+#[derive(Debug, Serialize)]
+pub struct DatasetMetaResponse {
+    pub id: String,
+    pub session_id: String,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_path: Option<String>,
+    pub source_type: String,
+    pub row_count: i32,
+    pub column_count: i32,
+    pub column_names: Vec<String>,
+    pub loaded_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_size_bytes: Option<i64>,
+}
+
+impl From<DatasetMeta> for DatasetMetaResponse {
+    fn from(meta: DatasetMeta) -> Self {
+        Self {
+            id: meta.id_string(),
+            session_id: meta.session_id,
+            name: meta.name,
+            source_path: meta.source_path,
+            source_type: meta.source_type,
+            row_count: meta.row_count,
+            column_count: meta.column_count,
+            column_names: meta.column_names,
+            loaded_at: chrono::DateTime::<chrono::Utc>::from(meta.loaded_at).to_rfc3339(),
+            file_size_bytes: meta.file_size_bytes,
+        }
+    }
+}
+
+/// Conversation for API responses (converts RecordId/Datetime to String)
+#[derive(Debug, Serialize)]
+pub struct ConversationResponse {
+    pub id: String,
+    pub session_id: String,
+    pub title: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub is_archived: bool,
+    pub message_count: i32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_message_preview: Option<String>,
+}
+
+impl From<Conversation> for ConversationResponse {
+    fn from(conv: Conversation) -> Self {
+        // Extract datetime strings first (before moving owned fields)
+        let id = conv.id_string();
+        let created_at = conv.created_at_chrono().to_rfc3339();
+        let updated_at = conv.updated_at_chrono().to_rfc3339();
+        Self {
+            id,
+            session_id: conv.session_id,
+            title: conv.title,
+            created_at,
+            updated_at,
+            is_archived: conv.is_archived,
+            message_count: conv.message_count,
+            last_message_preview: conv.last_message_preview,
+        }
+    }
+}
+
+/// Message for API responses (converts RecordId/Datetime to String)
+#[derive(Debug, Serialize)]
+pub struct MessageResponse {
+    pub id: String,
+    pub conversation_id: String,
+    pub role: String,
+    pub content: String,
+    pub created_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_count: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+}
+
+impl From<Message> for MessageResponse {
+    fn from(msg: Message) -> Self {
+        // Extract datetime and id strings first (before moving owned fields)
+        let id = msg.id_string();
+        let created_at = msg.created_at_chrono().to_rfc3339();
+        let role = format!("{:?}", msg.role).to_lowercase();
+        Self {
+            id,
+            conversation_id: msg.conversation_id,
+            role,
+            content: msg.content,
+            created_at,
+            token_count: msg.token_count,
+            model: msg.model,
+        }
+    }
+}
+
+/// Conversation with messages for API responses
+#[derive(Debug, Serialize)]
+pub struct ConversationWithMessagesResponse {
+    pub conversation: ConversationResponse,
+    pub messages: Vec<MessageResponse>,
+}
+
+impl From<ConversationWithMessages> for ConversationWithMessagesResponse {
+    fn from(cwm: ConversationWithMessages) -> Self {
+        Self {
+            conversation: cwm.conversation.into(),
+            messages: cwm.messages.into_iter().map(Into::into).collect(),
         }
     }
 }
@@ -155,10 +275,13 @@ async fn create_conversation(
         .create_conversation(&request.session_id, &request.title)
         .await
     {
-        Ok(conv) => (StatusCode::CREATED, Json(ApiResponse::success(conv))),
+        Ok(conv) => {
+            let response: ConversationResponse = conv.into();
+            (StatusCode::CREATED, Json(ApiResponse::success(response)))
+        }
         Err(e) => {
             let (status, json) = error_response(e);
-            (status, Json(ApiResponse::<Conversation>::error(json.0.error.unwrap_or_default())))
+            (status, Json(ApiResponse::<ConversationResponse>::error(json.0.error.unwrap_or_default())))
         }
     }
 }
@@ -173,10 +296,13 @@ async fn list_conversations(
         .list_conversations(&query.session_id)
         .await
     {
-        Ok(convs) => (StatusCode::OK, Json(ApiResponse::success(convs))),
+        Ok(convs) => {
+            let response: Vec<ConversationResponse> = convs.into_iter().map(Into::into).collect();
+            (StatusCode::OK, Json(ApiResponse::success(response)))
+        }
         Err(e) => {
             let (status, json) = error_response(e);
-            (status, Json(ApiResponse::<Vec<Conversation>>::error(json.0.error.unwrap_or_default())))
+            (status, Json(ApiResponse::<Vec<ConversationResponse>>::error(json.0.error.unwrap_or_default())))
         }
     }
 }
@@ -191,10 +317,13 @@ async fn get_conversation(
         .get_conversation_with_messages(&id)
         .await
     {
-        Ok(conv) => (StatusCode::OK, Json(ApiResponse::success(conv))),
+        Ok(conv) => {
+            let response: ConversationWithMessagesResponse = conv.into();
+            (StatusCode::OK, Json(ApiResponse::success(response)))
+        }
         Err(e) => {
             let (status, json) = error_response(e);
-            (status, Json(ApiResponse::<ConversationWithMessages>::error(json.0.error.unwrap_or_default())))
+            (status, Json(ApiResponse::<ConversationWithMessagesResponse>::error(json.0.error.unwrap_or_default())))
         }
     }
 }
@@ -210,10 +339,13 @@ async fn update_conversation(
         .update_conversation_title(&id, &request.title)
         .await
     {
-        Ok(conv) => (StatusCode::OK, Json(ApiResponse::success(conv))),
+        Ok(conv) => {
+            let response: ConversationResponse = conv.into();
+            (StatusCode::OK, Json(ApiResponse::success(response)))
+        }
         Err(e) => {
             let (status, json) = error_response(e);
-            (status, Json(ApiResponse::<Conversation>::error(json.0.error.unwrap_or_default())))
+            (status, Json(ApiResponse::<ConversationResponse>::error(json.0.error.unwrap_or_default())))
         }
     }
 }
@@ -240,10 +372,13 @@ async fn archive_conversation(
         .set_conversation_archived(&id, request.is_archived)
         .await
     {
-        Ok(conv) => (StatusCode::OK, Json(ApiResponse::success(conv))),
+        Ok(conv) => {
+            let response: ConversationResponse = conv.into();
+            (StatusCode::OK, Json(ApiResponse::success(response)))
+        }
         Err(e) => {
             let (status, json) = error_response(e);
-            (status, Json(ApiResponse::<Conversation>::error(json.0.error.unwrap_or_default())))
+            (status, Json(ApiResponse::<ConversationResponse>::error(json.0.error.unwrap_or_default())))
         }
     }
 }
@@ -254,10 +389,13 @@ async fn get_messages(
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     match state.session_manager.get_messages(&id).await {
-        Ok(messages) => (StatusCode::OK, Json(ApiResponse::success(messages))),
+        Ok(messages) => {
+            let response: Vec<MessageResponse> = messages.into_iter().map(Into::into).collect();
+            (StatusCode::OK, Json(ApiResponse::success(response)))
+        }
         Err(e) => {
             let (status, json) = error_response(e);
-            (status, Json(ApiResponse::<Vec<Message>>::error(json.0.error.unwrap_or_default())))
+            (status, Json(ApiResponse::<Vec<MessageResponse>>::error(json.0.error.unwrap_or_default())))
         }
     }
 }
@@ -273,10 +411,13 @@ async fn add_message(
         .add_message(&id, &request.role, &request.content)
         .await
     {
-        Ok(msg) => (StatusCode::CREATED, Json(ApiResponse::success(msg))),
+        Ok(msg) => {
+            let response: MessageResponse = msg.into();
+            (StatusCode::CREATED, Json(ApiResponse::success(response)))
+        }
         Err(e) => {
             let (status, json) = error_response(e);
-            (status, Json(ApiResponse::<Message>::error(json.0.error.unwrap_or_default())))
+            (status, Json(ApiResponse::<MessageResponse>::error(json.0.error.unwrap_or_default())))
         }
     }
 }
@@ -403,11 +544,59 @@ async fn list_session_datasets(
     State(state): State<ConversationState>,
     Path(session_id): Path<String>,
 ) -> impl IntoResponse {
+    tracing::info!(
+        session_id = %session_id,
+        "[LIST_DATASETS] Fetching datasets for session"
+    );
+
     match state.session_manager.get_datasets_for_session(&session_id).await {
-        Ok(datasets) => (StatusCode::OK, Json(ApiResponse::success(datasets))),
+        Ok(datasets) => {
+            // DEBUG: Log each dataset from the database
+            tracing::info!(
+                num_datasets = datasets.len(),
+                "[LIST_DATASETS] Retrieved datasets from database"
+            );
+            for (idx, ds) in datasets.iter().enumerate() {
+                tracing::info!(
+                    idx = idx,
+                    id = %ds.id_string(),
+                    name = %ds.name,
+                    column_count = ds.column_count,
+                    column_names_len = ds.column_names.len(),
+                    column_names = ?ds.column_names,
+                    "[LIST_DATASETS] Dataset from DB"
+                );
+            }
+
+            // Convert to API response type (RecordId -> String)
+            let response: Vec<DatasetMetaResponse> = datasets.into_iter().map(Into::into).collect();
+
+            // DEBUG: Log response being sent to frontend
+            tracing::info!(
+                num_datasets = response.len(),
+                "[LIST_DATASETS] Sending response to frontend"
+            );
+            for (idx, ds) in response.iter().enumerate() {
+                tracing::info!(
+                    idx = idx,
+                    id = %ds.id,
+                    name = %ds.name,
+                    column_count = ds.column_count,
+                    column_names_len = ds.column_names.len(),
+                    column_names = ?ds.column_names,
+                    "[LIST_DATASETS] Dataset in API response"
+                );
+            }
+
+            (StatusCode::OK, Json(ApiResponse::success(response)))
+        }
         Err(e) => {
+            tracing::error!(
+                error = %e,
+                "[LIST_DATASETS] Failed to fetch datasets"
+            );
             let (status, json) = error_response(e);
-            (status, Json(ApiResponse::<Vec<DatasetMeta>>::error(json.0.error.unwrap_or_default())))
+            (status, Json(ApiResponse::<Vec<DatasetMetaResponse>>::error(json.0.error.unwrap_or_default())))
         }
     }
 }

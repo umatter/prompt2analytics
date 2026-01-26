@@ -20,15 +20,14 @@ COPY Cargo.toml Cargo.lock ./
 COPY crates/p2a-core/Cargo.toml ./crates/p2a-core/
 COPY crates/p2a-mcp/Cargo.toml ./crates/p2a-mcp/
 COPY crates/p2a-cli/Cargo.toml ./crates/p2a-cli/
-COPY crates/p2a-desktop/Cargo.toml ./crates/p2a-desktop/
+COPY crates/p2a-dioxus/Cargo.toml ./crates/p2a-dioxus/
 
 # Create dummy source files for all workspace members
-RUN mkdir -p crates/p2a-core/src crates/p2a-mcp/src crates/p2a-cli/src crates/p2a-desktop/src && \
+RUN mkdir -p crates/p2a-core/src crates/p2a-mcp/src crates/p2a-cli/src crates/p2a-dioxus/src && \
     echo "pub fn dummy() {}" > crates/p2a-core/src/lib.rs && \
     echo "fn main() {}" > crates/p2a-mcp/src/main.rs && \
     echo "fn main() {}" > crates/p2a-cli/src/main.rs && \
-    echo "fn main() {}" > crates/p2a-desktop/src/main.rs && \
-    echo "pub fn dummy() {}" > crates/p2a-desktop/src/lib.rs
+    echo "fn main() {}" > crates/p2a-dioxus/src/main.rs
 
 # Build dependencies only (cached layer) - this may fail but will cache deps
 RUN cargo build --release -p p2a-mcp --features full 2>/dev/null || true

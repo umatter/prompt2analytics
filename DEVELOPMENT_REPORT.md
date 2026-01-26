@@ -1,7 +1,7 @@
 # prompt2analytics Development Report
 
-**Date:** January 12, 2026
-**Status:** Phase 6.5 (Regression Discontinuity) ✅ COMPLETE
+**Date:** January 22, 2026
+**Status:** Phase 7 (Dioxus Cross-Platform App) ✅ COMPLETE
 
 ---
 
@@ -26,6 +26,7 @@ Phases 1, 2, 2b, 3a, 3b, 4, and part of Phase 5 of the prompt2analytics developm
 - **LLM Integration: Multi-provider support (Ollama, Anthropic, OpenAI) with streaming**
 - **Conversation History: SQLite persistence with search, rename, and export**
 - **Dataset Context: Automatic injection of loaded dataset info into LLM prompts**
+- **Dioxus Cross-Platform App: Pure Rust web/desktop/mobile frontend with tool call transparency**
 
 The codebase uses **pure Rust implementations** for all econometrics (OLS, panel data, IV, DiD, discrete choice, time series), ML algorithms, native database drivers for SQLite/DuckDB, `plotters` for in-memory chart generation with base64-encoded PNG output, Tauri 2.0 for the desktop application, and multi-provider LLM integration with streaming responses and tool execution loop.
 
@@ -296,8 +297,7 @@ sudo apt install libwebkit2gtk-4.1-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-
 **Build & Run:**
 ```bash
 cargo build --release -p p2a-mcp
-cargo build --release -p p2a-desktop
-./target/release/p2a-desktop
+cd crates/p2a-dioxus && dx serve --platform desktop
 ```
 
 ---
@@ -434,19 +434,12 @@ cargo build --release -p p2a-desktop
 - `image` 0.24 — PNG encoding
 - `base64` 0.22 — Base64 encoding for image output
 
-*Desktop Application (p2a-desktop):*
-- `tauri` 2.9 — Desktop application framework
-- `tauri-plugin-dialog` 2.4 — Native file dialogs
-- `tauri-plugin-shell` 2.3 — Shell command support
-- `tokio` 1.x — Async runtime
-- `serde_json` 1.x — JSON serialization
-- `thiserror` 2.x — Error handling
-- `which` 7.x — Binary path finding
-- `reqwest` 0.12 — HTTP client for LLM APIs
-- `rusqlite` 0.33 — SQLite for conversation history
-- `async-trait` 0.1 — Async trait support for LLM providers
-- `chrono` 0.4 — Date/time handling for conversations
-- `futures` 0.3 — Stream utilities for SSE parsing
+*Dioxus Cross-Platform App (p2a-dioxus):*
+- `dioxus` 0.7 — Cross-platform UI framework (WASM + native)
+- `reqwest` — HTTP client for backend API
+- `gloo-storage` — Web localStorage for settings
+- `pulldown-cmark` — Markdown rendering
+- `chrono` + `uuid` — Timestamps and identifiers
 
 *Frontend (SvelteKit):*
 - `svelte` 5.x — UI framework with runes
@@ -643,67 +636,36 @@ prompt2analytics/
     │       ├── server.rs               # 101 MCP tools
     │       └── tools/
     │           └── mod.rs              # Placeholder
-    └── p2a-desktop/
-        ├── Cargo.toml                  # Tauri dependencies
-        ├── build.rs                    # Tauri build script
-        ├── tauri.conf.json             # Tauri configuration
-        ├── capabilities/
-        │   └── default.json            # Tauri permissions
-        ├── icons/                      # App icons (32x32, 128x128, etc.)
+    └── p2a-dioxus/
+        ├── Cargo.toml                  # Dioxus dependencies
+        ├── Dioxus.toml                 # Dioxus configuration
         ├── src/
-        │   ├── main.rs                 # Tauri entry point
-        │   ├── lib.rs                  # AppState, find_mcp_binary()
-        │   ├── mcp/
+        │   ├── main.rs                 # Entry point
+        │   ├── app.rs                  # Root App component
+        │   ├── api/
         │   │   ├── mod.rs
-        │   │   ├── protocol.rs         # JSON-RPC types
-        │   │   └── client.rs           # MCP subprocess client
-        │   ├── llm/
-        │   │   ├── mod.rs              # LLM module exports
-        │   │   ├── provider.rs         # LlmProvider trait, types
-        │   │   ├── ollama.rs           # Ollama provider
-        │   │   ├── anthropic.rs        # Anthropic (Claude) provider
-        │   │   ├── openai.rs           # OpenAI (GPT) provider
-        │   │   ├── history.rs          # SQLite conversation storage
-        │   │   ├── service.rs          # LlmService orchestration
-        │   │   └── tools.rs            # MCP tool definitions for LLM
-        │   └── commands/
-        │       ├── mod.rs
-        │       ├── analytics.rs        # invoke_tool, list_tools
-        │       ├── datasets.rs         # list/load/describe datasets
-        │       ├── files.rs            # File picker commands
-        │       └── llm.rs              # LLM chat, history, settings
-        └── ui/                         # SvelteKit frontend
-            ├── package.json
-            ├── svelte.config.js
-            ├── vite.config.ts
-            ├── tsconfig.json
-            ├── static/
-            │   └── favicon.png
-            └── src/
-                ├── app.html
-                ├── app.css             # CSS design system
-                ├── routes/
-                │   ├── +layout.ts      # SSR disabled
-                │   ├── +layout.svelte
-                │   ├── +page.svelte    # Main chat UI
-                │   └── settings/
-                │       └── +page.svelte  # Settings page (LLM config)
-                └── lib/
-                    ├── types/
-                    │   └── index.ts    # TypeScript interfaces
-                    ├── api/
-                    │   ├── tauri.ts    # Tauri invoke wrappers
-                    │   └── llm.ts      # LLM API functions
-                    ├── utils/
-                    │   └── markdown.ts # Markdown rendering utilities
-                    ├── components/
-                    │   ├── LoadingSpinner.svelte  # Loading indicator
-                    │   └── MessageContent.svelte  # Message with markdown
-                    └── state/
-                        ├── chat.svelte.ts     # Chat state (Svelte 5 runes)
-                        ├── datasets.svelte.ts # Dataset state
-                        ├── results.svelte.ts  # Results state
-                        └── settings.svelte.ts # Settings state with validation
+        │   │   ├── client.rs           # HTTP client for backend
+        │   │   ├── sse.rs              # SSE streaming for chat
+        │   │   └── types.rs            # Request/response types
+        │   ├── state/
+        │   │   ├── mod.rs
+        │   │   ├── chat.rs             # Message state
+        │   │   ├── conversation.rs     # Conversation management
+        │   │   ├── session.rs          # Backend session
+        │   │   └── settings.rs         # User preferences
+        │   ├── components/
+        │   │   ├── mod.rs
+        │   │   ├── chat_panel.rs       # Main chat interface
+        │   │   ├── conversation_sidebar.rs # Conversation list
+        │   │   ├── dataset_sidebar.rs  # Dataset list
+        │   │   ├── chat_input.rs       # Message input
+        │   │   ├── message.rs          # Message display
+        │   │   ├── tool_call.rs        # Tool call cards
+        │   │   └── settings_modal.rs   # Provider config
+        │   └── utils/
+        │       └── markdown.rs         # Markdown to RSX
+        └── assets/
+            └── styles.css              # Tailwind-like CSS
 ```
 
 ---
@@ -1337,3 +1299,127 @@ docs/guides/ECONOMETRICS_GUIDE.md # Added RD documentation section
 2. Calonico, Cattaneo & Farrell (2020). "Optimal Bandwidth Choice for Robust Bias Corrected Inference in RD Designs". *Econometrics Journal* 23(2): 192-210.
 3. Imbens & Kalyanaraman (2012). "Optimal Bandwidth Choice for the RD Estimator". *Review of Economic Studies* 79(3): 933-959.
 4. R package `rdrobust` (reference implementation)
+
+---
+
+## Phase 7: Dioxus Cross-Platform App — ✅ COMPLETE
+
+**Date:** January 2026
+
+### Overview
+
+The `p2a-dioxus` crate provides a pure Rust cross-platform frontend (web, desktop, mobile) using Dioxus 0.7. It communicates with the p2a-mcp HTTP backend via REST API and Server-Sent Events (SSE) for streaming.
+
+### Key Features Implemented
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| Cross-platform build | ✅ | Web (WASM), Desktop (native), Mobile (planned) |
+| Chat interface with streaming | ✅ | SSE-based streaming with real-time updates |
+| Multi-provider LLM support | ✅ | Ollama, Anthropic, OpenAI |
+| Conversation management | ✅ | Create, rename, archive, delete with SurrealDB persistence |
+| Dataset sidebar | ✅ | Live view of loaded datasets with metadata and refresh |
+| Tool call transparency | ✅ | "Rust Analytics" indicator showing which tools were called |
+| Tool call details | ✅ | Expandable cards showing arguments and results |
+| Environment variable detection | ✅ | Auto-detects OPENAI_API_KEY, ANTHROPIC_API_KEY on desktop |
+| Settings persistence | ✅ | localStorage (web) / file-based (native) |
+| Markdown rendering | ✅ | Assistant messages rendered as markdown |
+| Prompt history navigation | ✅ | Arrow keys to navigate previous prompts |
+| Create inline datasets | ✅ | `create_dataset` tool for generated/test data |
+
+### Architecture
+
+```
+p2a-dioxus/
+├── src/
+│   ├── main.rs              # Entry point (web/desktop conditional)
+│   ├── app.rs               # Root App component
+│   ├── api/
+│   │   ├── client.rs        # HTTP client with conversation endpoints
+│   │   ├── sse.rs           # SSE streaming for LLM chat
+│   │   └── types.rs         # API types (StreamEvent, DatasetMeta, etc.)
+│   ├── state/
+│   │   ├── chat.rs          # Messages, tool calls, history navigation
+│   │   ├── conversation.rs  # Conversation list and selection
+│   │   ├── session.rs       # Backend session, dataset refresh counter
+│   │   └── settings.rs      # Provider config with env var detection
+│   ├── components/
+│   │   ├── chat_panel.rs    # Main chat interface
+│   │   ├── message.rs       # Message with "Rust Analytics" indicator
+│   │   ├── tool_call.rs     # Expandable tool call card
+│   │   ├── dataset_sidebar.rs # Dataset list with auto-refresh
+│   │   ├── conversation_sidebar.rs # Conversation CRUD
+│   │   ├── chat_input.rs    # Input with keyboard shortcuts
+│   │   └── settings_modal.rs # Provider configuration
+│   └── utils/
+│       └── markdown.rs      # Markdown to RSX (pulldown-cmark)
+└── assets/
+    └── styles.css           # Tailwind-like CSS
+```
+
+### SSE Streaming Protocol
+
+The backend sends progress events during LLM chat:
+
+```rust
+enum ProgressEvent {
+    Status { message: String },
+    ToolStart { tool: String, arguments: serde_json::Value },
+    ToolEnd { tool: String, elapsed_ms: u64, result: Option<String> },
+    ToolResult { tool: String, images: Vec<ImageData> },
+    Content { text: String },
+    Done { message: Message },
+    Error { error: String },
+}
+```
+
+The frontend tracks tool calls in real-time:
+- `ToolStart`: Adds pending tool call with arguments to current message
+- `ToolEnd`: Marks tool call as complete with result
+- `Done`: Finalizes message with full tool call data from backend
+
+### Tool Call Display
+
+Assistant messages show tool call transparency:
+
+1. **"Rust Analytics" indicator** (green banner at top of message)
+   - Shows immediately which tools were called
+   - Displays tool names as compact chips
+
+2. **Expandable tool cards** (below message content)
+   - Shows tool name with success/running/error status
+   - Expandable to show arguments JSON
+   - Shows truncated result (up to 2KB via SSE)
+
+### Dataset Management
+
+- **Dataset Sidebar**: Shows all loaded datasets with metadata (rows, columns, type)
+- **Auto-refresh**: Sidebar refreshes after any tool execution via `datasets_refresh_counter`
+- **`create_dataset` tool**: Allows LLM to create datasets from inline CSV content
+- **Metadata persistence**: Dataset metadata stored in SurrealDB for session restoration
+
+### Running the App
+
+```bash
+# Terminal 1: Backend (embedded in desktop, or separate for web)
+cargo run -p p2a-mcp --features full -- --transport http --port 8081 --cors-permissive
+
+# Terminal 2: Dioxus dev server
+cd crates/p2a-dioxus
+
+# Web
+dx serve
+
+# Desktop (includes embedded backend)
+dx serve --platform desktop
+```
+
+### Files Created/Modified
+
+```
+crates/p2a-dioxus/                    # NEW: Entire crate
+crates/p2a-mcp/src/server.rs          # Added create_dataset tool
+crates/p2a-mcp/src/transport/http.rs  # Added arguments/result to ToolStart/ToolEnd events
+crates/p2a-mcp/src/llm/tools.rs       # Updated system prompt for create_dataset
+crates/p2a-mcp/src/transport/conversation.rs # Added DatasetMetaResponse DTO
+```

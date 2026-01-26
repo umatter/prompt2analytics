@@ -18,6 +18,7 @@ impl PartialEq for ChatMessage {
             && self.content == other.content
             && self.is_streaming == other.is_streaming
             && self.images.len() == other.images.len()
+            && self.tool_calls.len() == other.tool_calls.len()
     }
 }
 
@@ -25,7 +26,7 @@ impl PartialEq for ChatMessage {
 fn render_content(message: &ChatMessage) -> Element {
     if message.role == "user" {
         rsx! {
-            p { class: "text-gray-900 dark:text-white whitespace-pre-wrap",
+            p { class: "text-white whitespace-pre-wrap",
                 "{message.content}"
             }
         }
@@ -35,7 +36,7 @@ fn render_content(message: &ChatMessage) -> Element {
             rsx! {
                 div { class: "text-gray-800 dark:text-gray-200",
                     {render_markdown(content)}
-                    span { class: "inline-block w-2 h-4 ml-0.5 bg-blue-500 animate-pulse" }
+                    span { class: "inline-block w-2 h-4 ml-0.5 bg-teal-500 animate-pulse" }
                 }
             }
         } else {
@@ -53,15 +54,15 @@ pub fn Message(props: MessageProps) -> Element {
     let timestamp = message.timestamp.format("%H:%M").to_string();
 
     if is_user {
-        // User message - right aligned, blue background
+        // User message - right aligned, teal background
         rsx! {
             div { class: "flex justify-end mb-4 message-enter",
-                div { class: "max-w-[80%] rounded-2xl rounded-tr-sm px-4 py-3 bg-blue-600 text-white shadow-sm",
+                div { class: "max-w-[80%] rounded-2xl rounded-tr-sm px-4 py-3 bg-teal-600 text-white shadow-sm",
                     // Message content
                     {render_content(message)}
 
                     // Timestamp
-                    div { class: "text-xs text-blue-200 mt-2 text-right",
+                    div { class: "text-xs text-teal-200 mt-2 text-right",
                         "{timestamp}"
                     }
                 }
@@ -72,8 +73,46 @@ pub fn Message(props: MessageProps) -> Element {
         rsx! {
             div { class: "flex justify-start mb-4 message-enter",
                 div { class: "max-w-[85%]",
+                    // Tools Used indicator (orange for Rust/p2a-core branding)
+                    if !message.tool_calls.is_empty() {
+                        div { class: "mb-2 px-3 py-2 rounded-lg bg-orange-50 dark:bg-orange-900/30 border border-orange-200 dark:border-orange-700",
+                            div { class: "flex items-center gap-2 flex-wrap",
+                                // Rust gear icon
+                                svg {
+                                    class: "w-4 h-4 text-orange-600 dark:text-orange-400 flex-shrink-0",
+                                    fill: "none",
+                                    stroke: "currentColor",
+                                    view_box: "0 0 24 24",
+                                    path {
+                                        stroke_linecap: "round",
+                                        stroke_linejoin: "round",
+                                        stroke_width: "2",
+                                        d: "M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"
+                                    }
+                                    path {
+                                        stroke_linecap: "round",
+                                        stroke_linejoin: "round",
+                                        stroke_width: "2",
+                                        d: "M15 12a3 3 0 11-6 0 3 3 0 016 0z"
+                                    }
+                                }
+                                span { class: "text-xs font-semibold text-orange-700 dark:text-orange-300",
+                                    "Rust Analytics:"
+                                }
+                                // Tool chips
+                                for tool_call in message.tool_calls.iter() {
+                                    span {
+                                        key: "{tool_call.id}",
+                                        class: "inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-orange-100 dark:bg-orange-800 text-orange-800 dark:text-orange-200",
+                                        "{tool_call.name}"
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     // Main message bubble
-                    div { class: "rounded-2xl rounded-tl-sm px-4 py-3 bg-gray-100 dark:bg-gray-700 shadow-sm",
+                    div { class: "rounded-2xl rounded-tl-sm px-4 py-3 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700",
                         // Message content
                         {render_content(message)}
 
@@ -97,7 +136,7 @@ pub fn Message(props: MessageProps) -> Element {
                         }
                     }
 
-                    // Tool calls displayed outside the bubble
+                    // Tool call details (expandable cards) displayed below
                     if !message.tool_calls.is_empty() {
                         div { class: "mt-2 space-y-2",
                             for tool_call in message.tool_calls.iter() {
