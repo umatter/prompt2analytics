@@ -4,7 +4,7 @@
 
 use criterion::{criterion_group, criterion_main, Criterion, BenchmarkId};
 use p2a_core::{
-    Dataset, run_ols, run_diagnostics, run_one_way_anova, run_two_way_anova,
+    Dataset, run_ols, run_ols_raw, run_diagnostics, run_one_way_anova, run_two_way_anova,
     one_sample_t_test, two_sample_t_test, Alternative,
     acf, pacf, ccf, AcfType,
     chisq_test_gof, chisq_test_independence,
@@ -20,12 +20,52 @@ use p2a_core::{
     box_test, BoxTestType,
     pp_test,
 };
-use ndarray::Array1;
+use ndarray::{Array1, Array2};
 use p2a_core::regression::CovarianceType;
 use polars::prelude::*;
 use rand::Rng;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
+
+/// Generate pre-extracted regression data directly in ndarray format.
+/// Returns (X, y, variable_names) where X includes intercept column.
+fn generate_regression_data_raw(n: usize, k: usize, seed: u64) -> (Array2<f64>, Array1<f64>, Vec<String>) {
+    let mut rng = ChaCha8Rng::seed_from_u64(seed);
+
+    // Create design matrix with intercept
+    let mut x_data = Array2::<f64>::zeros((n, k + 1));
+
+    // First column is intercept (all 1s)
+    for i in 0..n {
+        x_data[[i, 0]] = 1.0;
+    }
+
+    // Generate predictor columns
+    for j in 1..=k {
+        for i in 0..n {
+            x_data[[i, j]] = rng.gen_range(0.0..1.0) * 2.0 - 1.0;
+        }
+    }
+
+    // Generate y = sum(x_i) + noise
+    let y: Array1<f64> = (0..n)
+        .map(|i| {
+            let mut sum = 0.0;
+            for j in 1..=k {
+                sum += x_data[[i, j]];
+            }
+            sum + rng.gen_range(0.0..1.0) * 0.5 // Add noise
+        })
+        .collect();
+
+    // Variable names
+    let mut names = vec!["(Intercept)".to_string()];
+    for j in 1..=k {
+        names.push(format!("x{}", j));
+    }
+
+    (x_data, y, names)
+}
 
 /// Generate synthetic regression data with known DGP
 fn generate_regression_data(n: usize, k: usize, seed: u64) -> Dataset {
@@ -64,12 +104,13 @@ fn ols_standard_benchmark(c: &mut Criterion) {
     let mut group = c.benchmark_group("OLS_Standard");
 
     for n in [100, 1000, 10000] {
-        let dataset = generate_regression_data(n, 5, 42);
-        let x_cols = vec!["x1", "x2", "x3", "x4", "x5"];
+        // Pre-extract data to ndarray OUTSIDE the benchmark loop
+        let (x, y, var_names) = generate_regression_data_raw(n, 5, 42);
 
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
             b.iter(|| {
-                run_ols(&dataset, "y", &x_cols, true, CovarianceType::Standard)
+                // Use run_ols_raw which operates directly on ndarrays
+                run_ols_raw(&x, &y, &var_names, "y", CovarianceType::Standard)
             });
         });
     }
@@ -80,8 +121,8 @@ fn ols_standard_benchmark(c: &mut Criterion) {
 fn ols_robust_se_benchmark(c: &mut Criterion) {
     let mut group = c.benchmark_group("OLS_RobustSE");
 
-    let dataset = generate_regression_data(1000, 5, 42);
-    let x_cols = vec!["x1", "x2", "x3", "x4", "x5"];
+    // Pre-extract data to ndarray
+    let (x, y, var_names) = generate_regression_data_raw(1000, 5, 42);
 
     for (name, cov_type) in [
         ("HC0", CovarianceType::HC0),
@@ -91,7 +132,7 @@ fn ols_robust_se_benchmark(c: &mut Criterion) {
     ] {
         group.bench_with_input(BenchmarkId::from_parameter(name), &cov_type, |b, cov| {
             b.iter(|| {
-                run_ols(&dataset, "y", &x_cols, true, cov.clone())
+                run_ols_raw(&x, &y, &var_names, "y", cov.clone())
             });
         });
     }

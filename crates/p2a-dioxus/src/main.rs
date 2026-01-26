@@ -52,10 +52,27 @@ fn start_embedded_backend() -> Option<p2a_mcp::EmbeddedServer> {
     // Create a tokio runtime for the embedded server
     let rt = tokio::runtime::Runtime::new().ok()?;
 
+    // Determine the database path (use user data directory)
+    let db_path = dirs::data_dir()
+        .map(|d| d.join("p2a").join("data"))
+        .map(|p| p.to_string_lossy().to_string());
+
+    if let Some(ref path) = db_path {
+        tracing::info!("Database path: {}", path);
+    } else {
+        tracing::warn!("Could not determine user data directory, using in-memory database");
+    }
+
     // Configure the embedded server
-    let config = EmbeddedServerConfig::default()
-        .with_port(8080)
+    // Use port 8081 to avoid conflict with dx serve dev server on 8080
+    let mut config = EmbeddedServerConfig::default()
+        .with_port(8081)
         .with_host("127.0.0.1");
+
+    // Set database path if available
+    if let Some(path) = db_path {
+        config = config.with_db_path(path);
+    }
 
     // Start the server
     let server = rt.block_on(async {
@@ -98,6 +115,47 @@ fn main() {
         server
     };
 
-    // Launch the Dioxus app
-    dioxus::launch(app::App);
+    // Launch the Dioxus app with platform-specific configuration
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        use dioxus::desktop::{Config, WindowBuilder};
+
+        // Load the app icon
+        let icon = load_icon();
+
+        let mut window_builder = WindowBuilder::new()
+            .with_title("prompt2analytics")
+            .with_inner_size(dioxus::desktop::tao::dpi::LogicalSize::new(1200.0, 800.0));
+
+        if let Some(icon) = icon {
+            window_builder = window_builder.with_window_icon(Some(icon));
+        }
+
+        let config = Config::new().with_window(window_builder);
+
+        dioxus::LaunchBuilder::desktop()
+            .with_cfg(config)
+            .launch(app::App);
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    {
+        dioxus::launch(app::App);
+    }
+}
+
+/// Load the application icon from embedded PNG data
+#[cfg(not(target_arch = "wasm32"))]
+fn load_icon() -> Option<dioxus::desktop::tao::window::Icon> {
+    use dioxus::desktop::tao::window::Icon;
+
+    // Embed the icon at compile time
+    let icon_bytes = include_bytes!("../assets/icons/p2a-icon-256.png");
+
+    // Decode PNG to RGBA
+    let img = image::load_from_memory(icon_bytes).ok()?;
+    let rgba = img.to_rgba8();
+    let (width, height) = rgba.dimensions();
+
+    Icon::from_rgba(rgba.into_raw(), width, height).ok()
 }

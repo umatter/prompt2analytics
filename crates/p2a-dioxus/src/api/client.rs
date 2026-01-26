@@ -7,7 +7,7 @@ use crate::platform::{create_http_client, HttpClient};
 use serde::Deserialize;
 
 /// Default API base URL
-const DEFAULT_BASE_URL: &str = "http://localhost:8080";
+const DEFAULT_BASE_URL: &str = "http://localhost:8081";
 
 /// API client for p2a-mcp backend
 #[derive(Clone)]
@@ -62,6 +62,24 @@ impl ApiClient {
         let body_json = serde_json::to_string(body).map_err(|e| e.to_string())?;
         let client = create_http_client();
         let response = client.post(&url, &body_json).await.map_err(|e| e.to_string())?;
+
+        if !response.is_ok() {
+            return Err(format!("HTTP error: {}", response.status));
+        }
+
+        serde_json::from_str(&response.body).map_err(|e| format!("JSON parse error: {}", e))
+    }
+
+    /// Perform a PUT request with JSON body
+    async fn put<T, B>(&self, endpoint: &str, body: &B) -> Result<ApiResponse<T>, String>
+    where
+        T: for<'de> serde::Deserialize<'de>,
+        B: serde::Serialize,
+    {
+        let url = format!("{}{}", self.base_url, endpoint);
+        let body_json = serde_json::to_string(body).map_err(|e| e.to_string())?;
+        let client = create_http_client();
+        let response = client.put(&url, &body_json).await.map_err(|e| e.to_string())?;
 
         if !response.is_ok() {
             return Err(format!("HTTP error: {}", response.status));
@@ -184,7 +202,7 @@ impl ApiClient {
     /// List all conversations for a session
     pub async fn list_conversations(&self, session_id: &str) -> Result<Vec<Conversation>, String> {
         let response: ApiResponse<Vec<Conversation>> = self
-            .get(&format!("/api/sessions/{session_id}/conversations"))
+            .get(&format!("/api/conversations?session_id={session_id}"))
             .await?;
 
         if response.success {
@@ -203,14 +221,12 @@ impl ApiClient {
         title: &str,
     ) -> Result<Conversation, String> {
         let request = CreateConversationRequest {
+            session_id: session_id.to_string(),
             title: title.to_string(),
         };
 
         let response: ApiResponse<Conversation> = self
-            .post(
-                &format!("/api/sessions/{session_id}/conversations"),
-                &request,
-            )
+            .post("/api/conversations", &request)
             .await?;
 
         if response.success {
@@ -268,7 +284,7 @@ impl ApiClient {
         };
 
         let response: ApiResponse<Conversation> = self
-            .post(
+            .put(
                 &format!("/api/conversations/{conversation_id}"),
                 &request,
             )
@@ -354,6 +370,35 @@ impl ApiClient {
                 .data
                 .map(|d| d.deleted_count)
                 .ok_or_else(|| "No count in response".to_string())
+        } else {
+            Err(response.error.unwrap_or_else(|| "Unknown error".to_string()))
+        }
+    }
+
+    // === LLM endpoints ===
+
+    /// Generate a conversation title using the LLM
+    pub async fn generate_title(
+        &self,
+        user_message: &str,
+        assistant_response: Option<&str>,
+        provider: Option<ProviderConfig>,
+    ) -> Result<String, String> {
+        let request = GenerateTitleRequest {
+            user_message: user_message.to_string(),
+            assistant_response: assistant_response.map(|s| s.to_string()),
+            provider,
+        };
+
+        let response: ApiResponse<GenerateTitleResponse> = self
+            .post("/api/llm/generate-title", &request)
+            .await?;
+
+        if response.success {
+            response
+                .data
+                .map(|r| r.title)
+                .ok_or_else(|| "No title in response".to_string())
         } else {
             Err(response.error.unwrap_or_else(|| "Unknown error".to_string()))
         }

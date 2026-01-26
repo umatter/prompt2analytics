@@ -4,7 +4,8 @@ use dioxus::prelude::*;
 use dioxus::events::FormData;
 
 use crate::api::ApiClient;
-use crate::state::settings::{Provider, Settings};
+use crate::app::apply_theme;
+use crate::state::settings::{Provider, Settings, Theme};
 use crate::state::SessionState;
 
 /// Parse dimensions from dataset load result message
@@ -48,6 +49,7 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
     let session_state = use_context::<Signal<SessionState>>();
 
     // Local state for editing
+    let mut local_theme = use_signal(|| settings.read().theme);
     let mut local_provider = use_signal(|| settings.read().provider);
     let mut local_api_key = use_signal(|| settings.read().current_api_key().to_string());
     let mut local_model = use_signal(|| settings.read().current_model().to_string());
@@ -57,6 +59,7 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
     // Data loading state
     let mut file_path = use_signal(String::new);
     let mut dataset_name = use_signal(String::new);
+    let mut file_type = use_signal(|| "auto".to_string()); // auto, csv, parquet, excel, stata, sas
     let mut load_status = use_signal(|| None::<String>);
     let mut load_error = use_signal(|| None::<String>);
 
@@ -75,6 +78,7 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
         // Modal just opened - reset to initial tab and sync settings
         active_tab.set(props.initial_tab.clone());
         let s = settings.read();
+        local_theme.set(s.theme);
         local_provider.set(s.provider);
         local_api_key.set(s.current_api_key().to_string());
         local_model.set(s.current_model().to_string());
@@ -93,6 +97,7 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
 
     let handle_save = move |_| {
         let mut s = settings.write();
+        s.theme = *local_theme.read();
         s.provider = *local_provider.read();
         s.set_current_api_key(&local_api_key.read());
         s.set_current_model(&local_model.read());
@@ -118,13 +123,28 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
         };
         local_provider.set(provider);
 
-        // Update model to default for this provider
-        let default_model = match provider {
-            Provider::Ollama => "llama3.2",
-            Provider::Anthropic => "claude-sonnet-4-20250514",
-            Provider::Openai => "gpt-4o",
+        // Update API key and model for this provider from settings
+        let s = settings.read();
+        let (api_key, model) = match provider {
+            Provider::Ollama => ("".to_string(), s.ollama_model.clone()),
+            Provider::Anthropic => (s.anthropic_api_key.clone(), s.anthropic_model.clone()),
+            Provider::Openai => (s.openai_api_key.clone(), s.openai_model.clone()),
         };
-        local_model.set(default_model.to_string());
+        local_api_key.set(api_key);
+        local_model.set(model);
+    };
+
+    let handle_theme_change = move |evt: Event<FormData>| {
+        let value = evt.value();
+        let theme = match value.as_str() {
+            "system" => Theme::System,
+            "light" => Theme::Light,
+            "dark" => Theme::Dark,
+            _ => Theme::System,
+        };
+        local_theme.set(theme);
+        // Apply theme immediately for instant feedback
+        apply_theme(theme);
     };
 
     // Handle file selection from browser file picker
@@ -157,6 +177,7 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
     let handle_load_dataset = move |_| {
         let path = file_path.read().clone();
         let name = dataset_name.read().clone();
+        let selected_file_type = file_type.read().clone();
         let uploaded_file_name = selected_file_name.read().clone();
         let uploaded_file_content = selected_file_content.read().clone();
 
@@ -199,18 +220,26 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
 
             let result = if use_upload {
                 // Use upload_dataset for browser-selected files
-                let args = serde_json::json!({
+                let mut args = serde_json::json!({
                     "content": uploaded_file_content.unwrap(),
                     "filename": uploaded_file_name.unwrap(),
                     "name": dataset_name_to_use
                 });
+                // Add file_type if not auto
+                if selected_file_type != "auto" {
+                    args["file_type"] = serde_json::Value::String(selected_file_type.clone());
+                }
                 client.call_tool(&session_id, "upload_dataset", args).await
             } else {
                 // Use load_dataset for path-based loading
-                let args = serde_json::json!({
+                let mut args = serde_json::json!({
                     "path": path,
                     "name": dataset_name_to_use
                 });
+                // Add file_type if not auto
+                if selected_file_type != "auto" {
+                    args["file_type"] = serde_json::Value::String(selected_file_type.clone());
+                }
                 client.call_tool(&session_id, "load_dataset", args).await
             };
 
@@ -257,6 +286,7 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
     };
 
     let current_provider = *local_provider.read();
+    let current_theme = *local_theme.read();
     let requires_api_key = current_provider.requires_api_key();
     let current_tab = active_tab.read().clone();
 
@@ -273,10 +303,10 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
 
             // Modal - positioned above backdrop, clicks don't propagate to backdrop
             div {
-                class: "relative bg-white dark:bg-gray-800 rounded-2xl shadow-2xl w-full max-w-lg max-h-[90vh] overflow-hidden",
+                class: "relative bg-white dark:bg-gray-900 rounded-2xl shadow-2xl w-full max-w-lg max-h-[90vh] overflow-hidden border border-gray-200 dark:border-gray-800",
 
                 // Header
-                div { class: "px-6 py-4 border-b border-gray-200 dark:border-gray-700 flex items-center justify-between",
+                div { class: "px-6 py-4 border-b border-gray-200 dark:border-gray-800 flex items-center justify-between",
                     h2 { class: "text-xl font-semibold text-gray-900 dark:text-white", "Settings" }
                     button {
                         class: "p-2 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors",
@@ -297,10 +327,10 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
                 }
 
                 // Tabs
-                div { class: "px-6 pt-4 flex gap-2 border-b border-gray-200 dark:border-gray-700",
+                div { class: "px-6 pt-4 flex gap-2 border-b border-gray-200 dark:border-gray-800",
                     button {
                         class: if current_tab == "llm" {
-                            "px-4 py-2 text-sm font-medium text-blue-600 dark:text-blue-400 border-b-2 border-blue-600 dark:border-blue-400 -mb-px"
+                            "px-4 py-2 text-sm font-medium text-teal-600 dark:text-teal-400 border-b-2 border-teal-600 dark:border-teal-400 -mb-px"
                         } else {
                             "px-4 py-2 text-sm font-medium text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300"
                         },
@@ -309,7 +339,7 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
                     }
                     button {
                         class: if current_tab == "data" {
-                            "px-4 py-2 text-sm font-medium text-blue-600 dark:text-blue-400 border-b-2 border-blue-600 dark:border-blue-400 -mb-px"
+                            "px-4 py-2 text-sm font-medium text-teal-600 dark:text-teal-400 border-b-2 border-teal-600 dark:border-teal-400 -mb-px"
                         } else {
                             "px-4 py-2 text-sm font-medium text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300"
                         },
@@ -323,13 +353,28 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
                     if current_tab == "llm" {
                         // LLM Settings
                         div { class: "space-y-4",
+                            // Theme selection
+                            div {
+                                label { class: "block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5",
+                                    "Theme"
+                                }
+                                select {
+                                    class: "w-full px-3 py-2.5 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-teal-500 focus:border-transparent",
+                                    value: "{current_theme.as_str().to_lowercase()}",
+                                    onchange: handle_theme_change,
+                                    option { value: "system", "System (auto)" }
+                                    option { value: "light", "Light" }
+                                    option { value: "dark", "Dark" }
+                                }
+                            }
+
                             // Provider selection
                             div {
                                 label { class: "block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5",
                                     "Provider"
                                 }
                                 select {
-                                    class: "w-full px-3 py-2.5 bg-gray-50 dark:bg-gray-700 border border-gray-200 dark:border-gray-600 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 focus:border-transparent",
+                                    class: "w-full px-3 py-2.5 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-teal-500 focus:border-transparent",
                                     value: "{current_provider.as_str()}",
                                     onchange: handle_provider_change,
                                     option { value: "ollama", "Ollama (Local)" }
@@ -345,7 +390,7 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
                                         "Ollama Base URL"
                                     }
                                     input {
-                                        class: "w-full px-3 py-2.5 bg-gray-50 dark:bg-gray-700 border border-gray-200 dark:border-gray-600 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 focus:border-transparent",
+                                        class: "w-full px-3 py-2.5 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-teal-500 focus:border-transparent",
                                         r#type: "text",
                                         placeholder: "http://localhost:11434",
                                         value: "{local_base_url}",
@@ -361,7 +406,7 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
                                         "API Key"
                                     }
                                     input {
-                                        class: "w-full px-3 py-2.5 bg-gray-50 dark:bg-gray-700 border border-gray-200 dark:border-gray-600 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 focus:border-transparent",
+                                        class: "w-full px-3 py-2.5 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-teal-500 focus:border-transparent",
                                         r#type: "password",
                                         placeholder: "Enter your API key...",
                                         value: "{local_api_key}",
@@ -391,7 +436,7 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
                                     "Model"
                                 }
                                 input {
-                                    class: "w-full px-3 py-2.5 bg-gray-50 dark:bg-gray-700 border border-gray-200 dark:border-gray-600 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 focus:border-transparent",
+                                    class: "w-full px-3 py-2.5 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-teal-500 focus:border-transparent",
                                     r#type: "text",
                                     value: "{local_model}",
                                     oninput: move |evt| local_model.set(evt.value().clone())
@@ -404,7 +449,7 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
                                     "Temperature: {local_temperature:.1}"
                                 }
                                 input {
-                                    class: "w-full h-2 bg-gray-200 dark:bg-gray-600 rounded-lg appearance-none cursor-pointer accent-blue-600",
+                                    class: "w-full h-2 bg-gray-200 dark:bg-gray-600 rounded-lg appearance-none cursor-pointer accent-teal-600",
                                     r#type: "range",
                                     min: "0",
                                     max: "2",
@@ -426,8 +471,8 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
                         // Data Loading
                         div { class: "space-y-4",
                             // Info box
-                            div { class: "p-3 bg-blue-50 dark:bg-blue-900/20 rounded-lg border border-blue-200 dark:border-blue-800",
-                                p { class: "text-sm text-blue-700 dark:text-blue-300",
+                            div { class: "p-3 bg-teal-50 dark:bg-teal-900/20 rounded-lg border border-teal-200 dark:border-teal-800",
+                                p { class: "text-sm text-teal-700 dark:text-teal-300",
                                     "Load datasets from your local filesystem. Supported formats: CSV, Parquet, Excel, Stata (.dta), SAS (.sas7bdat)"
                                 }
                             }
@@ -449,7 +494,7 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
                                     // Browse button
                                     label {
                                         r#for: "file-upload-input",
-                                        class: "flex-1 px-4 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium transition-colors flex items-center justify-center gap-2 cursor-pointer",
+                                        class: "flex-1 px-4 py-2.5 bg-teal-600 hover:bg-teal-700 text-white rounded-lg font-medium transition-colors flex items-center justify-center gap-2 cursor-pointer",
                                         svg {
                                             class: "w-5 h-5",
                                             fill: "none",
@@ -500,7 +545,7 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
                                     "Enter File Path"
                                 }
                                 input {
-                                    class: "w-full px-3 py-2.5 bg-gray-50 dark:bg-gray-700 border border-gray-200 dark:border-gray-600 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 focus:border-transparent font-mono text-sm",
+                                    class: "w-full px-3 py-2.5 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-teal-500 focus:border-transparent font-mono text-sm",
                                     r#type: "text",
                                     placeholder: "/path/to/your/data.csv",
                                     value: "{file_path}",
@@ -518,13 +563,34 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
                                 }
                             }
 
+                            // File type selector
+                            div {
+                                label { class: "block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5",
+                                    "File Type"
+                                }
+                                select {
+                                    class: "w-full px-3 py-2.5 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-teal-500 focus:border-transparent",
+                                    value: "{file_type}",
+                                    onchange: move |evt| file_type.set(evt.value().clone()),
+                                    option { value: "auto", "Auto-detect (from extension)" }
+                                    option { value: "csv", "CSV (.csv)" }
+                                    option { value: "parquet", "Parquet (.parquet)" }
+                                    option { value: "excel", "Excel (.xlsx, .xls)" }
+                                    option { value: "stata", "Stata (.dta)" }
+                                    option { value: "sas", "SAS (.sas7bdat)" }
+                                }
+                                p { class: "text-xs text-gray-500 dark:text-gray-400 mt-1",
+                                    "Usually auto-detect works. Override if needed."
+                                }
+                            }
+
                             // Dataset name
                             div {
                                 label { class: "block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5",
                                     "Dataset Name (optional)"
                                 }
                                 input {
-                                    class: "w-full px-3 py-2.5 bg-gray-50 dark:bg-gray-700 border border-gray-200 dark:border-gray-600 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 focus:border-transparent",
+                                    class: "w-full px-3 py-2.5 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-teal-500 focus:border-transparent",
                                     r#type: "text",
                                     placeholder: "Auto-generated from filename",
                                     value: "{dataset_name}",
@@ -596,7 +662,7 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
                 }
 
                 // Footer
-                div { class: "px-6 py-4 border-t border-gray-200 dark:border-gray-700 flex justify-end gap-3",
+                div { class: "px-6 py-4 border-t border-gray-200 dark:border-gray-800 flex justify-end gap-3",
                     button {
                         class: "px-4 py-2 text-sm font-medium text-gray-700 dark:text-gray-300 bg-gray-100 dark:bg-gray-700 rounded-lg hover:bg-gray-200 dark:hover:bg-gray-600 transition-colors",
                         onclick: handle_cancel,
@@ -604,13 +670,13 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
                     }
                     if current_tab == "llm" {
                         button {
-                            class: "px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 transition-colors",
+                            class: "px-4 py-2 text-sm font-medium text-white bg-teal-600 rounded-lg hover:bg-teal-700 transition-colors",
                             onclick: handle_save,
                             "Save Settings"
                         }
                     } else {
                         button {
-                            class: "px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 transition-colors",
+                            class: "px-4 py-2 text-sm font-medium text-white bg-teal-600 rounded-lg hover:bg-teal-700 transition-colors",
                             onclick: handle_cancel,
                             "Done"
                         }

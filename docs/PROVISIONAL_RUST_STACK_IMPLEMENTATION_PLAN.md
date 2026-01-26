@@ -96,11 +96,10 @@ The JavaScript SDK implements transaction queuing to work around IndexedDB limit
 
 | Component | Technology | Persistence |
 |-----------|------------|-------------|
-| p2a-web | Next.js 15, React 19, TypeScript | None (ephemeral) |
-| p2a-desktop | Tauri 2.0, SvelteKit, Svelte 5 | SQLite (conversation history) |
-| p2a-mcp | Rust, axum HTTP, 55+ tools | In-memory HashMap (volatile) |
-| p2a-dioxus | Rust, Dioxus 0.7, WASM | localStorage (settings only) |
+| p2a-mcp | Rust, axum HTTP, 55+ tools | SurrealDB (conversations, datasets) |
+| p2a-dioxus | Rust, Dioxus 0.7, WASM/Native | localStorage (settings) |
 | p2a-core | Pure Rust, ndarray, faer | N/A (analytics library) |
+| p2a-cli | Rust, clap | Session JSON files |
 
 **Current Session State (p2a-mcp):**
 - `SessionManager` with `Arc<RwLock<HashMap<SessionId, Arc<Session>>>>`

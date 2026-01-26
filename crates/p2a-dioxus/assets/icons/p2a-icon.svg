@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" width="120" height="120">
+  <defs>
+    <linearGradient id="p2a-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#FF6B35"/>
+      <stop offset="100%" stop-color="#00B4D8"/>
+    </linearGradient>
+  </defs>
+  <rect x="10" y="10" width="100" height="100" rx="22" fill="url(#p2a-grad)"/>
+  <path d="M25 45 C38 28 52 28 60 42 C68 56 82 56 95 40" stroke="#fff" stroke-width="4" fill="none" stroke-linecap="round"/>
+  <text x="60" y="85" text-anchor="middle" font-family="system-ui, -apple-system, BlinkMacSystemFont, sans-serif" font-size="28" font-weight="700" fill="#fff">p2a</text>
+</svg>

@@ -108,11 +108,13 @@ pub fn create_router(
 
     // Add conversation routes if persistent manager is available
     let router = if let Some(manager) = persistent_manager {
+        tracing::info!("Adding conversation routes to /api/*");
         let conv_state = super::conversation::ConversationState {
             session_manager: manager,
         };
         router.nest("/api", super::conversation::conversation_routes(conv_state))
     } else {
+        tracing::warn!("Conversation routes NOT added (no persistent manager)");
         router
     };
 
@@ -172,7 +174,8 @@ fn create_base_router(state: AppState, config: &ServerConfig) -> Router {
         .route("/api/llm/chat", post(llm_chat))
         .route("/api/llm/chat/stream", post(llm_chat_stream))
         .route("/api/llm/models", get(llm_list_models))
-        .route("/api/llm/env-keys", get(llm_env_keys));
+        .route("/api/llm/env-keys", get(llm_env_keys))
+        .route("/api/llm/generate-title", post(llm_generate_title));
 
     router
         // Add middleware
@@ -281,11 +284,28 @@ async fn create_session(
     State(state): State<AppState>,
     Json(request): Json<CreateSessionRequest>,
 ) -> impl IntoResponse {
-    match state.session_manager.create_session(request.user_id).await {
-        Ok(session_id) => (
-            StatusCode::CREATED,
-            Json(ApiResponse::success(CreateSessionResponse { session_id })),
-        ),
+    // First create the in-memory session
+    match state.session_manager.create_session(request.user_id.clone()).await {
+        Ok(session_id) => {
+            // Also register in persistent storage if available (for conversation support)
+            #[cfg(feature = "db")]
+            if let Some(ref persistent_manager) = state.persistent_manager {
+                match persistent_manager.register_session(&session_id, request.user_id).await {
+                    Ok(()) => {
+                        tracing::info!("Session {} registered in database for conversation support", session_id);
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to register session in database: {}", e);
+                        // Continue anyway - session exists in memory, conversations just won't work
+                    }
+                }
+            }
+
+            (
+                StatusCode::CREATED,
+                Json(ApiResponse::success(CreateSessionResponse { session_id })),
+            )
+        }
         Err(SessionError::MaxSessionsReached) => (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(ApiResponse::error("Maximum number of sessions reached")),
@@ -484,8 +504,47 @@ async fn call_tool(
     };
 
     // Execute the tool with session context
-    match state.server.call_tool_with_session(&name, request.arguments, &session).await {
-        Ok(result) => (StatusCode::OK, Json(ApiResponse::success(result))),
+    match state.server.call_tool_with_session(&name, request.arguments.clone(), &session).await {
+        Ok(result) => {
+            // Capture dataset metadata for load_dataset, upload_dataset, and create_dataset
+            #[cfg(feature = "db")]
+            if (name == "load_dataset" || name == "upload_dataset" || name == "create_dataset")
+                && result.success
+            {
+                if let Some(ref persistent_manager) = state.persistent_manager {
+                    // Extract text content from result
+                    let result_text: String = result
+                        .content
+                        .iter()
+                        .filter_map(|item| match item {
+                            ContentItem::Text { text } => Some(text.clone()),
+                            ContentItem::Image { .. } => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+
+                    tracing::info!(
+                        tool = %name,
+                        session_id = %request.session_id,
+                        result_len = result_text.len(),
+                        "[CALL_TOOL] Capturing dataset metadata for direct tool call"
+                    );
+
+                    // Use the same capture function as StreamingToolExecutor
+                    #[cfg(feature = "llm")]
+                    llm_handlers::StreamingToolExecutor::capture_dataset_metadata_static(
+                        persistent_manager.db().clone(),
+                        &request.session_id,
+                        &name,
+                        &request.arguments,
+                        &result_text,
+                    )
+                    .await;
+                }
+            }
+
+            (StatusCode::OK, Json(ApiResponse::success(result)))
+        }
         Err(e) => (
             StatusCode::BAD_REQUEST,
             Json(ApiResponse::error(e)),
@@ -501,7 +560,7 @@ async fn call_tool(
 mod llm_handlers {
     use super::*;
     use crate::llm::{
-        get_mcp_tool_definitions, get_system_prompt, LlmProvider, Message, OllamaProvider,
+        get_mcp_tool_definitions, get_system_prompt_with_context, LlmProvider, Message, OllamaProvider,
         OpenAIProvider, ProviderConfig, ProviderType, ToolExecutor,
     };
     use crate::session::Session;
@@ -559,6 +618,7 @@ mod llm_handlers {
             name: &str,
             arguments: serde_json::Value,
         ) -> Result<String, String> {
+            tracing::warn!(">>> SessionToolExecutor::execute called for tool: {}", name);
             tracing::info!(tool = %name, "Executing tool");
             let start = std::time::Instant::now();
             let result = self
@@ -647,13 +707,35 @@ mod llm_handlers {
 
         // Create provider and tool executor
         let provider = create_provider(request.provider);
-        let tool_executor = SessionToolExecutor::new(state.server.clone(), session);
+        let tool_executor = SessionToolExecutor::new(state.server.clone(), session.clone());
         let tools = get_mcp_tool_definitions();
 
-        tracing::info!(provider = %provider.provider_type(), num_tools = %tools.len(), "Starting LLM chat");
+        // Build dataset context from currently loaded datasets
+        let dataset_context = {
+            let datasets = session.datasets.read().await;
+            if datasets.is_empty() {
+                None
+            } else {
+                let context_lines: Vec<String> = datasets.iter().map(|(name, ds): (&String, &p2a_core::Dataset)| {
+                    let df = ds.df();
+                    let columns: Vec<String> = df.get_column_names().iter().map(|s| s.to_string()).collect();
+                    format!(
+                        "- **{}**: {} rows × {} columns\n  Columns: {}",
+                        name,
+                        df.height(),
+                        df.width(),
+                        columns.join(", ")
+                    )
+                }).collect();
+                Some(context_lines.join("\n"))
+            }
+        };
 
-        // Build message history
-        let mut messages = vec![Message::system(get_system_prompt())];
+        tracing::info!(provider = %provider.provider_type(), num_tools = %tools.len(), has_datasets = dataset_context.is_some(), "Starting LLM chat");
+
+        // Build message history with dataset context
+        let system_prompt = get_system_prompt_with_context(dataset_context.as_deref());
+        let mut messages = vec![Message::system(system_prompt)];
         messages.extend(request.history);
         messages.push(Message::user(request.message));
 
@@ -725,13 +807,102 @@ mod llm_handlers {
         )
     }
 
+    /// Request for generating a conversation title.
+    #[derive(Debug, Deserialize)]
+    pub struct GenerateTitleRequest {
+        /// The user's first message to base the title on
+        pub user_message: String,
+        /// Optional assistant response for more context
+        #[serde(default)]
+        pub assistant_response: Option<String>,
+        /// Provider configuration
+        #[serde(default)]
+        pub provider: Option<ProviderConfig>,
+    }
+
+    /// Response for title generation.
+    #[derive(Debug, Serialize)]
+    pub struct GenerateTitleResponse {
+        pub title: String,
+    }
+
+    /// Generate a conversation title using the LLM.
+    pub async fn llm_generate_title(
+        Json(request): Json<GenerateTitleRequest>,
+    ) -> impl IntoResponse {
+        let provider = create_provider(request.provider);
+
+        // Build a simple prompt for title generation
+        let context = if let Some(ref response) = request.assistant_response {
+            format!(
+                "User: {}\nAssistant: {}",
+                request.user_message,
+                // Truncate long responses
+                if response.len() > 500 { &response[..500] } else { response }
+            )
+        } else {
+            format!("User: {}", request.user_message)
+        };
+
+        let prompt = format!(
+            "Generate a very short title (3-6 words, no quotes) for this conversation:\n\n{}\n\nTitle:",
+            context
+        );
+
+        let messages = vec![
+            Message::system("You are a helpful assistant that generates concise conversation titles. Respond with only the title, no quotes or punctuation."),
+            Message::user(prompt),
+        ];
+
+        // Use chat without tools for simple title generation
+        match provider.chat(&messages, &[], &NoOpToolExecutor, false).await {
+            Ok(response) => {
+                // Clean up the title
+                let title = response.content
+                    .trim()
+                    .trim_matches('"')
+                    .trim_matches('\'')
+                    .to_string();
+
+                // Limit title length
+                let title = if title.len() > 50 {
+                    format!("{}...", title.chars().take(47).collect::<String>())
+                } else {
+                    title
+                };
+
+                (
+                    StatusCode::OK,
+                    Json(ApiResponse::success(GenerateTitleResponse { title })),
+                )
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "Failed to generate title");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ApiResponse::error(format!("Failed to generate title: {}", e))),
+                )
+            }
+        }
+    }
+
+    /// No-op tool executor for simple chat without tools.
+    struct NoOpToolExecutor;
+
+    #[async_trait::async_trait]
+    impl ToolExecutor for NoOpToolExecutor {
+        async fn execute(&self, _name: &str, _arguments: serde_json::Value) -> Result<String, String> {
+            Err("Tool execution not available".to_string())
+        }
+    }
+
     /// Progress event for streaming chat.
     #[derive(Debug, Clone, Serialize)]
     #[serde(tag = "type", rename_all = "snake_case")]
     pub enum ProgressEvent {
         Status { message: String },
-        ToolStart { tool: String },
-        ToolEnd { tool: String, elapsed_ms: u64 },
+        ToolStart { tool: String, arguments: serde_json::Value },
+        ToolEnd { tool: String, elapsed_ms: u64, result: Option<String> },
         /// Tool result with images (for viz tools)
         ToolResult { tool: String, images: Vec<ImageData> },
         Content { text: String },
@@ -801,7 +972,21 @@ mod llm_handlers {
             self
         }
 
+        /// Set just db and session_id for dataset metadata tracking
+        /// (doesn't require conversation_id/message_id)
+        #[cfg(feature = "db")]
+        pub fn with_dataset_tracking(
+            mut self,
+            db: Arc<crate::db::DbConnection>,
+            session_id: String,
+        ) -> Self {
+            self.db = Some(db);
+            self.session_id = Some(session_id);
+            self
+        }
+
         /// Capture dataset metadata after successful load_dataset or upload_dataset
+        /// This is the internal method called by the executor.
         #[cfg(feature = "db")]
         async fn capture_dataset_metadata(
             db: Arc<crate::db::DbConnection>,
@@ -810,53 +995,190 @@ mod llm_handlers {
             arguments: &serde_json::Value,
             result_text: &str,
         ) {
+            Self::capture_dataset_metadata_static(db, session_id, tool_name, arguments, result_text).await;
+        }
+
+        /// Public static method for capturing dataset metadata.
+        /// Can be called from outside the executor (e.g., direct tool calls).
+        #[cfg(feature = "db")]
+        pub async fn capture_dataset_metadata_static(
+            db: Arc<crate::db::DbConnection>,
+            session_id: &str,
+            tool_name: &str,
+            arguments: &serde_json::Value,
+            result_text: &str,
+        ) {
             use std::path::PathBuf;
+
+            // DEBUG: Log entry point with full context
+            tracing::info!(
+                tool = tool_name,
+                session = session_id,
+                result_len = result_text.len(),
+                "[METADATA_CAPTURE] Starting metadata capture"
+            );
+
+            // DEBUG: Log the full result text (truncated for very long results)
+            let result_preview = if result_text.len() > 2000 {
+                format!("{}...[truncated, total {} bytes]", &result_text[..2000], result_text.len())
+            } else {
+                result_text.to_string()
+            };
+            tracing::info!(
+                result_text = %result_preview,
+                "[METADATA_CAPTURE] Full result text"
+            );
 
             // Parse result to extract dataset info
             // Format: "Successfully loaded dataset 'name'\n\nDimensions: X rows x Y columns\n\nColumns:..."
-            let dataset_name = result_text
-                .lines()
-                .next()
-                .and_then(|line| {
-                    let start = line.find('\'')?;
-                    let end = line.rfind('\'')?;
-                    if start < end {
-                        Some(line[start + 1..end].to_string())
-                    } else {
-                        None
-                    }
-                });
+            let first_line = result_text.lines().next();
+            tracing::info!(
+                first_line = ?first_line,
+                "[METADATA_CAPTURE] First line of result"
+            );
 
-            let dimensions = result_text
-                .lines()
-                .find(|line| line.starts_with("Dimensions:"))
-                .and_then(|line| {
-                    // "Dimensions: X rows x Y columns"
-                    let parts: Vec<&str> = line.split_whitespace().collect();
-                    if parts.len() >= 5 {
-                        let rows = parts[1].parse::<i32>().ok()?;
-                        let cols = parts[4].parse::<i32>().ok()?;
-                        Some((rows, cols))
-                    } else {
+            let dataset_name = first_line.and_then(|line| {
+                let start = line.find('\'');
+                let end = line.rfind('\'');
+                tracing::info!(
+                    line = %line,
+                    start_quote_pos = ?start,
+                    end_quote_pos = ?end,
+                    "[METADATA_CAPTURE] Parsing dataset name from first line"
+                );
+                match (start, end) {
+                    (Some(s), Some(e)) if s < e => {
+                        let name = line[s + 1..e].to_string();
+                        tracing::info!(
+                            extracted_name = %name,
+                            "[METADATA_CAPTURE] Extracted dataset name"
+                        );
+                        Some(name)
+                    }
+                    _ => {
+                        tracing::warn!("[METADATA_CAPTURE] Could not extract dataset name - quote positions invalid");
                         None
                     }
-                });
+                }
+            });
+
+            // Find dimensions line
+            let dimensions_line = result_text
+                .lines()
+                .find(|line| line.trim().starts_with("Dimensions:"));
+            tracing::info!(
+                dimensions_line = ?dimensions_line,
+                "[METADATA_CAPTURE] Found dimensions line"
+            );
+
+            let dimensions = dimensions_line.and_then(|line| {
+                // "Dimensions: X rows x Y columns"
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                tracing::info!(
+                    parts = ?parts,
+                    parts_len = parts.len(),
+                    "[METADATA_CAPTURE] Dimensions line parts"
+                );
+                if parts.len() >= 5 {
+                    let rows = parts[1].parse::<i32>().ok();
+                    let cols = parts[4].parse::<i32>().ok();
+                    tracing::info!(
+                        rows = ?rows,
+                        cols = ?cols,
+                        "[METADATA_CAPTURE] Parsed dimensions"
+                    );
+                    match (rows, cols) {
+                        (Some(r), Some(c)) => Some((r, c)),
+                        _ => {
+                            tracing::warn!("[METADATA_CAPTURE] Could not parse row/col numbers");
+                            None
+                        }
+                    }
+                } else {
+                    tracing::warn!(
+                        parts_len = parts.len(),
+                        "[METADATA_CAPTURE] Dimensions line has insufficient parts (need >= 5)"
+                    );
+                    None
+                }
+            });
 
             // Extract column names from "Columns:" section
             let columns_start = result_text.find("Columns:");
+            tracing::info!(
+                columns_start_pos = ?columns_start,
+                "[METADATA_CAPTURE] Looking for 'Columns:' section"
+            );
+
             let column_names: Vec<String> = if let Some(start) = columns_start {
-                result_text[start..]
+                let columns_section = &result_text[start..];
+                let lines_after_columns: Vec<&str> = columns_section.lines().collect();
+                tracing::info!(
+                    total_lines_in_section = lines_after_columns.len(),
+                    first_5_lines = ?lines_after_columns.iter().take(5).collect::<Vec<_>>(),
+                    "[METADATA_CAPTURE] Lines in Columns section"
+                );
+
+                let parsed_columns: Vec<String> = columns_section
                     .lines()
                     .skip(1) // Skip "Columns:" line
-                    .filter(|line| line.trim().starts_with('-'))
-                    .filter_map(|line| {
+                    .enumerate()
+                    .filter_map(|(idx, line)| {
+                        let trimmed_line = line.trim();
+                        let starts_with_dash = trimmed_line.starts_with('-');
+
+                        if !starts_with_dash {
+                            if !trimmed_line.is_empty() {
+                                tracing::debug!(
+                                    line_idx = idx,
+                                    line = %line,
+                                    trimmed = %trimmed_line,
+                                    "[METADATA_CAPTURE] Skipping line (doesn't start with '-')"
+                                );
+                            }
+                            return None;
+                        }
+
                         // "  - column_name (dtype): X nulls (Y%)"
-                        let trimmed = line.trim().trim_start_matches('-').trim();
-                        let paren_pos = trimmed.find('(')?;
-                        Some(trimmed[..paren_pos].trim().to_string())
+                        let after_dash = trimmed_line.trim_start_matches('-').trim();
+                        let paren_pos = after_dash.find('(');
+
+                        tracing::info!(
+                            line_idx = idx,
+                            original_line = %line,
+                            after_dash = %after_dash,
+                            paren_pos = ?paren_pos,
+                            "[METADATA_CAPTURE] Parsing column line"
+                        );
+
+                        match paren_pos {
+                            Some(pos) => {
+                                let col_name = after_dash[..pos].trim().to_string();
+                                tracing::info!(
+                                    extracted_column = %col_name,
+                                    "[METADATA_CAPTURE] Extracted column name"
+                                );
+                                Some(col_name)
+                            }
+                            None => {
+                                tracing::warn!(
+                                    line = %line,
+                                    "[METADATA_CAPTURE] Column line has no '(' - cannot extract name"
+                                );
+                                None
+                            }
+                        }
                     })
-                    .collect()
+                    .collect();
+
+                tracing::info!(
+                    num_columns_parsed = parsed_columns.len(),
+                    columns = ?parsed_columns,
+                    "[METADATA_CAPTURE] Finished parsing columns"
+                );
+                parsed_columns
             } else {
+                tracing::warn!("[METADATA_CAPTURE] No 'Columns:' section found in result");
                 Vec::new()
             };
 
@@ -879,6 +1201,8 @@ mod llm_handlers {
                     .map(|f| PathBuf::from(f))
                     .and_then(|p| p.extension().map(|e| e.to_string_lossy().to_string()))
                     .unwrap_or_else(|| "unknown".to_string())
+            } else if tool_name == "create_dataset" {
+                "inline_csv".to_string()
             } else {
                 source_path
                     .as_ref()
@@ -887,33 +1211,92 @@ mod llm_handlers {
                     .unwrap_or_else(|| "unknown".to_string())
             };
 
-            // Build and save metadata
-            if let (Some(name), Some((rows, cols))) = (dataset_name, dimensions) {
-                let mut meta = crate::db::DatasetMeta::new(
-                    session_id.to_string(),
-                    name.clone(),
-                    source_type,
-                    rows,
-                    cols,
-                    column_names,
-                );
-                meta.source_path = source_path;
-                meta.file_size_bytes = file_size_bytes;
+            tracing::info!(
+                dataset_name = ?dataset_name,
+                dimensions = ?dimensions,
+                num_columns = column_names.len(),
+                column_names = ?column_names,
+                source_type = %source_type,
+                source_path = ?source_path,
+                "[METADATA_CAPTURE] Final parsed metadata summary"
+            );
 
-                match db.save_dataset_meta(&meta).await {
-                    Ok(_) => {
-                        tracing::info!(
-                            dataset = %name,
-                            session_id = %session_id,
-                            "Captured dataset metadata"
-                        );
-                    }
-                    Err(e) => {
-                        tracing::warn!("Failed to save dataset metadata: {}", e);
+            // Build and save metadata
+            match (dataset_name.as_ref(), dimensions.as_ref()) {
+                (Some(name), Some((rows, cols))) => {
+                    let mut meta = crate::db::DatasetMeta::new(
+                        session_id.to_string(),
+                        name.clone(),
+                        source_type.clone(),
+                        *rows,
+                        *cols,
+                        column_names.clone(),
+                    );
+                    meta.source_path = source_path;
+                    meta.file_size_bytes = file_size_bytes;
+
+                    tracing::info!(
+                        meta_id = %meta.id_string(),
+                        meta_session_id = %meta.session_id,
+                        meta_name = %meta.name,
+                        meta_source_type = %meta.source_type,
+                        meta_row_count = meta.row_count,
+                        meta_column_count = meta.column_count,
+                        meta_column_names = ?meta.column_names,
+                        meta_column_names_len = meta.column_names.len(),
+                        "[METADATA_CAPTURE] DatasetMeta object before save"
+                    );
+
+                    match db.save_dataset_meta(&meta).await {
+                        Ok(saved_meta) => {
+                            tracing::info!(
+                                dataset = %name,
+                                session_id = %session_id,
+                                saved_id = %saved_meta.id_string(),
+                                saved_column_names = ?saved_meta.column_names,
+                                saved_column_names_len = saved_meta.column_names.len(),
+                                "[METADATA_CAPTURE] Successfully saved dataset metadata"
+                            );
+
+                            // DEBUG: Immediately read back from DB to verify
+                            match db.get_dataset_meta(session_id, name).await {
+                                Ok(Some(read_back)) => {
+                                    tracing::info!(
+                                        read_back_id = %read_back.id_string(),
+                                        read_back_name = %read_back.name,
+                                        read_back_column_names = ?read_back.column_names,
+                                        read_back_column_names_len = read_back.column_names.len(),
+                                        "[METADATA_CAPTURE] Verified: read back from DB"
+                                    );
+                                }
+                                Ok(None) => {
+                                    tracing::error!(
+                                        "[METADATA_CAPTURE] ERROR: Just saved but cannot read back - not found!"
+                                    );
+                                }
+                                Err(e) => {
+                                    tracing::error!(
+                                        error = %e,
+                                        "[METADATA_CAPTURE] ERROR: Failed to read back from DB"
+                                    );
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                error = %e,
+                                "[METADATA_CAPTURE] Failed to save dataset metadata"
+                            );
+                        }
                     }
                 }
-            } else {
-                tracing::debug!("Could not parse dataset info from result, skipping metadata capture");
+                _ => {
+                    tracing::warn!(
+                        dataset_name = ?dataset_name,
+                        dimensions = ?dimensions,
+                        "[METADATA_CAPTURE] Could not parse dataset info from result - missing name or dimensions"
+                    );
+                }
             }
         }
     }
@@ -925,9 +1308,12 @@ mod llm_handlers {
             name: &str,
             arguments: serde_json::Value,
         ) -> Result<String, String> {
-            // Send tool start event
+            tracing::warn!(">>> StreamingToolExecutor::execute called for tool: {}", name);
+
+            // Send tool start event with arguments
             let _ = self.sender.send(ProgressEvent::ToolStart {
-                tool: name.to_string()
+                tool: name.to_string(),
+                arguments: arguments.clone(),
             }).await;
 
             // Create tool call record in DB if persistence is enabled
@@ -974,28 +1360,53 @@ mod llm_handlers {
             let elapsed = start.elapsed();
             let duration_ms = elapsed.as_millis() as i32;
 
-            // Send tool end event
+            // Extract result text for the ToolEnd event
+            let result_text = match &result {
+                Ok(r) => {
+                    let text: String = r.content
+                        .iter()
+                        .filter_map(|item| match item {
+                            ContentItem::Text { text } => Some(text.clone()),
+                            ContentItem::Image { .. } => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    // Truncate for the event (keep it reasonable for SSE)
+                    if text.len() > 2000 {
+                        Some(format!("{}...", &text[..2000]))
+                    } else {
+                        Some(text)
+                    }
+                }
+                Err(e) => Some(format!("Error: {}", e)),
+            };
+
+            // Send tool end event with result
             let _ = self.sender.send(ProgressEvent::ToolEnd {
                 tool: name.to_string(),
                 elapsed_ms: elapsed.as_millis() as u64,
+                result: result_text,
             }).await;
 
             tracing::info!(tool = %name, elapsed_ms = %elapsed.as_millis(), "Tool execution completed");
 
             match result {
                 Ok(result) => {
+                    // Extract result text for DB operations
+                    #[cfg(feature = "db")]
+                    let result_str = result
+                        .content
+                        .iter()
+                        .filter_map(|item| match item {
+                            ContentItem::Text { text } => Some(text.clone()),
+                            ContentItem::Image { .. } => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+
                     // Update tool call record with success
                     #[cfg(feature = "db")]
                     if let (Some(db), Some(tc_id)) = (&self.db, &tool_call_id) {
-                        let result_str = result
-                            .content
-                            .iter()
-                            .filter_map(|item| match item {
-                                ContentItem::Text { text } => Some(text.clone()),
-                                ContentItem::Image { .. } => None,
-                            })
-                            .collect::<Vec<_>>()
-                            .join("\n");
                         // Truncate result if too long (max 10KB)
                         let truncated_result = if result_str.len() > 10240 {
                             format!("{}...[truncated]", &result_str[..10240])
@@ -1005,9 +1416,13 @@ mod llm_handlers {
                         if let Err(e) = db.complete_tool_call(tc_id, &truncated_result, duration_ms).await {
                             tracing::warn!("Failed to update tool call record: {}", e);
                         }
+                    }
 
-                        // Capture dataset metadata for load_dataset and upload_dataset
-                        if (name == "load_dataset" || name == "upload_dataset") && result.error.is_none() {
+                    // Capture dataset metadata for load_dataset, upload_dataset, and create_dataset
+                    // This is separate from tool call tracking - it only needs db and session_id
+                    #[cfg(feature = "db")]
+                    if let Some(db) = &self.db {
+                        if (name == "load_dataset" || name == "upload_dataset" || name == "create_dataset") && result.error.is_none() {
                             if let Some(session_id) = &self.session_id {
                                 Self::capture_dataset_metadata(
                                     db.clone(),
@@ -1105,25 +1520,56 @@ mod llm_handlers {
                 }
             };
 
-            // Create placeholder assistant message if persistence is enabled
+            // Get database connection for persistence/tracking
             #[cfg(feature = "db")]
-            let (db_connection, message_id) = if let (Some(pm), Some(conv_id)) =
-                (&state_clone.persistent_manager, &request.conversation_id)
+            let db_connection = state_clone.persistent_manager.as_ref().map(|pm| pm.db().clone());
+
+            // Normalize conversation_id: treat empty string as None
+            #[cfg(feature = "db")]
+            let effective_conversation_id = request.conversation_id.as_ref()
+                .filter(|id| !id.is_empty())
+                .cloned();
+
+            // Create placeholder assistant message if conversation persistence is enabled
+            #[cfg(feature = "db")]
+            let message_id = if let (Some(pm), Some(conv_id)) =
+                (&state_clone.persistent_manager, &effective_conversation_id)
             {
                 // Create placeholder message
                 match pm.db().add_message(conv_id, "assistant", "").await {
                     Ok(msg) => {
                         let msg_id = msg.id_string();
                         tracing::debug!(message_id = %msg_id, "Created placeholder assistant message");
-                        (Some(pm.db().clone()), Some(msg_id))
+                        Some(msg_id)
                     }
                     Err(e) => {
                         tracing::warn!("Failed to create placeholder message: {}", e);
-                        (None, None)
+                        None
                     }
                 }
             } else {
-                (None, None)
+                None
+            };
+
+            // Build dataset context from currently loaded datasets
+            let dataset_context = {
+                let datasets = session.datasets.read().await;
+                if datasets.is_empty() {
+                    None
+                } else {
+                    let context_lines: Vec<String> = datasets.iter().map(|(name, ds): (&String, &p2a_core::Dataset)| {
+                        let df = ds.df();
+                        let columns: Vec<String> = df.get_column_names().iter().map(|s| s.to_string()).collect();
+                        format!(
+                            "- **{}**: {} rows × {} columns\n  Columns: {}",
+                            name,
+                            df.height(),
+                            df.width(),
+                            columns.join(", ")
+                        )
+                    }).collect();
+                    Some(context_lines.join("\n"))
+                }
             };
 
             // Create provider and streaming tool executor
@@ -1134,17 +1580,34 @@ mod llm_handlers {
                 tx_clone.clone(),
             );
 
-            // Add persistence context if available
+            // Track whether we've set up the executor for persistence
+            #[cfg(feature = "db")]
+            let mut persistence_configured = false;
+
+            // Add full persistence context if conversation tracking is available
             #[cfg(feature = "db")]
             if let (Some(db), Some(conv_id), Some(msg_id)) =
-                (db_connection.clone(), &request.conversation_id, &message_id)
+                (&db_connection, &effective_conversation_id, &message_id)
             {
                 tool_executor = tool_executor.with_persistence(
-                    db,
+                    db.clone(),
                     conv_id.clone(),
                     msg_id.clone(),
                     request.session_id.clone(),
                 );
+                persistence_configured = true;
+            }
+
+            // Fall back to dataset metadata tracking if full persistence wasn't configured
+            // This ensures we always capture dataset metadata when db is available
+            #[cfg(feature = "db")]
+            if !persistence_configured {
+                if let Some(db) = &db_connection {
+                    tool_executor = tool_executor.with_dataset_tracking(
+                        db.clone(),
+                        request.session_id.clone(),
+                    );
+                }
             }
 
             let tools = get_mcp_tool_definitions();
@@ -1153,8 +1616,11 @@ mod llm_handlers {
                 message: format!("Connecting to {} LLM...", provider.provider_type())
             }).await;
 
-            // Build message history
-            let mut messages = vec![Message::system(get_system_prompt())];
+            tracing::info!(has_datasets = dataset_context.is_some(), "Building system prompt with dataset context");
+
+            // Build message history with dataset context
+            let system_prompt = get_system_prompt_with_context(dataset_context.as_deref());
+            let mut messages = vec![Message::system(system_prompt)];
             messages.extend(request.history);
             messages.push(Message::user(request.message));
 
@@ -1235,4 +1701,4 @@ mod llm_handlers {
 }
 
 #[cfg(feature = "llm")]
-use llm_handlers::{llm_chat, llm_chat_stream, llm_env_keys, llm_list_models};
+use llm_handlers::{llm_chat, llm_chat_stream, llm_env_keys, llm_generate_title, llm_list_models};

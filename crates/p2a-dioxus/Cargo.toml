@@ -36,6 +36,7 @@ desktop = [
     "tracing-subscriber",
     "dirs",
     "p2a-mcp",
+    "image",
 ]
 
 # Mobile platform (iOS/Android + embedded backend)
@@ -52,7 +53,8 @@ mobile = [
 [dependencies]
 # Dioxus framework - base features, platform selected via features
 # Note: "macro" enables rsx!, "html" enables HTML elements, "hooks/signals" for state
-dioxus = { version = "0.7", default-features = false, features = ["macro", "html", "hooks", "signals"] }
+# "document" enables Stylesheet and other document components
+dioxus = { version = "0.7.3", default-features = false, features = ["macro", "html", "hooks", "signals", "document", "asset"] }
 
 # HTTP client - always needed, but streaming only on native
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
@@ -87,13 +89,15 @@ base64.workspace = true
 gloo-storage = { version = "0.3", optional = true }
 
 # Browser timers
-gloo-timers = { version = "0.3", optional = true }
+gloo-timers = { version = "0.3", optional = true, features = ["futures"] }
 
 # Browser APIs
 web-sys = { version = "0.3", optional = true, features = [
     "Window",
     "Document",
     "Element",
+    "DomTokenList",
+    "MediaQueryList",
     "HtmlElement",
     "HtmlTextAreaElement",
     "HtmlInputElement",
@@ -110,6 +114,8 @@ web-sys = { version = "0.3", optional = true, features = [
     "AbortSignal",
     "Blob",
     "TextDecoder",
+    "Navigator",
+    "Clipboard",
 ] }
 
 # WASM bindings
@@ -135,3 +141,6 @@ dirs = { version = "6.0", optional = true }
 
 # Embedded backend for desktop/mobile (not needed for web)
 p2a-mcp = { path = "../p2a-mcp", features = ["embedded"], optional = true }
+
+# Image loading for app icon (desktop only)
+image = { version = "0.25", default-features = false, features = ["png"], optional = true }

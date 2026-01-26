@@ -19,7 +19,7 @@ pub mod supsmu;
 
 pub use ols::{
     OlsResult, OlsCoefficient, OlsClusteredResult, CovarianceType,
-    run_ols, run_ols_clustered,
+    run_ols, run_ols_raw, run_ols_clustered,
     // HAC (Newey-West) standard errors
     HacResult, HacKernel, vcov_hac, run_vcov_hac,
     // Bootstrap covariance estimation

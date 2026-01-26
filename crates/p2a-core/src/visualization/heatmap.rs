@@ -222,7 +222,12 @@ pub fn correlation_heatmap(
     })
 }
 
-/// Convert a value to a color using a diverging blue-white-red colormap.
+/// Convert a value to a color using a diverging cyan-white-orange colormap.
+///
+/// Uses brand colors:
+/// - Negative values: Brand Cyan (#00B4D8)
+/// - Zero/neutral: White
+/// - Positive values: Brand Orange (#FF6B35)
 fn value_to_color(val: f64, min: f64, max: f64) -> RGBColor {
     if !val.is_finite() {
         return RGBColor(128, 128, 128);  // Gray for NaN
@@ -236,22 +241,26 @@ fn value_to_color(val: f64, min: f64, max: f64) -> RGBColor {
         (val - min) / range
     };
 
-    // Diverging colormap: blue (0) -> white (0.5) -> red (1)
+    // Brand colors for endpoints
+    // Cyan: (0, 180, 216) - #00B4D8
+    // Orange: (255, 107, 53) - #FF6B35
+
+    // Diverging colormap: cyan (0) -> white (0.5) -> orange (1)
     let (r, g, b) = if normalized <= 0.5 {
-        // Blue to white
+        // Cyan to white
         let t = normalized * 2.0;
         (
-            (66.0 + t * (255.0 - 66.0)) as u8,
-            (136.0 + t * (255.0 - 136.0)) as u8,
-            (181.0 + t * (255.0 - 181.0)) as u8,
+            (0.0 + t * 255.0) as u8,
+            (180.0 + t * (255.0 - 180.0)) as u8,
+            (216.0 + t * (255.0 - 216.0)) as u8,
         )
     } else {
-        // White to red
+        // White to orange
         let t = (normalized - 0.5) * 2.0;
         (
             255,
-            (255.0 - t * (255.0 - 77.0)) as u8,
-            (255.0 - t * (255.0 - 77.0)) as u8,
+            (255.0 - t * (255.0 - 107.0)) as u8,
+            (255.0 - t * (255.0 - 53.0)) as u8,
         )
     };
 

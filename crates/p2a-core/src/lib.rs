@@ -143,7 +143,7 @@ pub use stats::{
     ModelTablesResult, TwoWayModelTablesResult, ModelTablesSE, TableType,
 };
 pub use regression::{
-    OlsResult, run_ols, run_ols_clustered, DiagnosticsResult, run_diagnostics,
+    OlsResult, run_ols, run_ols_raw, run_ols_clustered, DiagnosticsResult, run_diagnostics,
     // Breusch-Godfrey test for serial correlation
     BgTestResult, BgTestType, bg_test, run_bg_test, bg_test_from_ols,
     // Ramsey's RESET test for functional form

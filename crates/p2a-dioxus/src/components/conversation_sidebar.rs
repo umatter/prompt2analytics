@@ -6,6 +6,7 @@
 use dioxus::prelude::*;
 
 use crate::api::Conversation;
+use crate::components::P2aIconMinimal;
 use crate::state::{ConversationState, SessionState};
 
 /// Conversation sidebar component
@@ -13,13 +14,14 @@ use crate::state::{ConversationState, SessionState};
 pub fn ConversationSidebar() -> Element {
     let session_state = use_context::<Signal<SessionState>>();
     let conversation_state = use_context::<Signal<ConversationState>>();
+    let mut sidebar_visible = use_context::<Signal<bool>>();
 
     // Editing state for rename
     let mut editing_id = use_signal(|| Option::<String>::None);
     let mut edit_title = use_signal(String::new);
 
-    // Show archived toggle
-    let mut show_archived = use_signal(|| false);
+    // Confirmation state for delete
+    let mut delete_confirm_id = use_signal(|| Option::<String>::None);
 
     // Load conversations when session is ready
     use_effect(move || {
@@ -61,6 +63,7 @@ pub fn ConversationSidebar() -> Element {
                     }
                     Err(e) => {
                         conv.write().set_error(Some(e));
+                        conv.write().set_operating(false);
                     }
                 }
             });
@@ -120,22 +123,72 @@ pub fn ConversationSidebar() -> Element {
         editing_id.set(None);
     };
 
-    // Handle delete conversation
-    let handle_delete = move |id: String| {
+    // Handle delete confirmation request
+    let mut handle_request_delete = move |id: String| {
+        delete_confirm_id.set(Some(id));
+    };
+
+    // Handle cancel delete
+    let mut handle_cancel_delete = move |_| {
+        delete_confirm_id.set(None);
+    };
+
+    // Handle confirmed delete
+    let handle_confirm_delete = move |_| {
+        let id = delete_confirm_id.read().clone();
         let mut conv = conversation_state;
-        spawn(async move {
-            conv.write().set_operating(true);
-            let state = conv.read().clone();
-            match state.delete_conversation(&id).await {
-                Ok(()) => {
-                    conv.write().remove_conversation(&id);
-                    conv.write().set_operating(false);
+        let mut confirm_id = delete_confirm_id;
+
+        if let Some(conversation_id) = id {
+            spawn(async move {
+                conv.write().set_operating(true);
+                let state = conv.read().clone();
+                match state.delete_conversation(&conversation_id).await {
+                    Ok(()) => {
+                        conv.write().remove_conversation(&conversation_id);
+
+                        // Auto-select the first remaining non-archived conversation
+                        let remaining: Vec<_> = conv
+                            .read()
+                            .conversations
+                            .iter()
+                            .filter(|c| !c.is_archived)
+                            .cloned()
+                            .collect();
+
+                        if let Some(next_conv) = remaining.first() {
+                            let next_id = next_conv.id.clone();
+                            tracing::debug!(
+                                "[ConversationSidebar] Auto-selecting conversation after delete: {}",
+                                next_id
+                            );
+                            conv.write().set_current_conversation(Some(next_id.clone()));
+
+                            // Load messages for the newly selected conversation
+                            let state = conv.read().clone();
+                            match state.load_messages(&next_id).await {
+                                Ok(messages) => {
+                                    conv.write().set_current_messages(messages);
+                                }
+                                Err(e) => {
+                                    tracing::error!(
+                                        "[ConversationSidebar] Failed to load messages for auto-selected conversation: {}",
+                                        e
+                                    );
+                                }
+                            }
+                        }
+
+                        conv.write().set_operating(false);
+                    }
+                    Err(e) => {
+                        conv.write().set_error(Some(e));
+                        conv.write().set_operating(false);
+                    }
                 }
-                Err(e) => {
-                    conv.write().set_error(Some(e));
-                }
-            }
-        });
+                confirm_id.set(None);
+            });
+        }
     };
 
     // Handle archive/unarchive
@@ -154,54 +207,72 @@ pub fn ConversationSidebar() -> Element {
         });
     };
 
-    // Get conversations to display
+    // Get conversations to display (filter out archived)
     let state = conversation_state.read();
-    let conversations: Vec<Conversation> = if *show_archived.read() {
-        state.conversations.clone()
-    } else {
-        state.conversations.iter().filter(|c| !c.is_archived).cloned().collect()
-    };
+    let conversations: Vec<Conversation> = state.conversations.iter()
+        .filter(|c| !c.is_archived)
+        .cloned()
+        .collect();
     let current_id = state.current_conversation_id.clone();
     let is_loading = state.is_loading;
     let is_operating = state.is_operating;
 
+    // Track if we need to show delete dialog (read outside of sidebar div)
+    let show_delete_dialog = delete_confirm_id.read().is_some();
+
     rsx! {
-        div { class: "flex flex-col h-full bg-gray-100 dark:bg-gray-900 border-r border-gray-200 dark:border-gray-700",
-            // Header
-            div { class: "flex-shrink-0 p-4 border-b border-gray-200 dark:border-gray-700",
-                div { class: "flex items-center justify-between mb-3",
-                    h2 { class: "text-sm font-semibold text-gray-700 dark:text-gray-300 uppercase tracking-wider",
-                        "Conversations"
+        // Use fragment to render sidebar and dialog as siblings
+        // This ensures the dialog isn't constrained by sidebar's width
+
+        div { class: "flex flex-col h-full w-fit min-w-[180px] max-w-[320px] bg-white dark:bg-gray-900 border-r border-gray-300 dark:border-gray-800",
+            // Header - h-16 matches ChatPanel header height
+            div { class: "flex-shrink-0 h-16 px-4 border-b border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-gray-900",
+                div { class: "h-full flex items-center justify-between",
+                    div { class: "flex items-center gap-2",
+                        P2aIconMinimal { size: 20.0 }
+                        h2 { class: "text-sm font-semibold text-gray-700 dark:text-gray-300 uppercase tracking-wider",
+                            "Conversations"
+                        }
                     }
-                    button {
-                        class: "p-1.5 text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200 hover:bg-gray-200 dark:hover:bg-gray-700 rounded-lg transition-colors",
-                        disabled: is_operating,
-                        onclick: handle_new_conversation,
-                        title: "New Conversation",
-                        svg {
-                            class: "w-5 h-5",
-                            fill: "none",
-                            stroke: "currentColor",
-                            view_box: "0 0 24 24",
-                            path {
-                                stroke_linecap: "round",
-                                stroke_linejoin: "round",
-                                stroke_width: "2",
-                                d: "M12 4v16m8-8H4"
+                    div { class: "flex items-center gap-1",
+                        // New conversation button
+                        button {
+                            class: "p-1 text-gray-500 hover:text-teal-600 dark:text-gray-400 dark:hover:text-teal-400 hover:bg-gray-200 dark:hover:bg-gray-700 rounded transition-colors",
+                            disabled: is_operating,
+                            onclick: handle_new_conversation,
+                            title: "New Conversation",
+                            svg {
+                                class: "w-4 h-4",
+                                fill: "none",
+                                stroke: "currentColor",
+                                view_box: "0 0 24 24",
+                                path {
+                                    stroke_linecap: "round",
+                                    stroke_linejoin: "round",
+                                    stroke_width: "2",
+                                    d: "M12 4v16m8-8H4"
+                                }
+                            }
+                        }
+                        // Collapse button
+                        button {
+                            class: "p-1 text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-700 rounded transition-colors",
+                            onclick: move |_| sidebar_visible.set(false),
+                            title: "Hide sidebar",
+                            svg {
+                                class: "w-4 h-4",
+                                fill: "none",
+                                stroke: "currentColor",
+                                view_box: "0 0 24 24",
+                                path {
+                                    stroke_linecap: "round",
+                                    stroke_linejoin: "round",
+                                    stroke_width: "2",
+                                    d: "M11 19l-7-7 7-7m8 14l-7-7 7-7"
+                                }
                             }
                         }
                     }
-                }
-
-                // Show archived toggle
-                label { class: "flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400 cursor-pointer",
-                    input {
-                        r#type: "checkbox",
-                        class: "rounded text-blue-600 focus:ring-blue-500 dark:focus:ring-blue-400",
-                        checked: *show_archived.read(),
-                        onchange: move |e| show_archived.set(e.checked())
-                    }
-                    "Show archived"
                 }
             }
 
@@ -209,10 +280,10 @@ pub fn ConversationSidebar() -> Element {
             div { class: "flex-1 overflow-y-auto p-2",
                 if is_loading {
                     div { class: "flex items-center justify-center py-8",
-                        div { class: "w-6 h-6 border-2 border-gray-300 border-t-blue-500 rounded-full animate-spin" }
+                        div { class: "w-6 h-6 border-2 border-gray-300 border-t-teal-500 rounded-full animate-spin" }
                     }
                 } else if conversations.is_empty() {
-                    div { class: "text-center py-8 text-gray-500 dark:text-gray-400",
+                    div { class: "text-center py-8 px-2 text-gray-500 dark:text-gray-400",
                         p { class: "text-sm", "No conversations yet" }
                         p { class: "text-xs mt-1", "Click + to start a new one" }
                     }
@@ -225,15 +296,14 @@ pub fn ConversationSidebar() -> Element {
                             let is_editing = editing_id.read().as_ref() == Some(&conv_id);
                             let is_archived = conv.is_archived;
                             let message_count = conv.message_count;
-                            let preview = conv.last_message_preview.clone();
 
                             rsx! {
                                 div {
                                     key: "{conv_id}",
                                     class: if is_current {
-                                        "group relative p-3 rounded-lg mb-1 cursor-pointer bg-blue-100 dark:bg-blue-900/40 border border-blue-300 dark:border-blue-700"
+                                        "group relative p-3 rounded-lg mb-1 cursor-pointer bg-teal-50 dark:bg-teal-900/30 border border-teal-400 dark:border-teal-700"
                                     } else {
-                                        "group relative p-3 rounded-lg mb-1 cursor-pointer hover:bg-gray-200 dark:hover:bg-gray-800 border border-transparent"
+                                        "group relative p-3 rounded-lg mb-1 cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-800 border border-gray-200 dark:border-transparent"
                                     },
                                     onclick: {
                                         let id = conv_id.clone();
@@ -244,7 +314,7 @@ pub fn ConversationSidebar() -> Element {
                                     div { class: "flex items-center gap-2",
                                         if is_editing {
                                             input {
-                                                class: "flex-1 px-2 py-1 text-sm rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500",
+                                                class: "flex-1 px-2 py-1 text-sm rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-teal-500",
                                                 value: "{edit_title}",
                                                 oninput: move |e| edit_title.set(e.value().clone()),
                                                 onkeydown: move |e| {
@@ -257,7 +327,7 @@ pub fn ConversationSidebar() -> Element {
                                                 onclick: |e| e.stop_propagation()
                                             }
                                             button {
-                                                class: "p-1 text-green-600 hover:text-green-700 dark:text-green-400",
+                                                class: "p-1 text-teal-600 hover:text-teal-700 dark:text-teal-400",
                                                 onclick: move |e| {
                                                     e.stop_propagation();
                                                     handle_save_rename(())
@@ -313,10 +383,10 @@ pub fn ConversationSidebar() -> Element {
                                             }
 
                                             // Action buttons (shown on hover)
-                                            div { class: "opacity-0 group-hover:opacity-100 flex items-center gap-1 transition-opacity",
+                                            div { class: "opacity-0 group-hover:opacity-100 flex items-center gap-0.5 transition-opacity",
                                                 // Rename button
                                                 button {
-                                                    class: "p-1 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300",
+                                                    class: "action-btn-rename p-1.5 rounded transition-all cursor-pointer hover:bg-teal-50 dark:hover:bg-teal-900/30",
                                                     title: "Rename",
                                                     onclick: {
                                                         let id = conv_id.clone();
@@ -327,7 +397,7 @@ pub fn ConversationSidebar() -> Element {
                                                         }
                                                     },
                                                     svg {
-                                                        class: "w-3.5 h-3.5",
+                                                        class: "w-3.5 h-3.5 text-gray-400 transition-colors",
                                                         fill: "none",
                                                         stroke: "currentColor",
                                                         view_box: "0 0 24 24",
@@ -341,7 +411,7 @@ pub fn ConversationSidebar() -> Element {
                                                 }
                                                 // Archive button
                                                 button {
-                                                    class: "p-1 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300",
+                                                    class: "action-btn-archive p-1.5 rounded transition-all cursor-pointer hover:bg-orange-50 dark:hover:bg-orange-900/30",
                                                     title: if is_archived { "Unarchive" } else { "Archive" },
                                                     onclick: {
                                                         let id = conv_id.clone();
@@ -351,7 +421,7 @@ pub fn ConversationSidebar() -> Element {
                                                         }
                                                     },
                                                     svg {
-                                                        class: "w-3.5 h-3.5",
+                                                        class: "w-3.5 h-3.5 text-gray-400 transition-colors",
                                                         fill: "none",
                                                         stroke: "currentColor",
                                                         view_box: "0 0 24 24",
@@ -365,17 +435,17 @@ pub fn ConversationSidebar() -> Element {
                                                 }
                                                 // Delete button
                                                 button {
-                                                    class: "p-1 text-gray-400 hover:text-red-500",
+                                                    class: "action-btn-delete p-1.5 rounded transition-all cursor-pointer hover:bg-red-50 dark:hover:bg-red-900/30",
                                                     title: "Delete",
                                                     onclick: {
                                                         let id = conv_id.clone();
                                                         move |e: Event<MouseData>| {
                                                             e.stop_propagation();
-                                                            handle_delete(id.clone())
+                                                            handle_request_delete(id.clone())
                                                         }
                                                     },
                                                     svg {
-                                                        class: "w-3.5 h-3.5",
+                                                        class: "w-3.5 h-3.5 text-gray-400 transition-colors",
                                                         fill: "none",
                                                         stroke: "currentColor",
                                                         view_box: "0 0 24 24",
@@ -391,21 +461,66 @@ pub fn ConversationSidebar() -> Element {
                                         }
                                     }
 
-                                    // Message count and preview
+                                    // Message count
                                     if !is_editing {
                                         div { class: "mt-1 flex items-center gap-2",
                                             span { class: "text-xs text-gray-400 dark:text-gray-500",
                                                 "{message_count} messages"
                                             }
                                         }
-                                        if let Some(ref prev) = preview {
-                                            p { class: "mt-1 text-xs text-gray-500 dark:text-gray-400 truncate",
-                                                "{prev}"
-                                            }
-                                        }
                                     }
                                 }
                             }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Delete confirmation dialog - rendered OUTSIDE sidebar div as a sibling
+        // Uses fixed positioning to overlay the entire viewport
+        if show_delete_dialog {
+            div { class: "fixed inset-0 z-[9999] flex items-center justify-center bg-black/50",
+                onclick: move |_| handle_cancel_delete(()),
+                div {
+                    class: "bg-white dark:bg-gray-800 rounded-xl shadow-2xl p-6 m-4 w-[90vw] max-w-md",
+                    onclick: |e| e.stop_propagation(),
+                    // Warning icon and title
+                    div { class: "flex items-center gap-3 mb-4",
+                        div { class: "p-2 rounded-full bg-red-100 dark:bg-red-900/30",
+                            svg {
+                                class: "w-6 h-6 text-red-600 dark:text-red-400",
+                                fill: "none",
+                                stroke: "currentColor",
+                                view_box: "0 0 24 24",
+                                path {
+                                    stroke_linecap: "round",
+                                    stroke_linejoin: "round",
+                                    stroke_width: "2",
+                                    d: "M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"
+                                }
+                            }
+                        }
+                        h3 { class: "text-lg font-semibold text-gray-900 dark:text-white",
+                            "Delete Conversation?"
+                        }
+                    }
+                    // Message
+                    p { class: "text-sm text-gray-600 dark:text-gray-400 mb-6",
+                        "This will permanently delete the conversation and all its messages. This action cannot be undone."
+                    }
+                    // Buttons - use grid to ensure both are always visible
+                    div { class: "grid grid-cols-2 gap-3 mt-2",
+                        button {
+                            class: "px-4 py-2.5 text-sm font-medium text-gray-700 dark:text-gray-300 bg-gray-100 dark:bg-gray-700 rounded-lg hover:bg-gray-200 dark:hover:bg-gray-600 transition-colors cursor-pointer",
+                            onclick: move |_| handle_cancel_delete(()),
+                            "Cancel"
+                        }
+                        button {
+                            class: "px-4 py-2.5 text-sm font-medium rounded-lg transition-colors cursor-pointer border-2 border-red-600 bg-red-600 text-white hover:bg-red-700 hover:border-red-700",
+                            style: "background-color: #dc2626; color: white;",
+                            onclick: handle_confirm_delete,
+                            "Delete"
                         }
                     }
                 }

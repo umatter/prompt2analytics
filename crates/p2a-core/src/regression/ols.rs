@@ -283,6 +283,182 @@ fn truncate(s: &str, max_len: usize) -> String {
     }
 }
 
+/// Run OLS regression on pre-extracted ndarray data.
+///
+/// This is the core computation function that operates directly on arrays,
+/// avoiding DataFrame extraction overhead. Use this for benchmarking or when
+/// you already have data in ndarray format.
+///
+/// # Arguments
+/// * `x` - Design matrix (n × k), should include intercept column if desired
+/// * `y` - Response vector (n × 1)
+/// * `variable_names` - Names for each column in X (including intercept if present)
+/// * `y_name` - Name of the dependent variable
+/// * `cov_type` - Type of standard errors to compute
+///
+/// # Returns
+/// An `OlsResult` containing the regression results.
+pub fn run_ols_raw(
+    x: &Array2<f64>,
+    y: &Array1<f64>,
+    variable_names: &[String],
+    y_name: &str,
+    cov_type: CovarianceType,
+) -> EconResult<OlsResult> {
+    let n = x.nrows();
+    let k = x.ncols();
+
+    if n != y.len() {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "X has {} rows but y has {} elements",
+                n, y.len()
+            ),
+        });
+    }
+
+    if variable_names.len() != k {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "X has {} columns but {} variable names provided",
+                k, variable_names.len()
+            ),
+        });
+    }
+
+    // Check we have enough observations
+    if n <= k {
+        return Err(EconError::InsufficientData {
+            required: k + 1,
+            provided: n,
+            context: format!("OLS regression with {} parameters", k),
+        });
+    }
+
+    let mut warnings = Vec::new();
+
+    // Check if first column is intercept (all 1s)
+    let has_intercept = x.column(0).iter().all(|&v| (v - 1.0).abs() < 1e-10);
+
+    // Compute (X'X)^{-1}
+    let (xtx_inv, cond_warning) = safe_inverse(&xtx(&x.view()).view())
+        .map_err(|_e| EconError::SingularMatrix {
+            context: "X'X matrix in OLS".to_string(),
+            suggestion: "Check for perfect multicollinearity between independent variables".to_string(),
+        })?;
+
+    if let Some(cond) = cond_warning {
+        warnings.push(EstimationWarning::HighConditionNumber {
+            value: cond,
+            threshold: CONDITION_THRESHOLD,
+        }.message());
+    }
+
+    // Compute β = (X'X)^{-1} X'y
+    let xty_vec = xty(&x.view(), y);
+    let beta = xtx_inv.dot(&xty_vec);
+
+    // Compute fitted values and residuals
+    let y_hat = x.dot(&beta);
+    let residuals: Array1<f64> = y - &y_hat;
+
+    // Compute statistics
+    let y_mean = y.mean().unwrap_or(0.0);
+    let sst: f64 = y.iter().map(|&yi| (yi - y_mean).powi(2)).sum();
+    let ssr: f64 = residuals.iter().map(|&e| e.powi(2)).sum();
+    let sse = sst - ssr; // Explained sum of squares
+
+    let df_resid = n - k;
+    let df_model = k - if has_intercept { 1 } else { 0 };
+
+    let r_squared = if sst > 0.0 { 1.0 - ssr / sst } else { 0.0 };
+    let adj_r_squared = if sst > 0.0 && df_resid > 0 {
+        1.0 - (1.0 - r_squared) * ((n - 1) as f64) / (df_resid as f64)
+    } else {
+        0.0
+    };
+
+    let sigma_squared = ssr / (df_resid as f64);
+    let residual_std_error = sigma_squared.sqrt();
+
+    // F-statistic
+    let f_statistic = if df_model > 0 && ssr > 0.0 {
+        (sse / df_model as f64) / sigma_squared
+    } else {
+        0.0
+    };
+    let f_p_value = if df_model > 0 && df_resid > 0 {
+        f_test_p_value(f_statistic, df_model as f64, df_resid as f64)
+    } else {
+        f64::NAN
+    };
+
+    // Log-likelihood
+    let log_likelihood = -0.5 * (n as f64) * (1.0 + (2.0 * std::f64::consts::PI * sigma_squared).ln());
+    let aic = 2.0 * (k as f64) - 2.0 * log_likelihood;
+    let bic = (k as f64) * (n as f64).ln() - 2.0 * log_likelihood;
+
+    // Compute variance-covariance matrix based on cov_type
+    let vcov = compute_vcov(&x.view(), &residuals, &xtx_inv, cov_type, n, k)?;
+
+    // Extract standard errors from diagonal
+    let se: Array1<f64> = (0..k).map(|i| vcov[[i, i]].sqrt()).collect();
+
+    // Compute t-statistics and p-values
+    let t_stats: Array1<f64> = &beta / &se;
+    let p_values: Vec<f64> = t_stats.iter()
+        .map(|&t| t_test_p_value(t, df_resid as f64))
+        .collect();
+
+    // Compute 95% confidence intervals
+    let t_crit = crate::traits::t_critical(0.05, df_resid as f64);
+
+    // Build coefficient results
+    let coefficients: Vec<OlsCoefficient> = variable_names.iter()
+        .enumerate()
+        .map(|(i, name)| {
+            let p = p_values[i];
+            OlsCoefficient {
+                name: name.clone(),
+                estimate: beta[i],
+                std_error: se[i],
+                t_value: t_stats[i],
+                p_value: p,
+                significance: SignificanceLevel::from_p_value(p),
+                ci_lower_95: beta[i] - t_crit * se[i],
+                ci_upper_95: beta[i] + t_crit * se[i],
+            }
+        })
+        .collect();
+
+    Ok(OlsResult {
+        dependent_var: y_name.to_string(),
+        variable_names: variable_names.to_vec(),
+        n_obs: n,
+        n_params: k,
+        df_resid,
+        df_model,
+        coefficients,
+        r_squared,
+        adj_r_squared,
+        residual_std_error,
+        f_statistic,
+        f_p_value,
+        log_likelihood,
+        aic,
+        bic,
+        cov_type,
+        warnings,
+        beta,
+        se,
+        resid: residuals,
+        vcov,
+        xtx_inv,
+        ssr,
+        sst,
+    })
+}
+
 /// Run OLS regression on a dataset.
 ///
 /// # Arguments

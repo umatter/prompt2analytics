@@ -123,6 +123,22 @@ fn default_interpret() -> bool {
     true
 }
 
+/// Request to generate a conversation title
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GenerateTitleRequest {
+    pub user_message: String,
+    #[serde(default)]
+    pub assistant_response: Option<String>,
+    #[serde(default)]
+    pub provider: Option<ProviderConfig>,
+}
+
+/// Response from title generation
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GenerateTitleResponse {
+    pub title: String,
+}
+
 /// Image data from tool results
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImageData {
@@ -140,11 +156,11 @@ pub enum StreamEvent {
 
     /// Tool execution started
     #[serde(rename = "tool_start")]
-    ToolStart { tool: String },
+    ToolStart { tool: String, arguments: serde_json::Value },
 
     /// Tool execution completed
     #[serde(rename = "tool_end")]
-    ToolEnd { tool: String, elapsed_ms: u64 },
+    ToolEnd { tool: String, elapsed_ms: u64, result: Option<String> },
 
     /// Tool result with potential images
     #[serde(rename = "tool_result")]
@@ -226,6 +242,7 @@ pub struct ConversationWithMessages {
 /// Create conversation request
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateConversationRequest {
+    pub session_id: String,
     pub title: String,
 }
 
