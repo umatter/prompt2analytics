@@ -15,6 +15,7 @@ pub mod ks;
 pub mod manova;
 pub mod tukey;
 pub mod bartlett;
+#[cfg(feature = "spectral-analysis")]
 pub mod spectrum;
 pub mod boxtest;
 pub mod pptest;
@@ -96,6 +97,7 @@ pub use bartlett::{
     bartlett_test, run_bartlett_test,
     BartlettResult, BartlettGroupStats,
 };
+#[cfg(feature = "spectral-analysis")]
 pub use spectrum::{
     spectrum, spectrum_ar, run_spectrum, run_spectrum_ar,
     SpectrumConfig, SpectrumResult,

@@ -329,6 +329,22 @@ pub struct CreateDatasetRequest {
     pub csv_content: String,
 }
 
+/// Request to export a dataset to a file.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ExportDatasetRequest {
+    /// Name/ID of the dataset to export
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Output file path
+    #[schemars(description = "Path where the file will be saved. The format is determined by extension: .csv, .parquet, .json")]
+    pub path: String,
+
+    /// Output format (optional, inferred from extension if not specified)
+    #[schemars(description = "Output format: 'csv', 'parquet', or 'json'. If not specified, inferred from file extension.")]
+    pub format: Option<String>,
+}
+
 /// Request to describe a loaded dataset.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct DescribeDatasetRequest {
@@ -7909,6 +7925,102 @@ impl AnalyticsServer {
         Ok(CallToolResult::success(vec![Content::text(result)]))
     }
 
+    /// Export a dataset to a file.
+    #[tool(description = "Export a loaded dataset to a file. Supports CSV, Parquet, and JSON formats. The format is determined by the file extension or can be explicitly specified.")]
+    async fn export_dataset(
+        &self,
+        Parameters(request): Parameters<ExportDatasetRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let path = PathBuf::from(&request.path);
+
+        // Determine format from extension or explicit parameter
+        let format = request.format.as_deref().or_else(|| {
+            path.extension()
+                .and_then(|ext| ext.to_str())
+        });
+
+        let result_msg = match format {
+            Some("csv") => {
+                match dataset.to_csv(&path) {
+                    Ok(()) => format!(
+                        "Successfully exported dataset '{}' to CSV file:\n  {}\n  {} rows x {} columns",
+                        request.dataset,
+                        path.display(),
+                        dataset.nrows(),
+                        dataset.ncols()
+                    ),
+                    Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Failed to export to CSV: {}",
+                        e
+                    ))])),
+                }
+            }
+            Some("parquet") => {
+                match dataset.to_parquet(&path) {
+                    Ok(()) => format!(
+                        "Successfully exported dataset '{}' to Parquet file:\n  {}\n  {} rows x {} columns",
+                        request.dataset,
+                        path.display(),
+                        dataset.nrows(),
+                        dataset.ncols()
+                    ),
+                    Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Failed to export to Parquet: {}",
+                        e
+                    ))])),
+                }
+            }
+            Some("json") => {
+                match dataset.to_json_string() {
+                    Ok(json) => {
+                        if let Err(e) = std::fs::write(&path, json) {
+                            return Ok(CallToolResult::error(vec![Content::text(format!(
+                                "Failed to write JSON file: {}",
+                                e
+                            ))]));
+                        }
+                        format!(
+                            "Successfully exported dataset '{}' to JSON file:\n  {}\n  {} rows x {} columns",
+                            request.dataset,
+                            path.display(),
+                            dataset.nrows(),
+                            dataset.ncols()
+                        )
+                    }
+                    Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Failed to export to JSON: {}",
+                        e
+                    ))])),
+                }
+            }
+            Some(fmt) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Unsupported format '{}'. Supported formats: csv, parquet, json",
+                    fmt
+                ))]));
+            }
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    "Could not determine output format. Specify format parameter or use a known extension (.csv, .parquet, .json)"
+                )]));
+            }
+        };
+
+        Ok(CallToolResult::success(vec![Content::text(result_msg)]))
+    }
+
     /// Upload and load a dataset from base64-encoded content.
     #[tool(description = "Upload and load a dataset from base64-encoded file content. Use this when the file is selected via browser file picker.")]
     async fn upload_dataset(
@@ -15053,6 +15165,7 @@ impl AnalyticsServer {
         Parameters(request): Parameters<ScpiRequest>,
     ) -> Result<CallToolResult, McpError> {
         use ndarray::{Array1, Array2};
+        use p2a_core::polars::prelude::{ChunkCompareEq, PolarsError};
 
         let datasets = self.datasets.read().await;
 
@@ -15139,19 +15252,22 @@ impl AnalyticsServer {
         let n_donors = donor_units.len();
 
         // Helper function to get value for unit at time
-        let get_value = |df: &polars::frame::DataFrame, outcome: &str, unit_col: &str, time_col: &str, unit: &str, time: i64| -> Result<f64, String> {
-            let unit_mask = df.column(unit_col).map_err(|e| e.to_string())?
-                .str().map_err(|_| "Unit column not string".to_string())?
-                .equal(unit);
-            let time_mask = df.column(time_col).map_err(|e| e.to_string())?
-                .i64().map_err(|_| "Time column not int".to_string())?
-                .equal(time);
+        let get_value = |df: &p2a_core::polars::frame::DataFrame, outcome: &str, unit_col: &str, time_col: &str, unit: &str, time: i64| -> Result<f64, String> {
+            let unit_col_data = df.column(unit_col).map_err(|e: PolarsError| e.to_string())?;
+            let unit_str = unit_col_data.str().map_err(|_| "Unit column not string".to_string())?;
+            let unit_mask = unit_str.equal(unit);
+
+            let time_col_data = df.column(time_col).map_err(|e: PolarsError| e.to_string())?;
+            let time_i64 = time_col_data.i64().map_err(|_| "Time column not int".to_string())?;
+            let time_mask = time_i64.equal(time);
+
             let combined = &unit_mask & &time_mask;
-            let filtered = df.filter(&combined).map_err(|e| e.to_string())?;
+            let filtered = df.filter(&combined).map_err(|e: PolarsError| e.to_string())?;
             if filtered.height() == 0 {
                 return Err(format!("No data for unit '{}' at time {}", unit, time));
             }
-            let val = filtered.column(outcome).map_err(|e| e.to_string())?
+            let outcome_col = filtered.column(outcome).map_err(|e: PolarsError| e.to_string())?;
+            let val = outcome_col
                 .f64().map_err(|_| "Outcome not numeric".to_string())?
                 .get(0).ok_or_else(|| "Missing value".to_string())?;
             Ok(val)

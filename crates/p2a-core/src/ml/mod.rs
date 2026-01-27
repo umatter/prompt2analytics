@@ -13,7 +13,7 @@
 
 mod clustering;
 mod cluster_validation;
-mod advanced_clustering;
+mod advanced_clustering_mod;
 mod cluster_optimized;
 pub mod kdtree;
 pub mod dual_tree;
@@ -38,7 +38,7 @@ pub use cluster_validation::{
     nmi, run_nmi, NmiResult,
     gap_statistic, run_gap_statistic, GapStatisticResult,
 };
-pub use advanced_clustering::{
+pub use advanced_clustering_mod::{
     kmedoids, run_kmedoids, KMedoidsResult,
     spectral_clustering, run_spectral_clustering, SpectralClusteringResult, AffinityType,
     affinity_propagation, run_affinity_propagation, AffinityPropagationResult,

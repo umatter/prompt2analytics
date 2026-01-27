@@ -4,24 +4,35 @@
 //!
 //! This crate provides the data loading, statistical analysis, and machine learning
 //! functionality that powers the MCP server.
+//!
+//! See the [crate README](https://github.com/umatter/prompt2analytics/tree/main/crates/p2a-core)
+//! for a complete overview of features and usage examples.
+
+// Enforce documentation on public items (warn, not error, for gradual adoption)
+#![warn(missing_docs)]
 
 // Foundation modules (pure Rust implementations)
 pub mod linalg;
 pub mod traits;
 pub mod errors;
 
-// Feature modules
+// Core feature modules (always available)
 pub mod data;
 pub mod stats;
 pub mod regression;
 pub mod econometrics;
 pub mod spatial;
-pub mod forecasting;
 pub mod ml;
-pub mod visualization;
 pub mod reports;
 pub mod simulation;
 pub mod export;
+
+// Optional feature modules
+#[cfg(feature = "forecasting")]
+pub mod forecasting;
+
+#[cfg(feature = "visualization")]
+pub mod visualization;
 
 // Re-export foundational types
 pub use errors::{EconError, EconResult, EstimationWarning};
@@ -58,8 +69,6 @@ pub use stats::{
     TukeyHsdResult, PairwiseComparison, tukey_hsd, run_tukey_hsd,
     // Bartlett's test
     BartlettResult, BartlettGroupStats, bartlett_test, run_bartlett_test,
-    // Spectral density estimation
-    SpectrumConfig, SpectrumResult, spectrum, spectrum_ar, run_spectrum, run_spectrum_ar,
     // Box-Pierce and Ljung-Box tests
     BoxTestResult, BoxTestType, box_test, run_box_test,
     // Phillips-Perron unit root test
@@ -142,6 +151,12 @@ pub use stats::{
     model_tables, model_tables_means, model_tables_effects,
     model_tables_two_way, run_model_tables, format_model_tables,
     ModelTablesResult, TwoWayModelTablesResult, ModelTablesSE, TableType,
+};
+
+// Spectral density estimation (requires spectral-analysis feature)
+#[cfg(feature = "spectral-analysis")]
+pub use stats::{
+    SpectrumConfig, SpectrumResult, spectrum, spectrum_ar, run_spectrum, run_spectrum_ar,
 };
 pub use regression::{
     OlsResult, run_ols, run_ols_raw, run_ols_clustered, DiagnosticsResult, run_diagnostics,
@@ -328,6 +343,7 @@ pub use spatial::{
     // Local Moran's I (LISA)
     LisaCluster, LocalMoranObs, LocalMoranResult, localmoran,
 };
+#[cfg(feature = "forecasting")]
 pub use forecasting::{
     ArimaResult, ArimaForecastResult, run_arima, forecast_arima,
     MstlResult, run_mstl,
@@ -386,6 +402,7 @@ pub use ml::{
     bart_causal, bart_causal_arrays, bart_causal_predict, bart_causal_predict_arrays,
     run_bart_causal, BartCausalConfig, BartCausalResult,
 };
+#[cfg(feature = "visualization")]
 pub use visualization::{
     ChartConfig, HistogramResult, ScatterResult, BoxPlotResult, LineChartResult, HeatmapResult,
     EventStudyResult, CoefficientPlotResult, IrfPlotResult, ResidualDiagnosticsResult, DendrogramResult,

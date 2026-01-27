@@ -1,7 +1,9 @@
 //! Data loading functionality for various file formats.
 
+#[cfg(feature = "file-formats")]
 use calamine::{open_workbook_auto, Data, Range, Reader};
 use polars::prelude::*;
+#[cfg(feature = "file-formats")]
 use polars::frame::column::Column;
 use std::path::Path;
 use thiserror::Error;
@@ -23,8 +25,13 @@ pub enum LoadError {
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),
 
+    #[cfg(feature = "file-formats")]
     #[error("Excel error: {0}")]
     ExcelError(String),
+
+    #[cfg(not(feature = "file-formats"))]
+    #[error("Excel support requires 'file-formats' feature")]
+    ExcelNotSupported,
 
     #[error("Stata error: {0}")]
     StataError(#[from] super::stata::StataError),
@@ -56,13 +63,20 @@ impl DataLoader {
         let df = match extension.as_str() {
             "csv" => Self::load_csv(path)?,
             "parquet" | "pq" => Self::load_parquet(path)?,
+            #[cfg(feature = "file-formats")]
             "xlsx" | "xls" | "xlsb" | "ods" => Self::load_excel(path, None)?,
+            #[cfg(not(feature = "file-formats"))]
+            "xlsx" | "xls" | "xlsb" | "ods" => return Err(LoadError::ExcelNotSupported),
             "dta" => Self::load_stata(path)?,
             "sas7bdat" => Self::load_sas(path)?,
             _ => {
+                #[cfg(feature = "file-formats")]
+                let supported = "csv, parquet, xlsx, xls, xlsb, ods, dta, sas7bdat";
+                #[cfg(not(feature = "file-formats"))]
+                let supported = "csv, parquet, dta, sas7bdat (enable 'file-formats' feature for xlsx/xls/xlsb/ods)";
                 return Err(LoadError::UnsupportedFormat(format!(
-                    "Extension '{}' not supported. Supported formats: csv, parquet, xlsx, xls, xlsb, ods, dta, sas7bdat",
-                    extension
+                    "Extension '{}' not supported. Supported formats: {}",
+                    extension, supported
                 )))
             }
         };
@@ -102,6 +116,9 @@ impl DataLoader {
     /// # Arguments
     /// * `path` - Path to the Excel file
     /// * `sheet_name` - Optional sheet name (uses first sheet if None)
+    ///
+    /// Requires the `file-formats` feature.
+    #[cfg(feature = "file-formats")]
     pub fn load_excel(path: impl AsRef<Path>, sheet_name: Option<&str>) -> Result<DataFrame, LoadError> {
         let path = path.as_ref();
 
@@ -156,6 +173,7 @@ impl DataLoader {
 /// Convert a calamine Range to a Polars DataFrame.
 ///
 /// Assumes the first row contains column headers.
+#[cfg(feature = "file-formats")]
 fn excel_range_to_dataframe(range: &Range<Data>) -> Result<DataFrame, LoadError> {
     let (height, width) = range.get_size();
 
@@ -226,6 +244,7 @@ fn excel_range_to_dataframe(range: &Range<Data>) -> Result<DataFrame, LoadError>
 }
 
 /// Convert calamine Data to a string representation.
+#[cfg(feature = "file-formats")]
 fn data_to_string(data: &Data) -> String {
     match data {
         Data::Int(i) => i.to_string(),
@@ -241,6 +260,7 @@ fn data_to_string(data: &Data) -> String {
 }
 
 /// Convert calamine Data to an optional string.
+#[cfg(feature = "file-formats")]
 fn data_to_option_string(data: &Data) -> Option<String> {
     match data {
         Data::Empty => None,
@@ -250,6 +270,7 @@ fn data_to_option_string(data: &Data) -> Option<String> {
 }
 
 /// Check if all non-null values in a column are numeric, and if they're all integers.
+#[cfg(feature = "file-formats")]
 fn check_numeric_type(col_data: &[Option<String>]) -> (bool, bool) {
     let mut is_all_numeric = true;
     let mut is_all_int = true;
@@ -294,6 +315,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "file-formats")]
     fn test_load_excel() {
         // Skip if test file doesn't exist
         let path = std::path::Path::new("tests/data/test.xlsx");

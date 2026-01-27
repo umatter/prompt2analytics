@@ -134,14 +134,17 @@ fn compute_autocorrelations(x: &[f64], lag_max: usize) -> Vec<f64> {
     // FFT wins when: lag > C × log2(n) where C ≈ 3-5 (empirically determined)
     // For typical Box.test usage (lag=10-20), direct method is almost always faster
     // FFT becomes beneficial for large lag values (e.g., lag > 50 for n > 10,000)
-    let log2_n = (n as f64).log2();
-    let fft_threshold = (3.0 * log2_n) as usize;
+    #[cfg(feature = "spectral-analysis")]
+    {
+        let log2_n = (n as f64).log2();
+        let fft_threshold = (3.0 * log2_n) as usize;
 
-    if lag_max > fft_threshold && n > 1000 {
-        compute_autocorrelations_fft(x, lag_max)
-    } else {
-        compute_autocorrelations_direct(x, lag_max)
+        if lag_max > fft_threshold && n > 1000 {
+            return compute_autocorrelations_fft(x, lag_max);
+        }
     }
+
+    compute_autocorrelations_direct(x, lag_max)
 }
 
 /// Direct computation of autocorrelations - O(n × lag)
@@ -188,6 +191,7 @@ fn compute_autocorrelations_direct(x: &[f64], lag_max: usize) -> Vec<f64> {
 /// 3. Compute power spectrum: |FFT|²
 /// 4. Inverse FFT to get autocorrelation
 /// 5. Normalize by variance
+#[cfg(feature = "spectral-analysis")]
 fn compute_autocorrelations_fft(x: &[f64], lag_max: usize) -> Vec<f64> {
     use rustfft::{FftPlanner, num_complex::Complex};
 

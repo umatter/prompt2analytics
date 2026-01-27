@@ -26,8 +26,8 @@ use std::collections::{BinaryHeap, HashMap};
 use std::cmp::Ordering;
 use faer::linalg::solvers::Solve;
 
-use super::kdtree::{euclidean_distance, KdTree, UnionFind, build_connected_mst, kruskal_mst};
-use super::dual_tree::kdtree_prim_mst;
+use crate::ml::kdtree::{euclidean_distance, KdTree, UnionFind, build_connected_mst, kruskal_mst};
+use crate::ml::dual_tree::kdtree_prim_mst;
 
 // =============================================================================
 // Algorithm Selection
@@ -660,7 +660,7 @@ fn cluster_eigenvectors(
     }
 
     // Run k-means
-    let result = super::super::ml::kmeans(
+    let result = crate::ml::kmeans(
         normalized.view(), k, Some(100), Some(1e-4), Some(10), seed,
     )?;
 
@@ -1610,7 +1610,7 @@ fn hdbscan_with_kdtree(
     data: &ArrayView2<f64>,
     min_samples: usize,
 ) -> (Vec<f64>, Vec<(usize, usize, f64)>) {
-    use super::kdtree::KdTree;
+    use crate::ml::kdtree::KdTree;
 
     let n = data.nrows();
 
@@ -2064,7 +2064,7 @@ pub fn gaussian_mixture(
     let tol = tolerance.unwrap_or(1e-4);
 
     // Initialize with k-means
-    let kmeans_result = super::super::ml::kmeans(
+    let kmeans_result = crate::ml::kmeans(
         data.view(), n_components, Some(20), Some(1e-4), Some(5), seed,
     )?;
 
@@ -8039,7 +8039,7 @@ mod tests {
 
         // Run both implementations
         let result_new = hdbscan(data.view(), Some(5), Some(5));
-        let result_old = super::super::cluster_optimized::hdbscan_optimized(data.view(), Some(5), Some(5));
+        let result_old = crate::ml::cluster_optimized::hdbscan_optimized(data.view(), Some(5), Some(5));
 
         // Both should succeed
         assert!(result_new.is_ok(), "New HDBSCAN failed: {:?}", result_new.err());
@@ -8090,7 +8090,7 @@ mod tests {
 
             // Warmup
             let _ = hdbscan(data.view(), Some(10), Some(10));
-            let _ = super::super::cluster_optimized::hdbscan_optimized(data.view(), Some(10), Some(10));
+            let _ = crate::ml::cluster_optimized::hdbscan_optimized(data.view(), Some(10), Some(10));
 
             // New algorithm (with auto-dispatch)
             let start = Instant::now();
@@ -8102,7 +8102,7 @@ mod tests {
             // Old optimized parallel algorithm
             let start = Instant::now();
             for _ in 0..3 {
-                let _ = super::super::cluster_optimized::hdbscan_optimized(data.view(), Some(10), Some(10));
+                let _ = crate::ml::cluster_optimized::hdbscan_optimized(data.view(), Some(10), Some(10));
             }
             let old_time = start.elapsed().as_secs_f64() / 3.0 * 1000.0;
 

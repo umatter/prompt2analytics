@@ -274,6 +274,43 @@ impl std::fmt::Display for OlsResult {
     }
 }
 
+impl OlsResult {
+    /// Export coefficient table to a CSV string.
+    ///
+    /// Produces a table with columns: variable, coefficient, std_error, t_stat, p_value,
+    /// significance, ci_lower_95, ci_upper_95
+    pub fn to_csv_string(&self) -> String {
+        let mut csv = String::new();
+        csv.push_str("variable,coefficient,std_error,t_stat,p_value,significance,ci_lower_95,ci_upper_95\n");
+
+        for coef in &self.coefficients {
+            csv.push_str(&format!(
+                "{},{:.6},{:.6},{:.4},{:.6},{},{:.6},{:.6}\n",
+                coef.name,
+                coef.estimate,
+                coef.std_error,
+                coef.t_value,
+                coef.p_value,
+                coef.significance.stars().replace(" ", ""),
+                coef.ci_lower_95,
+                coef.ci_upper_95
+            ));
+        }
+
+        csv
+    }
+
+    /// Export coefficient table to a CSV file.
+    pub fn to_csv(&self, path: impl AsRef<std::path::Path>) -> std::io::Result<()> {
+        std::fs::write(path, self.to_csv_string())
+    }
+
+    /// Export results to a JSON string.
+    pub fn to_json_string(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string_pretty(self)
+    }
+}
+
 /// Truncate a string to a maximum length.
 fn truncate(s: &str, max_len: usize) -> String {
     if s.len() > max_len {
@@ -898,11 +935,19 @@ pub fn run_ols_clustered(
         });
     }
 
-    // Add warning for few clusters
-    if n_clusters_1 < 10 {
+    // Add graduated warning for few clusters (Cameron-Miller 2015 guidance)
+    // - G < 20: Severe finite-sample bias concerns
+    // - 20 <= G < 50: Moderate concerns, consider wild bootstrap
+    // - G >= 50: Generally adequate for asymptotic inference
+    if n_clusters_1 < 50 {
+        let severity = if n_clusters_1 < 20 {
+            "severe"
+        } else {
+            "moderate"
+        };
         base_result.warnings.push(EstimationWarning::FewClusters {
             n_clusters: n_clusters_1,
-            recommended: 10,
+            severity: severity.to_string(),
         }.message());
     }
 

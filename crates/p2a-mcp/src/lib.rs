@@ -3,6 +3,7 @@
 //! This module exposes the MCP server functionality as a library,
 //! allowing it to be embedded in other applications (like p2a-dioxus desktop).
 
+pub mod audit;
 pub mod config;
 #[cfg(feature = "db")]
 pub mod db;

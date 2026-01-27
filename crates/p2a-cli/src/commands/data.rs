@@ -59,6 +59,20 @@ pub enum DataCommands {
         #[arg(short, long)]
         seed: Option<u64>,
     },
+
+    /// Save/export a dataset to a file
+    Save {
+        /// Dataset name
+        dataset: String,
+
+        /// Output file path (format inferred from extension: .csv, .parquet, .json)
+        #[arg(short, long)]
+        output: PathBuf,
+
+        /// Output format (csv, parquet, json) - overrides file extension
+        #[arg(short, long)]
+        format: Option<String>,
+    },
 }
 
 pub fn execute(
@@ -75,6 +89,9 @@ pub fn execute(
         DataCommands::Head { dataset, n } => execute_head(dataset, *n, format, session),
         DataCommands::Generate { rows, name, columns, seed } => {
             execute_generate(*rows, name, columns, *seed, format, session)
+        }
+        DataCommands::Save { dataset, output, format: fmt } => {
+            execute_save(dataset, output, fmt.as_deref(), format, session)
         }
     }
 }
@@ -389,6 +406,96 @@ fn execute_generate(
             if let Some(s) = seed {
                 println!("  Seed: {}", s);
             }
+        }
+    }
+
+    Ok(())
+}
+
+fn execute_save(
+    dataset_name: &str,
+    output: &PathBuf,
+    fmt: Option<&str>,
+    format: &OutputFormat,
+    session: Option<&mut SessionManager>,
+) -> anyhow::Result<()> {
+    let dataset = match session {
+        Some(mgr) => mgr.get_dataset(dataset_name),
+        None => {
+            print_error(
+                "No session active. Use --session <file> to enable dataset storage.",
+                format,
+            );
+            return Ok(());
+        }
+    };
+
+    let ds = match dataset {
+        Some(ds) => ds,
+        None => {
+            print_error(&format!("Dataset '{}' not found", dataset_name), format);
+            return Ok(());
+        }
+    };
+
+    // Determine format from option or extension
+    let output_format = fmt.or_else(|| {
+        output
+            .extension()
+            .and_then(|ext| ext.to_str())
+    });
+
+    let result: Result<&str, String> = match output_format {
+        Some("csv") => ds.to_csv(output).map(|_| "CSV").map_err(|e| e.to_string()),
+        Some("parquet") => ds.to_parquet(output).map(|_| "Parquet").map_err(|e| e.to_string()),
+        Some("json") => {
+            ds.to_json_string()
+                .map_err(|e| e.to_string())
+                .and_then(|json| std::fs::write(output, json).map_err(|e| e.to_string()))
+                .map(|_| "JSON")
+        }
+        Some(other) => {
+            print_error(
+                &format!("Unsupported format '{}'. Use csv, parquet, or json.", other),
+                format,
+            );
+            return Ok(());
+        }
+        None => {
+            print_error(
+                "Could not determine output format. Use --format or provide file extension (.csv, .parquet, .json).",
+                format,
+            );
+            return Ok(());
+        }
+    };
+
+    match result {
+        Ok(fmt_name) => {
+            match format {
+                OutputFormat::Json => {
+                    let json = serde_json::json!({
+                        "dataset": dataset_name,
+                        "path": output.display().to_string(),
+                        "format": fmt_name,
+                        "rows": ds.nrows(),
+                        "columns": ds.ncols(),
+                    });
+                    println!("{}", serde_json::to_string_pretty(&json)?);
+                }
+                _ => {
+                    println!(
+                        "Successfully exported dataset '{}' to {} format",
+                        dataset_name, fmt_name
+                    );
+                    println!("  Path: {}", output.display());
+                    println!("  Rows: {}", ds.nrows());
+                    println!("  Columns: {}", ds.ncols());
+                }
+            }
+        }
+        Err(e) => {
+            print_error(&format!("Failed to save dataset: {}", e), format);
         }
     }
 

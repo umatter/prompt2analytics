@@ -4,6 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 use crate::errors::{EconError, EconResult};
+#[cfg(feature = "spectral-analysis")]
 use rustfft::{FftPlanner, num_complex::Complex};
 
 // ============================================================================
@@ -391,78 +392,94 @@ pub fn density(
 
     // For small datasets or compact kernels, use direct computation
     // FFT overhead isn't worth it for small n
-    if n < 100 || !matches!(kernel, DensityKernel::Gaussian) {
+    #[cfg(feature = "spectral-analysis")]
+    let use_fft = n >= 100 && matches!(kernel, DensityKernel::Gaussian);
+    #[cfg(not(feature = "spectral-analysis"))]
+    let use_fft = false;
+
+    if !use_fft {
         return density_direct(&clean, bw, kernel, n_points_requested, from, to);
     }
 
     // FFT-based convolution for Gaussian kernel
-    // Step 1: Bin the data onto the grid
-    let mut binned = vec![0.0f64; n_points * 2]; // Zero-pad for circular convolution
-    for &xi in &clean {
-        if xi >= from && xi <= to {
-            let idx = ((xi - from) / step).floor() as usize;
-            let idx = idx.min(n_points - 1);
-            binned[idx] += 1.0;
+    #[cfg(feature = "spectral-analysis")]
+    {
+        // Step 1: Bin the data onto the grid
+        let mut binned = vec![0.0f64; n_points * 2]; // Zero-pad for circular convolution
+        for &xi in &clean {
+            if xi >= from && xi <= to {
+                let idx = ((xi - from) / step).floor() as usize;
+                let idx = idx.min(n_points - 1);
+                binned[idx] += 1.0;
+            }
         }
+
+        // Step 2: Create kernel weights on the grid
+        // For Gaussian: K(u) = exp(-u²/2) / sqrt(2π)
+        let mut kernel_weights = vec![0.0f64; n_points * 2];
+        #[allow(unused_variables)]
+        let half = n_points;
+        for i in 0..n_points {
+            let u = (i as f64 * step) / bw;
+            kernel_weights[i] = (-0.5 * u * u).exp();
+        }
+        // Mirror for negative side (wrap-around for circular convolution)
+        for i in 1..n_points {
+            kernel_weights[n_points * 2 - i] = kernel_weights[i];
+        }
+
+        // Step 3: FFT both signals
+        let fft_size = n_points * 2;
+        let mut planner = FftPlanner::<f64>::new();
+        let fft = planner.plan_fft_forward(fft_size);
+        let ifft = planner.plan_fft_inverse(fft_size);
+
+        let mut binned_complex: Vec<Complex<f64>> = binned.iter()
+            .map(|&x| Complex::new(x, 0.0))
+            .collect();
+        let mut kernel_complex: Vec<Complex<f64>> = kernel_weights.iter()
+            .map(|&x| Complex::new(x, 0.0))
+            .collect();
+
+        fft.process(&mut binned_complex);
+        fft.process(&mut kernel_complex);
+
+        // Step 4: Multiply in frequency domain
+        let mut result_complex: Vec<Complex<f64>> = binned_complex.iter()
+            .zip(kernel_complex.iter())
+            .map(|(a, b)| a * b)
+            .collect();
+
+        // Step 5: Inverse FFT
+        ifft.process(&mut result_complex);
+
+        // Step 6: Extract and normalize the density values
+        let norm_factor = 1.0 / (n as f64 * bw * (2.0 * std::f64::consts::PI).sqrt() * fft_size as f64);
+        let y: Vec<f64> = result_complex[..n_points_requested]
+            .iter()
+            .map(|c| (c.re * norm_factor).max(0.0))  // Ensure non-negative
+            .collect();
+
+        // Create x values
+        let x: Vec<f64> = (0..n_points_requested)
+            .map(|i| from + i as f64 * (range / (n_points_requested - 1) as f64))
+            .collect();
+
+        Ok(DensityResult {
+            x,
+            y,
+            bw,
+            n,
+            kernel,
+        })
     }
 
-    // Step 2: Create kernel weights on the grid
-    // For Gaussian: K(u) = exp(-u²/2) / sqrt(2π)
-    let mut kernel_weights = vec![0.0f64; n_points * 2];
-    let half = n_points;
-    for i in 0..n_points {
-        let u = (i as f64 * step) / bw;
-        kernel_weights[i] = (-0.5 * u * u).exp();
+    // Fallback for when spectral-analysis feature is disabled but use_fft was somehow true
+    // This shouldn't happen due to the cfg above, but satisfies the compiler
+    #[cfg(not(feature = "spectral-analysis"))]
+    {
+        unreachable!("FFT path should not be reached without spectral-analysis feature")
     }
-    // Mirror for negative side (wrap-around for circular convolution)
-    for i in 1..n_points {
-        kernel_weights[n_points * 2 - i] = kernel_weights[i];
-    }
-
-    // Step 3: FFT both signals
-    let fft_size = n_points * 2;
-    let mut planner = FftPlanner::<f64>::new();
-    let fft = planner.plan_fft_forward(fft_size);
-    let ifft = planner.plan_fft_inverse(fft_size);
-
-    let mut binned_complex: Vec<Complex<f64>> = binned.iter()
-        .map(|&x| Complex::new(x, 0.0))
-        .collect();
-    let mut kernel_complex: Vec<Complex<f64>> = kernel_weights.iter()
-        .map(|&x| Complex::new(x, 0.0))
-        .collect();
-
-    fft.process(&mut binned_complex);
-    fft.process(&mut kernel_complex);
-
-    // Step 4: Multiply in frequency domain
-    let mut result_complex: Vec<Complex<f64>> = binned_complex.iter()
-        .zip(kernel_complex.iter())
-        .map(|(a, b)| a * b)
-        .collect();
-
-    // Step 5: Inverse FFT
-    ifft.process(&mut result_complex);
-
-    // Step 6: Extract and normalize the density values
-    let norm_factor = 1.0 / (n as f64 * bw * (2.0 * std::f64::consts::PI).sqrt() * fft_size as f64);
-    let y: Vec<f64> = result_complex[..n_points_requested]
-        .iter()
-        .map(|c| (c.re * norm_factor).max(0.0))  // Ensure non-negative
-        .collect();
-
-    // Create x values
-    let x: Vec<f64> = (0..n_points_requested)
-        .map(|i| from + i as f64 * (range / (n_points_requested - 1) as f64))
-        .collect();
-
-    Ok(DensityResult {
-        x,
-        y,
-        bw,
-        n,
-        kernel,
-    })
 }
 
 /// Direct density computation for small datasets or non-Gaussian kernels.

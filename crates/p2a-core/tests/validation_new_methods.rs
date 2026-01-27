@@ -167,7 +167,6 @@ fn test_zip_vs_r() {
     println!("  count model intercept: {:.4}", result.count_coefficients[0]);
     println!("  count model x: {:.4}", result.count_coefficients[1]);
     println!("  zero model intercept: {:.4}", result.zero_coefficients[0]);
-    println!("  predicted zeros: {:.1}", result.predicted_zeros);
     println!("  log-likelihood: {:.4}", result.log_likelihood);
     println!("  converged: {} (iterations: {})", result.converged, result.iterations);
 }

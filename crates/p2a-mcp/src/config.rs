@@ -71,6 +71,14 @@ pub struct CliArgs {
     #[cfg(feature = "db")]
     #[arg(long, env = "P2A_DB_PATH")]
     pub db_path: Option<String>,
+
+    /// Enable audit logging for tool calls
+    #[arg(long, env = "P2A_AUDIT_LOG")]
+    pub audit_log: bool,
+
+    /// Path to audit log file (defaults to p2a-audit.log in current directory)
+    #[arg(long, env = "P2A_AUDIT_PATH")]
+    pub audit_path: Option<String>,
 }
 
 /// Server configuration derived from CLI args and environment.
@@ -82,6 +90,7 @@ pub struct ServerConfig {
     pub session: SessionConfig,
     #[cfg(feature = "auth")]
     pub auth: AuthConfig,
+    pub audit: AuditConfig,
 }
 
 /// HTTP transport configuration.
@@ -111,6 +120,15 @@ pub struct AuthConfig {
     pub jwt_secret: Option<String>,
 }
 
+/// Audit logging configuration.
+#[derive(Debug, Clone)]
+pub struct AuditConfig {
+    /// Whether audit logging is enabled
+    pub enabled: bool,
+    /// Path to the audit log file
+    pub path: String,
+}
+
 impl ServerConfig {
     /// Create configuration from CLI arguments.
     pub fn from_args(args: CliArgs) -> Self {
@@ -134,6 +152,10 @@ impl ServerConfig {
             auth: AuthConfig {
                 enabled: args.auth_enabled,
                 jwt_secret: args.jwt_secret,
+            },
+            audit: AuditConfig {
+                enabled: args.audit_log,
+                path: args.audit_path.unwrap_or_else(|| "p2a-audit.log".to_string()),
             },
         }
     }
@@ -159,6 +181,10 @@ impl Default for ServerConfig {
             auth: AuthConfig {
                 enabled: false,
                 jwt_secret: None,
+            },
+            audit: AuditConfig {
+                enabled: false,
+                path: "p2a-audit.log".to_string(),
             },
         }
     }

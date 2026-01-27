@@ -253,6 +253,11 @@ fn kolmogorov_p_value(d: f64) -> f64 {
     if d <= 0.0 {
         return 1.0;
     }
+    // For very small d, the asymptotic formula is numerically unstable
+    // and the p-value is effectively 1.0
+    if d < 0.1 {
+        return 1.0;
+    }
     if d >= 2.0 {
         return 0.0;
     }

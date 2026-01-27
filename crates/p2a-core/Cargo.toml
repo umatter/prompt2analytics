@@ -9,7 +9,16 @@ rust-version.workspace = true
 repository.workspace = true
 keywords = ["econometrics", "statistics", "regression", "panel-data", "machine-learning"]
 categories = ["science", "mathematics"]
-readme = "../../README.md"
+readme = "README.md"
+
+[features]
+default = ["full"]
+full = ["visualization", "forecasting", "file-formats", "database", "spectral-analysis"]
+visualization = ["dep:plotters", "dep:plotlars", "dep:image", "dep:base64"]
+forecasting = ["dep:arima", "dep:augurs-core", "dep:augurs-mstl", "dep:augurs-ets", "dep:stlrs"]
+file-formats = ["dep:calamine"]
+database = ["dep:rusqlite", "dep:duckdb"]
+spectral-analysis = ["dep:rustfft"]
 
 [dependencies]
 # DataFrame and data manipulation
@@ -33,27 +42,27 @@ regex.workspace = true
 # SIMD-optimized string operations
 bytecount.workspace = true
 
-# Time series forecasting
-arima.workspace = true
-augurs-core.workspace = true
-augurs-mstl.workspace = true
-augurs-ets.workspace = true
-stlrs.workspace = true
+# Time series forecasting (optional - enable with "forecasting" feature)
+arima = { workspace = true, optional = true }
+augurs-core = { workspace = true, optional = true }
+augurs-mstl = { workspace = true, optional = true }
+augurs-ets = { workspace = true, optional = true }
+stlrs = { workspace = true, optional = true }
 rand.workspace = true
 rand_distr.workspace = true
 
-# File format support
-calamine.workspace = true
+# File format support (optional - enable with "file-formats" feature)
+calamine = { workspace = true, optional = true }
 
-# Database connectivity
-rusqlite.workspace = true
-duckdb.workspace = true
+# Database connectivity (optional - enable with "database" feature)
+rusqlite = { workspace = true, optional = true }
+duckdb = { workspace = true, optional = true }
 
-# Visualization
-plotters.workspace = true
-plotlars.workspace = true
-image.workspace = true
-base64.workspace = true
+# Visualization (optional - enable with "visualization" feature)
+plotters = { workspace = true, optional = true }
+plotlars = { workspace = true, optional = true }
+image = { workspace = true, optional = true }
+base64 = { workspace = true, optional = true }
 
 # Serialization
 serde.workspace = true
@@ -69,8 +78,8 @@ tracing.workspace = true
 # Quadratic programming solver
 quadprog.workspace = true
 
-# FFT for spectral analysis
-rustfft.workspace = true
+# FFT for spectral analysis (optional - enable with "spectral-analysis" feature)
+rustfft = { workspace = true, optional = true }
 
 # Session management
 chrono = { version = "0.4", features = ["serde"] }
@@ -147,3 +156,30 @@ harness = false
 [[bench]]
 name = "clustering_benchmarks"
 harness = false
+
+# Examples
+[[example]]
+name = "ols_regression"
+
+[[example]]
+name = "panel_data"
+
+[[example]]
+name = "clustering"
+
+[[example]]
+name = "time_series"
+required-features = ["forecasting"]
+
+[[example]]
+name = "hw_compare"
+required-features = ["forecasting"]
+
+[[example]]
+name = "bench_batch2"
+
+[[example]]
+name = "bench_batch3"
+
+[[example]]
+name = "hdbscan_bench"

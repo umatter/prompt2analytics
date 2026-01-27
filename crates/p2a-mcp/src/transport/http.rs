@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 
+use crate::audit::AuditLogger;
 use crate::config::ServerConfig;
 use crate::server::AnalyticsServer;
 use crate::session::{SessionError, SessionInfo, SessionManager};
@@ -31,6 +32,8 @@ pub struct AppState {
     /// Persistent session manager for database operations (optional)
     #[cfg(feature = "db")]
     pub persistent_manager: Option<Arc<crate::persistent_session::PersistentSessionManager>>,
+    /// Audit logger for tool call logging
+    pub audit_logger: Arc<AuditLogger>,
 }
 
 /// Start the HTTP transport.
@@ -41,6 +44,15 @@ pub async fn start_http_transport(config: &ServerConfig) -> TransportResult<()> 
     session_manager.clone().start_cleanup_task(10);
 
     let server = Arc::new(AnalyticsServer::new());
+
+    // Create audit logger
+    let audit_logger = Arc::new(match AuditLogger::new(&config.audit) {
+        Ok(logger) => logger,
+        Err(e) => {
+            tracing::warn!("Failed to initialize audit logger: {}", e);
+            AuditLogger::disabled()
+        }
+    });
 
     // Create persistent session manager if db feature is enabled
     #[cfg(feature = "db")]
@@ -69,12 +81,14 @@ pub async fn start_http_transport(config: &ServerConfig) -> TransportResult<()> 
         server,
         session_manager,
         persistent_manager: persistent_manager.clone(),
+        audit_logger,
     };
 
     #[cfg(not(feature = "db"))]
     let state = AppState {
         server,
         session_manager,
+        audit_logger,
     };
 
     #[cfg(feature = "db")]
@@ -503,26 +517,44 @@ async fn call_tool(
         }
     };
 
-    // Execute the tool with session context
-    match state.server.call_tool_with_session(&name, request.arguments.clone(), &session).await {
+    // Execute the tool with session context and timing
+    let start = std::time::Instant::now();
+    let tool_result = state.server.call_tool_with_session(&name, request.arguments.clone(), &session).await;
+    let duration_ms = start.elapsed().as_millis() as u64;
+
+    match tool_result {
         Ok(result) => {
+            // Extract text content from result for logging
+            let result_text: String = result
+                .content
+                .iter()
+                .filter_map(|item| match item {
+                    ContentItem::Text { text } => Some(text.clone()),
+                    ContentItem::Image { .. } => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+
+            // Audit logging (if enabled)
+            if state.audit_logger.is_enabled() {
+                let entry = AuditLogger::create_entry(
+                    &request.session_id,
+                    &name,
+                    &request.arguments,
+                    result.success,
+                    duration_ms,
+                    &result_text,
+                    None, // Client IP would require extracting from request headers
+                );
+                state.audit_logger.log(entry).await;
+            }
+
             // Capture dataset metadata for load_dataset, upload_dataset, and create_dataset
             #[cfg(feature = "db")]
             if (name == "load_dataset" || name == "upload_dataset" || name == "create_dataset")
                 && result.success
             {
                 if let Some(ref persistent_manager) = state.persistent_manager {
-                    // Extract text content from result
-                    let result_text: String = result
-                        .content
-                        .iter()
-                        .filter_map(|item| match item {
-                            ContentItem::Text { text } => Some(text.clone()),
-                            ContentItem::Image { .. } => None,
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n");
-
                     tracing::info!(
                         tool = %name,
                         session_id = %request.session_id,
@@ -545,10 +577,26 @@ async fn call_tool(
 
             (StatusCode::OK, Json(ApiResponse::success(result)))
         }
-        Err(e) => (
-            StatusCode::BAD_REQUEST,
-            Json(ApiResponse::error(e)),
-        ),
+        Err(e) => {
+            // Audit log for failures
+            if state.audit_logger.is_enabled() {
+                let entry = AuditLogger::create_entry(
+                    &request.session_id,
+                    &name,
+                    &request.arguments,
+                    false,
+                    duration_ms,
+                    &e,
+                    None,
+                );
+                state.audit_logger.log(entry).await;
+            }
+
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::error(e)),
+            )
+        }
     }
 }
 

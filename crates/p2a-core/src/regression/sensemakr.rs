@@ -769,9 +769,9 @@ mod tests {
     /// Test partial R² calculation matches formula.
     #[test]
     fn test_partial_r2() {
-        // t = 3.0, df = 100 -> R² = 9 / (9 + 100) = 0.0826
+        // t = 3.0, df = 100 -> R² = 9 / (9 + 100) = 9/109 ≈ 0.08257
         let r2 = partial_r2(3.0, 100.0);
-        assert!((r2 - 0.0826446).abs() < 1e-5);
+        assert!((r2 - 0.0825688).abs() < 1e-5);
 
         // t = 0 -> R² = 0
         let r2_zero = partial_r2(0.0, 100.0);

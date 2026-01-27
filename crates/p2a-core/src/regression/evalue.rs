@@ -815,10 +815,12 @@ pub fn bounding_factor(rr_eu: f64, rr_ud: f64) -> f64 {
 /// let ev = evalue_rr(3.9);  // E-value = 7.26
 ///
 /// // Could a confounder with RR=3 for both associations explain this?
+/// // B = 9/5 = 1.8 < 7.26, so no
 /// assert!(!could_explain_away(ev, 3.0, 3.0));
 ///
-/// // Could a confounder with RR=8 for both associations explain this?
-/// assert!(could_explain_away(ev, 8.0, 8.0));
+/// // Could a confounder with RR=15 for both associations explain this?
+/// // B = 225/29 = 7.76 > 7.26, so yes
+/// assert!(could_explain_away(ev, 15.0, 15.0));
 /// ```
 pub fn could_explain_away(observed_evalue: f64, rr_eu: f64, rr_ud: f64) -> bool {
     let b = bounding_factor(rr_eu, rr_ud);
@@ -1025,10 +1027,12 @@ mod tests {
         let ev = evalue_rr(3.9); // E-value = 7.26
 
         // Weak confounder cannot explain
+        // B(3,3) = 9/5 = 1.8 < 7.26
         assert!(!could_explain_away(ev, 3.0, 3.0));
 
         // Strong confounder can explain
-        assert!(could_explain_away(ev, 10.0, 10.0));
+        // B(15,15) = 225/29 = 7.76 > 7.26
+        assert!(could_explain_away(ev, 15.0, 15.0));
     }
 
     /// Test edge cases.

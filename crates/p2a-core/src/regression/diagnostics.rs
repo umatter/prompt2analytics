@@ -1351,10 +1351,15 @@ pub fn wald_test(
     let df2 = n - k_u; // residual df in unrestricted model
 
     // Compute test statistic and p-value
+    // Note: In theory, RSS_r >= RSS_u (restricted has at least as much error).
+    // In practice, numerical issues can cause RSS_r < RSS_u, especially with
+    // multicollinear data. We clamp to ensure non-negative statistics.
+    let rss_diff = (rss_r - rss_u).max(0.0);
+
     let (statistic, p_value, test_type, df2_opt) = if use_f_test {
         // F = ((RSS_r - RSS_u) / q) / (RSS_u / (n - k_u))
         let f_stat = if rss_u > 0.0 && df2 > 0 {
-            ((rss_r - rss_u) / df1 as f64) / (rss_u / df2 as f64)
+            (rss_diff / df1 as f64) / (rss_u / df2 as f64)
         } else {
             0.0
         };
@@ -1363,7 +1368,7 @@ pub fn wald_test(
     } else {
         // Chi-sq = n * (RSS_r - RSS_u) / RSS_u
         let chi_stat = if rss_u > 0.0 {
-            (n as f64) * (rss_r - rss_u) / rss_u
+            (n as f64) * rss_diff / rss_u
         } else {
             0.0
         };
