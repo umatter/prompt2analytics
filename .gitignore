@@ -64,3 +64,9 @@ paper/_resources/review_reports/
 **/target/
 **/target/
 paper/code/rust_validation/datasets/synthetic_*.csv
+**/target/
+paper/code/rust_validation/datasets/synthetic_*.csv
+paper/_resources/
+paper/figures/test.pdf
+paper/code/paper/
+review_reports/
