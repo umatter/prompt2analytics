@@ -110,6 +110,8 @@ When implementing a new method:
 | Hausman Test | [hausman.md](econometrics/hausman.md) | Pending |
 | IV/2SLS | [iv_2sls.md](econometrics/iv_2sls.md) | Pending |
 | Diff-in-Diff | [did.md](econometrics/did.md) | Pending |
+| Regression Discontinuity (Sharp) | [rd.md](econometrics/rd.md) | Pending |
+| Regression Discontinuity (Fuzzy) | [rd.md](econometrics/rd.md) | Pending |
 | IPW Treatment Effects | [treatment_ipw.md](econometrics/treatment_ipw.md) | Pending |
 | Doubly Robust (AIPW) | [treatment_aipw.md](econometrics/treatment_aipw.md) | Pending |
 | TMLE | [tmle.md](econometrics/tmle.md) | **Complete** |

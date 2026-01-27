@@ -1,9 +1,10 @@
 # MCP Tool Usage Examples
 
-This guide provides usage examples for all 55 MCP tools available in prompt2analytics.
+This guide provides usage examples for MCP tools available in prompt2analytics (60+ tools).
 
 ## Table of Contents
 - [Data Management](#data-management)
+- [Data Quality & Cleaning](#data-quality--cleaning)
 - [Descriptive Statistics](#descriptive-statistics)
 - [ANOVA (Analysis of Variance)](#anova-analysis-of-variance)
 - [Regression Analysis](#regression-analysis)
@@ -66,6 +67,100 @@ Preview the first N rows of a dataset.
 
 ```
 /head_dataset dataset:mydata n:10
+```
+
+---
+
+## Data Quality & Cleaning
+
+Tools for LLM-assisted data cleaning with preview, verification, and rollback support.
+
+### data_quality_profile
+Generate a comprehensive quality profile for a dataset.
+
+```
+/data_quality_profile dataset:mydata
+/data_quality_profile dataset:mydata columns:name,age,salary
+```
+
+**Output includes:**
+- Missing value counts and percentages per column
+- Unique value counts
+- Data type information
+- Potential issues (leading/trailing whitespace, inconsistent casing)
+- Suggested cleaning operations
+
+### preview_cleaning
+Preview the effect of a cleaning operation without applying it.
+
+```
+/preview_cleaning dataset:mydata operation:trim column:name
+/preview_cleaning dataset:mydata operation:lowercase column:category sample_size:10
+/preview_cleaning dataset:mydata operation:fill_missing column:age fill_value:0
+```
+
+**Operations:**
+- `trim`: Remove leading/trailing whitespace
+- `lowercase` / `uppercase`: Case normalization
+- `fill_missing`: Fill missing values with specified value
+- `drop_missing`: Remove rows with missing values in column
+- `replace`: Replace specific values
+
+**Output includes:**
+- Before/after samples
+- Number of rows affected
+- Preview of changes
+
+### cleaning_session_start
+Start a new cleaning session for a dataset with checkpoint/rollback support.
+
+```
+/cleaning_session_start dataset:mydata
+```
+
+**Returns:** Session ID to use with other cleaning session tools
+
+### cleaning_session_apply
+Apply a cleaning operation within a session (creates checkpoint).
+
+```
+/cleaning_session_apply session_id:abc123 operation:trim column:name
+/cleaning_session_apply session_id:abc123 operation:fill_missing column:age fill_value:0
+```
+
+**Note:** Each operation creates a checkpoint that can be rolled back.
+
+### cleaning_session_status
+Check the current status of a cleaning session.
+
+```
+/cleaning_session_status session_id:abc123
+```
+
+**Output includes:**
+- Number of operations applied
+- Current checkpoint count
+- Dataset shape before/after
+
+### cleaning_session_checkpoints
+List all checkpoints in a cleaning session.
+
+```
+/cleaning_session_checkpoints session_id:abc123
+```
+
+### cleaning_rollback
+Rollback to a specific checkpoint in the session.
+
+```
+/cleaning_rollback session_id:abc123 checkpoint:2
+```
+
+### list_cleaning_sessions
+List all active cleaning sessions.
+
+```
+/list_cleaning_sessions
 ```
 
 ---
@@ -597,6 +692,73 @@ Difference-in-Differences estimation.
 **Interpretation:**
 - ATT = (Treated_Post - Treated_Pre) - (Control_Post - Control_Pre)
 - Assumes parallel trends: without treatment, both groups would have same trend
+
+### rd_estimate
+Sharp Regression Discontinuity estimation with robust bias-corrected inference.
+
+```
+/rd_estimate dataset:mydata y:test_score running:age cutoff:65
+/rd_estimate dataset:mydata y:outcome running:score cutoff:0 bandwidth:5 kernel:triangular
+/rd_estimate dataset:mydata y:earnings running:age cutoff:65 polynomial:1 level:0.95
+```
+
+**Parameters:**
+- `dataset` (required): Dataset name
+- `y` (required): Outcome variable
+- `running` (required): Running/forcing variable
+- `cutoff` (required): Cutoff value for treatment assignment
+- `bandwidth` (optional): Main bandwidth (auto-selected if not specified)
+- `kernel` (optional): Kernel function (`triangular`, `epanechnikov`, `uniform`)
+- `polynomial` (optional): Polynomial order (default: 1 for local linear)
+- `level` (optional): Confidence level (default: 0.95)
+
+**Output includes:**
+- Conventional, bias-corrected, and robust treatment effect estimates
+- Standard errors and confidence intervals
+- Effective sample sizes left/right of cutoff
+- Bandwidth values (main and bias)
+
+### rd_bw
+Bandwidth selection for Regression Discontinuity.
+
+```
+/rd_bw dataset:mydata y:outcome running:score cutoff:0
+/rd_bw dataset:mydata y:outcome running:score cutoff:0 method:mserd
+```
+
+**Parameters:**
+- `method` (optional): Bandwidth selection method
+  - `mserd` (default): MSE-optimal for RD estimate
+  - `msetwo`: MSE-optimal, two bandwidths
+  - `cerrd`: Coverage error rate optimal
+  - `certwo`: CER optimal, two bandwidths
+
+**Output includes:**
+- Optimal bandwidth(s)
+- Number of observations within bandwidth
+
+### rd_fuzzy
+Fuzzy Regression Discontinuity (LATE estimation via Wald estimator).
+
+```
+/rd_fuzzy dataset:mydata y:earnings treatment:enrolled running:score cutoff:50
+/rd_fuzzy dataset:mydata y:wage treatment:trained running:test_score cutoff:70 bandwidth:10
+```
+
+**Parameters:**
+- `treatment` (required): Actual treatment received (binary)
+- Other parameters same as `rd_estimate`
+
+**Output includes:**
+- LATE (Local Average Treatment Effect) estimate
+- First-stage discontinuity in treatment
+- First-stage F-statistic (instrument strength)
+- Reduced-form and first-stage details
+
+**Interpretation:**
+- Fuzzy RD estimates LATE: effect for compliers at the cutoff
+- Requires treatment probability to change discontinuously at cutoff
+- First-stage F > 10 indicates strong instrument
 
 ---
 

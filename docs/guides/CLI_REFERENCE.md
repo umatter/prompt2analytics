@@ -114,9 +114,25 @@ p2a causal did <DATASET> -y <DEP_VAR> --treat <TREAT_COL> --post <POST_COL>
 p2a causal synth <DATASET> -y <OUTCOME> --unit <UNIT_COL> --time <TIME_COL> \
     --treated <TREATED_UNIT> --treatment-time <TIME> -p <PREDICTORS...> \
     [--v-method <METHOD>] [--placebos]
+
+# Regression Discontinuity (Sharp RD)
+p2a causal rd <DATASET> -y <DEP_VAR> --running <RUNNING_VAR> --cutoff <CUTOFF> \
+    [--bandwidth <H>] [--kernel <TYPE>] [--polynomial <P>]
+
+# Regression Discontinuity (Fuzzy RD)
+p2a causal rd-fuzzy <DATASET> -y <DEP_VAR> --treatment <TREAT_VAR> --running <RUNNING_VAR> \
+    --cutoff <CUTOFF> [--bandwidth <H>] [--kernel <TYPE>]
+
+# RD Bandwidth Selection
+p2a causal rd-bw <DATASET> -y <DEP_VAR> --running <RUNNING_VAR> --cutoff <CUTOFF> \
+    [--method <METHOD>]
 ```
 
 **V-method options:** `datadriven` (default), `equal`
+
+**RD kernel types:** `triangular` (default), `epanechnikov`, `uniform`
+
+**RD bandwidth methods:** `mserd` (default), `msetwo`, `cerrd`, `certwo`
 
 **Examples:**
 ```bash
@@ -133,6 +149,15 @@ p2a causal synth smoking -y cigsale --unit state --time year --treated Californi
 # Synthetic control with placebo tests for inference
 p2a causal synth mydata -y gdp --unit country --time year --treated Germany \
     --treatment-time 1990 -p exports imports --placebos
+
+# Sharp RD: effect of crossing eligibility threshold
+p2a causal rd mydata -y test_score --running age --cutoff 65 --bandwidth 5
+
+# Fuzzy RD: treatment probability changes at cutoff
+p2a causal rd-fuzzy mydata -y earnings --treatment enrolled --running score --cutoff 50
+
+# Bandwidth selection for RD
+p2a causal rd-bw mydata -y outcome --running running_var --cutoff 0 --method mserd
 ```
 
 ### Discrete Choice Commands
