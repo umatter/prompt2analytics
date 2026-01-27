@@ -48,6 +48,17 @@ impl SignificanceLevel {
             Self::TenthPercent => "***",
         }
     }
+
+    /// Get a short code for this significance level (for CSV export).
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::NotSignificant => "",
+            Self::TenPercent => "p<0.10",
+            Self::FivePercent => "p<0.05",
+            Self::OnePercent => "p<0.01",
+            Self::TenthPercent => "p<0.001",
+        }
+    }
 }
 
 impl std::fmt::Display for SignificanceLevel {

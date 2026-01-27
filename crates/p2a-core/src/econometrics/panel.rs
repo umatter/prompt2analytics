@@ -659,6 +659,16 @@ impl fmt::Display for HausmanResult {
 }
 
 /// Run Hausman specification test comparing Fixed Effects vs Random Effects.
+///
+/// The Hausman test statistic is:
+/// H = (β̂_FE - β̂_RE)' [Var(β̂_FE) - Var(β̂_RE)]⁻¹ (β̂_FE - β̂_RE)
+///
+/// Under H0 (RE is consistent and efficient), H ~ χ²(k).
+///
+/// # References
+/// - Hausman, J.A. (1978). Specification tests in econometrics. Econometrica, 46(6), 1251-1271.
+/// - Cameron, A.C. & Trivedi, P.K. (2005). Microeconometrics: Methods and Applications.
+///   Cambridge University Press, Section 21.4.
 pub fn run_hausman_test(
     dataset: &Dataset,
     y_col: &str,
@@ -678,19 +688,29 @@ pub fn run_hausman_test(
     // Difference in coefficients
     let beta_diff = &beta_fe - &beta_re_no_intercept;
 
-    // For simplicity, use a simpler variance estimate
-    // In practice, you'd compute Var(FE) - Var(RE) and invert it
-    let var_diff: f64 = fe_result.std_errors.iter()
-        .zip(re_result.std_errors[1..].iter())
-        .map(|(&se_fe, &se_re)| (se_fe * se_fe - se_re * se_re).abs())
-        .sum::<f64>() / k as f64;
+    // Construct diagonal variance-covariance matrices from standard errors
+    // Under H0, Var(β̂_FE - β̂_RE) = Var(β̂_FE) - Var(β̂_RE)
+    // Note: This is a simplified formula using diagonal Var matrices
+    let mut var_diff_diag = Array1::zeros(k);
+    for i in 0..k {
+        let var_fe = fe_result.std_errors[i] * fe_result.std_errors[i];
+        let var_re = if i + 1 < re_result.std_errors.len() {
+            re_result.std_errors[i + 1] * re_result.std_errors[i + 1]
+        } else {
+            0.0
+        };
+        // Under H0, Var(FE) - Var(RE) should be positive semi-definite
+        // Use max(0, diff) to handle numerical issues
+        var_diff_diag[i] = (var_fe - var_re).max(1e-10);
+    }
 
-    // Hausman statistic
-    let chi2_statistic = if var_diff > 0.0 {
-        beta_diff.iter().map(|&d| d * d).sum::<f64>() / var_diff
-    } else {
-        0.0
-    };
+    // Hausman statistic: sum of (beta_diff[i]^2 / var_diff[i])
+    // This is the diagonal approximation to the full quadratic form
+    let chi2_statistic: f64 = beta_diff.iter()
+        .zip(var_diff_diag.iter())
+        .map(|(&b, &v)| if v > 1e-10 { b * b / v } else { 0.0 })
+        .sum();
+
     let chi2_statistic = chi2_statistic.max(0.0);
 
     let p_value = chi_squared_p_value(chi2_statistic, k as f64);

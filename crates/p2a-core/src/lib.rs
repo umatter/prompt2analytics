@@ -21,6 +21,7 @@ pub mod ml;
 pub mod visualization;
 pub mod reports;
 pub mod simulation;
+pub mod export;
 
 // Re-export foundational types
 pub use errors::{EconError, EconResult, EstimationWarning};
@@ -297,6 +298,19 @@ pub use econometrics::{
     run_sar_probit, run_sem_probit,
     // Spatial GMM with Heteroscedasticity-Robust Estimation (sphet package)
     SphetModel, SphetSE, SphetConfig, SphetResult, run_sphet, sphet,
+    // Spatial Panel Data Models (splm package)
+    SpatialPanelEffect, SpatialPanelModel, SpatialErrorType,
+    SpmlConfig, SpmlResult, run_spml,
+    SpgmMethod, SpgmMoments, SpgmConfig, SpgmResult, run_spgm,
+    // Stable Balancing Weights (SBW)
+    SBWEstimand, SBWConfig, BalanceStats, SBWResult, run_sbw, sbw,
+    // Treatment Effect Heterogeneity Testing (hettx)
+    HetTestStat, EffectEstimationMethod, HetTxConfig,
+    HetDecomposition, EffectSummary, HetTxResult,
+    run_hettx, run_hettx_dataset,
+    // Regression Standardization / G-computation (stdReg)
+    StdRegModel, StdRegEstimand, SEMethod, StdRegConfig,
+    SubgroupEffect, StdRegResult, run_stdreg, stdreg,
     // Balke-Pearl bounds for nonparametric IV
     BPBoundsConfig, CellProbabilities, MarginalProbabilities, BPBoundsResult,
     run_bp_bounds, bp_bounds_from_probs,
@@ -368,6 +382,9 @@ pub use ml::{
     causal_forest, causal_forest_arrays, causal_forest_predict, causal_forest_predict_arrays,
     average_treatment_effect, run_causal_forest,
     CausalForestConfig, CausalForestResult,
+    // BART for Causal Inference (bcf, bartCause)
+    bart_causal, bart_causal_arrays, bart_causal_predict, bart_causal_predict_arrays,
+    run_bart_causal, BartCausalConfig, BartCausalResult,
 };
 pub use visualization::{
     ChartConfig, HistogramResult, ScatterResult, BoxPlotResult, LineChartResult, HeatmapResult,
@@ -381,6 +398,12 @@ pub use reports::{
 };
 pub use simulation::{
     generate_random_data, ColumnSpec, Distribution, GenerationError,
+};
+pub use export::{
+    CsvExport,
+    HtmlTableBuilder, HtmlStyle,
+    LatexTableBuilder, LatexStyle,
+    MarkdownTableBuilder, MarkdownStyle,
 };
 
 /// Re-export polars for downstream use

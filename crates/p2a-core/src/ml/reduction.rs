@@ -1,7 +1,10 @@
 //! Dimensionality reduction: PCA and t-SNE.
 //!
 //! Pure Rust implementations using ndarray.
+//!
+//! PCA uses SVD via faer for O(nm²) complexity instead of power iteration.
 
+use faer::{prelude::*, Mat, MatRef};
 use ndarray::{Array1, Array2, ArrayView2, Axis};
 
 /// PCA (Principal Component Analysis) result.
@@ -100,11 +103,9 @@ pub fn pca(
         row -= &mean;
     }
 
-    // Compute covariance matrix
-    let cov = covariance_matrix(&centered.view());
-
-    // Eigendecomposition using power iteration
-    let (eigenvalues, eigenvectors) = symmetric_eigen(&cov, n_comp)?;
+    // Use SVD for numerical stability and speed
+    // For tall matrices (n >> p), SVD on X is faster than eigendecomp on X'X
+    let (eigenvalues, eigenvectors) = pca_via_svd(&centered.view(), n_comp)?;
 
     // Compute explained variance
     let total_variance: f64 = eigenvalues.iter().take(n_features).sum();
@@ -133,10 +134,60 @@ pub fn pca(
 }
 
 /// Compute covariance matrix (sample covariance, unbiased).
+#[allow(dead_code)]
 fn covariance_matrix(centered: &ArrayView2<f64>) -> Array2<f64> {
     let n = centered.nrows() as f64;
     let cov = centered.t().dot(centered) / (n - 1.0);
     cov
+}
+
+/// PCA via SVD (more numerically stable than eigendecomposition of covariance matrix).
+///
+/// For centered data X, SVD gives X = U * S * V^T
+/// - Principal components = columns of V
+/// - Explained variance = S² / (n - 1)
+/// - Transformed data = U * S
+///
+/// Optimized to compute thin SVD only once, extracting both singular values
+/// and right singular vectors in a single pass.
+fn pca_via_svd(
+    centered: &ArrayView2<f64>,
+    n_components: usize,
+) -> Result<(Array1<f64>, Array2<f64>), String> {
+    let n = centered.nrows();
+    let p = centered.ncols();
+
+    // Convert ndarray to faer Mat
+    let mat: Mat<f64> = Mat::from_fn(n, p, |i, j| centered[[i, j]]);
+
+    // Compute thin SVD - this gives us singular values and right singular vectors
+    let svd = mat.thin_svd().map_err(|e| format!("SVD failed: {:?}", e))?;
+    let v = svd.V();
+
+    // Get singular values from the SVD as a column vector
+    let s_vec = svd.S().column_vector();
+    let n_singular = s_vec.nrows();
+
+    // Number of components we can extract
+    let n_comp = n_components.min(n_singular);
+
+    // Convert singular values to explained variance
+    // Variance = s² / (n - 1)
+    let n_minus_1 = (n - 1) as f64;
+    let mut eigenvalues = Array1::zeros(n_comp);
+    for i in 0..n_comp {
+        eigenvalues[i] = s_vec[i].powi(2) / n_minus_1;
+    }
+
+    // Convert V to ndarray (principal components as columns)
+    let mut eigenvectors = Array2::zeros((p, n_comp));
+    for j in 0..n_comp {
+        for i in 0..p {
+            eigenvectors[[i, j]] = v[(i, j)];
+        }
+    }
+
+    Ok((eigenvalues, eigenvectors))
 }
 
 /// Symmetric eigendecomposition using power iteration with deflation.

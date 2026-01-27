@@ -125,6 +125,8 @@ pub struct DiscreteResult {
     pub n_positive: usize,
     /// Marginal effects at the mean
     pub marginal_effects: Vec<f64>,
+    /// Any warnings generated during estimation
+    pub warnings: Vec<String>,
 }
 
 impl fmt::Display for DiscreteResult {
@@ -164,6 +166,14 @@ impl fmt::Display for DiscreteResult {
         writeln!(f)?;
         writeln!(f, "Signif. codes: 0 '***' 0.001 '**' 0.01 '*' 0.05 '†' 0.1")?;
 
+        if !self.warnings.is_empty() {
+            writeln!(f)?;
+            writeln!(f, "Warnings:")?;
+            for w in &self.warnings {
+                writeln!(f, "  - {}", w)?;
+            }
+        }
+
         Ok(())
     }
 }
@@ -175,8 +185,16 @@ pub struct MleSettings {
     pub max_iter: usize,
     /// Convergence tolerance (for gradient norm)
     pub tolerance: f64,
-    /// Step size dampening factor (0 < α ≤ 1)
+    /// Initial step size (will be reduced by line search if needed)
     pub step_size: f64,
+    /// Use backtracking line search (Armijo rule) for step size
+    pub use_line_search: bool,
+    /// Armijo condition parameter (typically 1e-4)
+    pub armijo_c: f64,
+    /// Step reduction factor for line search (typically 0.5)
+    pub step_reduction: f64,
+    /// Maximum line search iterations
+    pub max_line_search: usize,
 }
 
 impl Default for MleSettings {
@@ -185,6 +203,10 @@ impl Default for MleSettings {
             max_iter: 100,
             tolerance: 1e-8,
             step_size: 1.0,
+            use_line_search: true,
+            armijo_c: 1e-4,
+            step_reduction: 0.5,
+            max_line_search: 20,
         }
     }
 }
@@ -223,6 +245,76 @@ pub fn run_probit(
     run_discrete_model(dataset, y_col, x_cols, DiscreteModelType::Probit, MleSettings::default())
 }
 
+/// Detect perfect or quasi-complete separation in binary outcome models.
+///
+/// Perfect separation occurs when a predictor perfectly predicts the outcome:
+/// - All observations with x > c have y = 1 (or y = 0)
+/// - All observations with x <= c have y = 0 (or y = 1)
+///
+/// This causes MLE to diverge because the likelihood can be increased
+/// infinitely by making the coefficient larger.
+///
+/// # Returns
+/// - `Ok(())` if no separation detected
+/// - `Err(PerfectSeparation)` if perfect separation found
+/// - `Ok(())` with warnings for quasi-separation
+fn detect_separation(
+    x: &Array2<f64>,
+    y: &Array1<f64>,
+    var_names: &[String],
+) -> EconResult<Vec<String>> {
+    let n = y.len();
+    let k = x.ncols();
+    let mut perfect_sep_vars = Vec::new();
+    let mut quasi_sep_vars = Vec::new();
+
+    // Skip intercept column (index 0) since it can't cause separation
+    for j in 1..k {
+        let col = x.column(j);
+
+        // Check for perfect separation: does this variable perfectly separate y=0 from y=1?
+        // Group observations by y value
+        let (mut x_when_y0, mut x_when_y1) = (Vec::new(), Vec::new());
+        for i in 0..n {
+            if y[i] < 0.5 {
+                x_when_y0.push(col[i]);
+            } else {
+                x_when_y1.push(col[i]);
+            }
+        }
+
+        if x_when_y0.is_empty() || x_when_y1.is_empty() {
+            continue;
+        }
+
+        // Find min/max for each group
+        let min_y0 = x_when_y0.iter().cloned().fold(f64::INFINITY, f64::min);
+        let max_y0 = x_when_y0.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let min_y1 = x_when_y1.iter().cloned().fold(f64::INFINITY, f64::min);
+        let max_y1 = x_when_y1.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+
+        // Perfect separation: ranges don't overlap
+        // Either all y=1 values are strictly greater than all y=0 values, or vice versa
+        if max_y0 < min_y1 || max_y1 < min_y0 {
+            perfect_sep_vars.push(var_names[j].clone());
+        }
+        // Quasi-separation: ranges barely overlap (touch at single point)
+        else if (max_y0 - min_y1).abs() < 1e-10 || (max_y1 - min_y0).abs() < 1e-10 {
+            quasi_sep_vars.push(var_names[j].clone());
+        }
+    }
+
+    // Return error for perfect separation
+    if !perfect_sep_vars.is_empty() {
+        return Err(EconError::PerfectSeparation {
+            variables: perfect_sep_vars,
+        });
+    }
+
+    // Return warnings for quasi-separation
+    Ok(quasi_sep_vars)
+}
+
 /// Run a discrete choice model (Logit or Probit) with custom settings.
 pub fn run_discrete_model(
     dataset: &Dataset,
@@ -256,6 +348,9 @@ pub fn run_discrete_model(
     let n = y.len();
     let k = x.ncols();
 
+    // Check for perfect separation before MLE
+    let quasi_sep_warnings = detect_separation(&x, &y, &var_names)?;
+
     // Link function and its derivative based on model type
     let (link_fn, link_pdf): (fn(f64) -> f64, fn(f64) -> f64) = match model_type {
         DiscreteModelType::Logit => (logistic_cdf, logistic_pdf),
@@ -268,6 +363,13 @@ pub fn run_discrete_model(
     // Newton-Raphson iteration
     let mut iterations = 0;
     let mut converged = false;
+    let mut multivariate_sep_warnings: Vec<String> = Vec::new();
+
+    // Track coefficient growth for multivariate separation detection
+    let mut prev_beta_norm: Option<f64> = None;
+    let mut consecutive_growth = 0;
+    const COEFFICIENT_THRESHOLD: f64 = 10.0; // Warn when |beta| exceeds this
+    const GROWTH_THRESHOLD: usize = 5; // Consecutive iterations of growth
 
     for iter in 0..settings.max_iter {
         iterations = iter + 1;
@@ -281,14 +383,9 @@ pub fn run_discrete_model(
         // Clip probabilities to avoid log(0)
         let p_clipped: Array1<f64> = p.mapv(|pi| pi.max(1e-10).min(1.0 - 1e-10));
 
-        // Compute gradient: g = X'(y - p)
+        // Compute gradient: g = X'(y - p) (vectorized)
         let residuals = &y - &p_clipped;
-        let mut gradient = Array1::zeros(k);
-        for i in 0..n {
-            for j in 0..k {
-                gradient[j] += residuals[i] * x[[i, j]];
-            }
-        }
+        let gradient = x.t().dot(&residuals);
 
         // Check convergence
         let grad_norm: f64 = gradient.iter().map(|g| g * g).sum::<f64>().sqrt();
@@ -317,16 +414,17 @@ pub fn run_discrete_model(
             }
         };
 
-        // Compute Hessian: H = -X' W X
-        let mut hessian: Array2<f64> = Array2::zeros((k, k));
+        // Compute Hessian: H = -X' W X (vectorized)
+        // Create weighted X: each row i of X scaled by sqrt(w_i)
+        let mut wx = x.clone();
         for i in 0..n {
-            let wi = weights[i];
+            let sqrt_wi = weights[i].sqrt();
             for j in 0..k {
-                for l in 0..k {
-                    hessian[[j, l]] -= wi * x[[i, j]] * x[[i, l]];
-                }
+                wx[[i, j]] *= sqrt_wi;
             }
         }
+        // H = -(WX)^T * (WX) = -X' * diag(W) * X
+        let hessian = -wx.t().dot(&wx);
 
         // Invert negative Hessian: (-H)^{-1}
         let neg_hessian = &hessian * -1.0;
@@ -336,9 +434,73 @@ pub fn run_discrete_model(
                 suggestion: format!("Try different starting values or check for separation: {:?}", e),
             })?;
 
-        // Newton-Raphson update: β ← β + α * H^{-1} g
+        // Newton-Raphson update with optional backtracking line search
         let delta = hess_inv.dot(&gradient);
-        beta = &beta + &(&delta * settings.step_size);
+
+        if settings.use_line_search {
+            // Backtracking line search (Armijo rule)
+            // Find α such that f(β + α*Δ) ≤ f(β) + c*α*∇f'*Δ
+            let current_ll = compute_log_likelihood(&y, &p_clipped);
+            let descent_direction = gradient.dot(&delta); // Should be positive
+
+            let mut alpha = settings.step_size;
+            let mut found = false;
+
+            for _ in 0..settings.max_line_search {
+                let beta_new = &beta + &(&delta * alpha);
+                let z_new: Array1<f64> = x.dot(&beta_new);
+                let p_new: Array1<f64> = z_new.mapv(link_fn)
+                    .mapv(|pi| pi.max(1e-10).min(1.0 - 1e-10));
+                let new_ll = compute_log_likelihood(&y, &p_new);
+
+                // Armijo condition: new_ll >= current_ll + c * alpha * descent
+                // (log-likelihood is being maximized, so we want increase)
+                if new_ll >= current_ll + settings.armijo_c * alpha * descent_direction {
+                    found = true;
+                    break;
+                }
+                alpha *= settings.step_reduction;
+            }
+
+            // If line search failed, use a small step anyway
+            if !found {
+                alpha = 0.01;
+            }
+
+            beta = &beta + &(&delta * alpha);
+        } else {
+            // Fixed step size (original behavior)
+            beta = &beta + &(&delta * settings.step_size);
+        }
+
+        // Multivariate separation detection: monitor coefficient growth
+        let beta_norm: f64 = beta.iter().map(|b| b * b).sum::<f64>().sqrt();
+
+        // Check for rapidly growing coefficients
+        if let Some(prev_norm) = prev_beta_norm {
+            if beta_norm > prev_norm * 1.5 && beta_norm > COEFFICIENT_THRESHOLD {
+                consecutive_growth += 1;
+                if consecutive_growth >= GROWTH_THRESHOLD && multivariate_sep_warnings.is_empty() {
+                    // Identify which coefficients are exploding
+                    for (i, &b) in beta.iter().enumerate() {
+                        if b.abs() > COEFFICIENT_THRESHOLD {
+                            multivariate_sep_warnings.push(format!(
+                                "Possible multivariate separation: coefficient for '{}' is large ({:.2}) and growing rapidly",
+                                var_names[i], b
+                            ));
+                        }
+                    }
+                    if multivariate_sep_warnings.is_empty() {
+                        multivariate_sep_warnings.push(
+                            "Possible multivariate separation: coefficients growing rapidly".to_string()
+                        );
+                    }
+                }
+            } else {
+                consecutive_growth = 0;
+            }
+        }
+        prev_beta_norm = Some(beta_norm);
     }
 
     // Final linear predictor and probabilities
@@ -432,6 +594,17 @@ pub fn run_discrete_model(
         .map(|&b| b * pdf_at_mean)
         .collect();
 
+    // Build warnings list
+    let mut warnings = Vec::new();
+    if !quasi_sep_warnings.is_empty() {
+        warnings.push(format!(
+            "Quasi-complete separation detected for variable(s): {}. Estimates may be unstable.",
+            quasi_sep_warnings.join(", ")
+        ));
+    }
+    // Add multivariate separation warnings from coefficient monitoring
+    warnings.extend(multivariate_sep_warnings);
+
     Ok(DiscreteResult {
         model_type,
         dep_var: y_col.to_string(),
@@ -451,7 +624,18 @@ pub fn run_discrete_model(
         n_obs: n,
         n_positive,
         marginal_effects,
+        warnings,
     })
+}
+
+/// Compute log-likelihood for binary outcomes (used by line search).
+fn compute_log_likelihood(y: &Array1<f64>, p: &Array1<f64>) -> f64 {
+    y.iter()
+        .zip(p.iter())
+        .map(|(&yi, &pi)| {
+            if yi >= 0.5 { pi.ln() } else { (1.0 - pi).ln() }
+        })
+        .sum()
 }
 
 // ============================================================================
@@ -4650,10 +4834,10 @@ mod tests {
     use polars::prelude::*;
 
     fn create_binary_dataset() -> Dataset {
-        // Binary outcome: y = 1 if x > threshold + noise
-        // True model: P(y=1) increases with x
+        // Binary outcome with overlapping x ranges to avoid perfect separation
+        // P(y=1) increases with x, but not perfectly
         let df = df! {
-            "y" => [0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+            "y" => [0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 1.0, 1.0],
             "x" => [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]
         }.unwrap();
         Dataset::new(df)
@@ -4750,6 +4934,46 @@ mod tests {
         let dataset = create_binary_dataset();
         let result = run_probit(&dataset, "nonexistent", &["x"]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_perfect_separation_detection() {
+        // Create data with perfect separation: all y=0 when x<5, all y=1 when x>=5
+        let df = df! {
+            "y" => [0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+            "x" => [1.0, 2.0, 3.0, 4.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0]
+        }.unwrap();
+        let dataset = Dataset::new(df);
+
+        let result = run_logit(&dataset, "y", &["x"]);
+        assert!(result.is_err(), "Should detect perfect separation");
+
+        match result {
+            Err(EconError::PerfectSeparation { variables }) => {
+                assert!(variables.contains(&"x".to_string()),
+                    "Should report x as causing separation");
+            }
+            _ => panic!("Expected PerfectSeparation error"),
+        }
+    }
+
+    #[test]
+    fn test_quasi_separation_warning() {
+        // Create data with quasi-separation: ranges barely touch
+        let df = df! {
+            "y" => [0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+            "x" => [1.0, 2.0, 3.0, 4.0, 5.0, 5.0, 6.0, 7.0, 8.0, 9.0]  // Touch at x=5
+        }.unwrap();
+        let dataset = Dataset::new(df);
+
+        let result = run_logit(&dataset, "y", &["x"]);
+        // This should succeed but with a warning
+        assert!(result.is_ok(), "Quasi-separation should not fail, but got: {:?}", result);
+
+        let res = result.unwrap();
+        assert!(!res.warnings.is_empty(), "Should have quasi-separation warning");
+        assert!(res.warnings[0].contains("Quasi-complete separation"),
+            "Warning should mention quasi-separation: {}", res.warnings[0]);
     }
 
     // Multinomial logit tests

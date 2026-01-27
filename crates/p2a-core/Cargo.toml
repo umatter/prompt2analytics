@@ -1,11 +1,15 @@
 [package]
 name = "p2a-core"
-description = "Core analytics engine for prompt2analytics"
+description = "Pure Rust econometrics, statistics, and machine learning library for data analysis"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
 rust-version.workspace = true
+repository.workspace = true
+keywords = ["econometrics", "statistics", "regression", "panel-data", "machine-learning"]
+categories = ["science", "mathematics"]
+readme = "../../README.md"
 
 [dependencies]
 # DataFrame and data manipulation

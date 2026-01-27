@@ -1,18 +1,25 @@
 # prompt2analytics
 
+[![CI](https://github.com/umatter/prompt2analytics/actions/workflows/ci.yml/badge.svg)](https://github.com/umatter/prompt2analytics/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/umatter/prompt2analytics/branch/main/graph/badge.svg)](https://codecov.io/gh/umatter/prompt2analytics)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Rust](https://img.shields.io/badge/rust-1.85%2B-blue.svg)](https://www.rust-lang.org/)
+
 A comprehensive analytics toolkit exposing econometrics, machine learning, and visualization capabilities through multiple interfaces:
 - **CLI (`p2a`)**: Direct command-line execution for scripted workflows
-- **MCP Server**: Model Context Protocol integration for AI assistants
-- **Dioxus App**: Cross-platform frontend (web, desktop, mobile) with LLM-powered natural language analysis
+- **MCP Server**: Model Context Protocol integration for AI assistants (60+ tools)
+- **Dioxus App**: Cross-platform frontend (web, desktop) with LLM-powered natural language analysis
+
+**Requirements**: Rust 1.85+ (edition 2024)
 
 ## Features
 
 ### Econometrics (Pure Rust)
 - **OLS Regression** with robust standard errors (HC0-HC3) and clustered SEs
-- **Panel Data**: Fixed Effects, Random Effects, Hausman specification test
+- **Panel Data**: Fixed Effects, Random Effects, Hausman specification test, HDFE
 - **Instrumental Variables**: 2SLS with first-stage diagnostics
-- **Causal Inference**: Difference-in-Differences estimation
-- **Discrete Choice**: Logit and Probit via Newton-Raphson MLE
+- **Causal Inference**: Difference-in-Differences, Regression Discontinuity (Sharp/Fuzzy RD)
+- **Discrete Choice**: Logit, Probit, FEGLM (GLM with high-dimensional fixed effects)
 - **Regression Diagnostics**: Jarque-Bera, Breusch-Pagan, Durbin-Watson, VIF
 
 ### Time Series
@@ -30,11 +37,17 @@ A comprehensive analytics toolkit exposing econometrics, machine learning, and v
 - Correlation heatmaps, coefficient plots, IRF plots
 - Event study plots, residual diagnostics, dendrograms
 - **Interactive charts** (HTML/Plotly.js): Scatter, histogram, line with zoom/pan/hover
-- Static charts rendered as base64-encoded PNG, interactive as self-contained HTML
 
-### Data Sources
-- **Files**: CSV, Parquet, Excel (.xlsx/.xls), Stata (.dta), SAS (.sas7bdat)
+### Data Management
+- **File formats**: CSV, Parquet, Excel (.xlsx/.xls), Stata (.dta), SAS (.sas7bdat)
 - **Databases**: SQLite, DuckDB (with direct file querying)
+- **LLM-assisted cleaning**: Quality profiling, preview/verify operations, rollback-enabled sessions
+
+### Export Formats
+- **LaTeX**: Publication-ready regression tables (OLS, Panel, Discrete)
+- **Markdown**: GitHub-compatible tables for documentation
+- **HTML**: Self-contained tables with embedded CSS
+- **CSV**: Generic export via `CsvExport` trait for all result types
 
 ### Command-Line Interface
 - Full access to all analytics via `p2a` binary
@@ -43,10 +56,10 @@ A comprehensive analytics toolkit exposing econometrics, machine learning, and v
 - JSON output format for programmatic use
 
 ### Dioxus Cross-Platform App
-- Pure Rust frontend compiled to WASM (web) or native (desktop/mobile)
+- Pure Rust frontend compiled to WASM (web) or native (desktop)
 - Multi-provider LLM integration (Ollama, Anthropic, OpenAI)
 - Conversation history with SurrealDB persistence
-- Natural language data analysis
+- Tool call transparency with expandable details
 
 ## Installation
 
@@ -116,12 +129,9 @@ p2a --session analysis.json ml kmeans mydata --cols x1 x2 x3 -k 3
 
 # Create static visualizations (PNG)
 p2a --session analysis.json viz scatter mydata -x income -y spending -f scatter.png
-p2a --session analysis.json viz histogram mydata --col price -f hist.png
 
 # Create interactive visualizations (HTML with Plotly.js)
 p2a --session analysis.json viz scatter-interactive mydata -x income -y spending -f scatter.html
-p2a --session analysis.json viz histogram-interactive mydata --col price -f hist.html
-p2a --session analysis.json viz line-interactive mydata -x date -y sales -f timeseries.html
 
 # Export session to reproducible bash script
 p2a script export analysis.json -o analysis.sh
@@ -131,18 +141,18 @@ p2a script export analysis.json -o analysis.sh
 - `data` - Load, list, describe, preview datasets
 - `reg` - OLS, clustered SEs, diagnostics
 - `panel` - Fixed effects, random effects, Hausman test, HDFE
-- `causal` - IV/2SLS, difference-in-differences
+- `causal` - IV/2SLS, difference-in-differences, regression discontinuity
 - `discrete` - Logit, probit
 - `ts` - ARIMA, MSTL, VAR
-- `ml` - K-means, PCA
-- `viz` - Static (PNG) and interactive (HTML) charts: histograms, scatter plots, line charts, box plots, heatmaps, coefficient plots, residual diagnostics, dendrograms, event study plots, IRF plots
+- `ml` - K-means, PCA, t-SNE, Random Forest
+- `viz` - Static (PNG) and interactive (HTML) charts
 - `script` - Export/run reproducible scripts
 
 **Output formats:** `--output text` (default), `--output json`, `--output table`
 
 ### MCP Server
 
-The MCP server exposes 55 analytics tools via the Model Context Protocol. Configure it in your MCP client (e.g., Claude Desktop):
+The MCP server exposes 60+ analytics tools via the Model Context Protocol. Configure it in your MCP client (e.g., Claude Desktop):
 
 ```json
 {
@@ -154,7 +164,7 @@ The MCP server exposes 55 analytics tools via the Model Context Protocol. Config
 }
 ```
 
-### Dioxus App (Web, Desktop, Mobile)
+### Dioxus App (Web, Desktop)
 
 A cross-platform frontend built with Dioxus 0.7:
 
@@ -179,63 +189,32 @@ dx serve --platform desktop
 Open http://localhost:8080 in your browser (web) or the native window (desktop). Features:
 - Chat interface with streaming LLM responses
 - Support for Ollama, Anthropic, and OpenAI providers
-- **Conversation management**: Create, rename, archive, and delete conversations
-- **Persistent history**: Messages are saved to SurrealDB backend
-- **Sidebar UI**: Collapsible conversation list with search
-- **Dataset sidebar**: Live view of loaded datasets with metadata
-- Settings persistence (localStorage on web, file-based on native)
-- **Environment variable detection**: Automatically detects `OPENAI_API_KEY` and `ANTHROPIC_API_KEY`
-- **Tool call transparency**: "Rust Analytics" indicator shows which tools were called
-- Tool call display with expandable details (arguments and results)
+- Conversation management with persistent history (SurrealDB)
+- Dataset sidebar with live metadata view
+- Tool call transparency ("Rust Analytics" indicator)
+- Environment variable detection for API keys
 - Markdown rendering for assistant messages
 
-### Persistence Layer (SurrealDB)
+### Example MCP Tool Calls
 
-The MCP server includes an optional SurrealDB persistence layer for conversation history:
+```
+# Load a dataset
+load_dataset path:/path/to/data.csv
 
-```bash
-# Run with database persistence (embedded RocksDB)
-cargo run -p p2a-mcp --features full -- --transport http --port 8080 --cors-permissive
+# Create an inline dataset
+create_dataset name:test_data csv_content:"x,y\n1,2\n2,4\n3,6"
 
-# Database stored at: ~/.p2a/data/
-```
+# Run OLS regression
+regression_ols dataset:mydata y:price x:sqft,bedrooms,bathrooms
 
-Features:
-- **Embedded database**: No separate server required (RocksDB backend)
-- **Conversation persistence**: Messages survive server restarts
-- **Session management**: User sessions with timestamps and metadata
-- **Settings storage**: Per-session LLM provider configuration
+# Generate a scatter plot
+viz_scatter dataset:mydata x_column:sqft y_column:price
 
-### Example Commands
+# Run panel fixed effects
+panel_fixed_effects dataset:panel y:outcome x:treatment entity_col:firm time_col:year
 
-Load a dataset:
-```
-/load_dataset path:/path/to/data.csv
-```
-
-Create an inline dataset (useful for quick tests or generated data):
-```
-/create_dataset name:test_data csv_content:"x,y\n1,2\n2,4\n3,6\n4,8"
-```
-
-Run OLS regression:
-```
-/regression_ols dataset:mydata y:price x:sqft,bedrooms,bathrooms
-```
-
-Generate a scatter plot (static PNG):
-```
-/viz_scatter dataset:mydata x_column:sqft y_column:price
-```
-
-Generate an interactive scatter plot (HTML with Plotly.js):
-```
-/viz_scatter_interactive dataset:mydata x_column:sqft y_column:price group_column:neighborhood
-```
-
-Run panel fixed effects:
-```
-/panel_fixed_effects dataset:panel y:outcome x:treatment entity_col:firm time_col:year
+# Data quality profiling (for LLM-assisted cleaning)
+data_quality_profile dataset:mydata
 ```
 
 ## Architecture
@@ -243,54 +222,27 @@ Run panel fixed effects:
 ```
 prompt2analytics/
 ├── crates/
-│   ├── p2a-core/          # Core analytics library
-│   │   ├── data/          # Data loading and manipulation
+│   ├── p2a-core/          # Core analytics library (all algorithms)
+│   │   ├── data/          # Data loading, quality profiling, cleaning
 │   │   ├── stats/         # Descriptive statistics, correlation
 │   │   ├── regression/    # OLS, diagnostics
-│   │   ├── econometrics/  # Panel, IV, DiD, discrete choice, time series
+│   │   ├── econometrics/  # Panel, IV, DiD, RD, discrete choice, time series
 │   │   ├── forecasting/   # ARIMA, MSTL, changepoint
 │   │   ├── ml/            # Clustering, PCA, t-SNE, Random Forest, SVM
 │   │   ├── visualization/ # Static (plotters) and interactive (plotlars) charts
+│   │   ├── export/        # LaTeX, Markdown, HTML, CSV export
 │   │   ├── linalg/        # Matrix operations (via faer)
-│   │   ├── traits/        # LinearEstimator trait
-│   │   └── errors.rs      # Error types
+│   │   └── traits/        # LinearEstimator trait
 │   ├── p2a-cli/           # CLI binary (`p2a`)
-│   │   ├── commands/      # Subcommand implementations
-│   │   ├── session.rs     # Session recording
-│   │   ├── script.rs      # Bash script generation
-│   │   └── output.rs      # Output formatting
-│   ├── p2a-mcp/           # MCP server (55+ tools)
-│   │   ├── src/
-│   │   │   ├── server.rs  # Tool definitions
-│   │   │   ├── session.rs # In-memory session management
-│   │   │   └── db/        # SurrealDB persistence layer
-│   │   │       ├── connection.rs  # Database connection
-│   │   │       ├── models.rs      # Data models
-│   │   │       ├── conversations.rs # Conversation CRUD
-│   │   │       └── sessions.rs    # Session persistence
-│   └── p2a-dioxus/        # Cross-platform Dioxus app (web/desktop/mobile)
-│       ├── src/           # Pure Rust frontend
-│       │   ├── api/       # HTTP client and SSE streaming
-│       │   │   ├── client.rs  # API client with conversation endpoints
-│       │   │   ├── sse.rs     # Server-sent events for streaming
-│       │   │   └── types.rs   # Request/response types
-│       │   ├── platform/  # Platform abstractions
-│       │   │   ├── storage.rs   # Storage (localStorage/file)
-│       │   │   ├── http.rs      # HTTP (fetch/reqwest)
-│       │   │   └── streaming.rs # SSE streaming
-│       │   ├── components/# UI components
-│       │   │   ├── chat_panel.rs    # Main chat interface
-│       │   │   ├── conversation_sidebar.rs # Conversation list
-│       │   │   ├── chat_input.rs    # Message input
-│       │   │   ├── message.rs       # Message display
-│       │   │   └── settings_modal.rs # Provider config
-│       │   ├── state/     # State management (Dioxus signals)
-│       │   │   ├── chat.rs        # Message state
-│       │   │   ├── conversation.rs # Conversation management
-│       │   │   ├── session.rs     # Backend session
-│       │   │   └── settings.rs    # User preferences
-│       │   └── utils/     # Markdown rendering
-│       └── assets/        # CSS styles
+│   ├── p2a-mcp/           # MCP server (60+ tools)
+│   │   └── db/            # SurrealDB persistence layer
+│   └── p2a-dioxus/        # Cross-platform Dioxus app
+│       ├── api/           # HTTP client and SSE streaming
+│       ├── components/    # UI components
+│       └── state/         # State management (Dioxus signals)
+├── validation/            # Validation against R/Python references
+├── performance/           # Benchmark framework and results
+└── paper/                 # JSS article materials
 ```
 
 ## MCP Tools
@@ -298,26 +250,36 @@ prompt2analytics/
 | Category | Tools |
 |----------|-------|
 | Data | `load_dataset`, `create_dataset`, `list_datasets`, `describe_dataset`, `head_dataset` |
+| Data Quality | `data_quality_profile`, `preview_cleaning`, `verify_cleaning`, `suggest_cleaning` |
+| Cleaning Sessions | `cleaning_session_start`, `cleaning_session_apply`, `cleaning_rollback`, `cleaning_session_checkpoints` |
 | Statistics | `compute_correlation` |
 | Regression | `regression_ols`, `regression_diagnostics`, `regression_clustered` |
-| Panel | `panel_fixed_effects`, `panel_random_effects`, `hausman_test` |
+| Panel | `panel_fixed_effects`, `panel_random_effects`, `hausman_test`, `feglm` |
 | IV | `iv_2sls`, `iv_first_stage` |
-| Causal | `diff_in_diff` |
+| Causal | `diff_in_diff`, `rd_estimate`, `rd_bw`, `rd_fuzzy` |
 | Discrete | `logit`, `probit` |
 | Time Series | `ts_var`, `ts_varma`, `ts_vecm`, `ts_var_irf`, `ts_arima_fit`, `ts_arima_forecast`, `ts_mstl`, `ts_changepoint` |
 | ML | `ml_kmeans`, `ml_dbscan`, `ml_hierarchical`, `ml_pca`, `ml_tsne`, `ml_random_forest`, `ml_svm` |
 | Database | `db_sqlite_query`, `db_sqlite_tables`, `db_sqlite_schema`, `db_duckdb_query`, `db_duckdb_tables`, `db_duckdb_schema` |
-| Visualization | `viz_histogram`, `viz_scatter`, `viz_line`, `viz_boxplot`, `viz_heatmap`, `viz_event_study`, `viz_coefficient`, `viz_irf`, `viz_residual_diagnostics`, `viz_dendrogram` (static PNG) |
-| Interactive Viz | `viz_scatter_interactive`, `viz_histogram_interactive`, `viz_line_interactive` (HTML/Plotly.js) |
+| Visualization | `viz_histogram`, `viz_scatter`, `viz_line`, `viz_boxplot`, `viz_heatmap`, `viz_event_study`, `viz_coefficient`, `viz_irf`, `viz_residual_diagnostics`, `viz_dendrogram` |
+| Interactive Viz | `viz_scatter_interactive`, `viz_histogram_interactive`, `viz_line_interactive` |
 | Utilities | `generate_report`, `batch_process`, `compare_datasets`, `export_session`, `import_session`, `set_seed`, `get_seed` |
-| Conversations | Session and conversation management via REST API (`/api/sessions`, `/api/conversations`) |
 
 ## Development
 
 ### Running Tests
 
 ```bash
-cargo test -p p2a-core
+cargo test                              # All tests
+cargo test -p p2a-core                  # Core library only
+cargo test -p p2a-core -- test_validate # Validation tests
+```
+
+### Linting
+
+```bash
+cargo clippy --all-targets --all-features
+cargo fmt --check
 ```
 
 ### Building Documentation
@@ -328,108 +290,76 @@ cargo doc --no-deps --open
 
 ### Managing Disk Space
 
-The Rust build cache (`target/`) can grow to 100GB+ during active development due to debug builds, incremental compilation, and benchmark artifacts. To reclaim disk space:
+The Rust build cache (`target/`) can grow large. To reclaim disk space:
 
 ```bash
-# Remove all build artifacts (will be regenerated on next build)
 cargo clean
-
-# Check current target size
 du -sh target/
 ```
 
-**Tip for contributors**: Run `cargo clean` periodically, especially after switching branches or completing major features. Debug builds in `target/debug/` are the largest consumers.
-
 ## Docker Deployment
 
-Docker is provided for **deployment** rather than development. For active development, use native tools (`cargo run`, `dx serve`) for faster iteration.
-
-### Quick Start
+Docker is provided for **deployment** rather than development.
 
 ```bash
 # Build and run the backend
 docker compose up --build
 
-# Or run in detached mode
-docker compose up --build -d
-```
-
-This starts:
-- **Backend** (p2a-mcp): http://localhost:8080
-
-### With Local LLM (Ollama)
-
-```bash
-# Include Ollama for local LLM support
+# With local LLM (Ollama)
 docker compose --profile with-ollama up --build
+
+# Health check
+curl http://localhost:8080/health
 ```
 
-### Health Check
-
-```bash
-curl http://localhost:8080/health   # Backend
-```
-
-### Development Recommendation
-
-For development, run services natively:
+For development, run services natively for faster iteration:
 
 ```bash
 # Terminal 1: Backend
 cargo run -p p2a-mcp --features full -- --transport http --host 127.0.0.1 --port 8080 --cors-permissive
 
-# Terminal 2: Frontend (web)
+# Terminal 2: Frontend
 cd crates/p2a-dioxus && dx serve
-
-# Or for desktop
-cd crates/p2a-dioxus && dx serve --platform desktop
 ```
-
-This provides faster rebuilds and hot module replacement.
 
 ## Technical Details
 
-- **Matrix Operations**: Uses `faer` 0.22 for high-performance linear algebra (Cholesky decomposition, matrix inverse)
-- **Statistical Distributions**: Uses `statrs` for t, F, chi-squared, and normal distributions
-- **DataFrames**: Uses `polars` 0.52 for efficient data manipulation
-- **Static Visualization**: Uses `plotters` for PNG chart generation
-- **Interactive Visualization**: Uses `plotlars` (Plotly.js wrapper) for HTML charts with zoom/pan/hover
-- **MCP Protocol**: Uses `rmcp` SDK for Model Context Protocol implementation
-- **Database**: Uses `surrealdb` with embedded RocksDB for persistent conversation storage
-- **Web Frontend**: Uses `dioxus` 0.7 compiling to WebAssembly with `web-sys` for browser APIs
+| Component | Library | Version |
+|-----------|---------|---------|
+| Matrix Operations | `faer` | 0.22 |
+| Statistical Distributions | `statrs` | 0.18 |
+| DataFrames | `polars` | 0.52 |
+| Static Visualization | `plotters` | 0.3 |
+| Interactive Visualization | `plotlars` | 0.11 |
+| MCP Protocol | `rmcp` | 0.8 |
+| Database | `surrealdb` | embedded RocksDB |
+| Web Frontend | `dioxus` | 0.7 |
 
 ## Paper
 
 The `paper/` directory contains materials for a Journal of Statistical Software (JSS) article:
 
-```
-paper/
-├── article.tex       # Main manuscript (LaTeX)
-├── article.pdf       # Compiled paper
-├── references.bib    # Bibliography (66+ entries)
-├── Makefile          # Build: make, make clean
-├── code/             # Benchmark analysis scripts
-│   └── analyze_benchmarks.sh  # Generate benchmark figures
-├── figures/          # Figures and logo
-│   └── jsslogo.jpg
-└── style/            # JSS LaTeX style files
-    ├── jss.cls       # JSS document class
-    ├── jss.bst       # JSS BibTeX style
-    └── jss.pdf       # JSS style manual (author guidelines)
-```
-
-Build the paper with `make` in the `paper/` directory (requires pdfLaTeX and BibTeX).
-
-To generate benchmark figures (requires p2a CLI and jq):
 ```bash
-cd paper/code
-./analyze_benchmarks.sh
+# Build the paper (requires pdfLaTeX and BibTeX)
+cd paper && make
+
+# Generate benchmark figures (requires p2a CLI and jq)
+cd paper/code && ./analyze_benchmarks.sh
 ```
 
 ## License
 
 MIT
 
+## Documentation
+
+- `docs/guides/TESTING.md` - Test runtime expectations, validation framework
+- `docs/guides/DATA_SECURITY.md` - Data write locations, privacy
+- `docs/security/PROMPT_INJECTION.md` - MCP security considerations
+
 ## Contributing
 
-Contributions are welcome! Please see the development report (`DEVELOPMENT_REPORT.md`) for architecture details and the current state of the project.
+Contributions are welcome! See:
+- `CLAUDE.md` - Development guidance for Claude Code
+- `DEVELOPMENT_REPORT.md` - Architecture details and current status
+- `validation/` - How to add validation tests
