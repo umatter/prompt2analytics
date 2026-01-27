@@ -1,0 +1,347 @@
+%% =============================================================================
+%% EXAMPLES
+%% =============================================================================
+
+\section{Examples} \label{sec:examples}
+
+This section demonstrates practical usage of \pkg{prompt2analytics} through
+two interfaces: the natural language chat interface powered by large language
+models, and the command-line interface for scripted workflows. Both interfaces
+access the same underlying \proglang{Rust} analytics engine, offering users
+flexibility in how they interact with the software.
+
+We use two datasets throughout this section:
+\begin{itemize}
+  \item The Grunfeld investment data \citep{Baltagi:2013}, a classic panel
+    dataset with 200 observations (10 firms over 20 years) containing firm
+    investment, market value, and capital stock. This dataset is included
+    in the \pkg{plm} package and can be loaded via \code{data("Grunfeld",
+    package = "plm")} in \proglang{R}; we provide it as \code{grunfeld.csv}
+    in the supplementary materials.
+  \item A simulated cross-sectional dataset demonstrating basic regression
+    analysis with heteroskedasticity.
+\end{itemize}
+
+
+%% -----------------------------------------------------------------------------
+\subsection{Chat interface} \label{sec:examples-chat}
+
+The chat interface enables natural language interaction with the analytics
+engine. Users describe their analysis goals in plain language, and the LLM
+translates these requests into structured tool calls executed by the MCP server.
+This interface is particularly valuable for exploratory data analysis and for
+users less familiar with programming syntax. The examples in this section
+were generated using Claude 3.5 Sonnet via the MCP integration; other models
+(GPT-4o, Llama 3.1 8B, etc.) produce similar results with minor variations
+in explanation style.
+
+\subsubsection{Loading and exploring data}
+
+A typical session begins by loading data and examining its structure:
+
+\begin{Sinput}
+User: Load the Grunfeld investment dataset from grunfeld.csv and show me
+      what's in it.
+\end{Sinput}
+
+\begin{Soutput}
+I'll load the dataset and describe its contents.
+
+**Dataset loaded: grunfeld**
+- Rows: 200
+- Columns: 5
+
+| Column  | Type    | Description                        |
+|---------|---------|-----------------------------------|
+| firm    | Integer | Firm identifier (1-10)            |
+| year    | Integer | Year (1935-1954)                  |
+| inv     | Float64 | Gross investment                  |
+| value   | Float64 | Market value of firm              |
+| capital | Float64 | Stock of plant and equipment      |
+
+This is a balanced panel dataset with 10 firms observed over 20 years,
+commonly used to demonstrate panel data methods.
+\end{Soutput}
+
+\subsubsection{OLS regression with robust standard errors}
+
+Cross-sectional regression with heteroskedasticity-consistent standard errors.%
+\footnote{HC1 is the default robust standard error estimator when robust SEs are
+requested. HC1 applies a degrees-of-freedom correction $(n/(n-k))$ to HC0,
+improving small-sample performance.}
+
+\begin{Sinput}
+User: Run a regression of investment on market value and capital stock.
+      Use robust standard errors.
+\end{Sinput}
+
+\begin{Soutput}
+Running OLS regression with HC1 robust standard errors...
+
+**OLS Regression Results**
+Dependent variable: inv
+
+| Variable    |    Coef |  Std Err |      t | P>|t| |
+|-------------|--------:|---------:|-------:|------:|
+| (Intercept) | -42.714 |   11.575 | -3.690 | 0.000 |
+| value       |   0.116 |    0.007 | 16.967 | 0.000 |
+| capital     |   0.231 |    0.049 |  4.721 | 0.000 |
+
+R-squared: 0.812
+Adj. R-squared: 0.810
+Observations: 200
+Standard errors: HC1 (heteroskedasticity-robust)
+
+Both market value and capital stock are highly significant predictors of
+investment. A $1 million increase in market value is associated with
+approximately $116,000 more investment, holding capital constant.
+\end{Soutput}
+
+\subsubsection{Panel data: Fixed effects estimation}
+
+For panel data, users can request fixed effects estimation in natural language:
+
+\begin{Sinput}
+User: The data has a panel structure. Run a fixed effects regression
+      controlling for firm-specific effects.
+\end{Sinput}
+
+\begin{Soutput}
+Running within-transformation fixed effects estimation...
+
+**Fixed Effects (Within) Estimation**
+Dependent variable: inv
+Entity fixed effects: firm (10 levels)
+
+| Variable |    Coef |  Std Err |      t | P>|t| |
+|----------|--------:|---------:|-------:|------:|
+| value    |   0.110 |    0.012 |  9.288 | 0.000 |
+| capital  |   0.310 |    0.017 | 17.867 | 0.000 |
+
+R-squared (within): 0.767
+Observations: 200
+Groups: 10
+F-statistic: 309.01 (p-value: 0.000)
+
+After controlling for time-invariant firm characteristics, the coefficient
+on capital increases from 0.23 to 0.31, suggesting that pooled OLS
+underestimated the association between capital stock and investment.
+(Note: This change in coefficient reflects removal of omitted variable
+bias, not necessarily identification of a causal effect.)
+\end{Soutput}
+
+\subsubsection{Model comparison: Hausman test}
+
+Users can request specification tests without knowing the technical details:
+
+\begin{Sinput}
+User: Should I use fixed effects or random effects for this analysis?
+\end{Sinput}
+
+\begin{Soutput}
+I'll run a Hausman test to help determine the appropriate specification.
+
+**Hausman Test Results**
+H0: Random Effects is consistent and efficient
+H1: Fixed Effects is consistent; Random Effects is inconsistent
+
+Chi-squared statistic: 0.0003
+Degrees of freedom: 2
+P-value: 0.9999
+
+**Recommendation**: Random Effects
+
+The test fails to reject the null hypothesis. The near-zero chi-squared
+statistic indicates virtually no systematic difference between the FE and
+RE coefficient estimates for this dataset.
+
+**Note**: Extreme p-values like 0.9999 warrant interpretation with caution.
+Such values can arise from small test statistics (as here), but also from
+numerical issues or model misspecification. The Hausman test \citep{Hausman:1978}
+assumes both estimators are consistent under the null, which requires correct
+functional form, homoskedastic errors, and no omitted variables correlated
+with the regressors. The test statistic may be unreliable with small samples,
+heteroskedasticity, or serial correlation. Users should treat very high
+p-values as suggestive rather than definitive.
+\end{Soutput}
+
+\subsubsection{High-dimensional fixed effects}
+
+For datasets with multiple categorical dimensions, users can request
+multi-way fixed effects:
+
+\begin{Sinput}
+User: Control for both firm and year fixed effects in the regression.
+\end{Sinput}
+
+\begin{Soutput}
+Running two-way fixed effects using alternating projections...
+
+**High-Dimensional Fixed Effects Estimation**
+Dependent variable: inv
+Fixed effects: firm (10 levels), year (20 levels)
+
+| Variable |    Coef |  Std Err |      t | P>|t| |
+|----------|--------:|---------:|-------:|------:|
+| value    |   0.118 |    0.019 |  6.137 | 0.000 |
+| capital  |   0.358 |    0.054 |  6.579 | 0.000 |
+
+R-squared (within): 0.720
+Observations: 200
+F-statistic: 217.44 (p-value: 0.000)
+\end{Soutput}
+
+\subsubsection{Regression diagnostics}
+
+Users can request diagnostic tests using natural language:
+
+\begin{Sinput}
+User: Check the regression assumptions for the OLS model.
+\end{Sinput}
+
+\begin{Soutput}
+Running regression diagnostics...
+
+**Jarque-Bera Test (Normality of residuals)**
+Statistic: 89.57
+P-value: 0.000
+Conclusion: Residuals deviate significantly from normality.
+
+**Breusch-Pagan Test (Heteroskedasticity)**
+Statistic: 55.25
+P-value: 0.000
+Conclusion: Evidence of heteroskedasticity; robust SEs recommended.
+
+**Durbin-Watson Statistic (Autocorrelation)**
+Statistic: 0.358
+Interpretation: Positive autocorrelation detected (expected in panel data).
+
+**Variance Inflation Factors**
+value: 1.31
+capital: 1.31
+No multicollinearity detected (VIF < 5).
+\end{Soutput}
+
+
+%% -----------------------------------------------------------------------------
+\subsection{Command-line interface} \label{sec:examples-cli}
+
+The command-line interface provides programmatic access for scripted workflows.
+Commands follow a hierarchical structure with sessions maintaining state:
+
+\begin{Sinput}
+# Load data and run OLS with robust standard errors
+p2a --session analysis.json data load grunfeld.csv --name grunfeld
+p2a --session analysis.json reg ols grunfeld \
+    -y inv -x value capital --robust hc1
+
+# Panel fixed effects
+p2a --session analysis.json panel fe grunfeld \
+    -y inv -x value capital --entity firm
+
+# Export session to reproducible script
+p2a script export analysis.json -o reproduce.sh
+\end{Sinput}
+
+All commands support JSON output (\code{-F json}) for programmatic integration.
+Appendix~\ref{app:extended-examples} provides additional CLI examples including
+panel estimation, hypothesis tests, and two-way fixed effects.
+
+
+%% -----------------------------------------------------------------------------
+\subsection{Comparison with R} \label{sec:examples-comparison}
+
+For reference, the equivalent \proglang{R} code for the fixed effects
+estimation is:
+
+\begin{Sinput}
+library(plm)
+data("Grunfeld", package = "plm")
+
+# Fixed effects model
+fe_model <- plm(inv ~ value + capital,
+                data = Grunfeld,
+                index = c("firm", "year"),
+                model = "within")
+summary(fe_model)
+
+# Two-way fixed effects
+fe_twoway <- plm(inv ~ value + capital,
+                 data = Grunfeld,
+                 index = c("firm", "year"),
+                 model = "within",
+                 effect = "twoways")
+summary(fe_twoway)
+\end{Sinput}
+
+The \pkg{prompt2analytics} implementation produces numerically equivalent
+results (see Section~\ref{sec:comparison}), while offering the conversational
+interface that enables users unfamiliar with \proglang{R} syntax to perform
+the same analyses through natural language.
+
+
+%% -----------------------------------------------------------------------------
+\subsection{Multi-step workflows} \label{sec:examples-multistep}
+
+Real-world analysis involves multiple steps: data inspection, handling issues,
+and specification refinement. The chat interface maintains context across turns,
+enabling progressive model refinement guided by user questions. The LLM provides
+interpretive commentary while all computations execute through validated
+\proglang{Rust} implementations.
+
+Appendix~\ref{app:extended-examples} provides a detailed multi-step workflow
+example demonstrating data loading, missingness analysis, initial specification,
+and refinement with fixed effects---illustrating context preservation and
+proactive issue identification.
+
+
+%% -----------------------------------------------------------------------------
+\subsection{Error handling and recovery} \label{sec:examples-errors}
+
+The system handles common failure modes with explanatory guidance. Two
+representative examples illustrate the approach.
+
+\subsubsection{Multicollinearity detection}
+
+\begin{Sinput}
+User: Add years_since_hire to the model alongside tenure.
+\end{Sinput}
+
+\begin{Soutput}
+**Error: Perfect multicollinearity detected**
+
+The design matrix is rank-deficient. Column `years_since_hire` is a linear
+combination of existing columns (correlation with tenure: 1.000).
+
+**Suggested actions:**
+1. Remove one of the collinear variables
+2. If both are theoretically important, consider which better captures
+   your construct of interest
+\end{Soutput}
+
+\subsubsection{Convergence failure}
+
+\begin{Sinput}
+User: Fit a logit model with department fixed effects.
+\end{Sinput}
+
+\begin{Soutput}
+**Warning: Convergence issues detected**
+
+**Issue:** Perfect prediction in some groups
+- Department "Legal" has 0% bonus rate (23 observations)
+
+**Options:**
+1. Drop singleton departments
+2. Use a linear probability model (robust to separation)
+3. Use penalized likelihood (Firth correction)
+
+Running linear probability model with department FE instead...
+\end{Soutput}
+
+The system detects problems before estimation fails, explains statistical
+issues rather than computational symptoms, and provides actionable suggestions.
+When requests exceed capabilities, it clearly states limitations and points
+to external tools. Appendix~\ref{app:extended-examples} provides additional
+error handling examples including small cluster warnings and out-of-scope
+request handling.

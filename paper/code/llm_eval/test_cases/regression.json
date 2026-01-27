@@ -1,0 +1,86 @@
+{
+  "category": "regression",
+  "description": "OLS, robust standard errors, clustered SE, and nonlinear regression tests",
+  "tests": [
+    {
+      "id": "reg_001",
+      "prompt": "Estimate the effect of firm value on investment using OLS",
+      "expected_tools": ["regression_ols"],
+      "acceptable_tools": ["regression_ols", "regression_clustered"],
+      "dataset_context": "grunfeld dataset: firm, year, inv, value, capital",
+      "difficulty": "basic"
+    },
+    {
+      "id": "reg_002",
+      "prompt": "Run a linear regression of wages on education and experience with robust standard errors",
+      "expected_tools": ["regression_ols"],
+      "acceptable_tools": ["regression_ols"],
+      "dataset_context": "cps dataset: wage, education, experience, age, gender",
+      "difficulty": "basic"
+    },
+    {
+      "id": "reg_003",
+      "prompt": "I need to regress sales on advertising spend controlling for market size",
+      "expected_tools": ["regression_ols"],
+      "acceptable_tools": ["regression_ols", "regression_clustered"],
+      "dataset_context": "marketing dataset: sales, ad_spend, market_size, region, quarter",
+      "difficulty": "basic"
+    },
+    {
+      "id": "reg_004",
+      "prompt": "Estimate a regression with standard errors clustered by firm",
+      "expected_tools": ["regression_clustered"],
+      "acceptable_tools": ["regression_clustered"],
+      "dataset_context": "panel dataset: y, x1, x2, firm_id, year",
+      "difficulty": "intermediate"
+    },
+    {
+      "id": "reg_005",
+      "prompt": "Run OLS with two-way clustering on firm and year",
+      "expected_tools": ["regression_clustered"],
+      "acceptable_tools": ["regression_clustered"],
+      "dataset_context": "panel dataset: return, market_cap, leverage, firm_id, year",
+      "difficulty": "intermediate"
+    },
+    {
+      "id": "reg_006",
+      "prompt": "Check the regression assumptions - normality, heteroskedasticity, and autocorrelation",
+      "expected_tools": ["regression_diagnostics"],
+      "acceptable_tools": ["regression_diagnostics"],
+      "dataset_context": "regression_data: y, x1, x2, x3",
+      "difficulty": "intermediate"
+    },
+    {
+      "id": "reg_007",
+      "prompt": "Calculate the VIF values to check for multicollinearity in my regression",
+      "expected_tools": ["regression_diagnostics"],
+      "acceptable_tools": ["regression_diagnostics"],
+      "dataset_context": "multivar_data: outcome, pred1, pred2, pred3, pred4",
+      "difficulty": "intermediate"
+    },
+    {
+      "id": "reg_008",
+      "prompt": "Fit an exponential growth model to the population data",
+      "expected_tools": ["regression_nls"],
+      "acceptable_tools": ["regression_nls", "regression_loess"],
+      "dataset_context": "population dataset: year, population",
+      "difficulty": "advanced"
+    },
+    {
+      "id": "reg_009",
+      "prompt": "Use LOESS to smooth the time series of temperature anomalies",
+      "expected_tools": ["regression_loess"],
+      "acceptable_tools": ["regression_loess"],
+      "dataset_context": "climate dataset: year, temp_anomaly",
+      "difficulty": "intermediate"
+    },
+    {
+      "id": "reg_010",
+      "prompt": "Estimate the relationship between height and weight with HC3 standard errors",
+      "expected_tools": ["regression_ols"],
+      "acceptable_tools": ["regression_ols"],
+      "dataset_context": "anthropometric dataset: height, weight, age, gender",
+      "difficulty": "basic"
+    }
+  ]
+}

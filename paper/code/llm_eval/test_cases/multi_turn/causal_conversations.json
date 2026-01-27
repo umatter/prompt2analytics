@@ -1,0 +1,175 @@
+{
+  "category": "multi_turn_causal",
+  "description": "Multi-turn conversations testing causal inference workflows",
+  "conversations": [
+    {
+      "id": "mt_cau_001",
+      "description": "IV estimation with diagnostics",
+      "dataset_context": "returns_to_schooling: wage, education, experience, ability_proxy, parents_education, distance_to_college",
+      "turns": [
+        {
+          "turn": 1,
+          "user_prompt": "I'm concerned that education is endogenous in a wage regression. What should I do?",
+          "expected_tool": "iv_2sls",
+          "acceptable_tools": ["iv_2sls", "regression_ols"],
+          "context_from_previous": false
+        },
+        {
+          "turn": 2,
+          "user_prompt": "Use parents' education and distance to college as instruments for education",
+          "expected_tool": "iv_2sls",
+          "acceptable_tools": ["iv_2sls"],
+          "context_from_previous": true
+        },
+        {
+          "turn": 3,
+          "user_prompt": "Test whether the instruments are weak",
+          "expected_tool": "iv_first_stage",
+          "acceptable_tools": ["iv_first_stage", "iv_diagnostics", "iv_weak_test"],
+          "context_from_previous": true
+        },
+        {
+          "turn": 4,
+          "user_prompt": "Run a Sargan test for overidentification",
+          "expected_tool": "iv_overid_test",
+          "acceptable_tools": ["iv_overid_test", "iv_diagnostics"],
+          "context_from_previous": true
+        }
+      ]
+    },
+    {
+      "id": "mt_cau_002",
+      "description": "Difference-in-differences analysis",
+      "dataset_context": "policy_evaluation: outcome, treated, post, state, year, controls",
+      "turns": [
+        {
+          "turn": 1,
+          "user_prompt": "I want to evaluate a policy that was implemented in some states in 2015",
+          "expected_tool": "diff_in_diff",
+          "acceptable_tools": ["diff_in_diff", "panel_fe"],
+          "context_from_previous": false
+        },
+        {
+          "turn": 2,
+          "user_prompt": "Estimate the DiD with state and year fixed effects",
+          "expected_tool": "diff_in_diff",
+          "acceptable_tools": ["diff_in_diff", "panel_twoway"],
+          "context_from_previous": true
+        },
+        {
+          "turn": 3,
+          "user_prompt": "Test for parallel pre-trends using an event study specification",
+          "expected_tool": "diff_event_study",
+          "acceptable_tools": ["diff_event_study", "diff_in_diff"],
+          "context_from_previous": true
+        },
+        {
+          "turn": 4,
+          "user_prompt": "Plot the event study coefficients with confidence intervals",
+          "expected_tool": "viz_event_study",
+          "acceptable_tools": ["viz_event_study", "viz_coef_plot", "viz_line"],
+          "context_from_previous": true
+        }
+      ]
+    },
+    {
+      "id": "mt_cau_003",
+      "description": "Treatment effect estimation",
+      "dataset_context": "training_program: earnings, treated, age, education, prior_earnings",
+      "turns": [
+        {
+          "turn": 1,
+          "user_prompt": "Estimate the effect of a job training program on earnings",
+          "expected_tool": "treatment_ate",
+          "acceptable_tools": ["treatment_ate", "regression_ols", "diff_in_diff"],
+          "context_from_previous": false
+        },
+        {
+          "turn": 2,
+          "user_prompt": "Use propensity score matching to control for selection bias",
+          "expected_tool": "treatment_psm",
+          "acceptable_tools": ["treatment_psm", "treatment_ipw"],
+          "context_from_previous": true
+        },
+        {
+          "turn": 3,
+          "user_prompt": "Check the balance of covariates after matching",
+          "expected_tool": "treatment_balance",
+          "acceptable_tools": ["treatment_balance", "treatment_diagnostics"],
+          "context_from_previous": true
+        },
+        {
+          "turn": 4,
+          "user_prompt": "Now estimate the ATT using inverse probability weighting",
+          "expected_tool": "treatment_ipw",
+          "acceptable_tools": ["treatment_ipw"],
+          "context_from_previous": true
+        }
+      ]
+    },
+    {
+      "id": "mt_cau_004",
+      "description": "Regression discontinuity design",
+      "dataset_context": "test_scores: outcome, running_var, treatment, covariates, school",
+      "turns": [
+        {
+          "turn": 1,
+          "user_prompt": "Students above a test score threshold get a scholarship. Evaluate its effect",
+          "expected_tool": "rd_sharp",
+          "acceptable_tools": ["rd_sharp", "rd_estimate"],
+          "context_from_previous": false
+        },
+        {
+          "turn": 2,
+          "user_prompt": "Use a triangular kernel with optimal bandwidth selection",
+          "expected_tool": "rd_sharp",
+          "acceptable_tools": ["rd_sharp", "rd_estimate"],
+          "expected_parameter_change": {"kernel": "triangular", "bw_selection": "optimal"},
+          "context_from_previous": true
+        },
+        {
+          "turn": 3,
+          "user_prompt": "Test for manipulation of the running variable around the cutoff",
+          "expected_tool": "rd_mccrary",
+          "acceptable_tools": ["rd_mccrary", "rd_density_test"],
+          "context_from_previous": true
+        },
+        {
+          "turn": 4,
+          "user_prompt": "Create an RD plot showing the discontinuity",
+          "expected_tool": "viz_rd_plot",
+          "acceptable_tools": ["viz_rd_plot", "viz_scatter"],
+          "context_from_previous": true
+        }
+      ]
+    },
+    {
+      "id": "mt_cau_005",
+      "description": "Synthetic control method",
+      "dataset_context": "regional_policy: gdp, population, employment, region, year, treated_region",
+      "turns": [
+        {
+          "turn": 1,
+          "user_prompt": "Evaluate a policy implemented in California using other states as controls",
+          "expected_tool": "synthetic_control",
+          "acceptable_tools": ["synthetic_control", "diff_in_diff"],
+          "context_from_previous": false
+        },
+        {
+          "turn": 2,
+          "user_prompt": "Show me the synthetic control weights for each donor state",
+          "expected_tool": "synthetic_weights",
+          "acceptable_tools": ["synthetic_weights", "synthetic_control"],
+          "context_from_previous": true
+        },
+        {
+          "turn": 3,
+          "user_prompt": "Run placebo tests by applying the method to each control unit",
+          "expected_tool": "synthetic_placebo",
+          "acceptable_tools": ["synthetic_placebo", "synthetic_inference"],
+          "context_from_previous": true
+        }
+      ]
+    }
+  ]
+}

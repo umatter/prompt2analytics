@@ -1,0 +1,19 @@
+{
+  "method": "probit",
+  "dataset": "synthetic_binary_n100000.csv",
+  "n": 100000,
+  "iterations": 5,
+  "warmup": 1,
+  "timestamp": "2026-01-26T09:13:08",
+  "r_version": "4.3.3",
+  "timing": {
+    "min_us": 171479.000011459,
+    "median_us": 180801.881942898,
+    "mean_us": [],
+    "max_us": [],
+    "itr_per_sec": 5.3773794857,
+    "mem_alloc": 334312712,
+    "n_gc": 68,
+    "n_itr": 5
+  }
+}

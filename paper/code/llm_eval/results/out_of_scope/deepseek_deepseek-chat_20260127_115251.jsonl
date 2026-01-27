@@ -1,0 +1,18 @@
+{
+  "timestamp": "2026-01-27T11:52:59+01:00",
+  "model": "deepseek/deepseek-chat",
+  "test_id": "oos_001",
+  "prompt": "Fit a Bayesian linear regression with informative priors on the coefficients",
+  "oos_reason": "bayesian_inference",
+  "closest_available": [
+    "regression_ols"
+  ],
+  "explanation": "p2a does not implement Bayesian estimation methods",
+  "selected_tool": "regression_ols",
+  "response_content": "",
+  "detected_oos": false,
+  "selected_false_tool": true,
+  "suggested_alternative": true,
+  "score_type": "graceful",
+  "latency_ms": 7679
+}

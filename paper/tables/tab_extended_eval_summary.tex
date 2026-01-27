@@ -1,0 +1,37 @@
+\begin{table}[htbp]
+\centering
+\caption{Extended evaluation results across robustness dimensions. Single-Turn
+shows baseline tool selection accuracy (87 tests). Multi-Turn shows turn-level
+accuracy (72 turns); Conv.\ Compl.\ shows percentage of conversations with all
+turns correct (20 conversations). Naturalistic shows accuracy on informal
+prompts (99 tests). Param F1 shows parameter extraction F1 score (49 tests).
+Interpret.\ shows interpretation accuracy (26 tests). OOS Det.\ shows
+out-of-scope detection rate (20 tests). Dashes indicate incomplete evaluation
+data due to API errors.}
+\label{tab:extended-eval}
+\small
+\begin{tabular}{@{}lrrrrrrr@{}}
+\toprule
+Model & \begin{tabular}{@{}c@{}}Single-\\Turn\end{tabular} &
+        \begin{tabular}{@{}c@{}}Multi-\\Turn\end{tabular} &
+        \begin{tabular}{@{}c@{}}Conv.\\Compl.\end{tabular} &
+        \begin{tabular}{@{}c@{}}Natural-\\istic\end{tabular} &
+        \begin{tabular}{@{}c@{}}Param\\F1\end{tabular} &
+        \begin{tabular}{@{}c@{}}Inter-\\pret.\end{tabular} &
+        \begin{tabular}{@{}c@{}}OOS\\Det.\end{tabular} \\
+\midrule
+Claude 3.5 Haiku      & 100.0 & 56.9 & 25.0 & 69.7 & 45.1 & 85.3 & 45.0 \\
+GPT-4o-mini           &  97.7 & 50.0 & 10.0 & 67.7 & 56.8 & 75.6 & 55.0 \\
+GPT-4.1 Nano          &  96.6 & 51.4 & 20.0 & 63.6 & 48.8 & 87.2 & 50.0 \\
+\addlinespace
+Llama 3.3 70B         &  98.9 & 59.7 & 35.0 & 68.7 & 41.1 & 85.6 & 55.0 \\
+Qwen 2.5 72B          & 100.0 & 56.9 & 15.0 & 68.7 & 59.1 & 82.7 & --- \\
+DeepSeek Chat         &  98.5 & 54.8 &  0.0 & --- & 50.3 & 82.7 & --- \\
+\addlinespace
+Mistral Small 24B     & 100.0 & 58.3 & 30.0 & 64.6 & 51.2 & 84.6 & 55.0 \\
+Ministral 3B          &  90.8 & 47.2 & 20.0 & 63.6 & 51.6 & 79.5 & 40.0 \\
+Qwen3 8B              &  96.2 & 55.6 & 25.0 & 57.6 & 43.7 & 67.8 & 55.0 \\
+Nemotron Nano 9B      &  97.7 & 48.6 & 15.0 & 58.6 & 51.9 & 80.3 & 60.0 \\
+\bottomrule
+\end{tabular}
+\end{table}

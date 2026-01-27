@@ -1,0 +1,11 @@
+{
+  "method": "pca",
+  "n": 100,
+  "iterations": 100,
+  "timing": {
+    "min_us": 4950,
+    "median_us": 7555,
+    "mean_us": 7177,
+    "max_us": 9923
+  }
+}

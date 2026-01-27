@@ -1,0 +1,11 @@
+{
+  "method": "hierarchical",
+  "n": 1000,
+  "iterations": 50,
+  "timing": {
+    "min_us": 17830450,
+    "median_us": 19794025,
+    "mean_us": 26063883,
+    "max_us": 48919362
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "method": "hierarchical",
+  "dataset": "synthetic_cluster_n1000.csv",
+  "n": 1000,
+  "iterations": 50,
+  "warmup": 5,
+  "timestamp": "2026-01-26T10:05:14",
+  "r_version": "4.3.3",
+  "timing": {
+    "min_us": 13394.0450614318,
+    "median_us": 13882.1030268446,
+    "mean_us": [],
+    "max_us": [],
+    "itr_per_sec": 68.1708628593,
+    "mem_alloc": 12257248,
+    "n_gc": 19,
+    "n_itr": 31
+  }
+}

@@ -1,0 +1,30 @@
+\begin{table}[htbp]
+\centering
+\caption{Performance benchmark results (median execution time)}
+\label{tab:benchmark-full}
+\begin{tabular}{llrrrr}
+\toprule
+Category & Method & $n$ & R (ms) & Rust (ms) & Speedup \\
+\midrule
+Discrete & Logit & 100,000 & 230.1 & 75.0 & 3.1x \\
+Discrete & Probit & 100,000 & 180.8 & 306.4 & 0.6x \\
+ML & Kmeans & 100,000 & 592.4 & 131.7 & 4.5x \\
+ML & Pca & 100,000 & 18.1 & 68.5 & 0.3x \\
+ML & Dbscan & 100,000 & 8762.3 & 71707.0 & 0.1x \\
+Munging & Group by & 100,000 & 30.3 & 18.6 & 1.6x \\
+Munging & Sort & 100,000 & 12.8 & 23.4 & 0.6x \\
+Munging & Filter & 100,000 & 9.4 & 24.8 & 0.4x \\
+Munging & Standardize & 100,000 & 6.1 & 15.9 & 0.4x \\
+Munging & Lag & 100,000 & 0.7 & 12.9 & 0.1x \\
+Munging & Select & 100,000 & 0.0 & 12.8 & 0.0x \\
+Panel & Panel FE & 100,000 & 194.8 & 31.7 & 6.1x \\
+Panel & Panel RE & 100,000 & 451.1 & 114.0 & 4.0x \\
+Regression & OLS+HC2 & 100,000 & 159.8 & 29.3 & 5.5x \\
+Regression & OLS+HC0 & 100,000 & 137.2 & 26.0 & 5.3x \\
+Regression & OLS+HC3 & 100,000 & 139.6 & 27.2 & 5.1x \\
+Regression & OLS+HC1 & 100,000 & 142.3 & 27.9 & 5.1x \\
+Regression & OLS & 100,000 & 23.1 & 28.0 & 0.8x \\
+\bottomrule
+\end{tabular}
+\end{table}
+

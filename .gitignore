@@ -54,3 +54,19 @@ docs/DIOXUS_MIGRATION_FEASIBILITY.md
 ideas.md
 # Benchmark result files
 crates/p2a-core/rust_*.json
+
+# LLM evaluation results
+paper/code/llm_eval/results/*.jsonl
+paper/code/llm_eval/results/*.md
+
+# Simulated review reports
+paper/_resources/review_reports/
+**/target/
+**/target/
+paper/code/rust_validation/datasets/synthetic_*.csv
+**/target/
+paper/code/rust_validation/datasets/synthetic_*.csv
+paper/_resources/
+paper/figures/test.pdf
+paper/code/paper/
+review_reports/

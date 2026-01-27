@@ -1,0 +1,11 @@
+{
+  "method": "sort",
+  "n": 1000,
+  "iterations": 100,
+  "timing": {
+    "min_us": 5686,
+    "median_us": 8578,
+    "mean_us": 8292,
+    "max_us": 9817
+  }
+}

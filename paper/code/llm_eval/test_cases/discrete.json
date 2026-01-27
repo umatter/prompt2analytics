@@ -1,0 +1,86 @@
+{
+  "category": "discrete",
+  "description": "Logit, probit, and discrete choice model tests",
+  "tests": [
+    {
+      "id": "dis_001",
+      "prompt": "Estimate the probability of loan default based on borrower characteristics",
+      "expected_tools": ["logit"],
+      "acceptable_tools": ["logit", "probit"],
+      "dataset_context": "credit dataset: default (0/1), income, debt_ratio, credit_score, employment_years",
+      "difficulty": "basic"
+    },
+    {
+      "id": "dis_002",
+      "prompt": "Run a logistic regression to predict customer churn",
+      "expected_tools": ["logit"],
+      "acceptable_tools": ["logit"],
+      "dataset_context": "telecom dataset: churned (0/1), tenure, monthly_charges, contract_type, support_calls",
+      "difficulty": "basic"
+    },
+    {
+      "id": "dis_003",
+      "prompt": "Use probit to model the binary choice of labor force participation",
+      "expected_tools": ["probit"],
+      "acceptable_tools": ["probit", "logit"],
+      "dataset_context": "labor dataset: working (0/1), age, education, children, spouse_income",
+      "difficulty": "basic"
+    },
+    {
+      "id": "dis_004",
+      "prompt": "Estimate a probit model for voting behavior",
+      "expected_tools": ["probit"],
+      "acceptable_tools": ["probit", "logit"],
+      "dataset_context": "election dataset: voted (0/1), age, education, income, party_affiliation",
+      "difficulty": "basic"
+    },
+    {
+      "id": "dis_005",
+      "prompt": "Model the binary outcome of bankruptcy using maximum likelihood",
+      "expected_tools": ["logit"],
+      "acceptable_tools": ["logit", "probit"],
+      "dataset_context": "bankruptcy dataset: bankrupt (0/1), current_ratio, debt_equity, roa, size",
+      "difficulty": "intermediate"
+    },
+    {
+      "id": "dis_006",
+      "prompt": "Fit a logit model with firm and year fixed effects",
+      "expected_tools": ["feglm"],
+      "acceptable_tools": ["feglm", "logit"],
+      "dataset_context": "panel_binary dataset: firm, year, outcome (0/1), x1, x2, x3",
+      "difficulty": "advanced"
+    },
+    {
+      "id": "dis_007",
+      "prompt": "Predict the probability of disease occurrence based on risk factors",
+      "expected_tools": ["logit"],
+      "acceptable_tools": ["logit", "probit"],
+      "dataset_context": "health dataset: disease (0/1), age, smoking, bmi, blood_pressure, family_history",
+      "difficulty": "basic"
+    },
+    {
+      "id": "dis_008",
+      "prompt": "Analyze the determinants of firm export participation with a binary choice model",
+      "expected_tools": ["logit"],
+      "acceptable_tools": ["logit", "probit"],
+      "dataset_context": "trade dataset: exports (0/1), firm_size, productivity, foreign_ownership, r_and_d",
+      "difficulty": "intermediate"
+    },
+    {
+      "id": "dis_009",
+      "prompt": "Estimate marginal effects from a probit regression",
+      "expected_tools": ["probit"],
+      "acceptable_tools": ["probit", "logit"],
+      "dataset_context": "choice dataset: y (0/1), x1, x2, x3",
+      "difficulty": "intermediate"
+    },
+    {
+      "id": "dis_010",
+      "prompt": "Run a Poisson regression with fixed effects for count data",
+      "expected_tools": ["feglm"],
+      "acceptable_tools": ["feglm"],
+      "dataset_context": "patent dataset: firm, year, patent_count, r_and_d, firm_size, industry",
+      "difficulty": "advanced"
+    }
+  ]
+}

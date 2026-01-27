@@ -1,0 +1,736 @@
+{
+  "category": "parameter_extraction",
+  "description": "Tests for evaluating LLM ability to extract and correctly specify tool parameters",
+  "tests": [
+    {
+      "id": "param_reg_001",
+      "prompt": "Regress investment on firm value and capital with HC2 robust standard errors",
+      "expected_tool": "regression_ols",
+      "dataset_context": "grunfeld dataset: firm, year, inv, value, capital",
+      "expected_parameters": {
+        "y_col": {"expected": "inv", "alternatives": ["investment"]},
+        "x_cols": {"expected": ["value", "capital"], "order_matters": false},
+        "robust": {"expected": "hc2", "alternatives": ["HC2"]},
+        "intercept": {"expected": true, "implicit": true}
+      },
+      "parameter_difficulty": {
+        "y_col": "explicit",
+        "x_cols": "explicit",
+        "robust": "explicit",
+        "intercept": "implicit_default"
+      }
+    },
+    {
+      "id": "param_reg_002",
+      "prompt": "Run OLS without an intercept regressing wages on education and experience",
+      "expected_tool": "regression_ols",
+      "dataset_context": "wages dataset: wage, education, experience, tenure",
+      "expected_parameters": {
+        "y_col": {"expected": "wage", "alternatives": ["wages"]},
+        "x_cols": {"expected": ["education", "experience"], "order_matters": false},
+        "intercept": {"expected": false, "alternatives": [false]},
+        "robust": {"expected": "none", "implicit": true}
+      },
+      "parameter_difficulty": {
+        "y_col": "explicit",
+        "x_cols": "explicit",
+        "intercept": "explicit_negation",
+        "robust": "implicit_default"
+      }
+    },
+    {
+      "id": "param_reg_003",
+      "prompt": "Cluster standard errors by firm in a regression of inv on value",
+      "expected_tool": "regression_clustered",
+      "dataset_context": "grunfeld dataset: firm, year, inv, value, capital",
+      "expected_parameters": {
+        "y_col": {"expected": "inv"},
+        "x_cols": {"expected": ["value"]},
+        "cluster_var": {"expected": "firm", "alternatives": ["firm_id"]}
+      },
+      "parameter_difficulty": {
+        "y_col": "explicit",
+        "x_cols": "explicit",
+        "cluster_var": "explicit"
+      }
+    },
+    {
+      "id": "param_pan_001",
+      "prompt": "Fixed effects regression of investment on value with firm as the entity and year as time",
+      "expected_tool": "panel_fe",
+      "dataset_context": "grunfeld dataset: firm, year, inv, value, capital",
+      "expected_parameters": {
+        "y_col": {"expected": "inv", "alternatives": ["investment"]},
+        "x_cols": {"expected": ["value"]},
+        "entity_col": {"expected": "firm"},
+        "time_col": {"expected": "year"}
+      },
+      "parameter_difficulty": {
+        "y_col": "explicit",
+        "x_cols": "explicit",
+        "entity_col": "explicit",
+        "time_col": "explicit"
+      }
+    },
+    {
+      "id": "param_pan_002",
+      "prompt": "Two-way fixed effects with both firm and year dummies",
+      "expected_tool": "panel_twoway",
+      "dataset_context": "grunfeld dataset: firm, year, inv, value, capital",
+      "expected_parameters": {
+        "entity_col": {"expected": "firm"},
+        "time_col": {"expected": "year"},
+        "entity_fe": {"expected": true, "implicit": true},
+        "time_fe": {"expected": true, "implicit": true}
+      },
+      "parameter_difficulty": {
+        "entity_col": "explicit",
+        "time_col": "explicit",
+        "entity_fe": "implicit_from_context",
+        "time_fe": "implicit_from_context"
+      }
+    },
+    {
+      "id": "param_pan_003",
+      "prompt": "High-dimensional fixed effects for origin, destination, and year",
+      "expected_tool": "panel_hdfe",
+      "dataset_context": "trade dataset: export_value, distance, gdp_origin, gdp_dest, origin, dest, year",
+      "expected_parameters": {
+        "fe_vars": {"expected": ["origin", "dest", "year"], "order_matters": false, "alternatives": [["origin", "destination", "year"]]}
+      },
+      "parameter_difficulty": {
+        "fe_vars": "explicit_multiple"
+      }
+    },
+    {
+      "id": "param_cau_001",
+      "prompt": "2SLS regression of wages on education using parents_education as an instrument",
+      "expected_tool": "iv_2sls",
+      "dataset_context": "returns_to_schooling: wage, education, experience, parents_education",
+      "expected_parameters": {
+        "y_col": {"expected": "wage", "alternatives": ["wages"]},
+        "endog_col": {"expected": "education"},
+        "instruments": {"expected": ["parents_education"], "alternatives": [["parents_education", "parents_ed"]]}
+      },
+      "parameter_difficulty": {
+        "y_col": "explicit",
+        "endog_col": "explicit",
+        "instruments": "explicit"
+      }
+    },
+    {
+      "id": "param_cau_002",
+      "prompt": "Difference-in-differences with treatment=treated, post=post_period, and outcome=earnings",
+      "expected_tool": "diff_in_diff",
+      "dataset_context": "policy_data: earnings, treated, post_period, state, year",
+      "expected_parameters": {
+        "y_col": {"expected": "earnings"},
+        "treat_col": {"expected": "treated", "alternatives": ["treatment"]},
+        "post_col": {"expected": "post_period", "alternatives": ["post"]}
+      },
+      "parameter_difficulty": {
+        "y_col": "explicit",
+        "treat_col": "explicit",
+        "post_col": "explicit"
+      }
+    },
+    {
+      "id": "param_cau_003",
+      "prompt": "Sharp RD with cutoff at 50 on the running variable test_score",
+      "expected_tool": "rd_sharp",
+      "dataset_context": "test_scores: outcome, test_score, treatment, school",
+      "expected_parameters": {
+        "running_var": {"expected": "test_score"},
+        "cutoff": {"expected": 50, "alternatives": [50.0]},
+        "outcome_col": {"expected": "outcome"}
+      },
+      "parameter_difficulty": {
+        "running_var": "explicit",
+        "cutoff": "explicit_numeric",
+        "outcome_col": "explicit"
+      }
+    },
+    {
+      "id": "param_ts_001",
+      "prompt": "Fit an ARIMA(2,1,1) model to the GDP series",
+      "expected_tool": "ts_arima",
+      "dataset_context": "gdp_quarterly: gdp, date",
+      "expected_parameters": {
+        "series_col": {"expected": "gdp"},
+        "p": {"expected": 2},
+        "d": {"expected": 1},
+        "q": {"expected": 1}
+      },
+      "parameter_difficulty": {
+        "series_col": "explicit",
+        "p": "explicit_numeric",
+        "d": "explicit_numeric",
+        "q": "explicit_numeric"
+      }
+    },
+    {
+      "id": "param_ts_002",
+      "prompt": "VAR with 4 lags for gdp, inflation, and interest_rate",
+      "expected_tool": "ts_var",
+      "dataset_context": "macro_quarterly: gdp, inflation, interest_rate, date",
+      "expected_parameters": {
+        "vars": {"expected": ["gdp", "inflation", "interest_rate"], "order_matters": false},
+        "lags": {"expected": 4}
+      },
+      "parameter_difficulty": {
+        "vars": "explicit_multiple",
+        "lags": "explicit_numeric"
+      }
+    },
+    {
+      "id": "param_ts_003",
+      "prompt": "Generate 12-step ahead forecasts with 95% confidence intervals",
+      "expected_tool": "ts_forecast",
+      "dataset_context": "gdp_quarterly: gdp, date",
+      "expected_parameters": {
+        "horizon": {"expected": 12, "alternatives": [12]},
+        "ci_level": {"expected": 0.95, "alternatives": [95, "95%"]}
+      },
+      "parameter_difficulty": {
+        "horizon": "explicit_numeric",
+        "ci_level": "explicit_numeric"
+      }
+    },
+    {
+      "id": "param_dis_001",
+      "prompt": "Logit model predicting employed from age, education, and married",
+      "expected_tool": "logit",
+      "dataset_context": "labor_participation: employed, age, education, married, children",
+      "expected_parameters": {
+        "y_col": {"expected": "employed"},
+        "x_cols": {"expected": ["age", "education", "married"], "order_matters": false}
+      },
+      "parameter_difficulty": {
+        "y_col": "explicit",
+        "x_cols": "explicit_multiple"
+      }
+    },
+    {
+      "id": "param_dis_002",
+      "prompt": "FEGLM with logit link and firm fixed effects",
+      "expected_tool": "feglm",
+      "dataset_context": "firm_outcomes: success, r_and_d, size, firm, year",
+      "expected_parameters": {
+        "family": {"expected": "binomial", "alternatives": ["logit"]},
+        "link": {"expected": "logit", "implicit": true},
+        "fe_var": {"expected": "firm"}
+      },
+      "parameter_difficulty": {
+        "family": "explicit",
+        "link": "implicit_from_family",
+        "fe_var": "explicit"
+      }
+    },
+    {
+      "id": "param_hyp_001",
+      "prompt": "Two-sample t-test comparing group A vs B at alpha=0.01",
+      "expected_tool": "hypothesis_t_test",
+      "dataset_context": "experiment: outcome, group",
+      "expected_parameters": {
+        "group_var": {"expected": "group"},
+        "outcome_var": {"expected": "outcome"},
+        "alpha": {"expected": 0.01}
+      },
+      "parameter_difficulty": {
+        "group_var": "explicit",
+        "outcome_var": "explicit",
+        "alpha": "explicit_numeric"
+      }
+    },
+    {
+      "id": "param_hyp_002",
+      "prompt": "One-way ANOVA with 3 groups: control, treatment1, treatment2",
+      "expected_tool": "anova_oneway",
+      "dataset_context": "experiment: outcome, treatment_group",
+      "expected_parameters": {
+        "group_var": {"expected": "treatment_group"},
+        "n_groups": {"expected": 3, "implicit": true}
+      },
+      "parameter_difficulty": {
+        "group_var": "explicit",
+        "n_groups": "implicit_from_context"
+      }
+    },
+    {
+      "id": "param_ml_001",
+      "prompt": "K-means clustering with k=5 and max 100 iterations",
+      "expected_tool": "ml_kmeans",
+      "dataset_context": "customers: spending, frequency, recency",
+      "expected_parameters": {
+        "k": {"expected": 5},
+        "max_iter": {"expected": 100}
+      },
+      "parameter_difficulty": {
+        "k": "explicit_numeric",
+        "max_iter": "explicit_numeric"
+      }
+    },
+    {
+      "id": "param_ml_002",
+      "prompt": "PCA keeping the first 3 components",
+      "expected_tool": "ml_pca",
+      "dataset_context": "survey_responses: q1, q2, ..., q50",
+      "expected_parameters": {
+        "n_components": {"expected": 3}
+      },
+      "parameter_difficulty": {
+        "n_components": "explicit_numeric"
+      }
+    },
+    {
+      "id": "param_ml_003",
+      "prompt": "t-SNE with perplexity=30 reducing to 2 dimensions",
+      "expected_tool": "ml_tsne",
+      "dataset_context": "embeddings: dim1, ..., dim100",
+      "expected_parameters": {
+        "perplexity": {"expected": 30},
+        "n_components": {"expected": 2, "implicit": true}
+      },
+      "parameter_difficulty": {
+        "perplexity": "explicit_numeric",
+        "n_components": "explicit_numeric"
+      }
+    },
+    {
+      "id": "param_ml_004",
+      "prompt": "Random forest with 500 trees, max depth 10, predicting churn",
+      "expected_tool": "ml_random_forest",
+      "dataset_context": "customers: churned, tenure, spending, complaints",
+      "expected_parameters": {
+        "n_trees": {"expected": 500, "alternatives": ["n_estimators"]},
+        "max_depth": {"expected": 10},
+        "target": {"expected": "churned", "alternatives": ["churn"]}
+      },
+      "parameter_difficulty": {
+        "n_trees": "explicit_numeric",
+        "max_depth": "explicit_numeric",
+        "target": "explicit"
+      }
+    },
+    {
+      "id": "param_viz_001",
+      "prompt": "Histogram of income with 25 bins",
+      "expected_tool": "viz_histogram",
+      "dataset_context": "census: income, age, education",
+      "expected_parameters": {
+        "column": {"expected": "income"},
+        "bins": {"expected": 25}
+      },
+      "parameter_difficulty": {
+        "column": "explicit",
+        "bins": "explicit_numeric"
+      }
+    },
+    {
+      "id": "param_viz_002",
+      "prompt": "Scatter plot of education vs income colored by gender",
+      "expected_tool": "viz_scatter",
+      "dataset_context": "census: income, education, gender, age",
+      "expected_parameters": {
+        "x_col": {"expected": "education"},
+        "y_col": {"expected": "income"},
+        "color_col": {"expected": "gender", "alternatives": ["hue", "group"]}
+      },
+      "parameter_difficulty": {
+        "x_col": "explicit",
+        "y_col": "explicit",
+        "color_col": "explicit"
+      }
+    },
+    {
+      "id": "param_reg_004",
+      "prompt": "Regress log wages on years of education",
+      "expected_tool": "regression_ols",
+      "dataset_context": "wages: wage, log_wage, education, experience",
+      "expected_parameters": {
+        "y_col": {"expected": "log_wage", "alternatives": ["ln_wage", "lwage"]},
+        "x_cols": {"expected": ["education"]}
+      },
+      "parameter_difficulty": {
+        "y_col": "requires_inference",
+        "x_cols": "explicit"
+      }
+    },
+    {
+      "id": "param_pan_004",
+      "prompt": "Random effects GLS with firm as the group variable",
+      "expected_tool": "panel_re",
+      "dataset_context": "grunfeld: firm, year, inv, value, capital",
+      "expected_parameters": {
+        "group_var": {"expected": "firm"},
+        "method": {"expected": "gls", "implicit": true}
+      },
+      "parameter_difficulty": {
+        "group_var": "explicit",
+        "method": "implicit_default"
+      }
+    },
+    {
+      "id": "param_cau_004",
+      "prompt": "IPW estimator for ATT using age, education, and income as matching variables",
+      "expected_tool": "treatment_ipw",
+      "dataset_context": "training: earnings, treated, age, education, income",
+      "expected_parameters": {
+        "covariates": {"expected": ["age", "education", "income"], "order_matters": false},
+        "estimand": {"expected": "ATT", "alternatives": ["att"]}
+      },
+      "parameter_difficulty": {
+        "covariates": "explicit_multiple",
+        "estimand": "explicit"
+      }
+    },
+    {
+      "id": "param_ts_004",
+      "prompt": "IRF for 20 periods with bootstrap confidence bands",
+      "expected_tool": "ts_irf",
+      "dataset_context": "macro: gdp, inflation, interest_rate",
+      "expected_parameters": {
+        "horizon": {"expected": 20},
+        "ci_method": {"expected": "bootstrap", "alternatives": ["boot"]}
+      },
+      "parameter_difficulty": {
+        "horizon": "explicit_numeric",
+        "ci_method": "explicit"
+      }
+    },
+    {
+      "id": "param_hyp_003",
+      "prompt": "Breusch-Pagan test with the LM version not F",
+      "expected_tool": "hypothesis_breusch_pagan",
+      "dataset_context": "regression_results: residuals, x1, x2",
+      "expected_parameters": {
+        "test_stat": {"expected": "lm", "alternatives": ["LM", "chi-squared"]}
+      },
+      "parameter_difficulty": {
+        "test_stat": "explicit"
+      }
+    },
+    {
+      "id": "param_ml_005",
+      "prompt": "Hierarchical clustering with complete linkage and 4 clusters",
+      "expected_tool": "ml_hierarchical",
+      "dataset_context": "customers: spending, frequency, recency",
+      "expected_parameters": {
+        "linkage": {"expected": "complete"},
+        "n_clusters": {"expected": 4}
+      },
+      "parameter_difficulty": {
+        "linkage": "explicit",
+        "n_clusters": "explicit_numeric"
+      }
+    },
+    {
+      "id": "param_viz_003",
+      "prompt": "Boxplot of income by education_level with outliers shown",
+      "expected_tool": "viz_boxplot",
+      "dataset_context": "census: income, education_level, gender",
+      "expected_parameters": {
+        "value_col": {"expected": "income"},
+        "group_col": {"expected": "education_level"},
+        "show_outliers": {"expected": true}
+      },
+      "parameter_difficulty": {
+        "value_col": "explicit",
+        "group_col": "explicit",
+        "show_outliers": "explicit"
+      }
+    },
+    {
+      "id": "param_reg_005",
+      "prompt": "Multiple regression controlling for age, gender, and region dummies",
+      "expected_tool": "regression_ols",
+      "dataset_context": "wages: wage, education, age, gender, region",
+      "expected_parameters": {
+        "x_cols": {"expected": ["education", "age", "gender", "region"], "order_matters": false},
+        "categorical": {"expected": ["region"], "implicit": true}
+      },
+      "parameter_difficulty": {
+        "x_cols": "partially_explicit",
+        "categorical": "requires_inference"
+      }
+    },
+    {
+      "id": "param_cau_005",
+      "prompt": "Event study with 3 leads and 5 lags relative to treatment",
+      "expected_tool": "diff_event_study",
+      "dataset_context": "policy: outcome, treated, time_to_treat, state, year",
+      "expected_parameters": {
+        "leads": {"expected": 3},
+        "lags": {"expected": 5}
+      },
+      "parameter_difficulty": {
+        "leads": "explicit_numeric",
+        "lags": "explicit_numeric"
+      }
+    },
+    {
+      "id": "param_ts_005",
+      "prompt": "Johansen cointegration test with 2 lags and trend specification 'ct'",
+      "expected_tool": "ts_johansen",
+      "dataset_context": "exchange_rates: usd_eur, usd_gbp, date",
+      "expected_parameters": {
+        "lags": {"expected": 2},
+        "det_order": {"expected": "ct", "alternatives": ["constant_trend", 1]}
+      },
+      "parameter_difficulty": {
+        "lags": "explicit_numeric",
+        "det_order": "explicit"
+      }
+    },
+    {
+      "id": "param_ml_006",
+      "prompt": "DBSCAN with epsilon=0.5 and min_samples=5",
+      "expected_tool": "ml_dbscan",
+      "dataset_context": "spatial: x, y, cluster",
+      "expected_parameters": {
+        "eps": {"expected": 0.5, "alternatives": ["epsilon"]},
+        "min_samples": {"expected": 5, "alternatives": ["min_pts"]}
+      },
+      "parameter_difficulty": {
+        "eps": "explicit_numeric",
+        "min_samples": "explicit_numeric"
+      }
+    },
+    {
+      "id": "param_hyp_004",
+      "prompt": "F-test for joint significance of x1, x2, and x3",
+      "expected_tool": "hypothesis_f_test",
+      "dataset_context": "regression_model: coefficients, vcov, x1, x2, x3, x4",
+      "expected_parameters": {
+        "test_vars": {"expected": ["x1", "x2", "x3"], "order_matters": false}
+      },
+      "parameter_difficulty": {
+        "test_vars": "explicit_multiple"
+      }
+    },
+    {
+      "id": "param_viz_004",
+      "prompt": "Time series plot of GDP from 2000 to 2020 with recession shading",
+      "expected_tool": "viz_ts",
+      "dataset_context": "gdp_data: gdp, date, recession",
+      "expected_parameters": {
+        "series_col": {"expected": "gdp"},
+        "date_col": {"expected": "date"},
+        "start_date": {"expected": "2000", "alternatives": ["2000-01-01"]},
+        "end_date": {"expected": "2020", "alternatives": ["2020-12-31"]},
+        "shade_col": {"expected": "recession", "implicit": true}
+      },
+      "parameter_difficulty": {
+        "series_col": "explicit",
+        "date_col": "implicit_from_context",
+        "start_date": "explicit",
+        "end_date": "explicit",
+        "shade_col": "requires_inference"
+      }
+    },
+    {
+      "id": "param_reg_006",
+      "prompt": "WLS regression with weights from the column 'precision'",
+      "expected_tool": "regression_wls",
+      "dataset_context": "meta_analysis: effect, se, precision, study",
+      "expected_parameters": {
+        "weights_col": {"expected": "precision"}
+      },
+      "parameter_difficulty": {
+        "weights_col": "explicit"
+      }
+    },
+    {
+      "id": "param_cau_006",
+      "prompt": "Synthetic control for unit 'California' with pre-treatment from 1970-1988",
+      "expected_tool": "synthetic_control",
+      "dataset_context": "state_data: gdp, state, year, treated",
+      "expected_parameters": {
+        "treated_unit": {"expected": "California", "alternatives": ["CA"]},
+        "pre_start": {"expected": 1970},
+        "pre_end": {"expected": 1988}
+      },
+      "parameter_difficulty": {
+        "treated_unit": "explicit",
+        "pre_start": "explicit_numeric",
+        "pre_end": "explicit_numeric"
+      }
+    },
+    {
+      "id": "param_dis_003",
+      "prompt": "Probit with average marginal effects at the mean",
+      "expected_tool": "probit_margins",
+      "dataset_context": "labor: employed, age, education, married",
+      "expected_parameters": {
+        "margin_type": {"expected": "atmean", "alternatives": ["MEM", "at_mean"]}
+      },
+      "parameter_difficulty": {
+        "margin_type": "explicit"
+      }
+    },
+    {
+      "id": "param_ts_006",
+      "prompt": "STL decomposition with seasonal period of 12 for monthly data",
+      "expected_tool": "ts_stl",
+      "dataset_context": "retail: sales, date",
+      "expected_parameters": {
+        "period": {"expected": 12, "alternatives": ["seasonal_period"]}
+      },
+      "parameter_difficulty": {
+        "period": "explicit_numeric"
+      }
+    },
+    {
+      "id": "param_hyp_005",
+      "prompt": "Power analysis for detecting effect size d=0.5 with n=100 per group",
+      "expected_tool": "power_analysis",
+      "dataset_context": "study_design",
+      "expected_parameters": {
+        "effect_size": {"expected": 0.5},
+        "n_per_group": {"expected": 100}
+      },
+      "parameter_difficulty": {
+        "effect_size": "explicit_numeric",
+        "n_per_group": "explicit_numeric"
+      }
+    },
+    {
+      "id": "param_reg_007",
+      "prompt": "Regress sales on price and advertising with two-way clustered standard errors by store and week",
+      "expected_tool": "regression_clustered",
+      "dataset_context": "retail_panel: sales, price, advertising, store, week",
+      "expected_parameters": {
+        "y_col": {"expected": "sales"},
+        "x_cols": {"expected": ["price", "advertising"], "order_matters": false},
+        "cluster_var1": {"expected": "store"},
+        "cluster_var2": {"expected": "week"}
+      },
+      "parameter_difficulty": {
+        "y_col": "explicit",
+        "x_cols": "explicit",
+        "cluster_var1": "explicit",
+        "cluster_var2": "explicit"
+      }
+    },
+    {
+      "id": "param_pan_005",
+      "prompt": "Between-effects estimator for time-invariant characteristics",
+      "expected_tool": "panel_between",
+      "dataset_context": "grunfeld: firm, year, inv, value, capital",
+      "expected_parameters": {
+        "entity_col": {"expected": "firm"},
+        "method": {"expected": "between"}
+      },
+      "parameter_difficulty": {
+        "entity_col": "requires_inference",
+        "method": "explicit"
+      }
+    },
+    {
+      "id": "param_cau_007",
+      "prompt": "Fuzzy RD with compliance rate around 0.7 at cutoff 60",
+      "expected_tool": "rd_fuzzy",
+      "dataset_context": "scholarship: outcome, running_var, treatment_received, cutoff_eligible",
+      "expected_parameters": {
+        "cutoff": {"expected": 60},
+        "fuzzy": {"expected": true},
+        "running_var": {"expected": "running_var"}
+      },
+      "parameter_difficulty": {
+        "cutoff": "explicit_numeric",
+        "fuzzy": "explicit",
+        "running_var": "requires_inference"
+      }
+    },
+    {
+      "id": "param_ts_007",
+      "prompt": "VARMA(2,1) model for gdp, inflation, and unemployment",
+      "expected_tool": "ts_varma",
+      "dataset_context": "macro: gdp, inflation, unemployment, date",
+      "expected_parameters": {
+        "vars": {"expected": ["gdp", "inflation", "unemployment"], "order_matters": false},
+        "p": {"expected": 2},
+        "q": {"expected": 1}
+      },
+      "parameter_difficulty": {
+        "vars": "explicit_multiple",
+        "p": "explicit_numeric",
+        "q": "explicit_numeric"
+      }
+    },
+    {
+      "id": "param_ml_007",
+      "prompt": "Gaussian Mixture Model with 3 components and full covariance",
+      "expected_tool": "ml_gmm",
+      "dataset_context": "customer_segments: feature1, feature2, feature3",
+      "expected_parameters": {
+        "n_components": {"expected": 3},
+        "covariance_type": {"expected": "full"}
+      },
+      "parameter_difficulty": {
+        "n_components": "explicit_numeric",
+        "covariance_type": "explicit"
+      }
+    },
+    {
+      "id": "param_viz_005",
+      "prompt": "Pair plot for education, income, age, and experience colored by gender",
+      "expected_tool": "viz_pairplot",
+      "dataset_context": "survey: education, income, age, experience, gender",
+      "expected_parameters": {
+        "vars": {"expected": ["education", "income", "age", "experience"], "order_matters": false},
+        "hue": {"expected": "gender", "alternatives": ["color_by"]}
+      },
+      "parameter_difficulty": {
+        "vars": "explicit_multiple",
+        "hue": "explicit"
+      }
+    },
+    {
+      "id": "param_hyp_006",
+      "prompt": "Levene's test for homogeneity of variance across 4 groups",
+      "expected_tool": "hypothesis_levene",
+      "dataset_context": "experiment: value, group",
+      "expected_parameters": {
+        "group_var": {"expected": "group"},
+        "value_var": {"expected": "value"},
+        "center": {"expected": "median", "implicit": true}
+      },
+      "parameter_difficulty": {
+        "group_var": "explicit",
+        "value_var": "requires_inference",
+        "center": "implicit_default"
+      }
+    },
+    {
+      "id": "param_dis_004",
+      "prompt": "Conditional logit for choice data with alternative-specific attributes",
+      "expected_tool": "logit_conditional",
+      "dataset_context": "transport_choice: chosen, mode, cost, time, individual",
+      "expected_parameters": {
+        "choice_var": {"expected": "chosen"},
+        "alt_var": {"expected": "mode"},
+        "alt_attrs": {"expected": ["cost", "time"], "order_matters": false}
+      },
+      "parameter_difficulty": {
+        "choice_var": "explicit",
+        "alt_var": "requires_inference",
+        "alt_attrs": "explicit_multiple"
+      }
+    },
+    {
+      "id": "param_reg_008",
+      "prompt": "Elastic net regression with alpha=0.5 and lambda selected by cross-validation",
+      "expected_tool": "regression_elastic_net",
+      "dataset_context": "high_dim: y, x1, x2, ..., x100",
+      "expected_parameters": {
+        "alpha": {"expected": 0.5},
+        "lambda_selection": {"expected": "cv", "alternatives": ["cross_validation"]}
+      },
+      "parameter_difficulty": {
+        "alpha": "explicit_numeric",
+        "lambda_selection": "explicit"
+      }
+    }
+  ]
+}

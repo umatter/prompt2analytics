@@ -1,0 +1,159 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 660" width="820" height="660">
+  <defs>
+    <style>
+      .title { font-family: 'Helvetica Neue', Arial, sans-serif; font-size: 20px; font-weight: 600; fill: #333; }
+      .header { font-family: 'Helvetica Neue', Arial, sans-serif; font-size: 15px; font-weight: 600; fill: #333; }
+      .label { font-family: 'Helvetica Neue', Arial, sans-serif; font-size: 13px; fill: #333; }
+      .sublabel { font-family: 'Helvetica Neue', Arial, sans-serif; font-size: 12px; fill: #666; }
+      .zone-label { font-family: 'Helvetica Neue', Arial, sans-serif; font-size: 12px; fill: #666; }
+      .step { font-family: 'Helvetica Neue', Arial, sans-serif; font-size: 12px; fill: #fff; font-weight: 700; }
+      .message { font-family: 'Helvetica Neue', Arial, sans-serif; font-size: 12px; fill: #555; font-style: italic; }
+      .mono { font-family: 'Monaco', 'Consolas', monospace; font-size: 12px; fill: #333; }
+    </style>
+  </defs>
+
+  <!-- Background -->
+  <rect width="820" height="660" fill="#fff"/>
+
+  <!-- Title -->
+  <text x="410" y="30" text-anchor="middle" class="title">Chat Interaction Flow</text>
+
+  <!-- Zone backgrounds -->
+  <!-- LLM zone: teal/cyan -->
+  <rect x="100" y="50" width="220" height="540" fill="#E0F7FA" fill-opacity="0.4" stroke="none"/>
+
+  <!-- MCP zone: light grey -->
+  <rect x="320" y="50" width="165" height="540" fill="#F5F5F5" fill-opacity="0.6" stroke="none"/>
+
+  <!-- p2a-core + Data zone: warm orange tint -->
+  <rect x="485" y="50" width="295" height="540" fill="#FFF3E0" fill-opacity="0.4" stroke="none"/>
+
+  <!-- LOCAL COMPUTATION dotted border around MCP + p2a-core + Data -->
+  <rect x="315" y="45" width="470" height="550" fill="none" stroke="#666" stroke-width="2" stroke-dasharray="8,4" rx="8"/>
+
+  <!-- Zone labels -->
+  <text x="210" y="68" text-anchor="middle" class="zone-label" fill="#0097A7">CLOUD (or local Ollama)</text>
+  <text x="550" y="68" text-anchor="middle" class="zone-label" fill="#666">LOCAL COMPUTATION</text>
+
+  <!-- ==================== COLUMN HEADERS ==================== -->
+
+  <!-- User icon -->
+  <g transform="translate(55, 100)">
+    <circle cx="0" cy="-10" r="10" fill="none" stroke="#333" stroke-width="2"/>
+    <path d="M-16,16 Q0,2 16,16" fill="none" stroke="#333" stroke-width="2"/>
+    <text x="0" y="40" text-anchor="middle" class="header">User</text>
+  </g>
+
+  <!-- LLM icon -->
+  <g transform="translate(210, 100)">
+    <rect x="-16" y="-16" width="32" height="24" rx="12" fill="#E0F7FA" stroke="#0097A7" stroke-width="2"/>
+    <circle cx="-6" cy="-4" r="3" fill="#0097A7"/>
+    <circle cx="6" cy="-4" r="3" fill="#0097A7"/>
+    <text x="0" y="40" text-anchor="middle" class="header" fill="#0097A7">LLM</text>
+  </g>
+
+  <!-- MCP icon -->
+  <g transform="translate(400, 100)">
+    <rect x="-22" y="-16" width="44" height="14" rx="2" fill="none" stroke="#666" stroke-width="2"/>
+    <rect x="-22" y="2" width="44" height="14" rx="2" fill="none" stroke="#666" stroke-width="2"/>
+    <circle cx="14" cy="-9" r="4" fill="#666"/>
+    <circle cx="14" cy="9" r="4" fill="#666"/>
+    <text x="0" y="40" text-anchor="middle" class="header" fill="#666">MCP</text>
+  </g>
+
+  <!-- p2a-core icon -->
+  <g transform="translate(580, 100)">
+    <rect x="-22" y="-16" width="44" height="32" rx="4" fill="none" stroke="#E65100" stroke-width="2"/>
+    <line x1="-14" y1="-7" x2="14" y2="-7" stroke="#E65100" stroke-width="2"/>
+    <line x1="-14" y1="0" x2="14" y2="0" stroke="#E65100" stroke-width="2"/>
+    <line x1="-14" y1="7" x2="8" y2="7" stroke="#E65100" stroke-width="2"/>
+    <text x="0" y="40" text-anchor="middle" class="header" fill="#E65100">p2a-core</text>
+  </g>
+
+  <!-- Data icon -->
+  <g transform="translate(735, 100)">
+    <ellipse cx="0" cy="-12" rx="18" ry="7" fill="none" stroke="#333" stroke-width="2"/>
+    <path d="M-18,-12 L-18,12 Q0,26 18,12 L18,-12" fill="none" stroke="#333" stroke-width="2"/>
+    <text x="0" y="40" text-anchor="middle" class="header">Data</text>
+  </g>
+
+  <!-- Vertical lifelines -->
+  <line x1="55" y1="155" x2="55" y2="580" stroke="#ddd" stroke-width="1" stroke-dasharray="4,4"/>
+  <line x1="210" y1="155" x2="210" y2="580" stroke="#b2ebf2" stroke-width="1" stroke-dasharray="4,4"/>
+  <line x1="400" y1="155" x2="400" y2="580" stroke="#ccc" stroke-width="1" stroke-dasharray="4,4"/>
+  <line x1="580" y1="155" x2="580" y2="580" stroke="#ffe0b2" stroke-width="1" stroke-dasharray="4,4"/>
+  <line x1="735" y1="155" x2="735" y2="580" stroke="#ddd" stroke-width="1" stroke-dasharray="4,4"/>
+
+  <!-- ==================== SEQUENCE STEPS ==================== -->
+
+  <!-- Step 1: User to LLM (arrow pointing right) -->
+  <line x1="72" y1="178" x2="188" y2="178" stroke="#333" stroke-width="2"/>
+  <polygon points="188,178 178,172 178,184" fill="#333"/>
+  <circle cx="38" cy="178" r="14" fill="#333"/>
+  <text x="38" y="183" text-anchor="middle" class="step">1</text>
+  <text x="132" y="166" text-anchor="middle" class="message">"Run OLS on sales data"</text>
+
+  <!-- LLM processing box -->
+  <rect x="148" y="200" width="124" height="46" rx="4" fill="#E0F7FA" stroke="#0097A7" stroke-width="1.5"/>
+  <text x="210" y="219" text-anchor="middle" class="label" fill="#0097A7">Interprets intent</text>
+  <text x="210" y="236" text-anchor="middle" class="sublabel" fill="#0097A7">Selects: run_ols</text>
+
+  <!-- Step 2: LLM to MCP (arrow pointing right) -->
+  <line x1="228" y1="270" x2="378" y2="270" stroke="#0097A7" stroke-width="2"/>
+  <polygon points="378,270 368,264 368,276" fill="#0097A7"/>
+  <circle cx="196" cy="270" r="14" fill="#0097A7"/>
+  <text x="196" y="275" text-anchor="middle" class="step">2</text>
+  <text x="305" y="258" text-anchor="middle" class="mono">tool: run_ols</text>
+  <text x="305" y="288" text-anchor="middle" class="sublabel">params: {dataset, y, x}</text>
+
+  <!-- Step 3: MCP to Core (arrow pointing right) -->
+  <line x1="418" y1="325" x2="558" y2="325" stroke="#666" stroke-width="2"/>
+  <polygon points="558,325 548,319 548,331" fill="#666"/>
+  <circle cx="385" cy="325" r="14" fill="#666"/>
+  <text x="385" y="330" text-anchor="middle" class="step">3</text>
+  <text x="488" y="313" text-anchor="middle" class="label" fill="#E65100">Execute method</text>
+
+  <!-- Step 4: Core to Data (arrow pointing right) -->
+  <line x1="600" y1="370" x2="713" y2="370" stroke="#E65100" stroke-width="2"/>
+  <polygon points="713,370 703,364 703,376" fill="#E65100"/>
+  <circle cx="565" cy="370" r="14" fill="#E65100"/>
+  <text x="565" y="375" text-anchor="middle" class="step">4</text>
+  <text x="658" y="358" text-anchor="middle" class="label">Load data</text>
+
+  <!-- Data returns matrices (arrow pointing left, dashed) -->
+  <line x1="720" y1="400" x2="605" y2="400" stroke="#888" stroke-width="1.5" stroke-dasharray="6,3"/>
+  <polygon points="605,400 615,394 615,406" fill="#888"/>
+  <text x="660" y="418" text-anchor="middle" class="sublabel">matrices</text>
+
+  <!-- Computation box -->
+  <rect x="515" y="435" width="130" height="46" rx="4" fill="#FFF3E0" stroke="#E65100" stroke-width="1.5"/>
+  <text x="580" y="454" text-anchor="middle" class="label" fill="#E65100">Rust compute</text>
+  <text x="580" y="471" text-anchor="middle" class="sublabel" fill="#E65100">X'X, b, SE, p-val</text>
+
+  <!-- Step 5: Core returns to MCP (arrow pointing left, dashed) -->
+  <line x1="560" y1="505" x2="422" y2="505" stroke="#888" stroke-width="1.5" stroke-dasharray="6,3"/>
+  <polygon points="422,505 432,499 432,511" fill="#888"/>
+  <circle cx="595" cy="505" r="14" fill="#E65100"/>
+  <text x="595" y="510" text-anchor="middle" class="step">5</text>
+  <text x="490" y="493" text-anchor="middle" class="sublabel">OlsResult (JSON)</text>
+
+  <!-- Step 6: MCP to LLM (arrow pointing left, dashed) -->
+  <line x1="382" y1="550" x2="232" y2="550" stroke="#888" stroke-width="1.5" stroke-dasharray="6,3"/>
+  <polygon points="232,550 242,544 242,556" fill="#888"/>
+  <circle cx="415" cy="550" r="14" fill="#666"/>
+  <text x="415" y="555" text-anchor="middle" class="step">6</text>
+  <text x="305" y="538" text-anchor="middle" class="sublabel">coefficients, stats</text>
+
+  <!-- Step 7: LLM to User (arrow pointing left, dashed) -->
+  <line x1="192" y1="590" x2="75" y2="590" stroke="#888" stroke-width="1.5" stroke-dasharray="6,3"/>
+  <polygon points="75,590 85,584 85,596" fill="#888"/>
+  <circle cx="225" cy="590" r="14" fill="#0097A7"/>
+  <text x="225" y="595" text-anchor="middle" class="step">7</text>
+  <text x="132" y="578" text-anchor="middle" class="message">"b1 = 0.42, p &lt; 0.01..."</text>
+
+  <!-- ==================== KEY CALLOUT ==================== -->
+  <rect x="590" y="600" width="190" height="46" rx="4" fill="#FCE4EC" stroke="#C2185B" stroke-width="2"/>
+  <text x="685" y="619" text-anchor="middle" class="label" fill="#C2185B" font-weight="600">Bulk data stays local</text>
+  <text x="685" y="636" text-anchor="middle" class="sublabel" fill="#C2185B">Only prompts + results via LLM</text>
+</svg>

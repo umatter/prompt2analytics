@@ -1,0 +1,86 @@
+{
+  "category": "panel",
+  "description": "Fixed effects, random effects, Hausman test, and HDFE regression tests",
+  "tests": [
+    {
+      "id": "pan_001",
+      "prompt": "Run a fixed effects regression to control for unobserved firm-specific factors",
+      "expected_tools": ["panel_fixed_effects"],
+      "acceptable_tools": ["panel_fixed_effects", "panel_hdfe"],
+      "dataset_context": "grunfeld dataset: firm, year, inv, value, capital",
+      "difficulty": "basic"
+    },
+    {
+      "id": "pan_002",
+      "prompt": "Estimate a random effects model for the panel data",
+      "expected_tools": ["panel_random_effects"],
+      "acceptable_tools": ["panel_random_effects"],
+      "dataset_context": "nlswork dataset: id, year, ln_wage, age, union, tenure",
+      "difficulty": "basic"
+    },
+    {
+      "id": "pan_003",
+      "prompt": "Should I use fixed effects or random effects? Run the appropriate test",
+      "expected_tools": ["hausman_test"],
+      "acceptable_tools": ["hausman_test"],
+      "dataset_context": "panel dataset: entity, time, y, x1, x2",
+      "difficulty": "intermediate"
+    },
+    {
+      "id": "pan_004",
+      "prompt": "Test whether the individual effects are correlated with the regressors",
+      "expected_tools": ["hausman_test"],
+      "acceptable_tools": ["hausman_test"],
+      "dataset_context": "panel dataset: id, year, outcome, treatment, control1, control2",
+      "difficulty": "intermediate"
+    },
+    {
+      "id": "pan_005",
+      "prompt": "Run a within-transformation regression absorbing entity fixed effects",
+      "expected_tools": ["panel_fixed_effects"],
+      "acceptable_tools": ["panel_fixed_effects", "panel_hdfe"],
+      "dataset_context": "panel dataset: firm, year, profit, assets, employees",
+      "difficulty": "basic"
+    },
+    {
+      "id": "pan_006",
+      "prompt": "Estimate with firm and year fixed effects absorbed",
+      "expected_tools": ["panel_hdfe"],
+      "acceptable_tools": ["panel_hdfe", "panel_fixed_effects"],
+      "dataset_context": "panel dataset: firm, year, stock_return, earnings, book_value",
+      "difficulty": "intermediate"
+    },
+    {
+      "id": "pan_007",
+      "prompt": "Run a regression with firm, year, and industry fixed effects using HDFE",
+      "expected_tools": ["panel_hdfe"],
+      "acceptable_tools": ["panel_hdfe"],
+      "dataset_context": "corporate dataset: firm, year, industry, roa, leverage, size",
+      "difficulty": "advanced"
+    },
+    {
+      "id": "pan_008",
+      "prompt": "Estimate a logit model with multiple fixed effects for the binary outcome",
+      "expected_tools": ["feglm"],
+      "acceptable_tools": ["feglm", "logit"],
+      "dataset_context": "binary_panel dataset: firm, year, default, leverage, size, profitability",
+      "difficulty": "advanced"
+    },
+    {
+      "id": "pan_009",
+      "prompt": "Run a Poisson regression absorbing county and year fixed effects",
+      "expected_tools": ["feglm"],
+      "acceptable_tools": ["feglm"],
+      "dataset_context": "count_data dataset: county, year, crime_count, unemployment, population",
+      "difficulty": "advanced"
+    },
+    {
+      "id": "pan_010",
+      "prompt": "Control for time-invariant heterogeneity in the wage equation",
+      "expected_tools": ["panel_fixed_effects"],
+      "acceptable_tools": ["panel_fixed_effects", "panel_random_effects", "panel_hdfe"],
+      "dataset_context": "labor dataset: person_id, year, wage, education, experience",
+      "difficulty": "basic"
+    }
+  ]
+}

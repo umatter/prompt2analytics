@@ -1,0 +1,19 @@
+{
+  "method": "kmeans",
+  "dataset": "synthetic_cluster_n100000.csv",
+  "n": 100000,
+  "iterations": 100,
+  "warmup": 5,
+  "timestamp": "2026-01-26T16:02:46",
+  "r_version": "4.3.3",
+  "timing": {
+    "min_us": 383610.1570632309,
+    "median_us": 592439.9464856833,
+    "mean_us": [],
+    "max_us": [],
+    "itr_per_sec": 1.4634479989,
+    "mem_alloc": 145539408,
+    "n_gc": 1038,
+    "n_itr": 100
+  }
+}

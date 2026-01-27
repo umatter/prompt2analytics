@@ -1,0 +1,289 @@
+%% =============================================================================
+%% VALIDATION
+%% =============================================================================
+
+\section{Numerical validation} \label{sec:validation}
+
+Numerical accuracy is essential for scientific software. This section documents
+the systematic validation of \pkg{prompt2analytics} against established
+\proglang{R} packages, demonstrating that results match reference implementations
+to high precision across all implemented methods.
+
+%% -----------------------------------------------------------------------------
+\subsection{Validation methodology} \label{sec:validation-methodology}
+
+Our validation framework follows a rigorous methodology:
+
+\begin{enumerate}
+  \item \textbf{Reference selection}: For each method, we identify the canonical
+    \proglang{R} implementation used in the econometrics and statistics
+    literature (Table~\ref{tab:reference-packages}).
+
+  \item \textbf{Test case design}: Each method is validated against multiple
+    test cases:
+    \begin{itemize}
+      \item Synthetic data with known data-generating process (DGP)
+      \item Real datasets with published results (e.g., Grunfeld, Longley)
+      \item Edge cases (small samples, collinearity, unbalanced panels)
+    \end{itemize}
+
+  \item \textbf{Precision thresholds}: We define tolerance levels that vary
+    by sample size and method type (Table~\ref{tab:tolerance-thresholds}).
+
+  \item \textbf{Automated testing}: Validation tests are integrated into the
+    continuous integration pipeline, ensuring results remain accurate as the
+    codebase evolves.
+\end{enumerate}
+
+All validation tests use fixed random seeds (seed = 42) for reproducibility.
+Reference \proglang{R} scripts are provided in the \code{validation/scripts/}
+directory of the source repository.
+
+
+%% -----------------------------------------------------------------------------
+\subsection{Reference implementations} \label{sec:validation-reference}
+
+Table~\ref{tab:reference-packages} lists the primary \proglang{R} packages
+used for validation. We selected packages that are widely used in applied
+econometrics and have established reputations for numerical accuracy.
+
+\begin{table}[htbp]
+\centering
+\caption{Reference \proglang{R} packages for numerical validation}
+\label{tab:reference-packages}
+\begin{tabular}{llll}
+\toprule
+Category & Package & Version & Functions \\
+\midrule
+Regression & stats & 4.3.x & \fct{lm} \\
+Robust SEs & sandwich & 3.0.x & \fct{vcovHC}, \fct{vcovCL} \\
+Diagnostics & lmtest & 0.9.x & \fct{bptest}, \fct{dwtest} \\
+Panel data & plm & 2.6.x & \fct{plm}, \fct{phtest} \\
+HDFE & lfe & 2.8.x & \fct{felm} \\
+IV/2SLS & AER & 1.2.x & \fct{ivreg} \\
+Discrete choice & stats & 4.3.x & \fct{glm} (binomial) \\
+Time series & vars & 1.5.x & \fct{VAR}, \fct{irf} \\
+Forecasting & forecast & 8.21.x & \fct{Arima}, \fct{mstl} \\
+Clustering & stats & 4.3.x & \fct{kmeans}, \fct{hclust} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Secondary validation against \proglang{Python} packages (statsmodels,
+linearmodels, scikit-learn) is performed for methods where multiple
+reference implementations exist, providing additional confidence in
+correctness.
+
+
+%% -----------------------------------------------------------------------------
+\subsection{Tolerance thresholds} \label{sec:validation-tolerance}
+
+Numerical precision requirements vary by sample size and estimator type.
+Table~\ref{tab:tolerance-thresholds} presents our tolerance guidelines.
+
+\begin{table}[htbp]
+\centering
+\caption{Numerical tolerance thresholds by sample size}
+\label{tab:tolerance-thresholds}
+\begin{tabular}{lccc}
+\toprule
+Sample size & Coefficients & Standard errors & P-values \\
+\midrule
+$n < 100$ & $10^{-6}$ & $10^{-4}$ & 0.01 \\
+$n = 100$--$1{,}000$ & $10^{-8}$ & $10^{-6}$ & 0.001 \\
+$n > 1{,}000$ & $10^{-10}$ & $10^{-8}$ & 0.0001 \\
+\midrule
+Iterative methods (HDFE, MLE) & \multicolumn{3}{c}{$10^{-5}$ (convergence-dependent)} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+For iterative estimation procedures such as high-dimensional fixed effects
+and maximum likelihood, slightly larger tolerances are applied due to
+differences in convergence criteria between implementations.
+
+
+%% -----------------------------------------------------------------------------
+\subsection{Validation results} \label{sec:validation-results}
+
+We present detailed validation results for core methods. All 70+ implemented
+methods have corresponding validation tests in the test suite.
+
+\subsubsection{Ordinary Least Squares}
+
+OLS estimation is validated against the Longley dataset \citep{Longley:1967},
+a classic benchmark for numerical accuracy in regression software due to its
+high multicollinearity.
+
+\begin{table}[htbp]
+\centering
+\caption{OLS validation: Longley dataset ($n = 16$, $k = 6$)}
+\label{tab:validation-ols}
+\begin{tabular}{lrrr}
+\toprule
+Coefficient & \proglang{R} \fct{lm} & \pkg{prompt2analytics} & Difference \\
+\midrule
+(Intercept) & $-3482.259$ & $-3482.259$ & $< 10^{-8}$ \\
+GNP.deflator & $0.01506$ & $0.01506$ & $< 10^{-8}$ \\
+GNP & $-0.03582$ & $-0.03582$ & $< 10^{-8}$ \\
+Unemployed & $-0.02020$ & $-0.02020$ & $< 10^{-8}$ \\
+Armed.Forces & $-0.01033$ & $-0.01033$ & $< 10^{-8}$ \\
+Population & $-0.05110$ & $-0.05110$ & $< 10^{-8}$ \\
+Year & $1.82915$ & $1.82915$ & $< 10^{-8}$ \\
+\midrule
+$R^2$ & $0.9955$ & $0.9955$ & $< 10^{-4}$ \\
+Adj.\ $R^2$ & $0.9925$ & $0.9925$ & $< 10^{-4}$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsubsection{Robust standard errors}
+
+Heteroskedasticity-consistent standard errors (HC0--HC3) are validated against
+the \pkg{sandwich} package \citep{Zeileis:2004}. Table~\ref{tab:validation-hc}
+shows achieved precision levels.
+
+\begin{table}[htbp]
+\centering
+\caption{Robust standard error precision vs.\ \pkg{sandwich}}
+\label{tab:validation-hc}
+\begin{tabular}{lcc}
+\toprule
+HC type & Description & Precision vs.\ \proglang{R} \\
+\midrule
+HC0 & White (1980) & $< 10^{-10}$ \\
+HC1 & Small-sample correction & $< 10^{-10}$ \\
+HC2 & Leverage-adjusted & $< 10^{-8}$ \\
+HC3 & MacKinnon-White (1985) & $< 10^{-8}$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The slightly reduced precision for HC2 and HC3 reflects numerical differences
+in leverage (hat matrix diagonal) computation, which propagate through the
+variance formula.
+
+\subsubsection{Panel data estimation}
+
+Fixed and random effects estimators are validated against the \pkg{plm}
+package \citep{Croissant+Millo:2008} using the Grunfeld investment dataset
+($n = 200$, 10 firms $\times$ 20 years).
+
+\begin{table}[htbp]
+\centering
+\caption{Panel FE validation: Grunfeld dataset}
+\label{tab:validation-fe}
+\begin{tabular}{lrrr}
+\toprule
+Statistic & \proglang{R} \pkg{plm} & \pkg{prompt2analytics} & Difference \\
+\midrule
+$\beta_{\text{value}}$ & $0.110124$ & $0.110124$ & $< 10^{-6}$ \\
+$\beta_{\text{capital}}$ & $0.310065$ & $0.310065$ & $< 10^{-6}$ \\
+SE($\beta_{\text{value}}$) & $0.011857$ & $0.011857$ & $< 10^{-5}$ \\
+SE($\beta_{\text{capital}}$) & $0.017355$ & $0.017355$ & $< 10^{-5}$ \\
+Within $R^2$ & $0.7668$ & $0.7668$ & $< 10^{-4}$ \\
+F-statistic & $309.01$ & $309.01$ & $< 0.01$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The Hausman test for choosing between fixed and random effects produces
+identical chi-squared statistics to \proglang{R}'s \fct{phtest} function
+(see Section~\ref{sec:examples} for output).
+
+\subsubsection{High-dimensional fixed effects}
+
+Two-way fixed effects using the alternating projections (MAP) algorithm
+\citep{Gaure:2013} are validated against the \pkg{lfe} package.
+
+\begin{table}[htbp]
+\centering
+\caption{HDFE validation: Grunfeld dataset (firm + year FE)}
+\label{tab:validation-hdfe}
+\begin{tabular}{lrrr}
+\toprule
+Statistic & \proglang{R} \pkg{lfe} & \pkg{prompt2analytics} & Difference \\
+\midrule
+$\beta_{\text{value}}$ & $0.117716$ & $0.117716$ & $< 10^{-5}$ \\
+$\beta_{\text{capital}}$ & $0.357916$ & $0.357916$ & $< 10^{-5}$ \\
+Within $R^2$ & $0.7201$ & $0.7201$ & $< 10^{-4}$ \\
+F-statistic & $217.44$ & $217.44$ & $< 0.01$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsubsection{Regression diagnostics}
+
+Diagnostic tests are validated against \pkg{lmtest}:
+
+\begin{itemize}
+  \item \textbf{Jarque-Bera}: Normality test statistic matches to $< 10^{-4}$
+  \item \textbf{Breusch-Pagan}: Heteroskedasticity test matches to $< 10^{-4}$
+  \item \textbf{Durbin-Watson}: Autocorrelation statistic matches to $< 10^{-6}$
+  \item \textbf{VIF}: Variance inflation factors match to $< 10^{-6}$
+\end{itemize}
+
+
+%% -----------------------------------------------------------------------------
+\subsection{Test coverage summary} \label{sec:validation-coverage}
+
+Table~\ref{tab:validation-summary} summarizes validation status across
+method categories.
+
+\begin{table}[htbp]
+\centering
+\caption{Validation test coverage by category}
+\label{tab:validation-summary}
+\begin{tabular}{lccl}
+\toprule
+Category & Methods & Tests & Reference \\
+\midrule
+Regression & 4 & 12 & stats, sandwich \\
+Panel data & 4 & 8 & plm, lfe \\
+Causal inference & 3 & 6 & AER \\
+Discrete choice & 2 & 4 & stats \\
+Time series & 5 & 10 & vars, forecast, urca \\
+Machine learning & 7 & 14 & stats, dbscan \\
+Diagnostics & 6 & 12 & lmtest \\
+Statistical tests & 20+ & 40+ & stats \\
+\midrule
+\textbf{Total} & \textbf{51+} & \textbf{106+} & \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+All validation tests are integrated into the continuous integration pipeline
+and run automatically on each code change. The test suite can be executed
+locally via:
+
+\begin{Sinput}
+cargo test -p p2a-core -- test_validate
+\end{Sinput}
+
+
+%% -----------------------------------------------------------------------------
+\subsection{Known differences} \label{sec:validation-differences}
+
+A small number of intentional differences exist between \pkg{prompt2analytics}
+and reference implementations:
+
+\begin{enumerate}
+  \item \textbf{Default robust SE type}: \pkg{prompt2analytics} defaults to
+    HC1 (consistent with Stata's \code{robust} option), while \proglang{R}'s
+    \pkg{sandwich} defaults to HC3.
+
+  \item \textbf{Coefficient naming}: \proglang{R} uses variable names in output;
+    \pkg{prompt2analytics} uses numeric indices internally but displays names
+    in formatted output.
+
+  \item \textbf{$R^2$ variants}: For panel models, we report ``within $R^2$''
+    by default, matching \pkg{plm}'s convention for fixed effects models.
+
+  \item \textbf{Convergence tolerance}: Iterative methods (HDFE, MLE) use
+    a default tolerance of $10^{-8}$, which may differ slightly from
+    \proglang{R} package defaults.
+\end{enumerate}
+
+These differences are documented in the method documentation and do not
+affect the validity of statistical inference.
+

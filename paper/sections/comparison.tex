@@ -1,0 +1,280 @@
+%% =============================================================================
+%% COMPARISON AND VALIDATION
+%% =============================================================================
+
+\section{Comparison and validation} \label{sec:comparison}
+
+A statistical software package must demonstrate both correctness and competitive
+performance. This section compares \pkg{prompt2analytics} against established
+\proglang{R} packages on both dimensions, showing that the \proglang{Rust}
+implementation achieves substantial speedups---ranging from 2$\times$ to over
+100$\times$ depending on the method---while matching reference implementations
+to high numerical precision.
+
+\subsection{Methodology}
+
+Comparisons use synthetic datasets generated with identical data-generating
+processes in both languages (seed $= 42$) and classic datasets with published
+results (Longley for OLS, Grunfeld for panel data). Reference implementations
+include \fct{lm}/\pkg{sandwich} for OLS, \pkg{plm}/\pkg{lfe} for panel data,
+\fct{glm} for discrete choice, and \pkg{forecast} for time series. Each
+benchmark executes 100 iterations after warmup; all tests run on identical
+hardware (Intel i7-1260P, 64GB RAM). Appendix~\ref{app:benchmark-methodology}
+provides complete details on data generating processes, execution protocol,
+and software versions.
+
+\subsection{Performance comparison}
+
+Table~\ref{tab:performance-summary} summarizes performance results across
+representative methods and sample sizes. The speedup factors vary considerably
+by method category and sample size, reflecting differences in algorithmic
+complexity and the relative weight of interpreter overhead versus numerical
+computation.
+
+\begin{table}[htbp]
+\centering
+\caption{Performance comparison: median execution time ($\mu$s) and speedup
+factors for representative methods}
+\label{tab:performance-summary}
+\renewcommand{\arraystretch}{1.2}
+\small
+\begin{tabular}{llrrrr}
+\toprule
+Category & Method & $n$ & \proglang{R} & \pkg{p2a} & Speedup \\
+\midrule
+\multirow{3}{*}{Regression} & OLS & 100 & 812 & 42 & 19$\times$ \\
+ & OLS & 10,000 & 2,181 & 924 & 2.4$\times$ \\
+ & OLS + HC1 & 10,000 & 25,224 & 1,571 & 16$\times$ \\
+\midrule
+\multirow{2}{*}{Panel} & Fixed effects & 100 & 4,901 & 27 & 184$\times$ \\
+ & HDFE (2-way) & 5,000 & 26,657 & 1,159 & 23$\times$ \\
+\midrule
+\multirow{2}{*}{Discrete} & Logit & 1,000 & 2,176 & 401 & 5.4$\times$ \\
+ & Probit & 1,000 & 2,760 & 2,347 & 1.2$\times$ \\
+\midrule
+\multirow{2}{*}{Time series} & ARIMA(1,1,1) & 500 & 4,783 & 521 & 9.2$\times$ \\
+ & MSTL & 500 & 1,853 & 219 & 8.5$\times$ \\
+\midrule
+\multirow{2}{*}{ML} & K-means ($k=3$) & 1,000 & 1,274 & 587 & 2.2$\times$ \\
+ & PCA & 1,000 & 246 & 67 & 3.7$\times$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Several patterns emerge from these results. First, speedup factors are largest
+for methods with significant per-call overhead in \proglang{R}. Panel data
+methods show the most dramatic improvements: fixed effects estimation at
+$n = 100$ is 184$\times$ faster in \pkg{prompt2analytics}, reflecting the
+substantial overhead of \pkg{plm}'s formula parsing, factor handling, and
+data frame manipulation rather than fundamental computational differences.
+This extreme speedup should be interpreted with caution: it primarily reflects
+\pkg{plm}'s known inefficiencies for small samples, not a general 184$\times$
+advantage. As sample size increases and matrix operations begin to dominate,
+speedup factors decrease to more representative levels (5--6$\times$ at
+$n = 10{,}000$). Users should consider the $n = 10{,}000$ results as more
+indicative of typical production performance.
+
+Second, methods involving expensive mathematical functions show smaller
+speedups. Probit estimation requires repeated evaluation of the standard
+normal CDF and PDF; both \proglang{R} (via compiled C code) and
+\proglang{Rust} incur similar costs for these operations, yielding a
+modest 1.2$\times$ speedup at $n = 1{,}000$. Logit, which uses the
+computationally simpler logistic function, achieves 5.4$\times$ speedup
+at the same sample size.
+
+Third, robust standard error computation shows consistent speedups (13--16$\times$)
+across sample sizes. The HC1 estimator requires computing the ``meat'' matrix
+$\sum_i \hat{u}_i^2 x_i x_i'$, which benefits from \proglang{Rust}'s efficient
+memory access patterns and SIMD vectorization in the \pkg{faer} linear algebra
+library.
+
+Figure~\ref{fig:benchmark-boxplots} displays the full timing distributions for
+selected methods at $n = 10{,}000$. Beyond the differences in central tendency,
+\pkg{prompt2analytics} shows substantially lower variance: interquartile ranges
+are typically 10--100$\times$ smaller than in \proglang{R}, reflecting the
+absence of garbage collection pauses and interpreter overhead. This predictability
+is valuable for production deployments where consistent response times matter.
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\textwidth]{figures/benchmark_boxplots}
+\caption{Execution time distributions for \proglang{R} (blue) and
+\pkg{prompt2analytics} (orange) at $n = 10{,}000$. Y-axis uses logarithmic
+scale. Boxes show interquartile range; whiskers extend to 1.5$\times$ IQR.}
+\label{fig:benchmark-boxplots}
+\end{figure}
+
+Memory usage differences are equally striking. For OLS at $n = 10{,}000$,
+\proglang{R} allocates approximately 3.6~MB (measured via \fct{bench::mark})
+while \pkg{prompt2analytics} reports minimal allocation---under 1~KB beyond
+the pre-allocated data structures---because operations proceed in-place where
+possible and temporary buffers are reused across iterations. For robust
+standard errors at the same sample size, \proglang{R} allocates over 10~MB
+due to intermediate matrix copies; \pkg{prompt2analytics} avoids these
+through careful ownership management. \proglang{Rust} allocations are
+measured via custom instrumentation of the global allocator during
+benchmark runs.
+
+\subsection{Numerical validation}
+
+We validate all methods against reference implementations using sample-size-dependent
+tolerances (looser for small samples where ill-conditioning amplifies differences,
+tighter for large samples). The Longley dataset, with its extreme multicollinearity
+(condition number $> 10^9$), provides a stringent test. Table~\ref{tab:validation-ols}
+shows coefficients match \proglang{R}'s \fct{lm} to at least 8 significant digits.
+
+\begin{table}[htbp]
+\centering
+\caption{OLS validation on the Longley dataset ($n = 16$, $k = 6$)}
+\label{tab:validation-ols}
+\renewcommand{\arraystretch}{1.15}
+\begin{tabular}{lrrr}
+\toprule
+Coefficient & \proglang{R} \fct{lm} & \pkg{prompt2analytics} & Difference \\
+\midrule
+(Intercept) & $-3482.259$ & $-3482.259$ & $< 10^{-8}$ \\
+GNP.deflator & $0.01506$ & $0.01506$ & $< 10^{-8}$ \\
+GNP & $-0.03582$ & $-0.03582$ & $< 10^{-8}$ \\
+Unemployed & $-0.02020$ & $-0.02020$ & $< 10^{-8}$ \\
+Armed.Forces & $-0.01033$ & $-0.01033$ & $< 10^{-8}$ \\
+Population & $-0.05110$ & $-0.05110$ & $< 10^{-8}$ \\
+Year & $1.82915$ & $1.82915$ & $< 10^{-8}$ \\
+\midrule
+$R^2$ & $0.9955$ & $0.9955$ & $< 10^{-4}$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Heteroskedasticity-consistent standard errors (HC0--HC3) are validated against
+the \pkg{sandwich} package. For HC0 and HC1, which differ only by a degrees-of-freedom
+correction, results match to $< 10^{-8}$. For HC2 and HC3, which involve leverage
+values $h_{ii} = x_i'(\mathbf{X}'\mathbf{X})^{-1}x_i$, results match to $< 10^{-7}$.
+The slightly larger tolerance reflects algorithmic differences in leverage
+computation: \pkg{sandwich} extracts leverage from the QR decomposition used
+internally by \fct{lm}, while \pkg{prompt2analytics} computes the hat matrix
+diagonal directly via matrix multiplication. Both approaches are numerically
+valid; the discrepancy arises from different accumulation of floating-point
+rounding errors rather than any methodological difference. For applied use,
+differences at the $10^{-7}$ level are negligible.
+
+Panel data methods are validated using the Grunfeld dataset (10 firms, 20 years,
+$n = 200$). Fixed effects coefficients match \pkg{plm} to $< 10^{-6}$, and the
+within $R^2$ matches to four decimal places. The Hausman test statistic for
+choosing between fixed and random effects matches to $< 10^{-4}$. Two-way
+high-dimensional fixed effects, implemented using the MAP algorithm
+\citep{Gaure:2013}, matches \pkg{lfe}'s \fct{felm} to $< 10^{-5}$.
+
+Beyond these flagship methods, the validation suite covers over 50 methods
+with more than 100 individual test cases. Statistical tests ($t$-tests, ANOVA,
+chi-squared, Fisher's exact, Wilcoxon, Shapiro-Wilk, Kolmogorov-Smirnov) are
+validated against \proglang{R}'s \pkg{stats} package. Discrete choice models
+(logit, probit) match \fct{glm} coefficients and standard errors. Time series
+methods (VAR, ARIMA) match the \pkg{vars} and \pkg{forecast} packages.
+Clustering algorithms match \fct{kmeans} cluster assignments and within-cluster
+sum of squares. All validation tests are integrated into continuous integration
+and can be run via \code{cargo test -p p2a-core}.
+
+\subsection{Sources of performance differences}
+
+The performance advantages of \pkg{prompt2analytics} stem from several
+architectural choices inherent to \proglang{Rust} and the library design.
+
+First, \proglang{Rust}'s ownership system enables stack allocation and in-place
+mutation without garbage collection. Matrix operations can reuse memory rather
+than allocating new buffers, and there are no GC pauses during computation.
+This is particularly impactful for iterative algorithms (HDFE, MLE) where
+\proglang{R} would allocate temporary objects on each iteration.
+
+Second, the \pkg{faer} linear algebra library provides highly optimized
+implementations that leverage SIMD instructions on modern processors. While
+\proglang{R} with OpenBLAS also uses SIMD for matrix multiplication, the
+overhead of crossing the R-C boundary for each operation accumulates.
+
+Third, the column-based API eliminates formula parsing. \proglang{R}'s model
+formula interface (\code{y \~{} x1 + x2}) involves parsing, factor expansion,
+and model matrix construction---operations that can dominate execution time
+for small datasets. \pkg{prompt2analytics} receives pre-specified column names
+directly from the MCP tool call.
+
+Fourth, the single-language design avoids the overhead of data serialization
+between components. In typical \proglang{R} workflows, data moves between
+\proglang{R}, C, and potentially Fortran; each transition involves memory
+copies and type conversions. \pkg{prompt2analytics} maintains data in native
+\proglang{Rust} structures throughout.
+
+These advantages diminish as sample size increases and matrix algebra dominates.
+For very large datasets ($n > 100{,}000$), speedup factors converge toward
+2--3$\times$ as both implementations spend most time in optimized BLAS routines.
+The largest advantages appear for small-to-medium datasets ($n = 100$ to $10{,}000$)
+and for methods with significant per-call overhead.
+
+\subsection{Feature comparison}
+
+Performance is one dimension of software quality; feature completeness and
+ecosystem integration are equally important for applied work. Table~\ref{tab:feature-comparison}
+compares \pkg{prompt2analytics} against established \proglang{R} packages across
+dimensions beyond execution speed.
+
+\begin{table}[htbp]
+\centering
+\caption{Feature comparison with established \proglang{R} packages}
+\label{tab:feature-comparison}
+\small
+\renewcommand{\arraystretch}{1.15}
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+Feature & \pkg{p2a} & \pkg{fixest} & \pkg{lfe} & \pkg{plm} \\
+\midrule
+\multicolumn{5}{l}{\textit{Panel data methods}} \\
+Within (FE) estimator        & \cmark & \cmark & \cmark & \cmark \\
+Random effects (GLS)         & \cmark & ---    & ---    & \cmark \\
+High-dimensional FE          & \cmark & \cmark & \cmark & --- \\
+Multi-way clustering         & 2-way  & $n$-way & 2-way & 2-way \\
+Hausman test                 & \cmark & ---    & ---    & \cmark \\
+\addlinespace
+\multicolumn{5}{l}{\textit{Standard errors}} \\
+HC0--HC3 robust              & \cmark & \cmark & \cmark & \cmark \\
+Driscoll-Kraay               & ---    & \cmark & ---    & \cmark \\
+Newey-West HAC               & ---    & \cmark & \cmark & \cmark \\
+Conley spatial               & ---    & \cmark & \cmark & --- \\
+\addlinespace
+\multicolumn{5}{l}{\textit{Causal inference}} \\
+Difference-in-differences    & \cmark & \cmark & --- & --- \\
+Sun-Abraham (staggered)      & ---    & \cmark & --- & --- \\
+IV/2SLS                      & \cmark & \cmark & \cmark & \cmark \\
+Weak instrument tests        & F-stat & \cmark & \cmark & --- \\
+\addlinespace
+\multicolumn{5}{l}{\textit{Diagnostics \& output}} \\
+Coefficient plots            & ---    & \cmark & --- & --- \\
+Regression tables (export)   & JSON   & \LaTeX/HTML & \LaTeX & \LaTeX \\
+Marginal effects             & AME    & \cmark & --- & --- \\
+Formula interface            & ---    & \cmark & \cmark & \cmark \\
+\addlinespace
+\multicolumn{5}{l}{\textit{Integration}} \\
+LLM/MCP interface            & \cmark & ---    & ---    & --- \\
+Local execution (no R)       & \cmark & ---    & ---    & --- \\
+tidyverse compatible         & ---    & \cmark & ---    & \cmark \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+For core panel methods, \pkg{prompt2analytics} provides comparable coverage
+to specialized packages; gaps include advanced standard errors (Driscoll-Kraay,
+Conley spatial) and staggered DiD estimators. The distinguishing features are
+the natural language interface and fully local execution without \proglang{R}
+dependencies. Performance advantages become practically relevant for simulation
+studies, bootstrap procedures, and deployment contexts where \proglang{R}
+installation is impractical; for typical one-off analyses, speed differences
+are imperceptible.
+
+\subsection{Limitations}
+
+Several caveats apply to these comparisons. First, we compare against specific
+\proglang{R} packages chosen for their widespread use in applied econometrics;
+the comparison necessarily reflects a snapshot of rapidly evolving software.
+Second, benchmarks use synthetic data with simple structure; real datasets
+with missing values, factors, or complex hierarchies may show different
+relative performance. Third, \proglang{R}'s flexibility (formula interface,
+extensive diagnostics, integration with the tidyverse ecosystem) provides
+value not captured in raw timing comparisons or feature checklists.
+

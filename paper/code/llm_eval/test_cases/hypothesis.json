@@ -1,0 +1,102 @@
+{
+  "category": "hypothesis",
+  "description": "T-tests, ANOVA, chi-squared, normality, and other hypothesis tests",
+  "tests": [
+    {
+      "id": "hyp_001",
+      "prompt": "Compare the mean test scores between treatment and control groups",
+      "expected_tools": ["hypothesis_t_test"],
+      "acceptable_tools": ["hypothesis_t_test", "hypothesis_wilcoxon"],
+      "dataset_context": "experiment dataset: score, group (treatment/control)",
+      "difficulty": "basic"
+    },
+    {
+      "id": "hyp_002",
+      "prompt": "Test if there's a significant difference in wages between men and women",
+      "expected_tools": ["hypothesis_t_test"],
+      "acceptable_tools": ["hypothesis_t_test", "hypothesis_wilcoxon"],
+      "dataset_context": "wage dataset: wage, gender",
+      "difficulty": "basic"
+    },
+    {
+      "id": "hyp_003",
+      "prompt": "Run a one-way ANOVA to compare means across three treatment conditions",
+      "expected_tools": ["anova_one_way"],
+      "acceptable_tools": ["anova_one_way", "hypothesis_kruskal_wallis"],
+      "dataset_context": "trial dataset: outcome, treatment_condition (A/B/C)",
+      "difficulty": "basic"
+    },
+    {
+      "id": "hyp_004",
+      "prompt": "Perform Tukey's HSD post-hoc comparisons after finding significant ANOVA results",
+      "expected_tools": ["anova_tukey_hsd"],
+      "acceptable_tools": ["anova_tukey_hsd", "hypothesis_pairwise_t_test"],
+      "dataset_context": "anova_results dataset: response, group",
+      "difficulty": "intermediate"
+    },
+    {
+      "id": "hyp_005",
+      "prompt": "Test the association between smoking status and lung cancer diagnosis",
+      "expected_tools": ["hypothesis_chisq_independence"],
+      "acceptable_tools": ["hypothesis_chisq_independence", "hypothesis_fisher_exact"],
+      "dataset_context": "health dataset: smoking (yes/no), cancer (yes/no)",
+      "difficulty": "basic"
+    },
+    {
+      "id": "hyp_006",
+      "prompt": "Check if the residuals are normally distributed",
+      "expected_tools": ["hypothesis_shapiro_wilk"],
+      "acceptable_tools": ["hypothesis_shapiro_wilk", "hypothesis_ks_test"],
+      "dataset_context": "regression_results dataset: residuals",
+      "difficulty": "basic"
+    },
+    {
+      "id": "hyp_007",
+      "prompt": "Run a Kolmogorov-Smirnov test to compare the two distributions",
+      "expected_tools": ["hypothesis_ks_test"],
+      "acceptable_tools": ["hypothesis_ks_test"],
+      "dataset_context": "distributions dataset: sample1, sample2",
+      "difficulty": "intermediate"
+    },
+    {
+      "id": "hyp_008",
+      "prompt": "Test for correlation between height and weight",
+      "expected_tools": ["hypothesis_cor_test"],
+      "acceptable_tools": ["hypothesis_cor_test", "compute_correlation"],
+      "dataset_context": "anthropometric dataset: height, weight",
+      "difficulty": "basic"
+    },
+    {
+      "id": "hyp_009",
+      "prompt": "Use Kruskal-Wallis since my data isn't normally distributed",
+      "expected_tools": ["hypothesis_kruskal_wallis"],
+      "acceptable_tools": ["hypothesis_kruskal_wallis"],
+      "dataset_context": "ordinal dataset: rating, group",
+      "difficulty": "intermediate"
+    },
+    {
+      "id": "hyp_010",
+      "prompt": "Compare paired observations before and after treatment with a non-parametric test",
+      "expected_tools": ["hypothesis_wilcoxon"],
+      "acceptable_tools": ["hypothesis_wilcoxon"],
+      "dataset_context": "paired dataset: before, after, subject_id",
+      "difficulty": "intermediate"
+    },
+    {
+      "id": "hyp_011",
+      "prompt": "Calculate the sample size needed for 80% power with effect size 0.5",
+      "expected_tools": ["power_t_test"],
+      "acceptable_tools": ["power_t_test"],
+      "dataset_context": "study design parameters",
+      "difficulty": "intermediate"
+    },
+    {
+      "id": "hyp_012",
+      "prompt": "Run Fisher's exact test for the small contingency table",
+      "expected_tools": ["hypothesis_fisher_exact"],
+      "acceptable_tools": ["hypothesis_fisher_exact", "hypothesis_chisq_independence"],
+      "dataset_context": "contingency table: 2x2 counts",
+      "difficulty": "intermediate"
+    }
+  ]
+}

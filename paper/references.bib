@@ -65,6 +65,17 @@
   doi = {10.1198/jbes.2010.07136},
 }
 
+@Article{Cameron+Miller:2015,
+  author = {A. Colin Cameron and Douglas L. Miller},
+  title = {A Practitioner's Guide to Cluster-Robust Inference},
+  journal = {Journal of Human Resources},
+  year = {2015},
+  volume = {50},
+  number = {2},
+  pages = {317--372},
+  doi = {10.3368/jhr.50.2.317},
+}
+
 @Article{Petersen:2009,
   author = {Mitchell A. Petersen},
   title = {Estimating Standard Errors in Finance Panel Data Sets: Comparing Approaches},
@@ -168,6 +179,14 @@
   doi = {10.18637/jss.v027.i02},
 }
 
+@Manual{plm,
+  title = {\pkg{plm}: Linear Models for Panel Data},
+  author = {Yves Croissant and Giovanni Millo and Kevin Tappe},
+  year = {2024},
+  note = {\proglang{R} package version 2.6-4},
+  url = {https://CRAN.R-project.org/package=plm},
+}
+
 % -----------------------------------------------------------------------------
 % HIGH-DIMENSIONAL FIXED EFFECTS
 % -----------------------------------------------------------------------------
@@ -262,6 +281,39 @@
   number = {2},
   pages = {254--277},
   doi = {10.1016/j.jeconom.2021.03.014},
+}
+
+@Article{deChaisemartin+DHaultfoeuille:2020,
+  author = {Cl{\'e}ment de Chaisemartin and Xavier D'Haultfoeuille},
+  title = {Two-Way Fixed Effects Estimators with Heterogeneous Treatment Effects},
+  journal = {American Economic Review},
+  year = {2020},
+  volume = {110},
+  number = {9},
+  pages = {2964--2996},
+  doi = {10.1257/aer.20181169},
+}
+
+@Article{Sun+Abraham:2021,
+  author = {Liyang Sun and Sarah Abraham},
+  title = {Estimating Dynamic Treatment Effects in Event Studies with Heterogeneous Treatment Effects},
+  journal = {Journal of Econometrics},
+  year = {2021},
+  volume = {225},
+  number = {2},
+  pages = {175--199},
+  doi = {10.1016/j.jeconom.2020.09.006},
+}
+
+@Article{Lee+etal:2022,
+  author = {David S. Lee and Justin McCrary and Marcelo J. Moreira and Jack Porter},
+  title = {Valid $t$-ratio Inference for {IV}},
+  journal = {American Economic Review},
+  year = {2022},
+  volume = {112},
+  number = {10},
+  pages = {3260--3290},
+  doi = {10.1257/aer.20211063},
 }
 
 % -----------------------------------------------------------------------------
@@ -606,6 +658,14 @@
 % RUST CRATES & DEPENDENCIES
 % -----------------------------------------------------------------------------
 
+@Manual{criterion,
+  title = {\pkg{Criterion.rs}: Statistics-Driven Micro-Benchmarking in \proglang{Rust}},
+  author = {Brook Heisler and Jorge Aparicio},
+  year = {2024},
+  note = {\proglang{Rust} crate version 0.5},
+  url = {https://github.com/bheisler/criterion.rs},
+}
+
 @Manual{polars,
   title = {\pkg{polars}: Blazingly Fast DataFrames in \proglang{Rust} and \proglang{Python}},
   author = {{Pola-rs Contributors}},
@@ -681,6 +741,30 @@
   year = {2024},
   url = {https://modelcontextprotocol.io/},
   note = {Accessed: 2024},
+}
+
+@Misc{A2A:2025,
+  author = {{Google}},
+  title = {Agent2Agent Protocol ({A2A})},
+  year = {2025},
+  url = {https://developers.googleblog.com/en/a2a-a-new-era-of-agent-interoperability/},
+  note = {Announced April 2025; transferred to Linux Foundation},
+}
+
+@Misc{ACP:2025,
+  author = {{IBM Research}},
+  title = {Agent Communication Protocol ({ACP})},
+  year = {2025},
+  url = {https://research.ibm.com/projects/agent-communication-protocol},
+  note = {Launched March 2025; merged with A2A under Linux Foundation},
+}
+
+@Misc{OWASP:MCP:2025,
+  author = {{OWASP Foundation}},
+  title = {{OWASP MCP} Top 10},
+  year = {2025},
+  url = {https://owasp.org/www-project-mcp-top-10/},
+  note = {Security risks for Model Context Protocol implementations},
 }
 
 % -----------------------------------------------------------------------------
@@ -843,4 +927,309 @@
   year = {2024},
   note = {\proglang{Rust} crate},
   url = {https://github.com/rust-ml/linfa},
+}
+
+% -----------------------------------------------------------------------------
+% LOCAL LLM DEPLOYMENT
+% -----------------------------------------------------------------------------
+
+@Manual{Ollama,
+  title = {Ollama: Run Large Language Models Locally},
+  author = {{Ollama Inc.}},
+  year = {2024},
+  url = {https://ollama.ai},
+}
+
+@InProceedings{BFCL:2024,
+  author = {Shishir G. Patil and Tianjun Zhang and Xin Wang and Joseph E. Gonzalez},
+  title = {Gorilla: Large Language Model Connected with Massive {APIs}},
+  booktitle = {Proceedings of the 41st International Conference on Machine Learning (ICML)},
+  year = {2024},
+  url = {https://gorilla.cs.berkeley.edu},
+  note = {Berkeley Function Calling Leaderboard},
+}
+
+@Article{Patil+Zhang+Song+Gonzalez:2023,
+  author = {Shishir G. Patil and Tianjun Zhang and Xin Wang and Joseph E. Gonzalez},
+  title = {Gorilla: Large Language Model Connected with Massive {APIs}},
+  journal = {arXiv preprint arXiv:2305.15334},
+  year = {2023},
+  url = {https://arxiv.org/abs/2305.15334},
+}
+
+% -----------------------------------------------------------------------------
+% NATURAL LANGUAGE INTERFACES - HISTORICAL
+% -----------------------------------------------------------------------------
+
+@InProceedings{Woods:1973,
+  author = {William A. Woods},
+  title = {Progress in Natural Language Understanding: An Application to Lunar Geology},
+  booktitle = {Proceedings of the AFIPS National Computer Conference},
+  year = {1973},
+  pages = {441--450},
+  doi = {10.1145/1499586.1499695},
+}
+
+@Article{Androutsopoulos+etal:1995,
+  author = {Ion Androutsopoulos and Graeme D. Ritchie and Peter Thanisch},
+  title = {Natural Language Interfaces to Databases -- An Introduction},
+  journal = {Natural Language Engineering},
+  year = {1995},
+  volume = {1},
+  number = {1},
+  pages = {29--81},
+  doi = {10.1017/S135132490000005X},
+}
+
+% -----------------------------------------------------------------------------
+% TEXT-TO-SQL & NL FOR DATA
+% -----------------------------------------------------------------------------
+
+@InProceedings{Yu+etal:2018,
+  author = {Tao Yu and Rui Zhang and Kai Yang and Michihiro Yasunaga and Dongxu Wang and Zifan Li and James Ma and Irene Li and Qingning Yao and Shanelle Roman and Zilin Zhang and Dragomir Radev},
+  title = {Spider: A Large-Scale Human-Labeled Dataset for Complex and Cross-Domain Semantic Parsing and Text-to-{SQL} Task},
+  booktitle = {Proceedings of the 2018 Conference on Empirical Methods in Natural Language Processing (EMNLP)},
+  year = {2018},
+  pages = {3911--3921},
+  doi = {10.18653/v1/D18-1425},
+}
+
+@Article{Li+etal:2024,
+  author = {Boyan Li and Yuyu Luo and Chengliang Chai and Guoliang Li and Nan Tang},
+  title = {The Dawn of Natural Language to {SQL}: Are We Fully Ready?},
+  journal = {Proceedings of the VLDB Endowment},
+  year = {2024},
+  volume = {17},
+  number = {11},
+  pages = {3318--3331},
+  doi = {10.14778/3681954.3682024},
+}
+
+@Article{Narechania+etal:2021,
+  author = {Arpit Narechania and Arjun Srinivasan and John Stasko},
+  title = {{NL4DV}: A Toolkit for Generating Analytic Specifications for Data Visualization from Natural Language Queries},
+  journal = {IEEE Transactions on Visualization and Computer Graphics},
+  year = {2021},
+  volume = {27},
+  number = {2},
+  pages = {369--379},
+  doi = {10.1109/TVCG.2020.3030378},
+}
+
+% -----------------------------------------------------------------------------
+% LLM AGENTS FOR DATA SCIENCE
+% -----------------------------------------------------------------------------
+
+@InProceedings{Hong+etal:2024,
+  author = {Sirui Hong and Yizhang Lin and Bang Liu and Bangbang Liu and Binhao Wu and Danyang Li and Jiaqi Chen and Jiayi Zhang and Jinlin Wang and Li Zhang and Lingyao Zhang and Min Yang and Mingchen Zhuge and Taicheng Guo and Tuo Zhou and Wei Tao and Wenyi Wang and Xiangru Tang and Xiangtao Lu and Xiawu Zheng and Xinbing Liang and Yaying Fei and Yuheng Cheng and Zongze Xu and Chenglin Wu},
+  title = {Data Interpreter: An {LLM} Agent For Data Science},
+  booktitle = {Findings of the Association for Computational Linguistics: ACL 2025},
+  year = {2025},
+  pages = {19796--19821},
+  url = {https://arxiv.org/abs/2402.18679},
+}
+
+@Article{Sun+etal:2025:LAMBDA,
+  author = {Maojun Sun and Ruijian Han and Binyan Jiang and Houduo Qi and Defeng Sun and Yancheng Yuan and Jian Huang},
+  title = {{LAMBDA}: A Large Model Based Data Agent},
+  journal = {Journal of the American Statistical Association},
+  year = {2025},
+  doi = {10.1080/01621459.2025.2510000},
+  note = {Online first},
+}
+
+@Article{Sun+etal:2025:Survey,
+  author = {Maojun Sun and Ruijian Han and Binyan Jiang and Houduo Qi and Defeng Sun and Yancheng Yuan and Jian Huang},
+  title = {A Survey on Large Language Model-Based Agents for Statistics and Data Science},
+  journal = {The American Statistician},
+  year = {2025},
+  doi = {10.1080/00031305.2025.2561140},
+  note = {Online first},
+}
+
+@Article{Nejjar+etal:2024,
+  author = {Amine Nejjar and Lorenz Zacharias and Fabian Stiehle and Ingo Weber},
+  title = {{LLMs} for Science: Usage for Code Generation and Data Analysis},
+  journal = {Journal of Software: Evolution and Process},
+  year = {2024},
+  volume = {36},
+  number = {9},
+  pages = {e2723},
+  doi = {10.1002/smr.2723},
+}
+
+% -----------------------------------------------------------------------------
+% LLM TOOL USE & AGENTS
+% -----------------------------------------------------------------------------
+
+@InProceedings{Yao+etal:2023,
+  author = {Shunyu Yao and Jeffrey Zhao and Dian Yu and Nan Du and Izhak Shafran and Karthik Narasimhan and Yuan Cao},
+  title = {{ReAct}: Synergizing Reasoning and Acting in Language Models},
+  booktitle = {Proceedings of the 11th International Conference on Learning Representations (ICLR)},
+  year = {2023},
+  url = {https://arxiv.org/abs/2210.03629},
+}
+
+@Article{Schick+etal:2023,
+  author = {Timo Schick and Jane Dwivedi-Yu and Roberto Dess{\`i} and Roberta Raileanu and Maria Lomeli and Luke Zettlemoyer and Nicola Cancedda and Thomas Scialom},
+  title = {Toolformer: Language Models Can Teach Themselves to Use Tools},
+  journal = {arXiv preprint arXiv:2302.04761},
+  year = {2023},
+  url = {https://arxiv.org/abs/2302.04761},
+}
+
+@Article{Qin+etal:2024,
+  author = {Yujia Qin and Shihao Liang and Yining Ye and Kunlun Zhu and Lan Yan and Yaxi Lu and Yankai Lin and Xin Cong and Xiangru Tang and Bill Qian and Sihan Zhao and Lauren Hong and Runchu Tian and Ruobing Xie and Jie Zhou and Mark Gerstein and Dahai Li and Zhiyuan Liu and Maosong Sun},
+  title = {{ToolLLM}: Facilitating Large Language Models to Master 16000+ Real-world {APIs}},
+  journal = {arXiv preprint arXiv:2307.16789},
+  year = {2024},
+  url = {https://arxiv.org/abs/2307.16789},
+}
+
+@InProceedings{Liu+etal:2025:ToolACE,
+  author = {Weiwen Liu and Xu Huang and Xingshan Zeng and Xinlong Hao and Shuai Yu and Dexun Li and Shuai Wang and Weinan Gan and Zhengying Liu and Yuanqing Yu and Zezhong Wang and Yuxian Wang and Wu Ning and Yutai Hou and Bin Wang and Chuhan Wu and Xinzhi Wang and Yong Liu and Yasheng Wang and Duyu Tang and Dandan Tu and Lifeng Shang and Xin Jiang and Ruiming Tang and Defu Lian and Qun Liu and Enhong Chen},
+  title = {{ToolACE}: Winning the Points of {LLM} Function Calling},
+  booktitle = {Proceedings of the 13th International Conference on Learning Representations (ICLR)},
+  year = {2025},
+  url = {https://openreview.net/forum?id=8EB8k6DdCU},
+}
+
+@Article{Qu+etal:2025,
+  author = {Changle Qu and Sunhao Dai and Xiaochi Wei and Jun Xu and Hengyi Cai and Shuaiqiang Wang and Dawei Yin and Ji-Rong Wen},
+  title = {Tool Learning with Language Models: A Comprehensive Survey of Methods, Pipelines, and Benchmarks},
+  journal = {Vicinagearth},
+  year = {2025},
+  doi = {10.1007/s44336-025-00024-x},
+}
+
+@Article{Ludwig+Mullainathan+Rambachan:2024,
+  author = {Jens Ludwig and Sendhil Mullainathan and Ashesh Rambachan},
+  title = {Large Language Models: An Applied Econometric Framework},
+  journal = {NBER Working Paper},
+  year = {2024},
+  number = {33344},
+  doi = {10.3386/w33344},
+  url = {https://www.nber.org/papers/w33344},
+}
+
+@Article{Chen+Shen+Ma:2025,
+  author = {Sheng Chen and Kai Shen and Xiaolin Ma},
+  title = {Econometrics {AI} Agent},
+  journal = {arXiv preprint arXiv:2506.00856},
+  year = {2025},
+  url = {https://arxiv.org/abs/2506.00856},
+}
+
+@Article{Korinek:2025,
+  author = {Anton Korinek},
+  title = {{AI} Agents for Economic Research},
+  journal = {Journal of Economic Literature},
+  year = {2025},
+  note = {Forthcoming},
+  url = {https://www.aeaweb.org/content/file?id=23290},
+}
+
+% -----------------------------------------------------------------------------
+% AUTOML (FOR COMPARISON)
+% -----------------------------------------------------------------------------
+
+@InProceedings{Feurer+etal:2015,
+  author = {Matthias Feurer and Aaron Klein and Katharina Eggensperger and Jost Tobias Springenberg and Manuel Blum and Frank Hutter},
+  title = {Efficient and Robust Automated Machine Learning},
+  booktitle = {Advances in Neural Information Processing Systems 28 (NeurIPS)},
+  year = {2015},
+  pages = {2962--2970},
+}
+
+@InProceedings{LeDell+Poirier:2020,
+  author = {Erin LeDell and Sebastien Poirier},
+  title = {{H2O AutoML}: Scalable Automatic Machine Learning},
+  booktitle = {Proceedings of the 7th ICML Workshop on Automated Machine Learning},
+  year = {2020},
+  url = {https://www.automl.org/wp-content/uploads/2020/07/AutoML_2020_paper_61.pdf},
+}
+
+% -----------------------------------------------------------------------------
+% RELATED WORK: STATISTICAL INTERFACES AND HISTORY
+% -----------------------------------------------------------------------------
+
+@Article{Wilkinson+Rogers:1973,
+  author = {G. N. Wilkinson and C. E. Rogers},
+  title = {Symbolic Description of Factorial Models for Analysis of Variance},
+  journal = {Journal of the Royal Statistical Society: Series C (Applied Statistics)},
+  year = {1973},
+  volume = {22},
+  number = {3},
+  pages = {392--399},
+  doi = {10.2307/2346786},
+}
+
+@Book{Chambers+Hastie:1992,
+  author = {John M. Chambers and Trevor J. Hastie},
+  title = {Statistical Models in \proglang{S}},
+  year = {1992},
+  publisher = {Wadsworth \& Brooks/Cole},
+  address = {Pacific Grove, CA},
+}
+
+@Book{Chambers:1998,
+  author = {John M. Chambers},
+  title = {Programming with Data: A Guide to the \proglang{S} Language},
+  year = {1998},
+  publisher = {Springer-Verlag},
+  address = {New York},
+  doi = {10.1007/978-1-4684-6310-8},
+}
+
+@Book{Chambers:2008,
+  author = {John M. Chambers},
+  title = {Software for Data Analysis: Programming with \proglang{R}},
+  year = {2008},
+  publisher = {Springer-Verlag},
+  address = {New York},
+  doi = {10.1007/978-0-387-75936-4},
+}
+
+@Article{Carpenter+etal:2017,
+  author = {Bob Carpenter and Andrew Gelman and Matthew D. Hoffman and Daniel Lee and Ben Goodrich and Michael Betancourt and Marcus Brubaker and Jiqiang Guo and Peter Li and Allen Riddell},
+  title = {Stan: A Probabilistic Programming Language},
+  journal = {Journal of Statistical Software},
+  year = {2017},
+  volume = {76},
+  number = {1},
+  pages = {1--32},
+  doi = {10.18637/jss.v076.i01},
+}
+
+@InProceedings{Zhong+etal:2017,
+  author = {Victor Zhong and Caiming Xiong and Richard Socher},
+  title = {Seq2{SQL}: Generating Structured Queries from Natural Language Using Reinforcement Learning},
+  booktitle = {arXiv preprint arXiv:1709.00103},
+  year = {2017},
+  url = {https://arxiv.org/abs/1709.00103},
+}
+
+@InProceedings{Thornton+etal:2013,
+  author = {Chris Thornton and Frank Hutter and Holger H. Hoos and Kevin Leyton-Brown},
+  title = {Auto-{WEKA}: Combined Selection and Hyperparameter Optimization of Classification Algorithms},
+  booktitle = {Proceedings of the 19th ACM SIGKDD International Conference on Knowledge Discovery and Data Mining},
+  year = {2013},
+  pages = {847--855},
+  doi = {10.1145/2487575.2487629},
+}
+
+@InProceedings{Hollmann+etal:2024,
+  author = {Noah Hollmann and Samuel M{\"u}ller and Frank Hutter},
+  title = {Large Language Models for Automated Machine Learning},
+  booktitle = {Proceedings of the 2024 Conference on Neural Information Processing Systems (NeurIPS)},
+  year = {2024},
+  url = {https://arxiv.org/abs/2408.14033},
+}
+
+@Book{Davidson+MacKinnon:2004,
+  author = {Russell Davidson and James G. MacKinnon},
+  title = {Econometric Theory and Methods},
+  year = {2004},
+  publisher = {Oxford University Press},
+  address = {New York},
 }
