@@ -245,7 +245,7 @@ impl KdTree {
         }
     }
 
-    /// Query all points within a given radius.
+    /// Query all points within a given radius (sorted by distance).
     pub fn radius_query(&self, query: &[f64], radius: f64, exclude_self: Option<usize>) -> Vec<(f64, usize)> {
         let mut results = Vec::new();
 
@@ -254,6 +254,17 @@ impl KdTree {
         }
 
         results.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal));
+        results
+    }
+
+    /// Query all points within a given radius (unsorted, faster for DBSCAN).
+    pub fn radius_query_unsorted(&self, query: &[f64], radius: f64, exclude_self: Option<usize>) -> Vec<(f64, usize)> {
+        let mut results = Vec::new();
+
+        if let Some(root) = &self.root {
+            self.search_radius(root, query, radius, &mut results, exclude_self);
+        }
+
         results
     }
 

@@ -1,9 +1,13 @@
 //! Clustering algorithms: K-means, DBSCAN, and Hierarchical Clustering.
 //!
 //! Pure Rust implementations using ndarray.
+//!
+//! DBSCAN uses KD-tree acceleration for O(n log n) average complexity
+//! when dimensionality ≤ 20, with parallel neighborhood queries via rayon.
 
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 use rand::prelude::*;
+use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 
 /// K-means clustering result.
@@ -264,13 +268,130 @@ fn kmeans_single(
     }
 }
 
+/// Maximum dimensionality for KDTree-based DBSCAN.
+/// Above this threshold, the curse of dimensionality makes KDTree inefficient.
+const KDTREE_MAX_DIMS: usize = 20;
+
 /// Run DBSCAN clustering.
+///
+/// Uses KD-tree acceleration for O(n log n) average complexity when dimensionality ≤ 20.
+/// Falls back to O(n²) naive algorithm for higher dimensions.
 ///
 /// # Arguments
 /// * `data` - Input data matrix (n_samples x n_features)
 /// * `eps` - Maximum distance between two samples for neighborhood
 /// * `min_samples` - Minimum samples in neighborhood for core point
 pub fn dbscan(
+    data: ArrayView2<f64>,
+    eps: f64,
+    min_samples: usize,
+) -> Result<DBSCANResult, String> {
+    let n_features = data.ncols();
+
+    // Use KD-tree for low-dimensional data, naive for high-dimensional
+    if n_features <= KDTREE_MAX_DIMS {
+        dbscan_kdtree(data, eps, min_samples)
+    } else {
+        dbscan_naive(data, eps, min_samples)
+    }
+}
+
+/// Run DBSCAN using KD-tree for efficient neighborhood queries.
+///
+/// Achieves O(n log n) average case for low-dimensional data.
+fn dbscan_kdtree(
+    data: ArrayView2<f64>,
+    eps: f64,
+    min_samples: usize,
+) -> Result<DBSCANResult, String> {
+    use super::kdtree::KdTree;
+
+    let n_samples = data.nrows();
+
+    if eps <= 0.0 {
+        return Err("eps must be positive".to_string());
+    }
+    if min_samples == 0 {
+        return Err("min_samples must be at least 1".to_string());
+    }
+
+    if n_samples == 0 {
+        return Ok(DBSCANResult {
+            labels: Vec::new(),
+            n_clusters: 0,
+            n_noise: 0,
+            core_sample_indices: Vec::new(),
+        });
+    }
+
+    // Build KD-tree from data
+    let data_vec: Vec<Vec<f64>> = data.rows().into_iter()
+        .map(|row| row.to_vec())
+        .collect();
+    let tree = KdTree::new(data_vec);
+
+    // Find neighbors for each point using KD-tree radius queries (parallel, unsorted)
+    let neighborhoods: Vec<Vec<usize>> = (0..n_samples)
+        .into_par_iter()
+        .map(|i| {
+            tree.radius_query_unsorted(tree.data().get(i).unwrap(), eps, None)
+                .into_iter()
+                .map(|(_, idx)| idx)
+                .collect()
+        })
+        .collect();
+
+    // Identify core points
+    let core_sample_indices: Vec<usize> = (0..n_samples)
+        .filter(|&i| neighborhoods[i].len() >= min_samples)
+        .collect();
+    let core_set: HashSet<usize> = core_sample_indices.iter().cloned().collect();
+
+    // Initialize labels (-1 = unvisited/noise)
+    let mut labels = vec![-1i32; n_samples];
+    let mut current_cluster = 0i32;
+
+    // Expand clusters from core points
+    for &core_idx in &core_sample_indices {
+        if labels[core_idx] != -1 {
+            continue;
+        }
+
+        // Start new cluster
+        labels[core_idx] = current_cluster;
+        let mut stack = vec![core_idx];
+
+        while let Some(idx) = stack.pop() {
+            for &neighbor in &neighborhoods[idx] {
+                if labels[neighbor] == -1 {
+                    labels[neighbor] = current_cluster;
+
+                    // If neighbor is a core point, expand from it
+                    if core_set.contains(&neighbor) {
+                        stack.push(neighbor);
+                    }
+                }
+            }
+        }
+
+        current_cluster += 1;
+    }
+
+    let n_clusters = current_cluster as usize;
+    let n_noise = labels.iter().filter(|&&l| l == -1).count();
+
+    Ok(DBSCANResult {
+        labels,
+        n_clusters,
+        n_noise,
+        core_sample_indices,
+    })
+}
+
+/// Run DBSCAN using naive O(n²) pairwise distance computation.
+///
+/// Used for high-dimensional data where KD-tree is inefficient.
+fn dbscan_naive(
     data: ArrayView2<f64>,
     eps: f64,
     min_samples: usize,
@@ -286,17 +407,16 @@ pub fn dbscan(
 
     let eps_squared = eps * eps;
 
-    // Find neighbors for each point
-    let mut neighborhoods: Vec<Vec<usize>> = Vec::with_capacity(n_samples);
-    for i in 0..n_samples {
-        let mut neighbors = Vec::new();
-        for j in 0..n_samples {
-            if euclidean_distance_squared(&data.row(i), &data.row(j)) <= eps_squared {
-                neighbors.push(j);
-            }
-        }
-        neighborhoods.push(neighbors);
-    }
+    // Find neighbors for each point (parallel)
+    let neighborhoods: Vec<Vec<usize>> = (0..n_samples)
+        .into_par_iter()
+        .map(|i| {
+            let row_i = data.row(i);
+            (0..n_samples)
+                .filter(|&j| euclidean_distance_squared(&row_i, &data.row(j)) <= eps_squared)
+                .collect()
+        })
+        .collect();
 
     // Identify core points
     let core_sample_indices: Vec<usize> = (0..n_samples)
@@ -1138,6 +1258,66 @@ mod tests {
         assert_eq!(result.n_clusters, 2);
         assert_eq!(result.n_noise, 1);
         assert_eq!(result.labels[5], -1); // Noise
+    }
+
+    #[test]
+    fn test_dbscan_kdtree_larger() {
+        // Create a larger dataset to test KDTree-based DBSCAN
+        // Two clusters of 50 points each, plus 5 noise points
+        let mut data_vec = Vec::new();
+
+        // Cluster 1 around (0, 0)
+        for i in 0..50 {
+            let x = (i as f64) * 0.01;
+            let y = (i as f64) * 0.01;
+            data_vec.push([x, y]);
+        }
+
+        // Cluster 2 around (10, 10)
+        for i in 0..50 {
+            let x = 10.0 + (i as f64) * 0.01;
+            let y = 10.0 + (i as f64) * 0.01;
+            data_vec.push([x, y]);
+        }
+
+        // Noise points
+        for i in 0..5 {
+            data_vec.push([50.0 + i as f64 * 10.0, 50.0 + i as f64 * 10.0]);
+        }
+
+        let data = Array2::from_shape_vec((105, 2), data_vec.into_iter().flatten().collect()).unwrap();
+
+        let result = dbscan(data.view(), 0.5, 3).unwrap();
+
+        assert_eq!(result.n_clusters, 2);
+        assert_eq!(result.n_noise, 5);
+
+        // Verify cluster assignments
+        // First 50 points should be in one cluster
+        let first_cluster = result.labels[0];
+        for i in 0..50 {
+            assert_eq!(result.labels[i], first_cluster);
+        }
+
+        // Next 50 points should be in another cluster
+        let second_cluster = result.labels[50];
+        assert_ne!(first_cluster, second_cluster);
+        for i in 50..100 {
+            assert_eq!(result.labels[i], second_cluster);
+        }
+
+        // Last 5 points should be noise
+        for i in 100..105 {
+            assert_eq!(result.labels[i], -1);
+        }
+    }
+
+    #[test]
+    fn test_dbscan_empty() {
+        let data: Array2<f64> = Array2::zeros((0, 2));
+        let result = dbscan(data.view(), 0.5, 2).unwrap();
+        assert_eq!(result.n_clusters, 0);
+        assert_eq!(result.n_noise, 0);
     }
 
     #[test]

@@ -630,7 +630,30 @@ impl fmt::Display for HausmanResult {
         writeln!(f, "Degrees of Freedom: {}", self.df)?;
         writeln!(f, "P-Value: {:.4}", self.p_value)?;
         writeln!(f)?;
+
+        // Show coefficient comparison for intuition
+        writeln!(f, "Coefficient Comparison:")?;
+        let n_vars = self.fe_result.variables.len().min(self.re_result.variables.len().saturating_sub(1));
+        writeln!(f, "{:<20} {:>12} {:>12} {:>12}",
+                 "Variable", "FE Coef", "RE Coef", "Difference")?;
+        writeln!(f, "{:-<60}", "")?;
+        for i in 0..n_vars {
+            let fe_coef = self.fe_result.coefficients[i];
+            let re_coef = self.re_result.coefficients.get(i + 1).copied().unwrap_or(0.0); // Skip RE intercept
+            let diff = fe_coef - re_coef;
+            writeln!(f, "{:<20} {:>12.4} {:>12.4} {:>12.4}",
+                     &self.fe_result.variables[i], fe_coef, re_coef, diff)?;
+        }
+        writeln!(f)?;
+
         writeln!(f, "Result: {}", self.recommendation)?;
+
+        // Add interpretation note
+        writeln!(f)?;
+        writeln!(f, "Note: The Hausman test compares FE and RE coefficient estimates.")?;
+        writeln!(f, "A significant result (p < 0.05) suggests entity effects are correlated")?;
+        writeln!(f, "with regressors, making RE inconsistent. A non-significant result")?;
+        writeln!(f, "suggests RE is more efficient, but may have low power in small samples.")?;
         Ok(())
     }
 }
@@ -672,8 +695,33 @@ pub fn run_hausman_test(
 
     let p_value = chi_squared_p_value(chi2_statistic, k as f64);
 
-    let recommendation = if p_value < 0.05 {
-        "Reject H0: Use Fixed Effects (systematic difference in coefficients detected)".to_string()
+    // Construct nuanced recommendation based on p-value and sample size
+    let n_entities = fe_result.n_groups;
+    let n_obs = fe_result.n_obs;
+
+    let recommendation = if p_value < 0.01 {
+        "Reject H0: Use Fixed Effects (strong evidence of systematic difference in coefficients)".to_string()
+    } else if p_value < 0.05 {
+        "Reject H0: Use Fixed Effects (moderate evidence of systematic difference in coefficients)".to_string()
+    } else if p_value < 0.10 {
+        format!(
+            "Marginally fail to reject H0 (p={:.3}). Consider Fixed Effects if correlation between \
+             entity effects and regressors is theoretically plausible.",
+            p_value
+        )
+    } else if p_value > 0.90 {
+        // Very high p-value suggests FE and RE are nearly identical
+        format!(
+            "FE and RE produce nearly identical estimates (p={:.3}). Either model is valid; \
+             RE is more efficient. Note: Both may be biased if unobserved heterogeneity is time-varying.",
+            p_value
+        )
+    } else if n_entities < 20 || n_obs < 100 {
+        format!(
+            "Fail to reject H0 (p={:.3}), but note: Hausman test may have low power with \
+             {} entities and {} observations. Consider theoretical arguments for model choice.",
+            p_value, n_entities, n_obs
+        )
     } else {
         "Fail to reject H0: Random Effects is consistent and more efficient".to_string()
     };
@@ -2552,6 +2600,158 @@ mod tests {
         let dataset = create_panel_dataset();
         let result = run_fixed_effects(&dataset, "y", &["x"], "nonexistent");
         assert!(result.is_err());
+    }
+
+    // =====================================================================
+    // Unbalanced Panel Tests (Cameron-Miller validation)
+    // =====================================================================
+
+    fn create_unbalanced_panel_dataset() -> Dataset {
+        // Unbalanced panel: 3 entities with different numbers of time periods
+        // Entity A: 5 periods, Entity B: 3 periods, Entity C: 4 periods
+        // y = 2*x + entity_effect + noise
+        let df = df! {
+            "entity" => ["A", "A", "A", "A", "A",   // 5 periods
+                         "B", "B", "B",              // 3 periods
+                         "C", "C", "C", "C"],        // 4 periods
+            "time" => [1, 2, 3, 4, 5,
+                       1, 2, 3,
+                       1, 2, 3, 4],
+            "x" => [1.0, 2.0, 3.0, 4.0, 5.0,
+                    1.0, 2.0, 3.0,
+                    1.0, 2.0, 3.0, 4.0],
+            "y" => [2.1, 4.2, 5.9, 8.1, 9.8,      // A: y ≈ 2x + 0
+                    7.0, 9.1, 10.9,                // B: y ≈ 2x + 5
+                    12.2, 13.8, 16.1, 17.9]        // C: y ≈ 2x + 10
+        }.unwrap();
+        Dataset::new(df)
+    }
+
+    fn create_panel_with_gaps() -> Dataset {
+        // Panel with gaps: some time periods missing for some entities
+        // Entity A: periods 1, 3, 4 (missing period 2)
+        // Entity B: periods 1, 2, 4 (missing period 3)
+        // Entity C: all periods 1-4
+        let df = df! {
+            "entity" => ["A", "A", "A",           // Missing period 2
+                         "B", "B", "B",           // Missing period 3
+                         "C", "C", "C", "C"],     // All periods
+            "time" => [1, 3, 4,
+                       1, 2, 4,
+                       1, 2, 3, 4],
+            "x" => [1.0, 3.0, 4.0,
+                    1.0, 2.0, 4.0,
+                    1.0, 2.0, 3.0, 4.0],
+            "y" => [2.1, 5.9, 8.1,                // A: y ≈ 2x + 0
+                    7.0, 9.1, 13.2,               // B: y ≈ 2x + 5
+                    12.2, 13.8, 16.1, 17.9]       // C: y ≈ 2x + 10
+        }.unwrap();
+        Dataset::new(df)
+    }
+
+    #[test]
+    fn test_fixed_effects_unbalanced() {
+        let dataset = create_unbalanced_panel_dataset();
+        let result = run_fixed_effects(&dataset, "y", &["x"], "entity").unwrap();
+
+        // Check structure with unbalanced data
+        assert_eq!(result.method, PanelMethod::FixedEffects);
+        assert_eq!(result.n_obs, 12); // 5 + 3 + 4
+        assert_eq!(result.n_groups, 3);
+
+        // Degrees of freedom: n - n_groups - k = 12 - 3 - 1 = 8
+        assert_eq!(result.df, 8);
+
+        // Coefficient should still be close to 2.0
+        assert!((result.coefficients[0] - 2.0).abs() < 0.5,
+            "FE coefficient should be close to 2.0 with unbalanced panel, got {}", result.coefficients[0]);
+
+        // R-squared should be high
+        assert!(result.r_squared > 0.8, "R² should be high with unbalanced panel, got {}", result.r_squared);
+    }
+
+    #[test]
+    fn test_random_effects_unbalanced() {
+        let dataset = create_unbalanced_panel_dataset();
+        let result = run_random_effects(&dataset, "y", &["x"], "entity").unwrap();
+
+        // Check structure with unbalanced data
+        assert_eq!(result.method, PanelMethod::RandomEffects);
+        assert_eq!(result.n_obs, 12);
+        assert_eq!(result.n_groups, 3);
+
+        // RE coefficient should be positive
+        assert!(result.coefficients[0] > 0.0,
+            "RE coefficient should be positive with unbalanced panel, got {}", result.coefficients[0]);
+
+        // Theta (quasi-demeaning factor) should be between 0 and 1
+        if let Some(theta) = result.theta {
+            assert!(theta >= 0.0 && theta <= 1.0,
+                "Theta should be in [0, 1], got {}", theta);
+        }
+    }
+
+    #[test]
+    fn test_hausman_unbalanced() {
+        let dataset = create_unbalanced_panel_dataset();
+        let result = run_hausman_test(&dataset, "y", &["x"], "entity").unwrap();
+
+        // Both FE and RE should produce results
+        assert!(!result.fe_result.coefficients.is_empty());
+        assert!(!result.re_result.coefficients.is_empty());
+
+        // Chi-squared statistic should be non-negative (or NaN if issues)
+        assert!(result.chi2_statistic >= 0.0 || result.chi2_statistic.is_nan(),
+            "Chi-squared should be non-negative, got {}", result.chi2_statistic);
+    }
+
+    #[test]
+    fn test_fixed_effects_with_gaps() {
+        let dataset = create_panel_with_gaps();
+        let result = run_fixed_effects(&dataset, "y", &["x"], "entity").unwrap();
+
+        // Check structure with gaps
+        assert_eq!(result.method, PanelMethod::FixedEffects);
+        assert_eq!(result.n_obs, 10); // 3 + 3 + 4
+        assert_eq!(result.n_groups, 3);
+
+        // Coefficient should still be close to 2.0
+        assert!((result.coefficients[0] - 2.0).abs() < 0.5,
+            "FE coefficient should be close to 2.0 with gaps, got {}", result.coefficients[0]);
+    }
+
+    #[test]
+    fn test_random_effects_with_gaps() {
+        let dataset = create_panel_with_gaps();
+        let result = run_random_effects(&dataset, "y", &["x"], "entity").unwrap();
+
+        // Check structure with gaps
+        assert_eq!(result.method, PanelMethod::RandomEffects);
+        assert_eq!(result.n_obs, 10);
+        assert_eq!(result.n_groups, 3);
+
+        // RE coefficient should be positive
+        assert!(result.coefficients[0] > 0.0,
+            "RE coefficient should be positive with gaps, got {}", result.coefficients[0]);
+    }
+
+    #[test]
+    fn test_panel_variance_components_unbalanced() {
+        // Verify variance components (sigma_u, sigma_e) are properly computed
+        // with unbalanced data (T_i varies across entities)
+        let dataset = create_unbalanced_panel_dataset();
+        let result = run_random_effects(&dataset, "y", &["x"], "entity").unwrap();
+
+        // Variance components should be non-negative (if present)
+        if let Some(sigma_u) = result.sigma_u {
+            assert!(sigma_u >= 0.0, "Between-entity variance should be non-negative");
+            // For this DGP with known entity effects, sigma_u should be substantial
+            // (entities have effects 0, 5, 10)
+            assert!(sigma_u > 0.0, "sigma_u should be positive given entity effects");
+        }
+        if let Some(sigma_e) = result.sigma_e {
+            assert!(sigma_e >= 0.0, "Within-entity variance should be non-negative");
+        }
     }
 
     // =====================================================================

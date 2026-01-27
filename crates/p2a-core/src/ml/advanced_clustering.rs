@@ -8016,8 +8016,52 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // Run with: cargo test -p p2a-core --release -- --ignored test_hdbscan_perf --nocapture
     fn test_hdbscan_perf_comparison() {
+        // Quick validation that both HDBSCAN implementations produce consistent results
+        // For full benchmark: cargo test -p p2a-core --release -- test_hdbscan_full_benchmark --ignored --nocapture
+        use rand::prelude::*;
+        use rand_distr::Normal;
+
+        let mut rng = StdRng::seed_from_u64(42);
+        let normal = Normal::new(0.0, 1.0).unwrap();
+
+        // Small dataset for quick validation
+        let n = 100;
+        let d = 3;
+        let mut data = Array2::zeros((n, d));
+        for i in 0..n {
+            let cluster = i % 3;
+            let center = cluster as f64 * 5.0;
+            for j in 0..d {
+                data[[i, j]] = center + rng.sample(normal);
+            }
+        }
+
+        // Run both implementations
+        let result_new = hdbscan(data.view(), Some(5), Some(5));
+        let result_old = super::super::cluster_optimized::hdbscan_optimized(data.view(), Some(5), Some(5));
+
+        // Both should succeed
+        assert!(result_new.is_ok(), "New HDBSCAN failed: {:?}", result_new.err());
+        assert!(result_old.is_ok(), "Old HDBSCAN failed: {:?}", result_old.err());
+
+        let new_result = result_new.unwrap();
+        let (old_labels, _old_probs, _old_n_clusters) = result_old.unwrap();
+
+        // Both should return same number of labels
+        assert_eq!(new_result.labels.len(), old_labels.len(), "Label count mismatch");
+        assert_eq!(new_result.labels.len(), n, "Expected {} labels", n);
+
+        // Both should find some clusters (not all noise)
+        let new_clusters: usize = new_result.labels.iter().filter(|&&l| l >= 0).count();
+        let old_clusters: usize = old_labels.iter().filter(|&&l| l >= 0).count();
+        assert!(new_clusters > 0, "New HDBSCAN found no clusters");
+        assert!(old_clusters > 0, "Old HDBSCAN found no clusters");
+    }
+
+    #[test]
+    #[ignore] // Run with: cargo test -p p2a-core --release -- test_hdbscan_full_benchmark --ignored --nocapture
+    fn test_hdbscan_full_benchmark() {
         use std::time::Instant;
         use rand::prelude::*;
         use rand_distr::Normal;

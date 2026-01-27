@@ -62,6 +62,12 @@ pub enum EconError {
     #[error("Invalid model specification: {message}")]
     InvalidSpecification { message: String },
 
+    #[error("Perfect separation detected in logit/probit model. Variable(s) {variables:?} perfectly predict the outcome. MLE cannot converge. Suggestion: Remove or combine these predictors, or use Firth's penalized likelihood.")]
+    PerfectSeparation { variables: Vec<String> },
+
+    #[error("Quasi-complete separation detected in logit/probit model. Variable(s) {variables:?} almost perfectly predict the outcome. Estimates may be unstable.")]
+    QuasiSeparation { variables: Vec<String> },
+
     // ═══════════════════════════════════════════════════════════════════
     // Panel Data Errors
     // ═══════════════════════════════════════════════════════════════════
@@ -72,9 +78,9 @@ pub enum EconError {
     UnbalancedPanel { min_obs: usize, max_obs: usize },
 
     // ═══════════════════════════════════════════════════════════════════
-    // Clustering Errors
+    // Clustering Errors (Cameron, Gelbach & Miller 2008; Cameron & Miller 2015)
     // ═══════════════════════════════════════════════════════════════════
-    #[error("Only {n_clusters} clusters found. Clustered standard errors are unreliable with fewer than 10 clusters. Consider using robust (HC) standard errors instead.")]
+    #[error("Only {n_clusters} clusters. Cameron-Miller (2015) guidance: G < 20 has severe bias concerns, 20-50 is moderate, G >= 50 is generally adequate. Consider cluster-robust wild bootstrap for small G.")]
     FewClusters { n_clusters: usize },
 
     // ═══════════════════════════════════════════════════════════════════
@@ -127,8 +133,12 @@ pub enum EstimationWarning {
     /// Variance inflation factors indicate potential multicollinearity
     HighVIF { variable: String, vif: f64 },
 
-    /// Few clusters for cluster-robust standard errors
-    FewClusters { n_clusters: usize, recommended: usize },
+    /// Few clusters for cluster-robust standard errors (Cameron-Miller 2015 guidance)
+    FewClusters {
+        n_clusters: usize,
+        /// Severity level: "severe" (< 20), "moderate" (20-50), "adequate" (>= 50)
+        severity: String,
+    },
 
     /// Potential heteroskedasticity detected
     Heteroskedasticity { test_name: String, p_value: f64 },
@@ -165,11 +175,26 @@ impl EstimationWarning {
                     vif, variable
                 )
             }
-            Self::FewClusters { n_clusters, recommended } => {
-                format!(
-                    "Only {} clusters (recommended: {}+). Clustered standard errors may be biased downward.",
-                    n_clusters, recommended
-                )
+            Self::FewClusters { n_clusters, severity } => {
+                // Cameron, Gelbach & Miller (2008) and Cameron & Miller (2015) guidance
+                match severity.as_str() {
+                    "severe" => format!(
+                        "Only {} clusters (< 20). Cameron-Miller (2015) warns of severe finite-sample \
+                         bias. Consider cluster-robust wild bootstrap (Cameron et al. 2008) or \
+                         bias-corrected estimates. Standard asymptotic inference is unreliable.",
+                        n_clusters
+                    ),
+                    "moderate" => format!(
+                        "Only {} clusters (20-50). Cameron-Miller (2015) notes moderate concerns. \
+                         Consider cluster-robust wild bootstrap for more reliable inference. \
+                         Asymptotic SEs may be downward biased.",
+                        n_clusters
+                    ),
+                    _ => format!(
+                        "{} clusters detected. Generally adequate for cluster-robust inference.",
+                        n_clusters
+                    ),
+                }
             }
             Self::Heteroskedasticity { test_name, p_value } => {
                 format!(
