@@ -11,6 +11,7 @@ use anyhow::Result;
 use clap::Parser;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
+mod audit;
 mod config;
 #[cfg(feature = "db")]
 pub mod db;

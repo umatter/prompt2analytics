@@ -333,6 +333,9 @@ pub use econometrics::{
     MTEEstimand, PropensityModel, IVMTEConfig, MTEPoint,
     TreatmentEffectEstimate, PropensityStageResult, IVMTEResult,
     run_ivmte, ivmte, run_ivmte_multi_z,
+    // Parametric G-Formula for causal inference with time-varying treatments (gfoRmula)
+    GFormulaIntervention, GFormulaOutcomeType, GFormulaConfig, GFormulaResult,
+    run_gformula, gformula,
 };
 pub use spatial::{
     // Neighbors and weights

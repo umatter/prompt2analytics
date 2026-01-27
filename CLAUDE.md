@@ -65,11 +65,11 @@ rustup target add wasm32-unknown-unknown
 
 ## Project Overview
 
-prompt2analytics is a Rust workspace (edition 2024, requires Rust 1.85+) exposing econometrics, ML, and visualization through multiple interfaces:
+prompt2analytics is a Rust workspace (edition 2024, requires Rust 1.85+) exposing 200+ econometrics, statistics, ML, and visualization methods through multiple interfaces:
 
 - **p2a-core**: Core analytics library (all algorithms)
 - **p2a-cli**: Command-line interface (`p2a` binary)
-- **p2a-mcp**: MCP server exposing 60+ tools with LLM integration
+- **p2a-mcp**: MCP server exposing 100+ tools with LLM integration
 - **p2a-dioxus**: Cross-platform GUI (web via WASM, desktop via native)
 
 ## Architecture Principles
@@ -87,45 +87,143 @@ Key dependencies for econometrics:
 - `statrs` 0.18 - Statistical distributions
 - `polars` 0.52 - DataFrame operations
 
+### Feature Flags
+
+```bash
+# Build with all features
+cargo build -p p2a-core --all-features
+
+# Specific features
+cargo build -p p2a-core --features spectral-analysis  # Spectral analysis (spectrum, periodogram)
+```
+
 ### Module Organization (p2a-core)
 
 ```
 src/
-├── errors.rs           # EconError, EconResult types
+├── errors.rs              # EconError, EconResult types
 ├── linalg/
-│   ├── matrix_ops.rs   # xtx, xty, safe_inverse, cholesky (via faer)
-│   └── design.rs       # DesignMatrix, demeaning functions
+│   ├── matrix_ops.rs      # xtx, xty, safe_inverse, cholesky (via faer)
+│   └── design.rs          # DesignMatrix, demeaning functions
 ├── traits/
-│   └── estimator.rs    # LinearEstimator trait, SignificanceLevel, p-value helpers
-├── regression/
-│   ├── ols.rs          # OLS with HC0-HC3 robust SEs, clustered SEs
-│   └── diagnostics.rs  # JB, BP, DW, VIF, condition number
-├── econometrics/
-│   ├── panel.rs        # Fixed Effects, Random Effects, Hausman
-│   ├── iv.rs           # 2SLS with first-stage diagnostics
-│   ├── did.rs          # Difference-in-Differences
-│   ├── discrete.rs     # Logit, Probit (Newton-Raphson MLE with line search)
-│   ├── feglm.rs        # GLM with HDFE (IRLS + weighted MAP)
-│   ├── rd.rs           # Regression Discontinuity (Sharp/Fuzzy RD)
-│   └── timeseries.rs   # VAR, VARMA, VECM, IRF
-├── ml/
-│   ├── clustering.rs   # K-means, DBSCAN, Hierarchical
-│   ├── reduction.rs    # PCA (via SVD), t-SNE
-│   ├── trees.rs        # Random Forest (CART)
-│   └── svm.rs          # Linear SVM (SMO)
-├── visualization/
-│   ├── charts.rs       # Static charts (plotters) - PNG output
-│   ├── heatmap.rs      # Correlation heatmaps
-│   └── interactive.rs  # Interactive charts (plotlars/Plotly) - HTML output
-├── export/
-│   ├── latex.rs        # LaTeX tables (OLS, Panel, Discrete)
-│   ├── markdown.rs     # Markdown tables for documentation
-│   ├── html.rs         # Self-contained HTML tables
-│   └── csv.rs          # CsvExport trait for all result types
-└── data/
-    ├── quality.rs      # DataQualityProfile for LLM-assisted cleaning
-    ├── verification.rs # Cleaning verification and preview
-    └── cleaning_session.rs # Rollback-enabled cleaning sessions
+│   └── estimator.rs       # LinearEstimator trait, SignificanceLevel, p-value helpers
+│
+├── regression/            # Regression methods
+│   ├── ols.rs             # OLS, HC0-HC3, clustered SEs, HAC (Newey-West), bootstrap, Driscoll-Kraay
+│   ├── diagnostics.rs     # JB, BP, DW, VIF, Breusch-Godfrey, RESET, Wald, Harvey-Collier
+│   ├── nls.rs             # Nonlinear least squares (Levenberg-Marquardt)
+│   ├── loess.rs           # Local polynomial regression (LOESS/LOWESS)
+│   ├── gls.rs             # Generalized least squares (AR1, custom correlation)
+│   ├── smooth_spline.rs   # Smoothing splines with GCV
+│   ├── step.rs            # Stepwise selection (forward, backward, both)
+│   ├── quantreg.rs        # Quantile regression (interior point, simplex)
+│   ├── marginal_effects.rs # Marginal effects and contrasts
+│   ├── sensemakr.rs       # Sensitivity analysis (Cinelli & Hazlett)
+│   └── evalue.rs          # E-values for unmeasured confounding
+│
+├── stats/                 # Statistical tests (50+ methods)
+│   ├── ttest.rs           # One-sample, two-sample, paired t-tests
+│   ├── anova.rs           # One-way, two-way ANOVA
+│   ├── manova.rs          # Multivariate ANOVA (Pillai, Wilks, Hotelling, Roy)
+│   ├── chisq.rs           # Chi-squared (goodness-of-fit, independence)
+│   ├── fisher.rs          # Fisher exact test
+│   ├── wilcoxon.rs        # Wilcoxon rank-sum and signed-rank
+│   ├── kruskal.rs         # Kruskal-Wallis test
+│   ├── friedman.rs        # Friedman test
+│   ├── shapiro.rs         # Shapiro-Wilk normality test
+│   ├── ks.rs              # Kolmogorov-Smirnov test
+│   ├── bartlett.rs        # Bartlett's test for homogeneity of variance
+│   ├── tukey.rs           # Tukey HSD post-hoc test
+│   ├── factanal.rs        # Factor analysis (MLE with rotation)
+│   ├── cancor.rs          # Canonical correlation analysis
+│   ├── acf.rs             # ACF, PACF, CCF
+│   ├── boxtest.rs         # Box-Ljung, Box-Pierce tests
+│   ├── pptest.rs          # Phillips-Perron unit root test
+│   ├── power.rs           # Power analysis (t-test, prop test, ANOVA)
+│   ├── robust.rs          # Robust statistics (fivenum, IQR, MAD, ECDF, density)
+│   ├── spline.rs          # Spline interpolation and approximation
+│   ├── weighted.rs        # Weighted mean and covariance
+│   └── ...                # 30+ more statistical tests
+│
+├── econometrics/          # Econometric methods (60+ methods)
+│   ├── panel.rs           # FE, RE, Hausman, Panel GLS, Arellano-Bond GMM, PVCM, PMG
+│   ├── iv.rs              # 2SLS, first-stage diagnostics, Sargan test
+│   ├── did.rs             # Canonical 2x2 DiD
+│   ├── staggered_did.rs   # Callaway-Sant'Anna staggered DiD
+│   ├── etwfe.rs           # Extended two-way fixed effects (Wooldridge)
+│   ├── bacon.rs           # Goodman-Bacon decomposition
+│   ├── discrete.rs        # Logit, Probit, Multinomial, Ordered, NegBin, ZIP, ZINB, Hurdle, Mixed logit
+│   ├── feglm.rs           # GLM with HDFE (IRLS + weighted MAP)
+│   ├── hdfe.rs            # High-dimensional fixed effects
+│   ├── rd.rs              # Sharp/Fuzzy RD with CCT robust inference
+│   ├── rdmulti.rs         # Multi-cutoff RD
+│   ├── synth.rs           # Synthetic control (classic + gsynth)
+│   ├── scpi.rs            # Synthetic control with prediction intervals
+│   ├── treatment.rs       # IPW, doubly robust estimation
+│   ├── tmle.rs            # Targeted MLE
+│   ├── ctmle.rs           # Collaborative TMLE
+│   ├── ltmle.rs           # Longitudinal TMLE
+│   ├── doubleml.rs        # Double/Debiased ML (PLR, PLIV, IRM, IIVM)
+│   ├── matching.rs        # Propensity score matching (MatchIt)
+│   ├── weightit.rs        # Flexible IPW (entropy balancing)
+│   ├── cbps.rs            # Covariate balancing propensity scores
+│   ├── twang.rs           # GBM propensity scores
+│   ├── mediation.rs       # Causal mediation analysis
+│   ├── medflex.rs         # Natural effect models
+│   ├── survival.rs        # Kaplan-Meier, Cox PH, AFT, competing risks
+│   ├── spatial.rs         # SAR, SEM, SAC models
+│   ├── spatialprobit.rs   # Spatial probit models
+│   ├── splm.rs            # Spatial panel models (SPML, SPGM)
+│   ├── sphet.rs           # Spatial GMM with heteroskedasticity
+│   ├── timeseries.rs      # VAR, VARMA, VECM, IRF, Granger causality
+│   ├── panel_unit_root.rs # LLC, IPS, Hadri panel unit root tests
+│   └── ...                # ivmte, hettx, stdreg, gformula, bpbounds, sbw
+│
+├── forecasting/           # Time series forecasting
+│   ├── arima_model.rs     # ARIMA modeling and forecasting
+│   ├── holtwinters.rs     # Holt-Winters exponential smoothing
+│   ├── ar.rs              # AR model fitting (Yule-Walker, OLS, MLE)
+│   ├── stl.rs             # STL decomposition
+│   ├── mstl.rs            # Multiple seasonal decomposition (MSTL)
+│   ├── decompose.rs       # Classical decomposition (additive/multiplicative)
+│   ├── kalman.rs          # Kalman filter and smoother
+│   ├── structts.rs        # Structural time series (local level, trend, BSM)
+│   ├── changepoint.rs     # PELT and binary segmentation
+│   ├── garch.rs           # GARCH(p,q) volatility modeling
+│   ├── causal_impact.rs   # Bayesian structural time series causal inference
+│   └── tsutils.rs         # lag, embed, diffinv, filter, window, arima_sim, runmed
+│
+├── ml/                    # Machine learning
+│   ├── clustering.rs      # K-means (k-means++), DBSCAN, Hierarchical (Ward, single, complete, average)
+│   ├── reduction.rs       # PCA (via SVD), t-SNE
+│   ├── trees.rs           # Random Forest (CART)
+│   └── svm.rs             # Linear SVM (SMO)
+│
+├── simulation/            # Data simulation
+│   └── generator.rs       # Synthetic data generation for testing
+│
+├── visualization/         # Chart generation
+│   ├── charts.rs          # Static charts (plotters) - PNG output
+│   ├── heatmap.rs         # Correlation heatmaps
+│   └── interactive.rs     # Interactive charts (plotlars/Plotly) - HTML output
+│
+├── export/                # Export formats
+│   ├── latex.rs           # LaTeX tables (OLS, Panel, Discrete)
+│   ├── markdown.rs        # Markdown tables for documentation
+│   ├── html.rs            # Self-contained HTML tables
+│   └── csv.rs             # CsvExport trait for all result types
+│
+├── reports/               # Report generation
+│   └── html.rs            # HTML report builder
+│
+└── data/                  # Data management
+    ├── quality.rs         # DataQualityProfile for LLM-assisted cleaning
+    ├── verification.rs    # Cleaning verification and preview
+    ├── cleaning_session.rs # Rollback-enabled cleaning sessions
+    ├── database.rs        # SQLite and DuckDB connectivity
+    ├── stata.rs           # Stata .dta file support
+    ├── sas.rs             # SAS .sas7bdat file support
+    └── munging/           # Data manipulation (reshape, aggregate, join, transform)
 ```
 
 ### API Design
@@ -169,6 +267,13 @@ fn my_function() -> EconResult<MyResult> {
 }
 ```
 
+Common error variants:
+- `EconError::InvalidInput(String)` - Bad input data
+- `EconError::SingularMatrix` - Non-invertible matrix
+- `EconError::ColumnNotFound(String)` - Missing column
+- `EconError::InsufficientObservations` - Not enough data
+- `EconError::ConvergenceFailure(String)` - Optimization didn't converge
+
 ## Common Patterns
 
 ### Matrix Operations
@@ -203,6 +308,11 @@ pub enum CovarianceType {
 }
 ```
 
+Additional variance estimators in `regression/ols.rs`:
+- `vcov_hac()` - HAC (Newey-West) for time series
+- `vcov_bootstrap()` - Bootstrap covariance (pairs, residual, wild)
+- `vcov_driscoll_kraay()` - Panel-robust SEs (cross-sectional dependence)
+
 ### MLE Settings (Discrete Models)
 
 Logit/Probit use Newton-Raphson with optional backtracking line search:
@@ -220,6 +330,20 @@ pub struct MleSettings {
 
 The line search improves convergence for difficult problems (near-separation).
 Multivariate separation is detected via coefficient explosion monitoring.
+
+### Config Pattern for Complex Methods
+
+Complex methods use a builder-style config:
+```rust
+let config = StaggeredDidConfig {
+    comparison_group: ComparisonGroup::NeverTreated,
+    estimation_method: AttEstimationMethod::Ipw,
+    anticipation: 0,
+    aggregation: Aggregation::Simple,
+    ..Default::default()
+};
+let result = run_staggered_did(dataset, &config)?;
+```
 
 ## MCP Server (p2a-mcp)
 
@@ -351,9 +475,27 @@ let df = df! {
 ## Key Files
 
 **Core Implementation:**
-- `crates/p2a-core/src/regression/ols.rs` - OLS with robust SEs
+- `crates/p2a-core/src/regression/ols.rs` - OLS with robust SEs, HAC, bootstrap
 - `crates/p2a-core/src/linalg/matrix_ops.rs` - Linear algebra primitives
 - `crates/p2a-core/src/traits/estimator.rs` - LinearEstimator trait
+
+**Major Econometrics:**
+- `crates/p2a-core/src/econometrics/panel.rs` - Panel data (FE, RE, GMM)
+- `crates/p2a-core/src/econometrics/discrete.rs` - All discrete choice models
+- `crates/p2a-core/src/econometrics/staggered_did.rs` - Callaway-Sant'Anna DiD
+- `crates/p2a-core/src/econometrics/synth.rs` - Synthetic control methods
+- `crates/p2a-core/src/econometrics/tmle.rs` - TMLE family (tmle, ctmle, ltmle)
+- `crates/p2a-core/src/econometrics/spatial.rs` - Spatial econometrics
+
+**Statistics:**
+- `crates/p2a-core/src/stats/mod.rs` - All 50+ statistical tests exported
+- `crates/p2a-core/src/stats/robust.rs` - Robust statistics (IQR, MAD, ECDF)
+- `crates/p2a-core/src/stats/power.rs` - Power analysis
+
+**Forecasting:**
+- `crates/p2a-core/src/forecasting/mod.rs` - All forecasting methods exported
+- `crates/p2a-core/src/forecasting/kalman.rs` - State-space models
+- `crates/p2a-core/src/forecasting/garch.rs` - Volatility modeling
 
 **MCP Server:**
 - `crates/p2a-mcp/src/server.rs` - All MCP tool definitions

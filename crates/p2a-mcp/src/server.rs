@@ -74,6 +74,10 @@ use p2a_core::{
         run_line, LineResult,
         // SuperSmoother
         supsmu, SupsmuResult,
+        // GLS regression
+        gls, run_gls, GlsResult, CorrelationStructure,
+        // Smooth splines
+        smooth_spline, smooth_spline_predict, run_smooth_spline, SmoothSplineResult, SmoothSplineConfig,
     },
     stats::{
         correlation_matrix, DescriptiveStats, run_one_way_anova, run_two_way_anova,
@@ -127,6 +131,14 @@ use p2a_core::{
         run_mauchly_test, MauchlyResult,
         // Constrained optimization
         ConstrOptimResult, ConstrOptimConfig, OptimMethod,
+        // Robust statistics
+        fivenum, run_fivenum, FivenumResult,
+        iqr, run_iqr,
+        mad, run_mad,
+        ecdf, run_ecdf, EcdfResult,
+        run_density, DensityResult,
+        // Spline interpolation
+        spline, approx, SplineResult, SplineMethod, ApproxResult, ApproxMethod, ApproxRule,
     },
     // Toeplitz matrix construction
     toeplitz, toeplitz_asymmetric, toeplitz_to_vec,
@@ -6442,6 +6454,214 @@ pub struct PropTrendTestRequest {
     /// Optional scores for the trend
     #[schemars(description = "Optional scores for each group. If omitted, uses 1, 2, 3, ... (equally spaced).")]
     pub scores: Option<Vec<f64>>,
+}
+
+// ============================================================================
+// Robust Statistics Request Structs
+// ============================================================================
+
+/// Request for Tukey's five-number summary.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct FivenumRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Column to summarize
+    #[schemars(description = "Name of the numeric column to compute five-number summary.")]
+    pub column: String,
+}
+
+/// Request for interquartile range.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct IqrRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Column to compute IQR for
+    #[schemars(description = "Name of the numeric column.")]
+    pub column: String,
+
+    /// Quantile type (1-9, default 7)
+    #[schemars(description = "Quantile type (1-9). Type 7 (default) matches R's default.")]
+    pub qtype: Option<usize>,
+}
+
+/// Request for median absolute deviation.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct MadRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Column to compute MAD for
+    #[schemars(description = "Name of the numeric column.")]
+    pub column: String,
+
+    /// Center (default: median)
+    #[schemars(description = "Center to use. Default is 'median'. Can also use 'mean'.")]
+    pub center: Option<String>,
+
+    /// Scaling constant (default: 1.4826 for normal consistency)
+    #[schemars(description = "Scaling constant. Default 1.4826 makes MAD consistent for normal data.")]
+    pub constant: Option<f64>,
+}
+
+/// Request for empirical CDF.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct EcdfRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Column to compute ECDF for
+    #[schemars(description = "Name of the numeric column.")]
+    pub column: String,
+
+    /// Optional values at which to evaluate the ECDF
+    #[schemars(description = "Optional specific values at which to evaluate the ECDF. If omitted, returns ECDF at all sorted unique data values.")]
+    pub at: Option<Vec<f64>>,
+}
+
+/// Request for kernel density estimation.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DensityRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Column to estimate density for
+    #[schemars(description = "Name of the numeric column.")]
+    pub column: String,
+
+    /// Kernel type
+    #[schemars(description = "Kernel function: 'gaussian' (default), 'epanechnikov', 'rectangular', 'triangular', 'biweight', or 'cosine'.")]
+    pub kernel: Option<String>,
+
+    /// Bandwidth
+    #[schemars(description = "Bandwidth for smoothing. If omitted, uses Silverman's rule of thumb.")]
+    pub bw: Option<f64>,
+
+    /// Number of evaluation points
+    #[schemars(description = "Number of points to evaluate density at. Default is 512.")]
+    pub n: Option<usize>,
+}
+
+// ============================================================================
+// Spline/Interpolation Request Structs
+// ============================================================================
+
+/// Request for spline interpolation.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SplineRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// X column (knot locations)
+    #[schemars(description = "Name of the x (independent) column.")]
+    pub x: String,
+
+    /// Y column (values at knots)
+    #[schemars(description = "Name of the y (dependent) column.")]
+    pub y: String,
+
+    /// Points at which to interpolate
+    #[schemars(description = "Points at which to interpolate. If omitted, returns the spline coefficients.")]
+    pub xout: Option<Vec<f64>>,
+
+    /// Spline method
+    #[schemars(description = "Spline method: 'fmm' (default, Forsythe-Malcolm-Moler), 'natural', 'periodic', or 'hyman' (monotone).")]
+    pub method: Option<String>,
+}
+
+/// Request for linear approximation/interpolation.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ApproxRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// X column
+    #[schemars(description = "Name of the x (independent) column.")]
+    pub x: String,
+
+    /// Y column
+    #[schemars(description = "Name of the y (dependent) column.")]
+    pub y: String,
+
+    /// Points at which to interpolate
+    #[schemars(description = "Points at which to interpolate.")]
+    pub xout: Vec<f64>,
+
+    /// Interpolation method
+    #[schemars(description = "Interpolation method: 'linear' (default) or 'constant'.")]
+    pub method: Option<String>,
+
+    /// Rule for extrapolation
+    #[schemars(description = "Rule for handling points outside range: 'na' (default, return NA) or 'nearest' (use boundary value).")]
+    pub rule: Option<String>,
+}
+
+// ============================================================================
+// GLS and Smooth Spline Request Structs
+// ============================================================================
+
+/// Request for Generalized Least Squares regression.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct GlsRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Response variable column
+    #[schemars(description = "Name of the dependent (y) variable column.")]
+    pub y: String,
+
+    /// Predictor variable columns
+    #[schemars(description = "Names of the independent (x) variable columns.")]
+    pub x: Vec<String>,
+
+    /// Include intercept
+    #[schemars(description = "Whether to include an intercept. Default is true.")]
+    pub intercept: Option<bool>,
+
+    /// Correlation structure type
+    #[schemars(description = "Correlation structure: 'ar1' (default), 'compound_symmetry', or 'identity' (OLS).")]
+    pub correlation: Option<String>,
+
+    /// Correlation parameter (rho)
+    #[schemars(description = "Correlation parameter rho for AR(1) or compound symmetry. If omitted with 'ar1', auto-estimated from OLS residuals.")]
+    pub rho: Option<f64>,
+}
+
+/// Request for smooth spline fitting.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SmoothSplineRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// X column
+    #[schemars(description = "Name of the x (independent) column.")]
+    pub x: String,
+
+    /// Y column
+    #[schemars(description = "Name of the y (dependent) column.")]
+    pub y: String,
+
+    /// Smoothing parameter (spar)
+    #[schemars(description = "Smoothing parameter (0 to 1). If omitted, uses generalized cross-validation (GCV) to select automatically.")]
+    pub spar: Option<f64>,
+
+    /// Degrees of freedom
+    #[schemars(description = "Equivalent degrees of freedom. Alternative to spar. If both omitted, uses GCV.")]
+    pub df: Option<f64>,
+
+    /// Points at which to predict
+    #[schemars(description = "Optional points at which to evaluate the fitted spline. If omitted, returns fit at data points.")]
+    pub xout: Option<Vec<f64>>,
 }
 
 // ============================================================================
@@ -24353,6 +24573,619 @@ impl AnalyticsServer {
 
         Ok(CallToolResult::success(vec![Content::text(output)]))
     }
+
+    // ========================================================================
+    // Robust Statistics Tools
+    // ========================================================================
+
+    /// Compute Tukey's five-number summary.
+    #[tool(description = "Compute Tukey's five-number summary: minimum, lower-hinge (Q1), median, upper-hinge (Q3), and maximum. The hinges follow Tukey's definition used in boxplots. Useful for understanding data distribution and identifying outliers.")]
+    async fn stats_fivenum(
+        &self,
+        Parameters(request): Parameters<FivenumRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let values = match extract_column_f64(dataset, &request.column) {
+            Ok(v) => v,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+        };
+
+        match fivenum(&values) {
+            Ok(result) => {
+                let json_output = serde_json::json!({
+                    "minimum": result.minimum,
+                    "lower_hinge": result.lower_hinge,
+                    "median": result.median,
+                    "upper_hinge": result.upper_hinge,
+                    "maximum": result.maximum,
+                    "n": result.n,
+                    "iqr": result.upper_hinge - result.lower_hinge
+                });
+                Ok(CallToolResult::success(vec![Content::text(
+                    serde_json::to_string_pretty(&json_output).unwrap(),
+                )]))
+            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
+                "Five-number summary failed: {}",
+                e
+            ))])),
+        }
+    }
+
+    /// Compute interquartile range.
+    #[tool(description = "Compute the interquartile range (IQR = Q3 - Q1). The IQR is a robust measure of spread that is resistant to outliers. Uses R's default quantile type 7 unless specified otherwise.")]
+    async fn stats_iqr(
+        &self,
+        Parameters(request): Parameters<IqrRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let values = match extract_column_f64(dataset, &request.column) {
+            Ok(v) => v,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+        };
+
+        match iqr(&values, request.qtype) {
+            Ok(result) => {
+                let json_output = serde_json::json!({
+                    "iqr": result,
+                    "quantile_type": request.qtype.unwrap_or(7)
+                });
+                Ok(CallToolResult::success(vec![Content::text(
+                    serde_json::to_string_pretty(&json_output).unwrap(),
+                )]))
+            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
+                "IQR computation failed: {}",
+                e
+            ))])),
+        }
+    }
+
+    /// Compute median absolute deviation.
+    #[tool(description = "Compute the median absolute deviation (MAD), a robust measure of variability. MAD = median(|x - center|) * constant. Default uses median as center and constant=1.4826 (consistent estimator of std for normal data). Unlike standard deviation, MAD is resistant to outliers.")]
+    async fn stats_mad(
+        &self,
+        Parameters(request): Parameters<MadRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let values = match extract_column_f64(dataset, &request.column) {
+            Ok(v) => v,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+        };
+
+        // If center is "mean", compute mean; otherwise use None (which defaults to median in mad())
+        let center = if request.center.as_deref() == Some("mean") {
+            let sum: f64 = values.iter().filter(|x| !x.is_nan()).sum();
+            let count = values.iter().filter(|x| !x.is_nan()).count();
+            if count > 0 { Some(sum / count as f64) } else { None }
+        } else {
+            None // Will use median by default
+        };
+
+        let constant = request.constant;
+
+        match run_mad(&values, center, constant) {
+            Ok(result) => {
+                let json_output = serde_json::json!({
+                    "mad": result,
+                    "center": request.center.as_deref().unwrap_or("median"),
+                    "constant": constant.unwrap_or(1.4826)
+                });
+                Ok(CallToolResult::success(vec![Content::text(
+                    serde_json::to_string_pretty(&json_output).unwrap(),
+                )]))
+            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
+                "MAD computation failed: {}",
+                e
+            ))])),
+        }
+    }
+
+    /// Compute empirical cumulative distribution function.
+    #[tool(description = "Compute the empirical cumulative distribution function (ECDF). Returns the proportion of observations less than or equal to each value. Useful for visualizing distributions and computing percentiles. If 'at' is specified, evaluates ECDF at those points; otherwise returns ECDF at all unique data values.")]
+    async fn stats_ecdf(
+        &self,
+        Parameters(request): Parameters<EcdfRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let values = match extract_column_f64(dataset, &request.column) {
+            Ok(v) => v,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+        };
+
+        match run_ecdf(&values) {
+            Ok(result) => {
+                // If specific evaluation points requested, use those
+                let (x_out, y_out) = if let Some(ref at) = request.at {
+                    let y_eval = result.evaluate_many(at);
+                    (at.clone(), y_eval)
+                } else {
+                    (result.x.clone(), result.y.clone())
+                };
+
+                let json_output = serde_json::json!({
+                    "x": x_out,
+                    "y": y_out,
+                    "n": result.n
+                });
+                Ok(CallToolResult::success(vec![Content::text(
+                    serde_json::to_string_pretty(&json_output).unwrap(),
+                )]))
+            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
+                "ECDF computation failed: {}",
+                e
+            ))])),
+        }
+    }
+
+    /// Estimate kernel density.
+    #[tool(description = "Estimate probability density function using kernel density estimation (KDE). Smooths the empirical distribution using a kernel function. Bandwidth can be specified or auto-selected using Silverman's rule of thumb. Returns density estimates at n evaluation points spanning the data range.")]
+    async fn stats_density(
+        &self,
+        Parameters(request): Parameters<DensityRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let values = match extract_column_f64(dataset, &request.column) {
+            Ok(v) => v,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+        };
+
+        let kernel = request.kernel.as_deref().unwrap_or("gaussian");
+
+        // Validate kernel
+        if !["gaussian", "normal", "epanechnikov", "rectangular", "uniform",
+             "triangular", "biweight", "quartic", "cosine"].contains(&kernel) {
+            return Ok(CallToolResult::error(vec![Content::text(format!(
+                "Unknown kernel '{}'. Supported: gaussian, epanechnikov, rectangular, triangular, biweight, cosine.",
+                kernel
+            ))]));
+        }
+
+        let n = request.n;
+
+        match run_density(&values, request.bw, kernel, n) {
+            Ok(result) => {
+                let json_output = serde_json::json!({
+                    "x": result.x,
+                    "y": result.y,
+                    "bandwidth": result.bw,
+                    "kernel": kernel,
+                    "n_data": result.n
+                });
+                Ok(CallToolResult::success(vec![Content::text(
+                    serde_json::to_string_pretty(&json_output).unwrap(),
+                )]))
+            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
+                "Density estimation failed: {}",
+                e
+            ))])),
+        }
+    }
+
+    // ========================================================================
+    // Spline/Interpolation Tools
+    // ========================================================================
+
+    /// Perform spline interpolation.
+    #[tool(description = "Perform cubic spline interpolation. Fits a smooth piecewise cubic polynomial through the data points. Methods: 'fmm' (Forsythe-Malcolm-Moler, default), 'natural' (second derivatives zero at endpoints), 'periodic' (for cyclic data), 'hyman' (monotone-preserving). If xout is provided, returns interpolated values; otherwise returns spline coefficients.")]
+    async fn stats_spline(
+        &self,
+        Parameters(request): Parameters<SplineRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let x = match extract_column_f64(dataset, &request.x) {
+            Ok(v) => v,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+        };
+
+        let y = match extract_column_f64(dataset, &request.y) {
+            Ok(v) => v,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+        };
+
+        let method = match request.method.as_deref().unwrap_or("fmm") {
+            "fmm" => SplineMethod::Fmm,
+            "natural" => SplineMethod::Natural,
+            "periodic" => SplineMethod::Periodic,
+            "hyman" | "monotone" | "monotonefc" => SplineMethod::MonotoneFC,
+            other => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Unknown spline method '{}'. Supported: fmm, natural, periodic, monotone.",
+                    other
+                ))]));
+            }
+        };
+
+        // spline(x, y, xout, n, method) - if xout is provided, n is ignored
+        match spline(&x, &y, request.xout.as_deref(), None, method) {
+            Ok(result) => {
+                let json_output = serde_json::json!({
+                    "x": result.x,
+                    "y": result.y,
+                    "method": format!("{:?}", method),
+                    "n_knots": result.n
+                });
+                Ok(CallToolResult::success(vec![Content::text(
+                    serde_json::to_string_pretty(&json_output).unwrap(),
+                )]))
+            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
+                "Spline interpolation failed: {}",
+                e
+            ))])),
+        }
+    }
+
+    /// Perform linear interpolation/approximation.
+    #[tool(description = "Perform linear interpolation or constant interpolation. Linear interpolation connects points with straight lines; constant interpolation uses step functions. Specify 'rule' to control extrapolation behavior: 'na' returns NA outside range, 'const' uses boundary values, 'extrapolate' extends linearly.")]
+    async fn stats_approx(
+        &self,
+        Parameters(request): Parameters<ApproxRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let x = match extract_column_f64(dataset, &request.x) {
+            Ok(v) => v,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+        };
+
+        let y = match extract_column_f64(dataset, &request.y) {
+            Ok(v) => v,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+        };
+
+        let method = match request.method.as_deref().unwrap_or("linear") {
+            "linear" => ApproxMethod::Linear,
+            "constant" | "step" => ApproxMethod::Constant,
+            other => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Unknown approx method '{}'. Supported: linear, constant.",
+                    other
+                ))]));
+            }
+        };
+
+        let rule = match request.rule.as_deref().unwrap_or("na") {
+            "na" | "NA" => ApproxRule::Na,
+            "nearest" | "const" | "constant" => ApproxRule::Nearest,
+            other => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Unknown rule '{}'. Supported: na, nearest.",
+                    other
+                ))]));
+            }
+        };
+
+        // approx(x, y, xout, n, method, rule, f) where f is for ties (default 0.5)
+        match approx(&x, &y, Some(&request.xout), None, method, rule, 0.5) {
+            Ok(result) => {
+                let json_output = serde_json::json!({
+                    "x": result.x,
+                    "y": result.y,
+                    "method": format!("{:?}", method),
+                    "rule": format!("{:?}", rule)
+                });
+                Ok(CallToolResult::success(vec![Content::text(
+                    serde_json::to_string_pretty(&json_output).unwrap(),
+                )]))
+            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
+                "Approximation failed: {}",
+                e
+            ))])),
+        }
+    }
+
+    // ========================================================================
+    // GLS and Smooth Spline Tools
+    // ========================================================================
+
+    /// Fit a Generalized Least Squares model.
+    #[tool(description = "Fit a Generalized Least Squares (GLS) regression model. GLS extends OLS to handle correlated or heteroscedastic errors. Correlation structures: 'ar1' (autoregressive), 'compound_symmetry' (equal correlation), 'identity' (OLS). For AR(1), rho can be specified or auto-estimated from OLS residuals. Returns coefficients, standard errors, t-values, p-values, and model fit statistics.")]
+    async fn regression_gls(
+        &self,
+        Parameters(request): Parameters<GlsRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        use p2a_core::linalg::design::DesignMatrix;
+        use ndarray::Array1;
+
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        // Extract y column
+        let y = match extract_column_f64(dataset, &request.y) {
+            Ok(v) => Array1::from_vec(v),
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+        };
+
+        // Build design matrix
+        let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
+        let intercept = request.intercept.unwrap_or(true);
+
+        let dm = match DesignMatrix::from_dataframe(dataset.df(), &x_refs, intercept) {
+            Ok(dm) => dm,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Failed to build design matrix: {}",
+                    e
+                ))]));
+            }
+        };
+
+        let x = dm.view();
+
+        // Determine correlation structure
+        let corr_type = request.correlation.as_deref().unwrap_or("ar1");
+
+        let correlation = match corr_type {
+            "identity" | "ols" => CorrelationStructure::Identity,
+            "compound_symmetry" | "cs" => {
+                let rho = request.rho.unwrap_or(0.5);
+                CorrelationStructure::CompoundSymmetry { rho }
+            }
+            "ar1" | "ar" => {
+                // If rho not provided, auto-estimate from OLS residuals
+                let rho = if let Some(r) = request.rho {
+                    r
+                } else {
+                    // Run OLS to get residuals for AR(1) estimation
+                    match gls(&y.view(), &x, CorrelationStructure::Identity) {
+                        Ok(ols_result) => {
+                            // Estimate rho from residuals
+                            let residuals = &ols_result.residuals;
+                            let n = residuals.len();
+                            if n > 1 {
+                                let mut sum_prod = 0.0;
+                                let mut sum_sq = 0.0;
+                                for i in 1..n {
+                                    sum_prod += residuals[i] * residuals[i - 1];
+                                    sum_sq += residuals[i - 1].powi(2);
+                                }
+                                (sum_prod / sum_sq).clamp(-0.99, 0.99)
+                            } else {
+                                0.0
+                            }
+                        }
+                        Err(_) => 0.5, // fallback
+                    }
+                };
+                CorrelationStructure::AR1 { rho }
+            }
+            other => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Unknown correlation structure '{}'. Supported: ar1, compound_symmetry, identity.",
+                    other
+                ))]));
+            }
+        };
+
+        match gls(&y.view(), &x, correlation) {
+            Ok(result) => {
+                // Build coefficient names
+                let mut coef_names: Vec<String> = if intercept {
+                    vec!["(Intercept)".to_string()]
+                } else {
+                    vec![]
+                };
+                coef_names.extend(request.x.iter().cloned());
+
+                let mut coef_table: Vec<serde_json::Value> = Vec::new();
+                for (i, name) in coef_names.iter().enumerate() {
+                    coef_table.push(serde_json::json!({
+                        "term": name,
+                        "estimate": result.coefficients[i],
+                        "std_error": result.std_errors[i],
+                        "t_value": result.t_values[i],
+                        "p_value": result.p_values[i]
+                    }));
+                }
+
+                let json_output = serde_json::json!({
+                    "model": "Generalized Least Squares",
+                    "correlation": result.correlation,
+                    "correlation_param": result.correlation_param,
+                    "coefficients": coef_table,
+                    "sigma": result.sigma,
+                    "r_squared": result.r_squared,
+                    "adj_r_squared": result.adj_r_squared,
+                    "log_likelihood": result.log_likelihood,
+                    "aic": result.aic,
+                    "bic": result.bic,
+                    "n_obs": result.n_obs,
+                    "df_residual": result.df_residual
+                });
+
+                Ok(CallToolResult::success(vec![Content::text(
+                    serde_json::to_string_pretty(&json_output).unwrap(),
+                )]))
+            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
+                "GLS regression failed: {}",
+                e
+            ))])),
+        }
+    }
+
+    /// Fit a smoothing spline.
+    #[tool(description = "Fit a smoothing spline to data. Smoothing splines balance goodness-of-fit against smoothness using a penalty on curvature. The smoothing parameter (spar) or degrees of freedom (df) controls the tradeoff. If neither is specified, uses generalized cross-validation (GCV) to automatically select optimal smoothing. Returns fitted values, effective degrees of freedom, and GCV score.")]
+    async fn regression_smooth_spline(
+        &self,
+        Parameters(request): Parameters<SmoothSplineRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let x = match extract_column_f64(dataset, &request.x) {
+            Ok(v) => v,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+        };
+
+        let y = match extract_column_f64(dataset, &request.y) {
+            Ok(v) => v,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+        };
+
+        let config = SmoothSplineConfig {
+            spar: request.spar,
+            df: request.df,
+            ..Default::default()
+        };
+
+        match smooth_spline(&x, &y, config) {
+            Ok(result) => {
+                // Get predictions at xout if specified, otherwise at data points
+                let (pred_x, pred_y) = if let Some(ref xout) = request.xout {
+                    match smooth_spline_predict(&result, xout) {
+                        Ok(yout) => (xout.clone(), yout),
+                        Err(e) => {
+                            return Ok(CallToolResult::error(vec![Content::text(format!(
+                                "Prediction failed: {}",
+                                e
+                            ))]));
+                        }
+                    }
+                } else {
+                    (result.x.clone(), result.y.clone())
+                };
+
+                let json_output = serde_json::json!({
+                    "model": "Smoothing Spline",
+                    "x": pred_x,
+                    "fitted": pred_y,
+                    "spar": result.spar,
+                    "df": result.df,
+                    "lambda": result.lambda,
+                    "cv_crit": result.cv_crit,
+                    "n_obs": result.n_obs,
+                    "n_knots": result.n_knots
+                });
+
+                Ok(CallToolResult::success(vec![Content::text(
+                    serde_json::to_string_pretty(&json_output).unwrap(),
+                )]))
+            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
+                "Smooth spline failed: {}",
+                e
+            ))])),
+        }
+    }
+}
+
+/// Helper function to extract a single column as Vec<f64>.
+fn extract_column_f64(dataset: &Dataset, column: &str) -> Result<Vec<f64>, String> {
+    use p2a_core::polars::prelude::*;
+
+    let df = dataset.df();
+    let col = df.column(column)
+        .map_err(|e| format!("Column '{}' not found: {}", column, e))?;
+
+    let values: Vec<f64> = col.cast(&DataType::Float64)
+        .map_err(|e| format!("Cannot convert column '{}' to numeric: {}", column, e))?
+        .f64()
+        .map_err(|e| format!("Column '{}' is not numeric: {}", column, e))?
+        .into_iter()
+        .map(|v: Option<f64>| v.unwrap_or(f64::NAN))
+        .collect();
+
+    Ok(values)
 }
 
 /// Helper function to extract numeric columns into an ndarray matrix.

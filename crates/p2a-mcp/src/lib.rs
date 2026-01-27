@@ -142,6 +142,10 @@ pub async fn start_embedded_server(
             enabled: false,
             jwt_secret: None,
         },
+        audit: config::AuditConfig {
+            enabled: false,
+            path: String::new(),
+        },
     };
 
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
@@ -182,6 +186,15 @@ async fn run_http_server_with_shutdown(
 
     let server = Arc::new(AnalyticsServer::new());
 
+    // Initialize audit logger
+    let audit_logger = match crate::audit::AuditLogger::new(&config.audit) {
+        Ok(logger) => Arc::new(logger),
+        Err(e) => {
+            tracing::warn!("Failed to initialize audit logger: {}. Proceeding without audit logging.", e);
+            Arc::new(crate::audit::AuditLogger::disabled())
+        }
+    };
+
     #[cfg(feature = "db")]
     let persistent_manager = {
         let db_path = config.http.db_path.as_deref();
@@ -212,12 +225,14 @@ async fn run_http_server_with_shutdown(
         server,
         session_manager,
         persistent_manager: persistent_manager.clone(),
+        audit_logger: audit_logger.clone(),
     };
 
     #[cfg(not(feature = "db"))]
     let state = AppState {
         server,
         session_manager,
+        audit_logger,
     };
 
     // Build router using the transport module's create_router
