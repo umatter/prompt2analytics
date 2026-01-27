@@ -2,6 +2,7 @@
 
 use clap::{Subcommand, ValueEnum};
 use p2a_core::{run_ols, run_ols_clustered, run_diagnostics, LinearEstimator};
+use p2a_core::{run_quantreg, run_loess};
 use p2a_core::regression::CovarianceType;
 
 use crate::output::{format_regression_results, print_error, OutputFormat};
@@ -87,6 +88,50 @@ pub enum RegressionCommands {
         #[arg(short = 'x', long, num_args = 1..)]
         indep_vars: Vec<String>,
     },
+
+    /// Quantile regression
+    Quantreg {
+        /// Dataset name
+        dataset: String,
+
+        /// Dependent variable column
+        #[arg(short = 'y', long)]
+        dep_var: String,
+
+        /// Independent variable columns
+        #[arg(short = 'x', long, num_args = 1..)]
+        indep_vars: Vec<String>,
+
+        /// Quantile (tau) value (default: 0.5 = median)
+        #[arg(short = 't', long, default_value = "0.5")]
+        tau: f64,
+
+        /// Include intercept
+        #[arg(long, default_value = "true")]
+        intercept: bool,
+    },
+
+    /// LOESS (local polynomial regression)
+    Loess {
+        /// Dataset name
+        dataset: String,
+
+        /// Dependent variable column
+        #[arg(short = 'y', long)]
+        dep_var: String,
+
+        /// Independent variable column (single predictor)
+        #[arg(short = 'x', long)]
+        indep_var: String,
+
+        /// Span (smoothing parameter, 0-1, default: 0.75)
+        #[arg(long, default_value = "0.75")]
+        span: f64,
+
+        /// Polynomial degree (1 = local linear, 2 = local quadratic)
+        #[arg(long, default_value = "2")]
+        degree: usize,
+    },
 }
 
 pub fn execute(
@@ -114,6 +159,20 @@ pub fn execute(
             dep_var,
             indep_vars,
         } => execute_diagnostics(dataset, dep_var, indep_vars, format, session),
+        RegressionCommands::Quantreg {
+            dataset,
+            dep_var,
+            indep_vars,
+            tau,
+            intercept: _,
+        } => execute_quantreg(dataset, dep_var, indep_vars, *tau, format, session),
+        RegressionCommands::Loess {
+            dataset,
+            dep_var,
+            indep_var,
+            span,
+            degree,
+        } => execute_loess(dataset, dep_var, indep_var, *span, *degree, format, session),
     }
 }
 
@@ -369,6 +428,138 @@ fn execute_diagnostics(
         None => {
             print_error(&format!("Dataset '{}' not found", dataset_name), format);
         }
+    }
+    Ok(())
+}
+
+fn execute_quantreg(
+    dataset_name: &str,
+    dep_var: &str,
+    indep_vars: &[String],
+    tau: f64,
+    format: &OutputFormat,
+    session: Option<&mut SessionManager>,
+) -> anyhow::Result<()> {
+    let dataset = match session {
+        Some(mgr) => mgr.get_dataset(dataset_name),
+        None => {
+            print_error("No session active. Use --session <file>.", format);
+            return Ok(());
+        }
+    };
+
+    match dataset {
+        Some(ds) => {
+            let x_cols: Vec<&str> = indep_vars.iter().map(|s| s.as_str()).collect();
+
+            match run_quantreg(ds, dep_var, &x_cols, tau) {
+                Ok(result) => {
+                    match format {
+                        OutputFormat::Json => {
+                            let json = serde_json::json!({
+                                "method": "Quantile Regression",
+                                "tau": result.tau,
+                                "coefficients": result.coefficients.iter().map(|c| {
+                                    serde_json::json!({
+                                        "name": c.name,
+                                        "estimate": c.estimate,
+                                        "std_error": c.std_error,
+                                        "t_value": c.t_value,
+                                        "p_value": c.p_value,
+                                        "ci_lower_95": c.ci_lower_95,
+                                        "ci_upper_95": c.ci_upper_95,
+                                    })
+                                }).collect::<Vec<_>>(),
+                                "n_obs": result.n_obs,
+                            });
+                            println!("{}", serde_json::to_string_pretty(&json)?);
+                        }
+                        _ => {
+                            println!("\nQuantile Regression (tau = {:.2})", result.tau);
+                            println!("{}", "=".repeat(60));
+
+                            println!("\nCoefficients:");
+                            println!("{:<15} {:>12} {:>12} {:>10} {:>10}",
+                                "Variable", "Coef", "Std Err", "t", "P>|t|");
+                            println!("{}", "-".repeat(60));
+
+                            for c in &result.coefficients {
+                                let sig = if c.p_value < 0.001 { "***" }
+                                         else if c.p_value < 0.01 { "**" }
+                                         else if c.p_value < 0.05 { "*" }
+                                         else { "" };
+                                println!("{:<15} {:>12.6} {:>12.6} {:>10.4} {:>9.4} {}",
+                                    c.name, c.estimate, c.std_error,
+                                    c.t_value, c.p_value, sig);
+                            }
+
+                            println!("\n---");
+                            println!("Observations: {}", result.n_obs);
+                        }
+                    }
+                }
+                Err(e) => print_error(&format!("Quantile regression failed: {}", e), format),
+            }
+        }
+        None => print_error(&format!("Dataset '{}' not found", dataset_name), format),
+    }
+    Ok(())
+}
+
+fn execute_loess(
+    dataset_name: &str,
+    dep_var: &str,
+    indep_var: &str,
+    span: f64,
+    degree: usize,
+    format: &OutputFormat,
+    session: Option<&mut SessionManager>,
+) -> anyhow::Result<()> {
+    let dataset = match session {
+        Some(mgr) => mgr.get_dataset(dataset_name),
+        None => {
+            print_error("No session active. Use --session <file>.", format);
+            return Ok(());
+        }
+    };
+
+    match dataset {
+        Some(ds) => {
+            match run_loess(ds, dep_var, indep_var, span, degree, false) {
+                Ok(result) => {
+                    match format {
+                        OutputFormat::Json => {
+                            let json = serde_json::json!({
+                                "method": "LOESS",
+                                "span": result.span,
+                                "degree": result.degree,
+                                "n_obs": result.n_obs,
+                                "enp": result.enp,
+                                "rss": result.rss,
+                                "fitted_values_sample": result.fitted.iter().take(10).collect::<Vec<_>>(),
+                                "residuals_sample": result.residuals.iter().take(10).collect::<Vec<_>>(),
+                            });
+                            println!("{}", serde_json::to_string_pretty(&json)?);
+                        }
+                        _ => {
+                            println!("\nLOESS (Local Polynomial Regression)");
+                            println!("{}", "=".repeat(50));
+                            println!("\nSpan: {:.4}", result.span);
+                            println!("Degree: {}", result.degree);
+                            println!("Observations: {}", result.n_obs);
+                            println!("Effective params: {:.2}", result.enp);
+
+                            println!("\nFitted values (first 10):");
+                            for (i, fitted) in result.fitted.iter().take(10).enumerate() {
+                                println!("  {}: {:.6}", i + 1, fitted);
+                            }
+                        }
+                    }
+                }
+                Err(e) => print_error(&format!("LOESS failed: {}", e), format),
+            }
+        }
+        None => print_error(&format!("Dataset '{}' not found", dataset_name), format),
     }
     Ok(())
 }

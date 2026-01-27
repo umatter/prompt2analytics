@@ -1,4 +1,107 @@
 //! Time series forecasting functionality.
+//!
+//! This module provides 20+ forecasting and time series analysis methods including
+//! ARIMA modeling, exponential smoothing, state-space models, and changepoint detection.
+//!
+//! ## ARIMA & Autoregressive Models
+//!
+//! | Method | Function | Description |
+//! |--------|----------|-------------|
+//! | **ARIMA** | [`run_arima`] | Auto-regressive integrated moving average |
+//! | **AR** | [`ar`], [`run_ar`] | Autoregressive models (Yule-Walker, OLS, Burg) |
+//! | **ARIMA Simulation** | [`arima_sim`] | Simulate ARIMA processes |
+//! | **ARMA ACF** | [`arma_acf`] | Theoretical ACF of ARMA models |
+//! | **ARMA to MA** | [`arma_to_ma`] | Convert ARMA to MA representation |
+//! | **ACF to AR** | [`acf_to_ar`] | Convert ACF to AR coefficients |
+//!
+//! ## Exponential Smoothing
+//!
+//! | Method | Function | Description |
+//! |--------|----------|-------------|
+//! | **Holt-Winters** | [`holt_winters`], [`run_holt_winters`] | Additive/multiplicative seasonality |
+//! | **Structural TS** | [`struct_ts`], [`run_struct_ts`] | Local level, trend, seasonal models |
+//!
+//! ## Decomposition
+//!
+//! | Method | Function | Description |
+//! |--------|----------|-------------|
+//! | **STL** | [`stl`], [`run_stl`] | Seasonal-trend decomposition (LOESS) |
+//! | **MSTL** | [`run_mstl`] | Multiple seasonal decomposition |
+//! | **Classical** | [`decompose`], [`run_decompose`] | Additive/multiplicative decomposition |
+//!
+//! ## Volatility Models
+//!
+//! | Method | Function | Description |
+//! |--------|----------|-------------|
+//! | **GARCH** | [`garch`], [`run_garch`] | Generalized autoregressive conditional heteroskedasticity |
+//!
+//! ## State-Space Models
+//!
+//! | Method | Function | Description |
+//! |--------|----------|-------------|
+//! | **Kalman Filter** | [`kalman_filter`] | Optimal state estimation |
+//! | **Kalman Smoother** | [`kalman_smoother`] | Fixed-interval smoothing |
+//! | **Kalman Forecast** | [`kalman_forecast`] | State-space forecasting |
+//!
+//! ## Changepoint Detection
+//!
+//! | Method | Function | Description |
+//! |--------|----------|-------------|
+//! | **PELT** | [`detect_changepoints`] | Optimal changepoint detection |
+//! | **Binary Segmentation** | [`binary_segmentation`] | Recursive partitioning |
+//!
+//! ## Causal Analysis
+//!
+//! | Method | Function | Description |
+//! |--------|----------|-------------|
+//! | **Causal Impact** | [`run_causal_impact`] | Bayesian time series causal inference |
+//!
+//! ## Utilities
+//!
+//! | Method | Function | Description |
+//! |--------|----------|-------------|
+//! | **Lag** | [`lag`], [`lag_padded`] | Create lagged series |
+//! | **Embed** | [`embed`] | Time-delay embedding |
+//! | **Diffinv** | [`diffinv`] | Inverse differencing |
+//! | **Filter** | [`filter`] | Convolution/recursive filtering |
+//! | **Window** | [`window`] | Extract time series windows |
+//! | **Running Median** | [`runmed`] | Smoothing via running medians |
+//! | **Cumulative Periodogram** | [`cpgram()`] | Test for white noise |
+//!
+//! ## Example
+//!
+//! ```rust,no_run
+//! use p2a_core::forecasting::{run_arima, forecast_arima, run_holt_winters};
+//! use p2a_core::Dataset;
+//!
+//! # fn example(dataset: &Dataset) -> Result<(), Box<dyn std::error::Error>> {
+//! // Fit ARIMA(1,1,1)
+//! let arima = run_arima(dataset, "sales", Some(1), Some(1), Some(1))?;
+//! println!("AIC: {:.2}", arima.aic);
+//!
+//! // Forecast 12 periods ahead
+//! let forecast = forecast_arima(&arima, 12)?;
+//! println!("Forecast: {:?}", forecast.point_forecast);
+//!
+//! // Holt-Winters seasonal model
+//! let hw = run_holt_winters(dataset, "sales", 12, "additive", None, None, None)?;
+//! println!("Fitted values: {:?}", hw.fitted);
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ## R Package Equivalents
+//!
+//! | R Function | p2a-core Function |
+//! |------------|-------------------|
+//! | `arima()` | [`run_arima`] |
+//! | `ar()` | [`ar`], [`run_ar`] |
+//! | `HoltWinters()` | [`holt_winters`], [`run_holt_winters`] |
+//! | `stl()` | [`stl`], [`run_stl`] |
+//! | `decompose()` | [`decompose`], [`run_decompose`] |
+//! | `StructTS()` | [`struct_ts`], [`run_struct_ts`] |
+//! | `KalmanFilter()` | [`kalman_filter`] |
+//! | `CausalImpact` | [`causal_impact()`], [`run_causal_impact`] |
 
 mod arima_model;
 mod mstl;

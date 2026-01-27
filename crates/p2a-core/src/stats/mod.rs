@@ -1,6 +1,70 @@
-//! Statistical analysis module.
+//! Statistical tests and descriptive statistics.
 //!
-//! Provides descriptive statistics, correlation analysis, and hypothesis tests.
+//! This module provides 50+ statistical methods organized into categories:
+//!
+//! ## Descriptive Statistics
+//!
+//! - [`DescriptiveStats`] - Mean, median, std, min, max, quartiles
+//! - [`fivenum`] - Five-number summary (Tukey)
+//! - [`iqr`], [`mad`] - Robust spread measures
+//! - [`ecdf`] - Empirical cumulative distribution
+//! - [`density`] - Kernel density estimation
+//!
+//! ## Hypothesis Tests
+//!
+//! ### Location Tests
+//! - [`one_sample_t_test`], [`two_sample_t_test`], [`paired_t_test`] - T-tests
+//! - [`wilcoxon_rank_sum`], [`wilcoxon_signed_rank`] - Nonparametric alternatives
+//! - [`kruskal_test`] - Kruskal-Wallis (nonparametric ANOVA)
+//! - [`friedman_test`] - Repeated measures nonparametric
+//!
+//! ### Variance Tests
+//! - [`bartlett_test`] - Homogeneity of variances (parametric)
+//! - [`fligner_test`] - Fligner-Killeen (robust)
+//! - [`var_test`] - F-test for two variances
+//! - [`ansari_test`] - Ansari-Bradley scale test
+//!
+//! ### Distribution Tests
+//! - [`shapiro_wilk_test`] - Normality test
+//! - [`ks_test_one_sample`], [`ks_test_two_sample`] - Kolmogorov-Smirnov
+//!
+//! ### Contingency Tables
+//! - [`chisq_test_gof`], [`chisq_test_independence`] - Chi-squared tests
+//! - [`fisher_exact_test`] - Exact test for 2×2 tables
+//! - [`mcnemar_test`] - Paired nominal data
+//! - [`mantelhaen_test`] - Cochran-Mantel-Haenszel
+//!
+//! ### Correlation Tests
+//! - [`cor_test`] - Test correlation significance
+//! - [`correlation_matrix`] - Pairwise correlation matrix
+//!
+//! ## ANOVA & Post-hoc
+//!
+//! - [`run_one_way_anova`], [`run_two_way_anova`] - Analysis of variance
+//! - [`oneway_test`] - Welch's ANOVA
+//! - [`run_manova`] - Multivariate ANOVA
+//! - [`tukey_hsd`] - Post-hoc comparisons
+//! - [`pairwise_t_test`], [`pairwise_wilcox_test`] - Multiple comparisons
+//!
+//! ## Time Series
+//!
+//! - [`acf`], [`pacf`], [`ccf`] - Autocorrelation functions
+//! - [`box_test`] - Ljung-Box / Box-Pierce portmanteau test
+//! - [`pp_test`] - Phillips-Perron unit root test
+//!
+//! ## Power Analysis
+//!
+//! - [`power_t_test`] - Power for t-tests
+//! - [`power_prop_test`] - Power for proportion tests
+//! - [`power_anova_test`] - Power for ANOVA
+//!
+//! ## Other
+//!
+//! - [`mahalanobis`] - Mahalanobis distance
+//! - [`isoreg`] - Isotonic regression
+//! - [`medpolish`] - Median polish for two-way tables
+//! - [`loglin`] - Log-linear models
+//! - [`spline`], [`approx`] - Interpolation
 
 mod descriptive;
 mod correlation;

@@ -5,7 +5,10 @@ use p2a_core::{
     run_arima, forecast_arima, run_mstl, run_var,
     run_varma, run_vecm, run_var_irf,
     detect_changepoints, CostFunction,
+    run_garch, run_holt_winters,
+    SeasonalType,
 };
+use p2a_core::econometrics::granger_test;
 
 use crate::output::{print_error, OutputFormat};
 use crate::session::SessionManager;
@@ -141,6 +144,68 @@ pub enum TimeseriesCommands {
         #[arg(long, default_value = "mean")]
         change_type: String,
     },
+
+    /// GARCH volatility model
+    Garch {
+        /// Dataset name
+        dataset: String,
+
+        /// Time series column
+        #[arg(long)]
+        col: String,
+
+        /// ARCH order (p) - number of lagged squared residuals
+        #[arg(short = 'p', long, default_value = "1")]
+        arch: usize,
+
+        /// GARCH order (q) - number of lagged variances
+        #[arg(short = 'q', long, default_value = "1")]
+        garch: usize,
+
+        /// Forecast horizon (optional)
+        #[arg(long)]
+        horizon: Option<usize>,
+    },
+
+    /// Holt-Winters exponential smoothing
+    HoltWinters {
+        /// Dataset name
+        dataset: String,
+
+        /// Time series column
+        #[arg(long)]
+        col: String,
+
+        /// Seasonal period (e.g., 12 for monthly, 4 for quarterly)
+        #[arg(long)]
+        period: usize,
+
+        /// Seasonal type: "additive" (default) or "multiplicative"
+        #[arg(long, default_value = "additive")]
+        seasonal: String,
+
+        /// Forecast horizon (optional)
+        #[arg(long)]
+        horizon: Option<usize>,
+    },
+
+    /// Granger causality test
+    Granger {
+        /// Dataset name
+        dataset: String,
+
+        /// First variable (potential cause)
+        #[arg(long)]
+        x: String,
+
+        /// Second variable (potential effect)
+        #[arg(long)]
+        y: String,
+
+        /// Number of lags
+        #[arg(long, default_value = "1")]
+        lags: usize,
+    },
 }
 
 pub fn execute(
@@ -192,6 +257,26 @@ pub fn execute(
             min_segment,
             change_type,
         } => execute_changepoint(dataset, col, *penalty, *min_segment, change_type, format, session),
+        TimeseriesCommands::Garch {
+            dataset,
+            col,
+            arch,
+            garch,
+            horizon,
+        } => execute_garch(dataset, col, *arch, *garch, *horizon, format, session),
+        TimeseriesCommands::HoltWinters {
+            dataset,
+            col,
+            period,
+            seasonal,
+            horizon,
+        } => execute_holt_winters(dataset, col, *period, seasonal, *horizon, format, session),
+        TimeseriesCommands::Granger {
+            dataset,
+            x,
+            y,
+            lags,
+        } => execute_granger(dataset, x, y, *lags, format, session),
     }
 }
 
@@ -688,6 +773,229 @@ fn execute_changepoint(
                     }
                 }
                 Err(e) => print_error(&format!("Changepoint detection failed: {}", e), format),
+            }
+        }
+        None => print_error(&format!("Dataset '{}' not found", dataset_name), format),
+    }
+    Ok(())
+}
+
+fn execute_garch(
+    dataset_name: &str,
+    col: &str,
+    arch: usize,
+    garch: usize,
+    horizon: Option<usize>,
+    format: &OutputFormat,
+    session: Option<&mut SessionManager>,
+) -> anyhow::Result<()> {
+    let dataset = match session {
+        Some(mgr) => mgr.get_dataset(dataset_name),
+        None => {
+            print_error("No session active. Use --session <file>.", format);
+            return Ok(());
+        }
+    };
+
+    match dataset {
+        Some(ds) => {
+            // Extract column data
+            let column = ds.df().column(col);
+            let data: Vec<f64> = match column {
+                Ok(c) => c.f64().map_or_else(
+                    |_| vec![],
+                    |ca| ca.into_no_null_iter().collect()
+                ),
+                Err(_) => {
+                    print_error(&format!("Column '{}' not found", col), format);
+                    return Ok(());
+                }
+            };
+
+            if data.is_empty() {
+                print_error(&format!("Column '{}' is empty or not numeric", col), format);
+                return Ok(());
+            }
+
+            match run_garch(&data, Some(arch), Some(garch), Some(true)) {
+                Ok(result) => {
+                    match format {
+                        OutputFormat::Json => {
+                            let json = serde_json::json!({
+                                "model": format!("GARCH({},{})", arch, garch),
+                                "omega": result.omega,
+                                "alpha": result.alpha,
+                                "beta": result.beta,
+                                "persistence": result.persistence,
+                                "unconditional_variance": result.unconditional_variance,
+                                "log_likelihood": result.log_likelihood,
+                                "aic": result.aic,
+                                "bic": result.bic,
+                                "n_obs": result.n_obs,
+                            });
+                            println!("{}", serde_json::to_string_pretty(&json)?);
+                        }
+                        _ => {
+                            println!("\nGARCH({},{}) Results", arch, garch);
+                            println!("{}", "=".repeat(50));
+                            println!("\nParameters:");
+                            println!("  Omega (constant): {:.8}", result.omega);
+                            for (i, a) in result.alpha.iter().enumerate() {
+                                println!("  Alpha{}: {:.6}", i + 1, a);
+                            }
+                            for (i, b) in result.beta.iter().enumerate() {
+                                println!("  Beta{}: {:.6}", i + 1, b);
+                            }
+                            println!("\nPersistence: {:.6}", result.persistence);
+                            println!("Unconditional Variance: {:.6}", result.unconditional_variance);
+                            println!("\nLog-likelihood: {:.4}", result.log_likelihood);
+                            println!("AIC: {:.4}", result.aic);
+                            println!("BIC: {:.4}", result.bic);
+                            println!("Observations: {}", result.n_obs);
+
+                            if let Some(h) = horizon {
+                                println!("\nVariance forecasts (h={}):", h);
+                                for (i, sigma2) in result.conditional_variance.iter().rev().take(h).enumerate() {
+                                    println!("  t+{}: {:.6}", i + 1, sigma2);
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(e) => print_error(&format!("GARCH failed: {}", e), format),
+            }
+        }
+        None => print_error(&format!("Dataset '{}' not found", dataset_name), format),
+    }
+    Ok(())
+}
+
+fn execute_holt_winters(
+    dataset_name: &str,
+    col: &str,
+    period: usize,
+    seasonal: &str,
+    _horizon: Option<usize>,
+    format: &OutputFormat,
+    session: Option<&mut SessionManager>,
+) -> anyhow::Result<()> {
+    let dataset = match session {
+        Some(mgr) => mgr.get_dataset(dataset_name),
+        None => {
+            print_error("No session active. Use --session <file>.", format);
+            return Ok(());
+        }
+    };
+
+    match dataset {
+        Some(ds) => {
+            let seasonal_type = match seasonal.to_lowercase().as_str() {
+                "multiplicative" | "mult" => SeasonalType::Multiplicative,
+                _ => SeasonalType::Additive,
+            };
+
+            // run_holt_winters(dataset, column, period, seasonal, alpha, beta, gamma)
+            match run_holt_winters(ds, col, period, seasonal_type, None, None, None) {
+                Ok(result) => {
+                    match format {
+                        OutputFormat::Json => {
+                            let json = serde_json::json!({
+                                "model": "Holt-Winters",
+                                "seasonal_type": format!("{:?}", result.seasonal_type),
+                                "period": result.period,
+                                "alpha": result.alpha,
+                                "beta": result.beta,
+                                "gamma": result.gamma,
+                                "fitted_sample": result.fitted.iter().take(10).collect::<Vec<_>>(),
+                                "sse": result.sse,
+                            });
+                            println!("{}", serde_json::to_string_pretty(&json)?);
+                        }
+                        _ => {
+                            println!("\nHolt-Winters Exponential Smoothing");
+                            println!("{}", "=".repeat(50));
+                            println!("\nSeasonal type: {:?}", result.seasonal_type);
+                            println!("Period: {}", result.period);
+                            println!("\nSmoothing parameters:");
+                            println!("  Alpha (level): {:.4}", result.alpha);
+                            if let Some(beta) = result.beta {
+                                println!("  Beta (trend): {:.4}", beta);
+                            }
+                            if let Some(gamma) = result.gamma {
+                                println!("  Gamma (seasonal): {:.4}", gamma);
+                            }
+                            println!("\nSSE: {:.4}", result.sse);
+                        }
+                    }
+                }
+                Err(e) => print_error(&format!("Holt-Winters failed: {}", e), format),
+            }
+        }
+        None => print_error(&format!("Dataset '{}' not found", dataset_name), format),
+    }
+    Ok(())
+}
+
+fn execute_granger(
+    dataset_name: &str,
+    x: &str,
+    y: &str,
+    lags: usize,
+    format: &OutputFormat,
+    session: Option<&mut SessionManager>,
+) -> anyhow::Result<()> {
+    let dataset = match session {
+        Some(mgr) => mgr.get_dataset(dataset_name),
+        None => {
+            print_error("No session active. Use --session <file>.", format);
+            return Ok(());
+        }
+    };
+
+    match dataset {
+        Some(ds) => {
+            // granger_test(dataset, dependent, cause, lags)
+            // Tests if x (cause) Granger-causes y (dependent)
+            match granger_test(ds, y, x, lags) {
+                Ok(result) => {
+                    let granger_causes = result.p_value < 0.05;
+                    match format {
+                        OutputFormat::Json => {
+                            let json = serde_json::json!({
+                                "test": "Granger Causality",
+                                "cause": result.cause,
+                                "dependent": result.dependent,
+                                "lags": result.lags,
+                                "f_statistic": result.f_statistic,
+                                "p_value": result.p_value,
+                                "n_obs": result.n_obs,
+                                "df1": result.df1,
+                                "df2": result.df2,
+                                "granger_causes": granger_causes,
+                            });
+                            println!("{}", serde_json::to_string_pretty(&json)?);
+                        }
+                        _ => {
+                            println!("\nGranger Causality Test");
+                            println!("{}", "=".repeat(50));
+                            println!("\nH0: {} does not Granger-cause {}", result.cause, result.dependent);
+                            println!("H1: {} Granger-causes {}", result.cause, result.dependent);
+                            println!("\nLags: {}", result.lags);
+                            println!("Observations: {}", result.n_obs);
+                            println!("\nF-statistic: {:.4} (df1={}, df2={})",
+                                result.f_statistic, result.df1, result.df2);
+                            println!("P-value: {:.4}", result.p_value);
+                            println!("\nConclusion: {}", if granger_causes {
+                                format!("{} Granger-causes {} at 5% significance",
+                                    result.cause, result.dependent)
+                            } else {
+                                format!("No evidence that {} Granger-causes {}",
+                                    result.cause, result.dependent)
+                            });
+                        }
+                    }
+                }
+                Err(e) => print_error(&format!("Granger test failed: {}", e), format),
             }
         }
         None => print_error(&format!("Dataset '{}' not found", dataset_name), format),

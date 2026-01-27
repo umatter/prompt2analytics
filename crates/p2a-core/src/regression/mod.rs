@@ -1,7 +1,69 @@
 //! Regression analysis module.
 //!
-//! Provides OLS regression, nonlinear least squares, local polynomial regression (LOESS),
-//! diagnostics, marginal effects, sensitivity analysis, and related analyses.
+//! This module provides linear and nonlinear regression methods with robust inference.
+//!
+//! ## Ordinary Least Squares
+//!
+//! - [`run_ols`] - OLS with heteroskedasticity-robust standard errors (HC0-HC3)
+//! - [`run_ols_clustered`] - Clustered standard errors
+//! - [`run_ols_raw`] - Low-level OLS from raw arrays
+//!
+//! ## Robust Standard Errors
+//!
+//! - [`vcov_hac`] - HAC (Newey-West) for time series
+//! - [`vcov_bootstrap`] - Bootstrap covariance estimation
+//! - [`vcov_driscoll_kraay`] - Panel-robust SEs (cross-sectional + serial)
+//!
+//! ## Generalized & Specialized Regression
+//!
+//! - [`run_gls`] - Generalized least squares (AR1, MA1, ARMA correlation)
+//! - [`run_quantreg`] - Quantile/median regression
+//! - [`run_loess`] - Local polynomial regression (LOESS/LOWESS)
+//! - [`smooth_spline`] - Smoothing splines
+//! - [`run_nls`] - Nonlinear least squares (Gauss-Newton/L-M)
+//!
+//! ## Model Selection
+//!
+//! - [`run_step`] - Stepwise selection (forward, backward, both)
+//! - [`add1`], [`drop1`] - Single-term addition/deletion
+//!
+//! ## Diagnostics
+//!
+//! - [`run_diagnostics`] - Comprehensive diagnostics (JB, BP, DW, VIF)
+//! - [`bg_test`] - Breusch-Godfrey serial correlation test
+//! - [`reset_test`] - Ramsey's RESET for functional form
+//! - [`wald_test`] - Linear hypothesis testing
+//! - [`harvey_collier_test`] - Linearity test
+//!
+//! ## Marginal Effects & Sensitivity
+//!
+//! - [`marginal_effects`] - Average marginal effects (AME)
+//! - [`contrasts`] - Effect contrasts
+//! - [`run_sensemakr`] - Sensitivity analysis for unmeasured confounding
+//! - [`evalue_rr`], [`evalue_or`] - E-values for causal inference
+//!
+//! ## Other
+//!
+//! - [`line`] - Tukey's resistant line
+//! - [`supsmu`] - Friedman's SuperSmoother
+//!
+//! ## Example
+//!
+//! ```rust,no_run
+//! use p2a_core::{Dataset, run_ols};
+//! use p2a_core::regression::CovarianceType;
+//!
+//! # fn example(dataset: &Dataset) -> Result<(), Box<dyn std::error::Error>> {
+//! // OLS with HC1 (Stata default) robust standard errors
+//! let result = run_ols(dataset, "price", &["sqft", "bedrooms"], true, CovarianceType::HC1)?;
+//!
+//! println!("R² = {:.4}", result.r_squared);
+//! for coef in &result.coefficients {
+//!     println!("{}: {:.4} (SE: {:.4})", coef.name, coef.estimate, coef.std_error);
+//! }
+//! # Ok(())
+//! # }
+//! ```
 
 mod ols;
 mod diagnostics;

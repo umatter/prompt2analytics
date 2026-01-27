@@ -10,7 +10,7 @@ mod session;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
-use commands::{data, munge, regression, panel, causal, discrete, timeseries, survival, ml, viz, script};
+use commands::{data, munge, regression, panel, causal, discrete, stats, timeseries, survival, ml, viz, script};
 use output::OutputFormat;
 use session::SessionManager;
 
@@ -62,6 +62,10 @@ pub enum Commands {
     #[command(subcommand)]
     Discrete(discrete::DiscreteCommands),
 
+    /// Statistical tests and descriptive statistics
+    #[command(subcommand)]
+    Stats(stats::StatsCommands),
+
     /// Time series analysis
     #[command(subcommand, visible_alias = "ts")]
     Timeseries(timeseries::TimeseriesCommands),
@@ -104,6 +108,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Panel(cmd) => panel::execute(cmd, &cli.format, session_manager.as_mut()),
         Commands::Causal(cmd) => causal::execute(cmd, &cli.format, session_manager.as_mut()),
         Commands::Discrete(cmd) => discrete::execute(cmd, &cli.format, session_manager.as_mut()),
+        Commands::Stats(cmd) => stats::execute(cmd, &cli.format, session_manager.as_mut()),
         Commands::Timeseries(cmd) => timeseries::execute(cmd, &cli.format, session_manager.as_mut()),
         Commands::Survival(cmd) => survival::execute(cmd, &cli.format, session_manager.as_mut()),
         Commands::MachineLearning(cmd) => ml::execute(cmd, &cli.format, session_manager.as_mut()),

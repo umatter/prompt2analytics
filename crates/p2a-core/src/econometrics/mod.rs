@@ -1,8 +1,94 @@
 //! Econometrics module with pure Rust implementations.
 //!
-//! Provides panel data estimators, instrumental variables, causal inference,
-//! discrete choice models, treatment effects, synthetic control, regression discontinuity,
-//! and multivariate time series.
+//! This module provides 100+ econometric methods organized into categories:
+//!
+//! ## Panel Data (R: plm, fixest)
+//!
+//! - [`run_fixed_effects`] - Within (FE) estimator
+//! - [`run_random_effects`] - GLS (RE) estimator
+//! - [`run_hausman_test`] - FE vs RE specification test
+//! - [`run_hdfe`] - High-dimensional fixed effects (reghdfe-style)
+//! - [`run_feglm`] - GLM with HDFE (logit, probit, poisson)
+//! - [`run_arellano_bond`] - Dynamic panel GMM
+//! - [`run_panel_gls`] - Feasible GLS
+//! - [`run_panel_unit_root`] - LLC, IPS, Fisher tests
+//!
+//! ## Instrumental Variables
+//!
+//! - [`run_iv2sls`] - Two-stage least squares
+//! - [`run_first_stage_diagnostics`] - Weak instrument tests
+//! - [`sargan_test`] - Overidentification test
+//! - [`run_general_gmm`] - General GMM (Hansen 1982)
+//!
+//! ## Discrete Choice (R: MASS, nnet, mlogit)
+//!
+//! - [`run_logit`], [`run_probit`] - Binary models
+//! - [`run_ordered_logit`], [`run_ordered_probit`] - Ordinal outcomes
+//! - [`run_multinom`] - Multinomial logit
+//! - [`run_conditional_logit`] - McFadden's choice model
+//! - [`run_mixed_logit`] - Random parameters logit
+//! - [`run_negbin`] - Negative binomial (count data)
+//! - [`run_zip`], [`run_zinb`] - Zero-inflated models
+//! - [`run_hurdle`] - Two-part count models
+//!
+//! ## Causal Inference - Treatment Effects
+//!
+//! - [`run_ipw_treatment`] - Inverse probability weighting
+//! - [`run_doubly_robust`] - AIPW estimator
+//! - [`run_cbps`] - Covariate balancing propensity score
+//! - [`run_tmle`] - Targeted maximum likelihood
+//! - [`run_ctmle`] - Collaborative TMLE
+//! - [`weightit`] - Flexible weighting (WeightIt)
+//! - [`entropy_balance`] - Entropy balancing
+//! - [`match_it`] - Propensity score matching
+//! - [`run_twang`] - GBM propensity scores
+//!
+//! ## Causal Inference - Design-Based
+//!
+//! - [`run_did`] - Difference-in-differences
+//! - [`run_staggered_did`] - Callaway-Sant'Anna
+//! - [`bacon_decomp`] - Goodman-Bacon decomposition
+//! - [`run_etwfe`] - Extended TWFE (Wooldridge)
+//! - [`run_rd`], [`run_fuzzy_rd`] - Regression discontinuity
+//! - [`run_rd_multi`] - Multi-cutoff RD
+//! - [`run_synthetic_control`] - Abadie synthetic control
+//! - [`run_gsynth`] - Generalized synthetic control
+//! - [`run_scpi`] - SC with prediction intervals
+//!
+//! ## Mediation & Sensitivity
+//!
+//! - [`run_mediation_analysis`] - IPW-based mediation
+//! - [`run_medflex`] - Natural effect models
+//! - [`run_hettx`] - Treatment effect heterogeneity
+//! - [`run_stdreg`] - G-computation / standardization
+//! - [`run_bp_bounds`] - Balke-Pearl bounds
+//! - [`run_ivmte`] - Marginal treatment effects
+//! - [`run_gformula`] - Parametric g-formula
+//!
+//! ## Time Series (R: vars)
+//!
+//! - [`run_var`] - Vector autoregression
+//! - [`run_varma`] - Vector ARMA
+//! - [`run_vecm`] - Vector error correction
+//! - [`run_var_irf`] - Impulse response functions
+//! - [`granger_test`] - Granger causality
+//!
+//! ## Spatial Econometrics (R: spdep, splm, sphet)
+//!
+//! - [`run_sar`] - Spatial autoregressive
+//! - [`run_sem`] - Spatial error model
+//! - [`run_sac`] - Combined SAR + SEM
+//! - [`run_sar_probit`] - Spatial probit
+//! - [`run_spml`] - Spatial panel ML
+//! - [`run_sphet`] - Spatial GMM
+//!
+//! ## Survival Analysis (R: survival)
+//!
+//! - [`run_kaplan_meier`] - Nonparametric survival
+//! - [`log_rank_test`] - Compare survival curves
+//! - [`run_cox_ph`] - Cox proportional hazards
+//! - [`run_aft`] - Accelerated failure time
+//! - [`run_competing_risks`] - Cumulative incidence
 
 mod panel;
 mod iv;

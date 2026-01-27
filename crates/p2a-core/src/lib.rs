@@ -1,12 +1,224 @@
 //! # p2a-core
 //!
-//! Core analytics engine for prompt2analytics.
+//! **Pure Rust econometrics and statistical analysis library** with 200+ methods
+//! validated against R/Python reference implementations.
 //!
-//! This crate provides the data loading, statistical analysis, and machine learning
-//! functionality that powers the MCP server.
+//! This crate provides data loading, statistical analysis, econometrics, machine learning,
+//! and visualization functionality. All algorithms are implemented in pure Rust without
+//! external econometrics dependencies.
 //!
-//! See the [crate README](https://github.com/umatter/prompt2analytics/tree/main/crates/p2a-core)
-//! for a complete overview of features and usage examples.
+//! ## Quick Start
+//!
+//! ```rust,no_run
+//! use p2a_core::{Dataset, run_ols};
+//! use p2a_core::regression::CovarianceType;
+//! use polars::prelude::*;
+//!
+//! // Load data
+//! let df = CsvReadOptions::default()
+//!     .try_into_reader_with_file_path(Some("data.csv".into()))
+//!     .unwrap()
+//!     .finish()
+//!     .unwrap();
+//! let dataset = Dataset::new(df);
+//!
+//! // Run OLS with robust standard errors
+//! let result = run_ols(&dataset, "y", &["x1", "x2"], true, CovarianceType::HC1).unwrap();
+//! println!("R² = {:.4}", result.r_squared);
+//! ```
+//!
+//! ## Feature Flags
+//!
+//! - `forecasting` - Time series forecasting (ARIMA, GARCH, Holt-Winters, etc.)
+//! - `visualization` - Chart generation (histograms, scatter plots, heatmaps)
+//! - `spectral-analysis` - Spectral density estimation
+//!
+//! ## Method Catalog
+//!
+//! ### Statistical Tests (50+ methods)
+//!
+//! | Category | Methods | Module |
+//! |----------|---------|--------|
+//! | **T-tests** | [`one_sample_t_test`], [`two_sample_t_test`], [`paired_t_test`] | [`stats`] |
+//! | **ANOVA** | [`run_one_way_anova`], [`run_two_way_anova`], [`oneway_test`] | [`stats`] |
+//! | **Chi-squared** | [`chisq_test_gof`], [`chisq_test_independence`] | [`stats`] |
+//! | **Nonparametric** | [`wilcoxon_rank_sum`], [`wilcoxon_signed_rank`], [`kruskal_test`], [`friedman_test`] | [`stats`] |
+//! | **Normality** | [`shapiro_wilk_test`], [`ks_test_one_sample`] | [`stats`] |
+//! | **Variance** | [`bartlett_test`], [`fligner_test`], [`var_test`] | [`stats`] |
+//! | **Correlation** | [`cor_test`], [`correlation_matrix`] | [`stats`] |
+//! | **Post-hoc** | [`tukey_hsd`], [`pairwise_t_test`], [`pairwise_wilcox_test`] | [`stats`] |
+//! | **Time series** | [`acf`], [`pacf`], [`ccf`], [`box_test`], [`pp_test`] | [`stats`] |
+//! | **Power analysis** | [`power_t_test`], [`power_prop_test`], [`power_anova_test`] | [`stats`] |
+//! | **Proportions** | [`prop_test_one`], [`prop_test_two`], [`binom_test`] | [`stats`] |
+//! | **Contingency** | [`fisher_exact_test`], [`mcnemar_test`], [`mantelhaen_test`] | [`stats`] |
+//!
+//! ### Regression Analysis (20+ methods)
+//!
+//! | Method | Description | Function |
+//! |--------|-------------|----------|
+//! | **OLS** | Ordinary least squares with HC0-HC3 robust SEs | [`run_ols`] |
+//! | **Clustered SE** | Clustered standard errors | [`run_ols_clustered`] |
+//! | **GLS** | Generalized least squares (AR1, MA1, ARMA) | [`run_gls`] |
+//! | **Quantile Reg** | Quantile/median regression | [`run_quantreg`] |
+//! | **LOESS** | Local polynomial regression | [`run_loess`] |
+//! | **NLS** | Nonlinear least squares | [`run_nls`] |
+//! | **Stepwise** | Forward/backward model selection | [`run_step`] |
+//! | **Diagnostics** | JB, BP, DW, VIF tests | [`run_diagnostics`] |
+//! | **HAC** | Newey-West standard errors | [`vcov_hac`] |
+//! | **Bootstrap** | Bootstrap covariance estimation | [`vcov_bootstrap`] |
+//!
+//! ### Panel Data Econometrics (15+ methods)
+//!
+//! | Method | Description | Function |
+//! |--------|-------------|----------|
+//! | **Fixed Effects** | Within estimator | [`run_fixed_effects`] |
+//! | **Random Effects** | GLS estimator | [`run_random_effects`] |
+//! | **Hausman Test** | FE vs RE specification test | [`run_hausman_test`] |
+//! | **HDFE** | High-dimensional fixed effects | [`run_hdfe`] |
+//! | **FEGLM** | GLM with fixed effects | [`run_feglm`] |
+//! | **Arellano-Bond** | Dynamic panel GMM | [`run_arellano_bond`] |
+//! | **Panel GLS** | Feasible GLS | [`run_panel_gls`] |
+//! | **Panel Unit Root** | LLC, IPS, Fisher tests | [`run_panel_unit_root`] |
+//!
+//! ### Discrete Choice Models (15+ methods)
+//!
+//! | Method | Description | Function |
+//! |--------|-------------|----------|
+//! | **Logit** | Binary logistic regression | [`run_logit`] |
+//! | **Probit** | Binary probit | [`run_probit`] |
+//! | **Ordered Logit** | Proportional odds model | [`run_ordered_logit`] |
+//! | **Ordered Probit** | Ordered probit | [`run_ordered_probit`] |
+//! | **Multinomial** | Multinomial logit | [`run_multinom`] |
+//! | **Conditional Logit** | McFadden's choice model | [`run_conditional_logit`] |
+//! | **Mixed Logit** | Random parameters logit | [`run_mixed_logit`] |
+//! | **Negative Binomial** | Count data with overdispersion | [`run_negbin`] |
+//! | **Zero-Inflated** | ZIP, ZINB models | [`run_zip`], [`run_zinb`] |
+//! | **Hurdle** | Two-part count models | [`run_hurdle`] |
+//!
+//! ### Causal Inference (30+ methods)
+//!
+//! | Method | Description | Function |
+//! |--------|-------------|----------|
+//! | **IV/2SLS** | Instrumental variables | [`run_iv2sls`] |
+//! | **DiD** | Difference-in-differences | [`run_did`] |
+//! | **Staggered DiD** | Callaway-Sant'Anna | [`run_staggered_did`] |
+//! | **Bacon Decomp** | Goodman-Bacon decomposition | [`bacon_decomp`] |
+//! | **ETWFE** | Extended TWFE (Wooldridge) | [`run_etwfe`] |
+//! | **IPW** | Inverse probability weighting | [`run_ipw_treatment`] |
+//! | **AIPW** | Doubly robust estimation | [`run_doubly_robust`] |
+//! | **CBPS** | Covariate balancing PS | [`run_cbps`] |
+//! | **TMLE** | Targeted MLE | [`run_tmle`] |
+//! | **C-TMLE** | Collaborative TMLE | [`run_ctmle`] |
+//! | **Matching** | Nearest neighbor, CEM, full | [`match_it`] |
+//! | **Synth Control** | Abadie synthetic control | [`run_synthetic_control`] |
+//! | **GSynth** | Generalized synthetic control | [`run_gsynth`] |
+//! | **RD** | Sharp/fuzzy regression discontinuity | [`run_rd`], [`run_fuzzy_rd`] |
+//! | **Mediation** | Natural effect models | [`run_mediation_analysis`], [`run_medflex`] |
+//! | **Sensemakr** | Sensitivity to confounding | [`run_sensemakr`] |
+//! | **G-Formula** | Parametric g-computation | [`run_gformula`] |
+//!
+//! ### Time Series (20+ methods)
+//!
+//! | Method | Description | Function |
+//! |--------|-------------|----------|
+//! | **VAR** | Vector autoregression | [`run_var`] |
+//! | **VARMA** | Vector ARMA | [`run_varma`] |
+//! | **VECM** | Vector error correction | [`run_vecm`] |
+//! | **IRF** | Impulse response functions | [`run_var_irf`] |
+//! | **Granger** | Granger causality test | [`granger_test`] |
+//! | **ARIMA** | ARIMA modeling (feature: forecasting) | `run_arima` |
+//! | **GARCH** | Volatility modeling (feature: forecasting) | `run_garch` |
+//! | **Holt-Winters** | Exponential smoothing (feature: forecasting) | `run_holt_winters` |
+//! | **STL/MSTL** | Seasonal decomposition (feature: forecasting) | `run_stl`, `run_mstl` |
+//! | **Changepoint** | Structural break detection (feature: forecasting) | `detect_changepoints` |
+//! | **Kalman** | State space models (feature: forecasting) | `kalman_filter` |
+//!
+//! ### Spatial Econometrics (15+ methods)
+//!
+//! | Method | Description | Function |
+//! |--------|-------------|----------|
+//! | **SAR** | Spatial autoregressive | [`run_sar`] |
+//! | **SEM** | Spatial error model | [`run_sem`] |
+//! | **SAC** | Combined SAR + SEM | [`run_sac`] |
+//! | **Spatial Probit** | SAR/SEM probit | [`run_sar_probit`] |
+//! | **Spatial GMM** | sphet package methods | [`run_sphet`] |
+//! | **Spatial Panel** | splm package methods | [`run_spml`] |
+//! | **Moran's I** | Spatial autocorrelation | [`moran_test`] |
+//! | **Geary's C** | Spatial association | [`geary_test`] |
+//! | **LISA** | Local indicators | [`localmoran`] |
+//!
+//! ### Survival Analysis (5+ methods)
+//!
+//! | Method | Description | Function |
+//! |--------|-------------|----------|
+//! | **Kaplan-Meier** | Nonparametric survival | [`run_kaplan_meier`] |
+//! | **Log-rank** | Survival curve comparison | [`log_rank_test`] |
+//! | **Cox PH** | Proportional hazards | [`run_cox_ph`] |
+//! | **AFT** | Accelerated failure time | [`run_aft`] |
+//! | **Competing Risks** | Cumulative incidence | [`run_competing_risks`] |
+//!
+//! ### Machine Learning (20+ methods)
+//!
+//! | Method | Description | Function |
+//! |--------|-------------|----------|
+//! | **K-Means** | Clustering | [`kmeans`] |
+//! | **DBSCAN** | Density-based clustering | [`dbscan`] |
+//! | **Hierarchical** | Agglomerative clustering | [`hierarchical`] |
+//! | **PCA** | Principal components | [`pca`] |
+//! | **t-SNE** | Dimensionality reduction | [`tsne`] |
+//! | **MDS** | Multidimensional scaling | [`cmdscale`] |
+//! | **Random Forest** | Ensemble trees | [`random_forest`] |
+//! | **SVM** | Support vector machines | [`linear_svm`] |
+//! | **Causal Forest** | Heterogeneous treatment effects | [`causal_forest`] |
+//! | **BART Causal** | Bayesian trees for causal | [`bart_causal`] |
+//!
+//! ### Export & Visualization
+//!
+//! | Category | Methods |
+//! |----------|---------|
+//! | **LaTeX** | [`LatexTableBuilder`] - Publication-ready tables |
+//! | **HTML** | [`HtmlTableBuilder`] - Self-contained HTML tables |
+//! | **Markdown** | [`MarkdownTableBuilder`] - GitHub-compatible tables |
+//! | **CSV** | [`CsvExport`] trait for all result types |
+//! | **Charts** | `histogram`, `scatter_plot`, `box_plot`, `correlation_heatmap` (feature: visualization) |
+//!
+//! ## Module Organization
+//!
+//! - [`data`] - Dataset loading and manipulation
+//! - [`stats`] - Statistical tests and descriptive statistics
+//! - [`regression`] - OLS, GLS, quantile regression, diagnostics
+//! - [`econometrics`] - Panel data, discrete choice, causal inference, time series
+//! - [`spatial`] - Spatial weights, autocorrelation tests, LISA
+//! - [`ml`] - Clustering, dimensionality reduction, ensemble methods
+//! - [`forecasting`] - Time series forecasting (feature-gated)
+//! - [`visualization`] - Chart generation (feature-gated)
+//! - [`export`] - LaTeX, HTML, Markdown, CSV export
+//! - [`linalg`] - Matrix operations (X'X, Cholesky, etc.)
+//! - [`traits`] - Common traits ([`LinearEstimator`])
+//! - [`errors`] - Error types ([`EconError`])
+//!
+//! ## R Package Equivalents
+//!
+//! Many methods are validated against R packages:
+//!
+//! | R Package | p2a-core Equivalent |
+//! |-----------|---------------------|
+//! | `stats` | [`stats`], [`regression`] |
+//! | `plm` | [`econometrics::panel`] |
+//! | `fixest` | [`run_hdfe`], [`run_feglm`] |
+//! | `lmtest` | [`run_diagnostics`], [`bg_test`], [`reset_test`] |
+//! | `sandwich` | [`vcov_hac`], [`vcov_bootstrap`] |
+//! | `MASS` | [`run_ordered_logit`], [`run_negbin`] |
+//! | `nnet` | [`run_multinom`] |
+//! | `survival` | [`run_cox_ph`], [`run_kaplan_meier`] |
+//! | `did` | [`run_staggered_did`] |
+//! | `rdrobust` | [`run_rd`] |
+//! | `MatchIt` | [`match_it`] |
+//! | `WeightIt` | [`weightit`] |
+//! | `tmle` | [`run_tmle`] |
+//! | `Synth` | [`run_synthetic_control`] |
+//! | `spdep` | [`spatial`] module |
+//! | `vars` | [`run_var`], [`run_vecm`] |
 
 // Enforce documentation on public items (warn, not error, for gradual adoption)
 #![warn(missing_docs)]
