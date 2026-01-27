@@ -1,0 +1,217 @@
+{
+  "category": "interpretation_causal",
+  "description": "Tests for evaluating LLM ability to correctly interpret causal inference results",
+  "tests": [
+    {
+      "id": "int_cau_001",
+      "task_type": "iv_interpretation",
+      "simulated_output": {
+        "model": "2SLS",
+        "dependent_var": "wage",
+        "endogenous_var": "education",
+        "instruments": ["parents_education", "distance_to_college"],
+        "coefficients": {"education": 0.12},
+        "std_errors": {"education": 0.04},
+        "p_values": {"education": 0.003},
+        "first_stage_f": 24.5,
+        "sargan_p": 0.34,
+        "ols_coefficient": 0.08
+      },
+      "interpretation_prompt": "The IV estimate of education is 0.12 compared to OLS of 0.08. Why might they differ and which should we trust?",
+      "expected_elements": [
+        {"element": "late_interpretation", "required": true, "description": "IV estimates LATE for compliers"},
+        {"element": "ols_bias_direction", "required": true, "description": "OLS likely biased by ability (positive correlation)"},
+        {"element": "instrument_strength", "required": true, "description": "First-stage F>10 suggests instruments aren't weak"},
+        {"element": "overid_test", "required": false, "description": "Sargan test doesn't reject, supporting instrument validity"}
+      ],
+      "incorrect_interpretations": [
+        {"error": "ate_claim", "description": "Claims IV estimates ATE for entire population"},
+        {"error": "iv_always_better", "description": "Claims IV is always better than OLS"},
+        {"error": "ignore_first_stage", "description": "Doesn't consider instrument strength"}
+      ]
+    },
+    {
+      "id": "int_cau_002",
+      "task_type": "did_interpretation",
+      "simulated_output": {
+        "model": "Difference-in-Differences",
+        "dependent_var": "employment",
+        "treatment_effect": -0.023,
+        "std_error": 0.008,
+        "p_value": 0.004,
+        "pre_treatment_diff": -0.005,
+        "pre_treatment_diff_p": 0.52,
+        "n_treated": 25,
+        "n_control": 180
+      },
+      "interpretation_prompt": "The DiD estimate shows a -2.3 percentage point effect on employment. What assumptions must hold for this to be causal?",
+      "expected_elements": [
+        {"element": "parallel_trends", "required": true, "description": "Key assumption: parallel trends in absence of treatment"},
+        {"element": "pre_trend_support", "required": true, "description": "Pre-treatment difference of -0.005 (p=0.52) supports assumption"},
+        {"element": "no_spillovers", "required": true, "description": "SUTVA: no spillovers between groups"},
+        {"element": "common_shocks", "required": false, "description": "Both groups affected similarly by other factors"}
+      ],
+      "incorrect_interpretations": [
+        {"error": "unconditional_causal", "description": "Claims result is causal without mentioning assumptions"},
+        {"error": "parallel_proven", "description": "Claims pre-trend test 'proves' parallel trends"},
+        {"error": "magnitude_interpretation", "description": "Interprets as 23% rather than 2.3pp"}
+      ]
+    },
+    {
+      "id": "int_cau_003",
+      "task_type": "rd_interpretation",
+      "simulated_output": {
+        "model": "Sharp RD",
+        "dependent_var": "college_enrollment",
+        "running_var": "test_score",
+        "cutoff": 50,
+        "treatment_effect": 0.18,
+        "std_error": 0.05,
+        "p_value": 0.0003,
+        "bandwidth": 8.5,
+        "mccrary_p": 0.42
+      },
+      "interpretation_prompt": "The RD estimate shows an 18 percentage point increase in enrollment at the cutoff. How should we interpret this finding?",
+      "expected_elements": [
+        {"element": "local_effect", "required": true, "description": "Effect is local to observations near the cutoff"},
+        {"element": "internal_validity", "required": true, "description": "High internal validity if assumptions hold"},
+        {"element": "no_manipulation", "required": true, "description": "McCrary test (p=0.42) suggests no manipulation"},
+        {"element": "external_validity_caveat", "required": false, "description": "May not generalize to units far from cutoff"}
+      ],
+      "incorrect_interpretations": [
+        {"error": "global_effect", "description": "Claims effect applies to all test-takers"},
+        {"error": "ignores_mccrary", "description": "Doesn't consider manipulation possibility"},
+        {"error": "bandwidth_irrelevant", "description": "Ignores role of bandwidth choice"}
+      ]
+    },
+    {
+      "id": "int_cau_004",
+      "task_type": "psm_interpretation",
+      "simulated_output": {
+        "model": "Propensity Score Matching",
+        "dependent_var": "earnings",
+        "treatment_effect_att": 2500,
+        "std_error": 800,
+        "p_value": 0.002,
+        "n_treated": 150,
+        "n_matched": 145,
+        "balance_improvement": {
+          "age_smd_before": 0.45,
+          "age_smd_after": 0.02,
+          "education_smd_before": 0.38,
+          "education_smd_after": 0.04
+        }
+      },
+      "interpretation_prompt": "The ATT from PSM is $2,500. The standardized mean differences improved substantially after matching. Is this estimate causal?",
+      "expected_elements": [
+        {"element": "selection_on_observables", "required": true, "description": "Relies on selection on observables (unconfoundedness)"},
+        {"element": "balance_important", "required": true, "description": "Good balance on observables is necessary but not sufficient"},
+        {"element": "unobserved_confounders", "required": true, "description": "Cannot rule out unobserved confounders"},
+        {"element": "att_not_ate", "required": false, "description": "ATT applies only to treated, not population"}
+      ],
+      "incorrect_interpretations": [
+        {"error": "balance_proves_causal", "description": "Claims good balance proves causal effect"},
+        {"error": "like_rct", "description": "Claims PSM creates experiment-like conditions"},
+        {"error": "ate_claim", "description": "Generalizes ATT to entire population"}
+      ]
+    },
+    {
+      "id": "int_cau_005",
+      "task_type": "event_study_interpretation",
+      "simulated_output": {
+        "model": "Event Study",
+        "pre_treatment_coefficients": {"t-3": 0.01, "t-2": -0.02, "t-1": 0.015},
+        "pre_treatment_pvalues": {"t-3": 0.82, "t-2": 0.65, "t-1": 0.72},
+        "post_treatment_coefficients": {"t+1": 0.08, "t+2": 0.12, "t+3": 0.15},
+        "post_treatment_pvalues": {"t+1": 0.02, "t+2": 0.001, "t+3": 0.0005}
+      },
+      "interpretation_prompt": "The pre-treatment coefficients are all close to zero and insignificant, while post-treatment coefficients are positive and significant. What does this tell us?",
+      "expected_elements": [
+        {"element": "parallel_trends_support", "required": true, "description": "Flat pre-trends support parallel trends assumption"},
+        {"element": "dynamic_effects", "required": true, "description": "Effect grows over time post-treatment"},
+        {"element": "delayed_impact", "required": true, "description": "Treatment takes time to fully materialize"},
+        {"element": "not_proof", "required": false, "description": "Pre-trend test is suggestive not definitive"}
+      ],
+      "incorrect_interpretations": [
+        {"error": "proves_parallel", "description": "Claims pre-trends definitively prove parallel trends"},
+        {"error": "ignores_dynamics", "description": "Only focuses on single post-treatment effect"},
+        {"error": "anticipation_ignored", "description": "Doesn't consider possible anticipation effects"}
+      ]
+    },
+    {
+      "id": "int_cau_006",
+      "task_type": "synthetic_control_interpretation",
+      "simulated_output": {
+        "model": "Synthetic Control",
+        "treated_unit": "California",
+        "treatment_year": 1988,
+        "effect_year_1": -5.2,
+        "effect_year_5": -12.8,
+        "effect_year_10": -18.5,
+        "donor_weights": {"Nevada": 0.35, "Colorado": 0.28, "Utah": 0.22, "Other": 0.15},
+        "pre_treatment_rmse": 2.1,
+        "placebo_rank": "2 of 39"
+      },
+      "interpretation_prompt": "The synthetic California tracks well pre-treatment, and the effect grows to -18.5 by year 10. The placebo rank is 2 of 39. Is this convincing evidence of a causal effect?",
+      "expected_elements": [
+        {"element": "good_pretreatment_fit", "required": true, "description": "Low RMSE suggests good pre-treatment match"},
+        {"element": "placebo_inference", "required": true, "description": "Rank 2/39 provides p-value ≈ 0.05"},
+        {"element": "weights_interpretable", "required": false, "description": "Donor weights show which states contribute"},
+        {"element": "single_unit_caveat", "required": true, "description": "Inference with single treated unit is challenging"}
+      ],
+      "incorrect_interpretations": [
+        {"error": "standard_inference", "description": "Uses standard errors/p-values instead of placebo inference"},
+        {"error": "ignores_fit", "description": "Doesn't consider quality of pre-treatment match"},
+        {"error": "extrapolation", "description": "Extrapolates effect to other states without justification"}
+      ]
+    },
+    {
+      "id": "int_cau_007",
+      "task_type": "hausman_interpretation",
+      "simulated_output": {
+        "test": "Hausman test (FE vs RE)",
+        "chi_squared": 28.5,
+        "p_value": 0.0001,
+        "df": 4,
+        "fe_coefficients": {"value": 0.095, "capital": 0.052},
+        "re_coefficients": {"value": 0.112, "capital": 0.068}
+      },
+      "interpretation_prompt": "The Hausman test strongly rejects the null (p<0.0001). Should we use fixed effects or random effects?",
+      "expected_elements": [
+        {"element": "fe_preferred", "required": true, "description": "Rejection suggests FE is more appropriate"},
+        {"element": "re_inconsistent", "required": true, "description": "RE coefficients may be inconsistent due to correlation"},
+        {"element": "efficiency_tradeoff", "required": false, "description": "RE would be more efficient if consistent"},
+        {"element": "substantive_difference", "required": true, "description": "Coefficients differ meaningfully between models"}
+      ],
+      "incorrect_interpretations": [
+        {"error": "re_preferred", "description": "Chooses RE despite rejection"},
+        {"error": "fe_always_better", "description": "Claims FE always preferred regardless of test"},
+        {"error": "ignores_coefficient_diff", "description": "Doesn't examine substantive coefficient differences"}
+      ]
+    },
+    {
+      "id": "int_cau_008",
+      "task_type": "weak_instrument_interpretation",
+      "simulated_output": {
+        "model": "2SLS",
+        "first_stage_f": 4.2,
+        "coefficients": {"education": 0.25},
+        "std_errors": {"education": 0.15},
+        "anderson_rubin_ci": [-0.05, 0.55],
+        "ols_coefficient": 0.08
+      },
+      "interpretation_prompt": "The first-stage F-statistic is 4.2 and the IV estimate is much larger than OLS. What should we conclude?",
+      "expected_elements": [
+        {"element": "weak_instrument", "required": true, "description": "F<10 indicates weak instruments"},
+        {"element": "biased_toward_ols", "required": true, "description": "Weak IV biased toward OLS, but estimate is larger"},
+        {"element": "ar_ci_preferred", "required": true, "description": "Anderson-Rubin CI more reliable than standard"},
+        {"element": "caution_warranted", "required": true, "description": "Results should be interpreted cautiously"}
+      ],
+      "incorrect_interpretations": [
+        {"error": "trust_estimate", "description": "Trusts point estimate despite weak instruments"},
+        {"error": "standard_inference", "description": "Uses standard errors ignoring weak IV problem"},
+        {"error": "reject_iv", "description": "Completely rejects IV approach instead of using robust methods"}
+      ]
+    }
+  ]
+}

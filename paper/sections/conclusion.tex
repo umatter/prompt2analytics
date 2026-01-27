@@ -4,12 +4,125 @@
 
 \section{Conclusion} \label{sec:conclusion}
 
-% TODO: Write conclusion
+This paper has introduced chat-first data analytics as an approach to statistical
+computation that combines natural language interfaces with pre-implemented,
+verified statistical methods. The key insight is that language models excel at
+interpreting user intent and selecting appropriate methods, but should not be
+trusted with numerical computation. By separating interpretation from execution,
+chat-first systems can provide the accessibility of conversational interfaces
+while maintaining the reliability that scientific work demands.
 
-\pkg{prompt2analytics} provides a comprehensive, high-performance econometrics
-toolkit in pure \proglang{Rust}. The software fills a gap in the \proglang{Rust}
-ecosystem for applied econometrics and provides novel integration with large
-language models via the Model Context Protocol.
+\pkg{prompt2analytics} demonstrates this approach through a foundational
+econometrics library implemented in pure \proglang{Rust}, exposed through the
+Model Context Protocol for integration with language models. The software makes
+several contributions:
+
+\begin{enumerate}
+  \item \textbf{A foundational econometrics library for \proglang{Rust}.} The
+    \pkg{p2a-core} library provides core methods across regression analysis, panel
+    data econometrics, instrumental variables, causal inference, discrete choice,
+    and time series analysis---filling a gap in the \proglang{Rust} ecosystem
+    for applied econometrics.
+
+  \item \textbf{Validated implementations.} Numerical accuracy is verified
+    against established \proglang{R} packages across thousands of test cases,
+    with tolerances calibrated to sample size. This addresses concerns about
+    numerical accuracy in statistical software raised by \cite{McCullough:1997}.
+
+  \item \textbf{Performance advantages.} For computationally intensive methods
+    (panel fixed effects, robust standard errors, clustering), \proglang{Rust}
+    implementations provide 3--6$\times$ speedups over equivalent \proglang{R}
+    code.
+
+  \item \textbf{Local LLM viability.} Our evaluation demonstrates that even
+    small models (3B parameters) can achieve over 90\% accuracy on tool
+    selection, enabling fully local deployment for privacy-sensitive applications.
+
+  \item \textbf{MCP as an integration standard.} The software demonstrates that
+    MCP provides a practical foundation for LLM-assisted scientific computing,
+    separating concerns between language understanding and numerical computation.
+\end{enumerate}
+
+\subsection{Limitations}
+
+\textbf{LLM interpretation failures.} The 9.2\% error rate with the smallest
+model concentrates in ambiguous cases; safeguards (result inspection,
+reformulation, clarifying questions) require statistical knowledge to be effective.
+
+\textbf{Evaluation scope.} Single-turn accuracy substantially overstates
+practical capability. Extended evaluation shows multi-turn accuracy of 50--60\%,
+parameter extraction F1 of 41--59\%, and out-of-scope detection rates of 40--60\%
+(Appendix~\ref{app:extended-eval}). User study validation remains unaddressed.
+
+\textbf{Method coverage.} Unimplemented methods include quantile regression,
+Heckman selection, spatial econometrics, GMM, dynamic panel models, matching
+estimators, and Bayesian methods. See Section~\ref{sec:design} for the complete list.
+
+\textbf{Scalability.} Data are loaded entirely into memory; datasets exceeding
+available RAM require external preprocessing.
+
+\textbf{Architecture.} Uses embedded SurrealDB for persistence (zero-configuration
+but not suitable for external database integration), 64-bit precision throughout,
+and semantic versioning for the MCP schema (currently 0.x, API may evolve).
+
+\subsection{Future directions}
+
+Several directions warrant further development.
+
+\textbf{User studies.} Controlled experiments measuring task completion rates,
+time-to-insight, and error detection rates would provide stronger evidence of
+the chat-first paradigm's practical benefits. Such studies should compare
+chat-first interfaces against traditional code-based workflows across users
+with varying levels of statistical expertise.
+
+\textbf{Enhanced error detection.} The system could proactively identify
+potential issues before estimation: detecting perfect multicollinearity,
+warning about small cluster counts, suggesting appropriate standard error
+corrections based on data structure. Current implementations provide errors
+after failures rather than preventive guidance.
+
+\textbf{Formal verification.} Property-based testing and formal verification
+techniques could strengthen confidence in implementation correctness beyond
+comparison to reference implementations. QuickCheck-style testing for statistical
+properties (e.g., residuals orthogonal to regressors) would complement
+numerical accuracy validation.
+
+\textbf{Method expansion.} High-priority additions include Bayesian inference
+(providing posterior distributions rather than point estimates), quantile
+regression, sample selection corrections, and spatial econometric methods.
+The modular architecture facilitates these extensions.
+
+\textbf{Workflow integration.} Integration with \proglang{R} and \proglang{Python}
+via foreign function interfaces would enable users to call \proglang{Rust}
+implementations from familiar environments, combining the performance benefits
+of compiled code with existing analytical workflows.
+
+\subsection{Broader implications}
+
+Chat-first data analytics represents one instance of a broader pattern: using
+language models as interpreters between human intent and specialized software.
+This pattern applies beyond econometrics to any domain where users express goals
+in natural language and systems execute well-defined operations.
+
+The success of this approach depends on a clear division of labor. Language
+models interpret and explain; specialized software computes. Attempts to
+have language models perform both roles---generating code that computes
+statistical quantities---conflate interpretation with execution and sacrifice
+the reliability that scientific work requires.
+
+The viability of local LLM deployment demonstrated in Section~\ref{sec:local}
+has implications beyond data privacy. If small models can reliably select among
+pre-implemented methods, the computational requirements for LLM-assisted analysis
+become modest enough for widespread deployment. This democratizes access to
+conversational interfaces without requiring cloud connectivity or powerful
+hardware.
+
+Finally, the design of \pkg{prompt2analytics} suggests a template for scientific
+software in the LLM era: implement algorithms in performant, memory-safe languages;
+expose them through structured protocols; and let language models handle the
+translation between human intent and computational execution. This separation
+of concerns preserves the benefits of both paradigms while mitigating their
+respective weaknesses.
 
 
 %% =============================================================================
@@ -18,11 +131,736 @@ language models via the Model Context Protocol.
 
 \section*{Acknowledgments}
 
-% TODO: Add acknowledgments
+The authors thank the reviewers for constructive feedback that improved the paper.
 
 
 %% =============================================================================
 %% APPENDIX
 %% =============================================================================
 
-%% Appendix reserved for future use
+\clearpage
+\appendix
+
+%% Renumber tables and figures by appendix section
+\renewcommand{\thetable}{\Alph{section}.\arabic{table}}
+\renewcommand{\thefigure}{\Alph{section}.\arabic{figure}}
+
+\section*{Appendix}
+\addcontentsline{toc}{section}{Appendix}
+
+\vspace{1em}
+\noindent\textbf{Contents}
+\vspace{0.5em}
+
+\noindent\hyperref[app:llm-eval]{A\hspace{1em}LLM evaluation details}\\
+\noindent\hyperref[app:extended-eval]{B\hspace{1em}Extended robustness evaluation}\\
+\noindent\hyperref[app:latency]{C\hspace{1em}API response latency}\\
+\noindent\hyperref[app:deployment]{D\hspace{1em}Deployment guide}\\
+\noindent\hyperref[app:privacy]{E\hspace{1em}Privacy and security}\\
+\noindent\hyperref[app:reproducibility]{F\hspace{1em}Reproducibility}\\
+\noindent\hyperref[app:benchmark-methodology]{G\hspace{1em}Benchmark methodology}\\
+\noindent\hyperref[app:related-work]{H\hspace{1em}Related work: Statistical interfaces}\\
+\noindent\hyperref[app:implementation]{I\hspace{1em}Implementation notes}\\
+\noindent\hyperref[app:extended-examples]{J\hspace{1em}Extended examples}
+
+\vspace{2em}
+
+\section{LLM evaluation details} \label{app:llm-eval}
+\setcounter{table}{0}
+\setcounter{figure}{0}
+
+This appendix provides detailed results from the tool selection evaluation
+described in Section~\ref{sec:local}. Table~\ref{tab:model-summary} presents
+accuracy, cost, and failure rates across all evaluated models.
+Table~\ref{tab:category-accuracy} breaks down accuracy by test category.
+
+\input{tables/tab_model_summary}
+
+\input{tables/tab_category_accuracy}
+
+\section{Extended robustness evaluation} \label{app:extended-eval}
+\setcounter{table}{0}
+\setcounter{figure}{0}
+
+This appendix provides detailed results from the extended evaluation described
+in Section~\ref{sec:local}. The evaluation assesses model performance across
+five dimensions beyond single-turn tool selection: multi-turn conversations,
+naturalistic prompts, parameter extraction, interpretation accuracy, and
+out-of-scope detection.
+
+\subsection{Evaluation methodology}
+
+\textbf{Multi-turn conversations.} Twenty conversations with 3--4 turns each
+(72 total turns) simulate realistic analytical workflows where subsequent
+requests build on prior context. Each turn is scored independently; a
+conversation is ``complete'' only if all turns are correct.
+
+\textbf{Naturalistic prompts.} Ninety-nine prompts across eight categories
+include realistic variations: typos (``regresion with robust se''), informal
+language (``just run a quick ols''), domain jargon (``estimate the ATT using
+DID''), verbose descriptions, and ambiguous specifications. Prompts are
+classified by variation type to identify specific robustness gaps.
+
+\textbf{Parameter extraction.} Forty-nine test cases evaluate whether models
+correctly extract variable names, options (robust SE type, clustering variables),
+and modifiers from natural language. We compute precision (correct extractions /
+total extractions), recall (correct extractions / expected parameters), and
+F1 score.
+
+\textbf{Interpretation accuracy.} Twenty-six statistical outputs spanning
+coefficient interpretation, hypothesis test results, and diagnostic statistics
+are presented to each model with interpretation prompts. Responses are scored
+for coverage of expected elements and absence of common errors (e.g., confusing
+correlation with causation, misinterpreting log coefficients).
+
+\textbf{Out-of-scope detection.} Twenty prompts request methods outside the
+\pkg{prompt2analytics} scope (Bayesian inference, GARCH, quantile regression,
+spatial econometrics, etc.). Correct responses either decline the request or
+suggest the closest available alternative; incorrect responses select an
+inappropriate tool.
+
+\subsection{Results}
+
+Table~\ref{tab:extended-eval} summarizes performance across all dimensions.
+The multi-turn and parameter extraction results reveal substantially lower
+accuracy than single-turn tool selection, highlighting the gap between
+controlled evaluation and realistic usage patterns.
+
+\input{tables/tab_extended_eval_summary}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.95\textwidth]{figures/fig_robustness_radar}
+\caption{Multi-dimensional performance profile by model. Each axis represents
+a robustness dimension normalized to 0--100\%. Models cluster in the 50--70\%
+range for most dimensions, with interpretation accuracy showing the strongest
+performance and out-of-scope detection the weakest.}
+\label{fig:robustness-radar}
+\end{figure}
+
+Figure~\ref{fig:robustness-radar} visualizes performance profiles, revealing
+that no single model dominates across all dimensions. Claude 3.5 Haiku shows
+strong single-turn and naturalistic performance but moderate multi-turn
+accuracy. Llama 3.3 70B achieves the best multi-turn coherence. Qwen 2.5 72B
+leads in parameter extraction. These trade-offs suggest that model selection
+should consider the expected usage pattern.
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.95\textwidth]{figures/fig_extended_eval_comparison}
+\caption{Comparison of single-turn vs.\ multi-turn accuracy (left) and
+synthetic vs.\ naturalistic prompt robustness (right). The consistent gap
+between controlled and realistic conditions indicates that baseline
+evaluations overstate practical capability.}
+\label{fig:extended-comparison}
+\end{figure}
+
+Figure~\ref{fig:extended-comparison} directly compares controlled vs.\
+realistic evaluation conditions. The 30--40 percentage point drop from
+single-turn to multi-turn accuracy is consistent across models, suggesting
+a fundamental challenge in maintaining conversational context rather than
+a model-specific limitation.
+
+\subsection{Failure analysis}
+
+Common failure patterns across dimensions include:
+
+\begin{itemize}
+  \item \emph{Context drift}: In multi-turn conversations, models frequently
+    ``forget'' prior specifications, reverting to defaults or misinterpreting
+    pronoun references (``use the same variables'' interpreted incorrectly).
+  \item \emph{Partial parameter extraction}: Models often extract the primary
+    parameters (dependent/independent variables) but omit secondary options
+    (robust SE type, clustering specification, interaction terms).
+  \item \emph{Overconfident tool selection}: When facing out-of-scope requests,
+    models rarely decline; instead, they select superficially similar tools
+    (e.g., OLS for quantile regression, VAR for Bayesian VAR).
+  \item \emph{Interpretation shortcuts}: Models sometimes provide accurate but
+    incomplete interpretations, omitting important caveats about statistical
+    vs.\ practical significance or the limitations of specific tests.
+\end{itemize}
+
+These patterns inform the deployment recommendations in Section~\ref{sec:local}:
+explicit specifications reduce context drift, parameter verification catches
+extraction errors, and result review identifies interpretation gaps.
+
+\section{API response latency} \label{app:latency}
+\setcounter{table}{0}
+\setcounter{figure}{0}
+
+Figure~\ref{fig:latency-comparison} presents response latency distributions
+for the models evaluated via their respective cloud APIs. These measurements
+include network round-trip time and reflect API-hosted inference, not local
+deployment performance.
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.85\textwidth]{figures/fig_latency_comparison}
+\caption{API response latency distribution by model (log scale). Latencies
+reflect cloud-hosted inference via OpenAI, Anthropic, and OpenRouter APIs,
+including network round-trip time. Local deployment latency depends on
+hardware configuration and would differ substantially from these figures.}
+\label{fig:latency-comparison}
+\end{figure}
+
+For cloud-hosted inference, GPT-4.1 Nano shows the fastest median response
+(1,245ms) among high-accuracy models, while Ministral 3B achieves 650ms
+median latency via OpenRouter. These figures are useful for comparing
+relative API performance but do not predict local inference speed.
+
+Local deployment latency depends on several factors: model size and
+quantization level, available RAM and GPU VRAM, CPU or GPU compute
+capability, and context length (which affects KV cache size). As a rough
+guide, GPU-accelerated inference on consumer hardware (RTX 3070/4070 with
+8~GB VRAM) typically achieves 1--3 seconds for 7--8B parameter models.
+CPU-only inference on modern laptops ranges from 5--15 seconds depending
+on model size and system specifications. Systematic benchmarks of local
+deployment latency across hardware configurations represent an important
+direction for future work; the cloud API measurements here serve primarily
+to compare relative performance across models rather than to predict
+local inference speed.
+
+
+\section{Deployment guide} \label{app:deployment}
+\setcounter{table}{0}
+\setcounter{figure}{0}
+
+This appendix provides deployment instructions for various platforms.
+
+\subsection{Linux workstation}
+
+\begin{enumerate}
+  \item Install \proglang{Rust} (1.85+): \code{curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh}
+  \item Clone repository: \code{git clone https://github.com/prompt2analytics/prompt2analytics}
+  \item Build MCP server: \code{cargo build --release -p p2a-mcp}
+  \item Install Ollama: \code{curl -fsSL https://ollama.ai/install.sh | sh}
+  \item Pull a model: \code{ollama pull llama3.1:8b}
+  \item Run MCP server: \code{./target/release/p2a-mcp --transport stdio}
+  \item Configure Claude Desktop or other MCP client to use the server
+\end{enumerate}
+
+\subsection{macOS (Apple Silicon)}
+
+Apple M-series chips provide excellent performance for local LLM inference
+due to unified memory architecture. Recommended configuration:
+
+\begin{itemize}
+  \item M1/M2: 7--8B models with Q4\_K\_M quantization
+  \item M2 Pro/Max: 13B models or 8B at Q8 quantization
+  \item M3 Max/Ultra: Up to 70B models with sufficient unified memory
+\end{itemize}
+
+\noindent Build commands are identical to Linux. Homebrew can simplify
+dependency management: \code{brew install rust ollama}.
+
+\subsection{Windows (WSL2)}
+
+Native Windows builds are supported but WSL2 provides a more consistent
+experience:
+
+\begin{enumerate}
+  \item Install WSL2: \code{wsl --install -d Ubuntu}
+  \item Follow Linux instructions within WSL2
+  \item For GPU acceleration, install NVIDIA CUDA drivers on Windows
+    (WSL2 will use them automatically)
+\end{enumerate}
+
+\subsection{MCP client configuration}
+
+For Claude Desktop, add to \code{claude\_desktop\_config.json}:
+
+\begin{verbatim}
+{
+  "mcpServers": {
+    "prompt2analytics": {
+      "command": "/path/to/p2a-mcp",
+      "args": ["--transport", "stdio"]
+    }
+  }
+}
+\end{verbatim}
+
+\subsection{Model selection guidance}
+
+\begin{center}
+\small
+\begin{tabular}{llp{5cm}}
+\toprule
+Use Case & Recommended Model & Notes \\
+\midrule
+Maximum privacy & Llama 3.1 8B (local) & No data leaves machine \\
+Best accuracy & Claude 3.5 Sonnet & Requires API key \\
+Cost-sensitive & GPT-4.1 Nano & Cheapest high-accuracy option \\
+Resource-constrained & Ministral 3B & Runs on 8GB RAM \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+
+\section{Privacy and security} \label{app:privacy}
+\setcounter{table}{0}
+\setcounter{figure}{0}
+
+This appendix documents data transmission behavior and security considerations.
+
+\subsection{Data transmission summary}
+
+Table~\ref{tab:data-transmission} lists operations that may transmit data
+beyond the local machine when using cloud LLM providers.
+
+\begin{table}[htbp]
+\centering
+\caption{Operations that may transmit data to LLM providers}
+\label{tab:data-transmission}
+\small
+\begin{tabular}{lp{6cm}l}
+\toprule
+Operation & Data Transmitted & Risk Level \\
+\midrule
+Dataset load & Column names, types, row count, null percentages & Low \\
+Data preview (head/tail/sample) & Actual row values & High \\
+Data profiling & Frequent values, min/max, examples & Medium \\
+Statistical estimation & Coefficients, SEs, test statistics only & Low \\
+Outlier detection & Specific observation values & Medium \\
+Error messages & May include problematic values & Low \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Audit logging}
+
+To enable audit logging of all MCP tool calls:
+
+\begin{verbatim}
+p2a-mcp --transport stdio --log-level debug --log-file audit.log
+\end{verbatim}
+
+\noindent The log records: timestamp, tool name, parameters (excluding bulk
+data), and result summary. Review logs to verify no unexpected data transmission.
+
+\subsection{Network verification}
+
+To verify local-only operation with Ollama:
+
+\begin{enumerate}
+  \item Start Ollama: \code{ollama serve}
+  \item Block outbound connections: \code{sudo iptables -A OUTPUT -j DROP}
+  \item Run analysis---should complete successfully
+  \item Restore network: \code{sudo iptables -D OUTPUT -j DROP}
+\end{enumerate}
+
+\subsection{Security best practices}
+
+\begin{itemize}
+  \item Avoid loading untrusted data files (potential injection payloads)
+  \item Review tool calls when processing sensitive data
+  \item Use local LLM deployment for high-security environments
+  \item Keep software updated; security patches are released as needed
+  \item The MCP server has no filesystem access beyond loaded datasets
+\end{itemize}
+
+
+\section{Reproducibility} \label{app:reproducibility}
+\setcounter{table}{0}
+\setcounter{figure}{0}
+
+This appendix provides detailed instructions for reproducing the results in this paper.
+
+\subsection{Version information}
+
+Results in this paper were generated with the following software versions:
+\begin{itemize}
+  \item \proglang{Rust}: 1.85.0 (stable)
+  \item \proglang{R}: 4.5.0 with OpenBLAS
+  \item Key \proglang{R} packages: \pkg{plm} 2.6-4, \pkg{lfe} 3.1-0,
+    \pkg{sandwich} 3.1-1, \pkg{fixest} 0.12.1, \pkg{forecast} 8.23.0
+  \item Operating system: Ubuntu 24.04 LTS (Linux 6.8)
+\end{itemize}
+
+\subsection{Reproducing benchmarks}
+
+Performance benchmarks can be reproduced using the following protocol:
+\begin{enumerate}
+  \item Install \proglang{R} 4.5+ with required packages: \pkg{plm}, \pkg{lfe},
+    \pkg{sandwich}, \pkg{forecast}, \pkg{microbenchmark}
+  \item Build \pkg{prompt2analytics} in release mode: \code{cargo build --release -p p2a-cli}
+  \item Execute benchmarks: \code{make -C paper/code benchmarks}
+\end{enumerate}
+
+\noindent Both languages use seed $= 42$ for random number generation. The
+benchmark protocol includes 10 warmup iterations before 100 measured iterations
+for fast methods (50 iterations for moderate, 20 for slow). Detailed
+instructions are provided in \code{paper/code/README\_REPRODUCIBILITY.md}.
+
+\subsection{Containerized reproduction}
+
+A \code{Dockerfile} in the repository root provides a containerized
+environment with all dependencies pinned to the versions above:
+
+\begin{verbatim}
+docker build -t p2a-paper .
+docker run -v $(pwd)/paper:/output p2a-paper make all
+\end{verbatim}
+
+\noindent The container includes both \proglang{R} and \proglang{Rust}
+toolchains with identical configurations to those used for this paper.
+
+
+\section{Benchmark methodology} \label{app:benchmark-methodology}
+\setcounter{table}{0}
+\setcounter{figure}{0}
+
+This appendix provides complete details on the benchmark methodology used in
+Sections~\ref{sec:comparison} and~\ref{sec:performance}.
+
+\subsection{Data generating processes}
+
+Benchmark datasets are generated synthetically using identical data-generating
+processes in both languages with fixed random seeds (seed $= 42$) for exact
+reproducibility.
+
+\textbf{Regression benchmarks.} Data follow
+$y_i = \beta_0 + \beta_1 x_{1i} + \beta_2 x_{2i} + \varepsilon_i$ with
+true parameters $\beta_0 = 1.0$, $\beta_1 = 2.0$, $\beta_2 = -1.5$, and
+$\varepsilon_i \sim \mathcal{N}(0, \sigma^2)$ where $\sigma = 1.0$. Covariates
+are drawn as $x_{1i} \sim \mathcal{N}(0, 1)$ and $x_{2i} \sim \mathcal{N}(0, 1)$
+with correlation $\rho = 0.3$.
+
+\textbf{Panel data benchmarks.} Entity effects
+$\alpha_i \sim \mathcal{N}(0, 0.5^2)$ are added, with 100 entities observed
+over 10 periods.
+
+\textbf{Discrete choice benchmarks.} The latent index
+$y^*_i = \beta' x_i + \varepsilon_i$ is transformed via the logit or probit link.
+
+\textbf{Time series benchmarks.} Data follow ARIMA$(1,1,1)$ with $\phi = 0.7$,
+$\theta = 0.3$, and innovation variance $\sigma^2_\eta = 1.0$.
+
+Complete DGP specifications are provided in
+\code{paper/code/README\_REPRODUCIBILITY.md}.
+
+\subsection{Benchmark execution protocol}
+
+Each benchmark configuration executes multiple iterations after a warmup phase:
+\begin{itemize}
+  \item 100 iterations for fast methods (OLS, robust SEs, PCA)
+  \item 50 iterations for moderate methods (panel FE, clustering)
+  \item 20 iterations for slow methods (ARIMA, MSTL decomposition)
+\end{itemize}
+
+\proglang{R} benchmarks use the \pkg{bench} package, which handles garbage
+collection timing. \proglang{Rust} benchmarks use Criterion with automatic
+warmup and outlier detection. We report full timing distributions (minimum,
+quartiles, maximum, mean, standard deviation) rather than point estimates alone.
+
+\subsection{Hardware and software environment}
+
+All benchmarks run on identical hardware: an Intel Core i7-1260P processor
+with 64GB RAM running Linux, with \proglang{R} 4.5.2 using OpenBLAS and
+\proglang{Rust} 1.92.0 compiled in release mode with link-time optimization.
+
+
+\section{Related work: Statistical interfaces} \label{app:related-work}
+\setcounter{table}{0}
+\setcounter{figure}{0}
+
+This appendix provides extended discussion of related work on statistical
+computing interfaces.
+
+\subsection{Formula notation and domain-specific languages}
+
+The most influential interface innovation in statistical computing was the
+Wilkinson-Rogers formula notation \citep{Wilkinson+Rogers:1973}, which
+introduced the symbolic representation of linear models that remains central
+to \proglang{R}, \proglang{Stata}, and other systems (e.g., \code{y \~{} x1 + x2}).
+\cite{Chambers+Hastie:1992} extended this notation in \proglang{S} and later
+\proglang{R}, establishing design principles for statistical software that
+prioritize expressiveness and composability \citep{Chambers:1998, Chambers:2008}.
+The formula interface represents a domain-specific language (DSL) for model
+specification---a pattern that \proglang{Stata} adopts with its command syntax
+and that appears in specialized systems like Stan's probabilistic programming
+language \citep{Carpenter+etal:2017}.
+
+\pkg{prompt2analytics} takes a fundamentally different approach: rather than
+inventing new notation, it accepts natural language descriptions of analytical
+intent. This trades the precision of formal DSLs for accessibility, relying
+on LLMs to bridge the gap between informal specification and structured
+execution.
+
+\subsection{Natural language interfaces to data systems}
+
+Natural language interfaces (NLIs) for data systems have a long history.
+LUNAR \citep{Woods:1973} demonstrated feasibility for database querying;
+subsequent decades produced various NLI systems with limited adoption
+\citep{Androutsopoulos+etal:1995}. Commercial systems attempted similar
+approaches: SPSS's syntax assistance, SAS Enterprise Guide's point-and-click
+interface with natural language elements, and JMP's scripting language with
+English-like constructs.
+
+The text-to-SQL paradigm, revitalized by deep learning, represents recent
+progress on natural language data interfaces. Benchmarks like WikiSQL
+\citep{Zhong+etal:2017} and Spider \citep{Yu+etal:2018} have driven substantial
+improvements in translating natural language to structured queries
+\citep{Li+etal:2024}. NL4DV \citep{Narechania+etal:2021} enables
+natural language specification of visualizations.
+
+\subsection{Automated machine learning}
+
+AutoML systems automate model selection through algorithmic search.
+Auto-WEKA \citep{Thornton+etal:2013}, Auto-sklearn \citep{Feurer+etal:2015},
+and H2O AutoML \citep{LeDell+Poirier:2020} optimize predictive performance
+over predefined pipeline spaces. Recent work integrates LLMs into AutoML:
+\cite{Hollmann+etal:2024} use language models to guide feature engineering
+and hyperparameter search.
+
+AutoML differs from chat-first analytics in objective and scope. AutoML
+optimizes for prediction; chat-first analytics interprets user intent across
+prediction, causal inference, hypothesis testing, and description.
+
+\subsection{Computational econometrics}
+
+The computational econometrics literature has established standards for
+numerical accuracy and implementation quality. \cite{McCullough:1997} and
+\cite{McCullough+Vinod:1999} documented numerical inaccuracies across
+commercial and open-source statistical packages. Textbooks by
+\cite{Davidson+MacKinnon:2004} and \cite{Cameron+Trivedi:2005}
+provide authoritative treatments of econometric methods and their
+implementation.
+
+
+\section{Implementation notes} \label{app:implementation}
+\setcounter{table}{0}
+\setcounter{figure}{0}
+
+This appendix documents implementation caveats and limitations for specific
+methods.
+
+\subsection{Instrumental variables}
+
+The 2SLS implementation reports first-stage $F$-statistics for instrument
+relevance. The traditional rule-of-thumb ($F > 10$) from \cite{Staiger+Stock:1997}
+has been superseded by more nuanced guidance. \cite{Stock+Yogo:2005} provide
+critical values depending on the number of instruments and acceptable bias
+levels; \cite{Lee+etal:2022} offer further refinements for inference under
+weak identification. The current implementation does not provide Stock-Yogo
+critical values or weak-identification-robust inference methods (Anderson-Rubin,
+conditional likelihood ratio). Users with potentially weak instruments should
+verify results using \proglang{R}'s \pkg{ivmodel} or \pkg{AER} packages.
+
+\subsection{Difference-in-differences}
+
+The DiD implementation assumes the canonical two-group, two-period design.
+Recent econometric literature has documented severe biases when this estimator
+is applied to staggered treatment timing. \cite{Goodman-Bacon:2021} demonstrates
+that two-way fixed effects DiD produces a weighted average of all possible 2$\times$2
+comparisons, including problematic ``forbidden'' comparisons using already-treated
+units as controls. \cite{deChaisemartin+DHaultfoeuille:2020} and
+\cite{Sun+Abraham:2021} propose alternative estimators robust to treatment
+effect heterogeneity.
+
+\pkg{prompt2analytics} does not implement staggered DiD estimators.
+Users with staggered treatment adoption should use \pkg{fixest}'s
+\fct{sunab} function, the \pkg{did} package, or \pkg{did2s} in \proglang{R}.
+
+\subsection{Random effects}
+
+The random effects estimator uses the Swamy-Arora variance component estimator,
+which can produce negative variance estimates for $\sigma^2_\alpha$ (the
+between-entity variance) in certain data configurations. When this occurs,
+the implementation truncates the estimate to zero and proceeds with pooled
+OLS, issuing a warning.
+
+\subsection{Discrete choice models}
+
+Logit and probit models report coefficients on the latent index scale. For
+interpretation, marginal effects are computed as \emph{Average Marginal Effects}
+(AME): the partial derivative $\partial \Pr(y=1)/\partial x_j$ is evaluated
+at each observation's covariate values, then averaged across the sample.
+This differs from \emph{Marginal Effects at Means} (MEM), which evaluates
+derivatives at the sample mean of all covariates. AME is generally preferred
+because it does not depend on potentially unrepresentative ``average''
+covariate values \citep{Cameron+Trivedi:2005}.
+
+\subsection{Time series models}
+
+ARIMA estimation supports non-seasonal models: ARIMA$(p,d,q)$ with automatic
+or user-specified orders. Seasonal ARIMA (SARIMA) is partially implemented:
+seasonal differencing and seasonal AR/MA terms can be specified, but automatic
+seasonal order selection is not available.
+
+VAR and VECM implementations support lag selection via AIC/BIC and Johansen
+cointegration testing, but do not implement structural VAR identification.
+
+\subsection{Methods not implemented}
+
+The current implementation focuses on foundational methods. Unimplemented
+categories include: sample selection (Heckman), quantile regression, spatial
+econometrics, GMM and structural estimation, dynamic panel models
+(Arellano-Bond, Arellano-Bover), matching estimators, synthetic control,
+user-facing bootstrap inference, Bayesian methods, and nonparametric methods.
+
+
+\section{Extended examples} \label{app:extended-examples}
+\setcounter{table}{0}
+\setcounter{figure}{0}
+
+This appendix provides additional worked examples demonstrating
+\pkg{prompt2analytics} capabilities.
+
+\subsection{Multi-step workflow example}
+
+Real-world analysis typically involves multiple steps beyond single-command
+estimation. This section demonstrates a realistic workflow including data
+inspection, handling issues, and specification refinement.
+
+\subsubsection{Initial exploration}
+
+\begin{Sinput}
+User: I have employee salary data in salaries.csv. Load it and tell me
+      what variables are available for analysis.
+\end{Sinput}
+
+\begin{Soutput}
+**Dataset loaded: salaries**
+- Rows: 1,847
+- Columns: 8
+
+| Column     | Type    | Non-null | Description                    |
+|------------|---------|----------|--------------------------------|
+| employee_id| Int64   | 100%     | Unique identifier              |
+| salary     | Float64 | 98.2%    | Annual salary (USD)            |
+| education  | String  | 99.5%    | Highest degree (HS/BA/MA/PhD)  |
+| experience | Float64 | 97.8%    | Years of experience            |
+| department | String  | 100%     | Department name                |
+| gender     | String  | 100%     | M/F                            |
+| performance| Float64 | 94.1%    | Performance rating (1-5)       |
+| tenure     | Int64   | 100%     | Years at company               |
+
+I notice some missing values, particularly in performance (5.9% missing)
+and experience (2.2% missing). Would you like me to examine the missingness
+pattern before proceeding?
+\end{Soutput}
+
+\subsubsection{Addressing data issues}
+
+\begin{Sinput}
+User: Yes, check if the missing values are random or if there's a pattern.
+      Then proceed with complete cases for now.
+\end{Sinput}
+
+\begin{Soutput}
+**Missingness Analysis**
+
+Performance ratings are more likely to be missing for:
+- Recent hires (tenure < 1 year): 23% missing vs 3% for others
+- This suggests MNAR (missing not at random) - new employees may not
+  yet have performance reviews.
+
+**Proceeding with complete cases:** 1,692 observations (91.6% retained)
+\end{Soutput}
+
+\subsubsection{Initial specification}
+
+\begin{Sinput}
+User: Regress salary on education, experience, and gender. I want to
+      understand the gender pay gap controlling for human capital.
+\end{Sinput}
+
+\begin{Soutput}
+**OLS Regression Results** (HC1 robust standard errors)
+
+| Variable         |     Coef |   Std Err |      t | P>|t| |
+|------------------|--------:|---------:|-------:|------:|
+| (Intercept)      | 42,156  |   1,247  | 33.81  | 0.000 |
+| education_BA     |  8,934  |     892  | 10.02  | 0.000 |
+| education_MA     | 15,267  |   1,103  | 13.84  | 0.000 |
+| education_PhD    | 22,891  |   1,456  | 15.72  | 0.000 |
+| experience       |  1,247  |      89  | 14.01  | 0.000 |
+| gender_M         |  4,892  |     743  |  6.58  | 0.000 |
+
+R-squared: 0.412
+\end{Soutput}
+
+\subsubsection{Specification refinement}
+
+\begin{Sinput}
+User: Add department fixed effects and performance rating.
+\end{Sinput}
+
+\begin{Soutput}
+**Regression with Department Fixed Effects**
+
+| Variable         |     Coef |   Std Err |      t | P>|t| |
+|------------------|--------:|---------:|-------:|------:|
+| education_BA     |  6,234  |     812  |  7.68  | 0.000 |
+| education_MA     | 11,456  |   1,021  | 11.22  | 0.000 |
+| education_PhD    | 17,234  |   1,298  | 13.28  | 0.000 |
+| experience       |  1,089  |      82  | 13.28  | 0.000 |
+| performance      |  3,456  |     312  | 11.08  | 0.000 |
+| gender_M         |  2,134  |     698  |  3.06  | 0.002 |
+
+R-squared (within): 0.523
+Department FE: 12 groups
+
+Adding department controls and performance reduces the gender coefficient
+from \$4,892 to \$2,134 (a 56\% reduction).
+\end{Soutput}
+
+
+\subsection{Additional CLI examples}
+
+The command-line interface provides programmatic access for scripted workflows:
+
+\begin{Sinput}
+# Session-based workflow
+p2a --session analysis.json data load grunfeld.csv --name grunfeld
+p2a --session analysis.json data describe grunfeld
+
+# Panel data estimation with clustering
+p2a --session analysis.json panel fe grunfeld \
+    -y inv -x value capital --entity firm
+
+# Export session to reproducible script
+p2a script export analysis.json -o reproduce.sh
+\end{Sinput}
+
+
+\subsection{Additional error handling examples}
+
+\subsubsection{Small cluster warnings}
+
+\begin{Sinput}
+User: Cluster the standard errors by department.
+\end{Sinput}
+
+\begin{Soutput}
+**Clustered Standard Errors (by department)**
+
+| Variable    |    Coef | Robust SE | Cluster SE |     t | P>|t| |
+|-------------|--------:|----------:|-----------:|------:|------:|
+| performance |   0.142 |     0.018 |      0.031 |  4.58 | 0.001 |
+| tenure      |   0.023 |     0.004 |      0.007 |  3.29 | 0.008 |
+| experience  |   0.008 |     0.003 |      0.004 |  2.00 | 0.071 |
+
+**Warning: Small number of clusters (G = 10)**
+
+Clustered standard errors require $G \to \infty$ asymptotics. With only
+10 clusters, standard errors may be biased downward.
+\end{Soutput}
+
+\subsubsection{Out-of-scope requests}
+
+\begin{Sinput}
+User: Run a Bayesian regression with informative priors.
+\end{Sinput}
+
+\begin{Soutput}
+**Method not available**
+
+Bayesian inference is not currently implemented. Available alternatives:
+- OLS with robust standard errors (implemented)
+- Ridge/LASSO regularization for coefficient shrinkage (implemented)
+- Bootstrap confidence intervals (implemented)
+
+**For Bayesian analysis**, consider: R (rstanarm, brms), Python (PyMC).
+\end{Soutput}

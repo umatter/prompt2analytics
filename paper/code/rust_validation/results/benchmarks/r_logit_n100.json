@@ -1,0 +1,19 @@
+{
+  "method": "logit",
+  "dataset": "synthetic_binary_n100.csv",
+  "n": 100,
+  "iterations": 100,
+  "warmup": 5,
+  "timestamp": "2026-01-26T16:00:29",
+  "r_version": "4.3.3",
+  "timing": {
+    "min_us": 864.6161295474,
+    "median_us": 1096.3705717586,
+    "mean_us": [],
+    "max_us": [],
+    "itr_per_sec": 952.467787686,
+    "mem_alloc": 303504,
+    "n_gc": 4,
+    "n_itr": 96
+  }
+}

@@ -21,73 +21,126 @@ whether this requires OLS, fixed effects, or instrumental variables. The
 system interprets the request, selects appropriate methods, executes the
 analysis, and returns results with natural language explanation.
 
-This approach offers several advantages. First, it lowers the barrier to
-entry for users unfamiliar with econometric software conventions. Second,
-it allows domain experts to focus on their research questions rather than
-implementation details. Third, it enables exploratory analysis through
+This approach builds on a long history of natural language interfaces for
+data. Early systems like LUNAR \citep{Woods:1973} demonstrated that users
+could query databases in English, though these systems were limited to
+specific domains and required careful phrasing
+\citep{Androutsopoulos+etal:1995}. The text-to-SQL paradigm, exemplified
+by benchmarks like Spider \citep{Yu+etal:2018}, has driven substantial
+progress in translating natural language to structured queries
+\citep{Li+etal:2024}. Similarly, systems like NL4DV \citep{Narechania+etal:2021}
+enable natural language specification of data visualizations.
+
+Our approach differs from these predecessors in two key respects. First,
+we target statistical analysis rather than data retrieval or visualization
+alone---the system must select among econometric methods, not just translate
+queries to SQL. Second, we leverage large language models as the interpretive
+layer, providing flexibility that rule-based systems cannot match.
+
+This conversational paradigm offers several advantages. It lowers the barrier
+to entry for users unfamiliar with econometric software conventions. It
+allows domain experts to focus on their research questions rather than
+implementation details. And it enables exploratory analysis through
 dialogue---users can refine their analysis iteratively based on results
 and suggestions from the system.
+
+\subsection{Positioning this work}
+
+\pkg{prompt2analytics} builds on a long tradition of interface innovation in
+statistical software, from the Wilkinson-Rogers formula notation
+\citep{Wilkinson+Rogers:1973} to text-to-SQL systems \citep{Yu+etal:2018} and
+AutoML pipelines \citep{Feurer+etal:2015}. Rather than inventing new notation,
+it accepts natural language descriptions of analytical intent---trading the
+precision of formal DSLs for accessibility.
+
+The contribution is primarily software engineering rather than methodological
+innovation: (1) providing a foundational \proglang{Rust} econometrics library,
+(2) exposing implementations through a standardized LLM integration protocol,
+and (3) demonstrating that chat-first interfaces to validated backends can
+address correctness and privacy concerns. We do not claim to advance econometric
+theory; the implementations follow established algorithms validated against
+\proglang{R} reference packages. Appendix~\ref{app:related-work} provides
+extended discussion of related work on statistical interfaces.
+
+\subsection{LLM limitations in chat-first systems}
 
 The chat-first paradigm does not replace statistical expertise. Users
 must still understand their data, formulate sensible research questions,
 and interpret results critically. The system assists with method selection
 and execution, not with research design or causal identification.
 
+A related concern is the handling of causal language. Users may request
+analyses using causal terminology (``estimate the effect of X on Y'')
+without satisfying identification assumptions. The system does not
+validate whether causal claims are supported by the research design;
+it executes the requested statistical procedure and returns results.
+LLM explanations may use causal language that echoes user prompts even
+when the underlying analysis provides only associational evidence.
+Users bear responsibility for ensuring that causal interpretations are
+warranted by their identification strategy, not merely by the statistical
+method employed.
+
 \subsection{LLM as method selector}
 
 Large language models serve as the interpretive layer between user intent
-and statistical execution. When a user submits a query, the LLM:
-\begin{enumerate}
-  \item Parses the natural language request to identify the analytical goal
-  \item Considers the available data structure and variables
-  \item Selects appropriate statistical methods from the available toolkit
-  \item Generates structured tool calls with correct parameters
-  \item Interprets results and formulates a response
-\end{enumerate}
+and statistical execution. The LLM parses natural language requests, selects
+appropriate methods from the toolkit, generates structured tool calls, and
+interprets results. This builds on the tool-augmented LLM paradigm
+\citep{Yao+etal:2023, Schick+etal:2023}.
 
-This design leverages the LLM's strength---natural language understanding
-and reasoning about method appropriateness---while delegating numerical
-computation to specialized, verified implementations. The LLM never performs
-statistical calculations directly; it orchestrates calls to the analytics
-engine.
+A key distinction from code-generation approaches is that our system does not
+ask the LLM to write statistical code---studies show LLMs generate incorrect
+code frequently \citep{Nejjar+etal:2024}. Instead, we provide pre-implemented,
+verified methods as callable tools. The LLM's constrained role (method selection
+and parameter specification) enables smaller models to perform adequately
+(Section~\ref{sec:local}).
+
+\begin{table}[htbp]
+\centering
+\caption{Comparison with existing LLM-based data analysis systems}
+\label{tab:system-comparison}
+\small
+\begin{tabular}{lcccc}
+\toprule
+Feature & \pkg{prompt2analytics} & Econometrics AI & Data Interpreter & LAMBDA \\
+\midrule
+Approach & Tool selection & Enhanced code gen & Code gen + exec & Agent orchestration \\
+Computation & Pre-validated Rust & LLM-generated & LLM-generated & LLM-generated \\
+Local execution & Yes (Ollama) & No & No & No \\
+Correctness & Validated vs R & Code review & None & None \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:system-comparison} contrasts \pkg{prompt2analytics} with related
+systems \citep{Chen+Shen+Ma:2025, Hong+etal:2024, Sun+etal:2025:LAMBDA}---all of
+which generate and execute code, whereas our system routes requests to
+pre-validated implementations.
 
 \subsection{Why Rust}
 
-The choice of \proglang{Rust} as the implementation language reflects
-several design priorities:
-
-\paragraph{Performance.}
-\proglang{Rust} compiles to native code with performance comparable to
-\proglang{C} and \proglang{C++}. For computationally intensive operations
-like high-dimensional fixed effects estimation or bootstrap inference,
-this provides substantial speedups over interpreted languages.
-
-\paragraph{Memory safety.}
-\proglang{Rust}'s ownership system guarantees memory safety at compile
-time without garbage collection. This eliminates entire classes of bugs
-(buffer overflows, use-after-free, data races) that can cause crashes or
-incorrect results in numerical software.
-
-\paragraph{Modern tooling.}
-The \proglang{Rust} ecosystem provides high-quality libraries for
-data manipulation (\pkg{polars}), numerical arrays (\pkg{ndarray}),
-linear algebra (\pkg{faer}), and statistical distributions (\pkg{statrs}).
-The \pkg{cargo} package manager ensures reproducible builds and
-dependency management.
-
-\paragraph{Deployment flexibility.}
-A single \proglang{Rust} codebase compiles to standalone binaries for
-multiple platforms, WebAssembly for browser deployment, and shared
-libraries for integration with other languages. This enables the same
-analytics engine to power CLI tools, desktop applications, and web
-interfaces.
+\proglang{Rust} compiles to native code with \proglang{C}-level performance
+while guaranteeing memory safety at compile time---eliminating buffer overflows,
+use-after-free, and data races that can cause incorrect results in numerical
+software. The ecosystem provides \pkg{polars} for data manipulation,
+\pkg{ndarray} for arrays, and \pkg{faer} for linear algebra. A single
+codebase compiles to standalone binaries, WebAssembly for browsers, and
+shared libraries for language integration.
 
 \subsection{MCP as the bridge}
 
 The Model Context Protocol (MCP) provides the communication layer between
-LLMs and the analytics engine \citep{MCP:2024}. MCP defines a standardized
-way for language models to discover available tools, invoke them with
-structured parameters, and receive structured results.
+LLMs and the analytics engine \citep{MCP:2024}.%
+\footnote{MCP focuses on model-to-tool integration. Complementary protocols
+address agent-to-agent communication: Google's Agent2Agent (A2A) protocol
+\citep{A2A:2025} enables discovery and task delegation between AI agents,
+while IBM's Agent Communication Protocol (ACP) \citep{ACP:2025} provides
+lightweight HTTP-native messaging. A2A and ACP merged under Linux Foundation
+governance in 2025. For single-agent tool invocation---the pattern used in
+\pkg{prompt2analytics}---MCP remains the dominant standard, with adoption
+by OpenAI, Microsoft, and Google alongside Anthropic.}
+MCP defines a standardized way for language models to discover available
+tools, invoke them with structured parameters, and receive structured results.
 
 Each statistical method is exposed as an MCP tool with a defined schema
 specifying required and optional parameters. For example, the OLS tool
@@ -101,7 +154,7 @@ computation layer. The LLM can be swapped (Claude, GPT, Ollama) without
 changing the analytics engine. Conversely, the statistical implementations
 can be updated or extended without modifying the LLM integration.
 
-\subsection{Data locality}
+\subsection{Data locality and privacy}
 
 A key design principle is that bulk data processing occurs locally.
 When a dataset is loaded, only metadata is transmitted to the LLM:
@@ -112,20 +165,76 @@ inference---execute entirely on the local machine, with only aggregated
 results (coefficients, standard errors, test statistics) returned
 through the LLM.
 
-However, users should be aware that certain exploratory tools transmit
-sample data when explicitly requested. Data preview commands return
-actual row values, and data quality profiling may include frequent
-values from categorical columns. Users working with sensitive data
-should avoid requesting such previews when using cloud-hosted LLMs,
-or deploy a local model via Ollama to eliminate external transmission
-entirely.%
-\footnote{Local LLM deployment via Ollama ensures complete data isolation.
-Moreover, the chat-first architecture makes local models more viable:
-selecting among pre-implemented statistical methods is a far simpler task
-than generating correct statistical code from scratch, enabling smaller
-models to function effectively as method selectors.}
-The same interface and analytics engine function identically
-with local or cloud-hosted models.
+\subsubsection{Tools that transmit data}
+
+Users should understand which operations may transmit data beyond
+metadata and aggregated results:
+
+\begin{itemize}
+  \item \emph{Data preview} (\code{head}, \code{tail}, \code{sample}):
+    Returns actual row values for inspection. Requested sample size
+    determines transmission volume.
+  \item \emph{Data profiling}: May include frequent values from categorical
+    columns, min/max values for numeric columns, and example values for
+    pattern detection.
+  \item \emph{Outlier detection}: Reports specific observations identified
+    as outliers, including their variable values.
+  \item \emph{Error messages}: Failed operations may return the problematic
+    values in error context (e.g., ``column `salary' contains non-numeric
+    value `N/A' at row 47'').
+\end{itemize}
+
+Statistical estimation tools---regression, panel methods, hypothesis
+tests---transmit only summary statistics (coefficients, standard errors,
+test statistics, $p$-values), not individual observations. Residual
+diagnostics report aggregate properties (normality tests, autocorrelation)
+rather than observation-level residuals unless specifically requested.
+
+\subsubsection{Information leakage through aggregates}
+
+Even aggregated statistics can leak sensitive information in certain
+contexts. Coefficient estimates in small-sample regressions may be
+influenced by individual observations. Group means with small group
+sizes (particularly singletons) directly reveal individual values.
+Summary statistics for highly skewed distributions may identify
+outlying individuals.
+
+Users working with sensitive data should consider whether aggregated
+output could enable re-identification or inference about protected
+individuals. Local LLM deployment via Ollama eliminates these concerns
+entirely by keeping all data and results on the local machine.
+
+\subsubsection{Security considerations}
+
+MCP implementations face security challenges common to tool-augmented
+LLM systems. \emph{Prompt injection} attacks embed malicious instructions
+in data that the LLM then processes, potentially causing unintended
+tool invocations. \emph{Tool poisoning} attacks modify tool descriptions
+to influence LLM behavior \citep{OWASP:MCP:2025}.
+
+\pkg{prompt2analytics} mitigates these risks through several design
+choices:
+\begin{itemize}
+  \item Tools have fixed, auditable descriptions embedded in the server
+    binary---external modification is not possible without rebuilding.
+  \item The server executes only pre-defined statistical methods.
+    No arbitrary code execution capability exists; the LLM cannot
+    instruct the server to run shell commands or access files outside
+    loaded datasets.
+  \item Tool calls are logged and can be inspected before execution
+    (in interactive mode) or reviewed in audit logs.
+  \item Dataset access requires explicit loading; the server does not
+    have ambient filesystem access.
+\end{itemize}
+
+Nevertheless, users deploying MCP servers should follow security best
+practices: avoid loading untrusted data files that could contain
+injection payloads, review tool calls when processing sensitive data,
+and prefer local LLM deployment for high-security environments.
+
+The same interface and analytics engine function identically with
+local or cloud-hosted models, allowing users to select the deployment
+appropriate to their security requirements.
 
 \subsection{Implemented methods}
 
@@ -138,4 +247,20 @@ treatment effects), discrete choice models (logit, probit), and time series
 analysis (ARIMA, VAR, VECM, seasonal decomposition). Full documentation
 of all methods, including mathematical specifications and implementation
 details, is available in the package documentation.
+
+\subsection{Implementation caveats}
+
+Several implemented methods have limitations relative to state-of-the-art
+practice. Key caveats include: 2SLS reports first-stage $F$-statistics but
+lacks Stock-Yogo critical values for weak instruments; DiD assumes the canonical
+two-group, two-period design and does not implement staggered treatment
+estimators \citep{Goodman-Bacon:2021, Sun+Abraham:2021}; and ARIMA supports
+non-seasonal models with partial seasonal support.
+
+The implementation focuses on foundational methods; unimplemented categories
+include Heckman selection, quantile regression, spatial econometrics, GMM,
+dynamic panel models, matching estimators, and Bayesian methods. Users
+requiring these should use \proglang{R} or \proglang{Stata} for those analyses.
+Appendix~\ref{app:implementation} provides detailed documentation of
+method-specific limitations and recommended alternatives.
 

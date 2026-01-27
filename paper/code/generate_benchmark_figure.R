@@ -226,7 +226,7 @@ create_boxplot <- function(data, title_suffix = "") {
     scale_y_log10(name = "Execution Time (milliseconds, log scale)",
                   labels = scales::comma) +
     scale_x_discrete(name = "Method") +
-    scale_fill_manual(values = c("R" = "#4292C6", "p2a (Rust)" = "#EF6548")) +
+    scale_fill_manual(values = c("R" = "#0097A7", "p2a (Rust)" = "#E65100")) +
     theme_bw(base_size = 12) +
     theme(
       legend.position = "none",
@@ -269,7 +269,7 @@ create_boxplot_appendix <- function(data) {
     scale_y_log10(name = "Execution Time (milliseconds, log scale)",
                   labels = scales::comma) +
     scale_x_discrete(name = "Method (sample size)") +
-    scale_fill_manual(values = c("R" = "#4292C6", "p2a (Rust)" = "#EF6548")) +
+    scale_fill_manual(values = c("R" = "#0097A7", "p2a (Rust)" = "#E65100")) +
     theme_bw(base_size = 11) +
     theme(
       legend.position = "none",

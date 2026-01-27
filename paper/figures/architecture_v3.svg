@@ -8,13 +8,13 @@
       .edge-label { font-family: 'Helvetica Neue', Arial, sans-serif; font-size: 11px; fill: #333; font-weight: 500; }
       .section-title { font-family: 'Helvetica Neue', Arial, sans-serif; font-size: 10px; font-weight: 600; fill: #666; letter-spacing: 1px; }
     </style>
-    <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="userSpaceOnUse">
       <path d="M0,0 L0,6 L9,3 z" fill="#666"/>
     </marker>
-    <marker id="arrow-cyan" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+    <marker id="arrow-cyan" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="userSpaceOnUse">
       <path d="M0,0 L0,6 L9,3 z" fill="#0097A7"/>
     </marker>
-    <marker id="arrow-orange" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+    <marker id="arrow-orange" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="userSpaceOnUse">
       <path d="M0,0 L0,6 L9,3 z" fill="#E65100"/>
     </marker>
   </defs>
@@ -38,7 +38,7 @@
 
   <!-- Desktop + Web grouped together above LLM -->
   <!-- Desktop App Box -->
-  <g transform="translate(270, 45)">
+  <g transform="translate(230, 45)">
     <rect x="0" y="0" width="110" height="65" rx="4" fill="#f5f5f5" stroke="#333" stroke-width="1.5"/>
     <!-- Window icon -->
     <rect x="12" y="12" width="28" height="20" rx="2" fill="none" stroke="#333" stroke-width="1.5"/>
@@ -51,7 +51,7 @@
   </g>
 
   <!-- Web Client Box -->
-  <g transform="translate(400, 45)">
+  <g transform="translate(360, 45)">
     <rect x="0" y="0" width="110" height="65" rx="4" fill="#f5f5f5" stroke="#333" stroke-width="1.5"/>
     <!-- Globe icon -->
     <circle cx="26" cy="22" r="10" fill="none" stroke="#333" stroke-width="1.5"/>
@@ -63,7 +63,7 @@
   </g>
 
   <!-- ==================== LLM LAYER (wider) ==================== -->
-  <g transform="translate(200, 140)">
+  <g transform="translate(160, 140)">
     <rect x="0" y="0" width="380" height="95" rx="6" fill="#E0F7FA" stroke="#0097A7" stroke-width="2"/>
     <text x="190" y="20" text-anchor="middle" class="section-title" fill="#0097A7">LLM LAYER</text>
 
@@ -172,28 +172,28 @@
 
   <!-- ==================== ARROWS ==================== -->
   <!-- CLI direct to Core (orange, prominent) -->
-  <path d="M95,110 L95,355" stroke="#E65100" stroke-width="2.5" fill="none" marker-end="url(#arrow-orange)"/>
+  <path d="M95,110 L95,360" stroke="#E65100" stroke-width="2.5" fill="none" marker-end="url(#arrow-orange)"/>
   <text x="105" y="240" class="edge-label" fill="#E65100">Direct</text>
 
   <!-- Desktop to LLM -->
-  <path d="M325,110 L325,135 L350,135 L350,140" stroke="#0097A7" stroke-width="1.5" fill="none" marker-end="url(#arrow-cyan)"/>
+  <path d="M285,110 L285,135 L310,135 L310,140" stroke="#0097A7" stroke-width="1.5" fill="none" marker-end="url(#arrow-cyan)"/>
 
   <!-- Web to LLM -->
-  <path d="M455,110 L455,135 L430,135 L430,140" stroke="#0097A7" stroke-width="1.5" fill="none" marker-end="url(#arrow-cyan)"/>
+  <path d="M415,110 L415,135 L390,135 L390,140" stroke="#0097A7" stroke-width="1.5" fill="none" marker-end="url(#arrow-cyan)"/>
 
   <!-- LLM to MCP -->
-  <path d="M390,235 L390,260" stroke="#666" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
-  <text x="400" y="252" class="edge-label">Tool calls</text>
+  <path d="M350,235 L350,265" stroke="#666" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
+  <text x="360" y="252" class="edge-label">Tool calls</text>
 
   <!-- MCP to Core -->
-  <path d="M350,320 L350,355" stroke="#E65100" stroke-width="1.5" fill="none" marker-end="url(#arrow-orange)"/>
+  <path d="M350,320 L350,360" stroke="#E65100" stroke-width="1.5" fill="none" marker-end="url(#arrow-orange)"/>
   <text x="360" y="342" class="edge-label" fill="#E65100">Execute</text>
 
   <!-- Core to Dependencies -->
-  <path d="M350,475 L350,500" stroke="#999" stroke-width="1" fill="none" marker-end="url(#arrow)"/>
+  <path d="M350,475 L350,505" stroke="#999" stroke-width="1" fill="none" marker-end="url(#arrow)"/>
 
   <!-- ==================== KEY INSIGHT CALLOUT (top right) ==================== -->
-  <g transform="translate(560, 45)">
+  <g transform="translate(540, 45)">
     <rect x="0" y="0" width="130" height="50" rx="4" fill="#FCE4EC" stroke="#C2185B" stroke-width="1.5"/>
     <text x="65" y="18" text-anchor="middle" class="label" fill="#C2185B" font-weight="600">Key Design</text>
     <text x="65" y="32" text-anchor="middle" class="sublabel" fill="#C2185B">LLM decides method</text>

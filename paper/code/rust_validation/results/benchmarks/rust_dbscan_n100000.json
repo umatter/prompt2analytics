@@ -1,0 +1,10 @@
+{
+  "method": "dbscan",
+  "n": 100000,
+  "iterations": 1,
+  "timing": {
+    "median_us": 71707000,
+    "min_us": 71707000,
+    "max_us": 71707000
+  }
+}

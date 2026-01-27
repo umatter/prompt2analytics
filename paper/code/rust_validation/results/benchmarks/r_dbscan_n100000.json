@@ -1,0 +1,9 @@
+{
+  "method": "dbscan",
+  "n": 100000,
+  "iterations": 30,
+  "timing": {
+    "median_us": 8762254.63,
+    "min_us": 7572327.49
+  }
+}

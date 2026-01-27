@@ -1,0 +1,136 @@
+{
+  "category": "naturalistic_regression",
+  "description": "Naturalistic prompt variations for regression tests",
+  "tests": [
+    {
+      "id": "nat_reg_001",
+      "base_test_id": "reg_001",
+      "prompt_type": "informal",
+      "prompt": "hey can u figure out if firm value affects investment",
+      "expected_tools": ["regression_ols"],
+      "acceptable_tools": ["regression_ols", "regression_clustered"],
+      "dataset_context": "grunfeld dataset: firm, year, inv, value, capital",
+      "linguistic_features": ["informal_register", "abbreviations"]
+    },
+    {
+      "id": "nat_reg_002",
+      "base_test_id": "reg_001",
+      "prompt_type": "typos",
+      "prompt": "Esitmate teh efect of firm vlaue on investmnet using OLS",
+      "expected_tools": ["regression_ols"],
+      "acceptable_tools": ["regression_ols", "regression_clustered"],
+      "dataset_context": "grunfeld dataset: firm, year, inv, value, capital",
+      "linguistic_features": ["typos", "misspellings"]
+    },
+    {
+      "id": "nat_reg_003",
+      "base_test_id": "reg_001",
+      "prompt_type": "domain_jargon",
+      "prompt": "Run a Mincerian regression of firm investment on Tobin's q proxy",
+      "expected_tools": ["regression_ols"],
+      "acceptable_tools": ["regression_ols", "regression_clustered"],
+      "dataset_context": "grunfeld dataset: firm, year, inv, value, capital",
+      "linguistic_features": ["domain_jargon", "technical_reference"]
+    },
+    {
+      "id": "nat_reg_004",
+      "base_test_id": "reg_001",
+      "prompt_type": "verbose",
+      "prompt": "I have this dataset and I've been wondering for a while now whether there might be some kind of relationship between how valuable a firm is and how much it invests. Could you perhaps run some kind of statistical analysis to investigate this potential association? I think a regression might work but I'm not entirely sure.",
+      "expected_tools": ["regression_ols"],
+      "acceptable_tools": ["regression_ols", "regression_clustered", "compute_correlation"],
+      "dataset_context": "grunfeld dataset: firm, year, inv, value, capital",
+      "linguistic_features": ["verbose", "hedging", "uncertainty"]
+    },
+    {
+      "id": "nat_reg_005",
+      "base_test_id": "reg_002",
+      "prompt_type": "informal",
+      "prompt": "need robust standard errors on this regression bc heteroskedasticity",
+      "expected_tools": ["regression_ols"],
+      "acceptable_tools": ["regression_ols"],
+      "dataset_context": "grunfeld dataset: firm, year, inv, value, capital",
+      "linguistic_features": ["informal_register", "abbreviations", "technical_shorthand"]
+    },
+    {
+      "id": "nat_reg_006",
+      "base_test_id": "reg_003",
+      "prompt_type": "ambiguous",
+      "prompt": "cluster these by company",
+      "expected_tools": ["regression_clustered"],
+      "acceptable_tools": ["regression_clustered", "ml_kmeans"],
+      "dataset_context": "grunfeld dataset: firm, year, inv, value, capital",
+      "linguistic_features": ["ambiguous", "context_dependent"]
+    },
+    {
+      "id": "nat_reg_007",
+      "base_test_id": "reg_004",
+      "prompt_type": "domain_jargon",
+      "prompt": "I need White-Huber standard errors for my investment equation",
+      "expected_tools": ["regression_ols"],
+      "acceptable_tools": ["regression_ols"],
+      "dataset_context": "grunfeld dataset: firm, year, inv, value, capital",
+      "linguistic_features": ["domain_jargon", "alternative_naming"]
+    },
+    {
+      "id": "nat_reg_008",
+      "base_test_id": "reg_005",
+      "prompt_type": "verbose",
+      "prompt": "So basically what I'm trying to do here is I want to understand the relationship between multiple variables and I think the best approach would be to use some kind of multiple regression analysis where we can see how each independent variable contributes to explaining the dependent variable while controlling for the others",
+      "expected_tools": ["regression_ols"],
+      "acceptable_tools": ["regression_ols"],
+      "dataset_context": "wages dataset: wage, education, experience, tenure, female, married",
+      "linguistic_features": ["verbose", "explanatory", "technical_but_vague"]
+    },
+    {
+      "id": "nat_reg_009",
+      "base_test_id": "reg_006",
+      "prompt_type": "typos",
+      "prompt": "calcualte the VIF for multicolinearity chekc",
+      "expected_tools": ["regression_vif"],
+      "acceptable_tools": ["regression_vif", "regression_diagnostics"],
+      "dataset_context": "wages dataset: wage, education, experience, tenure, female, married",
+      "linguistic_features": ["typos", "misspellings"]
+    },
+    {
+      "id": "nat_reg_010",
+      "base_test_id": "reg_007",
+      "prompt_type": "informal",
+      "prompt": "yo run a quick reg of wages on edu controlling for exp",
+      "expected_tools": ["regression_ols"],
+      "acceptable_tools": ["regression_ols"],
+      "dataset_context": "wages dataset: wage, education, experience, tenure, female, married",
+      "linguistic_features": ["informal_register", "abbreviations", "casual_language"]
+    },
+    {
+      "id": "nat_reg_011",
+      "base_test_id": "reg_008",
+      "prompt_type": "ambiguous",
+      "prompt": "fit a curve to this",
+      "expected_tools": ["regression_nls"],
+      "acceptable_tools": ["regression_nls", "regression_ols", "viz_scatter"],
+      "dataset_context": "growth dataset: gdp, population, capital, year",
+      "linguistic_features": ["ambiguous", "vague"]
+    },
+    {
+      "id": "nat_reg_012",
+      "base_test_id": "reg_009",
+      "prompt_type": "domain_jargon",
+      "prompt": "Estimate the Cobb-Douglas production function coefficients",
+      "expected_tools": ["regression_nls"],
+      "acceptable_tools": ["regression_nls", "regression_ols"],
+      "dataset_context": "growth dataset: gdp, labor, capital, year",
+      "linguistic_features": ["domain_jargon", "specific_model_reference"]
+    },
+    {
+      "id": "nat_reg_013",
+      "base_test_id": "reg_010",
+      "prompt_type": "verbose",
+      "prompt": "I'm not sure if the relationship between these variables is linear or if there might be some nonlinearity that we should account for. Maybe we should try fitting some kind of nonlinear model? I've heard about things like polynomial regression or maybe even some kind of exponential relationship could work here. What would you suggest?",
+      "expected_tools": ["regression_nls"],
+      "acceptable_tools": ["regression_nls", "regression_ols"],
+      "dataset_context": "growth dataset: gdp, population, capital, year",
+      "linguistic_features": ["verbose", "uncertainty", "seeking_guidance"]
+    }
+  ]
+}

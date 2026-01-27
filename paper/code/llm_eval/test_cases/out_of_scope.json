@@ -1,0 +1,166 @@
+{
+  "category": "out_of_scope",
+  "description": "Tests for detecting methods not implemented in p2a and graceful degradation",
+  "tests": [
+    {
+      "id": "oos_001",
+      "prompt": "Fit a Bayesian linear regression with informative priors on the coefficients",
+      "expected_response": "out_of_scope",
+      "oos_reason": "bayesian_inference",
+      "closest_available": ["regression_ols"],
+      "explanation": "p2a does not implement Bayesian estimation methods"
+    },
+    {
+      "id": "oos_002",
+      "prompt": "Estimate a GARCH(1,1) model to forecast stock return volatility",
+      "expected_response": "out_of_scope",
+      "oos_reason": "garch_volatility",
+      "closest_available": ["ts_arima", "ts_var"],
+      "explanation": "p2a does not implement GARCH or volatility models"
+    },
+    {
+      "id": "oos_003",
+      "prompt": "Run a quantile regression at the 25th, 50th, and 75th percentiles",
+      "expected_response": "out_of_scope",
+      "oos_reason": "quantile_regression",
+      "closest_available": ["regression_ols", "regression_nls"],
+      "explanation": "p2a does not implement quantile regression"
+    },
+    {
+      "id": "oos_004",
+      "prompt": "Estimate a spatial autoregressive model accounting for geographic spillovers",
+      "expected_response": "out_of_scope",
+      "oos_reason": "spatial_econometrics",
+      "closest_available": ["panel_fe", "regression_clustered"],
+      "explanation": "p2a does not implement spatial econometric models"
+    },
+    {
+      "id": "oos_005",
+      "prompt": "Fit a multilevel/hierarchical linear model with random slopes",
+      "expected_response": "out_of_scope",
+      "oos_reason": "mixed_effects_glm",
+      "closest_available": ["panel_re", "panel_fe"],
+      "explanation": "p2a implements simple random effects but not full mixed-effects GLMs"
+    },
+    {
+      "id": "oos_006",
+      "prompt": "Estimate a seemingly unrelated regression (SUR) system",
+      "expected_response": "out_of_scope",
+      "oos_reason": "sur_system",
+      "closest_available": ["regression_ols", "ts_var"],
+      "explanation": "p2a does not implement SUR estimation"
+    },
+    {
+      "id": "oos_007",
+      "prompt": "Train a neural network to predict customer churn",
+      "expected_response": "out_of_scope",
+      "oos_reason": "deep_learning",
+      "closest_available": ["ml_random_forest", "logit"],
+      "explanation": "p2a does not implement deep learning/neural networks"
+    },
+    {
+      "id": "oos_008",
+      "prompt": "Fit an ordered probit model for a satisfaction rating from 1-5",
+      "expected_response": "out_of_scope",
+      "oos_reason": "ordered_choice",
+      "closest_available": ["probit", "logit"],
+      "explanation": "p2a implements binary probit but not ordered choice models"
+    },
+    {
+      "id": "oos_009",
+      "prompt": "Estimate a Tobit model for censored data with observations at zero",
+      "expected_response": "out_of_scope",
+      "oos_reason": "censored_regression",
+      "closest_available": ["regression_ols", "regression_nls"],
+      "explanation": "p2a does not implement Tobit/censored regression models"
+    },
+    {
+      "id": "oos_010",
+      "prompt": "Run a structural equation model (SEM) with latent variables",
+      "expected_response": "out_of_scope",
+      "oos_reason": "sem_latent",
+      "closest_available": ["ml_pca", "iv_2sls"],
+      "explanation": "p2a does not implement structural equation modeling"
+    },
+    {
+      "id": "oos_011",
+      "prompt": "Perform a Bayesian VAR estimation with Minnesota priors",
+      "expected_response": "out_of_scope",
+      "oos_reason": "bayesian_var",
+      "closest_available": ["ts_var"],
+      "explanation": "p2a implements frequentist VAR but not Bayesian VAR"
+    },
+    {
+      "id": "oos_012",
+      "prompt": "Estimate a stochastic frontier production function",
+      "expected_response": "out_of_scope",
+      "oos_reason": "stochastic_frontier",
+      "closest_available": ["regression_nls", "regression_ols"],
+      "explanation": "p2a does not implement stochastic frontier models"
+    },
+    {
+      "id": "oos_013",
+      "prompt": "Fit a Poisson regression with overdispersion correction",
+      "expected_response": "out_of_scope",
+      "oos_reason": "count_models",
+      "closest_available": ["feglm", "logit"],
+      "explanation": "p2a does not implement count data models (Poisson, Negative Binomial)"
+    },
+    {
+      "id": "oos_014",
+      "prompt": "Estimate a survival/duration model using Cox proportional hazards",
+      "expected_response": "out_of_scope",
+      "oos_reason": "survival_analysis",
+      "closest_available": ["logit", "regression_ols"],
+      "explanation": "p2a does not implement survival analysis methods"
+    },
+    {
+      "id": "oos_015",
+      "prompt": "Perform a causal forest analysis to estimate heterogeneous treatment effects",
+      "expected_response": "out_of_scope",
+      "oos_reason": "causal_ml",
+      "closest_available": ["treatment_ate", "ml_random_forest"],
+      "explanation": "p2a does not implement causal machine learning methods"
+    },
+    {
+      "id": "oos_016",
+      "prompt": "Run a multinomial logit model for choice among 5 alternatives",
+      "expected_response": "out_of_scope",
+      "oos_reason": "multinomial_choice",
+      "closest_available": ["logit", "probit"],
+      "explanation": "p2a implements binary logit but not multinomial choice models"
+    },
+    {
+      "id": "oos_017",
+      "prompt": "Estimate an ARCH model for conditional heteroskedasticity",
+      "expected_response": "out_of_scope",
+      "oos_reason": "arch_volatility",
+      "closest_available": ["ts_arima"],
+      "explanation": "p2a does not implement ARCH family models"
+    },
+    {
+      "id": "oos_018",
+      "prompt": "Fit a state-space model using the Kalman filter",
+      "expected_response": "out_of_scope",
+      "oos_reason": "state_space",
+      "closest_available": ["ts_arima", "ts_var"],
+      "explanation": "p2a does not implement state-space models or Kalman filtering"
+    },
+    {
+      "id": "oos_019",
+      "prompt": "Perform bootstrap inference with 10,000 replications",
+      "expected_response": "out_of_scope",
+      "oos_reason": "bootstrap_inference",
+      "closest_available": ["regression_ols"],
+      "explanation": "p2a does not implement bootstrap inference methods"
+    },
+    {
+      "id": "oos_020",
+      "prompt": "Estimate a bivariate probit model with sample selection",
+      "expected_response": "out_of_scope",
+      "oos_reason": "selection_models",
+      "closest_available": ["probit", "logit"],
+      "explanation": "p2a does not implement sample selection (Heckman) models"
+    }
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "method": "kmeans",
+  "n": 100,
+  "iterations": 100,
+  "timing": {
+    "min_us": 5436,
+    "median_us": 8438,
+    "mean_us": 8649,
+    "max_us": 13583
+  }
+}

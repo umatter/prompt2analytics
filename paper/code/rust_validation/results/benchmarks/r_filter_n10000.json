@@ -1,0 +1,19 @@
+{
+  "method": "filter",
+  "dataset": "synthetic_ols_n10000.csv",
+  "n": 10000,
+  "iterations": 100,
+  "warmup": 5,
+  "timestamp": "2026-01-26T16:03:30",
+  "r_version": "4.3.3",
+  "timing": {
+    "min_us": 514.0559514984,
+    "median_us": 673.5500646755,
+    "mean_us": [],
+    "max_us": [],
+    "itr_per_sec": 1467.083434535,
+    "mem_alloc": 946736,
+    "n_gc": 1,
+    "n_itr": 99
+  }
+}

@@ -4,74 +4,198 @@
 
 \section{Software architecture} \label{sec:architecture}
 
-% TODO: Document the crate structure and interfaces
-
-\pkg{prompt2analytics} is organized as a \proglang{Rust} workspace with four crates:
+\pkg{prompt2analytics} is organized as a \proglang{Rust} workspace comprising
+four crates that separate concerns between core computation, user interfaces,
+and LLM integration. Figure~\ref{fig:architecture} illustrates the overall
+architecture, showing two distinct pathways: direct access via the CLI, and
+LLM-mediated access through chat interfaces.
 
 \begin{description}
-  \item[\pkg{p2a-core}] Core analytics library implementing all statistical methods
-  \item[\pkg{p2a-cli}] Command-line interface (\code{p2a} binary)
-  \item[\pkg{p2a-mcp}] Model Context Protocol server (101 tools)
-  \item[\pkg{p2a-desktop}] Desktop application with LLM integration
+  \item[\pkg{p2a-core}] Core analytics library implementing all statistical
+    methods in pure \proglang{Rust}. This crate has no external econometrics
+    dependencies; all estimators are implemented from first principles using
+    \pkg{ndarray} for matrix operations and \pkg{faer} for numerically stable
+    linear algebra. Implementations follow standard textbook algorithms:
+    OLS and robust standard errors follow \cite{Wooldridge:2010} and
+    \cite{Cameron+Trivedi:2005}; panel data methods follow \cite{Baltagi:2013};
+    time series methods follow \cite{Hamilton:1994}; maximum likelihood
+    estimation for discrete choice models uses Newton-Raphson as described
+    in \cite{Greene:2018}.
+  \item[\pkg{p2a-cli}] Command-line interface exposing the full analytics
+    functionality through hierarchical subcommands. Produces a standalone
+    \code{p2a} binary.
+  \item[\pkg{p2a-mcp}] Model Context Protocol server exposing 101 tools for
+    LLM integration. Supports multiple transport mechanisms (stdio, HTTP,
+    WebSocket) and maintains session state for dataset persistence.
+  \item[\pkg{p2a-dioxus}] Web application written entirely in \proglang{Rust}
+    using the Dioxus framework, compiling to WebAssembly for browser deployment.
+    Communicates with the MCP server via HTTP.
 \end{description}
 
-\subsection{Core library}
-
-The core library uses \pkg{polars} \citep{polars} for DataFrame operations,
-\pkg{ndarray} \citep{ndarray} for matrix operations, \pkg{faer} \citep{faer}
-for linear algebra (Cholesky decomposition, matrix inverse), and \pkg{statrs}
-\citep{statrs} for statistical distributions.
-
-\subsection{Interfaces}
-
-% CLI, MCP server, desktop app
-Three interfaces provide access to the functionality:
-\begin{enumerate}
-  \item Command-line interface with hierarchical subcommands
-  \item MCP server exposing 101 tools for LLM integration
-  \item Desktop application with conversational interface
-\end{enumerate}
-
-Figure~\ref{fig:architecture} illustrates the overall software architecture,
-showing how the different components interact. The CLI provides direct access
-to the analytics engine, while the chat-based interfaces route through an LLM
-layer that interprets natural language requests and translates them into
-structured tool calls via the MCP protocol.
+All user-facing crates depend on \pkg{p2a-core}, ensuring that statistical
+computations are identical regardless of the interface used.
 
 \begin{figure}[htbp]
 \centering
 \includegraphics[width=\textwidth]{figures/architecture_v3}
-\caption{Software architecture of \pkg{prompt2analytics}. User interfaces
-(top) connect either directly to the analytics engine (CLI) or through
-LLM providers and the MCP server (chat interfaces). The core analytics
-engine implements all statistical methods using pure \proglang{Rust}
-dependencies (bottom).}
+\caption{Software architecture of \pkg{prompt2analytics}. The CLI provides
+direct access to the analytics engine (orange path), while chat interfaces
+route through the LLM layer and MCP server (cyan path). All statistical
+computation occurs locally in the \pkg{p2a-core} engine, which implements
+methods across six categories using pure \proglang{Rust} dependencies.}
 \label{fig:architecture}
 \end{figure}
 
-\subsection{LLM integration via MCP}
+\subsection{Core library organization}
 
-The Model Context Protocol (MCP) enables integration with large language
-models \citep{MCP:2024}. When a user submits a natural language query through
-the chat interface, the LLM interprets the request and generates appropriate
-tool calls. Figure~\ref{fig:chat-flow} illustrates this interaction pattern.
+The \pkg{p2a-core} library organizes modules by analytical workflow: linear
+algebra primitives (\code{linalg}), regression methods with robust standard
+errors (\code{regression}), panel/IV/DiD/discrete choice methods
+(\code{econometrics}), 40+ statistical tests (\code{stats}), time series
+and forecasting (\code{forecasting}), clustering and dimensionality reduction
+(\code{ml}), and visualization (\code{visualization}).
+
+A \code{LinearEstimator} trait provides a consistent interface across OLS,
+panel models, and IV estimators---implementors provide core results (coefficients,
+standard errors, residuals); derived statistics ($t$-values, $p$-values,
+confidence intervals) are computed via default implementations. This ensures
+comparable output across estimators while enforcing the interface at compile
+time. Unlike \proglang{R}'s formula interface, \pkg{p2a-core} uses an explicit
+column-based API (\code{run\_ols(dataset, "y", \&["x1", "x2"], ...)}), since
+the LLM already translates intent to specification.
+
+The \code{EconError} type provides specific, actionable error messages
+(singular matrix, perfect multicollinearity, convergence failure, insufficient
+clusters) that enable the LLM to provide helpful recovery guidance.
+
+\subsection{User interfaces}
+
+Three interfaces provide access to the core functionality, as shown in
+Figure~\ref{fig:architecture}.
+
+\subsubsection{Command-line interface}
+
+The CLI uses hierarchical subcommands organized by analytical domain:
+
+\begin{verbatim}
+p2a data load sales.csv --name sales
+p2a reg ols sales -y revenue -x advertising budget --robust hc1
+p2a panel fe sales -y revenue -x advertising --entity firm --time year
+p2a viz scatter sales -x advertising -y revenue -o scatter.png
+\end{verbatim}
+
+Session management enables dataset persistence across commands and script
+generation for reproducibility. The \code{--session} flag records all
+commands to a JSON file that can be exported as an executable script.
+
+\subsubsection{MCP server}
+
+The MCP server exposes 101 tools organized into categories that mirror
+the core library structure:
+
+\begin{center}
+\begin{tabular}{llr}
+\hline
+Category & Examples & Tools \\
+\hline
+Data management & \code{load\_dataset}, \code{describe\_dataset} & 7 \\
+Data transformation & \code{munge\_filter}, \code{munge\_join}, \code{munge\_pivot} & 19 \\
+Regression & \code{regression\_ols}, \code{regression\_diagnostics} & 10 \\
+Panel data & \code{panel\_fixed\_effects}, \code{hausman\_test} & 5 \\
+Causal inference & \code{iv\_2sls}, \code{diff\_in\_diff} & 8 \\
+Discrete choice & \code{logit}, \code{probit} & 2 \\
+Time series & \code{ts\_arima\_fit}, \code{ts\_var} & 6 \\
+Statistics & various hypothesis tests & 30+ \\
+Visualization & \code{viz\_scatter}, \code{viz\_histogram\_interactive} & 7 \\
+\hline
+\end{tabular}
+\end{center}
+
+Each tool has a JSON Schema defining required and optional parameters,
+enabling LLMs to generate valid tool calls. The schema design follows
+several principles: required parameters are minimized to reduce LLM errors,
+sensible defaults are provided (e.g., HC1 robust standard errors), and
+parameter names use consistent conventions (dataset identifier is always
+\code{dataset}, dependent variable is \code{y\_var}). Tool descriptions
+are written to be interpretable by LLMs, specifying when each tool is
+appropriate and what alternatives exist. The complete tool schema is
+available in the supplementary materials (\code{paper/code/mcp\_tool\_schema.json}).
+The server supports multiple transport mechanisms: stdio for direct CLI
+integration, HTTP for the web application, and WebSocket for streaming results.
+
+\subsubsection{Web application}
+
+The web interface is implemented entirely in \proglang{Rust} using the
+Dioxus framework, which compiles to WebAssembly for browser deployment.
+This pure-\proglang{Rust} approach ensures type safety across the full
+stack and eliminates the JavaScript build toolchain. The application
+communicates with the MCP server's HTTP endpoint and supports three
+LLM providers: Ollama (local), Claude (Anthropic), and GPT (OpenAI).
+Conversations are persisted via an embedded SurrealDB database on the
+server side.
+
+\subsection{Communication flow}
+
+Figure~\ref{fig:chat-flow} illustrates the interaction pattern for
+LLM-mediated requests. When a user submits a natural language query:
+
+\begin{enumerate}
+  \item The query is sent to the LLM provider (cloud or local Ollama)
+  \item The LLM interprets the request and generates a structured tool call
+    with appropriate parameters
+  \item The MCP server routes the call to the corresponding \proglang{Rust}
+    method in \pkg{p2a-core}
+  \item The core library loads data and performs computation locally
+  \item Results (coefficients, test statistics, diagnostics) are serialized
+    to JSON and returned through the MCP server
+  \item The LLM receives the results and formulates a natural language response
+  \item The response is displayed to the user
+\end{enumerate}
 
 \begin{figure}[htbp]
 \centering
 \includegraphics[width=\textwidth]{figures/chat_flow_v2}
 \caption{Sequence diagram showing the chat interaction flow. The user's
-natural language request (1) is interpreted by the LLM, which generates
-a structured tool call (2). The MCP server executes the corresponding
-\proglang{Rust} method (3--6), and the result flows back through the
-LLM (7--8), which provides a natural language explanation. All data
-processing occurs locally; only the prompts and tool parameters are
-sent to cloud LLM providers (or processed locally with Ollama).}
+natural language request is interpreted by the LLM, which generates a
+structured tool call. The MCP server executes the corresponding
+\proglang{Rust} method, and results flow back through the LLM for
+natural language explanation. Bulk data processing (shaded region)
+occurs entirely on the local machine.}
 \label{fig:chat-flow}
 \end{figure}
 
-This architecture ensures that all data processing occurs locally.
-The LLM receives tool parameters and requested outputs, but the full dataset
-remains on the user's machine. Users should be aware that any explicitly
-requested data previews or detailed results will pass through the LLM provider.
-For fully local operation, users can deploy Ollama, eliminating any external
-data transmission entirely.
+This architecture maintains data locality: the full dataset never leaves
+the user's machine. Only metadata (column names, types), tool parameters,
+and aggregated results pass through the LLM. Users requesting data previews
+should be aware that sample rows will be transmitted; for complete isolation,
+local LLM deployment via Ollama eliminates all external data transmission.
+
+\subsection{Technical design decisions}
+
+Several technical choices merit brief explanation.
+
+\textbf{Numerical precision.} All computations use 64-bit floating point
+(\code{f64}) throughout, providing approximately 15--17 significant decimal
+digits. This matches the precision used by \proglang{R} and most established
+statistical software. Extended precision (128-bit) is not supported; users
+requiring higher precision for specialized applications (certain financial
+calculations, cryptographic contexts, or severely ill-conditioned matrices)
+should use dedicated software.
+
+\textbf{Conversation persistence.} The web application uses SurrealDB, an
+embedded document database, for storing conversation history and settings.
+This choice reflects a preference for zero-configuration deployment: the
+database runs as part of the application binary with no external service
+required. Analytical datasets are held in memory during sessions and not
+persisted to the database, limiting storage to lightweight conversation
+metadata.
+
+\textbf{Handling unimplemented methods.} When users request capabilities
+outside the implemented set, the LLM's behavior depends on its training.
+In some cases, it maps the request to the closest available alternative
+and explains the substitution. In others, it reports that the capability
+is not available. The system does not explicitly enumerate unimplemented
+methods; rather, the LLM infers scope from the tool schema. Users seeking
+methods not in the tool list should verify availability before assuming
+support.
+

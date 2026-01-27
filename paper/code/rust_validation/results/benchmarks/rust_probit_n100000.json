@@ -1,0 +1,11 @@
+{
+  "method": "probit",
+  "n": 100000,
+  "iterations": 20,
+  "timing": {
+    "min_us": 269792,
+    "median_us": 306443,
+    "mean_us": 306443,
+    "max_us": 506166
+  }
+}

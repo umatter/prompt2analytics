@@ -1,0 +1,136 @@
+{
+  "category": "naturalistic_timeseries",
+  "description": "Naturalistic prompt variations for time series tests",
+  "tests": [
+    {
+      "id": "nat_ts_001",
+      "base_test_id": "ts_001",
+      "prompt_type": "informal",
+      "prompt": "check if gdp is stationary",
+      "expected_tools": ["ts_adf_test"],
+      "acceptable_tools": ["ts_adf_test", "ts_kpss_test", "ts_unit_root"],
+      "dataset_context": "gdp_quarterly: gdp, date",
+      "linguistic_features": ["informal_register", "shorthand"]
+    },
+    {
+      "id": "nat_ts_002",
+      "base_test_id": "ts_001",
+      "prompt_type": "domain_jargon",
+      "prompt": "Conduct an augmented Dickey-Fuller test for a unit root",
+      "expected_tools": ["ts_adf_test"],
+      "acceptable_tools": ["ts_adf_test"],
+      "dataset_context": "gdp_quarterly: gdp, date",
+      "linguistic_features": ["domain_jargon", "formal_test_name"]
+    },
+    {
+      "id": "nat_ts_003",
+      "base_test_id": "ts_002",
+      "prompt_type": "typos",
+      "prompt": "fti an ARMIA model with autmatic order sleection",
+      "expected_tools": ["ts_auto_arima"],
+      "acceptable_tools": ["ts_auto_arima", "ts_arima"],
+      "dataset_context": "gdp_quarterly: gdp, date",
+      "linguistic_features": ["typos", "misspellings"]
+    },
+    {
+      "id": "nat_ts_004",
+      "base_test_id": "ts_003",
+      "prompt_type": "verbose",
+      "prompt": "I have quarterly GDP data and I want to forecast future values. I think there might be some autocorrelation in the series, so I probably need some kind of autoregressive model. I'm not sure what lag orders to use though - is there a way to select them automatically?",
+      "expected_tools": ["ts_auto_arima"],
+      "acceptable_tools": ["ts_auto_arima", "ts_arima"],
+      "dataset_context": "gdp_quarterly: gdp, date",
+      "linguistic_features": ["verbose", "uncertainty", "seeking_guidance"]
+    },
+    {
+      "id": "nat_ts_005",
+      "base_test_id": "ts_004",
+      "prompt_type": "informal",
+      "prompt": "var model for gdp inflation and rates",
+      "expected_tools": ["ts_var"],
+      "acceptable_tools": ["ts_var"],
+      "dataset_context": "macro_quarterly: gdp, inflation, interest_rate, date",
+      "linguistic_features": ["informal_register", "minimal_context"]
+    },
+    {
+      "id": "nat_ts_006",
+      "base_test_id": "ts_005",
+      "prompt_type": "domain_jargon",
+      "prompt": "Estimate a VAR(p) with Schwarz IC lag selection and compute IRFs",
+      "expected_tools": ["ts_var"],
+      "acceptable_tools": ["ts_var", "ts_var_select"],
+      "dataset_context": "macro_quarterly: gdp, inflation, interest_rate, date",
+      "linguistic_features": ["domain_jargon", "technical_terminology", "acronyms"]
+    },
+    {
+      "id": "nat_ts_007",
+      "base_test_id": "ts_006",
+      "prompt_type": "ambiguous",
+      "prompt": "forecast next quarter",
+      "expected_tools": ["ts_forecast"],
+      "acceptable_tools": ["ts_forecast", "ts_arima", "ts_var"],
+      "dataset_context": "gdp_quarterly: gdp, date",
+      "linguistic_features": ["ambiguous", "minimal_context"]
+    },
+    {
+      "id": "nat_ts_008",
+      "base_test_id": "ts_007",
+      "prompt_type": "verbose",
+      "prompt": "I want to understand the dynamic relationships between multiple macroeconomic variables. Specifically, I'm interested in how a shock to one variable propagates through the system and affects the other variables over time. Can you estimate a model that captures these interdependencies?",
+      "expected_tools": ["ts_var"],
+      "acceptable_tools": ["ts_var", "ts_vecm"],
+      "dataset_context": "macro_quarterly: gdp, inflation, interest_rate, date",
+      "linguistic_features": ["verbose", "conceptual_description"]
+    },
+    {
+      "id": "nat_ts_009",
+      "base_test_id": "ts_008",
+      "prompt_type": "informal",
+      "prompt": "impulse responses for a 1sd shock to int rates",
+      "expected_tools": ["ts_irf"],
+      "acceptable_tools": ["ts_irf", "ts_var_irf"],
+      "dataset_context": "macro_quarterly: gdp, inflation, interest_rate, date",
+      "linguistic_features": ["informal_register", "abbreviations"]
+    },
+    {
+      "id": "nat_ts_010",
+      "base_test_id": "ts_009",
+      "prompt_type": "domain_jargon",
+      "prompt": "Test for cointegration using the Johansen trace and max eigenvalue tests",
+      "expected_tools": ["ts_johansen"],
+      "acceptable_tools": ["ts_johansen", "ts_coint_test"],
+      "dataset_context": "exchange_rates: usd_eur, usd_gbp, date",
+      "linguistic_features": ["domain_jargon", "specific_test_names"]
+    },
+    {
+      "id": "nat_ts_011",
+      "base_test_id": "ts_010",
+      "prompt_type": "typos",
+      "prompt": "decompsoe the sries into trent seasonl and irrgular",
+      "expected_tools": ["ts_decompose"],
+      "acceptable_tools": ["ts_decompose", "ts_stl"],
+      "dataset_context": "retail_sales: sales, date",
+      "linguistic_features": ["typos", "severe_misspellings"]
+    },
+    {
+      "id": "nat_ts_012",
+      "base_test_id": "ts_011",
+      "prompt_type": "verbose",
+      "prompt": "My sales data has a clear seasonal pattern that repeats every year, along with a general upward trend. I want to separate out these different components so I can analyze the underlying trend without the seasonal fluctuations confounding things.",
+      "expected_tools": ["ts_decompose"],
+      "acceptable_tools": ["ts_decompose", "ts_stl", "ts_seasonal_adjust"],
+      "dataset_context": "retail_sales: sales, date",
+      "linguistic_features": ["verbose", "problem_description"]
+    },
+    {
+      "id": "nat_ts_013",
+      "base_test_id": "ts_012",
+      "prompt_type": "informal",
+      "prompt": "does oil granger-cause stocks or vice versa",
+      "expected_tools": ["ts_granger_test"],
+      "acceptable_tools": ["ts_granger_test", "ts_causality"],
+      "dataset_context": "oil_stocks: oil_price, stock_index, date",
+      "linguistic_features": ["informal_register", "bidirectional_question"]
+    }
+  ]
+}

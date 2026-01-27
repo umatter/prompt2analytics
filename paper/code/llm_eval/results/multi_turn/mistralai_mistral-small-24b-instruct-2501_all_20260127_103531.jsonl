@@ -1,0 +1,1008 @@
+{
+  "timestamp": "2026-01-27T10:35:33+01:00",
+  "model": "mistralai/mistral-small-24b-instruct-2501",
+  "conversation_id": "mt_cau_001",
+  "turn": 1,
+  "category": "causal",
+  "prompt": "I'm concerned that education is endogenous in a wage regression. What should I do?",
+  "selected": "iv_2sls",
+  "expected": "iv_2sls",
+  "match_type": "exact",
+  "score": 1.0,
+  "latency_ms": 2169,
+  "context_from_previous": false
+}
+{
+  "timestamp": "2026-01-27T10:35:35+01:00",
+  "model": "mistralai/mistral-small-24b-instruct-2501",
+  "conversation_id": "mt_cau_001",
+  "turn": 2,
+  "category": "causal",
+  "prompt": "Use parents' education and distance to college as instruments for education",
+  "selected": "iv_2sls",
+  "expected": "iv_2sls",
+  "match_type": "exact",
+  "score": 1.0,
+  "latency_ms": 1543,
+  "context_from_previous": true
+}
+{
+  "timestamp": "2026-01-27T10:35:37+01:00",
+  "model": "mistralai/mistral-small-24b-instruct-2501",
+  "conversation_id": "mt_cau_001",
+  "turn": 3,
+  "category": "causal",
+  "prompt": "Test whether the instruments are weak",
+  "selected": "iv_first_stage",
+  "expected": "iv_first_stage",
+  "match_type": "exact",
+  "score": 1.0,
+  "latency_ms": 1822,
+  "context_from_previous": true
+}
+{
+  "timestamp": "2026-01-27T10:35:39+01:00",
+  "model": "mistralai/mistral-small-24b-instruct-2501",
+  "conversation_id": "mt_cau_001",
+  "turn": 4,
+  "category": "causal",
+  "prompt": "Run a Sargan test for overidentification",
+  "selected": "iv_2sls",
+  "expected": "iv_overid_test",
+  "match_type": "category",
+  "score": 0.3,
+  "latency_ms": 1369,
+  "context_from_previous": true
+}
+{
+  "timestamp": "2026-01-27T10:35:41+01:00",
+  "model": "mistralai/mistral-small-24b-instruct-2501",
+  "conversation_id": "mt_cau_002",
+  "turn": 1,
+  "category": "causal",
+  "prompt": "I want to evaluate a policy that was implemented in some states in 2015",
+  "selected": "diff_in_diff",
+  "expected": "diff_in_diff",
+  "match_type": "exact",
+  "score": 1.0,
+  "latency_ms": 1223,
+  "context_from_previous": false
+}
+{
+  "timestamp": "2026-01-27T10:35:43+01:00",
+  "model": "mistralai/mistral-small-24b-instruct-2501",
+  "conversation_id": "mt_cau_002",
+  "turn": 2,
+  "category": "causal",
+  "prompt": "Estimate the DiD with state and year fixed effects",
+  "selected": "panel_hdfe",
+  "expected": "diff_in_diff",
+  "match_type": "none",
+  "score": 0.0,
+  "latency_ms": 1383,
+  "context_from_previous": true
+}
+{
+  "timestamp": "2026-01-27T10:35:45+01:00",
+  "model": "mistralai/mistral-small-24b-instruct-2501",
+  "conversation_id": "mt_cau_002",
+  "turn": 3,
+  "category": "causal",
+  "prompt": "Test for parallel pre-trends using an event study specification",
+  "selected": "panel_hdfe",
+  "expected": "diff_event_study",
+  "match_type": "none",
+  "score": 0.0,
+  "latency_ms": 1362,
+  "context_from_previous": true
+}
+{
+  "timestamp": "2026-01-27T10:35:47+01:00",
+  "model": "mistralai/mistral-small-24b-instruct-2501",
+  "conversation_id": "mt_cau_002",
+  "turn": 4,
+  "category": "causal",
+  "prompt": "Plot the event study coefficients with confidence intervals",
+  "selected": "viz_coefficient",
+  "expected": "viz_event_study",
+  "match_type": "none",
+  "score": 0.0,
+  "latency_ms": 1087,
+  "context_from_previous": true
+}
+{
+  "timestamp": "2026-01-27T10:35:48+01:00",
+  "model": "mistralai/mistral-small-24b-instruct-2501",
+  "conversation_id": "mt_cau_003",
+  "turn": 1,
+  "category": "causal",
+  "prompt": "Estimate the effect of a job training program on earnings",
+  "selected": "diff_in_diff",
+  "expected": "treatment_ate",
+  "match_type": "acceptable",
+  "score": 0.7,
+  "latency_ms": 1091,
+  "context_from_previous": false
+}
+{
+  "timestamp": "2026-01-27T10:35:50+01:00",
+  "model": "mistralai/mistral-small-24b-instruct-2501",
+  "conversation_id": "mt_cau_003",
+  "turn": 2,
+  "category": "causal",
+  "prompt": "Use propensity score matching to control for selection bias",
+  "selected": "treatment_ipw",
+  "expected": "treatment_psm",
+  "match_type": "acceptable",
+  "score": 0.7,
+  "latency_ms": 1180,
+  "context_from_previous": true
+}
+{
+  "timestamp": "2026-01-27T10:35:52+01:00",
+  "model": "mistralai/mistral-small-24b-instruct-2501",
+  "conversation_id": "mt_cau_003",
+  "turn": 3,
+  "category": "causal",
+  "prompt": "Check the balance of covariates after matching",
+  "selected": "treatment_ipw",
+  "expected": "treatment_balance",
+  "match_type": "category",
+  "score": 0.3,
+  "latency_ms": 1235,
+  "context_from_previous": true
+}
+{
+  "timestamp": "2026-01-27T10:35:54+01:00",
+  "model": "mistralai/mistral-small-24b-instruct-2501",
+  "conversation_id": "mt_cau_003",
+  "turn": 4,
+  "category": "causal",
+  "prompt": "Now estimate the ATT using inverse probability weighting",
+  "selected": "treatment_ipw",
+  "expected": "treatment_ipw",
+  "match_type": "exact",
+  "score": 1.0,
+  "latency_ms": 1273,
+  "context_from_previous": true
+}
+{
+  "timestamp": "2026-01-27T10:35:56+01:00",
+  "model": "mistralai/mistral-small-24b-instruct-2501",
+  "conversation_id": "mt_cau_004",
+  "turn": 1,
+  "category": "causal",
+  "prompt": "Students above a test score threshold get a scholarship. Evaluate its effect",
+  "selected": "rd_estimate",
+  "expected": "rd_sharp",
+  "match_type": "acceptable",
+  "score": 0.7,
+  "latency_ms": 1302,
+  "context_from_previous": false
+}
+{
+  "timestamp": "2026-01-27T10:35:58+01:00",
+  "model": "mistralai/mistral-small-24b-instruct-2501",
+  "conversation_id": "mt_cau_004",
+  "turn": 2,
+  "category": "causal",
+  "prompt": "Use a triangular kernel with optimal bandwidth selection",
+  "selected": "rd_estimate",
+  "expected": "rd_sharp",
+  "match_type": "acceptable",
+  "score": 0.7,
+  "latency_ms": 1211,
+  "context_from_previous": true
+}
+{
+  "timestamp": "2026-01-27T10:35:59+01:00",
+  "model": "mistralai/mistral-small-24b-instruct-2501",
+  "conversation_id": "mt_cau_004",
+  "turn": 3,
+  "category": "causal",
+  "prompt": "Test for manipulation of the running variable around the cutoff",
+  "selected": "rd_estimate",
+  "expected": "rd_mccrary",
+  "match_type": "category",
+  "score": 0.3,
+  "latency_ms": 1015,
+  "context_from_previous": true
+}
+{
+  "timestamp": "2026-01-27T10:36:01+01:00",
+  "model": "mistralai/mistral-small-24b-instruct-2501",
+  "conversation_id": "mt_cau_004",
+  "turn": 4,
+  "category": "causal",
+  "prompt": "Create an RD plot showing the discontinuity",
+  "selected": "viz_scatter",
+  "expected": "viz_rd_plot",
+  "match_type": "acceptable",
+  "score": 0.7,
+  "latency_ms": 1100,
+  "context_from_previous": true
+}
+{
+  "timestamp": "2026-01-27T10:36:02+01:00",
+  "model": "mistralai/mistral-small-24b-instruct-2501",
+  "conversation_id": "mt_cau_005",
+  "turn": 1,
+  "category": "causal",
+  "prompt": "Evaluate a policy implemented in California using other states as controls",
+  "selected": "diff_in_diff",
+  "expected": "synthetic_control",
+  "match_type": "acceptable",
+  "score": 0.7,
+  "latency_ms": 1037,
+  "context_from_previous": false
+}
+{
+  "timestamp": "2026-01-27T10:36:05+01:00",
+  "model": "mistralai/mistral-small-24b-instruct-2501",
+  "conversation_id": "mt_cau_005",
+  "turn": 2,
+  "category": "causal",
+  "prompt": "Show me the synthetic control weights for each donor state",
+  "selected": "synthetic_control",
+  "expected": "synthetic_weights",
+  "match_type": "acceptable",
+  "score": 0.7,
+  "latency_ms": 2120,
+  "context_from_previous": true
+}
+{
+  "timestamp": "2026-01-27T10:36:07+01:00",
+  "model": "mistralai/mistral-small-24b-instruct-2501",
+  "conversation_id": "mt_cau_005",
+  "turn": 3,
+  "category": "causal",
+  "prompt": "Run placebo tests by applying the method to each control unit",
+  "selected": "synthetic_control",
+  "expected": "synthetic_placebo",
+  "match_type": "category",
+  "score": 0.3,
+  "latency_ms": 1513,
+  "context_from_previous": true
+}
+{
+  "timestamp": "2026-01-27T10:36:09+01:00",
+  "model": "mistralai/mistral-small-24b-instruct-2501",
+  "conversation_id": "mt_pan_001",
+  "turn": 1,
+  "category": "panel",
+  "prompt": "I have panel data on firm investment. Start with a fixed effects model",
+  "selected": "panel_fixed_effects",
+  "expected": "panel_fe",
+  "match_type": "category",
+  "score": 0.3,
+  "latency_ms": 1249,
+  "context_from_previous": false
+}
+{
+  "timestamp": "2026-01-27T10:36:11+01:00",
+  "model": "mistralai/mistral-small-24b-instruct-2501",
+  "conversation_id": "mt_pan_001",
+  "turn": 2,
+  "category": "panel",
+  "prompt": "Now estimate a random effects model for comparison",
+  "selected": "panel_random_effects",
+  "expected": "panel_re",
+  "match_type": "category",
+  "score": 0.3,
+  "latency_ms": 1112,
+  "context_from_previous": true
+}
+{
+  "timestamp": "2026-01-27T10:36:13+01:00",
+  "model": "mistralai/mistral-small-24b-instruct-2501",
+  "conversation_id": "mt_pan_001",
+  "turn": 3,
+  "category": "panel",
+  "prompt": "Run a Hausman test to decide between FE and RE",
+  "selected": "hausman_test",
+  "expected": "hausman_test",
+  "match_type": "exact",
+  "score": 1.0,
+  "latency_ms": 1233,
+  "context_from_previous": true
+}
+{
+  "timestamp": "2026-01-27T10:36:14+01:00",
+  "model": "mistralai/mistral-small-24b-instruct-2501",
+  "conversation_id": "mt_pan_001",
+  "turn": 4,
+  "category": "panel",
+  "prompt": "Based on the test, estimate the appropriate model with clustered standard errors",
+  "selected": "hausman_test",
+  "expected": "panel_fe",
+  "match_type": "category",
+  "score": 0.3,
+  "latency_ms": 1187,
+  "context_from_previous": true
+}
+{
+  "timestamp": "2026-01-27T10:36:16+01:00",
+  "model": "mistralai/mistral-small-24b-instruct-2501",
+  "conversation_id": "mt_pan_002",
+  "turn": 1,
+  "category": "panel",
+  "prompt": "Estimate a gravity model of trade with country fixed effects",
+  "selected": "panel_fixed_effects",
+  "expected": "panel_fe",
+  "match_type": "category",
+  "score": 0.3,
+  "latency_ms": 1233,
+  "context_from_previous": false
+}
+{
+  "timestamp": "2026-01-27T10:36:18+01:00",
+  "model": "mistralai/mistral-small-24b-instruct-2501",
+  "conversation_id": "mt_pan_002",
+  "turn": 2,
+  "category": "panel",
+  "prompt": "I need to control for both origin and destination country effects simultaneously",
+  "selected": "panel_hdfe",
+  "expected": "panel_hdfe",
+  "match_type": "exact",
+  "score": 1.0,
+  "latency_ms": 1578,
+  "context_from_previous": true
+}
+{
+  "timestamp": "2026-01-27T10:36:21+01:00",
+  "model": "mistralai/mistral-small-24b-instruct-2501",
+  "conversation_id": "mt_pan_002",
+  "turn": 3,
+  "category": "panel",
+  "prompt": "Add year fixed effects as well - so three-way fixed effects",
+  "selected": "panel_hdfe",
+  "expected": "panel_hdfe",
+  "match_type": "exact",
+  "score": 1.0,
+  "latency_ms": 1695,
+  "context_from_previous": true
+}
+{
+  "timestamp": "2026-01-27T10:36:23+01:00",
+  "model": "mistralai/mistral-small-24b-instruct-2501",
+  "conversation_id": "mt_pan_003",
+  "turn": 1,
+  "category": "panel",
+  "prompt": "Estimate a fixed effects model of employment on wages and output",
+  "selected": "panel_fixed_effects",
+  "expected": "panel_fe",
+  "match_type": "category",
+  "score": 0.3,
+  "latency_ms": 1302,
+  "context_from_previous": false
+}
+{
+  "timestamp": "2026-01-27T10:36:25+01:00",
+  "model": "mistralai/mistral-small-24b-instruct-2501",
+  "conversation_id": "mt_pan_003",
+  "turn": 2,
+  "category": "panel",
+  "prompt": "Test for serial correlation in the residuals",
+  "selected": "regression_diagnostics",
+  "expected": "panel_serial_test",
+  "match_type": "none",
+  "score": 0.0,
+  "latency_ms": 1388,
+  "context_from_previous": true
+}
+{
+  "timestamp": "2026-01-27T10:36:26+01:00",
+  "model": "mistralai/mistral-small-24b-instruct-2501",
+  "conversation_id": "mt_pan_003",
+  "turn": 3,
+  "category": "panel",
+  "prompt": "Test for cross-sectional dependence",
+  "selected": "regression_diagnostics",
+  "expected": "panel_cd_test",
+  "match_type": "none",
+  "score": 0.0,
+  "latency_ms": 1025,
+  "context_from_previous": true
+}
+{
+  "timestamp": "2026-01-27T10:36:28+01:00",
+  "model": "mistralai/mistral-small-24b-instruct-2501",
+  "conversation_id": "mt_pan_004",
+  "turn": 1,
+  "category": "panel",
+  "prompt": "I suspect there's persistence in profits. Include a lagged dependent variable",
+  "selected": "regression_ols",
+  "expected": "panel_dynamic",
+  "match_type": "none",
+  "score": 0.0,
+  "latency_ms": 1125,
+  "context_from_previous": false
+}
+{
+  "timestamp": "2026-01-27T10:36:30+01:00",
+  "model": "mistralai/mistral-small-24b-instruct-2501",
+  "conversation_id": "mt_pan_004",
+  "turn": 2,
+  "category": "panel",
+  "prompt": "Use the Arellano-Bond GMM estimator to handle endogeneity",
+  "selected": "regression_clustered",
+  "expected": "panel_gmm",
+  "match_type": "none",
+  "score": 0.0,
+  "latency_ms": 1090,
+  "context_from_previous": true
+}
+{
+  "timestamp": "2026-01-27T10:36:31+01:00",
+  "model": "mistralai/mistral-small-24b-instruct-2501",
+  "conversation_id": "mt_pan_004",
+  "turn": 3,
+  "category": "panel",
+  "prompt": "Test for second-order serial correlation in the differenced residuals",
+  "selected": "regression_diagnostics",
+  "expected": "panel_ar_test",
+  "match_type": "none",
+  "score": 0.0,
+  "latency_ms": 1072,
+  "context_from_previous": true
+}
+{
+  "timestamp": "2026-01-27T10:36:33+01:00",
+  "model": "mistralai/mistral-small-24b-instruct-2501",
+  "conversation_id": "mt_pan_005",
+  "turn": 1,
+  "category": "panel",
+  "prompt": "Estimate state GDP as a function of population and spending with state fixed effects",
+  "selected": "panel_fixed_effects",
+  "expected": "panel_fe",
+  "match_type": "category",
+  "score": 0.3,
+  "latency_ms": 983,
+  "context_from_previous": false
+}
+{
+  "timestamp": "2026-01-27T10:36:34+01:00",
+  "model": "mistralai/mistral-small-24b-instruct-2501",
+  "conversation_id": "mt_pan_005",
+  "turn": 2,
+  "category": "panel",
+  "prompt": "Add time fixed effects to control for common shocks",
+  "selected": "panel_hdfe",
+  "expected": "panel_twoway",
+  "match_type": "acceptable",
+  "score": 0.7,
+  "latency_ms": 1062,
+  "context_from_previous": true
+}
+{
+  "timestamp": "2026-01-27T10:36:36+01:00",
+  "model": "mistralai/mistral-small-24b-instruct-2501",
+  "conversation_id": "mt_pan_005",
+  "turn": 3,
+  "category": "panel",
+  "prompt": "Actually, use state-specific linear time trends instead of year dummies",
+  "selected": "panel_hdfe",
+  "expected": "panel_fe",
+  "match_type": "category",
+  "score": 0.3,
+  "latency_ms": 1201,
+  "context_from_previous": true
+}
+{
+  "timestamp": "2026-01-27T10:36:38+01:00",
+  "model": "mistralai/mistral-small-24b-instruct-2501",
+  "conversation_id": "mt_reg_001",
+  "turn": 1,
+  "category": "regression",
+  "prompt": "Estimate the relationship between firm value and investment",
+  "selected": "regression_ols",
+  "expected": "regression_ols",
+  "match_type": "exact",
+  "score": 1.0,
+  "latency_ms": 984,
+  "context_from_previous": false
+}
+{
+  "timestamp": "2026-01-27T10:36:39+01:00",
+  "model": "mistralai/mistral-small-24b-instruct-2501",
+  "conversation_id": "mt_reg_001",
+  "turn": 2,
+  "category": "regression",
+  "prompt": "I'm worried about heteroskedasticity. Use robust standard errors instead.",
+  "selected": "regression_ols",
+  "expected": "regression_ols",
+  "match_type": "exact",
+  "score": 1.0,
+  "latency_ms": 1055,
+  "context_from_previous": true
+}
+{
+  "timestamp": "2026-01-27T10:36:41+01:00",
+  "model": "mistralai/mistral-small-24b-instruct-2501",
+  "conversation_id": "mt_reg_001",
+  "turn": 3,
+  "category": "regression",
+  "prompt": "Now show me diagnostic plots for the residuals",
+  "selected": "viz_residual_diagnostics",
+  "expected": "viz_residual_diagnostics",
+  "match_type": "exact",
+  "score": 1.0,
+  "latency_ms": 1093,
+  "context_from_previous": true
+}
+{
+  "timestamp": "2026-01-27T10:36:43+01:00",
+  "model": "mistralai/mistral-small-24b-instruct-2501",
+  "conversation_id": "mt_reg_002",
+  "turn": 1,
+  "category": "regression",
+  "prompt": "Run a regression of investment on value and capital",
+  "selected": "regression_ols",
+  "expected": "regression_ols",
+  "match_type": "exact",
+  "score": 1.0,
+  "latency_ms": 1009,
+  "context_from_previous": false
+}
+{
+  "timestamp": "2026-01-27T10:36:44+01:00",
+  "model": "mistralai/mistral-small-24b-instruct-2501",
+  "conversation_id": "mt_reg_002",
+  "turn": 2,
+  "category": "regression",
+  "prompt": "Actually, cluster the standard errors by firm since observations within firms might be correlated",
+  "selected": "regression_clustered",
+  "expected": "regression_clustered",
+  "match_type": "exact",
+  "score": 1.0,
+  "latency_ms": 1135,
+  "context_from_previous": true
+}
+{
+  "timestamp": "2026-01-27T10:36:46+01:00",
+  "model": "mistralai/mistral-small-24b-instruct-2501",
+  "conversation_id": "mt_reg_002",
+  "turn": 3,
+  "category": "regression",
+  "prompt": "What's the VIF for these variables? I want to check for multicollinearity",
+  "selected": "regression_diagnostics",
+  "expected": "regression_vif",
+  "match_type": "acceptable",
+  "score": 0.7,
+  "latency_ms": 1047,
+  "context_from_previous": true
+}
+{
+  "timestamp": "2026-01-27T10:36:48+01:00",
+  "model": "mistralai/mistral-small-24b-instruct-2501",
+  "conversation_id": "mt_reg_002",
+  "turn": 4,
+  "category": "regression",
+  "prompt": "Create a scatter plot of residuals vs fitted values",
+  "selected": "viz_scatter",
+  "expected": "viz_scatter",
+  "match_type": "exact",
+  "score": 1.0,
+  "latency_ms": 991,
+  "context_from_previous": true
+}
+{
+  "timestamp": "2026-01-27T10:36:50+01:00",
+  "model": "mistralai/mistral-small-24b-instruct-2501",
+  "conversation_id": "mt_reg_003",
+  "turn": 1,
+  "category": "regression",
+  "prompt": "Fit a linear regression of GDP on population and capital",
+  "selected": "regression_ols",
+  "expected": "regression_ols",
+  "match_type": "exact",
+  "score": 1.0,
+  "latency_ms": 1344,
+  "context_from_previous": false
+}
+{
+  "timestamp": "2026-01-27T10:36:51+01:00",
+  "model": "mistralai/mistral-small-24b-instruct-2501",
+  "conversation_id": "mt_reg_003",
+  "turn": 2,
+  "category": "regression",
+  "prompt": "The relationship doesn't look linear. Try a nonlinear specification with log transformations",
+  "selected": "regression_nls",
+  "expected": "regression_nls",
+  "match_type": "exact",
+  "score": 1.0,
+  "latency_ms": 1053,
+  "context_from_previous": true
+}
+{
+  "timestamp": "2026-01-27T10:36:53+01:00",
+  "model": "mistralai/mistral-small-24b-instruct-2501",
+  "conversation_id": "mt_reg_003",
+  "turn": 3,
+  "category": "regression",
+  "prompt": "Compare the R-squared values between the two models",
+  "selected": "regression_ols",
+  "expected": "regression_compare",
+  "match_type": "acceptable",
+  "score": 0.7,
+  "latency_ms": 991,
+  "context_from_previous": true
+}
+{
+  "timestamp": "2026-01-27T10:36:54+01:00",
+  "model": "mistralai/mistral-small-24b-instruct-2501",
+  "conversation_id": "mt_reg_004",
+  "turn": 1,
+  "category": "regression",
+  "prompt": "Start with a simple regression of wages on education",
+  "selected": "regression_ols",
+  "expected": "regression_ols",
+  "match_type": "exact",
+  "score": 1.0,
+  "latency_ms": 964,
+  "context_from_previous": false
+}
+{
+  "timestamp": "2026-01-27T10:36:56+01:00",
+  "model": "mistralai/mistral-small-24b-instruct-2501",
+  "conversation_id": "mt_reg_004",
+  "turn": 2,
+  "category": "regression",
+  "prompt": "Add experience and tenure to the model",
+  "selected": "regression_ols",
+  "expected": "regression_ols",
+  "match_type": "exact",
+  "score": 1.0,
+  "latency_ms": 1424,
+  "context_from_previous": true
+}
+{
+  "timestamp": "2026-01-27T10:36:58+01:00",
+  "model": "mistralai/mistral-small-24b-instruct-2501",
+  "conversation_id": "mt_reg_004",
+  "turn": 3,
+  "category": "regression",
+  "prompt": "Test for normality of the residuals",
+  "selected": "regression_diagnostics",
+  "expected": "hypothesis_jarque_bera",
+  "match_type": "acceptable",
+  "score": 0.7,
+  "latency_ms": 1047,
+  "context_from_previous": true
+}
+{
+  "timestamp": "2026-01-27T10:37:00+01:00",
+  "model": "mistralai/mistral-small-24b-instruct-2501",
+  "conversation_id": "mt_reg_004",
+  "turn": 4,
+  "category": "regression",
+  "prompt": "Test for heteroskedasticity using the Breusch-Pagan test",
+  "selected": "regression_diagnostics",
+  "expected": "hypothesis_breusch_pagan",
+  "match_type": "acceptable",
+  "score": 0.7,
+  "latency_ms": 1060,
+  "context_from_previous": true
+}
+{
+  "timestamp": "2026-01-27T10:37:01+01:00",
+  "model": "mistralai/mistral-small-24b-instruct-2501",
+  "conversation_id": "mt_reg_005",
+  "turn": 1,
+  "category": "regression",
+  "prompt": "Regress wages on education and experience with HC1 robust standard errors",
+  "selected": "regression_ols",
+  "expected": "regression_ols",
+  "match_type": "exact",
+  "score": 1.0,
+  "latency_ms": 1171,
+  "context_from_previous": false
+}
+{
+  "timestamp": "2026-01-27T10:37:03+01:00",
+  "model": "mistralai/mistral-small-24b-instruct-2501",
+  "conversation_id": "mt_reg_005",
+  "turn": 2,
+  "category": "regression",
+  "prompt": "Actually use HC3 instead - I have a small sample",
+  "selected": "regression_ols",
+  "expected": "regression_ols",
+  "match_type": "exact",
+  "score": 1.0,
+  "latency_ms": 1153,
+  "context_from_previous": true
+}
+{
+  "timestamp": "2026-01-27T10:37:05+01:00",
+  "model": "mistralai/mistral-small-24b-instruct-2501",
+  "conversation_id": "mt_reg_005",
+  "turn": 3,
+  "category": "regression",
+  "prompt": "Show me the confidence intervals for all coefficients",
+  "selected": "regression_ols",
+  "expected": "regression_confint",
+  "match_type": "acceptable",
+  "score": 0.7,
+  "latency_ms": 1261,
+  "context_from_previous": true
+}
+{
+  "timestamp": "2026-01-27T10:37:07+01:00",
+  "model": "mistralai/mistral-small-24b-instruct-2501",
+  "conversation_id": "mt_ts_001",
+  "turn": 1,
+  "category": "timeseries",
+  "prompt": "I want to forecast GDP. First, test if the series is stationary",
+  "selected": "timeseries_pp_test",
+  "expected": "ts_adf_test",
+  "match_type": "category",
+  "score": 0.3,
+  "latency_ms": 1124,
+  "context_from_previous": false
+}
+{
+  "timestamp": "2026-01-27T10:37:09+01:00",
+  "model": "mistralai/mistral-small-24b-instruct-2501",
+  "conversation_id": "mt_ts_001",
+  "turn": 2,
+  "category": "timeseries",
+  "prompt": "The series is non-stationary. Take the first difference and test again",
+  "selected": "timeseries_pp_test",
+  "expected": "ts_adf_test",
+  "match_type": "category",
+  "score": 0.3,
+  "latency_ms": 1328,
+  "context_from_previous": true
+}
+{
+  "timestamp": "2026-01-27T10:37:10+01:00",
+  "model": "mistralai/mistral-small-24b-instruct-2501",
+  "conversation_id": "mt_ts_001",
+  "turn": 3,
+  "category": "timeseries",
+  "prompt": "Now fit an ARIMA model with automatic order selection",
+  "selected": "timeseries_ar",
+  "expected": "ts_arima",
+  "match_type": "category",
+  "score": 0.3,
+  "latency_ms": 1035,
+  "context_from_previous": true
+}
+{
+  "timestamp": "2026-01-27T10:37:12+01:00",
+  "model": "mistralai/mistral-small-24b-instruct-2501",
+  "conversation_id": "mt_ts_001",
+  "turn": 4,
+  "category": "timeseries",
+  "prompt": "Generate forecasts for the next 8 quarters with confidence intervals",
+  "selected": "ts_arima_forecast",
+  "expected": "ts_forecast",
+  "match_type": "category",
+  "score": 0.3,
+  "latency_ms": 1266,
+  "context_from_previous": true
+}
+{
+  "timestamp": "2026-01-27T10:37:14+01:00",
+  "model": "mistralai/mistral-small-24b-instruct-2501",
+  "conversation_id": "mt_ts_001",
+  "turn": 5,
+  "category": "timeseries",
+  "prompt": "Plot the forecasts along with the historical data",
+  "selected": "viz_line",
+  "expected": "viz_forecast",
+  "match_type": "acceptable",
+  "score": 0.7,
+  "latency_ms": 1254,
+  "context_from_previous": true
+}
+{
+  "timestamp": "2026-01-27T10:37:16+01:00",
+  "model": "mistralai/mistral-small-24b-instruct-2501",
+  "conversation_id": "mt_ts_002",
+  "turn": 1,
+  "category": "timeseries",
+  "prompt": "I want to study the dynamic relationships between GDP, inflation, and interest rates",
+  "selected": "ts_var",
+  "expected": "ts_var",
+  "match_type": "exact",
+  "score": 1.0,
+  "latency_ms": 1136,
+  "context_from_previous": false
+}
+{
+  "timestamp": "2026-01-27T10:37:18+01:00",
+  "model": "mistralai/mistral-small-24b-instruct-2501",
+  "conversation_id": "mt_ts_002",
+  "turn": 2,
+  "category": "timeseries",
+  "prompt": "Select the optimal lag order using information criteria",
+  "selected": "ts_var",
+  "expected": "ts_var_select",
+  "match_type": "acceptable",
+  "score": 0.7,
+  "latency_ms": 1115,
+  "context_from_previous": true
+}
+{
+  "timestamp": "2026-01-27T10:37:19+01:00",
+  "model": "mistralai/mistral-small-24b-instruct-2501",
+  "conversation_id": "mt_ts_002",
+  "turn": 3,
+  "category": "timeseries",
+  "prompt": "Estimate the VAR with the selected lag order",
+  "selected": "ts_var",
+  "expected": "ts_var",
+  "match_type": "exact",
+  "score": 1.0,
+  "latency_ms": 1118,
+  "context_from_previous": true
+}
+{
+  "timestamp": "2026-01-27T10:37:21+01:00",
+  "model": "mistralai/mistral-small-24b-instruct-2501",
+  "conversation_id": "mt_ts_002",
+  "turn": 4,
+  "category": "timeseries",
+  "prompt": "Compute impulse response functions for a monetary policy shock",
+  "selected": "ts_var_irf",
+  "expected": "ts_irf",
+  "match_type": "acceptable",
+  "score": 0.7,
+  "latency_ms": 1163,
+  "context_from_previous": true
+}
+{
+  "timestamp": "2026-01-27T10:37:23+01:00",
+  "model": "mistralai/mistral-small-24b-instruct-2501",
+  "conversation_id": "mt_ts_002",
+  "turn": 5,
+  "category": "timeseries",
+  "prompt": "Plot the IRFs with confidence bands",
+  "selected": "viz_line",
+  "expected": "viz_irf",
+  "match_type": "acceptable",
+  "score": 0.7,
+  "latency_ms": 1198,
+  "context_from_previous": true
+}
+{
+  "timestamp": "2026-01-27T10:37:24+01:00",
+  "model": "mistralai/mistral-small-24b-instruct-2501",
+  "conversation_id": "mt_ts_003",
+  "turn": 1,
+  "category": "timeseries",
+  "prompt": "Test whether USD/EUR and USD/GBP exchange rates are cointegrated",
+  "selected": "ts_vecm",
+  "expected": "ts_coint_test",
+  "match_type": "category",
+  "score": 0.3,
+  "latency_ms": 1024,
+  "context_from_previous": false
+}
+{
+  "timestamp": "2026-01-27T10:37:26+01:00",
+  "model": "mistralai/mistral-small-24b-instruct-2501",
+  "conversation_id": "mt_ts_003",
+  "turn": 2,
+  "category": "timeseries",
+  "prompt": "Use the Johansen procedure to determine the number of cointegrating relationships",
+  "selected": "ts_vecm",
+  "expected": "ts_johansen",
+  "match_type": "category",
+  "score": 0.3,
+  "latency_ms": 1234,
+  "context_from_previous": true
+}
+{
+  "timestamp": "2026-01-27T10:37:28+01:00",
+  "model": "mistralai/mistral-small-24b-instruct-2501",
+  "conversation_id": "mt_ts_003",
+  "turn": 3,
+  "category": "timeseries",
+  "prompt": "Estimate a Vector Error Correction Model",
+  "selected": "ts_vecm",
+  "expected": "ts_vecm",
+  "match_type": "exact",
+  "score": 1.0,
+  "latency_ms": 1071,
+  "context_from_previous": true
+}
+{
+  "timestamp": "2026-01-27T10:37:30+01:00",
+  "model": "mistralai/mistral-small-24b-instruct-2501",
+  "conversation_id": "mt_ts_004",
+  "turn": 1,
+  "category": "timeseries",
+  "prompt": "Decompose the sales series into trend, seasonal, and irregular components",
+  "selected": "timeseries_decompose",
+  "expected": "ts_decompose",
+  "match_type": "category",
+  "score": 0.3,
+  "latency_ms": 1057,
+  "context_from_previous": false
+}
+{
+  "timestamp": "2026-01-27T10:37:31+01:00",
+  "model": "mistralai/mistral-small-24b-instruct-2501",
+  "conversation_id": "mt_ts_004",
+  "turn": 2,
+  "category": "timeseries",
+  "prompt": "Use STL decomposition for more flexibility",
+  "selected": "ts_mstl",
+  "expected": "ts_stl",
+  "match_type": "category",
+  "score": 0.3,
+  "latency_ms": 1016,
+  "context_from_previous": true
+}
+{
+  "timestamp": "2026-01-27T10:37:33+01:00",
+  "model": "mistralai/mistral-small-24b-instruct-2501",
+  "conversation_id": "mt_ts_004",
+  "turn": 3,
+  "category": "timeseries",
+  "prompt": "Create a seasonally adjusted series",
+  "selected": "ts_mstl",
+  "expected": "ts_seasonal_adjust",
+  "match_type": "category",
+  "score": 0.3,
+  "latency_ms": 1011,
+  "context_from_previous": true
+}
+{
+  "timestamp": "2026-01-27T10:37:34+01:00",
+  "model": "mistralai/mistral-small-24b-instruct-2501",
+  "conversation_id": "mt_ts_004",
+  "turn": 4,
+  "category": "timeseries",
+  "prompt": "Plot the original and seasonally adjusted series together",
+  "selected": "viz_line",
+  "expected": "viz_ts",
+  "match_type": "acceptable",
+  "score": 0.7,
+  "latency_ms": 1035,
+  "context_from_previous": true
+}
+{
+  "timestamp": "2026-01-27T10:37:36+01:00",
+  "model": "mistralai/mistral-small-24b-instruct-2501",
+  "conversation_id": "mt_ts_005",
+  "turn": 1,
+  "category": "timeseries",
+  "prompt": "Test whether oil prices Granger-cause stock market movements",
+  "selected": "ts_var",
+  "expected": "ts_granger_test",
+  "match_type": "category",
+  "score": 0.3,
+  "latency_ms": 1008,
+  "context_from_previous": false
+}
+{
+  "timestamp": "2026-01-27T10:37:38+01:00",
+  "model": "mistralai/mistral-small-24b-instruct-2501",
+  "conversation_id": "mt_ts_005",
+  "turn": 2,
+  "category": "timeseries",
+  "prompt": "Test the reverse direction - do stocks Granger-cause oil prices?",
+  "selected": "ts_var",
+  "expected": "ts_granger_test",
+  "match_type": "category",
+  "score": 0.3,
+  "latency_ms": 1211,
+  "context_from_previous": true
+}
+{
+  "timestamp": "2026-01-27T10:37:40+01:00",
+  "model": "mistralai/mistral-small-24b-instruct-2501",
+  "conversation_id": "mt_ts_005",
+  "turn": 3,
+  "category": "timeseries",
+  "prompt": "Estimate a bivariate VAR to quantify the relationships",
+  "selected": "ts_var",
+  "expected": "ts_var",
+  "match_type": "exact",
+  "score": 1.0,
+  "latency_ms": 1102,
+  "context_from_previous": true
+}

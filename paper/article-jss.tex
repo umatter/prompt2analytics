@@ -7,6 +7,7 @@
 
 %% additional packages
 \usepackage{booktabs}
+\usepackage{multirow}
 \usepackage{amsmath,amssymb}
 \usepackage{bm}
 \usepackage{graphicx}
@@ -14,6 +15,11 @@
 %% custom commands
 \newcommand{\class}[1]{`\code{#1}'}
 \newcommand{\fct}[1]{\code{#1()}}
+
+%% Checkmark for feature comparison tables
+\usepackage{pifont}
+\newcommand{\cmark}{\ding{51}}
+\newcommand{\xmark}{\ding{55}}
 
 %% Auto-generated output inclusion (styled like Soutput)
 \newcommand{\CliOutput}[1]{\VerbatimInput[fontsize=\small]{#1}}
@@ -25,29 +31,33 @@
 \Plainauthor{First Author}
 
 %% Title
-\title{\pkg{prompt2analytics}: A \proglang{Rust} Toolkit for Econometrics and Data Analytics}
+\title{Chat-First Data Analytics}
 \Plaintitle{prompt2analytics: A Rust Toolkit for Econometrics and Data Analytics}
 \Shorttitle{\pkg{prompt2analytics}: Econometrics in \proglang{Rust}}
 
 %% Abstract
 \Abstract{
-  This paper introduces \pkg{prompt2analytics}, a comprehensive econometrics and
-  data analytics toolkit implemented in pure \proglang{Rust}. The software provides
-  a wide range of statistical methods including ordinary least squares regression
-  with heteroskedasticity-consistent standard errors, panel data models (fixed and
-  random effects), instrumental variables estimation, difference-in-differences,
-  discrete choice models, time series analysis, and machine learning algorithms.
-  Key design features include a pure \proglang{Rust} implementation without external
-  BLAS/LAPACK dependencies, multiple interfaces (command-line, Model Context Protocol
-  server, desktop application), and validated numerical accuracy against established
-  \proglang{R} packages. Performance benchmarks demonstrate competitive speed compared
-  to \pkg{data.table} and \pkg{dplyr} for data manipulation, and \pkg{lfe} and \pkg{plm}
-  for econometric estimation.
+  This paper introduces \emph{chat-first data analytics}: an approach in which
+  natural language conversation serves as the primary interface to statistical
+  methods, while rigorous, pre-implemented algorithms perform the actual computation.
+  Unlike approaches where large language models generate statistical code---raising
+  concerns about correctness, data privacy, and reproducibility---chat-first
+  analytics separates the interpretive layer (understanding user intent) from the
+  computational layer (executing validated methods). The language model selects
+  appropriate tools; verified implementations produce the results. We present
+  \pkg{prompt2analytics}, a software implementation comprising a foundational
+  econometrics library in pure \proglang{Rust}, exposed through the Model Context
+  Protocol (MCP) for integration with language models. The library covers regression
+  analysis with robust and clustered standard errors, panel data models, instrumental
+  variables, difference-in-differences, discrete choice, and time series methods.
+  All implementations are validated against established \proglang{R} packages.
+  Local deployment via Ollama enables complete data isolation, addressing privacy
+  requirements for sensitive data analysis.
 }
 
 %% Keywords (at least one required)
-\Keywords{econometrics, \proglang{Rust}, regression, panel data, causal inference,
-  time series, MCP, \proglang{R}}
+\Keywords{chat-first analytics, natural language interface, econometrics,
+  \proglang{Rust}, MCP, local LLM, data privacy}
 \Plainkeywords{econometrics, Rust, regression, panel data, causal inference,
   time series, MCP, R}
 

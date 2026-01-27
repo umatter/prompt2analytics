@@ -1,0 +1,170 @@
+#!/bin/bash
+#
+# generate_report.sh - Generate markdown summary report from JSONL results
+#
+# Usage: ./generate_report.sh <results_file.jsonl>
+
+set -e
+
+RESULTS_FILE="$1"
+
+if [[ ! -f "$RESULTS_FILE" ]]; then
+    echo "Error: Results file not found: $RESULTS_FILE"
+    exit 1
+fi
+
+# Extract model name and generate report filename
+MODEL=$(head -1 "$RESULTS_FILE" | jq -r '.model')
+REPORT_FILE="${RESULTS_FILE%.jsonl}_report.md"
+
+# Calculate overall statistics using jq slurp mode
+STATS=$(jq -s '
+{
+  total: length,
+  exact: [.[] | select(.match_type == "exact")] | length,
+  acceptable: [.[] | select(.match_type == "acceptable")] | length,
+  category: [.[] | select(.match_type == "category")] | length,
+  none: [.[] | select(.match_type == "none")] | length,
+  avg_latency: ([.[].latency_ms] | add / length | floor)
+}' "$RESULTS_FILE")
+
+TOTAL=$(echo "$STATS" | jq '.total')
+EXACT=$(echo "$STATS" | jq '.exact')
+ACCEPTABLE=$(echo "$STATS" | jq '.acceptable')
+CATEGORY_MATCH=$(echo "$STATS" | jq '.category')
+NONE=$(echo "$STATS" | jq '.none')
+AVG_LATENCY=$(echo "$STATS" | jq '.avg_latency')
+
+# Calculate percentages
+EXACT_PCT=$(echo "scale=1; $EXACT * 100 / $TOTAL" | bc)
+ACCEPTABLE_PCT=$(echo "scale=1; $ACCEPTABLE * 100 / $TOTAL" | bc)
+CATEGORY_PCT=$(echo "scale=1; $CATEGORY_MATCH * 100 / $TOTAL" | bc)
+NONE_PCT=$(echo "scale=1; $NONE * 100 / $TOTAL" | bc)
+ACCURACY=$(echo "scale=1; ($EXACT + $ACCEPTABLE) * 100 / $TOTAL" | bc)
+
+# Generate report
+cat << EOF > "$REPORT_FILE"
+# LLM Tool Selection Evaluation Report
+
+**Model:** $MODEL
+**Date:** $(date +%Y-%m-%d)
+**Total Tests:** $TOTAL
+
+## Overall Results
+
+| Metric | Count | Percentage |
+|--------|-------|------------|
+| Exact Match | $EXACT | ${EXACT_PCT}% |
+| Acceptable | $ACCEPTABLE | ${ACCEPTABLE_PCT}% |
+| Category Match | $CATEGORY_MATCH | ${CATEGORY_PCT}% |
+| Failed | $NONE | ${NONE_PCT}% |
+
+**Accuracy (Exact + Acceptable):** ${ACCURACY}%
+**Average Latency:** ${AVG_LATENCY}ms
+
+## Results by Category
+
+| Category | Total | Exact | Acceptable | Failed | Accuracy |
+|----------|-------|-------|------------|--------|----------|
+EOF
+
+# Calculate per-category stats using jq
+jq -s '
+group_by(.category) | .[] |
+{
+  cat: .[0].category,
+  total: length,
+  exact: [.[] | select(.match_type == "exact")] | length,
+  acceptable: [.[] | select(.match_type == "acceptable")] | length,
+  none: [.[] | select(.match_type == "none")] | length
+} |
+"| \(.cat) | \(.total) | \(.exact) | \(.acceptable) | \(.none) | \(((.exact + .acceptable) * 100 / .total) | floor)% |"
+' -r "$RESULTS_FILE" >> "$REPORT_FILE"
+
+cat << EOF >> "$REPORT_FILE"
+
+## Results by Difficulty
+
+| Difficulty | Total | Exact | Failed | Accuracy |
+|------------|-------|-------|--------|----------|
+EOF
+
+# Calculate per-difficulty stats
+jq -s '
+group_by(.difficulty) | sort_by(.[0].difficulty) | .[] |
+{
+  diff: .[0].difficulty,
+  total: length,
+  exact: [.[] | select(.match_type == "exact")] | length,
+  acceptable: [.[] | select(.match_type == "acceptable")] | length,
+  none: [.[] | select(.match_type == "none" or .match_type == "category")] | length
+} |
+"| \(.diff) | \(.total) | \(.exact) | \(.none) | \(((.exact + .acceptable) * 100 / .total) | floor)% |"
+' -r "$RESULTS_FILE" >> "$REPORT_FILE"
+
+cat << EOF >> "$REPORT_FILE"
+
+## Failed Cases
+
+The following test cases were not matched correctly (match_type = "none" or "category"):
+
+| Test ID | Prompt | Expected | Selected | Match |
+|---------|--------|----------|----------|-------|
+EOF
+
+# List failed and category-match cases
+jq -s '
+[.[] | select(.match_type == "none" or .match_type == "category")] |
+if length == 0 then "| (none) | - | - | - | - |"
+else .[] | "| \(.test_id) | \(.prompt | .[0:45])... | \(.expected[0]) | \(.selected) | \(.match_type) |"
+end
+' -r "$RESULTS_FILE" >> "$REPORT_FILE"
+
+cat << EOF >> "$REPORT_FILE"
+
+## Latency Distribution
+
+EOF
+
+# Latency stats
+jq -s '
+{
+  min: ([.[].latency_ms] | min),
+  max: ([.[].latency_ms] | max),
+  avg: ([.[].latency_ms] | add / length | floor),
+  p50: ([.[].latency_ms] | sort | .[length/2 | floor]),
+  p90: ([.[].latency_ms] | sort | .[length * 0.9 | floor])
+} |
+"- **Min:** \(.min)ms\n- **Max:** \(.max)ms\n- **Average:** \(.avg)ms\n- **Median (p50):** \(.p50)ms\n- **p90:** \(.p90)ms"
+' -r "$RESULTS_FILE" >> "$REPORT_FILE"
+
+cat << EOF >> "$REPORT_FILE"
+
+## Confusion Analysis
+
+Most common mismatches (expected -> selected):
+
+EOF
+
+# Find common confusions
+CONFUSIONS=$(jq -s '[.[] | select(.match_type == "none")] |
+if length == 0 then empty
+else group_by("\(.expected[0]) -> \(.selected)") |
+  map({pair: .[0] | "\(.expected[0]) -> \(.selected)", count: length}) |
+  sort_by(-.count) | .[:10] | .[] |
+  "- \(.pair) (\(.count) times)"
+end' -r "$RESULTS_FILE" 2>/dev/null)
+
+if [[ -n "$CONFUSIONS" ]]; then
+    echo "$CONFUSIONS" >> "$REPORT_FILE"
+else
+    echo "- (no complete failures)" >> "$REPORT_FILE"
+fi
+
+cat << EOF >> "$REPORT_FILE"
+
+---
+*Report generated by generate_report.sh on $(date)*
+EOF
+
+echo "Report saved to: $REPORT_FILE"
