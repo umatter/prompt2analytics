@@ -37,15 +37,15 @@
 
 use ndarray::{Array1, Array2};
 use serde::{Deserialize, Serialize};
+use statrs::distribution::{ContinuousCDF, Normal};
 use std::collections::HashMap;
 use std::fmt;
-use statrs::distribution::{ContinuousCDF, Normal};
 
 use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
 use crate::linalg::matrix_ops::{matrix_inverse, xtx, xty};
 use crate::spatial::SpatialWeights;
-use crate::traits::estimator::{chi_squared_p_value, SignificanceLevel};
+use crate::traits::estimator::{SignificanceLevel, chi_squared_p_value};
 
 // ============================================================================
 // Configuration Types
@@ -381,44 +381,66 @@ impl fmt::Display for SpmlResult {
         writeln!(f, "\nSpatial Panel Model (ML)")?;
         writeln!(f, "{}", "=".repeat(60))?;
         writeln!(f, "Model: {}  Effect: {}", self.model, self.effect)?;
-        writeln!(f, "Spatial Lag: {}  Spatial Error: {}", self.has_lag, self.spatial_error)?;
-        writeln!(f, "Observations: {}  Entities: {}  Time periods: {}",
-                 self.n_obs, self.n_entities, self.n_time)?;
-        writeln!(f, "Log-Likelihood: {:.4}  AIC: {:.4}  BIC: {:.4}",
-                 self.log_likelihood, self.aic, self.bic)?;
+        writeln!(
+            f,
+            "Spatial Lag: {}  Spatial Error: {}",
+            self.has_lag, self.spatial_error
+        )?;
+        writeln!(
+            f,
+            "Observations: {}  Entities: {}  Time periods: {}",
+            self.n_obs, self.n_entities, self.n_time
+        )?;
+        writeln!(
+            f,
+            "Log-Likelihood: {:.4}  AIC: {:.4}  BIC: {:.4}",
+            self.log_likelihood, self.aic, self.bic
+        )?;
         writeln!(f, "{}", "-".repeat(60))?;
 
         // Spatial parameters
         if let Some(rho) = self.rho {
             writeln!(f, "\nSpatial lag coefficient (rho):")?;
-            writeln!(f, "  Estimate: {:.6}  SE: {:.6}  Z: {:.4}  P: {:.4}",
-                     rho,
-                     self.rho_se.unwrap_or(0.0),
-                     self.rho_z.unwrap_or(0.0),
-                     self.rho_p.unwrap_or(1.0))?;
+            writeln!(
+                f,
+                "  Estimate: {:.6}  SE: {:.6}  Z: {:.4}  P: {:.4}",
+                rho,
+                self.rho_se.unwrap_or(0.0),
+                self.rho_z.unwrap_or(0.0),
+                self.rho_p.unwrap_or(1.0)
+            )?;
         }
 
         if let Some(lambda) = self.lambda {
             writeln!(f, "\nSpatial error coefficient (lambda):")?;
-            writeln!(f, "  Estimate: {:.6}  SE: {:.6}  Z: {:.4}  P: {:.4}",
-                     lambda,
-                     self.lambda_se.unwrap_or(0.0),
-                     self.lambda_z.unwrap_or(0.0),
-                     self.lambda_p.unwrap_or(1.0))?;
+            writeln!(
+                f,
+                "  Estimate: {:.6}  SE: {:.6}  Z: {:.4}  P: {:.4}",
+                lambda,
+                self.lambda_se.unwrap_or(0.0),
+                self.lambda_z.unwrap_or(0.0),
+                self.lambda_p.unwrap_or(1.0)
+            )?;
         }
 
-        writeln!(f, "\n{:<20} {:>12} {:>12} {:>10} {:>10}",
-                 "Variable", "Coefficient", "Std.Error", "Z-value", "P>|z|")?;
+        writeln!(
+            f,
+            "\n{:<20} {:>12} {:>12} {:>10} {:>10}",
+            "Variable", "Coefficient", "Std.Error", "Z-value", "P>|z|"
+        )?;
         writeln!(f, "{}", "-".repeat(60))?;
 
         for i in 0..self.coef_names.len() {
-            writeln!(f, "{:<20} {:>12.6} {:>12.6} {:>10.4} {:>9.4}{}",
-                     self.coef_names[i],
-                     self.coefficients[i],
-                     self.std_errors[i],
-                     self.z_values[i],
-                     self.p_values[i],
-                     self.significance[i].stars())?;
+            writeln!(
+                f,
+                "{:<20} {:>12.6} {:>12.6} {:>10.4} {:>9.4}{}",
+                self.coef_names[i],
+                self.coefficients[i],
+                self.std_errors[i],
+                self.z_values[i],
+                self.p_values[i],
+                self.significance[i].stars()
+            )?;
         }
 
         writeln!(f, "{}", "-".repeat(60))?;
@@ -426,7 +448,11 @@ impl fmt::Display for SpmlResult {
         if let Some(sigma_mu) = self.variance.sigma_mu {
             writeln!(f, "  sigma_mu (individual): {:.6}", sigma_mu)?;
         }
-        writeln!(f, "  sigma_epsilon (error): {:.6}", self.variance.sigma_epsilon)?;
+        writeln!(
+            f,
+            "  sigma_epsilon (error): {:.6}",
+            self.variance.sigma_epsilon
+        )?;
 
         Ok(())
     }
@@ -486,24 +512,37 @@ impl fmt::Display for SpgmResult {
         writeln!(f, "\nSpatial Panel Model (GMM)")?;
         writeln!(f, "{}", "=".repeat(60))?;
         writeln!(f, "Method: {}", self.method)?;
-        writeln!(f, "Spatial Lag: {}  Spatial Error: {}", self.has_lag, self.has_spatial_error)?;
-        writeln!(f, "Observations: {}  Entities: {}  Time periods: {}",
-                 self.n_obs, self.n_entities, self.n_time)?;
+        writeln!(
+            f,
+            "Spatial Lag: {}  Spatial Error: {}",
+            self.has_lag, self.has_spatial_error
+        )?;
+        writeln!(
+            f,
+            "Observations: {}  Entities: {}  Time periods: {}",
+            self.n_obs, self.n_entities, self.n_time
+        )?;
         writeln!(f, "Instruments: {}", self.n_instruments)?;
         writeln!(f, "{}", "-".repeat(60))?;
 
-        writeln!(f, "\n{:<20} {:>12} {:>12} {:>10} {:>10}",
-                 "Variable", "Coefficient", "Std.Error", "Z-value", "P>|z|")?;
+        writeln!(
+            f,
+            "\n{:<20} {:>12} {:>12} {:>10} {:>10}",
+            "Variable", "Coefficient", "Std.Error", "Z-value", "P>|z|"
+        )?;
         writeln!(f, "{}", "-".repeat(60))?;
 
         for i in 0..self.coef_names.len() {
-            writeln!(f, "{:<20} {:>12.6} {:>12.6} {:>10.4} {:>9.4}{}",
-                     self.coef_names[i],
-                     self.coefficients[i],
-                     self.std_errors[i],
-                     self.z_values[i],
-                     self.p_values[i],
-                     self.significance[i].stars())?;
+            writeln!(
+                f,
+                "{:<20} {:>12.6} {:>12.6} {:>10.4} {:>9.4}{}",
+                self.coef_names[i],
+                self.coefficients[i],
+                self.std_errors[i],
+                self.z_values[i],
+                self.p_values[i],
+                self.significance[i].stars()
+            )?;
         }
 
         if let (Some(stat), Some(p), Some(df)) = (self.sargan_stat, self.sargan_p, self.sargan_df) {
@@ -554,13 +593,13 @@ pub fn run_spml(
     config: SpmlConfig,
 ) -> EconResult<SpmlResult> {
     let df = dataset.df();
-    let n_total = df.height();
+    let _n_total = df.height();
 
     // Extract and organize panel structure
     let (y, x, entity_ids, time_ids, n_entities, n_time) =
         extract_panel_data(dataset, y_col, x_cols, entity_col, time_col)?;
 
-    let k = x.ncols();
+    let _k = x.ncols();
 
     // Validate spatial weights dimension
     if listw.n() != n_entities {
@@ -580,18 +619,39 @@ pub fn run_spml(
 
     // Dispatch based on model type and spatial specification
     match config.model {
-        SpatialPanelModel::Within => {
-            run_spml_within(&y, &x, &entity_ids, &time_ids, n_entities, n_time,
-                           listw, &config, coef_names)
-        }
-        SpatialPanelModel::Random => {
-            run_spml_random(&y, &x, &entity_ids, &time_ids, n_entities, n_time,
-                           listw, &config, coef_names)
-        }
-        SpatialPanelModel::Pooling => {
-            run_spml_pooling(&y, &x, &entity_ids, &time_ids, n_entities, n_time,
-                            listw, &config, coef_names)
-        }
+        SpatialPanelModel::Within => run_spml_within(
+            &y,
+            &x,
+            &entity_ids,
+            &time_ids,
+            n_entities,
+            n_time,
+            listw,
+            &config,
+            coef_names,
+        ),
+        SpatialPanelModel::Random => run_spml_random(
+            &y,
+            &x,
+            &entity_ids,
+            &time_ids,
+            n_entities,
+            n_time,
+            listw,
+            &config,
+            coef_names,
+        ),
+        SpatialPanelModel::Pooling => run_spml_pooling(
+            &y,
+            &x,
+            &entity_ids,
+            &time_ids,
+            n_entities,
+            n_time,
+            listw,
+            &config,
+            coef_names,
+        ),
     }
 }
 
@@ -630,7 +690,7 @@ pub fn run_spgm(
     let (y, x, entity_ids, time_ids, n_entities, n_time) =
         extract_panel_data(dataset, y_col, x_cols, entity_col, time_col)?;
 
-    let k = x.ncols();
+    let _k = x.ncols();
 
     if listw.n() != n_entities {
         return Err(EconError::InvalidSpecification {
@@ -647,18 +707,41 @@ pub fn run_spgm(
 
     // Dispatch based on method
     match config.method {
-        SpgmMethod::W2sls => {
-            run_spgm_within(&y, &x, &entity_ids, &time_ids, n_entities, n_time,
-                           listw, &config, coef_names)
-        }
-        SpgmMethod::G2sls => {
-            run_spgm_gls(&y, &x, &entity_ids, &time_ids, n_entities, n_time,
-                        listw, &config, coef_names)
-        }
+        SpgmMethod::W2sls => run_spgm_within(
+            &y,
+            &x,
+            &entity_ids,
+            &time_ids,
+            n_entities,
+            n_time,
+            listw,
+            &config,
+            coef_names,
+        ),
+        SpgmMethod::G2sls => run_spgm_gls(
+            &y,
+            &x,
+            &entity_ids,
+            &time_ids,
+            n_entities,
+            n_time,
+            listw,
+            &config,
+            coef_names,
+        ),
         _ => {
             // Default to within for other methods (simplified)
-            run_spgm_within(&y, &x, &entity_ids, &time_ids, n_entities, n_time,
-                           listw, &config, coef_names)
+            run_spgm_within(
+                &y,
+                &x,
+                &entity_ids,
+                &time_ids,
+                n_entities,
+                n_time,
+                listw,
+                &config,
+                coef_names,
+            )
         }
     }
 }
@@ -674,14 +757,25 @@ fn extract_panel_data(
     x_cols: &[&str],
     entity_col: &str,
     time_col: &str,
-) -> EconResult<(Array1<f64>, Array2<f64>, Vec<usize>, Vec<usize>, usize, usize)> {
+) -> EconResult<(
+    Array1<f64>,
+    Array2<f64>,
+    Vec<usize>,
+    Vec<usize>,
+    usize,
+    usize,
+)> {
     let df = dataset.df();
     let n = df.height();
 
     // Extract y
     let y_series = df.column(y_col).map_err(|_| EconError::ColumnNotFound {
         column: y_col.to_string(),
-        available: df.get_column_names().iter().map(|s| s.to_string()).collect(),
+        available: df
+            .get_column_names()
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
     })?;
     let y: Array1<f64> = y_series
         .f64()
@@ -700,7 +794,11 @@ fn extract_panel_data(
     for (j, &col_name) in x_cols.iter().enumerate() {
         let col = df.column(col_name).map_err(|_| EconError::ColumnNotFound {
             column: col_name.to_string(),
-            available: df.get_column_names().iter().map(|s| s.to_string()).collect(),
+            available: df
+                .get_column_names()
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
         })?;
         let col_f64 = col.f64().map_err(|_| EconError::NonNumericColumn {
             column: col_name.to_string(),
@@ -711,18 +809,30 @@ fn extract_panel_data(
     }
 
     // Extract entity IDs
-    let entity_series = df.column(entity_col).map_err(|_| EconError::ColumnNotFound {
-        column: entity_col.to_string(),
-        available: df.get_column_names().iter().map(|s| s.to_string()).collect(),
-    })?;
+    let entity_series = df
+        .column(entity_col)
+        .map_err(|_| EconError::ColumnNotFound {
+            column: entity_col.to_string(),
+            available: df
+                .get_column_names()
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+        })?;
 
     let mut entity_map: HashMap<String, usize> = HashMap::new();
     let mut next_entity_id = 0usize;
 
     let entity_strings: Vec<String> = if let Ok(str_col) = entity_series.str() {
-        str_col.into_iter().map(|s| s.unwrap_or("").to_string()).collect()
+        str_col
+            .into_iter()
+            .map(|s| s.unwrap_or("").to_string())
+            .collect()
     } else if let Ok(i64_col) = entity_series.i64() {
-        i64_col.into_iter().map(|v| v.unwrap_or(0).to_string()).collect()
+        i64_col
+            .into_iter()
+            .map(|v| v.unwrap_or(0).to_string())
+            .collect()
     } else {
         return Err(EconError::NonNumericColumn {
             column: entity_col.to_string(),
@@ -745,7 +855,11 @@ fn extract_panel_data(
     // Extract time IDs
     let time_series = df.column(time_col).map_err(|_| EconError::ColumnNotFound {
         column: time_col.to_string(),
-        available: df.get_column_names().iter().map(|s| s.to_string()).collect(),
+        available: df
+            .get_column_names()
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
     })?;
 
     let mut time_map: HashMap<i64, usize> = HashMap::new();
@@ -754,7 +868,10 @@ fn extract_panel_data(
     let time_values: Vec<i64> = if let Ok(i64_col) = time_series.i64() {
         i64_col.into_iter().map(|v| v.unwrap_or(0)).collect()
     } else if let Ok(f64_col) = time_series.f64() {
-        f64_col.into_iter().map(|v| v.unwrap_or(0.0) as i64).collect()
+        f64_col
+            .into_iter()
+            .map(|v| v.unwrap_or(0.0) as i64)
+            .collect()
     } else {
         return Err(EconError::NonNumericColumn {
             column: time_col.to_string(),
@@ -906,7 +1023,7 @@ fn run_spml_within(
     let x_fe = x_within.slice(ndarray::s![.., 1..]).to_owned();
     let k_fe = k - 1;
 
-    let mut coef_names_fe: Vec<String> = coef_names[1..].to_vec();
+    let coef_names_fe: Vec<String> = coef_names[1..].to_vec();
 
     // Handle spatial lag if specified
     let (beta, rho_opt, sigma2, ll) = if config.lag {
@@ -947,8 +1064,9 @@ fn run_spml_within(
         (beta, Some(rho_opt), sigma2, ll_opt)
     } else if config.spatial_error != SpatialErrorType::None {
         // Spatial error panel model
-        run_spml_within_sem(&y_within, &x_fe, entity_ids, time_ids,
-                           n_entities, n_time, listw, config)?
+        run_spml_within_sem(
+            &y_within, &x_fe, entity_ids, time_ids, n_entities, n_time, listw, config,
+        )?
     } else {
         // Standard fixed effects (no spatial)
         let xtx_mat = xtx(&x_fe.view());
@@ -1226,7 +1344,7 @@ fn optimize_rho_panel(
     y_within: &Array1<f64>,
     wy_within: &Array1<f64>,
     x_fe: &Array2<f64>,
-    n_entities: usize,
+    _n_entities: usize,
     n_time: usize,
     listw: &mut SpatialWeights,
     rho_min: f64,
@@ -1235,7 +1353,7 @@ fn optimize_rho_panel(
     max_iter: usize,
 ) -> EconResult<(f64, f64)> {
     let n = y_within.len();
-    let k = x_fe.ncols();
+    let _k = x_fe.ncols();
     let eigenvalues = listw.eigenvalues().clone();
 
     let phi = (1.0 + 5.0_f64.sqrt()) / 2.0;
@@ -1327,8 +1445,11 @@ fn run_spml_random(
     // Estimate sigma2_u from between variation
     let y_means = compute_entity_means(y, entity_ids, n_entities);
     let y_overall = y.mean().unwrap_or(0.0);
-    let sigma2_between =
-        y_means.iter().map(|&m| (m - y_overall).powi(2)).sum::<f64>() / (n_entities - 1) as f64;
+    let sigma2_between = y_means
+        .iter()
+        .map(|&m| (m - y_overall).powi(2))
+        .sum::<f64>()
+        / (n_entities - 1) as f64;
     let t_bar = n as f64 / n_entities as f64;
     let sigma2_u = (sigma2_between - sigma2_e / t_bar).max(0.0);
 
@@ -1407,9 +1528,7 @@ fn run_spml_random(
     // Standard errors
     let xtx_mat = xtx(&x_quasi.view());
     let xtx_inv = matrix_inverse(&xtx_mat.view())?;
-    let std_errors: Vec<f64> = (0..k)
-        .map(|j| (sigma2 * xtx_inv[[j, j]]).sqrt())
-        .collect();
+    let std_errors: Vec<f64> = (0..k).map(|j| (sigma2 * xtx_inv[[j, j]]).sqrt()).collect();
 
     let normal = Normal::new(0.0, 1.0).unwrap();
     let z_values: Vec<f64> = beta
@@ -1543,9 +1662,7 @@ fn run_spml_pooling(
 
     let xtx_mat = xtx(&x.view());
     let xtx_inv = matrix_inverse(&xtx_mat.view())?;
-    let std_errors: Vec<f64> = (0..k)
-        .map(|j| (sigma2 * xtx_inv[[j, j]]).sqrt())
-        .collect();
+    let std_errors: Vec<f64> = (0..k).map(|j| (sigma2 * xtx_inv[[j, j]]).sqrt()).collect();
 
     let normal = Normal::new(0.0, 1.0).unwrap();
     let z_values: Vec<f64> = beta
@@ -1689,7 +1806,7 @@ fn run_spgm_within(
         let gamma = xtpx_inv.dot(&xtpy);
 
         let rho = gamma[k_fe];
-        let beta = gamma.slice(ndarray::s![..k_fe]).to_owned();
+        let _beta = gamma.slice(ndarray::s![..k_fe]).to_owned();
 
         coef_names_fe.push("rho (spatial lag)".to_string());
 
@@ -1745,18 +1862,18 @@ fn run_spgm_within(
         .collect();
 
     // Sargan test (if overidentified)
-    let (sargan_stat, sargan_p, sargan_df) = if n_instruments > k_fe + if config.lag { 1 } else { 0 }
-    {
-        let over_id = n_instruments - k_fe - if config.lag { 1 } else { 0 };
-        let zr = z.t().dot(&residuals);
-        let ztz = xtx(&z.view());
-        let ztz_inv = matrix_inverse(&ztz.view())?;
-        let stat = zr.dot(&ztz_inv).dot(&zr) / sigma2;
-        let p = chi_squared_p_value(stat, over_id as f64);
-        (Some(stat), Some(p), Some(over_id))
-    } else {
-        (None, None, None)
-    };
+    let (sargan_stat, sargan_p, sargan_df) =
+        if n_instruments > k_fe + if config.lag { 1 } else { 0 } {
+            let over_id = n_instruments - k_fe - if config.lag { 1 } else { 0 };
+            let zr = z.t().dot(&residuals);
+            let ztz = xtx(&z.view());
+            let ztz_inv = matrix_inverse(&ztz.view())?;
+            let stat = zr.dot(&ztz_inv).dot(&zr) / sigma2;
+            let p = chi_squared_p_value(stat, over_id as f64);
+            (Some(stat), Some(p), Some(over_id))
+        } else {
+            (None, None, None)
+        };
 
     Ok(SpgmResult {
         method: config.method,
@@ -1786,10 +1903,10 @@ fn run_spgm_gls(
     y: &Array1<f64>,
     x: &Array2<f64>,
     entity_ids: &[usize],
-    time_ids: &[usize],
+    _time_ids: &[usize],
     n_entities: usize,
     n_time: usize,
-    listw: &mut SpatialWeights,
+    _listw: &mut SpatialWeights,
     config: &SpgmConfig,
     coef_names: Vec<String>,
 ) -> EconResult<SpgmResult> {
@@ -1815,8 +1932,11 @@ fn run_spgm_gls(
 
     let y_means = compute_entity_means(y, entity_ids, n_entities);
     let y_overall = y.mean().unwrap_or(0.0);
-    let sigma2_between =
-        y_means.iter().map(|&m| (m - y_overall).powi(2)).sum::<f64>() / (n_entities - 1) as f64;
+    let sigma2_between = y_means
+        .iter()
+        .map(|&m| (m - y_overall).powi(2))
+        .sum::<f64>()
+        / (n_entities - 1) as f64;
     let t_bar = n as f64 / n_entities as f64;
     let sigma2_u = (sigma2_between - sigma2_e / t_bar).max(0.0);
 
@@ -1853,9 +1973,7 @@ fn run_spgm_gls(
     let residuals = &y_quasi - &x_quasi.dot(&beta);
     let sigma2 = residuals.iter().map(|&r| r * r).sum::<f64>() / (n - k) as f64;
 
-    let std_errors: Vec<f64> = (0..k)
-        .map(|j| (sigma2 * xtx_inv[[j, j]]).sqrt())
-        .collect();
+    let std_errors: Vec<f64> = (0..k).map(|j| (sigma2 * xtx_inv[[j, j]]).sqrt()).collect();
 
     let normal = Normal::new(0.0, 1.0).unwrap();
     let z_values: Vec<f64> = beta
@@ -2043,8 +2161,12 @@ mod tests {
 
         // Create spatial weights for 6 entities (2x3 grid)
         let coords: Vec<(f64, f64)> = vec![
-            (0.0, 0.0), (1.0, 0.0), (2.0, 0.0),
-            (0.0, 1.0), (1.0, 1.0), (2.0, 1.0),
+            (0.0, 0.0),
+            (1.0, 0.0),
+            (2.0, 0.0),
+            (0.0, 1.0),
+            (1.0, 1.0),
+            (2.0, 1.0),
         ];
         let nb = Neighbors::from_knn(&coords, 2);
         let mut listw = SpatialWeights::from_neighbors(&nb, WeightStyle::RowStd);
@@ -2056,16 +2178,8 @@ mod tests {
             ..Default::default()
         };
 
-        let result = run_spml(
-            &dataset,
-            "y",
-            &["x1"],
-            "entity",
-            "time",
-            &mut listw,
-            config,
-        )
-        .unwrap();
+        let result =
+            run_spml(&dataset, "y", &["x1"], "entity", "time", &mut listw, config).unwrap();
 
         assert_eq!(result.model, SpatialPanelModel::Random);
         assert!(result.variance.sigma_mu.is_some());

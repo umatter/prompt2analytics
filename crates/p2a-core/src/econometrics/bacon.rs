@@ -216,7 +216,10 @@ pub struct BaconEstimatesByType {
 impl fmt::Display for BaconDecompResult {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "Goodman-Bacon Decomposition")?;
-        writeln!(f, "═══════════════════════════════════════════════════════════")?;
+        writeln!(
+            f,
+            "═══════════════════════════════════════════════════════════"
+        )?;
         writeln!(f)?;
         writeln!(f, "Overall TWFE Estimate: {:.6}", self.overall_estimate)?;
         writeln!(f)?;
@@ -228,12 +231,24 @@ impl fmt::Display for BaconDecompResult {
         writeln!(f, "  Treatment cohorts:     {:?}", self.timing_groups)?;
         writeln!(f)?;
         writeln!(f, "Weight Distribution by Comparison Type:")?;
-        writeln!(f, "  Treated vs Never-Treated:    {:.4} ({:.1}%)",
-                 self.treated_vs_never, self.treated_vs_never * 100.0)?;
-        writeln!(f, "  Treated vs Not-Yet-Treated:  {:.4} ({:.1}%)",
-                 self.treated_vs_not_yet, self.treated_vs_not_yet * 100.0)?;
-        writeln!(f, "  Later vs Earlier Treated:    {:.4} ({:.1}%)",
-                 self.later_vs_earlier, self.later_vs_earlier * 100.0)?;
+        writeln!(
+            f,
+            "  Treated vs Never-Treated:    {:.4} ({:.1}%)",
+            self.treated_vs_never,
+            self.treated_vs_never * 100.0
+        )?;
+        writeln!(
+            f,
+            "  Treated vs Not-Yet-Treated:  {:.4} ({:.1}%)",
+            self.treated_vs_not_yet,
+            self.treated_vs_not_yet * 100.0
+        )?;
+        writeln!(
+            f,
+            "  Later vs Earlier Treated:    {:.4} ({:.1}%)",
+            self.later_vs_earlier,
+            self.later_vs_earlier * 100.0
+        )?;
         writeln!(f, "  Total weight:                {:.6}", self.weights_sum)?;
         writeln!(f)?;
 
@@ -251,9 +266,16 @@ impl fmt::Display for BaconDecompResult {
         writeln!(f)?;
 
         // Show individual components
-        writeln!(f, "Individual 2x2 Comparisons ({} total):", self.components.len())?;
-        writeln!(f, "{:>10} {:>10} {:>12} {:>10} {:>8} {:>8}  {}",
-                 "Treated_G", "Control_G", "Estimate", "Weight", "N_treat", "N_ctrl", "Type")?;
+        writeln!(
+            f,
+            "Individual 2x2 Comparisons ({} total):",
+            self.components.len()
+        )?;
+        writeln!(
+            f,
+            "{:>10} {:>10} {:>12} {:>10} {:>8} {:>8}  Type",
+            "Treated_G", "Control_G", "Estimate", "Weight", "N_treat", "N_ctrl"
+        )?;
         writeln!(f, "{}", "-".repeat(80))?;
 
         for comp in &self.components {
@@ -277,11 +299,23 @@ impl fmt::Display for BaconDecompResult {
 
         if self.later_vs_earlier > 0.1 {
             writeln!(f)?;
-            writeln!(f, "WARNING: {:.1}% of weight comes from 'forbidden' comparisons",
-                     self.later_vs_earlier * 100.0)?;
-            writeln!(f, "         (Later vs. Earlier Treated). If treatment effects are")?;
-            writeln!(f, "         heterogeneous over time, the TWFE estimate may be biased.")?;
-            writeln!(f, "         Consider using Callaway-Sant'Anna or Sun-Abraham estimators.")?;
+            writeln!(
+                f,
+                "WARNING: {:.1}% of weight comes from 'forbidden' comparisons",
+                self.later_vs_earlier * 100.0
+            )?;
+            writeln!(
+                f,
+                "         (Later vs. Earlier Treated). If treatment effects are"
+            )?;
+            writeln!(
+                f,
+                "         heterogeneous over time, the TWFE estimate may be biased."
+            )?;
+            writeln!(
+                f,
+                "         Consider using Callaway-Sant'Anna or Sun-Abraham estimators."
+            )?;
         }
 
         Ok(())
@@ -601,15 +635,33 @@ fn compute_twfe_estimate(
     n: usize,
 ) -> EconResult<f64> {
     // Get unique units and times for fixed effects
-    let unique_units: Vec<i64> = unit.iter().map(|&u| u as i64).collect::<BTreeSet<_>>().into_iter().collect();
-    let unique_times: Vec<i64> = time.iter().map(|&t| t as i64).collect::<BTreeSet<_>>().into_iter().collect();
+    let unique_units: Vec<i64> = unit
+        .iter()
+        .map(|&u| u as i64)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let unique_times: Vec<i64> = time
+        .iter()
+        .map(|&t| t as i64)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
 
     let n_units = unique_units.len();
     let n_times = unique_times.len();
 
     // Create unit and time index maps
-    let unit_idx: BTreeMap<i64, usize> = unique_units.iter().enumerate().map(|(i, &u)| (u, i)).collect();
-    let time_idx: BTreeMap<i64, usize> = unique_times.iter().enumerate().map(|(i, &t)| (t, i)).collect();
+    let unit_idx: BTreeMap<i64, usize> = unique_units
+        .iter()
+        .enumerate()
+        .map(|(i, &u)| (u, i))
+        .collect();
+    let time_idx: BTreeMap<i64, usize> = unique_times
+        .iter()
+        .enumerate()
+        .map(|(i, &t)| (t, i))
+        .collect();
 
     // Build design matrix: [treatment, unit_dummies (minus 1), time_dummies (minus 1)]
     // We exclude one unit and one time dummy for identification
@@ -772,13 +824,21 @@ fn compute_2x2_did_timing(
         // - Pre-period: before g_treated (early group treatment time)
         // - Post-period: g_treated to (g_control - 1) when early is treated but late is not yet
         let pre: Vec<i64> = times.iter().copied().filter(|&t| t < g_treated).collect();
-        let post: Vec<i64> = times.iter().copied().filter(|&t| t >= g_treated && t < g_control).collect();
+        let post: Vec<i64> = times
+            .iter()
+            .copied()
+            .filter(|&t| t >= g_treated && t < g_control)
+            .collect();
         (pre, post)
     } else {
         // Later vs Earlier Treated ("forbidden"):
         // - Pre-period: g_control (early treatment time) to g_treated - 1
         // - Post-period: g_treated and after (both groups now treated)
-        let pre: Vec<i64> = times.iter().copied().filter(|&t| t >= g_control && t < g_treated).collect();
+        let pre: Vec<i64> = times
+            .iter()
+            .copied()
+            .filter(|&t| t >= g_control && t < g_treated)
+            .collect();
         let post: Vec<i64> = times.iter().copied().filter(|&t| t >= g_treated).collect();
         (pre, post)
     };
@@ -926,12 +986,18 @@ fn compute_treatment_variance(
         ComparisonType::TreatedVsNotYetTreated => {
             // Pre: t < g_treated, Post: g_treated <= t < g_control
             let pre = times.iter().filter(|&&t| t < g_treated).count();
-            let post = times.iter().filter(|&&t| t >= g_treated && t < g_control).count();
+            let post = times
+                .iter()
+                .filter(|&&t| t >= g_treated && t < g_control)
+                .count();
             (pre, post)
         }
         ComparisonType::LaterVsEarlierTreated => {
             // Pre: g_control <= t < g_treated, Post: t >= g_treated
-            let pre = times.iter().filter(|&&t| t >= g_control && t < g_treated).count();
+            let pre = times
+                .iter()
+                .filter(|&&t| t >= g_control && t < g_treated)
+                .count();
             let post = times.iter().filter(|&&t| t >= g_treated).count();
             (pre, post)
         }
@@ -977,9 +1043,21 @@ fn compute_estimates_by_type(components: &[BaconComponent]) -> BaconEstimatesByT
     }
 
     BaconEstimatesByType {
-        treated_vs_never: if tvn_weight > 0.0 { Some(tvn_sum / tvn_weight) } else { None },
-        treated_vs_not_yet: if tvnyt_weight > 0.0 { Some(tvnyt_sum / tvnyt_weight) } else { None },
-        later_vs_earlier: if lve_weight > 0.0 { Some(lve_sum / lve_weight) } else { None },
+        treated_vs_never: if tvn_weight > 0.0 {
+            Some(tvn_sum / tvn_weight)
+        } else {
+            None
+        },
+        treated_vs_not_yet: if tvnyt_weight > 0.0 {
+            Some(tvnyt_sum / tvnyt_weight)
+        } else {
+            None
+        },
+        later_vs_earlier: if lve_weight > 0.0 {
+            Some(lve_sum / lve_weight)
+        } else {
+            None
+        },
     }
 }
 
@@ -1014,7 +1092,7 @@ mod tests {
                 time_vec.push(year as f64);
 
                 // Determine treatment status
-                let (treat_time, is_treated) = match unit {
+                let (_treat_time, is_treated) = match unit {
                     1 => (2001, year >= 2001),
                     2 => (2003, year >= 2003),
                     _ => (0, false), // Never treated
@@ -1068,7 +1146,10 @@ mod tests {
             .components
             .iter()
             .any(|c| c.comparison_type == ComparisonType::TreatedVsNeverTreated);
-        assert!(has_never, "Should have Treated vs Never-Treated comparisons");
+        assert!(
+            has_never,
+            "Should have Treated vs Never-Treated comparisons"
+        );
 
         // Print result for debugging
         println!("{}", result);
@@ -1080,7 +1161,11 @@ mod tests {
         let result = bacon_decomp(&dataset, "outcome", "unit", "year", "treated").unwrap();
 
         // Should have all three types of comparisons
-        let types: Vec<ComparisonType> = result.components.iter().map(|c| c.comparison_type).collect();
+        let types: Vec<ComparisonType> = result
+            .components
+            .iter()
+            .map(|c| c.comparison_type)
+            .collect();
 
         // Must have treated vs never-treated (2 groups x never-treated)
         assert!(
@@ -1091,7 +1176,10 @@ mod tests {
         // With 2 timing groups, should have at least one of the between-group comparisons
         let has_timing_comparison = types.contains(&ComparisonType::TreatedVsNotYetTreated)
             || types.contains(&ComparisonType::LaterVsEarlierTreated);
-        assert!(has_timing_comparison, "Should have comparisons between timing groups");
+        assert!(
+            has_timing_comparison,
+            "Should have comparisons between timing groups"
+        );
     }
 
     #[test]
@@ -1105,7 +1193,8 @@ mod tests {
         }
 
         // Sum of type weights should equal total
-        let type_sum = result.treated_vs_never + result.treated_vs_not_yet + result.later_vs_earlier;
+        let type_sum =
+            result.treated_vs_never + result.treated_vs_not_yet + result.later_vs_earlier;
         assert!(
             (type_sum - result.weights_sum).abs() < 0.001,
             "Type weights should sum to total: {} vs {}",

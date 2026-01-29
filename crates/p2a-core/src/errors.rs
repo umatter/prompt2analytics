@@ -15,19 +15,22 @@ pub enum EconError {
     #[error("Matrix is singular ({context}). Suggestion: {suggestion}")]
     SingularMatrix { context: String, suggestion: String },
 
-    #[error("Matrix is ill-conditioned (condition number: {condition:.2e}). Results may be numerically unstable. Suggestion: {suggestion}")]
-    IllConditioned {
-        condition: f64,
-        suggestion: String,
-    },
+    #[error(
+        "Matrix is ill-conditioned (condition number: {condition:.2e}). Results may be numerically unstable. Suggestion: {suggestion}"
+    )]
+    IllConditioned { condition: f64, suggestion: String },
 
-    #[error("Perfect multicollinearity detected between columns: {columns:?}. Suggestion: Remove one of the collinear variables.")]
+    #[error(
+        "Perfect multicollinearity detected between columns: {columns:?}. Suggestion: Remove one of the collinear variables."
+    )]
     PerfectMulticollinearity { columns: Vec<String> },
 
     // ═══════════════════════════════════════════════════════════════════
     // Data Errors
     // ═══════════════════════════════════════════════════════════════════
-    #[error("Insufficient data: need at least {required} observations, got {provided}. Context: {context}")]
+    #[error(
+        "Insufficient data: need at least {required} observations, got {provided}. Context: {context}"
+    )]
     InsufficientData {
         required: usize,
         provided: usize,
@@ -35,7 +38,10 @@ pub enum EconError {
     },
 
     #[error("Column '{column}' not found in dataset. Available columns: {available:?}")]
-    ColumnNotFound { column: String, available: Vec<String> },
+    ColumnNotFound {
+        column: String,
+        available: Vec<String>,
+    },
 
     #[error("Column '{column}' contains non-numeric values. Ensure all values are numeric.")]
     NonNumericColumn { column: String },
@@ -49,7 +55,9 @@ pub enum EconError {
     // ═══════════════════════════════════════════════════════════════════
     // Estimation Errors
     // ═══════════════════════════════════════════════════════════════════
-    #[error("Convergence failed after {iterations} iterations (last change: {last_change:.2e}). Suggestion: {suggestion}")]
+    #[error(
+        "Convergence failed after {iterations} iterations (last change: {last_change:.2e}). Suggestion: {suggestion}"
+    )]
     ConvergenceFailure {
         iterations: usize,
         last_change: f64,
@@ -57,55 +65,76 @@ pub enum EconError {
     },
 
     #[error("Optimization diverged at iteration {iteration}. Suggestion: {suggestion}")]
-    DivergenceError { iteration: usize, suggestion: String },
+    DivergenceError {
+        iteration: usize,
+        suggestion: String,
+    },
 
     #[error("Invalid model specification: {message}")]
     InvalidSpecification { message: String },
 
-    #[error("Perfect separation detected in logit/probit model. Variable(s) {variables:?} perfectly predict the outcome. MLE cannot converge. Suggestion: Remove or combine these predictors, or use Firth's penalized likelihood.")]
+    #[error(
+        "Perfect separation detected in logit/probit model. Variable(s) {variables:?} perfectly predict the outcome. MLE cannot converge. Suggestion: Remove or combine these predictors, or use Firth's penalized likelihood."
+    )]
     PerfectSeparation { variables: Vec<String> },
 
-    #[error("Quasi-complete separation detected in logit/probit model. Variable(s) {variables:?} almost perfectly predict the outcome. Estimates may be unstable.")]
+    #[error(
+        "Quasi-complete separation detected in logit/probit model. Variable(s) {variables:?} almost perfectly predict the outcome. Estimates may be unstable."
+    )]
     QuasiSeparation { variables: Vec<String> },
 
     // ═══════════════════════════════════════════════════════════════════
     // Panel Data Errors
     // ═══════════════════════════════════════════════════════════════════
-    #[error("Only {n_entities} entity groups found. Fixed effects estimation requires more variation. Suggestion: Use pooled OLS or check your entity identifier.")]
+    #[error(
+        "Only {n_entities} entity groups found. Fixed effects estimation requires more variation. Suggestion: Use pooled OLS or check your entity identifier."
+    )]
     InsufficientEntities { n_entities: usize },
 
-    #[error("Unbalanced panel data detected. Some entities have only {min_obs} observations while others have {max_obs}.")]
+    #[error(
+        "Unbalanced panel data detected. Some entities have only {min_obs} observations while others have {max_obs}."
+    )]
     UnbalancedPanel { min_obs: usize, max_obs: usize },
 
     // ═══════════════════════════════════════════════════════════════════
     // Clustering Errors (Cameron, Gelbach & Miller 2008; Cameron & Miller 2015)
     // ═══════════════════════════════════════════════════════════════════
-    #[error("Only {n_clusters} clusters. Cameron-Miller (2015) guidance: G < 20 has severe bias concerns, 20-50 is moderate, G >= 50 is generally adequate. Consider cluster-robust wild bootstrap for small G.")]
+    #[error(
+        "Only {n_clusters} clusters. Cameron-Miller (2015) guidance: G < 20 has severe bias concerns, 20-50 is moderate, G >= 50 is generally adequate. Consider cluster-robust wild bootstrap for small G."
+    )]
     FewClusters { n_clusters: usize },
 
     // ═══════════════════════════════════════════════════════════════════
     // IV/2SLS Errors
     // ═══════════════════════════════════════════════════════════════════
-    #[error("Under-identification: {n_endogenous} endogenous variable(s) but only {n_instruments} excluded instrument(s). Need at least as many instruments as endogenous variables.")]
+    #[error(
+        "Under-identification: {n_endogenous} endogenous variable(s) but only {n_instruments} excluded instrument(s). Need at least as many instruments as endogenous variables."
+    )]
     UnderIdentified {
         n_endogenous: usize,
         n_instruments: usize,
     },
 
-    #[error("Weak instruments detected (first-stage F = {f_stat:.2}). Rule of thumb: F should be > 10. Consider finding stronger instruments.")]
+    #[error(
+        "Weak instruments detected (first-stage F = {f_stat:.2}). Rule of thumb: F should be > 10. Consider finding stronger instruments."
+    )]
     WeakInstruments { f_stat: f64 },
 
     // ═══════════════════════════════════════════════════════════════════
     // Time Series Errors
     // ═══════════════════════════════════════════════════════════════════
-    #[error("Insufficient time periods for VAR({lags}): need at least {required} observations, got {provided}")]
+    #[error(
+        "Insufficient time periods for VAR({lags}): need at least {required} observations, got {provided}"
+    )]
     InsufficientTimePeriods {
         lags: usize,
         required: usize,
         provided: usize,
     },
 
-    #[error("Non-stationary series detected. Consider differencing the data or using VECM for cointegrated series.")]
+    #[error(
+        "Non-stationary series detected. Consider differencing the data or using VECM for cointegrated series."
+    )]
     NonStationarySeries,
 
     // ═══════════════════════════════════════════════════════════════════
@@ -175,7 +204,10 @@ impl EstimationWarning {
                     vif, variable
                 )
             }
-            Self::FewClusters { n_clusters, severity } => {
+            Self::FewClusters {
+                n_clusters,
+                severity,
+            } => {
                 // Cameron, Gelbach & Miller (2008) and Cameron & Miller (2015) guidance
                 match severity.as_str() {
                     "severe" => format!(
@@ -202,7 +234,10 @@ impl EstimationWarning {
                     test_name, p_value
                 )
             }
-            Self::Autocorrelation { test_name, statistic } => {
+            Self::Autocorrelation {
+                test_name,
+                statistic,
+            } => {
                 format!(
                     "{} statistic = {:.4}. Consider using Newey-West standard errors or checking model specification.",
                     test_name, statistic
@@ -220,7 +255,10 @@ impl EstimationWarning {
                     value
                 )
             }
-            Self::SlowConvergence { iterations, tolerance } => {
+            Self::SlowConvergence {
+                iterations,
+                tolerance,
+            } => {
                 format!(
                     "Convergence was slow ({} iterations to reach tolerance {:.2e}). Consider checking model specification.",
                     iterations, tolerance

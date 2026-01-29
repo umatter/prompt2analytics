@@ -81,7 +81,7 @@ use std::fmt;
 use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
 use crate::linalg::design::DesignMatrix;
-use crate::traits::estimator::{t_test_p_value, SignificanceLevel};
+use crate::traits::estimator::{SignificanceLevel, t_test_p_value};
 
 /// Configuration for BART-based causal inference.
 ///

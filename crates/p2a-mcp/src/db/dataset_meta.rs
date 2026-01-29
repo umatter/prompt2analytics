@@ -1,6 +1,5 @@
 //! Dataset metadata CRUD operations
 
-use surrealdb::RecordId;
 use tracing;
 
 use super::connection::{DbConnection, DbError};
@@ -20,9 +19,7 @@ impl DbConnection {
         );
 
         // Check if a dataset with the same name exists in this session
-        let existing = self
-            .get_dataset_meta(&meta.session_id, &meta.name)
-            .await?;
+        let existing = self.get_dataset_meta(&meta.session_id, &meta.name).await?;
 
         if let Some(existing_meta) = existing {
             tracing::info!(
@@ -116,7 +113,9 @@ impl DbConnection {
         let session_id_owned = session_id.to_string();
         let mut result = self
             .db()
-            .query("SELECT * FROM dataset_meta WHERE session_id = $session_id ORDER BY loaded_at DESC")
+            .query(
+                "SELECT * FROM dataset_meta WHERE session_id = $session_id ORDER BY loaded_at DESC",
+            )
             .bind(("session_id", session_id_owned))
             .await?;
 

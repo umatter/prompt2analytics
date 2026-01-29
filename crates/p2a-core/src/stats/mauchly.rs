@@ -54,10 +54,10 @@
 //!
 //! R equivalent: `stats::mauchly.test()`
 
-use ndarray::{Array1, Array2, Axis};
+use crate::errors::{EconError, EconResult};
+use ndarray::{Array2, Axis};
 use serde::{Deserialize, Serialize};
 use statrs::distribution::{ChiSquared, ContinuousCDF};
-use crate::errors::{EconError, EconResult};
 
 // ============================================================================
 // Mauchly Test Result
@@ -183,7 +183,10 @@ pub fn mauchly_test(data: &Array2<f64>, sigma: Option<&Array2<f64>>) -> EconResu
             return Err(EconError::InvalidSpecification {
                 message: format!(
                     "Sigma must be {} × {}, got {} × {}",
-                    p, p, s.dim().0, s.dim().1
+                    p,
+                    p,
+                    s.dim().0,
+                    s.dim().1
                 ),
             });
         }
@@ -201,7 +204,7 @@ pub fn mauchly_test(data: &Array2<f64>, sigma: Option<&Array2<f64>>) -> EconResu
 
     // If sigma is provided, transform it and adjust
     let s = if let Some(sig) = sigma {
-        let sig_t = transform_covariance(sig, &m)?;
+        let _sig_t = transform_covariance(sig, &m)?;
         // For now, we test against identity (sphericity)
         // A more general test would solve S * Sigma^{-1}
         s
@@ -389,11 +392,7 @@ fn matrix_trace(a: &Array2<f64>) -> f64 {
 /// Compute epsilon corrections for sphericity violations.
 ///
 /// Returns (Greenhouse-Geisser, Huynh-Feldt, Lower Bound) epsilon values.
-fn compute_epsilon_corrections(
-    s: &Array2<f64>,
-    n: usize,
-    p: usize,
-) -> EconResult<(f64, f64, f64)> {
+fn compute_epsilon_corrections(s: &Array2<f64>, n: usize, p: usize) -> EconResult<(f64, f64, f64)> {
     let d = p - 1;
 
     // Lower bound: 1 / (p - 1)
@@ -507,7 +506,7 @@ mod tests {
         // Data with clear violation of sphericity
         // Variance of first difference >> variance of second difference
         let data = array![
-            [1.0, 10.0, 11.0],   // Large jump then small
+            [1.0, 10.0, 11.0], // Large jump then small
             [2.0, 12.0, 12.5],
             [1.5, 15.0, 15.2],
             [2.5, 8.0, 8.3],
@@ -524,7 +523,11 @@ mod tests {
         let result = mauchly_test(&data, None).unwrap();
 
         // W should be small for non-spherical data
-        assert!(result.w < 0.9 || result.p_value < 0.05, "W = {} should be smaller or p < 0.05", result.w);
+        assert!(
+            result.w < 0.9 || result.p_value < 0.05,
+            "W = {} should be smaller or p < 0.05",
+            result.w
+        );
         // Epsilon corrections should be < 1
         assert!(result.epsilon_gg <= 1.0);
         assert!(result.epsilon_hf <= 1.0);
@@ -551,7 +554,7 @@ mod tests {
         let result = mauchly_test(&data, None).unwrap();
 
         // Lower bound should be 1/(p-1) = 1/3
-        assert!((result.epsilon_lb - 1.0/3.0).abs() < 0.01);
+        assert!((result.epsilon_lb - 1.0 / 3.0).abs() < 0.01);
 
         // GG should be >= lower bound
         assert!(result.epsilon_gg >= result.epsilon_lb);
@@ -568,12 +571,8 @@ mod tests {
     fn test_mauchly_from_slice() {
         // More varied data
         let data = vec![
-            1.0, 2.1, 3.3,
-            2.0, 3.2, 4.1,
-            1.5, 2.4, 3.8,
-            2.5, 3.6, 4.5,
-            1.2, 2.6, 3.2,
-            3.0, 4.1, 5.2,
+            1.0, 2.1, 3.3, 2.0, 3.2, 4.1, 1.5, 2.4, 3.8, 2.5, 3.6, 4.5, 1.2, 2.6, 3.2, 3.0, 4.1,
+            5.2,
         ];
 
         let result = mauchly_test_from_slice(&data, 6, 3).unwrap();
@@ -597,7 +596,10 @@ mod tests {
                 assert!(
                     (mtm[[i, j]] - expected).abs() < 1e-10,
                     "M'M[{},{}] = {} (expected {})",
-                    i, j, mtm[[i, j]], expected
+                    i,
+                    j,
+                    mtm[[i, j]],
+                    expected
                 );
             }
         }
@@ -611,11 +613,7 @@ mod tests {
         assert!((det - (-2.0)).abs() < 1e-10);
 
         // 3x3 matrix
-        let b = array![
-            [6.0, 1.0, 1.0],
-            [4.0, -2.0, 5.0],
-            [2.0, 8.0, 7.0]
-        ];
+        let b = array![[6.0, 1.0, 1.0], [4.0, -2.0, 5.0], [2.0, 8.0, 7.0]];
         let det = matrix_determinant(&b).unwrap();
         assert!((det - (-306.0)).abs() < 1e-8);
     }

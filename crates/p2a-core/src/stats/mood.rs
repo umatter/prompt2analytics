@@ -280,12 +280,20 @@ pub fn run_mood_test(
 
     let x_series = df.column(x_col).map_err(|_| EconError::ColumnNotFound {
         column: x_col.to_string(),
-        available: df.get_column_names().iter().map(|s| s.to_string()).collect(),
+        available: df
+            .get_column_names()
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
     })?;
 
     let y_series = df.column(y_col).map_err(|_| EconError::ColumnNotFound {
         column: y_col.to_string(),
-        available: df.get_column_names().iter().map(|s| s.to_string()).collect(),
+        available: df
+            .get_column_names()
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
     })?;
 
     let x: Vec<f64> = x_series

@@ -12,14 +12,14 @@
 //! R equivalent: `plm::pggls()`
 
 use ndarray::{Array1, Array2};
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
 
 use crate::data::Dataset;
-use crate::errors::{EconResult, EconError};
-use crate::linalg::matrix_ops::{xtx, xty, safe_inverse};
+use crate::errors::{EconError, EconResult};
 use crate::linalg::design::DesignMatrix;
+use crate::linalg::matrix_ops::{safe_inverse, xtx, xty};
 use crate::traits::estimator::{SignificanceLevel, t_test_p_value};
 
 use super::utils::demean_by_entity;
@@ -97,12 +97,18 @@ impl fmt::Display for PanelGlsResult {
         writeln!(f, "{}", "=".repeat(70))?;
         writeln!(f, "Model: {}", self.model)?;
         writeln!(f, "Dep. Variable: {}", self.dep_var)?;
-        writeln!(f, "Observations: {}  Entities: {}  Time periods: {}",
-            self.n_obs, self.n_groups, self.n_periods)?;
+        writeln!(
+            f,
+            "Observations: {}  Entities: {}  Time periods: {}",
+            self.n_obs, self.n_groups, self.n_periods
+        )?;
         writeln!(f, "R-squared: {:.4}", self.r_squared)?;
         writeln!(f, "{}", "-".repeat(70))?;
-        writeln!(f, "{:<20} {:>12} {:>12} {:>10} {:>10}",
-            "Variable", "Coefficient", "Std.Error", "t-stat", "P>|t|")?;
+        writeln!(
+            f,
+            "{:<20} {:>12} {:>12} {:>10} {:>10}",
+            "Variable", "Coefficient", "Std.Error", "t-stat", "P>|t|"
+        )?;
         writeln!(f, "{}", "-".repeat(70))?;
 
         for i in 0..self.variables.len() {
@@ -113,13 +119,16 @@ impl fmt::Display for PanelGlsResult {
                 SignificanceLevel::OnePercent => "**",
                 SignificanceLevel::TenthPercent => "***",
             };
-            writeln!(f, "{:<20} {:>12.6} {:>12.6} {:>10.4} {:>9.4}{}",
+            writeln!(
+                f,
+                "{:<20} {:>12.6} {:>12.6} {:>10.4} {:>9.4}{}",
                 self.variables[i],
                 self.coefficients[i],
                 self.std_errors[i],
                 self.t_stats[i],
                 self.p_values[i],
-                sig)?;
+                sig
+            )?;
         }
 
         writeln!(f, "{}", "-".repeat(70))?;
@@ -176,11 +185,13 @@ pub fn run_panel_gls(
 
     // Extract data from dataset
     let df = dataset.df();
-    let y_series = df.column(y_col)
+    let y_series = df
+        .column(y_col)
         .map_err(|_| EconError::InvalidSpecification {
             message: format!("Dependent variable '{}' not found", y_col),
         })?;
-    let y: Vec<f64> = y_series.f64()
+    let y: Vec<f64> = y_series
+        .f64()
         .map_err(|_| EconError::InvalidSpecification {
             message: format!("Dependent variable '{}' must be numeric", y_col),
         })?
@@ -188,21 +199,28 @@ pub fn run_panel_gls(
         .collect();
 
     // Extract entity and time identifiers
-    let entity_series = df.column(entity_col)
+    let entity_series = df
+        .column(entity_col)
         .map_err(|_| EconError::InvalidSpecification {
             message: format!("Entity column '{}' not found", entity_col),
         })?;
 
-    let time_series = df.column(time_col)
+    let time_series = df
+        .column(time_col)
         .map_err(|_| EconError::InvalidSpecification {
             message: format!("Time column '{}' not found", time_col),
         })?;
 
     // Get unique entities
     let entity_strings: Vec<String> = if let Ok(utf8) = entity_series.str() {
-        utf8.into_iter().map(|s| s.unwrap_or("").to_string()).collect()
+        utf8.into_iter()
+            .map(|s| s.unwrap_or("").to_string())
+            .collect()
     } else if let Ok(i64_col) = entity_series.i64() {
-        i64_col.into_iter().map(|v| v.unwrap_or(0).to_string()).collect()
+        i64_col
+            .into_iter()
+            .map(|v| v.unwrap_or(0).to_string())
+            .collect()
     } else {
         return Err(EconError::InvalidSpecification {
             message: "Entity column must be string or integer".to_string(),
@@ -212,7 +230,10 @@ pub fn run_panel_gls(
     let time_values: Vec<i64> = if let Ok(i64_col) = time_series.i64() {
         i64_col.into_iter().map(|v| v.unwrap_or(0)).collect()
     } else if let Ok(f64_col) = time_series.f64() {
-        f64_col.into_iter().map(|v| v.unwrap_or(0.0) as i64).collect()
+        f64_col
+            .into_iter()
+            .map(|v| v.unwrap_or(0.0) as i64)
+            .collect()
     } else {
         return Err(EconError::InvalidSpecification {
             message: "Time column must be numeric".to_string(),
@@ -236,7 +257,7 @@ pub fn run_panel_gls(
     let n_groups = entity_map.len();
 
     // Get unique time periods
-    let mut unique_times: Vec<i64> = time_values.iter().copied().collect();
+    let mut unique_times: Vec<i64> = time_values.to_vec();
     unique_times.sort_unstable();
     unique_times.dedup();
     let n_periods = unique_times.len();
@@ -282,7 +303,7 @@ pub fn run_panel_gls(
             let resid = &y_demeaned - &fitted;
 
             (resid.to_vec(), beta.to_vec())
-        },
+        }
         PanelGlsModel::Pooling => {
             // Simple OLS
             let y_arr = Array1::from(y.clone());
@@ -294,7 +315,7 @@ pub fn run_panel_gls(
             let resid = &y_arr - &fitted;
 
             (resid.to_vec(), beta.to_vec())
-        },
+        }
         PanelGlsModel::FirstDifference => {
             // First-difference transformation
             warnings.push("First-difference GLS drops first observation per entity".to_string());
@@ -333,7 +354,8 @@ pub fn run_panel_gls(
                 return Err(EconError::InsufficientData {
                     required: 2,
                     provided: 1,
-                    context: "First-difference requires at least 2 time periods per entity".to_string(),
+                    context: "First-difference requires at least 2 time periods per entity"
+                        .to_string(),
                 });
             }
 
@@ -355,7 +377,7 @@ pub fn run_panel_gls(
             let resid = &y_diff_arr - &fitted;
 
             (resid.to_vec(), beta.to_vec())
-        },
+        }
     };
 
     // Step 2: Estimate error covariance matrix
@@ -388,7 +410,9 @@ pub fn run_panel_gls(
 
         for (s, &ts) in times.iter().enumerate() {
             for (t_idx, &tt) in times.iter().enumerate() {
-                if let (Some(&s_idx), Some(&t_idx_val)) = (time_idx_map.get(&ts), time_idx_map.get(&tt)) {
+                if let (Some(&s_idx), Some(&t_idx_val)) =
+                    (time_idx_map.get(&ts), time_idx_map.get(&tt))
+                {
                     omega[[s_idx, t_idx_val]] += resids[s] * resids[t_idx];
                     omega_counts[[s_idx, t_idx_val]] += 1;
                 }
@@ -418,7 +442,8 @@ pub fn run_panel_gls(
                 .map(|(inv, _)| inv)
                 .map_err(|_| EconError::SingularMatrix {
                     context: "Error covariance matrix".to_string(),
-                    suggestion: "Check for multicollinearity or insufficient time variation".to_string(),
+                    suggestion: "Check for multicollinearity or insufficient time variation"
+                        .to_string(),
                 })?
         }
     };
@@ -482,8 +507,10 @@ pub fn run_panel_gls(
         suggestion: "Check for perfect collinearity".to_string(),
     })?;
 
-    if cond.map_or(false, |c| c > 1e10) {
-        warnings.push("High condition number detected, results may be numerically unstable".to_string());
+    if cond.is_some_and(|c| c > 1e10) {
+        warnings.push(
+            "High condition number detected, results may be numerically unstable".to_string(),
+        );
     }
 
     let beta: Array1<f64> = xtox_inv.dot(&xtoy);
@@ -493,10 +520,13 @@ pub fn run_panel_gls(
     let residuals = &y_arr - &fitted;
 
     let rss: f64 = residuals.iter().map(|r| r * r).sum();
-    let tss: f64 = y_arr.iter().map(|yi| {
-        let y_mean = y_arr.mean().unwrap_or(0.0);
-        (yi - y_mean).powi(2)
-    }).sum();
+    let tss: f64 = y_arr
+        .iter()
+        .map(|yi| {
+            let y_mean = y_arr.mean().unwrap_or(0.0);
+            (yi - y_mean).powi(2)
+        })
+        .sum();
 
     let r_squared = if tss > 0.0 { 1.0 - rss / tss } else { 0.0 };
 
@@ -514,16 +544,19 @@ pub fn run_panel_gls(
         .collect();
 
     // T-statistics and p-values
-    let t_stats: Vec<f64> = beta.iter()
+    let t_stats: Vec<f64> = beta
+        .iter()
         .zip(std_errors.iter())
         .map(|(&b, &se)| if se > 0.0 { b / se } else { 0.0 })
         .collect();
 
-    let p_values: Vec<f64> = t_stats.iter()
+    let p_values: Vec<f64> = t_stats
+        .iter()
         .map(|&t| t_test_p_value(t, df_residual as f64))
         .collect();
 
-    let significance: Vec<SignificanceLevel> = p_values.iter()
+    let significance: Vec<SignificanceLevel> = p_values
+        .iter()
         .map(|&p| SignificanceLevel::from_p_value(p))
         .collect();
 
@@ -565,7 +598,14 @@ pub fn run_fegls(
     entity_col: &str,
     time_col: &str,
 ) -> EconResult<PanelGlsResult> {
-    run_panel_gls(dataset, y_col, x_cols, entity_col, time_col, Some(PanelGlsModel::FixedEffects))
+    run_panel_gls(
+        dataset,
+        y_col,
+        x_cols,
+        entity_col,
+        time_col,
+        Some(PanelGlsModel::FixedEffects),
+    )
 }
 
 /// Convenience function for Pooled GLS.
@@ -576,5 +616,12 @@ pub fn run_pooled_gls(
     entity_col: &str,
     time_col: &str,
 ) -> EconResult<PanelGlsResult> {
-    run_panel_gls(dataset, y_col, x_cols, entity_col, time_col, Some(PanelGlsModel::Pooling))
+    run_panel_gls(
+        dataset,
+        y_col,
+        x_cols,
+        entity_col,
+        time_col,
+        Some(PanelGlsModel::Pooling),
+    )
 }

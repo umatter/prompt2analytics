@@ -2,21 +2,19 @@
 
 use clap::Subcommand;
 use ndarray::Array2;
-use p2a_core::{
-    histogram, scatter_plot, line_chart, box_plot, ChartConfig,
-    correlation_heatmap, coefficient_plot, residual_diagnostics,
-    dendrogram, event_study_plot, irf_plot,
-    hierarchical, Linkage, run_ols,
-};
-use p2a_core::visualization::{
-    scatter_interactive, histogram_interactive, line_interactive,
-    InteractiveConfig,
-};
 use p2a_core::regression::CovarianceType;
 use p2a_core::traits::LinearEstimator;
+use p2a_core::visualization::{
+    InteractiveConfig, histogram_interactive, line_interactive, scatter_interactive,
+};
+use p2a_core::{
+    ChartConfig, Linkage, box_plot, coefficient_plot, correlation_heatmap, dendrogram,
+    event_study_plot, hierarchical, histogram, irf_plot, line_chart, residual_diagnostics, run_ols,
+    scatter_plot,
+};
 use std::path::PathBuf;
 
-use crate::output::{print_error, print_message, OutputFormat};
+use crate::output::{OutputFormat, print_error, print_message};
 use crate::session::SessionManager;
 
 #[derive(Subcommand)]
@@ -369,28 +367,60 @@ pub fn execute(
             output,
             bins,
             title,
-        } => execute_histogram(dataset, col, output, *bins, title.as_deref(), format, session),
+        } => execute_histogram(
+            dataset,
+            col,
+            output,
+            *bins,
+            title.as_deref(),
+            format,
+            session,
+        ),
         VizCommands::Scatter {
             dataset,
             x_col,
             y_col,
             output,
             title,
-        } => execute_scatter(dataset, x_col, y_col, output, title.as_deref(), format, session),
+        } => execute_scatter(
+            dataset,
+            x_col,
+            y_col,
+            output,
+            title.as_deref(),
+            format,
+            session,
+        ),
         VizCommands::Line {
             dataset,
             x_col,
             y_col,
             output,
             title,
-        } => execute_line(dataset, x_col, y_col, output, title.as_deref(), format, session),
+        } => execute_line(
+            dataset,
+            x_col,
+            y_col,
+            output,
+            title.as_deref(),
+            format,
+            session,
+        ),
         VizCommands::Box {
             dataset,
             value_col,
             group_col,
             output,
             title,
-        } => execute_boxplot(dataset, value_col, group_col.as_deref(), output, title.as_deref(), format, session),
+        } => execute_boxplot(
+            dataset,
+            value_col,
+            group_col.as_deref(),
+            output,
+            title.as_deref(),
+            format,
+            session,
+        ),
         VizCommands::Heatmap {
             dataset,
             cols,
@@ -404,21 +434,46 @@ pub fn execute(
             output,
             conf_level,
             title,
-        } => execute_coefplot(dataset, dep_var, indep_vars, output, *conf_level, title.as_deref(), format, session),
+        } => execute_coefplot(
+            dataset,
+            dep_var,
+            indep_vars,
+            output,
+            *conf_level,
+            title.as_deref(),
+            format,
+            session,
+        ),
         VizCommands::Residuals {
             dataset,
             dep_var,
             indep_vars,
             output,
             title,
-        } => execute_residuals(dataset, dep_var, indep_vars, output, title.as_deref(), format, session),
+        } => execute_residuals(
+            dataset,
+            dep_var,
+            indep_vars,
+            output,
+            title.as_deref(),
+            format,
+            session,
+        ),
         VizCommands::Dendrogram {
             dataset,
             cols,
             linkage,
             output,
             title,
-        } => execute_dendrogram(dataset, cols, linkage, output, title.as_deref(), format, session),
+        } => execute_dendrogram(
+            dataset,
+            cols,
+            linkage,
+            output,
+            title.as_deref(),
+            format,
+            session,
+        ),
         VizCommands::EventStudy {
             dataset,
             time_col,
@@ -427,7 +482,17 @@ pub fn execute(
             ci_upper_col,
             output,
             title,
-        } => execute_event_study(dataset, time_col, estimate_col, ci_lower_col, ci_upper_col, output, title.as_deref(), format, session),
+        } => execute_event_study(
+            dataset,
+            time_col,
+            estimate_col,
+            ci_lower_col,
+            ci_upper_col,
+            output,
+            title.as_deref(),
+            format,
+            session,
+        ),
         VizCommands::Irf {
             dataset,
             horizon_col,
@@ -438,7 +503,19 @@ pub fn execute(
             response_label,
             output,
             title,
-        } => execute_irf(dataset, horizon_col, response_col, ci_lower_col.as_deref(), ci_upper_col.as_deref(), shock_label.as_deref(), response_label.as_deref(), output, title.as_deref(), format, session),
+        } => execute_irf(
+            dataset,
+            horizon_col,
+            response_col,
+            ci_lower_col.as_deref(),
+            ci_upper_col.as_deref(),
+            shock_label.as_deref(),
+            response_label.as_deref(),
+            output,
+            title.as_deref(),
+            format,
+            session,
+        ),
         VizCommands::ScatterInteractive {
             dataset,
             x_col,
@@ -446,21 +523,46 @@ pub fn execute(
             group_col,
             output,
             title,
-        } => execute_scatter_interactive(dataset, x_col, y_col, group_col.as_deref(), output, title.as_deref(), format, session),
+        } => execute_scatter_interactive(
+            dataset,
+            x_col,
+            y_col,
+            group_col.as_deref(),
+            output,
+            title.as_deref(),
+            format,
+            session,
+        ),
         VizCommands::HistogramInteractive {
             dataset,
             col,
             group_col,
             output,
             title,
-        } => execute_histogram_interactive(dataset, col, group_col.as_deref(), output, title.as_deref(), format, session),
+        } => execute_histogram_interactive(
+            dataset,
+            col,
+            group_col.as_deref(),
+            output,
+            title.as_deref(),
+            format,
+            session,
+        ),
         VizCommands::LineInteractive {
             dataset,
             x_col,
             y_col,
             output,
             title,
-        } => execute_line_interactive(dataset, x_col, y_col, output, title.as_deref(), format, session),
+        } => execute_line_interactive(
+            dataset,
+            x_col,
+            y_col,
+            output,
+            title.as_deref(),
+            format,
+            session,
+        ),
     }
 }
 
@@ -495,7 +597,9 @@ fn execute_histogram(
                 }
             };
 
-            let chart_title = title.map(|s| s.to_string()).or_else(|| Some(format!("Histogram of {}", col)));
+            let chart_title = title
+                .map(|s| s.to_string())
+                .or_else(|| Some(format!("Histogram of {}", col)));
             let config = ChartConfig {
                 title: chart_title,
                 width: 800,
@@ -570,7 +674,9 @@ fn execute_scatter(
                 }
             };
 
-            let chart_title = title.map(|s| s.to_string()).or_else(|| Some(format!("{} vs {}", y_col, x_col)));
+            let chart_title = title
+                .map(|s| s.to_string())
+                .or_else(|| Some(format!("{} vs {}", y_col, x_col)));
             let config = ChartConfig {
                 title: chart_title,
                 width: 800,
@@ -582,20 +688,18 @@ fn execute_scatter(
 
             // scatter_plot(x, y, config)
             match scatter_plot(&x_data, &y_data, config) {
-                Ok(result) => {
-                    match decode_base64_image(&result.image_base64) {
-                        Ok(png_data) => {
-                            std::fs::write(output, &png_data)?;
-                            print_message(
-                                &format!("Scatter plot saved to: {}", output.display()),
-                                format,
-                            );
-                        }
-                        Err(e) => {
-                            print_error(&e, format);
-                        }
+                Ok(result) => match decode_base64_image(&result.image_base64) {
+                    Ok(png_data) => {
+                        std::fs::write(output, &png_data)?;
+                        print_message(
+                            &format!("Scatter plot saved to: {}", output.display()),
+                            format,
+                        );
                     }
-                }
+                    Err(e) => {
+                        print_error(&e, format);
+                    }
+                },
                 Err(e) => {
                     print_error(&format!("Scatter plot creation failed: {}", e), format);
                 }
@@ -646,7 +750,9 @@ fn execute_line(
                 }
             };
 
-            let chart_title = title.map(|s| s.to_string()).or_else(|| Some(format!("{} vs {}", y_col, x_col)));
+            let chart_title = title
+                .map(|s| s.to_string())
+                .or_else(|| Some(format!("{} vs {}", y_col, x_col)));
             let config = ChartConfig {
                 title: chart_title,
                 width: 800,
@@ -660,20 +766,15 @@ fn execute_line(
             let series = vec![(y_col.to_string(), x_data, y_data)];
 
             match line_chart(&series, config) {
-                Ok(result) => {
-                    match decode_base64_image(&result.image_base64) {
-                        Ok(png_data) => {
-                            std::fs::write(output, &png_data)?;
-                            print_message(
-                                &format!("Line plot saved to: {}", output.display()),
-                                format,
-                            );
-                        }
-                        Err(e) => {
-                            print_error(&e, format);
-                        }
+                Ok(result) => match decode_base64_image(&result.image_base64) {
+                    Ok(png_data) => {
+                        std::fs::write(output, &png_data)?;
+                        print_message(&format!("Line plot saved to: {}", output.display()), format);
                     }
-                }
+                    Err(e) => {
+                        print_error(&e, format);
+                    }
+                },
                 Err(e) => {
                     print_error(&format!("Line plot creation failed: {}", e), format);
                 }
@@ -713,14 +814,20 @@ fn execute_boxplot(
                 let group_series = match df.column(grp_col) {
                     Ok(c) => c,
                     Err(e) => {
-                        print_error(&format!("Group column '{}' not found: {}", grp_col, e), format);
+                        print_error(
+                            &format!("Group column '{}' not found: {}", grp_col, e),
+                            format,
+                        );
                         return Ok(());
                     }
                 };
                 let value_series = match df.column(value_col) {
                     Ok(c) => c,
                     Err(e) => {
-                        print_error(&format!("Value column '{}' not found: {}", value_col, e), format);
+                        print_error(
+                            &format!("Value column '{}' not found: {}", value_col, e),
+                            format,
+                        );
                         return Ok(());
                     }
                 };
@@ -732,10 +839,8 @@ fn execute_boxplot(
                 match (groups_str, values_f64) {
                     (Ok(gs), Ok(vs)) => {
                         // Collect unique groups
-                        let unique: std::collections::HashSet<String> = gs
-                            .into_no_null_iter()
-                            .map(|s| s.to_string())
-                            .collect();
+                        let unique: std::collections::HashSet<String> =
+                            gs.into_no_null_iter().map(|s| s.to_string()).collect();
 
                         unique
                             .into_iter()
@@ -751,7 +856,10 @@ fn execute_boxplot(
                             .collect()
                     }
                     _ => {
-                        print_error("Group column must be string and value column must be numeric", format);
+                        print_error(
+                            "Group column must be string and value column must be numeric",
+                            format,
+                        );
                         return Ok(());
                     }
                 }
@@ -767,7 +875,9 @@ fn execute_boxplot(
                 vec![(value_col.to_string(), data)]
             };
 
-            let chart_title = title.map(|s| s.to_string()).or_else(|| Some(format!("Box Plot of {}", value_col)));
+            let chart_title = title
+                .map(|s| s.to_string())
+                .or_else(|| Some(format!("Box Plot of {}", value_col)));
             let config = ChartConfig {
                 title: chart_title,
                 width: 800,
@@ -777,18 +887,13 @@ fn execute_boxplot(
             };
 
             match box_plot(&groups, config) {
-                Ok(result) => {
-                    match decode_base64_image(&result.image_base64) {
-                        Ok(png_data) => {
-                            std::fs::write(output, &png_data)?;
-                            print_message(
-                                &format!("Box plot saved to: {}", output.display()),
-                                format,
-                            );
-                        }
-                        Err(e) => print_error(&e, format),
+                Ok(result) => match decode_base64_image(&result.image_base64) {
+                    Ok(png_data) => {
+                        std::fs::write(output, &png_data)?;
+                        print_message(&format!("Box plot saved to: {}", output.display()), format);
                     }
-                }
+                    Err(e) => print_error(&e, format),
+                },
                 Err(e) => print_error(&format!("Box plot creation failed: {}", e), format),
             }
         }
@@ -848,15 +953,13 @@ fn execute_heatmap(
             let labels: Vec<String> = cols.to_vec();
 
             match correlation_heatmap(&corr_matrix, &labels, &labels, title, Some(800), Some(600)) {
-                Ok(result) => {
-                    match decode_base64_image(&result.image_base64) {
-                        Ok(png_data) => {
-                            std::fs::write(output, &png_data)?;
-                            print_message(&format!("Heatmap saved to: {}", output.display()), format);
-                        }
-                        Err(e) => print_error(&e, format),
+                Ok(result) => match decode_base64_image(&result.image_base64) {
+                    Ok(png_data) => {
+                        std::fs::write(output, &png_data)?;
+                        print_message(&format!("Heatmap saved to: {}", output.display()), format);
                     }
-                }
+                    Err(e) => print_error(&e, format),
+                },
                 Err(e) => print_error(&format!("Heatmap creation failed: {}", e), format),
             }
         }
@@ -918,18 +1021,23 @@ fn execute_coefplot(
                     let z = 1.96; // Approximate for 95% CI
 
                     let names: Vec<String> = result.variable_names.clone();
-                    let estimates: Vec<f64> = result.coefficients.iter().map(|c| c.estimate).collect();
-                    let std_errors: Vec<f64> = result.coefficients.iter().map(|c| c.std_error).collect();
-                    let ci_lower: Vec<f64> = estimates.iter()
+                    let estimates: Vec<f64> =
+                        result.coefficients.iter().map(|c| c.estimate).collect();
+                    let std_errors: Vec<f64> =
+                        result.coefficients.iter().map(|c| c.std_error).collect();
+                    let ci_lower: Vec<f64> = estimates
+                        .iter()
                         .zip(std_errors.iter())
                         .map(|(b, se)| b - z * se)
                         .collect();
-                    let ci_upper: Vec<f64> = estimates.iter()
+                    let ci_upper: Vec<f64> = estimates
+                        .iter()
                         .zip(std_errors.iter())
                         .map(|(b, se)| b + z * se)
                         .collect();
 
-                    let chart_title = title.map(|s| s.to_string())
+                    let chart_title = title
+                        .map(|s| s.to_string())
                         .or_else(|| Some(format!("Coefficients: {}", dep_var)));
                     let config = ChartConfig {
                         title: chart_title,
@@ -939,15 +1047,16 @@ fn execute_coefplot(
                     };
 
                     match coefficient_plot(&names, &estimates, &ci_lower, &ci_upper, config, true) {
-                        Ok(plot_result) => {
-                            match decode_base64_image(&plot_result.image_base64) {
-                                Ok(png_data) => {
-                                    std::fs::write(output, &png_data)?;
-                                    print_message(&format!("Coefficient plot saved to: {}", output.display()), format);
-                                }
-                                Err(e) => print_error(&e, format),
+                        Ok(plot_result) => match decode_base64_image(&plot_result.image_base64) {
+                            Ok(png_data) => {
+                                std::fs::write(output, &png_data)?;
+                                print_message(
+                                    &format!("Coefficient plot saved to: {}", output.display()),
+                                    format,
+                                );
                             }
-                        }
+                            Err(e) => print_error(&e, format),
+                        },
                         Err(e) => print_error(&format!("Coefficient plot failed: {}", e), format),
                     }
                 }
@@ -996,12 +1105,14 @@ fn execute_residuals(
                     let resid = result.residuals();
                     let residuals: Vec<f64> = resid.to_vec();
                     // Compute fitted = y - residuals
-                    let fitted: Vec<f64> = y_values.iter()
+                    let fitted: Vec<f64> = y_values
+                        .iter()
                         .zip(residuals.iter())
                         .map(|(y, r)| y - r)
                         .collect();
 
-                    let chart_title = title.map(|s| s.to_string())
+                    let chart_title = title
+                        .map(|s| s.to_string())
                         .or_else(|| Some("Residual Diagnostics".to_string()));
                     let config = ChartConfig {
                         title: chart_title,
@@ -1020,10 +1131,12 @@ fn execute_residuals(
                                     std::fs::write(output, &png_data)?;
 
                                     // Save other plots with suffixes
-                                    let stem = output.file_stem()
+                                    let stem = output
+                                        .file_stem()
                                         .and_then(|s| s.to_str())
                                         .unwrap_or("residuals");
-                                    let parent = output.parent().unwrap_or(std::path::Path::new("."));
+                                    let parent =
+                                        output.parent().unwrap_or(std::path::Path::new("."));
 
                                     // Save Q-Q plot
                                     if let Ok(qq_data) = decode_base64_image(&plot_result.qq_plot) {
@@ -1031,17 +1144,29 @@ fn execute_residuals(
                                         let _ = std::fs::write(&qq_path, &qq_data);
                                     }
                                     // Save scale-location plot
-                                    if let Ok(sl_data) = decode_base64_image(&plot_result.scale_location) {
-                                        let sl_path = parent.join(format!("{}_scale_location.png", stem));
+                                    if let Ok(sl_data) =
+                                        decode_base64_image(&plot_result.scale_location)
+                                    {
+                                        let sl_path =
+                                            parent.join(format!("{}_scale_location.png", stem));
                                         let _ = std::fs::write(&sl_path, &sl_data);
                                     }
                                     // Save leverage plot
-                                    if let Ok(lev_data) = decode_base64_image(&plot_result.residuals_vs_leverage) {
-                                        let lev_path = parent.join(format!("{}_leverage.png", stem));
+                                    if let Ok(lev_data) =
+                                        decode_base64_image(&plot_result.residuals_vs_leverage)
+                                    {
+                                        let lev_path =
+                                            parent.join(format!("{}_leverage.png", stem));
                                         let _ = std::fs::write(&lev_path, &lev_data);
                                     }
 
-                                    print_message(&format!("Residual diagnostics saved to: {} (+ _qq, _scale_location, _leverage)", output.display()), format);
+                                    print_message(
+                                        &format!(
+                                            "Residual diagnostics saved to: {} (+ _qq, _scale_location, _leverage)",
+                                            output.display()
+                                        ),
+                                        format,
+                                    );
                                 }
                                 Err(e) => print_error(&e, format),
                             }
@@ -1098,7 +1223,8 @@ fn execute_dendrogram(
                     // linkage_matrix is already Vec<(usize, usize, f64, usize)>
                     let linkage_matrix = &result.linkage_matrix;
 
-                    let chart_title = title.map(|s| s.to_string())
+                    let chart_title = title
+                        .map(|s| s.to_string())
                         .or_else(|| Some("Dendrogram".to_string()));
                     let config = ChartConfig {
                         title: chart_title,
@@ -1107,17 +1233,20 @@ fn execute_dendrogram(
                         ..Default::default()
                     };
 
-                    match dendrogram(&linkage_matrix, None, config) {
-                        Ok(plot_result) => {
-                            match decode_base64_image(&plot_result.image_base64) {
-                                Ok(png_data) => {
-                                    std::fs::write(output, &png_data)?;
-                                    print_message(&format!("Dendrogram saved to: {}", output.display()), format);
-                                }
-                                Err(e) => print_error(&e, format),
+                    match dendrogram(linkage_matrix, None, config) {
+                        Ok(plot_result) => match decode_base64_image(&plot_result.image_base64) {
+                            Ok(png_data) => {
+                                std::fs::write(output, &png_data)?;
+                                print_message(
+                                    &format!("Dendrogram saved to: {}", output.display()),
+                                    format,
+                                );
                             }
+                            Err(e) => print_error(&e, format),
+                        },
+                        Err(e) => {
+                            print_error(&format!("Dendrogram creation failed: {}", e), format)
                         }
-                        Err(e) => print_error(&format!("Dendrogram creation failed: {}", e), format),
                     }
                 }
                 Err(e) => print_error(&format!("Hierarchical clustering failed: {}", e), format),
@@ -1185,22 +1314,35 @@ fn execute_event_study(
         Some(ds) => {
             let time = match extract_column(ds, time_col) {
                 Ok(d) => d,
-                Err(e) => { print_error(&e, format); return Ok(()); }
+                Err(e) => {
+                    print_error(&e, format);
+                    return Ok(());
+                }
             };
             let estimates = match extract_column(ds, estimate_col) {
                 Ok(d) => d,
-                Err(e) => { print_error(&e, format); return Ok(()); }
+                Err(e) => {
+                    print_error(&e, format);
+                    return Ok(());
+                }
             };
             let ci_lower = match extract_column(ds, ci_lower_col) {
                 Ok(d) => d,
-                Err(e) => { print_error(&e, format); return Ok(()); }
+                Err(e) => {
+                    print_error(&e, format);
+                    return Ok(());
+                }
             };
             let ci_upper = match extract_column(ds, ci_upper_col) {
                 Ok(d) => d,
-                Err(e) => { print_error(&e, format); return Ok(()); }
+                Err(e) => {
+                    print_error(&e, format);
+                    return Ok(());
+                }
             };
 
-            let chart_title = title.map(|s| s.to_string())
+            let chart_title = title
+                .map(|s| s.to_string())
                 .or_else(|| Some("Event Study".to_string()));
             let config = ChartConfig {
                 title: chart_title,
@@ -1212,15 +1354,16 @@ fn execute_event_study(
             };
 
             match event_study_plot(&time, &estimates, &ci_lower, &ci_upper, config) {
-                Ok(result) => {
-                    match decode_base64_image(&result.image_base64) {
-                        Ok(png_data) => {
-                            std::fs::write(output, &png_data)?;
-                            print_message(&format!("Event study plot saved to: {}", output.display()), format);
-                        }
-                        Err(e) => print_error(&e, format),
+                Ok(result) => match decode_base64_image(&result.image_base64) {
+                    Ok(png_data) => {
+                        std::fs::write(output, &png_data)?;
+                        print_message(
+                            &format!("Event study plot saved to: {}", output.display()),
+                            format,
+                        );
                     }
-                }
+                    Err(e) => print_error(&e, format),
+                },
                 Err(e) => print_error(&format!("Event study plot failed: {}", e), format),
             }
         }
@@ -1254,17 +1397,26 @@ fn execute_irf(
         Some(ds) => {
             let horizons = match extract_column(ds, horizon_col) {
                 Ok(d) => d,
-                Err(e) => { print_error(&e, format); return Ok(()); }
+                Err(e) => {
+                    print_error(&e, format);
+                    return Ok(());
+                }
             };
             let responses = match extract_column(ds, response_col) {
                 Ok(d) => d,
-                Err(e) => { print_error(&e, format); return Ok(()); }
+                Err(e) => {
+                    print_error(&e, format);
+                    return Ok(());
+                }
             };
 
-            let ci_lower: Option<Vec<f64>> = ci_lower_col.and_then(|col| extract_column(ds, col).ok());
-            let ci_upper: Option<Vec<f64>> = ci_upper_col.and_then(|col| extract_column(ds, col).ok());
+            let ci_lower: Option<Vec<f64>> =
+                ci_lower_col.and_then(|col| extract_column(ds, col).ok());
+            let ci_upper: Option<Vec<f64>> =
+                ci_upper_col.and_then(|col| extract_column(ds, col).ok());
 
-            let chart_title = title.map(|s| s.to_string())
+            let chart_title = title
+                .map(|s| s.to_string())
                 .or_else(|| Some("Impulse Response Function".to_string()));
             let config = ChartConfig {
                 title: chart_title,
@@ -1282,15 +1434,13 @@ fn execute_irf(
                 response_label,
                 config,
             ) {
-                Ok(result) => {
-                    match decode_base64_image(&result.image_base64) {
-                        Ok(png_data) => {
-                            std::fs::write(output, &png_data)?;
-                            print_message(&format!("IRF plot saved to: {}", output.display()), format);
-                        }
-                        Err(e) => print_error(&e, format),
+                Ok(result) => match decode_base64_image(&result.image_base64) {
+                    Ok(png_data) => {
+                        std::fs::write(output, &png_data)?;
+                        print_message(&format!("IRF plot saved to: {}", output.display()), format);
                     }
-                }
+                    Err(e) => print_error(&e, format),
+                },
                 Err(e) => print_error(&format!("IRF plot failed: {}", e), format),
             }
         }
@@ -1312,7 +1462,10 @@ fn execute_scatter_interactive(
     let dataset = match session {
         Some(mgr) => mgr.get_dataset(dataset_name),
         None => {
-            print_error("No session active. Use --session <file> to enable dataset storage.", format);
+            print_error(
+                "No session active. Use --session <file> to enable dataset storage.",
+                format,
+            );
             return Ok(());
         }
     };
@@ -1329,7 +1482,10 @@ fn execute_scatter_interactive(
             match scatter_interactive(ds.df(), x_col, y_col, group_col, config) {
                 Ok(result) => {
                     std::fs::write(output, &result.html)?;
-                    print_message(&format!("Interactive scatter plot saved to: {}", output.display()), format);
+                    print_message(
+                        &format!("Interactive scatter plot saved to: {}", output.display()),
+                        format,
+                    );
                 }
                 Err(e) => print_error(&format!("Scatter plot failed: {}", e), format),
             }
@@ -1351,7 +1507,10 @@ fn execute_histogram_interactive(
     let dataset = match session {
         Some(mgr) => mgr.get_dataset(dataset_name),
         None => {
-            print_error("No session active. Use --session <file> to enable dataset storage.", format);
+            print_error(
+                "No session active. Use --session <file> to enable dataset storage.",
+                format,
+            );
             return Ok(());
         }
     };
@@ -1368,7 +1527,10 @@ fn execute_histogram_interactive(
             match histogram_interactive(ds.df(), col, group_col, config) {
                 Ok(result) => {
                     std::fs::write(output, &result.html)?;
-                    print_message(&format!("Interactive histogram saved to: {}", output.display()), format);
+                    print_message(
+                        &format!("Interactive histogram saved to: {}", output.display()),
+                        format,
+                    );
                 }
                 Err(e) => print_error(&format!("Histogram failed: {}", e), format),
             }
@@ -1390,7 +1552,10 @@ fn execute_line_interactive(
     let dataset = match session {
         Some(mgr) => mgr.get_dataset(dataset_name),
         None => {
-            print_error("No session active. Use --session <file> to enable dataset storage.", format);
+            print_error(
+                "No session active. Use --session <file> to enable dataset storage.",
+                format,
+            );
             return Ok(());
         }
     };
@@ -1407,7 +1572,10 @@ fn execute_line_interactive(
             match line_interactive(ds.df(), x_col, y_col, config) {
                 Ok(result) => {
                     std::fs::write(output, &result.html)?;
-                    print_message(&format!("Interactive line plot saved to: {}", output.display()), format);
+                    print_message(
+                        &format!("Interactive line plot saved to: {}", output.display()),
+                        format,
+                    );
                 }
                 Err(e) => print_error(&format!("Line plot failed: {}", e), format),
             }

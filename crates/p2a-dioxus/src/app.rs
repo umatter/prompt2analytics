@@ -143,7 +143,9 @@ pub fn App() -> Element {
                     {
                         if let Some(window) = web_sys::window() {
                             if let Some(document) = window.document() {
-                                if let Some(textarea) = document.query_selector("textarea").ok().flatten() {
+                                if let Some(textarea) =
+                                    document.query_selector("textarea").ok().flatten()
+                                {
                                     if let Some(elem) = textarea.dyn_ref::<web_sys::HtmlElement>() {
                                         let _ = elem.focus();
                                     }
@@ -167,7 +169,9 @@ pub fn App() -> Element {
                                 Ok(new_conv) => {
                                     let id = new_conv.id.clone();
                                     conversation_state.write().add_conversation(new_conv);
-                                    conversation_state.write().set_current_conversation(Some(id));
+                                    conversation_state
+                                        .write()
+                                        .set_current_conversation(Some(id));
                                 }
                                 Err(e) => {
                                     tracing::warn!("Failed to create conversation: {}", e);

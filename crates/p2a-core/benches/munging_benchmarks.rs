@@ -3,12 +3,12 @@
 //! Benchmarks filter, select, join, group_by, pivot/melt, and lag/lead operations.
 //! Run with: `cargo bench -p p2a-core -- munging`
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
-use p2a_core::data::munging::{
-    filter, select, sort, left_join, group_by, pivot, melt, lag, fill_na,
-    AggFn, AggSpec, FillStrategy,
-};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use p2a_core::Dataset;
+use p2a_core::data::munging::{
+    AggFn, AggSpec, FillStrategy, fill_na, filter, group_by, lag, left_join, melt, pivot, select,
+    sort,
+};
 use polars::prelude::*;
 use rand::Rng;
 use rand::SeedableRng;
@@ -55,9 +55,7 @@ fn generate_join_data(n: usize, seed: u64) -> (Dataset, Dataset) {
     let right_n = n / 10;
     let key: Vec<i64> = (1..=right_n as i64).collect();
     let value: Vec<f64> = (0..right_n).map(|_| rng.gen_range(0.0..100.0)).collect();
-    let label: Vec<String> = (0..right_n)
-        .map(|i| format!("label_{}", i % 100))
-        .collect();
+    let label: Vec<String> = (0..right_n).map(|i| format!("label_{}", i % 100)).collect();
 
     let right_df = DataFrame::new(vec![
         Column::new("group".into(), key),
@@ -74,12 +72,8 @@ fn generate_panel_data(n_entities: usize, n_periods: usize, seed: u64) -> Datase
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
     let n = n_entities * n_periods;
 
-    let entity: Vec<i64> = (0..n)
-        .map(|i| (i / n_periods + 1) as i64)
-        .collect();
-    let period: Vec<i64> = (0..n)
-        .map(|i| (i % n_periods + 1) as i64)
-        .collect();
+    let entity: Vec<i64> = (0..n).map(|i| (i / n_periods + 1) as i64).collect();
+    let period: Vec<i64> = (0..n).map(|i| (i % n_periods + 1) as i64).collect();
     let value: Vec<f64> = (0..n).map(|_| rng.gen_range(-1.0..1.0)).collect();
 
     let df = DataFrame::new(vec![
@@ -98,9 +92,7 @@ fn generate_pivot_data(n_ids: usize, n_vars: usize, seed: u64) -> Dataset {
     let n = n_ids * n_vars;
 
     let id: Vec<i64> = (0..n).map(|i| (i / n_vars + 1) as i64).collect();
-    let variable: Vec<String> = (0..n)
-        .map(|i| format!("var_{}", i % n_vars + 1))
-        .collect();
+    let variable: Vec<String> = (0..n).map(|i| format!("var_{}", i % n_vars + 1)).collect();
     let value: Vec<f64> = (0..n).map(|_| rng.gen_range(0.0..100.0)).collect();
 
     let df = DataFrame::new(vec![
@@ -262,13 +254,7 @@ fn group_by_single_agg_benchmark(c: &mut Criterion) {
         let dataset = generate_munging_data(n, 42);
 
         group.bench_with_input(BenchmarkId::from_parameter(n), &dataset, |b, ds| {
-            b.iter(|| {
-                group_by(
-                    ds,
-                    &["group"],
-                    &[AggSpec::new("x1", AggFn::Sum)],
-                )
-            });
+            b.iter(|| group_by(ds, &["group"], &[AggSpec::new("x1", AggFn::Sum)]));
         });
     }
 
@@ -347,7 +333,15 @@ fn melt_benchmark(c: &mut Criterion) {
         let dataset = generate_munging_data(n, 42);
 
         group.bench_with_input(BenchmarkId::from_parameter(n), &dataset, |b, ds| {
-            b.iter(|| melt(ds, &["id", "group"], &["x1", "x2", "x3"], "variable", "value"));
+            b.iter(|| {
+                melt(
+                    ds,
+                    &["id", "group"],
+                    &["x1", "x2", "x3"],
+                    "variable",
+                    "value",
+                )
+            });
         });
     }
 
@@ -430,10 +424,7 @@ criterion_group!(
     filter_string_benchmark
 );
 
-criterion_group!(
-    select_benches,
-    select_benchmark
-);
+criterion_group!(select_benches, select_benchmark);
 
 criterion_group!(
     sort_benches,
@@ -441,10 +432,7 @@ criterion_group!(
     sort_multi_column_benchmark
 );
 
-criterion_group!(
-    join_benches,
-    left_join_benchmark
-);
+criterion_group!(join_benches, left_join_benchmark);
 
 criterion_group!(
     group_by_benches,
@@ -453,17 +441,9 @@ criterion_group!(
     group_by_multi_key_benchmark
 );
 
-criterion_group!(
-    reshape_benches,
-    pivot_benchmark,
-    melt_benchmark
-);
+criterion_group!(reshape_benches, pivot_benchmark, melt_benchmark);
 
-criterion_group!(
-    lag_benches,
-    lag_simple_benchmark,
-    lag_grouped_benchmark
-);
+criterion_group!(lag_benches, lag_simple_benchmark, lag_grouped_benchmark);
 
 criterion_group!(
     fill_na_benches,

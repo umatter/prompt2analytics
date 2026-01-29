@@ -1,7 +1,7 @@
-use std::time::Instant;
 use ndarray::Array2;
 use rand::prelude::*;
 use rand_distr::Normal;
+use std::time::Instant;
 
 fn generate_cluster_data(n: usize, k: usize, n_clusters: usize) -> Array2<f64> {
     let mut rng = StdRng::seed_from_u64(42);
@@ -22,13 +22,15 @@ fn generate_univariate_mixture(n: usize) -> Vec<f64> {
     let normal1 = Normal::new(0.0, 1.0).unwrap();
     let normal2 = Normal::new(10.0, 1.0).unwrap();
 
-    (0..n).map(|i| {
-        if i % 2 == 0 {
-            rng.sample(normal1)
-        } else {
-            rng.sample(normal2)
-        }
-    }).collect()
+    (0..n)
+        .map(|i| {
+            if i % 2 == 0 {
+                rng.sample(normal1)
+            } else {
+                rng.sample(normal2)
+            }
+        })
+        .collect()
 }
 
 fn main() {
@@ -75,7 +77,8 @@ fn main() {
         let start = Instant::now();
         let iters = if n <= 500 { 10 } else { 3 };
         for _ in 0..iters {
-            let _ = run_dynamic_tree_cut(data.view(), Some(FastLinkage::Ward), None, Some(2), Some(2));
+            let _ =
+                run_dynamic_tree_cut(data.view(), Some(FastLinkage::Ward), None, Some(2), Some(2));
         }
         let elapsed = start.elapsed().as_secs_f64() * 1000.0 / iters as f64;
         println!("dynamicTreeCut n={}: {:.3} ms", n, elapsed);
@@ -114,9 +117,7 @@ fn main() {
     println!("=== kprototypes (Mixed Data) ===");
     for n in sizes {
         let numeric_data = generate_cluster_data(n, 5, 3);
-        let categorical_data: Vec<Vec<usize>> = (0..n)
-            .map(|i| vec![i % 3, i % 5])
-            .collect();
+        let categorical_data: Vec<Vec<usize>> = (0..n).map(|i| vec![i % 3, i % 5]).collect();
 
         let start = Instant::now();
         let iters = if n <= 500 { 10 } else { 5 };

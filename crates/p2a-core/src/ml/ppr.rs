@@ -53,7 +53,7 @@
 //!
 //! R equivalent: `stats::ppr()`
 
-use ndarray::{Array1, ArrayView2};
+use ndarray::ArrayView2;
 use serde::{Deserialize, Serialize};
 
 /// Result of projection pursuit regression.
@@ -420,13 +420,14 @@ fn find_projection_direction_fast(
         var_ridge += weights[i] * r_dev * r_dev;
     }
 
-    let beta = if var_ridge > 1e-10 { cov / var_ridge } else { 1.0 };
+    let beta = if var_ridge > 1e-10 {
+        cov / var_ridge
+    } else {
+        1.0
+    };
 
     // Scale ridge values by beta
-    let scaled_ridge: Vec<f64> = smoothed
-        .iter()
-        .map(|&r| beta * (r - ridge_mean))
-        .collect();
+    let scaled_ridge: Vec<f64> = smoothed.iter().map(|&r| beta * (r - ridge_mean)).collect();
 
     Ok((alpha, scaled_ridge, beta))
 }
@@ -604,11 +605,7 @@ fn weighted_mean(x: &[f64], w: &[f64]) -> f64 {
         sum_wx += wi * xi;
         sum_w += wi;
     }
-    if sum_w > 0.0 {
-        sum_wx / sum_w
-    } else {
-        0.0
-    }
+    if sum_w > 0.0 { sum_wx / sum_w } else { 0.0 }
 }
 
 /// Run PPR (convenience wrapper).

@@ -65,7 +65,7 @@ use serde::{Deserialize, Serialize};
 use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
 use crate::linalg::{safe_inverse, xtx, xty};
-use crate::regression::ols::{run_ols, CovarianceType, OlsResult};
+use crate::regression::ols::{CovarianceType, OlsResult, run_ols};
 use crate::traits::t_critical;
 
 /// Result of sensitivity analysis for a single treatment variable.

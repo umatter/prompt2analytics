@@ -59,8 +59,8 @@
 //! R equivalent: `hettx::detect_idiosyncratic()`, `hettx::detect_systematic()`
 
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
-use rand::prelude::*;
 use rand::SeedableRng;
+use rand::prelude::*;
 use rand_chacha::ChaCha8Rng;
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -201,20 +201,32 @@ impl fmt::Display for HetDecomposition {
         writeln!(f)?;
         writeln!(f, "Variance Components:")?;
         writeln!(f, "  Total variance:       {:>10.4}", self.total_variance)?;
-        writeln!(f, "  Systematic variance:  {:>10.4} ({:.1}%)",
-                 self.systematic_variance,
-                 self.r_squared * 100.0)?;
-        writeln!(f, "  Idiosyncratic variance: {:>8.4} ({:.1}%)",
-                 self.idiosyncratic_variance,
-                 (1.0 - self.r_squared) * 100.0)?;
+        writeln!(
+            f,
+            "  Systematic variance:  {:>10.4} ({:.1}%)",
+            self.systematic_variance,
+            self.r_squared * 100.0
+        )?;
+        writeln!(
+            f,
+            "  Idiosyncratic variance: {:>8.4} ({:.1}%)",
+            self.idiosyncratic_variance,
+            (1.0 - self.r_squared) * 100.0
+        )?;
         writeln!(f)?;
         writeln!(f, "Tests for Heterogeneity:")?;
         writeln!(f, "  Systematic (H0: Var(E[tau|X])=0):")?;
-        writeln!(f, "    Test stat: {:.4}, p-value: {:.4}",
-                 self.systematic_test_stat, self.systematic_p_value)?;
+        writeln!(
+            f,
+            "    Test stat: {:.4}, p-value: {:.4}",
+            self.systematic_test_stat, self.systematic_p_value
+        )?;
         writeln!(f, "  Idiosyncratic (H0: E[Var(tau|X)]=0):")?;
-        writeln!(f, "    Test stat: {:.4}, p-value: {:.4}",
-                 self.idiosyncratic_test_stat, self.idiosyncratic_p_value)?;
+        writeln!(
+            f,
+            "    Test stat: {:.4}, p-value: {:.4}",
+            self.idiosyncratic_test_stat, self.idiosyncratic_p_value
+        )?;
 
         if !self.covariate_importance.is_empty() {
             writeln!(f)?;
@@ -226,7 +238,11 @@ impl fmt::Display for HetDecomposition {
                     "Unknown"
                 };
                 if idx >= 10 {
-                    writeln!(f, "  ... {} more covariates", self.covariate_importance.len() - 10)?;
+                    writeln!(
+                        f,
+                        "  ... {} more covariates",
+                        self.covariate_importance.len() - 10
+                    )?;
                     break;
                 }
                 writeln!(f, "  {:<20} {:.4}", name, importance)?;
@@ -301,13 +317,25 @@ impl fmt::Display for HetTxResult {
         writeln!(f, "===========================================")?;
         writeln!(f)?;
 
-        writeln!(f, "H0: All treatment effects are equal (tau_i = tau for all i)")?;
+        writeln!(
+            f,
+            "H0: All treatment effects are equal (tau_i = tau for all i)"
+        )?;
         writeln!(f, "H1: Treatment effects vary across units")?;
         writeln!(f)?;
 
         writeln!(f, "Test Results:")?;
-        writeln!(f, "  Statistic:     {} = {:.4}", self.test_statistic_type, self.test_statistic)?;
-        writeln!(f, "  P-value:       {:.4}{}", self.p_value, self.significance.stars())?;
+        writeln!(
+            f,
+            "  Statistic:     {} = {:.4}",
+            self.test_statistic_type, self.test_statistic
+        )?;
+        writeln!(
+            f,
+            "  P-value:       {:.4}{}",
+            self.p_value,
+            self.significance.stars()
+        )?;
         writeln!(f, "  Permutations:  {}", self.n_permutations)?;
         writeln!(f)?;
 
@@ -490,7 +518,8 @@ fn run_hettx_with_names(
         return Err(EconError::InvalidSpecification {
             message: format!(
                 "Treatment vector length ({}) does not match outcome length ({})",
-                treatment.len(), n
+                treatment.len(),
+                n
             ),
         });
     }
@@ -500,7 +529,8 @@ fn run_hettx_with_names(
             return Err(EconError::InvalidSpecification {
                 message: format!(
                     "Covariate matrix rows ({}) do not match outcome length ({})",
-                    x.nrows(), n
+                    x.nrows(),
+                    n
                 ),
             });
         }
@@ -529,8 +559,11 @@ fn run_hettx_with_names(
 
     // Step 1: Estimate individual treatment effects
     let tau_hat = estimate_individual_effects(
-        y, treatment, covariates,
-        &treated_idx, &control_idx,
+        y,
+        treatment,
+        covariates,
+        &treated_idx,
+        &control_idx,
         config.effect_method,
         config.n_neighbors,
     )?;
@@ -568,8 +601,11 @@ fn run_hettx_with_names(
 
         // Re-estimate individual effects under permuted assignment
         let tau_perm = match estimate_individual_effects(
-            y, &treatment_perm.view(), covariates,
-            &treated_perm, &control_perm,
+            y,
+            &treatment_perm.view(),
+            covariates,
+            &treated_perm,
+            &control_perm,
             config.effect_method,
             config.n_neighbors,
         ) {
@@ -589,13 +625,17 @@ fn run_hettx_with_names(
     if null_distribution.len() < config.n_permutations / 2 {
         warnings.push(format!(
             "Only {}/{} permutations yielded valid statistics",
-            null_distribution.len(), config.n_permutations
+            null_distribution.len(),
+            config.n_permutations
         ));
     }
 
     // Compute p-value: proportion of null stats >= observed
     // Adding 1 to numerator and denominator for continuity correction
-    let n_exceeding = null_distribution.iter().filter(|&&s| s >= observed_stat).count();
+    let n_exceeding = null_distribution
+        .iter()
+        .filter(|&&s| s >= observed_stat)
+        .count();
     let p_value = (n_exceeding as f64 + 1.0) / (null_distribution.len() as f64 + 1.0);
     let significance = SignificanceLevel::from_p_value(p_value);
 
@@ -703,8 +743,10 @@ fn estimate_individual_effects(
         EffectEstimationMethod::Stratified => {
             // Simple difference-in-means
             // This is essentially the same as matching with all units in each group
-            let mean_treated: f64 = treated_idx.iter().map(|&i| y[i]).sum::<f64>() / treated_idx.len() as f64;
-            let mean_control: f64 = control_idx.iter().map(|&i| y[i]).sum::<f64>() / control_idx.len() as f64;
+            let mean_treated: f64 =
+                treated_idx.iter().map(|&i| y[i]).sum::<f64>() / treated_idx.len() as f64;
+            let mean_control: f64 =
+                control_idx.iter().map(|&i| y[i]).sum::<f64>() / control_idx.len() as f64;
             let ate = mean_treated - mean_control;
 
             // Assign same effect to all units (constant treatment effect assumption)
@@ -814,7 +856,11 @@ fn fit_outcome_model_on_subset(
     let sst: f64 = y_sub.iter().map(|&yi| (yi - y_mean).powi(2)).sum();
 
     let y_hat = x_sub.dot(&beta);
-    let ssr: f64 = y_sub.iter().zip(y_hat.iter()).map(|(&yi, &yhi)| (yi - yhi).powi(2)).sum();
+    let ssr: f64 = y_sub
+        .iter()
+        .zip(y_hat.iter())
+        .map(|(&yi, &yhi)| (yi - yhi).powi(2))
+        .sum();
 
     let r2 = if sst > 0.0 { 1.0 - ssr / sst } else { 0.0 };
 
@@ -857,8 +903,14 @@ fn compute_effect_summary(tau: &Array1<f64>) -> EffectSummary {
     let n = tau.len();
     if n == 0 {
         return EffectSummary {
-            min: 0.0, p10: 0.0, p25: 0.0, median: 0.0,
-            p75: 0.0, p90: 0.0, max: 0.0, std_dev: 0.0,
+            min: 0.0,
+            p10: 0.0,
+            p25: 0.0,
+            median: 0.0,
+            p75: 0.0,
+            p90: 0.0,
+            max: 0.0,
+            std_dev: 0.0,
         };
     }
 
@@ -902,7 +954,8 @@ fn compute_heterogeneity_decomposition(
 
     // Total variance in individual effects
     let tau_mean = tau.mean().unwrap_or(0.0);
-    let total_variance = tau.iter().map(|&t| (t - tau_mean).powi(2)).sum::<f64>() / (n - 1).max(1) as f64;
+    let total_variance =
+        tau.iter().map(|&t| (t - tau_mean).powi(2)).sum::<f64>() / (n - 1).max(1) as f64;
 
     // Fit regression: tau = X * gamma + epsilon
     // This estimates E[tau|X] = X * gamma
@@ -915,9 +968,11 @@ fn compute_heterogeneity_decomposition(
 
     // Systematic variance: Var(E[tau|X]) = Var(X * gamma)
     let tau_fitted_mean = tau_fitted.mean().unwrap_or(0.0);
-    let systematic_variance = tau_fitted.iter()
+    let systematic_variance = tau_fitted
+        .iter()
         .map(|&t| (t - tau_fitted_mean).powi(2))
-        .sum::<f64>() / (n - 1).max(1) as f64;
+        .sum::<f64>()
+        / (n - 1).max(1) as f64;
 
     // Idiosyncratic variance: E[Var(tau|X)] = Var(tau) - Var(E[tau|X])
     // Note: This decomposition relies on the law of total variance
@@ -950,20 +1005,26 @@ fn compute_heterogeneity_decomposition(
         let tau_perm: Array1<f64> = perm.iter().map(|&i| tau[i]).collect();
 
         // Fit on permuted data
-        if let Ok((gamma_perm, _)) = fit_outcome_model_on_subset(&x_with_int, &tau_perm.view(), &all_idx) {
+        if let Ok((gamma_perm, _)) =
+            fit_outcome_model_on_subset(&x_with_int, &tau_perm.view(), &all_idx)
+        {
             let tau_fitted_perm = x_with_int.dot(&gamma_perm);
 
             // Compute permuted systematic variance
             let fitted_mean_perm = tau_fitted_perm.mean().unwrap_or(0.0);
-            let sys_var_perm = tau_fitted_perm.iter()
+            let sys_var_perm = tau_fitted_perm
+                .iter()
                 .map(|&t| (t - fitted_mean_perm).powi(2))
-                .sum::<f64>() / (n - 1).max(1) as f64;
+                .sum::<f64>()
+                / (n - 1).max(1) as f64;
 
             // Compute permuted tau variance for idiosyncratic
             let tau_perm_mean = tau_perm.mean().unwrap_or(0.0);
-            let total_var_perm = tau_perm.iter()
+            let total_var_perm = tau_perm
+                .iter()
                 .map(|&t| (t - tau_perm_mean).powi(2))
-                .sum::<f64>() / (n - 1).max(1) as f64;
+                .sum::<f64>()
+                / (n - 1).max(1) as f64;
             let idio_var_perm = (total_var_perm - sys_var_perm).max(0.0);
 
             systematic_null.push(sys_var_perm);
@@ -973,14 +1034,20 @@ fn compute_heterogeneity_decomposition(
 
     // Compute p-values
     let systematic_p_value = if !systematic_null.is_empty() {
-        let n_exceed = systematic_null.iter().filter(|&&s| s >= systematic_test_stat).count();
+        let n_exceed = systematic_null
+            .iter()
+            .filter(|&&s| s >= systematic_test_stat)
+            .count();
         (n_exceed as f64 + 1.0) / (systematic_null.len() as f64 + 1.0)
     } else {
         1.0
     };
 
     let idiosyncratic_p_value = if !idiosyncratic_null.is_empty() {
-        let n_exceed = idiosyncratic_null.iter().filter(|&&s| s >= idiosyncratic_test_stat).count();
+        let n_exceed = idiosyncratic_null
+            .iter()
+            .filter(|&&s| s >= idiosyncratic_test_stat)
+            .count();
         (n_exceed as f64 + 1.0) / (idiosyncratic_null.len() as f64 + 1.0)
     } else {
         1.0
@@ -1021,7 +1088,8 @@ fn compute_covariate_importance(
 
     // Total variance
     let tau_mean = tau.mean().unwrap_or(0.0);
-    let total_var = tau.iter().map(|&t| (t - tau_mean).powi(2)).sum::<f64>() / (n - 1).max(1) as f64;
+    let total_var =
+        tau.iter().map(|&t| (t - tau_mean).powi(2)).sum::<f64>() / (n - 1).max(1) as f64;
 
     // For each covariate, compute its marginal contribution
     // Using the squared coefficient times variance of the covariate
@@ -1029,10 +1097,15 @@ fn compute_covariate_importance(
     for j in 0..k {
         let col = x.column(j);
         let col_mean = col.mean().unwrap_or(0.0);
-        let col_var = col.iter().map(|&v| (v - col_mean).powi(2)).sum::<f64>() / (n - 1).max(1) as f64;
+        let col_var =
+            col.iter().map(|&v| (v - col_mean).powi(2)).sum::<f64>() / (n - 1).max(1) as f64;
 
         // gamma[j+1] because gamma[0] is intercept
-        let coef = if j + 1 < gamma.len() { gamma[j + 1] } else { 0.0 };
+        let coef = if j + 1 < gamma.len() {
+            gamma[j + 1]
+        } else {
+            0.0
+        };
 
         // Importance = beta^2 * Var(X) / Var(tau)
         let imp = if total_var > 0.0 {
@@ -1075,7 +1148,9 @@ mod tests {
         let x2: Vec<f64> = (0..n).map(|_| rng.gen_range(-1.0..1.0)).collect();
 
         // Treatment assignment (random 50%)
-        let treatment: Vec<f64> = (0..n).map(|_| if rng.gen_bool(0.5) { 1.0 } else { 0.0 }).collect();
+        let treatment: Vec<f64> = (0..n)
+            .map(|_| if rng.gen_bool(0.5) { 1.0 } else { 0.0 })
+            .collect();
 
         // Potential outcomes:
         // Y(0) = 1 + 0.2*X1 + 0.1*X2 + noise
@@ -1113,7 +1188,9 @@ mod tests {
 
         let x1: Vec<f64> = (0..n).map(|_| rng.gen_range(-1.0..1.0)).collect();
         let x2: Vec<f64> = (0..n).map(|_| rng.gen_range(-1.0..1.0)).collect();
-        let treatment: Vec<f64> = (0..n).map(|_| if rng.gen_bool(0.5) { 1.0 } else { 0.0 }).collect();
+        let treatment: Vec<f64> = (0..n)
+            .map(|_| if rng.gen_bool(0.5) { 1.0 } else { 0.0 })
+            .collect();
 
         // Constant treatment effect of 0.5
         let y: Vec<f64> = (0..n)
@@ -1160,22 +1237,36 @@ mod tests {
         assert!(result.n_control > 0);
 
         // With heterogeneous effects, test statistic should be non-negative
-        assert!(result.test_statistic >= 0.0,
-                "Test statistic should be non-negative");
+        assert!(
+            result.test_statistic >= 0.0,
+            "Test statistic should be non-negative"
+        );
 
         // Decomposition should show systematic component
         assert!(result.decomposition.is_some());
         let decomp = result.decomposition.unwrap();
-        assert!(decomp.total_variance >= 0.0, "Total variance should be non-negative");
-        assert!(decomp.systematic_variance >= 0.0, "Systematic variance should be non-negative");
+        assert!(
+            decomp.total_variance >= 0.0,
+            "Total variance should be non-negative"
+        );
+        assert!(
+            decomp.systematic_variance >= 0.0,
+            "Systematic variance should be non-negative"
+        );
 
         // R-squared should be in [0, 1]
-        assert!(decomp.r_squared >= 0.0 && decomp.r_squared <= 1.0,
-                "R-squared {} should be in [0, 1]", decomp.r_squared);
+        assert!(
+            decomp.r_squared >= 0.0 && decomp.r_squared <= 1.0,
+            "R-squared {} should be in [0, 1]",
+            decomp.r_squared
+        );
 
         // P-value should be valid
-        assert!(result.p_value >= 0.0 && result.p_value <= 1.0,
-                "P-value {} should be in [0, 1]", result.p_value);
+        assert!(
+            result.p_value >= 0.0 && result.p_value <= 1.0,
+            "P-value {} should be in [0, 1]",
+            result.p_value
+        );
     }
 
     #[test]
@@ -1194,10 +1285,17 @@ mod tests {
 
         // With constant effects, p-value should be higher (fail to reject null)
         // Note: matching-based estimation adds noise, so we don't expect perfect
-        assert!(result.p_value > 0.01, "P-value should be higher for homogeneous effects");
+        assert!(
+            result.p_value > 0.01,
+            "P-value should be higher for homogeneous effects"
+        );
 
         // ATE should be around 0.5
-        assert!((result.ate - 0.5).abs() < 0.3, "ATE {} should be near 0.5", result.ate);
+        assert!(
+            (result.ate - 0.5).abs() < 0.3,
+            "ATE {} should be near 0.5",
+            result.ate
+        );
     }
 
     #[test]
@@ -1220,7 +1318,11 @@ mod tests {
 
             let result = run_hettx(&y.view(), &treatment.view(), Some(&x.view()), config).unwrap();
 
-            assert!(result.test_statistic >= 0.0, "{:?} statistic should be non-negative", stat_type);
+            assert!(
+                result.test_statistic >= 0.0,
+                "{:?} statistic should be non-negative",
+                stat_type
+            );
             assert!(result.p_value >= 0.0 && result.p_value <= 1.0);
             assert_eq!(result.test_statistic_type, stat_type);
         }
@@ -1347,7 +1449,9 @@ mod tests {
 
         let x1: Vec<f64> = (0..n).map(|_| rng.gen_range(-1.0..1.0)).collect();
         let x2: Vec<f64> = (0..n).map(|_| rng.gen_range(-1.0..1.0)).collect();
-        let treatment: Vec<f64> = (0..n).map(|_| if rng.gen_bool(0.5) { 1.0 } else { 0.0 }).collect();
+        let treatment: Vec<f64> = (0..n)
+            .map(|_| if rng.gen_bool(0.5) { 1.0 } else { 0.0 })
+            .collect();
         let y: Vec<f64> = (0..n)
             .map(|i| {
                 let noise = rng.gen_range(-0.1..0.1);
@@ -1364,7 +1468,8 @@ mod tests {
             "treatment" => treatment,
             "x1" => x1,
             "x2" => x2,
-        }.unwrap();
+        }
+        .unwrap();
 
         let dataset = Dataset::new(df);
 
@@ -1375,9 +1480,8 @@ mod tests {
             ..Default::default()
         };
 
-        let result = run_hettx_dataset(
-            &dataset, "outcome", "treatment", &["x1", "x2"], config
-        ).unwrap();
+        let result =
+            run_hettx_dataset(&dataset, "outcome", "treatment", &["x1", "x2"], config).unwrap();
 
         assert_eq!(result.n_obs, n);
         assert!(result.decomposition.is_some());

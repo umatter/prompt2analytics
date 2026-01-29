@@ -75,7 +75,11 @@ impl Dataset {
 
     /// Get column names as strings.
     pub fn column_names(&self) -> Vec<String> {
-        self.df.get_column_names().into_iter().map(|s| s.to_string()).collect()
+        self.df
+            .get_column_names()
+            .into_iter()
+            .map(|s| s.to_string())
+            .collect()
     }
 
     /// Get the first n rows.
@@ -148,23 +152,35 @@ impl Dataset {
                         polars::datatypes::AnyValue::Null => serde_json::Value::Null,
                         polars::datatypes::AnyValue::Boolean(b) => serde_json::Value::Bool(b),
                         polars::datatypes::AnyValue::Int8(n) => serde_json::Value::Number(n.into()),
-                        polars::datatypes::AnyValue::Int16(n) => serde_json::Value::Number(n.into()),
-                        polars::datatypes::AnyValue::Int32(n) => serde_json::Value::Number(n.into()),
-                        polars::datatypes::AnyValue::Int64(n) => serde_json::Value::Number(n.into()),
-                        polars::datatypes::AnyValue::UInt8(n) => serde_json::Value::Number(n.into()),
-                        polars::datatypes::AnyValue::UInt16(n) => serde_json::Value::Number(n.into()),
-                        polars::datatypes::AnyValue::UInt32(n) => serde_json::Value::Number(n.into()),
-                        polars::datatypes::AnyValue::UInt64(n) => serde_json::Value::Number(n.into()),
+                        polars::datatypes::AnyValue::Int16(n) => {
+                            serde_json::Value::Number(n.into())
+                        }
+                        polars::datatypes::AnyValue::Int32(n) => {
+                            serde_json::Value::Number(n.into())
+                        }
+                        polars::datatypes::AnyValue::Int64(n) => {
+                            serde_json::Value::Number(n.into())
+                        }
+                        polars::datatypes::AnyValue::UInt8(n) => {
+                            serde_json::Value::Number(n.into())
+                        }
+                        polars::datatypes::AnyValue::UInt16(n) => {
+                            serde_json::Value::Number(n.into())
+                        }
+                        polars::datatypes::AnyValue::UInt32(n) => {
+                            serde_json::Value::Number(n.into())
+                        }
+                        polars::datatypes::AnyValue::UInt64(n) => {
+                            serde_json::Value::Number(n.into())
+                        }
                         polars::datatypes::AnyValue::Float32(n) => {
                             serde_json::Number::from_f64(n as f64)
                                 .map(serde_json::Value::Number)
                                 .unwrap_or(serde_json::Value::Null)
                         }
-                        polars::datatypes::AnyValue::Float64(n) => {
-                            serde_json::Number::from_f64(n)
-                                .map(serde_json::Value::Number)
-                                .unwrap_or(serde_json::Value::Null)
-                        }
+                        polars::datatypes::AnyValue::Float64(n) => serde_json::Number::from_f64(n)
+                            .map(serde_json::Value::Number)
+                            .unwrap_or(serde_json::Value::Null),
                         _ => serde_json::Value::String(format!("{}", v)),
                     }
                 });

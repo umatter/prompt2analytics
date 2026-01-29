@@ -48,8 +48,8 @@ fn parse_sse_line(line: &str) -> Option<StreamEvent> {
 #[cfg(target_arch = "wasm32")]
 pub mod web {
     use super::*;
-    use wasm_bindgen::prelude::*;
     use wasm_bindgen::JsCast;
+    use wasm_bindgen::prelude::*;
     use wasm_bindgen_futures::JsFuture;
     use web_sys::{Request, RequestInit, RequestMode, Response};
 
@@ -314,10 +314,10 @@ pub mod native {
         }
 
         // Process remaining buffer
-        if !buffer.is_empty() {
-            if let Some(event) = parse_sse_line(&buffer) {
-                on_event(event);
-            }
+        if !buffer.is_empty()
+            && let Some(event) = parse_sse_line(&buffer)
+        {
+            on_event(event);
         }
 
         tracing::debug!("[SSE] stream_chat completed");

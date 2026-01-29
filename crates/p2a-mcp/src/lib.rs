@@ -177,9 +177,6 @@ async fn run_http_server_with_shutdown(
     shutdown_rx: oneshot::Receiver<()>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use crate::transport::http::AppState;
-    use axum::Router;
-    use tower_http::cors::{Any, CorsLayer};
-    use tower_http::trace::TraceLayer;
 
     let session_manager = Arc::new(SessionManager::new(config.session.clone()));
     session_manager.clone().start_cleanup_task(10);
@@ -190,7 +187,10 @@ async fn run_http_server_with_shutdown(
     let audit_logger = match crate::audit::AuditLogger::new(&config.audit) {
         Ok(logger) => Arc::new(logger),
         Err(e) => {
-            tracing::warn!("Failed to initialize audit logger: {}. Proceeding without audit logging.", e);
+            tracing::warn!(
+                "Failed to initialize audit logger: {}. Proceeding without audit logging.",
+                e
+            );
             Arc::new(crate::audit::AuditLogger::disabled())
         }
     };
@@ -207,7 +207,9 @@ async fn run_http_server_with_shutdown(
         .await
         {
             Ok(manager) => {
-                tracing::info!("Database persistence enabled - conversation routes will be available");
+                tracing::info!(
+                    "Database persistence enabled - conversation routes will be available"
+                );
                 Some(Arc::new(manager))
             }
             Err(e) => {

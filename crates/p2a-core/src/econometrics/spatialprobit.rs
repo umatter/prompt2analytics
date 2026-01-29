@@ -280,7 +280,14 @@ pub fn run_sar_probit(
     listw: &mut SpatialWeights,
     config: SpatialProbitConfig,
 ) -> EconResult<SpatialProbitResult> {
-    run_spatial_probit_internal(dataset, y_col, x_cols, listw, config, SpatialProbitModel::Sar)
+    run_spatial_probit_internal(
+        dataset,
+        y_col,
+        x_cols,
+        listw,
+        config,
+        SpatialProbitModel::Sar,
+    )
 }
 
 /// Run SEM probit model: y* = X*beta + u, u = lambda*W*u + epsilon, y = 1(y* > 0).
@@ -305,7 +312,14 @@ pub fn run_sem_probit(
     listw: &mut SpatialWeights,
     config: SpatialProbitConfig,
 ) -> EconResult<SpatialProbitResult> {
-    run_spatial_probit_internal(dataset, y_col, x_cols, listw, config, SpatialProbitModel::Sem)
+    run_spatial_probit_internal(
+        dataset,
+        y_col,
+        x_cols,
+        listw,
+        config,
+        SpatialProbitModel::Sem,
+    )
 }
 
 /// Main spatial probit estimation function (internal).
@@ -335,7 +349,11 @@ fn run_spatial_probit_internal(
     // Extract y (binary outcome)
     let y_series = df.column(y_col).map_err(|_| EconError::ColumnNotFound {
         column: y_col.to_string(),
-        available: df.get_column_names().iter().map(|s| s.to_string()).collect(),
+        available: df
+            .get_column_names()
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
     })?;
     let y: Array1<f64> = y_series
         .f64()
@@ -364,7 +382,11 @@ fn run_spatial_probit_internal(
     for (j, &col_name) in x_cols.iter().enumerate() {
         let col = df.column(col_name).map_err(|_| EconError::ColumnNotFound {
             column: col_name.to_string(),
-            available: df.get_column_names().iter().map(|s| s.to_string()).collect(),
+            available: df
+                .get_column_names()
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
         })?;
         let col_f64 = col.f64().map_err(|_| EconError::NonNumericColumn {
             column: col_name.to_string(),
@@ -385,9 +407,7 @@ fn run_spatial_probit_internal(
     );
 
     // Run MCMC estimation
-    let mcmc_result = run_mcmc_spatial_probit(
-        &y, &x, &w, model_type, &config, rho_range,
-    )?;
+    let mcmc_result = run_mcmc_spatial_probit(&y, &x, &w, model_type, &config, rho_range)?;
 
     // Compute posterior statistics
     let n_draws = mcmc_result.beta_draws.nrows();
@@ -407,7 +427,11 @@ fn run_spatial_probit_internal(
         .map(|&z| 2.0 * (1.0 - normal_cdf(z.abs())))
         .collect();
 
-    let rho_z = if rho_std > 1e-10 { rho_mean / rho_std } else { 0.0 };
+    let rho_z = if rho_std > 1e-10 {
+        rho_mean / rho_std
+    } else {
+        0.0
+    };
     let rho_p = 2.0 * (1.0 - normal_cdf(rho_z.abs()));
 
     // Build coefficient names
@@ -417,9 +441,8 @@ fn run_spatial_probit_internal(
     }
 
     // Compute log-likelihood at posterior mean
-    let ll_mean = compute_spatial_probit_log_likelihood(
-        &y, &x, &w, &beta_mean, rho_mean, model_type,
-    );
+    let ll_mean =
+        compute_spatial_probit_log_likelihood(&y, &x, &w, &beta_mean, rho_mean, model_type);
 
     // Compute null log-likelihood (intercept only, no spatial)
     let p_bar = n_positive as f64 / n as f64;
@@ -441,9 +464,7 @@ fn run_spatial_probit_internal(
 
     // Approximate log marginal likelihood via harmonic mean estimator
     // (Newton & Raftery, 1994) - biased but simple
-    let log_marginal_ll = compute_log_marginal_likelihood_approx(
-        &mcmc_result.log_lik_draws,
-    );
+    let log_marginal_ll = compute_log_marginal_likelihood_approx(&mcmc_result.log_lik_draws);
 
     // DIC = D_bar + p_D where p_D = D_bar - D(theta_bar)
     let d_bar = -2.0 * mcmc_result.log_lik_draws.mean().unwrap_or(ll_mean);
@@ -454,8 +475,12 @@ fn run_spatial_probit_internal(
     // Compute spatial impacts if requested
     let impacts = if config.compute_impacts {
         Some(compute_spatial_probit_impacts(
-            &x, &w, &mcmc_result.beta_draws, &mcmc_result.rho_draws,
-            model_type, &coef_names[1..], // Exclude intercept
+            &x,
+            &w,
+            &mcmc_result.beta_draws,
+            &mcmc_result.rho_draws,
+            model_type,
+            &coef_names[1..], // Exclude intercept
         ))
     } else {
         None
@@ -551,37 +576,40 @@ fn run_mcmc_spatial_probit(
 
     for iter in 0..total_draws {
         // --- Step 1: Sample latent y* given (beta, rho) ---
-        y_star = sample_latent_y(
-            y, x, w, &beta, rho, model_type, &mut rng,
-        );
+        y_star = sample_latent_y(y, x, w, &beta, rho, model_type, &mut rng);
 
         // --- Step 2: Sample beta given (y*, rho) ---
         beta = sample_beta(
-            &y_star, x, w, rho, model_type,
-            &beta0, prior_precision, &mut rng,
+            &y_star,
+            x,
+            w,
+            rho,
+            model_type,
+            &beta0,
+            prior_precision,
+            &mut rng,
         )?;
 
         // --- Step 3: Sample rho given (y*, beta) using griddy Gibbs ---
-        let (new_rho, accepted) = sample_rho_griddy_gibbs(
-            &y_star, x, w, &beta, rho, model_type, rho_range, &mut rng,
-        );
+        let (new_rho, accepted) =
+            sample_rho_griddy_gibbs(&y_star, x, w, &beta, rho, model_type, rho_range, &mut rng);
         rho = new_rho;
         if accepted {
             n_accepted += 1;
         }
 
         // Store draws after burn-in, with thinning
-        if iter >= config.burn_in && (iter - config.burn_in) % config.thin == 0 {
-            if draw_idx < keep_draws {
-                for j in 0..k {
-                    beta_draws[[draw_idx, j]] = beta[j];
-                }
-                rho_draws[draw_idx] = rho;
-                log_lik_draws[draw_idx] = compute_spatial_probit_log_likelihood(
-                    y, x, w, &beta, rho, model_type,
-                );
-                draw_idx += 1;
+        if iter >= config.burn_in
+            && (iter - config.burn_in) % config.thin == 0
+            && draw_idx < keep_draws
+        {
+            for j in 0..k {
+                beta_draws[[draw_idx, j]] = beta[j];
             }
+            rho_draws[draw_idx] = rho;
+            log_lik_draws[draw_idx] =
+                compute_spatial_probit_log_likelihood(y, x, w, &beta, rho, model_type);
+            draw_idx += 1;
         }
     }
 
@@ -614,10 +642,10 @@ fn sample_latent_y<R: rand::Rng>(
             // y* = (I - rho*W)^{-1} * X * beta + (I - rho*W)^{-1} * epsilon
             // Mean: (I - rho*W)^{-1} * X * beta
             // For sampling, we use iterative approach
-            let xb = x.dot(beta);
+
             // Approximate: mu_i = (X*beta)_i + rho * sum_j(w_ij * y*_j)
             // This is a simplified approximation
-            xb
+            x.dot(beta)
         }
         SpatialProbitModel::Sem => {
             // y* = X*beta + u, Var(y*) = (I - lambda*W)^{-1} * (I - lambda*W')^{-1}
@@ -644,7 +672,8 @@ fn sample_latent_y<R: rand::Rng>(
     if model_type == SpatialProbitModel::Sar && rho.abs() > 1e-6 {
         // Apply one iteration of adjustment: y* = X*beta + rho*W*y*_old
         let xb = x.dot(beta);
-        for _ in 0..3 { // A few iterations for convergence
+        for _ in 0..3 {
+            // A few iterations for convergence
             let wy = w.dot(&y_star);
             for i in 0..n {
                 let new_mu = xb[i] + rho * wy[i];
@@ -713,12 +742,10 @@ fn sample_beta<R: rand::Rng>(
     // Sample from N(post_mean, post_var)
     // Using Cholesky: beta = post_mean + L * z where L*L' = post_var
     let l = crate::linalg::matrix_ops::cholesky(&post_var.view())?;
-    let z: Array1<f64> = Array1::from_iter(
-        (0..k).map(|_| {
-            use rand_distr::{Distribution, StandardNormal};
-            StandardNormal.sample(rng)
-        })
-    );
+    let z: Array1<f64> = Array1::from_iter((0..k).map(|_| {
+        use rand_distr::{Distribution, StandardNormal};
+        StandardNormal.sample(rng)
+    }));
     let beta = &post_mean + &l.dot(&z);
 
     Ok(beta)
@@ -792,7 +819,10 @@ fn sample_rho_griddy_gibbs<R: rand::Rng>(
     // Clamp to valid range
     let new_rho_clamped = new_rho.max(rho_range.0 + 0.001).min(rho_range.1 - 0.001);
 
-    (new_rho_clamped, (new_rho_clamped - current_rho).abs() > 1e-8)
+    (
+        new_rho_clamped,
+        (new_rho_clamped - current_rho).abs() > 1e-8,
+    )
 }
 
 /// Compute log-likelihood for spatial probit model.
@@ -926,7 +956,8 @@ fn compute_spatial_probit_impacts(
             // Total effect: average column sum
             let total: f64 = (0..n)
                 .map(|col| (0..n).map(|row| s_j[[row, col]] * phi_z[row]).sum::<f64>())
-                .sum::<f64>() / n as f64;
+                .sum::<f64>()
+                / n as f64;
 
             // Indirect = total - direct
             let indirect = total - direct;
@@ -970,7 +1001,12 @@ fn compute_spatial_probit_impacts(
 }
 
 /// Sample from truncated normal, truncated above threshold.
-fn sample_truncated_normal_above<R: rand::Rng>(mu: f64, sigma: f64, lower: f64, rng: &mut R) -> f64 {
+fn sample_truncated_normal_above<R: rand::Rng>(
+    mu: f64,
+    sigma: f64,
+    lower: f64,
+    rng: &mut R,
+) -> f64 {
     use rand_distr::{Distribution, Uniform};
 
     // Use inverse CDF method
@@ -994,7 +1030,12 @@ fn sample_truncated_normal_above<R: rand::Rng>(mu: f64, sigma: f64, lower: f64, 
 }
 
 /// Sample from truncated normal, truncated below threshold.
-fn sample_truncated_normal_below<R: rand::Rng>(mu: f64, sigma: f64, upper: f64, rng: &mut R) -> f64 {
+fn sample_truncated_normal_below<R: rand::Rng>(
+    mu: f64,
+    sigma: f64,
+    upper: f64,
+    rng: &mut R,
+) -> f64 {
     use rand_distr::{Distribution, Uniform};
 
     // Use inverse CDF method
@@ -1047,7 +1088,8 @@ fn compute_std_axis0(arr: &Array2<f64>) -> Array1<f64> {
             .column(j)
             .iter()
             .map(|&x| (x - mean[j]).powi(2))
-            .sum::<f64>() / (n - 1.0);
+            .sum::<f64>()
+            / (n - 1.0);
         std[j] = var.sqrt();
     }
     std
@@ -1057,11 +1099,15 @@ fn compute_std_axis0(arr: &Array2<f64>) -> Array1<f64> {
 fn compute_log_marginal_likelihood_approx(log_lik_draws: &Array1<f64>) -> f64 {
     // Harmonic mean estimator: 1 / (1/n * sum(1/L))
     // In log: -log(mean(exp(-log_lik)))
-    let max_ll = log_lik_draws.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let max_ll = log_lik_draws
+        .iter()
+        .cloned()
+        .fold(f64::NEG_INFINITY, f64::max);
     let mean_exp_neg: f64 = log_lik_draws
         .iter()
         .map(|&ll| (-(ll - max_ll)).exp())
-        .sum::<f64>() / log_lik_draws.len() as f64;
+        .sum::<f64>()
+        / log_lik_draws.len() as f64;
 
     max_ll - mean_exp_neg.ln()
 }
@@ -1104,7 +1150,11 @@ mod tests {
             let spatial_effect = 0.2 * ((row + col) as f64 - 4.0);
             let z_i = 0.5 + 0.5 * x_i + spatial_effect + normal.sample(&mut rng) * 0.5;
             let p_i = normal_cdf(z_i);
-            let y_i = if uniform.sample(&mut rng) < p_i { 1.0 } else { 0.0 };
+            let y_i = if uniform.sample(&mut rng) < p_i {
+                1.0
+            } else {
+                0.0
+            };
             y_vec.push(y_i);
         }
 

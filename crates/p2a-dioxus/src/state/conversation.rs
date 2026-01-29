@@ -2,7 +2,7 @@
 //!
 //! Manages the list of conversations and the currently active conversation.
 
-use crate::api::{api, Conversation, ConversationMessage};
+use crate::api::{Conversation, ConversationMessage, api};
 
 /// Conversation state for managing conversation history
 #[derive(Clone)]
@@ -244,19 +244,25 @@ impl ConversationState {
 
     /// Get the current conversation
     pub fn get_current_conversation(&self) -> Option<&Conversation> {
-        self.current_conversation_id.as_ref().and_then(|id| {
-            self.conversations.iter().find(|c| &c.id == id)
-        })
+        self.current_conversation_id
+            .as_ref()
+            .and_then(|id| self.conversations.iter().find(|c| &c.id == id))
     }
 
     /// Get non-archived conversations
     pub fn get_active_conversations(&self) -> Vec<&Conversation> {
-        self.conversations.iter().filter(|c| !c.is_archived).collect()
+        self.conversations
+            .iter()
+            .filter(|c| !c.is_archived)
+            .collect()
     }
 
     /// Get archived conversations
     pub fn get_archived_conversations(&self) -> Vec<&Conversation> {
-        self.conversations.iter().filter(|c| c.is_archived).collect()
+        self.conversations
+            .iter()
+            .filter(|c| c.is_archived)
+            .collect()
     }
 
     /// Check if there are any conversations

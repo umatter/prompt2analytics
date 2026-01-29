@@ -43,7 +43,7 @@ use crate::errors::{EconError, EconResult};
 use crate::linalg::design::DesignMatrix;
 use crate::linalg::matrix_ops::{safe_inverse, xtx};
 use crate::regression::HacKernel;
-use crate::traits::estimator::{chi_squared_p_value, SignificanceLevel};
+use crate::traits::estimator::{SignificanceLevel, chi_squared_p_value};
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Configuration Types
@@ -135,9 +135,7 @@ pub enum MomentCondition {
         z: Array2<f64>,
     },
     /// Normal distribution moments: E[x-μ] = 0, E[(x-μ)²-σ²] = 0
-    NormalDistribution {
-        data: Array1<f64>,
-    },
+    NormalDistribution { data: Array1<f64> },
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -190,20 +188,37 @@ impl fmt::Display for GeneralGmmResult {
         writeln!(f, "Observations: {}", self.n_obs)?;
         writeln!(f, "Parameters: {}", self.n_params)?;
         writeln!(f, "Moment conditions: {}", self.n_moments)?;
-        writeln!(f, "Overidentification: {} (q - k = {})",
-                 if self.n_moments > self.n_params { "Yes" } else { "No (just-identified)" },
-                 self.n_moments.saturating_sub(self.n_params))?;
+        writeln!(
+            f,
+            "Overidentification: {} (q - k = {})",
+            if self.n_moments > self.n_params {
+                "Yes"
+            } else {
+                "No (just-identified)"
+            },
+            self.n_moments.saturating_sub(self.n_params)
+        )?;
         writeln!(f)?;
         writeln!(f, "Coefficients:")?;
-        writeln!(f, "{:>15} {:>12} {:>12} {:>10} {:>10}",
-                 "Parameter", "Estimate", "Std.Err", "t-stat", "P>|t|")?;
+        writeln!(
+            f,
+            "{:>15} {:>12} {:>12} {:>10} {:>10}",
+            "Parameter", "Estimate", "Std.Err", "t-stat", "P>|t|"
+        )?;
         writeln!(f, "{}", "-".repeat(65))?;
 
         for i in 0..self.n_params {
             let sig = SignificanceLevel::from_p_value(self.p_values[i]);
-            writeln!(f, "{:>15} {:>12.6} {:>12.6} {:>10.3} {:>10.4}{}",
-                     self.names[i], self.coefficients[i], self.std_errors[i],
-                     self.t_stats[i], self.p_values[i], sig.stars())?;
+            writeln!(
+                f,
+                "{:>15} {:>12.6} {:>12.6} {:>10.3} {:>10.4}{}",
+                self.names[i],
+                self.coefficients[i],
+                self.std_errors[i],
+                self.t_stats[i],
+                self.p_values[i],
+                sig.stars()
+            )?;
         }
         writeln!(f, "{}", "-".repeat(65))?;
 
@@ -215,13 +230,20 @@ impl fmt::Display for GeneralGmmResult {
             if self.j_pvalue < 0.05 {
                 writeln!(f, "  WARNING: Instruments may be invalid (p < 0.05)")?;
             } else {
-                writeln!(f, "  Cannot reject validity of overidentifying restrictions")?;
+                writeln!(
+                    f,
+                    "  Cannot reject validity of overidentifying restrictions"
+                )?;
             }
         }
 
         if !self.converged {
             writeln!(f)?;
-            writeln!(f, "WARNING: Algorithm did not converge after {} iterations", self.iterations)?;
+            writeln!(
+                f,
+                "WARNING: Algorithm did not converge after {} iterations",
+                self.iterations
+            )?;
         }
 
         Ok(())
@@ -253,15 +275,9 @@ pub fn run_general_gmm(
     config: GeneralGmmConfig,
 ) -> EconResult<GeneralGmmResult> {
     match moments {
-        MomentCondition::LinearIV { y, x, z } => {
-            estimate_linear_iv(&y, &x, &z, config)
-        }
-        MomentCondition::LinearOveridentified { y, x, z } => {
-            estimate_linear_iv(&y, &x, &z, config)
-        }
-        MomentCondition::NormalDistribution { data } => {
-            estimate_normal_distribution(&data, config)
-        }
+        MomentCondition::LinearIV { y, x, z } => estimate_linear_iv(&y, &x, &z, config),
+        MomentCondition::LinearOveridentified { y, x, z } => estimate_linear_iv(&y, &x, &z, config),
+        MomentCondition::NormalDistribution { data } => estimate_normal_distribution(&data, config),
     }
 }
 
@@ -284,11 +300,12 @@ pub fn run_gmm_iv(
     let config = config.unwrap_or_default();
 
     // Extract y
-    let y = DesignMatrix::extract_column(dataset.df(), y_col)
-        .map_err(|e| EconError::ColumnNotFound {
+    let y = DesignMatrix::extract_column(dataset.df(), y_col).map_err(|e| {
+        EconError::ColumnNotFound {
             column: y_col.to_string(),
             available: vec![format!("{:?}", e)],
-        })?;
+        }
+    })?;
 
     // Extract X with intercept
     let x_dm = DesignMatrix::from_dataframe(dataset.df(), x_cols, true)?;
@@ -325,8 +342,12 @@ fn estimate_linear_iv(
 
     if z.nrows() != n || x.nrows() != n {
         return Err(EconError::InvalidSpecification {
-            message: format!("Dimension mismatch: n={}, X rows={}, Z rows={}",
-                           n, x.nrows(), z.nrows()),
+            message: format!(
+                "Dimension mismatch: n={}, X rows={}, Z rows={}",
+                n,
+                x.nrows(),
+                z.nrows()
+            ),
         });
     }
 
@@ -342,12 +363,8 @@ fn estimate_linear_iv(
     let zy = z.t().dot(y);
 
     match config.method {
-        GmmMethod::TwoStep => {
-            estimate_two_step_iv(y, x, z, &zz, &zx, &zy, n, k, q, &config)
-        }
-        GmmMethod::Iterative => {
-            estimate_iterative_iv(y, x, z, &zz, &zx, &zy, n, k, q, &config)
-        }
+        GmmMethod::TwoStep => estimate_two_step_iv(y, x, z, &zz, &zx, &zy, n, k, q, &config),
+        GmmMethod::Iterative => estimate_iterative_iv(y, x, z, &zz, &zx, &zy, n, k, q, &config),
         GmmMethod::CUE => {
             // CUE is more complex - fall back to iterative for now
             estimate_iterative_iv(y, x, z, &zz, &zx, &zy, n, k, q, &config)
@@ -380,10 +397,11 @@ fn estimate_two_step_iv(
     let xz_zzi = xz.dot(&zz_inv); // k x q dot q x q = k x q (X'Z (Z'Z)^{-1})
     let xz_zzi_zx = xz_zzi.dot(zx); // k x q dot q x k = k x k
 
-    let (xz_zzi_zx_inv, _) = safe_inverse(&xz_zzi_zx.view()).map_err(|e| EconError::SingularMatrix {
-        context: "GMM first step".to_string(),
-        suggestion: format!("X'Z(Z'Z)⁻¹Z'X singular: {}", e),
-    })?;
+    let (xz_zzi_zx_inv, _) =
+        safe_inverse(&xz_zzi_zx.view()).map_err(|e| EconError::SingularMatrix {
+            context: "GMM first step".to_string(),
+            suggestion: format!("X'Z(Z'Z)⁻¹Z'X singular: {}", e),
+        })?;
 
     let xz_zzi_zy = xz_zzi.dot(zy); // k x q dot q = k
     let beta1 = xz_zzi_zx_inv.dot(&xz_zzi_zy); // k x k dot k = k
@@ -431,18 +449,17 @@ fn estimate_two_step_iv(
     // Covariance matrix: Var(β̂) = (1/n)(X'ZWZ'X)⁻¹
     let vcov_mat = &xzwzx_inv / n as f64;
 
-    let std_errors: Vec<f64> = vcov_mat.diag()
-        .iter()
-        .map(|&v| v.max(0.0).sqrt())
-        .collect();
+    let std_errors: Vec<f64> = vcov_mat.diag().iter().map(|&v| v.max(0.0).sqrt()).collect();
 
     let coefficients: Vec<f64> = beta2.to_vec();
-    let t_stats: Vec<f64> = coefficients.iter()
+    let t_stats: Vec<f64> = coefficients
+        .iter()
         .zip(std_errors.iter())
         .map(|(&b, &se)| if se > 0.0 { b / se } else { 0.0 })
         .collect();
 
-    let p_values: Vec<f64> = t_stats.iter()
+    let p_values: Vec<f64> = t_stats
+        .iter()
         .map(|&t| 2.0 * (1.0 - crate::traits::estimator::normal_cdf(t.abs())))
         .collect();
 
@@ -552,18 +569,17 @@ fn estimate_iterative_iv(
     let (vcov_mat, _) = safe_inverse(&xz_w_zx_final.view())?;
     let vcov_mat = &vcov_mat / n as f64;
 
-    let std_errors: Vec<f64> = vcov_mat.diag()
-        .iter()
-        .map(|&v| v.max(0.0).sqrt())
-        .collect();
+    let std_errors: Vec<f64> = vcov_mat.diag().iter().map(|&v| v.max(0.0).sqrt()).collect();
 
     let coefficients: Vec<f64> = beta.to_vec();
-    let t_stats: Vec<f64> = coefficients.iter()
+    let t_stats: Vec<f64> = coefficients
+        .iter()
         .zip(std_errors.iter())
         .map(|(&b, &se)| if se > 0.0 { b / se } else { 0.0 })
         .collect();
 
-    let p_values: Vec<f64> = t_stats.iter()
+    let p_values: Vec<f64> = t_stats
+        .iter()
         .map(|&t| 2.0 * (1.0 - crate::traits::estimator::normal_cdf(t.abs())))
         .collect();
 
@@ -629,9 +645,9 @@ fn compute_optimal_weight(
         }
         GmmVcov::HAC => {
             // HAC weighting matrix with Newey-West style correction
-            let bw = config.bandwidth.unwrap_or_else(|| {
-                (4.0 * (n as f64 / 100.0).powf(2.0 / 9.0)).floor() as usize
-            });
+            let bw = config
+                .bandwidth
+                .unwrap_or_else(|| (4.0 * (n as f64 / 100.0).powf(2.0 / 9.0)).floor() as usize);
 
             // Score vectors
             let mut scores = Array2::<f64>::zeros((n, q));
@@ -698,7 +714,7 @@ fn compute_optimal_weight(
 
 fn estimate_normal_distribution(
     data: &Array1<f64>,
-    config: GeneralGmmConfig,
+    _config: GeneralGmmConfig,
 ) -> EconResult<GeneralGmmResult> {
     let n = data.len();
 
@@ -744,18 +760,17 @@ fn estimate_normal_distribution(
 
     let coefficients = vec![mu, sigma2];
     let std_errors = vec![se_mu, se_sigma2];
-    let t_stats: Vec<f64> = coefficients.iter()
+    let t_stats: Vec<f64> = coefficients
+        .iter()
         .zip(std_errors.iter())
         .map(|(&b, &se)| if se > 0.0 { b / se } else { 0.0 })
         .collect();
-    let p_values: Vec<f64> = t_stats.iter()
+    let p_values: Vec<f64> = t_stats
+        .iter()
         .map(|&t| 2.0 * (1.0 - crate::traits::estimator::normal_cdf(t.abs())))
         .collect();
 
-    let vcov = vec![
-        vec![se_mu * se_mu, 0.0],
-        vec![0.0, se_sigma2 * se_sigma2],
-    ];
+    let vcov = vec![vec![se_mu * se_mu, 0.0], vec![0.0, se_sigma2 * se_sigma2]];
 
     Ok(GeneralGmmResult {
         coefficients,
@@ -790,8 +805,8 @@ mod tests {
     fn test_normal_distribution_gmm() {
         // Generate normal data
         let data = Array1::from(vec![
-            1.2, 0.8, 1.5, 0.9, 1.1, 1.3, 0.7, 1.4, 1.0, 0.85,
-            1.15, 0.95, 1.25, 0.75, 1.35, 1.05, 0.65, 1.45, 0.55, 1.55
+            1.2, 0.8, 1.5, 0.9, 1.1, 1.3, 0.7, 1.4, 1.0, 0.85, 1.15, 0.95, 1.25, 0.75, 1.35, 1.05,
+            0.65, 1.45, 0.55, 1.55,
         ]);
 
         let moments = MomentCondition::NormalDistribution { data };
@@ -818,16 +833,12 @@ mod tests {
         // Simple IV example
         let n = 50;
         let y = Array1::from_iter((0..n).map(|i| 2.0 + 3.0 * (i as f64) + (i % 5) as f64 * 0.1));
-        let x = Array2::from_shape_fn((n, 2), |(i, j)| {
-            if j == 0 { 1.0 } else { i as f64 }
-        });
-        let z = Array2::from_shape_fn((n, 3), |(i, j)| {
-            match j {
-                0 => 1.0,
-                1 => i as f64,
-                2 => (i * i) as f64 / 100.0,
-                _ => 0.0,
-            }
+        let x = Array2::from_shape_fn((n, 2), |(i, j)| if j == 0 { 1.0 } else { i as f64 });
+        let z = Array2::from_shape_fn((n, 3), |(i, j)| match j {
+            0 => 1.0,
+            1 => i as f64,
+            2 => (i * i) as f64 / 100.0,
+            _ => 0.0,
         });
 
         let moments = MomentCondition::LinearIV { y, x, z };
@@ -856,9 +867,7 @@ mod tests {
     fn test_iterative_gmm() {
         let n = 50;
         let y = Array1::from_iter((0..n).map(|i| 1.0 + 2.0 * (i as f64)));
-        let x = Array2::from_shape_fn((n, 2), |(i, j)| {
-            if j == 0 { 1.0 } else { i as f64 }
-        });
+        let x = Array2::from_shape_fn((n, 2), |(i, j)| if j == 0 { 1.0 } else { i as f64 });
         let z = x.clone();
 
         let moments = MomentCondition::LinearIV { y, x, z };

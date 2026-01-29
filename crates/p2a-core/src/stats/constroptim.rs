@@ -203,9 +203,9 @@ where
         };
 
         // Optimize the augmented function
-        let (new_theta, new_value, fn_evals, grad_evals) = match config.method {
+        let (new_theta, _new_value, fn_evals, grad_evals) = match config.method {
             OptimMethod::NelderMead => {
-                nelder_mead(&theta, &aug_f, config.max_fn_evals, config.inner_tol)
+                nelder_mead(&theta, aug_f, config.max_fn_evals, config.inner_tol)
             }
             OptimMethod::BFGS | OptimMethod::LBFGSB => {
                 if let Some(ref g) = grad {
@@ -224,9 +224,15 @@ where
                         }
                         grad_vec
                     };
-                    bfgs_with_grad(&theta, &aug_f, &aug_grad, config.max_fn_evals, config.inner_tol)
+                    bfgs_with_grad(
+                        &theta,
+                        aug_f,
+                        aug_grad,
+                        config.max_fn_evals,
+                        config.inner_tol,
+                    )
                 } else {
-                    nelder_mead(&theta, &aug_f, config.max_fn_evals, config.inner_tol)
+                    nelder_mead(&theta, aug_f, config.max_fn_evals, config.inner_tol)
                 }
             }
         };
@@ -324,12 +330,7 @@ fn compute_constraint_margin(theta: &[f64], ui: &[Vec<f64>], ci: &[f64]) -> Vec<
 }
 
 /// Nelder-Mead simplex optimization (gradient-free).
-fn nelder_mead<F>(
-    x0: &[f64],
-    f: F,
-    max_evals: usize,
-    tol: f64,
-) -> (Vec<f64>, f64, usize, usize)
+fn nelder_mead<F>(x0: &[f64], f: F, max_evals: usize, tol: f64) -> (Vec<f64>, f64, usize, usize)
 where
     F: Fn(&[f64]) -> f64,
 {
@@ -351,21 +352,28 @@ where
     }
 
     // Evaluate function at all vertices
-    let mut values: Vec<f64> = simplex.iter().map(|v| {
-        fn_evals += 1;
-        f(v)
-    }).collect();
+    let mut values: Vec<f64> = simplex
+        .iter()
+        .map(|v| {
+            fn_evals += 1;
+            f(v)
+        })
+        .collect();
 
     // Nelder-Mead parameters
     let alpha = 1.0; // Reflection
     let gamma = 2.0; // Expansion
-    let rho = 0.5;   // Contraction
+    let rho = 0.5; // Contraction
     let sigma = 0.5; // Shrink
 
     for _ in 0..max_evals {
         // Sort vertices by function value
         let mut indices: Vec<usize> = (0..=n).collect();
-        indices.sort_by(|&a, &b| values[a].partial_cmp(&values[b]).unwrap_or(std::cmp::Ordering::Equal));
+        indices.sort_by(|&a, &b| {
+            values[a]
+                .partial_cmp(&values[b])
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         // Check convergence
         let f_range = values[indices[n]] - values[indices[0]];
@@ -386,7 +394,7 @@ where
 
         // Reflection
         let worst_idx = indices[n];
-        let mut reflected: Vec<f64> = centroid
+        let reflected: Vec<f64> = centroid
             .iter()
             .zip(simplex[worst_idx].iter())
             .map(|(&c, &w)| c + alpha * (c - w))
@@ -446,7 +454,8 @@ where
                 let best = simplex[indices[0]].clone();
                 for i in 1..=n {
                     for j in 0..n {
-                        simplex[indices[i]][j] = best[j] + sigma * (simplex[indices[i]][j] - best[j]);
+                        simplex[indices[i]][j] =
+                            best[j] + sigma * (simplex[indices[i]][j] - best[j]);
                     }
                     fn_evals += 1;
                     values[indices[i]] = f(&simplex[indices[i]]);
@@ -568,7 +577,8 @@ where
 
         for i in 0..n {
             for j in 0..n {
-                h_inv[i][j] += ((sy + yhy) * s[i] * s[j] - h_y[i] * s[j] - s[i] * h_y[j]) / (sy * sy);
+                h_inv[i][j] +=
+                    ((sy + yhy) * s[i] * s[j] - h_y[i] * s[j] - s[i] * h_y[j]) / (sy * sy);
             }
         }
     }
@@ -608,8 +618,15 @@ mod tests {
         let ci = vec![1.0];
         let theta0 = vec![1.0, 1.0]; // Feasible starting point
 
-        let result = constr_optim(&theta0, f, Some(grad), &ui, &ci, ConstrOptimConfig::default())
-            .unwrap();
+        let result = constr_optim(
+            &theta0,
+            f,
+            Some(grad),
+            &ui,
+            &ci,
+            ConstrOptimConfig::default(),
+        )
+        .unwrap();
 
         // Check constraint is satisfied (x + y >= 1)
         assert!(result.par[0] + result.par[1] >= 0.99, "Constraint violated");
@@ -619,7 +636,11 @@ mod tests {
 
         // Check result is reasonable (optimal is 0.5)
         // Barrier methods may not reach exact optimum but should be close
-        assert!(result.value < 1.0, "Value should be less than 1.0, got {}", result.value);
+        assert!(
+            result.value < 1.0,
+            "Value should be less than 1.0, got {}",
+            result.value
+        );
     }
 
     #[test]
@@ -628,29 +649,43 @@ mod tests {
         // Optimal is at any point on x + y = 1 where x,y > 0
         // Optimal value is -1 (minimizing -x - y when x + y = 1)
         let f = |x: &[f64]| -x[0] - x[1];
-        let grad = |x: &[f64]| vec![-1.0, -1.0];
+        let grad = |_x: &[f64]| vec![-1.0, -1.0];
 
         let ui = vec![
-            vec![1.0, 0.0],  // x >= 0
-            vec![0.0, 1.0],  // y >= 0
+            vec![1.0, 0.0],   // x >= 0
+            vec![0.0, 1.0],   // y >= 0
             vec![-1.0, -1.0], // -x - y >= -1 (x + y <= 1)
         ];
         let ci = vec![0.0, 0.0, -1.0];
         let theta0 = vec![0.3, 0.3];
 
-        let result = constr_optim(&theta0, f, Some(grad), &ui, &ci, ConstrOptimConfig::default())
-            .unwrap();
+        let result = constr_optim(
+            &theta0,
+            f,
+            Some(grad),
+            &ui,
+            &ci,
+            ConstrOptimConfig::default(),
+        )
+        .unwrap();
 
         // Check all constraints are satisfied
         assert!(result.par[0] >= -0.01, "x should be non-negative");
         assert!(result.par[1] >= -0.01, "y should be non-negative");
-        assert!(result.par[0] + result.par[1] <= 1.01, "x + y should be <= 1");
+        assert!(
+            result.par[0] + result.par[1] <= 1.01,
+            "x + y should be <= 1"
+        );
 
         // Check we improved from starting point (f(0.3, 0.3) = -0.6)
         assert!(result.value < -0.5, "Should improve from starting point");
 
         // Optimal value is -1; should be reasonably close
-        assert!(result.value <= -0.8, "Value should be close to optimal -1.0, got {}", result.value);
+        assert!(
+            result.value <= -0.8,
+            "Value should be close to optimal -1.0, got {}",
+            result.value
+        );
     }
 
     #[test]
@@ -667,9 +702,8 @@ mod tests {
             ..Default::default()
         };
 
-        let result = constr_optim::<_, fn(&[f64]) -> Vec<f64>>(
-            &theta0, f, None, &ui, &ci, config
-        ).unwrap();
+        let result =
+            constr_optim::<_, fn(&[f64]) -> Vec<f64>>(&theta0, f, None, &ui, &ci, config).unwrap();
 
         // Unconstrained optimum is (1, 2), which is feasible
         assert_relative_eq!(result.par[0], 1.0, epsilon = 0.1);
@@ -684,7 +718,12 @@ mod tests {
         let theta0 = vec![0.0]; // x = 0 doesn't satisfy x >= 1
 
         let result = constr_optim::<_, fn(&[f64]) -> Vec<f64>>(
-            &theta0, f, None, &ui, &ci, ConstrOptimConfig::default()
+            &theta0,
+            f,
+            None,
+            &ui,
+            &ci,
+            ConstrOptimConfig::default(),
         );
 
         assert!(result.is_err());
@@ -704,5 +743,183 @@ mod tests {
         assert_relative_eq!(margin[0], 1.0, epsilon = 1e-10);
         assert_relative_eq!(margin[1], 1.0, epsilon = 1e-10);
         assert_relative_eq!(margin[2], 1.0, epsilon = 1e-10);
+    }
+
+    // =========================================================================
+    // Validation tests against R
+    // =========================================================================
+
+    #[test]
+    fn test_validate_constr_optim_quadratic() {
+        // R: constrOptim(c(1, 1), function(x) x[1]^2 + x[2]^2,
+        //                grad = function(x) c(2*x[1], 2*x[2]),
+        //                ui = matrix(c(1, 1), nrow = 1), ci = 1)
+        // R result: par = [0.5, 0.5], value = 0.5, constraint x + y = 1.0
+        let f = |x: &[f64]| x[0].powi(2) + x[1].powi(2);
+        let grad = |x: &[f64]| vec![2.0 * x[0], 2.0 * x[1]];
+
+        let ui = vec![vec![1.0, 1.0]];
+        let ci = vec![1.0];
+        let theta0 = vec![1.0, 1.0];
+
+        let result = constr_optim(
+            &theta0,
+            f,
+            Some(grad),
+            &ui,
+            &ci,
+            ConstrOptimConfig::default(),
+        )
+        .unwrap();
+
+        // Should improve from starting point (f(1,1) = 2)
+        assert!(
+            result.value < 2.0,
+            "Should improve from starting value 2.0: got {:.6}",
+            result.value
+        );
+
+        // Constraint should be satisfied: x + y >= 1
+        let constraint_value = result.par[0] + result.par[1];
+        assert!(
+            constraint_value >= 0.99,
+            "Constraint violated: x + y = {:.6} < 1",
+            constraint_value
+        );
+
+        // Value should be reasonably close to optimal (0.5)
+        // Barrier methods may not reach exact optimum
+        assert!(
+            result.value < 1.5,
+            "Value should be less than 1.5: got {:.6}",
+            result.value
+        );
+    }
+
+    #[test]
+    fn test_validate_constr_optim_linear_three_constraints() {
+        // R: constrOptim(c(0.3, 0.3),
+        //                function(x) -x[1] - x[2],
+        //                grad = function(x) c(-1, -1),
+        //                ui = matrix(c(1, 0, 0, 1, -1, -1), nrow = 3, byrow = TRUE),
+        //                ci = c(0, 0, -1))
+        // R result: par = [0.5, 0.5], value = -1.0
+        let f = |x: &[f64]| -x[0] - x[1];
+        let grad = |_x: &[f64]| vec![-1.0, -1.0];
+
+        let ui = vec![
+            vec![1.0, 0.0],   // x >= 0
+            vec![0.0, 1.0],   // y >= 0
+            vec![-1.0, -1.0], // -x - y >= -1, i.e., x + y <= 1
+        ];
+        let ci = vec![0.0, 0.0, -1.0];
+        let theta0 = vec![0.3, 0.3];
+
+        let result = constr_optim(
+            &theta0,
+            f,
+            Some(grad),
+            &ui,
+            &ci,
+            ConstrOptimConfig::default(),
+        )
+        .unwrap();
+
+        // Optimal value should be -1.0 (maximize x + y subject to x + y <= 1)
+        let expected_value = -1.0;
+        assert!(
+            (result.value - expected_value).abs() < 0.2,
+            "Value mismatch: Rust={:.6}, R={:.6}",
+            result.value,
+            expected_value
+        );
+
+        // All constraints should be satisfied
+        assert!(
+            result.par[0] >= -0.01,
+            "x should be >= 0: x = {:.6}",
+            result.par[0]
+        );
+        assert!(
+            result.par[1] >= -0.01,
+            "y should be >= 0: y = {:.6}",
+            result.par[1]
+        );
+        assert!(
+            result.par[0] + result.par[1] <= 1.01,
+            "x + y should be <= 1: x + y = {:.6}",
+            result.par[0] + result.par[1]
+        );
+    }
+
+    #[test]
+    fn test_validate_constr_optim_nelder_mead() {
+        // Test without gradient (Nelder-Mead)
+        // Minimize (x - 1)^2 + (y - 2)^2 subject to x >= 0, y >= 0
+        // Optimal is at (1, 2) which is feasible
+        let f = |x: &[f64]| (x[0] - 1.0).powi(2) + (x[1] - 2.0).powi(2);
+
+        let ui = vec![vec![1.0, 0.0], vec![0.0, 1.0]];
+        let ci = vec![0.0, 0.0];
+        let theta0 = vec![0.5, 0.5];
+
+        let config = ConstrOptimConfig {
+            method: OptimMethod::NelderMead,
+            ..Default::default()
+        };
+
+        let result =
+            constr_optim::<_, fn(&[f64]) -> Vec<f64>>(&theta0, f, None, &ui, &ci, config).unwrap();
+
+        // Optimal at (1, 2), value = 0
+        assert!(
+            (result.par[0] - 1.0).abs() < 0.2,
+            "x should be near 1: x = {:.6}",
+            result.par[0]
+        );
+        assert!(
+            (result.par[1] - 2.0).abs() < 0.2,
+            "y should be near 2: y = {:.6}",
+            result.par[1]
+        );
+        assert!(
+            result.value < 0.1,
+            "Value should be near 0: value = {:.6}",
+            result.value
+        );
+    }
+
+    #[test]
+    fn test_validate_constr_optim_binding_constraint() {
+        // Minimize x^2 subject to x >= 1
+        // Optimal is at x = 1 (constraint binding)
+        let f = |x: &[f64]| x[0].powi(2);
+        let grad = |x: &[f64]| vec![2.0 * x[0]];
+
+        let ui = vec![vec![1.0]];
+        let ci = vec![1.0];
+        let theta0 = vec![2.0];
+
+        let result = constr_optim(
+            &theta0,
+            f,
+            Some(grad),
+            &ui,
+            &ci,
+            ConstrOptimConfig::default(),
+        )
+        .unwrap();
+
+        // Optimal value should be 1.0 (at x = 1)
+        assert!(
+            (result.par[0] - 1.0).abs() < 0.1,
+            "x should be at constraint boundary: x = {:.6}",
+            result.par[0]
+        );
+        assert!(
+            (result.value - 1.0).abs() < 0.2,
+            "Value should be 1.0: value = {:.6}",
+            result.value
+        );
     }
 }

@@ -1,10 +1,10 @@
 //! Data loading functionality for various file formats.
 
 #[cfg(feature = "file-formats")]
-use calamine::{open_workbook_auto, Data, Range, Reader};
-use polars::prelude::*;
+use calamine::{Data, Range, Reader, open_workbook_auto};
 #[cfg(feature = "file-formats")]
 use polars::frame::column::Column;
+use polars::prelude::*;
 use std::path::Path;
 use thiserror::Error;
 
@@ -77,14 +77,11 @@ impl DataLoader {
                 return Err(LoadError::UnsupportedFormat(format!(
                     "Extension '{}' not supported. Supported formats: {}",
                     extension, supported
-                )))
+                )));
             }
         };
 
-        let name = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .map(String::from);
+        let name = path.file_stem().and_then(|s| s.to_str()).map(String::from);
 
         let mut dataset = Dataset::new(df).with_source_path(path);
         if let Some(name) = name {
@@ -119,7 +116,10 @@ impl DataLoader {
     ///
     /// Requires the `file-formats` feature.
     #[cfg(feature = "file-formats")]
-    pub fn load_excel(path: impl AsRef<Path>, sheet_name: Option<&str>) -> Result<DataFrame, LoadError> {
+    pub fn load_excel(
+        path: impl AsRef<Path>,
+        sheet_name: Option<&str>,
+    ) -> Result<DataFrame, LoadError> {
         let path = path.as_ref();
 
         let mut workbook = open_workbook_auto(path)
@@ -138,9 +138,9 @@ impl DataLoader {
         };
 
         // Read the worksheet
-        let range: Range<Data> = workbook
-            .worksheet_range(&sheet_to_use)
-            .map_err(|e| LoadError::ExcelError(format!("Failed to read sheet '{}': {}", sheet_to_use, e)))?;
+        let range: Range<Data> = workbook.worksheet_range(&sheet_to_use).map_err(|e| {
+            LoadError::ExcelError(format!("Failed to read sheet '{}': {}", sheet_to_use, e))
+        })?;
 
         // Convert to DataFrame
         excel_range_to_dataframe(&range)
@@ -230,17 +230,14 @@ fn excel_range_to_dataframe(range: &Range<Data>) -> Result<DataFrame, LoadError>
             Column::new(name.as_str().into(), values)
         } else {
             // Keep as strings
-            let values: Vec<Option<&str>> = col_data
-                .iter()
-                .map(|opt| opt.as_deref())
-                .collect();
+            let values: Vec<Option<&str>> = col_data.iter().map(|opt| opt.as_deref()).collect();
             Column::new(name.as_str().into(), values)
         };
 
         column_vec.push(column);
     }
 
-    DataFrame::new(column_vec).map_err(|e| LoadError::PolarsError(e))
+    DataFrame::new(column_vec).map_err(LoadError::PolarsError)
 }
 
 /// Convert calamine Data to a string representation.

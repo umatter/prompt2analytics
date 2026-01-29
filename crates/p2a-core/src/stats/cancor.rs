@@ -21,16 +21,14 @@
 //!   https://gregorygundersen.com/blog/2018/07/17/cca/
 //! - R Documentation: https://stat.ethz.ch/R-manual/R-devel/library/stats/html/cancor.html
 
-use ndarray::{Array1, Array2, ArrayView2, Axis};
+use ndarray::{Array1, Array2, ArrayView2};
 use serde::{Deserialize, Serialize};
 
 use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
-use crate::linalg::matrix_ops::{
-    matmul, ndarray_to_faer, faer_to_ndarray, faer_ref_to_ndarray,
-};
-use faer::prelude::*;
+use crate::linalg::matrix_ops::{faer_ref_to_ndarray, faer_to_ndarray, matmul, ndarray_to_faer};
 use faer::linalg::solvers::Solve;
+use faer::prelude::*;
 
 /// Result of canonical correlation analysis.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -98,11 +96,7 @@ impl CancorResult {
     pub fn x_scores(&self, x: &ArrayView2<f64>) -> EconResult<Array2<f64>> {
         if x.ncols() != self.n_x_vars {
             return Err(EconError::InvalidSpecification {
-                message: format!(
-                    "X has {} columns, expected {}",
-                    x.ncols(),
-                    self.n_x_vars
-                ),
+                message: format!("X has {} columns, expected {}", x.ncols(), self.n_x_vars),
             });
         }
 
@@ -121,11 +115,7 @@ impl CancorResult {
     pub fn y_scores(&self, y: &ArrayView2<f64>) -> EconResult<Array2<f64>> {
         if y.ncols() != self.n_y_vars {
             return Err(EconError::InvalidSpecification {
-                message: format!(
-                    "Y has {} columns, expected {}",
-                    y.ncols(),
-                    self.n_y_vars
-                ),
+                message: format!("Y has {} columns, expected {}", y.ncols(), self.n_y_vars),
             });
         }
 
@@ -234,15 +224,11 @@ pub fn cancor(
 
     // Cholesky decomposition using faer's optimized implementation
     let chol_xx = cov_xx_faer.llt(faer::Side::Lower).map_err(|_| {
-        EconError::Internal(
-            "Cholesky decomposition of Σxx failed (X may be collinear)".to_string()
-        )
+        EconError::Internal("Cholesky decomposition of Σxx failed (X may be collinear)".to_string())
     })?;
 
     let chol_yy = cov_yy_faer.llt(faer::Side::Lower).map_err(|_| {
-        EconError::Internal(
-            "Cholesky decomposition of Σyy failed (Y may be collinear)".to_string()
-        )
+        EconError::Internal("Cholesky decomposition of Σyy failed (Y may be collinear)".to_string())
     })?;
 
     // Compute M = Lx^{-T} * Σxy * Ly^{-1} efficiently using triangular solves
@@ -356,7 +342,11 @@ pub fn run_cancor(
     let n = df.height();
 
     // Get available columns for error messages
-    let available_cols: Vec<String> = df.get_column_names().iter().map(|s| s.to_string()).collect();
+    let available_cols: Vec<String> = df
+        .get_column_names()
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
 
     // Extract X matrix
     let mut x_data = Array2::<f64>::zeros((n, x_cols.len()));
@@ -509,7 +499,11 @@ mod tests {
         assert_eq!(result.cor.len(), 2);
 
         // First canonical correlation should be high
-        assert!(result.cor[0] > 0.9, "First canonical correlation {} should be > 0.9", result.cor[0]);
+        assert!(
+            result.cor[0] > 0.9,
+            "First canonical correlation {} should be > 0.9",
+            result.cor[0]
+        );
 
         // Correlations should be in decreasing order
         assert!(result.cor[0] >= result.cor[1]);
@@ -517,7 +511,12 @@ mod tests {
 
     #[test]
     fn test_cancor_dimensions() {
-        let x = array![[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.1], [10.0, 11.0, 12.1]];
+        let x = array![
+            [1.0, 2.0, 3.0],
+            [4.0, 5.0, 6.0],
+            [7.0, 8.0, 9.1],
+            [10.0, 11.0, 12.1]
+        ];
         let y = array![[1.5, 2.5], [4.5, 5.5], [7.5, 8.5], [10.5, 11.5]];
 
         let result = cancor(&x.view(), &y.view(), true, true).unwrap();
@@ -617,12 +616,19 @@ mod tests {
 
         // All canonical correlations should be in valid range [0, 1]
         for &c in result.cor.iter() {
-            assert!(c >= 0.0 && c <= 1.0, "Canonical correlation {} should be in [0, 1]", c);
+            assert!(
+                (0.0..=1.0).contains(&c),
+                "Canonical correlation {} should be in [0, 1]",
+                c
+            );
         }
 
         // Correlations should be in decreasing order
         if result.cor.len() > 1 {
-            assert!(result.cor[0] >= result.cor[1], "Correlations should be in decreasing order");
+            assert!(
+                result.cor[0] >= result.cor[1],
+                "Correlations should be in decreasing order"
+            );
         }
     }
 
@@ -646,7 +652,7 @@ mod tests {
 
     /// Helper function to compute correlation between two vectors
     fn correlation(x: &Array1<f64>, y: &Array1<f64>) -> f64 {
-        let n = x.len() as f64;
+        let _n = x.len() as f64;
         let x_mean = x.mean().unwrap();
         let y_mean = y.mean().unwrap();
 

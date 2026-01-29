@@ -99,7 +99,12 @@ pub fn friedman_test(data: &[Vec<f64>], treatment_names: &[String]) -> EconResul
             return Err(EconError::InsufficientData {
                 required: n_treatments,
                 provided: row.len(),
-                context: format!("Block {} has {} treatments, expected {}", i, row.len(), n_treatments),
+                context: format!(
+                    "Block {} has {} treatments, expected {}",
+                    i,
+                    row.len(),
+                    n_treatments
+                ),
             });
         }
     }
@@ -186,9 +191,7 @@ fn rank_within_block(values: &[f64]) -> (Vec<f64>, f64) {
     let n = values.len();
 
     // Create index-value pairs and sort
-    let mut indexed: Vec<(usize, f64)> = values.iter().enumerate()
-        .map(|(i, &v)| (i, v))
-        .collect();
+    let mut indexed: Vec<(usize, f64)> = values.iter().enumerate().map(|(i, &v)| (i, v)).collect();
     indexed.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
 
     let mut ranks = vec![0.0; n];
@@ -277,7 +280,7 @@ pub fn run_friedman_test(
         })?;
 
     // Build block -> treatment -> value mapping
-    use std::collections::{HashMap, BTreeSet};
+    use std::collections::{BTreeSet, HashMap};
     let mut block_data: HashMap<String, HashMap<String, f64>> = HashMap::new();
     let mut treatment_set: BTreeSet<String> = BTreeSet::new();
 
@@ -297,7 +300,7 @@ pub fn run_friedman_test(
             treatment_set.insert(group_str.clone());
             block_data
                 .entry(block_str)
-                .or_insert_with(HashMap::new)
+                .or_default()
                 .insert(group_str, value);
         }
     }
@@ -382,9 +385,9 @@ mod tests {
     fn test_friedman_with_ties() {
         // Data with ties within blocks
         let data = vec![
-            vec![1.0, 1.0, 2.0],  // tie in first two
-            vec![2.0, 2.0, 3.0],  // tie in first two
-            vec![1.0, 2.0, 2.0],  // tie in last two
+            vec![1.0, 1.0, 2.0], // tie in first two
+            vec![2.0, 2.0, 3.0], // tie in first two
+            vec![1.0, 2.0, 2.0], // tie in last two
         ];
         let names = vec!["A".to_string(), "B".to_string(), "C".to_string()];
 
@@ -441,12 +444,26 @@ mod tests {
 
         // R gives: Friedman chi-squared = 4.9787, df = 2, p-value = 0.08296
         // (with tie correction for row 7 which has 5.40, 5.40, 5.35)
-        println!("Friedman result: statistic={}, df={}, p={}", result.statistic, result.df, result.p_value);
+        println!(
+            "Friedman result: statistic={}, df={}, p={}",
+            result.statistic, result.df, result.p_value
+        );
         println!("Rank sums: {:?}", result.rank_sums);
-        println!("Has ties: {}, tie_correction: {}", result.has_ties, result.tie_correction);
-        assert!((result.statistic - 4.9787).abs() < 0.05, "statistic mismatch: got {}", result.statistic);
+        println!(
+            "Has ties: {}, tie_correction: {}",
+            result.has_ties, result.tie_correction
+        );
+        assert!(
+            (result.statistic - 4.9787).abs() < 0.05,
+            "statistic mismatch: got {}",
+            result.statistic
+        );
         assert_eq!(result.df, 2);
-        assert!((result.p_value - 0.08296).abs() < 0.01, "p-value mismatch: got {}", result.p_value);
+        assert!(
+            (result.p_value - 0.08296).abs() < 0.01,
+            "p-value mismatch: got {}",
+            result.p_value
+        );
     }
 
     #[test]

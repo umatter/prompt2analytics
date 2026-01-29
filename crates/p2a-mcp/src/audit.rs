@@ -59,10 +59,7 @@ impl AuditLogger {
         }
 
         let path = Path::new(&config.path);
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)?;
+        let file = OpenOptions::new().create(true).append(true).open(path)?;
 
         tracing::info!(path = %config.path, "Audit logging enabled");
 

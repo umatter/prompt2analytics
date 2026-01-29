@@ -146,9 +146,15 @@ pub struct PanelUnitRootResult {
 
 impl fmt::Display for PanelUnitRootResult {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "═══════════════════════════════════════════════════════════════")?;
+        writeln!(
+            f,
+            "═══════════════════════════════════════════════════════════════"
+        )?;
         writeln!(f, "Panel Unit Root Test: {}", self.test_type)?;
-        writeln!(f, "═══════════════════════════════════════════════════════════════")?;
+        writeln!(
+            f,
+            "═══════════════════════════════════════════════════════════════"
+        )?;
         writeln!(f)?;
         writeln!(f, "Model:      {}", self.model)?;
         writeln!(f, "N panels:   {}", self.n_panels)?;
@@ -250,50 +256,60 @@ fn extract_panels(
 ) -> EconResult<BTreeMap<i64, Vec<f64>>> {
     let df = dataset.df();
 
-    let available: Vec<String> = df.get_column_names().iter().map(|s| s.to_string()).collect();
+    let available: Vec<String> = df
+        .get_column_names()
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
 
     // Get columns
-    let var = df
-        .column(var_col)
-        .map_err(|_| EconError::ColumnNotFound {
-            column: var_col.to_string(),
-            available: available.clone(),
-        })?;
-    let unit = df
-        .column(unit_col)
-        .map_err(|_| EconError::ColumnNotFound {
-            column: unit_col.to_string(),
-            available: available.clone(),
-        })?;
-    let time = df
-        .column(time_col)
-        .map_err(|_| EconError::ColumnNotFound {
-            column: time_col.to_string(),
-            available: available.clone(),
-        })?;
+    let var = df.column(var_col).map_err(|_| EconError::ColumnNotFound {
+        column: var_col.to_string(),
+        available: available.clone(),
+    })?;
+    let unit = df.column(unit_col).map_err(|_| EconError::ColumnNotFound {
+        column: unit_col.to_string(),
+        available: available.clone(),
+    })?;
+    let time = df.column(time_col).map_err(|_| EconError::ColumnNotFound {
+        column: time_col.to_string(),
+        available: available.clone(),
+    })?;
 
     // Convert to f64
     let var_vals: Vec<Option<f64>> = var
         .cast(&polars::prelude::DataType::Float64)
-        .map_err(|_| EconError::NonNumericColumn { column: var_col.to_string() })?
+        .map_err(|_| EconError::NonNumericColumn {
+            column: var_col.to_string(),
+        })?
         .f64()
-        .map_err(|_| EconError::NonNumericColumn { column: var_col.to_string() })?
+        .map_err(|_| EconError::NonNumericColumn {
+            column: var_col.to_string(),
+        })?
         .into_iter()
         .collect();
 
     let unit_vals: Vec<Option<i64>> = unit
         .cast(&polars::prelude::DataType::Int64)
-        .map_err(|_| EconError::NonNumericColumn { column: unit_col.to_string() })?
+        .map_err(|_| EconError::NonNumericColumn {
+            column: unit_col.to_string(),
+        })?
         .i64()
-        .map_err(|_| EconError::NonNumericColumn { column: unit_col.to_string() })?
+        .map_err(|_| EconError::NonNumericColumn {
+            column: unit_col.to_string(),
+        })?
         .into_iter()
         .collect();
 
     let time_vals: Vec<Option<i64>> = time
         .cast(&polars::prelude::DataType::Int64)
-        .map_err(|_| EconError::NonNumericColumn { column: time_col.to_string() })?
+        .map_err(|_| EconError::NonNumericColumn {
+            column: time_col.to_string(),
+        })?
         .i64()
-        .map_err(|_| EconError::NonNumericColumn { column: time_col.to_string() })?
+        .map_err(|_| EconError::NonNumericColumn {
+            column: time_col.to_string(),
+        })?
         .into_iter()
         .collect();
 
@@ -500,7 +516,7 @@ fn compute_llc_residuals(
             col += 1;
         }
         for j in 0..lags {
-            if i >= j + 1 {
+            if i > j {
                 x[[row, col + j]] = delta_y[i - j - 1];
             }
         }
@@ -861,7 +877,10 @@ fn adf_p_value(t_stat: f64, _df: u32, model: PanelModel) -> f64 {
 /// vs H1: Some panels have unit roots
 ///
 /// Based on KPSS-type LM statistics averaged across panels.
-fn run_hadri_test(panels: &BTreeMap<i64, Vec<f64>>, model: PanelModel) -> EconResult<PanelUnitRootResult> {
+fn run_hadri_test(
+    panels: &BTreeMap<i64, Vec<f64>>,
+    model: PanelModel,
+) -> EconResult<PanelUnitRootResult> {
     let n = panels.len();
     let mut lm_stats: Vec<f64> = Vec::with_capacity(n);
     let mut t_lengths: Vec<usize> = Vec::with_capacity(n);
@@ -947,7 +966,9 @@ fn compute_kpss_statistic(series: &[f64], model: PanelModel) -> EconResult<f64> 
             match safe_inverse(&xtx_mat.view()) {
                 Ok((inv, _)) => {
                     let beta = inv.dot(&xty_vec);
-                    (0..t).map(|i| series[i] - beta[0] - beta[1] * (i + 1) as f64).collect()
+                    (0..t)
+                        .map(|i| series[i] - beta[0] - beta[1] * (i + 1) as f64)
+                        .collect()
                 }
                 Err(_) => {
                     let mean: f64 = series.iter().sum::<f64>() / t as f64;
@@ -1092,7 +1113,10 @@ mod tests {
         assert_eq!(result.n_panels, 10);
         // For stationary data, should reject H0 (unit root) at some level
         // Note: small sample, might not always reject
-        println!("LLC stationary: stat={:.4}, p={:.4}", result.statistic, result.p_value);
+        println!(
+            "LLC stationary: stat={:.4}, p={:.4}",
+            result.statistic, result.p_value
+        );
     }
 
     #[test]
@@ -1108,7 +1132,10 @@ mod tests {
         let result = run_panel_unit_root(&dataset, "y_ur", "unit", "time", config).unwrap();
 
         // For unit root data, should NOT reject H0
-        println!("LLC unit root: stat={:.4}, p={:.4}", result.statistic, result.p_value);
+        println!(
+            "LLC unit root: stat={:.4}, p={:.4}",
+            result.statistic, result.p_value
+        );
     }
 
     #[test]
@@ -1142,7 +1169,10 @@ mod tests {
 
         assert_eq!(result.test_type, PanelUnitRootTest::Fisher);
         assert!(result.unit_p_values.is_some());
-        println!("Fisher: stat={:.4}, p={:.4}", result.statistic, result.p_value);
+        println!(
+            "Fisher: stat={:.4}, p={:.4}",
+            result.statistic, result.p_value
+        );
     }
 
     #[test]
@@ -1158,7 +1188,10 @@ mod tests {
 
         assert_eq!(result.test_type, PanelUnitRootTest::Hadri);
         // Hadri: H0 is stationarity, so for stationary data, should NOT reject
-        println!("Hadri: stat={:.4}, p={:.4}", result.statistic, result.p_value);
+        println!(
+            "Hadri: stat={:.4}, p={:.4}",
+            result.statistic, result.p_value
+        );
     }
 
     #[test]

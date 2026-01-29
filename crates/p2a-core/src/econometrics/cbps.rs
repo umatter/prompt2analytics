@@ -36,7 +36,7 @@ use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
 use crate::linalg::design::DesignMatrix;
 use crate::linalg::matrix_ops::safe_inverse;
-use crate::traits::estimator::{chi_squared_p_value, logistic_cdf, normal_cdf, SignificanceLevel};
+use crate::traits::estimator::{SignificanceLevel, chi_squared_p_value, logistic_cdf, normal_cdf};
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Configuration Types
@@ -170,24 +170,39 @@ impl Default for BalanceTable {
 impl fmt::Display for BalanceTable {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "Covariate Balance Table")?;
-        writeln!(f, "{:>20} {:>12} {:>12} {:>12} {:>12}",
-                 "Covariate", "Mean(T)", "Mean(C)", "Std.Diff", "Var.Ratio")?;
+        writeln!(
+            f,
+            "{:>20} {:>12} {:>12} {:>12} {:>12}",
+            "Covariate", "Mean(T)", "Mean(C)", "Std.Diff", "Var.Ratio"
+        )?;
         writeln!(f, "{}", "-".repeat(72))?;
 
         for i in 0..self.covariates.len() {
-            let balanced_marker = if self.std_diff[i].abs() < 0.1 { " " } else { "*" };
-            writeln!(f, "{:>20} {:>12.4} {:>12.4} {:>12.4}{} {:>12.4}",
-                     self.covariates[i],
-                     self.mean_treated[i],
-                     self.mean_control[i],
-                     self.std_diff[i],
-                     balanced_marker,
-                     self.var_ratio[i])?;
+            let balanced_marker = if self.std_diff[i].abs() < 0.1 {
+                " "
+            } else {
+                "*"
+            };
+            writeln!(
+                f,
+                "{:>20} {:>12.4} {:>12.4} {:>12.4}{} {:>12.4}",
+                self.covariates[i],
+                self.mean_treated[i],
+                self.mean_control[i],
+                self.std_diff[i],
+                balanced_marker,
+                self.var_ratio[i]
+            )?;
         }
 
         writeln!(f, "{}", "-".repeat(72))?;
-        writeln!(f, "Max |Std.Diff|: {:.4}  Balanced covariates: {}/{}",
-                 self.max_std_diff, self.n_balanced, self.covariates.len())?;
+        writeln!(
+            f,
+            "Max |Std.Diff|: {:.4}  Balanced covariates: {}/{}",
+            self.max_std_diff,
+            self.n_balanced,
+            self.covariates.len()
+        )?;
 
         Ok(())
     }
@@ -246,22 +261,38 @@ impl fmt::Display for CbpsResult {
         writeln!(f, "============================================")?;
         writeln!(f)?;
         writeln!(f, "Method: {}", self.method)?;
-        writeln!(f, "Observations: {} (Treated: {}, Control: {})",
-                 self.n_obs, self.n_treated, self.n_control)?;
-        writeln!(f, "Parameters: {}  Moment conditions: {}",
-                 self.n_params, self.n_moments)?;
+        writeln!(
+            f,
+            "Observations: {} (Treated: {}, Control: {})",
+            self.n_obs, self.n_treated, self.n_control
+        )?;
+        writeln!(
+            f,
+            "Parameters: {}  Moment conditions: {}",
+            self.n_params, self.n_moments
+        )?;
         writeln!(f)?;
 
         writeln!(f, "Coefficients:")?;
-        writeln!(f, "{:>15} {:>12} {:>12} {:>10} {:>10}",
-                 "Parameter", "Estimate", "Std.Err", "z-stat", "P>|z|")?;
+        writeln!(
+            f,
+            "{:>15} {:>12} {:>12} {:>10} {:>10}",
+            "Parameter", "Estimate", "Std.Err", "z-stat", "P>|z|"
+        )?;
         writeln!(f, "{}", "-".repeat(65))?;
 
         for i in 0..self.n_params {
             let sig = SignificanceLevel::from_p_value(self.p_values[i]);
-            writeln!(f, "{:>15} {:>12.6} {:>12.6} {:>10.3} {:>10.4}{}",
-                     self.names[i], self.coefficients[i], self.std_errors[i],
-                     self.z_stats[i], self.p_values[i], sig.stars())?;
+            writeln!(
+                f,
+                "{:>15} {:>12.6} {:>12.6} {:>10.3} {:>10.4}{}",
+                self.names[i],
+                self.coefficients[i],
+                self.std_errors[i],
+                self.z_stats[i],
+                self.p_values[i],
+                sig.stars()
+            )?;
         }
         writeln!(f, "{}", "-".repeat(65))?;
 
@@ -280,23 +311,51 @@ impl fmt::Display for CbpsResult {
 
         writeln!(f)?;
         writeln!(f, "Propensity Score Summary:")?;
-        let ps_min = self.propensity_scores.iter().cloned().fold(f64::INFINITY, f64::min);
-        let ps_max = self.propensity_scores.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let ps_min = self
+            .propensity_scores
+            .iter()
+            .cloned()
+            .fold(f64::INFINITY, f64::min);
+        let ps_max = self
+            .propensity_scores
+            .iter()
+            .cloned()
+            .fold(f64::NEG_INFINITY, f64::max);
         let ps_mean: f64 = self.propensity_scores.iter().sum::<f64>() / self.n_obs as f64;
-        writeln!(f, "  Mean: {:.4}  Min: {:.4}  Max: {:.4}", ps_mean, ps_min, ps_max)?;
+        writeln!(
+            f,
+            "  Mean: {:.4}  Min: {:.4}  Max: {:.4}",
+            ps_mean, ps_min, ps_max
+        )?;
 
         writeln!(f)?;
         writeln!(f, "Balance Improvement:")?;
-        writeln!(f, "  Before CBPS: Max |Std.Diff| = {:.4}", self.balance_before.max_std_diff)?;
-        writeln!(f, "  After CBPS:  Max |Std.Diff| = {:.4}", self.balance_after.max_std_diff)?;
-        writeln!(f, "  Balanced covariates: {}/{} -> {}/{}",
-                 self.balance_before.n_balanced, self.balance_before.covariates.len(),
-                 self.balance_after.n_balanced, self.balance_after.covariates.len())?;
+        writeln!(
+            f,
+            "  Before CBPS: Max |Std.Diff| = {:.4}",
+            self.balance_before.max_std_diff
+        )?;
+        writeln!(
+            f,
+            "  After CBPS:  Max |Std.Diff| = {:.4}",
+            self.balance_after.max_std_diff
+        )?;
+        writeln!(
+            f,
+            "  Balanced covariates: {}/{} -> {}/{}",
+            self.balance_before.n_balanced,
+            self.balance_before.covariates.len(),
+            self.balance_after.n_balanced,
+            self.balance_after.covariates.len()
+        )?;
 
         if !self.converged {
             writeln!(f)?;
-            writeln!(f, "WARNING: GMM optimization did not converge after {} iterations",
-                     self.iterations)?;
+            writeln!(
+                f,
+                "WARNING: GMM optimization did not converge after {} iterations",
+                self.iterations
+            )?;
         }
 
         writeln!(f)?;
@@ -377,7 +436,8 @@ pub fn run_cbps(
     let k = x.ncols(); // Number of parameters (including intercept)
 
     // Compute balance before CBPS (unweighted)
-    let balance_before = compute_balance_table(&x, &t, &design.column_names, None, config.balance_threshold);
+    let balance_before =
+        compute_balance_table(&x, &t, &design.column_names, None, config.balance_threshold);
 
     // Run CBPS GMM estimation
     let (beta, converged, iterations, gmm_criterion) =
@@ -392,28 +452,33 @@ pub fn run_cbps(
 
     // Compute balance after CBPS weighting
     let balance_after = compute_balance_table(
-        &x, &t, &design.column_names,
+        &x,
+        &t,
+        &design.column_names,
         Some(&weights),
-        config.balance_threshold
+        config.balance_threshold,
     );
 
     // Compute standard errors using GMM variance formula
-    let (std_errors, _vcov) = compute_cbps_std_errors(&x, &t, &beta, &propensity_scores, config.method)?;
+    let (std_errors, _vcov) =
+        compute_cbps_std_errors(&x, &t, &beta, &propensity_scores, config.method)?;
 
     // Compute z-statistics and p-values
-    let z_stats: Vec<f64> = beta.iter()
+    let z_stats: Vec<f64> = beta
+        .iter()
         .zip(std_errors.iter())
         .map(|(&b, &se)| if se > 0.0 { b / se } else { 0.0 })
         .collect();
 
-    let p_values: Vec<f64> = z_stats.iter()
+    let p_values: Vec<f64> = z_stats
+        .iter()
         .map(|&z| 2.0 * (1.0 - normal_cdf(z.abs())))
         .collect();
 
     // Compute J-test for overidentification
     let (j_statistic, j_p_value, j_df) = if config.method != CbpsMethod::JustIdentified {
         let n_moments = match config.method {
-            CbpsMethod::ExactBalance => 2 * k,  // Score + balance conditions
+            CbpsMethod::ExactBalance => 2 * k, // Score + balance conditions
             CbpsMethod::OverBalance => 2 * k,
             CbpsMethod::JustIdentified => k,
         };
@@ -853,10 +918,11 @@ fn estimate_logit_newton(
 
         // Invert -H
         let neg_hessian = &hessian * -1.0;
-        let (hess_inv, _) = safe_inverse(&neg_hessian.view()).map_err(|e| EconError::SingularMatrix {
-            context: "Logit Newton-Raphson".to_string(),
-            suggestion: format!("Hessian singular: {:?}", e),
-        })?;
+        let (hess_inv, _) =
+            safe_inverse(&neg_hessian.view()).map_err(|e| EconError::SingularMatrix {
+                context: "Logit Newton-Raphson".to_string(),
+                suggestion: format!("Hessian singular: {:?}", e),
+            })?;
 
         // Newton update
         let delta = hess_inv.dot(&gradient);
@@ -887,7 +953,11 @@ fn compute_balance_table(
     let mut table = BalanceTable::new();
 
     // Skip intercept column (usually first)
-    let start_col = if names.get(0).map(|s| s.as_str()) == Some("(Intercept)") { 1 } else { 0 };
+    let start_col = if names.first().map(|s| s.as_str()) == Some("(Intercept)") {
+        1
+    } else {
+        0
+    };
 
     for j in start_col..k {
         let name = names[j].clone();
@@ -945,7 +1015,9 @@ fn compute_balance_table(
     }
 
     // Update max standardized difference
-    table.max_std_diff = table.std_diff.iter()
+    table.max_std_diff = table
+        .std_diff
+        .iter()
         .map(|&d| d.abs())
         .fold(0.0_f64, f64::max);
 
@@ -958,7 +1030,8 @@ fn weighted_mean(values: &[f64], weights: &[f64]) -> f64 {
     if total_weight == 0.0 {
         return 0.0;
     }
-    let weighted_sum: f64 = values.iter()
+    let weighted_sum: f64 = values
+        .iter()
         .zip(weights.iter())
         .map(|(&v, &w)| v * w)
         .sum();
@@ -971,7 +1044,8 @@ fn weighted_variance(values: &[f64], weights: &[f64], mean: f64) -> f64 {
     if total_weight == 0.0 {
         return 0.0;
     }
-    let weighted_sq_diff: f64 = values.iter()
+    let weighted_sq_diff: f64 = values
+        .iter()
         .zip(weights.iter())
         .map(|(&v, &w)| w * (v - mean).powi(2))
         .sum();
@@ -1047,9 +1121,7 @@ fn compute_cbps_std_errors(
 
     let vcov = &gwg_inv / n as f64;
 
-    let std_errors: Vec<f64> = (0..k)
-        .map(|i| vcov[[i, i]].max(0.0).sqrt())
-        .collect();
+    let std_errors: Vec<f64> = (0..k).map(|i| vcov[[i, i]].max(0.0).sqrt()).collect();
 
     Ok((std_errors, vcov))
 }
@@ -1090,7 +1162,8 @@ mod tests {
                 0.15, 0.25, 0.35, 0.45, 0.55, 0.2, 0.3, 0.4, 0.5, 0.6,
                 0.25, 0.35, 0.45, 0.55, 0.28, 0.22, 0.38, 0.42, 0.52, 0.58
             ]
-        }.unwrap();
+        }
+        .unwrap();
         Dataset::new(df)
     }
 
@@ -1106,23 +1179,39 @@ mod tests {
         assert_eq!(result.n_params, 3); // intercept + 2 covariates
 
         // CBPS should improve or maintain balance (allow small increase due to estimation noise)
-        assert!(result.balance_after.max_std_diff <= result.balance_before.max_std_diff + 0.2,
-                "Balance after ({}) should not be much worse than before ({})",
-                result.balance_after.max_std_diff, result.balance_before.max_std_diff);
+        assert!(
+            result.balance_after.max_std_diff <= result.balance_before.max_std_diff + 0.2,
+            "Balance after ({}) should not be much worse than before ({})",
+            result.balance_after.max_std_diff,
+            result.balance_before.max_std_diff
+        );
 
         // Propensity scores should be in [0, 1] (allow boundary values after clipping)
-        assert!(result.propensity_scores.iter().all(|&p| p >= 0.0 && p <= 1.0),
-                "Propensity scores should be in [0,1]");
+        assert!(
+            result
+                .propensity_scores
+                .iter()
+                .all(|&p| (0.0..=1.0).contains(&p)),
+            "Propensity scores should be in [0,1]"
+        );
 
         // Weights should be non-negative
-        assert!(result.weights.iter().all(|&w| w >= 0.0),
-                "Weights should be non-negative");
+        assert!(
+            result.weights.iter().all(|&w| w >= 0.0),
+            "Weights should be non-negative"
+        );
     }
 
     #[test]
     fn test_cbps_just_identified() {
         let dataset = create_test_dataset();
-        let result = cbps(&dataset, "treatment", &["x1", "x2"], CbpsMethod::JustIdentified).unwrap();
+        let result = cbps(
+            &dataset,
+            "treatment",
+            &["x1", "x2"],
+            CbpsMethod::JustIdentified,
+        )
+        .unwrap();
 
         // Just-identified should be equivalent to logit
         assert!(result.converged);
@@ -1142,8 +1231,10 @@ mod tests {
         assert_eq!(result.balance_after.covariates.len(), 2);
 
         // Before balance should show some imbalance (std_diff > 0 indicates imbalance)
-        assert!(result.balance_before.max_std_diff > 0.0,
-                "There should be some initial imbalance");
+        assert!(
+            result.balance_before.max_std_diff > 0.0,
+            "There should be some initial imbalance"
+        );
     }
 
     #[test]
@@ -1170,7 +1261,8 @@ mod tests {
         let df = df! {
             "treatment" => [1.0, 1.0, 1.0, 1.0, 1.0],
             "x1" => [1.0, 2.0, 3.0, 4.0, 5.0]
-        }.unwrap();
+        }
+        .unwrap();
         let dataset = Dataset::new(df);
 
         let result = run_cbps(&dataset, "treatment", &["x1"], None);
@@ -1186,7 +1278,8 @@ mod tests {
         let weights = compute_ipw_weights(&ps, &t);
 
         // Sum of weights for treated should equal n_treated
-        let sum_treated: f64 = weights.iter()
+        let sum_treated: f64 = weights
+            .iter()
             .zip(t.iter())
             .filter(|&(_, ti)| *ti >= 0.5)
             .map(|(&w, _)| w)
@@ -1194,7 +1287,8 @@ mod tests {
         assert!((sum_treated - 5.0).abs() < 1e-6);
 
         // Sum of weights for control should equal n_control
-        let sum_control: f64 = weights.iter()
+        let sum_control: f64 = weights
+            .iter()
             .zip(t.iter())
             .filter(|&(_, ti)| *ti < 0.5)
             .map(|(&w, _)| w)

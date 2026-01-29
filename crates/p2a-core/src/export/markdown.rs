@@ -220,10 +220,10 @@ impl Default for MarkdownTableBuilder {
 /// Convert significance level to markdown-escaped stars.
 fn significance_stars(level: &SignificanceLevel) -> String {
     match level {
-        SignificanceLevel::TenthPercent => "\\*\\*\\*".to_string(),  // p < 0.001
-        SignificanceLevel::OnePercent => "\\*\\*".to_string(),       // p < 0.01
-        SignificanceLevel::FivePercent => "\\*".to_string(),         // p < 0.05
-        SignificanceLevel::TenPercent => "†".to_string(),            // p < 0.10
+        SignificanceLevel::TenthPercent => "\\*\\*\\*".to_string(), // p < 0.001
+        SignificanceLevel::OnePercent => "\\*\\*".to_string(),      // p < 0.01
+        SignificanceLevel::FivePercent => "\\*".to_string(),        // p < 0.05
+        SignificanceLevel::TenPercent => "†".to_string(),           // p < 0.10
         SignificanceLevel::NotSignificant => String::new(),
     }
 }
@@ -268,7 +268,10 @@ mod tests {
 
     #[test]
     fn test_significance_stars() {
-        assert_eq!(significance_stars(&SignificanceLevel::TenthPercent), "\\*\\*\\*");
+        assert_eq!(
+            significance_stars(&SignificanceLevel::TenthPercent),
+            "\\*\\*\\*"
+        );
         assert_eq!(significance_stars(&SignificanceLevel::OnePercent), "\\*\\*");
         assert_eq!(significance_stars(&SignificanceLevel::FivePercent), "\\*");
         assert_eq!(significance_stars(&SignificanceLevel::TenPercent), "†");

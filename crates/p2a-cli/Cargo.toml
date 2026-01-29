@@ -11,6 +11,10 @@ rust-version.workspace = true
 name = "p2a"
 path = "src/main.rs"
 
+[features]
+default = ["spectral-analysis"]
+spectral-analysis = ["p2a-core/spectral-analysis"]
+
 [dependencies]
 # Core analytics library
 p2a-core = { path = "../p2a-core", features = ["full"] }
@@ -40,3 +44,6 @@ colored = "2.1"
 # Error handling
 thiserror.workspace = true
 anyhow.workspace = true
+
+[lints]
+workspace = true

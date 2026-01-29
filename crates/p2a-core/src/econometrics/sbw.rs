@@ -154,24 +154,37 @@ pub struct BalanceStats {
 
 impl fmt::Display for BalanceStats {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "{:<20} {:>12} {:>12} {:>12} {:>12}",
-                 "Covariate", "Target", "Reweighted", "Std.Diff", "Var.Ratio")?;
+        writeln!(
+            f,
+            "{:<20} {:>12} {:>12} {:>12} {:>12}",
+            "Covariate", "Target", "Reweighted", "Std.Diff", "Var.Ratio"
+        )?;
         writeln!(f, "{}", "-".repeat(68))?;
 
         for i in 0..self.covariate_names.len() {
-            let balanced = if self.std_diff[i].abs() < 0.1 { " " } else { "*" };
-            writeln!(f, "{:<20} {:>12.4} {:>12.4} {:>11.4}{} {:>12.4}",
-                     self.covariate_names[i],
-                     self.mean_target[i],
-                     self.mean_reweighted[i],
-                     self.std_diff[i],
-                     balanced,
-                     self.var_ratio[i])?;
+            let balanced = if self.std_diff[i].abs() < 0.1 {
+                " "
+            } else {
+                "*"
+            };
+            writeln!(
+                f,
+                "{:<20} {:>12.4} {:>12.4} {:>11.4}{} {:>12.4}",
+                self.covariate_names[i],
+                self.mean_target[i],
+                self.mean_reweighted[i],
+                self.std_diff[i],
+                balanced,
+                self.var_ratio[i]
+            )?;
         }
 
         writeln!(f, "{}", "-".repeat(68))?;
-        writeln!(f, "Max |Std.Diff|: {:.4}   Mean |Std.Diff|: {:.4}",
-                 self.max_std_diff, self.mean_std_diff)?;
+        writeln!(
+            f,
+            "Max |Std.Diff|: {:.4}   Mean |Std.Diff|: {:.4}",
+            self.max_std_diff, self.mean_std_diff
+        )?;
 
         Ok(())
     }
@@ -226,32 +239,67 @@ impl fmt::Display for SBWResult {
         writeln!(f)?;
 
         writeln!(f, "Sample:")?;
-        writeln!(f, "  Total:      {}  (Target: {}, Reweighted: {})",
-                 self.n_obs, self.n_target, self.n_reweighted)?;
+        writeln!(
+            f,
+            "  Total:      {}  (Target: {}, Reweighted: {})",
+            self.n_obs, self.n_target, self.n_reweighted
+        )?;
         writeln!(f)?;
 
         writeln!(f, "Optimization:")?;
-        writeln!(f, "  Converged:  {} ({} iterations)",
-                 if self.converged { "Yes" } else { "No" }, self.iterations)?;
-        writeln!(f, "  Objective:  {:.6} (variance of weights)", self.objective_value)?;
+        writeln!(
+            f,
+            "  Converged:  {} ({} iterations)",
+            if self.converged { "Yes" } else { "No" },
+            self.iterations
+        )?;
+        writeln!(
+            f,
+            "  Objective:  {:.6} (variance of weights)",
+            self.objective_value
+        )?;
         writeln!(f, "  Max violation: {:.6}", self.max_constraint_violation)?;
         writeln!(f)?;
 
         writeln!(f, "Weight Summary (reweighted group):")?;
-        writeln!(f, "  Range:      [{:.4}, {:.4}]", self.min_weight, self.max_weight)?;
-        writeln!(f, "  ESS:        {:.1} of {} ({:.1}%)",
-                 self.ess_reweighted, self.n_reweighted,
-                 100.0 * self.ess_reweighted / self.n_reweighted as f64)?;
+        writeln!(
+            f,
+            "  Range:      [{:.4}, {:.4}]",
+            self.min_weight, self.max_weight
+        )?;
+        writeln!(
+            f,
+            "  ESS:        {:.1} of {} ({:.1}%)",
+            self.ess_reweighted,
+            self.n_reweighted,
+            100.0 * self.ess_reweighted / self.n_reweighted as f64
+        )?;
         writeln!(f)?;
 
         writeln!(f, "Balance Before Weighting:")?;
-        writeln!(f, "  Max |Std.Diff|:  {:.4}", self.balance_before.max_std_diff)?;
-        writeln!(f, "  Mean |Std.Diff|: {:.4}", self.balance_before.mean_std_diff)?;
+        writeln!(
+            f,
+            "  Max |Std.Diff|:  {:.4}",
+            self.balance_before.max_std_diff
+        )?;
+        writeln!(
+            f,
+            "  Mean |Std.Diff|: {:.4}",
+            self.balance_before.mean_std_diff
+        )?;
         writeln!(f)?;
 
         writeln!(f, "Balance After Weighting:")?;
-        writeln!(f, "  Max |Std.Diff|:  {:.4}", self.balance_after.max_std_diff)?;
-        writeln!(f, "  Mean |Std.Diff|: {:.4}", self.balance_after.mean_std_diff)?;
+        writeln!(
+            f,
+            "  Max |Std.Diff|:  {:.4}",
+            self.balance_after.max_std_diff
+        )?;
+        writeln!(
+            f,
+            "  Mean |Std.Diff|: {:.4}",
+            self.balance_after.mean_std_diff
+        )?;
 
         if !self.warnings.is_empty() {
             writeln!(f)?;
@@ -320,7 +368,8 @@ pub fn run_sbw(
         return Err(EconError::InvalidSpecification {
             message: format!(
                 "Treatment length ({}) must match covariate rows ({})",
-                n, covariates.nrows()
+                n,
+                covariates.nrows()
             ),
         });
     }
@@ -364,28 +413,26 @@ pub fn run_sbw(
     let x_reweight = extract_rows(covariates, &reweight_idx);
 
     // Compute target means (means of target group)
-    let target_means = x_target.mean_axis(Axis(0))
+    let target_means = x_target
+        .mean_axis(Axis(0))
         .ok_or_else(|| EconError::Computation("Failed to compute target means".to_string()))?;
 
     // Compute covariate names
     let cov_names: Vec<String> = (0..k).map(|i| format!("X{}", i + 1)).collect();
 
     // Compute balance before weighting
-    let balance_before = compute_balance_stats(
-        &x_target.view(),
-        &x_reweight.view(),
-        &cov_names,
-        None,
-    );
+    let balance_before =
+        compute_balance_stats(&x_target.view(), &x_reweight.view(), &cov_names, None);
 
     // Solve the quadratic programming problem
-    let (weights, lambda, converged, iterations, objective, max_violation) = if config.balance_tol == 0.0 {
-        // Exact balance: use Lagrangian method
-        solve_sbw_exact(&x_reweight.view(), &target_means.view(), &config)?
-    } else {
-        // Approximate balance: use penalized QP
-        solve_sbw_approximate(&x_reweight.view(), &target_means.view(), &config)?
-    };
+    let (weights, lambda, converged, iterations, objective, max_violation) =
+        if config.balance_tol == 0.0 {
+            // Exact balance: use Lagrangian method
+            solve_sbw_exact(&x_reweight.view(), &target_means.view(), &config)?
+        } else {
+            // Approximate balance: use penalized QP
+            solve_sbw_approximate(&x_reweight.view(), &target_means.view(), &config)?
+        };
 
     // Scale weights for normalization
     let mut final_weights = weights.clone();
@@ -419,8 +466,15 @@ pub fn run_sbw(
     let (ess_total, ess_target, ess_reweight) = compute_ess(&full_weights, treatment);
 
     // Weight statistics
-    let max_weight = final_weights.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-    let min_weight = final_weights.iter().filter(|&&w| w > 0.0).cloned().fold(f64::INFINITY, f64::min);
+    let max_weight = final_weights
+        .iter()
+        .cloned()
+        .fold(f64::NEG_INFINITY, f64::max);
+    let min_weight = final_weights
+        .iter()
+        .filter(|&&w| w > 0.0)
+        .cloned()
+        .fold(f64::INFINITY, f64::min);
 
     // Check for warnings
     if max_weight / min_weight.max(1e-10) > 100.0 {
@@ -433,7 +487,9 @@ pub fn run_sbw(
     if ess_reweight < n_reweight as f64 * 0.3 {
         warnings.push(format!(
             "Low effective sample size ({:.1} of {}, {:.0}%). Weights are highly variable.",
-            ess_reweight, n_reweight, 100.0 * ess_reweight / n_reweight as f64
+            ess_reweight,
+            n_reweight,
+            100.0 * ess_reweight / n_reweight as f64
         ));
     }
 
@@ -555,8 +611,8 @@ fn solve_sbw_exact(
         for j in 0..k {
             // A[j, i] = X[i, j] / n (balance constraint for covariate j)
             let val = x[[i, j]] / n as f64;
-            kkt[[i, n + j]] = val;        // A' part
-            kkt[[n + j, i]] = val;        // A part
+            kkt[[i, n + j]] = val; // A' part
+            kkt[[n + j, i]] = val; // A part
         }
         // Normalization constraint
         kkt[[i, n + k]] = 1.0 / n as f64;
@@ -573,15 +629,13 @@ fn solve_sbw_exact(
     rhs[n + k] = 1.0; // Normalized weights sum to 1
 
     // Solve KKT system
-    let (kkt_inv, _cond) = safe_inverse(&kkt.view()).map_err(|e| {
-        EconError::SingularMatrix {
-            context: "SBW KKT system".to_string(),
-            suggestion: format!(
-                "Balance constraints may be infeasible or redundant. Error: {:?}. \
+    let (kkt_inv, _cond) = safe_inverse(&kkt.view()).map_err(|e| EconError::SingularMatrix {
+        context: "SBW KKT system".to_string(),
+        suggestion: format!(
+            "Balance constraints may be infeasible or redundant. Error: {:?}. \
                  Try using approximate balance (balance_tol > 0).",
-                e
-            ),
-        }
+            e
+        ),
     })?;
 
     let solution = kkt_inv.dot(&rhs);
@@ -591,9 +645,7 @@ fn solve_sbw_exact(
     let lambda: Vec<f64> = solution.iter().skip(n).cloned().collect();
 
     // Project weights to satisfy lower bound constraint
-    let weights: Vec<f64> = weights.iter()
-        .map(|&w| w.max(config.min_weight))
-        .collect();
+    let weights: Vec<f64> = weights.iter().map(|&w| w.max(config.min_weight)).collect();
 
     // Renormalize after projection
     let w_sum: f64 = weights.iter().sum();
@@ -717,7 +769,14 @@ fn solve_sbw_approximate(
     // Lambda not available for approximate solution
     let lambda = vec![0.0; k + 1];
 
-    Ok((weights, lambda, converged, iterations, objective, max_violation))
+    Ok((
+        weights,
+        lambda,
+        converged,
+        iterations,
+        objective,
+        max_violation,
+    ))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -787,7 +846,10 @@ fn compute_balance_stats(
         let reweight_mean: f64 = if let Some(w) = weights {
             let w_sum: f64 = w.iter().sum();
             if w_sum > 0.0 {
-                (0..n_reweight).map(|i| w[i] * x_reweight[[i, j]]).sum::<f64>() / w_sum
+                (0..n_reweight)
+                    .map(|i| w[i] * x_reweight[[i, j]])
+                    .sum::<f64>()
+                    / w_sum
             } else {
                 x_reweight.column(j).iter().sum::<f64>() / n_reweight as f64
             }
@@ -796,9 +858,12 @@ fn compute_balance_stats(
         };
 
         // Target group variance
-        let target_var: f64 = x_target.column(j).iter()
+        let target_var: f64 = x_target
+            .column(j)
+            .iter()
             .map(|&x| (x - target_mean).powi(2))
-            .sum::<f64>() / (n_target - 1).max(1) as f64;
+            .sum::<f64>()
+            / (n_target - 1).max(1) as f64;
 
         // Reweight group weighted variance
         let reweight_var: f64 = if let Some(w) = weights {
@@ -809,14 +874,20 @@ fn compute_balance_stats(
                     .sum();
                 weighted_sq_diff / w_sum
             } else {
-                x_reweight.column(j).iter()
+                x_reweight
+                    .column(j)
+                    .iter()
                     .map(|&x| (x - reweight_mean).powi(2))
-                    .sum::<f64>() / (n_reweight - 1).max(1) as f64
+                    .sum::<f64>()
+                    / (n_reweight - 1).max(1) as f64
             }
         } else {
-            x_reweight.column(j).iter()
+            x_reweight
+                .column(j)
+                .iter()
                 .map(|&x| (x - reweight_mean).powi(2))
-                .sum::<f64>() / (n_reweight - 1).max(1) as f64
+                .sum::<f64>()
+                / (n_reweight - 1).max(1) as f64
         };
 
         // Pooled standard deviation
@@ -826,7 +897,11 @@ fn compute_balance_stats(
         let sd = (target_mean - reweight_mean) / pooled_sd;
 
         // Variance ratio
-        let vr = if reweight_var > 1e-10 { target_var / reweight_var } else { 1.0 };
+        let vr = if reweight_var > 1e-10 {
+            target_var / reweight_var
+        } else {
+            1.0
+        };
 
         std_diff.push(sd);
         var_ratio.push(vr);
@@ -874,9 +949,21 @@ fn compute_ess(weights: &[f64], treatment: &ArrayView1<f64>) -> (f64, f64, f64) 
         }
     }
 
-    let ess_all = if w_sq_sum_all > 0.0 { w_sum_all.powi(2) / w_sq_sum_all } else { 0.0 };
-    let ess_t = if w_sq_sum_t > 0.0 { w_sum_t.powi(2) / w_sq_sum_t } else { 0.0 };
-    let ess_c = if w_sq_sum_c > 0.0 { w_sum_c.powi(2) / w_sq_sum_c } else { 0.0 };
+    let ess_all = if w_sq_sum_all > 0.0 {
+        w_sum_all.powi(2) / w_sq_sum_all
+    } else {
+        0.0
+    };
+    let ess_t = if w_sq_sum_t > 0.0 {
+        w_sum_t.powi(2) / w_sq_sum_t
+    } else {
+        0.0
+    };
+    let ess_c = if w_sq_sum_c > 0.0 {
+        w_sum_c.powi(2) / w_sq_sum_c
+    } else {
+        0.0
+    };
 
     (ess_all, ess_t, ess_c)
 }
@@ -896,22 +983,45 @@ mod tests {
     fn create_test_data() -> (Array1<f64>, Array2<f64>) {
         // Treatment indicator: 10 treated, 20 control
         let treatment = Array1::from(vec![
-            1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
-            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+            1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
         ]);
 
         // Covariates with imbalance BUT OVERLAPPING SUPPORT
         // Treated mean ~0.65 for X1, control range 0.3-1.2 includes 0.65
         let covariates = array![
             // Treated (mean ~0.65 for X1, ~0.55 for X2)
-            [0.6, 0.5], [0.7, 0.6], [0.65, 0.55], [0.75, 0.6], [0.6, 0.5],
-            [0.7, 0.55], [0.55, 0.5], [0.8, 0.65], [0.65, 0.55], [0.6, 0.5],
+            [0.6, 0.5],
+            [0.7, 0.6],
+            [0.65, 0.55],
+            [0.75, 0.6],
+            [0.6, 0.5],
+            [0.7, 0.55],
+            [0.55, 0.5],
+            [0.8, 0.65],
+            [0.65, 0.55],
+            [0.6, 0.5],
             // Control (lower mean ~0.5 for X1, but range 0.3-1.2 covers treated mean)
-            [0.3, 0.3], [0.5, 0.4], [0.4, 0.35], [1.0, 0.8], [0.35, 0.3],
-            [0.9, 0.7], [0.3, 0.25], [1.2, 0.9], [0.4, 0.35], [0.5, 0.4],
-            [0.35, 0.3], [0.6, 0.5], [0.45, 0.38], [0.95, 0.75], [0.32, 0.28],
-            [0.85, 0.65], [0.28, 0.22], [1.1, 0.85], [0.42, 0.35], [0.55, 0.45],
+            [0.3, 0.3],
+            [0.5, 0.4],
+            [0.4, 0.35],
+            [1.0, 0.8],
+            [0.35, 0.3],
+            [0.9, 0.7],
+            [0.3, 0.25],
+            [1.2, 0.9],
+            [0.4, 0.35],
+            [0.5, 0.4],
+            [0.35, 0.3],
+            [0.6, 0.5],
+            [0.45, 0.38],
+            [0.95, 0.75],
+            [0.32, 0.28],
+            [0.85, 0.65],
+            [0.28, 0.22],
+            [1.1, 0.85],
+            [0.42, 0.35],
+            [0.55, 0.45],
         ];
 
         (treatment, covariates)
@@ -939,7 +1049,8 @@ mod tests {
                 0.3, 0.4, 0.35, 0.8, 0.3, 0.7, 0.25, 0.9, 0.35, 0.4,
                 0.3, 0.5, 0.38, 0.75, 0.28, 0.65, 0.22, 0.85, 0.35, 0.45
             ]
-        }.unwrap();
+        }
+        .unwrap();
         Dataset::new(df)
     }
 
@@ -949,7 +1060,7 @@ mod tests {
 
         let config = SBWConfig {
             estimand: SBWEstimand::ATT,
-            balance_tol: 0.0,  // Exact balance
+            balance_tol: 0.0, // Exact balance
             ..Default::default()
         };
 
@@ -963,20 +1074,28 @@ mod tests {
 
         // Treated units should have weight 1.0
         for i in 0..10 {
-            assert!((result.weights[i] - 1.0).abs() < 1e-6,
-                    "Treated weight should be 1.0, got {}", result.weights[i]);
+            assert!(
+                (result.weights[i] - 1.0).abs() < 1e-6,
+                "Treated weight should be 1.0, got {}",
+                result.weights[i]
+            );
         }
 
         // SBW should achieve reasonable balance (exact balance is difficult numerically)
         // Standard threshold is <0.25 standardized difference after weighting
-        assert!(result.balance_after.max_std_diff < 0.3,
-                "SBW should achieve reasonable balance, got max_std_diff = {}",
-                result.balance_after.max_std_diff);
+        assert!(
+            result.balance_after.max_std_diff < 0.3,
+            "SBW should achieve reasonable balance, got max_std_diff = {}",
+            result.balance_after.max_std_diff
+        );
 
         // Balance should improve from initial imbalance
-        assert!(result.balance_after.max_std_diff < result.balance_before.max_std_diff,
-                "Balance should improve: before={}, after={}",
-                result.balance_before.max_std_diff, result.balance_after.max_std_diff);
+        assert!(
+            result.balance_after.max_std_diff < result.balance_before.max_std_diff,
+            "Balance should improve: before={}, after={}",
+            result.balance_before.max_std_diff,
+            result.balance_after.max_std_diff
+        );
     }
 
     #[test]
@@ -985,7 +1104,7 @@ mod tests {
 
         let config = SBWConfig {
             estimand: SBWEstimand::ATT,
-            balance_tol: 0.1,  // Approximate balance
+            balance_tol: 0.1, // Approximate balance
             balance_penalty: 100.0,
             ..Default::default()
         };
@@ -993,9 +1112,11 @@ mod tests {
         let result = run_sbw(&treatment.view(), &covariates.view(), config).unwrap();
 
         // Should still achieve reasonable balance
-        assert!(result.balance_after.max_std_diff < 0.2,
-                "Approximate SBW should achieve reasonable balance, got {}",
-                result.balance_after.max_std_diff);
+        assert!(
+            result.balance_after.max_std_diff < 0.2,
+            "Approximate SBW should achieve reasonable balance, got {}",
+            result.balance_after.max_std_diff
+        );
 
         // Weights should be positive
         assert!(result.weights.iter().all(|&w| w >= 0.0));
@@ -1018,8 +1139,11 @@ mod tests {
 
         // Control units should have weight 1.0
         for i in 10..30 {
-            assert!((result.weights[i] - 1.0).abs() < 1e-6,
-                    "Control weight should be 1.0 for ATC, got {}", result.weights[i]);
+            assert!(
+                (result.weights[i] - 1.0).abs() < 1e-6,
+                "Control weight should be 1.0 for ATC, got {}",
+                result.weights[i]
+            );
         }
     }
 
@@ -1038,9 +1162,11 @@ mod tests {
         assert_eq!(result.balance_after.covariate_names, vec!["x1", "x2"]);
 
         // Should achieve reasonable balance (<0.3 std diff is acceptable)
-        assert!(result.balance_after.max_std_diff < 0.3,
-                "Balance should improve, got max_std_diff = {}",
-                result.balance_after.max_std_diff);
+        assert!(
+            result.balance_after.max_std_diff < 0.3,
+            "Balance should improve, got max_std_diff = {}",
+            result.balance_after.max_std_diff
+        );
     }
 
     #[test]
@@ -1100,7 +1226,7 @@ mod tests {
 
     #[test]
     fn test_sbw_empty_group() {
-        let treatment = Array1::from(vec![1.0, 1.0, 1.0]);  // All treated
+        let treatment = Array1::from(vec![1.0, 1.0, 1.0]); // All treated
         let covariates = array![[1.0], [1.2], [1.1]];
 
         let config = SBWConfig::default();
@@ -1112,8 +1238,8 @@ mod tests {
     #[test]
     fn test_constraint_violation() {
         let x = array![[1.0, 2.0], [2.0, 3.0], [3.0, 4.0]];
-        let weights = vec![0.5, 0.3, 0.2];  // Sum = 1
-        let target = Array1::from(vec![1.5, 2.5]);  // Exact match would need weights
+        let weights = vec![0.5, 0.3, 0.2]; // Sum = 1
+        let target = Array1::from(vec![1.5, 2.5]); // Exact match would need weights
 
         let violation = compute_constraint_violation(&x.view(), &weights, &target.view());
 

@@ -6,11 +6,11 @@
 use std::sync::Arc;
 
 use axum::{
+    Json, Router,
     extract::{Path, State},
     http::StatusCode,
     response::IntoResponse,
     routing::{delete, get, post, put},
-    Json, Router,
 };
 use serde::{Deserialize, Serialize};
 use tracing;
@@ -39,14 +39,23 @@ pub fn conversation_routes(state: ConversationState) -> Router {
         .route("/conversations/{id}/messages", post(add_message))
         .route("/conversations/{id}/messages", delete(clear_messages))
         // Tool calls
-        .route("/conversations/{id}/tool-calls", get(get_conversation_tool_calls))
+        .route(
+            "/conversations/{id}/tool-calls",
+            get(get_conversation_tool_calls),
+        )
         .route("/messages/{id}/tool-calls", get(get_message_tool_calls))
         // Settings
         .route("/sessions/{session_id}/settings", get(get_settings))
         .route("/sessions/{session_id}/settings", put(update_settings))
         // Datasets
-        .route("/sessions/{session_id}/datasets", get(list_session_datasets))
-        .route("/sessions/{session_id}/datasets/reload", post(reload_session_datasets))
+        .route(
+            "/sessions/{session_id}/datasets",
+            get(list_session_datasets),
+        )
+        .route(
+            "/sessions/{session_id}/datasets/reload",
+            post(reload_session_datasets),
+        )
         // Database health
         .route("/db/health", get(db_health))
         .route("/db/stats", get(db_stats))
@@ -281,7 +290,12 @@ async fn create_conversation(
         }
         Err(e) => {
             let (status, json) = error_response(e);
-            (status, Json(ApiResponse::<ConversationResponse>::error(json.0.error.unwrap_or_default())))
+            (
+                status,
+                Json(ApiResponse::<ConversationResponse>::error(
+                    json.0.error.unwrap_or_default(),
+                )),
+            )
         }
     }
 }
@@ -302,7 +316,12 @@ async fn list_conversations(
         }
         Err(e) => {
             let (status, json) = error_response(e);
-            (status, Json(ApiResponse::<Vec<ConversationResponse>>::error(json.0.error.unwrap_or_default())))
+            (
+                status,
+                Json(ApiResponse::<Vec<ConversationResponse>>::error(
+                    json.0.error.unwrap_or_default(),
+                )),
+            )
         }
     }
 }
@@ -323,7 +342,12 @@ async fn get_conversation(
         }
         Err(e) => {
             let (status, json) = error_response(e);
-            (status, Json(ApiResponse::<ConversationWithMessagesResponse>::error(json.0.error.unwrap_or_default())))
+            (
+                status,
+                Json(ApiResponse::<ConversationWithMessagesResponse>::error(
+                    json.0.error.unwrap_or_default(),
+                )),
+            )
         }
     }
 }
@@ -345,7 +369,12 @@ async fn update_conversation(
         }
         Err(e) => {
             let (status, json) = error_response(e);
-            (status, Json(ApiResponse::<ConversationResponse>::error(json.0.error.unwrap_or_default())))
+            (
+                status,
+                Json(ApiResponse::<ConversationResponse>::error(
+                    json.0.error.unwrap_or_default(),
+                )),
+            )
         }
     }
 }
@@ -378,7 +407,12 @@ async fn archive_conversation(
         }
         Err(e) => {
             let (status, json) = error_response(e);
-            (status, Json(ApiResponse::<ConversationResponse>::error(json.0.error.unwrap_or_default())))
+            (
+                status,
+                Json(ApiResponse::<ConversationResponse>::error(
+                    json.0.error.unwrap_or_default(),
+                )),
+            )
         }
     }
 }
@@ -395,7 +429,12 @@ async fn get_messages(
         }
         Err(e) => {
             let (status, json) = error_response(e);
-            (status, Json(ApiResponse::<Vec<MessageResponse>>::error(json.0.error.unwrap_or_default())))
+            (
+                status,
+                Json(ApiResponse::<Vec<MessageResponse>>::error(
+                    json.0.error.unwrap_or_default(),
+                )),
+            )
         }
     }
 }
@@ -417,7 +456,12 @@ async fn add_message(
         }
         Err(e) => {
             let (status, json) = error_response(e);
-            (status, Json(ApiResponse::<MessageResponse>::error(json.0.error.unwrap_or_default())))
+            (
+                status,
+                Json(ApiResponse::<MessageResponse>::error(
+                    json.0.error.unwrap_or_default(),
+                )),
+            )
         }
     }
 }
@@ -430,11 +474,18 @@ async fn clear_messages(
     match state.session_manager.clear_messages(&id).await {
         Ok(count) => (
             StatusCode::OK,
-            Json(ApiResponse::success(serde_json::json!({ "deleted_count": count }))),
+            Json(ApiResponse::success(
+                serde_json::json!({ "deleted_count": count }),
+            )),
         ),
         Err(e) => {
             let (status, json) = error_response(e);
-            (status, Json(ApiResponse::<serde_json::Value>::error(json.0.error.unwrap_or_default())))
+            (
+                status,
+                Json(ApiResponse::<serde_json::Value>::error(
+                    json.0.error.unwrap_or_default(),
+                )),
+            )
         }
     }
 }
@@ -448,7 +499,12 @@ async fn get_settings(
         Ok(settings) => (StatusCode::OK, Json(ApiResponse::success(settings))),
         Err(e) => {
             let (status, json) = error_response(e);
-            (status, Json(ApiResponse::<Settings>::error(json.0.error.unwrap_or_default())))
+            (
+                status,
+                Json(ApiResponse::<Settings>::error(
+                    json.0.error.unwrap_or_default(),
+                )),
+            )
         }
     }
 }
@@ -473,7 +529,12 @@ async fn update_settings(
         Ok(settings) => (StatusCode::OK, Json(ApiResponse::success(settings))),
         Err(e) => {
             let (status, json) = error_response(e);
-            (status, Json(ApiResponse::<Settings>::error(json.0.error.unwrap_or_default())))
+            (
+                status,
+                Json(ApiResponse::<Settings>::error(
+                    json.0.error.unwrap_or_default(),
+                )),
+            )
         }
     }
 }
@@ -483,11 +544,18 @@ async fn db_health(State(state): State<ConversationState>) -> impl IntoResponse 
     match state.session_manager.db_health_check().await {
         Ok(healthy) => (
             StatusCode::OK,
-            Json(ApiResponse::success(serde_json::json!({ "healthy": healthy }))),
+            Json(ApiResponse::success(
+                serde_json::json!({ "healthy": healthy }),
+            )),
         ),
         Err(e) => {
             let (status, json) = error_response(e);
-            (status, Json(ApiResponse::<serde_json::Value>::error(json.0.error.unwrap_or_default())))
+            (
+                status,
+                Json(ApiResponse::<serde_json::Value>::error(
+                    json.0.error.unwrap_or_default(),
+                )),
+            )
         }
     }
 }
@@ -498,7 +566,12 @@ async fn db_stats(State(state): State<ConversationState>) -> impl IntoResponse {
         Ok(stats) => (StatusCode::OK, Json(ApiResponse::success(stats))),
         Err(e) => {
             let (status, json) = error_response(e);
-            (status, Json(ApiResponse::<crate::db::DbStats>::error(json.0.error.unwrap_or_default())))
+            (
+                status,
+                Json(ApiResponse::<crate::db::DbStats>::error(
+                    json.0.error.unwrap_or_default(),
+                )),
+            )
         }
     }
 }
@@ -512,11 +585,20 @@ async fn get_conversation_tool_calls(
     State(state): State<ConversationState>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    match state.session_manager.get_tool_calls_for_conversation(&id).await {
+    match state
+        .session_manager
+        .get_tool_calls_for_conversation(&id)
+        .await
+    {
         Ok(tool_calls) => (StatusCode::OK, Json(ApiResponse::success(tool_calls))),
         Err(e) => {
             let (status, json) = error_response(e);
-            (status, Json(ApiResponse::<Vec<ToolCall>>::error(json.0.error.unwrap_or_default())))
+            (
+                status,
+                Json(ApiResponse::<Vec<ToolCall>>::error(
+                    json.0.error.unwrap_or_default(),
+                )),
+            )
         }
     }
 }
@@ -530,7 +612,12 @@ async fn get_message_tool_calls(
         Ok(tool_calls) => (StatusCode::OK, Json(ApiResponse::success(tool_calls))),
         Err(e) => {
             let (status, json) = error_response(e);
-            (status, Json(ApiResponse::<Vec<ToolCall>>::error(json.0.error.unwrap_or_default())))
+            (
+                status,
+                Json(ApiResponse::<Vec<ToolCall>>::error(
+                    json.0.error.unwrap_or_default(),
+                )),
+            )
         }
     }
 }
@@ -549,7 +636,11 @@ async fn list_session_datasets(
         "[LIST_DATASETS] Fetching datasets for session"
     );
 
-    match state.session_manager.get_datasets_for_session(&session_id).await {
+    match state
+        .session_manager
+        .get_datasets_for_session(&session_id)
+        .await
+    {
         Ok(datasets) => {
             // DEBUG: Log each dataset from the database
             tracing::info!(
@@ -596,7 +687,12 @@ async fn list_session_datasets(
                 "[LIST_DATASETS] Failed to fetch datasets"
             );
             let (status, json) = error_response(e);
-            (status, Json(ApiResponse::<Vec<DatasetMetaResponse>>::error(json.0.error.unwrap_or_default())))
+            (
+                status,
+                Json(ApiResponse::<Vec<DatasetMetaResponse>>::error(
+                    json.0.error.unwrap_or_default(),
+                )),
+            )
         }
     }
 }
@@ -606,11 +702,20 @@ async fn reload_session_datasets(
     State(state): State<ConversationState>,
     Path(session_id): Path<String>,
 ) -> impl IntoResponse {
-    match state.session_manager.reload_session_datasets(&session_id).await {
+    match state
+        .session_manager
+        .reload_session_datasets(&session_id)
+        .await
+    {
         Ok(result) => (StatusCode::OK, Json(ApiResponse::success(result))),
         Err(e) => {
             let (status, json) = error_response(e);
-            (status, Json(ApiResponse::<ReloadResult>::error(json.0.error.unwrap_or_default())))
+            (
+                status,
+                Json(ApiResponse::<ReloadResult>::error(
+                    json.0.error.unwrap_or_default(),
+                )),
+            )
         }
     }
 }

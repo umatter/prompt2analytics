@@ -8,6 +8,7 @@ pub mod munge;
 pub mod panel;
 pub mod regression;
 pub mod script;
+pub mod spatial;
 pub mod stats;
 pub mod survival;
 pub mod timeseries;

@@ -1,8 +1,8 @@
 //! Conversation CRUD operations
 
 use chrono::Utc;
-use surrealdb::sql::Datetime;
 use surrealdb::RecordId;
+use surrealdb::sql::Datetime;
 
 use super::connection::{DbConnection, DbError};
 use super::models::{Conversation, ConversationWithMessages, Message, MessageRole};
@@ -21,11 +21,7 @@ impl DbConnection {
     ) -> Result<Conversation, DbError> {
         let conv = Conversation::new(session_id.to_string(), title.to_string());
 
-        let created: Option<Conversation> = self
-            .db()
-            .create(conv.id.clone())
-            .content(conv)
-            .await?;
+        let created: Option<Conversation> = self.db().create(conv.id.clone()).content(conv).await?;
 
         created.ok_or_else(|| DbError::Query("Failed to create conversation".to_string()))
     }
@@ -230,9 +226,7 @@ impl DbConnection {
         let conv_id_owned = conversation_id.to_string();
         let mut result = self
             .db()
-            .query(
-                "SELECT * FROM messages WHERE conversation_id = $id ORDER BY created_at ASC",
-            )
+            .query("SELECT * FROM messages WHERE conversation_id = $id ORDER BY created_at ASC")
             .bind(("id", conv_id_owned))
             .await?;
 

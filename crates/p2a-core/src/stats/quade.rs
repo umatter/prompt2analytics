@@ -64,17 +64,28 @@ impl std::fmt::Display for QuadeResult {
         writeln!(f, "Quade test")?;
         writeln!(f, "==========")?;
         writeln!(f)?;
-        writeln!(f, "F = {:.4}, df1 = {}, df2 = {}, p-value = {:.6}",
-            self.statistic, self.df1, self.df2, self.p_value)?;
+        writeln!(
+            f,
+            "F = {:.4}, df1 = {}, df2 = {}, p-value = {:.6}",
+            self.statistic, self.df1, self.df2, self.p_value
+        )?;
         writeln!(f)?;
-        writeln!(f, "Blocks: {}, Treatments: {}", self.n_blocks, self.n_treatments)?;
+        writeln!(
+            f,
+            "Blocks: {}, Treatments: {}",
+            self.n_blocks, self.n_treatments
+        )?;
         writeln!(f)?;
         writeln!(f, "Treatment weighted rank sums:")?;
         for (name, sum) in self.treatment_names.iter().zip(self.treatment_sums.iter()) {
             writeln!(f, "  {}: {:.4}", name, sum)?;
         }
         writeln!(f)?;
-        writeln!(f, "A = {:.4}, B = {:.4}", self.a_statistic, self.b_statistic)?;
+        writeln!(
+            f,
+            "A = {:.4}, B = {:.4}",
+            self.a_statistic, self.b_statistic
+        )?;
         Ok(())
     }
 }
@@ -154,7 +165,11 @@ pub fn quade_test(data: &[Vec<f64>], treatment_names: &[String]) -> EconResult<Q
     // Validate treatment names
     if treatment_names.len() != k {
         return Err(EconError::InvalidSpecification {
-            message: format!("Expected {} treatment names, got {}", k, treatment_names.len()),
+            message: format!(
+                "Expected {} treatment names, got {}",
+                k,
+                treatment_names.len()
+            ),
         });
     }
 
@@ -180,9 +195,7 @@ pub fn quade_test(data: &[Vec<f64>], treatment_names: &[String]) -> EconResult<Q
     let mut s_matrix: Vec<Vec<f64>> = Vec::with_capacity(b);
     for (i, ranks) in within_ranks.iter().enumerate() {
         let q_i = range_ranks[i];
-        let s_row: Vec<f64> = ranks.iter()
-            .map(|&r_ij| q_i * (r_ij - center))
-            .collect();
+        let s_row: Vec<f64> = ranks.iter().map(|&r_ij| q_i * (r_ij - center)).collect();
         s_matrix.push(s_row);
     }
 
@@ -195,7 +208,8 @@ pub fn quade_test(data: &[Vec<f64>], treatment_names: &[String]) -> EconResult<Q
     }
 
     // Step 6: Compute A = ΣΣ S_ij² and B = (1/b) Σ S_j²
-    let a: f64 = s_matrix.iter()
+    let a: f64 = s_matrix
+        .iter()
         .flat_map(|row| row.iter())
         .map(|&s| s * s)
         .sum();
@@ -222,9 +236,7 @@ pub fn quade_test(data: &[Vec<f64>], treatment_names: &[String]) -> EconResult<Q
     let p_value = f_test_p_value(f_stat, df1, df2);
 
     // Compute mean weighted ranks
-    let mean_weighted_ranks: Vec<f64> = treatment_sums.iter()
-        .map(|&s| s / b as f64)
-        .collect();
+    let mean_weighted_ranks: Vec<f64> = treatment_sums.iter().map(|&s| s / b as f64).collect();
 
     Ok(QuadeResult {
         statistic: f_stat,
@@ -250,9 +262,7 @@ fn rank_values(values: &[f64]) -> Vec<f64> {
     let n = values.len();
 
     // Create index-value pairs and sort
-    let mut indexed: Vec<(usize, f64)> = values.iter().enumerate()
-        .map(|(i, &v)| (i, v))
-        .collect();
+    let mut indexed: Vec<(usize, f64)> = values.iter().enumerate().map(|(i, &v)| (i, v)).collect();
     indexed.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
 
     let mut ranks = vec![0.0; n];
@@ -322,7 +332,11 @@ pub fn run_quade_test(
         .column(value_col)
         .map_err(|_| EconError::ColumnNotFound {
             column: value_col.to_string(),
-            available: df.get_column_names().iter().map(|s| s.to_string()).collect(),
+            available: df
+                .get_column_names()
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
         })?
         .f64()
         .map_err(|_| EconError::NonNumericColumn {
@@ -333,38 +347,50 @@ pub fn run_quade_test(
         .column(group_col)
         .map_err(|_| EconError::ColumnNotFound {
             column: group_col.to_string(),
-            available: df.get_column_names().iter().map(|s| s.to_string()).collect(),
+            available: df
+                .get_column_names()
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
         })?;
 
     let blocks_col = df
         .column(block_col)
         .map_err(|_| EconError::ColumnNotFound {
             column: block_col.to_string(),
-            available: df.get_column_names().iter().map(|s| s.to_string()).collect(),
+            available: df
+                .get_column_names()
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
         })?;
 
     // Build block -> treatment -> value mapping
-    use std::collections::{HashMap, BTreeSet};
+    use std::collections::{BTreeSet, HashMap};
     let mut block_data: HashMap<String, HashMap<String, f64>> = HashMap::new();
     let mut treatment_set: BTreeSet<String> = BTreeSet::new();
 
     let n = df.height();
     for i in 0..n {
-        let block = blocks_col.get(i).map_err(|e| EconError::InvalidSpecification {
-            message: format!("Error accessing block at row {}: {}", i, e),
-        })?;
+        let block = blocks_col
+            .get(i)
+            .map_err(|e| EconError::InvalidSpecification {
+                message: format!("Error accessing block at row {}: {}", i, e),
+            })?;
         let block_str = format!("{}", block);
 
-        let group = groups_col.get(i).map_err(|e| EconError::InvalidSpecification {
-            message: format!("Error accessing group at row {}: {}", i, e),
-        })?;
+        let group = groups_col
+            .get(i)
+            .map_err(|e| EconError::InvalidSpecification {
+                message: format!("Error accessing group at row {}: {}", i, e),
+            })?;
         let group_str = format!("{}", group);
 
         if let Some(value) = values.get(i) {
             treatment_set.insert(group_str.clone());
             block_data
                 .entry(block_str)
-                .or_insert_with(HashMap::new)
+                .or_default()
                 .insert(group_str, value);
         }
     }
@@ -419,8 +445,10 @@ mod tests {
 
         let result = quade_test(&data, &names).unwrap();
 
-        println!("F = {}, df1 = {}, df2 = {}, p = {}",
-            result.statistic, result.df1, result.df2, result.p_value);
+        println!(
+            "F = {}, df1 = {}, df2 = {}, p = {}",
+            result.statistic, result.df1, result.df2, result.p_value
+        );
         println!("Block ranges: {:?}", result.block_ranges);
         println!("Treatment sums: {:?}", result.treatment_sums);
         println!("A = {}, B = {}", result.a_statistic, result.b_statistic);
@@ -430,8 +458,11 @@ mod tests {
         assert_eq!(result.df1, 2);
         assert_eq!(result.df2, 8);
         // R gives F = 36, p = 0.0001 for this data
-        assert!((result.statistic - 36.0).abs() < 1.0,
-            "F statistic mismatch: got {}, expected 36", result.statistic);
+        assert!(
+            (result.statistic - 36.0).abs() < 1.0,
+            "F statistic mismatch: got {}, expected 36",
+            result.statistic
+        );
         // With perfect ordering, should reject H0
         assert!(result.p_value < 0.05);
     }
@@ -543,36 +574,56 @@ mod tests {
             vec![19.0, 18.0, 28.0, 25.0, 20.0],
             vec![10.0, 7.0, 6.0, 8.0, 7.0],
         ];
-        let names = vec!["A".to_string(), "B".to_string(), "C".to_string(), "D".to_string(), "E".to_string()];
+        let names = vec![
+            "A".to_string(),
+            "B".to_string(),
+            "C".to_string(),
+            "D".to_string(),
+            "E".to_string(),
+        ];
 
         let result = quade_test(&data, &names).unwrap();
 
-        println!("Quade result: F={}, df1={}, df2={}, p={}",
-            result.statistic, result.df1, result.df2, result.p_value);
+        println!(
+            "Quade result: F={}, df1={}, df2={}, p={}",
+            result.statistic, result.df1, result.df2, result.p_value
+        );
         println!("Treatment sums: {:?}", result.treatment_sums);
         println!("Block ranges: {:?}", result.block_ranges);
         println!("A = {}, B = {}", result.a_statistic, result.b_statistic);
 
         // Check against verified R results
-        assert!((result.statistic - 2.4266).abs() < 0.01,
-            "F statistic mismatch: got {}, expected 2.4266", result.statistic);
+        assert!(
+            (result.statistic - 2.4266).abs() < 0.01,
+            "F statistic mismatch: got {}, expected 2.4266",
+            result.statistic
+        );
         assert_eq!(result.df1, 4);
         assert_eq!(result.df2, 24);
-        assert!((result.p_value - 0.07566).abs() < 0.01,
-            "p-value mismatch: got {}, expected 0.07566", result.p_value);
-        assert!((result.a_statistic - 1360.0).abs() < 1.0,
-            "A statistic mismatch: got {}, expected 1360", result.a_statistic);
-        assert!((result.b_statistic - 391.6429).abs() < 0.1,
-            "B statistic mismatch: got {}, expected 391.6429", result.b_statistic);
+        assert!(
+            (result.p_value - 0.07566).abs() < 0.01,
+            "p-value mismatch: got {}, expected 0.07566",
+            result.p_value
+        );
+        assert!(
+            (result.a_statistic - 1360.0).abs() < 1.0,
+            "A statistic mismatch: got {}, expected 1360",
+            result.a_statistic
+        );
+        assert!(
+            (result.b_statistic - 391.6429).abs() < 0.1,
+            "B statistic mismatch: got {}, expected 391.6429",
+            result.b_statistic
+        );
     }
 
     #[test]
     fn test_quade_block_ranges() {
         // Test that block ranges are computed correctly
         let data = vec![
-            vec![1.0, 5.0, 3.0],   // range = 4
-            vec![2.0, 10.0, 6.0],  // range = 8
-            vec![0.0, 2.0, 1.0],   // range = 2
+            vec![1.0, 5.0, 3.0],  // range = 4
+            vec![2.0, 10.0, 6.0], // range = 8
+            vec![0.0, 2.0, 1.0],  // range = 2
         ];
         let names = vec!["A".to_string(), "B".to_string(), "C".to_string()];
 

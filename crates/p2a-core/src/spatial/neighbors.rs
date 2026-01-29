@@ -69,7 +69,7 @@ impl Neighbors {
     /// ```
     pub fn from_indices(neighbors: Vec<Vec<usize>>) -> Self {
         let n = neighbors.len();
-        let mut sorted_neighbors: Vec<Vec<usize>> = neighbors
+        let sorted_neighbors: Vec<Vec<usize>> = neighbors
             .into_iter()
             .map(|mut nb| {
                 nb.sort_unstable();
@@ -427,11 +427,7 @@ mod tests {
 
     #[test]
     fn test_explicit_neighbors() {
-        let nb = Neighbors::from_indices(vec![
-            vec![1, 2],
-            vec![0, 2],
-            vec![0, 1],
-        ]);
+        let nb = Neighbors::from_indices(vec![vec![1, 2], vec![0, 2], vec![0, 1]]);
 
         assert_eq!(nb.n(), 3);
         assert!(nb.is_symmetric());

@@ -73,7 +73,11 @@ impl std::fmt::Display for SilhouetteResult {
         writeln!(f, "Number of observations: {}", self.n)?;
         writeln!(f, "Number of clusters: {}", self.n_clusters)?;
         writeln!(f)?;
-        writeln!(f, "Average Silhouette Width: {:.4}", self.average_silhouette)?;
+        writeln!(
+            f,
+            "Average Silhouette Width: {:.4}",
+            self.average_silhouette
+        )?;
         writeln!(f)?;
         writeln!(f, "Per-cluster average silhouette widths:")?;
         for (i, &avg) in self.cluster_silhouettes.iter().enumerate() {
@@ -117,16 +121,14 @@ impl std::fmt::Display for SilhouetteResult {
 /// - Rousseeuw, P.J. (1987). "Silhouettes: A graphical aid to the interpretation
 ///   and validation of cluster analysis". Journal of Computational and Applied
 ///   Mathematics, 20, 53-65.
-pub fn silhouette(
-    data: ArrayView2<f64>,
-    labels: &[usize],
-) -> Result<SilhouetteResult, String> {
+pub fn silhouette(data: ArrayView2<f64>, labels: &[usize]) -> Result<SilhouetteResult, String> {
     let n = data.nrows();
 
     if labels.len() != n {
         return Err(format!(
             "Labels length ({}) does not match data rows ({})",
-            labels.len(), n
+            labels.len(),
+            n
         ));
     }
 
@@ -160,7 +162,8 @@ pub fn silhouette(
 
         // Compute a(i): average distance to other points in same cluster
         let a_i = if cluster_i_indices.len() > 1 {
-            let sum: f64 = cluster_i_indices.iter()
+            let sum: f64 = cluster_i_indices
+                .iter()
                 .filter(|&&j| j != i)
                 .map(|&j| distances[[i, j]])
                 .sum();
@@ -178,9 +181,11 @@ pub fn silhouette(
                 continue;
             }
 
-            let avg_dist: f64 = cluster_indices[c].iter()
+            let avg_dist: f64 = cluster_indices[c]
+                .iter()
                 .map(|&j| distances[[i, j]])
-                .sum::<f64>() / cluster_indices[c].len() as f64;
+                .sum::<f64>()
+                / cluster_indices[c].len() as f64;
 
             if avg_dist < b_i {
                 b_i = avg_dist;
@@ -215,7 +220,8 @@ pub fn silhouette(
     let mut cluster_silhouettes = vec![0.0; n_clusters];
     for c in 0..n_clusters {
         if !cluster_indices[c].is_empty() {
-            let sum: f64 = cluster_indices[c].iter()
+            let sum: f64 = cluster_indices[c]
+                .iter()
                 .map(|&i| silhouette_widths[i])
                 .sum();
             cluster_silhouettes[c] = sum / cluster_indices[c].len() as f64;
@@ -251,7 +257,8 @@ pub fn silhouette_from_dist(
     if labels.len() != n {
         return Err(format!(
             "Labels length ({}) does not match matrix size ({})",
-            labels.len(), n
+            labels.len(),
+            n
         ));
     }
 
@@ -279,7 +286,8 @@ pub fn silhouette_from_dist(
         let cluster_i_indices = &cluster_indices[cluster_i];
 
         let a_i = if cluster_i_indices.len() > 1 {
-            let sum: f64 = cluster_i_indices.iter()
+            let sum: f64 = cluster_i_indices
+                .iter()
                 .filter(|&&j| j != i)
                 .map(|&j| dist_matrix[[i, j]])
                 .sum();
@@ -296,9 +304,11 @@ pub fn silhouette_from_dist(
                 continue;
             }
 
-            let avg_dist: f64 = cluster_indices[c].iter()
+            let avg_dist: f64 = cluster_indices[c]
+                .iter()
                 .map(|&j| dist_matrix[[i, j]])
-                .sum::<f64>() / cluster_indices[c].len() as f64;
+                .sum::<f64>()
+                / cluster_indices[c].len() as f64;
 
             if avg_dist < b_i {
                 b_i = avg_dist;
@@ -330,7 +340,8 @@ pub fn silhouette_from_dist(
     let mut cluster_silhouettes = vec![0.0; n_clusters];
     for c in 0..n_clusters {
         if !cluster_indices[c].is_empty() {
-            let sum: f64 = cluster_indices[c].iter()
+            let sum: f64 = cluster_indices[c]
+                .iter()
                 .map(|&i| silhouette_widths[i])
                 .sum();
             cluster_silhouettes[c] = sum / cluster_indices[c].len() as f64;
@@ -349,10 +360,7 @@ pub fn silhouette_from_dist(
 }
 
 /// Convenience wrapper for silhouette.
-pub fn run_silhouette(
-    data: ArrayView2<f64>,
-    labels: &[usize],
-) -> Result<SilhouetteResult, String> {
+pub fn run_silhouette(data: ArrayView2<f64>, labels: &[usize]) -> Result<SilhouetteResult, String> {
     silhouette(data, labels)
 }
 
@@ -422,7 +430,8 @@ pub fn calinski_harabasz(
     if labels.len() != n {
         return Err(format!(
             "Labels length ({}) does not match data rows ({})",
-            labels.len(), n
+            labels.len(),
+            n
         ));
     }
 
@@ -441,8 +450,7 @@ pub fn calinski_harabasz(
     }
 
     // Compute overall centroid
-    let overall_centroid: Array1<f64> = data.mean_axis(Axis(0))
-        .ok_or("Failed to compute mean")?;
+    let overall_centroid: Array1<f64> = data.mean_axis(Axis(0)).ok_or("Failed to compute mean")?;
 
     // Group points by cluster and compute cluster centroids
     let mut cluster_indices: Vec<Vec<usize>> = vec![Vec::new(); n_clusters];
@@ -579,7 +587,8 @@ pub fn davies_bouldin(
     if labels.len() != n {
         return Err(format!(
             "Labels length ({}) does not match data rows ({})",
-            labels.len(), n
+            labels.len(),
+            n
         ));
     }
 
@@ -709,10 +718,21 @@ impl std::fmt::Display for DunnIndexResult {
         writeln!(f, "Number of clusters: {}", self.n_clusters)?;
         writeln!(f, "Number of observations: {}", self.n)?;
         writeln!(f)?;
-        writeln!(f, "Min inter-cluster distance: {:.4}", self.min_inter_cluster_dist)?;
-        writeln!(f, "Max intra-cluster diameter: {:.4}", self.max_intra_cluster_diameter)?;
+        writeln!(
+            f,
+            "Min inter-cluster distance: {:.4}",
+            self.min_inter_cluster_dist
+        )?;
+        writeln!(
+            f,
+            "Max intra-cluster diameter: {:.4}",
+            self.max_intra_cluster_diameter
+        )?;
         writeln!(f)?;
-        writeln!(f, "Interpretation: Higher values indicate better clustering")?;
+        writeln!(
+            f,
+            "Interpretation: Higher values indicate better clustering"
+        )?;
         Ok(())
     }
 }
@@ -734,16 +754,14 @@ impl std::fmt::Display for DunnIndexResult {
 /// # References
 ///
 /// - Dunn, J.C. (1973). "A Fuzzy Relative of the ISODATA Process".
-pub fn dunn_index(
-    data: ArrayView2<f64>,
-    labels: &[usize],
-) -> Result<DunnIndexResult, String> {
+pub fn dunn_index(data: ArrayView2<f64>, labels: &[usize]) -> Result<DunnIndexResult, String> {
     let n = data.nrows();
 
     if labels.len() != n {
         return Err(format!(
             "Labels length ({}) does not match data rows ({})",
-            labels.len(), n
+            labels.len(),
+            n
         ));
     }
 
@@ -819,10 +837,7 @@ pub fn dunn_index(
 }
 
 /// Convenience wrapper for dunn_index.
-pub fn run_dunn_index(
-    data: ArrayView2<f64>,
-    labels: &[usize],
-) -> Result<DunnIndexResult, String> {
+pub fn run_dunn_index(data: ArrayView2<f64>, labels: &[usize]) -> Result<DunnIndexResult, String> {
     dunn_index(data, labels)
 }
 
@@ -860,7 +875,11 @@ impl std::fmt::Display for RandIndexResult {
         writeln!(f, "Adjusted Rand Index: {:.4}", self.adjusted_rand_index)?;
         writeln!(f, "Number of observations: {}", self.n)?;
         writeln!(f)?;
-        writeln!(f, "Pairs in agreement: {} / {}", self.pairs_agreement, self.total_pairs)?;
+        writeln!(
+            f,
+            "Pairs in agreement: {} / {}",
+            self.pairs_agreement, self.total_pairs
+        )?;
         writeln!(f)?;
         writeln!(f, "Interpretation:")?;
         writeln!(f, "  RI = 1: Perfect agreement")?;
@@ -890,16 +909,14 @@ impl std::fmt::Display for RandIndexResult {
 ///
 /// - Rand, W.M. (1971). "Objective criteria for the evaluation of clustering methods".
 /// - Hubert, L. and Arabie, P. (1985). "Comparing partitions".
-pub fn rand_index(
-    labels_true: &[usize],
-    labels_pred: &[usize],
-) -> Result<RandIndexResult, String> {
+pub fn rand_index(labels_true: &[usize], labels_pred: &[usize]) -> Result<RandIndexResult, String> {
     let n = labels_true.len();
 
     if labels_pred.len() != n {
         return Err(format!(
             "Labels length mismatch: {} vs {}",
-            labels_true.len(), labels_pred.len()
+            labels_true.len(),
+            labels_pred.len()
         ));
     }
 
@@ -917,22 +934,25 @@ pub fn rand_index(
     }
 
     // Compute sums
-    let row_sums: Vec<usize> = contingency.iter()
-        .map(|row| row.iter().sum())
-        .collect();
+    let row_sums: Vec<usize> = contingency.iter().map(|row| row.iter().sum()).collect();
     let col_sums: Vec<usize> = (0..n_clusters_pred)
         .map(|j| contingency.iter().map(|row| row[j]).sum())
         .collect();
 
     // Compute combinations
     fn comb2(x: usize) -> f64 {
-        if x < 2 { 0.0 } else { (x * (x - 1)) as f64 / 2.0 }
+        if x < 2 {
+            0.0
+        } else {
+            (x * (x - 1)) as f64 / 2.0
+        }
     }
 
     let n_comb = comb2(n);
 
     // Sum of n_ij choose 2
-    let sum_nij: f64 = contingency.iter()
+    let sum_nij: f64 = contingency
+        .iter()
         .flat_map(|row| row.iter())
         .map(|&x| comb2(x))
         .sum();
@@ -954,7 +974,11 @@ pub fn rand_index(
     let max_index = (sum_a + sum_b) / 2.0;
 
     let ari = if (max_index - expected).abs() < 1e-12 {
-        if (sum_nij - expected).abs() < 1e-12 { 1.0 } else { 0.0 }
+        if (sum_nij - expected).abs() < 1e-12 {
+            1.0
+        } else {
+            0.0
+        }
     } else {
         (sum_nij - expected) / (max_index - expected)
     };
@@ -1047,7 +1071,8 @@ pub fn nmi(
     if labels_pred.len() != n {
         return Err(format!(
             "Labels length mismatch: {} vs {}",
-            labels_true.len(), labels_pred.len()
+            labels_true.len(),
+            labels_pred.len()
         ));
     }
 
@@ -1067,9 +1092,7 @@ pub fn nmi(
     }
 
     // Compute marginal probabilities
-    let row_sums: Vec<usize> = contingency.iter()
-        .map(|row| row.iter().sum())
-        .collect();
+    let row_sums: Vec<usize> = contingency.iter().map(|row| row.iter().sum()).collect();
     let col_sums: Vec<usize> = (0..n_clusters_pred)
         .map(|j| contingency.iter().map(|row| row[j]).sum())
         .collect();
@@ -1077,7 +1100,8 @@ pub fn nmi(
     let n_f = n as f64;
 
     // Compute entropies
-    let entropy_true: f64 = row_sums.iter()
+    let entropy_true: f64 = row_sums
+        .iter()
         .filter(|&&x| x > 0)
         .map(|&x| {
             let p = x as f64 / n_f;
@@ -1085,7 +1109,8 @@ pub fn nmi(
         })
         .sum();
 
-    let entropy_pred: f64 = col_sums.iter()
+    let entropy_pred: f64 = col_sums
+        .iter()
         .filter(|&&x| x > 0)
         .map(|&x| {
             let p = x as f64 / n_f;
@@ -1132,10 +1157,7 @@ pub fn nmi(
 }
 
 /// Convenience wrapper for nmi.
-pub fn run_nmi(
-    labels_true: &[usize],
-    labels_pred: &[usize],
-) -> Result<NmiResult, String> {
+pub fn run_nmi(labels_true: &[usize], labels_pred: &[usize]) -> Result<NmiResult, String> {
     nmi(labels_true, labels_pred, None)
 }
 
@@ -1184,9 +1206,9 @@ impl std::fmt::Display for GapStatisticResult {
         writeln!(f, "  k     Gap(k)     SE(k)    log(W_k)  E[log(W_k)]")?;
         for i in 0..self.k_values.len() {
             writeln!(
-                f, "  {:2}    {:7.4}    {:6.4}    {:7.4}    {:7.4}",
-                self.k_values[i], self.gap[i], self.se[i],
-                self.log_w[i], self.e_log_w[i]
+                f,
+                "  {:2}    {:7.4}    {:6.4}    {:7.4}    {:7.4}",
+                self.k_values[i], self.gap[i], self.se[i], self.log_w[i], self.e_log_w[i]
             )?;
         }
         writeln!(f)?;
@@ -1283,7 +1305,8 @@ pub fn gap_statistic(
                 }
             }
 
-            let w_b = compute_pooled_within_cluster_dispersion(&ref_data.view(), k, Some(rng.r#gen()))?;
+            let w_b =
+                compute_pooled_within_cluster_dispersion(&ref_data.view(), k, Some(rng.r#gen()))?;
             log_w_b.push(w_b.ln());
         }
 
@@ -1291,9 +1314,11 @@ pub fn gap_statistic(
         let mean_log_w_b: f64 = log_w_b.iter().sum::<f64>() / b as f64;
         e_log_w.push(mean_log_w_b);
 
-        let variance: f64 = log_w_b.iter()
+        let variance: f64 = log_w_b
+            .iter()
             .map(|&x| (x - mean_log_w_b).powi(2))
-            .sum::<f64>() / b as f64;
+            .sum::<f64>()
+            / b as f64;
         let sd = variance.sqrt();
         let se_k = sd * (1.0 + 1.0 / b as f64).sqrt();
         se.push(se_k);
@@ -1332,9 +1357,7 @@ fn compute_pooled_within_cluster_dispersion(
     seed: Option<u64>,
 ) -> Result<f64, String> {
     // Use kmeans to cluster data
-    let result = super::super::ml::kmeans(
-        data.view(), k, Some(100), Some(1e-4), Some(3), seed,
-    )?;
+    let result = super::super::ml::kmeans(data.view(), k, Some(100), Some(1e-4), Some(3), seed)?;
 
     // Inertia is the within-cluster sum of squares
     Ok(result.inertia)
@@ -1407,12 +1430,7 @@ mod tests {
     #[test]
     fn test_silhouette_poor_clustering() {
         // Poorly separated clusters
-        let data = array![
-            [0.0, 0.0],
-            [1.0, 0.0],
-            [2.0, 0.0],
-            [3.0, 0.0],
-        ];
+        let data = array![[0.0, 0.0], [1.0, 0.0], [2.0, 0.0], [3.0, 0.0],];
         // Assign alternating clusters (bad clustering)
         let labels = vec![0, 1, 0, 1];
 
@@ -1424,12 +1442,7 @@ mod tests {
 
     #[test]
     fn test_calinski_harabasz_basic() {
-        let data = array![
-            [0.0, 0.0],
-            [0.1, 0.1],
-            [10.0, 10.0],
-            [10.1, 10.1],
-        ];
+        let data = array![[0.0, 0.0], [0.1, 0.1], [10.0, 10.0], [10.1, 10.1],];
         let labels = vec![0, 0, 1, 1];
 
         let result = calinski_harabasz(data.view(), &labels).unwrap();
@@ -1440,12 +1453,7 @@ mod tests {
 
     #[test]
     fn test_davies_bouldin_basic() {
-        let data = array![
-            [0.0, 0.0],
-            [0.1, 0.1],
-            [10.0, 10.0],
-            [10.1, 10.1],
-        ];
+        let data = array![[0.0, 0.0], [0.1, 0.1], [10.0, 10.0], [10.1, 10.1],];
         let labels = vec![0, 0, 1, 1];
 
         let result = davies_bouldin(data.view(), &labels).unwrap();
@@ -1455,12 +1463,7 @@ mod tests {
 
     #[test]
     fn test_dunn_index_basic() {
-        let data = array![
-            [0.0, 0.0],
-            [0.1, 0.0],
-            [10.0, 0.0],
-            [10.1, 0.0],
-        ];
+        let data = array![[0.0, 0.0], [0.1, 0.0], [10.0, 0.0], [10.1, 0.0],];
         let labels = vec![0, 0, 1, 1];
 
         let result = dunn_index(data.view(), &labels).unwrap();

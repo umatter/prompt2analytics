@@ -104,7 +104,10 @@ impl SpatialWeights {
                         _ => vec![1.0; n_neighbors],
                     }
                 };
-                SparseWeights { indices, weights: w }
+                SparseWeights {
+                    indices,
+                    weights: w,
+                }
             })
             .collect();
 
@@ -158,10 +161,7 @@ impl SpatialWeights {
                     .iter()
                     .map(|sw| sw.weights.iter().sum())
                     .collect();
-                let max_sum = row_sums
-                    .iter()
-                    .copied()
-                    .fold(f64::NEG_INFINITY, f64::max);
+                let max_sum = row_sums.iter().copied().fold(f64::NEG_INFINITY, f64::max);
                 let scale = if max_sum > 0.0 { 1.0 / max_sum } else { 1.0 };
                 weights = raw_weights
                     .into_iter()
@@ -213,11 +213,7 @@ impl SpatialWeights {
                     let dx = coords[i].0 - coords[j].0;
                     let dy = coords[i].1 - coords[j].1;
                     let dist = (dx * dx + dy * dy).sqrt();
-                    if dist > 0.0 {
-                        dist.powf(-alpha)
-                    } else {
-                        0.0
-                    }
+                    if dist > 0.0 { dist.powf(-alpha) } else { 0.0 }
                 })
                 .collect();
 
@@ -230,7 +226,10 @@ impl SpatialWeights {
                 }
             }
 
-            weights_list.push(SparseWeights { indices, weights: w });
+            weights_list.push(SparseWeights {
+                indices,
+                weights: w,
+            });
         }
 
         let style = if row_standardize {
@@ -496,10 +495,7 @@ impl SpatialWeights {
             .iter()
             .flat_map(|sw| sw.weights.iter().copied())
             .collect();
-        let min_weight = all_weights
-            .iter()
-            .copied()
-            .fold(f64::INFINITY, f64::min);
+        let min_weight = all_weights.iter().copied().fold(f64::INFINITY, f64::min);
         let max_weight = all_weights
             .iter()
             .copied()
@@ -568,10 +564,10 @@ mod tests {
         //               | |
         //               2-3
         Neighbors::from_indices(vec![
-            vec![1, 2],    // 0 neighbors 1, 2
-            vec![0, 3],    // 1 neighbors 0, 3
-            vec![0, 3],    // 2 neighbors 0, 3
-            vec![1, 2],    // 3 neighbors 1, 2
+            vec![1, 2], // 0 neighbors 1, 2
+            vec![0, 3], // 1 neighbors 0, 3
+            vec![0, 3], // 2 neighbors 0, 3
+            vec![1, 2], // 3 neighbors 1, 2
         ])
     }
 

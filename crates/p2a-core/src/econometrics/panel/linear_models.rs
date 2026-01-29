@@ -35,13 +35,15 @@
 use ndarray::Array1;
 
 use crate::data::Dataset;
-use crate::errors::{EconResult, EconError};
-use crate::linalg::matrix_ops::{xtx, xty, safe_inverse};
+use crate::errors::{EconError, EconResult};
 use crate::linalg::design::DesignMatrix;
+use crate::linalg::matrix_ops::{safe_inverse, xtx, xty};
 use crate::traits::estimator::{SignificanceLevel, t_test_p_value};
 
-use super::types::{PanelResult, PanelMethod};
-use super::utils::{extract_entity_ids, compute_entity_means, demean_by_entity, demean_matrix_by_entity};
+use super::types::{PanelMethod, PanelResult};
+use super::utils::{
+    compute_entity_means, demean_by_entity, demean_matrix_by_entity, extract_entity_ids,
+};
 
 /// Run Fixed Effects (within) panel estimation.
 ///
@@ -57,11 +59,12 @@ pub fn run_fixed_effects(
     entity_col: &str,
 ) -> EconResult<PanelResult> {
     // Extract y
-    let y = DesignMatrix::extract_column(dataset.df(), y_col)
-        .map_err(|e| EconError::ColumnNotFound {
+    let y = DesignMatrix::extract_column(dataset.df(), y_col).map_err(|e| {
+        EconError::ColumnNotFound {
             column: y_col.to_string(),
             available: vec![format!("{:?}", e)],
-        })?;
+        }
+    })?;
 
     // Build design matrix without intercept for FE
     let design = DesignMatrix::from_dataframe(dataset.df(), x_cols, false)?;
@@ -98,10 +101,13 @@ pub fn run_fixed_effects(
 
     // OLS on demeaned data: β = (X̃'X̃)^{-1} X̃'ỹ
     let xtx_mat = xtx(&x_demeaned.view());
-    let (xtx_inv, _cond_warning) = safe_inverse(&xtx_mat.view())
-        .map_err(|e| EconError::SingularMatrix {
+    let (xtx_inv, _cond_warning) =
+        safe_inverse(&xtx_mat.view()).map_err(|e| EconError::SingularMatrix {
             context: "X'X in Fixed Effects".to_string(),
-            suggestion: format!("Check for perfect multicollinearity among variables: {:?}", e),
+            suggestion: format!(
+                "Check for perfect multicollinearity among variables: {:?}",
+                e
+            ),
         })?;
 
     let xty_vec = xty(&x_demeaned.view(), &y_demeaned);
@@ -123,7 +129,10 @@ pub fn run_fixed_effects(
 
     // R-squared (within)
     let y_mean_demeaned = y_demeaned.mean().unwrap_or(0.0);
-    let sst: f64 = y_demeaned.iter().map(|y| (y - y_mean_demeaned).powi(2)).sum();
+    let sst: f64 = y_demeaned
+        .iter()
+        .map(|y| (y - y_mean_demeaned).powi(2))
+        .sum();
     let r_squared = if sst > 0.0 { 1.0 - ssr / sst } else { 0.0 };
 
     // Adjusted R-squared
@@ -139,14 +148,17 @@ pub fn run_fixed_effects(
 
     // t-statistics and p-values
     let beta_vec: Vec<f64> = beta.to_vec();
-    let t_stats: Vec<f64> = beta_vec.iter()
+    let t_stats: Vec<f64> = beta_vec
+        .iter()
         .zip(std_errors.iter())
         .map(|(&b, &se)| if se > 0.0 { b / se } else { 0.0 })
         .collect();
-    let p_values: Vec<f64> = t_stats.iter()
+    let p_values: Vec<f64> = t_stats
+        .iter()
         .map(|&t| t_test_p_value(t, df as f64))
         .collect();
-    let significance: Vec<SignificanceLevel> = p_values.iter()
+    let significance: Vec<SignificanceLevel> = p_values
+        .iter()
         .map(|&p| SignificanceLevel::from_p_value(p))
         .collect();
 
@@ -187,11 +199,12 @@ pub fn run_random_effects(
     entity_col: &str,
 ) -> EconResult<PanelResult> {
     // Extract y
-    let y = DesignMatrix::extract_column(dataset.df(), y_col)
-        .map_err(|e| EconError::ColumnNotFound {
+    let y = DesignMatrix::extract_column(dataset.df(), y_col).map_err(|e| {
+        EconError::ColumnNotFound {
             column: y_col.to_string(),
             available: vec![format!("{:?}", e)],
-        })?;
+        }
+    })?;
 
     // Build design matrix with intercept for RE
     let design = DesignMatrix::from_dataframe(dataset.df(), x_cols, true)?;
@@ -214,11 +227,10 @@ pub fn run_random_effects(
 
     // Step 1: Pooled OLS to get initial residuals
     let xtx_mat = xtx(&x.view());
-    let (xtx_inv, _) = safe_inverse(&xtx_mat.view())
-        .map_err(|e| EconError::SingularMatrix {
-            context: "X'X in Random Effects".to_string(),
-            suggestion: format!("Check for perfect multicollinearity: {:?}", e),
-        })?;
+    let (xtx_inv, _) = safe_inverse(&xtx_mat.view()).map_err(|e| EconError::SingularMatrix {
+        context: "X'X in Random Effects".to_string(),
+        suggestion: format!("Check for perfect multicollinearity: {:?}", e),
+    })?;
     let xty_vec = xty(&x.view(), &y);
     let beta_pooled: Array1<f64> = xtx_inv.dot(&xty_vec);
     let residuals_pooled = &y - &x.dot(&beta_pooled);
@@ -228,8 +240,8 @@ pub fn run_random_effects(
     let x_demeaned = demean_matrix_by_entity(&x, &entity_ids, n_groups);
 
     let xtx_demeaned = xtx(&x_demeaned.view());
-    let (xtx_demeaned_inv, _) = safe_inverse(&xtx_demeaned.view())
-        .map_err(|e| EconError::SingularMatrix {
+    let (xtx_demeaned_inv, _) =
+        safe_inverse(&xtx_demeaned.view()).map_err(|e| EconError::SingularMatrix {
             context: "X'X (demeaned) in Random Effects".to_string(),
             suggestion: format!("Check for perfect multicollinearity: {:?}", e),
         })?;
@@ -264,7 +276,11 @@ pub fn run_random_effects(
 
     let y_overall_mean = y.mean().unwrap_or(0.0);
     let sigma2_between = if n_groups > 1 {
-        y_between.iter().map(|&ym| (ym - y_overall_mean).powi(2)).sum::<f64>() / (n_groups - 1) as f64
+        y_between
+            .iter()
+            .map(|&ym| (ym - y_overall_mean).powi(2))
+            .sum::<f64>()
+            / (n_groups - 1) as f64
     } else {
         0.0
     };
@@ -303,8 +319,8 @@ pub fn run_random_effects(
 
     // Step 5: OLS on quasi-demeaned data
     let xtx_quasi = xtx(&x_quasi.view());
-    let (xtx_quasi_inv, _) = safe_inverse(&xtx_quasi.view())
-        .map_err(|e| EconError::SingularMatrix {
+    let (xtx_quasi_inv, _) =
+        safe_inverse(&xtx_quasi.view()).map_err(|e| EconError::SingularMatrix {
             context: "X'X (quasi-demeaned) in Random Effects".to_string(),
             suggestion: format!("Check for multicollinearity: {:?}", e),
         })?;
@@ -337,18 +353,22 @@ pub fn run_random_effects(
     } else {
         0.0
     };
-    let f_p_value = crate::traits::estimator::f_test_p_value(f_stat, (k.saturating_sub(1)) as f64, df as f64);
+    let f_p_value =
+        crate::traits::estimator::f_test_p_value(f_stat, (k.saturating_sub(1)) as f64, df as f64);
 
     // t-statistics and p-values
     let beta_vec: Vec<f64> = beta.to_vec();
-    let t_stats: Vec<f64> = beta_vec.iter()
+    let t_stats: Vec<f64> = beta_vec
+        .iter()
         .zip(std_errors.iter())
         .map(|(&b, &se)| if se > 0.0 { b / se } else { 0.0 })
         .collect();
-    let p_values: Vec<f64> = t_stats.iter()
+    let p_values: Vec<f64> = t_stats
+        .iter()
         .map(|&t| t_test_p_value(t, df as f64))
         .collect();
-    let significance: Vec<SignificanceLevel> = p_values.iter()
+    let significance: Vec<SignificanceLevel> = p_values
+        .iter()
         .map(|&p| SignificanceLevel::from_p_value(p))
         .collect();
 

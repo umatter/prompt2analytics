@@ -45,8 +45,8 @@
 //! - Stata package: `csdid` (https://github.com/friosavila/csdid)
 
 use ndarray::{Array1, Array2};
-use rand::prelude::*;
 use rand::SeedableRng;
+use rand::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -55,7 +55,7 @@ use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
 use crate::linalg::design::DesignMatrix;
 use crate::linalg::matrix_ops::safe_inverse;
-use crate::traits::estimator::{normal_cdf, SignificanceLevel};
+use crate::traits::estimator::{SignificanceLevel, normal_cdf};
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Configuration Types
@@ -286,7 +286,12 @@ impl fmt::Display for StaggeredDidResult {
             self.overall_att.ci_upper
         )?;
         let sig = SignificanceLevel::from_p_value(self.overall_att.p_value);
-        writeln!(f, "  p-value = {:.4}{}", self.overall_att.p_value, sig.stars())?;
+        writeln!(
+            f,
+            "  p-value = {:.4}{}",
+            self.overall_att.p_value,
+            sig.stars()
+        )?;
         writeln!(f)?;
 
         // Event Study
@@ -302,14 +307,22 @@ impl fmt::Display for StaggeredDidResult {
             writeln!(
                 f,
                 "{:>8} {:>12.4} {:>12.4} [{:>8.4}, {:>8.4}]{}",
-                eff.key, eff.att, eff.std_error, eff.ci_lower, eff.ci_upper, sig.stars()
+                eff.key,
+                eff.att,
+                eff.std_error,
+                eff.ci_lower,
+                eff.ci_upper,
+                sig.stars()
             )?;
         }
         writeln!(f)?;
 
         // Pre-trend test
         if let Some(ref pretrend) = self.pretrend_test {
-            writeln!(f, "PRE-TREND TEST (joint test that pre-treatment ATTs = 0):")?;
+            writeln!(
+                f,
+                "PRE-TREND TEST (joint test that pre-treatment ATTs = 0):"
+            )?;
             writeln!(
                 f,
                 "  Chi-squared({}) = {:.2}, p-value = {:.4}",
@@ -495,21 +508,14 @@ pub fn run_staggered_did(
 
             // Compute ATT(g, t)
             let att_result = compute_group_time_att(
-                &y,
-                &g_col,
-                &t_col,
-                &unit_ids,
-                &x_cov,
-                &panel_map,
-                g,
-                t,
-                base_t,
-                &config,
+                &y, &g_col, &t_col, &unit_ids, &x_cov, &panel_map, g, t, base_t, &config,
             );
 
             match att_result {
                 Ok(att) => {
-                    if att.n_treated >= config.min_obs_per_cell && att.n_comparison >= config.min_obs_per_cell {
+                    if att.n_treated >= config.min_obs_per_cell
+                        && att.n_comparison >= config.min_obs_per_cell
+                    {
                         group_time_atts.push(att);
                     } else {
                         warnings.push(format!(
@@ -1274,7 +1280,7 @@ fn compute_pretrend_test(atts: &[GroupTimeATT]) -> Option<PreTrendTest> {
         return None;
     }
 
-    let n_pre = pre_atts.len();
+    let _n_pre = pre_atts.len();
     let pre_effects: Vec<f64> = pre_atts.iter().map(|a| a.att).collect();
 
     // Wald test: sum of (ATT/SE)^2 ~ chi-squared(n_pre)
@@ -1334,11 +1340,7 @@ fn quantile_normal(p: f64) -> f64 {
 
     let z = t - (c0 + c1 * t + c2 * t * t) / (1.0 + d1 * t + d2 * t * t + d3 * t * t * t);
 
-    if p < 0.5 {
-        -z
-    } else {
-        z
-    }
+    if p < 0.5 { -z } else { z }
 }
 
 /// Chi-squared p-value (upper tail) using statrs if available.
@@ -1450,14 +1452,14 @@ fn ln_gamma(x: f64) -> f64 {
 
     // Lanczos coefficients for g=7, n=9
     let c = [
-        0.99999999999980993,
+        0.999_999_999_999_809_9,
         676.5203681218851,
         -1259.1392167224028,
-        771.32342877765313,
-        -176.61502916214059,
+        771.323_428_777_653_1,
+        -176.615_029_162_140_6,
         12.507343278686905,
         -0.13857109526572012,
-        9.9843695780195716e-6,
+        9.984_369_578_019_572e-6,
         1.5056327351493116e-7,
     ];
 
@@ -1526,7 +1528,11 @@ mod tests {
                 // Outcome: base + trend + treatment effect if post-treatment
                 let base = unit as f64 * 0.5; // unit fixed effect
                 let trend = (year - 2000) as f64 * 0.3; // common trend
-                let treated = if g > 0 && year >= g { treatment_effect } else { 0.0 };
+                let treated = if g > 0 && year >= g {
+                    treatment_effect
+                } else {
+                    0.0
+                };
                 let noise = ((unit * year) % 10) as f64 * 0.1 - 0.5; // pseudo-random noise
 
                 y_vec.push(base + trend + treated + noise);

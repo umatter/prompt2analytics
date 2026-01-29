@@ -81,7 +81,11 @@ impl std::fmt::Display for AnsariBradleyResult {
             self.statistic,
             self.p_value,
             self.significance.stars(),
-            if self.exact { "exact" } else { "normal approximation" }
+            if self.exact {
+                "exact"
+            } else {
+                "normal approximation"
+            }
         )?;
         writeln!(f)?;
 
@@ -215,8 +219,14 @@ pub fn ansari_test(
         (pval, lower, upper, est)
     } else {
         // Normal approximation
-        let (pval, lower, upper, est) =
-            approx_ansari(m_finite, n_finite, ab_stat, alternative, conf_level, has_ties);
+        let (pval, lower, upper, est) = approx_ansari(
+            m_finite,
+            n_finite,
+            ab_stat,
+            alternative,
+            conf_level,
+            has_ties,
+        );
         (pval, lower, upper, est)
     };
 
@@ -325,9 +335,7 @@ fn ansari_exact_probs(m: usize, n: usize, stat: f64) -> (f64, f64) {
     let total_n = m + n;
 
     // Generate all Ansari-Bradley scores for positions 1..=total_n
-    let scores: Vec<usize> = (1..=total_n)
-        .map(|r| r.min(total_n + 1 - r))
-        .collect();
+    let scores: Vec<usize> = (1..=total_n).map(|r| r.min(total_n + 1 - r)).collect();
 
     // Dynamic programming: count ways to achieve each sum
     // when choosing m items from total_n items

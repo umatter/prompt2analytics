@@ -2,14 +2,14 @@
 //!
 //! Run with: cargo bench -p p2a-core -- spatial_advanced
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use ndarray::Array1;
 use p2a_core::data::Dataset;
 use p2a_core::spatial::{Neighbors, SpatialWeights, WeightStyle};
 use polars::prelude::*;
+use rand::Rng;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
-use rand::Rng;
 
 // Generate spatial data for benchmarking
 fn generate_spatial_data(n: usize, rho: f64) -> (Dataset, SpatialWeights) {
@@ -165,7 +165,7 @@ fn generate_binary_spatial_data(n: usize, rho: f64) -> (Dataset, SpatialWeights)
 }
 
 fn bench_sphet(c: &mut Criterion) {
-    use p2a_core::econometrics::{run_sphet, SphetConfig, SphetModel, SphetSE};
+    use p2a_core::econometrics::{SphetConfig, SphetModel, SphetSE, run_sphet};
 
     let mut group = c.benchmark_group("sphet");
     group.sample_size(10);
@@ -185,7 +185,7 @@ fn bench_sphet(c: &mut Criterion) {
                     black_box(&dataset),
                     black_box("y"),
                     black_box(&["x1", "x2"]),
-                    black_box(&mut listw.clone()),
+                    black_box(&listw.clone()),
                     black_box(config),
                 )
             })
@@ -203,7 +203,7 @@ fn bench_sphet(c: &mut Criterion) {
                     black_box(&dataset),
                     black_box("y"),
                     black_box(&["x1", "x2"]),
-                    black_box(&mut listw.clone()),
+                    black_box(&listw.clone()),
                     black_box(config),
                 )
             })
@@ -214,7 +214,7 @@ fn bench_sphet(c: &mut Criterion) {
 }
 
 fn bench_splm(c: &mut Criterion) {
-    use p2a_core::econometrics::{run_spml, SpmlConfig, SpatialPanelEffect, SpatialPanelModel};
+    use p2a_core::econometrics::{SpatialPanelEffect, SpatialPanelModel, SpmlConfig, run_spml};
 
     let mut group = c.benchmark_group("splm");
     group.sample_size(10);
@@ -249,7 +249,7 @@ fn bench_splm(c: &mut Criterion) {
 }
 
 fn bench_spatialprobit(c: &mut Criterion) {
-    use p2a_core::econometrics::{run_sar_probit, SpatialProbitConfig};
+    use p2a_core::econometrics::{SpatialProbitConfig, run_sar_probit};
 
     let mut group = c.benchmark_group("spatialprobit");
     group.sample_size(10);

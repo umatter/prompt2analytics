@@ -41,7 +41,7 @@ impl OpenAIProvider {
         self.config
             .api_key
             .as_deref()
-            .ok_or_else(|| LlmError::InvalidApiKey)
+            .ok_or(LlmError::InvalidApiKey)
     }
 
     /// Convert our Message format to OpenAI's message format.
@@ -179,7 +179,9 @@ impl OpenAIProvider {
 
                     // If interpret is false, return raw tool output without calling LLM again
                     if !interpret {
-                        tracing::info!("interpret=false, returning raw tool output without LLM interpretation");
+                        tracing::info!(
+                            "interpret=false, returning raw tool output without LLM interpretation"
+                        );
                         return Ok(Message {
                             role: MessageRole::Assistant,
                             content: tool_outputs.join("\n\n"),
@@ -356,9 +358,10 @@ impl OpenAIProvider {
                             // Handle tool call deltas
                             if let Some(ref tool_calls) = choice.delta.tool_calls {
                                 for tc in tool_calls {
-                                    let entry = tool_calls_map
-                                        .entry(tc.index)
-                                        .or_insert_with(|| (String::new(), String::new(), String::new()));
+                                    let entry =
+                                        tool_calls_map.entry(tc.index).or_insert_with(|| {
+                                            (String::new(), String::new(), String::new())
+                                        });
 
                                     if let Some(ref id) = tc.id {
                                         entry.0 = id.clone();
@@ -387,7 +390,14 @@ impl OpenAIProvider {
                 .into_iter()
                 .map(|(idx, (id, name, arguments))| {
                     let args: Value = serde_json::from_str(&arguments).unwrap_or(Value::Null);
-                    (idx, ToolCall { id, name, arguments: args })
+                    (
+                        idx,
+                        ToolCall {
+                            id,
+                            name,
+                            arguments: args,
+                        },
+                    )
                 })
                 .collect();
             calls.sort_by_key(|(idx, _)| *idx);
@@ -464,7 +474,9 @@ impl OpenAIProvider {
 
                     // If interpret is false, return raw tool output without calling LLM again
                     if !interpret {
-                        tracing::info!("interpret=false, returning raw tool output without LLM interpretation");
+                        tracing::info!(
+                            "interpret=false, returning raw tool output without LLM interpretation"
+                        );
                         return Ok(Message {
                             role: MessageRole::Assistant,
                             content: tool_outputs.join("\n\n"),
@@ -550,8 +562,15 @@ impl LlmProvider for OpenAIProvider {
         callback: Box<dyn Fn(StreamChunk) + Send + Sync>,
     ) -> Result<Message, LlmError> {
         let mut conversation = messages.to_vec();
-        self.execute_tool_loop_stream(&mut conversation, tools, tool_executor, 10, interpret, callback.as_ref())
-            .await
+        self.execute_tool_loop_stream(
+            &mut conversation,
+            tools,
+            tool_executor,
+            10,
+            interpret,
+            callback.as_ref(),
+        )
+        .await
     }
 }
 

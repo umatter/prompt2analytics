@@ -34,11 +34,11 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+use super::ttest::{Alternative, two_sample_t_test};
+use super::wilcoxon::{WilcoxonConfig, wilcoxon_rank_sum};
 use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
 use crate::traits::SignificanceLevel;
-use super::ttest::{Alternative, two_sample_t_test};
-use super::wilcoxon::{wilcoxon_rank_sum, WilcoxonConfig};
 
 /// Method for adjusting p-values in multiple comparisons.
 ///
@@ -205,7 +205,11 @@ impl std::fmt::Display for PairwiseTTestResult {
         writeln!(f, "{}", "=".repeat(self.test_name.len()))?;
         writeln!(f)?;
 
-        writeln!(f, "P value adjustment method: {}", self.p_adjust_method.name())?;
+        writeln!(
+            f,
+            "P value adjustment method: {}",
+            self.p_adjust_method.name()
+        )?;
         if self.pool_sd {
             if let Some(sd) = self.pooled_sd {
                 writeln!(f, "Pooled SD: {:.6}", sd)?;
@@ -217,11 +221,17 @@ impl std::fmt::Display for PairwiseTTestResult {
         let k = self.group_names.len();
 
         // Find max width for group names
-        let max_width = self.group_names.iter().map(|s| s.len()).max().unwrap_or(6).max(10);
+        let max_width = self
+            .group_names
+            .iter()
+            .map(|s| s.len())
+            .max()
+            .unwrap_or(6)
+            .max(10);
 
         // Print column headers (all except last)
         write!(f, "{:width$}", "", width = max_width + 2)?;
-        for j in 0..k-1 {
+        for j in 0..k - 1 {
             write!(f, "{:>width$} ", self.group_names[j], width = max_width)?;
         }
         writeln!(f)?;
@@ -239,7 +249,7 @@ impl std::fmt::Display for PairwiseTTestResult {
                 }
             }
             // Fill remaining columns with blank
-            for _ in i..k-1 {
+            for _ in i..k - 1 {
                 write!(f, "{:>width$} ", "-", width = max_width)?;
             }
             writeln!(f)?;
@@ -441,10 +451,7 @@ pub fn pairwise_t_test<T: AsRef<str> + Clone + Eq + std::hash::Hash + ToString>(
     // Group the data
     let mut group_data: HashMap<String, Vec<f64>> = HashMap::new();
     for (v, g) in values.iter().zip(groups.iter()) {
-        group_data
-            .entry(g.to_string())
-            .or_insert_with(Vec::new)
-            .push(*v);
+        group_data.entry(g.to_string()).or_default().push(*v);
     }
 
     // Get sorted group names for consistent ordering
@@ -488,7 +495,9 @@ pub fn pairwise_t_test<T: AsRef<str> + Clone + Eq + std::hash::Hash + ToString>(
     let pooled_sd = if pool_sd {
         // MSE from one-way ANOVA: pooled variance
         let total_df: usize = group_sizes.iter().map(|n| n - 1).sum();
-        let ss_within: f64 = group_vars.iter().zip(&group_sizes)
+        let ss_within: f64 = group_vars
+            .iter()
+            .zip(&group_sizes)
             .map(|(&var, &n)| var * (n - 1) as f64)
             .sum();
         let mse = ss_within / total_df as f64;
@@ -582,13 +591,21 @@ pub fn run_pairwise_t_test(
     // Extract response values
     let response_col = df.column(response).map_err(|_| EconError::ColumnNotFound {
         column: response.to_string(),
-        available: df.get_column_names().iter().map(|s| s.to_string()).collect(),
+        available: df
+            .get_column_names()
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
     })?;
 
     // Extract factor values
     let factor_col = df.column(factor).map_err(|_| EconError::ColumnNotFound {
         column: factor.to_string(),
-        available: df.get_column_names().iter().map(|s| s.to_string()).collect(),
+        available: df
+            .get_column_names()
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
     })?;
 
     // Convert to vectors, handling missing values
@@ -597,25 +614,32 @@ pub fn run_pairwise_t_test(
 
     let response_f64 = response_col
         .f64()
-        .map_err(|_| EconError::NonNumericColumn { column: response.to_string() })?;
+        .map_err(|_| EconError::NonNumericColumn {
+            column: response.to_string(),
+        })?;
 
     // Handle factor as either String or numeric
     let factor_str: Vec<String> = if let Ok(str_col) = factor_col.str() {
-        str_col.into_iter().map(|opt| opt.unwrap_or("NA").to_string()).collect()
+        str_col
+            .into_iter()
+            .map(|opt| opt.unwrap_or("NA").to_string())
+            .collect()
     } else if let Ok(f64_col) = factor_col.f64() {
-        f64_col.into_iter().map(|opt| {
-            match opt {
+        f64_col
+            .into_iter()
+            .map(|opt| match opt {
                 Some(v) => v.to_string(),
                 None => "NA".to_string(),
-            }
-        }).collect()
+            })
+            .collect()
     } else if let Ok(i64_col) = factor_col.i64() {
-        i64_col.into_iter().map(|opt| {
-            match opt {
+        i64_col
+            .into_iter()
+            .map(|opt| match opt {
                 Some(v) => v.to_string(),
                 None => "NA".to_string(),
-            }
-        }).collect()
+            })
+            .collect()
     } else {
         return Err(EconError::InvalidSpecification {
             message: format!("Factor column '{}' must be string or numeric", factor),
@@ -748,18 +772,28 @@ impl std::fmt::Display for PairwiseWilcoxResult {
         writeln!(f, "{}", "=".repeat(self.test_name.len()))?;
         writeln!(f)?;
 
-        writeln!(f, "P value adjustment method: {}", self.p_adjust_method.name())?;
+        writeln!(
+            f,
+            "P value adjustment method: {}",
+            self.p_adjust_method.name()
+        )?;
         writeln!(f)?;
 
         // Print matrix header
         let k = self.group_names.len();
 
         // Find max width for group names
-        let max_width = self.group_names.iter().map(|s| s.len()).max().unwrap_or(6).max(10);
+        let max_width = self
+            .group_names
+            .iter()
+            .map(|s| s.len())
+            .max()
+            .unwrap_or(6)
+            .max(10);
 
         // Print column headers (all except last)
         write!(f, "{:width$}", "", width = max_width + 2)?;
-        for j in 0..k-1 {
+        for j in 0..k - 1 {
             write!(f, "{:>width$} ", self.group_names[j], width = max_width)?;
         }
         writeln!(f)?;
@@ -777,7 +811,7 @@ impl std::fmt::Display for PairwiseWilcoxResult {
                 }
             }
             // Fill remaining columns with blank
-            for _ in i..k-1 {
+            for _ in i..k - 1 {
                 write!(f, "{:>width$} ", "-", width = max_width)?;
             }
             writeln!(f)?;
@@ -846,10 +880,7 @@ pub fn pairwise_wilcox_test<T: AsRef<str> + Clone + Eq + std::hash::Hash + ToStr
     let mut group_data: HashMap<String, Vec<f64>> = HashMap::new();
     for (v, g) in values.iter().zip(groups.iter()) {
         if v.is_finite() {
-            group_data
-                .entry(g.to_string())
-                .or_insert_with(Vec::new)
-                .push(*v);
+            group_data.entry(g.to_string()).or_default().push(*v);
         }
     }
 
@@ -986,13 +1017,21 @@ pub fn run_pairwise_wilcox_test(
     // Extract response values
     let response_col = df.column(response).map_err(|_| EconError::ColumnNotFound {
         column: response.to_string(),
-        available: df.get_column_names().iter().map(|s| s.to_string()).collect(),
+        available: df
+            .get_column_names()
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
     })?;
 
     // Extract factor values
     let factor_col = df.column(factor).map_err(|_| EconError::ColumnNotFound {
         column: factor.to_string(),
-        available: df.get_column_names().iter().map(|s| s.to_string()).collect(),
+        available: df
+            .get_column_names()
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
     })?;
 
     // Convert to vectors, handling missing values
@@ -1001,25 +1040,32 @@ pub fn run_pairwise_wilcox_test(
 
     let response_f64 = response_col
         .f64()
-        .map_err(|_| EconError::NonNumericColumn { column: response.to_string() })?;
+        .map_err(|_| EconError::NonNumericColumn {
+            column: response.to_string(),
+        })?;
 
     // Handle factor as either String or numeric
     let factor_str: Vec<String> = if let Ok(str_col) = factor_col.str() {
-        str_col.into_iter().map(|opt| opt.unwrap_or("NA").to_string()).collect()
+        str_col
+            .into_iter()
+            .map(|opt| opt.unwrap_or("NA").to_string())
+            .collect()
     } else if let Ok(f64_col) = factor_col.f64() {
-        f64_col.into_iter().map(|opt| {
-            match opt {
+        f64_col
+            .into_iter()
+            .map(|opt| match opt {
                 Some(v) => v.to_string(),
                 None => "NA".to_string(),
-            }
-        }).collect()
+            })
+            .collect()
     } else if let Ok(i64_col) = factor_col.i64() {
-        i64_col.into_iter().map(|opt| {
-            match opt {
+        i64_col
+            .into_iter()
+            .map(|opt| match opt {
                 Some(v) => v.to_string(),
                 None => "NA".to_string(),
-            }
-        }).collect()
+            })
+            .collect()
     } else {
         return Err(EconError::InvalidSpecification {
             message: format!("Factor column '{}' must be string or numeric", factor),
@@ -1090,7 +1136,7 @@ mod tests {
         // [1] 0.04 0.04 0.06 0.06
         // Hmm, different from what I calculated. Let me trace through more carefully.
 
-        assert!((adj[0] - 0.04).abs() < 1e-10);  // 0.01 * 4
+        assert!((adj[0] - 0.04).abs() < 1e-10); // 0.01 * 4
         // The exact values depend on tie-handling
     }
 
@@ -1111,17 +1157,22 @@ mod tests {
     #[test]
     fn test_pairwise_t_test_basic() {
         let values = vec![
-            1.0, 2.0, 3.0, 2.5, 1.5,  // Group A: mean ≈ 2
-            10.0, 11.0, 12.0, 10.5, 11.5,  // Group B: mean ≈ 11
-            20.0, 21.0, 22.0, 20.5, 21.5,  // Group C: mean ≈ 21
+            1.0, 2.0, 3.0, 2.5, 1.5, // Group A: mean ≈ 2
+            10.0, 11.0, 12.0, 10.5, 11.5, // Group B: mean ≈ 11
+            20.0, 21.0, 22.0, 20.5, 21.5, // Group C: mean ≈ 21
         ];
         let groups = vec![
-            "A", "A", "A", "A", "A",
-            "B", "B", "B", "B", "B",
-            "C", "C", "C", "C", "C",
+            "A", "A", "A", "A", "A", "B", "B", "B", "B", "B", "C", "C", "C", "C", "C",
         ];
 
-        let result = pairwise_t_test(&values, &groups, true, Alternative::TwoSided, PValueAdjustMethod::Holm).unwrap();
+        let result = pairwise_t_test(
+            &values,
+            &groups,
+            true,
+            Alternative::TwoSided,
+            PValueAdjustMethod::Holm,
+        )
+        .unwrap();
 
         assert_eq!(result.group_names, vec!["A", "B", "C"]);
         assert_eq!(result.n_comparisons, 3);
@@ -1136,13 +1187,17 @@ mod tests {
     #[test]
     fn test_pairwise_t_test_welch() {
         // Test with unequal variances (pool_sd = false)
-        let values = vec![
-            1.0, 2.0, 3.0, 2.5, 1.5,
-            10.0, 11.0, 12.0, 10.5, 11.5,
-        ];
+        let values = vec![1.0, 2.0, 3.0, 2.5, 1.5, 10.0, 11.0, 12.0, 10.5, 11.5];
         let groups = vec!["A", "A", "A", "A", "A", "B", "B", "B", "B", "B"];
 
-        let result = pairwise_t_test(&values, &groups, false, Alternative::TwoSided, PValueAdjustMethod::None).unwrap();
+        let result = pairwise_t_test(
+            &values,
+            &groups,
+            false,
+            Alternative::TwoSided,
+            PValueAdjustMethod::None,
+        )
+        .unwrap();
 
         assert_eq!(result.n_comparisons, 1);
         assert!(!result.pool_sd);
@@ -1155,13 +1210,19 @@ mod tests {
         let df = df! {
             "yield" => [1.0, 2.0, 3.0, 10.0, 11.0, 12.0, 20.0, 21.0, 22.0],
             "treatment" => ["A", "A", "A", "B", "B", "B", "C", "C", "C"]
-        }.unwrap();
+        }
+        .unwrap();
         let dataset = Dataset::new(df);
 
         let result = run_pairwise_t_test(
-            &dataset, "yield", "treatment",
-            true, Alternative::TwoSided, PValueAdjustMethod::Bonferroni
-        ).unwrap();
+            &dataset,
+            "yield",
+            "treatment",
+            true,
+            Alternative::TwoSided,
+            PValueAdjustMethod::Bonferroni,
+        )
+        .unwrap();
 
         assert_eq!(result.group_names.len(), 3);
         assert_eq!(result.n_comparisons, 3);
@@ -1184,13 +1245,20 @@ mod tests {
         // C   1.3e-15     1.4e-10
 
         let values = vec![
-            1.0, 2.0, 3.0, 2.5, 1.5,
-            10.0, 11.0, 12.0, 10.5, 11.5,
-            20.0, 21.0, 22.0, 20.5, 21.5,
+            1.0, 2.0, 3.0, 2.5, 1.5, 10.0, 11.0, 12.0, 10.5, 11.5, 20.0, 21.0, 22.0, 20.5, 21.5,
         ];
-        let groups = vec!["A", "A", "A", "A", "A", "B", "B", "B", "B", "B", "C", "C", "C", "C", "C"];
+        let groups = vec![
+            "A", "A", "A", "A", "A", "B", "B", "B", "B", "B", "C", "C", "C", "C", "C",
+        ];
 
-        let result = pairwise_t_test(&values, &groups, true, Alternative::TwoSided, PValueAdjustMethod::None).unwrap();
+        let result = pairwise_t_test(
+            &values,
+            &groups,
+            true,
+            Alternative::TwoSided,
+            PValueAdjustMethod::None,
+        )
+        .unwrap();
 
         // B vs A (index 0)
         let p_ba = result.p_values_raw[result.index(1, 0)];
@@ -1198,7 +1266,11 @@ mod tests {
 
         // C vs A (index 1)
         let p_ca = result.p_values_raw[result.index(2, 0)];
-        assert!(p_ca < 1e-12, "C vs A p-value should be very small: {}", p_ca);
+        assert!(
+            p_ca < 1e-12,
+            "C vs A p-value should be very small: {}",
+            p_ca
+        );
 
         // C vs B (index 2)
         let p_cb = result.p_values_raw[result.index(2, 1)];
@@ -1212,10 +1284,26 @@ mod tests {
         let p = vec![0.001, 0.01, 0.05, 0.1];
         let adj = p_adjust(&p, PValueAdjustMethod::Holm);
 
-        assert!((adj[0] - 0.004).abs() < 0.001, "Expected 0.004, got {}", adj[0]);
-        assert!((adj[1] - 0.030).abs() < 0.001, "Expected 0.030, got {}", adj[1]);
-        assert!((adj[2] - 0.100).abs() < 0.001, "Expected 0.100, got {}", adj[2]);
-        assert!((adj[3] - 0.100).abs() < 0.001, "Expected 0.100, got {}", adj[3]);
+        assert!(
+            (adj[0] - 0.004).abs() < 0.001,
+            "Expected 0.004, got {}",
+            adj[0]
+        );
+        assert!(
+            (adj[1] - 0.030).abs() < 0.001,
+            "Expected 0.030, got {}",
+            adj[1]
+        );
+        assert!(
+            (adj[2] - 0.100).abs() < 0.001,
+            "Expected 0.100, got {}",
+            adj[2]
+        );
+        assert!(
+            (adj[3] - 0.100).abs() < 0.001,
+            "Expected 0.100, got {}",
+            adj[3]
+        );
     }
 
     #[test]
@@ -1225,10 +1313,26 @@ mod tests {
         let p = vec![0.001, 0.01, 0.05, 0.1];
         let adj = p_adjust(&p, PValueAdjustMethod::BH);
 
-        assert!((adj[0] - 0.004).abs() < 0.001, "Expected 0.004, got {}", adj[0]);
-        assert!((adj[1] - 0.020).abs() < 0.001, "Expected 0.020, got {}", adj[1]);
-        assert!((adj[2] - 0.0667).abs() < 0.001, "Expected 0.0667, got {}", adj[2]);
-        assert!((adj[3] - 0.100).abs() < 0.001, "Expected 0.100, got {}", adj[3]);
+        assert!(
+            (adj[0] - 0.004).abs() < 0.001,
+            "Expected 0.004, got {}",
+            adj[0]
+        );
+        assert!(
+            (adj[1] - 0.020).abs() < 0.001,
+            "Expected 0.020, got {}",
+            adj[1]
+        );
+        assert!(
+            (adj[2] - 0.0667).abs() < 0.001,
+            "Expected 0.0667, got {}",
+            adj[2]
+        );
+        assert!(
+            (adj[3] - 0.100).abs() < 0.001,
+            "Expected 0.100, got {}",
+            adj[3]
+        );
     }
 
     // ========================================================================
@@ -1238,17 +1342,22 @@ mod tests {
     #[test]
     fn test_pairwise_wilcox_basic() {
         let values = vec![
-            1.0, 2.0, 3.0, 2.5, 1.5,  // Group A
-            10.0, 11.0, 12.0, 10.5, 11.5,  // Group B
-            20.0, 21.0, 22.0, 20.5, 21.5,  // Group C
+            1.0, 2.0, 3.0, 2.5, 1.5, // Group A
+            10.0, 11.0, 12.0, 10.5, 11.5, // Group B
+            20.0, 21.0, 22.0, 20.5, 21.5, // Group C
         ];
         let groups = vec![
-            "A", "A", "A", "A", "A",
-            "B", "B", "B", "B", "B",
-            "C", "C", "C", "C", "C",
+            "A", "A", "A", "A", "A", "B", "B", "B", "B", "B", "C", "C", "C", "C", "C",
         ];
 
-        let result = pairwise_wilcox_test(&values, &groups, Alternative::TwoSided, PValueAdjustMethod::Holm, None).unwrap();
+        let result = pairwise_wilcox_test(
+            &values,
+            &groups,
+            Alternative::TwoSided,
+            PValueAdjustMethod::Holm,
+            None,
+        )
+        .unwrap();
 
         assert_eq!(result.group_names, vec!["A", "B", "C"]);
         assert_eq!(result.n_comparisons, 3);
@@ -1262,13 +1371,17 @@ mod tests {
 
     #[test]
     fn test_pairwise_wilcox_no_adjustment() {
-        let values = vec![
-            1.0, 2.0, 3.0, 4.0, 5.0,
-            10.0, 11.0, 12.0, 13.0, 14.0,
-        ];
+        let values = vec![1.0, 2.0, 3.0, 4.0, 5.0, 10.0, 11.0, 12.0, 13.0, 14.0];
         let groups = vec!["A", "A", "A", "A", "A", "B", "B", "B", "B", "B"];
 
-        let result = pairwise_wilcox_test(&values, &groups, Alternative::TwoSided, PValueAdjustMethod::None, None).unwrap();
+        let result = pairwise_wilcox_test(
+            &values,
+            &groups,
+            Alternative::TwoSided,
+            PValueAdjustMethod::None,
+            None,
+        )
+        .unwrap();
 
         assert_eq!(result.n_comparisons, 1);
         assert!(result.p_values_raw[0] < 0.05);
@@ -1281,13 +1394,19 @@ mod tests {
         let df = df! {
             "response" => [1.0, 2.0, 3.0, 10.0, 11.0, 12.0, 20.0, 21.0, 22.0],
             "group" => ["A", "A", "A", "B", "B", "B", "C", "C", "C"]
-        }.unwrap();
+        }
+        .unwrap();
         let dataset = Dataset::new(df);
 
         let result = run_pairwise_wilcox_test(
-            &dataset, "response", "group",
-            Alternative::TwoSided, PValueAdjustMethod::Bonferroni, None
-        ).unwrap();
+            &dataset,
+            "response",
+            "group",
+            Alternative::TwoSided,
+            PValueAdjustMethod::Bonferroni,
+            None,
+        )
+        .unwrap();
 
         assert_eq!(result.group_names.len(), 3);
         assert_eq!(result.n_comparisons, 3);
@@ -1295,13 +1414,17 @@ mod tests {
 
     #[test]
     fn test_pairwise_wilcox_display() {
-        let values = vec![
-            1.0, 2.0, 3.0,
-            10.0, 11.0, 12.0,
-        ];
+        let values = vec![1.0, 2.0, 3.0, 10.0, 11.0, 12.0];
         let groups = vec!["A", "A", "A", "B", "B", "B"];
 
-        let result = pairwise_wilcox_test(&values, &groups, Alternative::TwoSided, PValueAdjustMethod::Holm, None).unwrap();
+        let result = pairwise_wilcox_test(
+            &values,
+            &groups,
+            Alternative::TwoSided,
+            PValueAdjustMethod::Holm,
+            None,
+        )
+        .unwrap();
 
         let display = format!("{}", result);
         assert!(display.contains("Wilcoxon"));
@@ -1328,13 +1451,20 @@ mod tests {
         // (Note: exact values may vary slightly due to normal approximation)
 
         let values = vec![
-            1.0, 2.0, 3.0, 2.5, 1.5,
-            10.0, 11.0, 12.0, 10.5, 11.5,
-            20.0, 21.0, 22.0, 20.5, 21.5,
+            1.0, 2.0, 3.0, 2.5, 1.5, 10.0, 11.0, 12.0, 10.5, 11.5, 20.0, 21.0, 22.0, 20.5, 21.5,
         ];
-        let groups = vec!["A", "A", "A", "A", "A", "B", "B", "B", "B", "B", "C", "C", "C", "C", "C"];
+        let groups = vec![
+            "A", "A", "A", "A", "A", "B", "B", "B", "B", "B", "C", "C", "C", "C", "C",
+        ];
 
-        let result = pairwise_wilcox_test(&values, &groups, Alternative::TwoSided, PValueAdjustMethod::None, Some(false)).unwrap();
+        let result = pairwise_wilcox_test(
+            &values,
+            &groups,
+            Alternative::TwoSided,
+            PValueAdjustMethod::None,
+            Some(false),
+        )
+        .unwrap();
 
         // All three comparisons should have very small p-values
         // B vs A
@@ -1362,12 +1492,22 @@ mod tests {
         let values = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
         let groups = vec!["A", "A", "A", "B", "B", "B"];
 
-        let result = pairwise_wilcox_test(&values, &groups, Alternative::TwoSided, PValueAdjustMethod::None, Some(true)).unwrap();
+        let result = pairwise_wilcox_test(
+            &values,
+            &groups,
+            Alternative::TwoSided,
+            PValueAdjustMethod::None,
+            Some(true),
+        )
+        .unwrap();
 
         assert_eq!(result.n_comparisons, 1);
         // The exact p-value for W=6 (sum of ranks 1,2,3) with n1=n2=3 should be 0.1
-        assert!(result.p_values_raw[0] > 0.05 && result.p_values_raw[0] < 0.2,
-            "Expected p-value around 0.1, got {}", result.p_values_raw[0]);
+        assert!(
+            result.p_values_raw[0] > 0.05 && result.p_values_raw[0] < 0.2,
+            "Expected p-value around 0.1, got {}",
+            result.p_values_raw[0]
+        );
         assert!(result.exact);
     }
 
@@ -1379,20 +1519,29 @@ mod tests {
         // pairwise.wilcox.test(x, g, p.adjust.method = "holm")
 
         let values = vec![
-            1.0, 2.0, 3.0, 4.0, 5.0,
-            10.0, 11.0, 12.0, 13.0, 14.0,
-            20.0, 21.0, 22.0, 23.0, 24.0,
+            1.0, 2.0, 3.0, 4.0, 5.0, 10.0, 11.0, 12.0, 13.0, 14.0, 20.0, 21.0, 22.0, 23.0, 24.0,
         ];
-        let groups = vec!["A", "A", "A", "A", "A", "B", "B", "B", "B", "B", "C", "C", "C", "C", "C"];
+        let groups = vec![
+            "A", "A", "A", "A", "A", "B", "B", "B", "B", "B", "C", "C", "C", "C", "C",
+        ];
 
-        let result = pairwise_wilcox_test(&values, &groups, Alternative::TwoSided, PValueAdjustMethod::Holm, None).unwrap();
+        let result = pairwise_wilcox_test(
+            &values,
+            &groups,
+            Alternative::TwoSided,
+            PValueAdjustMethod::Holm,
+            None,
+        )
+        .unwrap();
 
         assert_eq!(result.n_comparisons, 3);
 
         // All adjusted p-values should be >= raw p-values
         for i in 0..result.n_comparisons {
-            assert!(result.p_values_adj[i] >= result.p_values_raw[i],
-                "Adjusted p-value should be >= raw p-value");
+            assert!(
+                result.p_values_adj[i] >= result.p_values_raw[i],
+                "Adjusted p-value should be >= raw p-value"
+            );
         }
 
         // Check that W statistics are stored
@@ -1404,12 +1553,19 @@ mod tests {
     #[test]
     fn test_pairwise_wilcox_medians() {
         let values = vec![
-            1.0, 2.0, 3.0, 4.0, 5.0,  // Median = 3
-            10.0, 11.0, 12.0, 13.0, 14.0,  // Median = 12
+            1.0, 2.0, 3.0, 4.0, 5.0, // Median = 3
+            10.0, 11.0, 12.0, 13.0, 14.0, // Median = 12
         ];
         let groups = vec!["A", "A", "A", "A", "A", "B", "B", "B", "B", "B"];
 
-        let result = pairwise_wilcox_test(&values, &groups, Alternative::TwoSided, PValueAdjustMethod::None, None).unwrap();
+        let result = pairwise_wilcox_test(
+            &values,
+            &groups,
+            Alternative::TwoSided,
+            PValueAdjustMethod::None,
+            None,
+        )
+        .unwrap();
 
         assert!((result.group_medians[0] - 3.0).abs() < 0.01);
         assert!((result.group_medians[1] - 12.0).abs() < 0.01);

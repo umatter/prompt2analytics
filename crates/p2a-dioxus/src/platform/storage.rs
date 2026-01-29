@@ -3,7 +3,7 @@
 //! - Web: Uses localStorage via gloo_storage
 //! - Native: Uses file-based storage in the user's config directory
 
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{Serialize, de::DeserializeOwned};
 
 /// Error type for storage operations
 #[derive(Debug, Clone)]
@@ -138,8 +138,9 @@ mod native {
         fn remove(&self, key: &str) -> Result<(), StorageError> {
             let path = self.key_path(key);
             if path.exists() {
-                fs::remove_file(&path)
-                    .map_err(|e| StorageError(format!("Failed to remove {}: {}", path.display(), e)))?;
+                fs::remove_file(&path).map_err(|e| {
+                    StorageError(format!("Failed to remove {}: {}", path.display(), e))
+                })?;
             }
             Ok(())
         }

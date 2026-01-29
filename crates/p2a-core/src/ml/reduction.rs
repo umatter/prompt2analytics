@@ -4,7 +4,7 @@
 //!
 //! PCA uses SVD via faer for O(nm²) complexity instead of power iteration.
 
-use faer::{prelude::*, Mat, MatRef};
+use faer::Mat;
 use ndarray::{Array1, Array2, ArrayView2, Axis};
 
 /// PCA (Principal Component Analysis) result.
@@ -49,11 +49,18 @@ impl std::fmt::Display for PCAResult {
         writeln!(f)?;
         writeln!(f, "Principal Components (loadings):")?;
         for i in 0..self.n_components.min(5) {
-            let loadings: Vec<String> = self.components.row(i).iter()
+            let loadings: Vec<String> = self
+                .components
+                .row(i)
+                .iter()
                 .take(10)
                 .map(|v| format!("{:.4}", v))
                 .collect();
-            let suffix = if self.components.ncols() > 10 { ", ..." } else { "" };
+            let suffix = if self.components.ncols() > 10 {
+                ", ..."
+            } else {
+                ""
+            };
             writeln!(f, "  PC{}: [{}{}]", i + 1, loadings.join(", "), suffix)?;
         }
         if self.n_components > 5 {
@@ -95,8 +102,7 @@ pub fn pca(
     };
 
     // Center the data
-    let mean = data.mean_axis(Axis(0))
-        .ok_or("Failed to compute mean")?;
+    let mean = data.mean_axis(Axis(0)).ok_or("Failed to compute mean")?;
 
     let mut centered = data.to_owned();
     for mut row in centered.rows_mut() {
@@ -137,8 +143,8 @@ pub fn pca(
 #[allow(dead_code)]
 fn covariance_matrix(centered: &ArrayView2<f64>) -> Array2<f64> {
     let n = centered.nrows() as f64;
-    let cov = centered.t().dot(centered) / (n - 1.0);
-    cov
+
+    centered.t().dot(centered) / (n - 1.0)
 }
 
 /// PCA via SVD (more numerically stable than eigendecomposition of covariance matrix).
@@ -278,10 +284,7 @@ fn outer_product(a: &ndarray::ArrayView1<f64>, b: &ndarray::ArrayView1<f64>) -> 
 }
 
 /// Project new data onto principal components.
-pub fn pca_transform(
-    data: ArrayView2<f64>,
-    pca_result: &PCAResult,
-) -> Result<Array2<f64>, String> {
+pub fn pca_transform(data: ArrayView2<f64>, pca_result: &PCAResult) -> Result<Array2<f64>, String> {
     let n_features = data.ncols();
     if n_features != pca_result.mean.len() {
         return Err(format!(
@@ -311,8 +314,7 @@ pub fn pca_inverse_transform(
     if n_components != pca_result.n_components {
         return Err(format!(
             "Transformed data has {} components, but PCA has {} components",
-            n_components,
-            pca_result.n_components
+            n_components, pca_result.n_components
         ));
     }
 
@@ -349,13 +351,21 @@ impl std::fmt::Display for TsneResult {
         writeln!(f, "Iterations: {}", self.n_iterations)?;
         writeln!(f, "Final KL divergence: {:.6}", self.kl_divergence)?;
         writeln!(f)?;
-        writeln!(f, "Embedding shape: ({}, {})", self.embedding.nrows(), self.embedding.ncols())?;
+        writeln!(
+            f,
+            "Embedding shape: ({}, {})",
+            self.embedding.nrows(),
+            self.embedding.ncols()
+        )?;
 
         // Show first few points
         let n_show = self.embedding.nrows().min(5);
         writeln!(f, "\nFirst {} embedded points:", n_show)?;
         for i in 0..n_show {
-            let point: Vec<String> = self.embedding.row(i).iter()
+            let point: Vec<String> = self
+                .embedding
+                .row(i)
+                .iter()
                 .map(|v| format!("{:.4}", v))
                 .collect();
             writeln!(f, "  Point {}: [{}]", i, point.join(", "))?;
@@ -584,7 +594,11 @@ fn compute_joint_probabilities(
 }
 
 /// Initialize low-dimensional embedding.
-fn initialize_embedding(data: ArrayView2<f64>, n_components: usize, seed: Option<u64>) -> Array2<f64> {
+fn initialize_embedding(
+    data: ArrayView2<f64>,
+    n_components: usize,
+    seed: Option<u64>,
+) -> Array2<f64> {
     let n_samples = data.nrows();
 
     // Try PCA initialization first
@@ -724,7 +738,11 @@ impl std::fmt::Display for CmdscaleResult {
         writeln!(f, "Output dimensions: {}", self.k)?;
         writeln!(f)?;
         writeln!(f, "Goodness of fit:")?;
-        writeln!(f, "  GOF1 (positive eigenvalues / |all|): {:.4}", self.gof[0])?;
+        writeln!(
+            f,
+            "  GOF1 (positive eigenvalues / |all|): {:.4}",
+            self.gof[0]
+        )?;
         writeln!(f, "  GOF2 (k eigenvalues / |all|): {:.4}", self.gof[1])?;
         writeln!(f)?;
 
@@ -743,9 +761,7 @@ impl std::fmt::Display for CmdscaleResult {
         let n_pts = self.points.len().min(5);
         writeln!(f, "Configuration (first {} points):", n_pts)?;
         for i in 0..n_pts {
-            let coords: Vec<String> = self.points[i].iter()
-                .map(|v| format!("{:.4}", v))
-                .collect();
+            let coords: Vec<String> = self.points[i].iter().map(|v| format!("{:.4}", v)).collect();
             writeln!(f, "  Point {}: [{}]", i + 1, coords.join(", "))?;
         }
         if self.points.len() > 5 {
@@ -798,7 +814,9 @@ pub fn cmdscale(
         if row.len() != n {
             return Err(format!(
                 "Distance matrix must be square. Row {} has {} elements, expected {}",
-                i, row.len(), n
+                i,
+                row.len(),
+                n
             ));
         }
     }
@@ -806,7 +824,10 @@ pub fn cmdscale(
     // Check symmetry and non-negative distances
     for i in 0..n {
         if d[i][i].abs() > 1e-10 {
-            return Err(format!("Diagonal element d[{},{}] = {} should be 0", i, i, d[i][i]));
+            return Err(format!(
+                "Diagonal element d[{},{}] = {} should be 0",
+                i, i, d[i][i]
+            ));
         }
         for j in (i + 1)..n {
             if (d[i][j] - d[j][i]).abs() > 1e-10 {
@@ -816,7 +837,10 @@ pub fn cmdscale(
                 ));
             }
             if d[i][j] < 0.0 {
-                return Err(format!("Distances must be non-negative. d[{},{}]={}", i, j, d[i][j]));
+                return Err(format!(
+                    "Distances must be non-negative. d[{},{}]={}",
+                    i, j, d[i][j]
+                ));
             }
         }
     }
@@ -844,12 +868,8 @@ pub fn cmdscale(
     // Double centering: B = -0.5 * H * D² * H
     // where H = I - (1/n) * 1 * 1'
     // This is equivalent to: B[i,j] = -0.5 * (D²[i,j] - row_mean[i] - col_mean[j] + grand_mean)
-    let row_means: Vec<f64> = (0..n)
-        .map(|i| d_sq.row(i).sum() / n as f64)
-        .collect();
-    let col_means: Vec<f64> = (0..n)
-        .map(|j| d_sq.column(j).sum() / n as f64)
-        .collect();
+    let row_means: Vec<f64> = (0..n).map(|i| d_sq.row(i).sum() / n as f64).collect();
+    let col_means: Vec<f64> = (0..n).map(|j| d_sq.column(j).sum() / n as f64).collect();
     let grand_mean: f64 = d_sq.sum() / (n * n) as f64;
 
     let mut b = Array2::zeros((n, n));
@@ -959,13 +979,7 @@ mod tests {
     #[test]
     fn test_pca_basic() {
         // Simple correlated data
-        let data = array![
-            [1.0, 2.0],
-            [2.0, 4.0],
-            [3.0, 6.0],
-            [4.0, 8.0],
-            [5.0, 10.0],
-        ];
+        let data = array![[1.0, 2.0], [2.0, 4.0], [3.0, 6.0], [4.0, 8.0], [5.0, 10.0],];
 
         let result = pca(data.view(), Some(2), true).unwrap();
 
@@ -1018,12 +1032,13 @@ mod tests {
 
         let result = tsne(
             data.view(),
-            Some(2),        // 2D embedding
-            Some(4.0),      // Low perplexity for small dataset (must be < n/3 = 5)
-            Some(100),      // Fewer iterations for test speed
+            Some(2),   // 2D embedding
+            Some(4.0), // Low perplexity for small dataset (must be < n/3 = 5)
+            Some(100), // Fewer iterations for test speed
             Some(200.0),
             Some(42),
-        ).unwrap();
+        )
+        .unwrap();
 
         assert_eq!(result.n_components, 2);
         assert_eq!(result.embedding.nrows(), 15);
@@ -1046,7 +1061,7 @@ mod tests {
         let result = tsne(
             data.view(),
             Some(2),
-            Some(3.0),  // n/3 = 2, so perplexity=3 should fail
+            Some(3.0), // n/3 = 2, so perplexity=3 should fail
             None,
             None,
             None,
@@ -1078,8 +1093,16 @@ mod tests {
         assert_eq!(result.points[0].len(), 2);
 
         // GOF should be high for perfect Euclidean distances
-        assert!(result.gof[0] > 0.9, "GOF1 should be high: {}", result.gof[0]);
-        assert!(result.gof[1] > 0.9, "GOF2 should be high: {}", result.gof[1]);
+        assert!(
+            result.gof[0] > 0.9,
+            "GOF1 should be high: {}",
+            result.gof[0]
+        );
+        assert!(
+            result.gof[1] > 0.9,
+            "GOF2 should be high: {}",
+            result.gof[1]
+        );
     }
 
     #[test]
@@ -1108,12 +1131,7 @@ mod tests {
     #[test]
     fn test_cmdscale_from_data() {
         // 2D data points
-        let data = array![
-            [0.0, 0.0],
-            [1.0, 0.0],
-            [1.0, 1.0],
-            [0.0, 1.0],
-        ];
+        let data = array![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0],];
 
         let result = cmdscale_from_data(data.view(), Some(2)).unwrap();
 
@@ -1144,7 +1162,10 @@ mod tests {
         assert_eq!(result.eig.len(), 3);
 
         // First eigenvalue should be positive (largest)
-        assert!(result.eig[0] >= 0.0, "First eigenvalue should be non-negative");
+        assert!(
+            result.eig[0] >= 0.0,
+            "First eigenvalue should be non-negative"
+        );
     }
 
     #[test]
@@ -1152,7 +1173,7 @@ mod tests {
         // Non-square matrix should fail
         let dist = vec![
             vec![0.0, 1.0, 2.0],
-            vec![1.0, 0.0],  // Wrong length
+            vec![1.0, 0.0], // Wrong length
         ];
 
         let result = cmdscale(&dist, Some(2), None, None);
@@ -1164,7 +1185,7 @@ mod tests {
         // Non-symmetric matrix should fail
         let dist = vec![
             vec![0.0, 1.0, 2.0],
-            vec![1.5, 0.0, 1.0],  // 1.5 != 1.0
+            vec![1.5, 0.0, 1.0], // 1.5 != 1.0
             vec![2.0, 1.0, 0.0],
         ];
 
@@ -1189,7 +1210,7 @@ mod tests {
     fn test_cmdscale_validation_non_zero_diagonal() {
         // Non-zero diagonal should fail
         let dist = vec![
-            vec![0.1, 1.0, 2.0],  // Should be 0.0
+            vec![0.1, 1.0, 2.0], // Should be 0.0
             vec![1.0, 0.0, 1.0],
             vec![2.0, 1.0, 0.0],
         ];
@@ -1261,5 +1282,299 @@ mod tests {
         assert!(display.contains("Number of points: 3"));
         assert!(display.contains("Output dimensions: 2"));
         assert!(display.contains("Goodness of fit"));
+    }
+
+    // ========================================================================
+    // R-vs-Rust Validation Tests (Phase 9)
+    // ========================================================================
+
+    fn create_validation_pca_data() -> Array2<f64> {
+        // Create data with clear principal components
+        // 10 samples x 4 features
+        // First PC: high variance along (1, 1, 0, 0)
+        // Second PC: lower variance along (0, 0, 1, 1)
+        array![
+            [1.0, 1.1, 0.5, 0.4],
+            [2.0, 2.2, 0.3, 0.5],
+            [3.0, 2.8, 0.6, 0.3],
+            [4.0, 4.1, 0.2, 0.6],
+            [5.0, 5.3, 0.4, 0.4],
+            [1.5, 1.4, 0.8, 0.9],
+            [2.5, 2.6, 1.0, 0.8],
+            [3.5, 3.4, 0.9, 1.1],
+            [4.5, 4.3, 1.2, 0.7],
+            [5.5, 5.1, 1.1, 1.2],
+        ]
+    }
+
+    #[test]
+    fn test_validate_pca_vs_r() {
+        // R reference:
+        // prcomp(data, center=TRUE, scale=FALSE)
+        let data = create_validation_pca_data();
+        let result = pca(data.view(), None, true).unwrap();
+
+        // Should have 4 components (min of 10 samples, 4 features)
+        assert_eq!(result.n_components, 4);
+
+        // Mean should be computed
+        assert_eq!(result.mean.len(), 4);
+
+        // Explained variance should sum to total
+        let sum_var: f64 = result.explained_variance.iter().sum();
+        assert!(
+            (sum_var - result.total_variance).abs() / result.total_variance < 0.01,
+            "Explained variance should sum to total"
+        );
+
+        // Variance ratio should sum to 1
+        let sum_ratio: f64 = result.explained_variance_ratio.iter().sum();
+        assert!(
+            (sum_ratio - 1.0).abs() < 0.01,
+            "Variance ratios should sum to 1"
+        );
+    }
+
+    #[test]
+    fn test_validate_pca_variance_ordering() {
+        // R reference: eigenvalues in decreasing order
+        let data = create_validation_pca_data();
+        let result = pca(data.view(), None, false).unwrap();
+
+        // Explained variance should be in decreasing order
+        for i in 1..result.n_components {
+            assert!(
+                result.explained_variance[i] <= result.explained_variance[i - 1] + 1e-10,
+                "PC{} variance {} should be <= PC{} variance {}",
+                i + 1,
+                result.explained_variance[i],
+                i,
+                result.explained_variance[i - 1]
+            );
+        }
+
+        // First PC should explain most variance
+        assert!(
+            result.explained_variance_ratio[0] > 0.5,
+            "First PC should explain > 50% of variance"
+        );
+    }
+
+    #[test]
+    fn test_validate_pca_components_orthonormal() {
+        let data = create_validation_pca_data();
+        let result = pca(data.view(), None, false).unwrap();
+
+        // Components should be orthonormal
+        for i in 0..result.n_components {
+            // Each component should have unit length
+            let norm: f64 = result
+                .components
+                .row(i)
+                .iter()
+                .map(|x| x * x)
+                .sum::<f64>()
+                .sqrt();
+            assert!(
+                (norm - 1.0).abs() < 0.01,
+                "PC{} should have unit length, got {}",
+                i + 1,
+                norm
+            );
+
+            // Components should be orthogonal to each other
+            for j in (i + 1)..result.n_components {
+                let dot: f64 = result
+                    .components
+                    .row(i)
+                    .iter()
+                    .zip(result.components.row(j).iter())
+                    .map(|(a, b)| a * b)
+                    .sum();
+                assert!(
+                    dot.abs() < 0.01,
+                    "PC{} and PC{} should be orthogonal, dot product = {}",
+                    i + 1,
+                    j + 1,
+                    dot
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_validate_pca_transformation() {
+        let data = create_validation_pca_data();
+        let result = pca(data.view(), Some(2), true).unwrap();
+
+        let transformed = result.transformed.expect("Transformation requested");
+
+        // Shape should be (10, 2) for 2 components
+        assert_eq!(transformed.nrows(), 10);
+        assert_eq!(transformed.ncols(), 2);
+
+        // Transformed data should be centered (mean ≈ 0)
+        for j in 0..2 {
+            let col_mean: f64 = transformed.column(j).iter().sum::<f64>() / 10.0;
+            assert!(
+                col_mean.abs() < 0.01,
+                "Transformed PC{} should have mean ≈ 0, got {}",
+                j + 1,
+                col_mean
+            );
+        }
+
+        // Variance of PC1 transformation should be larger than PC2
+        let var1: f64 = transformed.column(0).iter().map(|x| x * x).sum::<f64>() / 10.0;
+        let var2: f64 = transformed.column(1).iter().map(|x| x * x).sum::<f64>() / 10.0;
+        assert!(
+            var1 >= var2 - 0.01,
+            "PC1 variance {} should be >= PC2 variance {}",
+            var1,
+            var2
+        );
+    }
+
+    #[test]
+    fn test_validate_pca_n_components() {
+        let data = create_validation_pca_data();
+
+        // Request fewer components
+        let result2 = pca(data.view(), Some(2), false).unwrap();
+        assert_eq!(result2.n_components, 2);
+        assert_eq!(result2.components.nrows(), 2);
+        assert_eq!(result2.explained_variance.len(), 2);
+
+        let result3 = pca(data.view(), Some(3), false).unwrap();
+        assert_eq!(result3.n_components, 3);
+    }
+
+    #[test]
+    fn test_validate_cmdscale_vs_r() {
+        // R reference:
+        // cmdscale(dist(data), k=2, eig=TRUE)
+        // Test with points forming a square
+        let dist = vec![
+            vec![0.0, 1.0, 1.414, 1.0], // Point 0: (0, 0)
+            vec![1.0, 0.0, 1.0, 1.414], // Point 1: (1, 0)
+            vec![1.414, 1.0, 0.0, 1.0], // Point 2: (1, 1)
+            vec![1.0, 1.414, 1.0, 0.0], // Point 3: (0, 1)
+        ];
+
+        let result = cmdscale(&dist, Some(2), Some(true), None).unwrap();
+
+        assert_eq!(result.n, 4);
+        assert_eq!(result.k, 2);
+        assert_eq!(result.points.len(), 4);
+
+        // Each point should have 2 coordinates
+        for p in &result.points {
+            assert_eq!(p.len(), 2);
+        }
+
+        // GOF should be very high for perfect distance matrix
+        assert!(
+            result.gof[0] > 0.95,
+            "GOF should be > 0.95 for perfect square"
+        );
+    }
+
+    #[test]
+    fn test_validate_cmdscale_distance_preservation() {
+        // MDS should preserve original distances
+        let original_dist = vec![
+            vec![0.0, 1.0, 2.0],
+            vec![1.0, 0.0, 1.0],
+            vec![2.0, 1.0, 0.0],
+        ];
+
+        let result = cmdscale(&original_dist, Some(1), Some(true), None).unwrap();
+
+        // Reconstruct distances from MDS coordinates
+        let pts = &result.points;
+        let d01 = ((pts[0][0] - pts[1][0]).powi(2)).sqrt();
+        let d12 = ((pts[1][0] - pts[2][0]).powi(2)).sqrt();
+        let d02 = ((pts[0][0] - pts[2][0]).powi(2)).sqrt();
+
+        // Distances should approximately match original
+        assert!((d01 - 1.0).abs() < 0.1, "d01 should be ≈ 1.0, got {}", d01);
+        assert!((d12 - 1.0).abs() < 0.1, "d12 should be ≈ 1.0, got {}", d12);
+        assert!((d02 - 2.0).abs() < 0.1, "d02 should be ≈ 2.0, got {}", d02);
+    }
+
+    #[test]
+    fn test_validate_tsne_preserves_local_structure() {
+        // t-SNE should preserve local neighborhood structure
+        // Create 3 tight clusters with enough points for perplexity requirement
+        let data = array![
+            // Cluster 1 (close together)
+            [0.0, 0.0],
+            [0.1, 0.1],
+            [0.05, 0.15],
+            [0.08, 0.02],
+            // Cluster 2 (close together, far from cluster 1)
+            [10.0, 0.0],
+            [10.1, 0.1],
+            [9.95, 0.15],
+            [10.05, 0.08],
+            // Cluster 3 (close together, far from both)
+            [5.0, 10.0],
+            [5.1, 10.1],
+            [4.95, 10.15],
+            [5.02, 10.05],
+        ];
+
+        let result = tsne(
+            data.view(),
+            Some(2),     // n_components
+            Some(3.0),   // perplexity (must be < n_samples/3)
+            Some(500),   // max_iter
+            Some(200.0), // learning_rate
+            Some(42),    // seed
+        )
+        .unwrap();
+
+        assert_eq!(result.n_iterations, 500);
+        assert_eq!(result.embedding.nrows(), 12);
+        assert_eq!(result.embedding.ncols(), 2);
+
+        // KL divergence should be finite and positive
+        assert!(result.kl_divergence.is_finite());
+        assert!(result.kl_divergence > 0.0);
+    }
+
+    #[test]
+    fn test_validate_pca_deterministic() {
+        // PCA should be deterministic (no random state)
+        let data = create_validation_pca_data();
+
+        let result1 = pca(data.view(), Some(2), true).unwrap();
+        let result2 = pca(data.view(), Some(2), true).unwrap();
+
+        // Explained variances should be identical
+        for i in 0..2 {
+            assert!(
+                (result1.explained_variance[i] - result2.explained_variance[i]).abs() < 1e-10,
+                "PCA should be deterministic"
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_pca_centering() {
+        let data = create_validation_pca_data();
+        let result = pca(data.view(), None, false).unwrap();
+
+        // Mean should match column means
+        for j in 0..4 {
+            let col_mean: f64 = data.column(j).iter().sum::<f64>() / 10.0;
+            assert!(
+                (result.mean[j] - col_mean).abs() < 1e-10,
+                "Mean mismatch for feature {}: {} vs {}",
+                j,
+                result.mean[j],
+                col_mean
+            );
+        }
     }
 }

@@ -5,8 +5,8 @@
 //! - Standard errors in parentheses
 //! - Model statistics footer (N, R², F-stat)
 
-use crate::regression::OlsResult;
 use crate::econometrics::{DiscreteResult, PanelResult};
+use crate::regression::OlsResult;
 use crate::traits::SignificanceLevel;
 
 /// Style options for LaTeX tables.
@@ -168,7 +168,7 @@ impl LatexTableBuilder {
 
             // Standard error row (if enabled)
             if self.style.se_in_parentheses {
-                latex.push_str(" ");
+                latex.push(' ');
                 for (_, result) in &self.results {
                     if let Some(idx) = result.variable_names.iter().position(|v| v == var) {
                         let coef = &result.coefficients[idx];
@@ -189,7 +189,7 @@ impl LatexTableBuilder {
         latex.push_str("\\hline\n");
 
         if self.style.show_n {
-            latex.push_str("N");
+            latex.push('N');
             for (_, result) in &self.results {
                 latex.push_str(&format!(" & {}", result.n_obs));
             }
@@ -248,10 +248,10 @@ impl Default for LatexTableBuilder {
 /// Convert significance level to stars.
 fn significance_stars(level: &SignificanceLevel) -> String {
     match level {
-        SignificanceLevel::TenthPercent => "***".to_string(),  // p < 0.001
-        SignificanceLevel::OnePercent => "**".to_string(),     // p < 0.01
-        SignificanceLevel::FivePercent => "*".to_string(),     // p < 0.05
-        SignificanceLevel::TenPercent => "†".to_string(),      // p < 0.10
+        SignificanceLevel::TenthPercent => "***".to_string(), // p < 0.001
+        SignificanceLevel::OnePercent => "**".to_string(),    // p < 0.01
+        SignificanceLevel::FivePercent => "*".to_string(),    // p < 0.05
+        SignificanceLevel::TenPercent => "†".to_string(),     // p < 0.10
         SignificanceLevel::NotSignificant => String::new(),
     }
 }
@@ -292,7 +292,10 @@ impl DiscreteResult {
         // Begin table
         latex.push_str("\\begin{table}[htbp]\n");
         latex.push_str("\\centering\n");
-        latex.push_str(&format!("\\caption{{{} Regression Results}}\n", self.model_type));
+        latex.push_str(&format!(
+            "\\caption{{{} Regression Results}}\n",
+            self.model_type
+        ));
 
         // Begin tabular
         latex.push_str("\\begin{tabular}{lcccc}\n");
@@ -318,11 +321,26 @@ impl DiscreteResult {
 
         // Footer statistics
         latex.push_str("\\hline\n");
-        latex.push_str(&format!("N & \\multicolumn{{4}}{{c}}{{{}}} \\\\\n", self.n_obs));
-        latex.push_str(&format!("Log-Likelihood & \\multicolumn{{4}}{{c}}{{{:.4}}} \\\\\n", self.log_likelihood));
-        latex.push_str(&format!("Pseudo $R^2$ & \\multicolumn{{4}}{{c}}{{{:.4}}} \\\\\n", self.pseudo_r_squared));
-        latex.push_str(&format!("AIC & \\multicolumn{{4}}{{c}}{{{:.2}}} \\\\\n", self.aic));
-        latex.push_str(&format!("BIC & \\multicolumn{{4}}{{c}}{{{:.2}}} \\\\\n", self.bic));
+        latex.push_str(&format!(
+            "N & \\multicolumn{{4}}{{c}}{{{}}} \\\\\n",
+            self.n_obs
+        ));
+        latex.push_str(&format!(
+            "Log-Likelihood & \\multicolumn{{4}}{{c}}{{{:.4}}} \\\\\n",
+            self.log_likelihood
+        ));
+        latex.push_str(&format!(
+            "Pseudo $R^2$ & \\multicolumn{{4}}{{c}}{{{:.4}}} \\\\\n",
+            self.pseudo_r_squared
+        ));
+        latex.push_str(&format!(
+            "AIC & \\multicolumn{{4}}{{c}}{{{:.2}}} \\\\\n",
+            self.aic
+        ));
+        latex.push_str(&format!(
+            "BIC & \\multicolumn{{4}}{{c}}{{{:.2}}} \\\\\n",
+            self.bic
+        ));
 
         latex.push_str("\\hline\\hline\n");
         latex.push_str("\\end{tabular}\n");
@@ -347,7 +365,10 @@ impl PanelResult {
         // Begin table
         latex.push_str("\\begin{table}[htbp]\n");
         latex.push_str("\\centering\n");
-        latex.push_str(&format!("\\caption{{{} Panel Regression Results}}\n", self.method));
+        latex.push_str(&format!(
+            "\\caption{{{} Panel Regression Results}}\n",
+            self.method
+        ));
 
         // Begin tabular
         latex.push_str("\\begin{tabular}{lcccc}\n");
@@ -373,11 +394,26 @@ impl PanelResult {
 
         // Footer statistics
         latex.push_str("\\hline\n");
-        latex.push_str(&format!("N & \\multicolumn{{4}}{{c}}{{{}}} \\\\\n", self.n_obs));
-        latex.push_str(&format!("Groups & \\multicolumn{{4}}{{c}}{{{}}} \\\\\n", self.n_groups));
-        latex.push_str(&format!("$R^2$ & \\multicolumn{{4}}{{c}}{{{:.4}}} \\\\\n", self.r_squared));
-        latex.push_str(&format!("Adj. $R^2$ & \\multicolumn{{4}}{{c}}{{{:.4}}} \\\\\n", self.adj_r_squared));
-        latex.push_str(&format!("F-stat & \\multicolumn{{4}}{{c}}{{{:.2}}} \\\\\n", self.f_stat));
+        latex.push_str(&format!(
+            "N & \\multicolumn{{4}}{{c}}{{{}}} \\\\\n",
+            self.n_obs
+        ));
+        latex.push_str(&format!(
+            "Groups & \\multicolumn{{4}}{{c}}{{{}}} \\\\\n",
+            self.n_groups
+        ));
+        latex.push_str(&format!(
+            "$R^2$ & \\multicolumn{{4}}{{c}}{{{:.4}}} \\\\\n",
+            self.r_squared
+        ));
+        latex.push_str(&format!(
+            "Adj. $R^2$ & \\multicolumn{{4}}{{c}}{{{:.4}}} \\\\\n",
+            self.adj_r_squared
+        ));
+        latex.push_str(&format!(
+            "F-stat & \\multicolumn{{4}}{{c}}{{{:.2}}} \\\\\n",
+            self.f_stat
+        ));
 
         latex.push_str("\\hline\\hline\n");
         latex.push_str("\\end{tabular}\n");

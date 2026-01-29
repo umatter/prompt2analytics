@@ -227,24 +227,27 @@ impl ChatState {
 
     /// Append content to the current streaming message
     pub fn append_content(&mut self, text: &str) {
-        if let Some(last) = self.messages.last_mut() {
-            if last.is_streaming {
-                last.content.push_str(text);
-            }
+        if let Some(last) = self.messages.last_mut()
+            && last.is_streaming
+        {
+            last.content.push_str(text);
         }
     }
 
     /// Finalize the streaming message with full data
     pub fn finalize_message(&mut self, msg: Message) {
-        if let Some(last) = self.messages.last_mut() {
-            if last.is_streaming {
-                last.content = msg.content;
-                last.is_streaming = false;
+        if let Some(last) = self.messages.last_mut()
+            && last.is_streaming
+        {
+            last.content = msg.content;
+            last.is_streaming = false;
 
-                // Update tool calls from backend response (has full details)
-                // This replaces the streaming-tracked tool calls with the authoritative ones
-                if let Some(calls) = msg.tool_calls {
-                    let new_calls: Vec<ToolCallInfo> = calls.iter().map(|tc| {
+            // Update tool calls from backend response (has full details)
+            // This replaces the streaming-tracked tool calls with the authoritative ones
+            if let Some(calls) = msg.tool_calls {
+                let new_calls: Vec<ToolCallInfo> = calls
+                    .iter()
+                    .map(|tc| {
                         ToolCallInfo {
                             id: tc.id.clone(),
                             name: tc.name.clone(),
@@ -253,21 +256,21 @@ impl ChatState {
                             success: Some(true), // If we got them in Done, they succeeded
                             is_expanded: false,
                         }
-                    }).collect();
+                    })
+                    .collect();
 
-                    // If we have tool results, match them to tool calls
-                    if let Some(ref results) = msg.tool_results {
-                        let mut final_calls = new_calls;
-                        for tc in final_calls.iter_mut() {
-                            if let Some(result) = results.iter().find(|r| r.tool_call_id == tc.id) {
-                                tc.result = Some(result.content.clone());
-                                tc.success = Some(!result.is_error);
-                            }
+                // If we have tool results, match them to tool calls
+                if let Some(ref results) = msg.tool_results {
+                    let mut final_calls = new_calls;
+                    for tc in final_calls.iter_mut() {
+                        if let Some(result) = results.iter().find(|r| r.tool_call_id == tc.id) {
+                            tc.result = Some(result.content.clone());
+                            tc.success = Some(!result.is_error);
                         }
-                        last.tool_calls = final_calls;
-                    } else {
-                        last.tool_calls = new_calls;
                     }
+                    last.tool_calls = final_calls;
+                } else {
+                    last.tool_calls = new_calls;
                 }
             }
         }
@@ -318,19 +321,23 @@ impl ChatState {
         });
 
         // Add a pending tool call to the current streaming message
-        if let Some(last) = self.messages.last_mut() {
-            if last.is_streaming {
-                // Only add if not already present (avoid duplicates on re-renders)
-                if !last.tool_calls.iter().any(|tc| tc.name == name && tc.success.is_none()) {
-                    last.tool_calls.push(ToolCallInfo {
-                        id: uuid::Uuid::new_v4().to_string(),
-                        name,
-                        arguments,
-                        result: None,
-                        success: None, // None means still running
-                        is_expanded: false,
-                    });
-                }
+        if let Some(last) = self.messages.last_mut()
+            && last.is_streaming
+        {
+            // Only add if not already present (avoid duplicates on re-renders)
+            if !last
+                .tool_calls
+                .iter()
+                .any(|tc| tc.name == name && tc.success.is_none())
+            {
+                last.tool_calls.push(ToolCallInfo {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    name,
+                    arguments,
+                    result: None,
+                    success: None, // None means still running
+                    is_expanded: false,
+                });
             }
         }
     }
@@ -339,13 +346,15 @@ impl ChatState {
     pub fn clear_active_tool(&mut self, result: Option<String>) {
         if let Some(active) = self.active_tool.take() {
             // Mark the tool call as successful in the current message
-            if let Some(last) = self.messages.last_mut() {
-                if last.is_streaming {
-                    if let Some(tc) = last.tool_calls.iter_mut().find(|tc| tc.name == active.name && tc.success.is_none()) {
-                        tc.success = Some(true);
-                        tc.result = result;
-                    }
-                }
+            if let Some(last) = self.messages.last_mut()
+                && last.is_streaming
+                && let Some(tc) = last
+                    .tool_calls
+                    .iter_mut()
+                    .find(|tc| tc.name == active.name && tc.success.is_none())
+            {
+                tc.success = Some(true);
+                tc.result = result;
             }
         }
     }

@@ -177,12 +177,14 @@ pub fn moran_test(
 ) -> EconResult<MoranResult> {
     let n = x.len();
     if n != listw.n() {
-        return Err(EconError::InvalidSpecification { message:
-            "Variable length must match weights matrix size".to_string() });
+        return Err(EconError::InvalidSpecification {
+            message: "Variable length must match weights matrix size".to_string(),
+        });
     }
     if n < 3 {
-        return Err(EconError::InvalidSpecification { message:
-            "Need at least 3 observations for Moran's I test".to_string() });
+        return Err(EconError::InvalidSpecification {
+            message: "Need at least 3 observations for Moran's I test".to_string(),
+        });
     }
 
     // Center the variable
@@ -275,8 +277,9 @@ pub fn moran_test_residuals(
 
     let n = residuals.len();
     if n != listw.n() || n != x.nrows() {
-        return Err(EconError::InvalidSpecification { message:
-            "Dimensions must match".to_string() });
+        return Err(EconError::InvalidSpecification {
+            message: "Dimensions must match".to_string(),
+        });
     }
 
     let k = x.ncols();
@@ -302,7 +305,7 @@ pub fn moran_test_residuals(
     let ei = -1.0 / (df as f64);
 
     // Simplified variance (can be refined with more complex formula)
-    let (s1, s2) = compute_s1_s2(listw);
+    let (s1, _s2) = compute_s1_s2(listw);
     let n_f = n as f64;
     let s0_sq = s0 * s0;
 
@@ -342,12 +345,14 @@ pub fn moran_test_residuals(
 pub fn geary_test(x: &Array1<f64>, listw: &SpatialWeights) -> EconResult<GearyResult> {
     let n = x.len();
     if n != listw.n() {
-        return Err(EconError::InvalidSpecification { message:
-            "Variable length must match weights matrix size".to_string() });
+        return Err(EconError::InvalidSpecification {
+            message: "Variable length must match weights matrix size".to_string(),
+        });
     }
     if n < 3 {
-        return Err(EconError::InvalidSpecification { message:
-            "Need at least 3 observations for Geary's C test".to_string() });
+        return Err(EconError::InvalidSpecification {
+            message: "Need at least 3 observations for Geary's C test".to_string(),
+        });
     }
 
     let mean = x.mean().unwrap();
@@ -385,8 +390,8 @@ pub fn geary_test(x: &Array1<f64>, listw: &SpatialWeights) -> EconResult<GearyRe
     let m4: f64 = z.iter().map(|&zi| zi.powi(4)).sum::<f64>() / n_f;
     let b2 = m4 / (m2 * m2);
 
-    let term1 = (2.0 * s1 + s2) * (n_f - 1.0) - 4.0 * s0_sq;
-    let term2 = (n_f - 1.0) * (n_f - 2.0) * (n_f - 3.0) * s0_sq;
+    let _term1 = (2.0 * s1 + s2) * (n_f - 1.0) - 4.0 * s0_sq;
+    let _term2 = (n_f - 1.0) * (n_f - 2.0) * (n_f - 3.0) * s0_sq;
 
     let vc = ((n_f - 1.0) * s1 * (n_f * n_f - 3.0 * n_f + 3.0 - (n_f - 1.0) * b2))
         / (n_f * (n_f - 2.0) * (n_f - 3.0) * s0_sq)
@@ -604,8 +609,8 @@ fn compute_all_local_moran_pvalues_permutation(
     listw: &SpatialWeights,
     permutations: usize,
 ) -> Vec<f64> {
-    use rand::seq::SliceRandom;
     use rand::SeedableRng;
+    use rand::seq::SliceRandom;
     use rand_chacha::ChaCha8Rng;
 
     let n = z.len();
@@ -669,8 +674,9 @@ pub fn spatial_lm_tests(
 ) -> EconResult<SpatialLmTests> {
     let n = residuals.len();
     if n != listw.n() || n != x.nrows() {
-        return Err(EconError::InvalidSpecification { message:
-            "Dimensions must match".to_string() });
+        return Err(EconError::InvalidSpecification {
+            message: "Dimensions must match".to_string(),
+        });
     }
 
     let k = x.ncols();
@@ -683,7 +689,11 @@ pub fn spatial_lm_tests(
     let we = listw.lag(residuals);
 
     // Compute e'We / sigma^2
-    let ewe: f64 = residuals.iter().zip(we.iter()).map(|(&e, &we)| e * we).sum();
+    let ewe: f64 = residuals
+        .iter()
+        .zip(we.iter())
+        .map(|(&e, &we)| e * we)
+        .sum();
     let ewe_scaled = ewe / sigma2;
 
     // Compute trace terms
@@ -840,12 +850,7 @@ mod tests {
 
     fn test_weights() -> SpatialWeights {
         // Simple 4-point structure
-        let nb = Neighbors::from_indices(vec![
-            vec![1, 2],
-            vec![0, 3],
-            vec![0, 3],
-            vec![1, 2],
-        ]);
+        let nb = Neighbors::from_indices(vec![vec![1, 2], vec![0, 3], vec![0, 3], vec![1, 2]]);
         SpatialWeights::from_neighbors(&nb, crate::spatial::WeightStyle::RowStd)
     }
 
@@ -894,11 +899,8 @@ mod tests {
 
         // Simple residuals
         let residuals = Array1::from_vec(vec![0.1, -0.2, 0.15, -0.05]);
-        let x = Array2::from_shape_vec(
-            (4, 2),
-            vec![1.0, 1.0, 1.0, 2.0, 1.0, 3.0, 1.0, 4.0],
-        )
-        .unwrap();
+        let x =
+            Array2::from_shape_vec((4, 2), vec![1.0, 1.0, 1.0, 2.0, 1.0, 3.0, 1.0, 4.0]).unwrap();
 
         let result = spatial_lm_tests(&residuals, &x, &mut listw).unwrap();
 
@@ -959,7 +961,8 @@ mod tests {
         let result = localmoran(&x_arr, &listw, 0.10, 0).unwrap();
 
         // Should detect some clusters (with relaxed alpha)
-        let total_clusters = result.n_high_high + result.n_low_low + result.n_high_low + result.n_low_high;
+        let _total_clusters =
+            result.n_high_high + result.n_low_low + result.n_high_low + result.n_low_high;
         // At minimum, the extreme values should show some pattern
         assert!(result.local_stats[0].i_local > 0.0); // Hot spot area should have positive local I
         assert!(result.local_stats[24].i_local > 0.0); // Cold spot area should have positive local I

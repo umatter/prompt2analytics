@@ -90,8 +90,13 @@ impl std::fmt::Display for KsTestResult {
         writeln!(f, "{}", "=".repeat(self.test_name.len()))?;
         writeln!(f)?;
 
-        writeln!(f, "D = {:.6}, p-value = {:.6} {}",
-            self.statistic, self.p_value, self.significance.stars())?;
+        writeln!(
+            f,
+            "D = {:.6}, p-value = {:.6} {}",
+            self.statistic,
+            self.p_value,
+            self.significance.stars()
+        )?;
         writeln!(f)?;
 
         let alt_str = match self.alternative {
@@ -109,13 +114,23 @@ impl std::fmt::Display for KsTestResult {
         }
 
         writeln!(f)?;
-        writeln!(f, "P-value method: {}", if self.exact { "exact" } else { "asymptotic" })?;
+        writeln!(
+            f,
+            "P-value method: {}",
+            if self.exact { "exact" } else { "asymptotic" }
+        )?;
         writeln!(f)?;
 
         if self.reject_null {
-            writeln!(f, "Conclusion: Reject H₀ at α = 0.05 (distributions differ)")?;
+            writeln!(
+                f,
+                "Conclusion: Reject H₀ at α = 0.05 (distributions differ)"
+            )?;
         } else {
-            writeln!(f, "Conclusion: Fail to reject H₀ at α = 0.05 (no evidence of difference)")?;
+            writeln!(
+                f,
+                "Conclusion: Fail to reject H₀ at α = 0.05 (no evidence of difference)"
+            )?;
         }
         writeln!(f)?;
 
@@ -222,7 +237,7 @@ pub fn ks_test_one_sample(
 
     for (i, &xi) in data.iter().enumerate() {
         let f_emp_upper = (i + 1) as f64 / n as f64; // F_n(x_i)
-        let f_emp_lower = i as f64 / n as f64;       // F_n(x_i^-)
+        let f_emp_lower = i as f64 / n as f64; // F_n(x_i^-)
         let f_theo = distribution.cdf(xi);
 
         d_plus = d_plus.max(f_emp_upper - f_theo);
@@ -235,12 +250,8 @@ pub fn ks_test_one_sample(
             let p = kolmogorov_p_value_one_sample(d, n, true);
             (d, p)
         }
-        Alternative::Greater => {
-            (d_plus, kolmogorov_p_value_one_sample(d_plus, n, false))
-        }
-        Alternative::Less => {
-            (d_minus, kolmogorov_p_value_one_sample(d_minus, n, false))
-        }
+        Alternative::Greater => (d_plus, kolmogorov_p_value_one_sample(d_plus, n, false)),
+        Alternative::Less => (d_minus, kolmogorov_p_value_one_sample(d_minus, n, false)),
     };
 
     // Determine if using exact or asymptotic
@@ -334,12 +345,8 @@ pub fn ks_test_two_sample(
             let p = kolmogorov_p_value_two_sample(d, n, m, true);
             (d, p)
         }
-        Alternative::Greater => {
-            (d_plus, kolmogorov_p_value_two_sample(d_plus, n, m, false))
-        }
-        Alternative::Less => {
-            (d_minus, kolmogorov_p_value_two_sample(d_minus, n, m, false))
-        }
+        Alternative::Greater => (d_plus, kolmogorov_p_value_two_sample(d_plus, n, m, false)),
+        Alternative::Less => (d_minus, kolmogorov_p_value_two_sample(d_minus, n, m, false)),
     };
 
     // Use exact for small samples (product < 10000)
@@ -370,13 +377,9 @@ fn compute_two_sample_d(x: &[f64], y: &[f64]) -> (f64, f64) {
 
     // Create combined sorted array with labels
     // Include a small index to handle ties consistently
-    let mut combined: Vec<(f64, bool, usize)> = x.iter()
-        .enumerate()
-        .map(|(i, &v)| (v, true, i))
-        .collect();
-    combined.extend(y.iter()
-        .enumerate()
-        .map(|(i, &v)| (v, false, i)));
+    let mut combined: Vec<(f64, bool, usize)> =
+        x.iter().enumerate().map(|(i, &v)| (v, true, i)).collect();
+    combined.extend(y.iter().enumerate().map(|(i, &v)| (v, false, i)));
 
     // Sort by value, then by source (x before y for ties, to match R behavior)
     combined.sort_by(|a, b| {
@@ -385,14 +388,14 @@ fn compute_two_sample_d(x: &[f64], y: &[f64]) -> (f64, f64) {
                 // For ties, process all at once (doesn't matter order)
                 std::cmp::Ordering::Equal
             }
-            other => other
+            other => other,
         }
     });
 
     let mut d_plus = 0.0_f64;
     let mut d_minus = 0.0_f64;
-    let mut fn_x = 0.0;  // F_n(x) - CDF of first sample
-    let mut fm_y = 0.0;  // G_m(x) - CDF of second sample
+    let mut fn_x = 0.0; // F_n(x) - CDF of first sample
+    let mut fm_y = 0.0; // G_m(x) - CDF of second sample
 
     // Group by value to handle ties properly
     let mut i = 0;
@@ -457,11 +460,17 @@ pub fn ks_test(
     // Extract x values
     let x_series = df.column(x_col).map_err(|_| EconError::ColumnNotFound {
         column: x_col.to_string(),
-        available: df.get_column_names().iter().map(|s| s.to_string()).collect(),
+        available: df
+            .get_column_names()
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
     })?;
     let x: Vec<f64> = x_series
         .f64()
-        .map_err(|_| EconError::NonNumericColumn { column: x_col.to_string() })?
+        .map_err(|_| EconError::NonNumericColumn {
+            column: x_col.to_string(),
+        })?
         .into_no_null_iter()
         .collect();
 
@@ -470,11 +479,17 @@ pub fn ks_test(
             // Two-sample test
             let y_series = df.column(y_name).map_err(|_| EconError::ColumnNotFound {
                 column: y_name.to_string(),
-                available: df.get_column_names().iter().map(|s| s.to_string()).collect(),
+                available: df
+                    .get_column_names()
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect(),
             })?;
             let y: Vec<f64> = y_series
                 .f64()
-                .map_err(|_| EconError::NonNumericColumn { column: y_name.to_string() })?
+                .map_err(|_| EconError::NonNumericColumn {
+                    column: y_name.to_string(),
+                })?
                 .into_no_null_iter()
                 .collect();
 
@@ -541,7 +556,7 @@ fn kolmogorov_p_value_two_sample(d: f64, n: usize, m: usize, two_sided: bool) ->
 
     // Effective sample size
     let en = (nf * mf / (nf + mf)).sqrt();
-    let z = (en + 0.12 + 0.11 / en) * d;  // Stephens (1970) correction
+    let z = (en + 0.12 + 0.11 / en) * d; // Stephens (1970) correction
 
     if two_sided {
         kolmogorov_cdf_complement(z)
@@ -617,11 +632,17 @@ mod tests {
         let result = ks_test_two_sample(&x, &y, Alternative::TwoSided).unwrap();
 
         // Identical samples should have D = 0 (when handling ties properly)
-        assert!(result.statistic < 0.01,
-            "D should be 0 or very small for identical samples: {}", result.statistic);
+        assert!(
+            result.statistic < 0.01,
+            "D should be 0 or very small for identical samples: {}",
+            result.statistic
+        );
         // P-value should be high (not reject)
-        assert!(result.p_value > 0.9,
-            "p-value should be high for identical samples: {}", result.p_value);
+        assert!(
+            result.p_value > 0.9,
+            "p-value should be high for identical samples: {}",
+            result.p_value
+        );
     }
 
     #[test]
@@ -643,7 +664,9 @@ mod tests {
         // Data from uniform(0,1) - should not reject
         let x = vec![0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9];
 
-        let result = ks_test_one_sample(&x, TheoreticalDistribution::Uniform, Alternative::TwoSided).unwrap();
+        let result =
+            ks_test_one_sample(&x, TheoreticalDistribution::Uniform, Alternative::TwoSided)
+                .unwrap();
 
         assert_eq!(result.n, 9);
         assert!(result.statistic >= 0.0 && result.statistic <= 1.0);
@@ -656,7 +679,8 @@ mod tests {
         // Clearly non-normal data (all positive, skewed)
         let x = vec![0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 50.0];
 
-        let result = ks_test_one_sample(&x, TheoreticalDistribution::Normal, Alternative::TwoSided).unwrap();
+        let result =
+            ks_test_one_sample(&x, TheoreticalDistribution::Normal, Alternative::TwoSided).unwrap();
 
         // Should detect deviation from normality
         assert!(result.statistic > 0.3);
@@ -665,7 +689,7 @@ mod tests {
     #[test]
     fn test_ks_alternatives() {
         let x = vec![1.0, 2.0, 3.0, 4.0, 5.0];
-        let y = vec![2.0, 3.0, 4.0, 5.0, 6.0];  // Shifted up (y is stochastically greater than x)
+        let y = vec![2.0, 3.0, 4.0, 5.0, 6.0]; // Shifted up (y is stochastically greater than x)
 
         let result_two = ks_test_two_sample(&x, &y, Alternative::TwoSided).unwrap();
         let result_less = ks_test_two_sample(&x, &y, Alternative::Less).unwrap();
@@ -681,19 +705,29 @@ mod tests {
         // The "less" alternative tests D-, which should NOT be significant
 
         // D+ (greater statistic) should be larger than D- (less statistic)
-        assert!(result_greater.statistic >= result_less.statistic,
+        assert!(
+            result_greater.statistic >= result_less.statistic,
             "D_plus should be >= D_minus when x < y: greater={}, less={}",
-            result_greater.statistic, result_less.statistic);
+            result_greater.statistic,
+            result_less.statistic
+        );
 
         // Two-sided should equal max(D+, D-)
-        assert!((result_two.statistic - result_greater.statistic.max(result_less.statistic)).abs() < 1e-10,
+        assert!(
+            (result_two.statistic - result_greater.statistic.max(result_less.statistic)).abs()
+                < 1e-10,
             "Two-sided D should equal max(D+, D-): two={}, max={}",
-            result_two.statistic, result_greater.statistic.max(result_less.statistic));
+            result_two.statistic,
+            result_greater.statistic.max(result_less.statistic)
+        );
 
         // P-value for "greater" should be smaller (more evidence)
-        assert!(result_greater.p_value < result_less.p_value,
+        assert!(
+            result_greater.p_value < result_less.p_value,
             "greater p-value should be smaller when x < y: greater={}, less={}",
-            result_greater.p_value, result_less.p_value);
+            result_greater.p_value,
+            result_less.p_value
+        );
     }
 
     #[test]
@@ -713,7 +747,8 @@ mod tests {
         let df = df! {
             "x" => [1.0, 2.0, 3.0, 4.0, 5.0],
             "y" => [1.5, 2.5, 3.5, 4.5, 5.5]
-        }.unwrap();
+        }
+        .unwrap();
         let dataset = Dataset::new(df);
 
         // Two-sample test
@@ -722,7 +757,14 @@ mod tests {
         assert_eq!(result.n_2, Some(5));
 
         // One-sample test
-        let result = ks_test(&dataset, "x", None, Some(TheoreticalDistribution::Normal), Alternative::TwoSided).unwrap();
+        let result = ks_test(
+            &dataset,
+            "x",
+            None,
+            Some(TheoreticalDistribution::Normal),
+            Alternative::TwoSided,
+        )
+        .unwrap();
         assert_eq!(result.n, 5);
         assert!(result.n_2.is_none());
     }
@@ -755,11 +797,17 @@ mod tests {
 
         let result = ks_test_two_sample(&x, &y, Alternative::TwoSided).unwrap();
 
-        assert!((result.statistic - 0.8).abs() < 0.01,
-            "D mismatch: Rust={}, R=0.8", result.statistic);
+        assert!(
+            (result.statistic - 0.8).abs() < 0.01,
+            "D mismatch: Rust={}, R=0.8",
+            result.statistic
+        );
         // P-value can vary due to exact vs asymptotic, so we use a wider tolerance
-        assert!(result.p_value < 0.1,
-            "p-value should be small: Rust={}", result.p_value);
+        assert!(
+            result.p_value < 0.1,
+            "p-value should be small: Rust={}",
+            result.p_value
+        );
     }
 
     #[test]
@@ -774,11 +822,17 @@ mod tests {
         let result = ks_test_two_sample(&x, &y, Alternative::TwoSided).unwrap();
 
         // With proper tie handling, D should be 0 or very small
-        assert!(result.statistic < 0.01,
-            "D should be 0 or very small for identical samples: {}", result.statistic);
+        assert!(
+            result.statistic < 0.01,
+            "D should be 0 or very small for identical samples: {}",
+            result.statistic
+        );
         // P-value should be high
-        assert!(result.p_value > 0.5,
-            "p-value should be high for identical samples: {}", result.p_value);
+        assert!(
+            result.p_value > 0.5,
+            "p-value should be high for identical samples: {}",
+            result.p_value
+        );
     }
 
     #[test]
@@ -786,18 +840,24 @@ mod tests {
         // R: set.seed(42); ks.test(rnorm(20), "pnorm")
         // Using fixed data that is approximately normal
         let x = vec![
-            -0.56, 0.12, -0.89, 0.45, 0.23, -0.11, 0.78, -0.34,
-            0.56, -0.67, 0.89, -0.23, 0.01, 0.45, -0.78, 0.34,
-            -0.45, 0.67, -0.12, 0.23
+            -0.56, 0.12, -0.89, 0.45, 0.23, -0.11, 0.78, -0.34, 0.56, -0.67, 0.89, -0.23, 0.01,
+            0.45, -0.78, 0.34, -0.45, 0.67, -0.12, 0.23,
         ];
 
-        let result = ks_test_one_sample(&x, TheoreticalDistribution::Normal, Alternative::TwoSided).unwrap();
+        let result =
+            ks_test_one_sample(&x, TheoreticalDistribution::Normal, Alternative::TwoSided).unwrap();
 
         // For approximately normal data, D should be small and p-value large
-        assert!(result.statistic < 0.3,
-            "D should be small for normal-ish data: {}", result.statistic);
-        assert!(result.p_value > 0.05,
-            "p-value should be high for normal-ish data: {}", result.p_value);
+        assert!(
+            result.statistic < 0.3,
+            "D should be small for normal-ish data: {}",
+            result.statistic
+        );
+        assert!(
+            result.p_value > 0.05,
+            "p-value should be high for normal-ish data: {}",
+            result.p_value
+        );
     }
 
     #[test]
@@ -806,11 +866,16 @@ mod tests {
         // Uniformly spaced data on (0,1)
         let x: Vec<f64> = (1..=10).map(|i| i as f64 / 11.0).collect();
 
-        let result = ks_test_one_sample(&x, TheoreticalDistribution::Uniform, Alternative::TwoSided).unwrap();
+        let result =
+            ks_test_one_sample(&x, TheoreticalDistribution::Uniform, Alternative::TwoSided)
+                .unwrap();
 
         // Should not reject uniformity
-        assert!(result.p_value > 0.05,
-            "Uniform data should not reject uniform dist: p={}", result.p_value);
+        assert!(
+            result.p_value > 0.05,
+            "Uniform data should not reject uniform dist: p={}",
+            result.p_value
+        );
     }
 
     #[test]
@@ -818,20 +883,27 @@ mod tests {
         // R: ks.test(rnorm(100), rnorm(100))
         // Two samples from same normal distribution - should not reject
         // Using deterministic normal-like data
-        let x: Vec<f64> = (0..100).map(|i| {
-            let t = i as f64 / 99.0;
-            fast_inv_normal(t)
-        }).collect();
-        let y: Vec<f64> = (0..100).map(|i| {
-            let t = (i as f64 + 0.5) / 100.5;  // Slightly offset
-            fast_inv_normal(t)
-        }).collect();
+        let x: Vec<f64> = (0..100)
+            .map(|i| {
+                let t = i as f64 / 99.0;
+                fast_inv_normal(t)
+            })
+            .collect();
+        let y: Vec<f64> = (0..100)
+            .map(|i| {
+                let t = (i as f64 + 0.5) / 100.5; // Slightly offset
+                fast_inv_normal(t)
+            })
+            .collect();
 
         let result = ks_test_two_sample(&x, &y, Alternative::TwoSided).unwrap();
 
         // Same distribution, should not reject
-        assert!(result.p_value > 0.01,
-            "Similar normal samples should have high p-value: {}", result.p_value);
+        assert!(
+            result.p_value > 0.01,
+            "Similar normal samples should have high p-value: {}",
+            result.p_value
+        );
     }
 
     /// Fast inverse normal approximation for test data generation.

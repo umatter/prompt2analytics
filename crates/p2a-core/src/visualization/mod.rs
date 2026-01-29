@@ -20,21 +20,20 @@ mod heatmap;
 pub mod interactive;
 
 pub use charts::{
-    histogram, scatter_plot, box_plot, line_chart,
-    event_study_plot, coefficient_plot, irf_plot, residual_diagnostics, dendrogram,
-    ChartConfig, HistogramResult, ScatterResult, BoxPlotResult, LineChartResult,
-    EventStudyResult, CoefficientPlotResult, IrfPlotResult, ResidualDiagnosticsResult,
-    DendrogramResult,
-};
-pub use heatmap::{correlation_heatmap, HeatmapResult};
-pub use interactive::{
-    scatter_interactive, histogram_interactive, line_interactive,
-    InteractiveConfig, InteractivePlotResult,
+    BoxPlotResult, ChartConfig, CoefficientPlotResult, DendrogramResult, EventStudyResult,
+    HistogramResult, IrfPlotResult, LineChartResult, ResidualDiagnosticsResult, ScatterResult,
+    box_plot, coefficient_plot, dendrogram, event_study_plot, histogram, irf_plot, line_chart,
+    residual_diagnostics, scatter_plot,
 };
 pub use colors::{
-    BRAND_ORANGE, BRAND_CYAN, BRAND_TEAL, BRAND_ORANGE_LIGHT, BRAND_TEAL_DARK, BRAND_ORANGE_DARK,
-    BRAND_SLATE, CHART_PALETTE, PLOTLY_PALETTE, DEFAULT_SERIES_COLOR, SECONDARY_COLOR,
-    OUTLIER_COLOR, TREND_LINE_COLOR,
+    BRAND_CYAN, BRAND_ORANGE, BRAND_ORANGE_DARK, BRAND_ORANGE_LIGHT, BRAND_SLATE, BRAND_TEAL,
+    BRAND_TEAL_DARK, CHART_PALETTE, DEFAULT_SERIES_COLOR, OUTLIER_COLOR, PLOTLY_PALETTE,
+    SECONDARY_COLOR, TREND_LINE_COLOR,
+};
+pub use heatmap::{HeatmapResult, correlation_heatmap};
+pub use interactive::{
+    InteractiveConfig, InteractivePlotResult, histogram_interactive, line_interactive,
+    scatter_interactive,
 };
 
 use thiserror::Error;

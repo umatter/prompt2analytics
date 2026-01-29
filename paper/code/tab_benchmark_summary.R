@@ -7,27 +7,10 @@
 library(tidyverse)
 library(jsonlite)
 library(xtable)
-
-INPUT <- "rust_validation/results/summaries/"
-OUTPUT <- "../tables/"
+source("helpers.R")
 
 ## DATA IMPORT AND PREPARATION ----
-summary_data <- fromJSON(paste0(INPUT, "benchmark_summary.json"), simplifyVector = FALSE)
-
-# Extract methods data and flatten (handle type inconsistencies)
-methods_list <- summary_data$methods
-benchmark_df <- map_dfr(names(methods_list), function(method) {
-  method_results <- methods_list[[method]]
-  map_dfr(method_results, function(r) {
-    tibble(
-      method = method,
-      n = r$n,
-      r_median_us = r$r_median_us,
-      rust_median_us = r$rust_median_us,
-      speedup = r$speedup
-    )
-  })
-})
+benchmark_df <- load_benchmark_summary(paste0(INPUT_BENCHMARK, "benchmark_summary.json"))
 
 # Filter to n=100,000 and format for table
 table_data <- benchmark_df %>%
@@ -36,24 +19,8 @@ table_data <- benchmark_df %>%
   filter(n == max(n)) %>%
   ungroup() %>%
   mutate(
-    # Add category labels
-    Category = case_when(
-      grepl("^ols", method, ignore.case = TRUE) ~ "Regression",
-      grepl("^panel", method, ignore.case = TRUE) ~ "Panel",
-      grepl("logit|probit", method, ignore.case = TRUE) ~ "Discrete",
-      grepl("kmeans|pca|dbscan|hierarchical", method, ignore.case = TRUE) ~ "ML",
-      grepl("sort|filter|group|select|standardize|lag|lead|diff", method, ignore.case = TRUE) ~ "Munging",
-      TRUE ~ "Other"
-    ),
-    # Clean method labels
-    Method = method %>%
-      str_replace_all("_", " ") %>%
-      str_replace_all("hc([0-3])", "HC\\1") %>%
-      str_replace("^ols$", "OLS") %>%
-      str_replace("^ols ", "OLS+") %>%
-      str_replace("panel fe", "Panel FE") %>%
-      str_replace("panel re", "Panel RE") %>%
-      str_to_title(),
+    Category = categorize_method(method),
+    Method = clean_method_label(method),
     # Format columns
     `$n$` = format(n, big.mark = ","),
     `R (ms)` = sprintf("%.1f", r_median_us / 1000),
@@ -72,11 +39,11 @@ latex_table <- xtable(
 )
 
 ## WRITE TO DISK ----
-dir.create(OUTPUT, showWarnings = FALSE, recursive = TRUE)
+dir.create(OUTPUT_TABLES, showWarnings = FALSE, recursive = TRUE)
 
 print(
   latex_table,
-  file = paste0(OUTPUT, "tab_benchmark_summary.tex"),
+  file = paste0(OUTPUT_TABLES, "tab_benchmark_summary.tex"),
   include.rownames = FALSE,
   booktabs = TRUE,
   sanitize.text.function = identity,
@@ -85,8 +52,8 @@ print(
   floating = TRUE
 )
 
-message("Created: ", OUTPUT, "tab_benchmark_summary.tex")
+message("Created: ", OUTPUT_TABLES, "tab_benchmark_summary.tex")
 
 ## ALSO SAVE CSV FOR REFERENCE ----
-write_csv(table_data, paste0(INPUT, "benchmark_table.csv"))
-message("Created: ", INPUT, "benchmark_table.csv")
+write_csv(table_data, paste0(INPUT_BENCHMARK, "benchmark_table.csv"))
+message("Created: ", INPUT_BENCHMARK, "benchmark_table.csv")

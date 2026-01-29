@@ -1,12 +1,12 @@
 //! Settings modal component for configuring LLM provider
 
-use dioxus::prelude::*;
 use dioxus::events::FormData;
+use dioxus::prelude::*;
 
 use crate::api::ApiClient;
 use crate::app::apply_theme;
-use crate::state::settings::{Provider, Settings, Theme};
 use crate::state::SessionState;
+use crate::state::settings::{Provider, Settings, Theme};
 
 /// Parse dimensions from dataset load result message
 fn parse_dimensions(msg: &str) -> (usize, usize) {
@@ -15,14 +15,13 @@ fn parse_dimensions(msg: &str) -> (usize, usize) {
         let dims_part = &msg[dims_start..];
         if let Some(rows_end) = dims_part.find(" rows") {
             let rows_str = dims_part[11..rows_end].trim();
-            if let Ok(rows) = rows_str.parse::<usize>() {
-                if let Some(cols_start) = dims_part.find("x ") {
-                    if let Some(cols_end) = dims_part.find(" columns") {
-                        let cols_str = dims_part[cols_start + 2..cols_end].trim();
-                        if let Ok(cols) = cols_str.parse::<usize>() {
-                            return (rows, cols);
-                        }
-                    }
+            if let Ok(rows) = rows_str.parse::<usize>()
+                && let Some(cols_start) = dims_part.find("x ")
+                && let Some(cols_end) = dims_part.find(" columns")
+            {
+                let cols_str = dims_part[cols_start + 2..cols_end].trim();
+                if let Ok(cols) = cols_str.parse::<usize>() {
+                    return (rows, cols);
                 }
             }
         }
@@ -185,17 +184,26 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
         let use_upload = uploaded_file_content.is_some() && uploaded_file_name.is_some();
 
         if !use_upload && path.trim().is_empty() {
-            load_error.set(Some("Please select a file or enter a file path".to_string()));
+            load_error.set(Some(
+                "Please select a file or enter a file path".to_string(),
+            ));
             return;
         }
 
         let dataset_name_to_use = if name.trim().is_empty() {
             if use_upload {
-                uploaded_file_name.as_ref()
+                uploaded_file_name
+                    .as_ref()
                     .map(|n| n.split('.').next().unwrap_or("dataset").to_string())
                     .unwrap_or_else(|| "dataset".to_string())
             } else {
-                path.split('/').last().unwrap_or("dataset").split('.').next().unwrap_or("dataset").to_string()
+                path.split('/')
+                    .next_back()
+                    .unwrap_or("dataset")
+                    .split('.')
+                    .next()
+                    .unwrap_or("dataset")
+                    .to_string()
             }
         } else {
             name
@@ -271,9 +279,12 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
                         };
 
                         // Add to session state
-                        session.write().add_dataset(dataset_name_to_use.clone(), rows, cols);
+                        session
+                            .write()
+                            .add_dataset(dataset_name_to_use.clone(), rows, cols);
                     } else {
-                        load_error.set(Some(res.error.unwrap_or_else(|| "Load failed".to_string())));
+                        load_error
+                            .set(Some(res.error.unwrap_or_else(|| "Load failed".to_string())));
                         load_status.set(None);
                     }
                 }

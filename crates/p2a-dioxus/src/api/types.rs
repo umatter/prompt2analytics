@@ -156,11 +156,18 @@ pub enum StreamEvent {
 
     /// Tool execution started
     #[serde(rename = "tool_start")]
-    ToolStart { tool: String, arguments: serde_json::Value },
+    ToolStart {
+        tool: String,
+        arguments: serde_json::Value,
+    },
 
     /// Tool execution completed
     #[serde(rename = "tool_end")]
-    ToolEnd { tool: String, elapsed_ms: u64, result: Option<String> },
+    ToolEnd {
+        tool: String,
+        elapsed_ms: u64,
+        result: Option<String>,
+    },
 
     /// Tool result with potential images
     #[serde(rename = "tool_result")]

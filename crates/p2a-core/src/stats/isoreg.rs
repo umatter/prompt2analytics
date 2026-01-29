@@ -47,7 +47,11 @@ impl std::fmt::Display for IsoregResult {
         writeln!(f, "Knots (where fitted value changes):")?;
         writeln!(f, "  Index    X        Y       Fitted")?;
         for &k in &self.i_knots {
-            writeln!(f, "  {:5}    {:8.4}  {:8.4}  {:8.4}", k, self.x[k], self.y[k], self.yf[k])?;
+            writeln!(
+                f,
+                "  {:5}    {:8.4}  {:8.4}  {:8.4}",
+                k, self.x[k], self.y[k], self.yf[k]
+            )?;
         }
         writeln!(f)?;
 
@@ -56,7 +60,11 @@ impl std::fmt::Display for IsoregResult {
         writeln!(f, "First {} observations:", n_show)?;
         writeln!(f, "  Index    X        Y       Fitted")?;
         for i in 0..n_show {
-            writeln!(f, "  {:5}    {:8.4}  {:8.4}  {:8.4}", i, self.x[i], self.y[i], self.yf[i])?;
+            writeln!(
+                f,
+                "  {:5}    {:8.4}  {:8.4}  {:8.4}",
+                i, self.x[i], self.y[i], self.yf[i]
+            )?;
         }
         if self.n > 10 {
             writeln!(f, "  ... ({} more observations)", self.n - 10)?;
@@ -254,29 +262,32 @@ pub fn isoreg_y(y: &[f64]) -> Result<IsoregResult, String> {
 /// # Returns
 /// * Vector of predicted y values
 pub fn isoreg_predict(result: &IsoregResult, new_x: &[f64]) -> Vec<f64> {
-    new_x.iter().map(|&xi| {
-        // Find where xi falls in the sorted x values
-        if xi <= result.x[0] {
-            result.yf[0]
-        } else if xi >= result.x[result.n - 1] {
-            result.yf[result.n - 1]
-        } else {
-            // Binary search for the interval
-            let mut lo = 0;
-            let mut hi = result.n - 1;
-            while hi - lo > 1 {
-                let mid = (lo + hi) / 2;
-                if result.x[mid] <= xi {
-                    lo = mid;
-                } else {
-                    hi = mid;
+    new_x
+        .iter()
+        .map(|&xi| {
+            // Find where xi falls in the sorted x values
+            if xi <= result.x[0] {
+                result.yf[0]
+            } else if xi >= result.x[result.n - 1] {
+                result.yf[result.n - 1]
+            } else {
+                // Binary search for the interval
+                let mut lo = 0;
+                let mut hi = result.n - 1;
+                while hi - lo > 1 {
+                    let mid = (lo + hi) / 2;
+                    if result.x[mid] <= xi {
+                        lo = mid;
+                    } else {
+                        hi = mid;
+                    }
                 }
+                // For step function (isotonic regression), use the value at lo
+                // since the function is constant within each interval
+                result.yf[lo]
             }
-            // For step function (isotonic regression), use the value at lo
-            // since the function is constant within each interval
-            result.yf[lo]
-        }
-    }).collect()
+        })
+        .collect()
 }
 
 /// Convenience function to run isotonic regression.
@@ -302,7 +313,10 @@ mod tests {
             assert!(
                 result.yf[i] >= result.yf[i - 1] - 1e-10,
                 "yf[{}]={} < yf[{}]={}",
-                i, result.yf[i], i - 1, result.yf[i - 1]
+                i,
+                result.yf[i],
+                i - 1,
+                result.yf[i - 1]
             );
         }
     }
@@ -319,7 +333,10 @@ mod tests {
             assert!(
                 (result.yf[i] - result.y[i]).abs() < 1e-10,
                 "yf[{}]={} != y[{}]={}",
-                i, result.yf[i], i, result.y[i]
+                i,
+                result.yf[i],
+                i,
+                result.y[i]
             );
         }
     }
@@ -388,7 +405,11 @@ mod tests {
             assert!(
                 result.yf[i] >= result.yf[i - 1] - 1e-10,
                 "Monotonicity violated at i={}: yf[{}]={} < yf[{}]={}",
-                i, i, result.yf[i], i - 1, result.yf[i - 1]
+                i,
+                i,
+                result.yf[i],
+                i - 1,
+                result.yf[i - 1]
             );
         }
     }
@@ -446,5 +467,180 @@ mod tests {
         let x = vec![1.0, 2.0, 3.0, 4.0];
         let cs = cumsum(&x);
         assert_eq!(cs, vec![1.0, 3.0, 6.0, 10.0]);
+    }
+
+    // =========================================================================
+    // Validation tests against R
+    // =========================================================================
+
+    #[test]
+    fn test_validate_isoreg_r_example() {
+        // R: y <- c(1.0, 0.0, 4.0, 3.0, 3.0, 5.0, 4.0, 2.0, 0.0)
+        // R: isoreg(y)$yf
+        // R result: [0.5, 0.5, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0]
+        let y = vec![1.0, 0.0, 4.0, 3.0, 3.0, 5.0, 4.0, 2.0, 0.0];
+        let result = isoreg_y(&y).unwrap();
+
+        assert_eq!(result.n, 9);
+
+        // Expected fitted values from R
+        let expected_yf = vec![0.5, 0.5, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0];
+
+        // First two should be pooled to 0.5
+        assert!(
+            (result.yf[0] - expected_yf[0]).abs() < 0.1,
+            "yf[0] mismatch: Rust={:.4}, R={:.4}",
+            result.yf[0],
+            expected_yf[0]
+        );
+        assert!(
+            (result.yf[1] - expected_yf[1]).abs() < 0.1,
+            "yf[1] mismatch: Rust={:.4}, R={:.4}",
+            result.yf[1],
+            expected_yf[1]
+        );
+
+        // Rest should be pooled around 3.0 (approximately)
+        for i in 2..9 {
+            assert!(
+                result.yf[i] >= result.yf[0],
+                "yf[{}] should be >= yf[0] for monotonicity",
+                i
+            );
+        }
+
+        // Check monotonicity
+        for i in 1..result.n {
+            assert!(
+                result.yf[i] >= result.yf[i - 1] - 1e-10,
+                "Monotonicity violated at i={}: yf[{}]={:.4} < yf[{}]={:.4}",
+                i,
+                i,
+                result.yf[i],
+                i - 1,
+                result.yf[i - 1]
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_isoreg_monotone_unchanged() {
+        // R: isoreg(c(1, 2, 3, 4, 5))$yf == c(1, 2, 3, 4, 5) -> TRUE
+        let y = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        let result = isoreg_y(&y).unwrap();
+
+        for i in 0..5 {
+            assert!(
+                (result.yf[i] - y[i]).abs() < 1e-10,
+                "Already monotone data should be unchanged: yf[{}]={:.4} vs y[{}]={:.4}",
+                i,
+                result.yf[i],
+                i,
+                y[i]
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_isoreg_decreasing_pools_to_mean() {
+        // R: isoreg(c(5, 4, 3, 2, 1))$yf -> all values equal to mean(c(5,4,3,2,1)) = 3.0
+        let y = vec![5.0, 4.0, 3.0, 2.0, 1.0];
+        let result = isoreg_y(&y).unwrap();
+
+        let expected_mean = 3.0;
+
+        // All values should be equal (pooled to single block)
+        for i in 0..5 {
+            assert!(
+                (result.yf[i] - expected_mean).abs() < 1e-10,
+                "Decreasing data should pool to mean: yf[{}]={:.4}, expected={:.4}",
+                i,
+                result.yf[i],
+                expected_mean
+            );
+        }
+
+        // Should have only one knot
+        assert_eq!(
+            result.i_knots.len(),
+            1,
+            "Should have only one knot for single block"
+        );
+    }
+
+    #[test]
+    fn test_validate_isoreg_with_x_values() {
+        // R: isoreg(c(3, 1, 2), c(3, 1, 2))
+        // After sorting by x: x=[1,2,3], y=[1,2,3] which is monotone
+        let x = vec![3.0, 1.0, 2.0];
+        let y = vec![3.0, 1.0, 2.0];
+        let result = isoreg(&x, &y).unwrap();
+
+        // Data should be sorted by x
+        assert_eq!(result.x, vec![1.0, 2.0, 3.0]);
+        assert_eq!(result.y, vec![1.0, 2.0, 3.0]);
+
+        // Since sorted data is monotone, yf should equal y
+        for i in 0..3 {
+            assert!(
+                (result.yf[i] - result.y[i]).abs() < 1e-10,
+                "Sorted monotone data should be unchanged"
+            );
+        }
+
+        assert!(!result.is_ordered, "Original data was not sorted");
+        assert!(result.ord.is_some(), "Should have ordering permutation");
+    }
+
+    #[test]
+    fn test_validate_isoreg_knots() {
+        // For data with multiple level changes, knots should mark changes
+        let y = vec![1.0, 1.0, 3.0, 3.0, 5.0, 5.0];
+        let result = isoreg_y(&y).unwrap();
+
+        // This data is already monotone, so yf = y
+        for i in 0..6 {
+            assert!(
+                (result.yf[i] - y[i]).abs() < 1e-10,
+                "Monotone data unchanged"
+            );
+        }
+
+        // Should have knots at 0, 2, 4 (where value changes)
+        assert!(
+            result.i_knots.len() >= 3,
+            "Should have at least 3 knots: {:?}",
+            result.i_knots
+        );
+        assert_eq!(result.i_knots[0], 0, "First knot at index 0");
+    }
+
+    #[test]
+    fn test_validate_isoreg_predict() {
+        let x = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        let y = vec![1.0, 5.0, 2.0, 4.0, 6.0]; // Has violations
+        let result = isoreg(&x, &y).unwrap();
+
+        // Predict at original points
+        let pred = isoreg_predict(&result, &x);
+        for i in 0..5 {
+            assert!(
+                (pred[i] - result.yf[i]).abs() < 1e-10,
+                "Prediction at original x should equal fitted value"
+            );
+        }
+
+        // Predict outside range
+        let pred_below = isoreg_predict(&result, &[0.0]);
+        assert!(
+            (pred_below[0] - result.yf[0]).abs() < 1e-10,
+            "Below range uses first value"
+        );
+
+        let pred_above = isoreg_predict(&result, &[10.0]);
+        assert!(
+            (pred_above[0] - result.yf[4]).abs() < 1e-10,
+            "Above range uses last value"
+        );
     }
 }

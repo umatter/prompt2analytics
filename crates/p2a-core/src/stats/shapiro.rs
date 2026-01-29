@@ -100,18 +100,32 @@ impl std::fmt::Display for ShapiroWilkResult {
         writeln!(f, "{}", self.test_name)?;
         writeln!(f, "{}", "=".repeat(self.test_name.len()))?;
         writeln!(f)?;
-        writeln!(f, "W = {:.6}, p-value = {:.6} {}",
-            self.w_statistic, self.p_value, self.significance.stars())?;
+        writeln!(
+            f,
+            "W = {:.6}, p-value = {:.6} {}",
+            self.w_statistic,
+            self.p_value,
+            self.significance.stars()
+        )?;
         writeln!(f)?;
         writeln!(f, "Sample size: n = {}", self.n)?;
         writeln!(f)?;
         writeln!(f, "Null hypothesis: Data is normally distributed")?;
-        writeln!(f, "Alternative hypothesis: Data is not normally distributed")?;
+        writeln!(
+            f,
+            "Alternative hypothesis: Data is not normally distributed"
+        )?;
         writeln!(f)?;
         if self.reject_normality {
-            writeln!(f, "Conclusion: Reject H₀ at α = 0.05 (evidence against normality)")?;
+            writeln!(
+                f,
+                "Conclusion: Reject H₀ at α = 0.05 (evidence against normality)"
+            )?;
         } else {
-            writeln!(f, "Conclusion: Fail to reject H₀ at α = 0.05 (no evidence against normality)")?;
+            writeln!(
+                f,
+                "Conclusion: Fail to reject H₀ at α = 0.05 (no evidence against normality)"
+            )?;
         }
         writeln!(f)?;
         writeln!(f, "Signif. codes: 0 '***' 0.001 '**' 0.01 '*' 0.05 '†' 0.1")?;
@@ -212,7 +226,11 @@ pub fn run_shapiro_wilk(dataset: &Dataset, column: &str) -> EconResult<ShapiroWi
 
     let series = df.column(column).map_err(|_| EconError::ColumnNotFound {
         column: column.to_string(),
-        available: df.get_column_names().iter().map(|s| s.to_string()).collect(),
+        available: df
+            .get_column_names()
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
     })?;
 
     let x: Vec<f64> = series
@@ -305,7 +323,7 @@ fn compute_coefficients(n: usize) -> EconResult<Vec<f64>> {
         (0.5 / m_sq_sum).sqrt()
     } else {
         return Err(EconError::Internal(
-            "Failed to compute Shapiro-Wilk coefficients: degenerate case".to_string()
+            "Failed to compute Shapiro-Wilk coefficients: degenerate case".to_string(),
         ));
     };
 
@@ -331,40 +349,40 @@ fn fast_norm_quantile(p: f64) -> f64 {
 
     // Constants for rational approximation (Wichura AS241)
     const A: [f64; 4] = [
-        3.3871328727963666080,
-        1.3314166789178437745e2,
-        1.9715909503065514427e3,
-        1.3731693765509461125e4,
+        3.387_132_872_796_366_5,
+        1.331_416_678_917_843_8e2,
+        1.971_590_950_306_551_3e3,
+        1.373_169_376_550_946e4,
     ];
     const B: [f64; 4] = [
         1.0,
-        4.2313330701600911252e1,
-        6.8718700749205790830e2,
-        5.3941960214247511077e3,
+        4.231_333_070_160_091e1,
+        6.871_870_074_920_579e2,
+        5.394_196_021_424_751e3,
     ];
     const C: [f64; 4] = [
-        1.42343711074968357734,
-        4.63033784615654529590,
-        5.76949722146069140550,
-        3.64784832476320460504,
+        1.423_437_110_749_683_5,
+        4.630_337_846_156_546,
+        5.769_497_221_460_691,
+        3.647_848_324_763_204_5,
     ];
     const D: [f64; 4] = [
         1.0,
-        2.05319162663775882187,
-        1.67638483018380384940,
-        6.89767334985100004550e-1,
+        2.053_191_626_637_759,
+        1.676_384_830_183_803_8,
+        6.897_673_349_851e-1,
     ];
     const E: [f64; 4] = [
-        6.65790464350110377720,
-        5.46378491116411436990,
-        1.78482653991729133580,
-        2.96560571828504891230e-1,
+        6.657_904_643_501_103,
+        5.463_784_911_164_114,
+        1.784_826_539_917_291_3,
+        2.965_605_718_285_048_7e-1,
     ];
     const F: [f64; 4] = [
         1.0,
-        5.99832206555887937690e-1,
-        1.36929880922735805310e-1,
-        1.48753612908506148525e-2,
+        5.998_322_065_558_88e-1,
+        1.369_298_809_227_358e-1,
+        1.487_536_129_085_061_5e-2,
     ];
 
     let q = p - 0.5;
@@ -499,8 +517,8 @@ mod tests {
     fn test_shapiro_wilk_normal_data() {
         // Data that should appear normal
         let x = vec![
-            0.1, 0.5, 0.2, 0.8, 0.4, 0.9, 0.3, 0.7, 0.6, 0.45,
-            0.55, 0.35, 0.65, 0.25, 0.75, 0.15, 0.85, 0.42, 0.58, 0.38
+            0.1, 0.5, 0.2, 0.8, 0.4, 0.9, 0.3, 0.7, 0.6, 0.45, 0.55, 0.35, 0.65, 0.25, 0.75, 0.15,
+            0.85, 0.42, 0.58, 0.38,
         ];
 
         let result = shapiro_wilk_test(&x).unwrap();
@@ -514,8 +532,7 @@ mod tests {
     fn test_shapiro_wilk_non_normal_data() {
         // Highly skewed data (exponential-like)
         let x = vec![
-            0.1, 0.2, 0.3, 0.5, 0.8, 1.3, 2.1, 3.4, 5.5, 8.9,
-            14.4, 23.3, 37.7, 61.0, 98.7
+            0.1, 0.2, 0.3, 0.5, 0.8, 1.3, 2.1, 3.4, 5.5, 8.9, 14.4, 23.3, 37.7, 61.0, 98.7,
         ];
 
         let result = shapiro_wilk_test(&x).unwrap();
@@ -545,7 +562,10 @@ mod tests {
     fn test_shapiro_wilk_zero_variance() {
         let x = vec![5.0, 5.0, 5.0, 5.0, 5.0];
         let result = shapiro_wilk_test(&x);
-        assert!(matches!(result, Err(EconError::InvalidSpecification { .. })));
+        assert!(matches!(
+            result,
+            Err(EconError::InvalidSpecification { .. })
+        ));
     }
 
     #[test]
@@ -560,7 +580,8 @@ mod tests {
     fn test_run_shapiro_wilk_from_dataset() {
         let df = df! {
             "values" => [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]
-        }.unwrap();
+        }
+        .unwrap();
         let dataset = Dataset::new(df);
 
         let result = run_shapiro_wilk(&dataset, "values").unwrap();
@@ -582,17 +603,19 @@ mod tests {
 
         // Data generated by R: set.seed(42); round(rnorm(20), 4)
         let x = vec![
-            1.3710, -0.5647, 0.3631, 0.6329, 0.4043, -0.1062, 1.5115, -0.0947,
-            2.0184, -0.0627, 1.3048, 2.2866, -1.3888, -0.2788, -0.1333, 0.6360,
-            -0.2843, -2.6565, -2.4405, 1.3201
+            1.3710, -0.5647, 0.3631, 0.6329, 0.4043, -0.1062, 1.5115, -0.0947, 2.0184, -0.0627,
+            1.3048, 2.2866, -1.3888, -0.2788, -0.1333, 0.6360, -0.2843, -2.6565, -2.4405, 1.3201,
         ];
 
         let result = shapiro_wilk_test(&x).unwrap();
 
         // R gives: W = 0.9341, p-value = 0.1836
         // We allow larger tolerance due to approximation differences
-        assert!(result.w_statistic > 0.85 && result.w_statistic < 1.0,
-            "W statistic out of expected range: {}", result.w_statistic);
+        assert!(
+            result.w_statistic > 0.85 && result.w_statistic < 1.0,
+            "W statistic out of expected range: {}",
+            result.w_statistic
+        );
         assert!(result.n == 20);
     }
 
@@ -609,8 +632,11 @@ mod tests {
 
         // Uniform data should give W in valid range
         // Note: Our approximation may differ from R due to different coefficient methods
-        assert!(result.w_statistic > 0.70 && result.w_statistic <= 1.0,
-            "W should be in valid range: {}", result.w_statistic);
+        assert!(
+            result.w_statistic > 0.70 && result.w_statistic <= 1.0,
+            "W should be in valid range: {}",
+            result.w_statistic
+        );
         assert_eq!(result.n, 10);
         assert!(result.p_value >= 0.0 && result.p_value <= 1.0);
     }
@@ -621,15 +647,18 @@ mod tests {
         // Exponential data should strongly reject normality
         // Using fixed exponential-like data
         let x = vec![
-            0.05, 0.12, 0.18, 0.27, 0.41, 0.58, 0.82, 1.15,
-            1.63, 2.30, 3.25, 4.59, 6.49, 9.17, 12.96
+            0.05, 0.12, 0.18, 0.27, 0.41, 0.58, 0.82, 1.15, 1.63, 2.30, 3.25, 4.59, 6.49, 9.17,
+            12.96,
         ];
 
         let result = shapiro_wilk_test(&x).unwrap();
 
         // Exponential data should have low W and reject normality
-        assert!(result.w_statistic < 0.90,
-            "W should be low for exponential data: {}", result.w_statistic);
+        assert!(
+            result.w_statistic < 0.90,
+            "W should be low for exponential data: {}",
+            result.w_statistic
+        );
         assert_eq!(result.n, 15);
     }
 
@@ -642,8 +671,11 @@ mod tests {
         let result = shapiro_wilk_test(&x).unwrap();
 
         // Small sample with roughly linear data should have high W
-        assert!(result.w_statistic > 0.90,
-            "W should be high for small linear sample: {}", result.w_statistic);
+        assert!(
+            result.w_statistic > 0.90,
+            "W should be high for small linear sample: {}",
+            result.w_statistic
+        );
         assert_eq!(result.n, 5);
     }
 
@@ -656,8 +688,11 @@ mod tests {
         let result = shapiro_wilk_test(&x).unwrap();
 
         // n=3 with any non-constant data should give high W
-        assert!(result.w_statistic >= 0.75,
-            "W for n=3 should be at least 0.75: {}", result.w_statistic);
+        assert!(
+            result.w_statistic >= 0.75,
+            "W for n=3 should be at least 0.75: {}",
+            result.w_statistic
+        );
         assert_eq!(result.n, 3);
     }
 

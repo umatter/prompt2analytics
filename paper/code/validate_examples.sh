@@ -49,7 +49,7 @@ echo ""
     echo ""
     echo "Command: p2a --session analysis.json data load grunfeld.csv --name grunfeld"
     echo "---"
-    $P2A --session "$SESSION_FILE" data load "$DATA_DIR/grunfeld.csv" --name grunfeld
+    "$P2A" --session "$SESSION_FILE" data load "$DATA_DIR/grunfeld.csv" --name grunfeld
     echo ""
 
     echo "============================================================"
@@ -58,7 +58,7 @@ echo ""
     echo ""
     echo "Command: p2a --session analysis.json data describe grunfeld"
     echo "---"
-    $P2A --session "$SESSION_FILE" data describe grunfeld
+    "$P2A" --session "$SESSION_FILE" data describe grunfeld
     echo ""
 
     echo "============================================================"
@@ -67,7 +67,7 @@ echo ""
     echo ""
     echo "Command: p2a --session analysis.json data head grunfeld --n 5"
     echo "---"
-    $P2A --session "$SESSION_FILE" data head grunfeld --n 5
+    "$P2A" --session "$SESSION_FILE" data head grunfeld --n 5
     echo ""
 
     echo "============================================================"
@@ -76,7 +76,7 @@ echo ""
     echo ""
     echo "Command: p2a --session analysis.json reg ols grunfeld -y inv -x value capital --robust hc1"
     echo "---"
-    $P2A --session "$SESSION_FILE" reg ols grunfeld -y inv -x value capital --robust hc1
+    "$P2A" --session "$SESSION_FILE" reg ols grunfeld -y inv -x value capital --robust hc1
     echo ""
 
     echo "============================================================"
@@ -85,7 +85,7 @@ echo ""
     echo ""
     echo "Command: p2a --session analysis.json reg diagnostics grunfeld -y inv -x value capital"
     echo "---"
-    $P2A --session "$SESSION_FILE" reg diagnostics grunfeld -y inv -x value capital
+    "$P2A" --session "$SESSION_FILE" reg diagnostics grunfeld -y inv -x value capital
     echo ""
 
     echo "============================================================"
@@ -94,7 +94,7 @@ echo ""
     echo ""
     echo "Command: p2a --session analysis.json panel fe grunfeld -y inv -x value capital --entity firm"
     echo "---"
-    $P2A --session "$SESSION_FILE" panel fe grunfeld -y inv -x value capital --entity firm
+    "$P2A" --session "$SESSION_FILE" panel fe grunfeld -y inv -x value capital --entity firm
     echo ""
 
     echo "============================================================"
@@ -103,7 +103,7 @@ echo ""
     echo ""
     echo "Command: p2a --session analysis.json panel re grunfeld -y inv -x value capital --entity firm"
     echo "---"
-    $P2A --session "$SESSION_FILE" panel re grunfeld -y inv -x value capital --entity firm
+    "$P2A" --session "$SESSION_FILE" panel re grunfeld -y inv -x value capital --entity firm
     echo ""
 
     echo "============================================================"
@@ -112,7 +112,7 @@ echo ""
     echo ""
     echo "Command: p2a --session analysis.json panel hausman grunfeld -y inv -x value capital --entity firm"
     echo "---"
-    $P2A --session "$SESSION_FILE" panel hausman grunfeld -y inv -x value capital --entity firm
+    "$P2A" --session "$SESSION_FILE" panel hausman grunfeld -y inv -x value capital --entity firm
     echo ""
 
     echo "============================================================"
@@ -121,7 +121,7 @@ echo ""
     echo ""
     echo "Command: p2a --session analysis.json panel hdfe grunfeld -y inv -x value capital --fe firm year"
     echo "---"
-    $P2A --session "$SESSION_FILE" panel hdfe grunfeld -y inv -x value capital --fe firm year
+    "$P2A" --session "$SESSION_FILE" panel hdfe grunfeld -y inv -x value capital --fe firm year
     echo ""
 
     echo "============================================================"
@@ -130,7 +130,7 @@ echo ""
     echo ""
     echo "Command: p2a --session analysis.json -F json reg ols grunfeld -y inv -x value capital --robust hc1"
     echo "---"
-    $P2A --session "$SESSION_FILE" -F json reg ols grunfeld -y inv -x value capital --robust hc1
+    "$P2A" --session "$SESSION_FILE" -F json reg ols grunfeld -y inv -x value capital --robust hc1
     echo ""
 
     echo "============================================================"

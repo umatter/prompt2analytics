@@ -4,8 +4,8 @@
 //! across OLS, panel data, IV, and other linear estimators.
 
 use ndarray::{Array1, Array2};
+use serde::{Deserialize, Serialize};
 use statrs::distribution::{ContinuousCDF, StudentsT};
-use serde::{Serialize, Deserialize};
 
 /// Significance level indicators for p-values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -298,11 +298,26 @@ mod tests {
 
     #[test]
     fn test_significance_level() {
-        assert_eq!(SignificanceLevel::from_p_value(0.0001), SignificanceLevel::TenthPercent);
-        assert_eq!(SignificanceLevel::from_p_value(0.005), SignificanceLevel::OnePercent);
-        assert_eq!(SignificanceLevel::from_p_value(0.03), SignificanceLevel::FivePercent);
-        assert_eq!(SignificanceLevel::from_p_value(0.08), SignificanceLevel::TenPercent);
-        assert_eq!(SignificanceLevel::from_p_value(0.15), SignificanceLevel::NotSignificant);
+        assert_eq!(
+            SignificanceLevel::from_p_value(0.0001),
+            SignificanceLevel::TenthPercent
+        );
+        assert_eq!(
+            SignificanceLevel::from_p_value(0.005),
+            SignificanceLevel::OnePercent
+        );
+        assert_eq!(
+            SignificanceLevel::from_p_value(0.03),
+            SignificanceLevel::FivePercent
+        );
+        assert_eq!(
+            SignificanceLevel::from_p_value(0.08),
+            SignificanceLevel::TenPercent
+        );
+        assert_eq!(
+            SignificanceLevel::from_p_value(0.15),
+            SignificanceLevel::NotSignificant
+        );
     }
 
     #[test]

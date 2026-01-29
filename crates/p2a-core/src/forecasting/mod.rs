@@ -103,79 +103,83 @@
 //! | `KalmanFilter()` | [`kalman_filter`] |
 //! | `CausalImpact` | [`causal_impact()`], [`run_causal_impact`] |
 
-mod arima_model;
-mod mstl;
-mod changepoint;
-mod holtwinters;
 pub mod ar;
-pub mod decompose;
-pub mod kalman;
-pub mod structts;
-pub mod stl;
-pub mod tsutils;
-pub mod cpgram;
-pub mod garch;
+mod arima_model;
 pub mod causal_impact;
+mod changepoint;
+pub mod cpgram;
+pub mod decompose;
+pub mod garch;
+mod holtwinters;
+pub mod kalman;
+mod mstl;
+pub mod stl;
+pub mod structts;
+pub mod tsutils;
 
-pub use arima_model::{ArimaResult, ArimaForecastResult, run_arima, forecast_arima};
-pub use mstl::{MstlResult, run_mstl};
+pub use ar::{ArConfig, ArMethod, ArResult, ar, run_ar, run_ar_with_order};
+pub use arima_model::{ArimaForecastResult, ArimaResult, forecast_arima, run_arima};
+pub use causal_impact::{
+    CausalImpactConfig, CausalImpactModel, CausalImpactResult, CausalImpactSeries,
+    CausalImpactSummary, CausalInference, causal_impact, run_causal_impact,
+};
 pub use changepoint::{
-    ChangepointResult, SegmentStats, CostFunction,
-    detect_changepoints, binary_segmentation,
-    run_changepoint, run_binary_segmentation,
+    ChangepointResult, CostFunction, SegmentStats, binary_segmentation, detect_changepoints,
+    run_binary_segmentation, run_changepoint,
 };
-pub use holtwinters::{
-    HoltWintersResult, HoltWintersConfig, HoltWintersCoefficients, SeasonalType,
-    holt_winters, holt_winters_forecast, run_holt_winters,
-};
-pub use ar::{
-    ArResult, ArConfig, ArMethod, ar, run_ar, run_ar_with_order,
-};
+pub use cpgram::{CpgramResult, cpgram, run_cpgram, white_noise_test};
 pub use decompose::{
-    DecomposeResult, DecomposeConfig, DecomposeType,
-    decompose, run_decompose, run_decompose_with_filter,
+    DecomposeConfig, DecomposeResult, DecomposeType, decompose, run_decompose,
+    run_decompose_with_filter,
+};
+pub use garch::{GarchConfig, GarchResult, garch, garch_forecast, run_garch};
+pub use holtwinters::{
+    HoltWintersCoefficients, HoltWintersConfig, HoltWintersResult, SeasonalType, holt_winters,
+    holt_winters_forecast, run_holt_winters,
 };
 pub use kalman::{
-    StateSpaceModel, KalmanFilterResult, KalmanSmootherResult, KalmanForecastResult,
-    kalman_filter, kalman_smoother, kalman_forecast, kalman_loglik,
+    KalmanFilterResult, KalmanForecastResult, KalmanSmootherResult, StateSpaceModel, kalman_filter,
+    kalman_forecast, kalman_loglik, kalman_smoother,
 };
+pub use mstl::{MstlResult, run_mstl};
+pub use stl::{StlConfig, StlResult, run_stl, run_stl_with_config, stl};
 pub use structts::{
-    StructTsType, StructTsConfig, StructTsResult, StructTsCoefficients,
-    struct_ts, run_struct_ts,
-};
-pub use stl::{
-    StlResult, StlConfig, stl, run_stl, run_stl_with_config,
+    StructTsCoefficients, StructTsConfig, StructTsResult, StructTsType, run_struct_ts, struct_ts,
 };
 pub use tsutils::{
-    // Lag function
-    LagResult, lag, lag_padded,
-    // Embed function
-    EmbedResult, embed, embed_array,
-    // Diffinv function
-    DiffinvResult, diffinv,
-    // Filter function
-    FilterMethod, FilterSides, FilterResult, filter,
-    // Window function
-    WindowResult, window,
-    // ARMA ACF
-    ArmaAcfResult, arma_acf,
-    // ARMA to MA
-    ArmaToMaResult, arma_to_ma,
     // ACF to AR
-    Acf2ArResult, acf_to_ar,
+    Acf2ArResult,
     // ARIMA simulation
-    ArimaSimResult, arima_sim,
+    ArimaSimResult,
+    // ARMA ACF
+    ArmaAcfResult,
+    // ARMA to MA
+    ArmaToMaResult,
+    // Diffinv function
+    DiffinvResult,
+    // Embed function
+    EmbedResult,
     // Running median
-    EndRule, RunmedResult, runmed,
-};
-pub use cpgram::{
-    CpgramResult, cpgram, run_cpgram, white_noise_test,
-};
-pub use garch::{
-    GarchConfig, GarchResult, garch, garch_forecast, run_garch,
-};
-pub use causal_impact::{
-    CausalImpactConfig, CausalImpactSummary, CausalImpactSeries,
-    CausalImpactModel, CausalInference, CausalImpactResult,
-    causal_impact, run_causal_impact,
+    EndRule,
+    // Filter function
+    FilterMethod,
+    FilterResult,
+    FilterSides,
+    // Lag function
+    LagResult,
+    RunmedResult,
+    // Window function
+    WindowResult,
+    acf_to_ar,
+    arima_sim,
+    arma_acf,
+    arma_to_ma,
+    diffinv,
+    embed,
+    embed_array,
+    filter,
+    lag,
+    lag_padded,
+    runmed,
+    window,
 };

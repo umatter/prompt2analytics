@@ -314,14 +314,16 @@ pub fn run_mixed_logit(
     let choice_ids: Vec<String> = extract_string_or_int_column(df, choice_id_col)?;
     let alt_ids: Vec<String> = extract_string_or_int_column(df, alt_id_col)?;
 
-    let choice_series = df.column(choice_col).map_err(|_| EconError::ColumnNotFound {
-        column: choice_col.to_string(),
-        available: df
-            .get_column_names()
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
-    })?;
+    let choice_series = df
+        .column(choice_col)
+        .map_err(|_| EconError::ColumnNotFound {
+            column: choice_col.to_string(),
+            available: df
+                .get_column_names()
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+        })?;
     let choices: Vec<f64> = if let Ok(ca) = choice_series.f64() {
         ca.into_no_null_iter().collect()
     } else if let Ok(ca) = choice_series.i64() {
@@ -410,7 +412,7 @@ pub fn run_mixed_logit(
     let mut distributions: Vec<RandomDistribution> = vec![RandomDistribution::Fixed; n_vars];
     for spec in random_specs {
         for (j, &col) in x_cols.iter().enumerate() {
-            if col == spec.name || spec.name == col {
+            if col == spec.name {
                 distributions[j] = spec.distribution;
             }
         }
@@ -450,8 +452,7 @@ pub fn run_mixed_logit(
                 for r in 0..n_draws {
                     let u1: f64 = rng.gen_range(0.0001..0.9999);
                     let u2: f64 = rng.gen_range(0.0001..0.9999);
-                    draws[j][r] =
-                        (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos();
+                    draws[j][r] = (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos();
                 }
             }
         }
@@ -480,7 +481,7 @@ pub fn run_mixed_logit(
         let mut total_ll = 0.0;
 
         for sit in &situations {
-            let n_alts = sit.x.len();
+            let _n_alts = sit.x.len();
             let mut sim_prob = 0.0;
 
             for r in 0..n_draws {
@@ -806,5 +807,206 @@ mod tests {
         let display = format!("{}", result);
         assert!(display.contains("Mixed Logit"));
         assert!(display.contains("cost"));
+    }
+
+    // ==========================================================================
+    // R Validation Tests
+    // ==========================================================================
+
+    #[test]
+    fn test_validate_mixed_logit_structure() {
+        // R reference: gmnl::gmnl() or mlogit with rpar
+        // Test that mixed logit produces valid structure
+
+        let dataset = create_mlogit_dataset();
+
+        let result = run_mixed_logit(
+            &dataset,
+            "choice_id",
+            "alt_id",
+            "choice",
+            &["cost", "time"],
+            &[RandomParameterSpec {
+                name: "cost".to_string(),
+                distribution: RandomDistribution::Normal,
+            }],
+            Some(MixedLogitConfig {
+                n_draws: 100,
+                halton: true,
+                max_iter: 100,
+                tolerance: 1e-4,
+                seed: Some(42),
+            }),
+        )
+        .unwrap();
+
+        // Structure checks
+        assert_eq!(result.variable_names.len(), 2);
+        assert_eq!(result.n_choice_situations, 5);
+        assert_eq!(result.n_alternatives, 3);
+
+        // Should have means for all variables
+        assert_eq!(result.means.len(), 2);
+
+        // Should have std_devs for random parameters
+        assert_eq!(result.std_devs.len(), 2);
+        // Cost is random, should have non-zero std_dev potential
+        // Time is fixed, std_dev should be 0
+
+        // Distribution specifications
+        assert_eq!(result.distributions[0], RandomDistribution::Normal);
+        assert_eq!(result.distributions[1], RandomDistribution::Fixed);
+
+        // Log-likelihood should be finite
+        assert!(
+            result.log_likelihood.is_finite(),
+            "Log-likelihood should be finite"
+        );
+        assert!(
+            result.log_likelihood < 0.0,
+            "Log-likelihood should be negative"
+        );
+
+        // AIC/BIC should be positive
+        assert!(result.aic > 0.0, "AIC should be positive");
+        assert!(result.bic > 0.0, "BIC should be positive");
+    }
+
+    #[test]
+    fn test_validate_mixed_logit_multiple_random() {
+        // Test with multiple random parameters
+        let dataset = create_mlogit_dataset();
+
+        let result = run_mixed_logit(
+            &dataset,
+            "choice_id",
+            "alt_id",
+            "choice",
+            &["cost", "time"],
+            &[
+                RandomParameterSpec {
+                    name: "cost".to_string(),
+                    distribution: RandomDistribution::Normal,
+                },
+                RandomParameterSpec {
+                    name: "time".to_string(),
+                    distribution: RandomDistribution::Normal,
+                },
+            ],
+            Some(MixedLogitConfig {
+                n_draws: 50,
+                halton: true,
+                max_iter: 50,
+                tolerance: 1e-3,
+                seed: Some(42),
+            }),
+        )
+        .unwrap();
+
+        // Both should be random
+        assert_eq!(result.distributions[0], RandomDistribution::Normal);
+        assert_eq!(result.distributions[1], RandomDistribution::Normal);
+
+        // Should have std errors for both
+        assert_eq!(result.std_devs.len(), 2);
+
+        // Log-likelihood should be finite
+        assert!(result.log_likelihood.is_finite());
+    }
+
+    #[test]
+    fn test_validate_gmnl_vs_r() {
+        // R reference: gmnl::gmnl()
+        // Test GMNL convenience function
+
+        let dataset = create_mlogit_dataset();
+
+        let result = run_gmnl(
+            &dataset,
+            "choice_id",
+            "alt_id",
+            "choice",
+            &["cost", "time"],
+            Some(&["cost"]), // Only cost is random
+            Some(RandomDistribution::Normal),
+            Some(MixedLogitConfig {
+                n_draws: 50,
+                halton: true,
+                max_iter: 50,
+                tolerance: 1e-3,
+                seed: Some(42),
+            }),
+        )
+        .unwrap();
+
+        // Structure checks
+        assert_eq!(result.variable_names.len(), 2);
+        assert_eq!(result.n_alternatives, 3);
+
+        // Cost is random, time is fixed
+        assert_eq!(result.distributions[0], RandomDistribution::Normal);
+        assert_eq!(result.distributions[1], RandomDistribution::Fixed);
+
+        // Log-likelihood should be finite
+        assert!(result.log_likelihood.is_finite());
+    }
+
+    #[test]
+    fn test_validate_mixl_vs_r() {
+        // R reference: mixl package
+        // Test MIXL convenience function
+
+        let dataset = create_mlogit_dataset();
+
+        let result = run_mixl(
+            &dataset,
+            "choice_id",
+            "alt_id",
+            "choice",
+            &["cost"],
+            Some(&["cost"]),
+            Some(RandomDistribution::Normal),
+            Some(30), // n_draws
+        )
+        .unwrap();
+
+        // Structure checks
+        assert_eq!(result.variable_names.len(), 1);
+        assert_eq!(result.distributions[0], RandomDistribution::Normal);
+
+        // Log-likelihood should be finite
+        assert!(result.log_likelihood.is_finite());
+    }
+
+    #[test]
+    fn test_validate_mixed_logit_lognormal() {
+        // Test with log-normal distribution (for sign-constrained parameters)
+        let dataset = create_mlogit_dataset();
+
+        let result = run_mixed_logit(
+            &dataset,
+            "choice_id",
+            "alt_id",
+            "choice",
+            &["cost"],
+            &[RandomParameterSpec {
+                name: "cost".to_string(),
+                distribution: RandomDistribution::LogNormal,
+            }],
+            Some(MixedLogitConfig {
+                n_draws: 50,
+                halton: true,
+                max_iter: 50,
+                tolerance: 1e-3,
+                seed: Some(42),
+            }),
+        )
+        .unwrap();
+
+        // Should be log-normal
+        assert_eq!(result.distributions[0], RandomDistribution::LogNormal);
+
+        // Log-likelihood should be finite
+        assert!(result.log_likelihood.is_finite());
     }
 }

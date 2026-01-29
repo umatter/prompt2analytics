@@ -35,6 +35,4 @@
 
 mod generator;
 
-pub use generator::{
-    generate_random_data, ColumnSpec, Distribution, GenerationError,
-};
+pub use generator::{ColumnSpec, Distribution, GenerationError, generate_random_data};

@@ -93,7 +93,11 @@ impl fmt::Display for AcfResult {
         writeln!(f, "Observations: {}", self.n_obs)?;
         writeln!(f, "Max Lag: {}", self.lags.last().unwrap_or(&0))?;
         writeln!(f, "Demeaned: {}", if self.demeaned { "Yes" } else { "No" })?;
-        writeln!(f, "Adjusted: {}", if self.adjusted { "Yes (n-k)" } else { "No (n)" })?;
+        writeln!(
+            f,
+            "Adjusted: {}",
+            if self.adjusted { "Yes (n-k)" } else { "No (n)" }
+        )?;
         writeln!(f)?;
 
         // Print values in a compact format
@@ -143,7 +147,11 @@ impl fmt::Display for PacfResult {
         writeln!(f, "Lag    PACF")?;
         writeln!(f, "---    ----")?;
         for (lag, value) in self.lags.iter().zip(self.values.iter()) {
-            let sig = if value.abs() > self.confidence_bound { "*" } else { "" };
+            let sig = if value.abs() > self.confidence_bound {
+                "*"
+            } else {
+                ""
+            };
             writeln!(f, "{:3}    {:.4} {}", lag, value, sig)?;
         }
 
@@ -300,7 +308,8 @@ pub fn acf(
             let var = acvf[0];
             if var <= 0.0 {
                 return Err(EconError::InvalidSpecification {
-                    message: "Variance is zero or negative; cannot compute autocorrelation".to_string(),
+                    message: "Variance is zero or negative; cannot compute autocorrelation"
+                        .to_string(),
                 });
             }
             acvf.into_iter().map(|g| g / var).collect()
@@ -693,11 +702,7 @@ pub fn run_acf(
 /// let result = run_pacf(&dataset, "returns", Some(20))?;
 /// println!("{}", result);
 /// ```
-pub fn run_pacf(
-    dataset: &Dataset,
-    column: &str,
-    lag_max: Option<usize>,
-) -> EconResult<PacfResult> {
+pub fn run_pacf(dataset: &Dataset, column: &str, lag_max: Option<usize>) -> EconResult<PacfResult> {
     let x = extract_column(dataset, column)?;
     let mut result = pacf(&x, lag_max)?;
     result.series_name = Some(column.to_string());
@@ -833,12 +838,22 @@ mod tests {
         let n = x.len() as f64;
         let x_mean = x.iter().sum::<f64>() / n;
         let y_mean = y.iter().sum::<f64>() / n;
-        let cov: f64 = x.iter().zip(y.iter()).map(|(a, b)| (a - x_mean) * (b - y_mean)).sum::<f64>() / n;
+        let cov: f64 = x
+            .iter()
+            .zip(y.iter())
+            .map(|(a, b)| (a - x_mean) * (b - y_mean))
+            .sum::<f64>()
+            / n;
         let var_x: f64 = x.iter().map(|a| (a - x_mean).powi(2)).sum::<f64>() / n;
         let var_y: f64 = y.iter().map(|b| (b - y_mean).powi(2)).sum::<f64>() / n;
         let r = cov / (var_x.sqrt() * var_y.sqrt());
 
-        assert!(approx_eq(ccf_0, r, 1e-10), "CCF(0) = {} should equal r = {}", ccf_0, r);
+        assert!(
+            approx_eq(ccf_0, r, 1e-10),
+            "CCF(0) = {} should equal r = {}",
+            ccf_0,
+            r
+        );
     }
 
     #[test]
@@ -900,7 +915,7 @@ mod tests {
         //      0      1      2      3      4      5
         //  1.000  0.700  0.412  0.148 -0.079 -0.258
 
-        let r_values = vec![1.0, 0.700, 0.412, 0.148, -0.079, -0.258];
+        let r_values = [1.0, 0.700, 0.412, 0.148, -0.079, -0.258];
 
         for (i, (&computed, &expected)) in result.values.iter().zip(r_values.iter()).enumerate() {
             assert!(

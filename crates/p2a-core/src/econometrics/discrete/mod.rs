@@ -46,30 +46,30 @@ mod ordered_models;
 mod types;
 
 // Re-exports for types
-pub use types::{DiscreteModelType, DiscreteResult, MleSettings};
+pub use types::{DiscreteModelType, DiscreteResult};
 
 // Re-exports for binary choice models
-pub use binary_choice::{run_discrete_model, run_logit, run_probit};
+pub use binary_choice::{run_logit, run_probit};
 
 // Re-exports for multinomial logit
-pub use multinomial_logit::{run_multinom, MultinomResult};
+pub use multinomial_logit::{MultinomResult, run_multinom};
 
 // Re-exports for ordered models
-pub use ordered_models::{run_ordered_logit, run_ordered_probit, OrderedModelType, OrderedResult};
+pub use ordered_models::{OrderedModelType, OrderedResult, run_ordered_logit, run_ordered_probit};
 
 // Re-exports for count models
 pub use count_models::{
-    run_hurdle, run_negbin, run_zinb, run_zip, HurdleResult, HurdleType, NegBinResult,
-    ZeroInflResult, ZeroInflatedType,
+    HurdleResult, HurdleType, NegBinResult, ZeroInflResult, ZeroInflatedType, run_hurdle,
+    run_negbin, run_zinb, run_zip,
 };
 
 // Re-exports for conditional logit (mlogit)
-pub use conditional_logit::{run_conditional_logit, run_mlogit, MlogitResult};
+pub use conditional_logit::{MlogitResult, run_conditional_logit, run_mlogit};
 
 // Re-exports for mixed logit
 pub use mixed_logit::{
-    run_gmnl, run_mixl, run_mixed_logit, MixedLogitConfig, MixedLogitResult, RandomDistribution,
-    RandomParameterSpec,
+    MixedLogitConfig, MixedLogitResult, RandomDistribution, RandomParameterSpec, run_gmnl,
+    run_mixed_logit, run_mixl,
 };
 
 #[cfg(test)]
@@ -94,7 +94,7 @@ mod tests {
         let result = run_logit(&dataset, "y", &["x"]).unwrap();
 
         assert_eq!(result.n_obs, 10);
-        assert!(result.variables.len() >= 1);
+        assert!(!result.variables.is_empty());
         assert!(result.pseudo_r_squared > 0.3);
     }
 

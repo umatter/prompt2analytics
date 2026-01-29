@@ -178,7 +178,8 @@ pub fn extract_groups(
         .column(group_col)
         .map_err(|_| DesignError::ColumnNotFound(group_col.to_string()))?;
 
-    let mut groups: std::collections::HashMap<String, Vec<usize>> = std::collections::HashMap::new();
+    let mut groups: std::collections::HashMap<String, Vec<usize>> =
+        std::collections::HashMap::new();
 
     // Convert to string representation for grouping
     let str_values: Vec<String> = (0..series.len())
@@ -274,7 +275,6 @@ pub fn quasi_demean_within_groups(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use polars::prelude::*;
 
     fn create_test_df() -> DataFrame {
         df! {

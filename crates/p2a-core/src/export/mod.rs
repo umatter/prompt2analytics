@@ -96,6 +96,6 @@ mod latex;
 mod markdown;
 
 pub use csv::CsvExport;
-pub use html::{HtmlTableBuilder, HtmlStyle};
-pub use latex::{LatexTableBuilder, LatexStyle};
-pub use markdown::{MarkdownTableBuilder, MarkdownStyle};
+pub use html::{HtmlStyle, HtmlTableBuilder};
+pub use latex::{LatexStyle, LatexTableBuilder};
+pub use markdown::{MarkdownStyle, MarkdownTableBuilder};

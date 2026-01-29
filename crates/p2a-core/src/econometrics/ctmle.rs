@@ -61,7 +61,7 @@ use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
 use crate::linalg::design::DesignMatrix;
 use crate::linalg::matrix_ops::{safe_inverse, xtx, xty};
-use crate::traits::estimator::{logistic_cdf, normal_cdf, SignificanceLevel};
+use crate::traits::estimator::{SignificanceLevel, logistic_cdf, normal_cdf};
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Configuration Types
@@ -345,25 +345,52 @@ pub struct CTmleConfigSummary {
 
 impl fmt::Display for CTmleResult {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "Collaborative Targeted Maximum Likelihood Estimation (C-TMLE)")?;
-        writeln!(f, "=============================================================")?;
+        writeln!(
+            f,
+            "Collaborative Targeted Maximum Likelihood Estimation (C-TMLE)"
+        )?;
+        writeln!(
+            f,
+            "============================================================="
+        )?;
         writeln!(f)?;
         writeln!(f, "Treatment Effect (ATE):")?;
         writeln!(f, "  Estimate:   {:>12.4}", self.ate)?;
         writeln!(f, "  Std. Error: {:>12.4}", self.se)?;
         writeln!(f, "  z-stat:     {:>12.2}", self.z_stat)?;
-        writeln!(f, "  p-value:    {:>12.4}{}", self.p_value, self.significance.stars())?;
-        writeln!(f, "  95% CI:     [{:.4}, {:.4}]", self.ci_lower, self.ci_upper)?;
+        writeln!(
+            f,
+            "  p-value:    {:>12.4}{}",
+            self.p_value,
+            self.significance.stars()
+        )?;
+        writeln!(
+            f,
+            "  95% CI:     [{:.4}, {:.4}]",
+            self.ci_lower, self.ci_upper
+        )?;
         writeln!(f)?;
         writeln!(f, "Covariate Selection:")?;
-        writeln!(f, "  Selected: {} of {} candidates", self.n_selected, self.selection_path.len().saturating_sub(1))?;
+        writeln!(
+            f,
+            "  Selected: {} of {} candidates",
+            self.n_selected,
+            self.selection_path.len().saturating_sub(1)
+        )?;
         if !self.selected_covariate_names.is_empty() {
-            writeln!(f, "  Variables: {}", self.selected_covariate_names.join(", "))?;
+            writeln!(
+                f,
+                "  Variables: {}",
+                self.selected_covariate_names.join(", ")
+            )?;
         }
         writeln!(f)?;
         writeln!(f, "Sample:")?;
-        writeln!(f, "  Observations: {} (Treated: {}, Control: {})",
-                 self.n_obs, self.n_treated, self.n_control)?;
+        writeln!(
+            f,
+            "  Observations: {} (Treated: {}, Control: {})",
+            self.n_obs, self.n_treated, self.n_control
+        )?;
         writeln!(f)?;
         writeln!(f, "Configuration:")?;
         writeln!(f, "  CV Folds:       {}", self.config.n_folds)?;
@@ -371,7 +398,11 @@ impl fmt::Display for CTmleResult {
         writeln!(f, "  Selection:      {}", self.config.order)?;
         writeln!(f, "  CV Criterion:   {}", self.config.cv_criterion)?;
         writeln!(f, "  Outcome Model:  {}", self.config.q_model)?;
-        writeln!(f, "  PS Bounds:      [{:.3}, {:.3}]", self.config.gbound.0, self.config.gbound.1)?;
+        writeln!(
+            f,
+            "  PS Bounds:      [{:.3}, {:.3}]",
+            self.config.gbound.0, self.config.gbound.1
+        )?;
         writeln!(f)?;
 
         writeln!(f, "Selection Path:")?;
@@ -379,8 +410,11 @@ impl fmt::Display for CTmleResult {
         writeln!(f, "  -----|------------|-------------|-----------|--------")?;
         for (i, step) in self.selection_path.iter().enumerate() {
             let marker = if i == self.selected_step { " *" } else { "  " };
-            writeln!(f, "  {:>4} | {:>10} | {:>11.4} | {:>9.4} | {:>6.4}{}",
-                     i, step.n_covariates, step.cv_criterion, step.ate_estimate, step.ate_se, marker)?;
+            writeln!(
+                f,
+                "  {:>4} | {:>10} | {:>11.4} | {:>9.4} | {:>6.4}{}",
+                i, step.n_covariates, step.cv_criterion, step.ate_estimate, step.ate_se, marker
+            )?;
         }
         writeln!(f, "  (* = selected model)")?;
         writeln!(f)?;
@@ -529,12 +563,8 @@ pub fn ctmle(
     // ═══════════════════════════════════════════════════════════════════════
 
     let (q_init, q_beta, q_converged, _q_iterations) = match config.q_model {
-        CTmleQModel::Logistic => {
-            fit_logistic_model(&x_q, &y, config.max_iter, config.tolerance)?
-        }
-        CTmleQModel::Linear => {
-            fit_linear_model(&x_q, &y)?
-        }
+        CTmleQModel::Logistic => fit_logistic_model(&x_q, &y, config.max_iter, config.tolerance)?,
+        CTmleQModel::Linear => fit_linear_model(&x_q, &y)?,
     };
 
     if !q_converged {
@@ -545,8 +575,8 @@ pub fn ctmle(
     let mut x_q_1 = x_q.clone();
     let mut x_q_0 = x_q.clone();
     for i in 0..n {
-        x_q_1[[i, k_full]] = 1.0;  // Set A = 1
-        x_q_0[[i, k_full]] = 0.0;  // Set A = 0
+        x_q_1[[i, k_full]] = 1.0; // Set A = 1
+        x_q_0[[i, k_full]] = 0.0; // Set A = 0
     }
 
     let (q_1_init, q_0_init) = match config.q_model {
@@ -555,9 +585,7 @@ pub fn ctmle(
             let z_0: Array1<f64> = x_q_0.dot(&q_beta);
             (z_1.mapv(logistic_cdf), z_0.mapv(logistic_cdf))
         }
-        CTmleQModel::Linear => {
-            (x_q_1.dot(&q_beta), x_q_0.dot(&q_beta))
-        }
+        CTmleQModel::Linear => (x_q_1.dot(&q_beta), x_q_0.dot(&q_beta)),
     };
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -574,8 +602,8 @@ pub fn ctmle(
     let max_to_select = max_to_select.min(n_covariates);
 
     // Selection state
-    let mut selected: Vec<usize> = Vec::new();      // Indices of selected covariates
-    let mut available: Vec<usize> = (0..n_covariates).collect();  // Indices not yet selected
+    let mut selected: Vec<usize> = Vec::new(); // Indices of selected covariates
+    let mut available: Vec<usize> = (0..n_covariates).collect(); // Indices not yet selected
     let mut selection_path: Vec<SelectionStep> = Vec::new();
     let mut cv_risks: Vec<f64> = Vec::new();
     let mut best_cv = f64::INFINITY;
@@ -596,10 +624,18 @@ pub fn ctmle(
     // ═══════════════════════════════════════════════════════════════════════
 
     let (cv_rss_0, cv_rss_se_0, ate_0, ate_se_0) = evaluate_propensity_model_cv(
-        &y, &a, &q_init, &q_1_init, &q_0_init,
-        &covariate_data, &selected,
-        &folds, config.q_model, config.gbound,
-        config.max_iter, config.tolerance,
+        &y,
+        &a,
+        &q_init,
+        &q_1_init,
+        &q_0_init,
+        &covariate_data,
+        &selected,
+        &folds,
+        config.q_model,
+        config.gbound,
+        config.max_iter,
+        config.tolerance,
     )?;
 
     selection_path.push(SelectionStep {
@@ -630,19 +666,20 @@ pub fn ctmle(
         let mut best_ate_se_this_step = 0.0;
 
         // Determine which covariate to try based on selection order
-        let candidates: Vec<usize> = if !selection_indices.is_empty() && step < selection_indices.len() {
-            // Prespecified order: use the next one in sequence
-            let next_idx = selection_indices[step];
-            if available.contains(&next_idx) {
-                vec![next_idx]
+        let candidates: Vec<usize> =
+            if !selection_indices.is_empty() && step < selection_indices.len() {
+                // Prespecified order: use the next one in sequence
+                let next_idx = selection_indices[step];
+                if available.contains(&next_idx) {
+                    vec![next_idx]
+                } else {
+                    // Skip if already selected (shouldn't happen with proper input)
+                    continue;
+                }
             } else {
-                // Skip if already selected (shouldn't happen with proper input)
-                continue;
-            }
-        } else {
-            // Forward selection: try all available
-            available.clone()
-        };
+                // Forward selection: try all available
+                available.clone()
+            };
 
         // Try adding each candidate covariate
         for &cov_idx in &candidates {
@@ -652,10 +689,18 @@ pub fn ctmle(
 
             // Evaluate this propensity model via CV
             let (cv_rss, cv_rss_se, ate, ate_se) = evaluate_propensity_model_cv(
-                &y, &a, &q_init, &q_1_init, &q_0_init,
-                &covariate_data, &test_selected,
-                &folds, config.q_model, config.gbound,
-                config.max_iter, config.tolerance,
+                &y,
+                &a,
+                &q_init,
+                &q_1_init,
+                &q_0_init,
+                &covariate_data,
+                &test_selected,
+                &folds,
+                config.q_model,
+                config.gbound,
+                config.max_iter,
+                config.tolerance,
             )?;
 
             if cv_rss < best_cv_this_step {
@@ -670,8 +715,10 @@ pub fn ctmle(
         // Check stopping condition based on stop_factor
         if best_cv_this_step > config.stop_factor * best_cv {
             if config.verbose {
-                eprintln!("C-TMLE: Early stopping at step {} (CV risk {} > {} * {})",
-                         step, best_cv_this_step, config.stop_factor, best_cv);
+                eprintln!(
+                    "C-TMLE: Early stopping at step {} (CV risk {} > {} * {})",
+                    step, best_cv_this_step, config.stop_factor, best_cv
+                );
             }
             break;
         }
@@ -700,8 +747,13 @@ pub fn ctmle(
             cv_risks.push(best_cv_this_step);
 
             if config.verbose {
-                eprintln!("C-TMLE: Step {} added {} (CV: {:.4}, ATE: {:.4})",
-                         step + 1, covariate_names[idx], best_cv_this_step, best_ate_this_step);
+                eprintln!(
+                    "C-TMLE: Step {} added {} (CV: {:.4}, ATE: {:.4})",
+                    step + 1,
+                    covariate_names[idx],
+                    best_cv_this_step,
+                    best_ate_this_step
+                );
             }
         }
 
@@ -720,7 +772,8 @@ pub fn ctmle(
     let selected_step = match config.stopping_rule {
         StoppingRule::CVMinimum => {
             // Find step with minimum CV criterion
-            cv_risks.iter()
+            cv_risks
+                .iter()
                 .enumerate()
                 .min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
                 .map(|(i, _)| i)
@@ -728,18 +781,23 @@ pub fn ctmle(
         }
         StoppingRule::OneSE => {
             // Find minimum CV and its SE
-            let (min_idx, min_cv) = cv_risks.iter()
+            let (min_idx, min_cv) = cv_risks
+                .iter()
                 .enumerate()
                 .min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
                 .map(|(i, v)| (i, *v))
                 .unwrap_or((0, f64::INFINITY));
 
             // Get SE at minimum
-            let min_se = selection_path.get(min_idx).map(|s| s.cv_criterion_se).unwrap_or(0.0);
+            let min_se = selection_path
+                .get(min_idx)
+                .map(|s| s.cv_criterion_se)
+                .unwrap_or(0.0);
 
             // Find smallest model within 1 SE of minimum
             let threshold = min_cv + min_se;
-            cv_risks.iter()
+            cv_risks
+                .iter()
                 .enumerate()
                 .find(|(_, cv)| **cv <= threshold)
                 .map(|(i, _)| i)
@@ -807,19 +865,13 @@ pub fn ctmle(
 
     // Compute targeted predictions Q*(A,W)
     let q_star: Array1<f64> = match config.q_model {
-        CTmleQModel::Logistic => {
-            (0..n)
-                .map(|i| {
-                    let logit_q = logit(q_init[i]);
-                    logistic_cdf(logit_q + epsilon * h[i])
-                })
-                .collect()
-        }
-        CTmleQModel::Linear => {
-            (0..n)
-                .map(|i| q_init[i] + epsilon * h[i])
-                .collect()
-        }
+        CTmleQModel::Logistic => (0..n)
+            .map(|i| {
+                let logit_q = logit(q_init[i]);
+                logistic_cdf(logit_q + epsilon * h[i])
+            })
+            .collect(),
+        CTmleQModel::Linear => (0..n).map(|i| q_init[i] + epsilon * h[i]).collect(),
     };
 
     // Compute counterfactual clever covariates
@@ -844,20 +896,14 @@ pub fn ctmle(
             (q1, q0)
         }
         CTmleQModel::Linear => {
-            let q1 = (0..n)
-                .map(|i| q_1_init[i] + epsilon * h_1[i])
-                .collect();
-            let q0 = (0..n)
-                .map(|i| q_0_init[i] + epsilon * h_0[i])
-                .collect();
+            let q1 = (0..n).map(|i| q_1_init[i] + epsilon * h_1[i]).collect();
+            let q0 = (0..n).map(|i| q_0_init[i] + epsilon * h_0[i]).collect();
             (q1, q0)
         }
     };
 
     // Compute ATE
-    let ate: f64 = (0..n)
-        .map(|i| q_star_1[i] - q_star_0[i])
-        .sum::<f64>() / n as f64;
+    let ate: f64 = (0..n).map(|i| q_star_1[i] - q_star_0[i]).sum::<f64>() / n as f64;
 
     // Compute influence curve for variance
     let ic: Array1<f64> = (0..n)
@@ -870,8 +916,8 @@ pub fn ctmle(
 
     // Variance from influence curve
     let ic_mean: f64 = ic.iter().sum::<f64>() / n as f64;
-    let ic_var: f64 = ic.iter().map(|&ic_i| (ic_i - ic_mean).powi(2)).sum::<f64>()
-        / (n - 1).max(1) as f64;
+    let ic_var: f64 =
+        ic.iter().map(|&ic_i| (ic_i - ic_mean).powi(2)).sum::<f64>() / (n - 1).max(1) as f64;
     let ate_var = ic_var / n as f64;
     let se = ate_var.sqrt();
 
@@ -950,7 +996,13 @@ pub fn run_ctmle(
     treatment_col: &str,
     covariate_cols: &[&str],
 ) -> EconResult<CTmleResult> {
-    ctmle(dataset, outcome_col, treatment_col, covariate_cols, CTmleConfig::default())
+    ctmle(
+        dataset,
+        outcome_col,
+        treatment_col,
+        covariate_cols,
+        CTmleConfig::default(),
+    )
 }
 
 /// Run C-TMLE on array data directly.
@@ -978,8 +1030,10 @@ pub fn ctmle_arrays(
         return Err(EconError::InvalidSpecification {
             message: format!(
                 "Dimension mismatch: y has {} rows, treatment has {}, covariates has {}",
-                n, treatment.len(), covariates.nrows()
-            )
+                n,
+                treatment.len(),
+                covariates.nrows()
+            ),
         });
     }
 
@@ -988,17 +1042,18 @@ pub fn ctmle_arrays(
     let a_owned = treatment.to_owned();
 
     // Split covariates into individual vectors
-    let covariate_data: Vec<Array1<f64>> = (0..p)
-        .map(|j| covariates.column(j).to_owned())
-        .collect();
+    let covariate_data: Vec<Array1<f64>> =
+        (0..p).map(|j| covariates.column(j).to_owned()).collect();
 
-    let covariate_names: Vec<String> = (0..p)
-        .map(|j| format!("X{}", j + 1))
-        .collect();
+    let covariate_names: Vec<String> = (0..p).map(|j| format!("X{}", j + 1)).collect();
 
     // Run the core algorithm with array data
     ctmle_core(
-        &y_owned, &a_owned, &covariate_data, &covariate_names, config
+        &y_owned,
+        &a_owned,
+        &covariate_data,
+        &covariate_names,
+        config,
     )
 }
 
@@ -1032,7 +1087,8 @@ fn ctmle_core(
     }
 
     // Build full design matrix with all covariates (for Q model)
-    let w_full = build_design_matrix_subset(covariate_data, &(0..n_covariates).collect::<Vec<_>>(), n);
+    let w_full =
+        build_design_matrix_subset(covariate_data, &(0..n_covariates).collect::<Vec<_>>(), n);
     let k_full = w_full.ncols();
 
     // Build outcome model design: [intercept + covariates, A]
@@ -1046,12 +1102,8 @@ fn ctmle_core(
 
     // Fit outcome model
     let (q_init, q_beta, q_converged, _) = match config.q_model {
-        CTmleQModel::Logistic => {
-            fit_logistic_model(&x_q, y, config.max_iter, config.tolerance)?
-        }
-        CTmleQModel::Linear => {
-            fit_linear_model(&x_q, y)?
-        }
+        CTmleQModel::Logistic => fit_logistic_model(&x_q, y, config.max_iter, config.tolerance)?,
+        CTmleQModel::Linear => fit_linear_model(&x_q, y)?,
     };
 
     if !q_converged {
@@ -1072,16 +1124,17 @@ fn ctmle_core(
             let z_0: Array1<f64> = x_q_0.dot(&q_beta);
             (z_1.mapv(logistic_cdf), z_0.mapv(logistic_cdf))
         }
-        CTmleQModel::Linear => {
-            (x_q_1.dot(&q_beta), x_q_0.dot(&q_beta))
-        }
+        CTmleQModel::Linear => (x_q_1.dot(&q_beta), x_q_0.dot(&q_beta)),
     };
 
     // Generate CV folds
     let folds = create_cv_folds(n, config.n_folds);
 
     // Forward selection
-    let max_to_select = config.max_covariates.unwrap_or(n_covariates).min(n_covariates);
+    let max_to_select = config
+        .max_covariates
+        .unwrap_or(n_covariates)
+        .min(n_covariates);
     let mut selected: Vec<usize> = Vec::new();
     let mut available: Vec<usize> = (0..n_covariates).collect();
     let mut selection_path: Vec<SelectionStep> = Vec::new();
@@ -1090,10 +1143,18 @@ fn ctmle_core(
 
     // Step 0: Intercept-only model
     let (cv_rss_0, cv_rss_se_0, ate_0, ate_se_0) = evaluate_propensity_model_cv(
-        y, a, &q_init, &q_1_init, &q_0_init,
-        covariate_data, &selected,
-        &folds, config.q_model, config.gbound,
-        config.max_iter, config.tolerance,
+        y,
+        a,
+        &q_init,
+        &q_1_init,
+        &q_0_init,
+        covariate_data,
+        &selected,
+        &folds,
+        config.q_model,
+        config.gbound,
+        config.max_iter,
+        config.tolerance,
     )?;
 
     selection_path.push(SelectionStep {
@@ -1125,10 +1186,18 @@ fn ctmle_core(
             test_selected.push(cov_idx);
 
             let (cv_rss, cv_rss_se, ate, ate_se) = evaluate_propensity_model_cv(
-                y, a, &q_init, &q_1_init, &q_0_init,
-                covariate_data, &test_selected,
-                &folds, config.q_model, config.gbound,
-                config.max_iter, config.tolerance,
+                y,
+                a,
+                &q_init,
+                &q_1_init,
+                &q_0_init,
+                covariate_data,
+                &test_selected,
+                &folds,
+                config.q_model,
+                config.gbound,
+                config.max_iter,
+                config.tolerance,
             )?;
 
             if cv_rss < best_cv_this_step {
@@ -1174,32 +1243,34 @@ fn ctmle_core(
 
     // Select final model
     let selected_step = match config.stopping_rule {
-        StoppingRule::CVMinimum => {
-            cv_risks.iter()
-                .enumerate()
-                .min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-                .map(|(i, _)| i)
-                .unwrap_or(0)
-        }
+        StoppingRule::CVMinimum => cv_risks
+            .iter()
+            .enumerate()
+            .min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(i, _)| i)
+            .unwrap_or(0),
         StoppingRule::OneSE => {
-            let (min_idx, min_cv) = cv_risks.iter()
+            let (min_idx, min_cv) = cv_risks
+                .iter()
                 .enumerate()
                 .min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
                 .map(|(i, v)| (i, *v))
                 .unwrap_or((0, f64::INFINITY));
 
-            let min_se = selection_path.get(min_idx).map(|s| s.cv_criterion_se).unwrap_or(0.0);
+            let min_se = selection_path
+                .get(min_idx)
+                .map(|s| s.cv_criterion_se)
+                .unwrap_or(0.0);
             let threshold = min_cv + min_se;
 
-            cv_risks.iter()
+            cv_risks
+                .iter()
                 .enumerate()
                 .find(|(_, cv)| **cv <= threshold)
                 .map(|(i, _)| i)
                 .unwrap_or(min_idx)
         }
-        StoppingRule::MaxCovariates(_) => {
-            selection_path.len() - 1
-        }
+        StoppingRule::MaxCovariates(_) => selection_path.len() - 1,
     };
 
     let selected_covariates: Vec<usize> = if selected_step == 0 {
@@ -1218,7 +1289,8 @@ fn ctmle_core(
 
     // Fit final model on full data
     let w_g = build_design_matrix_subset(covariate_data, &selected_covariates, n);
-    let (g_raw, _, g_converged, _) = fit_logistic_model(&w_g, a, config.max_iter, config.tolerance)?;
+    let (g_raw, _, g_converged, _) =
+        fit_logistic_model(&w_g, a, config.max_iter, config.tolerance)?;
 
     if !g_converged {
         warnings.push("Final propensity score model did not converge".to_string());
@@ -1229,7 +1301,11 @@ fn ctmle_core(
 
     let h: Array1<f64> = (0..n)
         .map(|i| {
-            if a[i] >= 0.5 { 1.0 / g[i] } else { -1.0 / (1.0 - g[i]) }
+            if a[i] >= 0.5 {
+                1.0 / g[i]
+            } else {
+                -1.0 / (1.0 - g[i])
+            }
         })
         .collect();
 
@@ -1240,16 +1316,10 @@ fn ctmle_core(
     }
 
     let q_star: Array1<f64> = match config.q_model {
-        CTmleQModel::Logistic => {
-            (0..n)
-                .map(|i| logistic_cdf(logit(q_init[i]) + epsilon * h[i]))
-                .collect()
-        }
-        CTmleQModel::Linear => {
-            (0..n)
-                .map(|i| q_init[i] + epsilon * h[i])
-                .collect()
-        }
+        CTmleQModel::Logistic => (0..n)
+            .map(|i| logistic_cdf(logit(q_init[i]) + epsilon * h[i]))
+            .collect(),
+        CTmleQModel::Linear => (0..n).map(|i| q_init[i] + epsilon * h[i]).collect(),
     };
 
     let h_1: Array1<f64> = g.mapv(|gi| 1.0 / gi);
@@ -1266,33 +1336,29 @@ fn ctmle_core(
             (q1, q0)
         }
         CTmleQModel::Linear => {
-            let q1 = (0..n)
-                .map(|i| q_1_init[i] + epsilon * h_1[i])
-                .collect();
-            let q0 = (0..n)
-                .map(|i| q_0_init[i] + epsilon * h_0[i])
-                .collect();
+            let q1 = (0..n).map(|i| q_1_init[i] + epsilon * h_1[i]).collect();
+            let q0 = (0..n).map(|i| q_0_init[i] + epsilon * h_0[i]).collect();
             (q1, q0)
         }
     };
 
-    let ate: f64 = (0..n)
-        .map(|i| q_star_1[i] - q_star_0[i])
-        .sum::<f64>() / n as f64;
+    let ate: f64 = (0..n).map(|i| q_star_1[i] - q_star_0[i]).sum::<f64>() / n as f64;
 
     let ic: Array1<f64> = (0..n)
-        .map(|i| {
-            h[i] * (y[i] - q_star[i]) + q_star_1[i] - q_star_0[i] - ate
-        })
+        .map(|i| h[i] * (y[i] - q_star[i]) + q_star_1[i] - q_star_0[i] - ate)
         .collect();
 
     let ic_mean: f64 = ic.iter().sum::<f64>() / n as f64;
-    let ic_var: f64 = ic.iter().map(|&ic_i| (ic_i - ic_mean).powi(2)).sum::<f64>()
-        / (n - 1).max(1) as f64;
+    let ic_var: f64 =
+        ic.iter().map(|&ic_i| (ic_i - ic_mean).powi(2)).sum::<f64>() / (n - 1).max(1) as f64;
     let ate_var = ic_var / n as f64;
     let se = ate_var.sqrt();
 
-    let z_stat = if se > 0.0 && se.is_finite() { ate / se } else { 0.0 };
+    let z_stat = if se > 0.0 && se.is_finite() {
+        ate / se
+    } else {
+        0.0
+    };
     let z_crit = 1.96;
     let ci_lower = ate - z_crit * se;
     let ci_upper = ate + z_crit * se;
@@ -1364,23 +1430,23 @@ fn evaluate_propensity_model_cv(
 
     let h_full: Array1<f64> = (0..n)
         .map(|i| {
-            if a[i] >= 0.5 { 1.0 / g_full[i] } else { -1.0 / (1.0 - g_full[i]) }
+            if a[i] >= 0.5 {
+                1.0 / g_full[i]
+            } else {
+                -1.0 / (1.0 - g_full[i])
+            }
         })
         .collect();
 
     let (epsilon_full, _) = fit_targeting_model(y, q_init, &h_full, q_model)?;
 
     let q_star_full: Array1<f64> = match q_model {
-        CTmleQModel::Logistic => {
-            (0..n)
-                .map(|i| logistic_cdf(logit(q_init[i]) + epsilon_full * h_full[i]))
-                .collect()
-        }
-        CTmleQModel::Linear => {
-            (0..n)
-                .map(|i| q_init[i] + epsilon_full * h_full[i])
-                .collect()
-        }
+        CTmleQModel::Logistic => (0..n)
+            .map(|i| logistic_cdf(logit(q_init[i]) + epsilon_full * h_full[i]))
+            .collect(),
+        CTmleQModel::Linear => (0..n)
+            .map(|i| q_init[i] + epsilon_full * h_full[i])
+            .collect(),
     };
 
     let h_1_full: Array1<f64> = g_full.mapv(|gi| 1.0 / gi);
@@ -1409,7 +1475,8 @@ fn evaluate_propensity_model_cv(
 
     let ate_full: f64 = (0..n)
         .map(|i| q_star_1_full[i] - q_star_0_full[i])
-        .sum::<f64>() / n as f64;
+        .sum::<f64>()
+        / n as f64;
 
     let ic_full: Array1<f64> = (0..n)
         .map(|i| {
@@ -1418,7 +1485,10 @@ fn evaluate_propensity_model_cv(
         .collect();
 
     let ic_mean_full = ic_full.iter().sum::<f64>() / n as f64;
-    let ic_var_full = ic_full.iter().map(|&ic_i| (ic_i - ic_mean_full).powi(2)).sum::<f64>()
+    let ic_var_full = ic_full
+        .iter()
+        .map(|&ic_i| (ic_i - ic_mean_full).powi(2))
+        .sum::<f64>()
         / (n - 1).max(1) as f64;
     let ate_se_full = (ic_var_full / n as f64).sqrt();
 
@@ -1440,16 +1510,19 @@ fn evaluate_propensity_model_cv(
         let a_train: Array1<f64> = train_indices.iter().map(|&i| a[i]).collect();
 
         // Build training design matrix for propensity
-        let w_train = build_design_matrix_subset_indexed(covariate_data, selected_covariates, &train_indices);
+        let w_train =
+            build_design_matrix_subset_indexed(covariate_data, selected_covariates, &train_indices);
 
         // Fit propensity model on training data
-        let (_g_train_raw, g_beta, _, _) = match fit_logistic_model(&w_train, &a_train, max_iter, tolerance) {
-            Ok(result) => result,
-            Err(_) => continue, // Skip this fold if fitting fails
-        };
+        let (_g_train_raw, g_beta, _, _) =
+            match fit_logistic_model(&w_train, &a_train, max_iter, tolerance) {
+                Ok(result) => result,
+                Err(_) => continue, // Skip this fold if fitting fails
+            };
 
         // Predict propensity scores on test data
-        let w_test = build_design_matrix_subset_indexed(covariate_data, selected_covariates, test_indices);
+        let w_test =
+            build_design_matrix_subset_indexed(covariate_data, selected_covariates, test_indices);
         let g_test_raw: Array1<f64> = w_test.dot(&g_beta).mapv(logistic_cdf);
         let g_test: Array1<f64> = g_test_raw.mapv(|gi| gi.max(ps_min).min(ps_max));
 
@@ -1461,7 +1534,11 @@ fn evaluate_propensity_model_cv(
         // Compute clever covariate on test set using test propensity scores
         let h_test: Array1<f64> = (0..n_test)
             .map(|i| {
-                if a_test[i] >= 0.5 { 1.0 / g_test[i] } else { -1.0 / (1.0 - g_test[i]) }
+                if a_test[i] >= 0.5 {
+                    1.0 / g_test[i]
+                } else {
+                    -1.0 / (1.0 - g_test[i])
+                }
             })
             .collect();
 
@@ -1473,16 +1550,12 @@ fn evaluate_propensity_model_cv(
 
         // Compute Q* on test set
         let q_star_test: Array1<f64> = match q_model {
-            CTmleQModel::Logistic => {
-                (0..n_test)
-                    .map(|i| logistic_cdf(logit(q_init_test[i]) + epsilon_test * h_test[i]))
-                    .collect()
-            }
-            CTmleQModel::Linear => {
-                (0..n_test)
-                    .map(|i| q_init_test[i] + epsilon_test * h_test[i])
-                    .collect()
-            }
+            CTmleQModel::Logistic => (0..n_test)
+                .map(|i| logistic_cdf(logit(q_init_test[i]) + epsilon_test * h_test[i]))
+                .collect(),
+            CTmleQModel::Linear => (0..n_test)
+                .map(|i| q_init_test[i] + epsilon_test * h_test[i])
+                .collect(),
         };
 
         // Compute RSS on test set: sum((Y - Q*)^2)
@@ -1501,9 +1574,11 @@ fn evaluate_propensity_model_cv(
 
     let cv_rss_mean: f64 = fold_rss.iter().sum::<f64>() / fold_rss.len() as f64;
     let cv_rss_se = if fold_rss.len() > 1 {
-        let variance: f64 = fold_rss.iter()
+        let variance: f64 = fold_rss
+            .iter()
             .map(|&x| (x - cv_rss_mean).powi(2))
-            .sum::<f64>() / (fold_rss.len() - 1) as f64;
+            .sum::<f64>()
+            / (fold_rss.len() - 1) as f64;
         (variance / fold_rss.len() as f64).sqrt()
     } else {
         0.0
@@ -1630,12 +1705,11 @@ fn fit_logistic_model(
         }
 
         let neg_hessian = &hessian * -1.0;
-        let (hess_inv, _) = safe_inverse(&neg_hessian.view()).map_err(|e| {
-            EconError::SingularMatrix {
+        let (hess_inv, _) =
+            safe_inverse(&neg_hessian.view()).map_err(|e| EconError::SingularMatrix {
                 context: "Logistic regression Hessian".to_string(),
                 suggestion: format!("Check for multicollinearity: {:?}", e),
-            }
-        })?;
+            })?;
 
         let delta = hess_inv.dot(&gradient);
         beta = &beta + &delta;
@@ -1653,11 +1727,9 @@ fn fit_linear_model(
     y: &Array1<f64>,
 ) -> EconResult<(Array1<f64>, Array1<f64>, bool, usize)> {
     let xtx_mat = xtx(&x.view());
-    let (xtx_inv, _) = safe_inverse(&xtx_mat.view()).map_err(|e| {
-        EconError::SingularMatrix {
-            context: "Linear regression X'X matrix".to_string(),
-            suggestion: format!("Check for multicollinearity: {:?}", e),
-        }
+    let (xtx_inv, _) = safe_inverse(&xtx_mat.view()).map_err(|e| EconError::SingularMatrix {
+        context: "Linear regression X'X matrix".to_string(),
+        suggestion: format!("Check for multicollinearity: {:?}", e),
     })?;
 
     let xty_vec = xty(&x.view(), y);
@@ -1692,9 +1764,7 @@ fn fit_targeting_model(
                     .collect();
                 let p_clipped: Array1<f64> = p.mapv(|pi| pi.max(1e-10).min(1.0 - 1e-10));
 
-                let score: f64 = (0..n)
-                    .map(|i| h[i] * (y[i] - p_clipped[i]))
-                    .sum();
+                let score: f64 = (0..n).map(|i| h[i] * (y[i] - p_clipped[i])).sum();
 
                 if score.abs() < tolerance {
                     converged = true;
@@ -1718,9 +1788,7 @@ fn fit_targeting_model(
             Ok((epsilon, converged))
         }
         CTmleQModel::Linear => {
-            let numerator: f64 = (0..n)
-                .map(|i| h[i] * (y[i] - q_init[i]))
-                .sum();
+            let numerator: f64 = (0..n).map(|i| h[i] * (y[i] - q_init[i])).sum();
             let denominator: f64 = h.iter().map(|&hi| hi * hi).sum::<f64>();
 
             if denominator.abs() < 1e-10 {
@@ -1798,7 +1866,8 @@ mod tests {
                 0.55, 0.45, 0.5, 0.52, 0.48, 0.54, 0.46, 0.56, 0.44, 0.58,
                 0.52, 0.48, 0.54, 0.46, 0.5, 0.56, 0.44, 0.58, 0.42, 0.6
             ]
-        }.unwrap();
+        }
+        .unwrap();
         Dataset::new(df)
     }
 
@@ -1809,10 +1878,10 @@ mod tests {
         // Use simpler configuration for small sample size
         // C-TMLE with 4 covariates on n=40 is unstable
         let config = CTmleConfig {
-            n_folds: 3,  // Fewer folds for stability
-            max_covariates: Some(2),  // Limit complexity
+            n_folds: 3,              // Fewer folds for stability
+            max_covariates: Some(2), // Limit complexity
             stopping_rule: StoppingRule::MaxCovariates(2),
-            q_model: CTmleQModel::Linear,  // More stable with small samples
+            q_model: CTmleQModel::Linear, // More stable with small samples
             ..Default::default()
         };
 
@@ -1825,19 +1894,31 @@ mod tests {
 
         // With linear Q model and limited covariates, ATE should be positive
         // Binary outcome: treated 17/20 Y=1, control 7/20 Y=1
-        assert!(result.ate.is_finite(), "ATE should be finite, got {}", result.ate);
+        assert!(
+            result.ate.is_finite(),
+            "ATE should be finite, got {}",
+            result.ate
+        );
 
         // SE should be reasonable
-        assert!(result.se > 0.0 && result.se.is_finite(),
-                "SE should be positive and finite, got {}", result.se);
+        assert!(
+            result.se > 0.0 && result.se.is_finite(),
+            "SE should be positive and finite, got {}",
+            result.se
+        );
 
         // Selection path should have at least intercept step
-        assert!(!result.selection_path.is_empty(),
-                "Selection path should not be empty");
+        assert!(
+            !result.selection_path.is_empty(),
+            "Selection path should not be empty"
+        );
 
         // CV risks should match selection path length
-        assert_eq!(result.cv_risk.len(), result.selection_path.len(),
-                   "CV risk and selection path should have same length");
+        assert_eq!(
+            result.cv_risk.len(),
+            result.selection_path.len(),
+            "CV risk and selection path should have same length"
+        );
     }
 
     #[test]
@@ -1845,7 +1926,7 @@ mod tests {
         let dataset = create_ctmle_test_dataset();
 
         let config = CTmleConfig {
-            n_folds: 3,  // Fewer folds for small sample
+            n_folds: 3, // Fewer folds for small sample
             max_covariates: Some(2),
             stopping_rule: StoppingRule::MaxCovariates(2),
             order: SelectionOrder::Forward,
@@ -1855,15 +1936,28 @@ mod tests {
             ..Default::default()
         };
 
-        let result = ctmle(&dataset, "y", "treatment", &["w1", "w2", "w3", "w4"], config).unwrap();
+        let result = ctmle(
+            &dataset,
+            "y",
+            "treatment",
+            &["w1", "w2", "w3", "w4"],
+            config,
+        )
+        .unwrap();
 
         // Should have selected at most 2 covariates
-        assert!(result.n_selected <= 2,
-                "Should have at most 2 covariates, got {}", result.n_selected);
+        assert!(
+            result.n_selected <= 2,
+            "Should have at most 2 covariates, got {}",
+            result.n_selected
+        );
 
         // ATE should still be reasonable
-        assert!(result.ate > 0.1 && result.ate < 1.0,
-                "ATE should be reasonable, got {}", result.ate);
+        assert!(
+            result.ate > 0.1 && result.ate < 1.0,
+            "ATE should be reasonable, got {}",
+            result.ate
+        );
     }
 
     #[test]
@@ -1876,11 +1970,18 @@ mod tests {
             ..Default::default()
         };
 
-        let result = ctmle(&dataset, "y", "treatment", &["w1", "w2", "w3", "w4"], config).unwrap();
+        let result = ctmle(
+            &dataset,
+            "y",
+            "treatment",
+            &["w1", "w2", "w3", "w4"],
+            config,
+        )
+        .unwrap();
 
         // One-SE rule should select a sparser model than CV minimum
         // (or the same if minimum is already very simple)
-        assert!(result.selected_step <= result.selection_path.len() - 1);
+        assert!(result.selected_step < result.selection_path.len());
     }
 
     #[test]
@@ -1889,20 +1990,28 @@ mod tests {
         let result = run_ctmle(&dataset, "y", "treatment", &["w1", "w2", "w3", "w4"]).unwrap();
 
         // First step should be intercept only
-        assert!(result.selection_path[0].covariate_index.is_none(),
-                "First step should be intercept-only");
+        assert!(
+            result.selection_path[0].covariate_index.is_none(),
+            "First step should be intercept-only"
+        );
         assert_eq!(result.selection_path[0].n_covariates, 0);
 
         // Each subsequent step should add one covariate
         for i in 1..result.selection_path.len() {
-            assert_eq!(result.selection_path[i].n_covariates, i,
-                       "Step {} should have {} covariates", i, i);
+            assert_eq!(
+                result.selection_path[i].n_covariates, i,
+                "Step {} should have {} covariates",
+                i, i
+            );
         }
 
         // CV criterion should be non-negative
         for step in &result.selection_path {
-            assert!(step.cv_criterion >= 0.0,
-                    "CV criterion should be non-negative, got {}", step.cv_criterion);
+            assert!(
+                step.cv_criterion >= 0.0,
+                "CV criterion should be non-negative, got {}",
+                step.cv_criterion
+            );
         }
     }
 
@@ -1922,9 +2031,12 @@ mod tests {
 
         // IC variance should be positive (used for SE calculation)
         let ic_mean: f64 = result.influence_curve.iter().sum::<f64>() / result.n_obs as f64;
-        let ic_var: f64 = result.influence_curve.iter()
+        let ic_var: f64 = result
+            .influence_curve
+            .iter()
             .map(|&ic| (ic - ic_mean).powi(2))
-            .sum::<f64>() / (result.n_obs - 1) as f64;
+            .sum::<f64>()
+            / (result.n_obs - 1) as f64;
         assert!(ic_var > 0.0, "IC variance should be positive");
     }
 
@@ -1983,41 +2095,54 @@ mod tests {
             ..Default::default()
         };
 
-        let result = ctmle(&dataset, "y", "treatment", &["w1", "w2", "w3", "w4"], config).unwrap();
+        let result = ctmle(
+            &dataset,
+            "y",
+            "treatment",
+            &["w1", "w2", "w3", "w4"],
+            config,
+        )
+        .unwrap();
 
         // Should have followed the specified order (at least partially)
         // Check that we got some covariates selected
-        assert!(result.selection_path.len() >= 1,
-                "Should have at least intercept step");
+        assert!(
+            !result.selection_path.is_empty(),
+            "Should have at least intercept step"
+        );
     }
 
     /// Test that C-TMLE with array inputs works.
     #[test]
     fn test_ctmle_arrays() {
-        use ndarray::{array, Array2};
+        use ndarray::{Array2, array};
 
         let y = array![
-            0.9, 1.1, 0.8, 1.2, 0.95, 0.85, 1.15, 0.92, 1.08, 0.88,
-            0.3, 0.5, 0.25, 0.55, 0.35, 0.28, 0.58, 0.32, 0.52, 0.38
+            0.9, 1.1, 0.8, 1.2, 0.95, 0.85, 1.15, 0.92, 1.08, 0.88, 0.3, 0.5, 0.25, 0.55, 0.35,
+            0.28, 0.58, 0.32, 0.52, 0.38
         ];
         let treatment = array![
-            1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
-            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+            1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+            0.0, 0.0, 0.0
         ];
-        let covariates = Array2::from_shape_vec((20, 2), vec![
-            0.6, 0.55, 0.8, 0.7, 0.5, 0.5, 0.9, 0.75, 0.55, 0.52,
-            0.45, 0.48, 0.85, 0.72, 0.58, 0.54, 0.78, 0.68, 0.62, 0.58,
-            0.3, 0.4, 0.5, 0.55, 0.25, 0.38, 0.55, 0.58, 0.35, 0.42,
-            0.28, 0.36, 0.52, 0.54, 0.32, 0.44, 0.48, 0.52, 0.38, 0.48,
-        ]).unwrap();
+        let covariates = Array2::from_shape_vec(
+            (20, 2),
+            vec![
+                0.6, 0.55, 0.8, 0.7, 0.5, 0.5, 0.9, 0.75, 0.55, 0.52, 0.45, 0.48, 0.85, 0.72, 0.58,
+                0.54, 0.78, 0.68, 0.62, 0.58, 0.3, 0.4, 0.5, 0.55, 0.25, 0.38, 0.55, 0.58, 0.35,
+                0.42, 0.28, 0.36, 0.52, 0.54, 0.32, 0.44, 0.48, 0.52, 0.38, 0.48,
+            ],
+        )
+        .unwrap();
 
         let config = CTmleConfig {
-            n_folds: 2,  // Small folds for small data
+            n_folds: 2, // Small folds for small data
             max_covariates: Some(2),
             ..Default::default()
         };
 
-        let result = ctmle_arrays(&y.view(), &treatment.view(), &covariates.view(), config).unwrap();
+        let result =
+            ctmle_arrays(&y.view(), &treatment.view(), &covariates.view(), config).unwrap();
 
         assert_eq!(result.n_obs, 20);
         assert!(result.ate.is_finite());

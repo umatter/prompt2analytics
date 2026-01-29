@@ -2,7 +2,7 @@
 
 use dioxus::prelude::*;
 
-use crate::api::{api, DatasetMeta, ReloadResult};
+use crate::api::{DatasetMeta, ReloadResult, api};
 use crate::components::{DatasetInspectorModal, P2aIconMinimal};
 use crate::state::SessionState;
 

@@ -18,16 +18,16 @@
 //! - n >= 10,000 && d <= 15: Dual-Tree Boruvka (best scaling)
 //! - d > 15: Parallel brute-force (KD-tree degrades in high dimensions)
 
+use faer::linalg::solvers::Solve;
 use ndarray::{Array2, ArrayView2, Axis};
 use rand::prelude::*;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::collections::{BinaryHeap, HashMap};
 use std::cmp::Ordering;
-use faer::linalg::solvers::Solve;
+use std::collections::{BinaryHeap, HashMap};
 
-use crate::ml::kdtree::{euclidean_distance, KdTree, UnionFind, build_connected_mst, kruskal_mst};
 use crate::ml::dual_tree::kdtree_prim_mst;
+use crate::ml::kdtree::{KdTree, UnionFind, euclidean_distance, kruskal_mst};
 
 // =============================================================================
 // Algorithm Selection
@@ -110,7 +110,11 @@ impl std::fmt::Display for KMedoidsResult {
         writeln!(f)?;
         writeln!(f, "Cluster sizes:")?;
         for (i, count) in cluster_counts.iter().enumerate() {
-            writeln!(f, "  Cluster {}: {} points (medoid: {})", i, count, self.medoid_indices[i])?;
+            writeln!(
+                f,
+                "  Cluster {}: {} points (medoid: {})",
+                i, count, self.medoid_indices[i]
+            )?;
         }
         Ok(())
     }
@@ -175,7 +179,7 @@ pub fn kmedoids(
 
         // Try swapping each medoid with each non-medoid
         for m_idx in 0..k {
-            let current_medoid = medoid_indices[m_idx];
+            let _current_medoid = medoid_indices[m_idx];
 
             for candidate in 0..n {
                 // Skip if candidate is already a medoid
@@ -234,7 +238,7 @@ pub fn kmedoids(
 fn build_medoids(distances: &Array2<f64>, k: usize, seed: Option<u64>) -> Vec<usize> {
     let n = distances.nrows();
     let mut medoids = Vec::with_capacity(k);
-    let mut rng = match seed {
+    let _rng = match seed {
         Some(s) => StdRng::seed_from_u64(s),
         None => StdRng::from_entropy(),
     };
@@ -264,7 +268,8 @@ fn build_medoids(distances: &Array2<f64>, k: usize, seed: Option<u64>) -> Vec<us
             // Compute gain from adding this candidate
             let mut gain = 0.0;
             for i in 0..n {
-                let current_min: f64 = medoids.iter()
+                let current_min: f64 = medoids
+                    .iter()
                     .map(|&m| distances[[i, m]])
                     .fold(f64::INFINITY, |a, b| a.min(b));
                 let new_dist = distances[[i, candidate]];
@@ -288,20 +293,22 @@ fn build_medoids(distances: &Array2<f64>, k: usize, seed: Option<u64>) -> Vec<us
 /// Assign each point to its nearest medoid.
 fn assign_to_medoids(distances: &Array2<f64>, medoids: &[usize]) -> Vec<usize> {
     let n = distances.nrows();
-    let k = medoids.len();
+    let _k = medoids.len();
 
-    (0..n).map(|i| {
-        let mut min_dist = f64::INFINITY;
-        let mut best_cluster = 0;
-        for (cluster, &medoid) in medoids.iter().enumerate() {
-            let dist = distances[[i, medoid]];
-            if dist < min_dist {
-                min_dist = dist;
-                best_cluster = cluster;
+    (0..n)
+        .map(|i| {
+            let mut min_dist = f64::INFINITY;
+            let mut best_cluster = 0;
+            for (cluster, &medoid) in medoids.iter().enumerate() {
+                let dist = distances[[i, medoid]];
+                if dist < min_dist {
+                    min_dist = dist;
+                    best_cluster = cluster;
+                }
             }
-        }
-        best_cluster
-    }).collect()
+            best_cluster
+        })
+        .collect()
 }
 
 /// Compute total dissimilarity (sum of distances to assigned medoids).
@@ -310,7 +317,9 @@ fn compute_total_dissimilarity(
     labels: &[usize],
     medoids: &[usize],
 ) -> f64 {
-    labels.iter().enumerate()
+    labels
+        .iter()
+        .enumerate()
         .map(|(i, &label)| distances[[i, medoids[label]]])
         .sum()
 }
@@ -442,7 +451,8 @@ pub fn spectral_clustering(
 
     if n_clusters == 0 || n_clusters > n {
         return Err(format!(
-            "n_clusters must be between 1 and {} (n_samples)", n
+            "n_clusters must be between 1 and {} (n_samples)",
+            n
         ));
     }
 
@@ -474,10 +484,7 @@ pub fn spectral_clustering(
     };
 
     // Compute normalized Laplacian and its eigenvectors
-    let (eigenvalues, eigenvectors) = compute_laplacian_eigenvectors(
-        &affinity_matrix,
-        n_clusters,
-    )?;
+    let (eigenvalues, eigenvectors) = compute_laplacian_eigenvectors(&affinity_matrix, n_clusters)?;
 
     // Cluster the eigenvector embeddings with k-means
     let labels = cluster_eigenvectors(&eigenvectors, n_clusters, seed)?;
@@ -554,12 +561,11 @@ fn compute_laplacian_eigenvectors(
     let n = affinity.nrows();
 
     // Compute degree matrix D
-    let degrees: Vec<f64> = (0..n)
-        .map(|i| affinity.row(i).sum())
-        .collect();
+    let degrees: Vec<f64> = (0..n).map(|i| affinity.row(i).sum()).collect();
 
     // Compute D^(-1/2)
-    let d_inv_sqrt: Vec<f64> = degrees.iter()
+    let d_inv_sqrt: Vec<f64> = degrees
+        .iter()
         .map(|&d| if d > 1e-10 { 1.0 / d.sqrt() } else { 0.0 })
         .collect();
 
@@ -660,9 +666,7 @@ fn cluster_eigenvectors(
     }
 
     // Run k-means
-    let result = crate::ml::kmeans(
-        normalized.view(), k, Some(100), Some(1e-4), Some(10), seed,
-    )?;
+    let result = crate::ml::kmeans(normalized.view(), k, Some(100), Some(1e-4), Some(10), seed)?;
 
     Ok(result.labels)
 }
@@ -725,8 +729,11 @@ impl std::fmt::Display for AffinityPropagationResult {
         writeln!(f)?;
         writeln!(f, "Cluster sizes:")?;
         for (i, count) in cluster_counts.iter().enumerate() {
-            writeln!(f, "  Cluster {}: {} points (exemplar: {})",
-                     i, count, self.exemplar_indices[i])?;
+            writeln!(
+                f,
+                "  Cluster {}: {} points (exemplar: {})",
+                i, count, self.exemplar_indices[i]
+            )?;
         }
         Ok(())
     }
@@ -774,7 +781,7 @@ pub fn affinity_propagation(
     }
 
     let damp = damping.unwrap_or(0.5);
-    if damp < 0.5 || damp >= 1.0 {
+    if !(0.5..1.0).contains(&damp) {
         return Err("Damping must be between 0.5 and 1.0".to_string());
     }
 
@@ -806,7 +813,11 @@ pub fn affinity_propagation(
             }
         }
         sims.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
-        if sims.is_empty() { 0.0 } else { sims[sims.len() / 2] }
+        if sims.is_empty() {
+            0.0
+        } else {
+            sims[sims.len() / 2]
+        }
     });
     for i in 0..n {
         similarity[[i, i]] = pref;
@@ -856,7 +867,11 @@ pub fn affinity_propagation(
         // Compute new responsibilities using precomputed max values
         for i in 0..n {
             for k in 0..n {
-                let max_other = if k == row_argmax[i] { row_max2[i] } else { row_max1[i] };
+                let max_other = if k == row_argmax[i] {
+                    row_max2[i]
+                } else {
+                    row_max1[i]
+                };
                 let r_new = similarity[[i, k]] - max_other;
                 responsibility[[i, k]] = damp * responsibility[[i, k]] + (1.0 - damp) * r_new;
             }
@@ -893,7 +908,7 @@ pub fn affinity_propagation(
         }
 
         // Check convergence: exemplars are stable
-        let mut exemplars: Vec<bool> = (0..n)
+        let exemplars: Vec<bool> = (0..n)
             .map(|k| responsibility[[k, k]] + availability[[k, k]] > 0.0)
             .collect();
 
@@ -914,7 +929,8 @@ pub fn affinity_propagation(
         .map(|k| responsibility[[k, k]] + availability[[k, k]] > 0.0)
         .collect();
 
-    let exemplar_indices: Vec<usize> = exemplar_mask.iter()
+    let exemplar_indices: Vec<usize> = exemplar_mask
+        .iter()
         .enumerate()
         .filter(|&(_, is_ex)| *is_ex)
         .map(|(i, _)| i)
@@ -941,7 +957,9 @@ pub fn affinity_propagation(
     }
 
     // Compute net similarity
-    let net_similarity: f64 = labels.iter().enumerate()
+    let net_similarity: f64 = labels
+        .iter()
+        .enumerate()
         .map(|(i, &label)| {
             if label < exemplar_indices.len() {
                 similarity[[i, exemplar_indices[label]]]
@@ -1016,7 +1034,10 @@ impl std::fmt::Display for OpticsResult {
             writeln!(f, "Xi: {:.4}", xi)?;
         }
         writeln!(f)?;
-        writeln!(f, "Reachability plot data available in 'ordering' and 'reachability' fields")?;
+        writeln!(
+            f,
+            "Reachability plot data available in 'ordering' and 'reachability' fields"
+        )?;
 
         let mut cluster_counts: HashMap<i32, usize> = HashMap::new();
         for &label in &self.labels {
@@ -1091,14 +1112,16 @@ pub fn optics(
 
     // Select algorithm and compute core distances
     let algorithm = select_algorithm(n, d);
-    let use_kdtree = matches!(algorithm, ClusteringAlgorithm::KdTreePrim | ClusteringAlgorithm::DualTreeBoruvka);
+    let use_kdtree = matches!(
+        algorithm,
+        ClusteringAlgorithm::KdTreePrim | ClusteringAlgorithm::DualTreeBoruvka
+    );
 
     let (distances, core_distances, tree_opt) = if use_kdtree {
-        let data_vecs: Vec<Vec<f64>> = (0..n)
-            .map(|i| data.row(i).to_vec())
-            .collect();
+        let data_vecs: Vec<Vec<f64>> = (0..n).map(|i| data.row(i).to_vec()).collect();
         let tree = KdTree::new(data_vecs);
-        let core_dists = tree.compute_core_distances(min_samples)
+        let core_dists = tree
+            .compute_core_distances(min_samples)
             .into_iter()
             .map(|cd| cd.min(eps))
             .collect::<Vec<_>>();
@@ -1111,21 +1134,23 @@ pub fn optics(
             compute_distance_matrix(&data)
         };
 
-        let core_distances: Vec<f64> = (0..n).map(|i| {
-            let mut dists: Vec<f64> = (0..n)
-                .filter(|&j| i != j)
-                .map(|j| distances[[i, j]])
-                .collect();
+        let core_distances: Vec<f64> = (0..n)
+            .map(|i| {
+                let mut dists: Vec<f64> = (0..n)
+                    .filter(|&j| i != j)
+                    .map(|j| distances[[i, j]])
+                    .collect();
 
-            if dists.len() >= min_samples {
-                dists.select_nth_unstable_by(min_samples - 1, |a, b| {
-                    a.partial_cmp(b).unwrap_or(Ordering::Equal)
-                });
-                dists[min_samples - 1].min(eps)
-            } else {
-                f64::INFINITY
-            }
-        }).collect();
+                if dists.len() >= min_samples {
+                    dists.select_nth_unstable_by(min_samples - 1, |a, b| {
+                        a.partial_cmp(b).unwrap_or(Ordering::Equal)
+                    });
+                    dists[min_samples - 1].min(eps)
+                } else {
+                    f64::INFINITY
+                }
+            })
+            .collect();
 
         (Some(distances), core_distances, None)
     };
@@ -1147,7 +1172,9 @@ pub fn optics(
     impl Ord for OrderedPoint {
         fn cmp(&self, other: &Self) -> Ordering {
             // Reverse for min-heap
-            other.reachability.partial_cmp(&self.reachability)
+            other
+                .reachability
+                .partial_cmp(&self.reachability)
                 .unwrap_or(Ordering::Equal)
         }
     }
@@ -1191,14 +1218,21 @@ pub fn optics(
                     let new_reach = core_distances[start].max(dist);
                     if new_reach < reachability[j] {
                         reachability[j] = new_reach;
-                        seeds.push(OrderedPoint { reachability: new_reach, index: j });
+                        seeds.push(OrderedPoint {
+                            reachability: new_reach,
+                            index: j,
+                        });
                     }
                 }
             }
         }
 
         // Process seeds
-        while let Some(OrderedPoint { index: p, reachability: _ }) = seeds.pop() {
+        while let Some(OrderedPoint {
+            index: p,
+            reachability: _,
+        }) = seeds.pop()
+        {
             if processed[p] {
                 continue;
             }
@@ -1214,7 +1248,10 @@ pub fn optics(
                         let new_reach = core_distances[p].max(dist);
                         if new_reach < reachability[j] {
                             reachability[j] = new_reach;
-                            seeds.push(OrderedPoint { reachability: new_reach, index: j });
+                            seeds.push(OrderedPoint {
+                                reachability: new_reach,
+                                index: j,
+                            });
                         }
                     }
                 }
@@ -1227,7 +1264,8 @@ pub fn optics(
         extract_clusters_xi(&ordering, &reachability, xi_val)
     } else {
         // Use median reachability as threshold
-        let mut sorted_reach: Vec<f64> = reachability.iter()
+        let mut sorted_reach: Vec<f64> = reachability
+            .iter()
             .filter(|&&r| r.is_finite())
             .cloned()
             .collect();
@@ -1240,13 +1278,16 @@ pub fn optics(
         extract_clusters_threshold(&ordering, &reachability, threshold)
     };
 
-    let n_clusters = labels.iter().filter(|&&l| l >= 0).map(|&l| l).max().map_or(0, |m| m as usize + 1);
+    let n_clusters = labels
+        .iter()
+        .filter(|&&l| l >= 0)
+        .copied()
+        .max()
+        .map_or(0, |m| m as usize + 1);
     let n_noise = labels.iter().filter(|&&l| l == -1).count();
 
     // Reorder reachability to match ordering
-    let reachability_ordered: Vec<f64> = ordering.iter()
-        .map(|&i| reachability[i])
-        .collect();
+    let reachability_ordered: Vec<f64> = ordering.iter().map(|&i| reachability[i]).collect();
 
     Ok(OpticsResult {
         ordering,
@@ -1297,7 +1338,7 @@ fn extract_clusters_xi(ordering: &[usize], reachability: &[f64], xi: f64) -> Vec
         }
 
         if in_cluster {
-            labels[curr_idx] = current_cluster as i32;
+            labels[curr_idx] = current_cluster;
         }
     }
 
@@ -1305,7 +1346,11 @@ fn extract_clusters_xi(ordering: &[usize], reachability: &[f64], xi: f64) -> Vec
 }
 
 /// Extract clusters using simple reachability threshold.
-fn extract_clusters_threshold(ordering: &[usize], reachability: &[f64], threshold: f64) -> Vec<i32> {
+fn extract_clusters_threshold(
+    ordering: &[usize],
+    reachability: &[f64],
+    threshold: f64,
+) -> Vec<i32> {
     let n = ordering.len();
     let mut labels = vec![-1i32; n];
     let mut current_cluster = -1i32;
@@ -1462,13 +1507,13 @@ pub fn hdbscan(
     sorted_edges.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(Ordering::Equal));
 
     // Build hierarchy and extract clusters
-    let (labels, probabilities, outlier_scores) = extract_hdbscan_clusters(
-        &sorted_edges, n, mcs, &core_distances,
-    );
+    let (labels, probabilities, outlier_scores) =
+        extract_hdbscan_clusters(&sorted_edges, n, mcs, &core_distances);
 
-    let n_clusters = labels.iter()
+    let n_clusters = labels
+        .iter()
         .filter(|&&l| l >= 0)
-        .map(|&l| l)
+        .copied()
         .max()
         .map_or(0, |m| m as usize + 1);
     let n_noise = labels.iter().filter(|&&l| l == -1).count();
@@ -1494,9 +1539,7 @@ fn hdbscan_kdtree_prim(
     let n = data.nrows();
 
     // Convert to Vec<Vec<f64>> for KD-tree
-    let data_vecs: Vec<Vec<f64>> = (0..n)
-        .map(|i| data.row(i).to_vec())
-        .collect();
+    let data_vecs: Vec<Vec<f64>> = (0..n).map(|i| data.row(i).to_vec()).collect();
 
     let tree = KdTree::new(data_vecs);
     let core_distances = tree.compute_core_distances(min_samples);
@@ -1558,12 +1601,12 @@ fn hdbscan_parallel(
     let mr_edges: Vec<(usize, usize, f64)> = (0..n)
         .into_par_iter()
         .flat_map(|i| {
-            ((i + 1)..n).map(move |j| {
-                let mr = dist_ref[[i, j]]
-                    .max(core_ref[i])
-                    .max(core_ref[j]);
-                (i, j, mr)
-            }).collect::<Vec<_>>()
+            ((i + 1)..n)
+                .map(move |j| {
+                    let mr = dist_ref[[i, j]].max(core_ref[i]).max(core_ref[j]);
+                    (i, j, mr)
+                })
+                .collect::<Vec<_>>()
         })
         .collect();
 
@@ -1584,14 +1627,16 @@ fn compute_distance_matrix_parallel(data: &ArrayView2<f64>) -> Array2<f64> {
     let results: Vec<(usize, usize, f64)> = (0..n)
         .into_par_iter()
         .flat_map(|i| {
-            ((i + 1)..n).map(move |j| {
-                let mut sum = 0.0;
-                for k in 0..d {
-                    let diff = data_ref[i * d + k] - data_ref[j * d + k];
-                    sum += diff * diff;
-                }
-                (i, j, sum.sqrt())
-            }).collect::<Vec<_>>()
+            ((i + 1)..n)
+                .map(move |j| {
+                    let mut sum = 0.0;
+                    for k in 0..d {
+                        let diff = data_ref[i * d + k] - data_ref[j * d + k];
+                        sum += diff * diff;
+                    }
+                    (i, j, sum.sqrt())
+                })
+                .collect::<Vec<_>>()
         })
         .collect();
 
@@ -1615,9 +1660,7 @@ fn hdbscan_with_kdtree(
     let n = data.nrows();
 
     // Convert data to Vec<Vec<f64>> for KD-tree
-    let data_vecs: Vec<Vec<f64>> = (0..n)
-        .map(|i| data.row(i).to_vec())
-        .collect();
+    let data_vecs: Vec<Vec<f64>> = (0..n).map(|i| data.row(i).to_vec()).collect();
 
     let tree = KdTree::new(data_vecs.clone());
 
@@ -1669,12 +1712,16 @@ fn hdbscan_with_kdtree(
     }
 
     // Find connected components
-    let components: usize = (0..n).map(|i| uf.find(i)).collect::<std::collections::HashSet<_>>().len();
+    let components: usize = (0..n)
+        .map(|i| uf.find(i))
+        .collect::<std::collections::HashSet<_>>()
+        .len();
 
     if components > 1 {
         // Graph is disconnected - fall back to computing missing edges
         // Find representatives of each component
-        let mut component_reps: std::collections::HashMap<usize, Vec<usize>> = std::collections::HashMap::new();
+        let mut component_reps: std::collections::HashMap<usize, Vec<usize>> =
+            std::collections::HashMap::new();
         for i in 0..n {
             component_reps.entry(uf.find(i)).or_default().push(i);
         }
@@ -1834,14 +1881,24 @@ fn extract_hdbscan_clusters(
         parent[x]
     }
 
-    fn union(parent: &mut [usize], rank: &mut [usize], size: &mut [usize], x: usize, y: usize) -> usize {
+    fn union(
+        parent: &mut [usize],
+        rank: &mut [usize],
+        size: &mut [usize],
+        x: usize,
+        y: usize,
+    ) -> usize {
         let px = find(parent, x);
         let py = find(parent, y);
         if px == py {
             return px;
         }
 
-        let (smaller, larger) = if rank[px] < rank[py] { (px, py) } else { (py, px) };
+        let (smaller, larger) = if rank[px] < rank[py] {
+            (px, py)
+        } else {
+            (py, px)
+        };
         parent[smaller] = larger;
         size[larger] += size[smaller];
         if rank[px] == rank[py] {
@@ -1896,18 +1953,18 @@ fn extract_hdbscan_clusters(
     }
 
     // Compute probabilities (simplified: based on core distance relative to cluster)
-    let probabilities: Vec<f64> = (0..n).map(|i| {
-        if labels[i] >= 0 {
-            1.0 / (1.0 + core_distances[i])
-        } else {
-            0.0
-        }
-    }).collect();
+    let probabilities: Vec<f64> = (0..n)
+        .map(|i| {
+            if labels[i] >= 0 {
+                1.0 / (1.0 + core_distances[i])
+            } else {
+                0.0
+            }
+        })
+        .collect();
 
     // Compute outlier scores (simplified GLOSH)
-    let outlier_scores: Vec<f64> = core_distances.iter()
-        .map(|&cd| cd / (cd + 1.0))
-        .collect();
+    let outlier_scores: Vec<f64> = core_distances.iter().map(|&cd| cd / (cd + 1.0)).collect();
 
     (labels, probabilities, outlier_scores)
 }
@@ -2065,7 +2122,12 @@ pub fn gaussian_mixture(
 
     // Initialize with k-means
     let kmeans_result = crate::ml::kmeans(
-        data.view(), n_components, Some(20), Some(1e-4), Some(5), seed,
+        data.view(),
+        n_components,
+        Some(20),
+        Some(1e-4),
+        Some(5),
+        seed,
     )?;
 
     // Initialize parameters
@@ -2078,7 +2140,9 @@ pub fn gaussian_mixture(
     let mut covariances: Vec<Array2<f64>> = (0..n_components)
         .map(|k| {
             // Initialize to identity scaled by data variance
-            let cluster_points: Vec<usize> = kmeans_result.labels.iter()
+            let cluster_points: Vec<usize> = kmeans_result
+                .labels
+                .iter()
                 .enumerate()
                 .filter(|&(_, l)| *l == k)
                 .map(|(i, _)| i)
@@ -2108,8 +2172,8 @@ pub fn gaussian_mixture(
             let mut log_probs = Vec::with_capacity(n_components);
 
             for k in 0..n_components {
-                let log_prob = log_gaussian_pdf(&point, &means[k], &covariances[k])
-                    + weights[k].ln();
+                let log_prob =
+                    log_gaussian_pdf(&point, &means[k], &covariances[k]) + weights[k].ln();
                 log_probs.push(log_prob);
             }
 
@@ -2143,24 +2207,24 @@ pub fn gaussian_mixture(
         // Update means
         for k in 0..n_components {
             if nk[k] > 1e-10 {
-                means[k] = (0..d).map(|j| {
-                    let sum: f64 = (0..n)
-                        .map(|i| responsibilities[[i, k]] * data[[i, j]])
-                        .sum();
-                    sum / nk[k]
-                }).collect();
+                means[k] = (0..d)
+                    .map(|j| {
+                        let sum: f64 = (0..n)
+                            .map(|i| responsibilities[[i, k]] * data[[i, j]])
+                            .sum();
+                        sum / nk[k]
+                    })
+                    .collect();
             }
         }
 
         // Update covariances
         for k in 0..n_components {
             if nk[k] > 1e-10 {
-                let cluster_points: Vec<(usize, f64)> = (0..n)
-                    .map(|i| (i, responsibilities[[i, k]]))
-                    .collect();
-                covariances[k] = compute_weighted_covariance(
-                    &data, &cluster_points, &means[k], cov_type, nk[k],
-                );
+                let cluster_points: Vec<(usize, f64)> =
+                    (0..n).map(|i| (i, responsibilities[[i, k]])).collect();
+                covariances[k] =
+                    compute_weighted_covariance(&data, &cluster_points, &means[k], cov_type, nk[k]);
             }
         }
     }
@@ -2172,8 +2236,7 @@ pub fn gaussian_mixture(
         let mut log_probs = Vec::with_capacity(n_components);
 
         for k in 0..n_components {
-            let log_prob = log_gaussian_pdf(&point, &means[k], &covariances[k])
-                + weights[k].ln();
+            let log_prob = log_gaussian_pdf(&point, &means[k], &covariances[k]) + weights[k].ln();
             log_probs.push(log_prob);
         }
 
@@ -2206,15 +2269,12 @@ pub fn gaussian_mixture(
         .collect();
 
     // Convert responsibilities to Vec<Vec<f64>>
-    let resp_vecs: Vec<Vec<f64>> = (0..n)
-        .map(|i| responsibilities.row(i).to_vec())
-        .collect();
+    let resp_vecs: Vec<Vec<f64>> = (0..n).map(|i| responsibilities.row(i).to_vec()).collect();
 
     // Convert covariances to Vec<Vec<Vec<f64>>>
-    let cov_vecs: Vec<Vec<Vec<f64>>> = covariances.iter()
-        .map(|cov| {
-            (0..d).map(|i| cov.row(i).to_vec()).collect()
-        })
+    let cov_vecs: Vec<Vec<Vec<f64>>> = covariances
+        .iter()
+        .map(|cov| (0..d).map(|i| cov.row(i).to_vec()).collect())
         .collect();
 
     Ok(GaussianMixtureResult {
@@ -2294,22 +2354,24 @@ fn compute_covariance(
         CovarianceType::Diagonal => {
             let mut cov = Array2::zeros((d, d));
             for j in 0..d {
-                let var: f64 = indices.iter()
+                let var: f64 = indices
+                    .iter()
                     .map(|&i| (data[[i, j]] - mean[j]).powi(2))
-                    .sum::<f64>() / (n - 1) as f64;
+                    .sum::<f64>()
+                    / (n - 1) as f64;
                 cov[[j, j]] = var.max(1e-6);
             }
             cov
         }
         CovarianceType::Spherical => {
-            let var: f64 = indices.iter()
+            let var: f64 = indices
+                .iter()
                 .flat_map(|&i| (0..d).map(move |j| (data[[i, j]] - mean[j]).powi(2)))
-                .sum::<f64>() / ((n - 1) * d) as f64;
+                .sum::<f64>()
+                / ((n - 1) * d) as f64;
             Array2::eye(d) * var.max(1e-6)
         }
-        CovarianceType::Tied => {
-            compute_covariance(data, indices, mean, CovarianceType::Full)
-        }
+        CovarianceType::Tied => compute_covariance(data, indices, mean, CovarianceType::Full),
     }
 }
 
@@ -2346,17 +2408,21 @@ fn compute_weighted_covariance(
         CovarianceType::Diagonal => {
             let mut cov = Array2::zeros((d, d));
             for j in 0..d {
-                let var: f64 = weights.iter()
+                let var: f64 = weights
+                    .iter()
                     .map(|&(i, w)| w * (data[[i, j]] - mean[j]).powi(2))
-                    .sum::<f64>() / total_weight;
+                    .sum::<f64>()
+                    / total_weight;
                 cov[[j, j]] = var.max(1e-6);
             }
             cov
         }
         CovarianceType::Spherical => {
-            let var: f64 = weights.iter()
+            let var: f64 = weights
+                .iter()
                 .flat_map(|&(i, w)| (0..d).map(move |j| w * (data[[i, j]] - mean[j]).powi(2)))
-                .sum::<f64>() / (total_weight * d as f64);
+                .sum::<f64>()
+                / (total_weight * d as f64);
             Array2::eye(d) * var.max(1e-6)
         }
         CovarianceType::Tied => {
@@ -2370,9 +2436,7 @@ fn compute_determinant(m: &Array2<f64>) -> f64 {
     let d = m.nrows();
 
     // Check if diagonal
-    let is_diagonal = (0..d).all(|i| {
-        (0..d).all(|j| i == j || m[[i, j]].abs() < 1e-10)
-    });
+    let is_diagonal = (0..d).all(|i| (0..d).all(|j| i == j || m[[i, j]].abs() < 1e-10));
 
     if is_diagonal {
         return (0..d).map(|i| m[[i, i]]).product();
@@ -2399,9 +2463,7 @@ fn compute_inverse(m: &Array2<f64>) -> Array2<f64> {
     let d = m.nrows();
 
     // Check if diagonal
-    let is_diagonal = (0..d).all(|i| {
-        (0..d).all(|j| i == j || m[[i, j]].abs() < 1e-10)
-    });
+    let is_diagonal = (0..d).all(|i| (0..d).all(|j| i == j || m[[i, j]].abs() < 1e-10));
 
     if is_diagonal {
         let mut inv = Array2::zeros((d, d));
@@ -2505,7 +2567,8 @@ fn compute_silhouette_from_distances(
 
         // a(i): average distance to other points in same cluster
         let a_i = if cluster_i_indices.len() > 1 {
-            let sum: f64 = cluster_i_indices.iter()
+            let sum: f64 = cluster_i_indices
+                .iter()
                 .filter(|&&j| j != i)
                 .map(|&j| distances[[i, j]])
                 .sum();
@@ -2520,9 +2583,11 @@ fn compute_silhouette_from_distances(
             if c == cluster_i || cluster_indices[c].is_empty() {
                 continue;
             }
-            let avg_dist: f64 = cluster_indices[c].iter()
+            let avg_dist: f64 = cluster_indices[c]
+                .iter()
                 .map(|&j| distances[[i, j]])
-                .sum::<f64>() / cluster_indices[c].len() as f64;
+                .sum::<f64>()
+                / cluster_indices[c].len() as f64;
             b_i = b_i.min(avg_dist);
         }
 
@@ -2602,7 +2667,10 @@ impl std::fmt::Display for FuzzyCMeansResult {
         writeln!(f)?;
         writeln!(f, "Cluster centers:")?;
         for i in 0..self.centers.nrows() {
-            let center: Vec<String> = self.centers.row(i).iter()
+            let center: Vec<String> = self
+                .centers
+                .row(i)
+                .iter()
                 .map(|v| format!("{:.4}", v))
                 .collect();
             writeln!(f, "  Cluster {}: [{}]", i, center.join(", "))?;
@@ -2629,7 +2697,10 @@ impl std::str::FromStr for FcmDistance {
         match s.to_lowercase().as_str() {
             "euclidean" | "euclid" => Ok(FcmDistance::Euclidean),
             "manhattan" | "l1" => Ok(FcmDistance::Manhattan),
-            _ => Err(format!("Unknown distance metric: {}. Use 'euclidean' or 'manhattan'", s)),
+            _ => Err(format!(
+                "Unknown distance metric: {}. Use 'euclidean' or 'manhattan'",
+                s
+            )),
         }
     }
 }
@@ -2681,7 +2752,10 @@ pub fn fuzzy_cmeans(
         return Err("n_clusters must be at least 1".to_string());
     }
     if n_clusters > n {
-        return Err(format!("n_clusters ({}) cannot exceed n_samples ({})", n_clusters, n));
+        return Err(format!(
+            "n_clusters ({}) cannot exceed n_samples ({})",
+            n_clusters, n
+        ));
     }
 
     let fuzz = m.unwrap_or(2.0);
@@ -2751,9 +2825,8 @@ pub fn fuzzy_cmeans(
         let mut distances = Array2::zeros((n, n_clusters));
         for i in 0..n {
             for j in 0..n_clusters {
-                distances[[i, j]] = compute_fcm_distance(
-                    &data.row(i), &centers.row(j), dist_metric,
-                );
+                distances[[i, j]] =
+                    compute_fcm_distance(&data.row(i), &centers.row(j), dist_metric);
             }
         }
 
@@ -2807,9 +2880,7 @@ pub fn fuzzy_cmeans(
     let mut distances = Array2::zeros((n, n_clusters));
     for i in 0..n {
         for j in 0..n_clusters {
-            distances[[i, j]] = compute_fcm_distance(
-                &data.row(i), &centers.row(j), dist_metric,
-            );
+            distances[[i, j]] = compute_fcm_distance(&data.row(i), &centers.row(j), dist_metric);
         }
     }
 
@@ -2967,7 +3038,10 @@ pub fn mini_batch_kmeans(
         return Err("n_clusters must be at least 1".to_string());
     }
     if n_clusters > n {
-        return Err(format!("n_clusters ({}) cannot exceed n_samples ({})", n_clusters, n));
+        return Err(format!(
+            "n_clusters ({}) cannot exceed n_samples ({})",
+            n_clusters, n
+        ));
     }
 
     let batch = batch_size.unwrap_or(100.min(n));
@@ -2988,11 +3062,9 @@ pub fn mini_batch_kmeans(
         let mut counts = vec![1.0f64; n_clusters]; // Track update counts per centroid
 
         // Mini-batch loop
-        for iter in 0..max_iter {
+        for _iter in 0..max_iter {
             // Sample a mini-batch
-            let batch_indices: Vec<usize> = (0..batch)
-                .map(|_| rng.gen_range(0..n))
-                .collect();
+            let batch_indices: Vec<usize> = (0..batch).map(|_| rng.gen_range(0..n)).collect();
 
             // Assign each batch sample to nearest centroid and update
             for &idx in &batch_indices {
@@ -3013,8 +3085,8 @@ pub fn mini_batch_kmeans(
                 counts[nearest] += 1.0;
                 let eta = 1.0 / counts[nearest];
                 for k in 0..d {
-                    centroids[[nearest, k]] = (1.0 - eta) * centroids[[nearest, k]]
-                        + eta * data[[idx, k]];
+                    centroids[[nearest, k]] =
+                        (1.0 - eta) * centroids[[nearest, k]] + eta * data[[idx, k]];
                 }
             }
         }
@@ -3219,11 +3291,14 @@ pub fn trimmed_kmeans(
         return Err("n_clusters must be at least 1".to_string());
     }
     if n_clusters > n {
-        return Err(format!("n_clusters ({}) cannot exceed n_samples ({})", n_clusters, n));
+        return Err(format!(
+            "n_clusters ({}) cannot exceed n_samples ({})",
+            n_clusters, n
+        ));
     }
 
     let trim_prop = alpha.unwrap_or(0.1);
-    if trim_prop < 0.0 || trim_prop >= 0.5 {
+    if !(0.0..0.5).contains(&trim_prop) {
         return Err("alpha must be between 0 and 0.5".to_string());
     }
 
@@ -3333,7 +3408,8 @@ pub fn trimmed_kmeans(
         if inertia < best_inertia {
             best_inertia = inertia;
 
-            let trimmed_indices: Vec<usize> = trimmed_mask.iter()
+            let trimmed_indices: Vec<usize> = trimmed_mask
+                .iter()
                 .enumerate()
                 .filter(|&(_, &t)| t)
                 .map(|(i, _)| i)
@@ -3446,10 +3522,7 @@ impl std::fmt::Display for DianaResult {
 /// # References
 ///
 /// - Kaufman & Rousseeuw (1990). "Finding Groups in Data".
-pub fn diana(
-    data: ArrayView2<f64>,
-    n_clusters: Option<usize>,
-) -> Result<DianaResult, String> {
+pub fn diana(data: ArrayView2<f64>, n_clusters: Option<usize>) -> Result<DianaResult, String> {
     let n = data.nrows();
 
     if n == 0 {
@@ -3533,10 +3606,7 @@ pub fn diana(
 }
 
 /// Find the cluster with the largest diameter.
-fn find_largest_diameter_cluster(
-    clusters: &[Vec<usize>],
-    distances: &Array2<f64>,
-) -> (usize, f64) {
+fn find_largest_diameter_cluster(clusters: &[Vec<usize>], distances: &Array2<f64>) -> (usize, f64) {
     let mut max_diameter = 0.0f64;
     let mut max_idx = 0;
 
@@ -3577,10 +3647,12 @@ fn diana_split(cluster: &[usize], distances: &Array2<f64>) -> (Vec<usize>, Vec<u
     let mut splinter_idx = 0;
 
     for (i, &idx_i) in cluster.iter().enumerate() {
-        let avg_dissim: f64 = cluster.iter()
+        let avg_dissim: f64 = cluster
+            .iter()
             .filter(|&&j| j != idx_i)
             .map(|&j| distances[[idx_i, j]])
-            .sum::<f64>() / (cluster.len() - 1) as f64;
+            .sum::<f64>()
+            / (cluster.len() - 1) as f64;
 
         if avg_dissim > max_avg_dissim {
             max_avg_dissim = avg_dissim;
@@ -3590,7 +3662,8 @@ fn diana_split(cluster: &[usize], distances: &Array2<f64>) -> (Vec<usize>, Vec<u
 
     // Initialize splinter group with the most dissimilar object
     let mut splinter = vec![cluster[splinter_idx]];
-    let mut remaining: Vec<usize> = cluster.iter()
+    let mut remaining: Vec<usize> = cluster
+        .iter()
         .enumerate()
         .filter(|(i, _)| *i != splinter_idx)
         .map(|(_, &x)| x)
@@ -3609,18 +3682,18 @@ fn diana_split(cluster: &[usize], distances: &Array2<f64>) -> (Vec<usize>, Vec<u
 
         for (i, &idx) in remaining.iter().enumerate() {
             let avg_to_remaining = if remaining.len() > 1 {
-                remaining.iter()
+                remaining
+                    .iter()
                     .filter(|&&j| j != idx)
                     .map(|&j| distances[[idx, j]])
-                    .sum::<f64>() / (remaining.len() - 1) as f64
+                    .sum::<f64>()
+                    / (remaining.len() - 1) as f64
             } else {
                 0.0
             };
 
             let avg_to_splinter = if !splinter.is_empty() {
-                splinter.iter()
-                    .map(|&j| distances[[idx, j]])
-                    .sum::<f64>() / splinter.len() as f64
+                splinter.iter().map(|&j| distances[[idx, j]]).sum::<f64>() / splinter.len() as f64
             } else {
                 f64::INFINITY
             };
@@ -3656,18 +3729,13 @@ fn compute_diana_coefficient(heights: &[f64]) -> f64 {
         return 0.0;
     }
 
-    let normalized_heights: Vec<f64> = heights.iter()
-        .map(|&h| 1.0 - h / max_height)
-        .collect();
+    let normalized_heights: Vec<f64> = heights.iter().map(|&h| 1.0 - h / max_height).collect();
 
     normalized_heights.iter().sum::<f64>() / normalized_heights.len() as f64
 }
 
 /// Convenience wrapper for diana.
-pub fn run_diana(
-    data: ArrayView2<f64>,
-    n_clusters: Option<usize>,
-) -> Result<DianaResult, String> {
+pub fn run_diana(data: ArrayView2<f64>, n_clusters: Option<usize>) -> Result<DianaResult, String> {
     diana(data, n_clusters)
 }
 
@@ -3709,7 +3777,11 @@ impl std::fmt::Display for AgnesResult {
         writeln!(f, "Number of clusters: {}", self.n_clusters)?;
         writeln!(f, "Number of observations: {}", self.n)?;
         writeln!(f, "Linkage method: {}", self.method)?;
-        writeln!(f, "Agglomerative coefficient: {:.4}", self.agglomerative_coefficient)?;
+        writeln!(
+            f,
+            "Agglomerative coefficient: {:.4}",
+            self.agglomerative_coefficient
+        )?;
         writeln!(f)?;
 
         // Count points per cluster
@@ -3755,7 +3827,10 @@ impl std::str::FromStr for AgnesLinkage {
             "complete" => Ok(AgnesLinkage::Complete),
             "ward" => Ok(AgnesLinkage::Ward),
             "weighted" | "wpgma" => Ok(AgnesLinkage::Weighted),
-            _ => Err(format!("Unknown linkage: {}. Use average, single, complete, ward, or weighted", s)),
+            _ => Err(format!(
+                "Unknown linkage: {}. Use average, single, complete, ward, or weighted",
+                s
+            )),
         }
     }
 }
@@ -3827,7 +3902,12 @@ pub fn agnes(
         let c2 = active_clusters[c2_idx];
 
         // Record merge
-        merge_history.push((c1, c2, min_dist, cluster_members[c1].len() + cluster_members[c2].len()));
+        merge_history.push((
+            c1,
+            c2,
+            min_dist,
+            cluster_members[c1].len() + cluster_members[c2].len(),
+        ));
         heights.push(min_dist);
 
         // Update height for observations
@@ -3843,8 +3923,15 @@ pub fn agnes(
         new_members.extend(&cluster_members[c2]);
 
         // Update distances using Lance-Williams formula
-        update_agnes_distances(&mut cluster_dist, &cluster_members, &active_clusters,
-                               c1, c2, next_cluster, linkage);
+        update_agnes_distances(
+            &mut cluster_dist,
+            &cluster_members,
+            &active_clusters,
+            c1,
+            c2,
+            next_cluster,
+            linkage,
+        );
 
         // Update cluster tracking
         cluster_members.push(new_members);
@@ -3873,9 +3960,7 @@ pub fn agnes(
     // Compute agglomerative coefficient
     let max_height = heights.iter().cloned().fold(0.0, f64::max);
     let agglomerative_coefficient = if max_height > 1e-10 {
-        let sum: f64 = height_per_obs.iter()
-            .map(|&h| 1.0 - h / max_height)
-            .sum();
+        let sum: f64 = height_per_obs.iter().map(|&h| 1.0 - h / max_height).sum();
         sum / n as f64
     } else {
         0.0
@@ -3897,10 +3982,7 @@ pub fn agnes(
 }
 
 /// Find the closest pair of active clusters.
-fn find_closest_pair(
-    active: &[usize],
-    dist: &Array2<f64>,
-) -> Result<(usize, usize, f64), String> {
+fn find_closest_pair(active: &[usize], dist: &Array2<f64>) -> Result<(usize, usize, f64), String> {
     let mut min_dist = f64::INFINITY;
     let mut best_pair = (0, 0);
 
@@ -3958,18 +4040,10 @@ fn update_agnes_distances(
         let n_other = members[other].len() as f64;
 
         let new_dist = match linkage {
-            AgnesLinkage::Single => {
-                d_c1.min(d_c2)
-            }
-            AgnesLinkage::Complete => {
-                d_c1.max(d_c2)
-            }
-            AgnesLinkage::Average => {
-                (n1 * d_c1 + n2 * d_c2) / (n1 + n2)
-            }
-            AgnesLinkage::Weighted => {
-                (d_c1 + d_c2) / 2.0
-            }
+            AgnesLinkage::Single => d_c1.min(d_c2),
+            AgnesLinkage::Complete => d_c1.max(d_c2),
+            AgnesLinkage::Average => (n1 * d_c1 + n2 * d_c2) / (n1 + n2),
+            AgnesLinkage::Weighted => (d_c1 + d_c2) / 2.0,
             AgnesLinkage::Ward => {
                 let n_total = n1 + n2 + n_other;
                 let alpha1 = (n1 + n_other) / n_total;
@@ -4044,7 +4118,11 @@ impl std::fmt::Display for FlexMixResult {
         writeln!(f, "Components: {}", self.k)?;
         writeln!(f, "Observations: {}", self.n)?;
         writeln!(f, "Predictors: {}", self.p)?;
-        writeln!(f, "Converged: {} (iterations: {})", self.converged, self.n_iterations)?;
+        writeln!(
+            f,
+            "Converged: {} (iterations: {})",
+            self.converged, self.n_iterations
+        )?;
         writeln!(f)?;
         writeln!(f, "Model fit:")?;
         writeln!(f, "  Log-likelihood: {:.4}", self.loglik)?;
@@ -4104,7 +4182,11 @@ pub fn flexmix(
     let p = x.ncols();
 
     if n != x.nrows() {
-        return Err(format!("y ({}) and x ({}) must have same number of rows", n, x.nrows()));
+        return Err(format!(
+            "y ({}) and x ({}) must have same number of rows",
+            n,
+            x.nrows()
+        ));
     }
     if k == 0 {
         return Err("k must be at least 1".to_string());
@@ -4190,10 +4272,12 @@ pub fn flexmix(
             }
 
             // Log-sum-exp for numerical stability
-            let log_sum: f64 = densities.iter()
+            let log_sum: f64 = densities
+                .iter()
                 .map(|&d| (d - max_log_density).exp())
                 .sum::<f64>()
-                .ln() + max_log_density;
+                .ln()
+                + max_log_density;
 
             // Update posteriors
             for j in 0..k {
@@ -4214,9 +4298,13 @@ pub fn flexmix(
     // Hard cluster assignments
     let cluster: Vec<usize> = (0..n)
         .map(|i| {
-            (0..k).max_by(|&a, &b|
-                posterior[[i, a]].partial_cmp(&posterior[[i, b]]).unwrap_or(Ordering::Equal)
-            ).unwrap_or(0)
+            (0..k)
+                .max_by(|&a, &b| {
+                    posterior[[i, a]]
+                        .partial_cmp(&posterior[[i, b]])
+                        .unwrap_or(Ordering::Equal)
+                })
+                .unwrap_or(0)
         })
         .collect();
 
@@ -4243,7 +4331,11 @@ pub fn flexmix(
 }
 
 /// Weighted OLS: returns (coefficients, residual_std)
-fn weighted_ols(x: &ArrayView2<f64>, y: &[f64], weights: &[f64]) -> Result<(Vec<f64>, f64), String> {
+fn weighted_ols(
+    x: &ArrayView2<f64>,
+    y: &[f64],
+    weights: &[f64],
+) -> Result<(Vec<f64>, f64), String> {
     let n = x.nrows();
     let p = x.ncols();
 
@@ -4285,7 +4377,8 @@ fn weighted_ols(x: &ArrayView2<f64>, y: &[f64], weights: &[f64]) -> Result<(Vec<
 
     // Simple matrix solve using faer
     let xtwx_faer = faer::Mat::from_fn(p, p, |i, j| xtwx[[i, j]]);
-    let chol = xtwx_faer.llt(faer::Side::Lower)
+    let chol = xtwx_faer
+        .llt(faer::Side::Lower)
         .map_err(|_| "Cholesky decomposition failed - singular matrix")?;
 
     let xtwy_faer = faer::Mat::from_fn(p, 1, |i, _| xtwy[i]);
@@ -4363,11 +4456,17 @@ impl std::fmt::Display for PvClustResult {
         writeln!(f, "Linkage method: {}", self.method)?;
         writeln!(f, "Bootstrap replicates: {}", self.n_boot)?;
         writeln!(f, "AU threshold: {:.2}", self.au_threshold)?;
-        writeln!(f, "Clusters (AU >= {:.2}): {}", self.au_threshold, self.n_clusters)?;
+        writeln!(
+            f,
+            "Clusters (AU >= {:.2}): {}",
+            self.au_threshold, self.n_clusters
+        )?;
         writeln!(f)?;
 
         // Show significant clusters (top 10)
-        let mut significant: Vec<(usize, f64, f64)> = self.au_pvalues.iter()
+        let mut significant: Vec<(usize, f64, f64)> = self
+            .au_pvalues
+            .iter()
             .zip(&self.bp_pvalues)
             .enumerate()
             .filter(|&(_, (au, _))| *au >= self.au_threshold)
@@ -4460,14 +4559,10 @@ pub fn pvclust(
 
         for _ in 0..nboot {
             // Bootstrap sample indices
-            let indices: Vec<usize> = (0..sample_size)
-                .map(|_| rng.gen_range(0..n))
-                .collect();
+            let indices: Vec<usize> = (0..sample_size).map(|_| rng.gen_range(0..n)).collect();
 
             // Create bootstrap data
-            let boot_data = Array2::from_shape_fn((sample_size, d), |(i, j)| {
-                data[[indices[i], j]]
-            });
+            let boot_data = Array2::from_shape_fn((sample_size, d), |(i, j)| data[[indices[i], j]]);
 
             // Perform clustering on bootstrap sample
             let (boot_merge, _) = hierarchical_clustering_merge(&boot_data.view(), linkage_method)?;
@@ -4476,14 +4571,16 @@ pub fn pvclust(
             // Check which original clusters appear
             for (edge_idx, orig_cluster) in original_clusters.iter().enumerate() {
                 // Map original cluster members to bootstrap sample
-                let mapped: std::collections::HashSet<usize> = orig_cluster.iter()
+                let mapped: std::collections::HashSet<usize> = orig_cluster
+                    .iter()
                     .filter_map(|&obs| indices.iter().position(|&i| i == obs))
                     .collect();
 
                 if mapped.len() >= 2 {
                     // Check if this cluster appears in bootstrap
                     for boot_cluster in &boot_clusters {
-                        let boot_set: std::collections::HashSet<usize> = boot_cluster.iter().copied().collect();
+                        let boot_set: std::collections::HashSet<usize> =
+                            boot_cluster.iter().copied().collect();
                         if mapped == boot_set {
                             counts[edge_idx][scale_idx] += 1;
                             break;
@@ -4555,8 +4652,16 @@ fn hierarchical_clustering_merge(
         let c2 = active[c2_idx];
 
         // Record merge (using R-style indexing: negative for leaves, positive for internal)
-        let m1 = if c1 < n { -((c1 as i32) + 1) } else { (c1 - n + 1) as i32 };
-        let m2 = if c2 < n { -((c2 as i32) + 1) } else { (c2 - n + 1) as i32 };
+        let m1 = if c1 < n {
+            -((c1 as i32) + 1)
+        } else {
+            (c1 - n + 1) as i32
+        };
+        let m2 = if c2 < n {
+            -((c2 as i32) + 1)
+        } else {
+            (c2 - n + 1) as i32
+        };
         merge.push((m1, m2));
         heights.push(min_dist);
 
@@ -4565,8 +4670,15 @@ fn hierarchical_clustering_merge(
         new_members.extend(&cluster_members[c2]);
 
         // Update distances
-        update_hclust_distances(&mut cluster_dist, &cluster_members, &active,
-                                c1, c2, next_cluster, method);
+        update_hclust_distances(
+            &mut cluster_dist,
+            &cluster_members,
+            &active,
+            c1,
+            c2,
+            next_cluster,
+            method,
+        );
 
         // Update tracking
         cluster_members.push(new_members);
@@ -4672,7 +4784,8 @@ fn extract_clusters_from_merge(merge: &[(i32, i32)], n: usize) -> Vec<Vec<usize>
 /// Compute AU p-value from multiscale bootstrap.
 fn compute_au_pvalue(counts: &[usize], ratios: &[f64], nboot: usize) -> f64 {
     // Compute frequencies
-    let freqs: Vec<f64> = counts.iter()
+    let freqs: Vec<f64> = counts
+        .iter()
         .map(|&c| (c as f64 / nboot as f64).max(0.001).min(0.999))
         .collect();
 
@@ -4739,12 +4852,12 @@ fn normal_cdf(x: f64) -> f64 {
 /// Error function approximation.
 fn erf(x: f64) -> f64 {
     // Horner form of approximation
-    let a1 =  0.254829592;
+    let a1 = 0.254829592;
     let a2 = -0.284496736;
-    let a3 =  1.421413741;
+    let a3 = 1.421413741;
     let a4 = -1.453152027;
-    let a5 =  1.061405429;
-    let p  =  0.3275911;
+    let a5 = 1.061405429;
+    let p = 0.3275911;
 
     let sign = if x < 0.0 { -1.0 } else { 1.0 };
     let x = x.abs();
@@ -4765,7 +4878,8 @@ fn assign_pvclust_labels(
     let mut labels = vec![0; n];
 
     // Find significant clusters (starting from highest AU)
-    let mut significant_edges: Vec<(usize, f64)> = au_pvalues.iter()
+    let mut significant_edges: Vec<(usize, f64)> = au_pvalues
+        .iter()
         .enumerate()
         .filter(|&(_, au)| *au >= threshold)
         .map(|(i, au)| (i, *au))
@@ -4793,10 +4907,8 @@ fn assign_pvclust_labels(
         let cluster_id = (edge_idx + 1) as i32;
         if let Some(members) = cluster_contents.get(&cluster_id) {
             // Only assign if members haven't been assigned yet
-            let unassigned: Vec<usize> = members.iter()
-                .filter(|&&m| !assigned[m])
-                .copied()
-                .collect();
+            let unassigned: Vec<usize> =
+                members.iter().filter(|&&m| !assigned[m]).copied().collect();
 
             if !unassigned.is_empty() {
                 for &m in &unassigned {
@@ -4870,7 +4982,11 @@ impl std::fmt::Display for ClaraResult {
         writeln!(f, "========================")?;
         writeln!(f, "Number of clusters: {}", self.k)?;
         writeln!(f, "Number of observations: {}", self.n)?;
-        writeln!(f, "Samples taken: {} (size: {})", self.n_samples, self.sample_size)?;
+        writeln!(
+            f,
+            "Samples taken: {} (size: {})",
+            self.n_samples, self.sample_size
+        )?;
         writeln!(f, "Objective: {:.4}", self.objective)?;
         if let Some(sil) = self.average_silhouette {
             writeln!(f, "Average silhouette: {:.4}", sil)?;
@@ -4961,15 +5077,21 @@ pub fn clara(
         let sample_indices: Vec<usize> = indices.into_iter().take(samp_size).collect();
 
         // Create sample data
-        let sample_data = Array2::from_shape_fn((samp_size, d), |(i, j)| {
-            data[[sample_indices[i], j]]
-        });
+        let sample_data =
+            Array2::from_shape_fn((samp_size, d), |(i, j)| data[[sample_indices[i], j]]);
 
         // Run PAM on sample
-        let pam_result = kmedoids(sample_data.view(), k, Some(max_iterations), Some(rng.r#gen()))?;
+        let pam_result = kmedoids(
+            sample_data.view(),
+            k,
+            Some(max_iterations),
+            Some(rng.r#gen()),
+        )?;
 
         // Map sample medoid indices back to original data indices
-        let medoids: Vec<usize> = pam_result.medoid_indices.iter()
+        let medoids: Vec<usize> = pam_result
+            .medoid_indices
+            .iter()
             .map(|&idx| sample_indices[idx])
             .collect();
 
@@ -5032,25 +5154,27 @@ fn compute_clara_objective(data: &ArrayView2<f64>, medoids: &[usize]) -> f64 {
 fn assign_to_medoids_data(data: &ArrayView2<f64>, medoids: &[usize]) -> Vec<usize> {
     let n = data.nrows();
     let d = data.ncols();
-    let k = medoids.len();
+    let _k = medoids.len();
 
-    (0..n).map(|i| {
-        let mut best = 0;
-        let mut best_dist = f64::INFINITY;
+    (0..n)
+        .map(|i| {
+            let mut best = 0;
+            let mut best_dist = f64::INFINITY;
 
-        for (j, &med) in medoids.iter().enumerate() {
-            let mut dist = 0.0;
-            for l in 0..d {
-                dist += (data[[i, l]] - data[[med, l]]).powi(2);
+            for (j, &med) in medoids.iter().enumerate() {
+                let mut dist = 0.0;
+                for l in 0..d {
+                    dist += (data[[i, l]] - data[[med, l]]).powi(2);
+                }
+                if dist < best_dist {
+                    best_dist = dist;
+                    best = j;
+                }
             }
-            if dist < best_dist {
-                best_dist = dist;
-                best = j;
-            }
-        }
 
-        best
-    }).collect()
+            best
+        })
+        .collect()
 }
 
 /// Compute average silhouette width.
@@ -5240,7 +5364,11 @@ pub fn cluster_stats(
     let p = data.ncols();
 
     if n != labels.len() {
-        return Err(format!("Data rows ({}) != labels length ({})", n, labels.len()));
+        return Err(format!(
+            "Data rows ({}) != labels length ({})",
+            n,
+            labels.len()
+        ));
     }
 
     let k = *labels.iter().max().unwrap_or(&0) + 1;
@@ -5258,9 +5386,7 @@ pub fn cluster_stats(
     }
 
     // Global centroid
-    let global_mean: Vec<f64> = (0..p)
-        .map(|j| data.column(j).sum() / n as f64)
-        .collect();
+    let global_mean: Vec<f64> = (0..p).map(|j| data.column(j).sum() / n as f64).collect();
 
     // Cluster centroids
     let mut cluster_centroids: Vec<Vec<f64>> = vec![vec![0.0; p]; k];
@@ -5338,7 +5464,8 @@ pub fn cluster_stats(
     // Cluster diameters and minimum separation
     let mut cluster_diameters: Vec<f64> = vec![0.0; k];
     for l in 0..k {
-        let members: Vec<usize> = labels.iter()
+        let members: Vec<usize> = labels
+            .iter()
             .enumerate()
             .filter(|&(_, lab)| *lab == l)
             .map(|(i, _)| i)
@@ -5376,7 +5503,8 @@ pub fn cluster_stats(
     }
 
     // Silhouette
-    let (average_silhouette, cluster_silhouette) = compute_silhouette_details(labels, &distances, k);
+    let (average_silhouette, cluster_silhouette) =
+        compute_silhouette_details(labels, &distances, k);
 
     // Dunn index
     let dunn_index = if max_diameter > 0.0 {
@@ -5418,7 +5546,11 @@ pub fn cluster_stats(
 }
 
 /// Compute silhouette with per-cluster breakdown.
-fn compute_silhouette_details(labels: &[usize], distances: &Array2<f64>, k: usize) -> (f64, Vec<f64>) {
+fn compute_silhouette_details(
+    labels: &[usize],
+    distances: &Array2<f64>,
+    k: usize,
+) -> (f64, Vec<f64>) {
     let n = labels.len();
     if n < 2 || k < 2 {
         return (0.0, vec![0.0; k]);
@@ -5440,7 +5572,11 @@ fn compute_silhouette_details(labels: &[usize], distances: &Array2<f64>, k: usiz
                 same_count += 1;
             }
         }
-        let a_i = if same_count > 0 { same_dist / same_count as f64 } else { 0.0 };
+        let a_i = if same_count > 0 {
+            same_dist / same_count as f64
+        } else {
+            0.0
+        };
 
         // b(i)
         let mut b_i = f64::INFINITY;
@@ -5494,14 +5630,14 @@ fn compute_davies_bouldin(
         return 0.0;
     }
 
-    let n = labels.len();
+    let _n = labels.len();
     let p = centroids[0].len();
 
     // Compute scatter for each cluster (average distance to centroid)
     let mut scatter = vec![0.0; k];
     let mut counts = vec![0; k];
 
-    for (i, &l) in labels.iter().enumerate() {
+    for &l in labels.iter() {
         counts[l] += 1;
     }
 
@@ -5614,7 +5750,11 @@ impl std::fmt::Display for FannyResult {
         writeln!(f, "Number of clusters: {}", self.k)?;
         writeln!(f, "Number of observations: {}", self.n)?;
         writeln!(f, "Fuzziness parameter: {:.2}", self.membership_exponent)?;
-        writeln!(f, "Converged: {} (iterations: {})", self.converged, self.n_iterations)?;
+        writeln!(
+            f,
+            "Converged: {} (iterations: {})",
+            self.converged, self.n_iterations
+        )?;
         writeln!(f)?;
         writeln!(f, "Objective: {:.4}", self.objective)?;
         writeln!(f, "Dunn coefficient: {:.4}", self.dunn_coefficient)?;
@@ -5754,7 +5894,11 @@ pub fn fanny(
                         ratio_sum += (cluster_dist[v] / cluster_dist[w]).powf(exponent);
                     }
                 }
-                new_membership[[i, v]] = if ratio_sum > 1e-10 { 1.0 / ratio_sum } else { 0.0 };
+                new_membership[[i, v]] = if ratio_sum > 1e-10 {
+                    1.0 / ratio_sum
+                } else {
+                    0.0
+                };
                 sum += new_membership[[i, v]];
             }
 
@@ -5770,7 +5914,8 @@ pub fn fanny(
         let objective = compute_fanny_objective(&distances, &new_membership, m);
 
         // Check convergence
-        let change: f64 = membership.iter()
+        let change: f64 = membership
+            .iter()
             .zip(new_membership.iter())
             .map(|(old, new)| (*old - *new).abs())
             .sum();
@@ -5787,9 +5932,13 @@ pub fn fanny(
     // Hard cluster assignments
     let clustering: Vec<usize> = (0..n)
         .map(|i| {
-            (0..k).max_by(|&a, &b|
-                membership[[i, a]].partial_cmp(&membership[[i, b]]).unwrap_or(Ordering::Equal)
-            ).unwrap_or(0)
+            (0..k)
+                .max_by(|&a, &b| {
+                    membership[[i, a]]
+                        .partial_cmp(&membership[[i, b]])
+                        .unwrap_or(Ordering::Equal)
+                })
+                .unwrap_or(0)
         })
         .collect();
 
@@ -5812,9 +5961,7 @@ pub fn fanny(
     }
 
     // Dunn's partition coefficient
-    let dunn_coefficient: f64 = membership.iter()
-        .map(|u| u.powi(2))
-        .sum::<f64>() / n as f64;
+    let dunn_coefficient: f64 = membership.iter().map(|u| u.powi(2)).sum::<f64>() / n as f64;
 
     // Normalized Dunn coefficient: (F - 1/k) / (1 - 1/k)
     let normalized_dunn = if k > 1 {
@@ -5998,7 +6145,10 @@ pub fn skmeans(
         return Err("n_clusters must be at least 1".to_string());
     }
     if n_clusters > n {
-        return Err(format!("n_clusters ({}) cannot exceed n_samples ({})", n_clusters, n));
+        return Err(format!(
+            "n_clusters ({}) cannot exceed n_samples ({})",
+            n_clusters, n
+        ));
     }
 
     let max_iter = max_iterations.unwrap_or(100);
@@ -6145,7 +6295,7 @@ pub fn run_skmeans(
 // =============================================================================
 
 /// Linkage method for fast hierarchical clustering.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
 pub enum FastLinkage {
     /// Single linkage (minimum distance)
     Single,
@@ -6154,6 +6304,7 @@ pub enum FastLinkage {
     /// Average linkage (UPGMA)
     Average,
     /// Ward's minimum variance method
+    #[default]
     Ward,
     /// Weighted average linkage (WPGMA)
     Weighted,
@@ -6161,12 +6312,6 @@ pub enum FastLinkage {
     Centroid,
     /// Median linkage (WPGMC)
     Median,
-}
-
-impl Default for FastLinkage {
-    fn default() -> Self {
-        FastLinkage::Ward
-    }
 }
 
 /// Result of fast hierarchical clustering.
@@ -6405,7 +6550,11 @@ fn fastcluster_nnchain_optimized(
             // Check if we have a reciprocal pair (nn's nearest is current)
             if chain.len() >= 2 && chain[chain.len() - 2] == nn {
                 // Found reciprocal pair: merge current and nn
-                let (a, b) = if current < nn { (current, nn) } else { (nn, current) };
+                let (a, b) = if current < nn {
+                    (current, nn)
+                } else {
+                    (nn, current)
+                };
 
                 // Record the merge with proper height
                 let merge_dist = nn_dist.sqrt(); // Convert squared distance to distance
@@ -6413,11 +6562,11 @@ fn fastcluster_nnchain_optimized(
                 // R-style merge indices: negative for leaves, positive for merged clusters
                 let idx_a = match merge_step[a] {
                     None => -(a as i64 + 1),
-                    Some(s) => (s as i64 + 1),
+                    Some(s) => s as i64 + 1,
                 };
                 let idx_b = match merge_step[b] {
                     None => -(b as i64 + 1),
-                    Some(s) => (s as i64 + 1),
+                    Some(s) => s as i64 + 1,
                 };
 
                 merge[[step, 0]] = idx_a.min(idx_b);
@@ -6459,9 +6608,7 @@ fn fastcluster_nnchain_optimized(
                             let beta = -n_a * n_b / ((n_a + n_b) * (n_a + n_b));
                             (alpha_a * d_ak + alpha_b * d_bk + beta * d_ab).max(0.0)
                         }
-                        FastLinkage::Median => {
-                            (0.5 * d_ak + 0.5 * d_bk - 0.25 * d_ab).max(0.0)
-                        }
+                        FastLinkage::Median => (0.5 * d_ak + 0.5 * d_bk - 0.25 * d_ab).max(0.0),
                     };
 
                     set_dist(condensed_dist, a, k, n, new_dist_sq);
@@ -6559,21 +6706,21 @@ fn cut_dendrogram(merge: &Array2<i64>, height: &[f64], n: usize, k: usize) -> Ve
 
         // Get or assign labels for children
         let left_label = if left < 0 {
-            cluster_labels.entry(left).or_insert_with(|| {
+            *cluster_labels.entry(left).or_insert_with(|| {
                 let l = next_label;
                 next_label += 1;
                 l
-            }).clone()
+            })
         } else {
             *cluster_labels.get(&left).unwrap_or(&0)
         };
 
         let right_label = if right < 0 {
-            cluster_labels.entry(right).or_insert_with(|| {
+            *cluster_labels.entry(right).or_insert_with(|| {
                 let l = next_label;
                 next_label += 1;
                 l
-            }).clone()
+            })
         } else {
             *cluster_labels.get(&right).unwrap_or(&0)
         };
@@ -6625,18 +6772,13 @@ pub fn run_fastcluster(
 // =============================================================================
 
 /// Method for dynamic tree cutting.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
 pub enum DynamicCutMethod {
     /// Hybrid method combining hierarchical with PAM refinement
+    #[default]
     Hybrid,
     /// Pure tree-based method
     Tree,
-}
-
-impl Default for DynamicCutMethod {
-    fn default() -> Self {
-        DynamicCutMethod::Hybrid
-    }
 }
 
 /// Result of dynamic tree cut.
@@ -6722,7 +6864,11 @@ pub fn dynamic_tree_cut(
     let min_size = min_cluster_size.unwrap_or(2);
 
     if merge.nrows() != n - 1 {
-        return Err(format!("Merge matrix should have {} rows for {} observations", n - 1, n));
+        return Err(format!(
+            "Merge matrix should have {} rows for {} observations",
+            n - 1,
+            n
+        ));
     }
     if height.len() != n - 1 {
         return Err("Height vector length should match merge matrix rows".to_string());
@@ -7005,8 +7151,14 @@ impl std::fmt::Display for NormalMixEMResult {
         writeln!(f)?;
         writeln!(f, "Component parameters:")?;
         for i in 0..self.k {
-            writeln!(f, "  Component {}: mu={:.4}, sigma={:.4}, lambda={:.4}",
-                i + 1, self.mu[i], self.sigma[i], self.lambda[i])?;
+            writeln!(
+                f,
+                "  Component {}: mu={:.4}, sigma={:.4}, lambda={:.4}",
+                i + 1,
+                self.mu[i],
+                self.sigma[i],
+                self.lambda[i]
+            )?;
         }
         Ok(())
     }
@@ -7048,7 +7200,7 @@ pub fn normal_mix_em(
     let max_iter = max_iterations.unwrap_or(500);
     let tolerance = tol.unwrap_or(1e-6);
 
-    let mut rng = match seed {
+    let _rng = match seed {
         Some(s) => StdRng::seed_from_u64(s),
         None => StdRng::from_entropy(),
     };
@@ -7095,9 +7247,7 @@ pub fn normal_mix_em(
             }
 
             // Log-sum-exp trick for numerical stability
-            let sum_exp: f64 = log_probs.iter()
-                .map(|&lp| (lp - max_log_prob).exp())
-                .sum();
+            let sum_exp: f64 = log_probs.iter().map(|&lp| (lp - max_log_prob).exp()).sum();
             let log_total = max_log_prob + sum_exp.ln();
             loglik += log_total;
 
@@ -7130,7 +7280,8 @@ pub fn normal_mix_em(
                 // Update variance
                 let var_j: f64 = (0..n)
                     .map(|i| posterior[[i, j]] * (data[i] - mu[j]).powi(2))
-                    .sum::<f64>() / n_j;
+                    .sum::<f64>()
+                    / n_j;
                 sigma[j] = var_j.sqrt().max(1e-6);
             }
         }
@@ -7264,9 +7415,7 @@ pub fn mvnorm_mix_em(
         let mut distances = vec![f64::INFINITY; n];
         for i in 0..n {
             for j in 0..c {
-                let dist: f64 = (0..d)
-                    .map(|l| (data[[i, l]] - mu[[j, l]]).powi(2))
-                    .sum();
+                let dist: f64 = (0..d).map(|l| (data[[i, l]] - mu[[j, l]]).powi(2)).sum();
                 distances[i] = distances[i].min(dist);
             }
         }
@@ -7286,10 +7435,17 @@ pub fn mvnorm_mix_em(
     }
 
     // Initialize covariances as scaled identity
-    let global_var: f64 = (0..d).map(|j| {
-        let col_mean: f64 = data.column(j).sum() / n as f64;
-        data.column(j).iter().map(|&x| (x - col_mean).powi(2)).sum::<f64>() / n as f64
-    }).sum::<f64>() / d as f64;
+    let global_var: f64 = (0..d)
+        .map(|j| {
+            let col_mean: f64 = data.column(j).sum() / n as f64;
+            data.column(j)
+                .iter()
+                .map(|&x| (x - col_mean).powi(2))
+                .sum::<f64>()
+                / n as f64
+        })
+        .sum::<f64>()
+        / d as f64;
 
     for c in 0..k {
         sigma[c] = Array2::eye(d) * global_var.max(1e-6);
@@ -7318,19 +7474,20 @@ pub fn mvnorm_mix_em(
                 // Simple diagonal approximation for stability
                 let sigma_diag: Vec<f64> = (0..d).map(|l| sigma[j][[l, l]].max(1e-6)).collect();
                 let log_det: f64 = sigma_diag.iter().map(|s| s.ln()).sum();
-                let mahal: f64 = diff.iter().zip(sigma_diag.iter())
+                let mahal: f64 = diff
+                    .iter()
+                    .zip(sigma_diag.iter())
                     .map(|(di, si)| di * di / si)
                     .sum();
 
-                log_probs[j] = lambda[j].ln() - 0.5 * (d as f64 * (2.0 * std::f64::consts::PI).ln() + log_det + mahal);
+                log_probs[j] = lambda[j].ln()
+                    - 0.5 * (d as f64 * (2.0 * std::f64::consts::PI).ln() + log_det + mahal);
             }
 
             // Log-sum-exp
             let max_log_prob = log_probs.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
             if max_log_prob.is_finite() {
-                let sum_exp: f64 = log_probs.iter()
-                    .map(|&lp| (lp - max_log_prob).exp())
-                    .sum();
+                let sum_exp: f64 = log_probs.iter().map(|&lp| (lp - max_log_prob).exp()).sum();
                 let log_total = max_log_prob + sum_exp.ln();
                 loglik += log_total;
 
@@ -7361,14 +7518,18 @@ pub fn mvnorm_mix_em(
 
                 // Update mean
                 for l in 0..d {
-                    mu[[j, l]] = (0..n).map(|i| posterior[[i, j]] * data[[i, l]]).sum::<f64>() / n_j;
+                    mu[[j, l]] = (0..n)
+                        .map(|i| posterior[[i, j]] * data[[i, l]])
+                        .sum::<f64>()
+                        / n_j;
                 }
 
                 // Update covariance (diagonal for stability)
                 for l in 0..d {
                     let var_l: f64 = (0..n)
                         .map(|i| posterior[[i, j]] * (data[[i, l]] - mu[[j, l]]).powi(2))
-                        .sum::<f64>() / n_j;
+                        .sum::<f64>()
+                        / n_j;
                     sigma[j][[l, l]] = var_l.max(1e-6);
                 }
             }
@@ -7525,7 +7686,8 @@ pub fn kprototypes(
     if categorical_data.len() != n {
         return Err(format!(
             "Categorical data length ({}) must match numeric data rows ({})",
-            categorical_data.len(), n
+            categorical_data.len(),
+            n
         ));
     }
 
@@ -7539,7 +7701,10 @@ pub fn kprototypes(
         return Err("n_clusters must be at least 1".to_string());
     }
     if n_clusters > n {
-        return Err(format!("n_clusters ({}) cannot exceed n_samples ({})", n_clusters, n));
+        return Err(format!(
+            "n_clusters ({}) cannot exceed n_samples ({})",
+            n_clusters, n
+        ));
     }
 
     let max_iter = max_iterations.unwrap_or(100);
@@ -7553,10 +7718,18 @@ pub fn kprototypes(
     // Auto-compute gamma if not provided
     // Use ratio of average numeric variance to average categorical entropy
     let auto_gamma = if gamma.is_none() && d_num > 0 && d_cat > 0 {
-        let numeric_var: f64 = (0..d_num).map(|j| {
-            let col_mean: f64 = numeric_data.column(j).sum() / n as f64;
-            numeric_data.column(j).iter().map(|&x| (x - col_mean).powi(2)).sum::<f64>() / n as f64
-        }).sum::<f64>() / d_num as f64;
+        let numeric_var: f64 = (0..d_num)
+            .map(|j| {
+                let col_mean: f64 = numeric_data.column(j).sum() / n as f64;
+                numeric_data
+                    .column(j)
+                    .iter()
+                    .map(|&x| (x - col_mean).powi(2))
+                    .sum::<f64>()
+                    / n as f64
+            })
+            .sum::<f64>()
+            / d_num as f64;
 
         // For categorical, use 0.5 as proxy for average dissimilarity
         numeric_var / 0.5
@@ -7655,9 +7828,8 @@ pub fn kprototypes(
             for c in 0..n_clusters {
                 if cluster_counts[c] > 0 {
                     for j in 0..d_cat {
-                        if let Some((&mode, _)) = cat_counts[c][j]
-                            .iter()
-                            .max_by_key(|(_, count)| *count)
+                        if let Some((&mode, _)) =
+                            cat_counts[c][j].iter().max_by_key(|(_, count)| *count)
                         {
                             cat_proto[c][j] = mode;
                         }
@@ -7728,7 +7900,15 @@ pub fn run_kprototypes(
     max_iterations: Option<usize>,
     seed: Option<u64>,
 ) -> Result<KPrototypesResult, String> {
-    kprototypes(numeric_data, categorical_data, n_clusters, gamma, max_iterations, None, seed)
+    kprototypes(
+        numeric_data,
+        categorical_data,
+        n_clusters,
+        gamma,
+        max_iterations,
+        None,
+        seed,
+    )
 }
 
 // =============================================================================
@@ -7763,12 +7943,7 @@ mod tests {
 
     #[test]
     fn test_spectral_clustering_basic() {
-        let data = array![
-            [0.0, 0.0],
-            [0.1, 0.1],
-            [10.0, 10.0],
-            [10.1, 10.1],
-        ];
+        let data = array![[0.0, 0.0], [0.1, 0.1], [10.0, 10.0], [10.1, 10.1],];
 
         let result = spectral_clustering(data.view(), 2, None, Some(42)).unwrap();
 
@@ -7791,11 +7966,12 @@ mod tests {
         // Use a low preference to encourage fewer clusters
         let result = affinity_propagation(
             data.view(),
-            Some(-100.0),  // Strong preference against being an exemplar
+            Some(-100.0), // Strong preference against being an exemplar
             Some(0.9),
             Some(200),
-            Some(15)
-        ).unwrap();
+            Some(15),
+        )
+        .unwrap();
 
         assert_eq!(result.labels.len(), 6);
         // Affinity propagation may find varying numbers of clusters
@@ -7883,10 +8059,20 @@ mod tests {
 
         // Core distances should match
         for i in 0..core_bf.len() {
-            assert!((core_bf[i] - core_dt[i]).abs() < 1e-10,
-                "Core distance mismatch at {}: bf={}, dt={}", i, core_bf[i], core_dt[i]);
-            assert!((core_bf[i] - core_kp[i]).abs() < 1e-10,
-                "Core distance mismatch at {}: bf={}, kp={}", i, core_bf[i], core_kp[i]);
+            assert!(
+                (core_bf[i] - core_dt[i]).abs() < 1e-10,
+                "Core distance mismatch at {}: bf={}, dt={}",
+                i,
+                core_bf[i],
+                core_dt[i]
+            );
+            assert!(
+                (core_bf[i] - core_kp[i]).abs() < 1e-10,
+                "Core distance mismatch at {}: bf={}, kp={}",
+                i,
+                core_bf[i],
+                core_kp[i]
+            );
         }
 
         // All MSTs should have n-1 edges
@@ -7900,10 +8086,18 @@ mod tests {
         let total_dt: f64 = mst_dt.iter().map(|e| e.2).sum();
         let total_kp: f64 = mst_kp.iter().map(|e| e.2).sum();
 
-        assert!((total_bf - total_dt).abs() < 1e-6,
-            "MST weight mismatch: bf={}, dt={}", total_bf, total_dt);
-        assert!((total_bf - total_kp).abs() < 1e-6,
-            "MST weight mismatch: bf={}, kp={}", total_bf, total_kp);
+        assert!(
+            (total_bf - total_dt).abs() < 1e-6,
+            "MST weight mismatch: bf={}, dt={}",
+            total_bf,
+            total_dt
+        );
+        assert!(
+            (total_bf - total_kp).abs() < 1e-6,
+            "MST weight mismatch: bf={}, kp={}",
+            total_bf,
+            total_kp
+        );
     }
 
     #[test]
@@ -7950,12 +8144,20 @@ mod tests {
         let rel_error_dt = (total_bf - total_dt).abs() / total_bf;
         let rel_error_kp = (total_bf - total_kp).abs() / total_bf;
 
-        assert!(rel_error_dt < 1e-6,
+        assert!(
+            rel_error_dt < 1e-6,
             "Dual-tree MST weight mismatch: bf={:.6}, dt={:.6}, rel_error={:.2e}",
-            total_bf, total_dt, rel_error_dt);
-        assert!(rel_error_kp < 1e-6,
+            total_bf,
+            total_dt,
+            rel_error_dt
+        );
+        assert!(
+            rel_error_kp < 1e-6,
             "KD-tree Prim MST weight mismatch: bf={:.6}, kp={:.6}, rel_error={:.2e}",
-            total_bf, total_kp, rel_error_kp);
+            total_bf,
+            total_kp,
+            rel_error_kp
+        );
     }
 
     #[test]
@@ -7999,7 +8201,8 @@ mod tests {
 
         // Count clusters in each
         let count_clusters = |labels: &[i32]| -> usize {
-            labels.iter()
+            labels
+                .iter()
                 .filter(|&&l| l >= 0)
                 .map(|&l| l as usize)
                 .max()
@@ -8039,17 +8242,30 @@ mod tests {
 
         // Run both implementations
         let result_new = hdbscan(data.view(), Some(5), Some(5));
-        let result_old = crate::ml::cluster_optimized::hdbscan_optimized(data.view(), Some(5), Some(5));
+        let result_old =
+            crate::ml::cluster_optimized::hdbscan_optimized(data.view(), Some(5), Some(5));
 
         // Both should succeed
-        assert!(result_new.is_ok(), "New HDBSCAN failed: {:?}", result_new.err());
-        assert!(result_old.is_ok(), "Old HDBSCAN failed: {:?}", result_old.err());
+        assert!(
+            result_new.is_ok(),
+            "New HDBSCAN failed: {:?}",
+            result_new.err()
+        );
+        assert!(
+            result_old.is_ok(),
+            "Old HDBSCAN failed: {:?}",
+            result_old.err()
+        );
 
         let new_result = result_new.unwrap();
         let (old_labels, _old_probs, _old_n_clusters) = result_old.unwrap();
 
         // Both should return same number of labels
-        assert_eq!(new_result.labels.len(), old_labels.len(), "Label count mismatch");
+        assert_eq!(
+            new_result.labels.len(),
+            old_labels.len(),
+            "Label count mismatch"
+        );
         assert_eq!(new_result.labels.len(), n, "Expected {} labels", n);
 
         // Both should find some clusters (not all noise)
@@ -8062,9 +8278,9 @@ mod tests {
     #[test]
     #[ignore] // Run with: cargo test -p p2a-core --release -- test_hdbscan_full_benchmark --ignored --nocapture
     fn test_hdbscan_full_benchmark() {
-        use std::time::Instant;
         use rand::prelude::*;
         use rand_distr::Normal;
+        use std::time::Instant;
 
         fn generate_data(n: usize, d: usize) -> Array2<f64> {
             let mut rng = StdRng::seed_from_u64(42);
@@ -8090,7 +8306,8 @@ mod tests {
 
             // Warmup
             let _ = hdbscan(data.view(), Some(10), Some(10));
-            let _ = crate::ml::cluster_optimized::hdbscan_optimized(data.view(), Some(10), Some(10));
+            let _ =
+                crate::ml::cluster_optimized::hdbscan_optimized(data.view(), Some(10), Some(10));
 
             // New algorithm (with auto-dispatch)
             let start = Instant::now();
@@ -8102,12 +8319,19 @@ mod tests {
             // Old optimized parallel algorithm
             let start = Instant::now();
             for _ in 0..3 {
-                let _ = crate::ml::cluster_optimized::hdbscan_optimized(data.view(), Some(10), Some(10));
+                let _ = crate::ml::cluster_optimized::hdbscan_optimized(
+                    data.view(),
+                    Some(10),
+                    Some(10),
+                );
             }
             let old_time = start.elapsed().as_secs_f64() / 3.0 * 1000.0;
 
             let speedup = old_time / new_time;
-            println!("{}\t{:.1}\t\t{:.1}\t\t{:.2}x", n, new_time, old_time, speedup);
+            println!(
+                "{}\t{:.1}\t\t{:.1}\t\t{:.2}x",
+                n, new_time, old_time, speedup
+            );
         }
     }
 
@@ -8149,15 +8373,17 @@ mod tests {
     fn test_fuzzy_cmeans_fuzziness() {
         let data = array![
             [0.0, 0.0],
-            [5.0, 0.0],  // Point equidistant from both clusters
+            [5.0, 0.0], // Point equidistant from both clusters
             [10.0, 0.0],
         ];
 
         // With low fuzziness (near 1), should be crisper
-        let result_crisp = fuzzy_cmeans(data.view(), 2, Some(1.5), None, None, None, Some(42)).unwrap();
+        let result_crisp =
+            fuzzy_cmeans(data.view(), 2, Some(1.5), None, None, None, Some(42)).unwrap();
 
         // With high fuzziness, should be fuzzier
-        let result_fuzzy = fuzzy_cmeans(data.view(), 2, Some(3.0), None, None, None, Some(42)).unwrap();
+        let result_fuzzy =
+            fuzzy_cmeans(data.view(), 2, Some(3.0), None, None, None, Some(42)).unwrap();
 
         // The middle point should have more equal membership in fuzzy case
         let mid_idx = 1;
@@ -8165,11 +8391,24 @@ mod tests {
         let membership_fuzzy = result_fuzzy.membership.row(mid_idx);
 
         // Variance of memberships should be lower for fuzzier clustering
-        let var_crisp: f64 = membership_crisp.iter().map(|&x| (x - 0.5).powi(2)).sum::<f64>() / 2.0;
-        let var_fuzzy: f64 = membership_fuzzy.iter().map(|&x| (x - 0.5).powi(2)).sum::<f64>() / 2.0;
+        let var_crisp: f64 = membership_crisp
+            .iter()
+            .map(|&x| (x - 0.5).powi(2))
+            .sum::<f64>()
+            / 2.0;
+        let var_fuzzy: f64 = membership_fuzzy
+            .iter()
+            .map(|&x| (x - 0.5).powi(2))
+            .sum::<f64>()
+            / 2.0;
 
         // For a point in the middle, the fuzzy version should have memberships closer to 0.5
-        assert!(var_fuzzy <= var_crisp + 0.1, "Fuzzy version should be fuzzier: var_crisp={}, var_fuzzy={}", var_crisp, var_fuzzy);
+        assert!(
+            var_fuzzy <= var_crisp + 0.1,
+            "Fuzzy version should be fuzzier: var_crisp={}, var_fuzzy={}",
+            var_crisp,
+            var_fuzzy
+        );
     }
 
     #[test]
@@ -8183,7 +8422,8 @@ mod tests {
             [10.2, 10.0],
         ];
 
-        let result = mini_batch_kmeans(data.view(), 2, Some(3), Some(50), Some(3), Some(42)).unwrap();
+        let result =
+            mini_batch_kmeans(data.view(), 2, Some(3), Some(50), Some(3), Some(42)).unwrap();
 
         assert_eq!(result.labels.len(), 6);
         assert_eq!(result.n_clusters, 2);
@@ -8207,19 +8447,26 @@ mod tests {
             [10.1, 10.1],
             [10.2, 10.0],
             [10.3, 10.1],
-            [500.0, 500.0],  // Clear outlier - very far from both clusters
-            [501.0, 501.0],  // Another outlier
+            [500.0, 500.0], // Clear outlier - very far from both clusters
+            [501.0, 501.0], // Another outlier
         ];
 
         // With 20% trimming, should trim the 2 outliers
-        let result = trimmed_kmeans(data.view(), 2, Some(0.2), Some(50), Some(5), Some(42)).unwrap();
+        let result =
+            trimmed_kmeans(data.view(), 2, Some(0.2), Some(50), Some(5), Some(42)).unwrap();
 
         assert_eq!(result.labels.len(), 10);
         assert_eq!(result.n_clusters, 2);
-        assert!(result.n_trimmed >= 1, "At least one outlier should be trimmed");
+        assert!(
+            result.n_trimmed >= 1,
+            "At least one outlier should be trimmed"
+        );
 
         // Verify that trimmed points exist
-        assert!(!result.trimmed_indices.is_empty(), "Should have trimmed indices");
+        assert!(
+            !result.trimmed_indices.is_empty(),
+            "Should have trimmed indices"
+        );
 
         // Non-trimmed points in each cluster should be internally consistent
         let cluster0_count = result.labels.iter().filter(|&&l| l == 0).count();
@@ -8279,16 +8526,16 @@ mod tests {
 
     #[test]
     fn test_agnes_linkage_methods() {
-        let data = array![
-            [0.0, 0.0],
-            [1.0, 0.0],
-            [5.0, 0.0],
-            [6.0, 0.0],
-        ];
+        let data = array![[0.0, 0.0], [1.0, 0.0], [5.0, 0.0], [6.0, 0.0],];
 
         // Test all linkage methods work
-        for linkage in [AgnesLinkage::Single, AgnesLinkage::Complete,
-                        AgnesLinkage::Average, AgnesLinkage::Ward, AgnesLinkage::Weighted] {
+        for linkage in [
+            AgnesLinkage::Single,
+            AgnesLinkage::Complete,
+            AgnesLinkage::Average,
+            AgnesLinkage::Ward,
+            AgnesLinkage::Weighted,
+        ] {
             let result = agnes(data.view(), Some(2), Some(linkage)).unwrap();
             assert_eq!(result.n_clusters, 2);
         }
@@ -8314,14 +8561,14 @@ mod tests {
             [1.0, 2.0],
         ];
         let y = array![
-            [2.1],  // Group 1: 1 + 2*0.5 + noise
-            [3.0],  // Group 1: 1 + 2*1.0 + noise
-            [4.1],  // Group 1: 1 + 2*1.5 + noise
-            [5.0],  // Group 1: 1 + 2*2.0 + noise
-            [4.4],  // Group 2: 5 - 1*0.5 + noise
-            [3.9],  // Group 2: 5 - 1*1.0 + noise
-            [3.6],  // Group 2: 5 - 1*1.5 + noise
-            [3.1],  // Group 2: 5 - 1*2.0 + noise
+            [2.1], // Group 1: 1 + 2*0.5 + noise
+            [3.0], // Group 1: 1 + 2*1.0 + noise
+            [4.1], // Group 1: 1 + 2*1.5 + noise
+            [5.0], // Group 1: 1 + 2*2.0 + noise
+            [4.4], // Group 2: 5 - 1*0.5 + noise
+            [3.9], // Group 2: 5 - 1*1.0 + noise
+            [3.6], // Group 2: 5 - 1*1.5 + noise
+            [3.1], // Group 2: 5 - 1*2.0 + noise
         ];
 
         let result = flexmix(y.view(), x.view(), 2, Some(100), Some(1e-4), Some(42)).unwrap();
@@ -8337,18 +8584,8 @@ mod tests {
 
     #[test]
     fn test_flexmix_single_component() {
-        let x = array![
-            [1.0, 1.0],
-            [1.0, 2.0],
-            [1.0, 3.0],
-            [1.0, 4.0],
-        ];
-        let y = array![
-            [2.1],
-            [4.0],
-            [5.9],
-            [8.1],
-        ];
+        let x = array![[1.0, 1.0], [1.0, 2.0], [1.0, 3.0], [1.0, 4.0],];
+        let y = array![[2.1], [4.0], [5.9], [8.1],];
 
         let result = flexmix(y.view(), x.view(), 1, Some(50), None, Some(42)).unwrap();
 
@@ -8369,7 +8606,15 @@ mod tests {
         ];
 
         // Use fewer bootstrap samples for test speed
-        let result = pvclust(data.view(), Some("average"), Some(100), None, Some(0.80), Some(42)).unwrap();
+        let result = pvclust(
+            data.view(),
+            Some("average"),
+            Some(100),
+            None,
+            Some(0.80),
+            Some(42),
+        )
+        .unwrap();
 
         assert_eq!(result.n, 6);
         assert_eq!(result.labels.len(), 6);
@@ -8379,10 +8624,10 @@ mod tests {
 
         // AU and BP p-values should be in [0, 1]
         for &au in &result.au_pvalues {
-            assert!(au >= 0.0 && au <= 1.0, "AU p-value out of range: {}", au);
+            assert!((0.0..=1.0).contains(&au), "AU p-value out of range: {}", au);
         }
         for &bp in &result.bp_pvalues {
-            assert!(bp >= 0.0 && bp <= 1.0, "BP p-value out of range: {}", bp);
+            assert!((0.0..=1.0).contains(&bp), "BP p-value out of range: {}", bp);
         }
     }
 
@@ -8413,11 +8658,7 @@ mod tests {
     #[test]
     fn test_clara_large_sample() {
         // Test with larger sample size than data (should clamp)
-        let data = array![
-            [0.0, 0.0],
-            [1.0, 1.0],
-            [2.0, 2.0],
-        ];
+        let data = array![[0.0, 0.0], [1.0, 1.0], [2.0, 2.0],];
 
         let result = clara(data.view(), 2, Some(2), Some(100), None, Some(42)).unwrap();
 
@@ -8455,16 +8696,15 @@ mod tests {
         assert!(result.total_ss >= 0.0);
 
         // Well-separated clusters should have high silhouette
-        assert!(result.average_silhouette > 0.5, "Expected high silhouette for well-separated clusters");
+        assert!(
+            result.average_silhouette > 0.5,
+            "Expected high silhouette for well-separated clusters"
+        );
     }
 
     #[test]
     fn test_cluster_stats_single_cluster() {
-        let data = array![
-            [0.0, 0.0],
-            [0.1, 0.1],
-            [0.2, 0.0],
-        ];
+        let data = array![[0.0, 0.0], [0.1, 0.1], [0.2, 0.0],];
         let labels = vec![0, 0, 0];
 
         let result = cluster_stats(data.view(), &labels).unwrap();
@@ -8496,7 +8736,12 @@ mod tests {
         // Membership should sum to 1 for each observation
         for i in 0..6 {
             let row_sum: f64 = (0..2).map(|j| result.membership[[i, j]]).sum();
-            assert!((row_sum - 1.0).abs() < 1e-6, "Membership row {} sum: {}", i, row_sum);
+            assert!(
+                (row_sum - 1.0).abs() < 1e-6,
+                "Membership row {} sum: {}",
+                i,
+                row_sum
+            );
         }
 
         // Dunn coefficient should be in valid range
@@ -8512,19 +8757,17 @@ mod tests {
 
     #[test]
     fn test_fanny_fuzziness_parameter() {
-        let data = array![
-            [0.0, 0.0],
-            [5.0, 5.0],
-            [10.0, 10.0],
-        ];
+        let data = array![[0.0, 0.0], [5.0, 5.0], [10.0, 10.0],];
 
         // Higher m = fuzzier (memberships closer to 1/k)
         let result_low_m = fanny(data.view(), 2, Some(1.5), Some(100), None, Some(42)).unwrap();
         let result_high_m = fanny(data.view(), 2, Some(3.0), Some(100), None, Some(42)).unwrap();
 
         // Higher m should have lower Dunn coefficient (fuzzier)
-        assert!(result_high_m.dunn_coefficient <= result_low_m.dunn_coefficient + 0.1,
-            "Higher m should produce fuzzier clustering");
+        assert!(
+            result_high_m.dunn_coefficient <= result_low_m.dunn_coefficient + 0.1,
+            "Higher m should produce fuzzier clustering"
+        );
     }
 
     // =========================================================================
@@ -8563,12 +8806,7 @@ mod tests {
 
     #[test]
     fn test_skmeans_normalized_centroids() {
-        let data = array![
-            [1.0, 2.0],
-            [2.0, 1.0],
-            [10.0, 20.0],
-            [20.0, 10.0],
-        ];
+        let data = array![[1.0, 2.0], [2.0, 1.0], [10.0, 20.0], [20.0, 10.0],];
 
         let result = skmeans(data.view(), 2, Some(50), None, Some(5), Some(42)).unwrap();
 
@@ -8578,18 +8816,18 @@ mod tests {
                 .map(|j| result.centroids[[c, j]].powi(2))
                 .sum::<f64>()
                 .sqrt();
-            assert!((norm - 1.0).abs() < 1e-6, "Centroid {} should be unit vector, norm={}", c, norm);
+            assert!(
+                (norm - 1.0).abs() < 1e-6,
+                "Centroid {} should be unit vector, norm={}",
+                c,
+                norm
+            );
         }
     }
 
     #[test]
     fn test_fastcluster_basic() {
-        let data = array![
-            [0.0, 0.0],
-            [0.1, 0.1],
-            [10.0, 10.0],
-            [10.1, 10.1],
-        ];
+        let data = array![[0.0, 0.0], [0.1, 0.1], [10.0, 10.0], [10.1, 10.1],];
 
         let result = fastcluster(data.view(), Some(FastLinkage::Ward), None).unwrap();
 
@@ -8600,8 +8838,10 @@ mod tests {
 
         // Heights should be non-decreasing (approximately)
         for i in 1..result.height.len() {
-            assert!(result.height[i] >= result.height[i-1] - 1e-6,
-                "Heights should be non-decreasing");
+            assert!(
+                result.height[i] >= result.height[i - 1] - 1e-6,
+                "Heights should be non-decreasing"
+            );
         }
     }
 
@@ -8636,11 +8876,7 @@ mod tests {
 
     #[test]
     fn test_fastcluster_linkage_methods() {
-        let data = array![
-            [0.0, 0.0],
-            [1.0, 1.0],
-            [10.0, 10.0],
-        ];
+        let data = array![[0.0, 0.0], [1.0, 1.0], [10.0, 10.0],];
 
         // Test each linkage method runs without error
         for linkage in [
@@ -8672,9 +8908,10 @@ mod tests {
             data.view(),
             Some(FastLinkage::Ward),
             Some(DynamicCutMethod::Tree),
-            Some(2),  // deep_split
-            Some(2),  // min_cluster_size
-        ).unwrap();
+            Some(2), // deep_split
+            Some(2), // min_cluster_size
+        )
+        .unwrap();
 
         assert_eq!(result.n, 6);
         assert_eq!(result.labels.len(), 6);
@@ -8697,14 +8934,10 @@ mod tests {
         ];
 
         // Lower deep_split = fewer clusters
-        let result_low = run_dynamic_tree_cut(
-            data.view(), None, None, Some(0), Some(2)
-        ).unwrap();
+        let result_low = run_dynamic_tree_cut(data.view(), None, None, Some(0), Some(2)).unwrap();
 
         // Higher deep_split = potentially more clusters
-        let result_high = run_dynamic_tree_cut(
-            data.view(), None, None, Some(4), Some(2)
-        ).unwrap();
+        let result_high = run_dynamic_tree_cut(data.view(), None, None, Some(4), Some(2)).unwrap();
 
         // Both should produce valid results
         assert!(result_low.n_clusters >= 1);
@@ -8715,8 +8948,8 @@ mod tests {
     fn test_normal_mix_em_basic() {
         // Create bimodal data
         let data: Vec<f64> = vec![
-            0.1, 0.2, 0.3, 0.4, 0.5,  // Cluster around 0.3
-            9.5, 9.6, 9.7, 9.8, 9.9,  // Cluster around 9.7
+            0.1, 0.2, 0.3, 0.4, 0.5, // Cluster around 0.3
+            9.5, 9.6, 9.7, 9.8, 9.9, // Cluster around 9.7
         ];
 
         let result = normal_mix_em(&data, 2, Some(100), Some(1e-6), Some(42)).unwrap();
@@ -8735,7 +8968,11 @@ mod tests {
 
         // Means should be separated
         let mu_diff = (result.mu[0] - result.mu[1]).abs();
-        assert!(mu_diff > 5.0, "Means should be well separated: {:?}", result.mu);
+        assert!(
+            mu_diff > 5.0,
+            "Means should be well separated: {:?}",
+            result.mu
+        );
     }
 
     #[test]
@@ -8750,7 +8987,10 @@ mod tests {
         if result.loglik_history.len() > 1 {
             let first = result.loglik_history[0];
             let last = *result.loglik_history.last().unwrap();
-            assert!(last >= first - 1e-6, "Log-likelihood should not decrease significantly");
+            assert!(
+                last >= first - 1e-6,
+                "Log-likelihood should not decrease significantly"
+            );
         }
     }
 
@@ -8787,30 +9027,22 @@ mod tests {
     #[test]
     fn test_kprototypes_basic() {
         // Numeric features
-        let numeric_data = array![
-            [0.0, 0.0],
-            [0.1, 0.1],
-            [10.0, 10.0],
-            [10.1, 10.1],
-        ];
+        let numeric_data = array![[0.0, 0.0], [0.1, 0.1], [10.0, 10.0], [10.1, 10.1],];
 
         // Categorical features (e.g., encoded categories)
-        let categorical_data: Vec<Vec<usize>> = vec![
-            vec![0, 0],
-            vec![0, 0],
-            vec![1, 1],
-            vec![1, 1],
-        ];
+        let categorical_data: Vec<Vec<usize>> =
+            vec![vec![0, 0], vec![0, 0], vec![1, 1], vec![1, 1]];
 
         let result = kprototypes(
             numeric_data.view(),
             &categorical_data,
             2,
-            None,  // auto gamma
+            None, // auto gamma
             Some(100),
             Some(10),
             Some(42),
-        ).unwrap();
+        )
+        .unwrap();
 
         assert_eq!(result.n_clusters, 2);
         assert_eq!(result.n, 4);
@@ -8828,20 +9060,10 @@ mod tests {
 
     #[test]
     fn test_kprototypes_numeric_only() {
-        let numeric_data = array![
-            [0.0, 0.0],
-            [0.1, 0.1],
-            [10.0, 10.0],
-            [10.1, 10.1],
-        ];
+        let numeric_data = array![[0.0, 0.0], [0.1, 0.1], [10.0, 10.0], [10.1, 10.1],];
 
         // Empty categorical features
-        let categorical_data: Vec<Vec<usize>> = vec![
-            vec![],
-            vec![],
-            vec![],
-            vec![],
-        ];
+        let categorical_data: Vec<Vec<usize>> = vec![vec![], vec![], vec![], vec![]];
 
         let result = kprototypes(
             numeric_data.view(),
@@ -8851,7 +9073,8 @@ mod tests {
             Some(50),
             Some(5),
             Some(42),
-        ).unwrap();
+        )
+        .unwrap();
 
         assert_eq!(result.n_clusters, 2);
         assert_eq!(result.n_categorical, 0);
@@ -8859,19 +9082,9 @@ mod tests {
 
     #[test]
     fn test_kprototypes_gamma_effect() {
-        let numeric_data = array![
-            [0.0, 0.0],
-            [0.0, 0.0],
-            [1.0, 1.0],
-            [1.0, 1.0],
-        ];
+        let numeric_data = array![[0.0, 0.0], [0.0, 0.0], [1.0, 1.0], [1.0, 1.0],];
 
-        let categorical_data: Vec<Vec<usize>> = vec![
-            vec![0],
-            vec![1],
-            vec![0],
-            vec![1],
-        ];
+        let categorical_data: Vec<Vec<usize>> = vec![vec![0], vec![1], vec![0], vec![1]];
 
         // Low gamma: numeric features dominate
         let result_low = kprototypes(
@@ -8882,7 +9095,8 @@ mod tests {
             Some(50),
             Some(5),
             Some(42),
-        ).unwrap();
+        )
+        .unwrap();
 
         // High gamma: categorical features dominate
         let result_high = kprototypes(
@@ -8893,7 +9107,8 @@ mod tests {
             Some(50),
             Some(5),
             Some(42),
-        ).unwrap();
+        )
+        .unwrap();
 
         // Both should produce valid results
         assert_eq!(result_low.n_clusters, 2);

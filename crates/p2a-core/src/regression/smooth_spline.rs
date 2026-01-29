@@ -10,12 +10,12 @@
 //! - R Core Team. `stats::smooth.spline()` function.
 //!   <https://stat.ethz.ch/R-manual/R-devel/library/stats/html/smooth.spline.html>
 
-use serde::{Deserialize, Serialize};
 use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
+use serde::{Deserialize, Serialize};
 
 /// Configuration for smooth.spline fitting.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct SmoothSplineConfig {
     /// Equivalent degrees of freedom for the spline. If specified, spar is ignored.
     pub df: Option<f64>,
@@ -29,19 +29,6 @@ pub struct SmoothSplineConfig {
     pub cv: bool,
     /// Weights for observations (optional).
     pub weights: Option<Vec<f64>>,
-}
-
-impl Default for SmoothSplineConfig {
-    fn default() -> Self {
-        Self {
-            df: None,
-            spar: None,
-            lambda: None,
-            all_knots: false,
-            cv: false,
-            weights: None,
-        }
-    }
 }
 
 impl SmoothSplineConfig {
@@ -131,7 +118,11 @@ pub struct SmoothSplineResult {
 ///
 /// - R function `stats::smooth.spline()`
 /// - Green & Silverman (1994). "Nonparametric Regression and GLMs".
-pub fn smooth_spline(x: &[f64], y: &[f64], config: SmoothSplineConfig) -> EconResult<SmoothSplineResult> {
+pub fn smooth_spline(
+    x: &[f64],
+    y: &[f64],
+    config: SmoothSplineConfig,
+) -> EconResult<SmoothSplineResult> {
     if x.len() != y.len() {
         return Err(EconError::InvalidSpecification {
             message: format!("x and y must have same length: {} vs {}", x.len(), y.len()),
@@ -155,7 +146,7 @@ pub fn smooth_spline(x: &[f64], y: &[f64], config: SmoothSplineConfig) -> EconRe
     }
 
     // Sort by x and handle ties by averaging y values
-    let (xs, ys, ws, original_indices) = prepare_data(x, y, config.weights.as_deref())?;
+    let (xs, ys, ws, _original_indices) = prepare_data(x, y, config.weights.as_deref())?;
     let n_unique = xs.len();
 
     if n_unique < 4 {
@@ -233,7 +224,8 @@ pub fn smooth_spline_predict(result: &SmoothSplineResult, xnew: &[f64]) -> EconR
     let coeffs = compute_spline_coefficients(&result.x, &result.y)?;
 
     // Evaluate at new points
-    Ok(xnew.iter()
+    Ok(xnew
+        .iter()
         .map(|&xi| evaluate_spline(&result.x, &result.y, &coeffs, xi))
         .collect())
 }
@@ -246,14 +238,20 @@ pub fn run_smooth_spline(
     df: Option<f64>,
 ) -> EconResult<SmoothSplineResult> {
     let df_data = dataset.df();
-    let available: Vec<String> = df_data.get_column_names().iter().map(|s| s.to_string()).collect();
+    let available: Vec<String> = df_data
+        .get_column_names()
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
 
-    let x_series = df_data.column(x_col)
+    let x_series = df_data
+        .column(x_col)
         .map_err(|_| EconError::ColumnNotFound {
             column: x_col.to_string(),
             available: available.clone(),
         })?;
-    let y_series = df_data.column(y_col)
+    let y_series = df_data
+        .column(y_col)
         .map_err(|_| EconError::ColumnNotFound {
             column: y_col.to_string(),
             available: available.clone(),
@@ -261,12 +259,16 @@ pub fn run_smooth_spline(
 
     let x: Vec<f64> = x_series
         .f64()
-        .map_err(|_| EconError::NonNumericColumn { column: x_col.to_string() })?
+        .map_err(|_| EconError::NonNumericColumn {
+            column: x_col.to_string(),
+        })?
         .into_no_null_iter()
         .collect();
     let y: Vec<f64> = y_series
         .f64()
-        .map_err(|_| EconError::NonNumericColumn { column: y_col.to_string() })?
+        .map_err(|_| EconError::NonNumericColumn {
+            column: y_col.to_string(),
+        })?
         .into_no_null_iter()
         .collect();
 
@@ -456,7 +458,7 @@ fn cross_validate(
     weights: &[f64],
     gcv: bool,
 ) -> EconResult<(f64, Option<f64>)> {
-    let n = basis.len();
+    let _n = basis.len();
 
     // Coarse search first (fewer iterations)
     let mut best_lambda = 1.0;
@@ -506,7 +508,8 @@ fn compute_cv_score(
 
     let score = if gcv {
         // GCV score: (1/n) Σ (y_i - f(x_i))² / (1 - df/n)²
-        let rss: f64 = y.iter()
+        let rss: f64 = y
+            .iter()
             .zip(fitted.iter())
             .zip(weights.iter())
             .map(|((&yi, &fi), &wi)| wi * (yi - fi).powi(2))
@@ -569,7 +572,11 @@ fn fit_smoothing_spline(
     }
 
     // Weighted y
-    let wy: Vec<f64> = y.iter().zip(weights.iter()).map(|(&yi, &wi)| wi * yi).collect();
+    let wy: Vec<f64> = y
+        .iter()
+        .zip(weights.iter())
+        .map(|(&yi, &wi)| wi * yi)
+        .collect();
 
     // Solve banded system using banded Cholesky - O(n * bandwidth²)
     let (fitted, leverage) = solve_banded_system(&band, &wy, weights, bandwidth)?;
@@ -729,7 +736,8 @@ fn compute_residuals_at_original(
     let coeffs = compute_spline_coefficients(x_fitted, y_fitted)
         .unwrap_or_else(|_| vec![0.0; x_fitted.len()]);
 
-    x_orig.iter()
+    x_orig
+        .iter()
         .zip(y_orig.iter())
         .map(|(&xi, &yi)| yi - evaluate_spline(x_fitted, y_fitted, &coeffs, xi))
         .collect()
@@ -819,7 +827,10 @@ mod tests {
     fn test_smooth_spline_basic() {
         // Noisy sine curve
         let x: Vec<f64> = (0..50).map(|i| i as f64 * 0.1).collect();
-        let y: Vec<f64> = x.iter().map(|&xi| xi.sin() + 0.1 * (xi * 10.0).sin()).collect();
+        let y: Vec<f64> = x
+            .iter()
+            .map(|&xi| xi.sin() + 0.1 * (xi * 10.0).sin())
+            .collect();
 
         let config = SmoothSplineConfig::with_df(10.0);
         let result = smooth_spline(&x, &y, config).unwrap();
@@ -864,7 +875,13 @@ mod tests {
         for (i, &xi) in xnew.iter().enumerate() {
             let expected = xi.powi(2);
             let diff = (ynew[i] - expected).abs();
-            assert!(diff < 10.0, "At x={}, expected ~{}, got {}", xi, expected, ynew[i]);
+            assert!(
+                diff < 10.0,
+                "At x={}, expected ~{}, got {}",
+                xi,
+                expected,
+                ynew[i]
+            );
         }
     }
 
@@ -880,7 +897,13 @@ mod tests {
         // Fitted values should be close to original
         for (i, &yi) in y.iter().enumerate() {
             let diff = (result.y[i] - yi).abs();
-            assert!(diff < 1.0, "At index {}, expected ~{}, got {}", i, yi, result.y[i]);
+            assert!(
+                diff < 1.0,
+                "At index {}, expected ~{}, got {}",
+                i,
+                yi,
+                result.y[i]
+            );
         }
     }
 
@@ -888,7 +911,8 @@ mod tests {
     fn test_smooth_spline_low_df_smooths() {
         // Noisy data
         let x: Vec<f64> = (0..50).map(|i| i as f64 / 10.0).collect();
-        let y: Vec<f64> = x.iter()
+        let y: Vec<f64> = x
+            .iter()
             .enumerate()
             .map(|(i, &xi)| xi + 0.5 * (if i % 2 == 0 { 1.0 } else { -1.0 }))
             .collect();
@@ -900,13 +924,15 @@ mod tests {
         // Fitted values should follow the trend, not the noise
         // The underlying trend is y = x
         let mut trend_match = 0;
-        for (i, (&xi, &fi)) in x.iter().zip(result.y.iter()).enumerate() {
+        for (&xi, &fi) in x.iter().zip(result.y.iter()) {
             if (fi - xi).abs() < 1.0 {
                 trend_match += 1;
             }
         }
-        assert!(trend_match as f64 / x.len() as f64 > 0.8,
-            "Low df should follow the linear trend");
+        assert!(
+            trend_match as f64 / x.len() as f64 > 0.8,
+            "Low df should follow the linear trend"
+        );
     }
 
     /// Validation test against R's smooth.spline()
@@ -927,8 +953,11 @@ mod tests {
         let result = smooth_spline(&x, &y, config).unwrap();
 
         // df should be close to requested
-        assert!((result.df - 6.0).abs() < 1.0,
-            "Expected df ~6, got {}", result.df);
+        assert!(
+            (result.df - 6.0).abs() < 1.0,
+            "Expected df ~6, got {}",
+            result.df
+        );
 
         // Residuals should be small for smooth data
         let max_resid = result.residuals.iter().map(|r| r.abs()).fold(0.0, f64::max);

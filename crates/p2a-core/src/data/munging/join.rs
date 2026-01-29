@@ -94,7 +94,7 @@ pub fn join(
 ) -> MungeResult<Dataset> {
     // Validate left_on columns exist
     for col in left_on {
-        if left.df().column(*col).is_err() {
+        if left.df().column(col).is_err() {
             return Err(MungeError::ColumnNotFound(col.to_string()));
         }
     }
@@ -107,7 +107,7 @@ pub fn join(
 
     // Validate right_on columns exist
     for col in &right_on_cols {
-        if right.df().column(*col).is_err() {
+        if right.df().column(col).is_err() {
             return Err(MungeError::ColumnNotFound(col.to_string()));
         }
     }

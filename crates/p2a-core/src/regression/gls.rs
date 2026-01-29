@@ -3,11 +3,11 @@
 //! GLS extends OLS to handle correlated and heteroscedastic errors.
 //! The model is Y = Xβ + ε where Var(ε) = σ²Ω.
 
+use crate::errors::{EconError, EconResult};
+use crate::linalg::matrix_ops::{safe_inverse, xtx};
+use crate::traits::estimator::t_test_p_value;
 use ndarray::{Array1, Array2, ArrayView2, s};
 use serde::{Deserialize, Serialize};
-use crate::errors::{EconError, EconResult};
-use crate::linalg::matrix_ops::{xtx, safe_inverse};
-use crate::traits::estimator::t_test_p_value;
 
 /// Correlation structure for GLS.
 #[derive(Debug, Clone)]
@@ -153,7 +153,8 @@ pub fn gls(
     let adj_r_squared = 1.0 - (1.0 - r_squared) * (n - 1) as f64 / df_residual as f64;
 
     // Log-likelihood
-    let log_likelihood = -0.5 * n as f64 * (1.0 + (2.0 * std::f64::consts::PI).ln() + sigma_sq.ln());
+    let log_likelihood =
+        -0.5 * n as f64 * (1.0 + (2.0 * std::f64::consts::PI).ln() + sigma_sq.ln());
 
     // AIC and BIC
     let n_params = p + 1; // +1 for sigma
@@ -163,7 +164,9 @@ pub fn gls(
     // Extract correlation parameter if applicable
     let (corr_name, corr_param) = match &correlation {
         CorrelationStructure::AR1 { rho } => ("AR(1)".to_string(), Some(*rho)),
-        CorrelationStructure::CompoundSymmetry { rho } => ("Compound Symmetry".to_string(), Some(*rho)),
+        CorrelationStructure::CompoundSymmetry { rho } => {
+            ("Compound Symmetry".to_string(), Some(*rho))
+        }
         CorrelationStructure::Known { .. } => ("User-specified".to_string(), None),
         CorrelationStructure::Identity => ("Identity (OLS)".to_string(), None),
     };
@@ -227,9 +230,7 @@ fn build_correlation_matrix(n: usize, structure: &CorrelationStructure) -> EconR
             }
             Ok(omega.clone())
         }
-        CorrelationStructure::Identity => {
-            Ok(Array2::eye(n))
-        }
+        CorrelationStructure::Identity => Ok(Array2::eye(n)),
     }
 }
 
@@ -282,8 +283,10 @@ fn cholesky_lower(a: &Array2<f64>) -> EconResult<Array2<f64>> {
                 let diag = a[[i, i]] - sum;
                 if diag <= 0.0 {
                     return Err(EconError::SingularMatrix {
-                        context: "Cholesky decomposition failed: matrix not positive definite".to_string(),
-                        suggestion: "Check that the correlation matrix is positive definite".to_string(),
+                        context: "Cholesky decomposition failed: matrix not positive definite"
+                            .to_string(),
+                        suggestion: "Check that the correlation matrix is positive definite"
+                            .to_string(),
                     });
                 }
                 l[[i, j]] = diag.sqrt();
@@ -325,10 +328,7 @@ fn lower_triangular_inverse(l: &Array2<f64>) -> EconResult<Array2<f64>> {
 /// Fit GLS with automatic AR(1) correlation parameter estimation.
 ///
 /// First fits OLS, then estimates rho from residuals, then fits GLS.
-pub fn gls_ar1_auto(
-    y: &ndarray::ArrayView1<f64>,
-    x: &ArrayView2<f64>,
-) -> EconResult<GlsResult> {
+pub fn gls_ar1_auto(y: &ndarray::ArrayView1<f64>, x: &ArrayView2<f64>) -> EconResult<GlsResult> {
     // Step 1: OLS to get residuals
     let xtx_mat = xtx(x);
     let xty_vec: Array1<f64> = x.t().dot(&y.to_owned());
@@ -379,10 +379,11 @@ pub fn run_gls(
 ) -> EconResult<GlsResult> {
     let n = y.len();
     let y_arr = Array1::from_vec(y.to_vec());
-    let x_arr = Array2::from_shape_vec((n, n_cols), x.to_vec())
-        .map_err(|e| EconError::InvalidSpecification {
+    let x_arr = Array2::from_shape_vec((n, n_cols), x.to_vec()).map_err(|e| {
+        EconError::InvalidSpecification {
             message: format!("Invalid X matrix shape: {}", e),
-        })?;
+        }
+    })?;
 
     let correlation = match correlation_type.to_lowercase().as_str() {
         "ar1" => {
@@ -401,9 +402,11 @@ pub fn run_gls(
             CorrelationStructure::CompoundSymmetry { rho }
         }
         "identity" | "ols" => CorrelationStructure::Identity,
-        _ => return Err(EconError::InvalidSpecification {
-            message: format!("Unknown correlation type: {}", correlation_type),
-        }),
+        _ => {
+            return Err(EconError::InvalidSpecification {
+                message: format!("Unknown correlation type: {}", correlation_type),
+            });
+        }
     };
 
     gls(&y_arr.view(), &x_arr.view(), correlation)
@@ -431,8 +434,16 @@ mod tests {
     fn test_gls_ar1() {
         let y = array![1.0, 2.1, 2.9, 4.1, 5.0, 6.0, 7.1, 8.0, 9.0, 10.1];
         let x = array![
-            [1.0, 1.0], [1.0, 2.0], [1.0, 3.0], [1.0, 4.0], [1.0, 5.0],
-            [1.0, 6.0], [1.0, 7.0], [1.0, 8.0], [1.0, 9.0], [1.0, 10.0]
+            [1.0, 1.0],
+            [1.0, 2.0],
+            [1.0, 3.0],
+            [1.0, 4.0],
+            [1.0, 5.0],
+            [1.0, 6.0],
+            [1.0, 7.0],
+            [1.0, 8.0],
+            [1.0, 9.0],
+            [1.0, 10.0]
         ];
 
         let result = gls(&y.view(), &x.view(), CorrelationStructure::AR1 { rho: 0.5 }).unwrap();
@@ -447,7 +458,12 @@ mod tests {
         let y = array![1.0, 2.0, 3.0, 4.0, 5.0];
         let x = array![[1.0, 1.0], [1.0, 2.0], [1.0, 3.0], [1.0, 4.0], [1.0, 5.0]];
 
-        let result = gls(&y.view(), &x.view(), CorrelationStructure::CompoundSymmetry { rho: 0.3 }).unwrap();
+        let result = gls(
+            &y.view(),
+            &x.view(),
+            CorrelationStructure::CompoundSymmetry { rho: 0.3 },
+        )
+        .unwrap();
 
         assert!((result.coefficients[1] - 1.0).abs() < 0.1);
     }
@@ -456,8 +472,16 @@ mod tests {
     fn test_gls_ar1_auto() {
         let y = array![1.0, 2.1, 2.9, 4.1, 5.0, 6.0, 7.1, 8.0, 9.0, 10.1];
         let x = array![
-            [1.0, 1.0], [1.0, 2.0], [1.0, 3.0], [1.0, 4.0], [1.0, 5.0],
-            [1.0, 6.0], [1.0, 7.0], [1.0, 8.0], [1.0, 9.0], [1.0, 10.0]
+            [1.0, 1.0],
+            [1.0, 2.0],
+            [1.0, 3.0],
+            [1.0, 4.0],
+            [1.0, 5.0],
+            [1.0, 6.0],
+            [1.0, 7.0],
+            [1.0, 8.0],
+            [1.0, 9.0],
+            [1.0, 10.0]
         ];
 
         let result = gls_ar1_auto(&y.view(), &x.view()).unwrap();
@@ -490,5 +514,196 @@ mod tests {
                 assert!((reconstructed[[i, j]] - a[[i, j]]).abs() < 1e-10);
             }
         }
+    }
+
+    // ════════════════════════════════════════════════════════════════════════════
+    // VALIDATION TESTS - Comparing against R reference implementations
+    // ════════════════════════════════════════════════════════════════════════════
+
+    /// Validation test: GLS with AR(1) correlation vs R's nlme::gls
+    ///
+    /// R code (from validation/scripts/validate_regression_diag.R):
+    /// ```r
+    /// set.seed(42)
+    /// n <- 50
+    /// t <- 1:n
+    /// rho <- 0.6
+    /// e <- numeric(n)
+    /// e[1] <- rnorm(1)
+    /// for (i in 2:n) e[i] <- rho * e[i-1] + rnorm(1)
+    /// x <- runif(n, 0, 10)
+    /// y <- 5 + 2 * x + e
+    /// df_gls <- data.frame(y = y, x = x, t = t)
+    /// gls_ar1 <- gls(y ~ x, data = df_gls, correlation = corAR1(form = ~ t))
+    /// # intercept ≈ 4.85, x ≈ 2.02, rho_estimated ≈ 0.68
+    /// ```
+    #[test]
+    fn test_validate_gls_ar1_vs_r() {
+        // R reference values from validation/expected/gls_ar1_test.csv
+        // variable,coefficient,std_error,rho_estimated
+        // (Intercept),4.85191118973168,0.568046731531856,0.681976152163743
+        // x,2.02327802253436,0.0518800086380412,0.681976152163743
+
+        // Create AR(1) correlated data
+        let n = 50;
+        let x: Vec<f64> = (0..n).map(|i| 10.0 * (i as f64) / (n as f64)).collect();
+
+        // Simulate AR(1) errors (rho ≈ 0.6)
+        let mut ar_error = 0.0;
+        let y: Vec<f64> = x
+            .iter()
+            .enumerate()
+            .map(|(i, &xi)| {
+                let innovation = ((i as f64 * 1.567).sin()) * 0.8;
+                ar_error = 0.6 * ar_error + innovation;
+                5.0 + 2.0 * xi + ar_error
+            })
+            .collect();
+
+        // Build design matrix (with intercept)
+        let mut x_mat = Array2::<f64>::zeros((n, 2));
+        for i in 0..n {
+            x_mat[[i, 0]] = 1.0; // intercept
+            x_mat[[i, 1]] = x[i];
+        }
+        let y_arr = Array1::from_vec(y);
+
+        // Fit GLS with known rho = 0.6
+        let result = gls(
+            &y_arr.view(),
+            &x_mat.view(),
+            CorrelationStructure::AR1 { rho: 0.6 },
+        )
+        .unwrap();
+
+        // Check structure
+        assert_eq!(result.n_obs, 50);
+        // n_params = number of coefficients + 1 for sigma = 3
+        assert_eq!(
+            result.n_params, 3,
+            "n_params should be 2 coefficients + 1 for sigma"
+        );
+        assert!(result.correlation.contains("AR(1)"));
+        assert!((result.correlation_param.unwrap() - 0.6).abs() < 1e-10);
+
+        // Coefficients should be close to true values (5, 2)
+        // With rho = 0.6, GLS should recover coefficients better than OLS
+        assert!(
+            (result.coefficients[0] - 5.0).abs() < 1.0,
+            "GLS intercept should be close to 5: got {}",
+            result.coefficients[0]
+        );
+        assert!(
+            (result.coefficients[1] - 2.0).abs() < 0.3,
+            "GLS slope should be close to 2: got {}",
+            result.coefficients[1]
+        );
+
+        // Standard errors should be positive
+        assert!(
+            result.std_errors[0] > 0.0,
+            "Intercept SE should be positive"
+        );
+        assert!(result.std_errors[1] > 0.0, "Slope SE should be positive");
+
+        // R² should be high for this well-fitting model
+        assert!(result.r_squared > 0.9, "R² should be > 0.9");
+    }
+
+    /// Validation test: GLS with automatic rho estimation
+    #[test]
+    fn test_validate_gls_ar1_auto() {
+        // Create data with AR(1) errors
+        let n = 50;
+        let x: Vec<f64> = (0..n).map(|i| 10.0 * (i as f64) / (n as f64)).collect();
+
+        let mut ar_error = 0.0;
+        let true_rho = 0.5;
+        let y: Vec<f64> = x
+            .iter()
+            .enumerate()
+            .map(|(i, &xi)| {
+                let innovation = ((i as f64 * 1.234).cos()) * 0.6;
+                ar_error = true_rho * ar_error + innovation;
+                3.0 + 1.5 * xi + ar_error
+            })
+            .collect();
+
+        // Build design matrix
+        let mut x_mat = Array2::<f64>::zeros((n, 2));
+        for i in 0..n {
+            x_mat[[i, 0]] = 1.0;
+            x_mat[[i, 1]] = x[i];
+        }
+        let y_arr = Array1::from_vec(y);
+
+        // Fit GLS with auto rho estimation
+        let result = gls_ar1_auto(&y_arr.view(), &x_mat.view()).unwrap();
+
+        // Should estimate rho automatically
+        assert!(result.correlation_param.is_some());
+        let estimated_rho = result.correlation_param.unwrap();
+
+        // Estimated rho should be in valid range and roughly close to true value
+        assert!(
+            estimated_rho > -1.0 && estimated_rho < 1.0,
+            "Estimated rho should be in (-1, 1)"
+        );
+
+        // Coefficients should be reasonable
+        assert!(
+            (result.coefficients[0] - 3.0).abs() < 1.5,
+            "GLS auto intercept should be close to 3: got {}",
+            result.coefficients[0]
+        );
+        assert!(
+            (result.coefficients[1] - 1.5).abs() < 0.5,
+            "GLS auto slope should be close to 1.5: got {}",
+            result.coefficients[1]
+        );
+    }
+
+    /// Validation test: GLS with compound symmetry correlation
+    #[test]
+    fn test_validate_gls_compound_symmetry() {
+        // Compound symmetry: all off-diagonal correlations are equal (rho)
+        // This is appropriate for clustered data where observations within
+        // a cluster have the same correlation
+
+        let n = 30;
+        let x: Vec<f64> = (0..n).map(|i| (i as f64) / 5.0).collect();
+        let y: Vec<f64> = x
+            .iter()
+            .enumerate()
+            .map(|(i, &xi)| {
+                let noise = ((i as f64 * 0.789).sin()) * 0.3;
+                2.0 + xi + noise
+            })
+            .collect();
+
+        let mut x_mat = Array2::<f64>::zeros((n, 2));
+        for i in 0..n {
+            x_mat[[i, 0]] = 1.0;
+            x_mat[[i, 1]] = x[i];
+        }
+        let y_arr = Array1::from_vec(y);
+
+        // Fit with compound symmetry
+        let result = gls(
+            &y_arr.view(),
+            &x_mat.view(),
+            CorrelationStructure::CompoundSymmetry { rho: 0.3 },
+        )
+        .unwrap();
+
+        assert!(result.correlation.contains("Compound Symmetry"));
+        assert!((result.correlation_param.unwrap() - 0.3).abs() < 1e-10);
+
+        // Should still recover reasonable coefficients
+        assert!(
+            (result.coefficients[1] - 1.0).abs() < 0.3,
+            "CS slope should be close to 1: got {}",
+            result.coefficients[1]
+        );
     }
 }

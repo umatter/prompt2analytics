@@ -90,12 +90,12 @@
 //! https://cran.r-project.org/package=ivmte
 
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, s};
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use std::fmt;
 
-use crate::errors::{EconResult, EconError};
-use crate::linalg::matrix_ops::{xtx, xty, safe_inverse};
-use crate::traits::estimator::{SignificanceLevel, t_test_p_value, normal_cdf, normal_pdf};
+use crate::errors::{EconError, EconResult};
+use crate::linalg::matrix_ops::{safe_inverse, xtx, xty};
+use crate::traits::estimator::{SignificanceLevel, normal_cdf, normal_pdf, t_test_p_value};
 
 /// Estimand type for MTE analysis.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -331,16 +331,28 @@ impl fmt::Display for IVMTEResult {
         writeln!(f, "Marginal Treatment Effects (MTE) Estimation")?;
         writeln!(f, "=============================================")?;
         writeln!(f)?;
-        writeln!(f, "First Stage: {} Propensity Score Model", self.first_stage.model)?;
+        writeln!(
+            f,
+            "First Stage: {} Propensity Score Model",
+            self.first_stage.model
+        )?;
         writeln!(f, "  Observations: {}", self.n_obs)?;
-        writeln!(f, "  Propensity range: [{:.4}, {:.4}]", self.first_stage.p_min, self.first_stage.p_max)?;
+        writeln!(
+            f,
+            "  Propensity range: [{:.4}, {:.4}]",
+            self.first_stage.p_min, self.first_stage.p_max
+        )?;
         writeln!(f, "  Mean propensity: {:.4}", self.first_stage.p_mean)?;
         if let Some(pseudo_r2) = self.first_stage.pseudo_r_squared {
             writeln!(f, "  Pseudo R-squared: {:.4}", pseudo_r2)?;
         }
         writeln!(f)?;
 
-        writeln!(f, "Second Stage: Polynomial MTE (degree {})", self.mte_degree)?;
+        writeln!(
+            f,
+            "Second Stage: Polynomial MTE (degree {})",
+            self.mte_degree
+        )?;
         writeln!(f, "  R-squared: {:.4}", self.r_squared)?;
         writeln!(f, "  Residual SE: {:.4}", self.residual_se)?;
         writeln!(f)?;
@@ -348,23 +360,42 @@ impl fmt::Display for IVMTEResult {
         writeln!(f, "MTE Polynomial Coefficients (on P^j):")?;
         writeln!(f, "  {:>10} {:>12} {:>12}", "Power", "Coef", "Std Err")?;
         writeln!(f, "  {}", "-".repeat(36))?;
-        for (j, (coef, se)) in self.polynomial_coefficients.iter()
+        for (j, (coef, se)) in self
+            .polynomial_coefficients
+            .iter()
             .zip(self.polynomial_se.iter())
             .enumerate()
         {
-            writeln!(f, "  {:>10} {:>12.4} {:>12.4}", format!("P^{}", j + 1), coef, se)?;
+            writeln!(
+                f,
+                "  {:>10} {:>12.4} {:>12.4}",
+                format!("P^{}", j + 1),
+                coef,
+                se
+            )?;
         }
         writeln!(f)?;
 
         writeln!(f, "Treatment Effect Estimates:")?;
-        writeln!(f, "{:<10} {:>12} {:>10} {:>10} {:>20}",
-                 "Estimand", "Estimate", "Std Err", "P>|z|", "95% CI")?;
+        writeln!(
+            f,
+            "{:<10} {:>12} {:>10} {:>10} {:>20}",
+            "Estimand", "Estimate", "Std Err", "P>|z|", "95% CI"
+        )?;
         writeln!(f, "{}", "-".repeat(64))?;
 
         for te in [&self.ate, &self.att, &self.atu, &self.late] {
-            writeln!(f, "{:<10} {:>12.4} {:>10.4} {:>10.4} [{:>8.4}, {:>8.4}]{}",
-                     te.name, te.estimate, te.se, te.p_value,
-                     te.ci_lower, te.ci_upper, te.significance.stars())?;
+            writeln!(
+                f,
+                "{:<10} {:>12.4} {:>10.4} {:>10.4} [{:>8.4}, {:>8.4}]{}",
+                te.name,
+                te.estimate,
+                te.se,
+                te.p_value,
+                te.ci_lower,
+                te.ci_upper,
+                te.significance.stars()
+            )?;
         }
 
         writeln!(f, "{}", "-".repeat(64))?;
@@ -461,7 +492,9 @@ pub fn run_ivmte(
         return Err(EconError::InvalidSpecification {
             message: format!(
                 "Dimension mismatch: y has {} obs, d has {}, z has {}",
-                n, d.len(), z.len()
+                n,
+                d.len(),
+                z.len()
             ),
         });
     }
@@ -492,9 +525,11 @@ pub fn run_ivmte(
     }
 
     // Check for sufficient variation in propensity
-    let p_variance = propensity.iter()
+    let p_variance = propensity
+        .iter()
         .map(|&p| (p - first_stage.p_mean).powi(2))
-        .sum::<f64>() / (n - 1) as f64;
+        .sum::<f64>()
+        / (n - 1) as f64;
 
     if p_variance < 0.01 {
         warnings.push(format!(
@@ -540,7 +575,8 @@ pub fn run_ivmte(
     let late_est = build_te_estimate("LATE", late, late_se, df);
 
     // Convert MTE coefficients (derivatives of polynomial)
-    let mte_coefficients: Vec<f64> = polynomial_coefs.iter()
+    let mte_coefficients: Vec<f64> = polynomial_coefs
+        .iter()
         .enumerate()
         .map(|(j, &c)| (j + 1) as f64 * c)
         .collect();
@@ -577,7 +613,7 @@ fn estimate_propensity(
     // Build design matrix with intercept
     let mut x_prop = Array2::zeros((n, 2));
     for i in 0..n {
-        x_prop[[i, 0]] = 1.0;  // intercept
+        x_prop[[i, 0]] = 1.0; // intercept
         x_prop[[i, 1]] = z[i]; // instrument
     }
 
@@ -615,15 +651,14 @@ fn estimate_probit(
         let p_clipped: Array1<f64> = p.mapv(|v| v.max(1e-10).min(1.0 - 1e-10));
 
         // Log-likelihood
-        let new_log_lik: f64 = d.iter()
+        let new_log_lik: f64 = d
+            .iter()
             .zip(p_clipped.iter())
-            .map(|(&di, &pi)| {
-                if di > 0.5 {
-                    pi.ln()
-                } else {
-                    (1.0 - pi).ln()
-                }
-            })
+            .map(
+                |(&di, &pi)| {
+                    if di > 0.5 { pi.ln() } else { (1.0 - pi).ln() }
+                },
+            )
             .sum();
 
         // Check convergence
@@ -636,7 +671,8 @@ fn estimate_probit(
 
         // Gradient and Hessian
         let phi: Array1<f64> = xb.mapv(normal_pdf);
-        let lambda: Array1<f64> = d.iter()
+        let lambda: Array1<f64> = d
+            .iter()
             .zip(p_clipped.iter())
             .zip(phi.iter())
             .map(|((&di, &pi), &phi_i)| {
@@ -653,7 +689,8 @@ fn estimate_probit(
 
         // Hessian approximation (expected information): -X'WX
         // where W = diag(phi² / (p(1-p)))
-        let w: Array1<f64> = phi.iter()
+        let w: Array1<f64> = phi
+            .iter()
             .zip(p_clipped.iter())
             .map(|(&phi_i, &pi)| {
                 let denom = pi * (1.0 - pi);
@@ -677,14 +714,13 @@ fn estimate_probit(
         }
 
         // Newton update: beta_new = beta + (X'WX)^{-1} X'λ
-        let (xwx_inv, _) = safe_inverse(&xwx.view())
-            .map_err(|_| EconError::SingularMatrix {
-                context: "Probit Hessian".to_string(),
-                suggestion: "Check for perfect separation in propensity model".to_string(),
-            })?;
+        let (xwx_inv, _) = safe_inverse(&xwx.view()).map_err(|_| EconError::SingularMatrix {
+            context: "Probit Hessian".to_string(),
+            suggestion: "Check for perfect separation in propensity model".to_string(),
+        })?;
 
         let delta = xwx_inv.dot(&gradient);
-        beta = beta + &delta;
+        beta += &delta;
     }
 
     if !converged {
@@ -703,7 +739,8 @@ fn estimate_probit(
     let phi: Array1<f64> = xb.mapv(normal_pdf);
     let p_clipped: Array1<f64> = propensity.mapv(|v| v.max(1e-10).min(1.0 - 1e-10));
 
-    let w: Array1<f64> = phi.iter()
+    let w: Array1<f64> = phi
+        .iter()
         .zip(p_clipped.iter())
         .map(|(&phi_i, &pi)| {
             let denom = pi * (1.0 - pi);
@@ -725,17 +762,17 @@ fn estimate_probit(
         }
     }
 
-    let (vcov, _) = safe_inverse(&info.view())
-        .map_err(|_| EconError::SingularMatrix {
-            context: "Probit variance-covariance".to_string(),
-            suggestion: "Model may be poorly identified".to_string(),
-        })?;
+    let (vcov, _) = safe_inverse(&info.view()).map_err(|_| EconError::SingularMatrix {
+        context: "Probit variance-covariance".to_string(),
+        suggestion: "Model may be poorly identified".to_string(),
+    })?;
 
     let std_errors: Vec<f64> = vcov.diag().mapv(|v| v.max(0.0).sqrt()).to_vec();
 
     // Null log-likelihood (intercept only)
     let p_bar = d.mean().unwrap_or(0.5);
-    let log_lik_null: f64 = d.iter()
+    let log_lik_null: f64 = d
+        .iter()
         .map(|&di| {
             if di > 0.5 {
                 p_bar.ln()
@@ -799,15 +836,14 @@ fn estimate_logit(
         let p_clipped: Array1<f64> = p.mapv(|v| v.max(1e-10).min(1.0 - 1e-10));
 
         // Log-likelihood
-        let new_log_lik: f64 = d.iter()
+        let new_log_lik: f64 = d
+            .iter()
             .zip(p_clipped.iter())
-            .map(|(&di, &pi)| {
-                if di > 0.5 {
-                    pi.ln()
-                } else {
-                    (1.0 - pi).ln()
-                }
-            })
+            .map(
+                |(&di, &pi)| {
+                    if di > 0.5 { pi.ln() } else { (1.0 - pi).ln() }
+                },
+            )
             .sum();
 
         // Check convergence
@@ -819,7 +855,8 @@ fn estimate_logit(
         log_lik = new_log_lik;
 
         // Gradient: X'(d - p)
-        let residuals: Array1<f64> = d.iter()
+        let residuals: Array1<f64> = d
+            .iter()
             .zip(p_clipped.iter())
             .map(|(&di, &pi)| di - pi)
             .collect();
@@ -839,14 +876,13 @@ fn estimate_logit(
         }
 
         // Newton update
-        let (xwx_inv, _) = safe_inverse(&xwx.view())
-            .map_err(|_| EconError::SingularMatrix {
-                context: "Logit Hessian".to_string(),
-                suggestion: "Check for perfect separation".to_string(),
-            })?;
+        let (xwx_inv, _) = safe_inverse(&xwx.view()).map_err(|_| EconError::SingularMatrix {
+            context: "Logit Hessian".to_string(),
+            suggestion: "Check for perfect separation".to_string(),
+        })?;
 
         let delta = xwx_inv.dot(&gradient);
-        beta = beta + &delta;
+        beta += &delta;
     }
 
     if !converged {
@@ -874,17 +910,17 @@ fn estimate_logit(
         }
     }
 
-    let (vcov, _) = safe_inverse(&info.view())
-        .map_err(|_| EconError::SingularMatrix {
-            context: "Logit variance-covariance".to_string(),
-            suggestion: "Model may be poorly identified".to_string(),
-        })?;
+    let (vcov, _) = safe_inverse(&info.view()).map_err(|_| EconError::SingularMatrix {
+        context: "Logit variance-covariance".to_string(),
+        suggestion: "Model may be poorly identified".to_string(),
+    })?;
 
     let std_errors: Vec<f64> = vcov.diag().mapv(|v| v.max(0.0).sqrt()).to_vec();
 
     // Pseudo R-squared
     let p_bar = d.mean().unwrap_or(0.5);
-    let log_lik_null: f64 = d.iter()
+    let log_lik_null: f64 = d
+        .iter()
         .map(|&di| {
             if di > 0.5 {
                 p_bar.ln()
@@ -925,15 +961,14 @@ fn estimate_linear_probability(
     let k = x.ncols();
 
     // OLS: beta = (X'X)^{-1}X'd
-    let xtx_mat = xtx(&x);
-    let (xtx_inv, _) = safe_inverse(&xtx_mat.view())
-        .map_err(|_| EconError::SingularMatrix {
-            context: "Linear probability model X'X".to_string(),
-            suggestion: "Check for perfect collinearity".to_string(),
-        })?;
+    let xtx_mat = xtx(x);
+    let (xtx_inv, _) = safe_inverse(&xtx_mat.view()).map_err(|_| EconError::SingularMatrix {
+        context: "Linear probability model X'X".to_string(),
+        suggestion: "Check for perfect collinearity".to_string(),
+    })?;
 
     let d_array = Array1::from_iter(d.iter().cloned());
-    let xty_vec = xty(&x, &d_array);
+    let xty_vec = xty(x, &d_array);
     let beta = xtx_inv.dot(&xty_vec);
 
     // Fitted values (propensity scores)
@@ -1020,11 +1055,10 @@ fn estimate_polynomial_stage(
 
     // OLS regression
     let xtx_mat = xtx(&design.view());
-    let (xtx_inv, _) = safe_inverse(&xtx_mat.view())
-        .map_err(|_| EconError::SingularMatrix {
-            context: "Polynomial stage X'X".to_string(),
-            suggestion: "Try reducing polynomial degree".to_string(),
-        })?;
+    let (xtx_inv, _) = safe_inverse(&xtx_mat.view()).map_err(|_| EconError::SingularMatrix {
+        context: "Polynomial stage X'X".to_string(),
+        suggestion: "Try reducing polynomial degree".to_string(),
+    })?;
 
     let y_array = Array1::from_iter(y.iter().cloned());
     let xty_vec = xty(&design.view(), &y_array);
@@ -1035,7 +1069,11 @@ fn estimate_polynomial_stage(
     let residuals = &y_array - &fitted;
     let ssr: f64 = residuals.iter().map(|r| r * r).sum();
     let df = n.saturating_sub(total_cols);
-    let sigma2 = if df > 0 { ssr / df as f64 } else { ssr / n as f64 };
+    let sigma2 = if df > 0 {
+        ssr / df as f64
+    } else {
+        ssr / n as f64
+    };
     let residual_se = sigma2.sqrt();
 
     // R-squared
@@ -1058,7 +1096,13 @@ fn estimate_polynomial_stage(
         None
     };
 
-    Ok((polynomial_coefs, polynomial_se, r_squared, residual_se, covariate_coefs))
+    Ok((
+        polynomial_coefs,
+        polynomial_se,
+        r_squared,
+        residual_se,
+        covariate_coefs,
+    ))
 }
 
 /// Compute MTE curve from polynomial coefficients.
@@ -1150,15 +1194,11 @@ fn compute_att(poly_coefs: &[f64], propensity: &Array1<f64>, n_grid: usize) -> (
         // Under the model, D=1 iff P(Z) ≥ U_D, so given D=1, U_D ≤ P(Z)
         // Thus h_ATT(u) = Pr(U_D ≤ u | U_D ≤ P(Z)) = min(u, P(Z)) / P(Z)
 
-        let w_raw: f64 = propensity.iter()
-            .map(|&p| {
-                if p > 0.0 {
-                    u.min(p) / p
-                } else {
-                    0.0
-                }
-            })
-            .sum::<f64>() / n as f64;
+        let w_raw: f64 = propensity
+            .iter()
+            .map(|&p| if p > 0.0 { u.min(p) / p } else { 0.0 })
+            .sum::<f64>()
+            / n as f64;
 
         let w = w_raw * du;
         weights.push(w);
@@ -1200,7 +1240,8 @@ fn compute_atu(poly_coefs: &[f64], propensity: &Array1<f64>, n_grid: usize) -> (
         // ATU weight: h_ATU(u) = Pr(U_D > u | D=0)
         // Given D=0, U_D > P(Z), so h_ATU(u) = Pr(U_D > u | U_D > P(Z))
         // = (1 - max(u, P(Z))) / (1 - P(Z))
-        let w_raw: f64 = propensity.iter()
+        let w_raw: f64 = propensity
+            .iter()
             .map(|&p| {
                 if p < 1.0 {
                     (1.0 - u.max(p)) / (1.0 - p)
@@ -1208,7 +1249,8 @@ fn compute_atu(poly_coefs: &[f64], propensity: &Array1<f64>, n_grid: usize) -> (
                     0.0
                 }
             })
-            .sum::<f64>() / n as f64;
+            .sum::<f64>()
+            / n as f64;
 
         let w = w_raw * du;
         weights.push(w);
@@ -1380,7 +1422,11 @@ pub fn run_ivmte_multi_z(
     let (atu, weights_atu) = compute_atu(&polynomial_coefs, propensity, config.n_grid);
     let (late, weights_late) = compute_late(&polynomial_coefs, propensity, config.n_grid);
 
-    let ate_se = compute_te_se(&polynomial_coefs, &polynomial_se, &vec![1.0 / config.n_grid as f64; config.n_grid]);
+    let ate_se = compute_te_se(
+        &polynomial_coefs,
+        &polynomial_se,
+        &vec![1.0 / config.n_grid as f64; config.n_grid],
+    );
     let att_se = compute_te_se(&polynomial_coefs, &polynomial_se, &weights_att);
     let atu_se = compute_te_se(&polynomial_coefs, &polynomial_se, &weights_atu);
     let late_se = compute_te_se(&polynomial_coefs, &polynomial_se, &weights_late);
@@ -1392,7 +1438,8 @@ pub fn run_ivmte_multi_z(
     let atu_est = build_te_estimate("ATU", atu, atu_se, df);
     let late_est = build_te_estimate("LATE", late, late_se, df);
 
-    let mte_coefficients: Vec<f64> = polynomial_coefs.iter()
+    let mte_coefficients: Vec<f64> = polynomial_coefs
+        .iter()
         .enumerate()
         .map(|(j, &c)| (j + 1) as f64 * c)
         .collect();
@@ -1474,7 +1521,8 @@ mod tests {
             &z.view(),
             None,
             IVMTEConfig::default(),
-        ).unwrap();
+        )
+        .unwrap();
 
         // Check structure
         assert_eq!(result.n_obs, 200);
@@ -1501,7 +1549,8 @@ mod tests {
             propensity_model: PropensityModel::Probit,
             ..Default::default()
         };
-        let result_probit = run_ivmte(&y.view(), &d.view(), &z.view(), None, config_probit).unwrap();
+        let result_probit =
+            run_ivmte(&y.view(), &d.view(), &z.view(), None, config_probit).unwrap();
         assert!(result_probit.first_stage.model == PropensityModel::Probit);
         assert!(result_probit.first_stage.converged);
 
@@ -1519,14 +1568,23 @@ mod tests {
             propensity_model: PropensityModel::Linear,
             ..Default::default()
         };
-        let result_linear = run_ivmte(&y.view(), &d.view(), &z.view(), None, config_linear).unwrap();
+        let result_linear =
+            run_ivmte(&y.view(), &d.view(), &z.view(), None, config_linear).unwrap();
         assert!(result_linear.first_stage.model == PropensityModel::Linear);
 
         // All should give similar ATEs
         let ate_diff_1 = (result_probit.ate.estimate - result_logit.ate.estimate).abs();
         let ate_diff_2 = (result_probit.ate.estimate - result_linear.ate.estimate).abs();
-        assert!(ate_diff_1 < 0.5, "Probit vs Logit ATE difference too large: {}", ate_diff_1);
-        assert!(ate_diff_2 < 0.5, "Probit vs Linear ATE difference too large: {}", ate_diff_2);
+        assert!(
+            ate_diff_1 < 0.5,
+            "Probit vs Logit ATE difference too large: {}",
+            ate_diff_1
+        );
+        assert!(
+            ate_diff_2 < 0.5,
+            "Probit vs Linear ATE difference too large: {}",
+            ate_diff_2
+        );
     }
 
     #[test]
@@ -1556,7 +1614,14 @@ mod tests {
     fn test_treatment_effect_relationships() {
         let (y, d, z) = create_mte_test_data();
 
-        let result = run_ivmte(&y.view(), &d.view(), &z.view(), None, IVMTEConfig::default()).unwrap();
+        let result = run_ivmte(
+            &y.view(),
+            &d.view(),
+            &z.view(),
+            None,
+            IVMTEConfig::default(),
+        )
+        .unwrap();
 
         // With increasing MTE (higher u = higher treatment effect):
         // - ATT < ATE because treated have lower U on average
@@ -1611,16 +1676,35 @@ mod tests {
     fn test_weights_sum_to_one() {
         let (y, d, z) = create_mte_test_data();
 
-        let result = run_ivmte(&y.view(), &d.view(), &z.view(), None, IVMTEConfig::default()).unwrap();
+        let result = run_ivmte(
+            &y.view(),
+            &d.view(),
+            &z.view(),
+            None,
+            IVMTEConfig::default(),
+        )
+        .unwrap();
 
         // ATT and ATU weights should sum to 1 (approximately)
         let att_sum: f64 = result.weights_att.iter().sum();
         let atu_sum: f64 = result.weights_atu.iter().sum();
         let late_sum: f64 = result.weights_late.iter().sum();
 
-        assert!((att_sum - 1.0).abs() < 0.01, "ATT weights sum = {}", att_sum);
-        assert!((atu_sum - 1.0).abs() < 0.01, "ATU weights sum = {}", atu_sum);
-        assert!((late_sum - 1.0).abs() < 0.01, "LATE weights sum = {}", late_sum);
+        assert!(
+            (att_sum - 1.0).abs() < 0.01,
+            "ATT weights sum = {}",
+            att_sum
+        );
+        assert!(
+            (atu_sum - 1.0).abs() < 0.01,
+            "ATU weights sum = {}",
+            atu_sum
+        );
+        assert!(
+            (late_sum - 1.0).abs() < 0.01,
+            "LATE weights sum = {}",
+            late_sum
+        );
     }
 
     #[test]
@@ -1629,7 +1713,13 @@ mod tests {
         let d = array![0.0, 1.0, 1.0];
         let z = array![0.1, 0.5, 0.9];
 
-        let result = run_ivmte(&y.view(), &d.view(), &z.view(), None, IVMTEConfig::default());
+        let result = run_ivmte(
+            &y.view(),
+            &d.view(),
+            &z.view(),
+            None,
+            IVMTEConfig::default(),
+        );
 
         assert!(result.is_err());
     }
@@ -1640,7 +1730,13 @@ mod tests {
         let d = array![1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]; // All treated
         let z = array![0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0];
 
-        let result = run_ivmte(&y.view(), &d.view(), &z.view(), None, IVMTEConfig::default());
+        let result = run_ivmte(
+            &y.view(),
+            &d.view(),
+            &z.view(),
+            None,
+            IVMTEConfig::default(),
+        );
 
         assert!(result.is_err());
     }

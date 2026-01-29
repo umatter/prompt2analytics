@@ -181,19 +181,27 @@ pub struct WeightItBalanceTable {
 
 impl fmt::Display for WeightItBalanceTable {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "{:<20} {:>12} {:>12} {:>12} {:>12}",
-                 "Variable", "Mean Treat", "Mean Ctrl", "Std.Diff", "Var.Ratio")?;
+        writeln!(
+            f,
+            "{:<20} {:>12} {:>12} {:>12} {:>12}",
+            "Variable", "Mean Treat", "Mean Ctrl", "Std.Diff", "Var.Ratio"
+        )?;
         writeln!(f, "{}", "-".repeat(68))?;
 
         for cov in &self.covariates {
-            writeln!(f, "{:<20} {:>12.4} {:>12.4} {:>12.4} {:>12.4}",
-                     cov.variable, cov.mean_treated, cov.mean_control,
-                     cov.std_diff, cov.var_ratio)?;
+            writeln!(
+                f,
+                "{:<20} {:>12.4} {:>12.4} {:>12.4} {:>12.4}",
+                cov.variable, cov.mean_treated, cov.mean_control, cov.std_diff, cov.var_ratio
+            )?;
         }
 
         writeln!(f, "{}", "-".repeat(68))?;
-        writeln!(f, "Max |Std.Diff|: {:.4}  Mean |Std.Diff|: {:.4}",
-                 self.max_std_diff, self.mean_std_diff)?;
+        writeln!(
+            f,
+            "Max |Std.Diff|: {:.4}  Mean |Std.Diff|: {:.4}",
+            self.max_std_diff, self.mean_std_diff
+        )?;
 
         Ok(())
     }
@@ -247,27 +255,57 @@ impl fmt::Display for WeightItResult {
         writeln!(f, "Estimand: {}", self.estimand)?;
         writeln!(f)?;
         writeln!(f, "Sample:")?;
-        writeln!(f, "  Total:    {}  (Treated: {}, Control: {})",
-                 self.n_obs, self.n_treated, self.n_control)?;
+        writeln!(
+            f,
+            "  Total:    {}  (Treated: {}, Control: {})",
+            self.n_obs, self.n_treated, self.n_control
+        )?;
         writeln!(f)?;
         writeln!(f, "Weight Summary:")?;
-        writeln!(f, "  Range:    [{:.4}, {:.4}]", self.min_weight, self.max_weight)?;
-        writeln!(f, "  ESS:      {:.1} (Treated: {:.1}, Control: {:.1})",
-                 self.effective_sample_size, self.ess_treated, self.ess_control)?;
+        writeln!(
+            f,
+            "  Range:    [{:.4}, {:.4}]",
+            self.min_weight, self.max_weight
+        )?;
+        writeln!(
+            f,
+            "  ESS:      {:.1} (Treated: {:.1}, Control: {:.1})",
+            self.effective_sample_size, self.ess_treated, self.ess_control
+        )?;
         writeln!(f)?;
 
         if !self.converged {
-            writeln!(f, "WARNING: Algorithm did not converge after {} iterations", self.iterations)?;
+            writeln!(
+                f,
+                "WARNING: Algorithm did not converge after {} iterations",
+                self.iterations
+            )?;
             writeln!(f)?;
         }
 
         writeln!(f, "Balance Before Weighting:")?;
-        writeln!(f, "  Max |Std.Diff|:  {:.4}", self.balance_before.max_std_diff)?;
-        writeln!(f, "  Mean |Std.Diff|: {:.4}", self.balance_before.mean_std_diff)?;
+        writeln!(
+            f,
+            "  Max |Std.Diff|:  {:.4}",
+            self.balance_before.max_std_diff
+        )?;
+        writeln!(
+            f,
+            "  Mean |Std.Diff|: {:.4}",
+            self.balance_before.mean_std_diff
+        )?;
         writeln!(f)?;
         writeln!(f, "Balance After Weighting:")?;
-        writeln!(f, "  Max |Std.Diff|:  {:.4}", self.balance_after.max_std_diff)?;
-        writeln!(f, "  Mean |Std.Diff|: {:.4}", self.balance_after.mean_std_diff)?;
+        writeln!(
+            f,
+            "  Max |Std.Diff|:  {:.4}",
+            self.balance_after.max_std_diff
+        )?;
+        writeln!(
+            f,
+            "  Mean |Std.Diff|: {:.4}",
+            self.balance_after.mean_std_diff
+        )?;
 
         if !self.warnings.is_empty() {
             writeln!(f)?;
@@ -311,11 +349,19 @@ impl fmt::Display for EntropyBalanceResult {
         writeln!(f, "Entropy Balancing Results")?;
         writeln!(f, "=========================")?;
         writeln!(f, "Observations Reweighted: {}", self.n_reweighted)?;
-        writeln!(f, "Converged: {} ({} iterations)", self.converged, self.iterations)?;
+        writeln!(
+            f,
+            "Converged: {} ({} iterations)",
+            self.converged, self.iterations
+        )?;
         writeln!(f, "Constraint Tolerance: {:.2e}", self.constraint_tolerance)?;
         writeln!(f)?;
         writeln!(f, "Weight Summary:")?;
-        writeln!(f, "  Range: [{:.4}, {:.4}]", self.min_weight, self.max_weight)?;
+        writeln!(
+            f,
+            "  Range: [{:.4}, {:.4}]",
+            self.min_weight, self.max_weight
+        )?;
         writeln!(f, "  ESS:   {:.1}", self.effective_sample_size)?;
         writeln!(f)?;
         writeln!(f, "Balance After Weighting:")?;
@@ -416,7 +462,13 @@ pub fn weightit(
             (w, Some(ps), true, 0)
         }
         WeightMethod::Entropy => {
-            let result = compute_entropy_weights(&x, &d, config.estimand, config.max_iter, config.tolerance)?;
+            let result = compute_entropy_weights(
+                &x,
+                &d,
+                config.estimand,
+                config.max_iter,
+                config.tolerance,
+            )?;
             if !result.converged {
                 warnings.push(format!(
                     "Entropy balancing did not converge after {} iterations",
@@ -426,7 +478,8 @@ pub fn weightit(
             (result.weights, None, result.converged, result.iterations)
         }
         WeightMethod::Energy => {
-            let (w, conv, iters) = compute_energy_weights(&x, &d, config.estimand, config.max_iter, config.tolerance)?;
+            let (w, conv, iters) =
+                compute_energy_weights(&x, &d, config.estimand, config.max_iter, config.tolerance)?;
             if !conv {
                 warnings.push(format!(
                     "Energy balancing did not converge after {} iterations",
@@ -436,7 +489,8 @@ pub fn weightit(
             (w, None, conv, iters)
         }
         WeightMethod::Stable => {
-            let (w, conv, iters) = compute_stable_weights(&x, &d, config.estimand, config.max_iter, config.tolerance)?;
+            let (w, conv, iters) =
+                compute_stable_weights(&x, &d, config.estimand, config.max_iter, config.tolerance)?;
             if !conv {
                 warnings.push(format!(
                     "Stable balancing did not converge after {} iterations",
@@ -462,7 +516,11 @@ pub fn weightit(
 
     // Weight summary statistics
     let max_weight = weights.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-    let min_weight = weights.iter().filter(|&&w| w > 0.0).cloned().fold(f64::INFINITY, f64::min);
+    let min_weight = weights
+        .iter()
+        .filter(|&&w| w > 0.0)
+        .cloned()
+        .fold(f64::INFINITY, f64::min);
 
     // Warnings for extreme weights
     if max_weight / min_weight.max(1e-10) > 100.0 {
@@ -475,7 +533,9 @@ pub fn weightit(
     if ess_total < n as f64 * 0.3 {
         warnings.push(format!(
             "Low effective sample size ({:.1} of {} = {:.0}%). Weights may be too variable.",
-            ess_total, n, 100.0 * ess_total / n as f64
+            ess_total,
+            n,
+            100.0 * ess_total / n as f64
         ));
     }
 
@@ -569,7 +629,11 @@ pub fn entropy_balance(
         Some(t) => {
             if t.len() != k {
                 return Err(EconError::InvalidSpecification {
-                    message: format!("Target means length ({}) must match number of covariates ({})", t.len(), k),
+                    message: format!(
+                        "Target means length ({}) must match number of covariates ({})",
+                        t.len(),
+                        k
+                    ),
                 });
             }
             Array1::from_vec(t.to_vec())
@@ -608,10 +672,18 @@ pub fn entropy_balance(
     // Compute ESS for control group
     let w_sum: f64 = weights.iter().sum();
     let w_sq_sum: f64 = weights.iter().map(|w| w * w).sum();
-    let ess = if w_sq_sum > 0.0 { w_sum * w_sum / w_sq_sum } else { 0.0 };
+    let ess = if w_sq_sum > 0.0 {
+        w_sum * w_sum / w_sq_sum
+    } else {
+        0.0
+    };
 
     let max_w = weights.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-    let min_w = weights.iter().filter(|&&w| w > 0.0).cloned().fold(f64::INFINITY, f64::min);
+    let min_w = weights
+        .iter()
+        .filter(|&&w| w > 0.0)
+        .cloned()
+        .fold(f64::INFINITY, f64::min);
 
     Ok(EntropyBalanceResult {
         weights: full_weights,
@@ -685,12 +757,11 @@ fn compute_logistic_weights(
 
         // Invert -H
         let neg_hessian = &hessian * -1.0;
-        let (hess_inv, _) = safe_inverse(&neg_hessian.view()).map_err(|e| {
-            EconError::SingularMatrix {
+        let (hess_inv, _) =
+            safe_inverse(&neg_hessian.view()).map_err(|e| EconError::SingularMatrix {
                 context: "Propensity score estimation".to_string(),
                 suggestion: format!("Check for multicollinearity in covariates: {:?}", e),
-            }
-        })?;
+            })?;
 
         // Update
         let delta = hess_inv.dot(&gradient);
@@ -699,59 +770,56 @@ fn compute_logistic_weights(
 
     // Final propensity scores
     let z_final: Array1<f64> = x.dot(&beta);
-    let ps: Vec<f64> = z_final.iter().map(|&z| logistic_cdf(z).max(1e-10).min(1.0 - 1e-10)).collect();
+    let ps: Vec<f64> = z_final
+        .iter()
+        .map(|&z| logistic_cdf(z).max(1e-10).min(1.0 - 1e-10))
+        .collect();
 
     // Compute stabilization factor
     let p_treat = d.iter().filter(|&&di| di >= 0.5).count() as f64 / n as f64;
 
     // Compute weights based on estimand
-    let weights: Vec<f64> = (0..n).map(|i| {
-        let di = d[i];
-        let psi = ps[i];
+    let weights: Vec<f64> = (0..n)
+        .map(|i| {
+            let di = d[i];
+            let psi = ps[i];
 
-        let raw_weight = match estimand {
-            WeightEstimand::ATE => {
-                // ATE: T/ps + (1-T)/(1-ps)
-                if di >= 0.5 {
-                    1.0 / psi
-                } else {
-                    1.0 / (1.0 - psi)
-                }
-            }
-            WeightEstimand::ATT => {
-                // ATT: T + (1-T) * ps / (1-ps)
-                if di >= 0.5 {
-                    1.0
-                } else {
-                    psi / (1.0 - psi)
-                }
-            }
-            WeightEstimand::ATC => {
-                // ATC: T * (1-ps) / ps + (1-T)
-                if di >= 0.5 {
-                    (1.0 - psi) / psi
-                } else {
-                    1.0
-                }
-            }
-        };
-
-        if stabilize {
-            match estimand {
+            let raw_weight = match estimand {
                 WeightEstimand::ATE => {
+                    // ATE: T/ps + (1-T)/(1-ps)
                     if di >= 0.5 {
-                        p_treat / psi
+                        1.0 / psi
                     } else {
-                        (1.0 - p_treat) / (1.0 - psi)
+                        1.0 / (1.0 - psi)
                     }
                 }
-                WeightEstimand::ATT => raw_weight, // ATT weights are already stable
-                WeightEstimand::ATC => raw_weight, // ATC weights are already stable
+                WeightEstimand::ATT => {
+                    // ATT: T + (1-T) * ps / (1-ps)
+                    if di >= 0.5 { 1.0 } else { psi / (1.0 - psi) }
+                }
+                WeightEstimand::ATC => {
+                    // ATC: T * (1-ps) / ps + (1-T)
+                    if di >= 0.5 { (1.0 - psi) / psi } else { 1.0 }
+                }
+            };
+
+            if stabilize {
+                match estimand {
+                    WeightEstimand::ATE => {
+                        if di >= 0.5 {
+                            p_treat / psi
+                        } else {
+                            (1.0 - p_treat) / (1.0 - psi)
+                        }
+                    }
+                    WeightEstimand::ATT => raw_weight, // ATT weights are already stable
+                    WeightEstimand::ATC => raw_weight, // ATC weights are already stable
+                }
+            } else {
+                raw_weight
             }
-        } else {
-            raw_weight
-        }
-    }).collect();
+        })
+        .collect();
 
     Ok((weights, ps))
 }
@@ -805,7 +873,8 @@ fn compute_entropy_weights(
     }
 
     // Target means (mean of target group)
-    let target_means: Array1<f64> = x_target.mean_axis(ndarray::Axis(0))
+    let target_means: Array1<f64> = x_target
+        .mean_axis(ndarray::Axis(0))
         .ok_or_else(|| EconError::Computation("Failed to compute target means".to_string()))?;
 
     // Run entropy balancing optimization
@@ -829,7 +898,11 @@ fn compute_entropy_weights(
     let (ess_total, ess_treated, ess_control) = compute_ess(&weights, d);
 
     let max_w = weights.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-    let min_w = weights.iter().filter(|&&w| w > 0.0).cloned().fold(f64::INFINITY, f64::min);
+    let min_w = weights
+        .iter()
+        .filter(|&&w| w > 0.0)
+        .cloned()
+        .fold(f64::INFINITY, f64::min);
 
     let n_treated = d.iter().filter(|&&v| v >= 0.5).count();
     let n_control = n - n_treated;
@@ -930,12 +1003,11 @@ fn entropy_balance_optimize(
         }
 
         // Solve for update
-        let (hess_inv, _) = safe_inverse(&hessian.view()).map_err(|_| {
-            EconError::SingularMatrix {
+        let (hess_inv, _) =
+            safe_inverse(&hessian.view()).map_err(|_| EconError::SingularMatrix {
                 context: "Entropy balancing Hessian".to_string(),
                 suggestion: "Covariates may be linearly dependent".to_string(),
-            }
-        })?;
+            })?;
 
         let delta = hess_inv.dot(&constraint);
 
@@ -960,7 +1032,10 @@ fn entropy_balance_optimize(
                 }
             }
 
-            let new_tol = (&means_new - target).iter().map(|c: &f64| c.abs()).fold(0.0, f64::max);
+            let new_tol = (&means_new - target)
+                .iter()
+                .map(|c: &f64| c.abs())
+                .fold(0.0, f64::max);
 
             if new_tol < constraint_tol * 1.1 {
                 // Accept step
@@ -990,7 +1065,7 @@ fn entropy_balance_optimize(
 fn compute_energy_weights(
     x: &Array2<f64>,
     d: &Array1<f64>,
-    estimand: WeightEstimand,
+    _estimand: WeightEstimand,
     max_iter: usize,
     tolerance: f64,
 ) -> EconResult<(Vec<f64>, bool, usize)> {
@@ -1042,7 +1117,11 @@ fn compute_energy_weights(
         }
 
         // Check convergence: distance to target
-        let diff: f64 = (&weighted_mean - &target_mean).iter().map(|d| d * d).sum::<f64>().sqrt();
+        let diff: f64 = (&weighted_mean - &target_mean)
+            .iter()
+            .map(|d| d * d)
+            .sum::<f64>()
+            .sqrt();
         if diff < tolerance {
             converged = true;
             break;
@@ -1051,7 +1130,10 @@ fn compute_energy_weights(
         // Update weights using gradient of energy distance
         // Simplified: increase weight for control units closer to target
         for &i in &control_idx {
-            let dist: f64 = (0..k).map(|j| (x[[i, j]] - target_mean[j]).powi(2)).sum::<f64>().sqrt();
+            let dist: f64 = (0..k)
+                .map(|j| (x[[i, j]] - target_mean[j]).powi(2))
+                .sum::<f64>()
+                .sqrt();
             // Inverse distance weighting
             weights[i] = 1.0 / (dist + 0.1);
         }
@@ -1077,7 +1159,7 @@ fn compute_energy_weights(
 fn compute_stable_weights(
     x: &Array2<f64>,
     d: &Array1<f64>,
-    estimand: WeightEstimand,
+    _estimand: WeightEstimand,
     max_iter: usize,
     tolerance: f64,
 ) -> EconResult<(Vec<f64>, bool, usize)> {
@@ -1129,8 +1211,11 @@ fn compute_stable_weights(
         }
 
         // Balance violation
-        let balance_viol: f64 = (&weighted_mean - &target_mean).iter()
-            .map(|d| d * d).sum::<f64>().sqrt();
+        let balance_viol: f64 = (&weighted_mean - &target_mean)
+            .iter()
+            .map(|d| d * d)
+            .sum::<f64>()
+            .sqrt();
 
         if balance_viol < tolerance {
             converged = true;
@@ -1149,7 +1234,8 @@ fn compute_stable_weights(
             let mut balance_grad = 0.0;
             for j in 0..k {
                 let diff = weighted_mean[j] - target_mean[j];
-                balance_grad += 2.0 * balance_penalty * diff * (x[[i, j]] - weighted_mean[j]) / ctrl_w_sum;
+                balance_grad +=
+                    2.0 * balance_penalty * diff * (x[[i, j]] - weighted_mean[j]) / ctrl_w_sum;
             }
 
             // Update
@@ -1232,8 +1318,16 @@ fn compute_balance_table(
             }
         }
 
-        var_t = if w_sum_t > 1.0 { var_t / (w_sum_t - 1.0) } else { 0.0 };
-        var_c = if w_sum_c > 1.0 { var_c / (w_sum_c - 1.0) } else { 0.0 };
+        var_t = if w_sum_t > 1.0 {
+            var_t / (w_sum_t - 1.0)
+        } else {
+            0.0
+        };
+        var_c = if w_sum_c > 1.0 {
+            var_c / (w_sum_c - 1.0)
+        } else {
+            0.0
+        };
 
         // Standardized difference
         let pooled_sd = ((var_t + var_c) / 2.0).sqrt().max(1e-10);
@@ -1243,7 +1337,10 @@ fn compute_balance_table(
         let var_ratio = if var_c > 1e-10 { var_t / var_c } else { 1.0 };
 
         covariates.push(WeightItCovariateBalance {
-            variable: var_names.get(j).cloned().unwrap_or_else(|| format!("X{}", j)),
+            variable: var_names
+                .get(j)
+                .cloned()
+                .unwrap_or_else(|| format!("X{}", j)),
             mean_treated: mean_t,
             mean_control: mean_c,
             std_diff,
@@ -1252,7 +1349,10 @@ fn compute_balance_table(
     }
 
     // Summary statistics
-    let max_std_diff = covariates.iter().map(|c| c.std_diff.abs()).fold(0.0, f64::max);
+    let max_std_diff = covariates
+        .iter()
+        .map(|c| c.std_diff.abs())
+        .fold(0.0, f64::max);
     let mean_std_diff = covariates.iter().map(|c| c.std_diff.abs()).sum::<f64>() / k as f64;
 
     WeightItBalanceTable {
@@ -1291,9 +1391,21 @@ fn compute_ess(weights: &[f64], d: &Array1<f64>) -> (f64, f64, f64) {
         }
     }
 
-    let ess_all = if w_sq_sum_all > 0.0 { w_sum_all * w_sum_all / w_sq_sum_all } else { 0.0 };
-    let ess_t = if w_sq_sum_t > 0.0 { w_sum_t * w_sum_t / w_sq_sum_t } else { 0.0 };
-    let ess_c = if w_sq_sum_c > 0.0 { w_sum_c * w_sum_c / w_sq_sum_c } else { 0.0 };
+    let ess_all = if w_sq_sum_all > 0.0 {
+        w_sum_all * w_sum_all / w_sq_sum_all
+    } else {
+        0.0
+    };
+    let ess_t = if w_sq_sum_t > 0.0 {
+        w_sum_t * w_sum_t / w_sq_sum_t
+    } else {
+        0.0
+    };
+    let ess_c = if w_sq_sum_c > 0.0 {
+        w_sum_c * w_sum_c / w_sq_sum_c
+    } else {
+        0.0
+    };
 
     (ess_all, ess_t, ess_c)
 }
@@ -1310,7 +1422,10 @@ fn trim_weights(weights: &[f64], quantile: f64) -> Vec<f64> {
     let lower_bound = sorted[lower_idx.min(n - 1)];
     let upper_bound = sorted[upper_idx.min(n - 1)];
 
-    weights.iter().map(|&w| w.max(lower_bound).min(upper_bound)).collect()
+    weights
+        .iter()
+        .map(|&w| w.max(lower_bound).min(upper_bound))
+        .collect()
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1347,7 +1462,8 @@ mod tests {
                 0.2, 0.3, 0.25, 0.45, 0.18, 0.38, 0.2, 0.5, 0.3, 0.28,
                 0.35, 0.42, 0.22, 0.55, 0.28, 0.32, 0.2, 0.48, 0.32, 0.38
             ]
-        }.unwrap();
+        }
+        .unwrap();
         Dataset::new(df)
     }
 
@@ -1373,8 +1489,10 @@ mod tests {
         assert!(result.effective_sample_size <= 40.0);
 
         // Balance should improve after weighting
-        assert!(result.balance_after.max_std_diff < result.balance_before.max_std_diff
-                || result.balance_after.max_std_diff < 0.5);
+        assert!(
+            result.balance_after.max_std_diff < result.balance_before.max_std_diff
+                || result.balance_after.max_std_diff < 0.5
+        );
     }
 
     #[test]
@@ -1390,10 +1508,13 @@ mod tests {
 
         // Treated weights should all be 1.0 for ATT
         for i in 0..40 {
-            let is_treated = if i < 20 { true } else { false };
+            let is_treated = i < 20;
             if is_treated {
-                assert!((result.weights[i] - 1.0).abs() < 1e-10,
-                        "Treated weight should be 1.0, got {}", result.weights[i]);
+                assert!(
+                    (result.weights[i] - 1.0).abs() < 1e-10,
+                    "Treated weight should be 1.0, got {}",
+                    result.weights[i]
+                );
             }
         }
     }
@@ -1404,7 +1525,7 @@ mod tests {
         let config = WeightItConfig {
             method: WeightMethod::Entropy,
             estimand: WeightEstimand::ATT,
-            max_iter: 500,  // More iterations for convergence
+            max_iter: 500, // More iterations for convergence
             tolerance: 1e-4,
             ..Default::default()
         };
@@ -1412,13 +1533,17 @@ mod tests {
         let result = weightit(&dataset, "treatment", &["x1", "x2"], config).unwrap();
 
         // Entropy balancing should improve balance (though may not achieve exact)
-        assert!(result.balance_after.max_std_diff < 1.0,
-                "Entropy balancing should improve balance, got max std_diff = {}",
-                result.balance_after.max_std_diff);
+        assert!(
+            result.balance_after.max_std_diff < 1.0,
+            "Entropy balancing should improve balance, got max std_diff = {}",
+            result.balance_after.max_std_diff
+        );
 
         // Weights should be valid
-        assert!(result.weights.iter().all(|&w| w > 0.0 && w.is_finite()),
-                "Weights should be positive and finite");
+        assert!(
+            result.weights.iter().all(|&w| w > 0.0 && w.is_finite()),
+            "Weights should be positive and finite"
+        );
     }
 
     #[test]
@@ -1431,18 +1556,28 @@ mod tests {
         assert!(result.iterations > 0, "Should run at least one iteration");
 
         // Balance should be finite and not extremely large
-        assert!(result.balance.max_std_diff.is_finite(),
-                "Balance std_diff should be finite");
-        assert!(result.balance.max_std_diff < 2.0,
-                "Balance should improve somewhat, got {}", result.balance.max_std_diff);
+        assert!(
+            result.balance.max_std_diff.is_finite(),
+            "Balance std_diff should be finite"
+        );
+        assert!(
+            result.balance.max_std_diff < 2.0,
+            "Balance should improve somewhat, got {}",
+            result.balance.max_std_diff
+        );
 
         // ESS should be positive
-        assert!(result.effective_sample_size > 0.0,
-                "ESS should be positive, got {}", result.effective_sample_size);
+        assert!(
+            result.effective_sample_size > 0.0,
+            "ESS should be positive, got {}",
+            result.effective_sample_size
+        );
 
         // Weights should be valid
-        assert!(result.weights.iter().all(|&w| w >= 0.0 && w.is_finite()),
-                "Weights should be non-negative and finite");
+        assert!(
+            result.weights.iter().all(|&w| w >= 0.0 && w.is_finite()),
+            "Weights should be non-negative and finite"
+        );
     }
 
     #[test]
@@ -1494,14 +1629,13 @@ mod tests {
 
     #[test]
     fn test_balance_table() {
-        let x = Array2::from_shape_vec((6, 2), vec![
-            1.0, 0.5,
-            1.2, 0.6,
-            1.1, 0.55,
-            0.5, 0.2,
-            0.6, 0.3,
-            0.55, 0.25,
-        ]).unwrap();
+        let x = Array2::from_shape_vec(
+            (6, 2),
+            vec![
+                1.0, 0.5, 1.2, 0.6, 1.1, 0.55, 0.5, 0.2, 0.6, 0.3, 0.55, 0.25,
+            ],
+        )
+        .unwrap();
         let d = Array1::from(vec![1.0, 1.0, 1.0, 0.0, 0.0, 0.0]);
         let var_names = vec!["x1".to_string(), "x2".to_string()];
 
@@ -1521,7 +1655,7 @@ mod tests {
         let trimmed = trim_weights(&weights, 0.8);
 
         // Extreme values should be trimmed
-        assert!(trimmed.iter().all(|&w| w >= 0.1 && w <= 10.0));
+        assert!(trimmed.iter().all(|&w| (0.1..=10.0).contains(&w)));
     }
 
     #[test]

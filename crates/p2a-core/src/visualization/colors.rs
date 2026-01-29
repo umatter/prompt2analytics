@@ -50,12 +50,12 @@ pub const CHART_PALETTE: [RGBColor; 6] = [
 /// Same colors as `CHART_PALETTE` but as (u8, u8, u8) tuples
 /// compatible with the plotlars `Rgb` type.
 pub const PLOTLY_PALETTE: [(u8, u8, u8); 6] = [
-    (255, 107, 53),  // Brand orange
-    (0, 180, 216),   // Brand cyan
-    (20, 184, 166),  // Teal
-    (249, 115, 22),  // Orange light
-    (13, 148, 136),  // Teal dark
-    (234, 88, 12),   // Orange dark
+    (255, 107, 53), // Brand orange
+    (0, 180, 216),  // Brand cyan
+    (20, 184, 166), // Teal
+    (249, 115, 22), // Orange light
+    (13, 148, 136), // Teal dark
+    (234, 88, 12),  // Orange dark
 ];
 
 /// Default color for single-series charts (brand orange).

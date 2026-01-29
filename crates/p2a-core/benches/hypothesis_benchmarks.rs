@@ -2,22 +2,12 @@
 //!
 //! Run with: `cargo bench -p p2a-core -- hypothesis`
 
-use criterion::{criterion_group, criterion_main, Criterion, BenchmarkId};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use p2a_core::{
-    var_test, VarTestResult,
-    prop_test_one, prop_test_two, PropTestResult,
-    binom_test, BinomTestResult,
-    fligner_test, FlignerResult,
-    ansari_test, AnsariBradleyResult,
-    mood_test, MoodTestResult,
-    kruskal_test, KruskalWallisResult,
-    friedman_test, FriedmanResult,
-    quade_test, QuadeResult,
-    mantelhaen_test, Table2x2, CmhAlternative, MantelHaenszelResult,
-    oneway_test, OnewayTestResult,
-    mcnemar_test, McnemarResult,
-    pairwise_t_test, pairwise_wilcox_test, PValueAdjustMethod, PairwiseTTestResult,
-    Alternative,
+    Alternative, CmhAlternative, PValueAdjustMethod, Table2x2, ansari_test, binom_test,
+    fligner_test, friedman_test, kruskal_test, mantelhaen_test, mcnemar_test, mood_test,
+    oneway_test, pairwise_t_test, pairwise_wilcox_test, prop_test_one, prop_test_two, quade_test,
+    var_test,
 };
 use rand::Rng;
 use rand::SeedableRng;
@@ -39,9 +29,24 @@ fn generate_three_groups(n: usize, seed: u64) -> Vec<(String, Vec<f64>)> {
     let group_size = n / 3;
 
     vec![
-        ("A".to_string(), (0..group_size).map(|_| rng.r#gen::<f64>() * 2.0 + 5.0).collect()),
-        ("B".to_string(), (0..group_size).map(|_| rng.r#gen::<f64>() * 3.0 + 5.0).collect()),
-        ("C".to_string(), (0..group_size).map(|_| rng.r#gen::<f64>() * 4.0 + 5.0).collect()),
+        (
+            "A".to_string(),
+            (0..group_size)
+                .map(|_| rng.r#gen::<f64>() * 2.0 + 5.0)
+                .collect(),
+        ),
+        (
+            "B".to_string(),
+            (0..group_size)
+                .map(|_| rng.r#gen::<f64>() * 3.0 + 5.0)
+                .collect(),
+        ),
+        (
+            "C".to_string(),
+            (0..group_size)
+                .map(|_| rng.r#gen::<f64>() * 4.0 + 5.0)
+                .collect(),
+        ),
     ]
 }
 
@@ -51,13 +56,9 @@ fn var_test_benchmark(c: &mut Criterion) {
     for size in [100, 1000, 10000].iter() {
         let (x, y) = generate_two_samples(*size, 42);
 
-        group.bench_with_input(
-            BenchmarkId::from_parameter(size),
-            size,
-            |b, _| {
-                b.iter(|| var_test(&x, &y, 1.0, Alternative::TwoSided, 0.95))
-            },
-        );
+        group.bench_with_input(BenchmarkId::from_parameter(size), size, |b, _| {
+            b.iter(|| var_test(&x, &y, 1.0, Alternative::TwoSided, 0.95))
+        });
     }
     group.finish();
 }
@@ -69,13 +70,9 @@ fn prop_test_one_benchmark(c: &mut Criterion) {
         let successes = (*size as f64 * 0.3) as u64;
         let trials = *size as u64;
 
-        group.bench_with_input(
-            BenchmarkId::from_parameter(size),
-            size,
-            |b, _| {
-                b.iter(|| prop_test_one(successes, trials, 0.5, Alternative::TwoSided, 0.95, true))
-            },
-        );
+        group.bench_with_input(BenchmarkId::from_parameter(size), size, |b, _| {
+            b.iter(|| prop_test_one(successes, trials, 0.5, Alternative::TwoSided, 0.95, true))
+        });
     }
     group.finish();
 }
@@ -88,13 +85,9 @@ fn prop_test_two_benchmark(c: &mut Criterion) {
         let s2 = (*size as f64 * 0.4) as u64;
         let n = *size as u64;
 
-        group.bench_with_input(
-            BenchmarkId::from_parameter(size),
-            size,
-            |b, _| {
-                b.iter(|| prop_test_two(s1, n, s2, n, Alternative::TwoSided, 0.95, true))
-            },
-        );
+        group.bench_with_input(BenchmarkId::from_parameter(size), size, |b, _| {
+            b.iter(|| prop_test_two(s1, n, s2, n, Alternative::TwoSided, 0.95, true))
+        });
     }
     group.finish();
 }
@@ -106,13 +99,9 @@ fn binom_test_benchmark(c: &mut Criterion) {
         let successes = (*size as f64 * 0.3) as u64;
         let trials = *size as u64;
 
-        group.bench_with_input(
-            BenchmarkId::from_parameter(size),
-            size,
-            |b, _| {
-                b.iter(|| binom_test(successes, trials, 0.5, Alternative::TwoSided, 0.95))
-            },
-        );
+        group.bench_with_input(BenchmarkId::from_parameter(size), size, |b, _| {
+            b.iter(|| binom_test(successes, trials, 0.5, Alternative::TwoSided, 0.95))
+        });
     }
     group.finish();
 }
@@ -123,13 +112,9 @@ fn fligner_test_benchmark(c: &mut Criterion) {
     for size in [100, 1000, 10000].iter() {
         let groups = generate_three_groups(*size, 42);
 
-        group.bench_with_input(
-            BenchmarkId::from_parameter(size),
-            size,
-            |b, _| {
-                b.iter(|| fligner_test(&groups))
-            },
-        );
+        group.bench_with_input(BenchmarkId::from_parameter(size), size, |b, _| {
+            b.iter(|| fligner_test(&groups))
+        });
     }
     group.finish();
 }
@@ -149,13 +134,9 @@ fn ansari_test_benchmark(c: &mut Criterion) {
     for size in [100, 1000].iter() {
         let (x, y) = generate_two_samples(*size, 42);
 
-        group.bench_with_input(
-            BenchmarkId::new("approx", size),
-            size,
-            |b, _| {
-                b.iter(|| ansari_test(&x, &y, Alternative::TwoSided, false, None))
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("approx", size), size, |b, _| {
+            b.iter(|| ansari_test(&x, &y, Alternative::TwoSided, false, None))
+        });
     }
     group.finish();
 }
@@ -166,19 +147,19 @@ fn mood_test_benchmark(c: &mut Criterion) {
     for size in [100, 1000, 10000, 100000].iter() {
         let (x, y) = generate_two_samples(*size, 42);
 
-        group.bench_with_input(
-            BenchmarkId::from_parameter(size),
-            size,
-            |b, _| {
-                b.iter(|| mood_test(&x, &y, Alternative::TwoSided))
-            },
-        );
+        group.bench_with_input(BenchmarkId::from_parameter(size), size, |b, _| {
+            b.iter(|| mood_test(&x, &y, Alternative::TwoSided))
+        });
     }
     group.finish();
 }
 
 /// Generate grouped data for Kruskal-Wallis test
-fn generate_kruskal_groups(n_per_group: usize, n_groups: usize, seed: u64) -> Vec<(String, Vec<f64>)> {
+fn generate_kruskal_groups(
+    n_per_group: usize,
+    n_groups: usize,
+    seed: u64,
+) -> Vec<(String, Vec<f64>)> {
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
 
     (0..n_groups)
@@ -199,19 +180,19 @@ fn kruskal_test_benchmark(c: &mut Criterion) {
     for size in [100, 1000, 10000, 100000].iter() {
         let groups = generate_kruskal_groups(*size / 3, 3, 42);
 
-        group.bench_with_input(
-            BenchmarkId::from_parameter(size),
-            size,
-            |b, _| {
-                b.iter(|| kruskal_test(&groups))
-            },
-        );
+        group.bench_with_input(BenchmarkId::from_parameter(size), size, |b, _| {
+            b.iter(|| kruskal_test(&groups))
+        });
     }
     group.finish();
 }
 
 /// Generate blocked data for Friedman test (n_blocks x n_treatments matrix)
-fn generate_friedman_data(n_blocks: usize, n_treatments: usize, seed: u64) -> (Vec<Vec<f64>>, Vec<String>) {
+fn generate_friedman_data(
+    n_blocks: usize,
+    n_treatments: usize,
+    seed: u64,
+) -> (Vec<Vec<f64>>, Vec<String>) {
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
 
     let data: Vec<Vec<f64>> = (0..n_blocks)
@@ -234,13 +215,9 @@ fn friedman_test_benchmark(c: &mut Criterion) {
     for n_blocks in [30, 100, 300, 1000].iter() {
         let (data, names) = generate_friedman_data(*n_blocks, 3, 42);
 
-        group.bench_with_input(
-            BenchmarkId::from_parameter(n_blocks),
-            n_blocks,
-            |b, _| {
-                b.iter(|| friedman_test(&data, &names))
-            },
-        );
+        group.bench_with_input(BenchmarkId::from_parameter(n_blocks), n_blocks, |b, _| {
+            b.iter(|| friedman_test(&data, &names))
+        });
     }
     group.finish();
 }
@@ -251,23 +228,19 @@ fn quade_test_benchmark(c: &mut Criterion) {
     // Test with varying number of blocks and treatments
     // (blocks, treatments)
     let configs = vec![
-        (10, 3),    // Small: 10 blocks, 3 treatments
-        (50, 4),    // Medium: 50 blocks, 4 treatments
-        (100, 5),   // Large: 100 blocks, 5 treatments
-        (500, 3),   // Very large: 500 blocks, 3 treatments
+        (10, 3),  // Small: 10 blocks, 3 treatments
+        (50, 4),  // Medium: 50 blocks, 4 treatments
+        (100, 5), // Large: 100 blocks, 5 treatments
+        (500, 3), // Very large: 500 blocks, 3 treatments
     ];
 
     for (n_blocks, n_treatments) in configs {
         let (data, names) = generate_friedman_data(n_blocks, n_treatments, 42);
         let label = format!("b{}_t{}", n_blocks, n_treatments);
 
-        group.bench_with_input(
-            BenchmarkId::from_parameter(&label),
-            &label,
-            |b, _| {
-                b.iter(|| quade_test(&data, &names))
-            },
-        );
+        group.bench_with_input(BenchmarkId::from_parameter(&label), &label, |b, _| {
+            b.iter(|| quade_test(&data, &names))
+        });
     }
     group.finish();
 }
@@ -279,13 +252,9 @@ fn oneway_test_benchmark(c: &mut Criterion) {
     for size in [100, 1000, 10000, 100000].iter() {
         let groups = generate_kruskal_groups(*size / 3, 3, 42);
 
-        group.bench_with_input(
-            BenchmarkId::from_parameter(size),
-            size,
-            |b, _| {
-                b.iter(|| oneway_test(&groups, false))  // Welch's ANOVA (var.equal = FALSE)
-            },
-        );
+        group.bench_with_input(BenchmarkId::from_parameter(size), size, |b, _| {
+            b.iter(|| oneway_test(&groups, false)) // Welch's ANOVA (var.equal = FALSE)
+        });
     }
     group.finish();
 }
@@ -315,16 +284,20 @@ fn mcnemar_test_benchmark(c: &mut Criterion) {
 }
 
 /// Generate pairwise test data: k groups with n_per_group observations each
-fn generate_pairwise_groups(k_groups: usize, n_per_group: usize, seed: u64) -> (Vec<f64>, Vec<String>) {
+fn generate_pairwise_groups(
+    k_groups: usize,
+    n_per_group: usize,
+    seed: u64,
+) -> (Vec<f64>, Vec<String>) {
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
 
     let mut values = Vec::with_capacity(k_groups * n_per_group);
     let mut groups = Vec::with_capacity(k_groups * n_per_group);
 
     for g in 0..k_groups {
-        let group_mean = (g + 1) as f64 * 10.0;  // Groups have different means
+        let group_mean = (g + 1) as f64 * 10.0; // Groups have different means
         for _ in 0..n_per_group {
-            values.push(group_mean + rng.r#gen::<f64>() * 4.0 - 2.0);  // Mean ± 2
+            values.push(group_mean + rng.r#gen::<f64>() * 4.0 - 2.0); // Mean ± 2
             groups.push(format!("G{}", g + 1));
         }
     }
@@ -337,10 +310,10 @@ fn pairwise_t_test_benchmark(c: &mut Criterion) {
 
     // Test configurations: (k_groups, n_per_group)
     let configs = vec![
-        (3, 10),    // 3 comparisons
-        (5, 50),    // 10 comparisons
-        (10, 100),  // 45 comparisons
-        (20, 500),  // 190 comparisons
+        (3, 10),   // 3 comparisons
+        (5, 50),   // 10 comparisons
+        (10, 100), // 45 comparisons
+        (20, 500), // 190 comparisons
     ];
 
     for (k, n) in configs {
@@ -351,7 +324,15 @@ fn pairwise_t_test_benchmark(c: &mut Criterion) {
             BenchmarkId::from_parameter(&label),
             &(values.clone(), groups.clone()),
             |b, (vals, grps)| {
-                b.iter(|| pairwise_t_test(vals, grps, true, Alternative::TwoSided, PValueAdjustMethod::Holm))
+                b.iter(|| {
+                    pairwise_t_test(
+                        vals,
+                        grps,
+                        true,
+                        Alternative::TwoSided,
+                        PValueAdjustMethod::Holm,
+                    )
+                })
             },
         );
     }
@@ -364,10 +345,10 @@ fn pairwise_wilcox_test_benchmark(c: &mut Criterion) {
     // Test configurations: (k_groups, n_per_group)
     // Use smaller configs for Wilcoxon (ranking is more expensive)
     let configs = vec![
-        (3, 10),    // 3 comparisons
-        (5, 50),    // 10 comparisons
-        (10, 100),  // 45 comparisons
-        (20, 200),  // 190 comparisons (smaller n per group due to ranking cost)
+        (3, 10),   // 3 comparisons
+        (5, 50),   // 10 comparisons
+        (10, 100), // 45 comparisons
+        (20, 200), // 190 comparisons (smaller n per group due to ranking cost)
     ];
 
     for (k, n) in configs {
@@ -378,7 +359,15 @@ fn pairwise_wilcox_test_benchmark(c: &mut Criterion) {
             BenchmarkId::from_parameter(&label),
             &(values.clone(), groups.clone()),
             |b, (vals, grps)| {
-                b.iter(|| pairwise_wilcox_test(vals, grps, Alternative::TwoSided, PValueAdjustMethod::Holm, Some(false)))
+                b.iter(|| {
+                    pairwise_wilcox_test(
+                        vals,
+                        grps,
+                        Alternative::TwoSided,
+                        PValueAdjustMethod::Holm,
+                        Some(false),
+                    )
+                })
             },
         );
     }
@@ -392,7 +381,7 @@ fn generate_cmh_tables(n_strata: usize, seed: u64) -> Vec<Table2x2> {
     (0..n_strata)
         .map(|_| {
             // Generate realistic cell counts with some variation
-            let base = (rng.r#gen::<f64>() * 50.0 + 10.0) as f64;
+            let base = rng.r#gen::<f64>() * 50.0 + 10.0;
             Table2x2::new(
                 base * (0.5 + rng.r#gen::<f64>()),
                 base * (0.8 + rng.r#gen::<f64>()),
@@ -410,34 +399,26 @@ fn mantelhaen_test_benchmark(c: &mut Criterion) {
     for n_strata in [5, 10, 50, 100].iter() {
         let tables = generate_cmh_tables(*n_strata, 42);
 
-        group.bench_with_input(
-            BenchmarkId::from_parameter(n_strata),
-            n_strata,
-            |b, _| {
-                b.iter(|| mantelhaen_test(&tables, None, true, CmhAlternative::TwoSided))
-            },
-        );
+        group.bench_with_input(BenchmarkId::from_parameter(n_strata), n_strata, |b, _| {
+            b.iter(|| mantelhaen_test(&tables, None, true, CmhAlternative::TwoSided))
+        });
     }
     group.finish();
 }
 
 fn poisson_test_benchmark(c: &mut Criterion) {
-    use p2a_core::{poisson_test, PoissonAlternative, PoissonTestResult};
+    use p2a_core::{PoissonAlternative, poisson_test};
 
     let mut group = c.benchmark_group("poisson_test");
 
     // One-sample test benchmark
     for size in [1u64, 10, 100, 1000].iter() {
-        let x = *size * 10;  // events scale with size
-        let t = *size as f64;  // time base
+        let x = *size * 10; // events scale with size
+        let t = *size as f64; // time base
 
-        group.bench_with_input(
-            BenchmarkId::new("one_sample", size),
-            size,
-            |b, _| {
-                b.iter(|| poisson_test(&[x], &[t], 1.0, PoissonAlternative::TwoSided, 0.95))
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("one_sample", size), size, |b, _| {
+            b.iter(|| poisson_test(&[x], &[t], 1.0, PoissonAlternative::TwoSided, 0.95))
+        });
     }
 
     // Two-sample test benchmark
@@ -447,13 +428,17 @@ fn poisson_test_benchmark(c: &mut Criterion) {
         let t1 = *size as f64;
         let t2 = *size as f64 * 2.0;
 
-        group.bench_with_input(
-            BenchmarkId::new("two_sample", size),
-            size,
-            |b, _| {
-                b.iter(|| poisson_test(&[x1, x2], &[t1, t2], 1.0, PoissonAlternative::TwoSided, 0.95))
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("two_sample", size), size, |b, _| {
+            b.iter(|| {
+                poisson_test(
+                    &[x1, x2],
+                    &[t1, t2],
+                    1.0,
+                    PoissonAlternative::TwoSided,
+                    0.95,
+                )
+            })
+        });
     }
 
     group.finish();

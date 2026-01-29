@@ -65,14 +65,14 @@
 //!
 //! - R package medflex: https://CRAN.R-project.org/package=medflex
 
-use std::fmt;
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
-use rand::prelude::*;
 use rand::SeedableRng;
+use rand::prelude::*;
 use serde::{Deserialize, Serialize};
+use std::fmt;
 
 use crate::errors::{EconError, EconResult};
-use crate::linalg::{xtx, xty, safe_inverse};
+use crate::linalg::{safe_inverse, xtx, xty};
 use crate::traits::estimator::normal_cdf;
 
 /// Scale for reporting mediation effects.
@@ -231,47 +231,84 @@ impl fmt::Display for MedflexResult {
         writeln!(f)?;
         writeln!(f, "Effect Decomposition ({}):", self.scale)?;
         writeln!(f, "{}", "─".repeat(70))?;
-        writeln!(f, "{:<25} {:>12} {:>12} {:>16} {:>8}",
-                 "Effect", "Estimate", "Std.Err",
-                 &format!("{:.0}% CI", self.confidence_level * 100.0), "p-value")?;
+        writeln!(
+            f,
+            "{:<25} {:>12} {:>12} {:>16} {:>8}",
+            "Effect",
+            "Estimate",
+            "Std.Err",
+            &format!("{:.0}% CI", self.confidence_level * 100.0),
+            "p-value"
+        )?;
         writeln!(f, "{}", "─".repeat(70))?;
 
         let stars = |p: f64| -> &str {
-            if p < 0.001 { "***" }
-            else if p < 0.01 { "**" }
-            else if p < 0.05 { "*" }
-            else if p < 0.10 { "." }
-            else { "" }
+            if p < 0.001 {
+                "***"
+            } else if p < 0.01 {
+                "**"
+            } else if p < 0.05 {
+                "*"
+            } else if p < 0.10 {
+                "."
+            } else {
+                ""
+            }
         };
 
-        writeln!(f, "{:<25} {:>12.4} {:>12.4} [{:>6.3}, {:>6.3}] {:>7.4}{}",
-                 "Total Effect (TE)",
-                 self.total_effect, self.te_se,
-                 self.te_ci.0, self.te_ci.1,
-                 self.te_p_value, stars(self.te_p_value))?;
+        writeln!(
+            f,
+            "{:<25} {:>12.4} {:>12.4} [{:>6.3}, {:>6.3}] {:>7.4}{}",
+            "Total Effect (TE)",
+            self.total_effect,
+            self.te_se,
+            self.te_ci.0,
+            self.te_ci.1,
+            self.te_p_value,
+            stars(self.te_p_value)
+        )?;
 
-        writeln!(f, "{:<25} {:>12.4} {:>12.4} [{:>6.3}, {:>6.3}] {:>7.4}{}",
-                 "Natural Direct Effect",
-                 self.natural_direct_effect, self.nde_se,
-                 self.nde_ci.0, self.nde_ci.1,
-                 self.nde_p_value, stars(self.nde_p_value))?;
+        writeln!(
+            f,
+            "{:<25} {:>12.4} {:>12.4} [{:>6.3}, {:>6.3}] {:>7.4}{}",
+            "Natural Direct Effect",
+            self.natural_direct_effect,
+            self.nde_se,
+            self.nde_ci.0,
+            self.nde_ci.1,
+            self.nde_p_value,
+            stars(self.nde_p_value)
+        )?;
 
-        writeln!(f, "{:<25} {:>12.4} {:>12.4} [{:>6.3}, {:>6.3}] {:>7.4}{}",
-                 "Natural Indirect Effect",
-                 self.natural_indirect_effect, self.nie_se,
-                 self.nie_ci.0, self.nie_ci.1,
-                 self.nie_p_value, stars(self.nie_p_value))?;
+        writeln!(
+            f,
+            "{:<25} {:>12.4} {:>12.4} [{:>6.3}, {:>6.3}] {:>7.4}{}",
+            "Natural Indirect Effect",
+            self.natural_indirect_effect,
+            self.nie_se,
+            self.nie_ci.0,
+            self.nie_ci.1,
+            self.nie_p_value,
+            stars(self.nie_p_value)
+        )?;
 
         writeln!(f, "{}", "─".repeat(70))?;
         writeln!(f)?;
 
-        writeln!(f, "Proportion Mediated (NIE/TE): {:.1}%", self.proportion_mediated * 100.0)?;
+        writeln!(
+            f,
+            "Proportion Mediated (NIE/TE): {:.1}%",
+            self.proportion_mediated * 100.0
+        )?;
         writeln!(f)?;
 
         writeln!(f, "Model Components:")?;
         writeln!(f, "  Mediator Model (M ~ A + C):")?;
-        writeln!(f, "    Treatment -> Mediator: {:.4} (SE = {:.4})",
-                 self.mediator_coef, self.mediator_coef_se)?;
+        writeln!(
+            f,
+            "    Treatment -> Mediator: {:.4} (SE = {:.4})",
+            self.mediator_coef, self.mediator_coef_se
+        )?;
         writeln!(f, "    R-squared: {:.4}", self.mediator_r_squared)?;
         writeln!(f)?;
 
@@ -280,23 +317,42 @@ impl fmt::Display for MedflexResult {
         } else {
             writeln!(f, "  Outcome Model (Y ~ A + M + C):")?;
         }
-        writeln!(f, "    Treatment -> Outcome: {:.4} (SE = {:.4})",
-                 self.direct_coef, self.direct_coef_se)?;
-        writeln!(f, "    Mediator -> Outcome:  {:.4} (SE = {:.4})",
-                 self.mediator_outcome_coef, self.mediator_outcome_coef_se)?;
+        writeln!(
+            f,
+            "    Treatment -> Outcome: {:.4} (SE = {:.4})",
+            self.direct_coef, self.direct_coef_se
+        )?;
+        writeln!(
+            f,
+            "    Mediator -> Outcome:  {:.4} (SE = {:.4})",
+            self.mediator_outcome_coef, self.mediator_outcome_coef_se
+        )?;
         if let (Some(int_coef), Some(int_se)) = (self.interaction_coef, self.interaction_coef_se) {
-            writeln!(f, "    A*M Interaction:      {:.4} (SE = {:.4})", int_coef, int_se)?;
+            writeln!(
+                f,
+                "    A*M Interaction:      {:.4} (SE = {:.4})",
+                int_coef, int_se
+            )?;
         }
         writeln!(f, "    R-squared: {:.4}", self.outcome_r_squared)?;
         writeln!(f)?;
 
         writeln!(f, "Sample:")?;
-        writeln!(f, "  N = {} (treated: {}, control: {})",
-                 self.n_obs, self.n_treated, self.n_control)?;
-        writeln!(f, "  E[M|A=0] = {:.4}, E[M|A=1] = {:.4}",
-                 self.mediator_mean_control, self.mediator_mean_treated)?;
+        writeln!(
+            f,
+            "  N = {} (treated: {}, control: {})",
+            self.n_obs, self.n_treated, self.n_control
+        )?;
+        writeln!(
+            f,
+            "  E[M|A=0] = {:.4}, E[M|A=1] = {:.4}",
+            self.mediator_mean_control, self.mediator_mean_treated
+        )?;
         writeln!(f)?;
-        writeln!(f, "Signif. codes: *** p<0.001, ** p<0.01, * p<0.05, . p<0.10")?;
+        writeln!(
+            f,
+            "Signif. codes: *** p<0.001, ** p<0.01, * p<0.05, . p<0.10"
+        )?;
 
         Ok(())
     }
@@ -353,20 +409,29 @@ pub fn run_medflex(
     // Validate inputs
     if treatment.len() != n {
         return Err(EconError::InvalidSpecification {
-            message: format!("Treatment length ({}) must match outcome length ({})",
-                           treatment.len(), n),
+            message: format!(
+                "Treatment length ({}) must match outcome length ({})",
+                treatment.len(),
+                n
+            ),
         });
     }
     if mediator.len() != n {
         return Err(EconError::InvalidSpecification {
-            message: format!("Mediator length ({}) must match outcome length ({})",
-                           mediator.len(), n),
+            message: format!(
+                "Mediator length ({}) must match outcome length ({})",
+                mediator.len(),
+                n
+            ),
         });
     }
     if confounders.nrows() != n {
         return Err(EconError::InvalidSpecification {
-            message: format!("Confounders rows ({}) must match outcome length ({})",
-                           confounders.nrows(), n),
+            message: format!(
+                "Confounders rows ({}) must match outcome length ({})",
+                confounders.nrows(),
+                n
+            ),
         });
     }
 
@@ -405,9 +470,7 @@ pub fn run_medflex(
     let mediator_mean_control = sum_m_control / (n_control as f64);
 
     // Step 1: Fit mediator model: M = alpha_0 + alpha_1*A + alpha_2'*C + epsilon
-    let (alpha, alpha_se, mediator_r2) = fit_mediator_model(
-        mediator, treatment, confounders
-    )?;
+    let (alpha, alpha_se, mediator_r2) = fit_mediator_model(mediator, treatment, confounders)?;
 
     // alpha[0] = intercept, alpha[1] = treatment effect, alpha[2..] = confounders
     let alpha_1 = alpha[1];
@@ -415,15 +478,19 @@ pub fn run_medflex(
 
     // Step 2: Fit outcome model with or without interaction
     let (beta, beta_se, outcome_r2) = fit_outcome_model(
-        y, treatment, mediator, confounders, config.allow_interaction
+        y,
+        treatment,
+        mediator,
+        confounders,
+        config.allow_interaction,
     )?;
 
     // Extract coefficients
     // Without interaction: Y = beta_0 + beta_1*A + beta_2*M + beta_3'*C
     // With interaction:    Y = beta_0 + beta_1*A + beta_2*M + beta_3*A*M + beta_4'*C
-    let beta_1 = beta[1];  // Treatment coefficient
+    let beta_1 = beta[1]; // Treatment coefficient
     let beta_1_se = beta_se[1];
-    let beta_2 = beta[2];  // Mediator coefficient
+    let beta_2 = beta[2]; // Mediator coefficient
     let beta_2_se = beta_se[2];
 
     let (beta_3, beta_3_se) = if config.allow_interaction {
@@ -434,14 +501,16 @@ pub fn run_medflex(
 
     // Step 3: Compute Natural Direct and Indirect Effects
     // Using formulas from VanderWeele (2015) and medflex documentation
-    let (nde, nie, te) = compute_natural_effects(
-        alpha_1, beta_1, beta_2, beta_3, mediator_mean_control
-    );
+    let (nde, nie, te) =
+        compute_natural_effects(alpha_1, beta_1, beta_2, beta_3, mediator_mean_control);
 
     // Step 4: Bootstrap for standard errors and confidence intervals
     let (te_se, nde_se, nie_se, te_ci, nde_ci, nie_ci) = if config.bootstrap_ci {
         bootstrap_effects(
-            y, treatment, mediator, confounders,
+            y,
+            treatment,
+            mediator,
+            confounders,
             config.allow_interaction,
             config.n_bootstrap,
             config.confidence_level,
@@ -450,8 +519,16 @@ pub fn run_medflex(
     } else {
         // Delta method approximation for standard errors
         delta_method_se(
-            alpha_1, alpha_1_se, beta_1, beta_1_se, beta_2, beta_2_se,
-            beta_3, beta_3_se, mediator_mean_control, config.confidence_level
+            alpha_1,
+            alpha_1_se,
+            beta_1,
+            beta_1_se,
+            beta_2,
+            beta_2_se,
+            beta_3,
+            beta_3_se,
+            mediator_mean_control,
+            config.confidence_level,
         )
     };
 
@@ -462,7 +539,7 @@ pub fn run_medflex(
 
     // Proportion mediated
     let proportion_mediated = if te.abs() > 1e-10 {
-        (nie / te).clamp(-2.0, 2.0)  // Clamp to reasonable range
+        (nie / te).clamp(-2.0, 2.0) // Clamp to reasonable range
     } else {
         f64::NAN
     };
@@ -512,12 +589,12 @@ fn fit_mediator_model(
 ) -> EconResult<(Array1<f64>, Array1<f64>, f64)> {
     let n = mediator.len();
     let p_conf = confounders.ncols();
-    let k = 2 + p_conf;  // intercept + treatment + confounders
+    let k = 2 + p_conf; // intercept + treatment + confounders
 
     // Build design matrix X = [1, A, C]
     let mut x = Array2::zeros((n, k));
     for i in 0..n {
-        x[[i, 0]] = 1.0;  // Intercept
+        x[[i, 0]] = 1.0; // Intercept
         x[[i, 1]] = treatment[i];
         for j in 0..p_conf {
             x[[i, 2 + j]] = confounders[[i, j]];
@@ -529,11 +606,10 @@ fn fit_mediator_model(
 
     // OLS: beta = (X'X)^{-1} X'y
     let xtx_mat = xtx(&x.view());
-    let (xtx_inv, _) = safe_inverse(&xtx_mat.view())
-        .map_err(|_| EconError::SingularMatrix {
-            context: "X'X in mediator model".to_string(),
-            suggestion: "Check for collinearity among treatment and confounders".to_string(),
-        })?;
+    let (xtx_inv, _) = safe_inverse(&xtx_mat.view()).map_err(|_| EconError::SingularMatrix {
+        context: "X'X in mediator model".to_string(),
+        suggestion: "Check for collinearity among treatment and confounders".to_string(),
+    })?;
 
     let xty_vec = xty(&x.view(), &m);
     let alpha = xtx_inv.dot(&xty_vec);
@@ -573,21 +649,21 @@ fn fit_outcome_model(
     let n = y.len();
     let p_conf = confounders.ncols();
     let k = if include_interaction {
-        4 + p_conf  // intercept + A + M + A*M + confounders
+        4 + p_conf // intercept + A + M + A*M + confounders
     } else {
-        3 + p_conf  // intercept + A + M + confounders
+        3 + p_conf // intercept + A + M + confounders
     };
 
     // Build design matrix
     let mut x = Array2::zeros((n, k));
     for i in 0..n {
-        x[[i, 0]] = 1.0;  // Intercept
+        x[[i, 0]] = 1.0; // Intercept
         x[[i, 1]] = treatment[i];
         x[[i, 2]] = mediator[i];
 
         let mut col_idx = 3;
         if include_interaction {
-            x[[i, 3]] = treatment[i] * mediator[i];  // A*M interaction
+            x[[i, 3]] = treatment[i] * mediator[i]; // A*M interaction
             col_idx = 4;
         }
 
@@ -601,11 +677,10 @@ fn fit_outcome_model(
 
     // OLS: beta = (X'X)^{-1} X'y
     let xtx_mat = xtx(&x.view());
-    let (xtx_inv, _) = safe_inverse(&xtx_mat.view())
-        .map_err(|_| EconError::SingularMatrix {
-            context: "X'X in outcome model".to_string(),
-            suggestion: "Check for collinearity in treatment, mediator, and confounders".to_string(),
-        })?;
+    let (xtx_inv, _) = safe_inverse(&xtx_mat.view()).map_err(|_| EconError::SingularMatrix {
+        context: "X'X in outcome model".to_string(),
+        suggestion: "Check for collinearity in treatment, mediator, and confounders".to_string(),
+    })?;
 
     let xty_vec = xty(&x.view(), &y_arr);
     let beta = xtx_inv.dot(&xty_vec);
@@ -642,11 +717,11 @@ fn fit_outcome_model(
 ///
 /// Total Effect = NDE + NIE
 fn compute_natural_effects(
-    alpha_1: f64,      // Treatment effect on mediator
-    beta_1: f64,       // Direct treatment effect on outcome
-    beta_2: f64,       // Mediator effect on outcome
-    beta_3: Option<f64>,  // Interaction coefficient (if included)
-    mediator_mean_control: f64,  // E[M|A=0]
+    alpha_1: f64,               // Treatment effect on mediator
+    beta_1: f64,                // Direct treatment effect on outcome
+    beta_2: f64,                // Mediator effect on outcome
+    beta_3: Option<f64>,        // Interaction coefficient (if included)
+    mediator_mean_control: f64, // E[M|A=0]
 ) -> (f64, f64, f64) {
     match beta_3 {
         Some(interaction) => {
@@ -700,10 +775,9 @@ fn bootstrap_effects(
         let y_boot: Array1<f64> = indices.iter().map(|&i| y[i]).collect();
         let t_boot: Array1<f64> = indices.iter().map(|&i| treatment[i]).collect();
         let m_boot: Array1<f64> = indices.iter().map(|&i| mediator[i]).collect();
-        let c_boot: Array2<f64> = Array2::from_shape_fn(
-            (n, confounders.ncols()),
-            |(row, col)| confounders[[indices[row], col]]
-        );
+        let c_boot: Array2<f64> = Array2::from_shape_fn((n, confounders.ncols()), |(row, col)| {
+            confounders[[indices[row], col]]
+        });
 
         // Compute mediator mean in control group for bootstrap sample
         let mut sum_m_ctrl = 0.0;
@@ -714,22 +788,34 @@ fn bootstrap_effects(
                 n_ctrl += 1;
             }
         }
-        let m_mean_ctrl = if n_ctrl > 0 { sum_m_ctrl / (n_ctrl as f64) } else { 0.0 };
+        let m_mean_ctrl = if n_ctrl > 0 {
+            sum_m_ctrl / (n_ctrl as f64)
+        } else {
+            0.0
+        };
 
         // Fit models on bootstrap sample
         if let (Ok((alpha, _, _)), Ok((beta, _, _))) = (
             fit_mediator_model(&m_boot.view(), &t_boot.view(), &c_boot.view()),
-            fit_outcome_model(&y_boot.view(), &t_boot.view(), &m_boot.view(),
-                            &c_boot.view(), include_interaction),
+            fit_outcome_model(
+                &y_boot.view(),
+                &t_boot.view(),
+                &m_boot.view(),
+                &c_boot.view(),
+                include_interaction,
+            ),
         ) {
             let alpha_1 = alpha[1];
             let beta_1 = beta[1];
             let beta_2 = beta[2];
-            let beta_3 = if include_interaction { Some(beta[3]) } else { None };
+            let beta_3 = if include_interaction {
+                Some(beta[3])
+            } else {
+                None
+            };
 
-            let (nde, nie, te) = compute_natural_effects(
-                alpha_1, beta_1, beta_2, beta_3, m_mean_ctrl
-            );
+            let (nde, nie, te) =
+                compute_natural_effects(alpha_1, beta_1, beta_2, beta_3, m_mean_ctrl);
 
             if te.is_finite() && nde.is_finite() && nie.is_finite() {
                 boot_te.push(te);
@@ -763,9 +849,7 @@ fn bootstrap_stats(samples: &[f64], confidence_level: f64) -> (f64, (f64, f64)) 
 
     let n = samples.len() as f64;
     let mean: f64 = samples.iter().sum::<f64>() / n;
-    let variance: f64 = samples.iter()
-        .map(|x| (x - mean).powi(2))
-        .sum::<f64>() / (n - 1.0);
+    let variance: f64 = samples.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (n - 1.0);
     let se = variance.sqrt();
 
     // Percentile CI
@@ -774,17 +858,23 @@ fn bootstrap_stats(samples: &[f64], confidence_level: f64) -> (f64, (f64, f64)) 
 
     let alpha = 1.0 - confidence_level;
     let lower_idx = ((alpha / 2.0 * n) as usize).max(0).min(samples.len() - 1);
-    let upper_idx = (((1.0 - alpha / 2.0) * n) as usize).max(0).min(samples.len() - 1);
+    let upper_idx = (((1.0 - alpha / 2.0) * n) as usize)
+        .max(0)
+        .min(samples.len() - 1);
 
     (se, (sorted[lower_idx], sorted[upper_idx]))
 }
 
 /// Delta method approximation for standard errors (when bootstrap is disabled).
 fn delta_method_se(
-    alpha_1: f64, alpha_1_se: f64,
-    beta_1: f64, beta_1_se: f64,
-    beta_2: f64, beta_2_se: f64,
-    beta_3: Option<f64>, beta_3_se: Option<f64>,
+    alpha_1: f64,
+    alpha_1_se: f64,
+    beta_1: f64,
+    beta_1_se: f64,
+    beta_2: f64,
+    beta_2_se: f64,
+    beta_3: Option<f64>,
+    beta_3_se: Option<f64>,
     mediator_mean_control: f64,
     confidence_level: f64,
 ) -> (f64, f64, f64, (f64, f64), (f64, f64), (f64, f64)) {
@@ -805,7 +895,7 @@ fn delta_method_se(
             // Using delta method: approximately alpha_1^2 * (Var(beta_2) + Var(beta_3)) + (beta_2+beta_3)^2 * Var(alpha_1)
             let sum_beta = beta_2 + b3;
             let nie_var = alpha_1.powi(2) * (beta_2_se.powi(2) + b3_se.powi(2))
-                        + sum_beta.powi(2) * alpha_1_se.powi(2);
+                + sum_beta.powi(2) * alpha_1_se.powi(2);
             let nie_se = nie_var.sqrt();
 
             // SE(TE) = sqrt(Var(NDE) + Var(NIE) + 2*Cov(NDE,NIE))
@@ -818,7 +908,9 @@ fn delta_method_se(
             let te = nde + nie;
 
             (
-                te_se, nde_se, nie_se,
+                te_se,
+                nde_se,
+                nie_se,
                 (te - z * te_se, te + z * te_se),
                 (nde - z * nde_se, nde + z * nde_se),
                 (nie - z * nie_se, nie + z * nie_se),
@@ -832,8 +924,7 @@ fn delta_method_se(
             let nde_se = beta_1_se;
 
             // SE(NIE) = SE(alpha_1 * beta_2) using delta method
-            let nie_var = alpha_1.powi(2) * beta_2_se.powi(2)
-                        + beta_2.powi(2) * alpha_1_se.powi(2);
+            let nie_var = alpha_1.powi(2) * beta_2_se.powi(2) + beta_2.powi(2) * alpha_1_se.powi(2);
             let nie_se = nie_var.sqrt();
 
             let te_se = (nde_se.powi(2) + nie_se.powi(2)).sqrt();
@@ -844,7 +935,9 @@ fn delta_method_se(
             let te = nde + nie;
 
             (
-                te_se, nde_se, nie_se,
+                te_se,
+                nde_se,
+                nie_se,
                 (te - z * te_se, te + z * te_se),
                 (nde - z * nde_se, nde + z * nde_se),
                 (nie - z * nie_se, nie + z * nie_se),
@@ -916,53 +1009,69 @@ pub fn run_medflex_dataset(
 ) -> EconResult<MedflexResult> {
     let df = dataset.df();
     let n = df.height();
-    let available_cols: Vec<String> = df.get_column_names().iter().map(|s| s.to_string()).collect();
+    let available_cols: Vec<String> = df
+        .get_column_names()
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
 
     // Extract outcome
-    let y_col = df.column(outcome).map_err(|_| {
-        EconError::ColumnNotFound {
-            column: outcome.to_string(),
-            available: available_cols.clone(),
-        }
+    let y_col = df.column(outcome).map_err(|_| EconError::ColumnNotFound {
+        column: outcome.to_string(),
+        available: available_cols.clone(),
     })?;
-    let y: Array1<f64> = y_col.f64().map_err(|_| {
-        EconError::NonNumericColumn { column: outcome.to_string() }
-    })?.into_no_null_iter().collect();
+    let y: Array1<f64> = y_col
+        .f64()
+        .map_err(|_| EconError::NonNumericColumn {
+            column: outcome.to_string(),
+        })?
+        .into_no_null_iter()
+        .collect();
 
     // Extract treatment
-    let t_col = df.column(treatment).map_err(|_| {
-        EconError::ColumnNotFound {
+    let t_col = df
+        .column(treatment)
+        .map_err(|_| EconError::ColumnNotFound {
             column: treatment.to_string(),
             available: available_cols.clone(),
-        }
-    })?;
-    let t: Array1<f64> = t_col.f64().map_err(|_| {
-        EconError::NonNumericColumn { column: treatment.to_string() }
-    })?.into_no_null_iter().collect();
+        })?;
+    let t: Array1<f64> = t_col
+        .f64()
+        .map_err(|_| EconError::NonNumericColumn {
+            column: treatment.to_string(),
+        })?
+        .into_no_null_iter()
+        .collect();
 
     // Extract mediator
-    let m_col = df.column(mediator).map_err(|_| {
-        EconError::ColumnNotFound {
-            column: mediator.to_string(),
-            available: available_cols.clone(),
-        }
+    let m_col = df.column(mediator).map_err(|_| EconError::ColumnNotFound {
+        column: mediator.to_string(),
+        available: available_cols.clone(),
     })?;
-    let m: Array1<f64> = m_col.f64().map_err(|_| {
-        EconError::NonNumericColumn { column: mediator.to_string() }
-    })?.into_no_null_iter().collect();
+    let m: Array1<f64> = m_col
+        .f64()
+        .map_err(|_| EconError::NonNumericColumn {
+            column: mediator.to_string(),
+        })?
+        .into_no_null_iter()
+        .collect();
 
     // Extract confounders
     let mut c_data: Vec<f64> = Vec::with_capacity(n * confounders.len());
     for conf_name in confounders {
-        let col = df.column(conf_name).map_err(|_| {
-            EconError::ColumnNotFound {
+        let col = df
+            .column(conf_name)
+            .map_err(|_| EconError::ColumnNotFound {
                 column: conf_name.to_string(),
                 available: available_cols.clone(),
-            }
-        })?;
-        let vals: Vec<f64> = col.f64().map_err(|_| {
-            EconError::NonNumericColumn { column: conf_name.to_string() }
-        })?.into_no_null_iter().collect();
+            })?;
+        let vals: Vec<f64> = col
+            .f64()
+            .map_err(|_| EconError::NonNumericColumn {
+                column: conf_name.to_string(),
+            })?
+            .into_no_null_iter()
+            .collect();
         c_data.extend(vals);
     }
 
@@ -998,45 +1107,33 @@ mod tests {
         let n = 100;
         let y = array![
             // Treated (A=1) with higher Y on average
-            2.1, 2.3, 2.0, 2.5, 2.2, 2.4, 2.1, 2.6, 2.3, 2.2,
-            2.0, 2.4, 2.5, 2.1, 2.3, 2.6, 2.2, 2.4, 2.0, 2.5,
-            2.3, 2.1, 2.4, 2.2, 2.5, 2.0, 2.3, 2.6, 2.1, 2.4,
-            2.2, 2.5, 2.0, 2.3, 2.1, 2.6, 2.4, 2.2, 2.5, 2.3,
-            2.1, 2.4, 2.2, 2.0, 2.5, 2.3, 2.6, 2.1, 2.4, 2.2,
+            2.1, 2.3, 2.0, 2.5, 2.2, 2.4, 2.1, 2.6, 2.3, 2.2, 2.0, 2.4, 2.5, 2.1, 2.3, 2.6, 2.2,
+            2.4, 2.0, 2.5, 2.3, 2.1, 2.4, 2.2, 2.5, 2.0, 2.3, 2.6, 2.1, 2.4, 2.2, 2.5, 2.0, 2.3,
+            2.1, 2.6, 2.4, 2.2, 2.5, 2.3, 2.1, 2.4, 2.2, 2.0, 2.5, 2.3, 2.6, 2.1, 2.4, 2.2,
             // Control (A=0) with lower Y on average
-            1.3, 1.5, 1.2, 1.6, 1.4, 1.3, 1.5, 1.2, 1.4, 1.6,
-            1.3, 1.5, 1.4, 1.2, 1.6, 1.3, 1.5, 1.4, 1.2, 1.6,
-            1.4, 1.3, 1.5, 1.2, 1.6, 1.4, 1.3, 1.5, 1.2, 1.6,
-            1.5, 1.3, 1.4, 1.2, 1.6, 1.5, 1.3, 1.4, 1.2, 1.6,
-            1.4, 1.5, 1.3, 1.2, 1.6, 1.4, 1.5, 1.3, 1.2, 1.6
+            1.3, 1.5, 1.2, 1.6, 1.4, 1.3, 1.5, 1.2, 1.4, 1.6, 1.3, 1.5, 1.4, 1.2, 1.6, 1.3, 1.5,
+            1.4, 1.2, 1.6, 1.4, 1.3, 1.5, 1.2, 1.6, 1.4, 1.3, 1.5, 1.2, 1.6, 1.5, 1.3, 1.4, 1.2,
+            1.6, 1.5, 1.3, 1.4, 1.2, 1.6, 1.4, 1.5, 1.3, 1.2, 1.6, 1.4, 1.5, 1.3, 1.2, 1.6
         ];
 
         let treatment = array![
-            1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
-            1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
-            1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
-            1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
-            1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
-            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+            1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+            1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+            1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0,
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
         ];
 
         let mediator = array![
             // Treated have higher M (around 1.1 = 0.5 + 0.6)
-            1.0, 1.2, 0.9, 1.3, 1.1, 1.2, 1.0, 1.4, 1.1, 1.0,
-            0.9, 1.2, 1.3, 1.0, 1.1, 1.4, 1.0, 1.2, 0.9, 1.3,
-            1.1, 0.9, 1.2, 1.0, 1.3, 0.9, 1.1, 1.4, 0.9, 1.2,
-            1.0, 1.3, 0.9, 1.1, 0.9, 1.4, 1.2, 1.0, 1.3, 1.1,
-            0.9, 1.2, 1.0, 0.9, 1.3, 1.1, 1.4, 0.9, 1.2, 1.0,
+            1.0, 1.2, 0.9, 1.3, 1.1, 1.2, 1.0, 1.4, 1.1, 1.0, 0.9, 1.2, 1.3, 1.0, 1.1, 1.4, 1.0,
+            1.2, 0.9, 1.3, 1.1, 0.9, 1.2, 1.0, 1.3, 0.9, 1.1, 1.4, 0.9, 1.2, 1.0, 1.3, 0.9, 1.1,
+            0.9, 1.4, 1.2, 1.0, 1.3, 1.1, 0.9, 1.2, 1.0, 0.9, 1.3, 1.1, 1.4, 0.9, 1.2, 1.0,
             // Control have lower M (around 0.5)
-            0.4, 0.6, 0.3, 0.7, 0.5, 0.4, 0.6, 0.3, 0.5, 0.7,
-            0.4, 0.6, 0.5, 0.3, 0.7, 0.4, 0.6, 0.5, 0.3, 0.7,
-            0.5, 0.4, 0.6, 0.3, 0.7, 0.5, 0.4, 0.6, 0.3, 0.7,
-            0.6, 0.4, 0.5, 0.3, 0.7, 0.6, 0.4, 0.5, 0.3, 0.7,
-            0.5, 0.6, 0.4, 0.3, 0.7, 0.5, 0.6, 0.4, 0.3, 0.7
+            0.4, 0.6, 0.3, 0.7, 0.5, 0.4, 0.6, 0.3, 0.5, 0.7, 0.4, 0.6, 0.5, 0.3, 0.7, 0.4, 0.6,
+            0.5, 0.3, 0.7, 0.5, 0.4, 0.6, 0.3, 0.7, 0.5, 0.4, 0.6, 0.3, 0.7, 0.6, 0.4, 0.5, 0.3,
+            0.7, 0.6, 0.4, 0.5, 0.3, 0.7, 0.5, 0.6, 0.4, 0.3, 0.7, 0.5, 0.6, 0.4, 0.3, 0.7
         ];
 
         // No confounders for simplicity
@@ -1052,15 +1149,19 @@ mod tests {
         let config = MedflexConfig {
             allow_interaction: false,
             bootstrap_ci: true,
-            n_bootstrap: 200,  // Reduced for faster tests
+            n_bootstrap: 200, // Reduced for faster tests
             seed: Some(42),
             ..Default::default()
         };
 
         let result = run_medflex(
-            &y.view(), &treatment.view(), &mediator.view(),
-            &confounders.view(), config
-        ).unwrap();
+            &y.view(),
+            &treatment.view(),
+            &mediator.view(),
+            &confounders.view(),
+            config,
+        )
+        .unwrap();
 
         // Check basic properties
         assert!(result.total_effect > 0.0, "Total effect should be positive");
@@ -1069,11 +1170,14 @@ mod tests {
         assert!(result.n_control == 50, "Should have 50 control");
 
         // Check decomposition: TE = NDE + NIE
-        let decomp_error = (result.total_effect
-                          - result.natural_direct_effect
-                          - result.natural_indirect_effect).abs();
-        assert!(decomp_error < 1e-10,
-                "Decomposition error {} too large", decomp_error);
+        let decomp_error =
+            (result.total_effect - result.natural_direct_effect - result.natural_indirect_effect)
+                .abs();
+        assert!(
+            decomp_error < 1e-10,
+            "Decomposition error {} too large",
+            decomp_error
+        );
 
         // Check that SEs are positive
         assert!(result.te_se > 0.0, "TE SE should be positive");
@@ -1098,22 +1202,33 @@ mod tests {
         };
 
         let result = run_medflex(
-            &y.view(), &treatment.view(), &mediator.view(),
-            &confounders.view(), config
-        ).unwrap();
+            &y.view(),
+            &treatment.view(),
+            &mediator.view(),
+            &confounders.view(),
+            config,
+        )
+        .unwrap();
 
         // Check that interaction coefficient is present
-        assert!(result.interaction_coef.is_some(),
-                "Interaction coefficient should be present");
-        assert!(result.interaction_included,
-                "Should flag interaction as included");
+        assert!(
+            result.interaction_coef.is_some(),
+            "Interaction coefficient should be present"
+        );
+        assert!(
+            result.interaction_included,
+            "Should flag interaction as included"
+        );
 
         // Decomposition should still hold
-        let decomp_error = (result.total_effect
-                          - result.natural_direct_effect
-                          - result.natural_indirect_effect).abs();
-        assert!(decomp_error < 1e-10,
-                "Decomposition error {} too large", decomp_error);
+        let decomp_error =
+            (result.total_effect - result.natural_direct_effect - result.natural_indirect_effect)
+                .abs();
+        assert!(
+            decomp_error < 1e-10,
+            "Decomposition error {} too large",
+            decomp_error
+        );
     }
 
     #[test]
@@ -1121,30 +1236,36 @@ mod tests {
         // Create data with a confounder
         let n = 80;
         let y = Array1::from_iter((0..n).map(|i| {
-            if i < 40 { 2.0 + 0.1 * (i as f64 % 10.0) }
-            else { 1.3 + 0.1 * (i as f64 % 10.0) }
+            if i < 40 {
+                2.0 + 0.1 * (i as f64 % 10.0)
+            } else {
+                1.3 + 0.1 * (i as f64 % 10.0)
+            }
         }));
-        let treatment = Array1::from_iter((0..n).map(|i| {
-            if i < 40 { 1.0 } else { 0.0 }
-        }));
+        let treatment = Array1::from_iter((0..n).map(|i| if i < 40 { 1.0 } else { 0.0 }));
         let mediator = Array1::from_iter((0..n).map(|i| {
-            if i < 40 { 1.1 + 0.05 * (i as f64 % 10.0) }
-            else { 0.5 + 0.05 * (i as f64 % 10.0) }
+            if i < 40 {
+                1.1 + 0.05 * (i as f64 % 10.0)
+            } else {
+                0.5 + 0.05 * (i as f64 % 10.0)
+            }
         }));
-        let confounders = Array2::from_shape_fn((n, 1), |(i, _)| {
-            0.5 + 0.1 * (i as f64 % 10.0)
-        });
+        let confounders = Array2::from_shape_fn((n, 1), |(i, _)| 0.5 + 0.1 * (i as f64 % 10.0));
 
         let config = MedflexConfig {
             allow_interaction: false,
-            bootstrap_ci: false,  // Use delta method for speed
+            bootstrap_ci: false, // Use delta method for speed
             ..Default::default()
         };
 
         let result = run_medflex(
-            &y.view(), &treatment.view(), &mediator.view(),
-            &confounders.view(), config
-        ).unwrap();
+            &y.view(),
+            &treatment.view(),
+            &mediator.view(),
+            &confounders.view(),
+            config,
+        )
+        .unwrap();
 
         // Should complete without error
         assert!(result.total_effect.is_finite());
@@ -1158,15 +1279,19 @@ mod tests {
 
         let config = MedflexConfig {
             allow_interaction: false,
-            bootstrap_ci: false,  // Use delta method
+            bootstrap_ci: false, // Use delta method
             confidence_level: 0.95,
             ..Default::default()
         };
 
         let result = run_medflex(
-            &y.view(), &treatment.view(), &mediator.view(),
-            &confounders.view(), config
-        ).unwrap();
+            &y.view(),
+            &treatment.view(),
+            &mediator.view(),
+            &confounders.view(),
+            config,
+        )
+        .unwrap();
 
         // Standard errors should be computed
         assert!(result.te_se > 0.0, "TE SE should be positive");
@@ -1174,7 +1299,10 @@ mod tests {
         assert!(result.nie_se > 0.0, "NIE SE should be positive");
 
         // CIs should be valid
-        assert!(result.te_ci.0 < result.te_ci.1, "CI should have lower < upper");
+        assert!(
+            result.te_ci.0 < result.te_ci.1,
+            "CI should have lower < upper"
+        );
     }
 
     #[test]
@@ -1188,9 +1316,13 @@ mod tests {
         };
 
         let result = run_medflex(
-            &y.view(), &treatment.view(), &mediator.view(),
-            &confounders.view(), config
-        ).unwrap();
+            &y.view(),
+            &treatment.view(),
+            &mediator.view(),
+            &confounders.view(),
+            config,
+        )
+        .unwrap();
 
         let display = result.to_string();
         assert!(display.contains("Natural Effect Models"));
@@ -1211,7 +1343,8 @@ mod tests {
                           0.9, 1.3, 0.4, 0.6, 1.1, 0.9, 0.5, 0.3, 1.2, 1.0],
             "age" => [30.0, 35.0, 28.0, 42.0, 38.0, 31.0, 33.0, 40.0, 36.0, 29.0,
                      34.0, 37.0, 41.0, 32.0, 39.0, 27.0, 43.0, 35.0, 30.0, 38.0]
-        }.unwrap();
+        }
+        .unwrap();
 
         let ds = Dataset::new(df);
 
@@ -1220,9 +1353,8 @@ mod tests {
             ..Default::default()
         };
 
-        let result = run_medflex_dataset(
-            &ds, "y", "treatment", "mediator", &["age"], config
-        ).unwrap();
+        let result =
+            run_medflex_dataset(&ds, "y", "treatment", "mediator", &["age"], config).unwrap();
 
         assert_eq!(result.n_obs, 20);
         assert!(result.total_effect.is_finite());
@@ -1238,8 +1370,11 @@ mod tests {
 
         let config = MedflexConfig::default();
         let result = run_medflex(
-            &y.view(), &treatment.view(), &mediator.view(),
-            &confounders.view(), config
+            &y.view(),
+            &treatment.view(),
+            &mediator.view(),
+            &confounders.view(),
+            config,
         );
 
         assert!(result.is_err());
@@ -1261,12 +1396,19 @@ mod tests {
         };
 
         let result = run_medflex(
-            &y.view(), &treatment.view(), &mediator.view(),
-            &confounders.view(), config
-        ).unwrap();
+            &y.view(),
+            &treatment.view(),
+            &mediator.view(),
+            &confounders.view(),
+            config,
+        )
+        .unwrap();
 
         // Proportion mediated should be between -2 and 2 (clamped)
-        assert!(result.proportion_mediated >= -2.0 && result.proportion_mediated <= 2.0,
-                "Proportion mediated {} out of bounds", result.proportion_mediated);
+        assert!(
+            result.proportion_mediated >= -2.0 && result.proportion_mediated <= 2.0,
+            "Proportion mediated {} out of bounds",
+            result.proportion_mediated
+        );
     }
 }

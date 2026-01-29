@@ -219,7 +219,9 @@ fn render_tag(tag: &Tag, events: &[Event]) -> (Element, usize) {
                 end_idx + 1,
             )
         }
-        Tag::Link { dest_url, title, .. } => {
+        Tag::Link {
+            dest_url, title, ..
+        } => {
             let children = render_events(inner_events);
             let href = dest_url.to_string();
             let title_attr = title.to_string();
@@ -237,7 +239,9 @@ fn render_tag(tag: &Tag, events: &[Event]) -> (Element, usize) {
                 end_idx + 1,
             )
         }
-        Tag::Image { dest_url, title, .. } => {
+        Tag::Image {
+            dest_url, title, ..
+        } => {
             let src = dest_url.to_string();
             let alt = extract_text(inner_events);
             let title_attr = title.to_string();
@@ -488,10 +492,10 @@ fn render_table_cells(events: &[Event], is_header: bool) -> Vec<Element> {
 /// Find end of table section
 fn find_table_section_end(events: &[Event], end_tag: TagEnd) -> usize {
     for (i, event) in events.iter().enumerate() {
-        if let Event::End(tag) = event {
-            if std::mem::discriminant(tag) == std::mem::discriminant(&end_tag) {
-                return i;
-            }
+        if let Event::End(tag) = event
+            && std::mem::discriminant(tag) == std::mem::discriminant(&end_tag)
+        {
+            return i;
         }
     }
     events.len() - 1

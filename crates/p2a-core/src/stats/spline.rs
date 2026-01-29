@@ -10,8 +10,8 @@
 //! - Forsythe, G. E., Malcolm, M. A., & Moler, C. B. (1977).
 //!   "Computer Methods for Mathematical Computations". Prentice-Hall.
 
-use serde::{Deserialize, Serialize};
 use crate::errors::{EconError, EconResult};
+use serde::{Deserialize, Serialize};
 
 /// Method for spline interpolation.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
@@ -141,7 +141,7 @@ pub fn spline(
 
     // Check for duplicate x values
     for i in 1..xs.len() {
-        if (xs[i] - xs[i-1]).abs() < 1e-14 {
+        if (xs[i] - xs[i - 1]).abs() < 1e-14 {
             return Err(EconError::InvalidSpecification {
                 message: "Duplicate x values not allowed in spline interpolation".to_string(),
             });
@@ -170,7 +170,8 @@ pub fn spline(
     };
 
     // Evaluate spline at output points
-    let y_out: Vec<f64> = x_out.iter()
+    let y_out: Vec<f64> = x_out
+        .iter()
         .map(|&xi| evaluate_cubic_spline(&xs, &ys, &coeffs, xi))
         .collect();
 
@@ -228,7 +229,9 @@ pub fn approx(
     }
 
     // Sort by x values
-    let mut pairs: Vec<(f64, f64)> = x.iter().zip(y.iter())
+    let mut pairs: Vec<(f64, f64)> = x
+        .iter()
+        .zip(y.iter())
         .filter(|(xi, yi)| xi.is_finite() && yi.is_finite())
         .map(|(&xi, &yi)| (xi, yi))
         .collect();
@@ -259,7 +262,8 @@ pub fn approx(
     };
 
     // Interpolate at output points
-    let y_out: Vec<f64> = x_out.iter()
+    let y_out: Vec<f64> = x_out
+        .iter()
         .map(|&xi| interpolate_approx(&xs, &ys, xi, method, rule, f))
         .collect();
 
@@ -275,11 +279,7 @@ pub fn approx(
 ///
 /// This is a convenience wrapper that returns a closure for evaluating
 /// the interpolation at arbitrary points.
-pub fn splinefun(
-    x: &[f64],
-    y: &[f64],
-    method: SplineMethod,
-) -> EconResult<impl Fn(f64) -> f64> {
+pub fn splinefun(x: &[f64], y: &[f64], method: SplineMethod) -> EconResult<impl Fn(f64) -> f64> {
     if x.len() != y.len() {
         return Err(EconError::InvalidSpecification {
             message: format!("x and y must have same length: {} vs {}", x.len(), y.len()),
@@ -335,7 +335,9 @@ pub fn approxfun(
     }
 
     // Sort by x values
-    let mut pairs: Vec<(f64, f64)> = x.iter().zip(y.iter())
+    let mut pairs: Vec<(f64, f64)> = x
+        .iter()
+        .zip(y.iter())
         .filter(|(xi, yi)| xi.is_finite() && yi.is_finite())
         .map(|(&xi, &yi)| (xi, yi))
         .collect();
@@ -375,7 +377,7 @@ fn compute_natural_spline(x: &[f64], y: &[f64]) -> EconResult<SplineCoeffs> {
     }
 
     // Build the tridiagonal matrix (sub-diagonal, diagonal, super-diagonal)
-    let mut diag = vec![1.0; n];  // Boundary conditions
+    let mut diag = vec![1.0; n]; // Boundary conditions
     let mut sub = vec![0.0; n];
     let mut sup = vec![0.0; n];
 
@@ -407,7 +409,7 @@ fn compute_fmm_spline(x: &[f64], y: &[f64]) -> EconResult<SplineCoeffs> {
     // Estimate end slopes using finite differences on 4 points
     // This approximates the FMM behavior
     let d_left = estimate_end_derivative(&x[..4], &y[..4], true);
-    let d_right = estimate_end_derivative(&x[n-4..], &y[n-4..], false);
+    let d_right = estimate_end_derivative(&x[n - 4..], &y[n - 4..], false);
 
     // Build the right-hand side with modified boundary conditions
     let mut d = vec![0.0; n];
@@ -446,7 +448,9 @@ fn compute_periodic_spline(x: &[f64], y: &[f64]) -> EconResult<SplineCoeffs> {
     // For periodic splines, we need y[0] == y[n-1] (approximately)
     // We use cyclic boundary conditions
 
-    if (y[0] - y[n - 1]).abs() > 1e-10 * (y.iter().map(|v| v.abs()).sum::<f64>() / n as f64).max(1.0) {
+    if (y[0] - y[n - 1]).abs()
+        > 1e-10 * (y.iter().map(|v| v.abs()).sum::<f64>() / n as f64).max(1.0)
+    {
         return Err(EconError::InvalidSpecification {
             message: "Periodic spline requires y[0] ≈ y[n-1]".to_string(),
         });
@@ -459,7 +463,7 @@ fn compute_periodic_spline(x: &[f64], y: &[f64]) -> EconResult<SplineCoeffs> {
 
     // Build system with periodic boundary conditions
     // This is a cyclic tridiagonal system
-    let mut d = vec![0.0; n - 1];  // We have n-1 unknowns (M_0 = M_{n-1})
+    let mut d = vec![0.0; n - 1]; // We have n-1 unknowns (M_0 = M_{n-1})
     for i in 0..n - 1 {
         let i_next = (i + 1) % (n - 1);
         let h_prev = if i == 0 { h[n - 2] } else { h[i - 1] };
@@ -480,7 +484,7 @@ fn compute_periodic_spline(x: &[f64], y: &[f64]) -> EconResult<SplineCoeffs> {
 
     // Solve cyclic tridiagonal system (simplified: use Gauss elimination)
     let mut second_derivs = solve_cyclic_tridiagonal(&sub, &diag, &sup, &d)?;
-    second_derivs.push(second_derivs[0]);  // M_{n-1} = M_0 for periodic
+    second_derivs.push(second_derivs[0]); // M_{n-1} = M_0 for periodic
 
     Ok(SplineCoeffs { second_derivs })
 }
@@ -594,7 +598,9 @@ fn solve_tridiagonal(sub: &[f64], diag: &[f64], sup: &[f64], rhs: &[f64]) -> Eco
     for i in 1..n {
         let denom = diag[i] - sub[i] * c_prime[i - 1];
         if denom.abs() < 1e-14 {
-            return Err(EconError::Computation("Singular matrix in tridiagonal solve".to_string()));
+            return Err(EconError::Computation(
+                "Singular matrix in tridiagonal solve".to_string(),
+            ));
         }
         c_prime[i] = sup[i] / denom;
         d_prime[i] = (rhs[i] - sub[i] * d_prime[i - 1]) / denom;
@@ -611,7 +617,12 @@ fn solve_tridiagonal(sub: &[f64], diag: &[f64], sup: &[f64], rhs: &[f64]) -> Eco
 }
 
 /// Solve a cyclic tridiagonal system (simplified approach).
-fn solve_cyclic_tridiagonal(sub: &[f64], diag: &[f64], sup: &[f64], rhs: &[f64]) -> EconResult<Vec<f64>> {
+fn solve_cyclic_tridiagonal(
+    sub: &[f64],
+    diag: &[f64],
+    sup: &[f64],
+    rhs: &[f64],
+) -> EconResult<Vec<f64>> {
     let n = diag.len();
     if n < 3 {
         return Err(EconError::InsufficientData {
@@ -644,7 +655,11 @@ fn solve_cyclic_tridiagonal(sub: &[f64], diag: &[f64], sup: &[f64], rhs: &[f64])
     let vtq = q[0] + sup[n - 1] / gamma * q[n - 1];
 
     let factor = vty / (1.0 + vtq);
-    let x: Vec<f64> = y.iter().zip(q.iter()).map(|(&yi, &qi)| yi - factor * qi).collect();
+    let x: Vec<f64> = y
+        .iter()
+        .zip(q.iter())
+        .map(|(&yi, &qi)| yi - factor * qi)
+        .collect();
 
     Ok(x)
 }
@@ -680,7 +695,14 @@ fn evaluate_cubic_spline(x: &[f64], y: &[f64], coeffs: &SplineCoeffs, xi: f64) -
 }
 
 /// Linear or constant interpolation at a single point.
-fn interpolate_approx(x: &[f64], y: &[f64], xi: f64, method: ApproxMethod, rule: ApproxRule, f: f64) -> f64 {
+fn interpolate_approx(
+    x: &[f64],
+    y: &[f64],
+    xi: f64,
+    method: ApproxMethod,
+    rule: ApproxRule,
+    f: f64,
+) -> f64 {
     let n = x.len();
 
     // Handle out-of-range
@@ -732,14 +754,27 @@ mod tests {
         let x = vec![0.0, 1.0, 2.0, 3.0, 4.0];
         let y: Vec<f64> = x.iter().map(|&xi| xi * xi).collect();
 
-        let result = spline(&x, &y, Some(&[0.5, 1.5, 2.5, 3.5]), None, SplineMethod::Natural).unwrap();
+        let result = spline(
+            &x,
+            &y,
+            Some(&[0.5, 1.5, 2.5, 3.5]),
+            None,
+            SplineMethod::Natural,
+        )
+        .unwrap();
 
         assert_eq!(result.n, 4);
         // Check interpolated values are close to true values
         for (i, &xi) in result.x.iter().enumerate() {
             let expected = xi * xi;
             let diff = (result.y[i] - expected).abs();
-            assert!(diff < 0.5, "At x={}, expected {}, got {}", xi, expected, result.y[i]);
+            assert!(
+                diff < 0.5,
+                "At x={}, expected {}, got {}",
+                xi,
+                expected,
+                result.y[i]
+            );
         }
     }
 
@@ -753,7 +788,13 @@ mod tests {
         // Spline should pass through all original points
         for (i, &yi) in y.iter().enumerate() {
             let diff = (result.y[i] - yi).abs();
-            assert!(diff < 1e-10, "At x[{}], expected {}, got {}", i, yi, result.y[i]);
+            assert!(
+                diff < 1e-10,
+                "At x[{}], expected {}, got {}",
+                i,
+                yi,
+                result.y[i]
+            );
         }
     }
 
@@ -776,8 +817,11 @@ mod tests {
 
         // Check monotonicity
         for i in 1..result.y.len() {
-            assert!(result.y[i] >= result.y[i - 1] - 1e-10,
-                "Monotone spline not monotone at index {}", i);
+            assert!(
+                result.y[i] >= result.y[i - 1] - 1e-10,
+                "Monotone spline not monotone at index {}",
+                i
+            );
         }
     }
 
@@ -786,12 +830,21 @@ mod tests {
         let x = vec![0.0, 1.0, 2.0, 3.0];
         let y = vec![0.0, 2.0, 4.0, 6.0];
 
-        let result = approx(&x, &y, Some(&[0.5, 1.5, 2.5]), None, ApproxMethod::Linear, ApproxRule::Na, 0.5).unwrap();
+        let result = approx(
+            &x,
+            &y,
+            Some(&[0.5, 1.5, 2.5]),
+            None,
+            ApproxMethod::Linear,
+            ApproxRule::Na,
+            0.5,
+        )
+        .unwrap();
 
         assert_eq!(result.n, 3);
-        assert!((result.y[0] - 1.0).abs() < 1e-10);  // Linear interpolation at 0.5
-        assert!((result.y[1] - 3.0).abs() < 1e-10);  // Linear interpolation at 1.5
-        assert!((result.y[2] - 5.0).abs() < 1e-10);  // Linear interpolation at 2.5
+        assert!((result.y[0] - 1.0).abs() < 1e-10); // Linear interpolation at 0.5
+        assert!((result.y[1] - 3.0).abs() < 1e-10); // Linear interpolation at 1.5
+        assert!((result.y[2] - 5.0).abs() < 1e-10); // Linear interpolation at 2.5
     }
 
     #[test]
@@ -800,12 +853,30 @@ mod tests {
         let y = vec![0.0, 2.0, 4.0, 6.0];
 
         // Left-continuous (f=0): returns left value
-        let result = approx(&x, &y, Some(&[0.5, 1.5]), None, ApproxMethod::Constant, ApproxRule::Na, 0.0).unwrap();
+        let result = approx(
+            &x,
+            &y,
+            Some(&[0.5, 1.5]),
+            None,
+            ApproxMethod::Constant,
+            ApproxRule::Na,
+            0.0,
+        )
+        .unwrap();
         assert!((result.y[0] - 0.0).abs() < 1e-10);
         assert!((result.y[1] - 2.0).abs() < 1e-10);
 
         // Right-continuous (f=1): returns right value
-        let result = approx(&x, &y, Some(&[0.5, 1.5]), None, ApproxMethod::Constant, ApproxRule::Na, 1.0).unwrap();
+        let result = approx(
+            &x,
+            &y,
+            Some(&[0.5, 1.5]),
+            None,
+            ApproxMethod::Constant,
+            ApproxRule::Na,
+            1.0,
+        )
+        .unwrap();
         assert!((result.y[0] - 2.0).abs() < 1e-10);
         assert!((result.y[1] - 4.0).abs() < 1e-10);
     }
@@ -816,12 +887,30 @@ mod tests {
         let y = vec![0.0, 1.0, 2.0];
 
         // NA rule: out of range returns NaN
-        let result = approx(&x, &y, Some(&[-1.0, 3.0]), None, ApproxMethod::Linear, ApproxRule::Na, 0.5).unwrap();
+        let result = approx(
+            &x,
+            &y,
+            Some(&[-1.0, 3.0]),
+            None,
+            ApproxMethod::Linear,
+            ApproxRule::Na,
+            0.5,
+        )
+        .unwrap();
         assert!(result.y[0].is_nan());
         assert!(result.y[1].is_nan());
 
         // Nearest rule: returns endpoint value
-        let result = approx(&x, &y, Some(&[-1.0, 3.0]), None, ApproxMethod::Linear, ApproxRule::Nearest, 0.5).unwrap();
+        let result = approx(
+            &x,
+            &y,
+            Some(&[-1.0, 3.0]),
+            None,
+            ApproxMethod::Linear,
+            ApproxRule::Nearest,
+            0.5,
+        )
+        .unwrap();
         assert!((result.y[0] - 0.0).abs() < 1e-10);
         assert!((result.y[1] - 2.0).abs() < 1e-10);
     }
@@ -829,7 +918,7 @@ mod tests {
     #[test]
     fn test_splinefun() {
         let x: Vec<f64> = vec![0.0, 1.0, 2.0, 3.0, 4.0];
-        let y: Vec<f64> = x.iter().map(|&xi| (xi as f64).sin()).collect();
+        let y: Vec<f64> = x.iter().map(|&xi| xi.sin()).collect();
 
         let f = splinefun(&x, &y, SplineMethod::Natural).unwrap();
 
@@ -849,8 +938,8 @@ mod tests {
 
         assert!((f(0.5) - 1.0).abs() < 1e-10);
         assert!((f(1.5) - 3.0).abs() < 1e-10);
-        assert!((f(-1.0) - 0.0).abs() < 1e-10);  // Extrapolation
-        assert!((f(5.0) - 6.0).abs() < 1e-10);   // Extrapolation
+        assert!((f(-1.0) - 0.0).abs() < 1e-10); // Extrapolation
+        assert!((f(5.0) - 6.0).abs() < 1e-10); // Extrapolation
     }
 
     /// Validation test against R's spline() function
@@ -873,8 +962,13 @@ mod tests {
         for i in 0..x.len() {
             let f = splinefun(&x, &y, SplineMethod::Natural).unwrap();
             let diff = (f(x[i]) - y[i]).abs();
-            assert!(diff < 1e-8, "Spline doesn't pass through point {}: got {}, expected {}",
-                i, f(x[i]), y[i]);
+            assert!(
+                diff < 1e-8,
+                "Spline doesn't pass through point {}: got {}, expected {}",
+                i,
+                f(x[i]),
+                y[i]
+            );
         }
 
         // Check output has correct number of points
@@ -894,12 +988,27 @@ mod tests {
         let y = vec![1.0, 4.0, 9.0, 16.0, 25.0];
         let xout = vec![1.5, 2.5, 3.5, 4.5];
 
-        let result = approx(&x, &y, Some(&xout), None, ApproxMethod::Linear, ApproxRule::Na, 0.5).unwrap();
+        let result = approx(
+            &x,
+            &y,
+            Some(&xout),
+            None,
+            ApproxMethod::Linear,
+            ApproxRule::Na,
+            0.5,
+        )
+        .unwrap();
 
-        let expected = vec![2.5, 6.5, 12.5, 20.5];
+        let expected = [2.5, 6.5, 12.5, 20.5];
         for i in 0..expected.len() {
             let diff = (result.y[i] - expected[i]).abs();
-            assert!(diff < 1e-10, "At xout[{}], expected {}, got {}", i, expected[i], result.y[i]);
+            assert!(
+                diff < 1e-10,
+                "At xout[{}], expected {}, got {}",
+                i,
+                expected[i],
+                result.y[i]
+            );
         }
     }
 }

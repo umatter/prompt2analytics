@@ -138,8 +138,14 @@ impl std::fmt::Display for WilcoxonResult {
         } else {
             "W"
         };
-        write!(f, "{} = {:.1}, p-value = {:.6} {}",
-            stat_name, self.statistic, self.p_value, self.significance.stars())?;
+        write!(
+            f,
+            "{} = {:.1}, p-value = {:.6} {}",
+            stat_name,
+            self.statistic,
+            self.p_value,
+            self.significance.stars()
+        )?;
 
         if let Some(z) = self.z_score {
             write!(f, " (z = {:.4})", z)?;
@@ -151,22 +157,35 @@ impl std::fmt::Display for WilcoxonResult {
         }
 
         if !self.exact {
-            writeln!(f, "(Normal approximation{})",
-                if self.continuity_correction { " with continuity correction" } else { "" })?;
+            writeln!(
+                f,
+                "(Normal approximation{})",
+                if self.continuity_correction {
+                    " with continuity correction"
+                } else {
+                    ""
+                }
+            )?;
         }
         writeln!(f)?;
 
         // Alternative hypothesis
         let alt_str = match self.alternative {
-            Alternative::TwoSided => format!("true location shift is not equal to {}", self.null_value),
-            Alternative::Greater => format!("true location shift is greater than {}", self.null_value),
+            Alternative::TwoSided => {
+                format!("true location shift is not equal to {}", self.null_value)
+            }
+            Alternative::Greater => {
+                format!("true location shift is greater than {}", self.null_value)
+            }
             Alternative::Less => format!("true location shift is less than {}", self.null_value),
         };
         writeln!(f, "Alternative hypothesis: {}", alt_str)?;
         writeln!(f)?;
 
         // Confidence interval (if computed)
-        if let (Some(cl), Some(lo), Some(hi)) = (self.conf_level, self.conf_int_lower, self.conf_int_upper) {
+        if let (Some(cl), Some(lo), Some(hi)) =
+            (self.conf_level, self.conf_int_lower, self.conf_int_upper)
+        {
             writeln!(f, "{:.0}% confidence interval:", cl * 100.0)?;
             writeln!(f, "  ({:.6}, {:.6})", lo, hi)?;
             writeln!(f)?;
@@ -313,9 +332,8 @@ pub fn wilcoxon_rank_sum(
         let hl = hodges_lehmann_estimate(&x, &y_adj);
         // For simplicity, confidence interval via normal approximation
         // (proper exact CI requires the Bauer algorithm, which is complex)
-        let ci = approximate_rank_sum_ci(
-            &x, &y_adj, config.conf_level, alternative, config.correct
-        );
+        let ci =
+            approximate_rank_sum_ci(&x, &y_adj, config.conf_level, alternative, config.correct);
         (Some(hl), ci.map(|(l, _)| l), ci.map(|(_, u)| u))
     } else {
         (None, None, None)
@@ -333,7 +351,11 @@ pub fn wilcoxon_rank_sum(
         u_statistic: Some(u),
         estimate,
         null_value: mu,
-        conf_level: if config.conf_int { Some(config.conf_level) } else { None },
+        conf_level: if config.conf_int {
+            Some(config.conf_level)
+        } else {
+            None
+        },
         conf_int_lower,
         conf_int_upper,
         n: n1,
@@ -467,8 +489,13 @@ pub fn wilcoxon_signed_rank(
     let (estimate, conf_int_lower, conf_int_upper) = if config.conf_int {
         let pm = pseudomedian(&nonzero);
         // Approximate CI
-        let ci = approximate_signed_rank_ci(&nonzero, config.conf_level, alternative, config.correct);
-        (Some(pm + mu), ci.map(|(l, _)| l + mu), ci.map(|(_, u)| u + mu))
+        let ci =
+            approximate_signed_rank_ci(&nonzero, config.conf_level, alternative, config.correct);
+        (
+            Some(pm + mu),
+            ci.map(|(l, _)| l + mu),
+            ci.map(|(_, u)| u + mu),
+        )
     } else {
         (None, None, None)
     };
@@ -491,7 +518,11 @@ pub fn wilcoxon_signed_rank(
         u_statistic: None,
         estimate,
         null_value: mu,
-        conf_level: if config.conf_int { Some(config.conf_level) } else { None },
+        conf_level: if config.conf_int {
+            Some(config.conf_level)
+        } else {
+            None
+        },
         conf_int_lower,
         conf_int_upper,
         n: x.len(),
@@ -541,7 +572,11 @@ pub fn wilcoxon_test(
     // Extract x values
     let x_series = df.column(x_col).map_err(|_| EconError::ColumnNotFound {
         column: x_col.to_string(),
-        available: df.get_column_names().iter().map(|s| s.to_string()).collect(),
+        available: df
+            .get_column_names()
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
     })?;
     let x: Vec<f64> = x_series
         .f64()
@@ -555,7 +590,11 @@ pub fn wilcoxon_test(
         Some(y_name) => {
             let y_series = df.column(y_name).map_err(|_| EconError::ColumnNotFound {
                 column: y_name.to_string(),
-                available: df.get_column_names().iter().map(|s| s.to_string()).collect(),
+                available: df
+                    .get_column_names()
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect(),
             })?;
             let y: Vec<f64> = y_series
                 .f64()
@@ -809,7 +848,11 @@ fn count_rank_sums_ge(w: usize, n1: usize, n2: usize) -> u64 {
     }
 
     let total = binomial(n, n1);
-    let count_lt = if w > 0 { count_rank_sums_le(w - 1, n1, n2) } else { 0 };
+    let count_lt = if w > 0 {
+        count_rank_sums_le(w - 1, n1, n2)
+    } else {
+        0
+    };
     total - count_lt
 }
 
@@ -1112,7 +1155,11 @@ fn approximate_signed_rank_ci(
     let se = ((nf * (nf + 1.0) * (2.0 * nf + 1.0)) / 24.0).sqrt();
 
     let scale = se / (nf * (nf + 1.0) / 2.0).sqrt();
-    let _ = if correct { 0.5 / (nf * (nf + 1.0) / 2.0) } else { 0.0 };
+    let _ = if correct {
+        0.5 / (nf * (nf + 1.0) / 2.0)
+    } else {
+        0.0
+    };
 
     match alternative {
         Alternative::TwoSided => {
@@ -1156,7 +1203,14 @@ mod tests {
         let x = vec![1.0, 2.0, 3.0, 4.0, 5.0];
         let y = vec![6.0, 7.0, 8.0, 9.0, 10.0];
 
-        let result = wilcoxon_rank_sum(&x, &y, 0.0, Alternative::TwoSided, &WilcoxonConfig::default()).unwrap();
+        let result = wilcoxon_rank_sum(
+            &x,
+            &y,
+            0.0,
+            Alternative::TwoSided,
+            &WilcoxonConfig::default(),
+        )
+        .unwrap();
 
         // X has ranks 1-5, sum = 15
         assert!((result.statistic - 15.0).abs() < 0.001);
@@ -1170,7 +1224,14 @@ mod tests {
         let x = vec![1.0, 3.0, 5.0, 7.0, 9.0];
         let y = vec![2.0, 4.0, 6.0, 8.0, 10.0];
 
-        let result = wilcoxon_rank_sum(&x, &y, 0.0, Alternative::TwoSided, &WilcoxonConfig::default()).unwrap();
+        let result = wilcoxon_rank_sum(
+            &x,
+            &y,
+            0.0,
+            Alternative::TwoSided,
+            &WilcoxonConfig::default(),
+        )
+        .unwrap();
 
         // X has ranks 1, 3, 5, 7, 9 → sum = 25
         assert!((result.statistic - 25.0).abs() < 0.001);
@@ -1197,7 +1258,9 @@ mod tests {
         let after = vec![195.0, 188.0, 202.0, 175.0, 188.0];
 
         let config = WilcoxonConfig::default();
-        let result = wilcoxon_signed_rank(&before, Some(&after), 0.0, Alternative::TwoSided, &config).unwrap();
+        let result =
+            wilcoxon_signed_rank(&before, Some(&after), 0.0, Alternative::TwoSided, &config)
+                .unwrap();
 
         // Differences: 5, 2, 8, 5, 7
         assert!(result.p_value < 0.1); // Should show some significance
@@ -1253,12 +1316,30 @@ mod tests {
         let config = WilcoxonConfig::default();
 
         // Rank sum test
-        let result = wilcoxon_test(&dataset, "x", Some("y"), 0.0, Alternative::TwoSided, false, &config).unwrap();
+        let result = wilcoxon_test(
+            &dataset,
+            "x",
+            Some("y"),
+            0.0,
+            Alternative::TwoSided,
+            false,
+            &config,
+        )
+        .unwrap();
         assert_eq!(result.n, 5);
         assert_eq!(result.n_2, Some(5));
 
         // Paired test
-        let result = wilcoxon_test(&dataset, "x", Some("y"), 0.0, Alternative::TwoSided, true, &config).unwrap();
+        let result = wilcoxon_test(
+            &dataset,
+            "x",
+            Some("y"),
+            0.0,
+            Alternative::TwoSided,
+            true,
+            &config,
+        )
+        .unwrap();
         assert!(result.test_name.contains("signed rank"));
     }
 
@@ -1407,7 +1488,8 @@ mod tests {
             correct: true,
             ..Default::default()
         };
-        let result = wilcoxon_signed_rank(&x, Some(&y), 0.0, Alternative::TwoSided, &config).unwrap();
+        let result =
+            wilcoxon_signed_rank(&x, Some(&y), 0.0, Alternative::TwoSided, &config).unwrap();
 
         // Differences: 15, -7, 5, 20, 0, -9, 17, -12, 5, -10
         // Zero removed, 9 pairs left
@@ -1428,7 +1510,13 @@ mod tests {
         let x: Vec<f64> = vec![];
         let y = vec![1.0, 2.0, 3.0];
 
-        let result = wilcoxon_rank_sum(&x, &y, 0.0, Alternative::TwoSided, &WilcoxonConfig::default());
+        let result = wilcoxon_rank_sum(
+            &x,
+            &y,
+            0.0,
+            Alternative::TwoSided,
+            &WilcoxonConfig::default(),
+        );
         assert!(matches!(result, Err(EconError::InsufficientData { .. })));
     }
 
@@ -1436,7 +1524,13 @@ mod tests {
     fn test_all_zeros_signed_rank() {
         let x = vec![0.0, 0.0, 0.0];
 
-        let result = wilcoxon_signed_rank(&x, None, 0.0, Alternative::TwoSided, &WilcoxonConfig::default());
+        let result = wilcoxon_signed_rank(
+            &x,
+            None,
+            0.0,
+            Alternative::TwoSided,
+            &WilcoxonConfig::default(),
+        );
         assert!(matches!(result, Err(EconError::InsufficientData { .. })));
     }
 
@@ -1445,7 +1539,14 @@ mod tests {
         let x = vec![5.0];
         let y = vec![3.0];
 
-        let result = wilcoxon_rank_sum(&x, &y, 0.0, Alternative::TwoSided, &WilcoxonConfig::default()).unwrap();
+        let result = wilcoxon_rank_sum(
+            &x,
+            &y,
+            0.0,
+            Alternative::TwoSided,
+            &WilcoxonConfig::default(),
+        )
+        .unwrap();
         assert_eq!(result.n, 1);
         assert_eq!(result.n_2, Some(1));
     }
@@ -1455,7 +1556,14 @@ mod tests {
         let x = vec![1.0, f64::NAN, 3.0, f64::INFINITY, 5.0];
         let y = vec![2.0, 4.0, f64::NEG_INFINITY, 6.0];
 
-        let result = wilcoxon_rank_sum(&x, &y, 0.0, Alternative::TwoSided, &WilcoxonConfig::default()).unwrap();
+        let result = wilcoxon_rank_sum(
+            &x,
+            &y,
+            0.0,
+            Alternative::TwoSided,
+            &WilcoxonConfig::default(),
+        )
+        .unwrap();
 
         // Should only use finite values: x = [1, 3, 5], y = [2, 4, 6]
         assert_eq!(result.n, 3);
@@ -1467,7 +1575,14 @@ mod tests {
         let x = vec![1.0, 2.0, 3.0, 4.0, 5.0];
         let y = vec![6.0, 7.0, 8.0, 9.0, 10.0];
 
-        let result = wilcoxon_rank_sum(&x, &y, 0.0, Alternative::TwoSided, &WilcoxonConfig::default()).unwrap();
+        let result = wilcoxon_rank_sum(
+            &x,
+            &y,
+            0.0,
+            Alternative::TwoSided,
+            &WilcoxonConfig::default(),
+        )
+        .unwrap();
 
         // W = 1+2+3+4+5 = 15
         // U = n1*n2 + n1*(n1+1)/2 - W = 25 + 15 - 15 = 25

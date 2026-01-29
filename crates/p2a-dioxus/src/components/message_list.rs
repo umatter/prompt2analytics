@@ -76,15 +76,15 @@ pub fn MessageList(props: MessageListProps) -> Element {
                     div { class: "mt-6 flex flex-wrap gap-2 justify-center",
                         QuickSuggestion {
                             text: "Create a sample dataset with x and y",
-                            on_click: props.on_suggestion.clone()
+                            on_click: props.on_suggestion
                         }
                         QuickSuggestion {
                             text: "Explain OLS regression",
-                            on_click: props.on_suggestion.clone()
+                            on_click: props.on_suggestion
                         }
                         QuickSuggestion {
                             text: "What tools are available?",
-                            on_click: props.on_suggestion.clone()
+                            on_click: props.on_suggestion
                         }
                     }
                 }

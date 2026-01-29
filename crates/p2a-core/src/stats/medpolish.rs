@@ -10,9 +10,9 @@
 //! - R `medpolish` function: Implementation adapted from R stats package.
 //!   Source: <https://stat.ethz.ch/R-manual/R-devel/library/stats/html/medpolish.html>
 
+use crate::errors::{EconError, EconResult};
 use ndarray::{Array1, Array2};
 use serde::{Deserialize, Serialize};
-use crate::errors::{EconError, EconResult};
 
 // ============================================================================
 // MedpolishResult - Return type for median polish
@@ -183,7 +183,9 @@ pub fn medpolish(
             for &val in row {
                 if val.is_nan() {
                     return Err(EconError::InvalidSpecification {
-                        message: "Matrix contains NaN values. Set na_rm=true to handle missing values.".to_string()
+                        message:
+                            "Matrix contains NaN values. Set na_rm=true to handle missing values."
+                                .to_string(),
                     });
                 }
             }
@@ -202,9 +204,9 @@ pub fn medpolish(
     // Initialize
     // z = residuals (starts as copy of x)
     let mut z: Vec<Vec<f64>> = x.to_vec();
-    let mut t = 0.0;  // overall effect
-    let mut r = vec![0.0; nr];  // row effects
-    let mut c = vec![0.0; nc];  // column effects
+    let mut t = 0.0; // overall effect
+    let mut r = vec![0.0; nr]; // row effects
+    let mut c = vec![0.0; nc]; // column effects
     let mut oldsum = 0.0;
     let mut converged = false;
     let mut iter = 0;
@@ -214,9 +216,7 @@ pub fn medpolish(
 
         // Step 1: Extract row medians
         // rdelta = apply(z, 1, median)
-        let rdelta: Vec<f64> = z.iter()
-            .map(|row| compute_median(row, na_rm))
-            .collect();
+        let rdelta: Vec<f64> = z.iter().map(|row| compute_median(row, na_rm)).collect();
 
         // z = z - rdelta (subtract row medians from each row)
         for i in 0..nr {
@@ -272,7 +272,8 @@ pub fn medpolish(
         t += delta;
 
         // Check convergence
-        let newsum: f64 = z.iter()
+        let newsum: f64 = z
+            .iter()
             .flat_map(|row| row.iter())
             .filter(|&&v| !v.is_nan())
             .map(|&v| v.abs())
@@ -287,7 +288,8 @@ pub fn medpolish(
     }
 
     // Calculate final sum
-    let final_sum: f64 = z.iter()
+    let final_sum: f64 = z
+        .iter()
         .flat_map(|row| row.iter())
         .filter(|&&v| !v.is_nan())
         .map(|&v| v.abs())
@@ -355,7 +357,8 @@ pub fn medpolish_array(
         for &val in x.iter() {
             if val.is_nan() {
                 return Err(EconError::InvalidSpecification {
-                    message: "Matrix contains NaN values. Set na_rm=true to handle missing values.".to_string()
+                    message: "Matrix contains NaN values. Set na_rm=true to handle missing values."
+                        .to_string(),
                 });
             }
         }
@@ -377,7 +380,8 @@ pub fn medpolish_array(
         iter = iteration;
 
         // Step 1: Row medians
-        let rdelta: Array1<f64> = z.rows()
+        let rdelta: Array1<f64> = z
+            .rows()
             .into_iter()
             .map(|row| array_median(&row.to_vec(), na_rm))
             .collect();
@@ -395,7 +399,8 @@ pub fn medpolish_array(
         t += delta;
 
         // Step 3: Column medians
-        let cdelta: Array1<f64> = z.columns()
+        let cdelta: Array1<f64> = z
+            .columns()
             .into_iter()
             .map(|col| array_median(&col.to_vec(), na_rm))
             .collect();
@@ -413,10 +418,7 @@ pub fn medpolish_array(
         t += delta;
 
         // Check convergence
-        let newsum: f64 = z.iter()
-            .filter(|&&v| !v.is_nan())
-            .map(|&v| v.abs())
-            .sum();
+        let newsum: f64 = z.iter().filter(|&&v| !v.is_nan()).map(|&v| v.abs()).sum();
 
         if newsum == 0.0 || (oldsum - newsum).abs() < eps * newsum {
             converged = true;
@@ -426,16 +428,10 @@ pub fn medpolish_array(
         oldsum = newsum;
     }
 
-    let final_sum: f64 = z.iter()
-        .filter(|&&v| !v.is_nan())
-        .map(|&v| v.abs())
-        .sum();
+    let final_sum: f64 = z.iter().filter(|&&v| !v.is_nan()).map(|&v| v.abs()).sum();
 
     // Convert to Vec for result
-    let residuals: Vec<Vec<f64>> = z.rows()
-        .into_iter()
-        .map(|row| row.to_vec())
-        .collect();
+    let residuals: Vec<Vec<f64>> = z.rows().into_iter().map(|row| row.to_vec()).collect();
 
     Ok(MedpolishResult {
         overall: t,
@@ -501,9 +497,14 @@ mod tests {
         let original = result.original();
         for i in 0..3 {
             for j in 0..3 {
-                assert!((original[i][j] - data[i][j]).abs() < 1e-10,
+                assert!(
+                    (original[i][j] - data[i][j]).abs() < 1e-10,
                     "Reconstruction failed at ({}, {}): {} != {}",
-                    i, j, original[i][j], data[i][j]);
+                    i,
+                    j,
+                    original[i][j],
+                    data[i][j]
+                );
             }
         }
     }
@@ -528,8 +529,12 @@ mod tests {
         let original = result.original();
         for i in 0..4 {
             for j in 0..3 {
-                assert!((original[i][j] - deaths[i][j]).abs() < 1e-10,
-                    "Reconstruction failed at ({}, {})", i, j);
+                assert!(
+                    (original[i][j] - deaths[i][j]).abs() < 1e-10,
+                    "Reconstruction failed at ({}, {})",
+                    i,
+                    j
+                );
             }
         }
 
@@ -542,15 +547,17 @@ mod tests {
         // Matrix with one outlier - median polish should be robust
         let data = vec![
             vec![1.0, 2.0, 3.0],
-            vec![4.0, 100.0, 6.0],  // 100 is an outlier
+            vec![4.0, 100.0, 6.0], // 100 is an outlier
             vec![7.0, 8.0, 9.0],
         ];
 
         let result = medpolish(&data, None, None, false).unwrap();
 
         // The residual at [1][1] should capture most of the outlier effect
-        assert!(result.residuals[1][1].abs() > 50.0,
-            "Outlier should be captured in residuals");
+        assert!(
+            result.residuals[1][1].abs() > 50.0,
+            "Outlier should be captured in residuals"
+        );
 
         // Reconstruction should still work
         let original = result.original();
@@ -565,22 +572,26 @@ mod tests {
     fn test_medpolish_perfect_additive() {
         // Perfect additive model: x[i,j] = i + j
         let data = vec![
-            vec![2.0, 3.0, 4.0],   // 1+1, 1+2, 1+3
-            vec![3.0, 4.0, 5.0],   // 2+1, 2+2, 2+3
-            vec![4.0, 5.0, 6.0],   // 3+1, 3+2, 3+3
+            vec![2.0, 3.0, 4.0], // 1+1, 1+2, 1+3
+            vec![3.0, 4.0, 5.0], // 2+1, 2+2, 2+3
+            vec![4.0, 5.0, 6.0], // 3+1, 3+2, 3+3
         ];
 
         let result = medpolish(&data, None, None, false).unwrap();
 
         // Residuals should be near zero for perfect additive data
-        let max_residual: f64 = result.residuals.iter()
+        let max_residual: f64 = result
+            .residuals
+            .iter()
             .flat_map(|row| row.iter())
             .map(|r| r.abs())
             .fold(0.0, f64::max);
 
-        assert!(max_residual < 1e-10,
+        assert!(
+            max_residual < 1e-10,
             "Perfect additive model should have zero residuals, got {}",
-            max_residual);
+            max_residual
+        );
     }
 
     #[test]
@@ -596,11 +607,7 @@ mod tests {
 
     #[test]
     fn test_medpolish_single_col() {
-        let data = vec![
-            vec![1.0],
-            vec![2.0],
-            vec![3.0],
-        ];
+        let data = vec![vec![1.0], vec![2.0], vec![3.0]];
 
         let result = medpolish(&data, None, None, false).unwrap();
 
@@ -618,10 +625,7 @@ mod tests {
 
     #[test]
     fn test_medpolish_nan_error() {
-        let data = vec![
-            vec![1.0, f64::NAN, 3.0],
-            vec![4.0, 5.0, 6.0],
-        ];
+        let data = vec![vec![1.0, f64::NAN, 3.0], vec![4.0, 5.0, 6.0]];
 
         let result = medpolish(&data, None, None, false);
         assert!(result.is_err());
@@ -629,10 +633,7 @@ mod tests {
 
     #[test]
     fn test_medpolish_nan_rm() {
-        let data = vec![
-            vec![1.0, f64::NAN, 3.0],
-            vec![4.0, 5.0, 6.0],
-        ];
+        let data = vec![vec![1.0, f64::NAN, 3.0], vec![4.0, 5.0, 6.0]];
 
         let result = medpolish(&data, None, None, true);
         assert!(result.is_ok());
@@ -640,10 +641,7 @@ mod tests {
 
     #[test]
     fn test_medpolish_fitted() {
-        let data = vec![
-            vec![1.0, 2.0],
-            vec![3.0, 4.0],
-        ];
+        let data = vec![vec![1.0, 2.0], vec![3.0, 4.0]];
 
         let result = medpolish(&data, None, None, false).unwrap();
         let fitted = result.fitted();
@@ -661,7 +659,11 @@ mod tests {
     fn test_medpolish_convergence() {
         // Large random-ish matrix to test convergence
         let data: Vec<Vec<f64>> = (0..10)
-            .map(|i| (0..10).map(|j| (i + j) as f64 + (i * j) as f64 * 0.1).collect())
+            .map(|i| {
+                (0..10)
+                    .map(|j| (i + j) as f64 + (i * j) as f64 * 0.1)
+                    .collect()
+            })
             .collect();
 
         let result = medpolish(&data, Some(0.001), Some(100), false).unwrap();
@@ -690,31 +692,38 @@ mod tests {
 
         // Expected values from R
         let expected_overall = 9.5;
-        let expected_row = vec![4.0, -3.0, -2.5, 1.5];
-        let expected_col = vec![0.5, -2.0, 0.5];
+        let _expected_row = [4.0, -3.0, -2.5, 1.5];
+        let _expected_col = [0.5, -2.0, 0.5];
 
         // Check overall (may differ slightly due to iteration order)
-        assert!((result.overall - expected_overall).abs() < 1.0,
-            "Overall: expected {}, got {}", expected_overall, result.overall);
+        assert!(
+            (result.overall - expected_overall).abs() < 1.0,
+            "Overall: expected {}, got {}",
+            expected_overall,
+            result.overall
+        );
 
         // Verify reconstruction (this should be exact)
         let original = result.original();
         for i in 0..4 {
             for j in 0..3 {
-                assert!((original[i][j] - x[i][j]).abs() < 1e-10,
+                assert!(
+                    (original[i][j] - x[i][j]).abs() < 1e-10,
                     "Reconstruction mismatch at ({}, {}): expected {}, got {}",
-                    i, j, x[i][j], original[i][j]);
+                    i,
+                    j,
+                    x[i][j],
+                    original[i][j]
+                );
             }
         }
     }
 
     #[test]
     fn test_medpolish_array_version() {
-        let data = Array2::from_shape_vec((3, 3), vec![
-            1.0, 2.0, 3.0,
-            4.0, 5.0, 6.0,
-            7.0, 8.0, 9.0,
-        ]).unwrap();
+        let data =
+            Array2::from_shape_vec((3, 3), vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0])
+                .unwrap();
 
         let result = medpolish_array(&data, None, None, false).unwrap();
 

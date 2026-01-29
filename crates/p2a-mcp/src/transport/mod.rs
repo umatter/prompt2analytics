@@ -40,33 +40,31 @@ pub async fn start_transport(config: &ServerConfig) -> TransportResult<()> {
     use crate::config::TransportType;
 
     match config.transport {
-        TransportType::Stdio => {
-            start_stdio_transport().await
-        }
+        TransportType::Stdio => start_stdio_transport().await,
         #[cfg(feature = "http")]
-        TransportType::Http => {
-            http::start_http_transport(config).await
-        }
+        TransportType::Http => http::start_http_transport(config).await,
     }
 }
 
 /// Start the stdio transport (existing behavior).
 async fn start_stdio_transport() -> TransportResult<()> {
-    use rmcp::{transport::stdio, ServiceExt};
     use crate::server::AnalyticsServer;
+    use rmcp::{ServiceExt, transport::stdio};
 
     tracing::info!("Starting stdio transport...");
 
     let server = AnalyticsServer::new();
-    let service = server.serve(stdio()).await.map_err(|e| {
-        TransportError::Server(format!("Failed to start stdio transport: {}", e))
-    })?;
+    let service = server
+        .serve(stdio())
+        .await
+        .map_err(|e| TransportError::Server(format!("Failed to start stdio transport: {}", e)))?;
 
     tracing::info!("MCP server running on stdio, waiting for requests...");
 
-    service.waiting().await.map_err(|e| {
-        TransportError::Server(format!("Stdio transport error: {}", e))
-    })?;
+    service
+        .waiting()
+        .await
+        .map_err(|e| TransportError::Server(format!("Stdio transport error: {}", e)))?;
 
     Ok(())
 }

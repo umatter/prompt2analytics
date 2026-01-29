@@ -12,11 +12,11 @@
 //! - R Core Team. `stats::StructTS()` function.
 //!   <https://stat.ethz.ch/R-manual/R-devel/library/stats/html/StructTS.html>
 
-use ndarray::{Array1, Array2};
-use serde::{Deserialize, Serialize};
 use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
-use crate::forecasting::kalman::{StateSpaceModel, kalman_filter, kalman_smoother, kalman_forecast, KalmanFilterResult};
+use crate::forecasting::kalman::{StateSpaceModel, kalman_filter, kalman_smoother};
+use ndarray::{Array1, Array2};
+use serde::{Deserialize, Serialize};
 
 /// Type of structural time series model.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
@@ -136,7 +136,11 @@ pub fn struct_ts(y: &[f64], config: StructTsConfig) -> EconResult<StructTsResult
             return Err(EconError::InsufficientData {
                 required: 2 * period,
                 provided: n,
-                context: format!("BSM with period {} requires at least {} observations", period, 2 * period),
+                context: format!(
+                    "BSM with period {} requires at least {} observations",
+                    period,
+                    2 * period
+                ),
             });
         }
     }
@@ -146,7 +150,8 @@ pub fn struct_ts(y: &[f64], config: StructTsConfig) -> EconResult<StructTsResult
     let (init_params, n_params) = initialize_params(&config, y_var);
 
     // Optimize variance parameters
-    let (opt_params, log_lik, converged) = optimize_params(y, &config, init_params, config.max_iter, config.tolerance)?;
+    let (opt_params, log_lik, converged) =
+        optimize_params(y, &config, init_params, config.max_iter, config.tolerance)?;
 
     // Build final model and get smoothed states
     let model = build_model(&config, &opt_params)?;
@@ -171,7 +176,8 @@ pub fn struct_ts(y: &[f64], config: StructTsConfig) -> EconResult<StructTsResult
         .collect();
 
     // Compute residuals
-    let residuals: Vec<f64> = y.iter()
+    let residuals: Vec<f64> = y
+        .iter()
         .zip(fitted.iter())
         .map(|(yi, fi)| yi - fi)
         .collect();
@@ -208,12 +214,15 @@ pub fn run_struct_ts(
     period: Option<usize>,
 ) -> EconResult<StructTsResult> {
     let df = dataset.df();
-    let available: Vec<String> = df.get_column_names().iter().map(|s| s.to_string()).collect();
-    let col = df.column(column)
-        .map_err(|_| EconError::ColumnNotFound {
-            column: column.to_string(),
-            available: available.clone(),
-        })?;
+    let available: Vec<String> = df
+        .get_column_names()
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let col = df.column(column).map_err(|_| EconError::ColumnNotFound {
+        column: column.to_string(),
+        available: available.clone(),
+    })?;
 
     let y: Vec<f64> = col
         .f64()
@@ -223,11 +232,14 @@ pub fn run_struct_ts(
         .into_no_null_iter()
         .collect();
 
-    struct_ts(&y, StructTsConfig {
-        model_type,
-        period,
-        ..Default::default()
-    })
+    struct_ts(
+        &y,
+        StructTsConfig {
+            model_type,
+            period,
+            ..Default::default()
+        },
+    )
 }
 
 // Helper functions
@@ -251,7 +263,10 @@ fn initialize_params(config: &StructTsConfig, y_var: f64) -> (Vec<f64>, usize) {
         }
         StructTsType::BSM => {
             // [level_var, slope_var, seasonal_var, obs_var]
-            (vec![y_var * 0.1, y_var * 0.01, y_var * 0.1, y_var * 0.79], 4)
+            (
+                vec![y_var * 0.1, y_var * 0.01, y_var * 0.1, y_var * 0.79],
+                4,
+            )
         }
     }
 }
@@ -267,15 +282,14 @@ fn optimize_params(
     let y_var = sample_variance(y);
 
     // Transform to log scale (relative to y_var)
-    let init_log: Vec<f64> = init_params.iter()
+    let init_log: Vec<f64> = init_params
+        .iter()
         .map(|&p| (p / y_var).max(1e-10).ln())
         .collect();
 
     // Objective function: negative log-likelihood with log-transformed params
     let objective = |log_params: &[f64]| -> f64 {
-        let params: Vec<f64> = log_params.iter()
-            .map(|&lp| y_var * lp.exp())
-            .collect();
+        let params: Vec<f64> = log_params.iter().map(|&lp| y_var * lp.exp()).collect();
         match compute_loglik(y, config, &params) {
             Ok(ll) => -ll,
             Err(_) => 1e20,
@@ -283,17 +297,11 @@ fn optimize_params(
     };
 
     // Use Nelder-Mead (simpler and more robust for small parameter counts)
-    let (best_log_params, neg_loglik, converged) = nelder_mead_optimize(
-        &objective,
-        &init_log,
-        max_iter,
-        tolerance,
-    );
+    let (best_log_params, neg_loglik, converged) =
+        nelder_mead_optimize(&objective, &init_log, max_iter, tolerance);
 
     // Transform back to original scale
-    let best_params: Vec<f64> = best_log_params.iter()
-        .map(|&lp| y_var * lp.exp())
-        .collect();
+    let best_params: Vec<f64> = best_log_params.iter().map(|&lp| y_var * lp.exp()).collect();
 
     Ok((best_params, -neg_loglik, converged))
 }
@@ -308,10 +316,10 @@ fn nelder_mead_optimize(
     let n = init.len();
 
     // Standard Nelder-Mead parameters
-    let alpha = 1.0;   // Reflection
-    let gamma = 2.0;   // Expansion
-    let rho = 0.5;     // Contraction
-    let sigma = 0.5;   // Shrink
+    let alpha = 1.0; // Reflection
+    let gamma = 2.0; // Expansion
+    let rho = 0.5; // Contraction
+    let sigma = 0.5; // Shrink
 
     // Initialize simplex
     let mut simplex: Vec<Vec<f64>> = Vec::with_capacity(n + 1);
@@ -319,7 +327,7 @@ fn nelder_mead_optimize(
 
     for i in 0..n {
         let mut vertex = init.to_vec();
-        vertex[i] += 0.5;  // Step of 0.5 in log space
+        vertex[i] += 0.5; // Step of 0.5 in log space
         simplex.push(vertex);
     }
 
@@ -328,7 +336,11 @@ fn nelder_mead_optimize(
     for _iter in 0..max_iter {
         // Sort vertices by value
         let mut indices: Vec<usize> = (0..=n).collect();
-        indices.sort_by(|&a, &b| values[a].partial_cmp(&values[b]).unwrap_or(std::cmp::Ordering::Equal));
+        indices.sort_by(|&a, &b| {
+            values[a]
+                .partial_cmp(&values[b])
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         let sorted_simplex: Vec<Vec<f64>> = indices.iter().map(|&i| simplex[i].clone()).collect();
         let sorted_values: Vec<f64> = indices.iter().map(|&i| values[i]).collect();
@@ -378,13 +390,21 @@ fn nelder_mead_optimize(
         } else {
             // Contraction
             let contract_point: Vec<f64> = if f_reflected < values[n] {
-                (0..n).map(|j| centroid[j] + rho * (reflected[j] - centroid[j])).collect()
+                (0..n)
+                    .map(|j| centroid[j] + rho * (reflected[j] - centroid[j]))
+                    .collect()
             } else {
-                (0..n).map(|j| centroid[j] - rho * (centroid[j] - simplex[n][j])).collect()
+                (0..n)
+                    .map(|j| centroid[j] - rho * (centroid[j] - simplex[n][j]))
+                    .collect()
             };
             let f_contracted = objective(&contract_point);
 
-            let threshold = if f_reflected < values[n] { f_reflected } else { values[n] };
+            let threshold = if f_reflected < values[n] {
+                f_reflected
+            } else {
+                values[n]
+            };
             if f_contracted < threshold {
                 simplex[n] = contract_point;
                 values[n] = f_contracted;
@@ -428,16 +448,14 @@ fn build_model(config: &StructTsConfig, params: &[f64]) -> EconResult<StateSpace
         }
         StructTsType::Trend => {
             // State: [μ, ν]
-            let transition = Array2::from_shape_vec((2, 2), vec![
-                1.0, 1.0,
-                0.0, 1.0,
-            ]).unwrap();
+            let transition = Array2::from_shape_vec((2, 2), vec![1.0, 1.0, 0.0, 1.0]).unwrap();
             let observation = Array1::from_vec(vec![1.0, 0.0]);
             let selection = Array2::eye(2);
-            let state_cov = Array2::from_shape_vec((2, 2), vec![
-                params[0].max(1e-12), 0.0,
-                0.0, params[1].max(1e-12),
-            ]).unwrap();
+            let state_cov = Array2::from_shape_vec(
+                (2, 2),
+                vec![params[0].max(1e-12), 0.0, 0.0, params[1].max(1e-12)],
+            )
+            .unwrap();
             let obs_var = params[2].max(1e-12);
 
             StateSpaceModel::new(transition, observation, selection, state_cov, obs_var)
@@ -463,21 +481,31 @@ fn build_model(config: &StructTsConfig, params: &[f64]) -> EconResult<StateSpace
 
             // Observation: y_t = μ_t + γ_t
             let mut observation = Array1::zeros(m);
-            observation[0] = 1.0;  // Level
-            observation[2] = 1.0;  // Seasonal
+            observation[0] = 1.0; // Level
+            observation[2] = 1.0; // Seasonal
 
             // Selection matrix (which states receive innovations)
             let mut selection = Array2::zeros((m, 3));
-            selection[[0, 0]] = 1.0;  // Level gets innovation
-            selection[[1, 1]] = 1.0;  // Slope gets innovation
-            selection[[2, 2]] = 1.0;  // Seasonal gets innovation
+            selection[[0, 0]] = 1.0; // Level gets innovation
+            selection[[1, 1]] = 1.0; // Slope gets innovation
+            selection[[2, 2]] = 1.0; // Seasonal gets innovation
 
             // State covariance
-            let state_cov = Array2::from_shape_vec((3, 3), vec![
-                params[0].max(1e-12), 0.0, 0.0,
-                0.0, params[1].max(1e-12), 0.0,
-                0.0, 0.0, params[2].max(1e-12),
-            ]).unwrap();
+            let state_cov = Array2::from_shape_vec(
+                (3, 3),
+                vec![
+                    params[0].max(1e-12),
+                    0.0,
+                    0.0,
+                    0.0,
+                    params[1].max(1e-12),
+                    0.0,
+                    0.0,
+                    0.0,
+                    params[2].max(1e-12),
+                ],
+            )
+            .unwrap();
 
             let obs_var = params[3].max(1e-12);
 
@@ -488,9 +516,7 @@ fn build_model(config: &StructTsConfig, params: &[f64]) -> EconResult<StateSpace
 
 fn initialize_state(config: &StructTsConfig, y: &[f64]) -> Array1<f64> {
     match config.model_type {
-        StructTsType::Level => {
-            Array1::from_elem(1, y[0])
-        }
+        StructTsType::Level => Array1::from_elem(1, y[0]),
         StructTsType::Trend => {
             // Initial level from first observation, slope from first difference
             let slope = if y.len() > 1 { y[1] - y[0] } else { 0.0 };
@@ -500,8 +526,8 @@ fn initialize_state(config: &StructTsConfig, y: &[f64]) -> Array1<f64> {
             let period = config.period.unwrap_or(12);
             let m = 2 + period - 1;
             let mut state = Array1::zeros(m);
-            state[0] = y[0];  // Level
-            state[1] = if y.len() > 1 { y[1] - y[0] } else { 0.0 };  // Slope
+            state[0] = y[0]; // Level
+            state[1] = if y.len() > 1 { y[1] - y[0] } else { 0.0 }; // Slope
             // Seasonal initialized to zero
             state
         }
@@ -523,7 +549,7 @@ fn extract_components(
     smoothed_states: &[Vec<f64>],
     config: &StructTsConfig,
 ) -> (Vec<f64>, Option<Vec<f64>>, Option<Vec<f64>>) {
-    let n = smoothed_states.len();
+    let _n = smoothed_states.len();
 
     let level: Vec<f64> = smoothed_states.iter().map(|s| s[0]).collect();
 
@@ -590,10 +616,14 @@ mod tests {
     fn test_local_level_model() {
         let y = generate_local_level_data(100, 1.0, 0.5, 42);
 
-        let result = struct_ts(&y, StructTsConfig {
-            model_type: StructTsType::Level,
-            ..Default::default()
-        }).unwrap();
+        let result = struct_ts(
+            &y,
+            StructTsConfig {
+                model_type: StructTsType::Level,
+                ..Default::default()
+            },
+        )
+        .unwrap();
 
         assert_eq!(result.model_type, StructTsType::Level);
         assert_eq!(result.n_obs, 100);
@@ -616,10 +646,14 @@ mod tests {
             .map(|t| 100.0 + 0.5 * t as f64 + (t as f64 * 0.1).sin())
             .collect();
 
-        let result = struct_ts(&y, StructTsConfig {
-            model_type: StructTsType::Trend,
-            ..Default::default()
-        }).unwrap();
+        let result = struct_ts(
+            &y,
+            StructTsConfig {
+                model_type: StructTsType::Trend,
+                ..Default::default()
+            },
+        )
+        .unwrap();
 
         assert_eq!(result.model_type, StructTsType::Trend);
         assert!(result.slope.is_some());
@@ -634,7 +668,7 @@ mod tests {
     fn test_bsm_model() {
         // Generate seasonal data
         let period = 12;
-        let n = 48;  // 4 years of monthly data
+        let n = 48; // 4 years of monthly data
         let y: Vec<f64> = (0..n)
             .map(|t| {
                 let trend = 100.0 + 0.2 * t as f64;
@@ -643,11 +677,15 @@ mod tests {
             })
             .collect();
 
-        let result = struct_ts(&y, StructTsConfig {
-            model_type: StructTsType::BSM,
-            period: Some(period),
-            ..Default::default()
-        }).unwrap();
+        let result = struct_ts(
+            &y,
+            StructTsConfig {
+                model_type: StructTsType::BSM,
+                period: Some(period),
+                ..Default::default()
+            },
+        )
+        .unwrap();
 
         assert_eq!(result.model_type, StructTsType::BSM);
         assert!(result.seasonal.is_some());

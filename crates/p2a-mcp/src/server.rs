@@ -6,280 +6,514 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use rmcp::{
-    handler::server::router::tool::ToolRouter,
-    handler::server::wrapper::Parameters,
-    model::*,
-    tool, tool_handler, tool_router,
-    ErrorData as McpError, ServerHandler,
+    ErrorData as McpError, ServerHandler, handler::server::router::tool::ToolRouter,
+    handler::server::wrapper::Parameters, model::*, tool, tool_handler, tool_router,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
 
 use p2a_core::{
+    AftConfig,
+    AftDistribution,
+    ArConfig,
+    ArMethod,
+    AttEstimationMethod,
+    BPBoundsConfig,
+    BandwidthMethod,
+    CTmleConfig,
+    CTmleQModel,
+    CausalImpactConfig,
+    CbpsConfig,
+    CbpsMethod,
+    ChartConfig,
+    ComparisonGroup,
+    ControlGroup as EtwfeControlGroup,
+    CostFunction,
+    CoxConfig,
+    DRMethod,
+    DecomposeConfig,
+    DecomposeType,
+    DistanceMethod,
+    DoublyRobustConfig,
+    EffectEstimationMethod,
+    EffectScale,
+    EndRule,
+    Estimand,
+    EtwfeConfig,
+    FeglmConfig,
+    FilterMethod,
+    FilterSides,
+    GFormulaConfig,
+    GFormulaData,
+    GFormulaIntervention,
+    GFormulaOutcomeType,
+    GModel,
+    GarchConfig,
+    GeneralGmmConfig,
+    GeneralGmmResult,
+    GlmFamily,
+    GmmConfig,
+    GmmMethod,
+    GmmResult,
+    GmmStep,
+    GmmTransform,
+    GmmVcov,
+    GsynthConfig,
+    GsynthEstimator,
+    GsynthForce,
+    HdfeConfig,
+    HetTestStat,
+    HetTxConfig,
+    // Reports
+    HtmlReport,
+    HurdleType,
+    IVMTEConfig,
+    IpwConfig,
+    KernelType,
     // Traits
     LinearEstimator,
+    Linkage,
+    MatchMethod,
+    MatchResult,
+    MedflexConfig,
+    MedflexResult,
+    MediationConfig,
+    MixedLogitConfig,
+    MoranAlternative,
+    // Spatial econometrics
+    Neighbors,
+    PanelGlsModel,
+    // Panel GLS (FGLS)
+    PanelGlsResult,
+    PanelModel,
+    PanelUnitRootConfig,
+    PanelUnitRootTest,
+    PoolingWeights,
+    PprConfig,
+    PredictorSpec,
+    PropensityModel,
+    PvcmType,
+    QModel,
+    RandomDistribution,
+    RdConfig,
+    RdMultiBandwidth,
+    RdMultiConfig,
+    RdMultiResult,
+    ReportSection,
+    ReportTable,
+    SBWConfig,
+    SBWEstimand,
+    SCPIConfig,
+    SCPIConstraint,
+    SEMethod,
+    SarConfig,
+    SeasonalType,
+    SelectionOrder,
+    SemConfig,
+    SmoothingMethod,
+    SpatialErrorType,
+    SpatialPanelEffect,
+    SpatialPanelModel,
+    SpatialProbitConfig,
+    SpatialWeights,
+    SpgmConfig,
+    SpgmMethod,
+    SphetConfig,
+    SphetModel,
+    SphetSE,
+    SpmlConfig,
+    StaggeredDidConfig,
+    StdRegConfig,
+    StdRegEstimand,
+    StdRegModel,
+    StopMethod,
+    StoppingRule,
+    StructTsConfig,
+    StructTsType,
+    SynthConfig,
+    TiesMethod,
+    TimeAggregation,
+    TmleConfig,
+    TwangConfig,
+    TwangEstimand,
+    VOptimization,
+    VarianceMethod,
+    VceType,
+    WeightEstimand,
+    WeightItConfig,
+    WeightMethod,
+    WeightStyle,
+    acf_to_ar,
+    ar,
+    arima_sim,
+    arma_acf,
+    arma_to_ma,
+    // Goodman-Bacon decomposition
+    bacon_decomp,
+    box_plot,
+    // CausalImpact (Bayesian Structural Time Series)
+    causal_impact,
+    cmdscale,
+    cmdscale_from_data,
+    coefficient_plot,
+    correlation_heatmap,
+    // Cumulative periodogram
+    cpgram,
+    // C-TMLE (Collaborative TMLE with data-adaptive covariate selection)
+    ctmle,
+    cutree,
     data::{
-        DataLoader, Dataset, DatasetInfo,
-        // Database connectivity
-        query_sqlite, list_sqlite_tables, sqlite_table_schema,
-        query_duckdb, list_duckdb_tables, duckdb_table_schema,
-        query_file_with_duckdb,
-        // Data quality profiling
-        generate_quality_profile,
-        // Verification and preview
-        preview_cleaning, verify_cleaning, CleaningOperation,
+        CleaningOperation,
         // Session management
         CleaningSession,
+        DataLoader,
+        Dataset,
+        DatasetInfo,
+        SuggestionPriority,
+        duckdb_table_schema,
+        // Data quality profiling
+        generate_quality_profile,
         // Smart suggestions
-        generate_suggestions, SuggestionPriority,
+        generate_suggestions,
+        list_duckdb_tables,
+        list_sqlite_tables,
         // Data munging
         munging::{
-            // Transform operations
-            filter, select, drop_columns, rename, mutate, sort, sample,
-            MutateExpr, ArithOp,
-            // Clean operations
-            drop_na, fill_na, deduplicate, FillStrategy,
-            trim, to_lowercase, to_uppercase, replace,
-            // Regex and string operations
-            regex_replace, regex_extract, regex_count,
-            str_split, str_concat, str_substring, str_length,
-            // Join operations
-            left_join, right_join, inner_join, full_join, concat,
-            // Aggregate operations
-            group_by, value_counts, AggFn, AggSpec,
-            // Reshape operations
-            pivot, melt,
-            // Feature engineering
-            lag, lead, diff, pct_change, standardize, normalize, bin, one_hot_encode,
+            AggFn,
+            AggSpec,
+            ArithOp,
             BinStrategy,
+            FillStrategy,
+            MutateExpr,
+            bin,
+            concat,
+            deduplicate,
+            diff,
+            drop_columns,
+            // Clean operations
+            drop_na,
+            fill_na,
+            // Transform operations
+            filter,
+            full_join,
+            // Aggregate operations
+            group_by,
+            inner_join,
+            // Feature engineering
+            lag,
+            lead,
+            // Join operations
+            left_join,
+            melt,
+            mutate,
+            normalize,
+            one_hot_encode,
+            pct_change,
+            // Reshape operations
+            pivot,
+            regex_count,
+            regex_extract,
+            // Regex and string operations
+            regex_replace,
+            rename,
+            replace,
+            right_join,
+            sample,
+            select,
+            sort,
+            standardize,
+            str_concat,
+            str_length,
+            str_split,
+            str_substring,
+            to_lowercase,
+            to_uppercase,
+            trim,
+            value_counts,
         },
+        // Verification and preview
+        preview_cleaning,
+        query_duckdb,
+        query_file_with_duckdb,
+        // Database connectivity
+        query_sqlite,
+        sqlite_table_schema,
+        verify_cleaning,
     },
+    dbscan,
+    decompose,
+    diffinv,
+    embed,
+    entropy_balance,
+    event_study_plot,
+    filter as ts_filter,
+    forecast_arima,
+    // GARCH (volatility modeling)
+    garch,
+    // Granger causality test
+    granger_test,
+    // Harvey-Collier test for linearity
+    harvey_collier_test,
+    hierarchical,
+    // Visualization
+    histogram,
+    holt_winters_forecast,
+    irf_plot,
+    // Machine Learning
+    kmeans,
+    // Time series utilities (aliased to avoid collision with munging)
+    lag as ts_lag,
+    line_chart,
+    linear_svm,
+    log_rank_test,
+    // MatchIt (Propensity Score Matching)
+    match_it,
+    moran_test,
+    pca,
+    // Projection Pursuit Regression
+    ppr,
+    random_forest,
+    rd_bandwidth,
     regression::{
-        run_ols, run_ols_clustered, run_diagnostics, CovarianceType,
+        BgTestType,
+        CorrelationStructure,
+        CovarianceType,
+        ResetType,
+        SmoothSplineConfig,
         // Breusch-Godfrey test for serial correlation
-        bg_test, BgTestType,
+        bg_test,
+        // GLS regression
+        gls,
+        quantreg_multi,
         // Ramsey's RESET test
-        reset_test, ResetType,
-        // Wald test for nested model comparison
-        wald_test,
-        // HAC (Newey-West) standard errors
-        run_vcov_hac,
+        reset_test,
+        run_diagnostics,
+        // Tukey's resistant line
+        run_line,
+        run_ols,
+        run_ols_clustered,
+        // Quantile regression
+        run_quantreg,
         // Bootstrap covariance estimation
-        run_vcov_bootstrap, BootstrapType,
+        run_vcov_bootstrap,
         // Driscoll-Kraay panel-robust standard errors
         run_vcov_driscoll_kraay,
-        // Quantile regression
-        run_quantreg, quantreg_multi,
-        // Tukey's resistant line
-        run_line, LineResult,
-        // SuperSmoother
-        supsmu, SupsmuResult,
-        // GLS regression
-        gls, run_gls, GlsResult, CorrelationStructure,
+        // HAC (Newey-West) standard errors
+        run_vcov_hac,
         // Smooth splines
-        smooth_spline, smooth_spline_predict, run_smooth_spline, SmoothSplineResult, SmoothSplineConfig,
+        smooth_spline,
+        smooth_spline_predict,
+        // SuperSmoother
+        supsmu,
+        // Wald test for nested model comparison
+        wald_test,
     },
+    residual_diagnostics,
+    run_aft,
+    // Forecasting
+    run_arima,
+    // BART-based Causal Inference (bartCause style)
+    run_bart_causal,
+    run_binary_segmentation,
+    // Balke-Pearl bounds for nonparametric IV
+    run_bp_bounds,
+    // Causal Forests (Wager & Athey 2018)
+    run_causal_forest,
+    // CBPS (Covariate Balancing Propensity Score)
+    run_cbps,
+    run_changepoint,
+    run_competing_risks,
+    run_cox_ph,
+    run_did,
+    run_doubly_robust,
+    // Extended TWFE (Wooldridge)
+    run_etwfe,
+    // GLM with HDFE
+    run_feglm,
+    run_first_stage_diagnostics,
+    // Econometrics
+    run_fixed_effects,
+    run_fuzzy_rd,
+    // Parametric G-Formula for time-varying treatments (gfoRmula)
+    run_gformula,
+    // Arellano-Bond / System GMM
+    run_gmm,
+    // General GMM (Hansen 1982)
+    run_gmm_iv,
+    run_gmnl,
+    run_granger_test,
+    // Generalized synthetic control
+    run_gsynth,
+    run_hausman_test,
+    run_hdfe,
+    // Treatment Effect Heterogeneity Testing (hettx)
+    run_hettx_dataset,
+    run_holt_winters,
+    // Hurdle models
+    run_hurdle,
+    // Treatment effects
+    run_ipw_treatment,
+    run_iv2sls,
+    // Marginal Treatment Effects (MTE) for IV analysis
+    run_ivmte,
+    // Survival Analysis
+    run_kaplan_meier,
+    run_logit,
+    // Natural Effect Models (medflex)
+    run_medflex_dataset,
+    // Mediation analysis
+    run_mediation_analysis,
+    // McFadden conditional logit (mlogit)
+    run_mlogit,
+    run_mstl,
+    // Multinomial and ordered logit/probit
+    run_multinom,
+    // Negative binomial and zero-inflated models
+    run_negbin,
+    run_ordered_logit,
+    run_ordered_probit,
+    run_panel_gls,
+    // Panel unit root tests
+    run_panel_unit_root,
+    run_pmg,
+    run_probit,
+    // Variable Coefficients Model (pvcm) and Mean Group (pmg)
+    run_pvcm,
+    run_random_effects,
+    // Regression Discontinuity
+    run_rd,
+    // Multi-cutoff RD (rdmulti)
+    run_rd_multi_dataset,
+    run_sar,
+    // Spatial probit models
+    run_sar_probit,
+    // Synthetic Control with Prediction Intervals (SCPI)
+    run_scpi,
+    run_sem,
+    run_sem_probit,
+    run_spgm,
+    // Spatial GMM with heteroscedasticity robustness (sphet)
+    run_sphet,
+    // Spatial panel data models (splm)
+    run_spml,
+    run_staggered_did,
+    // Regression Standardization / G-computation (stdReg)
+    run_stdreg,
+    run_step,
+    // Synthetic control
+    run_synthetic_control,
+    // twang (GBM propensity score estimation)
+    run_twang,
+    // Time series
+    run_var,
+    run_var_irf,
+    run_varma,
+    run_vecm,
+    run_zinb,
+    run_zip,
+    runmed,
+    sargan_test,
+    // SBW (Stable Balancing Weights)
+    sbw,
+    scatter_plot,
+    // Simulation
+    simulation::{ColumnSpec, Distribution, generate_random_data},
+    spatial_lm_tests,
     stats::{
-        correlation_matrix, DescriptiveStats, run_one_way_anova, run_two_way_anova,
-        one_sample_t_test, two_sample_t_test, paired_t_test, Alternative,
-        // ACF/PACF/CCF
-        run_acf, run_pacf, run_ccf, AcfType, CcfType,
-        // Chi-squared tests
-        run_chisq_gof, run_chisq_independence,
-        // MANOVA, Tukey HSD, and Bartlett test
-        run_manova, run_tukey_hsd, run_bartlett_test,
-        // Mood test
-        mood_test,
-        // Kruskal-Wallis test
-        run_kruskal_test,
-        // Friedman test
-        run_friedman_test,
-        // Welch's one-way ANOVA
-        run_oneway_test,
+        AcfType,
+        Alternative,
+        ApproxMethod,
+        ApproxRule,
+        BoxTestType,
+        CcfType,
+        CmhAlternative,
+        ContrastType,
+        DescriptiveStats,
+        PValueAdjustMethod,
+        PoissonAlternative,
+        SpectrumConfig,
+        SplineMethod,
+        TableType,
+        approx,
+        correlation_matrix,
+        // Robust statistics
+        fivenum,
+        generate_contrasts,
+        iqr,
+        // Isotonic regression
+        isoreg,
+        // Log-linear models
+        loglin,
         // McNemar's test
         mcnemar_test,
-        // Spectral density estimation
-        run_spectrum, run_spectrum_ar, SpectrumConfig,
+        model_tables,
+        // Mood test
+        mood_test,
+        one_sample_t_test,
+        paired_t_test,
+        // Exact Poisson test
+        poisson_test,
+        // ACF/PACF/CCF
+        run_acf,
+        run_bartlett_test,
         // Box-Pierce and Ljung-Box tests
-        run_box_test, BoxTestType,
+        run_box_test,
+        run_ccf,
+        // Chi-squared tests
+        run_chisq_gof,
+        run_chisq_independence,
+        run_cov_wt,
+        run_density,
+        run_ecdf,
+        // Friedman test
+        run_friedman_test,
+        // Kruskal-Wallis test
+        run_kruskal_test,
+        run_mad,
+        run_mahalanobis,
+        // MANOVA, Tukey HSD, and Bartlett test
+        run_manova,
+        // Cochran-Mantel-Haenszel test
+        run_mantelhaen_test,
+        // Mauchly's sphericity test
+        run_mauchly_test,
+        // Median polish
+        run_medpolish,
+        run_one_way_anova,
+        // Welch's one-way ANOVA
+        run_oneway_test,
+        run_pacf,
+        // Pairwise t-tests and Wilcoxon tests
+        run_pairwise_t_test,
+        run_pairwise_wilcox_test,
         // Phillips-Perron unit root test
         run_pp_test,
-        // Pairwise t-tests and Wilcoxon tests
-        run_pairwise_t_test, run_pairwise_wilcox_test, PValueAdjustMethod,
         // Quade test
         run_quade_test,
-        // Cochran-Mantel-Haenszel test
-        run_mantelhaen_test, CmhAlternative,
-        // Exact Poisson test
-        poisson_test, PoissonAlternative,
-        // Mahalanobis distance
-        mahalanobis, run_mahalanobis, MahalanobisResult,
-        // Median polish
-        run_medpolish, MedpolishResult,
-        // Isotonic regression
-        isoreg, run_isoreg, IsoregResult,
-        // Log-linear models
-        loglin, loglin_independence, run_loglin, LoglinResult,
-        // Model tables
-        run_model_tables, model_tables, ModelTablesResult, TwoWayModelTablesResult, TableType,
+        // Spectral density estimation
+        run_spectrum,
+        run_spectrum_ar,
+        run_tukey_hsd,
+        run_two_way_anova,
         // Standard errors for contrasts
-        se_contrast, SeContrastResult, ContrastType, generate_contrasts,
-        // Weighted statistics
-        weighted_mean, run_weighted_mean,
-        cov_wt, run_cov_wt, CovWtResult,
-        // Mauchly's sphericity test
-        run_mauchly_test, MauchlyResult,
-        // Constrained optimization
-        ConstrOptimResult, ConstrOptimConfig, OptimMethod,
-        // Robust statistics
-        fivenum, run_fivenum, FivenumResult,
-        iqr, run_iqr,
-        mad, run_mad,
-        ecdf, run_ecdf, EcdfResult,
-        run_density, DensityResult,
+        se_contrast,
         // Spline interpolation
-        spline, approx, SplineResult, SplineMethod, ApproxResult, ApproxMethod, ApproxRule,
+        spline,
+        two_sample_t_test,
+        // Weighted statistics
+        weighted_mean,
     },
-    // Toeplitz matrix construction
-    toeplitz, toeplitz_asymmetric, toeplitz_to_vec,
-    // Stepwise regression
-    step, run_step, StepResult, StepConfig, StepDirection,
-    // Econometrics
-    run_fixed_effects, run_random_effects, run_hausman_test, run_iv2sls, run_did,
-    run_staggered_did, StaggeredDidConfig, ComparisonGroup, AttEstimationMethod,
-    // Goodman-Bacon decomposition
-    bacon_decomp, BaconDecompResult, ComparisonType, BaconComponent,
-    // Extended TWFE (Wooldridge)
-    run_etwfe, EtwfeConfig, EtwfeResult, ControlGroup as EtwfeControlGroup,
-    run_logit, run_probit, run_first_stage_diagnostics, sargan_test,
-    // Marginal Treatment Effects (MTE) for IV analysis
-    run_ivmte, ivmte, IVMTEConfig, IVMTEResult, MTEEstimand, PropensityModel,
-    // Balke-Pearl bounds for nonparametric IV
-    run_bp_bounds, BPBoundsConfig, BPBoundsResult,
-    // Panel GLS (FGLS)
-    PanelGlsResult, PanelGlsModel, run_panel_gls,
-    // Arellano-Bond / System GMM
-    run_gmm, run_arellano_bond, GmmConfig, GmmTransform, GmmStep, GmmResult,
-    // Variable Coefficients Model (pvcm) and Mean Group (pmg)
-    run_pvcm, run_pmg, PvcmResult, PvcmType,
-    // General GMM (Hansen 1982)
-    run_gmm_iv, GeneralGmmConfig, GeneralGmmResult, GmmMethod, GmmVcov,
-    // Multinomial and ordered logit/probit
-    run_multinom, run_ordered_logit, run_ordered_probit,
-    // McFadden conditional logit (mlogit)
-    run_mlogit, MlogitResult,
-    // Mixed logit / random parameters logit (gmnl, mixl)
-    run_mixed_logit, run_gmnl, MixedLogitConfig, MixedLogitResult,
-    RandomDistribution, RandomParameterSpec,
-    // Negative binomial and zero-inflated models
-    run_negbin, run_zip, run_zinb,
-    // Hurdle models
-    run_hurdle, HurdleType, HurdleResult,
-    // Harvey-Collier test for linearity
-    harvey_collier_test, HarveyCollierResult,
-    run_hdfe, HdfeConfig,
-    // GLM with HDFE
-    run_feglm, GlmFamily, FeglmConfig,
-    // Panel unit root tests
-    run_panel_unit_root, PanelUnitRootTest, PanelUnitRootConfig, PanelModel,
-    // Spatial econometrics
-    Neighbors, NeighborMethod, SpatialWeights, WeightStyle,
-    moran_test, geary_test, spatial_lm_tests, MoranAlternative,
-    run_sar, run_sem, SarConfig, SemConfig,
-    // Spatial GMM with heteroscedasticity robustness (sphet)
-    run_sphet, sphet, SphetConfig, SphetModel, SphetSE,
-    // Spatial probit models
-    run_sar_probit, run_sem_probit, SpatialProbitConfig, SpatialProbitModel,
-    // Spatial panel data models (splm)
-    run_spml, run_spgm, SpmlConfig, SpgmConfig,
-    SpatialPanelModel, SpatialPanelEffect, SpatialErrorType,
-    SpgmMethod, SpgmMoments,
-    // Treatment effects
-    run_ipw_treatment, run_doubly_robust, IpwConfig, DoublyRobustConfig, Estimand, DRMethod,
-    // CBPS (Covariate Balancing Propensity Score)
-    run_cbps, CbpsConfig, CbpsMethod,
-    // WeightIt (Flexible inverse probability weighting)
-    weightit, entropy_balance, WeightItConfig, WeightMethod, WeightEstimand,
-    // MatchIt (Propensity Score Matching)
-    match_it, nearest_neighbor_match, cem_match, full_match, subclass_match,
-    MatchMethod, DistanceMethod, MatchResult,
-    // twang (GBM propensity score estimation)
-    run_twang, TwangConfig, StopMethod, TwangEstimand,
-    // SBW (Stable Balancing Weights)
-    sbw, run_sbw, SBWConfig, SBWEstimand, SBWResult,
-    // TMLE (Targeted Maximum Likelihood Estimation)
-    run_tmle, tmle, TmleConfig, TmleResult, QModel, GModel,
-    // C-TMLE (Collaborative TMLE with data-adaptive covariate selection)
-    ctmle, run_ctmle, CTmleConfig, CTmleResult, CTmleQModel, StoppingRule, SelectionOrder,
-    // Regression Standardization / G-computation (stdReg)
-    run_stdreg, StdRegConfig, StdRegModel, StdRegEstimand, SEMethod,
-    // Mediation analysis
-    run_mediation_analysis, MediationConfig,
-    // Natural Effect Models (medflex)
-    run_medflex_dataset, MedflexConfig, MedflexResult, EffectScale,
-    // Synthetic control
-    run_synthetic_control, SynthConfig, PredictorSpec, TimeAggregation, VOptimization,
-    // Generalized synthetic control
-    run_gsynth, GsynthConfig, GsynthEstimator, GsynthForce,
-    // Synthetic Control with Prediction Intervals (SCPI)
-    run_scpi, SCPIConfig, SCPIConstraint, VarianceMethod,
-    // Regression Discontinuity
-    run_rd, rd_bandwidth, run_fuzzy_rd, RdConfig, KernelType, BandwidthMethod, VceType,
-    // Multi-cutoff RD (rdmulti)
-    run_rd_multi_dataset, RdMultiConfig, RdMultiBandwidth, PoolingWeights, RdMultiResult,
-    // Survival Analysis
-    run_kaplan_meier, log_rank_test, run_cox_ph, run_aft, run_competing_risks,
-    CoxConfig, AftConfig, TiesMethod, AftDistribution,
-    // Time series
-    run_var, run_varma, run_vecm, run_var_irf,
-    // Granger causality test
-    granger_test, run_granger_test, granger_test_bidirectional,
-    // Forecasting
-    run_arima, forecast_arima, run_mstl,
-    run_changepoint, run_binary_segmentation, CostFunction,
-    run_holt_winters, holt_winters_forecast, SeasonalType,
-    ar, ArConfig, ArMethod, ArResult,
-    decompose, DecomposeConfig, DecomposeType, DecomposeResult,
     // Kalman filter and StructTS
-    struct_ts, StructTsConfig, StructTsType, StructTsResult,
-    // Cumulative periodogram
-    cpgram, CpgramResult,
-    // GARCH (volatility modeling)
-    garch, garch_forecast, GarchConfig, GarchResult,
-    // CausalImpact (Bayesian Structural Time Series)
-    causal_impact, run_causal_impact, CausalImpactConfig, CausalImpactResult,
-    // Time series utilities (aliased to avoid collision with munging)
-    lag as ts_lag, LagResult,
-    embed, EmbedResult,
-    diffinv, DiffinvResult,
-    filter as ts_filter, FilterResult, FilterMethod, FilterSides,
-    window as ts_window, WindowResult,
-    arma_acf, ArmaAcfResult,
-    arma_to_ma, ArmaToMaResult,
-    acf_to_ar, Acf2ArResult,
-    arima_sim, ArimaSimResult,
-    runmed, RunmedResult, EndRule,
-    // Machine Learning
-    kmeans, dbscan, pca, hierarchical, tsne, random_forest, linear_svm,
-    cmdscale, cmdscale_from_data, CmdscaleResult,
-    cutree, CutreeResult, HierarchicalResult,
-    Linkage,
-    // Projection Pursuit Regression
-    ppr, PprResult, PprConfig, SmoothingMethod,
-    // Causal Forests (Wager & Athey 2018)
-    run_causal_forest, CausalForestConfig, CausalForestResult,
-    // BART-based Causal Inference (bartCause style)
-    run_bart_causal, BartCausalConfig, BartCausalResult,
-    // Treatment Effect Heterogeneity Testing (hettx)
-    run_hettx_dataset, HetTxConfig, HetTestStat, EffectEstimationMethod,
-    // Visualization
-    histogram, scatter_plot, box_plot, line_chart, correlation_heatmap,
-    event_study_plot, coefficient_plot, irf_plot, residual_diagnostics,
-    ChartConfig,
-    // Reports
-    HtmlReport, ReportSection, ReportTable,
-    // Simulation
-    simulation::{generate_random_data, ColumnSpec, Distribution},
+    struct_ts,
+    tmle,
+    // Toeplitz matrix construction
+    toeplitz,
+    toeplitz_asymmetric,
+    toeplitz_to_vec,
+    tsne,
+    // WeightIt (Flexible inverse probability weighting)
+    weightit,
+    window as ts_window,
 };
 
 /// The main analytics server that handles MCP requests.
@@ -305,11 +539,15 @@ pub struct AnalyticsServer {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct LoadDatasetRequest {
     /// Path to the data file
-    #[schemars(description = "Absolute or relative path to the data file. Supports CSV, Parquet, Excel (xlsx, xls, xlsb, ods), Stata (dta), and SAS (sas7bdat) formats.")]
+    #[schemars(
+        description = "Absolute or relative path to the data file. Supports CSV, Parquet, Excel (xlsx, xls, xlsb, ods), Stata (dta), and SAS (sas7bdat) formats."
+    )]
     pub path: String,
 
     /// Optional name/identifier for the dataset
-    #[schemars(description = "Optional name to identify this dataset. If not provided, the filename will be used.")]
+    #[schemars(
+        description = "Optional name to identify this dataset. If not provided, the filename will be used."
+    )]
     pub name: Option<String>,
 }
 
@@ -325,7 +563,9 @@ pub struct UploadDatasetRequest {
     pub filename: String,
 
     /// Optional name/identifier for the dataset
-    #[schemars(description = "Optional name to identify this dataset. If not provided, the filename will be used.")]
+    #[schemars(
+        description = "Optional name to identify this dataset. If not provided, the filename will be used."
+    )]
     pub name: Option<String>,
 }
 
@@ -349,11 +589,15 @@ pub struct ExportDatasetRequest {
     pub dataset: String,
 
     /// Output file path
-    #[schemars(description = "Path where the file will be saved. The format is determined by extension: .csv, .parquet, .json")]
+    #[schemars(
+        description = "Path where the file will be saved. The format is determined by extension: .csv, .parquet, .json"
+    )]
     pub path: String,
 
     /// Output format (optional, inferred from extension if not specified)
-    #[schemars(description = "Output format: 'csv', 'parquet', or 'json'. If not specified, inferred from file extension.")]
+    #[schemars(
+        description = "Output format: 'csv', 'parquet', or 'json'. If not specified, inferred from file extension."
+    )]
     pub format: Option<String>,
 }
 
@@ -393,19 +637,27 @@ pub struct PreviewCleaningRequest {
     pub dataset: String,
 
     /// Type of cleaning operation to preview
-    #[schemars(description = "The type of cleaning operation: 'trim', 'lowercase', 'uppercase', 'fill_na', 'drop_na', 'deduplicate', 'replace', or 'filter'.")]
+    #[schemars(
+        description = "The type of cleaning operation: 'trim', 'lowercase', 'uppercase', 'fill_na', 'drop_na', 'deduplicate', 'replace', or 'filter'."
+    )]
     pub operation: String,
 
     /// Target column(s) - behavior depends on operation type
-    #[schemars(description = "Column name(s) to apply the operation to. For some operations this can be omitted to apply to all columns.")]
+    #[schemars(
+        description = "Column name(s) to apply the operation to. For some operations this can be omitted to apply to all columns."
+    )]
     pub columns: Option<Vec<String>>,
 
     /// Strategy for fill_na operations
-    #[schemars(description = "For fill_na: strategy to use ('mean', 'median', 'mode', 'forward', 'backward', 'constant').")]
+    #[schemars(
+        description = "For fill_na: strategy to use ('mean', 'median', 'mode', 'forward', 'backward', 'constant')."
+    )]
     pub strategy: Option<String>,
 
     /// Value for fill_na with constant, or replacement value
-    #[schemars(description = "For fill_na with constant: the fill value. For replace: the new value.")]
+    #[schemars(
+        description = "For fill_na with constant: the fill value. For replace: the new value."
+    )]
     pub value: Option<String>,
 
     /// Old value for replace operation
@@ -413,15 +665,21 @@ pub struct PreviewCleaningRequest {
     pub old_value: Option<String>,
 
     /// How to handle drop_na: 'any' or 'all'
-    #[schemars(description = "For drop_na: 'any' (drop if any null) or 'all' (drop only if all null).")]
+    #[schemars(
+        description = "For drop_na: 'any' (drop if any null) or 'all' (drop only if all null)."
+    )]
     pub how: Option<String>,
 
     /// Keep strategy for deduplicate: 'first', 'last', or 'none'
-    #[schemars(description = "For deduplicate: which duplicate to keep ('first', 'last', 'none').")]
+    #[schemars(
+        description = "For deduplicate: which duplicate to keep ('first', 'last', 'none')."
+    )]
     pub keep: Option<String>,
 
     /// Operator for filter: '>', '<', '>=', '<=', '==', '!=', 'contains'
-    #[schemars(description = "For filter: comparison operator ('>', '<', '>=', '<=', '==', '!=', 'contains').")]
+    #[schemars(
+        description = "For filter: comparison operator ('>', '<', '>=', '<=', '==', '!=', 'contains')."
+    )]
     pub operator: Option<String>,
 
     /// Value for filter comparison
@@ -477,7 +735,9 @@ pub struct CleaningRollbackRequest {
     pub session_id: String,
 
     /// Optional checkpoint index to rollback to (defaults to previous checkpoint)
-    #[schemars(description = "Checkpoint index to rollback to. If not provided, rolls back to the previous checkpoint.")]
+    #[schemars(
+        description = "Checkpoint index to rollback to. If not provided, rolls back to the previous checkpoint."
+    )]
     pub checkpoint_index: Option<usize>,
 }
 
@@ -489,7 +749,9 @@ pub struct CleaningSessionApplyRequest {
     pub session_id: String,
 
     /// Type of cleaning operation to apply
-    #[schemars(description = "The type of cleaning operation: 'trim', 'lowercase', 'uppercase', 'fill_na', 'drop_na', 'deduplicate', 'replace', or 'filter'.")]
+    #[schemars(
+        description = "The type of cleaning operation: 'trim', 'lowercase', 'uppercase', 'fill_na', 'drop_na', 'deduplicate', 'replace', or 'filter'."
+    )]
     pub operation: String,
 
     /// Target column(s) - behavior depends on operation type
@@ -540,7 +802,9 @@ pub struct SuggestCleaningRequest {
     #[schemars(description = "The name/ID of the loaded dataset.")]
     pub dataset: String,
     /// Minimum priority level to include (optional, default: all).
-    #[schemars(description = "Minimum priority: 'low', 'medium', 'high', or 'critical'. Default: include all.")]
+    #[schemars(
+        description = "Minimum priority: 'low', 'medium', 'high', or 'critical'. Default: include all."
+    )]
     pub min_priority: Option<String>,
     /// Maximum number of suggestions to return (optional).
     #[schemars(description = "Maximum number of suggestions to return. Default: all.")]
@@ -571,7 +835,9 @@ pub struct OneWayAnovaRequest {
     pub response: String,
 
     /// Factor (grouping) variable column name
-    #[schemars(description = "Name of the factor (grouping) variable column. Groups observations for comparison.")]
+    #[schemars(
+        description = "Name of the factor (grouping) variable column. Groups observations for comparison."
+    )]
     pub factor: String,
 }
 
@@ -595,7 +861,9 @@ pub struct TwoWayAnovaRequest {
     pub factor_b: String,
 
     /// Whether to include interaction term
-    #[schemars(description = "Whether to include the interaction term (factor_a × factor_b). Default is true.")]
+    #[schemars(
+        description = "Whether to include the interaction term (factor_a × factor_b). Default is true."
+    )]
     pub interaction: Option<bool>,
 }
 
@@ -607,15 +875,21 @@ pub struct ManovaRequest {
     pub dataset: String,
 
     /// Response variable column names (must have at least 2)
-    #[schemars(description = "Names of the response (dependent) variable columns. Must be numeric. MANOVA requires at least 2 response variables.")]
+    #[schemars(
+        description = "Names of the response (dependent) variable columns. Must be numeric. MANOVA requires at least 2 response variables."
+    )]
     pub response_vars: Vec<String>,
 
     /// Factor (grouping) variable column name
-    #[schemars(description = "Name of the factor (grouping) variable column. Groups observations for comparison.")]
+    #[schemars(
+        description = "Name of the factor (grouping) variable column. Groups observations for comparison."
+    )]
     pub factor: String,
 
     /// Which test statistic to emphasize (default: Pillai)
-    #[schemars(description = "Test statistic to use: 'pillai' (default, most robust), 'wilks' (most popular), 'hotelling' (Hotelling-Lawley), or 'roy' (Roy's largest root). All four are always computed.")]
+    #[schemars(
+        description = "Test statistic to use: 'pillai' (default, most robust), 'wilks' (most popular), 'hotelling' (Hotelling-Lawley), or 'roy' (Roy's largest root). All four are always computed."
+    )]
     pub test: Option<String>,
 }
 
@@ -631,11 +905,15 @@ pub struct TukeyHsdRequest {
     pub response: String,
 
     /// Factor (grouping) variable column name
-    #[schemars(description = "Name of the factor (grouping) variable column. Defines groups to compare.")]
+    #[schemars(
+        description = "Name of the factor (grouping) variable column. Defines groups to compare."
+    )]
     pub factor: String,
 
     /// Confidence level (default: 0.95)
-    #[schemars(description = "Confidence level for intervals (default: 0.95). Common values: 0.90, 0.95, 0.99.")]
+    #[schemars(
+        description = "Confidence level for intervals (default: 0.95). Common values: 0.90, 0.95, 0.99."
+    )]
     pub conf_level: Option<f64>,
 }
 
@@ -671,7 +949,9 @@ pub struct MoodTestRequest {
     pub y: String,
 
     /// Alternative hypothesis direction
-    #[schemars(description = "Alternative hypothesis: 'two.sided' (default), 'greater', or 'less'. For 'greater': scale of x > scale of y.")]
+    #[schemars(
+        description = "Alternative hypothesis: 'two.sided' (default), 'greater', or 'less'. For 'greater': scale of x > scale of y."
+    )]
     pub alternative: Option<String>,
 }
 
@@ -683,7 +963,9 @@ pub struct KruskalWallisRequest {
     pub dataset: String,
 
     /// Value column name
-    #[schemars(description = "Name of the numeric column containing the values to compare across groups.")]
+    #[schemars(
+        description = "Name of the numeric column containing the values to compare across groups."
+    )]
     pub value: String,
 
     /// Group column name
@@ -695,15 +977,21 @@ pub struct KruskalWallisRequest {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct McnemarTestRequest {
     /// Upper-right cell (b) of the 2x2 table
-    #[schemars(description = "The count in the upper-right cell (row 1, column 2) of the 2x2 table. Represents discordant pairs where first classifier is positive and second is negative.")]
+    #[schemars(
+        description = "The count in the upper-right cell (row 1, column 2) of the 2x2 table. Represents discordant pairs where first classifier is positive and second is negative."
+    )]
     pub b: u64,
 
     /// Lower-left cell (c) of the 2x2 table
-    #[schemars(description = "The count in the lower-left cell (row 2, column 1) of the 2x2 table. Represents discordant pairs where first classifier is negative and second is positive.")]
+    #[schemars(
+        description = "The count in the lower-left cell (row 2, column 1) of the 2x2 table. Represents discordant pairs where first classifier is negative and second is positive."
+    )]
     pub c: u64,
 
     /// Apply continuity correction
-    #[schemars(description = "If true (default), apply Yates' continuity correction. Set to false for the uncorrected version.")]
+    #[schemars(
+        description = "If true (default), apply Yates' continuity correction. Set to false for the uncorrected version."
+    )]
     pub correct: Option<bool>,
 }
 
@@ -715,7 +1003,9 @@ pub struct OnewayTestRequest {
     pub dataset: String,
 
     /// Value column name
-    #[schemars(description = "Name of the numeric column containing the values to compare across groups.")]
+    #[schemars(
+        description = "Name of the numeric column containing the values to compare across groups."
+    )]
     pub value: String,
 
     /// Group column name
@@ -723,7 +1013,9 @@ pub struct OnewayTestRequest {
     pub group: String,
 
     /// Assume equal variances
-    #[schemars(description = "If true, use standard ANOVA assuming equal variances. If false (default), use Welch's ANOVA.")]
+    #[schemars(
+        description = "If true, use standard ANOVA assuming equal variances. If false (default), use Welch's ANOVA."
+    )]
     pub var_equal: Option<bool>,
 }
 
@@ -775,15 +1067,21 @@ pub struct MantelhaenTestRequest {
     pub dataset: String,
 
     /// Row variable column name (binary factor)
-    #[schemars(description = "Name of the column containing the row variable (must have exactly 2 levels, e.g., 'exposed'/'unexposed').")]
+    #[schemars(
+        description = "Name of the column containing the row variable (must have exactly 2 levels, e.g., 'exposed'/'unexposed')."
+    )]
     pub row_var: String,
 
     /// Column variable column name (binary factor)
-    #[schemars(description = "Name of the column containing the column variable (must have exactly 2 levels, e.g., 'disease'/'healthy').")]
+    #[schemars(
+        description = "Name of the column containing the column variable (must have exactly 2 levels, e.g., 'disease'/'healthy')."
+    )]
     pub col_var: String,
 
     /// Stratum variable column name
-    #[schemars(description = "Name of the column containing stratum identifiers (e.g., 'hospital', 'study_site').")]
+    #[schemars(
+        description = "Name of the column containing stratum identifiers (e.g., 'hospital', 'study_site')."
+    )]
     pub stratum_var: String,
 
     /// Continuity correction
@@ -791,7 +1089,9 @@ pub struct MantelhaenTestRequest {
     pub correct: Option<bool>,
 
     /// Alternative hypothesis
-    #[schemars(description = "Direction of alternative hypothesis: 'two.sided' (default), 'greater', or 'less'.")]
+    #[schemars(
+        description = "Direction of alternative hypothesis: 'two.sided' (default), 'greater', or 'less'."
+    )]
     pub alternative: Option<String>,
 }
 
@@ -799,19 +1099,27 @@ pub struct MantelhaenTestRequest {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct PoissonTestRequest {
     /// Number of events (one or two values)
-    #[schemars(description = "Number of events. For one-sample test: single value. For two-sample rate comparison: two values [x1, x2].")]
+    #[schemars(
+        description = "Number of events. For one-sample test: single value. For two-sample rate comparison: two values [x1, x2]."
+    )]
     pub x: Vec<u64>,
 
     /// Time base (one or two values)
-    #[schemars(description = "Time base(s) or exposure(s). Must match length of x. For one-sample: single value. For two-sample: two values [t1, t2].")]
+    #[schemars(
+        description = "Time base(s) or exposure(s). Must match length of x. For one-sample: single value. For two-sample: two values [t1, t2]."
+    )]
     pub t: Vec<f64>,
 
     /// Hypothesized rate or rate ratio
-    #[schemars(description = "Hypothesized rate (one-sample) or rate ratio (two-sample). Default: 1.0.")]
+    #[schemars(
+        description = "Hypothesized rate (one-sample) or rate ratio (two-sample). Default: 1.0."
+    )]
     pub r: Option<f64>,
 
     /// Alternative hypothesis
-    #[schemars(description = "Direction of alternative hypothesis: 'two.sided' (default), 'greater', or 'less'.")]
+    #[schemars(
+        description = "Direction of alternative hypothesis: 'two.sided' (default), 'greater', or 'less'."
+    )]
     pub alternative: Option<String>,
 
     /// Confidence level
@@ -831,23 +1139,33 @@ pub struct TTestRequest {
     pub x: String,
 
     /// Second variable column name (optional)
-    #[schemars(description = "Name of the second variable column for two-sample or paired tests. Omit for one-sample test.")]
+    #[schemars(
+        description = "Name of the second variable column for two-sample or paired tests. Omit for one-sample test."
+    )]
     pub y: Option<String>,
 
     /// Hypothesized mean or difference
-    #[schemars(description = "Null hypothesis value (default: 0). For one-sample: hypothesized mean. For two-sample: hypothesized difference.")]
+    #[schemars(
+        description = "Null hypothesis value (default: 0). For one-sample: hypothesized mean. For two-sample: hypothesized difference."
+    )]
     pub mu: Option<f64>,
 
     /// Alternative hypothesis direction
-    #[schemars(description = "Alternative hypothesis: 'two.sided' (default), 'greater', or 'less'.")]
+    #[schemars(
+        description = "Alternative hypothesis: 'two.sided' (default), 'greater', or 'less'."
+    )]
     pub alternative: Option<String>,
 
     /// Paired test flag
-    #[schemars(description = "If true, perform a paired t-test. Requires both x and y columns. Default: false.")]
+    #[schemars(
+        description = "If true, perform a paired t-test. Requires both x and y columns. Default: false."
+    )]
     pub paired: Option<bool>,
 
     /// Equal variances assumption
-    #[schemars(description = "For two-sample tests: if true, assume equal variances (Student's t); if false (default), use Welch's t-test.")]
+    #[schemars(
+        description = "For two-sample tests: if true, assume equal variances (Student's t); if false (default), use Welch's t-test."
+    )]
     pub var_equal: Option<bool>,
 
     /// Confidence level
@@ -871,15 +1189,21 @@ pub struct PairwiseTTestRequest {
     pub factor: String,
 
     /// P-value adjustment method
-    #[schemars(description = "Method for adjusting p-values: 'holm' (default), 'bonferroni', 'hochberg', 'hommel', 'BH' (Benjamini-Hochberg FDR), 'BY', or 'none'.")]
+    #[schemars(
+        description = "Method for adjusting p-values: 'holm' (default), 'bonferroni', 'hochberg', 'hommel', 'BH' (Benjamini-Hochberg FDR), 'BY', or 'none'."
+    )]
     pub p_adjust_method: Option<String>,
 
     /// Use pooled standard deviation
-    #[schemars(description = "If true, use pooled SD from all groups (Student's); if false (default), use Welch's t-test for each pair.")]
+    #[schemars(
+        description = "If true, use pooled SD from all groups (Student's); if false (default), use Welch's t-test for each pair."
+    )]
     pub pool_sd: Option<bool>,
 
     /// Alternative hypothesis direction
-    #[schemars(description = "Alternative hypothesis: 'two.sided' (default), 'greater', or 'less'.")]
+    #[schemars(
+        description = "Alternative hypothesis: 'two.sided' (default), 'greater', or 'less'."
+    )]
     pub alternative: Option<String>,
 }
 
@@ -899,15 +1223,21 @@ pub struct PairwiseWilcoxRequest {
     pub factor: String,
 
     /// P-value adjustment method
-    #[schemars(description = "Method for adjusting p-values: 'holm' (default), 'bonferroni', 'hochberg', 'hommel', 'BH' (Benjamini-Hochberg FDR), 'BY', or 'none'.")]
+    #[schemars(
+        description = "Method for adjusting p-values: 'holm' (default), 'bonferroni', 'hochberg', 'hommel', 'BH' (Benjamini-Hochberg FDR), 'BY', or 'none'."
+    )]
     pub p_adjust_method: Option<String>,
 
     /// Alternative hypothesis direction
-    #[schemars(description = "Alternative hypothesis: 'two.sided' (default), 'greater', or 'less'.")]
+    #[schemars(
+        description = "Alternative hypothesis: 'two.sided' (default), 'greater', or 'less'."
+    )]
     pub alternative: Option<String>,
 
     /// Use exact p-value computation
-    #[schemars(description = "If true, compute exact p-values (slow for large samples); if false, use normal approximation; if not specified, auto-decide based on sample size.")]
+    #[schemars(
+        description = "If true, compute exact p-values (slow for large samples); if false, use normal approximation; if not specified, auto-decide based on sample size."
+    )]
     pub exact: Option<bool>,
 }
 
@@ -923,31 +1253,45 @@ pub struct WilcoxonTestRequest {
     pub x: String,
 
     /// Second variable column name (optional)
-    #[schemars(description = "Name of the second variable column for two-sample or paired tests. Omit for one-sample signed rank test.")]
+    #[schemars(
+        description = "Name of the second variable column for two-sample or paired tests. Omit for one-sample signed rank test."
+    )]
     pub y: Option<String>,
 
     /// Hypothesized location shift
-    #[schemars(description = "Null hypothesis value (default: 0). For one-sample: hypothesized median. For two-sample: hypothesized location shift.")]
+    #[schemars(
+        description = "Null hypothesis value (default: 0). For one-sample: hypothesized median. For two-sample: hypothesized location shift."
+    )]
     pub mu: Option<f64>,
 
     /// Alternative hypothesis direction
-    #[schemars(description = "Alternative hypothesis: 'two.sided' (default), 'greater', or 'less'.")]
+    #[schemars(
+        description = "Alternative hypothesis: 'two.sided' (default), 'greater', or 'less'."
+    )]
     pub alternative: Option<String>,
 
     /// Paired test flag
-    #[schemars(description = "If true with two samples, perform paired signed rank test. If false (default), perform rank sum test.")]
+    #[schemars(
+        description = "If true with two samples, perform paired signed rank test. If false (default), perform rank sum test."
+    )]
     pub paired: Option<bool>,
 
     /// Use exact p-value calculation
-    #[schemars(description = "If true, compute exact p-value (only for small samples without ties). If omitted, automatically decides based on sample size.")]
+    #[schemars(
+        description = "If true, compute exact p-value (only for small samples without ties). If omitted, automatically decides based on sample size."
+    )]
     pub exact: Option<bool>,
 
     /// Apply continuity correction
-    #[schemars(description = "If true (default), apply continuity correction to normal approximation.")]
+    #[schemars(
+        description = "If true (default), apply continuity correction to normal approximation."
+    )]
     pub correct: Option<bool>,
 
     /// Compute confidence interval
-    #[schemars(description = "If true, compute confidence interval and location estimate. Default: false.")]
+    #[schemars(
+        description = "If true, compute confidence interval and location estimate. Default: false."
+    )]
     pub conf_int: Option<bool>,
 
     /// Confidence level
@@ -963,7 +1307,9 @@ pub struct ChiSquaredGofRequest {
     pub dataset: String,
 
     /// Column name with categorical values to count
-    #[schemars(description = "Name of the categorical column. Counts of each unique value will be tested.")]
+    #[schemars(
+        description = "Name of the categorical column. Counts of each unique value will be tested."
+    )]
     pub column: String,
 
     /// Expected probabilities (optional)
@@ -1003,11 +1349,15 @@ pub struct FisherExactRequest {
     pub dataset: String,
 
     /// Row variable column name
-    #[schemars(description = "Name of the column for rows of the 2×2 table. Must have exactly 2 unique values.")]
+    #[schemars(
+        description = "Name of the column for rows of the 2×2 table. Must have exactly 2 unique values."
+    )]
     pub row_var: String,
 
     /// Column variable column name
-    #[schemars(description = "Name of the column for columns of the 2×2 table. Must have exactly 2 unique values.")]
+    #[schemars(
+        description = "Name of the column for columns of the 2×2 table. Must have exactly 2 unique values."
+    )]
     pub col_var: String,
 
     /// Alternative hypothesis
@@ -1047,35 +1397,51 @@ pub struct KsTestRequest {
     pub x: String,
 
     /// Second variable column name (optional)
-    #[schemars(description = "Name of the second variable column for two-sample test. Omit for one-sample test against a theoretical distribution.")]
+    #[schemars(
+        description = "Name of the second variable column for two-sample test. Omit for one-sample test against a theoretical distribution."
+    )]
     pub y: Option<String>,
 
     /// Theoretical distribution for one-sample test
-    #[schemars(description = "For one-sample test: distribution to test against. Options: 'normal' (default), 'uniform', 'exponential'. Ignored for two-sample test.")]
+    #[schemars(
+        description = "For one-sample test: distribution to test against. Options: 'normal' (default), 'uniform', 'exponential'. Ignored for two-sample test."
+    )]
     pub distribution: Option<String>,
 
     /// Mean parameter for normal distribution
-    #[schemars(description = "Mean parameter for normal distribution (default: 0). Only used when distribution='normal'.")]
+    #[schemars(
+        description = "Mean parameter for normal distribution (default: 0). Only used when distribution='normal'."
+    )]
     pub mean: Option<f64>,
 
     /// Standard deviation parameter for normal distribution
-    #[schemars(description = "Standard deviation parameter for normal distribution (default: 1). Only used when distribution='normal'.")]
+    #[schemars(
+        description = "Standard deviation parameter for normal distribution (default: 1). Only used when distribution='normal'."
+    )]
     pub sd: Option<f64>,
 
     /// Lower bound for uniform distribution
-    #[schemars(description = "Lower bound for uniform distribution (default: 0). Only used when distribution='uniform'.")]
+    #[schemars(
+        description = "Lower bound for uniform distribution (default: 0). Only used when distribution='uniform'."
+    )]
     pub a: Option<f64>,
 
     /// Upper bound for uniform distribution
-    #[schemars(description = "Upper bound for uniform distribution (default: 1). Only used when distribution='uniform'.")]
+    #[schemars(
+        description = "Upper bound for uniform distribution (default: 1). Only used when distribution='uniform'."
+    )]
     pub b: Option<f64>,
 
     /// Rate parameter for exponential distribution
-    #[schemars(description = "Rate parameter for exponential distribution (default: 1). Only used when distribution='exponential'.")]
+    #[schemars(
+        description = "Rate parameter for exponential distribution (default: 1). Only used when distribution='exponential'."
+    )]
     pub rate: Option<f64>,
 
     /// Alternative hypothesis direction
-    #[schemars(description = "Alternative hypothesis: 'two.sided' (default), 'greater', or 'less'. For two-sample: 'greater' means CDF of x is not below CDF of y (x is stochastically greater).")]
+    #[schemars(
+        description = "Alternative hypothesis: 'two.sided' (default), 'greater', or 'less'. For two-sample: 'greater' means CDF of x is not below CDF of y (x is stochastically greater)."
+    )]
     pub alternative: Option<String>,
 }
 
@@ -1095,7 +1461,9 @@ pub struct AcfRequest {
     pub lag_max: Option<usize>,
 
     /// Type of ACF
-    #[schemars(description = "Type of autocorrelation: 'correlation' (default), 'covariance', or 'partial' (PACF).")]
+    #[schemars(
+        description = "Type of autocorrelation: 'correlation' (default), 'covariance', or 'partial' (PACF)."
+    )]
     pub acf_type: Option<String>,
 }
 
@@ -1115,7 +1483,9 @@ pub struct CcfRequest {
     pub y: String,
 
     /// Maximum lag
-    #[schemars(description = "Maximum lag to compute (in both directions). Default: min(10*log10(n), n-1).")]
+    #[schemars(
+        description = "Maximum lag to compute (in both directions). Default: min(10*log10(n), n-1)."
+    )]
     pub lag_max: Option<usize>,
 }
 
@@ -1131,23 +1501,33 @@ pub struct SpectrumRequest {
     pub column: String,
 
     /// Smoothing spans (Daniell kernel widths)
-    #[schemars(description = "Vector of odd integers for modified Daniell smoothers, e.g., [3,3] or [5,5,5]. If omitted, returns raw periodogram. Multiple values are convolved for more smoothing.")]
+    #[schemars(
+        description = "Vector of odd integers for modified Daniell smoothers, e.g., [3,3] or [5,5,5]. If omitted, returns raw periodogram. Multiple values are convolved for more smoothing."
+    )]
     pub spans: Option<Vec<usize>>,
 
     /// Taper proportion
-    #[schemars(description = "Proportion of data to taper at ends using split cosine bell (0 to 0.5). Default: 0.1. Reduces spectral leakage.")]
+    #[schemars(
+        description = "Proportion of data to taper at ends using split cosine bell (0 to 0.5). Default: 0.1. Reduces spectral leakage."
+    )]
     pub taper: Option<f64>,
 
     /// Whether to detrend
-    #[schemars(description = "Whether to remove linear trend before computing spectrum. Default: true.")]
+    #[schemars(
+        description = "Whether to remove linear trend before computing spectrum. Default: true."
+    )]
     pub detrend: Option<bool>,
 
     /// Method for spectrum estimation
-    #[schemars(description = "Estimation method: 'pgram' (periodogram, default) or 'ar' (autoregressive). AR method fits an AR model and computes its theoretical spectrum.")]
+    #[schemars(
+        description = "Estimation method: 'pgram' (periodogram, default) or 'ar' (autoregressive). AR method fits an AR model and computes its theoretical spectrum."
+    )]
     pub method: Option<String>,
 
     /// AR order (for method='ar')
-    #[schemars(description = "AR model order for method='ar'. If omitted, order is selected by AIC.")]
+    #[schemars(
+        description = "AR model order for method='ar'. If omitted, order is selected by AIC."
+    )]
     pub ar_order: Option<usize>,
 }
 
@@ -1159,19 +1539,27 @@ pub struct BoxTestRequest {
     pub dataset: String,
 
     /// Time series column name
-    #[schemars(description = "Name of the numeric time series column to test for autocorrelation.")]
+    #[schemars(
+        description = "Name of the numeric time series column to test for autocorrelation."
+    )]
     pub column: String,
 
     /// Number of lags
-    #[schemars(description = "Number of autocorrelation lags to include in the test statistic. Default: 1. Common choices: 10 for short series, 20 for longer series.")]
+    #[schemars(
+        description = "Number of autocorrelation lags to include in the test statistic. Default: 1. Common choices: 10 for short series, 20 for longer series."
+    )]
     pub lag: Option<usize>,
 
     /// Test type
-    #[schemars(description = "Test type: 'ljung-box' (default, better finite-sample properties) or 'box-pierce' (simpler, classic version).")]
+    #[schemars(
+        description = "Test type: 'ljung-box' (default, better finite-sample properties) or 'box-pierce' (simpler, classic version)."
+    )]
     pub test_type: Option<String>,
 
     /// Degrees of freedom adjustment
-    #[schemars(description = "Number of parameters already estimated (subtract from df). When testing ARMA(p,q) residuals, set fitdf = p + q for proper df adjustment. Default: 0.")]
+    #[schemars(
+        description = "Number of parameters already estimated (subtract from df). When testing ARMA(p,q) residuals, set fitdf = p + q for proper df adjustment. Default: 0."
+    )]
     pub fitdf: Option<usize>,
 }
 
@@ -1187,7 +1575,9 @@ pub struct PPTestRequest {
     pub column: String,
 
     /// Use short truncation lag
-    #[schemars(description = "Whether to use short truncation lag formula: trunc(4*(n/100)^0.25). If false, uses long formula: trunc(12*(n/100)^0.25). Default: true.")]
+    #[schemars(
+        description = "Whether to use short truncation lag formula: trunc(4*(n/100)^0.25). If false, uses long formula: trunc(12*(n/100)^0.25). Default: true."
+    )]
     pub lshort: Option<bool>,
 }
 
@@ -1199,19 +1589,27 @@ pub struct FactorAnalysisRequest {
     pub dataset: String,
 
     /// Variable columns to include in factor analysis
-    #[schemars(description = "Names of the numeric columns to include in factor analysis. Should have at least n_factors + 1 variables.")]
+    #[schemars(
+        description = "Names of the numeric columns to include in factor analysis. Should have at least n_factors + 1 variables."
+    )]
     pub columns: Vec<String>,
 
     /// Number of factors to extract
-    #[schemars(description = "Number of factors to extract. Must be between 1 and (number of variables - 1). Rule of thumb: fewer factors that explain most variance.")]
+    #[schemars(
+        description = "Number of factors to extract. Must be between 1 and (number of variables - 1). Rule of thumb: fewer factors that explain most variance."
+    )]
     pub n_factors: usize,
 
     /// Rotation method
-    #[schemars(description = "Factor rotation method: 'varimax' (default, orthogonal), 'promax' (oblique, allows correlated factors), or 'none'.")]
+    #[schemars(
+        description = "Factor rotation method: 'varimax' (default, orthogonal), 'promax' (oblique, allows correlated factors), or 'none'."
+    )]
     pub rotation: Option<String>,
 
     /// Factor scores method
-    #[schemars(description = "Method for computing factor scores: 'none' (default), 'regression' (Thomson's method), or 'bartlett' (weighted least squares).")]
+    #[schemars(
+        description = "Method for computing factor scores: 'none' (default), 'regression' (Thomson's method), or 'bartlett' (weighted least squares)."
+    )]
     pub scores: Option<String>,
 }
 
@@ -1223,19 +1621,27 @@ pub struct CancorRequest {
     pub dataset: String,
 
     /// First set of variables (X)
-    #[schemars(description = "Names of the columns for the first set of variables (X). These are the 'predictor' or 'input' variables.")]
+    #[schemars(
+        description = "Names of the columns for the first set of variables (X). These are the 'predictor' or 'input' variables."
+    )]
     pub x_columns: Vec<String>,
 
     /// Second set of variables (Y)
-    #[schemars(description = "Names of the columns for the second set of variables (Y). These are the 'response' or 'output' variables.")]
+    #[schemars(
+        description = "Names of the columns for the second set of variables (Y). These are the 'response' or 'output' variables."
+    )]
     pub y_columns: Vec<String>,
 
     /// Whether to center X variables
-    #[schemars(description = "Whether to center X variables by subtracting column means. Default: true.")]
+    #[schemars(
+        description = "Whether to center X variables by subtracting column means. Default: true."
+    )]
     pub xcenter: Option<bool>,
 
     /// Whether to center Y variables
-    #[schemars(description = "Whether to center Y variables by subtracting column means. Default: true.")]
+    #[schemars(
+        description = "Whether to center Y variables by subtracting column means. Default: true."
+    )]
     pub ycenter: Option<bool>,
 }
 
@@ -1287,15 +1693,21 @@ pub struct BgTestRequest {
     pub x: Vec<String>,
 
     /// Order of serial correlation to test (default: 1)
-    #[schemars(description = "Maximum lag order for serial correlation test. Default is 1 (first-order).")]
+    #[schemars(
+        description = "Maximum lag order for serial correlation test. Default is 1 (first-order)."
+    )]
     pub order: Option<usize>,
 
     /// Test statistic type: 'chisq' (default) or 'f'
-    #[schemars(description = "Type of test statistic: 'chisq' for chi-squared (asymptotic) or 'f' for F-test (finite sample correction). Default: 'chisq'.")]
+    #[schemars(
+        description = "Type of test statistic: 'chisq' for chi-squared (asymptotic) or 'f' for F-test (finite sample correction). Default: 'chisq'."
+    )]
     pub test_type: Option<String>,
 
     /// Fill value for initial lagged residuals (default: 0.0)
-    #[schemars(description = "Value to fill for initial lagged residuals before enough observations exist. Default: 0.0.")]
+    #[schemars(
+        description = "Value to fill for initial lagged residuals before enough observations exist. Default: 0.0."
+    )]
     pub fill: Option<f64>,
 }
 
@@ -1315,11 +1727,15 @@ pub struct ResetTestRequest {
     pub x: Vec<String>,
 
     /// Powers to test (default: [2, 3])
-    #[schemars(description = "Powers to use for augmentation. Default: [2, 3] tests for quadratic and cubic terms.")]
+    #[schemars(
+        description = "Powers to use for augmentation. Default: [2, 3] tests for quadratic and cubic terms."
+    )]
     pub powers: Option<Vec<usize>>,
 
     /// Type of augmentation: 'fitted' (default), 'regressor', or 'princomp'
-    #[schemars(description = "Type of augmentation: 'fitted' (powers of fitted values, default), 'regressor' (powers of regressors), or 'princomp' (powers of first principal component).")]
+    #[schemars(
+        description = "Type of augmentation: 'fitted' (powers of fitted values, default), 'regressor' (powers of regressors), or 'princomp' (powers of first principal component)."
+    )]
     pub reset_type: Option<String>,
 }
 
@@ -1335,15 +1751,21 @@ pub struct WaldTestRequest {
     pub y: String,
 
     /// Independent variables for the unrestricted (full) model
-    #[schemars(description = "Column names for the unrestricted (full) model. Must be a superset of restricted model variables.")]
+    #[schemars(
+        description = "Column names for the unrestricted (full) model. Must be a superset of restricted model variables."
+    )]
     pub x_unrestricted: Vec<String>,
 
     /// Independent variables for the restricted (null) model
-    #[schemars(description = "Column names for the restricted (null) model. Must be a subset of unrestricted model variables.")]
+    #[schemars(
+        description = "Column names for the restricted (null) model. Must be a subset of unrestricted model variables."
+    )]
     pub x_restricted: Vec<String>,
 
     /// Use F-test (default: true) or Chi-squared test
-    #[schemars(description = "If true (default), use F-test. If false, use Chi-squared test. F-test is more common for finite samples.")]
+    #[schemars(
+        description = "If true (default), use F-test. If false, use Chi-squared test. F-test is more common for finite samples."
+    )]
     pub use_f_test: Option<bool>,
 }
 
@@ -1379,11 +1801,15 @@ pub struct HacRequest {
     pub x: Vec<String>,
 
     /// Bandwidth (number of lags). Default: automatic Newey-West selection
-    #[schemars(description = "Number of lags for HAC estimation. If not provided, uses automatic Newey-West bandwidth: floor(4 * (n/100)^(2/9)).")]
+    #[schemars(
+        description = "Number of lags for HAC estimation. If not provided, uses automatic Newey-West bandwidth: floor(4 * (n/100)^(2/9))."
+    )]
     pub bandwidth: Option<usize>,
 
     /// Kernel type: 'bartlett' (default), 'parzen', 'qs', 'truncated', 'tukey-hanning'
-    #[schemars(description = "Kernel function for weighting lags: 'bartlett' (Newey-West, default), 'parzen', 'qs' (quadratic spectral), 'truncated', or 'tukey-hanning'.")]
+    #[schemars(
+        description = "Kernel function for weighting lags: 'bartlett' (Newey-West, default), 'parzen', 'qs' (quadratic spectral), 'truncated', or 'tukey-hanning'."
+    )]
     pub kernel: Option<String>,
 
     /// Whether to use VAR(1) prewhitening (default: false)
@@ -1407,11 +1833,15 @@ pub struct BootstrapCovRequest {
     pub x: Vec<String>,
 
     /// Number of bootstrap replications (default: 999)
-    #[schemars(description = "Number of bootstrap replications. Default: 999. More replications give more precise SE estimates.")]
+    #[schemars(
+        description = "Number of bootstrap replications. Default: 999. More replications give more precise SE estimates."
+    )]
     pub n_boot: Option<usize>,
 
     /// Bootstrap type: 'pairs' (default), 'residual', or 'wild'
-    #[schemars(description = "Bootstrap method: 'pairs' (xy, most robust), 'residual' (assumes homoskedasticity), 'wild' (Rademacher weights, robust to heteroskedasticity).")]
+    #[schemars(
+        description = "Bootstrap method: 'pairs' (xy, most robust), 'residual' (assumes homoskedasticity), 'wild' (Rademacher weights, robust to heteroskedasticity)."
+    )]
     pub bootstrap_type: Option<String>,
 
     /// Random seed for reproducibility
@@ -1439,7 +1869,9 @@ pub struct OlsClusteredRequest {
     pub cluster1: String,
 
     /// Second cluster dimension column (optional, for two-way clustering)
-    #[schemars(description = "Optional column for second clustering dimension (e.g., 'year'). If provided, two-way clustering is used.")]
+    #[schemars(
+        description = "Optional column for second clustering dimension (e.g., 'year'). If provided, two-way clustering is used."
+    )]
     pub cluster2: Option<String>,
 }
 
@@ -1459,15 +1891,21 @@ pub struct DriscollKraayRequest {
     pub x: Vec<String>,
 
     /// Time period identifier column
-    #[schemars(description = "Column containing time period identifiers (e.g., 'year', 'quarter'). Used to aggregate scores within periods.")]
+    #[schemars(
+        description = "Column containing time period identifiers (e.g., 'year', 'quarter'). Used to aggregate scores within periods."
+    )]
     pub time_col: String,
 
     /// Bandwidth for HAC kernel (optional)
-    #[schemars(description = "Bandwidth for HAC kernel. Default uses Newey-West rule: floor(T^0.25). Higher values allow for more serial correlation.")]
+    #[schemars(
+        description = "Bandwidth for HAC kernel. Default uses Newey-West rule: floor(T^0.25). Higher values allow for more serial correlation."
+    )]
     pub bandwidth: Option<usize>,
 
     /// Kernel type for HAC
-    #[schemars(description = "HAC kernel: 'bartlett' (default), 'parzen', 'qs', 'truncated', 'tukey-hanning'.")]
+    #[schemars(
+        description = "HAC kernel: 'bartlett' (default), 'parzen', 'qs', 'truncated', 'tukey-hanning'."
+    )]
     pub kernel: Option<String>,
 }
 
@@ -1487,11 +1925,15 @@ pub struct QuantRegRequest {
     pub x: Vec<String>,
 
     /// Quantile (tau) to estimate (0-1)
-    #[schemars(description = "Quantile to estimate. Must be between 0 and 1. Common values: 0.25 (first quartile), 0.5 (median), 0.75 (third quartile). Default: 0.5 (median regression).")]
+    #[schemars(
+        description = "Quantile to estimate. Must be between 0 and 1. Common values: 0.25 (first quartile), 0.5 (median), 0.75 (third quartile). Default: 0.5 (median regression)."
+    )]
     pub tau: Option<f64>,
 
     /// Multiple quantiles to estimate
-    #[schemars(description = "Optional: estimate multiple quantiles at once (e.g., [0.25, 0.5, 0.75] for quartiles). If provided, 'tau' is ignored.")]
+    #[schemars(
+        description = "Optional: estimate multiple quantiles at once (e.g., [0.25, 0.5, 0.75] for quartiles). If provided, 'tau' is ignored."
+    )]
     pub taus: Option<Vec<f64>>,
 }
 
@@ -1507,35 +1949,51 @@ pub struct SensemakrRequest {
     pub y: String,
 
     /// Treatment variable column name
-    #[schemars(description = "Name of the treatment variable whose coefficient will be analyzed for sensitivity.")]
+    #[schemars(
+        description = "Name of the treatment variable whose coefficient will be analyzed for sensitivity."
+    )]
     pub treatment: String,
 
     /// Control covariate column names
-    #[schemars(description = "Names of the control covariate columns. These are conditioned on when assessing confounding.")]
+    #[schemars(
+        description = "Names of the control covariate columns. These are conditioned on when assessing confounding."
+    )]
     pub covariates: Vec<String>,
 
     /// Benchmark covariates for bounding (optional)
-    #[schemars(description = "Covariate names to use as benchmarks. Their partial R² provides intuition about confounding magnitude.")]
+    #[schemars(
+        description = "Covariate names to use as benchmarks. Their partial R² provides intuition about confounding magnitude."
+    )]
     pub benchmark_covariates: Option<Vec<String>>,
 
     /// Multiplier for treatment benchmark partial R² (kd)
-    #[schemars(description = "Multiplier applied to benchmark partial R² with treatment. E.g., kd=2 assumes confounder is twice as strong. Default: 1.0.")]
+    #[schemars(
+        description = "Multiplier applied to benchmark partial R² with treatment. E.g., kd=2 assumes confounder is twice as strong. Default: 1.0."
+    )]
     pub kd: Option<f64>,
 
     /// Multiplier for outcome benchmark partial R² (ky)
-    #[schemars(description = "Multiplier applied to benchmark partial R² with outcome. Default: same as kd.")]
+    #[schemars(
+        description = "Multiplier applied to benchmark partial R² with outcome. Default: same as kd."
+    )]
     pub ky: Option<f64>,
 
     /// Proportion of effect to reduce (q)
-    #[schemars(description = "Proportion of the effect to explain away. q=1 (default) means nullify; q=0.5 means reduce by half.")]
+    #[schemars(
+        description = "Proportion of the effect to explain away. q=1 (default) means nullify; q=0.5 means reduce by half."
+    )]
     pub q: Option<f64>,
 
     /// Significance level for RV_alpha
-    #[schemars(description = "Significance level for robustness value calculation. Default: 0.05.")]
+    #[schemars(
+        description = "Significance level for robustness value calculation. Default: 0.05."
+    )]
     pub alpha: Option<f64>,
 
     /// Generate contour plot data
-    #[schemars(description = "Whether to generate data for sensitivity contour plots. Default: false.")]
+    #[schemars(
+        description = "Whether to generate data for sensitivity contour plots. Default: false."
+    )]
     pub contour_data: Option<bool>,
 }
 
@@ -1543,31 +2001,45 @@ pub struct SensemakrRequest {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct EValueRequest {
     /// Type of effect measure
-    #[schemars(description = "Type of effect measure: 'rr' (risk ratio), 'or' (odds ratio), 'hr' (hazard ratio), 'smd' (standardized mean difference), 'rd' (risk difference).")]
+    #[schemars(
+        description = "Type of effect measure: 'rr' (risk ratio), 'or' (odds ratio), 'hr' (hazard ratio), 'smd' (standardized mean difference), 'rd' (risk difference)."
+    )]
     pub effect_type: String,
 
     /// Point estimate of the effect
-    #[schemars(description = "Point estimate of the effect measure (e.g., RR=2.5, OR=3.0, SMD=0.5).")]
+    #[schemars(
+        description = "Point estimate of the effect measure (e.g., RR=2.5, OR=3.0, SMD=0.5)."
+    )]
     pub point: f64,
 
     /// Lower bound of 95% confidence interval
-    #[schemars(description = "Lower bound of the 95% confidence interval. Optional but recommended.")]
+    #[schemars(
+        description = "Lower bound of the 95% confidence interval. Optional but recommended."
+    )]
     pub ci_lower: Option<f64>,
 
     /// Upper bound of 95% confidence interval
-    #[schemars(description = "Upper bound of the 95% confidence interval. Optional but recommended.")]
+    #[schemars(
+        description = "Upper bound of the 95% confidence interval. Optional but recommended."
+    )]
     pub ci_upper: Option<f64>,
 
     /// Standard error (for SMD)
-    #[schemars(description = "Standard error of the estimate. Required for SMD if CI not provided.")]
+    #[schemars(
+        description = "Standard error of the estimate. Required for SMD if CI not provided."
+    )]
     pub se: Option<f64>,
 
     /// Whether outcome is rare (for OR/HR)
-    #[schemars(description = "Whether the outcome is rare (<15% prevalence). If true, OR/HR used as RR approximation. If false, sqrt transformation applied. Default: true for OR/HR.")]
+    #[schemars(
+        description = "Whether the outcome is rare (<15% prevalence). If true, OR/HR used as RR approximation. If false, sqrt transformation applied. Default: true for OR/HR."
+    )]
     pub rare: Option<bool>,
 
     /// Baseline risk (for RD)
-    #[schemars(description = "Baseline risk (probability in unexposed group), required for risk difference. Must be between 0 and 1.")]
+    #[schemars(
+        description = "Baseline risk (probability in unexposed group), required for risk difference. Must be between 0 and 1."
+    )]
     pub baseline_risk: Option<f64>,
 }
 
@@ -1587,7 +2059,9 @@ pub struct MarginalEffectsRequest {
     pub x: Vec<String>,
 
     /// Model type
-    #[schemars(description = "Model type for marginal effects: 'ols' (linear regression), 'logit' (logistic regression), 'probit' (probit regression). Default: 'ols'.")]
+    #[schemars(
+        description = "Model type for marginal effects: 'ols' (linear regression), 'logit' (logistic regression), 'probit' (probit regression). Default: 'ols'."
+    )]
     pub model: Option<String>,
 }
 
@@ -1607,15 +2081,21 @@ pub struct NlsRequest {
     pub x: String,
 
     /// Model type to fit
-    #[schemars(description = "Nonlinear model to fit: 'exponential_decay' (y = a*exp(-b*x) + c), 'exponential_growth' (y = a*exp(b*x)), 'michaelis_menten' (y = Vmax*x/(Km+x)), 'logistic' (y = K/(1+exp(-r*(x-x0)))), 'power' (y = a*x^b), 'asymptotic' (y = a - b*exp(-c*x)).")]
+    #[schemars(
+        description = "Nonlinear model to fit: 'exponential_decay' (y = a*exp(-b*x) + c), 'exponential_growth' (y = a*exp(b*x)), 'michaelis_menten' (y = Vmax*x/(Km+x)), 'logistic' (y = K/(1+exp(-r*(x-x0)))), 'power' (y = a*x^b), 'asymptotic' (y = a - b*exp(-c*x))."
+    )]
     pub model: String,
 
     /// Starting values for parameters
-    #[schemars(description = "Initial parameter values. For exponential_decay: [a, b, c]. For exponential_growth: [a, b]. For michaelis_menten: [Vmax, Km]. For logistic: [K, r, x0]. For power: [a, b]. For asymptotic: [a, b, c].")]
+    #[schemars(
+        description = "Initial parameter values. For exponential_decay: [a, b, c]. For exponential_growth: [a, b]. For michaelis_menten: [Vmax, Km]. For logistic: [K, r, x0]. For power: [a, b]. For asymptotic: [a, b, c]."
+    )]
     pub start: Vec<f64>,
 
     /// Algorithm to use
-    #[schemars(description = "Optimization algorithm: 'levenberg_marquardt' (default, more robust) or 'gauss_newton' (faster but may not converge).")]
+    #[schemars(
+        description = "Optimization algorithm: 'levenberg_marquardt' (default, more robust) or 'gauss_newton' (faster but may not converge)."
+    )]
     pub algorithm: Option<String>,
 
     /// Maximum iterations
@@ -1639,15 +2119,21 @@ pub struct LoessRequest {
     pub x: String,
 
     /// Smoothing parameter (span)
-    #[schemars(description = "Smoothing parameter controlling neighborhood size. Range (0,1] uses proportion of data; >1 uses all points. Default: 0.75. Smaller = more wiggly, larger = smoother.")]
+    #[schemars(
+        description = "Smoothing parameter controlling neighborhood size. Range (0,1] uses proportion of data; >1 uses all points. Default: 0.75. Smaller = more wiggly, larger = smoother."
+    )]
     pub span: Option<f64>,
 
     /// Polynomial degree (1=linear, 2=quadratic)
-    #[schemars(description = "Degree of local polynomial: 1 (linear) or 2 (quadratic, default). Quadratic captures curvature better at boundaries.")]
+    #[schemars(
+        description = "Degree of local polynomial: 1 (linear) or 2 (quadratic, default). Quadratic captures curvature better at boundaries."
+    )]
     pub degree: Option<usize>,
 
     /// Use robust fitting
-    #[schemars(description = "Use robust fitting with iterative reweighting to downweight outliers. Default: false (gaussian family). Set true for 'symmetric' family.")]
+    #[schemars(
+        description = "Use robust fitting with iterative reweighting to downweight outliers. Default: false (gaussian family). Set true for 'symmetric' family."
+    )]
     pub robust: Option<bool>,
 }
 
@@ -1671,7 +2157,9 @@ pub struct PanelFERequest {
     pub x: Vec<String>,
 
     /// Entity/individual identifier column
-    #[schemars(description = "Column name for entity/individual identifier (e.g., 'firm_id', 'person_id').")]
+    #[schemars(
+        description = "Column name for entity/individual identifier (e.g., 'firm_id', 'person_id')."
+    )]
     pub entity_var: String,
 }
 
@@ -1691,7 +2179,9 @@ pub struct PanelRERequest {
     pub x: Vec<String>,
 
     /// Entity/individual identifier column
-    #[schemars(description = "Column name for entity/individual identifier (e.g., 'firm_id', 'person_id').")]
+    #[schemars(
+        description = "Column name for entity/individual identifier (e.g., 'firm_id', 'person_id')."
+    )]
     pub entity_var: String,
 }
 
@@ -1711,7 +2201,9 @@ pub struct HausmanRequest {
     pub x: Vec<String>,
 
     /// Entity/individual identifier column
-    #[schemars(description = "Column name for entity/individual identifier (e.g., 'firm_id', 'person_id').")]
+    #[schemars(
+        description = "Column name for entity/individual identifier (e.g., 'firm_id', 'person_id')."
+    )]
     pub entity_var: String,
 }
 
@@ -1727,11 +2219,15 @@ pub struct GmmRequest {
     pub y: String,
 
     /// Independent variables (X) column names
-    #[schemars(description = "Names of the independent variable (X) columns. Include lagged dependent variable if desired.")]
+    #[schemars(
+        description = "Names of the independent variable (X) columns. Include lagged dependent variable if desired."
+    )]
     pub x: Vec<String>,
 
     /// Entity/individual identifier column
-    #[schemars(description = "Column name for entity/individual identifier (e.g., 'firm_id', 'person_id').")]
+    #[schemars(
+        description = "Column name for entity/individual identifier (e.g., 'firm_id', 'person_id')."
+    )]
     pub entity_var: String,
 
     /// Time period identifier column
@@ -1743,15 +2239,21 @@ pub struct GmmRequest {
     pub lags: Option<usize>,
 
     /// Transformation type: 'difference' (Arellano-Bond 1991) or 'system' (Blundell-Bond 1998)
-    #[schemars(description = "Transformation: 'difference' for Arellano-Bond, 'system' for Blundell-Bond. Default: 'difference'.")]
+    #[schemars(
+        description = "Transformation: 'difference' for Arellano-Bond, 'system' for Blundell-Bond. Default: 'difference'."
+    )]
     pub transform: Option<String>,
 
     /// Estimation step: 'onestep' or 'twostep'
-    #[schemars(description = "Estimation step: 'onestep' or 'twostep'. Two-step is more efficient. Default: 'twostep'.")]
+    #[schemars(
+        description = "Estimation step: 'onestep' or 'twostep'. Two-step is more efficient. Default: 'twostep'."
+    )]
     pub step: Option<String>,
 
     /// Maximum lag for instruments
-    #[schemars(description = "Maximum lag of Y to use as instruments. None means all available lags. Default: None.")]
+    #[schemars(
+        description = "Maximum lag of Y to use as instruments. None means all available lags. Default: None."
+    )]
     pub max_lag: Option<usize>,
 
     /// Minimum lag for instruments
@@ -1759,11 +2261,15 @@ pub struct GmmRequest {
     pub min_lag: Option<usize>,
 
     /// Collapse instruments to reduce count
-    #[schemars(description = "If true, collapse instruments to reduce instrument count and avoid overfitting. Default: false.")]
+    #[schemars(
+        description = "If true, collapse instruments to reduce instrument count and avoid overfitting. Default: false."
+    )]
     pub collapse: Option<bool>,
 
     /// Use robust standard errors
-    #[schemars(description = "Use robust (Windmeijer-corrected for two-step) standard errors. Default: true.")]
+    #[schemars(
+        description = "Use robust (Windmeijer-corrected for two-step) standard errors. Default: true."
+    )]
     pub robust: Option<bool>,
 }
 
@@ -1783,19 +2289,27 @@ pub struct GeneralGmmIvRequest {
     pub x: Vec<String>,
 
     /// Instruments (Z) column names
-    #[schemars(description = "Names of the instrument columns. Should include exogenous regressors plus additional instruments. Must have at least as many instruments as regressors.")]
+    #[schemars(
+        description = "Names of the instrument columns. Should include exogenous regressors plus additional instruments. Must have at least as many instruments as regressors."
+    )]
     pub z: Vec<String>,
 
     /// GMM estimation method
-    #[schemars(description = "Estimation method: 'twostep' (default), 'iterative', or 'cue' (continuously updated).")]
+    #[schemars(
+        description = "Estimation method: 'twostep' (default), 'iterative', or 'cue' (continuously updated)."
+    )]
     pub method: Option<String>,
 
     /// Variance-covariance type
-    #[schemars(description = "Vcov type: 'hac' (default, robust to serial correlation), 'iid', or 'fixed'.")]
+    #[schemars(
+        description = "Vcov type: 'hac' (default, robust to serial correlation), 'iid', or 'fixed'."
+    )]
     pub vcov: Option<String>,
 
     /// HAC kernel type
-    #[schemars(description = "Kernel for HAC weighting: 'bartlett' (default), 'parzen', 'qs', 'truncated'.")]
+    #[schemars(
+        description = "Kernel for HAC weighting: 'bartlett' (default), 'parzen', 'qs', 'truncated'."
+    )]
     pub kernel: Option<String>,
 
     /// HAC bandwidth
@@ -1819,7 +2333,9 @@ pub struct PanelGlsRequest {
     pub x: Vec<String>,
 
     /// Entity/individual identifier column
-    #[schemars(description = "Column name for entity/individual identifier (e.g., 'firm_id', 'person_id').")]
+    #[schemars(
+        description = "Column name for entity/individual identifier (e.g., 'firm_id', 'person_id')."
+    )]
     pub entity_var: String,
 
     /// Time period identifier column
@@ -1827,7 +2343,9 @@ pub struct PanelGlsRequest {
     pub time_var: String,
 
     /// Model type: 'fe' (fixed effects), 'pooling', or 'fd' (first difference)
-    #[schemars(description = "Model type: 'fe' for fixed effects GLS (default), 'pooling' for pooled GLS, 'fd' for first-difference GLS.")]
+    #[schemars(
+        description = "Model type: 'fe' for fixed effects GLS (default), 'pooling' for pooled GLS, 'fd' for first-difference GLS."
+    )]
     pub model: Option<String>,
 }
 
@@ -1847,11 +2365,15 @@ pub struct PvcmRequest {
     pub x: Vec<String>,
 
     /// Entity/individual identifier column
-    #[schemars(description = "Column name for entity/individual identifier (e.g., 'firm_id', 'person_id').")]
+    #[schemars(
+        description = "Column name for entity/individual identifier (e.g., 'firm_id', 'person_id')."
+    )]
     pub entity_var: String,
 
     /// Model type: 'within' or 'random'
-    #[schemars(description = "Model type: 'within' for separate OLS per entity (default), 'random' for Swamy (1970) GLS estimator.")]
+    #[schemars(
+        description = "Model type: 'within' for separate OLS per entity (default), 'random' for Swamy (1970) GLS estimator."
+    )]
     pub model: Option<String>,
 }
 
@@ -1867,7 +2389,9 @@ pub struct PanelUnitRootRequest {
     pub variable: String,
 
     /// Unit/entity identifier column
-    #[schemars(description = "Column name for panel unit identifier (e.g., 'country', 'firm_id').")]
+    #[schemars(
+        description = "Column name for panel unit identifier (e.g., 'country', 'firm_id')."
+    )]
     pub unit_col: String,
 
     /// Time period column
@@ -1875,15 +2399,21 @@ pub struct PanelUnitRootRequest {
     pub time_col: String,
 
     /// Test type
-    #[schemars(description = "Test type: 'llc' (Levin-Lin-Chu, default), 'ips' (Im-Pesaran-Shin), 'fisher' (Maddala-Wu), 'hadri' (stationarity null).")]
+    #[schemars(
+        description = "Test type: 'llc' (Levin-Lin-Chu, default), 'ips' (Im-Pesaran-Shin), 'fisher' (Maddala-Wu), 'hadri' (stationarity null)."
+    )]
     pub test: Option<String>,
 
     /// Model specification
-    #[schemars(description = "Model: 'intercept' (default, individual intercepts), 'trend' (intercepts + trends), 'none' (no deterministics).")]
+    #[schemars(
+        description = "Model: 'intercept' (default, individual intercepts), 'trend' (intercepts + trends), 'none' (no deterministics)."
+    )]
     pub model: Option<String>,
 
     /// Number of lags
-    #[schemars(description = "Number of lags for ADF-type regressions. None for automatic selection.")]
+    #[schemars(
+        description = "Number of lags for ADF-type regressions. None for automatic selection."
+    )]
     pub lags: Option<usize>,
 }
 
@@ -1907,7 +2437,9 @@ pub struct SpatialNeighborsRequest {
     pub y_coord: String,
 
     /// Neighbor method: 'knn' (default), 'distance', or 'distance_longlat'
-    #[schemars(description = "Method for defining neighbors: 'knn' (k-nearest neighbors, default), 'distance' (within distance), 'distance_longlat' (great-circle distance for lon/lat).")]
+    #[schemars(
+        description = "Method for defining neighbors: 'knn' (k-nearest neighbors, default), 'distance' (within distance), 'distance_longlat' (great-circle distance for lon/lat)."
+    )]
     pub method: Option<String>,
 
     /// Number of neighbors for knn method
@@ -1915,7 +2447,9 @@ pub struct SpatialNeighborsRequest {
     pub k: Option<usize>,
 
     /// Maximum distance (for distance-based methods)
-    #[schemars(description = "Maximum distance threshold (for 'distance' or 'distance_longlat' methods). Units are in coordinate units or kilometers for longlat.")]
+    #[schemars(
+        description = "Maximum distance threshold (for 'distance' or 'distance_longlat' methods). Units are in coordinate units or kilometers for longlat."
+    )]
     pub d_max: Option<f64>,
 
     /// Minimum distance (for distance-based methods)
@@ -1923,11 +2457,15 @@ pub struct SpatialNeighborsRequest {
     pub d_min: Option<f64>,
 
     /// Name to store the spatial weights under
-    #[schemars(description = "Name to store the spatial weights for later use. If not provided, uses dataset name + '_weights'.")]
+    #[schemars(
+        description = "Name to store the spatial weights for later use. If not provided, uses dataset name + '_weights'."
+    )]
     pub weights_name: Option<String>,
 
     /// Weight style
-    #[schemars(description = "Weight style: 'W' or 'row' (row-standardized, default), 'B' (binary), 'C' (global standardized), 'U' (unstandardized).")]
+    #[schemars(
+        description = "Weight style: 'W' or 'row' (row-standardized, default), 'B' (binary), 'C' (global standardized), 'U' (unstandardized)."
+    )]
     pub style: Option<String>,
 }
 
@@ -1943,11 +2481,15 @@ pub struct MoranTestRequest {
     pub variable: String,
 
     /// Name of stored spatial weights
-    #[schemars(description = "Name of previously created spatial weights (from spatial_neighbors tool).")]
+    #[schemars(
+        description = "Name of previously created spatial weights (from spatial_neighbors tool)."
+    )]
     pub weights: String,
 
     /// Alternative hypothesis
-    #[schemars(description = "Alternative hypothesis: 'greater' (positive autocorrelation, default), 'less' (negative), 'two.sided'.")]
+    #[schemars(
+        description = "Alternative hypothesis: 'greater' (positive autocorrelation, default), 'less' (negative), 'two.sided'."
+    )]
     pub alternative: Option<String>,
 }
 
@@ -1967,7 +2509,9 @@ pub struct SpatialLmTestRequest {
     pub x: Vec<String>,
 
     /// Name of stored spatial weights
-    #[schemars(description = "Name of previously created spatial weights (from spatial_neighbors tool).")]
+    #[schemars(
+        description = "Name of previously created spatial weights (from spatial_neighbors tool)."
+    )]
     pub weights: String,
 }
 
@@ -1987,15 +2531,21 @@ pub struct SarModelRequest {
     pub x: Vec<String>,
 
     /// Name of stored spatial weights
-    #[schemars(description = "Name of previously created spatial weights (from spatial_neighbors tool).")]
+    #[schemars(
+        description = "Name of previously created spatial weights (from spatial_neighbors tool)."
+    )]
     pub weights: String,
 
     /// Spatial Durbin model (include WX)
-    #[schemars(description = "If true, estimates Spatial Durbin Model (SDM) which includes spatially lagged covariates (WX). Default is false.")]
+    #[schemars(
+        description = "If true, estimates Spatial Durbin Model (SDM) which includes spatially lagged covariates (WX). Default is false."
+    )]
     pub durbin: Option<bool>,
 
     /// Compute spatial impacts
-    #[schemars(description = "If true, computes direct, indirect, and total spatial impacts. Default is true.")]
+    #[schemars(
+        description = "If true, computes direct, indirect, and total spatial impacts. Default is true."
+    )]
     pub compute_impacts: Option<bool>,
 }
 
@@ -2015,7 +2565,9 @@ pub struct SemModelRequest {
     pub x: Vec<String>,
 
     /// Name of stored spatial weights
-    #[schemars(description = "Name of previously created spatial weights (from spatial_neighbors tool).")]
+    #[schemars(
+        description = "Name of previously created spatial weights (from spatial_neighbors tool)."
+    )]
     pub weights: String,
 }
 
@@ -2035,23 +2587,33 @@ pub struct SphetRequest {
     pub x: Vec<String>,
 
     /// Name of stored spatial weights
-    #[schemars(description = "Name of previously created spatial weights (from spatial_neighbors tool).")]
+    #[schemars(
+        description = "Name of previously created spatial weights (from spatial_neighbors tool)."
+    )]
     pub weights: String,
 
     /// Model type: 'lag' (SAR), 'error' (SEM), or 'sarar' (both)
-    #[schemars(description = "Model type: 'lag' for SAR (y=lambda*Wy+Xb+e), 'error' for SEM (y=Xb+u, u=rho*Wu+e), or 'sarar' for combined. Default is 'lag'.")]
+    #[schemars(
+        description = "Model type: 'lag' for SAR (y=lambda*Wy+Xb+e), 'error' for SEM (y=Xb+u, u=rho*Wu+e), or 'sarar' for combined. Default is 'lag'."
+    )]
     pub model: Option<String>,
 
     /// Standard error type: 'robust', 'hac', or 'standard'
-    #[schemars(description = "Standard error type: 'robust' for heteroscedasticity-robust (Kelejian-Prucha 2010), 'hac' for HAC (Kelejian-Prucha 2007), or 'standard' for homoscedastic. Default is 'robust'.")]
+    #[schemars(
+        description = "Standard error type: 'robust' for heteroscedasticity-robust (Kelejian-Prucha 2010), 'hac' for HAC (Kelejian-Prucha 2007), or 'standard' for homoscedastic. Default is 'robust'."
+    )]
     pub se_type: Option<String>,
 
     /// HAC kernel type (for se_type='hac')
-    #[schemars(description = "HAC kernel: 'bartlett', 'parzen', 'quadratic_spectral', 'tukey_hanning', or 'truncated'. Default is 'bartlett'.")]
+    #[schemars(
+        description = "HAC kernel: 'bartlett', 'parzen', 'quadratic_spectral', 'tukey_hanning', or 'truncated'. Default is 'bartlett'."
+    )]
     pub kernel: Option<String>,
 
     /// HAC bandwidth (for se_type='hac')
-    #[schemars(description = "Bandwidth for HAC estimation. If not specified, uses automatic bandwidth selection.")]
+    #[schemars(
+        description = "Bandwidth for HAC estimation. If not specified, uses automatic bandwidth selection."
+    )]
     pub bandwidth: Option<usize>,
 
     /// Instrument order (default 2)
@@ -2075,7 +2637,9 @@ pub struct SarProbitRequest {
     pub x: Vec<String>,
 
     /// Name of stored spatial weights
-    #[schemars(description = "Name of previously created spatial weights (from spatial_neighbors tool).")]
+    #[schemars(
+        description = "Name of previously created spatial weights (from spatial_neighbors tool)."
+    )]
     pub weights: String,
 
     /// Number of MCMC draws
@@ -2087,7 +2651,9 @@ pub struct SarProbitRequest {
     pub burn_in: Option<usize>,
 
     /// Compute spatial impacts
-    #[schemars(description = "If true, computes direct, indirect, and total spatial impacts. Default is true.")]
+    #[schemars(
+        description = "If true, computes direct, indirect, and total spatial impacts. Default is true."
+    )]
     pub compute_impacts: Option<bool>,
 
     /// Random seed
@@ -2111,7 +2677,9 @@ pub struct SemProbitRequest {
     pub x: Vec<String>,
 
     /// Name of stored spatial weights
-    #[schemars(description = "Name of previously created spatial weights (from spatial_neighbors tool).")]
+    #[schemars(
+        description = "Name of previously created spatial weights (from spatial_neighbors tool)."
+    )]
     pub weights: String,
 
     /// Number of MCMC draws
@@ -2151,19 +2719,27 @@ pub struct SpmlRequest {
     pub time_col: String,
 
     /// Name of stored spatial weights
-    #[schemars(description = "Name of previously created spatial weights (from spatial_neighbors tool). Must match number of cross-sectional entities.")]
+    #[schemars(
+        description = "Name of previously created spatial weights (from spatial_neighbors tool). Must match number of cross-sectional entities."
+    )]
     pub weights: String,
 
     /// Panel model type
-    #[schemars(description = "Panel model type: 'within' (fixed effects, default), 'random' (random effects), or 'pooling' (no effects).")]
+    #[schemars(
+        description = "Panel model type: 'within' (fixed effects, default), 'random' (random effects), or 'pooling' (no effects)."
+    )]
     pub model: Option<String>,
 
     /// Include spatial lag
-    #[schemars(description = "If true, includes spatial lag of dependent variable (rho*W*y). Default is false.")]
+    #[schemars(
+        description = "If true, includes spatial lag of dependent variable (rho*W*y). Default is false."
+    )]
     pub lag: Option<bool>,
 
     /// Spatial error type
-    #[schemars(description = "Spatial error specification: 'none' (default), 'baltagi' (Baltagi-type), or 'kkp' (Kapoor-Kelejian-Prucha type).")]
+    #[schemars(
+        description = "Spatial error specification: 'none' (default), 'baltagi' (Baltagi-type), or 'kkp' (Kapoor-Kelejian-Prucha type)."
+    )]
     pub spatial_error: Option<String>,
 
     /// Effect type
@@ -2195,19 +2771,27 @@ pub struct SpgmRequest {
     pub time_col: String,
 
     /// Name of stored spatial weights
-    #[schemars(description = "Name of previously created spatial weights (from spatial_neighbors tool).")]
+    #[schemars(
+        description = "Name of previously created spatial weights (from spatial_neighbors tool)."
+    )]
     pub weights: String,
 
     /// Estimation method
-    #[schemars(description = "GMM estimation method: 'w2sls' (within/fixed effects, default), 'g2sls' (GLS random effects), 'b2sls' (between), or 'ec2sls' (Baltagi EC2SLS).")]
+    #[schemars(
+        description = "GMM estimation method: 'w2sls' (within/fixed effects, default), 'g2sls' (GLS random effects), 'b2sls' (between), or 'ec2sls' (Baltagi EC2SLS)."
+    )]
     pub method: Option<String>,
 
     /// Include spatial lag
-    #[schemars(description = "If true, includes spatial lag of dependent variable (uses IV/GMM for identification). Default is false.")]
+    #[schemars(
+        description = "If true, includes spatial lag of dependent variable (uses IV/GMM for identification). Default is false."
+    )]
     pub lag: Option<bool>,
 
     /// Include spatial error
-    #[schemars(description = "If true, includes spatially correlated error term. Default is true.")]
+    #[schemars(
+        description = "If true, includes spatially correlated error term. Default is true."
+    )]
     pub spatial_error: Option<bool>,
 }
 
@@ -2223,7 +2807,9 @@ pub struct IV2SLSRequest {
     pub y: String,
 
     /// Exogenous independent variables
-    #[schemars(description = "Names of exogenous independent variable columns (not instrumented).")]
+    #[schemars(
+        description = "Names of exogenous independent variable columns (not instrumented)."
+    )]
     pub x_exog: Vec<String>,
 
     /// Endogenous variable to be instrumented
@@ -2235,7 +2821,9 @@ pub struct IV2SLSRequest {
     pub instruments: Vec<String>,
 
     /// Use robust standard errors
-    #[schemars(description = "Whether to use heteroskedasticity-robust standard errors. Default is true.")]
+    #[schemars(
+        description = "Whether to use heteroskedasticity-robust standard errors. Default is true."
+    )]
     pub robust: Option<bool>,
 }
 
@@ -2251,7 +2839,9 @@ pub struct FirstStageRequest {
     pub endogenous_var: String,
 
     /// Instrument variable names
-    #[schemars(description = "Names of the instrumental variables (e.g., ['parents_edu', 'distance_to_college']).")]
+    #[schemars(
+        description = "Names of the instrumental variables (e.g., ['parents_edu', 'distance_to_college'])."
+    )]
     pub instruments: Vec<String>,
 
     /// Control variable names (optional)
@@ -2271,7 +2861,9 @@ pub struct SarganTestRequest {
     pub y: String,
 
     /// Exogenous independent variables
-    #[schemars(description = "Names of exogenous independent variable columns (not instrumented). May be empty.")]
+    #[schemars(
+        description = "Names of exogenous independent variable columns (not instrumented). May be empty."
+    )]
     pub x_exog: Vec<String>,
 
     /// Endogenous variable to be instrumented
@@ -2279,7 +2871,9 @@ pub struct SarganTestRequest {
     pub x_endog: Vec<String>,
 
     /// Instrumental variables
-    #[schemars(description = "Names of instrument columns. Must exceed number of endogenous variables for test to be valid.")]
+    #[schemars(
+        description = "Names of instrument columns. Must exceed number of endogenous variables for test to be valid."
+    )]
     pub instruments: Vec<String>,
 }
 
@@ -2294,11 +2888,15 @@ pub struct BPBoundsRequest {
     pub dataset: String,
 
     /// Instrument column (binary 0/1)
-    #[schemars(description = "Name of the binary instrument column (Z). Example: randomized treatment assignment.")]
+    #[schemars(
+        description = "Name of the binary instrument column (Z). Example: randomized treatment assignment."
+    )]
     pub instrument: String,
 
     /// Treatment column (binary 0/1)
-    #[schemars(description = "Name of the binary treatment received column (D). Example: actual treatment uptake.")]
+    #[schemars(
+        description = "Name of the binary treatment received column (D). Example: actual treatment uptake."
+    )]
     pub treatment: String,
 
     /// Outcome column (binary 0/1)
@@ -2306,15 +2904,21 @@ pub struct BPBoundsRequest {
     pub outcome: String,
 
     /// Assume monotonicity (no defiers)
-    #[schemars(description = "Whether to assume monotonicity (no defiers). If true, bounds tighten but assumption may be violated. Default is false.")]
+    #[schemars(
+        description = "Whether to assume monotonicity (no defiers). If true, bounds tighten but assumption may be violated. Default is false."
+    )]
     pub monotonicity: Option<bool>,
 
     /// Compute bootstrap confidence intervals
-    #[schemars(description = "Whether to compute bootstrap confidence intervals for the bounds. Default is true.")]
+    #[schemars(
+        description = "Whether to compute bootstrap confidence intervals for the bounds. Default is true."
+    )]
     pub bootstrap_ci: Option<bool>,
 
     /// Number of bootstrap replications
-    #[schemars(description = "Number of bootstrap replications for confidence intervals. Default is 1000.")]
+    #[schemars(
+        description = "Number of bootstrap replications for confidence intervals. Default is 1000."
+    )]
     pub n_bootstrap: Option<usize>,
 
     /// Confidence level (1 - alpha)
@@ -2346,7 +2950,9 @@ pub struct IVMTERequest {
     pub d: String,
 
     /// Instrument column name
-    #[schemars(description = "Name of the instrumental variable (Z) column that affects treatment but not outcome directly.")]
+    #[schemars(
+        description = "Name of the instrumental variable (Z) column that affects treatment but not outcome directly."
+    )]
     pub z: String,
 
     /// Covariate columns (optional)
@@ -2354,11 +2960,15 @@ pub struct IVMTERequest {
     pub x: Option<Vec<String>>,
 
     /// Polynomial degree for MTE curve
-    #[schemars(description = "Polynomial degree for MTE approximation. Higher degrees allow more flexible MTE shapes but may overfit. Default is 2.")]
+    #[schemars(
+        description = "Polynomial degree for MTE approximation. Higher degrees allow more flexible MTE shapes but may overfit. Default is 2."
+    )]
     pub mte_degree: Option<usize>,
 
     /// Propensity score model type
-    #[schemars(description = "Propensity score model: 'probit' (default), 'logit', or 'linear'. Probit is standard in the MTE literature.")]
+    #[schemars(
+        description = "Propensity score model: 'probit' (default), 'logit', or 'linear'. Probit is standard in the MTE literature."
+    )]
     pub propensity_model: Option<String>,
 
     /// Number of grid points for MTE curve
@@ -2398,15 +3008,21 @@ pub struct StaggeredDiDRequest {
     pub outcome: String,
 
     /// Treatment timing column
-    #[schemars(description = "Column indicating when each unit was first treated (period number). Use 0 or negative for never-treated units.")]
+    #[schemars(
+        description = "Column indicating when each unit was first treated (period number). Use 0 or negative for never-treated units."
+    )]
     pub treatment_time: String,
 
     /// Time period column
-    #[schemars(description = "Column containing the time period identifier (e.g., year, quarter).")]
+    #[schemars(
+        description = "Column containing the time period identifier (e.g., year, quarter)."
+    )]
     pub time_col: String,
 
     /// Unit identifier column
-    #[schemars(description = "Column containing the unit/individual identifier (e.g., state_id, firm_id).")]
+    #[schemars(
+        description = "Column containing the unit/individual identifier (e.g., state_id, firm_id)."
+    )]
     pub unit_col: String,
 
     /// Covariate columns (optional)
@@ -2414,19 +3030,27 @@ pub struct StaggeredDiDRequest {
     pub covariates: Option<Vec<String>>,
 
     /// Comparison group strategy
-    #[schemars(description = "Comparison group: 'never_treated' (default) uses only never-treated units, 'not_yet_treated' uses units not yet treated by that period.")]
+    #[schemars(
+        description = "Comparison group: 'never_treated' (default) uses only never-treated units, 'not_yet_treated' uses units not yet treated by that period."
+    )]
     pub comparison_group: Option<String>,
 
     /// Estimation method
-    #[schemars(description = "Estimation method: 'outcome_regression' (default), 'ipw', or 'doubly_robust'.")]
+    #[schemars(
+        description = "Estimation method: 'outcome_regression' (default), 'ipw', or 'doubly_robust'."
+    )]
     pub estimation_method: Option<String>,
 
     /// Base period relative to treatment
-    #[schemars(description = "Base period for pre-treatment comparison, relative to g. Default is -1 (one period before treatment).")]
+    #[schemars(
+        description = "Base period for pre-treatment comparison, relative to g. Default is -1 (one period before treatment)."
+    )]
     pub base_period: Option<i32>,
 
     /// Number of bootstrap replications
-    #[schemars(description = "Number of bootstrap replications for standard errors. Default is 999.")]
+    #[schemars(
+        description = "Number of bootstrap replications for standard errors. Default is 999."
+    )]
     pub bootstrap: Option<usize>,
 }
 
@@ -2434,7 +3058,9 @@ pub struct StaggeredDiDRequest {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct BaconDecompRequest {
     /// Name/ID of the dataset
-    #[schemars(description = "Name or ID of a previously loaded panel dataset with staggered treatment.")]
+    #[schemars(
+        description = "Name or ID of a previously loaded panel dataset with staggered treatment."
+    )]
     pub dataset: String,
 
     /// Outcome variable column name
@@ -2442,15 +3068,21 @@ pub struct BaconDecompRequest {
     pub outcome: String,
 
     /// Unit identifier column
-    #[schemars(description = "Column containing the unit/individual identifier (e.g., state_id, firm_id).")]
+    #[schemars(
+        description = "Column containing the unit/individual identifier (e.g., state_id, firm_id)."
+    )]
     pub unit_col: String,
 
     /// Time period column
-    #[schemars(description = "Column containing the time period identifier (e.g., year, quarter).")]
+    #[schemars(
+        description = "Column containing the time period identifier (e.g., year, quarter)."
+    )]
     pub time_col: String,
 
     /// Treatment indicator column
-    #[schemars(description = "Binary treatment indicator column (0 = untreated, 1 = treated). Should be 0 before treatment and 1 after for each unit.")]
+    #[schemars(
+        description = "Binary treatment indicator column (0 = untreated, 1 = treated). Should be 0 before treatment and 1 after for each unit."
+    )]
     pub treatment_col: String,
 }
 
@@ -2466,19 +3098,27 @@ pub struct EtwfeRequest {
     pub outcome: String,
 
     /// Unit identifier column
-    #[schemars(description = "Column containing the unit/individual identifier (e.g., state_id, firm_id).")]
+    #[schemars(
+        description = "Column containing the unit/individual identifier (e.g., state_id, firm_id)."
+    )]
     pub unit_col: String,
 
     /// Time period column
-    #[schemars(description = "Column containing the time period identifier (e.g., year, quarter).")]
+    #[schemars(
+        description = "Column containing the time period identifier (e.g., year, quarter)."
+    )]
     pub time_col: String,
 
     /// Treatment indicator column
-    #[schemars(description = "Column indicating treatment status (1 = currently treated, 0 = not treated). Binary indicator.")]
+    #[schemars(
+        description = "Column indicating treatment status (1 = currently treated, 0 = not treated). Binary indicator."
+    )]
     pub treatment: String,
 
     /// First treatment period column
-    #[schemars(description = "Column indicating when each unit was first treated (period number). Use 0 for never-treated units.")]
+    #[schemars(
+        description = "Column indicating when each unit was first treated (period number). Use 0 for never-treated units."
+    )]
     pub first_treat: String,
 
     /// Control variables (optional)
@@ -2486,7 +3126,9 @@ pub struct EtwfeRequest {
     pub controls: Option<Vec<String>>,
 
     /// Control group strategy
-    #[schemars(description = "Control group: 'notyet' (default) uses not-yet-treated units, 'never' uses only never-treated units.")]
+    #[schemars(
+        description = "Control group: 'notyet' (default) uses not-yet-treated units, 'never' uses only never-treated units."
+    )]
     pub cgroup: Option<String>,
 }
 
@@ -2502,7 +3144,9 @@ pub struct IpwRequest {
     pub outcome: String,
 
     /// Treatment indicator column (0/1)
-    #[schemars(description = "Column indicating treatment status (1 = treated, 0 = control). Must be binary.")]
+    #[schemars(
+        description = "Column indicating treatment status (1 = treated, 0 = control). Must be binary."
+    )]
     pub treatment: String,
 
     /// Covariate columns for propensity score model
@@ -2510,15 +3154,21 @@ pub struct IpwRequest {
     pub covariates: Vec<String>,
 
     /// Estimand: 'ate' (Average Treatment Effect) or 'att' (Average Treatment Effect on Treated)
-    #[schemars(description = "Treatment effect estimand: 'ate' for Average Treatment Effect (default), 'att' for Average Treatment Effect on Treated.")]
+    #[schemars(
+        description = "Treatment effect estimand: 'ate' for Average Treatment Effect (default), 'att' for Average Treatment Effect on Treated."
+    )]
     pub estimand: Option<String>,
 
     /// Trimming threshold for extreme propensity scores
-    #[schemars(description = "Trim observations with propensity scores below trim or above 1-trim. Default is 0.05.")]
+    #[schemars(
+        description = "Trim observations with propensity scores below trim or above 1-trim. Default is 0.05."
+    )]
     pub trim: Option<f64>,
 
     /// Number of bootstrap replications for standard errors
-    #[schemars(description = "Number of bootstrap replications for standard error estimation. Default is 999.")]
+    #[schemars(
+        description = "Number of bootstrap replications for standard error estimation. Default is 999."
+    )]
     pub bootstrap: Option<usize>,
 }
 
@@ -2534,27 +3184,39 @@ pub struct DoublyRobustRequest {
     pub outcome: String,
 
     /// Treatment indicator column (0/1)
-    #[schemars(description = "Column indicating treatment status (1 = treated, 0 = control). Must be binary.")]
+    #[schemars(
+        description = "Column indicating treatment status (1 = treated, 0 = control). Must be binary."
+    )]
     pub treatment: String,
 
     /// Covariate columns for propensity score and outcome models
-    #[schemars(description = "Names of covariate columns to include in both propensity score and outcome models.")]
+    #[schemars(
+        description = "Names of covariate columns to include in both propensity score and outcome models."
+    )]
     pub covariates: Vec<String>,
 
     /// Estimation method: 'aipw' (default), 'ipw', or 'regression'
-    #[schemars(description = "Estimation method: 'aipw' for Augmented IPW (default, doubly robust), 'ipw' for IPW only, 'regression' for outcome regression only.")]
+    #[schemars(
+        description = "Estimation method: 'aipw' for Augmented IPW (default, doubly robust), 'ipw' for IPW only, 'regression' for outcome regression only."
+    )]
     pub method: Option<String>,
 
     /// Estimand: 'ate' (Average Treatment Effect) or 'att' (Average Treatment Effect on Treated)
-    #[schemars(description = "Treatment effect estimand: 'ate' for Average Treatment Effect (default), 'att' for Average Treatment Effect on Treated.")]
+    #[schemars(
+        description = "Treatment effect estimand: 'ate' for Average Treatment Effect (default), 'att' for Average Treatment Effect on Treated."
+    )]
     pub estimand: Option<String>,
 
     /// Trimming threshold for extreme propensity scores
-    #[schemars(description = "Trim observations with propensity scores below trim or above 1-trim. Default is 0.05.")]
+    #[schemars(
+        description = "Trim observations with propensity scores below trim or above 1-trim. Default is 0.05."
+    )]
     pub trim: Option<f64>,
 
     /// Number of bootstrap replications for standard errors
-    #[schemars(description = "Number of bootstrap replications for standard error estimation. Default is 999.")]
+    #[schemars(
+        description = "Number of bootstrap replications for standard error estimation. Default is 999."
+    )]
     pub bootstrap: Option<usize>,
 }
 
@@ -2570,7 +3232,9 @@ pub struct DoubleMLRequest {
     pub outcome: String,
 
     /// Treatment variable column name
-    #[schemars(description = "Name of the treatment variable column (D). Can be continuous or binary.")]
+    #[schemars(
+        description = "Name of the treatment variable column (D). Can be continuous or binary."
+    )]
     pub treatment: String,
 
     /// Covariate columns for nuisance model estimation
@@ -2578,19 +3242,27 @@ pub struct DoubleMLRequest {
     pub covariates: Vec<String>,
 
     /// Model type: 'plr' (Partially Linear Regression, default) or 'irm' (Interactive Regression Model)
-    #[schemars(description = "DML model type: 'plr' for Partially Linear Regression (default, Y = theta*D + g(X) + eps), 'irm' for Interactive Regression Model (binary treatment, heterogeneous effects).")]
+    #[schemars(
+        description = "DML model type: 'plr' for Partially Linear Regression (default, Y = theta*D + g(X) + eps), 'irm' for Interactive Regression Model (binary treatment, heterogeneous effects)."
+    )]
     pub model_type: Option<String>,
 
     /// Number of cross-fitting folds (default: 5)
-    #[schemars(description = "Number of folds for cross-fitting. Default is 5. Must be at least 2.")]
+    #[schemars(
+        description = "Number of folds for cross-fitting. Default is 5. Must be at least 2."
+    )]
     pub n_folds: Option<usize>,
 
     /// Random seed for reproducible fold splits
-    #[schemars(description = "Random seed for reproducible cross-fitting splits. If omitted, uses random seed.")]
+    #[schemars(
+        description = "Random seed for reproducible cross-fitting splits. If omitted, uses random seed."
+    )]
     pub seed: Option<u64>,
 
     /// Trimming threshold for propensity scores (IRM only)
-    #[schemars(description = "Trim propensity scores to [trim, 1-trim] for IRM model. Default is 0.01.")]
+    #[schemars(
+        description = "Trim propensity scores to [trim, 1-trim] for IRM model. Default is 0.01."
+    )]
     pub trim: Option<f64>,
 }
 
@@ -2602,7 +3274,9 @@ pub struct CbpsRequest {
     pub dataset: String,
 
     /// Treatment indicator column (0/1)
-    #[schemars(description = "Column indicating treatment status (1 = treated, 0 = control). Must be binary.")]
+    #[schemars(
+        description = "Column indicating treatment status (1 = treated, 0 = control). Must be binary."
+    )]
     pub treatment: String,
 
     /// Covariate columns for propensity score model
@@ -2610,11 +3284,15 @@ pub struct CbpsRequest {
     pub covariates: Vec<String>,
 
     /// CBPS method: 'exact' (default), 'over', or 'just'
-    #[schemars(description = "CBPS method: 'exact' for exact balance (default, overidentified), 'over' for over-balanced, 'just' for just-identified (standard logit).")]
+    #[schemars(
+        description = "CBPS method: 'exact' for exact balance (default, overidentified), 'over' for over-balanced, 'just' for just-identified (standard logit)."
+    )]
     pub method: Option<String>,
 
     /// Standardized difference threshold for balance
-    #[schemars(description = "Threshold for standardized difference to consider a covariate balanced. Default is 0.1.")]
+    #[schemars(
+        description = "Threshold for standardized difference to consider a covariate balanced. Default is 0.1."
+    )]
     pub balance_threshold: Option<f64>,
 }
 
@@ -2626,7 +3304,9 @@ pub struct WeightItRequest {
     pub dataset: String,
 
     /// Treatment indicator column (0/1)
-    #[schemars(description = "Column indicating treatment status (1 = treated, 0 = control). Must be binary.")]
+    #[schemars(
+        description = "Column indicating treatment status (1 = treated, 0 = control). Must be binary."
+    )]
     pub treatment: String,
 
     /// Covariate columns for balance
@@ -2634,19 +3314,27 @@ pub struct WeightItRequest {
     pub covariates: Vec<String>,
 
     /// Weighting method: 'logistic' (default), 'entropy', 'energy', or 'stable'
-    #[schemars(description = "Weighting method: 'logistic' (standard PS, default), 'entropy' (entropy balancing), 'energy' (energy distance), 'stable' (stable weights).")]
+    #[schemars(
+        description = "Weighting method: 'logistic' (standard PS, default), 'entropy' (entropy balancing), 'energy' (energy distance), 'stable' (stable weights)."
+    )]
     pub method: Option<String>,
 
     /// Target estimand: 'ate' (default), 'att', or 'atc'
-    #[schemars(description = "Target estimand: 'ate' (average treatment effect, default), 'att' (on treated), 'atc' (on control).")]
+    #[schemars(
+        description = "Target estimand: 'ate' (average treatment effect, default), 'att' (on treated), 'atc' (on control)."
+    )]
     pub estimand: Option<String>,
 
     /// Whether to stabilize weights
-    #[schemars(description = "Whether to stabilize weights by multiplying by marginal treatment probability. Default is false.")]
+    #[schemars(
+        description = "Whether to stabilize weights by multiplying by marginal treatment probability. Default is false."
+    )]
     pub stabilize: Option<bool>,
 
     /// Trimming quantile for extreme weights
-    #[schemars(description = "Quantile for trimming extreme weights (e.g., 0.99 trims at 1st and 99th percentile). Default is 1.0 (no trimming).")]
+    #[schemars(
+        description = "Quantile for trimming extreme weights (e.g., 0.99 trims at 1st and 99th percentile). Default is 1.0 (no trimming)."
+    )]
     pub trim_quantile: Option<f64>,
 }
 
@@ -2658,7 +3346,9 @@ pub struct EntropyBalanceRequest {
     pub dataset: String,
 
     /// Treatment indicator column (0/1)
-    #[schemars(description = "Column indicating treatment status (1 = treated, 0 = control). Must be binary.")]
+    #[schemars(
+        description = "Column indicating treatment status (1 = treated, 0 = control). Must be binary."
+    )]
     pub treatment: String,
 
     /// Covariate columns for balance
@@ -2666,7 +3356,9 @@ pub struct EntropyBalanceRequest {
     pub covariates: Vec<String>,
 
     /// Optional target means (defaults to treated group means for ATT)
-    #[schemars(description = "Optional target means for covariates. If not provided, uses treated group means (ATT).")]
+    #[schemars(
+        description = "Optional target means for covariates. If not provided, uses treated group means (ATT)."
+    )]
     pub target_means: Option<Vec<f64>>,
 }
 
@@ -2678,7 +3370,9 @@ pub struct SBWRequest {
     pub dataset: String,
 
     /// Treatment indicator column (0/1)
-    #[schemars(description = "Column indicating treatment status (1 = treated, 0 = control). Must be binary.")]
+    #[schemars(
+        description = "Column indicating treatment status (1 = treated, 0 = control). Must be binary."
+    )]
     pub treatment: String,
 
     /// Covariate columns for balance
@@ -2686,11 +3380,15 @@ pub struct SBWRequest {
     pub covariates: Vec<String>,
 
     /// Target estimand: 'att' (default), 'ate', or 'atc'
-    #[schemars(description = "Target estimand: 'att' (effect on treated, default), 'ate' (average treatment effect), 'atc' (effect on control).")]
+    #[schemars(
+        description = "Target estimand: 'att' (effect on treated, default), 'ate' (average treatment effect), 'atc' (effect on control)."
+    )]
     pub estimand: Option<String>,
 
     /// Balance tolerance for approximate balance (0 = exact balance)
-    #[schemars(description = "Tolerance for approximate balance. 0 means exact balance (default), positive values allow some deviation.")]
+    #[schemars(
+        description = "Tolerance for approximate balance. 0 means exact balance (default), positive values allow some deviation."
+    )]
     pub balance_tol: Option<f64>,
 
     /// Minimum weight allowed (default 0 for non-negativity)
@@ -2698,7 +3396,9 @@ pub struct SBWRequest {
     pub min_weight: Option<f64>,
 
     /// Penalty parameter for approximate balance (higher = stricter balance)
-    #[schemars(description = "Penalty parameter for approximate balance. Higher values enforce stricter balance. Default is 1000.")]
+    #[schemars(
+        description = "Penalty parameter for approximate balance. Higher values enforce stricter balance. Default is 1000."
+    )]
     pub balance_penalty: Option<f64>,
 }
 
@@ -2710,19 +3410,27 @@ pub struct TwangRequest {
     pub dataset: String,
 
     /// Treatment indicator column (0/1)
-    #[schemars(description = "Column indicating treatment status (1 = treated, 0 = control). Must be binary.")]
+    #[schemars(
+        description = "Column indicating treatment status (1 = treated, 0 = control). Must be binary."
+    )]
     pub treatment: String,
 
     /// Covariate columns for propensity model
-    #[schemars(description = "Names of covariate columns to include in the GBM propensity score model.")]
+    #[schemars(
+        description = "Names of covariate columns to include in the GBM propensity score model."
+    )]
     pub covariates: Vec<String>,
 
     /// Stopping rule: 'es.mean' (default), 'es.max', 'ks.mean', 'ks.max'
-    #[schemars(description = "Stopping rule for selecting optimal iterations: 'es.mean' (mean standardized effect size, default), 'es.max' (max effect size), 'ks.mean' (mean KS statistic), 'ks.max' (max KS statistic).")]
+    #[schemars(
+        description = "Stopping rule for selecting optimal iterations: 'es.mean' (mean standardized effect size, default), 'es.max' (max effect size), 'ks.mean' (mean KS statistic), 'ks.max' (max KS statistic)."
+    )]
     pub stop_method: Option<String>,
 
     /// Target estimand: 'att' (default), 'ate', or 'atc'
-    #[schemars(description = "Target estimand: 'att' (effect on treated, default), 'ate' (average treatment effect), 'atc' (effect on control).")]
+    #[schemars(
+        description = "Target estimand: 'att' (effect on treated, default), 'ate' (average treatment effect), 'atc' (effect on control)."
+    )]
     pub estimand: Option<String>,
 
     /// Maximum number of boosting iterations (default: 3000)
@@ -2730,7 +3438,9 @@ pub struct TwangRequest {
     pub n_trees: Option<usize>,
 
     /// Learning rate / shrinkage (default: 0.01)
-    #[schemars(description = "Learning rate for gradient boosting. Smaller values need more iterations but often give better results. Default is 0.01.")]
+    #[schemars(
+        description = "Learning rate for gradient boosting. Smaller values need more iterations but often give better results. Default is 0.01."
+    )]
     pub shrinkage: Option<f64>,
 
     /// Balance threshold for early stopping (default: 0.1)
@@ -2746,7 +3456,9 @@ pub struct MatchItRequest {
     pub dataset: String,
 
     /// Treatment indicator column (0/1)
-    #[schemars(description = "Column indicating treatment status (1 = treated, 0 = control). Must be binary.")]
+    #[schemars(
+        description = "Column indicating treatment status (1 = treated, 0 = control). Must be binary."
+    )]
     pub treatment: String,
 
     /// Covariate columns for matching
@@ -2754,27 +3466,39 @@ pub struct MatchItRequest {
     pub covariates: Vec<String>,
 
     /// Matching method: 'nearest' (default), 'cem', 'full', or 'subclass'
-    #[schemars(description = "Matching method: 'nearest' (nearest neighbor, default), 'cem' (coarsened exact matching), 'full' (full/optimal matching), 'subclass' (propensity score subclassification).")]
+    #[schemars(
+        description = "Matching method: 'nearest' (nearest neighbor, default), 'cem' (coarsened exact matching), 'full' (full/optimal matching), 'subclass' (propensity score subclassification)."
+    )]
     pub method: Option<String>,
 
     /// Distance metric: 'logit' (default), 'probit', 'mahalanobis', or 'euclidean'
-    #[schemars(description = "Distance metric: 'logit' (propensity score via logit, default), 'probit', 'mahalanobis', 'euclidean'.")]
+    #[schemars(
+        description = "Distance metric: 'logit' (propensity score via logit, default), 'probit', 'mahalanobis', 'euclidean'."
+    )]
     pub distance: Option<String>,
 
     /// Matching ratio (1:k matching, default k=1)
-    #[schemars(description = "For nearest neighbor: number of controls per treated unit (1:k matching). Default is 1.")]
+    #[schemars(
+        description = "For nearest neighbor: number of controls per treated unit (1:k matching). Default is 1."
+    )]
     pub ratio: Option<usize>,
 
     /// Caliper width (in SD of propensity score)
-    #[schemars(description = "For nearest neighbor: maximum distance for a valid match, in SD of propensity score. Default is no caliper.")]
+    #[schemars(
+        description = "For nearest neighbor: maximum distance for a valid match, in SD of propensity score. Default is no caliper."
+    )]
     pub caliper: Option<f64>,
 
     /// Whether to sample with replacement
-    #[schemars(description = "For nearest neighbor: whether to sample controls with replacement. Default is false.")]
+    #[schemars(
+        description = "For nearest neighbor: whether to sample controls with replacement. Default is false."
+    )]
     pub replace: Option<bool>,
 
     /// Number of subclasses for subclassification
-    #[schemars(description = "For subclassification: number of subclasses to create. Default is 5.")]
+    #[schemars(
+        description = "For subclassification: number of subclasses to create. Default is 5."
+    )]
     pub n_subclasses: Option<usize>,
 }
 
@@ -2790,15 +3514,21 @@ pub struct TmleRequest {
     pub outcome: String,
 
     /// Treatment indicator column (0/1)
-    #[schemars(description = "Column indicating treatment status (1 = treated, 0 = control). Must be binary.")]
+    #[schemars(
+        description = "Column indicating treatment status (1 = treated, 0 = control). Must be binary."
+    )]
     pub treatment: String,
 
     /// Covariate columns for propensity score and outcome models
-    #[schemars(description = "Names of covariate columns to include in both propensity score and outcome models.")]
+    #[schemars(
+        description = "Names of covariate columns to include in both propensity score and outcome models."
+    )]
     pub covariates: Vec<String>,
 
     /// Outcome model type: 'logistic' (default) or 'linear'
-    #[schemars(description = "Outcome model type: 'logistic' for binary outcomes (default), 'linear' for continuous outcomes.")]
+    #[schemars(
+        description = "Outcome model type: 'logistic' for binary outcomes (default), 'linear' for continuous outcomes."
+    )]
     pub q_model: Option<String>,
 
     /// Lower bound for propensity score truncation
@@ -2822,27 +3552,39 @@ pub struct CTmleRequest {
     pub outcome: String,
 
     /// Treatment indicator column (0/1)
-    #[schemars(description = "Column indicating treatment status (1 = treated, 0 = control). Must be binary.")]
+    #[schemars(
+        description = "Column indicating treatment status (1 = treated, 0 = control). Must be binary."
+    )]
     pub treatment: String,
 
     /// Covariate columns (candidates for propensity score selection)
-    #[schemars(description = "Names of candidate covariate columns. C-TMLE will select which ones to include in the propensity score model via cross-validation.")]
+    #[schemars(
+        description = "Names of candidate covariate columns. C-TMLE will select which ones to include in the propensity score model via cross-validation."
+    )]
     pub covariates: Vec<String>,
 
     /// Outcome model type: 'logistic' (default) or 'linear'
-    #[schemars(description = "Outcome model type: 'logistic' for binary outcomes (default), 'linear' for continuous outcomes.")]
+    #[schemars(
+        description = "Outcome model type: 'logistic' for binary outcomes (default), 'linear' for continuous outcomes."
+    )]
     pub q_model: Option<String>,
 
     /// Number of cross-validation folds (default: 5)
-    #[schemars(description = "Number of cross-validation folds for covariate selection. Default is 5.")]
+    #[schemars(
+        description = "Number of cross-validation folds for covariate selection. Default is 5."
+    )]
     pub n_folds: Option<usize>,
 
     /// Maximum number of covariates to select (optional)
-    #[schemars(description = "Maximum number of covariates to include in propensity score model. Default is no limit.")]
+    #[schemars(
+        description = "Maximum number of covariates to include in propensity score model. Default is no limit."
+    )]
     pub max_covariates: Option<usize>,
 
     /// Stopping rule: 'cv_minimum' (default), 'one_se', or 'max_covariates'
-    #[schemars(description = "Stopping rule for selection: 'cv_minimum' (stop at minimum CV risk, default), 'one_se' (one-standard-error rule for parsimony), 'max_covariates' (use max_covariates parameter).")]
+    #[schemars(
+        description = "Stopping rule for selection: 'cv_minimum' (stop at minimum CV risk, default), 'one_se' (one-standard-error rule for parsimony), 'max_covariates' (use max_covariates parameter)."
+    )]
     pub stopping_rule: Option<String>,
 
     /// Lower bound for propensity score truncation (default: 0.025)
@@ -2862,19 +3604,27 @@ pub struct LtmleRequest {
     pub dataset: String,
 
     /// Outcome column names at each time point (chronological order)
-    #[schemars(description = "Names of outcome variable columns at each time point. For survival outcomes, only the last time point may have the actual outcome; earlier can be zeros.")]
+    #[schemars(
+        description = "Names of outcome variable columns at each time point. For survival outcomes, only the last time point may have the actual outcome; earlier can be zeros."
+    )]
     pub outcomes: Vec<String>,
 
     /// Treatment column names at each time point (chronological order)
-    #[schemars(description = "Names of treatment indicator columns at each time point. Must be binary (0 or 1).")]
+    #[schemars(
+        description = "Names of treatment indicator columns at each time point. Must be binary (0 or 1)."
+    )]
     pub treatments: Vec<String>,
 
     /// Covariate column names at each time point (chronological order, comma-separated within each time point)
-    #[schemars(description = "Names of covariate columns at each time point. Each element is a comma-separated list of column names for that time point.")]
+    #[schemars(
+        description = "Names of covariate columns at each time point. Each element is a comma-separated list of column names for that time point."
+    )]
     pub covariates: Vec<String>,
 
     /// Outcome model type: 'linear' (default) or 'logistic'
-    #[schemars(description = "Outcome model type: 'linear' for continuous outcomes (default), 'logistic' for binary outcomes.")]
+    #[schemars(
+        description = "Outcome model type: 'linear' for continuous outcomes (default), 'logistic' for binary outcomes."
+    )]
     pub q_model: Option<String>,
 
     /// Lower bound for propensity score truncation
@@ -2898,7 +3648,9 @@ pub struct StdRegRequest {
     pub outcome: String,
 
     /// Treatment indicator column (0/1)
-    #[schemars(description = "Column indicating treatment status (1 = treated, 0 = control). Must be binary.")]
+    #[schemars(
+        description = "Column indicating treatment status (1 = treated, 0 = control). Must be binary."
+    )]
     pub treatment: String,
 
     /// Covariate columns for the outcome model
@@ -2906,28 +3658,120 @@ pub struct StdRegRequest {
     pub covariates: Vec<String>,
 
     /// Outcome model type: 'linear' (default), 'logistic', or 'poisson'
-    #[schemars(description = "Outcome model type: 'linear' for continuous outcomes (default), 'logistic' for binary outcomes, 'poisson' for count outcomes.")]
+    #[schemars(
+        description = "Outcome model type: 'linear' for continuous outcomes (default), 'logistic' for binary outcomes, 'poisson' for count outcomes."
+    )]
     pub model_type: Option<String>,
 
     /// Estimand: 'ate' (default), 'att', 'atc', or 'levels'
-    #[schemars(description = "Target estimand: 'ate' (Average Treatment Effect, default), 'att' (ATT on Treated), 'atc' (ATC on Controls), 'levels' (E[Y(1)] and E[Y(0)] separately).")]
+    #[schemars(
+        description = "Target estimand: 'ate' (Average Treatment Effect, default), 'att' (ATT on Treated), 'atc' (ATC on Controls), 'levels' (E[Y(1)] and E[Y(0)] separately)."
+    )]
     pub estimand: Option<String>,
 
     /// SE method: 'bootstrap' (default), 'delta', or 'sandwich'
-    #[schemars(description = "Standard error method: 'bootstrap' (default, recommended), 'delta' (analytical), 'sandwich' (robust).")]
+    #[schemars(
+        description = "Standard error method: 'bootstrap' (default, recommended), 'delta' (analytical), 'sandwich' (robust)."
+    )]
     pub se_method: Option<String>,
 
     /// Number of bootstrap replications (if using bootstrap SE)
-    #[schemars(description = "Number of bootstrap replications for SE estimation. Default is 999.")]
+    #[schemars(
+        description = "Number of bootstrap replications for SE estimation. Default is 999."
+    )]
     pub n_bootstrap: Option<usize>,
 
     /// Whether to include treatment-covariate interactions
-    #[schemars(description = "Include treatment-covariate interactions in outcome model. Default is false.")]
+    #[schemars(
+        description = "Include treatment-covariate interactions in outcome model. Default is false."
+    )]
     pub interactions: Option<bool>,
 
     /// Confidence level (e.g., 0.95 for 95% CI)
     #[schemars(description = "Confidence level for intervals. Default is 0.95.")]
     pub confidence_level: Option<f64>,
+}
+
+/// Request for Parametric G-Formula with time-varying treatments.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct GFormulaRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded panel dataset.")]
+    pub dataset: String,
+
+    /// Outcome variable column name (observed at final time point)
+    #[schemars(description = "Name of the outcome variable column.")]
+    pub outcome: String,
+
+    /// Baseline (time-invariant) covariate column names
+    #[schemars(description = "Names of baseline covariates that do not change over time.")]
+    pub baseline_covariates: Vec<String>,
+
+    /// Time-varying covariate column names (must have suffix _t0, _t1, etc.)
+    #[schemars(
+        description = "Base names of time-varying covariates. Columns must be named as 'varname_t0', 'varname_t1', etc. for each time point."
+    )]
+    pub time_varying_covariates: Vec<String>,
+
+    /// Treatment column names for each time point (e.g., ['treat_t0', 'treat_t1'])
+    #[schemars(
+        description = "Column names for treatment at each time point. Order matters: first element is treatment at t=0, second at t=1, etc."
+    )]
+    pub treatment_cols: Vec<String>,
+
+    /// Number of time points
+    #[schemars(
+        description = "Number of time points in the analysis (must match number of treatment columns)."
+    )]
+    pub time_points: usize,
+
+    /// Intervention type: 'always_treat', 'never_treat', 'natural', or 'threshold'
+    #[schemars(
+        description = "Intervention type: 'always_treat' (default), 'never_treat', 'natural' (observed patterns), or 'threshold'."
+    )]
+    pub intervention: Option<String>,
+
+    /// For threshold intervention: variable index (0-indexed into time-varying covariates)
+    #[schemars(
+        description = "For threshold intervention: index of the time-varying covariate to check (0-indexed)."
+    )]
+    pub threshold_variable: Option<usize>,
+
+    /// For threshold intervention: cutoff value
+    #[schemars(
+        description = "For threshold intervention: threshold value for treatment decision."
+    )]
+    pub threshold_cutoff: Option<f64>,
+
+    /// For threshold intervention: treat if above (true) or below (false)
+    #[schemars(
+        description = "For threshold intervention: if true, treat when variable > cutoff; if false, treat when variable <= cutoff."
+    )]
+    pub threshold_above: Option<bool>,
+
+    /// Outcome type: 'continuous' (default), 'binary', or 'survival'
+    #[schemars(
+        description = "Outcome type: 'continuous' for linear model (default), 'binary' for logistic model, 'survival' for discrete hazard model."
+    )]
+    pub outcome_type: Option<String>,
+
+    /// Number of Monte Carlo simulations (default: 1000)
+    #[schemars(description = "Number of Monte Carlo simulations. Default is 1000.")]
+    pub n_simulations: Option<usize>,
+
+    /// Number of bootstrap samples for standard errors (default: 200)
+    #[schemars(
+        description = "Number of bootstrap samples for standard error estimation. Default is 200."
+    )]
+    pub n_bootstrap: Option<usize>,
+
+    /// Confidence level (default: 0.95)
+    #[schemars(description = "Confidence level for intervals. Default is 0.95.")]
+    pub confidence_level: Option<f64>,
+
+    /// Random seed for reproducibility
+    #[schemars(description = "Optional random seed for reproducible results.")]
+    pub seed: Option<u64>,
 }
 
 /// Request for Causal Mediation Analysis.
@@ -2942,23 +3786,33 @@ pub struct MediationRequest {
     pub outcome: String,
 
     /// Treatment indicator column (0/1)
-    #[schemars(description = "Column indicating treatment status (1 = treated, 0 = control). Must be binary.")]
+    #[schemars(
+        description = "Column indicating treatment status (1 = treated, 0 = control). Must be binary."
+    )]
     pub treatment: String,
 
     /// Mediator variable column name
-    #[schemars(description = "Name of the mediator variable column - the intermediate variable through which treatment may affect the outcome.")]
+    #[schemars(
+        description = "Name of the mediator variable column - the intermediate variable through which treatment may affect the outcome."
+    )]
     pub mediator: String,
 
     /// Covariate columns for propensity score models
-    #[schemars(description = "Names of covariate columns for adjustment in propensity score models.")]
+    #[schemars(
+        description = "Names of covariate columns for adjustment in propensity score models."
+    )]
     pub covariates: Vec<String>,
 
     /// Trimming threshold for extreme propensity scores
-    #[schemars(description = "Trim observations with propensity scores below trim or above 1-trim. Default is 0.05.")]
+    #[schemars(
+        description = "Trim observations with propensity scores below trim or above 1-trim. Default is 0.05."
+    )]
     pub trim: Option<f64>,
 
     /// Number of bootstrap replications for standard errors
-    #[schemars(description = "Number of bootstrap replications for standard error estimation. Default is 999.")]
+    #[schemars(
+        description = "Number of bootstrap replications for standard error estimation. Default is 999."
+    )]
     pub bootstrap: Option<usize>,
 }
 
@@ -2974,31 +3828,45 @@ pub struct NaturalEffectsRequest {
     pub outcome: String,
 
     /// Treatment indicator column (0/1)
-    #[schemars(description = "Column indicating treatment status (1 = treated, 0 = control). Typically binary.")]
+    #[schemars(
+        description = "Column indicating treatment status (1 = treated, 0 = control). Typically binary."
+    )]
     pub treatment: String,
 
     /// Mediator variable column name
-    #[schemars(description = "Name of the mediator variable column - the intermediate variable through which treatment may affect the outcome.")]
+    #[schemars(
+        description = "Name of the mediator variable column - the intermediate variable through which treatment may affect the outcome."
+    )]
     pub mediator: String,
 
     /// Confounder columns for adjustment
-    #[schemars(description = "Names of confounder columns for adjustment in mediator and outcome models. Can be empty.")]
+    #[schemars(
+        description = "Names of confounder columns for adjustment in mediator and outcome models. Can be empty."
+    )]
     pub confounders: Option<Vec<String>>,
 
     /// Whether to include treatment-mediator interaction
-    #[schemars(description = "Include treatment-mediator interaction term in outcome model. Default is true. Set to false for simple product-of-coefficients decomposition.")]
+    #[schemars(
+        description = "Include treatment-mediator interaction term in outcome model. Default is true. Set to false for simple product-of-coefficients decomposition."
+    )]
     pub allow_interaction: Option<bool>,
 
     /// Number of bootstrap replications for standard errors
-    #[schemars(description = "Number of bootstrap replications for confidence intervals. Default is 1000. Set to 0 to use delta method instead.")]
+    #[schemars(
+        description = "Number of bootstrap replications for confidence intervals. Default is 1000. Set to 0 to use delta method instead."
+    )]
     pub n_bootstrap: Option<usize>,
 
     /// Confidence level for intervals
-    #[schemars(description = "Confidence level for intervals (e.g., 0.95 for 95% CI). Default is 0.95.")]
+    #[schemars(
+        description = "Confidence level for intervals (e.g., 0.95 for 95% CI). Default is 0.95."
+    )]
     pub confidence_level: Option<f64>,
 
     /// Effect scale (difference, ratio, odds_ratio)
-    #[schemars(description = "Scale for reporting effects: 'difference' (default for continuous outcomes), 'ratio' (for log-link), 'odds_ratio' (for logit).")]
+    #[schemars(
+        description = "Scale for reporting effects: 'difference' (default for continuous outcomes), 'ratio' (for log-link), 'odds_ratio' (for logit)."
+    )]
     pub scale: Option<String>,
 }
 
@@ -3014,7 +3882,9 @@ pub struct SynthPredictorSpec {
     pub aggregation: Option<String>,
 
     /// Optional time window (start, end) for aggregation
-    #[schemars(description = "Time window for predictor aggregation as [start, end]. If omitted, uses all pre-treatment periods.")]
+    #[schemars(
+        description = "Time window for predictor aggregation as [start, end]. If omitted, uses all pre-treatment periods."
+    )]
     pub time_window: Option<(i64, i64)>,
 }
 
@@ -3034,7 +3904,9 @@ pub struct SyntheticControlRequest {
     pub unit_col: String,
 
     /// Time period column name
-    #[schemars(description = "Name of the column identifying time periods (must be integer, e.g., 'year').")]
+    #[schemars(
+        description = "Name of the column identifying time periods (must be integer, e.g., 'year')."
+    )]
     pub time_col: String,
 
     /// Name/ID of the treated unit
@@ -3042,27 +3914,39 @@ pub struct SyntheticControlRequest {
     pub treated_unit: String,
 
     /// Treatment time (first post-treatment period)
-    #[schemars(description = "First post-treatment period (treatment starts at or after this time).")]
+    #[schemars(
+        description = "First post-treatment period (treatment starts at or after this time)."
+    )]
     pub treatment_time: i64,
 
     /// Predictor specifications
-    #[schemars(description = "List of predictor specifications. Can be column names (strings) or detailed specs with aggregation and time windows.")]
+    #[schemars(
+        description = "List of predictor specifications. Can be column names (strings) or detailed specs with aggregation and time windows."
+    )]
     pub predictors: Vec<SynthPredictorSpec>,
 
     /// V matrix optimization method
-    #[schemars(description = "Method for predictor importance weights: 'datadriven' (default), 'equal', or 'custom'.")]
+    #[schemars(
+        description = "Method for predictor importance weights: 'datadriven' (default), 'equal', or 'custom'."
+    )]
     pub v_method: Option<String>,
 
     /// Custom V weights (if v_method is 'custom')
-    #[schemars(description = "Custom predictor weights (only used if v_method is 'custom'). Must sum to 1.")]
+    #[schemars(
+        description = "Custom predictor weights (only used if v_method is 'custom'). Must sum to 1."
+    )]
     pub custom_v_weights: Option<Vec<f64>>,
 
     /// Whether to run placebo tests for inference
-    #[schemars(description = "Whether to run placebo tests for inference. Default is false (can be slow with many units).")]
+    #[schemars(
+        description = "Whether to run placebo tests for inference. Default is false (can be slow with many units)."
+    )]
     pub run_placebos: Option<bool>,
 
     /// Optimization window (start, end)
-    #[schemars(description = "Time window for optimization [start, end]. If omitted, uses all pre-treatment periods.")]
+    #[schemars(
+        description = "Time window for optimization [start, end]. If omitted, uses all pre-treatment periods."
+    )]
     pub optimization_window: Option<(i64, i64)>,
 
     /// Convergence tolerance
@@ -3074,7 +3958,9 @@ pub struct SyntheticControlRequest {
     pub max_iter: Option<usize>,
 
     /// Minimum weight threshold for output
-    #[schemars(description = "Minimum weight to display in output (for readability). Default is 0.001.")]
+    #[schemars(
+        description = "Minimum weight to display in output (for readability). Default is 0.001."
+    )]
     pub weight_threshold: Option<f64>,
 }
 
@@ -3090,7 +3976,9 @@ pub struct GsynthRequest {
     pub outcome: String,
 
     /// Treatment indicator column name
-    #[schemars(description = "Name of the treatment indicator column (D, binary 0/1). Treatment can start at different times for different units.")]
+    #[schemars(
+        description = "Name of the treatment indicator column (D, binary 0/1). Treatment can start at different times for different units."
+    )]
     pub treatment: String,
 
     /// Unit identifier column name
@@ -3106,19 +3994,27 @@ pub struct GsynthRequest {
     pub covariates: Option<Vec<String>>,
 
     /// Number of factors (0 for auto-selection via CV)
-    #[schemars(description = "Number of latent factors. Use 0 with cross_validate=true for automatic selection. Default is 2.")]
+    #[schemars(
+        description = "Number of latent factors. Use 0 with cross_validate=true for automatic selection. Default is 2."
+    )]
     pub n_factors: Option<usize>,
 
     /// Whether to cross-validate factor selection
-    #[schemars(description = "Whether to select number of factors via cross-validation. Default is false.")]
+    #[schemars(
+        description = "Whether to select number of factors via cross-validation. Default is false."
+    )]
     pub cross_validate: Option<bool>,
 
     /// Maximum factors to consider in CV
-    #[schemars(description = "Maximum number of factors to consider during cross-validation. Default is 5.")]
+    #[schemars(
+        description = "Maximum number of factors to consider during cross-validation. Default is 5."
+    )]
     pub max_factors: Option<usize>,
 
     /// Estimator type
-    #[schemars(description = "Estimator: 'ife' (interactive fixed effects, default) or 'mc' (matrix completion).")]
+    #[schemars(
+        description = "Estimator: 'ife' (interactive fixed effects, default) or 'mc' (matrix completion)."
+    )]
     pub estimator: Option<String>,
 
     /// Fixed effects specification
@@ -3130,7 +4026,9 @@ pub struct GsynthRequest {
     pub bootstrap_se: Option<bool>,
 
     /// Number of bootstrap iterations
-    #[schemars(description = "Number of bootstrap iterations for standard errors. Default is 500.")]
+    #[schemars(
+        description = "Number of bootstrap iterations for standard errors. Default is 500."
+    )]
     pub n_bootstrap: Option<usize>,
 }
 
@@ -3162,27 +4060,39 @@ pub struct ScpiRequest {
     pub treatment_time: i64,
 
     /// Constraint type
-    #[schemars(description = "Weight constraint: 'simplex' (default, sum=1, non-negative), 'lasso', 'ridge', or 'lasso_simplex'.")]
+    #[schemars(
+        description = "Weight constraint: 'simplex' (default, sum=1, non-negative), 'lasso', 'ridge', or 'lasso_simplex'."
+    )]
     pub constraint: Option<String>,
 
     /// Lambda for Lasso/Ridge constraints
-    #[schemars(description = "Regularization parameter for Lasso or Ridge constraints. Default is 0.1.")]
+    #[schemars(
+        description = "Regularization parameter for Lasso or Ridge constraints. Default is 0.1."
+    )]
     pub lambda: Option<f64>,
 
     /// Significance level
-    #[schemars(description = "Significance level for prediction intervals. Default is 0.05 (95% PI).")]
+    #[schemars(
+        description = "Significance level for prediction intervals. Default is 0.05 (95% PI)."
+    )]
     pub alpha: Option<f64>,
 
     /// Variance estimation method
-    #[schemars(description = "Out-of-sample variance method: 'subgaussian' (default, more conservative), 'gaussian', 'loo_cv', or 'kfold_cv'.")]
+    #[schemars(
+        description = "Out-of-sample variance method: 'subgaussian' (default, more conservative), 'gaussian', 'loo_cv', or 'kfold_cv'."
+    )]
     pub variance_method: Option<String>,
 
     /// Number of CV folds
-    #[schemars(description = "Number of folds for K-fold cross-validation (if variance_method='kfold_cv'). Default is 5.")]
+    #[schemars(
+        description = "Number of folds for K-fold cross-validation (if variance_method='kfold_cv'). Default is 5."
+    )]
     pub cv_folds: Option<usize>,
 
     /// Minimum weight threshold
-    #[schemars(description = "Minimum weight to report in output (for sparsity). Default is 0.001.")]
+    #[schemars(
+        description = "Minimum weight to report in output (for sparsity). Default is 0.001."
+    )]
     pub weight_threshold: Option<f64>,
 }
 
@@ -3206,19 +4116,27 @@ pub struct RdEstimateRequest {
     pub cutoff: Option<f64>,
 
     /// Polynomial order for estimation
-    #[schemars(description = "Polynomial order for local polynomial estimation. Default is 1 (local linear).")]
+    #[schemars(
+        description = "Polynomial order for local polynomial estimation. Default is 1 (local linear)."
+    )]
     pub p: Option<usize>,
 
     /// Kernel type
-    #[schemars(description = "Kernel function: 'triangular' (default), 'epanechnikov', or 'uniform'.")]
+    #[schemars(
+        description = "Kernel function: 'triangular' (default), 'epanechnikov', or 'uniform'."
+    )]
     pub kernel: Option<String>,
 
     /// Bandwidth selection method
-    #[schemars(description = "Bandwidth selection: 'mserd' (MSE-optimal, default), 'msetwo' (separate left/right), 'cerrd', or 'certwo'.")]
+    #[schemars(
+        description = "Bandwidth selection: 'mserd' (MSE-optimal, default), 'msetwo' (separate left/right), 'cerrd', or 'certwo'."
+    )]
     pub bwselect: Option<String>,
 
     /// Main bandwidth (overrides automatic selection)
-    #[schemars(description = "Main bandwidth h for estimation. If not specified, uses automatic MSE-optimal selection.")]
+    #[schemars(
+        description = "Main bandwidth h for estimation. If not specified, uses automatic MSE-optimal selection."
+    )]
     pub h: Option<f64>,
 
     /// Bias bandwidth (overrides automatic selection)
@@ -3254,11 +4172,15 @@ pub struct RdBandwidthRequest {
     pub p: Option<usize>,
 
     /// Kernel type
-    #[schemars(description = "Kernel function: 'triangular' (default), 'epanechnikov', or 'uniform'.")]
+    #[schemars(
+        description = "Kernel function: 'triangular' (default), 'epanechnikov', or 'uniform'."
+    )]
     pub kernel: Option<String>,
 
     /// Bandwidth selection method
-    #[schemars(description = "Bandwidth selection: 'mserd' (MSE-optimal, default), 'msetwo', 'cerrd', or 'certwo'.")]
+    #[schemars(
+        description = "Bandwidth selection: 'mserd' (MSE-optimal, default), 'msetwo', 'cerrd', or 'certwo'."
+    )]
     pub bwselect: Option<String>,
 }
 
@@ -3278,7 +4200,9 @@ pub struct FuzzyRdRequest {
     pub running_var: String,
 
     /// Treatment indicator column name
-    #[schemars(description = "Name of the treatment indicator column (actual treatment received, 0/1).")]
+    #[schemars(
+        description = "Name of the treatment indicator column (actual treatment received, 0/1)."
+    )]
     pub treatment: String,
 
     /// Cutoff value
@@ -3290,11 +4214,15 @@ pub struct FuzzyRdRequest {
     pub p: Option<usize>,
 
     /// Kernel type
-    #[schemars(description = "Kernel function: 'triangular' (default), 'epanechnikov', or 'uniform'.")]
+    #[schemars(
+        description = "Kernel function: 'triangular' (default), 'epanechnikov', or 'uniform'."
+    )]
     pub kernel: Option<String>,
 
     /// Bandwidth selection method
-    #[schemars(description = "Bandwidth selection: 'mserd' (default), 'msetwo', 'cerrd', or 'certwo'.")]
+    #[schemars(
+        description = "Bandwidth selection: 'mserd' (default), 'msetwo', 'cerrd', or 'certwo'."
+    )]
     pub bwselect: Option<String>,
 
     /// Main bandwidth
@@ -3326,35 +4254,51 @@ pub struct RdMultiRequest {
     pub cutoffs: Vec<f64>,
 
     /// Cutoff assignment column (optional)
-    #[schemars(description = "Column indicating which cutoff each observation belongs to (0, 1, ...). If not specified, observations are assigned to the nearest cutoff.")]
+    #[schemars(
+        description = "Column indicating which cutoff each observation belongs to (0, 1, ...). If not specified, observations are assigned to the nearest cutoff."
+    )]
     pub cutoff_col: Option<String>,
 
     /// Whether to compute pooled estimate
-    #[schemars(description = "Whether to compute a pooled treatment effect across all cutoffs. Default is true.")]
+    #[schemars(
+        description = "Whether to compute a pooled treatment effect across all cutoffs. Default is true."
+    )]
     pub pooled: Option<bool>,
 
     /// Pooling weight scheme
-    #[schemars(description = "Weighting scheme for pooling: 'sample_size' (default), 'inverse_variance', or 'equal'.")]
+    #[schemars(
+        description = "Weighting scheme for pooling: 'sample_size' (default), 'inverse_variance', or 'equal'."
+    )]
     pub pooling_weights: Option<String>,
 
     /// Bandwidth specification
-    #[schemars(description = "Bandwidth specification: single value for global bandwidth, or omit for per-cutoff optimal.")]
+    #[schemars(
+        description = "Bandwidth specification: single value for global bandwidth, or omit for per-cutoff optimal."
+    )]
     pub bandwidth: Option<f64>,
 
     /// Per-cutoff bandwidths
-    #[schemars(description = "List of bandwidths for each cutoff. Must match length of cutoffs if specified.")]
+    #[schemars(
+        description = "List of bandwidths for each cutoff. Must match length of cutoffs if specified."
+    )]
     pub bandwidths: Option<Vec<f64>>,
 
     /// Polynomial order for estimation
-    #[schemars(description = "Polynomial order for local polynomial estimation. Default is 1 (local linear).")]
+    #[schemars(
+        description = "Polynomial order for local polynomial estimation. Default is 1 (local linear)."
+    )]
     pub p: Option<usize>,
 
     /// Kernel type
-    #[schemars(description = "Kernel function: 'triangular' (default), 'epanechnikov', or 'uniform'.")]
+    #[schemars(
+        description = "Kernel function: 'triangular' (default), 'epanechnikov', or 'uniform'."
+    )]
     pub kernel: Option<String>,
 
     /// Whether to test for heterogeneity
-    #[schemars(description = "Whether to perform a chi-squared test for heterogeneous effects across cutoffs. Default is true.")]
+    #[schemars(
+        description = "Whether to perform a chi-squared test for heterogeneous effects across cutoffs. Default is true."
+    )]
     pub test_heterogeneity: Option<bool>,
 
     /// Confidence level
@@ -3410,7 +4354,9 @@ pub struct MultinomRequest {
     pub x: Vec<String>,
 
     /// Reference category (optional)
-    #[schemars(description = "Reference category for the model. If not specified, the first category (alphabetically) is used.")]
+    #[schemars(
+        description = "Reference category for the model. If not specified, the first category (alphabetically) is used."
+    )]
     pub reference: Option<String>,
 }
 
@@ -3418,32 +4364,46 @@ pub struct MultinomRequest {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct MlogitRequest {
     /// Name/ID of the dataset (in long format)
-    #[schemars(description = "Name or ID of a dataset in long format (one row per individual-alternative combination).")]
+    #[schemars(
+        description = "Name or ID of a dataset in long format (one row per individual-alternative combination)."
+    )]
     pub dataset: String,
 
     /// Column identifying choice situations (individuals)
-    #[schemars(description = "Column name identifying each choice situation (individual chooser).")]
+    #[schemars(
+        description = "Column name identifying each choice situation (individual chooser)."
+    )]
     pub choice_id: String,
 
     /// Column identifying alternatives
-    #[schemars(description = "Column name identifying alternatives (e.g., 'car', 'bus', 'train').")]
+    #[schemars(
+        description = "Column name identifying alternatives (e.g., 'car', 'bus', 'train')."
+    )]
     pub alt_id: String,
 
     /// Column with binary choice indicator (1 = chosen)
-    #[schemars(description = "Column with binary choice indicator (1 if alternative is chosen, 0 otherwise).")]
+    #[schemars(
+        description = "Column with binary choice indicator (1 if alternative is chosen, 0 otherwise)."
+    )]
     pub choice: String,
 
     /// Alternative-specific variables (generic coefficients)
-    #[schemars(description = "Alternative-specific variables that vary across alternatives (e.g., 'price', 'time'). These get generic coefficients (same β across all alternatives).")]
+    #[schemars(
+        description = "Alternative-specific variables that vary across alternatives (e.g., 'price', 'time'). These get generic coefficients (same β across all alternatives)."
+    )]
     pub alt_specific: Vec<String>,
 
     /// Individual-specific variables (alternative-specific coefficients)
-    #[schemars(description = "Individual-specific variables that are constant across alternatives (e.g., 'income', 'age'). These get alternative-specific coefficients (different γⱼ for each alternative vs reference).")]
+    #[schemars(
+        description = "Individual-specific variables that are constant across alternatives (e.g., 'income', 'age'). These get alternative-specific coefficients (different γⱼ for each alternative vs reference)."
+    )]
     #[serde(default)]
     pub ind_specific: Vec<String>,
 
     /// Reference alternative (optional)
-    #[schemars(description = "Reference alternative for identification. Default: first alternative (alphabetically).")]
+    #[schemars(
+        description = "Reference alternative for identification. Default: first alternative (alphabetically)."
+    )]
     pub reference: Option<String>,
 }
 
@@ -3452,19 +4412,27 @@ pub struct MlogitRequest {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct MixedLogitRequest {
     /// Name/ID of the dataset (in long format)
-    #[schemars(description = "Name or ID of a dataset in long format (one row per individual-alternative combination).")]
+    #[schemars(
+        description = "Name or ID of a dataset in long format (one row per individual-alternative combination)."
+    )]
     pub dataset: String,
 
     /// Column identifying choice situations (individuals)
-    #[schemars(description = "Column name identifying each choice situation (individual chooser).")]
+    #[schemars(
+        description = "Column name identifying each choice situation (individual chooser)."
+    )]
     pub choice_id: String,
 
     /// Column identifying alternatives
-    #[schemars(description = "Column name identifying alternatives (e.g., 'car', 'bus', 'train').")]
+    #[schemars(
+        description = "Column name identifying alternatives (e.g., 'car', 'bus', 'train')."
+    )]
     pub alt_id: String,
 
     /// Column with binary choice indicator (1 = chosen)
-    #[schemars(description = "Column with binary choice indicator (1 if alternative is chosen, 0 otherwise).")]
+    #[schemars(
+        description = "Column with binary choice indicator (1 if alternative is chosen, 0 otherwise)."
+    )]
     pub choice: String,
 
     /// Variables to include in the model
@@ -3472,19 +4440,27 @@ pub struct MixedLogitRequest {
     pub variables: Vec<String>,
 
     /// Variables with random coefficients
-    #[schemars(description = "Variable names that should have random (mixed) coefficients. If not specified, all variables are random.")]
+    #[schemars(
+        description = "Variable names that should have random (mixed) coefficients. If not specified, all variables are random."
+    )]
     pub random_vars: Option<Vec<String>>,
 
     /// Distribution for random parameters
-    #[schemars(description = "Distribution for random parameters: 'normal' (default), 'lognormal', 'triangular', 'uniform'.")]
+    #[schemars(
+        description = "Distribution for random parameters: 'normal' (default), 'lognormal', 'triangular', 'uniform'."
+    )]
     pub distribution: Option<String>,
 
     /// Number of simulation draws
-    #[schemars(description = "Number of simulation draws for MSL estimation. Default: 500. Higher values improve accuracy but increase computation time.")]
+    #[schemars(
+        description = "Number of simulation draws for MSL estimation. Default: 500. Higher values improve accuracy but increase computation time."
+    )]
     pub n_draws: Option<usize>,
 
     /// Use Halton sequences (quasi-random)
-    #[schemars(description = "Use Halton quasi-random sequences instead of pseudo-random draws. Default: true. Improves accuracy.")]
+    #[schemars(
+        description = "Use Halton quasi-random sequences instead of pseudo-random draws. Default: true. Improves accuracy."
+    )]
     pub halton: Option<bool>,
 }
 
@@ -3524,7 +4500,9 @@ pub struct NegBinRequest {
     pub x: Vec<String>,
 
     /// Initial theta (dispersion) parameter
-    #[schemars(description = "Optional initial theta (dispersion) parameter. If not specified, estimated from data.")]
+    #[schemars(
+        description = "Optional initial theta (dispersion) parameter. If not specified, estimated from data."
+    )]
     pub init_theta: Option<f64>,
 }
 
@@ -3544,7 +4522,9 @@ pub struct ZeroInflRequest {
     pub x: Vec<String>,
 
     /// Independent variables (Z) column names for zero-inflation model
-    #[schemars(description = "Names of the variables for the zero-inflation model. If not specified, uses intercept only.")]
+    #[schemars(
+        description = "Names of the variables for the zero-inflation model. If not specified, uses intercept only."
+    )]
     pub z: Option<Vec<String>>,
 
     /// Model type: "poisson" (default) or "negbin"
@@ -3568,7 +4548,9 @@ pub struct HurdleModelRequest {
     pub x: Vec<String>,
 
     /// Independent variables (Z) column names for binary (hurdle) model
-    #[schemars(description = "Names of the variables for the binary hurdle model. If not specified, uses same as x.")]
+    #[schemars(
+        description = "Names of the variables for the binary hurdle model. If not specified, uses same as x."
+    )]
     pub z: Option<Vec<String>>,
 
     /// Model type: "poisson" (default) or "negbin"
@@ -3592,11 +4574,15 @@ pub struct PanelHdfeRequest {
     pub x: Vec<String>,
 
     /// Fixed effect columns to absorb
-    #[schemars(description = "Column names for fixed effects to absorb (e.g., ['firm_id', 'year']). Supports multiple dimensions.")]
+    #[schemars(
+        description = "Column names for fixed effects to absorb (e.g., ['firm_id', 'year']). Supports multiple dimensions."
+    )]
     pub fe: Vec<String>,
 
     /// Convergence tolerance for MAP algorithm
-    #[schemars(description = "Convergence tolerance for the Method of Alternating Projections. Default is 1e-8.")]
+    #[schemars(
+        description = "Convergence tolerance for the Method of Alternating Projections. Default is 1e-8."
+    )]
     pub tolerance: Option<f64>,
 
     /// Maximum iterations for MAP algorithm
@@ -3604,7 +4590,9 @@ pub struct PanelHdfeRequest {
     pub max_iterations: Option<usize>,
 
     /// Standard error type
-    #[schemars(description = "Standard error type: 'standard', 'hc0', 'hc1' (default), 'hc2', or 'hc3'.")]
+    #[schemars(
+        description = "Standard error type: 'standard', 'hc0', 'hc1' (default), 'hc2', or 'hc3'."
+    )]
     pub se_type: Option<String>,
 }
 
@@ -3616,7 +4604,9 @@ pub struct FeglmRequest {
     pub dataset: String,
 
     /// Dependent variable (Y) column name
-    #[schemars(description = "Name of the dependent variable (Y) column. For logit/probit must be binary (0/1). For Poisson must be non-negative counts.")]
+    #[schemars(
+        description = "Name of the dependent variable (Y) column. For logit/probit must be binary (0/1). For Poisson must be non-negative counts."
+    )]
     pub y: String,
 
     /// Independent variables (X) column names
@@ -3624,11 +4614,15 @@ pub struct FeglmRequest {
     pub x: Vec<String>,
 
     /// Fixed effect columns to absorb
-    #[schemars(description = "Column names for fixed effects to absorb (e.g., ['firm_id', 'year']). Supports multiple dimensions.")]
+    #[schemars(
+        description = "Column names for fixed effects to absorb (e.g., ['firm_id', 'year']). Supports multiple dimensions."
+    )]
     pub fe: Vec<String>,
 
     /// GLM family
-    #[schemars(description = "GLM family: 'logit' (binomial logit, default), 'probit' (binomial probit), 'poisson' (count data), or 'gaussian' (continuous, equivalent to linear HDFE).")]
+    #[schemars(
+        description = "GLM family: 'logit' (binomial logit, default), 'probit' (binomial probit), 'poisson' (count data), or 'gaussian' (continuous, equivalent to linear HDFE)."
+    )]
     pub family: Option<String>,
 
     /// Maximum IRLS iterations
@@ -3652,15 +4646,21 @@ pub struct KaplanMeierRequest {
     pub dataset: String,
 
     /// Time-to-event column name
-    #[schemars(description = "Name of the column containing time-to-event or time-to-censoring values.")]
+    #[schemars(
+        description = "Name of the column containing time-to-event or time-to-censoring values."
+    )]
     pub time: String,
 
     /// Event indicator column name
-    #[schemars(description = "Name of the column indicating event occurrence (1=event, 0=censored).")]
+    #[schemars(
+        description = "Name of the column indicating event occurrence (1=event, 0=censored)."
+    )]
     pub event: String,
 
     /// Optional group column for stratified analysis
-    #[schemars(description = "Optional column name for stratified analysis (e.g., 'treatment_group').")]
+    #[schemars(
+        description = "Optional column name for stratified analysis (e.g., 'treatment_group')."
+    )]
     pub group: Option<String>,
 
     /// Confidence level
@@ -3676,15 +4676,21 @@ pub struct LogRankRequest {
     pub dataset: String,
 
     /// Time-to-event column name
-    #[schemars(description = "Name of the column containing time-to-event or time-to-censoring values.")]
+    #[schemars(
+        description = "Name of the column containing time-to-event or time-to-censoring values."
+    )]
     pub time: String,
 
     /// Event indicator column name
-    #[schemars(description = "Name of the column indicating event occurrence (1=event, 0=censored).")]
+    #[schemars(
+        description = "Name of the column indicating event occurrence (1=event, 0=censored)."
+    )]
     pub event: String,
 
     /// Group column name for comparison
-    #[schemars(description = "Name of the column defining groups to compare (e.g., 'treatment_group').")]
+    #[schemars(
+        description = "Name of the column defining groups to compare (e.g., 'treatment_group')."
+    )]
     pub group: String,
 }
 
@@ -3696,11 +4702,15 @@ pub struct CoxPhRequest {
     pub dataset: String,
 
     /// Time-to-event column name
-    #[schemars(description = "Name of the column containing time-to-event or time-to-censoring values.")]
+    #[schemars(
+        description = "Name of the column containing time-to-event or time-to-censoring values."
+    )]
     pub time: String,
 
     /// Event indicator column name
-    #[schemars(description = "Name of the column indicating event occurrence (1=event, 0=censored).")]
+    #[schemars(
+        description = "Name of the column indicating event occurrence (1=event, 0=censored)."
+    )]
     pub event: String,
 
     /// Covariate column names
@@ -3708,15 +4718,21 @@ pub struct CoxPhRequest {
     pub covariates: Vec<String>,
 
     /// Method for handling ties
-    #[schemars(description = "Method for handling tied event times: 'efron' (default) or 'breslow'.")]
+    #[schemars(
+        description = "Method for handling tied event times: 'efron' (default) or 'breslow'."
+    )]
     pub ties_method: Option<String>,
 
     /// Convergence tolerance
-    #[schemars(description = "Convergence tolerance for Newton-Raphson optimization. Default is 1e-9.")]
+    #[schemars(
+        description = "Convergence tolerance for Newton-Raphson optimization. Default is 1e-9."
+    )]
     pub tolerance: Option<f64>,
 
     /// Maximum iterations
-    #[schemars(description = "Maximum iterations for Newton-Raphson optimization. Default is 100.")]
+    #[schemars(
+        description = "Maximum iterations for Newton-Raphson optimization. Default is 100."
+    )]
     pub max_iter: Option<usize>,
 }
 
@@ -3728,11 +4744,15 @@ pub struct AftRequest {
     pub dataset: String,
 
     /// Time-to-event column name
-    #[schemars(description = "Name of the column containing time-to-event or time-to-censoring values.")]
+    #[schemars(
+        description = "Name of the column containing time-to-event or time-to-censoring values."
+    )]
     pub time: String,
 
     /// Event indicator column name
-    #[schemars(description = "Name of the column indicating event occurrence (1=event, 0=censored).")]
+    #[schemars(
+        description = "Name of the column indicating event occurrence (1=event, 0=censored)."
+    )]
     pub event: String,
 
     /// Covariate column names
@@ -3740,7 +4760,9 @@ pub struct AftRequest {
     pub covariates: Vec<String>,
 
     /// Distribution for the AFT model
-    #[schemars(description = "Distribution assumption: 'weibull' (default), 'exponential', 'lognormal', or 'loglogistic'.")]
+    #[schemars(
+        description = "Distribution assumption: 'weibull' (default), 'exponential', 'lognormal', or 'loglogistic'."
+    )]
     pub distribution: Option<String>,
 
     /// Convergence tolerance
@@ -3760,15 +4782,21 @@ pub struct CompetingRisksRequest {
     pub dataset: String,
 
     /// Time-to-event column name
-    #[schemars(description = "Name of the column containing time-to-event or time-to-censoring values.")]
+    #[schemars(
+        description = "Name of the column containing time-to-event or time-to-censoring values."
+    )]
     pub time: String,
 
     /// Event type column name
-    #[schemars(description = "Name of the column indicating event type (0=censored, 1=event of interest, 2=competing event, etc.).")]
+    #[schemars(
+        description = "Name of the column indicating event type (0=censored, 1=event of interest, 2=competing event, etc.)."
+    )]
     pub event: String,
 
     /// Confidence level
-    #[schemars(description = "Confidence level for cumulative incidence estimates. Default is 0.95.")]
+    #[schemars(
+        description = "Confidence level for cumulative incidence estimates. Default is 0.95."
+    )]
     pub confidence_level: Option<f64>,
 }
 
@@ -3784,7 +4812,9 @@ pub struct VarRequest {
     pub dataset: String,
 
     /// Columns to include in the VAR model
-    #[schemars(description = "Names of the columns to include in the VAR model (e.g., ['gdp', 'inflation', 'interest_rate']).")]
+    #[schemars(
+        description = "Names of the columns to include in the VAR model (e.g., ['gdp', 'inflation', 'interest_rate'])."
+    )]
     pub columns: Vec<String>,
 
     /// Number of lags
@@ -3800,15 +4830,21 @@ pub struct GrangerRequest {
     pub dataset: String,
 
     /// Dependent variable (the "caused" variable)
-    #[schemars(description = "Name of the dependent variable column - the variable being predicted (the 'caused' variable).")]
+    #[schemars(
+        description = "Name of the dependent variable column - the variable being predicted (the 'caused' variable)."
+    )]
     pub dependent: String,
 
     /// Potential causing variable
-    #[schemars(description = "Name of the potential causing variable column - tests whether this variable helps predict the dependent variable.")]
+    #[schemars(
+        description = "Name of the potential causing variable column - tests whether this variable helps predict the dependent variable."
+    )]
     pub cause: String,
 
     /// Number of lags (optional, default: automatic selection)
-    #[schemars(description = "Number of lags to include in the test. Default: automatic selection using Schwert's rule.")]
+    #[schemars(
+        description = "Number of lags to include in the test. Default: automatic selection using Schwert's rule."
+    )]
     pub lags: Option<usize>,
 }
 
@@ -3840,7 +4876,9 @@ pub struct VecmRequest {
     pub dataset: String,
 
     /// Columns to include in the VECM model
-    #[schemars(description = "Names of the columns to include in the VECM model. Should be I(1) cointegrated series.")]
+    #[schemars(
+        description = "Names of the columns to include in the VECM model. Should be I(1) cointegrated series."
+    )]
     pub columns: Vec<String>,
 
     /// Number of lags
@@ -3848,7 +4886,9 @@ pub struct VecmRequest {
     pub lags: usize,
 
     /// Cointegration rank
-    #[schemars(description = "Cointegration rank (number of cointegrating relationships). Must be between 1 and k-1 where k is the number of variables.")]
+    #[schemars(
+        description = "Cointegration rank (number of cointegrating relationships). Must be between 1 and k-1 where k is the number of variables."
+    )]
     pub rank: usize,
 }
 
@@ -3936,7 +4976,9 @@ pub struct GarchRequest {
     pub dataset: String,
 
     /// Column name with return series
-    #[schemars(description = "Name of the column containing returns (e.g., stock returns, percentage changes).")]
+    #[schemars(
+        description = "Name of the column containing returns (e.g., stock returns, percentage changes)."
+    )]
     pub column: String,
 
     /// ARCH order (p) - default 1
@@ -3964,7 +5006,9 @@ pub struct MstlRequest {
     pub column: String,
 
     /// Seasonal periods
-    #[schemars(description = "Seasonal periods to extract (e.g., [7, 365] for daily data with weekly and yearly seasonality).")]
+    #[schemars(
+        description = "Seasonal periods to extract (e.g., [7, 365] for daily data with weekly and yearly seasonality)."
+    )]
     pub periods: Vec<usize>,
 }
 
@@ -3980,7 +5024,9 @@ pub struct ChangepointRequest {
     pub column: String,
 
     /// Penalty for adding a changepoint (optional, uses BIC if not specified)
-    #[schemars(description = "Penalty for adding a changepoint. Higher values = fewer changepoints. Default uses BIC (log(n)).")]
+    #[schemars(
+        description = "Penalty for adding a changepoint. Higher values = fewer changepoints. Default uses BIC (log(n))."
+    )]
     pub penalty: Option<f64>,
 
     /// Minimum segment length between changepoints
@@ -3988,7 +5034,9 @@ pub struct ChangepointRequest {
     pub min_segment_length: Option<usize>,
 
     /// Detection method: 'pelt' or 'binary'
-    #[schemars(description = "Algorithm to use: 'pelt' (Pruned Exact Linear Time, default) or 'binary' (Binary Segmentation).")]
+    #[schemars(
+        description = "Algorithm to use: 'pelt' (Pruned Exact Linear Time, default) or 'binary' (Binary Segmentation)."
+    )]
     pub method: Option<String>,
 
     /// Type of change to detect: 'mean', 'variance', or 'both'
@@ -4008,27 +5056,39 @@ pub struct HoltWintersRequest {
     pub column: String,
 
     /// Seasonal period
-    #[schemars(description = "Number of observations per seasonal cycle (e.g., 12 for monthly data with yearly seasonality, 4 for quarterly).")]
+    #[schemars(
+        description = "Number of observations per seasonal cycle (e.g., 12 for monthly data with yearly seasonality, 4 for quarterly)."
+    )]
     pub period: usize,
 
     /// Seasonal type
-    #[schemars(description = "Type of seasonality: 'additive' (default) for constant seasonal variation, 'multiplicative' for proportional variation.")]
+    #[schemars(
+        description = "Type of seasonality: 'additive' (default) for constant seasonal variation, 'multiplicative' for proportional variation."
+    )]
     pub seasonal: Option<String>,
 
     /// Level smoothing parameter alpha (0-1)
-    #[schemars(description = "Smoothing parameter for the level component (0-1). If not specified, will be optimized.")]
+    #[schemars(
+        description = "Smoothing parameter for the level component (0-1). If not specified, will be optimized."
+    )]
     pub alpha: Option<f64>,
 
     /// Trend smoothing parameter beta (0-1)
-    #[schemars(description = "Smoothing parameter for the trend component (0-1). If not specified, will be optimized.")]
+    #[schemars(
+        description = "Smoothing parameter for the trend component (0-1). If not specified, will be optimized."
+    )]
     pub beta: Option<f64>,
 
     /// Seasonal smoothing parameter gamma (0-1)
-    #[schemars(description = "Smoothing parameter for the seasonal component (0-1). If not specified, will be optimized.")]
+    #[schemars(
+        description = "Smoothing parameter for the seasonal component (0-1). If not specified, will be optimized."
+    )]
     pub gamma: Option<f64>,
 
     /// Forecast horizon (optional)
-    #[schemars(description = "Number of periods to forecast ahead. If specified, returns forecasts in addition to fitted values.")]
+    #[schemars(
+        description = "Number of periods to forecast ahead. If specified, returns forecasts in addition to fitted values."
+    )]
     pub horizon: Option<usize>,
 }
 
@@ -4052,7 +5112,9 @@ pub struct ArModelRequest {
     pub order_max: Option<usize>,
 
     /// Specific order to use
-    #[schemars(description = "Specific AR order to fit. If provided with aic=false, uses this exact order.")]
+    #[schemars(
+        description = "Specific AR order to fit. If provided with aic=false, uses this exact order."
+    )]
     pub order: Option<usize>,
 
     /// Fitting method
@@ -4076,11 +5138,15 @@ pub struct DecomposeRequest {
     pub column: String,
 
     /// Seasonal period
-    #[schemars(description = "Number of observations per seasonal cycle (e.g., 12 for monthly data with yearly seasonality, 4 for quarterly).")]
+    #[schemars(
+        description = "Number of observations per seasonal cycle (e.g., 12 for monthly data with yearly seasonality, 4 for quarterly)."
+    )]
     pub period: usize,
 
     /// Decomposition type
-    #[schemars(description = "Type of decomposition: 'additive' (default, Y = Trend + Seasonal + Random) or 'multiplicative' (Y = Trend × Seasonal × Random).")]
+    #[schemars(
+        description = "Type of decomposition: 'additive' (default, Y = Trend + Seasonal + Random) or 'multiplicative' (Y = Trend × Seasonal × Random)."
+    )]
     pub decompose_type: Option<String>,
 }
 
@@ -4096,11 +5162,15 @@ pub struct StructTsRequest {
     pub column: String,
 
     /// Model type
-    #[schemars(description = "Type of structural model: 'level' (local level/random walk + noise), 'trend' (local linear trend), or 'bsm' (basic structural model with seasonality).")]
+    #[schemars(
+        description = "Type of structural model: 'level' (local level/random walk + noise), 'trend' (local linear trend), or 'bsm' (basic structural model with seasonality)."
+    )]
     pub model_type: Option<String>,
 
     /// Seasonal period (for BSM only)
-    #[schemars(description = "Seasonal period for BSM model (e.g., 12 for monthly data with yearly seasonality). Required for 'bsm' type.")]
+    #[schemars(
+        description = "Seasonal period for BSM model (e.g., 12 for monthly data with yearly seasonality). Required for 'bsm' type."
+    )]
     pub period: Option<usize>,
 }
 
@@ -4116,11 +5186,15 @@ pub struct CausalImpactRequest {
     pub response_col: String,
 
     /// Column name with time index
-    #[schemars(description = "Name of the column containing the time index (must be integer-like: integers, dates as days since epoch, etc.).")]
+    #[schemars(
+        description = "Name of the column containing the time index (must be integer-like: integers, dates as days since epoch, etc.)."
+    )]
     pub time_col: String,
 
     /// Start of pre-intervention period (inclusive)
-    #[schemars(description = "Start time value of the pre-intervention period (inclusive). This is the period used to train the model.")]
+    #[schemars(
+        description = "Start time value of the pre-intervention period (inclusive). This is the period used to train the model."
+    )]
     pub pre_period_start: i64,
 
     /// End of pre-intervention period (inclusive)
@@ -4128,7 +5202,9 @@ pub struct CausalImpactRequest {
     pub pre_period_end: i64,
 
     /// Start of post-intervention period (inclusive)
-    #[schemars(description = "Start time value of the post-intervention period (inclusive). This is when the intervention occurs.")]
+    #[schemars(
+        description = "Start time value of the post-intervention period (inclusive). This is when the intervention occurs."
+    )]
     pub post_period_start: i64,
 
     /// End of post-intervention period (inclusive)
@@ -4136,11 +5212,15 @@ pub struct CausalImpactRequest {
     pub post_period_end: i64,
 
     /// Optional control series columns
-    #[schemars(description = "Optional names of columns to use as control time series. These should be correlated with the response but unaffected by the intervention.")]
+    #[schemars(
+        description = "Optional names of columns to use as control time series. These should be correlated with the response but unaffected by the intervention."
+    )]
     pub control_cols: Option<Vec<String>>,
 
     /// Significance level (default 0.05)
-    #[schemars(description = "Significance level for credible intervals. Default: 0.05 (95% credible intervals).")]
+    #[schemars(
+        description = "Significance level for credible intervals. Default: 0.05 (95% credible intervals)."
+    )]
     pub alpha: Option<f64>,
 
     /// Include trend component
@@ -4148,7 +5228,9 @@ pub struct CausalImpactRequest {
     pub include_trend: Option<bool>,
 
     /// Seasonal period
-    #[schemars(description = "If the data has seasonality, specify the period (e.g., 12 for monthly data with yearly seasonality).")]
+    #[schemars(
+        description = "If the data has seasonality, specify the period (e.g., 12 for monthly data with yearly seasonality)."
+    )]
     pub seasonal_period: Option<usize>,
 }
 
@@ -4160,7 +5242,9 @@ pub struct MahalanobisRequest {
     pub dataset: String,
 
     /// Column names to use as variables
-    #[schemars(description = "Names of the columns to use as variables for computing Mahalanobis distance.")]
+    #[schemars(
+        description = "Names of the columns to use as variables for computing Mahalanobis distance."
+    )]
     pub columns: Vec<String>,
 
     /// Optional center vector
@@ -4176,11 +5260,15 @@ pub struct MedpolishRequest {
     pub dataset: String,
 
     /// Column names to use as the matrix
-    #[schemars(description = "Names of the numeric columns to use as the matrix for median polish. The columns become the columns of the matrix, and each row of the dataset becomes a row of the matrix.")]
+    #[schemars(
+        description = "Names of the numeric columns to use as the matrix for median polish. The columns become the columns of the matrix, and each row of the dataset becomes a row of the matrix."
+    )]
     pub columns: Vec<String>,
 
     /// Convergence tolerance
-    #[schemars(description = "Convergence tolerance (default: 0.01). Iteration stops when the proportional reduction in sum of absolute residuals is less than this value.")]
+    #[schemars(
+        description = "Convergence tolerance (default: 0.01). Iteration stops when the proportional reduction in sum of absolute residuals is less than this value."
+    )]
     pub eps: Option<f64>,
 
     /// Maximum iterations
@@ -4188,7 +5276,9 @@ pub struct MedpolishRequest {
     pub max_iter: Option<usize>,
 
     /// Handle missing values
-    #[schemars(description = "Whether to remove NaN values when computing medians (default: false). If false, the function fails if NaN values are present.")]
+    #[schemars(
+        description = "Whether to remove NaN values when computing medians (default: false). If false, the function fails if NaN values are present."
+    )]
     pub na_rm: Option<bool>,
 }
 
@@ -4200,7 +5290,9 @@ pub struct IsoregRequest {
     pub dataset: String,
 
     /// Column for x values (predictor)
-    #[schemars(description = "Name of the column to use as x (predictor). If not provided, uses row index.")]
+    #[schemars(
+        description = "Name of the column to use as x (predictor). If not provided, uses row index."
+    )]
     pub x_column: Option<String>,
 
     /// Column for y values (response)
@@ -4212,7 +5304,9 @@ pub struct IsoregRequest {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct LoglinRequest {
     /// Name/ID of the dataset
-    #[schemars(description = "Name or ID of a previously loaded dataset containing contingency table data.")]
+    #[schemars(
+        description = "Name or ID of a previously loaded dataset containing contingency table data."
+    )]
     pub dataset: String,
 
     /// Count column
@@ -4220,11 +5314,15 @@ pub struct LoglinRequest {
     pub count_column: String,
 
     /// Factor columns that define the contingency table dimensions
-    #[schemars(description = "Names of the factor columns that define the contingency table dimensions.")]
+    #[schemars(
+        description = "Names of the factor columns that define the contingency table dimensions."
+    )]
     pub factor_columns: Vec<String>,
 
     /// Model margins to fit
-    #[schemars(description = "Margins to fit in the model. Each margin is a list of factor indices (0-based). For example, [[0,1], [1,2]] fits the (0,1) and (1,2) two-way interactions. If not specified, fits an independence model (all main effects only).")]
+    #[schemars(
+        description = "Margins to fit in the model. Each margin is a list of factor indices (0-based). For example, [[0,1], [1,2]] fits the (0,1) and (1,2) two-way interactions. If not specified, fits an independence model (all main effects only)."
+    )]
     pub margins: Option<Vec<Vec<usize>>>,
 
     /// Convergence tolerance
@@ -4256,7 +5354,9 @@ pub struct ReportSectionInput {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ReportContentInput {
     /// Type of content: 'text', 'code', 'table', 'chart', or 'stats'
-    #[schemars(description = "Type of content: 'text' (paragraph), 'code' (code block), 'table' (data table), 'chart' (base64 image), or 'stats' (key-value pairs).")]
+    #[schemars(
+        description = "Type of content: 'text' (paragraph), 'code' (code block), 'table' (data table), 'chart' (base64 image), or 'stats' (key-value pairs)."
+    )]
     pub content_type: String,
 
     /// Text content (for text and code types)
@@ -4292,7 +5392,9 @@ pub struct ReportContentInput {
     pub chart_caption: Option<String>,
 
     /// Key-value statistics (for stats type)
-    #[schemars(description = "Key-value pairs for statistics display. Format: [[key, value], ...]")]
+    #[schemars(
+        description = "Key-value pairs for statistics display. Format: [[key, value], ...]"
+    )]
     pub stats: Option<Vec<Vec<String>>>,
 }
 
@@ -4360,11 +5462,15 @@ pub struct DBSCANRequest {
     pub columns: Vec<String>,
 
     /// Epsilon (neighborhood radius)
-    #[schemars(description = "Maximum distance between two samples for them to be considered in the same neighborhood.")]
+    #[schemars(
+        description = "Maximum distance between two samples for them to be considered in the same neighborhood."
+    )]
     pub eps: f64,
 
     /// Minimum samples for core point
-    #[schemars(description = "Minimum number of samples in a neighborhood for a point to be considered a core point.")]
+    #[schemars(
+        description = "Minimum number of samples in a neighborhood for a point to be considered a core point."
+    )]
     pub min_samples: usize,
 }
 
@@ -4380,7 +5486,9 @@ pub struct PCARequest {
     pub columns: Vec<String>,
 
     /// Number of principal components to keep (optional)
-    #[schemars(description = "Number of principal components to keep. If not specified, keeps all components.")]
+    #[schemars(
+        description = "Number of principal components to keep. If not specified, keeps all components."
+    )]
     pub n_components: Option<usize>,
 }
 
@@ -4396,15 +5504,21 @@ pub struct HierarchicalRequest {
     pub columns: Vec<String>,
 
     /// Number of clusters to cut the dendrogram into (optional)
-    #[schemars(description = "Number of clusters to create. If not specified, uses distance_threshold.")]
+    #[schemars(
+        description = "Number of clusters to create. If not specified, uses distance_threshold."
+    )]
     pub n_clusters: Option<usize>,
 
     /// Distance threshold for cutting the dendrogram (optional)
-    #[schemars(description = "Distance threshold for cutting. Used if n_clusters is not specified.")]
+    #[schemars(
+        description = "Distance threshold for cutting. Used if n_clusters is not specified."
+    )]
     pub distance_threshold: Option<f64>,
 
     /// Linkage method
-    #[schemars(description = "Linkage method: 'single', 'complete', 'average', or 'ward'. Default is 'ward'.")]
+    #[schemars(
+        description = "Linkage method: 'single', 'complete', 'average', or 'ward'. Default is 'ward'."
+    )]
     pub linkage: Option<String>,
 }
 
@@ -4424,7 +5538,9 @@ pub struct TsneRequest {
     pub n_components: Option<usize>,
 
     /// Perplexity parameter (default: 30.0)
-    #[schemars(description = "Perplexity parameter, related to number of nearest neighbors. Default is 30.")]
+    #[schemars(
+        description = "Perplexity parameter, related to number of nearest neighbors. Default is 30."
+    )]
     pub perplexity: Option<f64>,
 
     /// Maximum iterations (default: 1000)
@@ -4448,7 +5564,9 @@ pub struct CmdscaleRequest {
     pub dataset: String,
 
     /// Columns to use for computing distances
-    #[schemars(description = "Names of the numeric columns to include. Euclidean distances will be computed from these columns.")]
+    #[schemars(
+        description = "Names of the numeric columns to include. Euclidean distances will be computed from these columns."
+    )]
     pub columns: Vec<String>,
 
     /// Number of output dimensions (default: 2)
@@ -4456,7 +5574,9 @@ pub struct CmdscaleRequest {
     pub k: Option<usize>,
 
     /// Whether input is already a distance matrix
-    #[schemars(description = "Set to true if the input columns represent a distance matrix. Default is false (data is converted to distances).")]
+    #[schemars(
+        description = "Set to true if the input columns represent a distance matrix. Default is false (data is converted to distances)."
+    )]
     pub is_distance_matrix: Option<bool>,
 }
 
@@ -4472,15 +5592,21 @@ pub struct CutreeRequest {
     pub columns: Vec<String>,
 
     /// Number of clusters to form
-    #[schemars(description = "Number of clusters to cut the tree into. Takes priority over cut_height.")]
+    #[schemars(
+        description = "Number of clusters to cut the tree into. Takes priority over cut_height."
+    )]
     pub k: Option<usize>,
 
     /// Height at which to cut the tree
-    #[schemars(description = "Height (distance threshold) at which to cut the dendrogram. Ignored if k is specified.")]
+    #[schemars(
+        description = "Height (distance threshold) at which to cut the dendrogram. Ignored if k is specified."
+    )]
     pub cut_height: Option<f64>,
 
     /// Linkage method for hierarchical clustering
-    #[schemars(description = "Linkage method: 'single', 'complete', 'average', or 'ward'. Default is 'ward'.")]
+    #[schemars(
+        description = "Linkage method: 'single', 'complete', 'average', or 'ward'. Default is 'ward'."
+    )]
     pub linkage: Option<String>,
 }
 
@@ -4512,7 +5638,9 @@ pub struct RandomForestRequest {
     pub min_samples_split: Option<usize>,
 
     /// Max features per split
-    #[schemars(description = "Max features to consider per split: 'sqrt', 'log2', 'all', or a number. Default is 'sqrt'.")]
+    #[schemars(
+        description = "Max features to consider per split: 'sqrt', 'log2', 'all', or a number. Default is 'sqrt'."
+    )]
     pub max_features: Option<String>,
 
     /// Random seed for reproducibility
@@ -4532,11 +5660,15 @@ pub struct SvmRequest {
     pub features: Vec<String>,
 
     /// Target column name
-    #[schemars(description = "Name of the binary target column (Y variable). Must have exactly 2 unique values.")]
+    #[schemars(
+        description = "Name of the binary target column (Y variable). Must have exactly 2 unique values."
+    )]
     pub target: String,
 
     /// Regularization parameter C (default: 1.0)
-    #[schemars(description = "Regularization parameter C. Larger values = less regularization. Default is 1.0.")]
+    #[schemars(
+        description = "Regularization parameter C. Larger values = less regularization. Default is 1.0."
+    )]
     pub c: Option<f64>,
 
     /// Maximum iterations (default: 1000)
@@ -4580,7 +5712,9 @@ pub struct CausalForestRequest {
     pub max_depth: Option<usize>,
 
     /// Use honest splitting (default: true)
-    #[schemars(description = "Whether to use honest splitting (separate data for tree structure and estimation). Default is true.")]
+    #[schemars(
+        description = "Whether to use honest splitting (separate data for tree structure and estimation). Default is true."
+    )]
     pub honesty: Option<bool>,
 
     /// Random seed for reproducibility
@@ -4612,15 +5746,21 @@ pub struct BartCausalRequest {
     pub n_trees: Option<usize>,
 
     /// Maximum tree depth (default: 4)
-    #[schemars(description = "Maximum depth of each tree. Default is 4 (BART uses shallow trees).")]
+    #[schemars(
+        description = "Maximum depth of each tree. Default is 4 (BART uses shallow trees)."
+    )]
     pub max_depth: Option<usize>,
 
     /// Number of bootstrap samples for uncertainty (default: 100)
-    #[schemars(description = "Number of bootstrap samples for confidence intervals. Default is 100.")]
+    #[schemars(
+        description = "Number of bootstrap samples for confidence intervals. Default is 100."
+    )]
     pub n_bootstrap: Option<usize>,
 
     /// Include propensity score as covariate (default: false)
-    #[schemars(description = "Whether to include estimated propensity score as a covariate. Default is false.")]
+    #[schemars(
+        description = "Whether to include estimated propensity score as a covariate. Default is false."
+    )]
     pub include_propensity: Option<bool>,
 
     /// Random seed for reproducibility
@@ -4656,15 +5796,21 @@ pub struct HetTxRequest {
     pub test_statistic: Option<String>,
 
     /// Whether to decompose heterogeneity (default: true)
-    #[schemars(description = "Whether to decompose heterogeneity into systematic and idiosyncratic components. Default is true.")]
+    #[schemars(
+        description = "Whether to decompose heterogeneity into systematic and idiosyncratic components. Default is true."
+    )]
     pub decompose: Option<bool>,
 
     /// Effect estimation method (default: 'matching')
-    #[schemars(description = "Method for estimating individual effects: 'matching' (default), 'regression', or 'stratified'.")]
+    #[schemars(
+        description = "Method for estimating individual effects: 'matching' (default), 'regression', or 'stratified'."
+    )]
     pub effect_method: Option<String>,
 
     /// Number of nearest neighbors for matching (default: 3)
-    #[schemars(description = "Number of nearest neighbors for matching-based imputation. Default is 3.")]
+    #[schemars(
+        description = "Number of nearest neighbors for matching-based imputation. Default is 3."
+    )]
     pub n_neighbors: Option<usize>,
 
     /// Random seed for reproducibility
@@ -4692,15 +5838,21 @@ pub struct PprRequest {
     pub nterms: Option<usize>,
 
     /// Maximum terms to consider (default: nterms)
-    #[schemars(description = "Maximum terms to consider during forward selection. Default is nterms.")]
+    #[schemars(
+        description = "Maximum terms to consider during forward selection. Default is nterms."
+    )]
     pub max_terms: Option<usize>,
 
     /// Smoothing method
-    #[schemars(description = "Smoothing method for ridge functions: 'supsmu' (default), 'spline', or 'gcvspline'.")]
+    #[schemars(
+        description = "Smoothing method for ridge functions: 'supsmu' (default), 'spline', or 'gcvspline'."
+    )]
     pub sm_method: Option<String>,
 
     /// Bass parameter for supsmu (0-10)
-    #[schemars(description = "Bass parameter for supsmu smoothing (0-10). Higher = smoother. Default is 0.")]
+    #[schemars(
+        description = "Bass parameter for supsmu smoothing (0-10). Higher = smoother. Default is 0."
+    )]
     pub bass: Option<f64>,
 }
 
@@ -4724,11 +5876,15 @@ pub struct SupsmuRequest {
     pub weights: Option<String>,
 
     /// Span parameter (0-1)
-    #[schemars(description = "Fixed span fraction (0-1). If not specified, cross-validation selects optimal span.")]
+    #[schemars(
+        description = "Fixed span fraction (0-1). If not specified, cross-validation selects optimal span."
+    )]
     pub span: Option<f64>,
 
     /// Bass parameter for smoothness (0-10)
-    #[schemars(description = "Bass parameter controlling smoothness (0-10). Higher = smoother. Default is 0.")]
+    #[schemars(
+        description = "Bass parameter controlling smoothness (0-10). Higher = smoother. Default is 0."
+    )]
     pub bass: Option<f64>,
 
     /// Periodic boundary conditions
@@ -4776,11 +5932,15 @@ pub struct CpgramRequest {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ToeplitzRequest {
     /// First column (and row for symmetric matrix)
-    #[schemars(description = "Values for the first column. For a symmetric matrix, this is also the first row.")]
+    #[schemars(
+        description = "Values for the first column. For a symmetric matrix, this is also the first row."
+    )]
     pub column: Vec<f64>,
 
     /// First row (optional, for asymmetric matrix)
-    #[schemars(description = "Values for the first row. If not specified, creates a symmetric matrix using column values.")]
+    #[schemars(
+        description = "Values for the first row. If not specified, creates a symmetric matrix using column values."
+    )]
     pub row: Option<Vec<f64>>,
 }
 
@@ -4796,11 +5956,15 @@ pub struct ModelTablesRequest {
     pub response: String,
 
     /// Factor column(s) for ANOVA
-    #[schemars(description = "Name of the factor column for one-way ANOVA, or list of two factor columns for two-way ANOVA.")]
+    #[schemars(
+        description = "Name of the factor column for one-way ANOVA, or list of two factor columns for two-way ANOVA."
+    )]
     pub factors: Vec<String>,
 
     /// Type of table
-    #[schemars(description = "Type of table: 'means' (default) or 'effects' (deviations from grand mean).")]
+    #[schemars(
+        description = "Type of table: 'means' (default) or 'effects' (deviations from grand mean)."
+    )]
     pub table_type: Option<String>,
 
     /// Whether to compute standard errors
@@ -4824,11 +5988,15 @@ pub struct SeContrastRequest {
     pub factor: String,
 
     /// Contrast coefficients
-    #[schemars(description = "Contrast coefficients. Each inner array is one contrast (must sum to 0).")]
+    #[schemars(
+        description = "Contrast coefficients. Each inner array is one contrast (must sum to 0)."
+    )]
     pub contrasts: Option<Vec<Vec<f64>>>,
 
     /// Contrast type (if contrasts not provided)
-    #[schemars(description = "Type of contrasts to generate: 'treatment', 'helmert', 'sum', or 'poly'. Only used if contrasts not provided.")]
+    #[schemars(
+        description = "Type of contrasts to generate: 'treatment', 'helmert', 'sum', or 'poly'. Only used if contrasts not provided."
+    )]
     pub contrast_type: Option<String>,
 }
 
@@ -4868,7 +6036,9 @@ pub struct CovWtRequest {
     pub weights: String,
 
     /// Whether to center the data
-    #[schemars(description = "Whether to center the data (subtract weighted mean). Default is true.")]
+    #[schemars(
+        description = "Whether to center the data (subtract weighted mean). Default is true."
+    )]
     pub center: Option<bool>,
 
     /// Covariance method
@@ -4884,7 +6054,9 @@ pub struct MauchlyTestRequest {
     pub dataset: String,
 
     /// Columns for repeated measures
-    #[schemars(description = "Names of columns representing repeated measures (at least 3 required).")]
+    #[schemars(
+        description = "Names of columns representing repeated measures (at least 3 required)."
+    )]
     pub columns: Vec<String>,
 }
 
@@ -4924,7 +6096,9 @@ pub struct LagRequest {
     pub column: String,
 
     /// Number of lags
-    #[schemars(description = "Number of positions to lag. Positive = shift back, negative = shift forward. Default is 1.")]
+    #[schemars(
+        description = "Number of positions to lag. Positive = shift back, negative = shift forward. Default is 1."
+    )]
     pub k: Option<i32>,
 }
 
@@ -5004,7 +6178,9 @@ pub struct WindowRequest {
     pub column: String,
 
     /// Start index (0-based)
-    #[schemars(description = "Start index (0-based, inclusive). If not specified, starts from beginning.")]
+    #[schemars(
+        description = "Start index (0-based, inclusive). If not specified, starts from beginning."
+    )]
     pub start: Option<usize>,
 
     /// End index (0-based)
@@ -5120,7 +6296,9 @@ pub struct SqliteQueryRequest {
     pub query: String,
 
     /// Optional name for the resulting dataset
-    #[schemars(description = "Optional name for the resulting dataset. If not provided, a default name will be generated.")]
+    #[schemars(
+        description = "Optional name for the resulting dataset. If not provided, a default name will be generated."
+    )]
     pub name: Option<String>,
 }
 
@@ -5148,7 +6326,9 @@ pub struct SqliteSchemaRequest {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct DuckDBQueryRequest {
     /// Path to the DuckDB database file
-    #[schemars(description = "Path to the DuckDB database file (.duckdb, .db). Use ':memory:' for in-memory database.")]
+    #[schemars(
+        description = "Path to the DuckDB database file (.duckdb, .db). Use ':memory:' for in-memory database."
+    )]
     pub db_path: String,
 
     /// SQL query to execute
@@ -5184,15 +6364,21 @@ pub struct DuckDBSchemaRequest {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct DuckDBFileQueryRequest {
     /// Path to the data file (Parquet or CSV)
-    #[schemars(description = "Path to the data file (.parquet, .csv). DuckDB can query these files directly with SQL.")]
+    #[schemars(
+        description = "Path to the data file (.parquet, .csv). DuckDB can query these files directly with SQL."
+    )]
     pub file_path: String,
 
     /// SQL query to execute
-    #[schemars(description = "SQL query to execute. Use {file} as placeholder for the file path. Example: 'SELECT * FROM {file} WHERE amount > 100'")]
+    #[schemars(
+        description = "SQL query to execute. Use {file} as placeholder for the file path. Example: 'SELECT * FROM {file} WHERE amount > 100'"
+    )]
     pub query: String,
 
     /// Optional name for the resulting dataset
-    #[schemars(description = "Optional name for the resulting dataset. If not provided, one will be generated.")]
+    #[schemars(
+        description = "Optional name for the resulting dataset. If not provided, one will be generated."
+    )]
     pub name: Option<String>,
 }
 
@@ -5212,7 +6398,9 @@ pub struct HistogramRequest {
     pub column: String,
 
     /// Number of bins (optional, auto-calculated if not specified)
-    #[schemars(description = "Number of bins for the histogram. If not specified, uses Sturges' rule.")]
+    #[schemars(
+        description = "Number of bins for the histogram. If not specified, uses Sturges' rule."
+    )]
     pub bins: Option<usize>,
 
     /// Chart title (optional)
@@ -5252,7 +6440,9 @@ pub struct LineChartRequest {
     pub x_column: String,
 
     /// Y-axis column names (one or more series)
-    #[schemars(description = "Names of the columns to plot as lines (can be multiple for multi-series).")]
+    #[schemars(
+        description = "Names of the columns to plot as lines (can be multiple for multi-series)."
+    )]
     pub y_columns: Vec<String>,
 
     /// Chart title (optional)
@@ -5284,7 +6474,9 @@ pub struct HeatmapRequest {
     pub dataset: String,
 
     /// Column names to include (optional, uses all numeric if not specified)
-    #[schemars(description = "Names of numeric columns to include. If not specified, uses all numeric columns.")]
+    #[schemars(
+        description = "Names of numeric columns to include. If not specified, uses all numeric columns."
+    )]
     pub columns: Option<Vec<String>>,
 
     /// Chart title (optional)
@@ -5308,7 +6500,9 @@ pub struct ScatterInteractiveRequest {
     pub y_column: String,
 
     /// Group column for separate traces (optional)
-    #[schemars(description = "Optional column for grouping data points into separate traces with different colors.")]
+    #[schemars(
+        description = "Optional column for grouping data points into separate traces with different colors."
+    )]
     pub group_column: Option<String>,
 
     /// Chart title (optional)
@@ -5328,7 +6522,9 @@ pub struct HistogramInteractiveRequest {
     pub column: String,
 
     /// Group column for separate traces (optional)
-    #[schemars(description = "Optional column for grouping data into separate overlaid histograms.")]
+    #[schemars(
+        description = "Optional column for grouping data into separate overlaid histograms."
+    )]
     pub group_column: Option<String>,
 
     /// Chart title (optional)
@@ -5364,7 +6560,9 @@ pub struct EventStudyRequest {
     pub dataset: String,
 
     /// Column name for time/period relative to treatment
-    #[schemars(description = "Column with time periods relative to treatment (e.g., -3, -2, -1, 0, 1, 2, 3).")]
+    #[schemars(
+        description = "Column with time periods relative to treatment (e.g., -3, -2, -1, 0, 1, 2, 3)."
+    )]
     pub time_column: String,
 
     /// Column name for point estimates
@@ -5412,7 +6610,9 @@ pub struct CoefficientPlotRequest {
     pub title: Option<String>,
 
     /// Horizontal orientation (optional, default: true)
-    #[schemars(description = "If true, draw horizontal error bars (default). If false, draw vertical.")]
+    #[schemars(
+        description = "If true, draw horizontal error bars (default). If false, draw vertical."
+    )]
     pub horizontal: Option<bool>,
 }
 
@@ -5456,7 +6656,9 @@ pub struct IrfPlotRequest {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ResidualDiagnosticsRequest {
     /// Name/ID of the dataset
-    #[schemars(description = "Name or ID of a previously loaded dataset containing regression results.")]
+    #[schemars(
+        description = "Name or ID of a previously loaded dataset containing regression results."
+    )]
     pub dataset: String,
 
     /// Column name for fitted/predicted values
@@ -5468,7 +6670,9 @@ pub struct ResidualDiagnosticsRequest {
     pub residuals_column: String,
 
     /// Column name for leverage (hat) values (optional)
-    #[schemars(description = "Optional column with leverage (hat) values. If not provided, will be estimated.")]
+    #[schemars(
+        description = "Optional column with leverage (hat) values. If not provided, will be estimated."
+    )]
     pub leverage_column: Option<String>,
 }
 
@@ -5480,11 +6684,15 @@ pub struct BatchProcessRequest {
     pub datasets: Vec<String>,
 
     /// Operation to perform on each dataset
-    #[schemars(description = "Operation to perform: 'describe' (summary stats), 'correlation' (correlation matrix), or 'ols' (regression).")]
+    #[schemars(
+        description = "Operation to perform: 'describe' (summary stats), 'correlation' (correlation matrix), or 'ols' (regression)."
+    )]
     pub operation: String,
 
     /// Columns to analyze (optional, defaults to all numeric for describe/correlation)
-    #[schemars(description = "List of column names to analyze. For 'ols', first column is dependent variable.")]
+    #[schemars(
+        description = "List of column names to analyze. For 'ols', first column is dependent variable."
+    )]
     pub columns: Option<Vec<String>>,
 
     /// Whether to return combined summary across all datasets
@@ -5504,7 +6712,9 @@ pub struct CompareDatasetRequest {
     pub columns: Vec<String>,
 
     /// Type of comparison
-    #[schemars(description = "Comparison type: 'summary' (side-by-side stats), 'correlation' (correlation differences), or 'distribution' (distribution comparison).")]
+    #[schemars(
+        description = "Comparison type: 'summary' (side-by-side stats), 'correlation' (correlation differences), or 'distribution' (distribution comparison)."
+    )]
     pub comparison_type: Option<String>,
 }
 
@@ -5512,11 +6722,15 @@ pub struct CompareDatasetRequest {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ExportSessionRequest {
     /// Path to save the session file
-    #[schemars(description = "File path to save the session (JSON format). If not provided, returns session data as string.")]
+    #[schemars(
+        description = "File path to save the session (JSON format). If not provided, returns session data as string."
+    )]
     pub file_path: Option<String>,
 
     /// Whether to include dataset data (default: true)
-    #[schemars(description = "Include full dataset data. If false, only metadata and file paths are saved.")]
+    #[schemars(
+        description = "Include full dataset data. If false, only metadata and file paths are saved."
+    )]
     pub include_data: Option<bool>,
 }
 
@@ -5552,7 +6766,9 @@ pub struct ColumnSpecInput {
     pub name: String,
 
     /// Distribution type and parameters
-    #[schemars(description = "Distribution specification. Must include 'type' field and distribution-specific parameters.")]
+    #[schemars(
+        description = "Distribution specification. Must include 'type' field and distribution-specific parameters."
+    )]
     pub distribution: serde_json::Value,
 }
 
@@ -5564,7 +6780,9 @@ pub struct GenerateRandomDataRequest {
     pub n_rows: usize,
 
     /// Column specifications
-    #[schemars(description = "Array of column specifications. Each must have 'name' and 'distribution' fields. Distribution types: 'uniform' (min, max), 'normal' (mean, std), 'binomial' (n, p), 'poisson' (lambda), 'exponential' (rate), 'bernoulli' (p), 'categorical' (categories, optional weights), 'uniform_int' (min, max), 'sequence' (start), 'constant' (value), 'constant_string' (value).")]
+    #[schemars(
+        description = "Array of column specifications. Each must have 'name' and 'distribution' fields. Distribution types: 'uniform' (min, max), 'normal' (mean, std), 'binomial' (n, p), 'poisson' (lambda), 'exponential' (rate), 'bernoulli' (p), 'categorical' (categories, optional weights), 'uniform_int' (min, max), 'sequence' (start), 'constant' (value), 'constant_string' (value)."
+    )]
     pub columns: Vec<ColumnSpecInput>,
 
     /// Random seed for reproducibility
@@ -5580,11 +6798,15 @@ pub struct GenerateRandomDataRequest {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct DendrogramRequest {
     /// Linkage matrix from hierarchical clustering (JSON array of arrays)
-    #[schemars(description = "Linkage matrix from hierarchical clustering. Array of [cluster1, cluster2, distance, size] tuples.")]
+    #[schemars(
+        description = "Linkage matrix from hierarchical clustering. Array of [cluster1, cluster2, distance, size] tuples."
+    )]
     pub linkage_matrix: Vec<Vec<f64>>,
 
     /// Optional labels for leaf nodes
-    #[schemars(description = "Optional labels for leaf nodes (original samples). If not provided, uses indices.")]
+    #[schemars(
+        description = "Optional labels for leaf nodes (original samples). If not provided, uses indices."
+    )]
     pub labels: Option<Vec<String>>,
 
     /// Chart width
@@ -5616,15 +6838,21 @@ pub struct FilterDatasetRequest {
     pub column: String,
 
     /// Comparison operator
-    #[schemars(description = "Comparison operator: 'eq', 'ne', 'gt', 'ge', 'lt', 'le', 'contains', 'starts_with', 'ends_with'.")]
+    #[schemars(
+        description = "Comparison operator: 'eq', 'ne', 'gt', 'ge', 'lt', 'le', 'contains', 'starts_with', 'ends_with'."
+    )]
     pub op: String,
 
     /// Value to compare against
-    #[schemars(description = "Value to compare against (as string, will be parsed based on column type).")]
+    #[schemars(
+        description = "Value to compare against (as string, will be parsed based on column type)."
+    )]
     pub value: String,
 
     /// Optional name for the resulting dataset
-    #[schemars(description = "Optional name for the filtered result. If not provided, overwrites the source dataset.")]
+    #[schemars(
+        description = "Optional name for the filtered result. If not provided, overwrites the source dataset."
+    )]
     pub result_name: Option<String>,
 }
 
@@ -5640,7 +6868,9 @@ pub struct SelectColumnsRequest {
     pub columns: Vec<String>,
 
     /// Optional name for the resulting dataset
-    #[schemars(description = "Optional name for the result. If not provided, overwrites the source dataset.")]
+    #[schemars(
+        description = "Optional name for the result. If not provided, overwrites the source dataset."
+    )]
     pub result_name: Option<String>,
 }
 
@@ -5656,7 +6886,9 @@ pub struct DropColumnsRequest {
     pub columns: Vec<String>,
 
     /// Optional name for the resulting dataset
-    #[schemars(description = "Optional name for the result. If not provided, overwrites the source dataset.")]
+    #[schemars(
+        description = "Optional name for the result. If not provided, overwrites the source dataset."
+    )]
     pub result_name: Option<String>,
 }
 
@@ -5668,11 +6900,15 @@ pub struct RenameColumnsRequest {
     pub dataset: String,
 
     /// Mapping of old names to new names
-    #[schemars(description = "Mapping of old column names to new names as pairs: [[\"old1\", \"new1\"], [\"old2\", \"new2\"]].")]
+    #[schemars(
+        description = "Mapping of old column names to new names as pairs: [[\"old1\", \"new1\"], [\"old2\", \"new2\"]]."
+    )]
     pub renames: Vec<Vec<String>>,
 
     /// Optional name for the resulting dataset
-    #[schemars(description = "Optional name for the result. If not provided, overwrites the source dataset.")]
+    #[schemars(
+        description = "Optional name for the result. If not provided, overwrites the source dataset."
+    )]
     pub result_name: Option<String>,
 }
 
@@ -5692,7 +6928,9 @@ pub struct SortDatasetRequest {
     pub descending: Option<bool>,
 
     /// Optional name for the resulting dataset
-    #[schemars(description = "Optional name for the result. If not provided, overwrites the source dataset.")]
+    #[schemars(
+        description = "Optional name for the result. If not provided, overwrites the source dataset."
+    )]
     pub result_name: Option<String>,
 }
 
@@ -5712,7 +6950,9 @@ pub struct JoinDatasetsRequest {
     pub left_on: Vec<String>,
 
     /// Columns to join on (from right dataset)
-    #[schemars(description = "Column names from the right dataset to join on. If not provided, uses left_on.")]
+    #[schemars(
+        description = "Column names from the right dataset to join on. If not provided, uses left_on."
+    )]
     pub right_on: Option<Vec<String>>,
 
     /// Type of join
@@ -5720,7 +6960,9 @@ pub struct JoinDatasetsRequest {
     pub join_type: Option<String>,
 
     /// Suffix for duplicate column names
-    #[schemars(description = "Suffix to add to duplicate column names from the right dataset. Default is '_right'.")]
+    #[schemars(
+        description = "Suffix to add to duplicate column names from the right dataset. Default is '_right'."
+    )]
     pub suffix: Option<String>,
 
     /// Optional name for the resulting dataset
@@ -5752,7 +6994,9 @@ pub struct GroupByRequest {
     pub by: Vec<String>,
 
     /// Aggregation specifications
-    #[schemars(description = "Aggregation specs as [[\"column\", \"function\"], ...]. Functions: 'count', 'sum', 'mean', 'median', 'min', 'max', 'std', 'var', 'first', 'last'.")]
+    #[schemars(
+        description = "Aggregation specs as [[\"column\", \"function\"], ...]. Functions: 'count', 'sum', 'mean', 'median', 'min', 'max', 'std', 'var', 'first', 'last'."
+    )]
     pub aggs: Vec<Vec<String>>,
 
     /// Optional name for the resulting dataset
@@ -5840,11 +7084,15 @@ pub struct DropNaRequest {
     pub dataset: String,
 
     /// Columns to check for nulls
-    #[schemars(description = "Column names to check for nulls. If not provided, checks all columns.")]
+    #[schemars(
+        description = "Column names to check for nulls. If not provided, checks all columns."
+    )]
     pub columns: Option<Vec<String>>,
 
     /// How to drop rows
-    #[schemars(description = "How to drop: 'any' (drop if any null) or 'all' (drop only if all null). Default is 'any'.")]
+    #[schemars(
+        description = "How to drop: 'any' (drop if any null) or 'all' (drop only if all null). Default is 'any'."
+    )]
     pub how: Option<String>,
 
     /// Optional name for the resulting dataset
@@ -5864,7 +7112,9 @@ pub struct FillNaRequest {
     pub columns: Option<Vec<String>>,
 
     /// Fill strategy
-    #[schemars(description = "Fill strategy: 'mean', 'median', 'mode', 'forward', 'backward', or a constant value.")]
+    #[schemars(
+        description = "Fill strategy: 'mean', 'median', 'mode', 'forward', 'backward', or a constant value."
+    )]
     pub strategy: String,
 
     /// Optional name for the resulting dataset
@@ -5880,11 +7130,15 @@ pub struct DeduplicateRequest {
     pub dataset: String,
 
     /// Columns to check for duplicates
-    #[schemars(description = "Column names to check for duplicates. If not provided, checks all columns.")]
+    #[schemars(
+        description = "Column names to check for duplicates. If not provided, checks all columns."
+    )]
     pub columns: Option<Vec<String>>,
 
     /// Which duplicate to keep
-    #[schemars(description = "Which duplicate to keep: 'first', 'last', or 'none'. Default is 'first'.")]
+    #[schemars(
+        description = "Which duplicate to keep: 'first', 'last', or 'none'. Default is 'first'."
+    )]
     pub keep: Option<String>,
 
     /// Optional name for the resulting dataset
@@ -6004,7 +7258,9 @@ pub struct RegexExtractRequest {
     pub column: String,
 
     /// Regex pattern with capture groups
-    #[schemars(description = "Regular expression pattern. Use capture groups () to specify what to extract.")]
+    #[schemars(
+        description = "Regular expression pattern. Use capture groups () to specify what to extract."
+    )]
     pub pattern: String,
 
     /// Name for the new column
@@ -6012,7 +7268,9 @@ pub struct RegexExtractRequest {
     pub new_column: String,
 
     /// Which capture group to extract
-    #[schemars(description = "Which capture group to extract: 0 = entire match, 1 = first group, etc. Default is 1.")]
+    #[schemars(
+        description = "Which capture group to extract: 0 = entire match, 1 = first group, etc. Default is 1."
+    )]
     pub group: Option<usize>,
 
     /// Optional name for the resulting dataset
@@ -6060,11 +7318,15 @@ pub struct StrSplitRequest {
     pub pattern: String,
 
     /// Maximum number of splits
-    #[schemars(description = "Maximum number of splits. If not provided, splits on all occurrences.")]
+    #[schemars(
+        description = "Maximum number of splits. If not provided, splits on all occurrences."
+    )]
     pub max_splits: Option<usize>,
 
     /// Prefix for new column names
-    #[schemars(description = "Prefix for new column names. Creates columns named prefix_0, prefix_1, etc.")]
+    #[schemars(
+        description = "Prefix for new column names. Creates columns named prefix_0, prefix_1, etc."
+    )]
     pub prefix: String,
 
     /// Optional name for the resulting dataset
@@ -6152,11 +7414,15 @@ pub struct LagLeadRequest {
     pub column: String,
 
     /// Number of periods to shift
-    #[schemars(description = "Number of periods to shift. Positive for lag, negative for lead (or use 'direction').")]
+    #[schemars(
+        description = "Number of periods to shift. Positive for lag, negative for lead (or use 'direction')."
+    )]
     pub periods: i64,
 
     /// Direction: 'lag' or 'lead'
-    #[schemars(description = "Direction: 'lag' (shift forward) or 'lead' (shift backward). Default is 'lag'.")]
+    #[schemars(
+        description = "Direction: 'lag' (shift forward) or 'lead' (shift backward). Default is 'lag'."
+    )]
     pub direction: Option<String>,
 
     /// Columns to group by (for panel data)
@@ -6180,7 +7446,9 @@ pub struct StandardizeRequest {
     pub columns: Vec<String>,
 
     /// Method: 'standardize' or 'normalize'
-    #[schemars(description = "Method: 'standardize' (z-score) or 'normalize' (0-1 range). Default is 'standardize'.")]
+    #[schemars(
+        description = "Method: 'standardize' (z-score) or 'normalize' (0-1 range). Default is 'standardize'."
+    )]
     pub method: Option<String>,
 
     /// Optional name for the resulting dataset
@@ -6200,11 +7468,15 @@ pub struct BinColumnRequest {
     pub column: String,
 
     /// Binning strategy
-    #[schemars(description = "Binning strategy: 'uniform' (equal width), 'quantile' (equal frequency), or 'custom'.")]
+    #[schemars(
+        description = "Binning strategy: 'uniform' (equal width), 'quantile' (equal frequency), or 'custom'."
+    )]
     pub strategy: String,
 
     /// Number of bins or custom breaks
-    #[schemars(description = "Number of bins (for uniform/quantile) or list of break points (for custom).")]
+    #[schemars(
+        description = "Number of bins (for uniform/quantile) or list of break points (for custom)."
+    )]
     pub bins: Vec<f64>,
 
     /// Optional labels for bins
@@ -6228,7 +7500,9 @@ pub struct OneHotEncodeRequest {
     pub column: String,
 
     /// Whether to drop the first category
-    #[schemars(description = "If true, drop first category to avoid multicollinearity. Default is false.")]
+    #[schemars(
+        description = "If true, drop first category to avoid multicollinearity. Default is false."
+    )]
     pub drop_first: Option<bool>,
 
     /// Optional name for the resulting dataset
@@ -6252,7 +7526,9 @@ pub struct DiffRequest {
     pub periods: Option<i64>,
 
     /// Type of difference
-    #[schemars(description = "Type: 'diff' (absolute difference) or 'pct_change' (percent change). Default is 'diff'.")]
+    #[schemars(
+        description = "Type: 'diff' (absolute difference) or 'pct_change' (percent change). Default is 'diff'."
+    )]
     pub diff_type: Option<String>,
 
     /// Columns to group by (for panel data)
@@ -6300,15 +7576,21 @@ pub struct MutateColumnRequest {
     pub new_column: String,
 
     /// Expression type
-    #[schemars(description = "Expression type: 'arithmetic' (e.g., col1 + col2), 'function' (e.g., log(col)), or 'constant'.")]
+    #[schemars(
+        description = "Expression type: 'arithmetic' (e.g., col1 + col2), 'function' (e.g., log(col)), or 'constant'."
+    )]
     pub expr_type: String,
 
     /// Left operand (column name for arithmetic)
-    #[schemars(description = "Left operand: column name for arithmetic, column for function, or constant value.")]
+    #[schemars(
+        description = "Left operand: column name for arithmetic, column for function, or constant value."
+    )]
     pub left: String,
 
     /// Operator (for arithmetic: '+', '-', '*', '/')
-    #[schemars(description = "Operator for arithmetic: '+', '-', '*', '/'. For function: function name ('log', 'exp', 'sqrt', 'abs', 'square').")]
+    #[schemars(
+        description = "Operator for arithmetic: '+', '-', '*', '/'. For function: function name ('log', 'exp', 'sqrt', 'abs', 'square')."
+    )]
     pub operator: Option<String>,
 
     /// Right operand (column name for arithmetic)
@@ -6336,11 +7618,15 @@ pub struct CorTestRequest {
     pub y: String,
 
     /// Correlation method
-    #[schemars(description = "Correlation method: 'pearson' (default), 'spearman' (rank), or 'kendall' (tau).")]
+    #[schemars(
+        description = "Correlation method: 'pearson' (default), 'spearman' (rank), or 'kendall' (tau)."
+    )]
     pub method: Option<String>,
 
     /// Alternative hypothesis
-    #[schemars(description = "Alternative hypothesis: 'two.sided' (default), 'greater', or 'less'.")]
+    #[schemars(
+        description = "Alternative hypothesis: 'two.sided' (default), 'greater', or 'less'."
+    )]
     pub alternative: Option<String>,
 
     /// Confidence level
@@ -6352,15 +7638,21 @@ pub struct CorTestRequest {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct PowerTTestRequest {
     /// Sample size (per group for two-sample)
-    #[schemars(description = "Sample size per group. Leave None to solve for required sample size.")]
+    #[schemars(
+        description = "Sample size per group. Leave None to solve for required sample size."
+    )]
     pub n: Option<f64>,
 
     /// True difference in means
-    #[schemars(description = "True difference in means (effect size in original units). Leave None to solve for detectable effect.")]
+    #[schemars(
+        description = "True difference in means (effect size in original units). Leave None to solve for detectable effect."
+    )]
     pub delta: Option<f64>,
 
     /// Standard deviation
-    #[schemars(description = "Standard deviation. Default: 1 (use d = delta/sd as standardized effect size).")]
+    #[schemars(
+        description = "Standard deviation. Default: 1 (use d = delta/sd as standardized effect size)."
+    )]
     pub sd: Option<f64>,
 
     /// Significance level
@@ -6368,7 +7660,9 @@ pub struct PowerTTestRequest {
     pub sig_level: Option<f64>,
 
     /// Power
-    #[schemars(description = "Power (1 - Type II error rate). Leave None to solve for power. Common target: 0.80.")]
+    #[schemars(
+        description = "Power (1 - Type II error rate). Leave None to solve for power. Common target: 0.80."
+    )]
     pub power: Option<f64>,
 
     /// Type of t-test
@@ -6384,7 +7678,9 @@ pub struct PowerTTestRequest {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct PowerPropTestRequest {
     /// Sample size per group
-    #[schemars(description = "Sample size per group. Leave None to solve for required sample size.")]
+    #[schemars(
+        description = "Sample size per group. Leave None to solve for required sample size."
+    )]
     pub n: Option<f64>,
 
     /// Proportion in group 1
@@ -6392,7 +7688,9 @@ pub struct PowerPropTestRequest {
     pub p1: Option<f64>,
 
     /// Proportion in group 2
-    #[schemars(description = "Proportion in second group (0-1). Leave None to solve for detectable difference.")]
+    #[schemars(
+        description = "Proportion in second group (0-1). Leave None to solve for detectable difference."
+    )]
     pub p2: Option<f64>,
 
     /// Significance level
@@ -6400,7 +7698,9 @@ pub struct PowerPropTestRequest {
     pub sig_level: Option<f64>,
 
     /// Power
-    #[schemars(description = "Power (1 - Type II error rate). Leave None to solve for power. Common target: 0.80.")]
+    #[schemars(
+        description = "Power (1 - Type II error rate). Leave None to solve for power. Common target: 0.80."
+    )]
     pub power: Option<f64>,
 
     /// Alternative hypothesis
@@ -6416,7 +7716,9 @@ pub struct PowerAnovaTestRequest {
     pub groups: Option<usize>,
 
     /// Sample size per group
-    #[schemars(description = "Sample size per group. Leave None to solve for required sample size.")]
+    #[schemars(
+        description = "Sample size per group. Leave None to solve for required sample size."
+    )]
     pub n: Option<f64>,
 
     /// Between-group variance
@@ -6432,7 +7734,9 @@ pub struct PowerAnovaTestRequest {
     pub sig_level: Option<f64>,
 
     /// Power
-    #[schemars(description = "Power (1 - Type II error rate). Leave None to solve for power. Common target: 0.80.")]
+    #[schemars(
+        description = "Power (1 - Type II error rate). Leave None to solve for power. Common target: 0.80."
+    )]
     pub power: Option<f64>,
 }
 
@@ -6452,7 +7756,9 @@ pub struct PropTrendTestRequest {
     pub trials: String,
 
     /// Optional scores for the trend
-    #[schemars(description = "Optional scores for each group. If omitted, uses 1, 2, 3, ... (equally spaced).")]
+    #[schemars(
+        description = "Optional scores for each group. If omitted, uses 1, 2, 3, ... (equally spaced)."
+    )]
     pub scores: Option<Vec<f64>>,
 }
 
@@ -6504,7 +7810,9 @@ pub struct MadRequest {
     pub center: Option<String>,
 
     /// Scaling constant (default: 1.4826 for normal consistency)
-    #[schemars(description = "Scaling constant. Default 1.4826 makes MAD consistent for normal data.")]
+    #[schemars(
+        description = "Scaling constant. Default 1.4826 makes MAD consistent for normal data."
+    )]
     pub constant: Option<f64>,
 }
 
@@ -6520,7 +7828,9 @@ pub struct EcdfRequest {
     pub column: String,
 
     /// Optional values at which to evaluate the ECDF
-    #[schemars(description = "Optional specific values at which to evaluate the ECDF. If omitted, returns ECDF at all sorted unique data values.")]
+    #[schemars(
+        description = "Optional specific values at which to evaluate the ECDF. If omitted, returns ECDF at all sorted unique data values."
+    )]
     pub at: Option<Vec<f64>>,
 }
 
@@ -6536,11 +7846,15 @@ pub struct DensityRequest {
     pub column: String,
 
     /// Kernel type
-    #[schemars(description = "Kernel function: 'gaussian' (default), 'epanechnikov', 'rectangular', 'triangular', 'biweight', or 'cosine'.")]
+    #[schemars(
+        description = "Kernel function: 'gaussian' (default), 'epanechnikov', 'rectangular', 'triangular', 'biweight', or 'cosine'."
+    )]
     pub kernel: Option<String>,
 
     /// Bandwidth
-    #[schemars(description = "Bandwidth for smoothing. If omitted, uses Silverman's rule of thumb.")]
+    #[schemars(
+        description = "Bandwidth for smoothing. If omitted, uses Silverman's rule of thumb."
+    )]
     pub bw: Option<f64>,
 
     /// Number of evaluation points
@@ -6568,11 +7882,15 @@ pub struct SplineRequest {
     pub y: String,
 
     /// Points at which to interpolate
-    #[schemars(description = "Points at which to interpolate. If omitted, returns the spline coefficients.")]
+    #[schemars(
+        description = "Points at which to interpolate. If omitted, returns the spline coefficients."
+    )]
     pub xout: Option<Vec<f64>>,
 
     /// Spline method
-    #[schemars(description = "Spline method: 'fmm' (default, Forsythe-Malcolm-Moler), 'natural', 'periodic', or 'hyman' (monotone).")]
+    #[schemars(
+        description = "Spline method: 'fmm' (default, Forsythe-Malcolm-Moler), 'natural', 'periodic', or 'hyman' (monotone)."
+    )]
     pub method: Option<String>,
 }
 
@@ -6600,7 +7918,9 @@ pub struct ApproxRequest {
     pub method: Option<String>,
 
     /// Rule for extrapolation
-    #[schemars(description = "Rule for handling points outside range: 'na' (default, return NA) or 'nearest' (use boundary value).")]
+    #[schemars(
+        description = "Rule for handling points outside range: 'na' (default, return NA) or 'nearest' (use boundary value)."
+    )]
     pub rule: Option<String>,
 }
 
@@ -6628,11 +7948,15 @@ pub struct GlsRequest {
     pub intercept: Option<bool>,
 
     /// Correlation structure type
-    #[schemars(description = "Correlation structure: 'ar1' (default), 'compound_symmetry', or 'identity' (OLS).")]
+    #[schemars(
+        description = "Correlation structure: 'ar1' (default), 'compound_symmetry', or 'identity' (OLS)."
+    )]
     pub correlation: Option<String>,
 
     /// Correlation parameter (rho)
-    #[schemars(description = "Correlation parameter rho for AR(1) or compound symmetry. If omitted with 'ar1', auto-estimated from OLS residuals.")]
+    #[schemars(
+        description = "Correlation parameter rho for AR(1) or compound symmetry. If omitted with 'ar1', auto-estimated from OLS residuals."
+    )]
     pub rho: Option<f64>,
 }
 
@@ -6652,15 +7976,21 @@ pub struct SmoothSplineRequest {
     pub y: String,
 
     /// Smoothing parameter (spar)
-    #[schemars(description = "Smoothing parameter (0 to 1). If omitted, uses generalized cross-validation (GCV) to select automatically.")]
+    #[schemars(
+        description = "Smoothing parameter (0 to 1). If omitted, uses generalized cross-validation (GCV) to select automatically."
+    )]
     pub spar: Option<f64>,
 
     /// Degrees of freedom
-    #[schemars(description = "Equivalent degrees of freedom. Alternative to spar. If both omitted, uses GCV.")]
+    #[schemars(
+        description = "Equivalent degrees of freedom. Alternative to spar. If both omitted, uses GCV."
+    )]
     pub df: Option<f64>,
 
     /// Points at which to predict
-    #[schemars(description = "Optional points at which to evaluate the fitted spline. If omitted, returns fit at data points.")]
+    #[schemars(
+        description = "Optional points at which to evaluate the fitted spline. If omitted, returns fit at data points."
+    )]
     pub xout: Option<Vec<f64>>,
 }
 
@@ -7589,121 +8919,87 @@ impl AnalyticsServer {
             "load_dataset" => {
                 let req: LoadDatasetRequest = serde_json::from_value(arguments)
                     .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server
-                    .load_dataset(Parameters(req))
-                    .await
+                session_server.load_dataset(Parameters(req)).await
             }
             "upload_dataset" => {
                 let req: UploadDatasetRequest = serde_json::from_value(arguments)
                     .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server
-                    .upload_dataset(Parameters(req))
-                    .await
+                session_server.upload_dataset(Parameters(req)).await
             }
             "create_dataset" => {
                 let req: CreateDatasetRequest = serde_json::from_value(arguments)
                     .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server
-                    .create_dataset(Parameters(req))
-                    .await
+                session_server.create_dataset(Parameters(req)).await
             }
             "describe_dataset" => {
                 let req: DescribeDatasetRequest = serde_json::from_value(arguments)
                     .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server
-                    .describe_dataset(Parameters(req))
-                    .await
+                session_server.describe_dataset(Parameters(req)).await
             }
             "head_dataset" => {
                 let req: HeadDatasetRequest = serde_json::from_value(arguments)
                     .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server
-                    .head_dataset(Parameters(req))
-                    .await
+                session_server.head_dataset(Parameters(req)).await
             }
             "data_quality_profile" => {
                 let req: DataQualityProfileRequest = serde_json::from_value(arguments)
                     .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server
-                    .data_quality_profile(Parameters(req))
-                    .await
+                session_server.data_quality_profile(Parameters(req)).await
             }
             "preview_cleaning" => {
                 let req: PreviewCleaningRequest = serde_json::from_value(arguments)
                     .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server
-                    .preview_cleaning(Parameters(req))
-                    .await
+                session_server.preview_cleaning(Parameters(req)).await
             }
             "verify_cleaning" => {
                 let req: VerifyCleaningRequest = serde_json::from_value(arguments)
                     .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server
-                    .verify_cleaning(Parameters(req))
-                    .await
+                session_server.verify_cleaning(Parameters(req)).await
             }
             "compute_correlation" => {
                 let req: CorrelationRequest = serde_json::from_value(arguments)
                     .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server
-                    .compute_correlation(Parameters(req))
-                    .await
+                session_server.compute_correlation(Parameters(req)).await
             }
             "regression_ols" => {
                 let req: OlsRequest = serde_json::from_value(arguments)
                     .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server
-                    .regression_ols(Parameters(req))
-                    .await
+                session_server.regression_ols(Parameters(req)).await
             }
             "regression_diagnostics" => {
                 let req: DiagnosticsRequest = serde_json::from_value(arguments)
                     .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server
-                    .regression_diagnostics(Parameters(req))
-                    .await
+                session_server.regression_diagnostics(Parameters(req)).await
             }
             "panel_fixed_effects" => {
                 let req: PanelFERequest = serde_json::from_value(arguments)
                     .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server
-                    .panel_fixed_effects(Parameters(req))
-                    .await
+                session_server.panel_fixed_effects(Parameters(req)).await
             }
             "panel_random_effects" => {
                 let req: PanelRERequest = serde_json::from_value(arguments)
                     .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server
-                    .panel_random_effects(Parameters(req))
-                    .await
+                session_server.panel_random_effects(Parameters(req)).await
             }
             "panel_gmm" => {
                 let req: GmmRequest = serde_json::from_value(arguments)
                     .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server
-                    .panel_gmm(Parameters(req))
-                    .await
+                session_server.panel_gmm(Parameters(req)).await
             }
             "iv_2sls" => {
                 let req: IV2SLSRequest = serde_json::from_value(arguments)
                     .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server
-                    .iv_2sls(Parameters(req))
-                    .await
+                session_server.iv_2sls(Parameters(req)).await
             }
             "diff_in_diff" => {
                 let req: DiDRequest = serde_json::from_value(arguments)
                     .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server
-                    .diff_in_diff(Parameters(req))
-                    .await
+                session_server.diff_in_diff(Parameters(req)).await
             }
             "treatment_ipw" => {
                 let req: IpwRequest = serde_json::from_value(arguments)
                     .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server
-                    .treatment_ipw(Parameters(req))
-                    .await
+                session_server.treatment_ipw(Parameters(req)).await
             }
             "treatment_doubly_robust" => {
                 let req: DoublyRobustRequest = serde_json::from_value(arguments)
@@ -7715,23 +9011,17 @@ impl AnalyticsServer {
             "treatment_tmle" => {
                 let req: TmleRequest = serde_json::from_value(arguments)
                     .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server
-                    .treatment_tmle(Parameters(req))
-                    .await
+                session_server.treatment_tmle(Parameters(req)).await
             }
             "collaborative_tmle" => {
                 let req: CTmleRequest = serde_json::from_value(arguments)
                     .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server
-                    .collaborative_tmle(Parameters(req))
-                    .await
+                session_server.collaborative_tmle(Parameters(req)).await
             }
             "ltmle" => {
                 let req: LtmleRequest = serde_json::from_value(arguments)
                     .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server
-                    .ltmle(Parameters(req))
-                    .await
+                session_server.ltmle(Parameters(req)).await
             }
             "regression_standardization" => {
                 let req: StdRegRequest = serde_json::from_value(arguments)
@@ -7740,12 +9030,15 @@ impl AnalyticsServer {
                     .regression_standardization(Parameters(req))
                     .await
             }
+            "gformula" => {
+                let req: GFormulaRequest = serde_json::from_value(arguments)
+                    .map_err(|e| format!("Invalid arguments: {}", e))?;
+                session_server.gformula(Parameters(req)).await
+            }
             "mediation_analysis" => {
                 let req: MediationRequest = serde_json::from_value(arguments)
                     .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server
-                    .mediation_analysis(Parameters(req))
-                    .await
+                session_server.mediation_analysis(Parameters(req)).await
             }
             "natural_effects_mediation" => {
                 let req: NaturalEffectsRequest = serde_json::from_value(arguments)
@@ -7757,100 +9050,72 @@ impl AnalyticsServer {
             "logit" => {
                 let req: LogitRequest = serde_json::from_value(arguments)
                     .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server
-                    .logit(Parameters(req))
-                    .await
+                session_server.logit(Parameters(req)).await
             }
             "probit" => {
                 let req: ProbitRequest = serde_json::from_value(arguments)
                     .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server
-                    .probit(Parameters(req))
-                    .await
+                session_server.probit(Parameters(req)).await
             }
             "multinom" => {
                 let req: MultinomRequest = serde_json::from_value(arguments)
                     .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server
-                    .multinom(Parameters(req))
-                    .await
+                session_server.multinom(Parameters(req)).await
             }
             "ordered_model" => {
                 let req: OrderedRequest = serde_json::from_value(arguments)
                     .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server
-                    .ordered_model(Parameters(req))
-                    .await
+                session_server.ordered_model(Parameters(req)).await
             }
             "negbin" => {
                 let req: NegBinRequest = serde_json::from_value(arguments)
                     .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server
-                    .negbin(Parameters(req))
-                    .await
+                session_server.negbin(Parameters(req)).await
             }
             "zeroinfl" => {
                 let req: ZeroInflRequest = serde_json::from_value(arguments)
                     .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server
-                    .zeroinfl(Parameters(req))
-                    .await
+                session_server.zeroinfl(Parameters(req)).await
             }
             "ml_kmeans" => {
                 let req: KMeansRequest = serde_json::from_value(arguments)
                     .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server
-                    .ml_kmeans(Parameters(req))
-                    .await
+                session_server.ml_kmeans(Parameters(req)).await
             }
             "ml_pca" => {
                 let req: PCARequest = serde_json::from_value(arguments)
                     .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server
-                    .ml_pca(Parameters(req))
-                    .await
+                session_server.ml_pca(Parameters(req)).await
             }
             "ml_cmdscale" => {
                 let req: CmdscaleRequest = serde_json::from_value(arguments)
                     .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server
-                    .ml_cmdscale(Parameters(req))
-                    .await
+                session_server.ml_cmdscale(Parameters(req)).await
             }
             "ml_cutree" => {
                 let req: CutreeRequest = serde_json::from_value(arguments)
                     .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server
-                    .ml_cutree(Parameters(req))
-                    .await
+                session_server.ml_cutree(Parameters(req)).await
             }
             "viz_histogram" => {
                 let req: HistogramRequest = serde_json::from_value(arguments)
                     .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server
-                    .viz_histogram(Parameters(req))
-                    .await
+                session_server.viz_histogram(Parameters(req)).await
             }
             "viz_scatter" => {
                 let req: ScatterPlotRequest = serde_json::from_value(arguments)
                     .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server
-                    .viz_scatter(Parameters(req))
-                    .await
+                session_server.viz_scatter(Parameters(req)).await
             }
             "viz_line" => {
                 let req: LineChartRequest = serde_json::from_value(arguments)
                     .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server
-                    .viz_line(Parameters(req))
-                    .await
+                session_server.viz_line(Parameters(req)).await
             }
             "viz_heatmap" => {
                 let req: HeatmapRequest = serde_json::from_value(arguments)
                     .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server
-                    .viz_heatmap(Parameters(req))
-                    .await
+                session_server.viz_heatmap(Parameters(req)).await
             }
             "viz_scatter_interactive" => {
                 let req: ScatterInteractiveRequest = serde_json::from_value(arguments)
@@ -7869,178 +9134,128 @@ impl AnalyticsServer {
             "viz_line_interactive" => {
                 let req: LineInteractiveRequest = serde_json::from_value(arguments)
                     .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server
-                    .viz_line_interactive(Parameters(req))
-                    .await
+                session_server.viz_line_interactive(Parameters(req)).await
             }
             "db_sqlite_query" => {
                 let req: SqliteQueryRequest = serde_json::from_value(arguments)
                     .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server
-                    .db_sqlite_query(Parameters(req))
-                    .await
+                session_server.db_sqlite_query(Parameters(req)).await
             }
             "db_duckdb_query" => {
                 let req: DuckDBQueryRequest = serde_json::from_value(arguments)
                     .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server
-                    .db_duckdb_query(Parameters(req))
-                    .await
+                session_server.db_duckdb_query(Parameters(req)).await
             }
             "db_query_file" => {
                 let req: DuckDBFileQueryRequest = serde_json::from_value(arguments)
                     .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server
-                    .db_query_file(Parameters(req))
-                    .await
+                session_server.db_query_file(Parameters(req)).await
             }
             // Data munging tools
             "munge_filter" => {
                 let req: FilterDatasetRequest = serde_json::from_value(arguments)
                     .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server
-                    .munge_filter(Parameters(req))
-                    .await
+                session_server.munge_filter(Parameters(req)).await
             }
             "munge_select" => {
                 let req: SelectColumnsRequest = serde_json::from_value(arguments)
                     .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server
-                    .munge_select(Parameters(req))
-                    .await
+                session_server.munge_select(Parameters(req)).await
             }
             "munge_drop_columns" => {
                 let req: DropColumnsRequest = serde_json::from_value(arguments)
                     .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server
-                    .munge_drop_columns(Parameters(req))
-                    .await
+                session_server.munge_drop_columns(Parameters(req)).await
             }
             "munge_rename" => {
                 let req: RenameColumnsRequest = serde_json::from_value(arguments)
                     .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server
-                    .munge_rename(Parameters(req))
-                    .await
+                session_server.munge_rename(Parameters(req)).await
             }
             "munge_sort" => {
                 let req: SortDatasetRequest = serde_json::from_value(arguments)
                     .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server
-                    .munge_sort(Parameters(req))
-                    .await
+                session_server.munge_sort(Parameters(req)).await
             }
             "munge_mutate" => {
                 let req: MutateColumnRequest = serde_json::from_value(arguments)
                     .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server
-                    .munge_mutate(Parameters(req))
-                    .await
+                session_server.munge_mutate(Parameters(req)).await
             }
             "munge_sample" => {
                 let req: SampleDatasetRequest = serde_json::from_value(arguments)
                     .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server
-                    .munge_sample(Parameters(req))
-                    .await
+                session_server.munge_sample(Parameters(req)).await
             }
             "munge_join" => {
                 let req: JoinDatasetsRequest = serde_json::from_value(arguments)
                     .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server
-                    .munge_join(Parameters(req))
-                    .await
+                session_server.munge_join(Parameters(req)).await
             }
             "munge_concat" => {
                 let req: ConcatDatasetsRequest = serde_json::from_value(arguments)
                     .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server
-                    .munge_concat(Parameters(req))
-                    .await
+                session_server.munge_concat(Parameters(req)).await
             }
             "munge_group_by" => {
                 let req: GroupByRequest = serde_json::from_value(arguments)
                     .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server
-                    .munge_group_by(Parameters(req))
-                    .await
+                session_server.munge_group_by(Parameters(req)).await
             }
             "munge_value_counts" => {
                 let req: ValueCountsRequest = serde_json::from_value(arguments)
                     .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server
-                    .munge_value_counts(Parameters(req))
-                    .await
+                session_server.munge_value_counts(Parameters(req)).await
             }
             "munge_pivot" => {
                 let req: PivotDatasetRequest = serde_json::from_value(arguments)
                     .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server
-                    .munge_pivot(Parameters(req))
-                    .await
+                session_server.munge_pivot(Parameters(req)).await
             }
             "munge_melt" => {
                 let req: MeltDatasetRequest = serde_json::from_value(arguments)
                     .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server
-                    .munge_melt(Parameters(req))
-                    .await
+                session_server.munge_melt(Parameters(req)).await
             }
             "munge_drop_na" => {
                 let req: DropNaRequest = serde_json::from_value(arguments)
                     .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server
-                    .munge_drop_na(Parameters(req))
-                    .await
+                session_server.munge_drop_na(Parameters(req)).await
             }
             "munge_fill_na" => {
                 let req: FillNaRequest = serde_json::from_value(arguments)
                     .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server
-                    .munge_fill_na(Parameters(req))
-                    .await
+                session_server.munge_fill_na(Parameters(req)).await
             }
             "munge_deduplicate" => {
                 let req: DeduplicateRequest = serde_json::from_value(arguments)
                     .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server
-                    .munge_deduplicate(Parameters(req))
-                    .await
+                session_server.munge_deduplicate(Parameters(req)).await
             }
             "munge_lag_lead" => {
                 let req: LagLeadRequest = serde_json::from_value(arguments)
                     .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server
-                    .munge_lag_lead(Parameters(req))
-                    .await
+                session_server.munge_lag_lead(Parameters(req)).await
             }
             "munge_diff" => {
                 let req: DiffRequest = serde_json::from_value(arguments)
                     .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server
-                    .munge_diff(Parameters(req))
-                    .await
+                session_server.munge_diff(Parameters(req)).await
             }
             "munge_standardize" => {
                 let req: StandardizeRequest = serde_json::from_value(arguments)
                     .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server
-                    .munge_standardize(Parameters(req))
-                    .await
+                session_server.munge_standardize(Parameters(req)).await
             }
             "munge_bin" => {
                 let req: BinColumnRequest = serde_json::from_value(arguments)
                     .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server
-                    .munge_bin(Parameters(req))
-                    .await
+                session_server.munge_bin(Parameters(req)).await
             }
             "munge_one_hot_encode" => {
                 let req: OneHotEncodeRequest = serde_json::from_value(arguments)
                     .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server
-                    .munge_one_hot_encode(Parameters(req))
-                    .await
+                session_server.munge_one_hot_encode(Parameters(req)).await
             }
             _ => {
                 return Err(format!("Unknown tool: {}", tool_name));
@@ -8054,7 +9269,9 @@ impl AnalyticsServer {
     }
 
     /// List all currently loaded datasets.
-    #[tool(description = "List all currently loaded datasets with their basic information (name, dimensions, column types).")]
+    #[tool(
+        description = "List all currently loaded datasets with their basic information (name, dimensions, column types)."
+    )]
     async fn list_datasets(&self) -> Result<CallToolResult, McpError> {
         let datasets = self.datasets.read().await;
 
@@ -8085,7 +9302,9 @@ impl AnalyticsServer {
     }
 
     /// Load a dataset from a file.
-    #[tool(description = "Load a dataset from a file. Supports CSV, Parquet, Excel (xlsx, xls, xlsb, ods), Stata (dta), and SAS (sas7bdat) formats. Returns dataset information including dimensions and column types.")]
+    #[tool(
+        description = "Load a dataset from a file. Supports CSV, Parquet, Excel (xlsx, xls, xlsb, ods), Stata (dta), and SAS (sas7bdat) formats. Returns dataset information including dimensions and column types."
+    )]
     async fn load_dataset(
         &self,
         Parameters(request): Parameters<LoadDatasetRequest>,
@@ -8146,7 +9365,9 @@ impl AnalyticsServer {
     }
 
     /// Export a dataset to a file.
-    #[tool(description = "Export a loaded dataset to a file. Supports CSV, Parquet, and JSON formats. The format is determined by the file extension or can be explicitly specified.")]
+    #[tool(
+        description = "Export a loaded dataset to a file. Supports CSV, Parquet, and JSON formats. The format is determined by the file extension or can be explicitly specified."
+    )]
     async fn export_dataset(
         &self,
         Parameters(request): Parameters<ExportDatasetRequest>,
@@ -8166,65 +9387,65 @@ impl AnalyticsServer {
         let path = PathBuf::from(&request.path);
 
         // Determine format from extension or explicit parameter
-        let format = request.format.as_deref().or_else(|| {
-            path.extension()
-                .and_then(|ext| ext.to_str())
-        });
+        let format = request
+            .format
+            .as_deref()
+            .or_else(|| path.extension().and_then(|ext| ext.to_str()));
 
         let result_msg = match format {
-            Some("csv") => {
-                match dataset.to_csv(&path) {
-                    Ok(()) => format!(
-                        "Successfully exported dataset '{}' to CSV file:\n  {}\n  {} rows x {} columns",
-                        request.dataset,
-                        path.display(),
-                        dataset.nrows(),
-                        dataset.ncols()
-                    ),
-                    Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!(
+            Some("csv") => match dataset.to_csv(&path) {
+                Ok(()) => format!(
+                    "Successfully exported dataset '{}' to CSV file:\n  {}\n  {} rows x {} columns",
+                    request.dataset,
+                    path.display(),
+                    dataset.nrows(),
+                    dataset.ncols()
+                ),
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
                         "Failed to export to CSV: {}",
                         e
-                    ))])),
+                    ))]));
                 }
-            }
-            Some("parquet") => {
-                match dataset.to_parquet(&path) {
-                    Ok(()) => format!(
-                        "Successfully exported dataset '{}' to Parquet file:\n  {}\n  {} rows x {} columns",
+            },
+            Some("parquet") => match dataset.to_parquet(&path) {
+                Ok(()) => format!(
+                    "Successfully exported dataset '{}' to Parquet file:\n  {}\n  {} rows x {} columns",
+                    request.dataset,
+                    path.display(),
+                    dataset.nrows(),
+                    dataset.ncols()
+                ),
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Failed to export to Parquet: {}",
+                        e
+                    ))]));
+                }
+            },
+            Some("json") => match dataset.to_json_string() {
+                Ok(json) => {
+                    if let Err(e) = std::fs::write(&path, json) {
+                        return Ok(CallToolResult::error(vec![Content::text(format!(
+                            "Failed to write JSON file: {}",
+                            e
+                        ))]));
+                    }
+                    format!(
+                        "Successfully exported dataset '{}' to JSON file:\n  {}\n  {} rows x {} columns",
                         request.dataset,
                         path.display(),
                         dataset.nrows(),
                         dataset.ncols()
-                    ),
-                    Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Failed to export to Parquet: {}",
-                        e
-                    ))])),
+                    )
                 }
-            }
-            Some("json") => {
-                match dataset.to_json_string() {
-                    Ok(json) => {
-                        if let Err(e) = std::fs::write(&path, json) {
-                            return Ok(CallToolResult::error(vec![Content::text(format!(
-                                "Failed to write JSON file: {}",
-                                e
-                            ))]));
-                        }
-                        format!(
-                            "Successfully exported dataset '{}' to JSON file:\n  {}\n  {} rows x {} columns",
-                            request.dataset,
-                            path.display(),
-                            dataset.nrows(),
-                            dataset.ncols()
-                        )
-                    }
-                    Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!(
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
                         "Failed to export to JSON: {}",
                         e
-                    ))])),
+                    ))]));
                 }
-            }
+            },
             Some(fmt) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
                     "Unsupported format '{}'. Supported formats: csv, parquet, json",
@@ -8233,7 +9454,7 @@ impl AnalyticsServer {
             }
             None => {
                 return Ok(CallToolResult::error(vec![Content::text(
-                    "Could not determine output format. Specify format parameter or use a known extension (.csv, .parquet, .json)"
+                    "Could not determine output format. Specify format parameter or use a known extension (.csv, .parquet, .json)",
                 )]));
             }
         };
@@ -8242,7 +9463,9 @@ impl AnalyticsServer {
     }
 
     /// Upload and load a dataset from base64-encoded content.
-    #[tool(description = "Upload and load a dataset from base64-encoded file content. Use this when the file is selected via browser file picker.")]
+    #[tool(
+        description = "Upload and load a dataset from base64-encoded file content. Use this when the file is selected via browser file picker."
+    )]
     async fn upload_dataset(
         &self,
         Parameters(request): Parameters<UploadDatasetRequest>,
@@ -8342,7 +9565,9 @@ impl AnalyticsServer {
     }
 
     /// Create a dataset from inline CSV content.
-    #[tool(description = "Create a dataset from inline CSV content. Use this to create datasets on-the-fly from generated or inline data without needing a file.")]
+    #[tool(
+        description = "Create a dataset from inline CSV content. Use this to create datasets on-the-fly from generated or inline data without needing a file."
+    )]
     async fn create_dataset(
         &self,
         Parameters(request): Parameters<CreateDatasetRequest>,
@@ -8396,7 +9621,9 @@ impl AnalyticsServer {
     }
 
     /// Get summary statistics for a dataset.
-    #[tool(description = "Compute descriptive statistics for all columns in a dataset. Returns count, mean, std, min, quartiles, max for numeric columns; unique count for categorical columns.")]
+    #[tool(
+        description = "Compute descriptive statistics for all columns in a dataset. Returns count, mean, std, min, quartiles, max for numeric columns; unique count for categorical columns."
+    )]
     async fn describe_dataset(
         &self,
         Parameters(request): Parameters<DescribeDatasetRequest>,
@@ -8423,7 +9650,9 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(stats.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            stats.to_string(),
+        )]))
     }
 
     /// Preview the first rows of a dataset.
@@ -8454,7 +9683,9 @@ impl AnalyticsServer {
     }
 
     /// Generate a comprehensive data quality profile.
-    #[tool(description = "Generate a comprehensive data quality profile for LLM-assisted data cleaning. Returns column-level statistics (nulls, uniques, types), numeric outlier detection, string pattern analysis, and automated issue detection with severity ratings.")]
+    #[tool(
+        description = "Generate a comprehensive data quality profile for LLM-assisted data cleaning. Returns column-level statistics (nulls, uniques, types), numeric outlier detection, string pattern analysis, and automated issue detection with severity ratings."
+    )]
     async fn data_quality_profile(
         &self,
         Parameters(request): Parameters<DataQualityProfileRequest>,
@@ -8482,27 +9713,49 @@ impl AnalyticsServer {
 
         for col in &profile.columns {
             result.push_str(&format!("\n## {} ({})\n", col.name, col.dtype));
-            result.push_str(&format!("  - Null: {} ({:.1}%)\n", col.null_count, col.null_pct * 100.0));
-            result.push_str(&format!("  - Unique: {} ({:.1}%)\n", col.unique_count, col.unique_pct * 100.0));
+            result.push_str(&format!(
+                "  - Null: {} ({:.1}%)\n",
+                col.null_count,
+                col.null_pct * 100.0
+            ));
+            result.push_str(&format!(
+                "  - Unique: {} ({:.1}%)\n",
+                col.unique_count,
+                col.unique_pct * 100.0
+            ));
 
             if let Some(ref stats) = col.numeric_stats {
-                result.push_str(&format!("  - Range: {:.2} to {:.2}\n", stats.min, stats.max));
-                result.push_str(&format!("  - Mean: {:.2}, Median: {:.2}, Std: {:.2}\n",
-                    stats.mean, stats.median, stats.std));
+                result.push_str(&format!(
+                    "  - Range: {:.2} to {:.2}\n",
+                    stats.min, stats.max
+                ));
+                result.push_str(&format!(
+                    "  - Mean: {:.2}, Median: {:.2}, Std: {:.2}\n",
+                    stats.mean, stats.median, stats.std
+                ));
                 if stats.outlier_count > 0 {
-                    result.push_str(&format!("  - Outliers: {} (outside {:.2} to {:.2})\n",
-                        stats.outlier_count, stats.outlier_lower_bound, stats.outlier_upper_bound));
+                    result.push_str(&format!(
+                        "  - Outliers: {} (outside {:.2} to {:.2})\n",
+                        stats.outlier_count, stats.outlier_lower_bound, stats.outlier_upper_bound
+                    ));
                 }
             }
 
             if let Some(ref stats) = col.string_stats {
-                result.push_str(&format!("  - Length: {} to {} chars (avg {:.1})\n",
-                    stats.min_length, stats.max_length, stats.mean_length));
+                result.push_str(&format!(
+                    "  - Length: {} to {} chars (avg {:.1})\n",
+                    stats.min_length, stats.max_length, stats.mean_length
+                ));
                 if !stats.detected_patterns.is_empty() {
-                    result.push_str(&format!("  - Patterns: {}\n", stats.detected_patterns.join(", ")));
+                    result.push_str(&format!(
+                        "  - Patterns: {}\n",
+                        stats.detected_patterns.join(", ")
+                    ));
                 }
                 if !stats.top_values.is_empty() {
-                    let top_3: Vec<String> = stats.top_values.iter()
+                    let top_3: Vec<String> = stats
+                        .top_values
+                        .iter()
                         .take(3)
                         .map(|(v, c)| format!("'{}' ({})", v, c))
                         .collect();
@@ -8515,7 +9768,9 @@ impl AnalyticsServer {
     }
 
     /// Preview what a cleaning operation would do before applying it.
-    #[tool(description = "Preview a data cleaning operation before applying it. Shows how many rows would be affected, sample changes, and warnings. Supports: trim, lowercase, uppercase, fill_na, drop_na, deduplicate, replace, filter.")]
+    #[tool(
+        description = "Preview a data cleaning operation before applying it. Shows how many rows would be affected, sample changes, and warnings. Supports: trim, lowercase, uppercase, fill_na, drop_na, deduplicate, replace, filter."
+    )]
     async fn preview_cleaning(
         &self,
         Parameters(request): Parameters<PreviewCleaningRequest>,
@@ -8534,65 +9789,85 @@ impl AnalyticsServer {
 
         // Build the CleaningOperation from request parameters
         let operation = match request.operation.to_lowercase().as_str() {
-            "trim" => CleaningOperation::Trim { columns: request.columns },
+            "trim" => CleaningOperation::Trim {
+                columns: request.columns,
+            },
             "lowercase" | "to_lowercase" => {
-                let column = request.columns
+                let column = request
+                    .columns
                     .as_ref()
                     .and_then(|c| c.first())
-                    .ok_or_else(|| McpError::invalid_request("lowercase operation requires a column", None))?
+                    .ok_or_else(|| {
+                        McpError::invalid_request("lowercase operation requires a column", None)
+                    })?
                     .clone();
                 CleaningOperation::ToLowercase { column }
             }
             "uppercase" | "to_uppercase" => {
-                let column = request.columns
+                let column = request
+                    .columns
                     .as_ref()
                     .and_then(|c| c.first())
-                    .ok_or_else(|| McpError::invalid_request("uppercase operation requires a column", None))?
+                    .ok_or_else(|| {
+                        McpError::invalid_request("uppercase operation requires a column", None)
+                    })?
                     .clone();
                 CleaningOperation::ToUppercase { column }
             }
-            "fill_na" | "fillna" => {
-                CleaningOperation::FillNa {
-                    columns: request.columns,
-                    strategy: request.strategy.unwrap_or_else(|| "constant".to_string()),
-                    value: request.value,
-                }
-            }
-            "drop_na" | "dropna" => {
-                CleaningOperation::DropNa {
-                    columns: request.columns,
-                    how: request.how.unwrap_or_else(|| "any".to_string()),
-                }
-            }
-            "deduplicate" | "dedup" => {
-                CleaningOperation::Deduplicate {
-                    columns: request.columns,
-                    keep: request.keep.unwrap_or_else(|| "first".to_string()),
-                }
-            }
+            "fill_na" | "fillna" => CleaningOperation::FillNa {
+                columns: request.columns,
+                strategy: request.strategy.unwrap_or_else(|| "constant".to_string()),
+                value: request.value,
+            },
+            "drop_na" | "dropna" => CleaningOperation::DropNa {
+                columns: request.columns,
+                how: request.how.unwrap_or_else(|| "any".to_string()),
+            },
+            "deduplicate" | "dedup" => CleaningOperation::Deduplicate {
+                columns: request.columns,
+                keep: request.keep.unwrap_or_else(|| "first".to_string()),
+            },
             "replace" => {
-                let column = request.columns
+                let column = request
+                    .columns
                     .as_ref()
                     .and_then(|c| c.first())
-                    .ok_or_else(|| McpError::invalid_request("replace operation requires a column", None))?
+                    .ok_or_else(|| {
+                        McpError::invalid_request("replace operation requires a column", None)
+                    })?
                     .clone();
-                let old_value = request.old_value
-                    .ok_or_else(|| McpError::invalid_request("replace operation requires old_value", None))?;
-                let new_value = request.value
-                    .ok_or_else(|| McpError::invalid_request("replace operation requires value (new value)", None))?;
-                CleaningOperation::Replace { column, old_value, new_value }
+                let old_value = request.old_value.ok_or_else(|| {
+                    McpError::invalid_request("replace operation requires old_value", None)
+                })?;
+                let new_value = request.value.ok_or_else(|| {
+                    McpError::invalid_request("replace operation requires value (new value)", None)
+                })?;
+                CleaningOperation::Replace {
+                    column,
+                    old_value,
+                    new_value,
+                }
             }
             "filter" => {
-                let column = request.columns
+                let column = request
+                    .columns
                     .as_ref()
                     .and_then(|c| c.first())
-                    .ok_or_else(|| McpError::invalid_request("filter operation requires a column", None))?
+                    .ok_or_else(|| {
+                        McpError::invalid_request("filter operation requires a column", None)
+                    })?
                     .clone();
-                let operator = request.operator
-                    .ok_or_else(|| McpError::invalid_request("filter operation requires operator", None))?;
-                let value = request.filter_value
-                    .ok_or_else(|| McpError::invalid_request("filter operation requires filter_value", None))?;
-                CleaningOperation::Filter { column, operator, value }
+                let operator = request.operator.ok_or_else(|| {
+                    McpError::invalid_request("filter operation requires operator", None)
+                })?;
+                let value = request.filter_value.ok_or_else(|| {
+                    McpError::invalid_request("filter operation requires filter_value", None)
+                })?;
+                CleaningOperation::Filter {
+                    column,
+                    operator,
+                    value,
+                }
             }
             _ => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -8605,11 +9880,15 @@ impl AnalyticsServer {
         let sample_size = request.sample_size.unwrap_or(5);
         let preview = preview_cleaning(dataset, &operation, sample_size);
 
-        Ok(CallToolResult::success(vec![Content::text(preview.summary())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            preview.summary(),
+        )]))
     }
 
     /// Verify a cleaning operation by comparing before and after datasets.
-    #[tool(description = "Verify a cleaning operation by comparing the original and cleaned datasets. Returns a detailed report with row counts, quality delta (completeness change, issues resolved/introduced), and sample changes.")]
+    #[tool(
+        description = "Verify a cleaning operation by comparing the original and cleaned datasets. Returns a detailed report with row counts, quality delta (completeness change, issues resolved/introduced), and sample changes."
+    )]
     async fn verify_cleaning(
         &self,
         Parameters(request): Parameters<VerifyCleaningRequest>,
@@ -8638,7 +9917,9 @@ impl AnalyticsServer {
 
         let report = verify_cleaning(before, after, &request.operation_description);
 
-        Ok(CallToolResult::success(vec![Content::text(report.summary())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            report.summary(),
+        )]))
     }
 
     // ========================================================================
@@ -8646,7 +9927,9 @@ impl AnalyticsServer {
     // ========================================================================
 
     /// Start a new cleaning session for a dataset.
-    #[tool(description = "Start a new cleaning session for a dataset. Returns a session ID that can be used to track progress, apply operations, and rollback changes. Each session maintains checkpoints for undo capability.")]
+    #[tool(
+        description = "Start a new cleaning session for a dataset. Returns a session ID that can be used to track progress, apply operations, and rollback changes. Each session maintains checkpoints for undo capability."
+    )]
     async fn cleaning_session_start(
         &self,
         Parameters(request): Parameters<CleaningSessionStartRequest>,
@@ -8664,7 +9947,9 @@ impl AnalyticsServer {
         };
         drop(datasets);
 
-        let session_name = request.session_name.unwrap_or_else(|| request.dataset.clone());
+        let session_name = request
+            .session_name
+            .unwrap_or_else(|| request.dataset.clone());
         let session = CleaningSession::new(dataset, &session_name);
         let session_id = session.id.clone();
         let status = session.status();
@@ -8681,12 +9966,17 @@ impl AnalyticsServer {
              Use 'cleaning_session_apply' to apply cleaning operations.\n\
              Use 'cleaning_session_status' to check progress.\n\
              Use 'cleaning_rollback' to undo operations.",
-            session_id, session_name, status.current_row_count, status.current_completeness * 100.0
+            session_id,
+            session_name,
+            status.current_row_count,
+            status.current_completeness * 100.0
         ))]))
     }
 
     /// Get the status of a cleaning session.
-    #[tool(description = "Get the current status of a cleaning session, including checkpoint count, operations performed, current row count, and completeness score.")]
+    #[tool(
+        description = "Get the current status of a cleaning session, including checkpoint count, operations performed, current row count, and completeness score."
+    )]
     async fn cleaning_session_status(
         &self,
         Parameters(request): Parameters<CleaningSessionStatusRequest>,
@@ -8703,7 +9993,9 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(session.summary())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            session.summary(),
+        )]))
     }
 
     /// List all active cleaning sessions.
@@ -8716,7 +10008,7 @@ impl AnalyticsServer {
 
         if sessions.is_empty() {
             return Ok(CallToolResult::success(vec![Content::text(
-                "No active cleaning sessions.\n\nUse 'cleaning_session_start' to start a new session."
+                "No active cleaning sessions.\n\nUse 'cleaning_session_start' to start a new session.",
             )]));
         }
 
@@ -8736,7 +10028,9 @@ impl AnalyticsServer {
     }
 
     /// Apply a cleaning operation within a session.
-    #[tool(description = "Apply a cleaning operation within a session. Creates a new checkpoint automatically. Returns a verification report showing what changed.")]
+    #[tool(
+        description = "Apply a cleaning operation within a session. Creates a new checkpoint automatically. Returns a verification report showing what changed."
+    )]
     async fn cleaning_session_apply(
         &self,
         Parameters(request): Parameters<CleaningSessionApplyRequest>,
@@ -8759,7 +10053,8 @@ impl AnalyticsServer {
 
         // Helper to convert Vec<String> to Vec<&str>
         fn to_str_slice(v: &Option<Vec<String>>) -> Option<Vec<&str>> {
-            v.as_ref().map(|cols| cols.iter().map(|s| s.as_str()).collect())
+            v.as_ref()
+                .map(|cols| cols.iter().map(|s| s.as_str()).collect())
         }
 
         // Apply the operation based on type
@@ -8772,22 +10067,32 @@ impl AnalyticsServer {
                 })
             }
             "lowercase" | "to_lowercase" => {
-                let column = request.columns.as_ref()
+                let column = request
+                    .columns
+                    .as_ref()
                     .and_then(|c| c.first())
                     .ok_or_else(|| McpError::invalid_request("lowercase requires a column", None))?
                     .clone();
-                session.apply_operation(&operation_type, &format!("lowercase {}", column), params, |ds| {
-                    to_lowercase(ds, &column).map_err(|e| e.to_string())
-                })
+                session.apply_operation(
+                    &operation_type,
+                    &format!("lowercase {}", column),
+                    params,
+                    |ds| to_lowercase(ds, &column).map_err(|e| e.to_string()),
+                )
             }
             "uppercase" | "to_uppercase" => {
-                let column = request.columns.as_ref()
+                let column = request
+                    .columns
+                    .as_ref()
                     .and_then(|c| c.first())
                     .ok_or_else(|| McpError::invalid_request("uppercase requires a column", None))?
                     .clone();
-                session.apply_operation(&operation_type, &format!("uppercase {}", column), params, |ds| {
-                    to_uppercase(ds, &column).map_err(|e| e.to_string())
-                })
+                session.apply_operation(
+                    &operation_type,
+                    &format!("uppercase {}", column),
+                    params,
+                    |ds| to_uppercase(ds, &column).map_err(|e| e.to_string()),
+                )
             }
             "fill_na" | "fillna" => {
                 let strategy_str = request.strategy.as_deref().unwrap_or("constant");
@@ -8799,53 +10104,86 @@ impl AnalyticsServer {
                     "median" => FillStrategy::Median,
                     "forward" => FillStrategy::Forward,
                     "backward" => FillStrategy::Backward,
-                    "constant" | _ => FillStrategy::Constant(value.unwrap_or_else(|| "0".to_string())),
+                    "constant" | _ => {
+                        FillStrategy::Constant(value.unwrap_or_else(|| "0".to_string()))
+                    }
                 };
-                session.apply_operation(&operation_type, &format!("fill_na with {:?}", strategy), params, move |ds| {
-                    fill_na(ds, cols_ref.as_deref(), strategy.clone()).map_err(|e| e.to_string())
-                })
+                session.apply_operation(
+                    &operation_type,
+                    &format!("fill_na with {:?}", strategy),
+                    params,
+                    move |ds| {
+                        fill_na(ds, cols_ref.as_deref(), strategy.clone())
+                            .map_err(|e| e.to_string())
+                    },
+                )
             }
             "drop_na" | "dropna" => {
                 let how = request.how.as_deref().unwrap_or("any").to_string();
                 let cols = request.columns.clone();
                 let cols_ref = to_str_slice(&cols);
-                session.apply_operation(&operation_type, &format!("drop_na ({})", how), params, move |ds| {
-                    drop_na(ds, cols_ref.as_deref(), &how).map_err(|e| e.to_string())
-                })
+                session.apply_operation(
+                    &operation_type,
+                    &format!("drop_na ({})", how),
+                    params,
+                    move |ds| drop_na(ds, cols_ref.as_deref(), &how).map_err(|e| e.to_string()),
+                )
             }
             "deduplicate" | "dedup" => {
                 let keep = request.keep.as_deref().unwrap_or("first").to_string();
                 let cols = request.columns.clone();
                 let cols_ref = to_str_slice(&cols);
-                session.apply_operation(&operation_type, &format!("deduplicate (keep={})", keep), params, move |ds| {
-                    deduplicate(ds, cols_ref.as_deref(), &keep).map_err(|e| e.to_string())
-                })
+                session.apply_operation(
+                    &operation_type,
+                    &format!("deduplicate (keep={})", keep),
+                    params,
+                    move |ds| {
+                        deduplicate(ds, cols_ref.as_deref(), &keep).map_err(|e| e.to_string())
+                    },
+                )
             }
             "replace" => {
-                let column = request.columns.as_ref()
+                let column = request
+                    .columns
+                    .as_ref()
                     .and_then(|c| c.first())
                     .ok_or_else(|| McpError::invalid_request("replace requires a column", None))?
                     .clone();
-                let old_value = request.old_value.clone()
+                let old_value = request
+                    .old_value
+                    .clone()
                     .ok_or_else(|| McpError::invalid_request("replace requires old_value", None))?;
-                let new_value = request.value.clone()
+                let new_value = request
+                    .value
+                    .clone()
                     .ok_or_else(|| McpError::invalid_request("replace requires value", None))?;
-                session.apply_operation(&operation_type, &format!("replace '{}' with '{}' in {}", old_value, new_value, column), params, |ds| {
-                    replace(ds, &column, &old_value, &new_value).map_err(|e| e.to_string())
-                })
+                session.apply_operation(
+                    &operation_type,
+                    &format!("replace '{}' with '{}' in {}", old_value, new_value, column),
+                    params,
+                    |ds| replace(ds, &column, &old_value, &new_value).map_err(|e| e.to_string()),
+                )
             }
             "filter" => {
-                let column = request.columns.as_ref()
+                let column = request
+                    .columns
+                    .as_ref()
                     .and_then(|c| c.first())
                     .ok_or_else(|| McpError::invalid_request("filter requires a column", None))?
                     .clone();
-                let operator = request.operator.clone()
+                let operator = request
+                    .operator
+                    .clone()
                     .ok_or_else(|| McpError::invalid_request("filter requires operator", None))?;
-                let value = request.filter_value.clone()
-                    .ok_or_else(|| McpError::invalid_request("filter requires filter_value", None))?;
-                session.apply_operation(&operation_type, &format!("filter {} {} {}", column, operator, value), params, |ds| {
-                    filter(ds, &column, &operator, &value).map_err(|e| e.to_string())
-                })
+                let value = request.filter_value.clone().ok_or_else(|| {
+                    McpError::invalid_request("filter requires filter_value", None)
+                })?;
+                session.apply_operation(
+                    &operation_type,
+                    &format!("filter {} {} {}", column, operator, value),
+                    params,
+                    |ds| filter(ds, &column, &operator, &value).map_err(|e| e.to_string()),
+                )
             }
             _ => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -8868,7 +10206,9 @@ impl AnalyticsServer {
     }
 
     /// Rollback a cleaning session to a previous checkpoint.
-    #[tool(description = "Rollback a cleaning session to a previous checkpoint. If no checkpoint index is provided, rolls back to the previous checkpoint (undo last operation).")]
+    #[tool(
+        description = "Rollback a cleaning session to a previous checkpoint. If no checkpoint index is provided, rolls back to the previous checkpoint (undo last operation)."
+    )]
     async fn cleaning_rollback(
         &self,
         Parameters(request): Parameters<CleaningRollbackRequest>,
@@ -8898,7 +10238,9 @@ impl AnalyticsServer {
                      Current checkpoint: {}\n\
                      Rows: {}\n\
                      Completeness: {:.1}%",
-                    status.current_checkpoint, status.current_row_count, status.current_completeness * 100.0
+                    status.current_checkpoint,
+                    status.current_row_count,
+                    status.current_completeness * 100.0
                 ))]))
             }
             Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
@@ -8909,7 +10251,9 @@ impl AnalyticsServer {
     }
 
     /// List all checkpoints in a cleaning session.
-    #[tool(description = "List all checkpoints in a cleaning session, showing the state at each point.")]
+    #[tool(
+        description = "List all checkpoints in a cleaning session, showing the state at each point."
+    )]
     async fn cleaning_session_checkpoints(
         &self,
         Parameters(request): Parameters<CleaningSessionCheckpointsRequest>,
@@ -8934,7 +10278,11 @@ impl AnalyticsServer {
             let marker = if cp.is_current { " <-- current" } else { "" };
             result.push_str(&format!(
                 "#{}: {}{}\n  - Rows: {}\n  - Completeness: {:.1}%\n  - Created: {}\n\n",
-                cp.index, cp.description, marker, cp.row_count, cp.completeness * 100.0,
+                cp.index,
+                cp.description,
+                marker,
+                cp.row_count,
+                cp.completeness * 100.0,
                 cp.created_at.format("%H:%M:%S")
             ));
         }
@@ -8943,7 +10291,9 @@ impl AnalyticsServer {
     }
 
     /// Generate smart cleaning suggestions for a dataset.
-    #[tool(description = "Analyze a dataset and generate prioritized cleaning suggestions. Returns specific operations with parameters, estimated impact, and reasoning. Use this to get intelligent recommendations before starting a cleaning workflow.")]
+    #[tool(
+        description = "Analyze a dataset and generate prioritized cleaning suggestions. Returns specific operations with parameters, estimated impact, and reasoning. Use this to get intelligent recommendations before starting a cleaning workflow."
+    )]
     async fn suggest_cleaning(
         &self,
         Parameters(request): Parameters<SuggestCleaningRequest>,
@@ -8965,19 +10315,23 @@ impl AnalyticsServer {
         let report = generate_suggestions(&profile);
 
         // Parse minimum priority filter
-        let min_priority = request.min_priority.as_ref().and_then(|p| {
-            match p.to_lowercase().as_str() {
-                "low" => Some(SuggestionPriority::Low),
-                "medium" => Some(SuggestionPriority::Medium),
-                "high" => Some(SuggestionPriority::High),
-                "critical" => Some(SuggestionPriority::Critical),
-                _ => None,
-            }
-        });
+        let min_priority =
+            request
+                .min_priority
+                .as_ref()
+                .and_then(|p| match p.to_lowercase().as_str() {
+                    "low" => Some(SuggestionPriority::Low),
+                    "medium" => Some(SuggestionPriority::Medium),
+                    "high" => Some(SuggestionPriority::High),
+                    "critical" => Some(SuggestionPriority::Critical),
+                    _ => None,
+                });
 
         // Filter suggestions
-        let mut suggestions: Vec<_> = report.suggestions.iter()
-            .filter(|s| min_priority.map_or(true, |min| s.priority >= min))
+        let mut suggestions: Vec<_> = report
+            .suggestions
+            .iter()
+            .filter(|s| min_priority.is_none_or(|min| s.priority >= min))
             .collect();
 
         // Apply limit if specified
@@ -9041,18 +10395,23 @@ impl AnalyticsServer {
                 for consideration in &s.considerations {
                     result.push_str(&format!("  - {}\n", consideration));
                 }
-                result.push_str("\n");
+                result.push('\n');
             }
 
             // Add overall recommendation
-            result.push_str(&format!("\nRecommendation\n--------------\n{}\n", report.overall_recommendation));
+            result.push_str(&format!(
+                "\nRecommendation\n--------------\n{}\n",
+                report.overall_recommendation
+            ));
         }
 
         Ok(CallToolResult::success(vec![Content::text(result)]))
     }
 
     /// Compute correlation matrix for numeric columns.
-    #[tool(description = "Compute the Pearson correlation matrix for all numeric columns in a dataset.")]
+    #[tool(
+        description = "Compute the Pearson correlation matrix for all numeric columns in a dataset."
+    )]
     async fn compute_correlation(
         &self,
         Parameters(request): Parameters<CorrelationRequest>,
@@ -9097,7 +10456,9 @@ impl AnalyticsServer {
     // ========================================================================
 
     /// Run one-way ANOVA.
-    #[tool(description = "Run one-way Analysis of Variance (ANOVA) to test whether means differ across groups. Returns F-statistic, p-value, effect sizes (eta-squared, omega-squared), and group statistics. Use when comparing a continuous response variable across 2+ categorical groups.")]
+    #[tool(
+        description = "Run one-way Analysis of Variance (ANOVA) to test whether means differ across groups. Returns F-statistic, p-value, effect sizes (eta-squared, omega-squared), and group statistics. Use when comparing a continuous response variable across 2+ categorical groups."
+    )]
     async fn anova_one_way(
         &self,
         Parameters(request): Parameters<OneWayAnovaRequest>,
@@ -9124,11 +10485,15 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     /// Run two-way ANOVA.
-    #[tool(description = "Run two-way Analysis of Variance (ANOVA) to test effects of two factors and their interaction on a response variable. Returns F-statistics and p-values for each factor and the interaction term. Use for factorial experimental designs.")]
+    #[tool(
+        description = "Run two-way Analysis of Variance (ANOVA) to test effects of two factors and their interaction on a response variable. Returns F-statistics and p-values for each factor and the interaction term. Use for factorial experimental designs."
+    )]
     async fn anova_two_way(
         &self,
         Parameters(request): Parameters<TwoWayAnovaRequest>,
@@ -9163,11 +10528,15 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     /// Run MANOVA (Multivariate Analysis of Variance).
-    #[tool(description = "Run Multivariate Analysis of Variance (MANOVA) to test whether group means differ across multiple response variables simultaneously. Returns four test statistics: Wilks' Lambda (most popular), Pillai's Trace (most robust, default), Hotelling-Lawley Trace, and Roy's Largest Root. Each with approximate F-statistic and p-value. Use when you have 2+ continuous response variables and want to test group differences while accounting for correlations between responses.")]
+    #[tool(
+        description = "Run Multivariate Analysis of Variance (MANOVA) to test whether group means differ across multiple response variables simultaneously. Returns four test statistics: Wilks' Lambda (most popular), Pillai's Trace (most robust, default), Hotelling-Lawley Trace, and Roy's Largest Root. Each with approximate F-statistic and p-value. Use when you have 2+ continuous response variables and want to test group differences while accounting for correlations between responses."
+    )]
     async fn anova_manova(
         &self,
         Parameters(request): Parameters<ManovaRequest>,
@@ -9187,7 +10556,7 @@ impl AnalyticsServer {
         // Validate at least 2 response variables
         if request.response_vars.len() < 2 {
             return Ok(CallToolResult::error(vec![Content::text(
-                "MANOVA requires at least 2 response variables.".to_string()
+                "MANOVA requires at least 2 response variables.".to_string(),
             )]));
         }
 
@@ -9266,12 +10635,14 @@ impl AnalyticsServer {
         });
 
         Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&output).unwrap_or_else(|_| format!("{:?}", result))
+            serde_json::to_string_pretty(&output).unwrap_or_else(|_| format!("{:?}", result)),
         )]))
     }
 
     /// Run Tukey's HSD (Honest Significant Differences) test.
-    #[tool(description = "Run Tukey's HSD post-hoc test after one-way ANOVA to perform pairwise comparisons between all group means. Controls for family-wise error rate using the Studentized range distribution. Returns: difference in means, confidence interval, and adjusted p-value for each pair. Use this after finding a significant ANOVA result to identify which specific groups differ.")]
+    #[tool(
+        description = "Run Tukey's HSD post-hoc test after one-way ANOVA to perform pairwise comparisons between all group means. Controls for family-wise error rate using the Studentized range distribution. Returns: difference in means, confidence interval, and adjusted p-value for each pair. Use this after finding a significant ANOVA result to identify which specific groups differ."
+    )]
     async fn anova_tukey_hsd(
         &self,
         Parameters(request): Parameters<TukeyHsdRequest>,
@@ -9293,32 +10664,37 @@ impl AnalyticsServer {
         // Validate confidence level
         if conf_level <= 0.0 || conf_level >= 1.0 {
             return Ok(CallToolResult::error(vec![Content::text(
-                "Confidence level must be between 0 and 1 (e.g., 0.95 for 95% CI).".to_string()
+                "Confidence level must be between 0 and 1 (e.g., 0.95 for 95% CI).".to_string(),
             )]));
         }
 
-        let (anova, tukey) = match run_tukey_hsd(dataset, &request.response, &request.factor, conf_level) {
-            Ok(r) => r,
-            Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Tukey HSD failed: {}",
-                    e
-                ))]));
-            }
-        };
+        let (anova, tukey) =
+            match run_tukey_hsd(dataset, &request.response, &request.factor, conf_level) {
+                Ok(r) => r,
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Tukey HSD failed: {}",
+                        e
+                    ))]));
+                }
+            };
 
         // Build comparisons array
-        let comparisons: Vec<serde_json::Value> = tukey.comparisons.iter().map(|c| {
-            serde_json::json!({
-                "group1": c.group1,
-                "group2": c.group2,
-                "diff": c.diff,
-                "ci_lower": c.ci_lower,
-                "ci_upper": c.ci_upper,
-                "p_adj": c.p_adj,
-                "significant": c.p_adj < (1.0 - conf_level)
+        let comparisons: Vec<serde_json::Value> = tukey
+            .comparisons
+            .iter()
+            .map(|c| {
+                serde_json::json!({
+                    "group1": c.group1,
+                    "group2": c.group2,
+                    "diff": c.diff,
+                    "ci_lower": c.ci_lower,
+                    "ci_upper": c.ci_upper,
+                    "p_adj": c.p_adj,
+                    "significant": c.p_adj < (1.0 - conf_level)
+                })
             })
-        }).collect();
+            .collect();
 
         let output = serde_json::json!({
             "method": "Tukey HSD (Honest Significant Differences)",
@@ -9344,12 +10720,14 @@ impl AnalyticsServer {
         });
 
         Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&output).unwrap_or_else(|_| format!("{:?}", tukey))
+            serde_json::to_string_pretty(&output).unwrap_or_else(|_| format!("{:?}", tukey)),
         )]))
     }
 
     /// Run Bartlett's test for homogeneity of variances.
-    #[tool(description = "Run Bartlett's test for homogeneity of variances across groups. Tests H₀: all group variances are equal. Suitable for checking the equal variance assumption before ANOVA. Note: Sensitive to non-normality; use Levene's test if data may be non-normal. Returns: K-squared statistic, df, p-value, and group-wise variance estimates.")]
+    #[tool(
+        description = "Run Bartlett's test for homogeneity of variances across groups. Tests H₀: all group variances are equal. Suitable for checking the equal variance assumption before ANOVA. Note: Sensitive to non-normality; use Levene's test if data may be non-normal. Returns: K-squared statistic, df, p-value, and group-wise variance estimates."
+    )]
     async fn hypothesis_bartlett_test(
         &self,
         Parameters(request): Parameters<BartlettTestRequest>,
@@ -9377,14 +10755,18 @@ impl AnalyticsServer {
         };
 
         // Build group statistics array
-        let group_stats: Vec<serde_json::Value> = result.group_stats.iter().map(|gs| {
-            serde_json::json!({
-                "group": gs.group,
-                "n": gs.n,
-                "variance": gs.variance,
-                "std_dev": gs.std_dev
+        let group_stats: Vec<serde_json::Value> = result
+            .group_stats
+            .iter()
+            .map(|gs| {
+                serde_json::json!({
+                    "group": gs.group,
+                    "n": gs.n,
+                    "variance": gs.variance,
+                    "std_dev": gs.std_dev
+                })
             })
-        }).collect();
+            .collect();
 
         let output = serde_json::json!({
             "method": "Bartlett's Test for Homogeneity of Variances",
@@ -9410,12 +10792,14 @@ impl AnalyticsServer {
         });
 
         Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&output).unwrap_or_else(|_| format!("{:?}", result))
+            serde_json::to_string_pretty(&output).unwrap_or_else(|_| format!("{:?}", result)),
         )]))
     }
 
     /// Run Mood's two-sample test of scale.
-    #[tool(description = "Run Mood's two-sample test for comparing scale parameters between two independent samples. Tests H₀: scale ratio = 1 (equal scales) using squared rank deviations from the mean rank. Non-parametric alternative to F-test for variance comparison. Handles ties using Mielke (1967) variance correction. Returns Z-statistic, p-value, and sample sizes. Related tests: var_test (parametric), ansari.test (another rank-based scale test), bartlett_test (k-sample variances).")]
+    #[tool(
+        description = "Run Mood's two-sample test for comparing scale parameters between two independent samples. Tests H₀: scale ratio = 1 (equal scales) using squared rank deviations from the mean rank. Non-parametric alternative to F-test for variance comparison. Handles ties using Mielke (1967) variance correction. Returns Z-statistic, p-value, and sample sizes. Related tests: var_test (parametric), ansari.test (another rank-based scale test), bartlett_test (k-sample variances)."
+    )]
     async fn hypothesis_mood_test(
         &self,
         Parameters(request): Parameters<MoodTestRequest>,
@@ -9521,12 +10905,14 @@ impl AnalyticsServer {
         });
 
         Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&output).unwrap_or_else(|_| format!("{:?}", result))
+            serde_json::to_string_pretty(&output).unwrap_or_else(|_| format!("{:?}", result)),
         )]))
     }
 
     /// Run Kruskal-Wallis rank sum test.
-    #[tool(description = "Run Kruskal-Wallis rank sum test - the non-parametric alternative to one-way ANOVA. Tests whether samples from two or more groups have the same median. Uses chi-squared approximation with tie correction. Returns H statistic, degrees of freedom, p-value, and rank statistics per group.")]
+    #[tool(
+        description = "Run Kruskal-Wallis rank sum test - the non-parametric alternative to one-way ANOVA. Tests whether samples from two or more groups have the same median. Uses chi-squared approximation with tie correction. Returns H statistic, degrees of freedom, p-value, and rank statistics per group."
+    )]
     async fn hypothesis_kruskal_wallis(
         &self,
         Parameters(request): Parameters<KruskalWallisRequest>,
@@ -9597,12 +10983,14 @@ impl AnalyticsServer {
         });
 
         Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&output).unwrap_or_else(|_| format!("{:?}", result))
+            serde_json::to_string_pretty(&output).unwrap_or_else(|_| format!("{:?}", result)),
         )]))
     }
 
     /// Run Friedman rank sum test.
-    #[tool(description = "Run Friedman rank sum test for unreplicated blocked data. Non-parametric alternative to one-way repeated measures ANOVA. Tests whether treatments have equal effects across blocks. Returns Q statistic, degrees of freedom, p-value, and rank statistics per treatment.")]
+    #[tool(
+        description = "Run Friedman rank sum test for unreplicated blocked data. Non-parametric alternative to one-way repeated measures ANOVA. Tests whether treatments have equal effects across blocks. Returns Q statistic, degrees of freedom, p-value, and rank statistics per treatment."
+    )]
     async fn hypothesis_friedman(
         &self,
         Parameters(request): Parameters<FriedmanTestRequest>,
@@ -9619,15 +11007,16 @@ impl AnalyticsServer {
             }
         };
 
-        let result = match run_friedman_test(dataset, &request.value, &request.treatment, &request.block) {
-            Ok(r) => r,
-            Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Friedman test failed: {}",
-                    e
-                ))]));
-            }
-        };
+        let result =
+            match run_friedman_test(dataset, &request.value, &request.treatment, &request.block) {
+                Ok(r) => r,
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Friedman test failed: {}",
+                        e
+                    ))]));
+                }
+            };
 
         // Build treatment statistics
         let treatment_stats: Vec<serde_json::Value> = result
@@ -9671,7 +11060,7 @@ impl AnalyticsServer {
         });
 
         Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&output).unwrap_or_else(|_| format!("{:?}", result))
+            serde_json::to_string_pretty(&output).unwrap_or_else(|_| format!("{:?}", result)),
         )]))
     }
 
@@ -9680,7 +11069,9 @@ impl AnalyticsServer {
     /// Similar to Friedman test but uses a different weighting scheme that can be
     /// more powerful when block effects vary considerably. Weights blocks by their
     /// range and uses an F distribution for the test statistic.
-    #[tool(description = "Run Quade test for unreplicated blocked data. Similar to Friedman test but uses weighted rankings based on block ranges, making it more powerful when block effects vary. Returns F statistic, degrees of freedom, p-value, and treatment statistics. Requires complete blocks (one observation per treatment per block).")]
+    #[tool(
+        description = "Run Quade test for unreplicated blocked data. Similar to Friedman test but uses weighted rankings based on block ranges, making it more powerful when block effects vary. Returns F statistic, degrees of freedom, p-value, and treatment statistics. Requires complete blocks (one observation per treatment per block)."
+    )]
     async fn hypothesis_quade(
         &self,
         Parameters(request): Parameters<QuadeTestRequest>,
@@ -9697,15 +11088,16 @@ impl AnalyticsServer {
             }
         };
 
-        let result = match run_quade_test(dataset, &request.value, &request.treatment, &request.block) {
-            Ok(r) => r,
-            Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Quade test failed: {}",
-                    e
-                ))]));
-            }
-        };
+        let result =
+            match run_quade_test(dataset, &request.value, &request.treatment, &request.block) {
+                Ok(r) => r,
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Quade test failed: {}",
+                        e
+                    ))]));
+                }
+            };
 
         // Build treatment statistics
         let treatment_stats: Vec<serde_json::Value> = result
@@ -9751,7 +11143,7 @@ impl AnalyticsServer {
         });
 
         Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&output).unwrap_or_else(|_| format!("{:?}", result))
+            serde_json::to_string_pretty(&output).unwrap_or_else(|_| format!("{:?}", result)),
         )]))
     }
 
@@ -9759,7 +11151,9 @@ impl AnalyticsServer {
     ///
     /// Tests whether there is a conditional association between two binary variables
     /// while controlling for a stratification variable.
-    #[tool(description = "Run Cochran-Mantel-Haenszel test for conditional independence in stratified 2×2 tables. Tests whether two binary variables are associated while controlling for a third (stratum) variable. Returns CMH chi-squared statistic, p-value, common odds ratio estimate with confidence interval, and per-stratum statistics.")]
+    #[tool(
+        description = "Run Cochran-Mantel-Haenszel test for conditional independence in stratified 2×2 tables. Tests whether two binary variables are associated while controlling for a third (stratum) variable. Returns CMH chi-squared statistic, p-value, common odds ratio estimate with confidence interval, and per-stratum statistics."
+    )]
     async fn hypothesis_mantelhaen(
         &self,
         Parameters(request): Parameters<MantelhaenTestRequest>,
@@ -9860,12 +11254,14 @@ impl AnalyticsServer {
         });
 
         Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&output).unwrap_or_else(|_| format!("{:?}", result))
+            serde_json::to_string_pretty(&output).unwrap_or_else(|_| format!("{:?}", result)),
         )]))
     }
 
     /// Run exact Poisson test.
-    #[tool(description = "Run exact Poisson test for rate parameters. One-sample test: tests whether the rate equals a hypothesized value. Two-sample test: compares the ratio of two rates. Returns test statistic, p-value, rate estimate (or ratio), and confidence interval.")]
+    #[tool(
+        description = "Run exact Poisson test for rate parameters. One-sample test: tests whether the rate equals a hypothesized value. Two-sample test: compares the ratio of two rates. Returns test statistic, p-value, rate estimate (or ratio), and confidence interval."
+    )]
     async fn hypothesis_poisson(
         &self,
         Parameters(request): Parameters<PoissonTestRequest>,
@@ -9913,7 +11309,11 @@ impl AnalyticsServer {
             }
         };
 
-        let estimate_name = if result.n_samples == 1 { "event rate" } else { "rate ratio" };
+        let estimate_name = if result.n_samples == 1 {
+            "event rate"
+        } else {
+            "rate ratio"
+        };
 
         let output = serde_json::json!({
             "method": result.method,
@@ -9945,23 +11345,23 @@ impl AnalyticsServer {
                 } else {
                     "Reject H₀: Rate ratio significantly differs from hypothesized value."
                 }
+            } else if result.n_samples == 1 {
+                "Fail to reject H₀: No significant difference from hypothesized rate."
             } else {
-                if result.n_samples == 1 {
-                    "Fail to reject H₀: No significant difference from hypothesized rate."
-                } else {
-                    "Fail to reject H₀: No significant difference in rates."
-                }
+                "Fail to reject H₀: No significant difference in rates."
             },
             "references": "Przyborowski & Wilenski (1940), Biometrika 31(3/4):313-323"
         });
 
         Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&output).unwrap_or_else(|_| format!("{:?}", result))
+            serde_json::to_string_pretty(&output).unwrap_or_else(|_| format!("{:?}", result)),
         )]))
     }
 
     /// Run Welch's one-way ANOVA test.
-    #[tool(description = "Run Welch's one-way ANOVA test - compares means of multiple groups without assuming equal variances. This is more robust than standard ANOVA when variances differ. Returns F statistic, numerator and denominator degrees of freedom, p-value, and group statistics.")]
+    #[tool(
+        description = "Run Welch's one-way ANOVA test - compares means of multiple groups without assuming equal variances. This is more robust than standard ANOVA when variances differ. Returns F statistic, numerator and denominator degrees of freedom, p-value, and group statistics."
+    )]
     async fn hypothesis_oneway(
         &self,
         Parameters(request): Parameters<OnewayTestRequest>,
@@ -10040,12 +11440,14 @@ impl AnalyticsServer {
         });
 
         Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&output).unwrap_or_else(|_| format!("{:?}", result))
+            serde_json::to_string_pretty(&output).unwrap_or_else(|_| format!("{:?}", result)),
         )]))
     }
 
     /// Run McNemar's chi-squared test.
-    #[tool(description = "Run McNemar's chi-squared test for paired nominal data. Tests symmetry in a 2x2 contingency table. Commonly used for comparing two classifiers or before/after studies. Only requires the discordant cells (b and c).")]
+    #[tool(
+        description = "Run McNemar's chi-squared test for paired nominal data. Tests symmetry in a 2x2 contingency table. Commonly used for comparing two classifiers or before/after studies. Only requires the discordant cells (b and c)."
+    )]
     async fn hypothesis_mcnemar(
         &self,
         Parameters(request): Parameters<McnemarTestRequest>,
@@ -10094,12 +11496,14 @@ impl AnalyticsServer {
         });
 
         Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&output).unwrap_or_else(|_| format!("{:?}", result))
+            serde_json::to_string_pretty(&output).unwrap_or_else(|_| format!("{:?}", result)),
         )]))
     }
 
     /// Run t-test for comparing means.
-    #[tool(description = "Run Student's t-test for comparing means. Supports: (1) One-sample t-test: compare sample mean to hypothesized value, (2) Two-sample t-test: compare means between two groups (Welch's by default), (3) Paired t-test: compare matched pairs. Returns t-statistic, p-value, confidence interval, and effect estimate.")]
+    #[tool(
+        description = "Run Student's t-test for comparing means. Supports: (1) One-sample t-test: compare sample mean to hypothesized value, (2) Two-sample t-test: compare means between two groups (Welch's by default), (3) Paired t-test: compare matched pairs. Returns t-statistic, p-value, confidence interval, and effect estimate."
+    )]
     async fn hypothesis_t_test(
         &self,
         Parameters(request): Parameters<TTestRequest>,
@@ -10177,7 +11581,7 @@ impl AnalyticsServer {
             None => {
                 if paired {
                     return Ok(CallToolResult::error(vec![Content::text(
-                        "Paired t-test requires both x and y columns.".to_string()
+                        "Paired t-test requires both x and y columns.".to_string(),
                     )]));
                 }
                 one_sample_t_test(&x, mu, alternative, conf_level)
@@ -10202,7 +11606,9 @@ impl AnalyticsServer {
     /// - R `stats::pairwise.t.test`: https://stat.ethz.ch/R-manual/R-devel/library/stats/html/pairwise.t.test.html
     /// - Holm, S. (1979). "A Simple Sequentially Rejective Multiple Test Procedure". Scand. J. Stat., 6(2), 65-70.
     /// - Benjamini, Y. & Hochberg, Y. (1995). "Controlling the False Discovery Rate". JRSS-B, 57(1), 289-300.
-    #[tool(description = "Run pairwise t-tests between all group levels with p-value adjustment for multiple comparisons. Post-hoc analysis after ANOVA. Options: pool_sd=true uses pooled variance (Student's), false uses Welch's (default). Adjustment methods: 'holm' (default, FWER), 'bonferroni', 'hochberg', 'hommel', 'BH' (FDR), 'BY', 'none'. Returns matrix of adjusted p-values for all pairs.")]
+    #[tool(
+        description = "Run pairwise t-tests between all group levels with p-value adjustment for multiple comparisons. Post-hoc analysis after ANOVA. Options: pool_sd=true uses pooled variance (Student's), false uses Welch's (default). Adjustment methods: 'holm' (default, FWER), 'bonferroni', 'hochberg', 'hommel', 'BH' (FDR), 'BY', 'none'. Returns matrix of adjusted p-values for all pairs."
+    )]
     async fn hypothesis_pairwise_t_test(
         &self,
         Parameters(request): Parameters<PairwiseTTestRequest>,
@@ -10292,7 +11698,7 @@ impl AnalyticsServer {
                 });
 
                 Ok(CallToolResult::success(vec![Content::text(
-                    serde_json::to_string_pretty(&output).unwrap_or_else(|_| result.to_string())
+                    serde_json::to_string_pretty(&output).unwrap_or_else(|_| result.to_string()),
                 )]))
             }
             Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
@@ -10311,7 +11717,9 @@ impl AnalyticsServer {
     /// - R `stats::pairwise.wilcox.test`: https://stat.ethz.ch/R-manual/R-devel/library/stats/html/pairwise.wilcox.test.html
     /// - Mann, H. B. & Whitney, D. R. (1947). "On a Test of Whether one of Two Random Variables
     ///   is Stochastically Larger than the Other". Annals of Mathematical Statistics, 18(1), 50-60.
-    #[tool(description = "Run pairwise Wilcoxon rank sum tests between all group levels with p-value adjustment. Non-parametric post-hoc analysis after Kruskal-Wallis test. Does not assume normality. Adjustment methods: 'holm' (default, FWER), 'bonferroni', 'hochberg', 'hommel', 'BH' (FDR), 'BY', 'none'. Returns matrix of adjusted p-values for all pairs.")]
+    #[tool(
+        description = "Run pairwise Wilcoxon rank sum tests between all group levels with p-value adjustment. Non-parametric post-hoc analysis after Kruskal-Wallis test. Does not assume normality. Adjustment methods: 'holm' (default, FWER), 'bonferroni', 'hochberg', 'hommel', 'BH' (FDR), 'BY', 'none'. Returns matrix of adjusted p-values for all pairs."
+    )]
     async fn hypothesis_pairwise_wilcox(
         &self,
         Parameters(request): Parameters<PairwiseWilcoxRequest>,
@@ -10398,7 +11806,7 @@ impl AnalyticsServer {
                 });
 
                 Ok(CallToolResult::success(vec![Content::text(
-                    serde_json::to_string_pretty(&output).unwrap_or_else(|_| result.to_string())
+                    serde_json::to_string_pretty(&output).unwrap_or_else(|_| result.to_string()),
                 )]))
             }
             Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
@@ -10417,12 +11825,14 @@ impl AnalyticsServer {
     ///   Random Variables is Stochastically Larger than the Other".
     ///   Annals of Mathematical Statistics, 18(1), 50-60.
     /// - R `stats::wilcox.test`: https://stat.ethz.ch/R-manual/R-devel/library/stats/html/wilcox.test.html
-    #[tool(description = "Run Wilcoxon non-parametric test for location. Supports: (1) One-sample signed rank test: test if median differs from hypothesized value, (2) Two-sample rank sum test (Mann-Whitney U): compare distributions between two groups, (3) Paired signed rank test: compare matched pairs. Does not assume normality. Returns W/V statistic, p-value, and optionally confidence interval and location estimate.")]
+    #[tool(
+        description = "Run Wilcoxon non-parametric test for location. Supports: (1) One-sample signed rank test: test if median differs from hypothesized value, (2) Two-sample rank sum test (Mann-Whitney U): compare distributions between two groups, (3) Paired signed rank test: compare matched pairs. Does not assume normality. Returns W/V statistic, p-value, and optionally confidence interval and location estimate."
+    )]
     async fn hypothesis_wilcoxon(
         &self,
         Parameters(request): Parameters<WilcoxonTestRequest>,
     ) -> Result<CallToolResult, McpError> {
-        use p2a_core::stats::wilcoxon::{wilcoxon_test, WilcoxonConfig};
+        use p2a_core::stats::wilcoxon::{WilcoxonConfig, wilcoxon_test};
 
         let datasets = self.datasets.read().await;
 
@@ -10494,7 +11904,11 @@ impl AnalyticsServer {
                 if let Some(est) = result.estimate {
                     json_output["estimate"] = serde_json::json!(est);
                 }
-                if let (Some(cl), Some(lo), Some(hi)) = (result.conf_level, result.conf_int_lower, result.conf_int_upper) {
+                if let (Some(cl), Some(lo), Some(hi)) = (
+                    result.conf_level,
+                    result.conf_int_lower,
+                    result.conf_int_upper,
+                ) {
                     json_output["confidence_interval"] = serde_json::json!({
                         "level": cl,
                         "lower": lo,
@@ -10532,7 +11946,9 @@ impl AnalyticsServer {
     ///   the probable in the case of a correlated system of variables is such that it
     ///   can be reasonably supposed to have arisen from random sampling".
     /// - R `stats::chisq.test`: https://stat.ethz.ch/R-manual/R-devel/library/stats/html/chisq.test.html
-    #[tool(description = "Run Pearson's chi-squared goodness-of-fit test to check if observed category frequencies match expected probabilities. Tests H₀: observed frequencies follow the expected distribution. Returns chi-squared statistic, p-value, degrees of freedom, and residuals. Use for categorical data to test if a distribution is uniform or matches specific probabilities.")]
+    #[tool(
+        description = "Run Pearson's chi-squared goodness-of-fit test to check if observed category frequencies match expected probabilities. Tests H₀: observed frequencies follow the expected distribution. Returns chi-squared statistic, p-value, degrees of freedom, and residuals. Use for categorical data to test if a distribution is uniform or matches specific probabilities."
+    )]
     async fn hypothesis_chisq_gof(
         &self,
         Parameters(request): Parameters<ChiSquaredGofRequest>,
@@ -10583,7 +11999,9 @@ impl AnalyticsServer {
     /// - Pearson, K. (1900). "On the criterion that a given system of deviations..."
     /// - Yates, F. (1934). "Contingency tables involving small numbers and the χ² test".
     /// - R `stats::chisq.test`: https://stat.ethz.ch/R-manual/R-devel/library/stats/html/chisq.test.html
-    #[tool(description = "Run Pearson's chi-squared test of independence to check if two categorical variables are independent. Creates a contingency table from two columns and tests H₀: row and column variables are independent. For 2×2 tables, Yates' continuity correction is applied by default. Returns chi-squared statistic, p-value, degrees of freedom, expected values, and residuals.")]
+    #[tool(
+        description = "Run Pearson's chi-squared test of independence to check if two categorical variables are independent. Creates a contingency table from two columns and tests H₀: row and column variables are independent. For 2×2 tables, Yates' continuity correction is applied by default. Returns chi-squared statistic, p-value, degrees of freedom, expected values, and residuals."
+    )]
     async fn hypothesis_chisq_independence(
         &self,
         Parameters(request): Parameters<ChiSquaredIndependenceRequest>,
@@ -10636,12 +12054,14 @@ impl AnalyticsServer {
     /// - Fisher, R. A. (1935). "The logic of inductive inference".
     ///   Journal of the Royal Statistical Society, 98(1), 39-82.
     /// - R `stats::fisher.test`: https://stat.ethz.ch/R-manual/R-devel/library/stats/html/fisher.test.html
-    #[tool(description = "Run Fisher's exact test for a 2×2 contingency table. Tests independence between two binary categorical variables using exact probability calculations (hypergeometric distribution). More accurate than chi-squared test for small samples. Returns p-value, odds ratio, and optionally a confidence interval. Use when expected cell counts are small (<5) or when exact p-values are needed.")]
+    #[tool(
+        description = "Run Fisher's exact test for a 2×2 contingency table. Tests independence between two binary categorical variables using exact probability calculations (hypergeometric distribution). More accurate than chi-squared test for small samples. Returns p-value, odds ratio, and optionally a confidence interval. Use when expected cell counts are small (<5) or when exact p-values are needed."
+    )]
     async fn hypothesis_fisher_exact(
         &self,
         Parameters(request): Parameters<FisherExactRequest>,
     ) -> Result<CallToolResult, McpError> {
-        use p2a_core::stats::fisher::{run_fisher_test, FisherAlternative};
+        use p2a_core::stats::fisher::{FisherAlternative, run_fisher_test};
 
         let datasets = self.datasets.read().await;
 
@@ -10668,7 +12088,13 @@ impl AnalyticsServer {
             }
         };
 
-        match run_fisher_test(dataset, &request.row_var, &request.col_var, alternative, request.conf_level) {
+        match run_fisher_test(
+            dataset,
+            &request.row_var,
+            &request.col_var,
+            alternative,
+            request.conf_level,
+        ) {
             Ok(result) => {
                 // Convert to JSON for structured output
                 let mut json_output = serde_json::json!({
@@ -10717,7 +12143,9 @@ impl AnalyticsServer {
     /// - Royston, P. (1995). "Remark AS R94: A remark on Algorithm AS 181: The W-test
     ///   for normality". Journal of the Royal Statistical Society Series C, 44(4), 547-551.
     /// - R `stats::shapiro.test`: https://stat.ethz.ch/R-manual/R-devel/library/stats/html/shapiro.test.html
-    #[tool(description = "Run the Shapiro-Wilk test for normality. Tests the null hypothesis that a sample came from a normally distributed population. Returns W statistic (values close to 1 indicate normality) and p-value. Sample size must be between 3 and 5000. A small p-value (e.g., < 0.05) suggests data is not normally distributed.")]
+    #[tool(
+        description = "Run the Shapiro-Wilk test for normality. Tests the null hypothesis that a sample came from a normally distributed population. Returns W statistic (values close to 1 indicate normality) and p-value. Sample size must be between 3 and 5000. A small p-value (e.g., < 0.05) suggests data is not normally distributed."
+    )]
     async fn hypothesis_shapiro_wilk(
         &self,
         Parameters(request): Parameters<ShapiroWilkRequest>,
@@ -10770,12 +12198,16 @@ impl AnalyticsServer {
     /// - Smirnov, N. V. (1939). "On the estimation of the discrepancy between empirical curves
     ///   of distribution for two independent samples". Bulletin of Moscow University, 2(2), 3-16.
     /// - R `stats::ks.test`: https://stat.ethz.ch/R-manual/R-devel/library/stats/html/ks.test.html
-    #[tool(description = "Run the Kolmogorov-Smirnov test. Two-sample test: Tests if two samples come from the same distribution. One-sample test: Tests if a sample comes from a specified theoretical distribution (normal, uniform, exponential). Returns D statistic (maximum absolute difference between CDFs) and p-value. A small p-value suggests the distributions differ.")]
+    #[tool(
+        description = "Run the Kolmogorov-Smirnov test. Two-sample test: Tests if two samples come from the same distribution. One-sample test: Tests if a sample comes from a specified theoretical distribution (normal, uniform, exponential). Returns D statistic (maximum absolute difference between CDFs) and p-value. A small p-value suggests the distributions differ."
+    )]
     async fn hypothesis_ks_test(
         &self,
         Parameters(request): Parameters<KsTestRequest>,
     ) -> Result<CallToolResult, McpError> {
-        use p2a_core::stats::ks::{ks_test_one_sample, ks_test_two_sample, TheoreticalDistribution};
+        use p2a_core::stats::ks::{
+            TheoreticalDistribution, ks_test_one_sample, ks_test_two_sample,
+        };
 
         let datasets = self.datasets.read().await;
 
@@ -10810,7 +12242,8 @@ impl AnalyticsServer {
             Ok(s) => s,
             Err(_) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Column '{}' not found in dataset.", request.x
+                    "Column '{}' not found in dataset.",
+                    request.x
                 ))]));
             }
         };
@@ -10818,7 +12251,8 @@ impl AnalyticsServer {
             Ok(ca) => ca.into_no_null_iter().collect(),
             Err(_) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Column '{}' is not numeric.", request.x
+                    "Column '{}' is not numeric.",
+                    request.x
                 ))]));
             }
         };
@@ -10829,7 +12263,8 @@ impl AnalyticsServer {
                 Ok(s) => s,
                 Err(_) => {
                     return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Column '{}' not found in dataset.", y_col
+                        "Column '{}' not found in dataset.",
+                        y_col
                     ))]));
                 }
             };
@@ -10837,7 +12272,8 @@ impl AnalyticsServer {
                 Ok(ca) => ca.into_no_null_iter().collect(),
                 Err(_) => {
                     return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Column '{}' is not numeric.", y_col
+                        "Column '{}' is not numeric.",
+                        y_col
                     ))]));
                 }
             };
@@ -10920,12 +12356,14 @@ impl AnalyticsServer {
     ///   coefficient in samples from an indefinitely large population". Biometrika, 10(4), 507-521.
     /// - Kendall, M. G. (1938). "A new measure of rank correlation". Biometrika, 30(1-2), 81-93.
     /// - R `stats::cor.test`: https://stat.ethz.ch/R-manual/R-devel/library/stats/html/cor.test.html
-    #[tool(description = "Test for association between paired samples using Pearson, Spearman, or Kendall correlation. Returns correlation coefficient, test statistic, p-value, and confidence interval (for Pearson). Pearson measures linear association; Spearman and Kendall measure monotonic association and are robust to outliers.")]
+    #[tool(
+        description = "Test for association between paired samples using Pearson, Spearman, or Kendall correlation. Returns correlation coefficient, test statistic, p-value, and confidence interval (for Pearson). Pearson measures linear association; Spearman and Kendall measure monotonic association and are robust to outliers."
+    )]
     async fn hypothesis_cor_test(
         &self,
         Parameters(request): Parameters<CorTestRequest>,
     ) -> Result<CallToolResult, McpError> {
-        use p2a_core::stats::cortest::{run_cor_test, CorrelationMethod};
+        use p2a_core::stats::cortest::run_cor_test;
 
         let datasets = self.datasets.read().await;
 
@@ -11034,12 +12472,14 @@ impl AnalyticsServer {
     /// References:
     /// - Cohen, J. (1988). Statistical Power Analysis for the Behavioral Sciences (2nd ed.).
     /// - R `stats::power.t.test`: https://stat.ethz.ch/R-manual/R-devel/library/stats/html/power.t.test.html
-    #[tool(description = "Compute power or sample size for t-tests. Given 4 of {n, delta, sd, sig_level, power}, computes the 5th. Use for study design to determine required sample size for desired power, or to compute power for a given sample size. Supports one-sample, two-sample, and paired t-tests.")]
+    #[tool(
+        description = "Compute power or sample size for t-tests. Given 4 of {n, delta, sd, sig_level, power}, computes the 5th. Use for study design to determine required sample size for desired power, or to compute power for a given sample size. Supports one-sample, two-sample, and paired t-tests."
+    )]
     async fn power_t_test(
         &self,
         Parameters(request): Parameters<PowerTTestRequest>,
     ) -> Result<CallToolResult, McpError> {
-        use p2a_core::stats::power::{power_t_test, TTestType, PowerAlternative};
+        use p2a_core::stats::power::{PowerAlternative, TTestType, power_t_test};
 
         // Parse test type
         let test_type = match request.test_type.as_deref() {
@@ -11097,12 +12537,14 @@ impl AnalyticsServer {
     /// References:
     /// - Cohen, J. (1988). Statistical Power Analysis for the Behavioral Sciences (2nd ed.).
     /// - R `stats::power.prop.test`: https://stat.ethz.ch/R-manual/R-devel/library/stats/html/power.prop.test.html
-    #[tool(description = "Compute power or sample size for two-sample proportion tests. Given 4 of {n, p1, p2, sig_level, power}, computes the 5th. Use for study design comparing proportions between two groups.")]
+    #[tool(
+        description = "Compute power or sample size for two-sample proportion tests. Given 4 of {n, p1, p2, sig_level, power}, computes the 5th. Use for study design comparing proportions between two groups."
+    )]
     async fn power_prop_test(
         &self,
         Parameters(request): Parameters<PowerPropTestRequest>,
     ) -> Result<CallToolResult, McpError> {
-        use p2a_core::stats::power::{power_prop_test, PowerAlternative};
+        use p2a_core::stats::power::{PowerAlternative, power_prop_test};
 
         // Parse alternative
         let alternative = match request.alternative.as_deref() {
@@ -11115,7 +12557,7 @@ impl AnalyticsServer {
             Some(p) => p,
             None => {
                 return Ok(CallToolResult::error(vec![Content::text(
-                    "p1 (proportion in first group) is required".to_string()
+                    "p1 (proportion in first group) is required".to_string(),
                 )]));
             }
         };
@@ -11164,7 +12606,9 @@ impl AnalyticsServer {
     /// References:
     /// - Cohen, J. (1988). Statistical Power Analysis for the Behavioral Sciences (2nd ed.).
     /// - R `stats::power.anova.test`: https://stat.ethz.ch/R-manual/R-devel/library/stats/html/power.anova.test.html
-    #[tool(description = "Compute power or sample size for balanced one-way ANOVA. Given 4 of {groups, n, between_var, within_var, sig_level, power}, computes the 5th. Use for study design comparing means across multiple groups.")]
+    #[tool(
+        description = "Compute power or sample size for balanced one-way ANOVA. Given 4 of {groups, n, between_var, within_var, sig_level, power}, computes the 5th. Use for study design comparing means across multiple groups."
+    )]
     async fn power_anova_test(
         &self,
         Parameters(request): Parameters<PowerAnovaTestRequest>,
@@ -11182,7 +12626,7 @@ impl AnalyticsServer {
             }
             None => {
                 return Ok(CallToolResult::error(vec![Content::text(
-                    "groups (number of groups) is required".to_string()
+                    "groups (number of groups) is required".to_string(),
                 )]));
             }
         };
@@ -11192,7 +12636,7 @@ impl AnalyticsServer {
             Some(v) => v,
             None => {
                 return Ok(CallToolResult::error(vec![Content::text(
-                    "between_var (between-group variance) is required".to_string()
+                    "between_var (between-group variance) is required".to_string(),
                 )]));
             }
         };
@@ -11251,7 +12695,9 @@ impl AnalyticsServer {
     /// - Armitage, P. (1955). "Tests for linear trends in proportions and frequencies".
     ///   Biometrics, 11(3), 375-386.
     /// - R `stats::prop.trend.test`: https://stat.ethz.ch/R-manual/R-devel/library/stats/html/prop.trend.test.html
-    #[tool(description = "Test for trend in proportions across ordered groups (Cochran-Armitage test). Tests whether proportions increase or decrease linearly with group scores. Commonly used in dose-response studies. Returns chi-squared statistic with 1 df and p-value.")]
+    #[tool(
+        description = "Test for trend in proportions across ordered groups (Cochran-Armitage test). Tests whether proportions increase or decrease linearly with group scores. Commonly used in dose-response studies. Returns chi-squared statistic with 1 df and p-value."
+    )]
     async fn hypothesis_prop_trend_test(
         &self,
         Parameters(request): Parameters<PropTrendTestRequest>,
@@ -11287,7 +12733,7 @@ impl AnalyticsServer {
                         request.successes
                     ))]));
                 }
-            },
+            }
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
                     "Column '{}' not found: {}",
@@ -11311,7 +12757,7 @@ impl AnalyticsServer {
                         request.trials
                     ))]));
                 }
-            },
+            }
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
                     "Column '{}' not found: {}",
@@ -11320,11 +12766,7 @@ impl AnalyticsServer {
             }
         };
 
-        match run_prop_trend_test(
-            &successes,
-            &trials,
-            request.scores.clone(),
-        ) {
+        match run_prop_trend_test(&successes, &trials, request.scores.clone()) {
             Ok(result) => {
                 let json_output = serde_json::json!({
                     "test": result.method,
@@ -11357,7 +12799,9 @@ impl AnalyticsServer {
     /// - Box, G. E. P., Jenkins, G. M., Reinsel, G. C., & Ljung, G. M. (2015).
     ///   Time Series Analysis: Forecasting and Control (5th ed.). Wiley.
     /// - R `stats::acf`: https://stat.ethz.ch/R-manual/R-devel/library/stats/html/acf.html
-    #[tool(description = "Compute autocorrelation function (ACF), autocovariance, or partial autocorrelation function (PACF) for a time series. ACF measures correlation between observations at different lags. PACF measures correlation after removing effects of intermediate lags - useful for identifying AR order. Returns values for lags 0 to lag_max with 95% confidence bounds.")]
+    #[tool(
+        description = "Compute autocorrelation function (ACF), autocovariance, or partial autocorrelation function (PACF) for a time series. ACF measures correlation between observations at different lags. PACF measures correlation after removing effects of intermediate lags - useful for identifying AR order. Returns values for lags 0 to lag_max with 95% confidence bounds."
+    )]
     async fn timeseries_acf(
         &self,
         Parameters(request): Parameters<AcfRequest>,
@@ -11453,7 +12897,9 @@ impl AnalyticsServer {
     /// - Box, G. E. P., Jenkins, G. M., Reinsel, G. C., & Ljung, G. M. (2015).
     ///   Time Series Analysis: Forecasting and Control (5th ed.). Wiley.
     /// - R `stats::ccf`: https://stat.ethz.ch/R-manual/R-devel/library/stats/html/acf.html
-    #[tool(description = "Compute cross-correlation function (CCF) between two time series. CCF at lag k estimates correlation between x_{t+k} and y_t. Positive lag k means x leads y; negative lag means y leads x. Useful for identifying lead-lag relationships between variables.")]
+    #[tool(
+        description = "Compute cross-correlation function (CCF) between two time series. CCF at lag k estimates correlation between x_{t+k} and y_t. Positive lag k means x leads y; negative lag means y leads x. Useful for identifying lead-lag relationships between variables."
+    )]
     async fn timeseries_ccf(
         &self,
         Parameters(request): Parameters<CcfRequest>,
@@ -11470,7 +12916,13 @@ impl AnalyticsServer {
             }
         };
 
-        match run_ccf(dataset, &request.x, &request.y, request.lag_max, CcfType::Correlation) {
+        match run_ccf(
+            dataset,
+            &request.x,
+            &request.y,
+            request.lag_max,
+            CcfType::Correlation,
+        ) {
             Ok(result) => {
                 // Find the lag with maximum absolute correlation
                 let max_idx = result
@@ -11488,7 +12940,10 @@ impl AnalyticsServer {
                 } else if max_lag < 0 {
                     format!("{} leads {} by {} periods", request.y, request.x, -max_lag)
                 } else {
-                    format!("{} and {} are contemporaneously correlated", request.x, request.y)
+                    format!(
+                        "{} and {} are contemporaneously correlated",
+                        request.x, request.y
+                    )
                 };
 
                 let json_output = serde_json::json!({
@@ -11523,7 +12978,9 @@ impl AnalyticsServer {
     /// References:
     /// - Priestley, M. B. (1981). *Spectral Analysis and Time Series*. Academic Press.
     /// - R `stats::spectrum`: https://stat.ethz.ch/R-manual/R-devel/library/stats/html/spectrum.html
-    #[tool(description = "Estimate spectral density (power spectrum) of a time series. Returns spectral density at Fourier frequencies showing how variance is distributed across frequency components. Methods: 'pgram' (periodogram with optional smoothing) or 'ar' (AR model-based). Use spans parameter for smoothing raw periodogram (e.g., spans=[3,3] for moderate smoothing). Peak frequency reveals dominant cyclical patterns.")]
+    #[tool(
+        description = "Estimate spectral density (power spectrum) of a time series. Returns spectral density at Fourier frequencies showing how variance is distributed across frequency components. Methods: 'pgram' (periodogram with optional smoothing) or 'ar' (AR model-based). Use spans parameter for smoothing raw periodogram (e.g., spans=[3,3] for moderate smoothing). Peak frequency reveals dominant cyclical patterns."
+    )]
     async fn timeseries_spectrum(
         &self,
         Parameters(request): Parameters<SpectrumRequest>,
@@ -11579,7 +13036,11 @@ impl AnalyticsServer {
 
         // Get peak frequency info
         let (peak_freq, peak_spec) = result.peak_frequency().unwrap_or((0.0, 0.0));
-        let peak_period = if peak_freq > 0.0 { 1.0 / peak_freq } else { f64::INFINITY };
+        let peak_period = if peak_freq > 0.0 {
+            1.0 / peak_freq
+        } else {
+            f64::INFINITY
+        };
 
         // Compute confidence interval multipliers
         let (ci_lower_mult, ci_upper_mult) = result.confidence_multipliers(0.95);
@@ -11636,7 +13097,9 @@ impl AnalyticsServer {
     /// References:
     /// - Box, G. E. P. & Pierce, D. A. (1970). "Distribution of residual correlations in ARIMA models." JASA, 65, 1509-1526.
     /// - Ljung, G. M. & Box, G. E. P. (1978). "On a measure of lack of fit in time series models." Biometrika, 65, 297-303.
-    #[tool(description = "Test for autocorrelation in a time series using Box-Pierce or Ljung-Box test. Tests H₀: no autocorrelation up to specified lag. Commonly used to check whether ARIMA residuals are white noise. Ljung-Box (default) has better finite-sample properties. For ARMA(p,q) residuals, set fitdf=p+q to adjust degrees of freedom. Returns: X-squared statistic, df, p-value, and sample autocorrelations.")]
+    #[tool(
+        description = "Test for autocorrelation in a time series using Box-Pierce or Ljung-Box test. Tests H₀: no autocorrelation up to specified lag. Commonly used to check whether ARIMA residuals are white noise. Ljung-Box (default) has better finite-sample properties. For ARMA(p,q) residuals, set fitdf=p+q to adjust degrees of freedom. Returns: X-squared statistic, df, p-value, and sample autocorrelations."
+    )]
     async fn timeseries_box_test(
         &self,
         Parameters(request): Parameters<BoxTestRequest>,
@@ -11661,13 +13124,7 @@ impl AnalyticsServer {
 
         let fitdf = request.fitdf.unwrap_or(0);
 
-        let result = match run_box_test(
-            dataset,
-            &request.column,
-            request.lag,
-            test_type,
-            fitdf,
-        ) {
+        let result = match run_box_test(dataset, &request.column, request.lag, test_type, fitdf) {
             Ok(r) => r,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -11713,7 +13170,9 @@ impl AnalyticsServer {
     /// References:
     /// - Phillips, P. C. B. & Perron, P. (1988). "Testing for a Unit Root in Time Series Regression." Biometrika, 75(2), 335-346.
     /// - Banerjee, A., Dolado, J. J., Galbraith, J. W., & Hendry, D. (1993). Co-integration, Error Correction, and the Econometric Analysis of Non-Stationary Data. Oxford University Press.
-    #[tool(description = "Test for unit root in a time series using the Phillips-Perron test. Tests H₀: series has unit root (non-stationary) vs H₁: series is stationary. Uses Newey-West long-run variance estimator with Bartlett weights for serial correlation correction. Similar to ADF test but makes non-parametric correction. Returns: Z(τ) statistic, truncation lag, p-value, and diagnostics.")]
+    #[tool(
+        description = "Test for unit root in a time series using the Phillips-Perron test. Tests H₀: series has unit root (non-stationary) vs H₁: series is stationary. Uses Newey-West long-run variance estimator with Bartlett weights for serial correlation correction. Similar to ADF test but makes non-parametric correction. Returns: Z(τ) statistic, truncation lag, p-value, and diagnostics."
+    )]
     async fn timeseries_pp_test(
         &self,
         Parameters(request): Parameters<PPTestRequest>,
@@ -11788,12 +13247,14 @@ impl AnalyticsServer {
     ///   Psychometrika, 32, 443-482.
     /// - Kaiser, H. F. (1958). "The varimax criterion for analytic rotation in factor analysis".
     ///   Psychometrika, 23, 187-200.
-    #[tool(description = "Run Maximum Likelihood Factor Analysis to identify latent factors underlying observed variables. Models correlation structure as x = Λf + e where Λ is the loadings matrix, f are factor scores, and e is error. Returns loadings matrix, uniquenesses (specific variances), communalities (variance explained per variable), variance proportions, chi-squared goodness-of-fit test, and optionally factor scores. Supports varimax (orthogonal) and promax (oblique) rotation.")]
+    #[tool(
+        description = "Run Maximum Likelihood Factor Analysis to identify latent factors underlying observed variables. Models correlation structure as x = Λf + e where Λ is the loadings matrix, f are factor scores, and e is error. Returns loadings matrix, uniquenesses (specific variances), communalities (variance explained per variable), variance proportions, chi-squared goodness-of-fit test, and optionally factor scores. Supports varimax (orthogonal) and promax (oblique) rotation."
+    )]
     async fn multivariate_factanal(
         &self,
         Parameters(request): Parameters<FactorAnalysisRequest>,
     ) -> Result<CallToolResult, McpError> {
-        use p2a_core::stats::factanal::{run_factanal, RotationMethod, ScoresMethod};
+        use p2a_core::stats::factanal::{RotationMethod, ScoresMethod, run_factanal};
 
         let datasets = self.datasets.read().await;
 
@@ -11848,7 +13309,9 @@ impl AnalyticsServer {
 
         // Format loadings matrix for display
         let var_names: Vec<String> = result.var_names.clone().unwrap_or_else(|| {
-            (0..result.n_vars).map(|i| format!("Var{}", i + 1)).collect()
+            (0..result.n_vars)
+                .map(|i| format!("Var{}", i + 1))
+                .collect()
         });
 
         let mut loadings_display = Vec::new();
@@ -11909,7 +13372,7 @@ impl AnalyticsServer {
         }
 
         Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&json_output).unwrap_or_default()
+            serde_json::to_string_pretty(&json_output).unwrap_or_default(),
         )]))
     }
 
@@ -11919,7 +13382,9 @@ impl AnalyticsServer {
     ///
     /// - Hotelling, H. (1936). "Relations Between Two Sets of Variates".
     ///   Biometrika, 28(3/4), 321-377.
-    #[tool(description = "Run Canonical Correlation Analysis (CCA) to find linear combinations of two sets of variables that have maximum correlation with each other. Returns canonical correlations (in decreasing order), coefficients for X variables (xcoef), and coefficients for Y variables (ycoef). The canonical variates are X*xcoef and Y*ycoef. Useful for multivariate dimensionality reduction, identifying relationships between variable sets, and understanding shared variance.")]
+    #[tool(
+        description = "Run Canonical Correlation Analysis (CCA) to find linear combinations of two sets of variables that have maximum correlation with each other. Returns canonical correlations (in decreasing order), coefficients for X variables (xcoef), and coefficients for Y variables (ycoef). The canonical variates are X*xcoef and Y*ycoef. Useful for multivariate dimensionality reduction, identifying relationships between variable sets, and understanding shared variance."
+    )]
     async fn multivariate_cancor(
         &self,
         Parameters(request): Parameters<CancorRequest>,
@@ -11957,7 +13422,9 @@ impl AnalyticsServer {
 
         // Format X coefficients for display
         let x_names: Vec<String> = result.x_names.clone().unwrap_or_else(|| {
-            (0..result.n_x_vars).map(|i| format!("X{}", i + 1)).collect()
+            (0..result.n_x_vars)
+                .map(|i| format!("X{}", i + 1))
+                .collect()
         });
         let mut xcoef_display = Vec::new();
         for i in 0..result.n_x_vars {
@@ -11972,7 +13439,9 @@ impl AnalyticsServer {
 
         // Format Y coefficients for display
         let y_names: Vec<String> = result.y_names.clone().unwrap_or_else(|| {
-            (0..result.n_y_vars).map(|i| format!("Y{}", i + 1)).collect()
+            (0..result.n_y_vars)
+                .map(|i| format!("Y{}", i + 1))
+                .collect()
         });
         let mut ycoef_display = Vec::new();
         for i in 0..result.n_y_vars {
@@ -12011,7 +13480,7 @@ impl AnalyticsServer {
         });
 
         Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&json_output).unwrap_or_default()
+            serde_json::to_string_pretty(&json_output).unwrap_or_default(),
         )]))
     }
 
@@ -12021,7 +13490,9 @@ impl AnalyticsServer {
     ///
     /// - Mahalanobis, P. C. (1936). "On the generalized distance in statistics".
     ///   Proceedings of the National Institute of Sciences (Calcutta), 2, 49–55.
-    #[tool(description = "Compute squared Mahalanobis distance for each observation. The Mahalanobis distance measures how far each observation is from the center of the distribution, accounting for correlations between variables. Useful for outlier detection, multivariate normality assessment, and cluster analysis. Returns squared distances (D²) which follow a chi-squared distribution with p degrees of freedom under multivariate normality.")]
+    #[tool(
+        description = "Compute squared Mahalanobis distance for each observation. The Mahalanobis distance measures how far each observation is from the center of the distribution, accounting for correlations between variables. Useful for outlier detection, multivariate normality assessment, and cluster analysis. Returns squared distances (D²) which follow a chi-squared distribution with p degrees of freedom under multivariate normality."
+    )]
     async fn multivariate_mahalanobis(
         &self,
         Parameters(request): Parameters<MahalanobisRequest>,
@@ -12039,7 +13510,7 @@ impl AnalyticsServer {
         };
 
         let col_refs: Vec<&str> = request.columns.iter().map(|s| s.as_str()).collect();
-        let center = request.center.as_ref().map(|c| c.as_slice());
+        let center = request.center.as_deref();
 
         let result = match run_mahalanobis(dataset, &col_refs, center, None) {
             Ok(r) => r,
@@ -12054,8 +13525,16 @@ impl AnalyticsServer {
         // Compute summary statistics
         let n = result.distances.len();
         let mean_dist = result.distances.iter().sum::<f64>() / n as f64;
-        let max_dist = result.distances.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-        let min_dist = result.distances.iter().cloned().fold(f64::INFINITY, f64::min);
+        let max_dist = result
+            .distances
+            .iter()
+            .cloned()
+            .fold(f64::NEG_INFINITY, f64::max);
+        let min_dist = result
+            .distances
+            .iter()
+            .cloned()
+            .fold(f64::INFINITY, f64::min);
 
         // Chi-squared critical value for outlier detection (df = p, alpha = 0.05)
         let p = result.n_vars;
@@ -12096,7 +13575,7 @@ impl AnalyticsServer {
         });
 
         Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&json_output).unwrap_or_default()
+            serde_json::to_string_pretty(&json_output).unwrap_or_default(),
         )]))
     }
 
@@ -12105,7 +13584,9 @@ impl AnalyticsServer {
     /// # References
     ///
     /// - Tukey, J. W. (1977). Exploratory Data Analysis. Addison-Wesley.
-    #[tool(description = "Run Tukey's Median Polish for robust two-way decomposition of a matrix. Fits an additive model (constant + row effects + column effects + residuals) iteratively using medians instead of means, making it resistant to outliers. Returns the overall effect, row effects, column effects, and residuals. Useful for exploratory data analysis of two-way tables.")]
+    #[tool(
+        description = "Run Tukey's Median Polish for robust two-way decomposition of a matrix. Fits an additive model (constant + row effects + column effects + residuals) iteratively using medians instead of means, making it resistant to outliers. Returns the overall effect, row effects, column effects, and residuals. Useful for exploratory data analysis of two-way tables."
+    )]
     async fn descriptive_medpolish(
         &self,
         Parameters(request): Parameters<MedpolishRequest>,
@@ -12128,7 +13609,7 @@ impl AnalyticsServer {
 
         if request.columns.is_empty() {
             return Ok(CallToolResult::error(vec![Content::text(
-                "No columns specified for median polish. Provide at least 2 columns."
+                "No columns specified for median polish. Provide at least 2 columns.",
             )]));
         }
 
@@ -12141,7 +13622,8 @@ impl AnalyticsServer {
                     Ok(c) => c,
                     Err(_) => {
                         return Ok(CallToolResult::error(vec![Content::text(format!(
-                            "Column '{}' not found in dataset.", col_name
+                            "Column '{}' not found in dataset.",
+                            col_name
                         ))]));
                     }
                 };
@@ -12149,7 +13631,8 @@ impl AnalyticsServer {
                     Ok(ca) => ca.get(row_idx).unwrap_or(f64::NAN),
                     Err(_) => {
                         return Ok(CallToolResult::error(vec![Content::text(format!(
-                            "Column '{}' is not numeric.", col_name
+                            "Column '{}' is not numeric.",
+                            col_name
                         ))]));
                     }
                 };
@@ -12164,7 +13647,8 @@ impl AnalyticsServer {
             Ok(r) => r,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Median polish failed: {}", e
+                    "Median polish failed: {}",
+                    e
                 ))]));
             }
         };
@@ -12213,12 +13697,14 @@ impl AnalyticsServer {
         });
 
         Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&json_output).unwrap_or_default()
+            serde_json::to_string_pretty(&json_output).unwrap_or_default(),
         )]))
     }
 
     /// Run isotonic regression (monotonic constraint).
-    #[tool(description = "Run isotonic (monotonically increasing) least squares regression using the Pool Adjacent Violators Algorithm (PAVA). Returns piecewise constant fitted values that are monotonically non-decreasing. Useful for calibration, dose-response modeling, and trend analysis where monotonicity is assumed.")]
+    #[tool(
+        description = "Run isotonic (monotonically increasing) least squares regression using the Pool Adjacent Violators Algorithm (PAVA). Returns piecewise constant fitted values that are monotonically non-decreasing. Useful for calibration, dose-response modeling, and trend analysis where monotonicity is assumed."
+    )]
     async fn descriptive_isoreg(
         &self,
         Parameters(request): Parameters<IsoregRequest>,
@@ -12244,7 +13730,8 @@ impl AnalyticsServer {
             Ok(c) => c,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Y column '{}' not found: {}", request.y_column, e
+                    "Y column '{}' not found: {}",
+                    request.y_column, e
                 ))]));
             }
         };
@@ -12252,13 +13739,19 @@ impl AnalyticsServer {
         let y: Vec<f64> = match y_col.cast(&DataType::Float64) {
             Ok(c) => match c.f64() {
                 Ok(f) => f.into_no_null_iter().collect(),
-                Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Y column not numeric: {}", e
-                ))])),
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Y column not numeric: {}",
+                        e
+                    ))]));
+                }
             },
-            Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!(
-                "Cannot cast Y column: {}", e
-            ))])),
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Cannot cast Y column: {}",
+                    e
+                ))]));
+            }
         };
 
         // Extract or generate x
@@ -12267,20 +13760,27 @@ impl AnalyticsServer {
                 Ok(c) => c,
                 Err(e) => {
                     return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "X column '{}' not found: {}", x_col_name, e
+                        "X column '{}' not found: {}",
+                        x_col_name, e
                     ))]));
                 }
             };
             match x_col.cast(&DataType::Float64) {
                 Ok(c) => match c.f64() {
                     Ok(f) => f.into_no_null_iter().collect(),
-                    Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "X column not numeric: {}", e
-                    ))])),
+                    Err(e) => {
+                        return Ok(CallToolResult::error(vec![Content::text(format!(
+                            "X column not numeric: {}",
+                            e
+                        ))]));
+                    }
                 },
-                Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Cannot cast X column: {}", e
-                ))])),
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Cannot cast X column: {}",
+                        e
+                    ))]));
+                }
             }
         } else {
             // Use row index as x
@@ -12291,7 +13791,8 @@ impl AnalyticsServer {
             Ok(r) => r,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Isotonic regression failed: {}", e
+                    "Isotonic regression failed: {}",
+                    e
                 ))]));
             }
         };
@@ -12316,12 +13817,14 @@ impl AnalyticsServer {
         });
 
         Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&json_output).unwrap_or_default()
+            serde_json::to_string_pretty(&json_output).unwrap_or_default(),
         )]))
     }
 
     /// Fit log-linear model to contingency table.
-    #[tool(description = "Fit a log-linear model to a contingency table using Iterative Proportional Fitting (IPF). Tests associations among categorical variables. Returns likelihood ratio test (G²), Pearson chi-squared, degrees of freedom, and p-values. Use for analyzing multidimensional contingency tables and testing independence or conditional independence hypotheses.")]
+    #[tool(
+        description = "Fit a log-linear model to a contingency table using Iterative Proportional Fitting (IPF). Tests associations among categorical variables. Returns likelihood ratio test (G²), Pearson chi-squared, degrees of freedom, and p-values. Use for analyzing multidimensional contingency tables and testing independence or conditional independence hypotheses."
+    )]
     async fn stats_loglin(
         &self,
         Parameters(request): Parameters<LoglinRequest>,
@@ -12348,7 +13851,8 @@ impl AnalyticsServer {
             Ok(c) => c,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Count column '{}' not found: {}", request.count_column, e
+                    "Count column '{}' not found: {}",
+                    request.count_column, e
                 ))]));
             }
         };
@@ -12356,13 +13860,19 @@ impl AnalyticsServer {
         let counts: Vec<f64> = match count_col.cast(&DataType::Float64) {
             Ok(c) => match c.f64() {
                 Ok(f) => f.into_no_null_iter().collect(),
-                Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Count column not numeric: {}", e
-                ))])),
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Count column not numeric: {}",
+                        e
+                    ))]));
+                }
             },
-            Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!(
-                "Cannot cast count column: {}", e
-            ))])),
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Cannot cast count column: {}",
+                    e
+                ))]));
+            }
         };
 
         // Extract factor columns and determine dimensions
@@ -12374,7 +13884,8 @@ impl AnalyticsServer {
                 Ok(c) => c,
                 Err(e) => {
                     return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Factor column '{}' not found: {}", col_name, e
+                        "Factor column '{}' not found: {}",
+                        col_name, e
                     ))]));
                 }
             };
@@ -12384,7 +13895,8 @@ impl AnalyticsServer {
                 Ok(c) => c,
                 Err(e) => {
                     return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Cannot cast factor column '{}' to string: {}", col_name, e
+                        "Cannot cast factor column '{}' to string: {}",
+                        col_name, e
                     ))]));
                 }
             };
@@ -12393,7 +13905,8 @@ impl AnalyticsServer {
                 Ok(c) => c,
                 Err(e) => {
                     return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Error getting unique values for '{}': {}", col_name, e
+                        "Error getting unique values for '{}': {}",
+                        col_name, e
                     ))]));
                 }
             };
@@ -12402,13 +13915,15 @@ impl AnalyticsServer {
                 Ok(s) => s.into_no_null_iter().map(|v| v.to_string()).collect(),
                 Err(e) => {
                     return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Error reading unique levels: {}", e
+                        "Error reading unique levels: {}",
+                        e
                     ))]));
                 }
             };
 
             // Map values to indices
-            let level_map: HashMap<String, usize> = levels.iter()
+            let level_map: HashMap<String, usize> = levels
+                .iter()
                 .enumerate()
                 .map(|(i, s)| (s.clone(), i))
                 .collect();
@@ -12418,12 +13933,14 @@ impl AnalyticsServer {
                 Ok(s) => s,
                 Err(e) => {
                     return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Cannot read string series: {}", e
+                        "Cannot read string series: {}",
+                        e
                     ))]));
                 }
             };
 
-            let indices: Vec<usize> = str_series.into_no_null_iter()
+            let indices: Vec<usize> = str_series
+                .into_no_null_iter()
                 .map(|v| *level_map.get(v).unwrap_or(&0))
                 .collect();
 
@@ -12463,7 +13980,8 @@ impl AnalyticsServer {
             Ok(r) => r,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Log-linear model fitting failed: {}", e
+                    "Log-linear model fitting failed: {}",
+                    e
                 ))]));
             }
         };
@@ -12509,12 +14027,14 @@ impl AnalyticsServer {
         });
 
         Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&json_output).unwrap_or_default()
+            serde_json::to_string_pretty(&json_output).unwrap_or_default(),
         )]))
     }
 
     /// Run OLS regression.
-    #[tool(description = "Run Ordinary Least Squares (OLS) regression. Returns coefficients, standard errors, t-values, p-values, R-squared, and F-statistic.")]
+    #[tool(
+        description = "Run Ordinary Least Squares (OLS) regression. Returns coefficients, standard errors, t-values, p-values, R-squared, and F-statistic."
+    )]
     async fn regression_ols(
         &self,
         Parameters(request): Parameters<OlsRequest>,
@@ -12543,11 +14063,15 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     /// Run regression diagnostics.
-    #[tool(description = "Run comprehensive regression diagnostics. Tests include: Jarque-Bera (normality), Breusch-Pagan (heteroskedasticity), Durbin-Watson (autocorrelation), VIF (multicollinearity), and condition number.")]
+    #[tool(
+        description = "Run comprehensive regression diagnostics. Tests include: Jarque-Bera (normality), Breusch-Pagan (heteroskedasticity), Durbin-Watson (autocorrelation), VIF (multicollinearity), and condition number."
+    )]
     async fn regression_diagnostics(
         &self,
         Parameters(request): Parameters<DiagnosticsRequest>,
@@ -12576,11 +14100,15 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     /// Run Breusch-Godfrey test for serial correlation.
-    #[tool(description = "Breusch-Godfrey test for higher-order serial correlation in regression residuals. More general than Durbin-Watson as it: (1) tests for AR(p) or MA(p) correlation, (2) allows lagged dependent variables as regressors, (3) is valid regardless of regressor properties. Returns LM statistic and p-value.")]
+    #[tool(
+        description = "Breusch-Godfrey test for higher-order serial correlation in regression residuals. More general than Durbin-Watson as it: (1) tests for AR(p) or MA(p) correlation, (2) allows lagged dependent variables as regressors, (3) is valid regardless of regressor properties. Returns LM statistic and p-value."
+    )]
     async fn regression_bgtest(
         &self,
         Parameters(request): Parameters<BgTestRequest>,
@@ -12616,11 +14144,15 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     /// Run Ramsey's RESET test for functional form.
-    #[tool(description = "Ramsey's RESET test for functional form misspecification. Tests whether nonlinear terms (powers of fitted values) should be added to the model. Significant result suggests the linear model is misspecified and nonlinear terms may be needed.")]
+    #[tool(
+        description = "Ramsey's RESET test for functional form misspecification. Tests whether nonlinear terms (powers of fitted values) should be added to the model. Significant result suggests the linear model is misspecified and nonlinear terms may be needed."
+    )]
     async fn regression_resettest(
         &self,
         Parameters(request): Parameters<ResetTestRequest>,
@@ -12655,11 +14187,15 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     /// Wald test for comparing nested linear models.
-    #[tool(description = "Wald test (F-test) for comparing nested linear models. Tests whether variables excluded from the restricted model are jointly significant. Common uses: testing joint significance of multiple coefficients, testing nested model hypotheses, comparing model specifications.")]
+    #[tool(
+        description = "Wald test (F-test) for comparing nested linear models. Tests whether variables excluded from the restricted model are jointly significant. Common uses: testing joint significance of multiple coefficients, testing nested model hypotheses, comparing model specifications."
+    )]
     async fn regression_waldtest(
         &self,
         Parameters(request): Parameters<WaldTestRequest>,
@@ -12676,8 +14212,10 @@ impl AnalyticsServer {
             }
         };
 
-        let x_unrestricted_refs: Vec<&str> = request.x_unrestricted.iter().map(|s| s.as_str()).collect();
-        let x_restricted_refs: Vec<&str> = request.x_restricted.iter().map(|s| s.as_str()).collect();
+        let x_unrestricted_refs: Vec<&str> =
+            request.x_unrestricted.iter().map(|s| s.as_str()).collect();
+        let x_restricted_refs: Vec<&str> =
+            request.x_restricted.iter().map(|s| s.as_str()).collect();
         let use_f_test = request.use_f_test.unwrap_or(true);
 
         let result = match wald_test(
@@ -12696,11 +14234,15 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     /// Harvey-Collier test for linearity using recursive residuals.
-    #[tool(description = "Harvey-Collier test for detecting departure from linearity. Uses recursive residuals to test whether the mean of one-step-ahead forecast errors differs from zero. A significant result suggests convex or concave functional misspecification - the linear model may need polynomial terms. Equivalent to R's lmtest::harvtest().")]
+    #[tool(
+        description = "Harvey-Collier test for detecting departure from linearity. Uses recursive residuals to test whether the mean of one-step-ahead forecast errors differs from zero. A significant result suggests convex or concave functional misspecification - the linear model may need polynomial terms. Equivalent to R's lmtest::harvtest()."
+    )]
     async fn regression_harvtest(
         &self,
         Parameters(request): Parameters<HarveyCollierRequest>,
@@ -12729,11 +14271,15 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     /// HAC (Newey-West) standard errors for time series regression.
-    #[tool(description = "Compute HAC (Heteroskedasticity and Autocorrelation Consistent) standard errors using the Newey-West estimator. Essential for time series regression where errors may be both heteroskedastic and autocorrelated. Supports multiple kernel functions and automatic bandwidth selection.")]
+    #[tool(
+        description = "Compute HAC (Heteroskedasticity and Autocorrelation Consistent) standard errors using the Newey-West estimator. Essential for time series regression where errors may be both heteroskedastic and autocorrelated. Supports multiple kernel functions and automatic bandwidth selection."
+    )]
     async fn regression_hac(
         &self,
         Parameters(request): Parameters<HacRequest>,
@@ -12770,11 +14316,15 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     /// Bootstrap covariance estimation (vcovBS).
-    #[tool(description = "Compute bootstrap covariance matrix and standard errors for OLS regression. Supports pairs bootstrap (most robust, resamples observations), residual bootstrap (assumes homoskedasticity), and wild bootstrap (robust to heteroskedasticity). Useful when asymptotic standard errors may be unreliable.")]
+    #[tool(
+        description = "Compute bootstrap covariance matrix and standard errors for OLS regression. Supports pairs bootstrap (most robust, resamples observations), residual bootstrap (assumes homoskedasticity), and wild bootstrap (robust to heteroskedasticity). Useful when asymptotic standard errors may be unreliable."
+    )]
     async fn regression_bootstrap_cov(
         &self,
         Parameters(request): Parameters<BootstrapCovRequest>,
@@ -12810,11 +14360,15 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     /// Driscoll-Kraay panel-robust standard errors.
-    #[tool(description = "Compute Driscoll-Kraay (1998) panel-robust standard errors. Robust to arbitrary cross-sectional correlation (spatial dependence) and serial correlation in panel data. Aggregates score vectors by time period and applies Newey-West HAC correction. Best for panels with large T (many time periods). Returns coefficient estimates with panel-robust SEs, t-stats, and p-values.")]
+    #[tool(
+        description = "Compute Driscoll-Kraay (1998) panel-robust standard errors. Robust to arbitrary cross-sectional correlation (spatial dependence) and serial correlation in panel data. Aggregates score vectors by time period and applies Newey-West HAC correction. Best for panels with large T (many time periods). Returns coefficient estimates with panel-robust SEs, t-stats, and p-values."
+    )]
     async fn regression_driscoll_kraay(
         &self,
         Parameters(request): Parameters<DriscollKraayRequest>,
@@ -12850,11 +14404,15 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     /// Quantile regression.
-    #[tool(description = "Run quantile regression to estimate conditional quantiles instead of conditional means. Useful when the relationship varies across the distribution, or when the error distribution is non-Gaussian. Can estimate single quantile (tau) or multiple quantiles simultaneously.")]
+    #[tool(
+        description = "Run quantile regression to estimate conditional quantiles instead of conditional means. Useful when the relationship varies across the distribution, or when the error distribution is non-Gaussian. Can estimate single quantile (tau) or multiple quantiles simultaneously."
+    )]
     async fn regression_quantreg(
         &self,
         Parameters(request): Parameters<QuantRegRequest>,
@@ -12887,7 +14445,8 @@ impl AnalyticsServer {
             };
 
             // Format all results
-            let output: String = results.iter()
+            let output: String = results
+                .iter()
                 .map(|r| format!("{}", r))
                 .collect::<Vec<_>>()
                 .join("\n---\n");
@@ -12906,17 +14465,21 @@ impl AnalyticsServer {
                 }
             };
 
-            Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+            Ok(CallToolResult::success(vec![Content::text(
+                result.to_string(),
+            )]))
         }
     }
 
     /// Sensitivity analysis for unmeasured confounding (sensemakr).
-    #[tool(description = "Run sensitivity analysis for unmeasured confounding (Cinelli & Hazlett 2020). Computes robustness value (RV) - the minimum confounding strength needed to nullify the treatment effect. Key outputs: (1) Partial R²: how much variance treatment explains in outcome, (2) RV_q: confounding needed to reduce effect by q%, (3) RV_alpha: confounding needed to make effect insignificant, (4) Benchmark bounds: adjusted estimates under various confounding scenarios. Essential for causal inference to assess how robust findings are to unmeasured confounding.")]
+    #[tool(
+        description = "Run sensitivity analysis for unmeasured confounding (Cinelli & Hazlett 2020). Computes robustness value (RV) - the minimum confounding strength needed to nullify the treatment effect. Key outputs: (1) Partial R²: how much variance treatment explains in outcome, (2) RV_q: confounding needed to reduce effect by q%, (3) RV_alpha: confounding needed to make effect insignificant, (4) Benchmark bounds: adjusted estimates under various confounding scenarios. Essential for causal inference to assess how robust findings are to unmeasured confounding."
+    )]
     async fn sensemakr(
         &self,
         Parameters(request): Parameters<SensemakrRequest>,
     ) -> Result<CallToolResult, McpError> {
-        use p2a_core::regression::{run_sensemakr, generate_contour_data, run_ols, CovarianceType};
+        use p2a_core::regression::{CovarianceType, generate_contour_data, run_ols, run_sensemakr};
 
         let datasets = self.datasets.read().await;
 
@@ -12931,7 +14494,9 @@ impl AnalyticsServer {
         };
 
         let covariate_refs: Vec<&str> = request.covariates.iter().map(|s| s.as_str()).collect();
-        let benchmark_refs: Option<Vec<&str>> = request.benchmark_covariates.as_ref()
+        let benchmark_refs: Option<Vec<&str>> = request
+            .benchmark_covariates
+            .as_ref()
             .map(|v| v.iter().map(|s| s.as_str()).collect());
 
         let q = request.q.unwrap_or(1.0);
@@ -12963,23 +14528,30 @@ impl AnalyticsServer {
             let mut x_cols: Vec<&str> = vec![request.treatment.as_str()];
             x_cols.extend(covariate_refs.iter());
 
-            if let Ok(ols_result) = run_ols(dataset, &request.y, &x_cols, true, CovarianceType::HC1) {
-                if let Ok(contour) = generate_contour_data(&ols_result, &request.treatment, Some(20), Some(0.5)) {
+            if let Ok(ols_result) = run_ols(dataset, &request.y, &x_cols, true, CovarianceType::HC1)
+            {
+                if let Ok(contour) =
+                    generate_contour_data(&ols_result, &request.treatment, Some(20), Some(0.5))
+                {
                     result.contour_data = Some(contour);
                 }
             }
         }
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     /// E-value sensitivity analysis for unmeasured confounding.
-    #[tool(description = "Compute E-values for sensitivity analysis to unmeasured confounding (VanderWeele & Ding 2017). The E-value is the minimum strength of association that an unmeasured confounder would need with both treatment and outcome to fully explain away an observed effect. Supports risk ratios (RR), odds ratios (OR), hazard ratios (HR), standardized mean differences (SMD), and risk differences (RD). A large E-value means considerable confounding would be needed to explain away the effect. Returns E-value for point estimate and confidence interval limit closest to null.")]
+    #[tool(
+        description = "Compute E-values for sensitivity analysis to unmeasured confounding (VanderWeele & Ding 2017). The E-value is the minimum strength of association that an unmeasured confounder would need with both treatment and outcome to fully explain away an observed effect. Supports risk ratios (RR), odds ratios (OR), hazard ratios (HR), standardized mean differences (SMD), and risk differences (RD). A large E-value means considerable confounding would be needed to explain away the effect. Returns E-value for point estimate and confidence interval limit closest to null."
+    )]
     async fn evalue(
         &self,
         Parameters(request): Parameters<EValueRequest>,
     ) -> Result<CallToolResult, McpError> {
-        use p2a_core::regression::{evalue_rr_ci, evalue_or, evalue_hr, evalue_smd, evalue_rd};
+        use p2a_core::regression::{evalue_hr, evalue_or, evalue_rd, evalue_rr_ci, evalue_smd};
 
         let effect_type = request.effect_type.to_lowercase();
 
@@ -12995,15 +14567,10 @@ impl AnalyticsServer {
                 let rare = request.rare.unwrap_or(true);
                 evalue_hr(request.point, request.ci_lower, request.ci_upper, rare)
             }
-            "smd" | "standardized_mean_difference" => {
-                evalue_smd(request.point, request.se)
-            }
+            "smd" | "standardized_mean_difference" => evalue_smd(request.point, request.se),
             "rd" | "risk_difference" | "riskdifference" => {
                 let baseline = request.baseline_risk.ok_or_else(|| {
-                    McpError::invalid_params(
-                        "baseline_risk is required for risk difference",
-                        None,
-                    )
+                    McpError::invalid_params("baseline_risk is required for risk difference", None)
                 })?;
                 evalue_rd(request.point, baseline, request.se)
             }
@@ -13025,12 +14592,14 @@ impl AnalyticsServer {
     }
 
     /// Compute average marginal effects from regression models.
-    #[tool(description = "Compute average marginal effects (AME) from regression models. For OLS, marginal effects equal coefficients. For Logit/Probit, effects are averaged across observations accounting for nonlinearity. Returns effects, standard errors, z-values, p-values, and confidence intervals.")]
+    #[tool(
+        description = "Compute average marginal effects (AME) from regression models. For OLS, marginal effects equal coefficients. For Logit/Probit, effects are averaged across observations accounting for nonlinearity. Returns effects, standard errors, z-values, p-values, and confidence intervals."
+    )]
     async fn marginal_effects(
         &self,
         Parameters(request): Parameters<MarginalEffectsRequest>,
     ) -> Result<CallToolResult, McpError> {
-        use p2a_core::regression::{marginal_effects, ModelType};
+        use p2a_core::regression::{ModelType, marginal_effects};
 
         let datasets = self.datasets.read().await;
 
@@ -13068,11 +14637,15 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     /// Run OLS with clustered standard errors.
-    #[tool(description = "Run OLS regression with clustered standard errors. Supports one-way (firm, state) or two-way (firm + time) clustering. Essential for panel data with correlated errors.")]
+    #[tool(
+        description = "Run OLS regression with clustered standard errors. Supports one-way (firm, state) or two-way (firm + time) clustering. Essential for panel data with correlated errors."
+    )]
     async fn regression_clustered(
         &self,
         Parameters(request): Parameters<OlsClusteredRequest>,
@@ -13107,23 +14680,26 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     /// Run nonlinear least squares regression.
-    #[tool(description = "Fit a nonlinear regression model using Levenberg-Marquardt algorithm. Supports common models: exponential decay/growth, Michaelis-Menten kinetics, logistic growth, power law, asymptotic. Returns parameter estimates, standard errors, t-values, and convergence info.")]
+    #[tool(
+        description = "Fit a nonlinear regression model using Levenberg-Marquardt algorithm. Supports common models: exponential decay/growth, Michaelis-Menten kinetics, logistic growth, power law, asymptotic. Returns parameter estimates, standard errors, t-values, and convergence info."
+    )]
     async fn regression_nls(
         &self,
         Parameters(request): Parameters<NlsRequest>,
     ) -> Result<CallToolResult, McpError> {
-        use p2a_core::regression::{
-            nls, NlsConfig, NlsAlgorithm,
-            model_exponential_decay, model_exponential_growth,
-            model_michaelis_menten, model_logistic_growth,
-            model_power, model_asymptotic,
-        };
-        use p2a_core::linalg::design::DesignMatrix;
         use ndarray::Array1;
+        use p2a_core::linalg::design::DesignMatrix;
+        use p2a_core::regression::{
+            NlsAlgorithm, NlsConfig, model_asymptotic, model_exponential_decay,
+            model_exponential_growth, model_logistic_growth, model_michaelis_menten, model_power,
+            nls,
+        };
 
         let datasets = self.datasets.read().await;
 
@@ -13164,7 +14740,7 @@ impl AnalyticsServer {
                 "exponential_decay" | "exp_decay" => {
                     if request.start.len() != 3 {
                         return Ok(CallToolResult::error(vec![Content::text(
-                            "exponential_decay requires 3 starting values: [a, b, c] for y = a*exp(-b*x) + c"
+                            "exponential_decay requires 3 starting values: [a, b, c] for y = a*exp(-b*x) + c",
                         )]));
                     }
                     (model_exponential_decay, vec!["a", "b", "c"])
@@ -13172,7 +14748,7 @@ impl AnalyticsServer {
                 "exponential_growth" | "exp_growth" => {
                     if request.start.len() != 2 {
                         return Ok(CallToolResult::error(vec![Content::text(
-                            "exponential_growth requires 2 starting values: [a, b] for y = a*exp(b*x)"
+                            "exponential_growth requires 2 starting values: [a, b] for y = a*exp(b*x)",
                         )]));
                     }
                     (model_exponential_growth, vec!["a", "b"])
@@ -13180,7 +14756,7 @@ impl AnalyticsServer {
                 "michaelis_menten" | "mm" => {
                     if request.start.len() != 2 {
                         return Ok(CallToolResult::error(vec![Content::text(
-                            "michaelis_menten requires 2 starting values: [Vmax, Km] for y = Vmax*x/(Km+x)"
+                            "michaelis_menten requires 2 starting values: [Vmax, Km] for y = Vmax*x/(Km+x)",
                         )]));
                     }
                     (model_michaelis_menten, vec!["Vmax", "Km"])
@@ -13188,7 +14764,7 @@ impl AnalyticsServer {
                 "logistic" | "logistic_growth" => {
                     if request.start.len() != 3 {
                         return Ok(CallToolResult::error(vec![Content::text(
-                            "logistic requires 3 starting values: [K, r, x0] for y = K/(1+exp(-r*(x-x0)))"
+                            "logistic requires 3 starting values: [K, r, x0] for y = K/(1+exp(-r*(x-x0)))",
                         )]));
                     }
                     (model_logistic_growth, vec!["K", "r", "x0"])
@@ -13196,7 +14772,7 @@ impl AnalyticsServer {
                 "power" => {
                     if request.start.len() != 2 {
                         return Ok(CallToolResult::error(vec![Content::text(
-                            "power requires 2 starting values: [a, b] for y = a*x^b"
+                            "power requires 2 starting values: [a, b] for y = a*x^b",
                         )]));
                     }
                     (model_power, vec!["a", "b"])
@@ -13204,7 +14780,7 @@ impl AnalyticsServer {
                 "asymptotic" => {
                     if request.start.len() != 3 {
                         return Ok(CallToolResult::error(vec![Content::text(
-                            "asymptotic requires 3 starting values: [a, b, c] for y = a - b*exp(-c*x)"
+                            "asymptotic requires 3 starting values: [a, b, c] for y = a - b*exp(-c*x)",
                         )]));
                     }
                     (model_asymptotic, vec!["a", "b", "c"])
@@ -13247,16 +14823,20 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     /// Run LOESS (local polynomial regression) smoothing.
-    #[tool(description = "Fit a LOESS (LOcally Estimated Scatterplot Smoothing) model. LOESS fits local polynomial regressions at each point, weighted by distance from the target point using tricubic weights. Useful for non-parametric trend estimation, data smoothing, and exploring nonlinear relationships. Returns fitted values, residuals, R-squared, and equivalent number of parameters.")]
+    #[tool(
+        description = "Fit a LOESS (LOcally Estimated Scatterplot Smoothing) model. LOESS fits local polynomial regressions at each point, weighted by distance from the target point using tricubic weights. Useful for non-parametric trend estimation, data smoothing, and exploring nonlinear relationships. Returns fitted values, residuals, R-squared, and equivalent number of parameters."
+    )]
     async fn regression_loess(
         &self,
         Parameters(request): Parameters<LoessRequest>,
     ) -> Result<CallToolResult, McpError> {
-        use p2a_core::regression::{run_loess, LoessConfig};
+        use p2a_core::regression::run_loess;
 
         let datasets = self.datasets.read().await;
 
@@ -13277,12 +14857,12 @@ impl AnalyticsServer {
         // Validate parameters
         if span <= 0.0 {
             return Ok(CallToolResult::error(vec![Content::text(
-                "span must be positive".to_string()
+                "span must be positive".to_string(),
             )]));
         }
         if degree > 2 {
             return Ok(CallToolResult::error(vec![Content::text(
-                "degree must be 0, 1, or 2".to_string()
+                "degree must be 0, 1, or 2".to_string(),
             )]));
         }
 
@@ -13313,7 +14893,7 @@ impl AnalyticsServer {
         });
 
         Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&output).unwrap_or_else(|_| result.to_string())
+            serde_json::to_string_pretty(&output).unwrap_or_else(|_| result.to_string()),
         )]))
     }
 
@@ -13322,7 +14902,9 @@ impl AnalyticsServer {
     // ========================================================================
 
     /// Run Fixed Effects panel regression.
-    #[tool(description = "Run Fixed Effects (within) panel regression. Controls for time-invariant unobserved heterogeneity. Requires panel data with entity identifiers.")]
+    #[tool(
+        description = "Run Fixed Effects (within) panel regression. Controls for time-invariant unobserved heterogeneity. Requires panel data with entity identifiers."
+    )]
     async fn panel_fixed_effects(
         &self,
         Parameters(request): Parameters<PanelFERequest>,
@@ -13351,11 +14933,15 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     /// Run Random Effects panel regression.
-    #[tool(description = "Run Random Effects (GLS) panel regression. Assumes individual effects are uncorrelated with regressors. More efficient than FE if assumption holds.")]
+    #[tool(
+        description = "Run Random Effects (GLS) panel regression. Assumes individual effects are uncorrelated with regressors. More efficient than FE if assumption holds."
+    )]
     async fn panel_random_effects(
         &self,
         Parameters(request): Parameters<PanelRERequest>,
@@ -13384,11 +14970,15 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     /// Run Hausman specification test.
-    #[tool(description = "Run Hausman specification test to choose between Fixed Effects and Random Effects. Tests H0: RE is consistent. If p-value < 0.05, use Fixed Effects.")]
+    #[tool(
+        description = "Run Hausman specification test to choose between Fixed Effects and Random Effects. Tests H0: RE is consistent. If p-value < 0.05, use Fixed Effects."
+    )]
     async fn hausman_test(
         &self,
         Parameters(request): Parameters<HausmanRequest>,
@@ -13417,11 +15007,15 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     /// Run Variable Coefficients Model (PVCM) for heterogeneous panels.
-    #[tool(description = "Run Variable Coefficients Model (PVCM) for heterogeneous panel data. Allows slope coefficients to vary across entities. Two modes: 'within' runs separate OLS per entity, 'random' (Swamy 1970) computes a GLS weighted average. Also computes homogeneity test for coefficient equality.")]
+    #[tool(
+        description = "Run Variable Coefficients Model (PVCM) for heterogeneous panel data. Allows slope coefficients to vary across entities. Two modes: 'within' runs separate OLS per entity, 'random' (Swamy 1970) computes a GLS weighted average. Also computes homogeneity test for coefficient equality."
+    )]
     async fn panel_pvcm(
         &self,
         Parameters(request): Parameters<PvcmRequest>,
@@ -13445,7 +15039,13 @@ impl AnalyticsServer {
             _ => PvcmType::Within,
         };
 
-        let result = match run_pvcm(dataset, &request.y, &x_refs, &request.entity_var, model_type) {
+        let result = match run_pvcm(
+            dataset,
+            &request.y,
+            &x_refs,
+            &request.entity_var,
+            model_type,
+        ) {
             Ok(r) => r,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -13455,11 +15055,15 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     /// Run Mean Group (PMG) estimator for heterogeneous panels.
-    #[tool(description = "Run Mean Group (MG) estimator (Pesaran & Smith 1995) for heterogeneous panel data. Computes simple average of individual-specific OLS estimates across entities. Equivalent to PVCM with 'within' model type.")]
+    #[tool(
+        description = "Run Mean Group (MG) estimator (Pesaran & Smith 1995) for heterogeneous panel data. Computes simple average of individual-specific OLS estimates across entities. Equivalent to PVCM with 'within' model type."
+    )]
     async fn panel_pmg(
         &self,
         Parameters(request): Parameters<PvcmRequest>,
@@ -13488,11 +15092,15 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     /// Run Arellano-Bond / System GMM dynamic panel estimation.
-    #[tool(description = "Run Arellano-Bond (difference GMM) or Blundell-Bond (system GMM) estimation for dynamic panel data models. Handles endogeneity of lagged dependent variables using lagged levels/differences as instruments. Reports Sargan test for overidentifying restrictions and AR(1)/AR(2) tests for serial correlation.")]
+    #[tool(
+        description = "Run Arellano-Bond (difference GMM) or Blundell-Bond (system GMM) estimation for dynamic panel data models. Handles endogeneity of lagged dependent variables using lagged levels/differences as instruments. Reports Sargan test for overidentifying restrictions and AR(1)/AR(2) tests for serial correlation."
+    )]
     async fn panel_gmm(
         &self,
         Parameters(request): Parameters<GmmRequest>,
@@ -13550,11 +15158,15 @@ impl AnalyticsServer {
                 ))]));
             }
         };
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     /// Run general GMM IV estimation (Hansen 1982).
-    #[tool(description = "Run general GMM (Generalized Method of Moments) IV estimation following Hansen (1982). Estimates parameters using moment conditions E[z(y - xβ)] = 0. Supports two-step, iterative, and CUE estimation with HAC weighting. Reports J-test for overidentifying restrictions. Use for IV estimation when you have more instruments than endogenous variables.")]
+    #[tool(
+        description = "Run general GMM (Generalized Method of Moments) IV estimation following Hansen (1982). Estimates parameters using moment conditions E[z(y - xβ)] = 0. Supports two-step, iterative, and CUE estimation with HAC weighting. Reports J-test for overidentifying restrictions. Use for IV estimation when you have more instruments than endogenous variables."
+    )]
     async fn gmm_iv(
         &self,
         Parameters(request): Parameters<GeneralGmmIvRequest>,
@@ -13606,26 +15218,25 @@ impl AnalyticsServer {
             ..Default::default()
         };
 
-        let result: GeneralGmmResult = match run_gmm_iv(
-            dataset,
-            &request.y,
-            &x_refs,
-            &z_refs,
-            Some(config),
-        ) {
-            Ok(r) => r,
-            Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "GMM IV estimation failed: {}",
-                    e
-                ))]));
-            }
-        };
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        let result: GeneralGmmResult =
+            match run_gmm_iv(dataset, &request.y, &x_refs, &z_refs, Some(config)) {
+                Ok(r) => r,
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "GMM IV estimation failed: {}",
+                        e
+                    ))]));
+                }
+            };
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     /// Run Panel GLS (Feasible Generalized Least Squares) estimation.
-    #[tool(description = "Run Panel GLS (Feasible Generalized Least Squares) for panel data with heteroskedasticity and/or cross-sectional correlation. Supports fixed effects GLS, pooled GLS, and first-difference GLS. More efficient than standard FE/RE when error structure is known.")]
+    #[tool(
+        description = "Run Panel GLS (Feasible Generalized Least Squares) for panel data with heteroskedasticity and/or cross-sectional correlation. Supports fixed effects GLS, pooled GLS, and first-difference GLS. More efficient than standard FE/RE when error structure is known."
+    )]
     async fn panel_gls(
         &self,
         Parameters(request): Parameters<PanelGlsRequest>,
@@ -13672,11 +15283,15 @@ impl AnalyticsServer {
                 ))]));
             }
         };
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     /// Run panel unit root tests.
-    #[tool(description = "Run panel unit root tests to test for stationarity in panel data. Supports LLC (Levin-Lin-Chu), IPS (Im-Pesaran-Shin), Fisher/Maddala-Wu, and Hadri tests. Panel tests have more power than univariate tests by exploiting cross-sectional variation. LLC assumes common unit root, IPS allows heterogeneous roots, Hadri tests null of stationarity.")]
+    #[tool(
+        description = "Run panel unit root tests to test for stationarity in panel data. Supports LLC (Levin-Lin-Chu), IPS (Im-Pesaran-Shin), Fisher/Maddala-Wu, and Hadri tests. Panel tests have more power than univariate tests by exploiting cross-sectional variation. LLC assumes common unit root, IPS allows heterogeneous roots, Hadri tests null of stationarity."
+    )]
     async fn panel_unit_root(
         &self,
         Parameters(request): Parameters<PanelUnitRootRequest>,
@@ -13730,11 +15345,15 @@ impl AnalyticsServer {
                 ))]));
             }
         };
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     /// Run IV/2SLS regression.
-    #[tool(description = "Run Instrumental Variables (2SLS) regression. Use when an explanatory variable is endogenous (correlated with the error term). Requires valid instruments.")]
+    #[tool(
+        description = "Run Instrumental Variables (2SLS) regression. Use when an explanatory variable is endogenous (correlated with the error term). Requires valid instruments."
+    )]
     async fn iv_2sls(
         &self,
         Parameters(request): Parameters<IV2SLSRequest>,
@@ -13756,7 +15375,14 @@ impl AnalyticsServer {
         let x_endog_refs: Vec<&str> = request.x_endog.iter().map(|s| s.as_str()).collect();
         let instruments_refs: Vec<&str> = request.instruments.iter().map(|s| s.as_str()).collect();
 
-        let result = match run_iv2sls(dataset, &request.y, &x_exog_refs, &x_endog_refs, &instruments_refs, robust) {
+        let result = match run_iv2sls(
+            dataset,
+            &request.y,
+            &x_exog_refs,
+            &x_endog_refs,
+            &instruments_refs,
+            robust,
+        ) {
             Ok(r) => r,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -13766,11 +15392,15 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     /// Run first-stage diagnostics for IV/2SLS.
-    #[tool(description = "Run first-stage diagnostics to test instrument strength. Reports F-statistic (F > 10 suggests strong instruments), R-squared, and coefficient estimates. Essential before running 2SLS.")]
+    #[tool(
+        description = "Run first-stage diagnostics to test instrument strength. Reports F-statistic (F > 10 suggests strong instruments), R-squared, and coefficient estimates. Essential before running 2SLS."
+    )]
     async fn iv_first_stage(
         &self,
         Parameters(request): Parameters<FirstStageRequest>,
@@ -13788,7 +15418,9 @@ impl AnalyticsServer {
         };
 
         let instruments: Vec<&str> = request.instruments.iter().map(|s| s.as_str()).collect();
-        let controls: Option<Vec<&str>> = request.controls.as_ref()
+        let controls: Option<Vec<&str>> = request
+            .controls
+            .as_ref()
             .map(|c| c.iter().map(|s| s.as_str()).collect());
 
         let result = match run_first_stage_diagnostics(
@@ -13806,11 +15438,15 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     /// Run Sargan test of overidentifying restrictions for IV/2SLS.
-    #[tool(description = "Run Sargan test of overidentifying restrictions for IV/2SLS. Tests whether instruments are valid (uncorrelated with error term). H0: instruments are valid. Rejection suggests at least one invalid instrument. Requires more instruments than endogenous variables.")]
+    #[tool(
+        description = "Run Sargan test of overidentifying restrictions for IV/2SLS. Tests whether instruments are valid (uncorrelated with error term). H0: instruments are valid. Rejection suggests at least one invalid instrument. Requires more instruments than endogenous variables."
+    )]
     async fn iv_sargan_test(
         &self,
         Parameters(request): Parameters<SarganTestRequest>,
@@ -13841,11 +15477,15 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     /// Compute Balke-Pearl bounds on the Average Causal Effect (ACE).
-    #[tool(description = "Compute Balke-Pearl bounds for nonparametric IV analysis. Provides sharp bounds on the Average Causal Effect (ACE) without parametric assumptions. All three variables (instrument Z, treatment D, outcome Y) must be binary (0/1). Returns bounds with optional bootstrap confidence intervals. Also reports the Wald (standard IV) estimate for comparison. Use monotonicity=true if you can assume no defiers (instrument only affects treatment in one direction).")]
+    #[tool(
+        description = "Compute Balke-Pearl bounds for nonparametric IV analysis. Provides sharp bounds on the Average Causal Effect (ACE) without parametric assumptions. All three variables (instrument Z, treatment D, outcome Y) must be binary (0/1). Returns bounds with optional bootstrap confidence intervals. Also reports the Wald (standard IV) estimate for comparison. Use monotonicity=true if you can assume no defiers (instrument only affects treatment in one direction)."
+    )]
     async fn bp_bounds(
         &self,
         Parameters(request): Parameters<BPBoundsRequest>,
@@ -13920,11 +15560,15 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     /// Estimate Marginal Treatment Effects (MTE) using instrumental variables.
-    #[tool(description = "Estimate Marginal Treatment Effects (MTE) using the Heckman-Vytlacil framework. MTE reveals heterogeneity in treatment effects across the distribution of unobserved resistance to treatment. Returns MTE curve, ATE, ATT, ATU, and LATE estimates. The MTE framework shows how different IV estimands are weighted averages of the MTE curve, providing deeper insight into treatment effect heterogeneity than standard IV/2SLS.")]
+    #[tool(
+        description = "Estimate Marginal Treatment Effects (MTE) using the Heckman-Vytlacil framework. MTE reveals heterogeneity in treatment effects across the distribution of unobserved resistance to treatment. Returns MTE curve, ATE, ATT, ATU, and LATE estimates. The MTE framework shows how different IV estimands are weighted averages of the MTE curve, providing deeper insight into treatment effect heterogeneity than standard IV/2SLS."
+    )]
     async fn iv_mte(
         &self,
         Parameters(request): Parameters<IVMTERequest>,
@@ -14010,11 +15654,15 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     /// Run Difference-in-Differences estimation.
-    #[tool(description = "Run Difference-in-Differences (DiD) estimation. Estimates causal treatment effects by comparing treated vs control groups before and after treatment.")]
+    #[tool(
+        description = "Run Difference-in-Differences (DiD) estimation. Estimates causal treatment effects by comparing treated vs control groups before and after treatment."
+    )]
     async fn diff_in_diff(
         &self,
         Parameters(request): Parameters<DiDRequest>,
@@ -14031,7 +15679,13 @@ impl AnalyticsServer {
             }
         };
 
-        let result = match run_did(dataset, &request.dep_var, &request.treatment_var, &request.post_var, None) {
+        let result = match run_did(
+            dataset,
+            &request.dep_var,
+            &request.treatment_var,
+            &request.post_var,
+            None,
+        ) {
             Ok(r) => r,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -14041,11 +15695,15 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     /// Run Callaway-Sant'Anna staggered difference-in-differences.
-    #[tool(description = "Estimate causal effects with staggered treatment adoption using Callaway-Sant'Anna (2021) method. Handles multiple time periods, heterogeneous treatment timing, and dynamic treatment effects. Returns group-time ATTs, event study plots, and overall ATT with pre-trend tests.")]
+    #[tool(
+        description = "Estimate causal effects with staggered treatment adoption using Callaway-Sant'Anna (2021) method. Handles multiple time periods, heterogeneous treatment timing, and dynamic treatment effects. Returns group-time ATTs, event study plots, and overall ATT with pre-trend tests."
+    )]
     async fn staggered_did(
         &self,
         Parameters(request): Parameters<StaggeredDiDRequest>,
@@ -14085,9 +15743,10 @@ impl AnalyticsServer {
         };
 
         // Parse covariates
-        let cov_refs: Option<Vec<&str>> = request.covariates.as_ref().map(|v| {
-            v.iter().map(|s| s.as_str()).collect()
-        });
+        let cov_refs: Option<Vec<&str>> = request
+            .covariates
+            .as_ref()
+            .map(|v| v.iter().map(|s| s.as_str()).collect());
 
         let result = match run_staggered_did(
             dataset,
@@ -14107,11 +15766,15 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     /// Perform Goodman-Bacon decomposition for staggered DiD.
-    #[tool(description = "Decompose a two-way fixed effects (TWFE) DiD estimate into weighted 2x2 comparisons using Goodman-Bacon (2021) decomposition. Reveals which comparisons (treated vs. never-treated, treated vs. not-yet-treated, later vs. earlier treated) contribute to the overall estimate and with what weights. Essential for understanding potential biases from 'forbidden' comparisons when treatment effects are heterogeneous over time.")]
+    #[tool(
+        description = "Decompose a two-way fixed effects (TWFE) DiD estimate into weighted 2x2 comparisons using Goodman-Bacon (2021) decomposition. Reveals which comparisons (treated vs. never-treated, treated vs. not-yet-treated, later vs. earlier treated) contribute to the overall estimate and with what weights. Essential for understanding potential biases from 'forbidden' comparisons when treatment effects are heterogeneous over time."
+    )]
     async fn bacon_decomp(
         &self,
         Parameters(request): Parameters<BaconDecompRequest>,
@@ -14144,11 +15807,15 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     /// Run Extended Two-Way Fixed Effects (ETWFE) estimation.
-    #[tool(description = "Estimate treatment effects using Extended TWFE (Wooldridge 2021, 2023). Addresses heterogeneous treatment effects in staggered DiD by estimating saturated cohort-by-time interactions. Returns cohort-time ATT estimates, event study by relative time, cohort averages, and overall ATT. Robust to treatment effect heterogeneity across cohorts and over time.")]
+    #[tool(
+        description = "Estimate treatment effects using Extended TWFE (Wooldridge 2021, 2023). Addresses heterogeneous treatment effects in staggered DiD by estimating saturated cohort-by-time interactions. Returns cohort-time ATT estimates, event study by relative time, cohort averages, and overall ATT. Robust to treatment effect heterogeneity across cohorts and over time."
+    )]
     async fn etwfe(
         &self,
         Parameters(request): Parameters<EtwfeRequest>,
@@ -14180,9 +15847,10 @@ impl AnalyticsServer {
         };
 
         // Parse controls
-        let control_refs: Option<Vec<&str>> = request.controls.as_ref().map(|v| {
-            v.iter().map(|s| s.as_str()).collect()
-        });
+        let control_refs: Option<Vec<&str>> = request
+            .controls
+            .as_ref()
+            .map(|v| v.iter().map(|s| s.as_str()).collect());
 
         let result = match run_etwfe(
             dataset,
@@ -14203,7 +15871,9 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     // ========================================================================
@@ -14211,7 +15881,9 @@ impl AnalyticsServer {
     // ========================================================================
 
     /// Run IPW treatment effect estimation.
-    #[tool(description = "Estimate Average Treatment Effect (ATE) or Average Treatment Effect on Treated (ATT) using Inverse Probability Weighting. Uses propensity scores to create pseudo-populations that balance covariates between treatment groups. Returns effect estimate with bootstrap standard errors and confidence intervals.")]
+    #[tool(
+        description = "Estimate Average Treatment Effect (ATE) or Average Treatment Effect on Treated (ATT) using Inverse Probability Weighting. Uses propensity scores to create pseudo-populations that balance covariates between treatment groups. Returns effect estimate with bootstrap standard errors and confidence intervals."
+    )]
     async fn treatment_ipw(
         &self,
         Parameters(request): Parameters<IpwRequest>,
@@ -14244,7 +15916,13 @@ impl AnalyticsServer {
             seed: None,
         };
 
-        let result = match run_ipw_treatment(dataset, &request.outcome, &request.treatment, &cov_refs, config) {
+        let result = match run_ipw_treatment(
+            dataset,
+            &request.outcome,
+            &request.treatment,
+            &cov_refs,
+            config,
+        ) {
             Ok(r) => r,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -14254,11 +15932,15 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     /// Run Doubly Robust (AIPW) treatment effect estimation.
-    #[tool(description = "Estimate treatment effects using Augmented IPW (doubly robust). Combines propensity score weighting with outcome regression. Consistent if either the propensity model OR the outcome model is correctly specified. Returns effect estimate with bootstrap standard errors and model fit diagnostics.")]
+    #[tool(
+        description = "Estimate treatment effects using Augmented IPW (doubly robust). Combines propensity score weighting with outcome regression. Consistent if either the propensity model OR the outcome model is correctly specified. Returns effect estimate with bootstrap standard errors and model fit diagnostics."
+    )]
     async fn treatment_doubly_robust(
         &self,
         Parameters(request): Parameters<DoublyRobustRequest>,
@@ -14298,7 +15980,13 @@ impl AnalyticsServer {
             seed: None,
         };
 
-        let result = match run_doubly_robust(dataset, &request.outcome, &request.treatment, &cov_refs, config) {
+        let result = match run_doubly_robust(
+            dataset,
+            &request.outcome,
+            &request.treatment,
+            &cov_refs,
+            config,
+        ) {
             Ok(r) => r,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -14308,19 +15996,20 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
-
     /// Run Double/Debiased Machine Learning (DoubleML) estimation.
-    #[tool(description = "Estimate causal treatment effects using Double/Debiased Machine Learning. Uses Neyman-orthogonal score functions and K-fold cross-fitting to achieve root-n consistent and asymptotically normal estimates. Supports Partially Linear Regression (PLR: Y = theta*D + g(X) + eps) and Interactive Regression Model (IRM: binary treatment with heterogeneous effects). Returns treatment effect estimate with influence function-based standard errors and diagnostic information.")]
+    #[tool(
+        description = "Estimate causal treatment effects using Double/Debiased Machine Learning. Uses Neyman-orthogonal score functions and K-fold cross-fitting to achieve root-n consistent and asymptotically normal estimates. Supports Partially Linear Regression (PLR: Y = theta*D + g(X) + eps) and Interactive Regression Model (IRM: binary treatment with heterogeneous effects). Returns treatment effect estimate with influence function-based standard errors and diagnostic information."
+    )]
     async fn treatment_double_ml(
         &self,
         Parameters(request): Parameters<DoubleMLRequest>,
     ) -> Result<CallToolResult, McpError> {
-        use p2a_core::econometrics::{
-            run_double_ml, DoubleMLConfig, DMLModelType, TreatmentType,
-        };
+        use p2a_core::econometrics::{DMLModelType, DoubleMLConfig, TreatmentType, run_double_ml};
 
         let datasets = self.datasets.read().await;
 
@@ -14353,7 +16042,7 @@ impl AnalyticsServer {
                 )
             })?
             .iter()
-            .filter_map(|v| v)
+            .flatten()
             .collect();
 
         // Extract treatment (D)
@@ -14372,7 +16061,7 @@ impl AnalyticsServer {
                 )
             })?
             .iter()
-            .filter_map(|v| v)
+            .flatten()
             .collect();
 
         // Extract covariates (X)
@@ -14382,7 +16071,10 @@ impl AnalyticsServer {
 
         for col_name in &request.covariates {
             let col = df.column(col_name).map_err(|_| {
-                McpError::invalid_request(format!("Covariate column '{}' not found", col_name), None)
+                McpError::invalid_request(
+                    format!("Covariate column '{}' not found", col_name),
+                    None,
+                )
             })?;
             let col_f64 = col.f64().map_err(|_| {
                 McpError::invalid_request(
@@ -14411,7 +16103,9 @@ impl AnalyticsServer {
             }
             row_major
         })
-        .map_err(|e| McpError::internal_error(format!("Failed to create covariate matrix: {}", e), None))?;
+        .map_err(|e| {
+            McpError::internal_error(format!("Failed to create covariate matrix: {}", e), None)
+        })?;
 
         // Parse model type
         let model_type = match request.model_type.as_deref() {
@@ -14420,7 +16114,9 @@ impl AnalyticsServer {
         };
 
         // Determine treatment type for IRM
-        let is_binary = d.iter().all(|&di| (di - 0.0).abs() < 1e-10 || (di - 1.0).abs() < 1e-10);
+        let is_binary = d
+            .iter()
+            .all(|&di| (di - 0.0).abs() < 1e-10 || (di - 1.0).abs() < 1e-10);
         let treatment_type = if is_binary {
             TreatmentType::Binary
         } else {
@@ -14446,11 +16142,15 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     /// Run Covariate Balancing Propensity Score (CBPS) estimation.
-    #[tool(description = "Estimate propensity scores using Covariate Balancing Propensity Score (CBPS). Unlike standard logistic regression, CBPS uses GMM to simultaneously estimate propensity scores AND achieve covariate balance. Returns propensity scores, IPW weights, balance diagnostics before and after weighting, and J-test for overidentification.")]
+    #[tool(
+        description = "Estimate propensity scores using Covariate Balancing Propensity Score (CBPS). Unlike standard logistic regression, CBPS uses GMM to simultaneously estimate propensity scores AND achieve covariate balance. Returns propensity scores, IPW weights, balance diagnostics before and after weighting, and J-test for overidentification."
+    )]
     async fn treatment_cbps(
         &self,
         Parameters(request): Parameters<CbpsRequest>,
@@ -14493,11 +16193,15 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     /// Compute flexible inverse probability weights using multiple methods.
-    #[tool(description = "Compute balancing weights for causal inference using WeightIt. Supports multiple methods: 'logistic' (standard propensity score), 'entropy' (entropy balancing for exact mean balance), 'energy' (energy distance minimization), 'stable' (stable balancing weights). Returns weights, balance diagnostics before/after, and effective sample size (ESS). Low ESS indicates high weight variability.")]
+    #[tool(
+        description = "Compute balancing weights for causal inference using WeightIt. Supports multiple methods: 'logistic' (standard propensity score), 'entropy' (entropy balancing for exact mean balance), 'energy' (energy distance minimization), 'stable' (stable balancing weights). Returns weights, balance diagnostics before/after, and effective sample size (ESS). Low ESS indicates high weight variability."
+    )]
     async fn treatment_weightit(
         &self,
         Parameters(request): Parameters<WeightItRequest>,
@@ -14551,11 +16255,15 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     /// Run entropy balancing for exact covariate mean balance.
-    #[tool(description = "Compute entropy balancing weights (Hainmueller 2012). Reweights the control group to achieve exact mean balance on specified covariates with the treated group. Minimizes entropy (KL divergence) from uniform weights subject to balance constraints. Useful when exact balance is needed for bias reduction. Returns weights, balance table, and effective sample size.")]
+    #[tool(
+        description = "Compute entropy balancing weights (Hainmueller 2012). Reweights the control group to achieve exact mean balance on specified covariates with the treated group. Minimizes entropy (KL divergence) from uniform weights subject to balance constraints. Useful when exact balance is needed for bias reduction. Returns weights, balance table, and effective sample size."
+    )]
     async fn treatment_entropy_balance(
         &self,
         Parameters(request): Parameters<EntropyBalanceRequest>,
@@ -14574,7 +16282,12 @@ impl AnalyticsServer {
 
         let cov_refs: Vec<&str> = request.covariates.iter().map(|s| s.as_str()).collect();
 
-        let result = match entropy_balance(dataset, &request.treatment, &cov_refs, request.target_means.as_deref()) {
+        let result = match entropy_balance(
+            dataset,
+            &request.treatment,
+            &cov_refs,
+            request.target_means.as_deref(),
+        ) {
             Ok(r) => r,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -14584,11 +16297,15 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     /// Compute stable balancing weights for causal inference.
-    #[tool(description = "Compute Stable Balancing Weights (SBW) using quadratic programming (Zubizarreta 2015). Directly optimizes for covariate balance rather than modeling the propensity score. Finds weights that minimize variance while achieving exact or approximate balance on covariate means. Advantages: directly targets balance (not propensity score fit), provides stable weights with lower variance than IPW, handles approximate balance when exact is infeasible. Returns weights, balance diagnostics before/after, effective sample size, and optimization details.")]
+    #[tool(
+        description = "Compute Stable Balancing Weights (SBW) using quadratic programming (Zubizarreta 2015). Directly optimizes for covariate balance rather than modeling the propensity score. Finds weights that minimize variance while achieving exact or approximate balance on covariate means. Advantages: directly targets balance (not propensity score fit), provides stable weights with lower variance than IPW, handles approximate balance when exact is infeasible. Returns weights, balance diagnostics before/after, effective sample size, and optimization details."
+    )]
     async fn treatment_sbw(
         &self,
         Parameters(request): Parameters<SBWRequest>,
@@ -14634,11 +16351,15 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     /// Run twang GBM propensity score estimation.
-    #[tool(description = "Estimate propensity scores using Gradient Boosted Machine (GBM) with automatic tuning for covariate balance (twang). Unlike logistic regression, twang uses machine learning and automatically selects the optimal number of iterations based on balance metrics (standardized effect sizes or KS statistics). Particularly useful when you need good balance across many covariates. Returns propensity scores, IPW weights, optimal iteration number, and balance diagnostics before/after weighting.")]
+    #[tool(
+        description = "Estimate propensity scores using Gradient Boosted Machine (GBM) with automatic tuning for covariate balance (twang). Unlike logistic regression, twang uses machine learning and automatically selects the optimal number of iterations based on balance metrics (standardized effect sizes or KS statistics). Particularly useful when you need good balance across many covariates. Returns propensity scores, IPW weights, optimal iteration number, and balance diagnostics before/after weighting."
+    )]
     async fn treatment_twang(
         &self,
         Parameters(request): Parameters<TwangRequest>,
@@ -14693,11 +16414,15 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     /// Run propensity score matching (MatchIt) for causal inference.
-    #[tool(description = "Perform propensity score matching to create balanced comparison groups for causal inference. Methods: 'nearest' (nearest neighbor matching on propensity score), 'cem' (coarsened exact matching on covariate bins), 'full' (optimal full matching), 'subclass' (propensity score subclassification). Returns matched sample with weights, balance diagnostics (standardized mean differences, variance ratios, KS statistics) before and after matching. Low SMD (<0.1) indicates good balance.")]
+    #[tool(
+        description = "Perform propensity score matching to create balanced comparison groups for causal inference. Methods: 'nearest' (nearest neighbor matching on propensity score), 'cem' (coarsened exact matching on covariate bins), 'full' (optimal full matching), 'subclass' (propensity score subclassification). Returns matched sample with weights, balance diagnostics (standardized mean differences, variance ratios, KS statistics) before and after matching. Low SMD (<0.1) indicates good balance."
+    )]
     async fn propensity_matching(
         &self,
         Parameters(request): Parameters<MatchItRequest>,
@@ -14744,21 +16469,27 @@ impl AnalyticsServer {
             _ => Some(DistanceMethod::Logit),
         };
 
-        let result: MatchResult = match match_it(dataset, &request.treatment, &cov_refs, method, distance) {
-            Ok(r) => r,
-            Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Propensity score matching failed: {}",
-                    e
-                ))]));
-            }
-        };
+        let result: MatchResult =
+            match match_it(dataset, &request.treatment, &cov_refs, method, distance) {
+                Ok(r) => r,
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Propensity score matching failed: {}",
+                        e
+                    ))]));
+                }
+            };
 
-        Ok(CallToolResult::success(vec![Content::text(format!("{}", result))]))
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "{}",
+            result
+        ))]))
     }
 
     /// Run Targeted Maximum Likelihood Estimation (TMLE) for causal inference.
-    #[tool(description = "Estimate Average Treatment Effect (ATE) using TMLE - a doubly robust, semiparametric efficient estimator. TMLE uses a targeting step to optimize the bias-variance tradeoff for the ATE. More efficient than standard AIPW due to the fluctuation model. Returns ATE estimate with influence curve-based standard errors and confidence intervals.")]
+    #[tool(
+        description = "Estimate Average Treatment Effect (ATE) using TMLE - a doubly robust, semiparametric efficient estimator. TMLE uses a targeting step to optimize the bias-variance tradeoff for the ATE. More efficient than standard AIPW due to the fluctuation model. Returns ATE estimate with influence curve-based standard errors and confidence intervals."
+    )]
     async fn treatment_tmle(
         &self,
         Parameters(request): Parameters<TmleRequest>,
@@ -14795,7 +16526,13 @@ impl AnalyticsServer {
             tolerance: 1e-8,
         };
 
-        let result = match tmle(dataset, &request.outcome, &request.treatment, &cov_refs, config) {
+        let result = match tmle(
+            dataset,
+            &request.outcome,
+            &request.treatment,
+            &cov_refs,
+            config,
+        ) {
             Ok(r) => r,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -14805,11 +16542,15 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     /// Run Collaborative Targeted Maximum Likelihood Estimation (C-TMLE) for causal inference.
-    #[tool(description = "Estimate Average Treatment Effect (ATE) using C-TMLE - extends TMLE with data-adaptive covariate selection for the propensity score model. Uses cross-validation to select which covariates to include, reducing finite-sample bias from including too many covariates while maintaining double robustness. Returns ATE estimate, selected covariates, selection path with CV criterion at each step, and influence curve-based standard errors.")]
+    #[tool(
+        description = "Estimate Average Treatment Effect (ATE) using C-TMLE - extends TMLE with data-adaptive covariate selection for the propensity score model. Uses cross-validation to select which covariates to include, reducing finite-sample bias from including too many covariates while maintaining double robustness. Returns ATE estimate, selected covariates, selection path with CV criterion at each step, and influence curve-based standard errors."
+    )]
     async fn collaborative_tmle(
         &self,
         Parameters(request): Parameters<CTmleRequest>,
@@ -14857,7 +16598,13 @@ impl AnalyticsServer {
             ..Default::default()
         };
 
-        let result = match ctmle(dataset, &request.outcome, &request.treatment, &cov_refs, config) {
+        let result = match ctmle(
+            dataset,
+            &request.outcome,
+            &request.treatment,
+            &cov_refs,
+            config,
+        ) {
             Ok(r) => r,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -14867,16 +16614,20 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     /// Run Longitudinal Targeted Maximum Likelihood Estimation (LTMLE) for time-varying treatments.
-    #[tool(description = "Estimate causal effects of time-varying treatments using Longitudinal TMLE. LTMLE extends standard TMLE to longitudinal settings with multiple time points where treatments and confounders vary over time. Uses sequential regression (g-computation) combined with a targeting step at each time point to achieve double robustness. Estimates E[Y^{always treat}] - E[Y^{never treat}] under static intervention regimes. Returns ATE estimate, counterfactual means, influence curve-based standard errors, and diagnostics.")]
+    #[tool(
+        description = "Estimate causal effects of time-varying treatments using Longitudinal TMLE. LTMLE extends standard TMLE to longitudinal settings with multiple time points where treatments and confounders vary over time. Uses sequential regression (g-computation) combined with a targeting step at each time point to achieve double robustness. Estimates E[Y^{always treat}] - E[Y^{never treat}] under static intervention regimes. Returns ATE estimate, counterfactual means, influence curve-based standard errors, and diagnostics."
+    )]
     async fn ltmle(
         &self,
         Parameters(request): Parameters<LtmleRequest>,
     ) -> Result<CallToolResult, McpError> {
-        use p2a_core::econometrics::{run_ltmle, LtmleConfig, LtmleData, LtmleQModel};
+        use p2a_core::econometrics::{LtmleConfig, LtmleData, LtmleQModel, run_ltmle};
 
         let datasets = self.datasets.read().await;
 
@@ -14894,7 +16645,7 @@ impl AnalyticsServer {
         let t_max = request.outcomes.len();
         if t_max < 2 {
             return Ok(CallToolResult::error(vec![Content::text(
-                "LTMLE requires at least 2 time points. For single time point, use standard TMLE."
+                "LTMLE requires at least 2 time points. For single time point, use standard TMLE.",
             )]));
         }
         if request.treatments.len() != t_max || request.covariates.len() != t_max {
@@ -14922,8 +16673,14 @@ impl AnalyticsServer {
                     ))]));
                 }
             };
-            let values: Vec<f64> = col.f64()
-                .map_err(|e| McpError::invalid_request(format!("Column '{}' must be numeric: {}", col_name, e), None))?
+            let values: Vec<f64> = col
+                .f64()
+                .map_err(|e| {
+                    McpError::invalid_request(
+                        format!("Column '{}' must be numeric: {}", col_name, e),
+                        None,
+                    )
+                })?
                 .into_no_null_iter()
                 .collect();
             outcomes.push(ndarray::Array1::from_vec(values));
@@ -14941,8 +16698,14 @@ impl AnalyticsServer {
                     ))]));
                 }
             };
-            let values: Vec<f64> = col.f64()
-                .map_err(|e| McpError::invalid_request(format!("Column '{}' must be numeric: {}", col_name, e), None))?
+            let values: Vec<f64> = col
+                .f64()
+                .map_err(|e| {
+                    McpError::invalid_request(
+                        format!("Column '{}' must be numeric: {}", col_name, e),
+                        None,
+                    )
+                })?
                 .into_no_null_iter()
                 .collect();
             treatments.push(ndarray::Array1::from_vec(values));
@@ -14958,7 +16721,7 @@ impl AnalyticsServer {
             let mut cov_data = Vec::with_capacity(n * k);
             for row_idx in 0..n {
                 for col_name in &cov_names {
-                    let col = match df.column(*col_name) {
+                    let col = match df.column(col_name) {
                         Ok(c) => c,
                         Err(e) => {
                             return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -14967,16 +16730,23 @@ impl AnalyticsServer {
                             ))]));
                         }
                     };
-                    let value = col.f64()
-                        .map_err(|e| McpError::invalid_request(format!("Column '{}' must be numeric: {}", col_name, e), None))?
+                    let value = col
+                        .f64()
+                        .map_err(|e| {
+                            McpError::invalid_request(
+                                format!("Column '{}' must be numeric: {}", col_name, e),
+                                None,
+                            )
+                        })?
                         .get(row_idx)
                         .unwrap_or(f64::NAN);
                     cov_data.push(value);
                 }
             }
 
-            let cov_array = ndarray::Array2::from_shape_vec((n, k), cov_data)
-                .map_err(|e| McpError::invalid_request(format!("Failed to create covariate matrix: {}", e), None))?;
+            let cov_array = ndarray::Array2::from_shape_vec((n, k), cov_data).map_err(|e| {
+                McpError::invalid_request(format!("Failed to create covariate matrix: {}", e), None)
+            })?;
             covariates.push(cov_array);
         }
 
@@ -15016,11 +16786,15 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     /// Run Regression Standardization (G-computation) for causal effect estimation.
-    #[tool(description = "Estimate causal effects using regression standardization (G-computation/parametric g-formula). Fits an outcome model and averages predictions under different treatment values over the covariate distribution. Supports ATE (Average Treatment Effect), ATT (on Treated), ATC (on Controls). Returns effect estimate, potential outcomes E[Y(1)] and E[Y(0)], confidence intervals, and for binary outcomes: risk ratio, odds ratio, and NNT.")]
+    #[tool(
+        description = "Estimate causal effects using regression standardization (G-computation/parametric g-formula). Fits an outcome model and averages predictions under different treatment values over the covariate distribution. Supports ATE (Average Treatment Effect), ATT (on Treated), ATC (on Controls). Returns effect estimate, potential outcomes E[Y(1)] and E[Y(0)], confidence intervals, and for binary outcomes: risk ratio, odds ratio, and NNT."
+    )]
     async fn regression_standardization(
         &self,
         Parameters(request): Parameters<StdRegRequest>,
@@ -15073,7 +16847,13 @@ impl AnalyticsServer {
             tolerance: 1e-8,
         };
 
-        let result = match run_stdreg(dataset, &request.outcome, &request.treatment, &cov_refs, config) {
+        let result = match run_stdreg(
+            dataset,
+            &request.outcome,
+            &request.treatment,
+            &cov_refs,
+            config,
+        ) {
             Ok(r) => r,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -15083,7 +16863,187 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
+    }
+
+    /// Run Parametric G-Formula for time-varying treatments.
+    #[tool(
+        description = "Estimate causal effects of time-varying treatments using the parametric g-formula (generalized formula). Uses Monte Carlo simulation to estimate counterfactual outcomes under different treatment regimes. Suitable for longitudinal/panel data with time-varying confounders. Returns risk difference, risk ratio, potential outcomes, and bootstrap confidence intervals. Based on Robins (1986) and Hernan & Robins (2020). R equivalent: gfoRmula package."
+    )]
+    async fn gformula(
+        &self,
+        Parameters(request): Parameters<GFormulaRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        use ndarray::{Array1, Array2};
+        use p2a_core::linalg::design::DesignMatrix;
+
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let n = dataset.df().height();
+        let t_max = request.time_points;
+
+        // Validate treatment columns match time points
+        if request.treatment_cols.len() != t_max {
+            return Ok(CallToolResult::error(vec![Content::text(format!(
+                "Number of treatment columns ({}) must match time_points ({})",
+                request.treatment_cols.len(),
+                t_max
+            ))]));
+        }
+
+        // Extract baseline covariates
+        let n_baseline = request.baseline_covariates.len();
+        let mut baseline = Array2::zeros((n, n_baseline));
+        for (j, col_name) in request.baseline_covariates.iter().enumerate() {
+            let col = match DesignMatrix::extract_column(dataset.df(), col_name) {
+                Ok(c) => c,
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Failed to extract baseline covariate '{}': {:?}",
+                        col_name, e
+                    ))]));
+                }
+            };
+            for i in 0..n {
+                baseline[[i, j]] = col[i];
+            }
+        }
+
+        // Extract time-varying covariates for each time point
+        let n_tv = request.time_varying_covariates.len();
+        let mut time_varying: Vec<Array2<f64>> = Vec::with_capacity(t_max);
+        for t in 0..t_max {
+            let mut tv_matrix = Array2::zeros((n, n_tv));
+            for (j, base_name) in request.time_varying_covariates.iter().enumerate() {
+                let col_name = format!("{}_t{}", base_name, t);
+                let col = match DesignMatrix::extract_column(dataset.df(), &col_name) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        return Ok(CallToolResult::error(vec![Content::text(format!(
+                            "Failed to extract time-varying covariate '{}': {:?}. \
+                             Expected columns named '{}' for each time point t=0..{}.",
+                            col_name,
+                            e,
+                            format!("{}_t0, {}_t1, ...", base_name, base_name),
+                            t_max - 1
+                        ))]));
+                    }
+                };
+                for i in 0..n {
+                    tv_matrix[[i, j]] = col[i];
+                }
+            }
+            time_varying.push(tv_matrix);
+        }
+
+        // Extract treatments for each time point
+        let mut treatments: Vec<Array1<f64>> = Vec::with_capacity(t_max);
+        for col_name in &request.treatment_cols {
+            let col = match DesignMatrix::extract_column(dataset.df(), col_name) {
+                Ok(c) => c,
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Failed to extract treatment column '{}': {:?}",
+                        col_name, e
+                    ))]));
+                }
+            };
+            treatments.push(col);
+        }
+
+        // Extract outcome
+        let outcome = match DesignMatrix::extract_column(dataset.df(), &request.outcome) {
+            Ok(c) => c,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Failed to extract outcome '{}': {:?}",
+                    request.outcome, e
+                ))]));
+            }
+        };
+
+        // Create GFormulaData
+        let gformula_data = match GFormulaData::new(baseline, time_varying, treatments, outcome) {
+            Ok(d) => d,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Failed to create g-formula data: {}",
+                    e
+                ))]));
+            }
+        };
+
+        // Parse intervention type
+        let intervention = match request.intervention.as_deref() {
+            Some("never_treat") | Some("never") | Some("control") => {
+                GFormulaIntervention::Static { treat_all: false }
+            }
+            Some("natural") | Some("natural_course") | Some("observed") => {
+                GFormulaIntervention::NaturalCourse
+            }
+            Some("threshold") => {
+                let variable_idx = request.threshold_variable.unwrap_or(0);
+                let cutoff = request.threshold_cutoff.unwrap_or(0.5);
+                let above = request.threshold_above.unwrap_or(true);
+                GFormulaIntervention::Threshold {
+                    variable_idx,
+                    cutoff,
+                    above,
+                }
+            }
+            _ => GFormulaIntervention::Static { treat_all: true }, // default: always treat
+        };
+
+        // Parse outcome type
+        let outcome_type = match request.outcome_type.as_deref() {
+            Some("binary") | Some("Binary") | Some("logistic") => GFormulaOutcomeType::Binary,
+            Some("survival") | Some("Survival") | Some("hazard") => GFormulaOutcomeType::Survival,
+            _ => GFormulaOutcomeType::Continuous,
+        };
+
+        // Use per-tool seed if provided, otherwise fall back to global seed
+        let global_seed = self.global_seed.read().await;
+        let seed = request.seed.or(*global_seed);
+
+        // Build config
+        let config = GFormulaConfig {
+            n_simulations: request.n_simulations.unwrap_or(1000),
+            time_points: t_max,
+            intervention,
+            outcome_type,
+            n_bootstrap: request.n_bootstrap.unwrap_or(200),
+            seed,
+            confidence_level: request.confidence_level.unwrap_or(0.95),
+            max_iter: 100,
+            tolerance: 1e-8,
+        };
+
+        // Run g-formula
+        let result = match run_gformula(&gformula_data, config) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "G-formula estimation failed: {}",
+                    e
+                ))]));
+            }
+        };
+
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     // ========================================================================
@@ -15091,7 +17051,9 @@ impl AnalyticsServer {
     // ========================================================================
 
     /// Run causal mediation analysis.
-    #[tool(description = "Perform causal mediation analysis to decompose treatment effects into direct and indirect (mediated) effects. Uses IPW-based identification following Huber (2014). Returns Natural Direct Effect (NDE), Natural Indirect Effect (NIE), proportion mediated, and bootstrap inference.")]
+    #[tool(
+        description = "Perform causal mediation analysis to decompose treatment effects into direct and indirect (mediated) effects. Uses IPW-based identification following Huber (2014). Returns Natural Direct Effect (NDE), Natural Indirect Effect (NIE), proportion mediated, and bootstrap inference."
+    )]
     async fn mediation_analysis(
         &self,
         Parameters(request): Parameters<MediationRequest>,
@@ -15133,15 +17095,19 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     /// Run Natural Effect Models for mediation analysis with treatment-mediator interactions.
-    #[tool(description = "Perform Natural Effect Models (medflex) mediation analysis that allows for \
+    #[tool(
+        description = "Perform Natural Effect Models (medflex) mediation analysis that allows for \
         treatment-mediator interactions. Decomposes total effect into Natural Direct Effect (NDE) and \
         Natural Indirect Effect (NIE) using the regression-based approach of Lange, Vansteelandt, & Bekaert (2012). \
         Unlike IPW-based mediation, this method uses regression models for both mediator and outcome, \
-        with optional A*M interaction terms. Returns effect estimates, bootstrap CIs, and model diagnostics.")]
+        with optional A*M interaction terms. Returns effect estimates, bootstrap CIs, and model diagnostics."
+    )]
     async fn natural_effects_mediation(
         &self,
         Parameters(request): Parameters<NaturalEffectsRequest>,
@@ -15158,7 +17124,8 @@ impl AnalyticsServer {
             }
         };
 
-        let conf_refs: Vec<&str> = request.confounders
+        let conf_refs: Vec<&str> = request
+            .confounders
             .as_ref()
             .map(|v| v.iter().map(|s| s.as_str()).collect())
             .unwrap_or_default();
@@ -15197,7 +17164,9 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     // ========================================================================
@@ -15205,11 +17174,13 @@ impl AnalyticsServer {
     // ========================================================================
 
     /// Run Synthetic Control Method for comparative case studies.
-    #[tool(description = "Run Synthetic Control Method for comparative case studies with a single treated unit. \
+    #[tool(
+        description = "Run Synthetic Control Method for comparative case studies with a single treated unit. \
         Creates a weighted combination of control (donor) units to construct a synthetic counterfactual. \
         Developed by Abadie, Diamond, and Hainmueller (2010). \
         Returns unit weights, predictor balance, treatment effects at each post-treatment period, \
-        and optional placebo-based inference (p-values).")]
+        and optional placebo-based inference (p-values)."
+    )]
     async fn synthetic_control(
         &self,
         Parameters(request): Parameters<SyntheticControlRequest>,
@@ -15288,7 +17259,9 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     // ========================================================================
@@ -15296,11 +17269,13 @@ impl AnalyticsServer {
     // ========================================================================
 
     /// Run Generalized Synthetic Control (gsynth) for panel data with multiple treated units.
-    #[tool(description = "Run Generalized Synthetic Control Method for causal inference with interactive fixed effects. \
+    #[tool(
+        description = "Run Generalized Synthetic Control Method for causal inference with interactive fixed effects. \
         Unlike traditional synthetic control (single treated unit), gsynth handles multiple treated units with staggered adoption. \
         Uses Interactive Fixed Effects (IFE) to model: Y_it = α_i + λ_i'f_t + X_it'β + τ_it·D_it + ε_it. \
         Factors f_t and loadings λ_i capture unobserved confounders. Developed by Xu (2017). \
-        Returns ATT (average treatment effect on treated), unit-level effects, factor structure, and optional bootstrap inference.")]
+        Returns ATT (average treatment effect on treated), unit-level effects, factor structure, and optional bootstrap inference."
+    )]
     async fn gsynth(
         &self,
         Parameters(request): Parameters<GsynthRequest>,
@@ -15366,7 +17341,9 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     // ========================================================================
@@ -15374,12 +17351,14 @@ impl AnalyticsServer {
     // ========================================================================
 
     /// Run Synthetic Control with Prediction Intervals (SCPI).
-    #[tool(description = "Run Synthetic Control with Prediction Intervals (SCPI) for causal inference. \
+    #[tool(
+        description = "Run Synthetic Control with Prediction Intervals (SCPI) for causal inference. \
         Extends the classic synthetic control method (Abadie et al. 2010) with proper uncertainty quantification \
         through prediction intervals that account for both in-sample and out-of-sample variance. \
         Supports multiple constraint types: simplex (classic SC), lasso (sparse), ridge (shrinkage), or lasso_simplex (sparse with sum=1). \
         Developed by Cattaneo, Feng & Titiunik (2021) in JASA. \
-        Returns donor weights, treatment effects with prediction intervals, variance decomposition, and pre-treatment fit statistics.")]
+        Returns donor weights, treatment effects with prediction intervals, variance decomposition, and pre-treatment fit statistics."
+    )]
     async fn scpi(
         &self,
         Parameters(request): Parameters<ScpiRequest>,
@@ -15411,15 +17390,17 @@ impl AnalyticsServer {
                     .into_iter()
                     .collect(),
                 Err(_) => {
-                    return Ok(CallToolResult::error(vec![Content::text(
-                        format!("Unit column '{}' must be string type", request.unit_col)
-                    )]));
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Unit column '{}' must be string type",
+                        request.unit_col
+                    ))]));
                 }
             },
             Err(_) => {
-                return Ok(CallToolResult::error(vec![Content::text(
-                    format!("Unit column '{}' not found", request.unit_col)
-                )]));
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Unit column '{}' not found",
+                    request.unit_col
+                ))]));
             }
         };
 
@@ -15427,20 +17408,22 @@ impl AnalyticsServer {
             Ok(col) => match col.i64() {
                 Ok(int_col) => int_col
                     .into_iter()
-                    .filter_map(|t| t)
+                    .flatten()
                     .collect::<std::collections::HashSet<_>>()
                     .into_iter()
                     .collect(),
                 Err(_) => {
-                    return Ok(CallToolResult::error(vec![Content::text(
-                        format!("Time column '{}' must be integer type", request.time_col)
-                    )]));
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Time column '{}' must be integer type",
+                        request.time_col
+                    ))]));
                 }
             },
             Err(_) => {
-                return Ok(CallToolResult::error(vec![Content::text(
-                    format!("Time column '{}' not found", request.time_col)
-                )]));
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Time column '{}' not found",
+                    request.time_col
+                ))]));
             }
         };
         times.sort();
@@ -15468,39 +17451,71 @@ impl AnalyticsServer {
 
         // Build treated series and donor matrix
         let n_times = times.len();
-        let donor_units: Vec<String> = units.iter().filter(|u| *u != &request.treated_unit).cloned().collect();
+        let donor_units: Vec<String> = units
+            .iter()
+            .filter(|u| *u != &request.treated_unit)
+            .cloned()
+            .collect();
         let n_donors = donor_units.len();
 
         // Helper function to get value for unit at time
-        let get_value = |df: &p2a_core::polars::frame::DataFrame, outcome: &str, unit_col: &str, time_col: &str, unit: &str, time: i64| -> Result<f64, String> {
-            let unit_col_data = df.column(unit_col).map_err(|e: PolarsError| e.to_string())?;
-            let unit_str = unit_col_data.str().map_err(|_| "Unit column not string".to_string())?;
+        let get_value = |df: &p2a_core::polars::frame::DataFrame,
+                         outcome: &str,
+                         unit_col: &str,
+                         time_col: &str,
+                         unit: &str,
+                         time: i64|
+         -> Result<f64, String> {
+            let unit_col_data = df
+                .column(unit_col)
+                .map_err(|e: PolarsError| e.to_string())?;
+            let unit_str = unit_col_data
+                .str()
+                .map_err(|_| "Unit column not string".to_string())?;
             let unit_mask = unit_str.equal(unit);
 
-            let time_col_data = df.column(time_col).map_err(|e: PolarsError| e.to_string())?;
-            let time_i64 = time_col_data.i64().map_err(|_| "Time column not int".to_string())?;
+            let time_col_data = df
+                .column(time_col)
+                .map_err(|e: PolarsError| e.to_string())?;
+            let time_i64 = time_col_data
+                .i64()
+                .map_err(|_| "Time column not int".to_string())?;
             let time_mask = time_i64.equal(time);
 
             let combined = &unit_mask & &time_mask;
-            let filtered = df.filter(&combined).map_err(|e: PolarsError| e.to_string())?;
+            let filtered = df
+                .filter(&combined)
+                .map_err(|e: PolarsError| e.to_string())?;
             if filtered.height() == 0 {
                 return Err(format!("No data for unit '{}' at time {}", unit, time));
             }
-            let outcome_col = filtered.column(outcome).map_err(|e: PolarsError| e.to_string())?;
+            let outcome_col = filtered
+                .column(outcome)
+                .map_err(|e: PolarsError| e.to_string())?;
             let val = outcome_col
-                .f64().map_err(|_| "Outcome not numeric".to_string())?
-                .get(0).ok_or_else(|| "Missing value".to_string())?;
+                .f64()
+                .map_err(|_| "Outcome not numeric".to_string())?
+                .get(0)
+                .ok_or_else(|| "Missing value".to_string())?;
             Ok(val)
         };
 
         // Extract outcome values for treated unit
         let mut treated_values = Array1::zeros(n_times);
         for (t_idx, &time) in times.iter().enumerate() {
-            match get_value(df, &request.outcome, &request.unit_col, &request.time_col, &request.treated_unit, time) {
+            match get_value(
+                df,
+                &request.outcome,
+                &request.unit_col,
+                &request.time_col,
+                &request.treated_unit,
+                time,
+            ) {
                 Ok(v) => treated_values[t_idx] = v,
                 Err(e) => {
                     return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Error extracting treated unit data: {}", e
+                        "Error extracting treated unit data: {}",
+                        e
                     ))]));
                 }
             }
@@ -15510,11 +17525,19 @@ impl AnalyticsServer {
         let mut donor_matrix = Array2::zeros((n_times, n_donors));
         for (d_idx, donor) in donor_units.iter().enumerate() {
             for (t_idx, &time) in times.iter().enumerate() {
-                match get_value(df, &request.outcome, &request.unit_col, &request.time_col, donor, time) {
+                match get_value(
+                    df,
+                    &request.outcome,
+                    &request.unit_col,
+                    &request.time_col,
+                    donor,
+                    time,
+                ) {
                     Ok(v) => donor_matrix[[t_idx, d_idx]] = v,
                     Err(e) => {
                         return Ok(CallToolResult::error(vec![Content::text(format!(
-                            "Error extracting donor unit '{}' data: {}", donor, e
+                            "Error extracting donor unit '{}' data: {}",
+                            donor, e
                         ))]));
                     }
                 }
@@ -15556,7 +17579,8 @@ impl AnalyticsServer {
             Ok(r) => r,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "SCPI estimation failed: {}", e
+                    "SCPI estimation failed: {}",
+                    e
                 ))]));
             }
         };
@@ -15578,7 +17602,9 @@ impl AnalyticsServer {
     // ========================================================================
 
     /// Run Sharp Regression Discontinuity estimation.
-    #[tool(description = "Run Sharp Regression Discontinuity (RD) estimation. Implements local polynomial regression with robust bias-corrected inference following Calonico, Cattaneo & Titiunik (2014). Returns conventional, bias-corrected, and robust treatment effect estimates with confidence intervals.")]
+    #[tool(
+        description = "Run Sharp Regression Discontinuity (RD) estimation. Implements local polynomial regression with robust bias-corrected inference following Calonico, Cattaneo & Titiunik (2014). Returns conventional, bias-corrected, and robust treatment effect estimates with confidence intervals."
+    )]
     async fn rd_estimate(
         &self,
         Parameters(request): Parameters<RdEstimateRequest>,
@@ -15623,7 +17649,13 @@ impl AnalyticsServer {
             ..Default::default()
         };
 
-        let result = match run_rd(dataset, &request.outcome, &request.running_var, cutoff, config) {
+        let result = match run_rd(
+            dataset,
+            &request.outcome,
+            &request.running_var,
+            cutoff,
+            config,
+        ) {
             Ok(r) => r,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -15633,11 +17665,15 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     /// Compute RD bandwidth only.
-    #[tool(description = "Compute MSE-optimal bandwidth for Regression Discontinuity estimation. Returns bandwidth values without running the full estimation. Useful for inspecting bandwidth selection before estimation.")]
+    #[tool(
+        description = "Compute MSE-optimal bandwidth for Regression Discontinuity estimation. Returns bandwidth values without running the full estimation. Useful for inspecting bandwidth selection before estimation."
+    )]
     async fn rd_bw(
         &self,
         Parameters(request): Parameters<RdBandwidthRequest>,
@@ -15690,11 +17726,15 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     /// Run Fuzzy Regression Discontinuity estimation.
-    #[tool(description = "Run Fuzzy Regression Discontinuity estimation. For cases where treatment probability (not assignment) jumps at the cutoff. Uses a Wald estimator (ratio of reduced-form to first-stage). Returns Local Average Treatment Effect (LATE).")]
+    #[tool(
+        description = "Run Fuzzy Regression Discontinuity estimation. For cases where treatment probability (not assignment) jumps at the cutoff. Uses a Wald estimator (ratio of reduced-form to first-stage). Returns Local Average Treatment Effect (LATE)."
+    )]
     async fn rd_fuzzy(
         &self,
         Parameters(request): Parameters<FuzzyRdRequest>,
@@ -15756,11 +17796,15 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     /// Run Multi-Cutoff Regression Discontinuity estimation.
-    #[tool(description = "Run Multi-Cutoff Regression Discontinuity (rdmulti) estimation. Handles RD designs with multiple cutoffs (different thresholds) sharing the same running variable. Estimates cutoff-specific effects and optionally pools them into a single weighted estimate. Includes a heterogeneity test for whether effects differ across cutoffs. Reference: Cattaneo, Titiunik & Vazquez-Bare (2020).")]
+    #[tool(
+        description = "Run Multi-Cutoff Regression Discontinuity (rdmulti) estimation. Handles RD designs with multiple cutoffs (different thresholds) sharing the same running variable. Estimates cutoff-specific effects and optionally pools them into a single weighted estimate. Includes a heterogeneity test for whether effects differ across cutoffs. Reference: Cattaneo, Titiunik & Vazquez-Bare (2020)."
+    )]
     async fn rd_multi(
         &self,
         Parameters(request): Parameters<RdMultiRequest>,
@@ -15779,7 +17823,7 @@ impl AnalyticsServer {
 
         if request.cutoffs.is_empty() {
             return Ok(CallToolResult::error(vec![Content::text(
-                "At least one cutoff value must be specified in 'cutoffs'."
+                "At least one cutoff value must be specified in 'cutoffs'.",
             )]));
         }
 
@@ -15802,7 +17846,8 @@ impl AnalyticsServer {
             if bws.len() != request.cutoffs.len() {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
                     "Number of bandwidths ({}) must match number of cutoffs ({})",
-                    bws.len(), request.cutoffs.len()
+                    bws.len(),
+                    request.cutoffs.len()
                 ))]));
             }
             RdMultiBandwidth::PerCutoff(bws.clone())
@@ -15842,7 +17887,9 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     // ========================================================================
@@ -15850,7 +17897,9 @@ impl AnalyticsServer {
     // ========================================================================
 
     /// Run Kaplan-Meier survival curve estimation.
-    #[tool(description = "Run Kaplan-Meier survival curve estimation. Computes the non-parametric product-limit estimator with Greenwood's variance formula for confidence intervals. Optionally computes stratified curves by group. Returns survival probabilities at each event time with standard errors and confidence intervals.")]
+    #[tool(
+        description = "Run Kaplan-Meier survival curve estimation. Computes the non-parametric product-limit estimator with Greenwood's variance formula for confidence intervals. Optionally computes stratified curves by group. Returns survival probabilities at each event time with standard errors and confidence intervals."
+    )]
     async fn kaplan_meier(
         &self,
         Parameters(request): Parameters<KaplanMeierRequest>,
@@ -15887,11 +17936,15 @@ impl AnalyticsServer {
 
         // Format all results
         let output: Vec<String> = results.iter().map(|r| r.to_string()).collect();
-        Ok(CallToolResult::success(vec![Content::text(output.join("\n\n"))]))
+        Ok(CallToolResult::success(vec![Content::text(
+            output.join("\n\n"),
+        )]))
     }
 
     /// Run Log-Rank test comparing survival curves.
-    #[tool(description = "Run Log-Rank test for comparing survival curves between groups. Tests the null hypothesis that the survival functions are equal across groups. Returns chi-squared statistic, p-value, and expected/observed event counts per group.")]
+    #[tool(
+        description = "Run Log-Rank test for comparing survival curves between groups. Tests the null hypothesis that the survival functions are equal across groups. Returns chi-squared statistic, p-value, and expected/observed event counts per group."
+    )]
     async fn log_rank(
         &self,
         Parameters(request): Parameters<LogRankRequest>,
@@ -15918,11 +17971,15 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     /// Run Cox Proportional Hazards model.
-    #[tool(description = "Run Cox Proportional Hazards (Cox PH) regression model. Semi-parametric regression estimating covariate effects on hazard rate without assuming a baseline hazard form. Uses Newton-Raphson optimization. Returns hazard ratios, coefficients, standard errors, confidence intervals, and concordance (C-index).")]
+    #[tool(
+        description = "Run Cox Proportional Hazards (Cox PH) regression model. Semi-parametric regression estimating covariate effects on hazard rate without assuming a baseline hazard form. Uses Newton-Raphson optimization. Returns hazard ratios, coefficients, standard errors, confidence intervals, and concordance (C-index)."
+    )]
     async fn cox_ph(
         &self,
         Parameters(request): Parameters<CoxPhRequest>,
@@ -15954,7 +18011,13 @@ impl AnalyticsServer {
             robust_se: false,
         };
 
-        let result = match run_cox_ph(dataset, &request.time, &request.event, &cov_refs, Some(config)) {
+        let result = match run_cox_ph(
+            dataset,
+            &request.time,
+            &request.event,
+            &cov_refs,
+            Some(config),
+        ) {
             Ok(r) => r,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -15964,11 +18027,15 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     /// Run Accelerated Failure Time (AFT) model.
-    #[tool(description = "Run Accelerated Failure Time (AFT) parametric survival model. Models log(T) as a linear function of covariates. Supports Weibull, Exponential, Log-Normal, and Log-Logistic distributions. Returns regression coefficients (as acceleration factors), standard errors, shape parameters, and AIC/BIC.")]
+    #[tool(
+        description = "Run Accelerated Failure Time (AFT) parametric survival model. Models log(T) as a linear function of covariates. Supports Weibull, Exponential, Log-Normal, and Log-Logistic distributions. Returns regression coefficients (as acceleration factors), standard errors, shape parameters, and AIC/BIC."
+    )]
     async fn aft(
         &self,
         Parameters(request): Parameters<AftRequest>,
@@ -16001,7 +18068,13 @@ impl AnalyticsServer {
             max_iter: request.max_iter.unwrap_or(100),
         };
 
-        let result = match run_aft(dataset, &request.time, &request.event, &cov_refs, Some(config)) {
+        let result = match run_aft(
+            dataset,
+            &request.time,
+            &request.event,
+            &cov_refs,
+            Some(config),
+        ) {
             Ok(r) => r,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -16011,11 +18084,15 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     /// Run Competing Risks analysis (Aalen-Johansen estimator).
-    #[tool(description = "Run Competing Risks analysis using the Aalen-Johansen estimator. Computes cumulative incidence functions (CIF) for multiple event types in the presence of competing risks. Properly accounts for subjects who experience a different event than the one of interest. Returns CIF curves with confidence intervals for each event type.")]
+    #[tool(
+        description = "Run Competing Risks analysis using the Aalen-Johansen estimator. Computes cumulative incidence functions (CIF) for multiple event types in the presence of competing risks. Properly accounts for subjects who experience a different event than the one of interest. Returns CIF curves with confidence intervals for each event type."
+    )]
     async fn competing_risks(
         &self,
         Parameters(request): Parameters<CompetingRisksRequest>,
@@ -16034,22 +18111,20 @@ impl AnalyticsServer {
 
         let confidence_level = request.confidence_level.unwrap_or(0.95);
 
-        let result = match run_competing_risks(
-            dataset,
-            &request.time,
-            &request.event,
-            confidence_level,
-        ) {
-            Ok(r) => r,
-            Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Competing risks analysis failed: {}",
-                    e
-                ))]));
-            }
-        };
+        let result =
+            match run_competing_risks(dataset, &request.time, &request.event, confidence_level) {
+                Ok(r) => r,
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Competing risks analysis failed: {}",
+                        e
+                    ))]));
+                }
+            };
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     // ========================================================================
@@ -16057,7 +18132,9 @@ impl AnalyticsServer {
     // ========================================================================
 
     /// Run Logit (logistic) regression.
-    #[tool(description = "Run Logit (logistic) regression for binary outcomes. Uses MLE with Newton-Raphson. Dependent variable must be 0/1.")]
+    #[tool(
+        description = "Run Logit (logistic) regression for binary outcomes. Uses MLE with Newton-Raphson. Dependent variable must be 0/1."
+    )]
     async fn logit(
         &self,
         Parameters(request): Parameters<LogitRequest>,
@@ -16086,11 +18163,15 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     /// Run Probit regression.
-    #[tool(description = "Run Probit regression for binary outcomes. Uses MLE with Newton-Raphson. Dependent variable must be 0/1.")]
+    #[tool(
+        description = "Run Probit regression for binary outcomes. Uses MLE with Newton-Raphson. Dependent variable must be 0/1."
+    )]
     async fn probit(
         &self,
         Parameters(request): Parameters<ProbitRequest>,
@@ -16119,11 +18200,15 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     /// Run multinomial logit regression for unordered categorical outcomes.
-    #[tool(description = "Run multinomial logit regression for unordered categorical outcomes with 3+ categories. Uses MLE with Newton-Raphson. Equivalent to R's nnet::multinom().")]
+    #[tool(
+        description = "Run multinomial logit regression for unordered categorical outcomes with 3+ categories. Uses MLE with Newton-Raphson. Equivalent to R's nnet::multinom()."
+    )]
     async fn multinom(
         &self,
         Parameters(request): Parameters<MultinomRequest>,
@@ -16153,11 +18238,15 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     /// Run McFadden's conditional logit (mlogit) for discrete choice analysis.
-    #[tool(description = "Run McFadden's conditional logit (mlogit) for discrete choice analysis. Supports both alternative-specific variables (with generic coefficients) and individual-specific variables (with alternative-specific coefficients). Data must be in long format with one row per individual-alternative combination. Equivalent to R's mlogit::mlogit().")]
+    #[tool(
+        description = "Run McFadden's conditional logit (mlogit) for discrete choice analysis. Supports both alternative-specific variables (with generic coefficients) and individual-specific variables (with alternative-specific coefficients). Data must be in long format with one row per individual-alternative combination. Equivalent to R's mlogit::mlogit()."
+    )]
     async fn mlogit(
         &self,
         Parameters(request): Parameters<MlogitRequest>,
@@ -16174,8 +18263,10 @@ impl AnalyticsServer {
             }
         };
 
-        let alt_specific_refs: Vec<&str> = request.alt_specific.iter().map(|s| s.as_str()).collect();
-        let ind_specific_refs: Vec<&str> = request.ind_specific.iter().map(|s| s.as_str()).collect();
+        let alt_specific_refs: Vec<&str> =
+            request.alt_specific.iter().map(|s| s.as_str()).collect();
+        let ind_specific_refs: Vec<&str> =
+            request.ind_specific.iter().map(|s| s.as_str()).collect();
         let reference = request.reference.as_deref();
 
         let result = match run_mlogit(
@@ -16196,11 +18287,15 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     /// Run mixed logit (random parameters logit) for discrete choice with preference heterogeneity.
-    #[tool(description = "Run mixed logit (random parameters logit) for discrete choice models with heterogeneous preferences. Allows coefficients to vary across individuals according to specified distributions (normal, lognormal, triangular, uniform). Uses Maximum Simulated Likelihood (MSL) with Halton sequences. Equivalent to R's gmnl::gmnl() or mixl::mixl().")]
+    #[tool(
+        description = "Run mixed logit (random parameters logit) for discrete choice models with heterogeneous preferences. Allows coefficients to vary across individuals according to specified distributions (normal, lognormal, triangular, uniform). Uses Maximum Simulated Likelihood (MSL) with Halton sequences. Equivalent to R's gmnl::gmnl() or mixl::mixl()."
+    )]
     async fn mixed_logit(
         &self,
         Parameters(request): Parameters<MixedLogitRequest>,
@@ -16229,9 +18324,10 @@ impl AnalyticsServer {
         };
 
         // Convert random_vars to refs
-        let random_refs: Option<Vec<&str>> = request.random_vars.as_ref().map(|v| {
-            v.iter().map(|s| s.as_str()).collect()
-        });
+        let random_refs: Option<Vec<&str>> = request
+            .random_vars
+            .as_ref()
+            .map(|v| v.iter().map(|s| s.as_str()).collect());
 
         // Build config
         let config = MixedLogitConfig {
@@ -16261,11 +18357,15 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     /// Run ordered logit/probit regression for ordinal outcomes.
-    #[tool(description = "Run ordered logit or probit regression (proportional odds model) for ordered categorical outcomes. Estimates threshold (cut-point) parameters. Equivalent to R's MASS::polr().")]
+    #[tool(
+        description = "Run ordered logit or probit regression (proportional odds model) for ordered categorical outcomes. Estimates threshold (cut-point) parameters. Equivalent to R's MASS::polr()."
+    )]
     async fn ordered_model(
         &self,
         Parameters(request): Parameters<OrderedRequest>,
@@ -16290,7 +18390,7 @@ impl AnalyticsServer {
             "probit" => run_ordered_probit(dataset, &request.y, &x_refs),
             _ => {
                 return Ok(CallToolResult::error(vec![Content::text(
-                    "Invalid model_type. Use 'logit' or 'probit'.".to_string()
+                    "Invalid model_type. Use 'logit' or 'probit'.".to_string(),
                 )]));
             }
         };
@@ -16305,7 +18405,9 @@ impl AnalyticsServer {
     }
 
     /// Run negative binomial regression for count data with overdispersion.
-    #[tool(description = "Run negative binomial regression for count data with overdispersion (variance > mean). Estimates dispersion parameter (theta). Equivalent to R's MASS::glm.nb().")]
+    #[tool(
+        description = "Run negative binomial regression for count data with overdispersion (variance > mean). Estimates dispersion parameter (theta). Equivalent to R's MASS::glm.nb()."
+    )]
     async fn negbin(
         &self,
         Parameters(request): Parameters<NegBinRequest>,
@@ -16334,11 +18436,15 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     /// Run zero-inflated regression for count data with excess zeros.
-    #[tool(description = "Run zero-inflated Poisson or negative binomial regression for count data with excess zeros. Models both the zero-inflation probability and the count process. Equivalent to R's pscl::zeroinfl().")]
+    #[tool(
+        description = "Run zero-inflated Poisson or negative binomial regression for count data with excess zeros. Models both the zero-inflation probability and the count process. Equivalent to R's pscl::zeroinfl()."
+    )]
     async fn zeroinfl(
         &self,
         Parameters(request): Parameters<ZeroInflRequest>,
@@ -16356,7 +18462,9 @@ impl AnalyticsServer {
         };
 
         let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
-        let z_refs: Option<Vec<&str>> = request.z.as_ref()
+        let z_refs: Option<Vec<&str>> = request
+            .z
+            .as_ref()
             .map(|zz| zz.iter().map(|s| s.as_str()).collect());
         let z_slice: Option<&[&str]> = z_refs.as_deref();
         let dist = request.dist.as_deref().unwrap_or("poisson");
@@ -16366,7 +18474,7 @@ impl AnalyticsServer {
             "negbin" | "negbinom" => run_zinb(dataset, &request.y, &x_refs, z_slice),
             _ => {
                 return Ok(CallToolResult::error(vec![Content::text(
-                    "Invalid dist. Use 'poisson' or 'negbin'.".to_string()
+                    "Invalid dist. Use 'poisson' or 'negbin'.".to_string(),
                 )]));
             }
         };
@@ -16381,7 +18489,9 @@ impl AnalyticsServer {
     }
 
     /// Run hurdle model for count data with excess zeros.
-    #[tool(description = "Run a hurdle model (two-part model) for count data with excess zeros. The hurdle model separates the zero vs. positive decision (binary logit) from the count magnitude (truncated Poisson or negative binomial). Unlike zero-inflated models, hurdle assumes all zeros come from the binary part. Equivalent to R's pscl::hurdle().")]
+    #[tool(
+        description = "Run a hurdle model (two-part model) for count data with excess zeros. The hurdle model separates the zero vs. positive decision (binary logit) from the count magnitude (truncated Poisson or negative binomial). Unlike zero-inflated models, hurdle assumes all zeros come from the binary part. Equivalent to R's pscl::hurdle()."
+    )]
     async fn hurdle_model(
         &self,
         Parameters(request): Parameters<HurdleModelRequest>,
@@ -16399,7 +18509,9 @@ impl AnalyticsServer {
         };
 
         let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
-        let z_refs: Option<Vec<&str>> = request.z.as_ref()
+        let z_refs: Option<Vec<&str>> = request
+            .z
+            .as_ref()
             .map(|zz| zz.iter().map(|s| s.as_str()).collect());
         let z_slice: Option<&[&str]> = z_refs.as_deref();
         let dist = request.dist.as_deref().unwrap_or("poisson");
@@ -16409,7 +18521,7 @@ impl AnalyticsServer {
             "negbin" | "negbinom" => HurdleType::NegBin,
             _ => {
                 return Ok(CallToolResult::error(vec![Content::text(
-                    "Invalid dist. Use 'poisson' or 'negbin'.".to_string()
+                    "Invalid dist. Use 'poisson' or 'negbin'.".to_string(),
                 )]));
             }
         };
@@ -16424,7 +18536,9 @@ impl AnalyticsServer {
     }
 
     /// Run High-Dimensional Fixed Effects regression with multiple absorbed FE.
-    #[tool(description = "Run High-Dimensional Fixed Effects (HDFE) regression with multiple absorbed fixed effects (e.g., firm + year + industry). Uses the Method of Alternating Projections (MAP) for efficient estimation. Equivalent to R's lfe::felm() or Stata's reghdfe.")]
+    #[tool(
+        description = "Run High-Dimensional Fixed Effects (HDFE) regression with multiple absorbed fixed effects (e.g., firm + year + industry). Uses the Method of Alternating Projections (MAP) for efficient estimation. Equivalent to R's lfe::felm() or Stata's reghdfe."
+    )]
     async fn panel_hdfe(
         &self,
         Parameters(request): Parameters<PanelHdfeRequest>,
@@ -16466,7 +18580,14 @@ impl AnalyticsServer {
             }
         };
 
-        let result = match run_hdfe(dataset, &request.y, &x_refs, &fe_refs, Some(config), cov_type) {
+        let result = match run_hdfe(
+            dataset,
+            &request.y,
+            &x_refs,
+            &fe_refs,
+            Some(config),
+            cov_type,
+        ) {
             Ok(r) => r,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -16476,11 +18597,15 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     /// Run Generalized Linear Model with High-Dimensional Fixed Effects (FEGLM).
-    #[tool(description = "Run Generalized Linear Model with high-dimensional fixed effects (FEGLM). Supports Logit, Probit, Poisson, and Gaussian families with multiple absorbed fixed effects. Uses IRLS + Method of Alternating Projections. Equivalent to R's alpaca::feglm().")]
+    #[tool(
+        description = "Run Generalized Linear Model with high-dimensional fixed effects (FEGLM). Supports Logit, Probit, Poisson, and Gaussian families with multiple absorbed fixed effects. Uses IRLS + Method of Alternating Projections. Equivalent to R's alpaca::feglm()."
+    )]
     async fn feglm(
         &self,
         Parameters(request): Parameters<FeglmRequest>,
@@ -16531,7 +18656,9 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     // ========================================================================
@@ -16539,7 +18666,9 @@ impl AnalyticsServer {
     // ========================================================================
 
     /// Create spatial neighbors and weights from coordinates.
-    #[tool(description = "Create spatial neighbors and weights matrix from coordinate data. Supports k-nearest neighbors (knn), distance-based neighbors, and great-circle distance for lon/lat coordinates. The resulting weights are stored for use with spatial tests and models (Moran's I, SAR, SEM). Equivalent to R's spdep::knearneigh() + nb2listw() or dnearneigh() + nb2listw().")]
+    #[tool(
+        description = "Create spatial neighbors and weights matrix from coordinate data. Supports k-nearest neighbors (knn), distance-based neighbors, and great-circle distance for lon/lat coordinates. The resulting weights are stored for use with spatial tests and models (Moran's I, SAR, SEM). Equivalent to R's spdep::knearneigh() + nb2listw() or dnearneigh() + nb2listw()."
+    )]
     async fn spatial_neighbors(
         &self,
         Parameters(request): Parameters<SpatialNeighborsRequest>,
@@ -16630,7 +18759,7 @@ impl AnalyticsServer {
             Some("B") | Some("binary") => WeightStyle::Binary,
             Some("C") | Some("global") => WeightStyle::GlobalStd,
             Some("U") | Some("unstandardized") => WeightStyle::Binary, // Closest approximation
-            _ => WeightStyle::RowStd, // Default: row-standardized
+            _ => WeightStyle::RowStd,                                  // Default: row-standardized
         };
 
         // Create spatial weights
@@ -16643,7 +18772,8 @@ impl AnalyticsServer {
         let is_symmetric = neighbors.is_symmetric();
 
         // Store the weights
-        let weights_name = request.weights_name
+        let weights_name = request
+            .weights_name
             .unwrap_or_else(|| format!("{}_weights", request.dataset));
 
         drop(datasets);
@@ -16658,12 +18788,7 @@ impl AnalyticsServer {
              Style: {:?}\n\
              Average neighbors: {:.2}\n\
              Symmetric: {}\n",
-            weights_name,
-            n,
-            method,
-            style,
-            avg_neighbors,
-            is_symmetric
+            weights_name, n, method, style, avg_neighbors, is_symmetric
         );
 
         if has_isolates {
@@ -16677,7 +18802,9 @@ impl AnalyticsServer {
     }
 
     /// Run Moran's I test for spatial autocorrelation.
-    #[tool(description = "Run Moran's I test for spatial autocorrelation on a variable. Tests whether nearby observations tend to have similar values (positive autocorrelation) or dissimilar values (negative autocorrelation). Requires spatial weights created with 'spatial_neighbors'. Equivalent to R's spdep::moran.test().")]
+    #[tool(
+        description = "Run Moran's I test for spatial autocorrelation on a variable. Tests whether nearby observations tend to have similar values (positive autocorrelation) or dissimilar values (negative autocorrelation). Requires spatial weights created with 'spatial_neighbors'. Equivalent to R's spdep::moran.test()."
+    )]
     async fn moran_test(
         &self,
         Parameters(request): Parameters<MoranTestRequest>,
@@ -16768,7 +18895,9 @@ impl AnalyticsServer {
     }
 
     /// Run spatial LM tests to choose between SAR and SEM models.
-    #[tool(description = "Run Lagrange Multiplier tests for spatial dependence. Tests for spatial lag (SAR) vs spatial error (SEM) dependence in OLS residuals. Includes robust versions that account for the presence of the other form of spatial dependence. Use to decide between SAR and SEM models. Equivalent to R's spdep::lm.LMtests().")]
+    #[tool(
+        description = "Run Lagrange Multiplier tests for spatial dependence. Tests for spatial lag (SAR) vs spatial error (SEM) dependence in OLS residuals. Includes robust versions that account for the presence of the other form of spatial dependence. Use to decide between SAR and SEM models. Equivalent to R's spdep::lm.LMtests()."
+    )]
     async fn spatial_lm_tests_tool(
         &self,
         Parameters(request): Parameters<SpatialLmTestRequest>,
@@ -16799,7 +18928,8 @@ impl AnalyticsServer {
         let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
 
         // Run OLS to get residuals
-        let ols_result = match run_ols(dataset, &request.y, &x_refs, true, CovarianceType::Standard) {
+        let ols_result = match run_ols(dataset, &request.y, &x_refs, true, CovarianceType::Standard)
+        {
             Ok(r) => r,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -16865,11 +18995,21 @@ impl AnalyticsServer {
                      - Only RLM-Error significant: use SEM model (errorsarlm)\n\
                      - Both robust tests significant: use SARAR model",
                     request.y,
-                    result.lm_lag.statistic, result.lm_lag.df, result.lm_lag.p_value,
-                    result.lm_error.statistic, result.lm_error.df, result.lm_error.p_value,
-                    result.rlm_lag.statistic, result.rlm_lag.df, result.rlm_lag.p_value,
-                    result.rlm_error.statistic, result.rlm_error.df, result.rlm_error.p_value,
-                    result.lm_sarma.statistic, result.lm_sarma.df, result.lm_sarma.p_value
+                    result.lm_lag.statistic,
+                    result.lm_lag.df,
+                    result.lm_lag.p_value,
+                    result.lm_error.statistic,
+                    result.lm_error.df,
+                    result.lm_error.p_value,
+                    result.rlm_lag.statistic,
+                    result.rlm_lag.df,
+                    result.rlm_lag.p_value,
+                    result.rlm_error.statistic,
+                    result.rlm_error.df,
+                    result.rlm_error.p_value,
+                    result.lm_sarma.statistic,
+                    result.lm_sarma.df,
+                    result.lm_sarma.p_value
                 );
                 Ok(CallToolResult::success(vec![Content::text(output)]))
             }
@@ -16881,7 +19021,9 @@ impl AnalyticsServer {
     }
 
     /// Run Spatial Autoregressive Lag (SAR) model.
-    #[tool(description = "Run Spatial Autoregressive Lag (SAR) model: y = ρWy + Xβ + ε. Estimates spatial lag parameter ρ via maximum likelihood. Use when there is substantive spatial interaction (e.g., neighbors' outcomes affect own outcome). Optionally estimates Spatial Durbin Model (SDM) with spatially lagged covariates. Equivalent to R's spatialreg::lagsarlm().")]
+    #[tool(
+        description = "Run Spatial Autoregressive Lag (SAR) model: y = ρWy + Xβ + ε. Estimates spatial lag parameter ρ via maximum likelihood. Use when there is substantive spatial interaction (e.g., neighbors' outcomes affect own outcome). Optionally estimates Spatial Durbin Model (SDM) with spatially lagged covariates. Equivalent to R's spatialreg::lagsarlm()."
+    )]
     async fn sar_model(
         &self,
         Parameters(request): Parameters<SarModelRequest>,
@@ -16919,7 +19061,11 @@ impl AnalyticsServer {
 
         match run_sar(dataset, &request.y, &x_refs, listw, config) {
             Ok(result) => {
-                let model_type = if result.is_durbin { "Spatial Durbin Model (SDM)" } else { "Spatial Lag Model (SAR)" };
+                let model_type = if result.is_durbin {
+                    "Spatial Durbin Model (SDM)"
+                } else {
+                    "Spatial Lag Model (SAR)"
+                };
 
                 let mut output = format!(
                     "{}\n{}\n\
@@ -16959,28 +19105,26 @@ impl AnalyticsServer {
                      BIC: {:.4}\n\
                      Sigma²: {:.6}\n\
                      N: {}\n",
-                    result.log_likelihood,
-                    result.aic,
-                    result.bic,
-                    result.sigma2,
-                    result.n_obs
+                    result.log_likelihood, result.aic, result.bic, result.sigma2, result.n_obs
                 ));
 
                 // Add impacts if computed
                 if let Some(impacts) = &result.impacts {
                     output.push_str("\nSpatial Impacts:\n");
                     output.push_str("----------------\n");
-                    output.push_str(&format!("{:15} {:>12} {:>12} {:>12}\n", "Variable", "Direct", "Indirect", "Total"));
+                    output.push_str(&format!(
+                        "{:15} {:>12} {:>12} {:>12}\n",
+                        "Variable", "Direct", "Indirect", "Total"
+                    ));
                     for (i, name) in impacts.var_names.iter().enumerate() {
                         output.push_str(&format!(
                             "{:15} {:>12.6} {:>12.6} {:>12.6}\n",
-                            name,
-                            impacts.direct[i],
-                            impacts.indirect[i],
-                            impacts.total[i]
+                            name, impacts.direct[i], impacts.indirect[i], impacts.total[i]
                         ));
                     }
-                    output.push_str("\nNote: Direct = own effect, Indirect = spillover effects from neighbors");
+                    output.push_str(
+                        "\nNote: Direct = own effect, Indirect = spillover effects from neighbors",
+                    );
                 }
 
                 Ok(CallToolResult::success(vec![Content::text(output)]))
@@ -16993,7 +19137,9 @@ impl AnalyticsServer {
     }
 
     /// Run Spatial Error Model (SEM).
-    #[tool(description = "Run Spatial Error Model (SEM): y = Xβ + u, where u = λWu + ε. Estimates spatial error parameter λ via maximum likelihood. Use when spatial dependence is in the error term (nuisance dependence, e.g., omitted spatially correlated variables). Equivalent to R's spatialreg::errorsarlm().")]
+    #[tool(
+        description = "Run Spatial Error Model (SEM): y = Xβ + u, where u = λWu + ε. Estimates spatial error parameter λ via maximum likelihood. Use when spatial dependence is in the error term (nuisance dependence, e.g., omitted spatially correlated variables). Equivalent to R's spatialreg::errorsarlm()."
+    )]
     async fn sem_model(
         &self,
         Parameters(request): Parameters<SemModelRequest>,
@@ -17044,7 +19190,11 @@ impl AnalyticsServer {
                     result.lambda_se,
                     result.lambda_z,
                     result.lambda_p,
-                    "Variable", "Estimate", "Std.Err", "Z-value", "P-value"
+                    "Variable",
+                    "Estimate",
+                    "Std.Err",
+                    "Z-value",
+                    "P-value"
                 );
 
                 for (i, name) in result.coef_names.iter().enumerate() {
@@ -17068,11 +19218,7 @@ impl AnalyticsServer {
                      N: {}\n\n\
                      Note: SEM coefficients have their usual interpretation\n\
                      (no spatial multiplier effects unlike SAR)",
-                    result.log_likelihood,
-                    result.aic,
-                    result.bic,
-                    result.sigma2,
-                    result.n_obs
+                    result.log_likelihood, result.aic, result.bic, result.sigma2, result.n_obs
                 ));
 
                 Ok(CallToolResult::success(vec![Content::text(output)]))
@@ -17085,7 +19231,9 @@ impl AnalyticsServer {
     }
 
     /// Run Spatial GMM with heteroscedasticity robustness (sphet).
-    #[tool(description = "Run spatial regression via GMM with heteroscedasticity-robust estimation. Implements the Kelejian-Prucha (1998, 1999, 2010) GMM estimator that is robust to heteroscedasticity of unknown form. Supports SAR (lag), SEM (error), and SARAR (combined) models. Unlike ML estimation, GMM does not require normally distributed errors. Returns heteroscedasticity-robust or HAC standard errors. Equivalent to R's sphet::spreg() and sphet::gstslshet().")]
+    #[tool(
+        description = "Run spatial regression via GMM with heteroscedasticity-robust estimation. Implements the Kelejian-Prucha (1998, 1999, 2010) GMM estimator that is robust to heteroscedasticity of unknown form. Supports SAR (lag), SEM (error), and SARAR (combined) models. Unlike ML estimation, GMM does not require normally distributed errors. Returns heteroscedasticity-robust or HAC standard errors. Equivalent to R's sphet::spreg() and sphet::gstslshet()."
+    )]
     async fn sphet_model(
         &self,
         Parameters(request): Parameters<SphetRequest>,
@@ -17167,9 +19315,12 @@ impl AnalyticsServer {
                 );
 
                 // Spatial parameters
-                if let (Some(lambda), Some(se), Some(z), Some(p)) =
-                    (result.lambda, result.lambda_se, result.lambda_z, result.lambda_p)
-                {
+                if let (Some(lambda), Some(se), Some(z), Some(p)) = (
+                    result.lambda,
+                    result.lambda_se,
+                    result.lambda_z,
+                    result.lambda_p,
+                ) {
                     output.push_str(&format!(
                         "Spatial lag coefficient (lambda):\n\
                          ---------------------------------\n\
@@ -17223,11 +19374,7 @@ impl AnalyticsServer {
                      Converged: {}\n\n\
                      Note: GMM estimation is robust to heteroscedasticity of unknown form.\n\
                      Unlike ML, it does not require normally distributed errors.",
-                    result.sigma2,
-                    result.n_obs,
-                    result.df,
-                    result.iterations,
-                    result.converged
+                    result.sigma2, result.n_obs, result.df, result.iterations, result.converged
                 ));
 
                 Ok(CallToolResult::success(vec![Content::text(output)]))
@@ -17240,7 +19387,9 @@ impl AnalyticsServer {
     }
 
     /// Run SAR Probit model (spatial lag probit for binary outcomes).
-    #[tool(description = "Run Spatial Autoregressive (SAR) Probit model for binary dependent variables: y* = rho*W*y* + X*beta + epsilon, y = 1(y* > 0). Estimates spatial lag parameter rho via Bayesian MCMC with data augmentation. Use when binary outcomes have substantive spatial interaction (e.g., neighbor's choices affect own choice). Returns posterior means, credible intervals, and spatial impacts (direct, indirect, total effects). Equivalent to R's spatialprobit::sarprobit().")]
+    #[tool(
+        description = "Run Spatial Autoregressive (SAR) Probit model for binary dependent variables: y* = rho*W*y* + X*beta + epsilon, y = 1(y* > 0). Estimates spatial lag parameter rho via Bayesian MCMC with data augmentation. Use when binary outcomes have substantive spatial interaction (e.g., neighbor's choices affect own choice). Returns posterior means, credible intervals, and spatial impacts (direct, indirect, total effects). Equivalent to R's spatialprobit::sarprobit()."
+    )]
     async fn sar_probit_model(
         &self,
         Parameters(request): Parameters<SarProbitRequest>,
@@ -17300,11 +19449,15 @@ impl AnalyticsServer {
                     result.rho_p,
                     result.credible_interval_rho(0.95).0,
                     result.credible_interval_rho(0.95).1,
-                    "Variable", "Mean", "Std.Dev", "Z-value", "P-value"
+                    "Variable",
+                    "Mean",
+                    "Std.Dev",
+                    "Z-value",
+                    "P-value"
                 );
 
                 for (i, name) in result.coef_names.iter().enumerate() {
-                    let ci = result.credible_interval_beta(i, 0.95);
+                    let _ci = result.credible_interval_beta(i, 0.95);
                     output.push_str(&format!(
                         "{:15} {:>12.6} {:>10.6} {:>10.4} {:>10.6}\n",
                         name,
@@ -17346,10 +19499,7 @@ impl AnalyticsServer {
                     for (i, name) in impacts.var_names.iter().enumerate() {
                         output.push_str(&format!(
                             "{:15} {:>12.6} {:>12.6} {:>12.6}\n",
-                            name,
-                            impacts.direct[i],
-                            impacts.indirect[i],
-                            impacts.total[i]
+                            name, impacts.direct[i], impacts.indirect[i], impacts.total[i]
                         ));
                     }
                     output.push_str(&format!(
@@ -17372,7 +19522,9 @@ impl AnalyticsServer {
     }
 
     /// Run SEM Probit model (spatial error probit for binary outcomes).
-    #[tool(description = "Run Spatial Error (SEM) Probit model for binary dependent variables: y* = X*beta + u, u = lambda*W*u + epsilon, y = 1(y* > 0). Estimates spatial error parameter lambda via Bayesian MCMC. Use when binary outcomes have spatially correlated unobserved factors (nuisance spatial dependence). Equivalent to R's spatialprobit::semprobit().")]
+    #[tool(
+        description = "Run Spatial Error (SEM) Probit model for binary dependent variables: y* = X*beta + u, u = lambda*W*u + epsilon, y = 1(y* > 0). Estimates spatial error parameter lambda via Bayesian MCMC. Use when binary outcomes have spatially correlated unobserved factors (nuisance spatial dependence). Equivalent to R's spatialprobit::semprobit()."
+    )]
     async fn sem_probit_model(
         &self,
         Parameters(request): Parameters<SemProbitRequest>,
@@ -17432,7 +19584,11 @@ impl AnalyticsServer {
                     result.rho_p,
                     result.credible_interval_rho(0.95).0,
                     result.credible_interval_rho(0.95).1,
-                    "Variable", "Mean", "Std.Dev", "Z-value", "P-value"
+                    "Variable",
+                    "Mean",
+                    "Std.Dev",
+                    "Z-value",
+                    "P-value"
                 );
 
                 for (i, name) in result.coef_names.iter().enumerate() {
@@ -17479,7 +19635,9 @@ impl AnalyticsServer {
     }
 
     /// Run Spatial Panel ML model (spml).
-    #[tool(description = "Run spatial panel data model via Maximum Likelihood. Combines panel data methods (fixed/random effects) with spatial dependence (lag and/or error). Supports: (1) Spatial lag panel models: y = rho*W*y + X*beta + alpha + e, (2) Spatial error panel models: y = X*beta + alpha + u, u = lambda*W*u + e, (3) Combined spatial lag and error. Equivalent to R's splm::spml(). Reference: Millo & Piras (2012), JSS.")]
+    #[tool(
+        description = "Run spatial panel data model via Maximum Likelihood. Combines panel data methods (fixed/random effects) with spatial dependence (lag and/or error). Supports: (1) Spatial lag panel models: y = rho*W*y + X*beta + alpha + e, (2) Spatial error panel models: y = X*beta + alpha + u, u = lambda*W*u + e, (3) Combined spatial lag and error. Equivalent to R's splm::spml(). Reference: Millo & Piras (2012), JSS."
+    )]
     async fn spatial_panel_ml(
         &self,
         Parameters(request): Parameters<SpmlRequest>,
@@ -17538,7 +19696,15 @@ impl AnalyticsServer {
             ..Default::default()
         };
 
-        match run_spml(dataset, &request.y, &x_refs, &request.entity_col, &request.time_col, listw, config) {
+        match run_spml(
+            dataset,
+            &request.y,
+            &x_refs,
+            &request.entity_col,
+            &request.time_col,
+            listw,
+            config,
+        ) {
             Ok(result) => {
                 let mut output = format!(
                     "Spatial Panel Model (ML)\n\
@@ -17608,7 +19774,10 @@ impl AnalyticsServer {
                 if let Some(sigma_mu) = result.variance.sigma_mu {
                     output.push_str(&format!("  sigma_mu (individual): {:.6}\n", sigma_mu));
                 }
-                output.push_str(&format!("  sigma_epsilon (error): {:.6}\n", result.variance.sigma_epsilon));
+                output.push_str(&format!(
+                    "  sigma_epsilon (error): {:.6}\n",
+                    result.variance.sigma_epsilon
+                ));
 
                 Ok(CallToolResult::success(vec![Content::text(output)]))
             }
@@ -17620,7 +19789,9 @@ impl AnalyticsServer {
     }
 
     /// Run Spatial Panel GMM model (spgm).
-    #[tool(description = "Run spatial panel data model via Generalized Method of Moments. Uses IV/GMM estimation for spatial lag models and moment conditions for spatial error. More robust to non-normality than ML. Methods: w2sls (fixed effects), g2sls (random effects GLS), b2sls (between), ec2sls (Baltagi's EC2SLS). Equivalent to R's splm::spgm(). Reference: Kapoor, Kelejian & Prucha (2007).")]
+    #[tool(
+        description = "Run spatial panel data model via Generalized Method of Moments. Uses IV/GMM estimation for spatial lag models and moment conditions for spatial error. More robust to non-normality than ML. Methods: w2sls (fixed effects), g2sls (random effects GLS), b2sls (between), ec2sls (Baltagi's EC2SLS). Equivalent to R's splm::spgm(). Reference: Kapoor, Kelejian & Prucha (2007)."
+    )]
     async fn spatial_panel_gmm(
         &self,
         Parameters(request): Parameters<SpgmRequest>,
@@ -17665,7 +19836,15 @@ impl AnalyticsServer {
             ..Default::default()
         };
 
-        match run_spgm(dataset, &request.y, &x_refs, &request.entity_col, &request.time_col, listw, config) {
+        match run_spgm(
+            dataset,
+            &request.y,
+            &x_refs,
+            &request.entity_col,
+            &request.time_col,
+            listw,
+            config,
+        ) {
             Ok(result) => {
                 let mut output = format!(
                     "Spatial Panel Model (GMM)\n\
@@ -17685,10 +19864,7 @@ impl AnalyticsServer {
 
                 // Spatial parameters
                 if let Some(rho) = result.rho {
-                    output.push_str(&format!(
-                        "Spatial lag coefficient (rho): {:.6}\n\n",
-                        rho
-                    ));
+                    output.push_str(&format!("Spatial lag coefficient (rho): {:.6}\n\n", rho));
                 }
                 if let Some(lambda) = result.lambda {
                     output.push_str(&format!(
@@ -17717,7 +19893,9 @@ impl AnalyticsServer {
                 }
 
                 // Sargan test
-                if let (Some(stat), Some(p), Some(df)) = (result.sargan_stat, result.sargan_p, result.sargan_df) {
+                if let (Some(stat), Some(p), Some(df)) =
+                    (result.sargan_stat, result.sargan_p, result.sargan_df)
+                {
                     output.push_str(&format!(
                         "\nSargan test for overidentifying restrictions:\n\
                          chi2({}) = {:.4}, p-value = {:.4}\n",
@@ -17726,9 +19904,15 @@ impl AnalyticsServer {
                 }
 
                 // Variance components
-                output.push_str(&format!("\nResidual variance (sigma2): {:.6}\n", result.sigma2));
+                output.push_str(&format!(
+                    "\nResidual variance (sigma2): {:.6}\n",
+                    result.sigma2
+                ));
                 if let Some(sigma2_mu) = result.sigma2_mu {
-                    output.push_str(&format!("Individual variance (sigma2_mu): {:.6}\n", sigma2_mu));
+                    output.push_str(&format!(
+                        "Individual variance (sigma2_mu): {:.6}\n",
+                        sigma2_mu
+                    ));
                 }
 
                 Ok(CallToolResult::success(vec![Content::text(output)]))
@@ -17745,7 +19929,9 @@ impl AnalyticsServer {
     // ========================================================================
 
     /// Run VAR (Vector Autoregression) model.
-    #[tool(description = "Run Vector Autoregression (VAR) model for multivariate time series. Returns coefficients, residual covariance, AIC, and BIC.")]
+    #[tool(
+        description = "Run Vector Autoregression (VAR) model for multivariate time series. Returns coefficients, residual covariance, AIC, and BIC."
+    )]
     async fn ts_var(
         &self,
         Parameters(request): Parameters<VarRequest>,
@@ -17774,11 +19960,15 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     /// Granger causality test.
-    #[tool(description = "Test Granger causality between two time series variables. Tests whether lagged values of 'cause' help predict 'dependent' after controlling for lagged 'dependent'. Uses F-test comparing restricted (y lags only) vs unrestricted (y and x lags) models.")]
+    #[tool(
+        description = "Test Granger causality between two time series variables. Tests whether lagged values of 'cause' help predict 'dependent' after controlling for lagged 'dependent'. Uses F-test comparing restricted (y lags only) vs unrestricted (y and x lags) models."
+    )]
     async fn ts_granger(
         &self,
         Parameters(request): Parameters<GrangerRequest>,
@@ -17810,11 +20000,15 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     /// Run VARMA (Vector ARMA) model.
-    #[tool(description = "Run VARMA(p,q) model using Hannan-Rissanen estimation. Combines autoregressive and moving average components for multivariate time series.")]
+    #[tool(
+        description = "Run VARMA(p,q) model using Hannan-Rissanen estimation. Combines autoregressive and moving average components for multivariate time series."
+    )]
     async fn ts_varma(
         &self,
         Parameters(request): Parameters<VarmaRequest>,
@@ -17843,11 +20037,15 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     /// Run VECM (Vector Error Correction Model).
-    #[tool(description = "Run VECM using Johansen Maximum Likelihood. For cointegrated I(1) time series. Returns cointegration vectors (beta), adjustment speeds (alpha), and eigenvalues.")]
+    #[tool(
+        description = "Run VECM using Johansen Maximum Likelihood. For cointegrated I(1) time series. Returns cointegration vectors (beta), adjustment speeds (alpha), and eigenvalues."
+    )]
     async fn ts_vecm(
         &self,
         Parameters(request): Parameters<VecmRequest>,
@@ -17876,11 +20074,15 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     /// Compute VAR Impulse Response Functions.
-    #[tool(description = "Compute Impulse Response Functions (IRF) from a VAR model. Shows how variables respond to shocks over time using Cholesky orthogonalization.")]
+    #[tool(
+        description = "Compute Impulse Response Functions (IRF) from a VAR model. Shows how variables respond to shocks over time using Cholesky orthogonalization."
+    )]
     async fn ts_var_irf(
         &self,
         Parameters(request): Parameters<VarIrfRequest>,
@@ -17909,7 +20111,9 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     // ========================================================================
@@ -17917,7 +20121,9 @@ impl AnalyticsServer {
     // ========================================================================
 
     /// Fit an ARIMA model.
-    #[tool(description = "Fit an ARIMA(p,d,q) model to a univariate time series. Returns AR/MA coefficients, residuals, AIC, and model diagnostics.")]
+    #[tool(
+        description = "Fit an ARIMA(p,d,q) model to a univariate time series. Returns AR/MA coefficients, residuals, AIC, and model diagnostics."
+    )]
     async fn ts_arima_fit(
         &self,
         Parameters(request): Parameters<ArimaRequest>,
@@ -17955,7 +20161,9 @@ impl AnalyticsServer {
              Intercept: {:.6}\n\n\
              Sum of Squared Residuals: {:.4}\n\
              AIC: {:.4}",
-            result.p, result.d, result.q,
+            result.p,
+            result.d,
+            result.q,
             result.column,
             result.n_obs,
             result.ar_coeffs,
@@ -17969,7 +20177,9 @@ impl AnalyticsServer {
     }
 
     /// Forecast using an ARIMA model.
-    #[tool(description = "Forecast future values using an ARIMA(p,d,q) model. Fits the model and generates h-step ahead forecasts.")]
+    #[tool(
+        description = "Forecast future values using an ARIMA(p,d,q) model. Fits the model and generates h-step ahead forecasts."
+    )]
     async fn ts_arima_forecast(
         &self,
         Parameters(request): Parameters<ArimaForecastRequest>,
@@ -18021,7 +20231,9 @@ impl AnalyticsServer {
     }
 
     /// Fit a GARCH model for volatility modeling.
-    #[tool(description = "Fit a GARCH(p,q) model for time-varying volatility. Estimates the conditional variance equation: σ²_t = ω + Σα_i ε²_{t-i} + Σβ_j σ²_{t-j}. Reports persistence, unconditional variance, and half-life of volatility shocks.")]
+    #[tool(
+        description = "Fit a GARCH(p,q) model for time-varying volatility. Estimates the conditional variance equation: σ²_t = ω + Σα_i ε²_{t-i} + Σβ_j σ²_{t-j}. Reports persistence, unconditional variance, and half-life of volatility shocks."
+    )]
     async fn ts_garch_fit(
         &self,
         Parameters(request): Parameters<GarchRequest>,
@@ -18039,10 +20251,13 @@ impl AnalyticsServer {
         };
 
         // Extract column data
-        let col = dataset.df().column(&request.column)
+        let col = dataset
+            .df()
+            .column(&request.column)
             .map_err(|e| McpError::invalid_request(format!("Column error: {}", e), None))?;
 
-        let data: Vec<f64> = col.f64()
+        let data: Vec<f64> = col
+            .f64()
             .map_err(|e| McpError::invalid_request(format!("Column must be numeric: {}", e), None))?
             .into_no_null_iter()
             .collect();
@@ -18064,11 +20279,15 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     /// Run MSTL decomposition.
-    #[tool(description = "Perform MSTL (Multiple Seasonal-Trend decomposition using LOESS) on a time series. Extracts trend, seasonal components, and residuals.")]
+    #[tool(
+        description = "Perform MSTL (Multiple Seasonal-Trend decomposition using LOESS) on a time series. Extracts trend, seasonal components, and residuals."
+    )]
     async fn ts_mstl(
         &self,
         Parameters(request): Parameters<MstlRequest>,
@@ -18097,7 +20316,8 @@ impl AnalyticsServer {
 
         // Format result with summary statistics
         let trend_mean: f64 = result.trend.iter().sum::<f64>() / result.trend.len() as f64;
-        let resid_var: f64 = result.residuals.iter().map(|r| r * r).sum::<f64>() / result.residuals.len() as f64;
+        let resid_var: f64 =
+            result.residuals.iter().map(|r| r * r).sum::<f64>() / result.residuals.len() as f64;
 
         let mut output = format!(
             "MSTL Decomposition Results\n\
@@ -18108,11 +20328,7 @@ impl AnalyticsServer {
              Component Statistics:\n\
              - Trend mean: {:.4}\n\
              - Residual variance: {:.4}\n",
-            result.column,
-            result.n_obs,
-            result.periods,
-            trend_mean,
-            resid_var
+            result.column, result.n_obs, result.periods, trend_mean, resid_var
         );
 
         // Show first few values of each component
@@ -18120,7 +20336,9 @@ impl AnalyticsServer {
         output.push_str(&format!("\nFirst {} values:\n", show_n));
         output.push_str("  Trend: [");
         for (i, val) in result.trend.iter().take(show_n).enumerate() {
-            if i > 0 { output.push_str(", "); }
+            if i > 0 {
+                output.push_str(", ");
+            }
             output.push_str(&format!("{:.2}", val));
         }
         output.push_str("]\n");
@@ -18128,7 +20346,9 @@ impl AnalyticsServer {
         for (idx, seasonal) in result.seasonal.iter().enumerate() {
             output.push_str(&format!("  Seasonal (period {}): [", result.periods[idx]));
             for (i, val) in seasonal.iter().take(show_n).enumerate() {
-                if i > 0 { output.push_str(", "); }
+                if i > 0 {
+                    output.push_str(", ");
+                }
                 output.push_str(&format!("{:.2}", val));
             }
             output.push_str("]\n");
@@ -18136,7 +20356,9 @@ impl AnalyticsServer {
 
         output.push_str("  Residuals: [");
         for (i, val) in result.residuals.iter().take(show_n).enumerate() {
-            if i > 0 { output.push_str(", "); }
+            if i > 0 {
+                output.push_str(", ");
+            }
             output.push_str(&format!("{:.2}", val));
         }
         output.push_str("]\n");
@@ -18145,7 +20367,9 @@ impl AnalyticsServer {
     }
 
     /// Detect changepoints (structural breaks) in a time series.
-    #[tool(description = "Detect changepoints (structural breaks) in a time series using PELT or Binary Segmentation. Identifies points where the statistical properties (mean, variance) change significantly. Useful for regime detection, anomaly detection, and segmenting time series into homogeneous periods.")]
+    #[tool(
+        description = "Detect changepoints (structural breaks) in a time series using PELT or Binary Segmentation. Identifies points where the statistical properties (mean, variance) change significantly. Useful for regime detection, anomaly detection, and segmenting time series into homogeneous periods."
+    )]
     async fn ts_changepoint(
         &self,
         Parameters(request): Parameters<ChangepointRequest>,
@@ -18219,15 +20443,14 @@ impl AnalyticsServer {
              Method: {}\n\
              Penalty: {:.4}\n\n\
              Changepoints Detected: {}\n",
-            request.column,
-            n_obs,
-            result.method,
-            result.penalty,
-            result.n_changepoints,
+            request.column, n_obs, result.method, result.penalty, result.n_changepoints,
         );
 
         if result.n_changepoints > 0 {
-            output.push_str(&format!("Changepoint Positions: {:?}\n\n", result.changepoints));
+            output.push_str(&format!(
+                "Changepoint Positions: {:?}\n\n",
+                result.changepoints
+            ));
         } else {
             output.push_str("\nNo changepoints detected (series appears stationary).\n\n");
         }
@@ -18260,7 +20483,9 @@ impl AnalyticsServer {
     ///   Management Science, 6(3), 324-342.
     /// - Hyndman, R. J. & Athanasopoulos, G. (2021). "Forecasting: Principles and Practice" (3rd ed).
     ///   OTexts. https://otexts.com/fpp3/
-    #[tool(description = "Fit Holt-Winters exponential smoothing model to a time series with trend and seasonality. Supports both additive (constant seasonal variation) and multiplicative (proportional variation) seasonality. Automatically optimizes smoothing parameters (alpha, beta, gamma) if not provided. Can generate forecasts for future periods. Returns fitted values, residuals, optimized parameters, and seasonal coefficients.")]
+    #[tool(
+        description = "Fit Holt-Winters exponential smoothing model to a time series with trend and seasonality. Supports both additive (constant seasonal variation) and multiplicative (proportional variation) seasonality. Automatically optimizes smoothing parameters (alpha, beta, gamma) if not provided. Can generate forecasts for future periods. Returns fitted values, residuals, optimized parameters, and seasonal coefficients."
+    )]
     async fn ts_holt_winters(
         &self,
         Parameters(request): Parameters<HoltWintersRequest>,
@@ -18279,7 +20504,9 @@ impl AnalyticsServer {
 
         // Parse seasonal type
         let seasonal = match request.seasonal.as_deref() {
-            Some("multiplicative") | Some("Multiplicative") | Some("mult") => SeasonalType::Multiplicative,
+            Some("multiplicative") | Some("Multiplicative") | Some("mult") => {
+                SeasonalType::Multiplicative
+            }
             _ => SeasonalType::Additive,
         };
 
@@ -18328,11 +20555,18 @@ impl AnalyticsServer {
             result.period,
             seasonal_type_str,
             result.alpha,
-            result.beta.map_or("N/A".to_string(), |v| format!("{:.6}", v)),
-            result.gamma.map_or("N/A".to_string(), |v| format!("{:.6}", v)),
+            result
+                .beta
+                .map_or("N/A".to_string(), |v| format!("{:.6}", v)),
+            result
+                .gamma
+                .map_or("N/A".to_string(), |v| format!("{:.6}", v)),
             result.sse,
             result.coefficients.level,
-            result.coefficients.trend.map_or("N/A".to_string(), |v| format!("{:.6}", v)),
+            result
+                .coefficients
+                .trend
+                .map_or("N/A".to_string(), |v| format!("{:.6}", v)),
         );
 
         // Add seasonal coefficients
@@ -18362,14 +20596,18 @@ impl AnalyticsServer {
         output.push_str(&format!("\nFirst {} values:\n", show_n));
         output.push_str("  Fitted: [");
         for (i, val) in result.fitted.iter().take(show_n).enumerate() {
-            if i > 0 { output.push_str(", "); }
+            if i > 0 {
+                output.push_str(", ");
+            }
             output.push_str(&format!("{:.4}", val));
         }
         output.push_str("...]\n");
 
         output.push_str("  Residuals: [");
         for (i, val) in result.residuals.iter().take(show_n).enumerate() {
-            if i > 0 { output.push_str(", "); }
+            if i > 0 {
+                output.push_str(", ");
+            }
             output.push_str(&format!("{:.4}", val));
         }
         output.push_str("...]\n");
@@ -18378,7 +20616,9 @@ impl AnalyticsServer {
     }
 
     /// Fit an autoregressive (AR) model to time series data.
-    #[tool(description = "Fit an autoregressive model to time series data with automatic order selection via AIC. Supports Yule-Walker (default), Burg, and OLS methods. Returns AR coefficients, prediction variance, AIC values, partial autocorrelations, and residuals.")]
+    #[tool(
+        description = "Fit an autoregressive model to time series data with automatic order selection via AIC. Supports Yule-Walker (default), Burg, and OLS methods. Returns AR coefficients, prediction variance, AIC values, partial autocorrelations, and residuals."
+    )]
     async fn timeseries_ar(
         &self,
         Parameters(request): Parameters<ArModelRequest>,
@@ -18470,12 +20710,14 @@ impl AnalyticsServer {
         });
 
         Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&output).unwrap_or_else(|_| format!("{:?}", result))
+            serde_json::to_string_pretty(&output).unwrap_or_else(|_| format!("{:?}", result)),
         )]))
     }
 
     /// Perform classical seasonal decomposition by moving averages.
-    #[tool(description = "Decompose a time series into trend, seasonal, and random components using moving averages. Implements R's decompose() function. Supports additive (Y = T + S + R) and multiplicative (Y = T × S × R) decomposition.")]
+    #[tool(
+        description = "Decompose a time series into trend, seasonal, and random components using moving averages. Implements R's decompose() function. Supports additive (Y = T + S + R) and multiplicative (Y = T × S × R) decomposition."
+    )]
     async fn timeseries_decompose(
         &self,
         Parameters(request): Parameters<DecomposeRequest>,
@@ -18513,10 +20755,14 @@ impl AnalyticsServer {
         };
 
         // Run decomposition
-        let result = match decompose(&x, request.period, DecomposeConfig {
-            decompose_type,
-            filter: None,
-        }) {
+        let result = match decompose(
+            &x,
+            request.period,
+            DecomposeConfig {
+                decompose_type,
+                filter: None,
+            },
+        ) {
             Ok(r) => r,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -18527,8 +20773,18 @@ impl AnalyticsServer {
         };
 
         // Calculate statistics for output
-        let valid_trend: Vec<f64> = result.trend.iter().filter(|t| !t.is_nan()).copied().collect();
-        let valid_random: Vec<f64> = result.random.iter().filter(|r| !r.is_nan()).copied().collect();
+        let valid_trend: Vec<f64> = result
+            .trend
+            .iter()
+            .filter(|t| !t.is_nan())
+            .copied()
+            .collect();
+        let valid_random: Vec<f64> = result
+            .random
+            .iter()
+            .filter(|r| !r.is_nan())
+            .copied()
+            .collect();
 
         let trend_mean = if valid_trend.is_empty() {
             f64::NAN
@@ -18586,12 +20842,14 @@ impl AnalyticsServer {
         });
 
         Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&output).unwrap_or_else(|_| format!("{:?}", result))
+            serde_json::to_string_pretty(&output).unwrap_or_else(|_| format!("{:?}", result)),
         )]))
     }
 
     /// Fit a structural time series model.
-    #[tool(description = "Fit a structural time series model by maximum likelihood using the Kalman filter. Supports: 'level' (local level/random walk + noise, equivalent to ARIMA(0,1,1)), 'trend' (local linear trend, equivalent to ARIMA(0,2,2)), and 'bsm' (basic structural model with level, trend, and seasonality). Returns variance parameters, smoothed components, fitted values, residuals, log-likelihood, AIC, and BIC.")]
+    #[tool(
+        description = "Fit a structural time series model by maximum likelihood using the Kalman filter. Supports: 'level' (local level/random walk + noise, equivalent to ARIMA(0,1,1)), 'trend' (local linear trend, equivalent to ARIMA(0,2,2)), and 'bsm' (basic structural model with level, trend, and seasonality). Returns variance parameters, smoothed components, fitted values, residuals, log-likelihood, AIC, and BIC."
+    )]
     async fn timeseries_structts(
         &self,
         Parameters(request): Parameters<StructTsRequest>,
@@ -18632,16 +20890,19 @@ impl AnalyticsServer {
         // Validate period for BSM
         if model_type == StructTsType::BSM && request.period.is_none() {
             return Ok(CallToolResult::error(vec![Content::text(
-                "BSM model requires a period parameter (e.g., 12 for monthly data)"
+                "BSM model requires a period parameter (e.g., 12 for monthly data)",
             )]));
         }
 
         // Run StructTS
-        let result = match struct_ts(&y, StructTsConfig {
-            model_type,
-            period: request.period,
-            ..Default::default()
-        }) {
+        let result = match struct_ts(
+            &y,
+            StructTsConfig {
+                model_type,
+                period: request.period,
+                ..Default::default()
+            },
+        ) {
             Ok(r) => r,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -18709,12 +20970,14 @@ impl AnalyticsServer {
         });
 
         Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&output).unwrap_or_else(|_| format!("{:?}", result))
+            serde_json::to_string_pretty(&output).unwrap_or_else(|_| format!("{:?}", result)),
         )]))
     }
 
     /// CausalImpact analysis using Bayesian Structural Time Series.
-    #[tool(description = "Estimate the causal effect of an intervention using Bayesian Structural Time Series (BSTS). Uses pre-intervention data to build a counterfactual prediction, then compares with observed post-intervention data to estimate the causal effect. Optionally uses control time series that are correlated with the response but unaffected by the intervention. Returns cumulative/average effects with credible intervals and Bayesian p-value.")]
+    #[tool(
+        description = "Estimate the causal effect of an intervention using Bayesian Structural Time Series (BSTS). Uses pre-intervention data to build a counterfactual prediction, then compares with observed post-intervention data to estimate the causal effect. Optionally uses control time series that are correlated with the response but unaffected by the intervention. Returns cumulative/average effects with credible intervals and Bayesian p-value."
+    )]
     async fn causal_impact_analysis(
         &self,
         Parameters(request): Parameters<CausalImpactRequest>,
@@ -18743,7 +21006,8 @@ impl AnalyticsServer {
         };
 
         // Run CausalImpact
-        let result = match causal_impact(dataset, &request.response_col, &request.time_col, config) {
+        let result = match causal_impact(dataset, &request.response_col, &request.time_col, config)
+        {
             Ok(r) => r,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -18831,7 +21095,7 @@ impl AnalyticsServer {
         });
 
         Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&output).unwrap_or_else(|_| format!("{:?}", result))
+            serde_json::to_string_pretty(&output).unwrap_or_else(|_| format!("{:?}", result)),
         )]))
     }
 
@@ -18840,7 +21104,9 @@ impl AnalyticsServer {
     // ========================================================================
 
     /// Generate an HTML report from structured analysis results.
-    #[tool(description = "Generate a self-contained HTML report from analysis results. The report includes proper styling, tables, charts (as embedded images), and is suitable for sharing or printing. Returns the complete HTML document as a string.")]
+    #[tool(
+        description = "Generate a self-contained HTML report from analysis results. The report includes proper styling, tables, charts (as embedded images), and is suitable for sharing or printing. Returns the complete HTML document as a string."
+    )]
     async fn generate_report(
         &self,
         Parameters(request): Parameters<GenerateReportRequest>,
@@ -18873,7 +21139,9 @@ impl AnalyticsServer {
                         }
                     }
                     "table" => {
-                        if let (Some(headers), Some(rows)) = (&content_input.headers, &content_input.rows) {
+                        if let (Some(headers), Some(rows)) =
+                            (&content_input.headers, &content_input.rows)
+                        {
                             let mut table = ReportTable::new(headers.clone());
                             if let Some(ref caption) = content_input.caption {
                                 table = table.with_caption(caption);
@@ -18942,7 +21210,9 @@ impl AnalyticsServer {
     // ========================================================================
 
     /// Run K-means clustering.
-    #[tool(description = "Run K-means clustering to partition data into k clusters. Uses k-means++ initialization for better convergence. Returns cluster assignments, centroids, and inertia (within-cluster sum of squares).")]
+    #[tool(
+        description = "Run K-means clustering to partition data into k clusters. Uses k-means++ initialization for better convergence. Returns cluster assignments, centroids, and inertia (within-cluster sum of squares)."
+    )]
     async fn ml_kmeans(
         &self,
         Parameters(request): Parameters<KMeansRequest>,
@@ -18986,11 +21256,15 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     /// Run DBSCAN clustering.
-    #[tool(description = "Run DBSCAN (Density-Based Spatial Clustering of Applications with Noise) clustering. Finds clusters of arbitrary shape and identifies outliers as noise points. Does not require specifying number of clusters.")]
+    #[tool(
+        description = "Run DBSCAN (Density-Based Spatial Clustering of Applications with Noise) clustering. Finds clusters of arbitrary shape and identifies outliers as noise points. Does not require specifying number of clusters."
+    )]
     async fn ml_dbscan(
         &self,
         Parameters(request): Parameters<DBSCANRequest>,
@@ -19023,11 +21297,15 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     /// Run PCA (Principal Component Analysis).
-    #[tool(description = "Run Principal Component Analysis (PCA) for dimensionality reduction. Returns principal components, explained variance ratios, and loadings. Useful for understanding data structure and reducing feature dimensionality.")]
+    #[tool(
+        description = "Run Principal Component Analysis (PCA) for dimensionality reduction. Returns principal components, explained variance ratios, and loadings. Useful for understanding data structure and reducing feature dimensionality."
+    )]
     async fn ml_pca(
         &self,
         Parameters(request): Parameters<PCARequest>,
@@ -19060,11 +21338,15 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     /// Run Hierarchical (Agglomerative) clustering.
-    #[tool(description = "Run Hierarchical clustering using agglomerative approach. Supports Ward, single, complete, and average linkage methods. Returns cluster assignments and dendrogram information.")]
+    #[tool(
+        description = "Run Hierarchical clustering using agglomerative approach. Supports Ward, single, complete, and average linkage methods. Returns cluster assignments and dendrogram information."
+    )]
     async fn ml_hierarchical(
         &self,
         Parameters(request): Parameters<HierarchicalRequest>,
@@ -19114,11 +21396,15 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     /// Run t-SNE dimensionality reduction.
-    #[tool(description = "Run t-SNE (t-distributed Stochastic Neighbor Embedding) for visualizing high-dimensional data in 2D or 3D. Preserves local structure while revealing clusters. Good for exploratory visualization.")]
+    #[tool(
+        description = "Run t-SNE (t-distributed Stochastic Neighbor Embedding) for visualizing high-dimensional data in 2D or 3D. Preserves local structure while revealing clusters. Good for exploratory visualization."
+    )]
     async fn ml_tsne(
         &self,
         Parameters(request): Parameters<TsneRequest>,
@@ -19161,11 +21447,15 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     /// Run Classical Multidimensional Scaling (cmdscale).
-    #[tool(description = "Classical Multidimensional Scaling (cmdscale) for embedding distances into Euclidean space. Takes a data matrix and computes a low-dimensional configuration that preserves pairwise Euclidean distances. Returns point coordinates and goodness-of-fit measures. Useful for visualizing similarity/dissimilarity data.")]
+    #[tool(
+        description = "Classical Multidimensional Scaling (cmdscale) for embedding distances into Euclidean space. Takes a data matrix and computes a low-dimensional configuration that preserves pairwise Euclidean distances. Returns point coordinates and goodness-of-fit measures. Useful for visualizing similarity/dissimilarity data."
+    )]
     async fn ml_cmdscale(
         &self,
         Parameters(request): Parameters<CmdscaleRequest>,
@@ -19196,13 +21486,12 @@ impl AnalyticsServer {
             if data.ncols() != n {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
                     "Distance matrix must be square. Got {} rows x {} cols.",
-                    n, data.ncols()
+                    n,
+                    data.ncols()
                 ))]));
             }
             // Convert to nested Vec
-            let dist: Vec<Vec<f64>> = (0..n)
-                .map(|i| data.row(i).to_vec())
-                .collect();
+            let dist: Vec<Vec<f64>> = (0..n).map(|i| data.row(i).to_vec()).collect();
             cmdscale(&dist, k, Some(true), None)
         } else {
             // Compute Euclidean distances from data
@@ -19224,20 +21513,20 @@ impl AnalyticsServer {
                     "note": if r.n > 20 { Some(format!("Showing first 20 of {} points", r.n)) } else { None }
                 });
                 Ok(CallToolResult::success(vec![Content::text(
-                    serde_json::to_string_pretty(&output).unwrap_or_else(|_| r.to_string())
+                    serde_json::to_string_pretty(&output).unwrap_or_else(|_| r.to_string()),
                 )]))
             }
-            Err(e) => {
-                Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Classical MDS (cmdscale) failed: {}",
-                    e
-                ))]))
-            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
+                "Classical MDS (cmdscale) failed: {}",
+                e
+            ))])),
         }
     }
 
     /// Cut a hierarchical clustering tree into groups.
-    #[tool(description = "Cut a hierarchical clustering dendrogram into groups (cutree). First performs hierarchical clustering, then cuts the resulting tree at a specified number of clusters (k) or height. Returns cluster assignments for each observation. Useful for extracting cluster memberships from a dendrogram.")]
+    #[tool(
+        description = "Cut a hierarchical clustering dendrogram into groups (cutree). First performs hierarchical clustering, then cuts the resulting tree at a specified number of clusters (k) or height. Returns cluster assignments for each observation. Useful for extracting cluster memberships from a dendrogram."
+    )]
     async fn ml_cutree(
         &self,
         Parameters(request): Parameters<CutreeRequest>,
@@ -19296,7 +21585,8 @@ impl AnalyticsServer {
         };
 
         // Format output as JSON
-        let mut cluster_counts: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+        let mut cluster_counts: std::collections::HashMap<usize, usize> =
+            std::collections::HashMap::new();
         for &label in &result.labels {
             *cluster_counts.entry(label).or_insert(0) += 1;
         }
@@ -19311,12 +21601,14 @@ impl AnalyticsServer {
         });
 
         Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&output).unwrap_or_else(|_| result.to_string())
+            serde_json::to_string_pretty(&output).unwrap_or_else(|_| result.to_string()),
         )]))
     }
 
     /// Run Random Forest regression.
-    #[tool(description = "Run Random Forest regression. Ensemble of decision trees for robust predictions. Returns feature importances, out-of-bag score, and predictions.")]
+    #[tool(
+        description = "Run Random Forest regression. Ensemble of decision trees for robust predictions. Returns feature importances, out-of-bag score, and predictions."
+    )]
     async fn ml_random_forest(
         &self,
         Parameters(request): Parameters<RandomForestRequest>,
@@ -19395,11 +21687,15 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     /// Run Causal Forest for heterogeneous treatment effects (Wager & Athey 2018).
-    #[tool(description = "Causal Forest estimates heterogeneous treatment effects (CATE) using random forests adapted for causal inference. Key features: honest splitting (separate data for tree structure vs estimation), local centering, bootstrap variance estimation. Returns: CATE estimates for each unit, ATE with confidence interval, variable importance showing which covariates drive treatment effect heterogeneity. Based on R package 'grf'.")]
+    #[tool(
+        description = "Causal Forest estimates heterogeneous treatment effects (CATE) using random forests adapted for causal inference. Key features: honest splitting (separate data for tree structure vs estimation), local centering, bootstrap variance estimation. Returns: CATE estimates for each unit, ATE with confidence interval, variable importance showing which covariates drive treatment effect heterogeneity. Based on R package 'grf'."
+    )]
     async fn ml_causal_forest(
         &self,
         Parameters(request): Parameters<CausalForestRequest>,
@@ -19467,13 +21763,15 @@ impl AnalyticsServer {
 
         Ok(CallToolResult::success(vec![Content::text(format!(
             "{}\n\nJSON Summary:\n{}",
-            result.to_string(),
+            result,
             serde_json::to_string_pretty(&output).unwrap_or_default()
         ))]))
     }
 
     /// Run BART-based causal inference for heterogeneous treatment effects (bartCause style).
-    #[tool(description = "BART Causal estimates heterogeneous treatment effects using Bayesian Additive Regression Trees methodology. Fits separate response surfaces for treated and control groups, then computes CATE = E[Y|T=1,X] - E[Y|T=0,X]. Uses bootstrap for uncertainty quantification. Returns: ATE with confidence interval, CATE estimates for each unit, variable importance for treatment effect heterogeneity. Simplified frequentist approximation to R's bartCause package.")]
+    #[tool(
+        description = "BART Causal estimates heterogeneous treatment effects using Bayesian Additive Regression Trees methodology. Fits separate response surfaces for treated and control groups, then computes CATE = E[Y|T=1,X] - E[Y|T=0,X]. Uses bootstrap for uncertainty quantification. Returns: ATE with confidence interval, CATE estimates for each unit, variable importance for treatment effect heterogeneity. Simplified frequentist approximation to R's bartCause package."
+    )]
     async fn ml_bart_causal(
         &self,
         Parameters(request): Parameters<BartCausalRequest>,
@@ -19543,14 +21841,15 @@ impl AnalyticsServer {
 
         Ok(CallToolResult::success(vec![Content::text(format!(
             "{}\n\nJSON Summary:\n{}",
-            result.to_string(),
+            result,
             serde_json::to_string_pretty(&output).unwrap_or_default()
         ))]))
     }
 
-
     /// Run Treatment Effect Heterogeneity Test (hettx).
-    #[tool(description = "Test for treatment effect heterogeneity using Fisherian randomization inference. Tests H0: all individual treatment effects are equal (tau_i = tau). Returns permutation p-value, estimated individual effects, ATE, and optionally decomposes heterogeneity into systematic (explained by covariates) and idiosyncratic components. Based on R package 'hettx' by Ding, Feller & Miratrix.")]
+    #[tool(
+        description = "Test for treatment effect heterogeneity using Fisherian randomization inference. Tests H0: all individual treatment effects are equal (tau_i = tau). Returns permutation p-value, estimated individual effects, ATE, and optionally decomposes heterogeneity into systematic (explained by covariates) and idiosyncratic components. Based on R package 'hettx' by Ding, Feller & Miratrix."
+    )]
     async fn heterogeneity_test(
         &self,
         Parameters(request): Parameters<HetTxRequest>,
@@ -19653,12 +21952,14 @@ impl AnalyticsServer {
 
         Ok(CallToolResult::success(vec![Content::text(format!(
             "{}\n\nJSON Summary:\n{}",
-            result.to_string(),
+            result,
             serde_json::to_string_pretty(&output).unwrap_or_default()
         ))]))
     }
     /// Run Linear SVM classification.
-    #[tool(description = "Run Linear Support Vector Machine (SVM) for binary classification. Uses SMO algorithm. Returns weights, bias, support vector count, and predictions.")]
+    #[tool(
+        description = "Run Linear Support Vector Machine (SVM) for binary classification. Uses SMO algorithm. Returns weights, bias, support vector count, and predictions."
+    )]
     async fn ml_svm(
         &self,
         Parameters(request): Parameters<SvmRequest>,
@@ -19731,11 +22032,15 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+        Ok(CallToolResult::success(vec![Content::text(
+            result.to_string(),
+        )]))
     }
 
     /// Run Projection Pursuit Regression (PPR).
-    #[tool(description = "Projection Pursuit Regression (PPR) - a dimension reduction regression that fits models of the form y = sum(f_k(alpha_k' * x)). Finds optimal projection directions and ridge functions. Returns projection directions, coefficients, fitted values, and goodness-of-fit metrics. Useful for non-linear regression when relationships are complex.")]
+    #[tool(
+        description = "Projection Pursuit Regression (PPR) - a dimension reduction regression that fits models of the form y = sum(f_k(alpha_k' * x)). Finds optimal projection directions and ridge functions. Returns projection directions, coefficients, fitted values, and goodness-of-fit metrics. Useful for non-linear regression when relationships are complex."
+    )]
     async fn ml_ppr(
         &self,
         Parameters(request): Parameters<PprRequest>,
@@ -19834,12 +22139,14 @@ impl AnalyticsServer {
         });
 
         Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&output).unwrap_or_else(|_| format!("{:?}", result))
+            serde_json::to_string_pretty(&output).unwrap_or_else(|_| format!("{:?}", result)),
         )]))
     }
 
     /// Run Friedman's SuperSmoother (supsmu).
-    #[tool(description = "Friedman's SuperSmoother - adaptive local regression smoother that automatically selects optimal bandwidth at each point via cross-validation. Uses three candidate spans (0.05n, 0.2n, 0.5n) and chooses the best one per-point. Returns smoothed values. Ideal for non-parametric trend estimation.")]
+    #[tool(
+        description = "Friedman's SuperSmoother - adaptive local regression smoother that automatically selects optimal bandwidth at each point via cross-validation. Uses three candidate spans (0.05n, 0.2n, 0.5n) and chooses the best one per-point. Returns smoothed values. Ideal for non-parametric trend estimation."
+    )]
     async fn regression_supsmu(
         &self,
         Parameters(request): Parameters<SupsmuRequest>,
@@ -19968,12 +22275,14 @@ impl AnalyticsServer {
         });
 
         Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&output).unwrap_or_else(|_| format!("{:?}", result))
+            serde_json::to_string_pretty(&output).unwrap_or_else(|_| format!("{:?}", result)),
         )]))
     }
 
     /// Fit Tukey's resistant line.
-    #[tool(description = "Tukey's resistant line - robust regression using medians instead of means, making it resistant to outliers. Divides data into three groups and uses group medians to determine slope and intercept. Returns coefficients, fitted values, and residuals.")]
+    #[tool(
+        description = "Tukey's resistant line - robust regression using medians instead of means, making it resistant to outliers. Divides data into three groups and uses group medians to determine slope and intercept. Returns coefficients, fitted values, and residuals."
+    )]
     async fn regression_line(
         &self,
         Parameters(request): Parameters<LineRequest>,
@@ -20076,12 +22385,14 @@ impl AnalyticsServer {
         });
 
         Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&output).unwrap_or_else(|_| format!("{:?}", result))
+            serde_json::to_string_pretty(&output).unwrap_or_else(|_| format!("{:?}", result)),
         )]))
     }
 
     /// Compute cumulative periodogram for white noise test.
-    #[tool(description = "Cumulative periodogram (cpgram) - diagnostic tool for testing if a time series is white noise. Plots cumulative sum of periodogram ordinates. For white noise, should follow a uniform distribution. Returns cumulative periodogram, confidence bands, and Kolmogorov-Smirnov test for white noise.")]
+    #[tool(
+        description = "Cumulative periodogram (cpgram) - diagnostic tool for testing if a time series is white noise. Plots cumulative sum of periodogram ordinates. For white noise, should follow a uniform distribution. Returns cumulative periodogram, confidence bands, and Kolmogorov-Smirnov test for white noise."
+    )]
     async fn timeseries_cpgram(
         &self,
         Parameters(request): Parameters<CpgramRequest>,
@@ -20115,7 +22426,7 @@ impl AnalyticsServer {
 
         let values: Vec<f64> = match col.cast(&DataType::Float64) {
             Ok(c) => match c.f64() {
-                Ok(f) => f.into_iter().filter_map(|v| v).collect(),
+                Ok(f) => f.into_iter().flatten().collect(),
                 Err(e) => {
                     return Ok(CallToolResult::error(vec![Content::text(format!(
                         "Column not numeric: {}",
@@ -20157,12 +22468,14 @@ impl AnalyticsServer {
         });
 
         Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&output).unwrap_or_else(|_| format!("{:?}", result))
+            serde_json::to_string_pretty(&output).unwrap_or_else(|_| format!("{:?}", result)),
         )]))
     }
 
     /// Construct a Toeplitz matrix.
-    #[tool(description = "Construct a Toeplitz matrix - a matrix with constant values along each diagonal. Useful for autocorrelation matrices, circulant matrices, and time series analysis. Can create symmetric or asymmetric Toeplitz matrices.")]
+    #[tool(
+        description = "Construct a Toeplitz matrix - a matrix with constant values along each diagonal. Useful for autocorrelation matrices, circulant matrices, and time series analysis. Can create symmetric or asymmetric Toeplitz matrices."
+    )]
     async fn linalg_toeplitz(
         &self,
         Parameters(request): Parameters<ToeplitzRequest>,
@@ -20198,12 +22511,14 @@ impl AnalyticsServer {
         });
 
         Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&output).unwrap_or_else(|_| format!("{:?}", result))
+            serde_json::to_string_pretty(&output).unwrap_or_else(|_| format!("{:?}", result)),
         )]))
     }
 
     /// Compute model tables from ANOVA.
-    #[tool(description = "Compute model tables (means or effects) from one-way or two-way ANOVA. Returns tables of group means or effects (deviations from grand mean) along with standard errors. Useful for post-hoc analysis of ANOVA results.")]
+    #[tool(
+        description = "Compute model tables (means or effects) from one-way or two-way ANOVA. Returns tables of group means or effects (deviations from grand mean) along with standard errors. Useful for post-hoc analysis of ANOVA results."
+    )]
     async fn stats_model_tables(
         &self,
         Parameters(request): Parameters<ModelTablesRequest>,
@@ -20269,11 +22584,17 @@ impl AnalyticsServer {
             });
 
             Ok(CallToolResult::success(vec![Content::text(
-                serde_json::to_string_pretty(&output).unwrap_or_else(|_| format!("{:?}", result))
+                serde_json::to_string_pretty(&output).unwrap_or_else(|_| format!("{:?}", result)),
             )]))
         } else if request.factors.len() == 2 {
             // Two-way ANOVA
-            let anova = match run_two_way_anova(dataset, &request.response, &request.factors[0], &request.factors[1], true) {
+            let anova = match run_two_way_anova(
+                dataset,
+                &request.response,
+                &request.factors[0],
+                &request.factors[1],
+                true,
+            ) {
                 Ok(a) => a,
                 Err(e) => {
                     return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -20315,17 +22636,19 @@ impl AnalyticsServer {
             });
 
             Ok(CallToolResult::success(vec![Content::text(
-                serde_json::to_string_pretty(&output).unwrap_or_else(|_| format!("{:?}", anova))
+                serde_json::to_string_pretty(&output).unwrap_or_else(|_| format!("{:?}", anova)),
             )]))
         } else {
             Ok(CallToolResult::error(vec![Content::text(
-                "Model tables requires 1 factor (one-way) or 2 factors (two-way)."
+                "Model tables requires 1 factor (one-way) or 2 factors (two-way).",
             )]))
         }
     }
 
     /// Compute standard errors for contrasts in ANOVA.
-    #[tool(description = "Compute standard errors for linear contrasts in ANOVA. A contrast is a linear combination of group means where coefficients sum to zero. Can specify custom contrasts or generate standard ones (treatment, Helmert, sum, polynomial). Returns SE for each contrast.")]
+    #[tool(
+        description = "Compute standard errors for linear contrasts in ANOVA. A contrast is a linear combination of group means where coefficients sum to zero. Can specify custom contrasts or generate standard ones (treatment, Helmert, sum, polynomial). Returns SE for each contrast."
+    )]
     async fn stats_se_contrast(
         &self,
         Parameters(request): Parameters<SeContrastRequest>,
@@ -20396,12 +22719,14 @@ impl AnalyticsServer {
         });
 
         Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&output).unwrap_or_else(|_| format!("{:?}", result))
+            serde_json::to_string_pretty(&output).unwrap_or_else(|_| format!("{:?}", result)),
         )]))
     }
 
     /// Compute weighted mean.
-    #[tool(description = "Compute the weighted arithmetic mean: sum(w*x) / sum(w). Useful when observations have different importance or frequency weights.")]
+    #[tool(
+        description = "Compute the weighted arithmetic mean: sum(w*x) / sum(w). Useful when observations have different importance or frequency weights."
+    )]
     async fn stats_weighted_mean(
         &self,
         Parameters(request): Parameters<WeightedMeanRequest>,
@@ -20414,7 +22739,8 @@ impl AnalyticsServer {
             Some(ds) => ds,
             None => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Dataset '{}' not found.", request.dataset
+                    "Dataset '{}' not found.",
+                    request.dataset
                 ))]));
             }
         };
@@ -20423,23 +22749,48 @@ impl AnalyticsServer {
 
         let values: Vec<f64> = match df.column(&request.column) {
             Ok(c) => match c.cast(&DataType::Float64) {
-                Ok(c) => c.f64().unwrap().into_iter().filter_map(|v| v).collect(),
-                Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!("Column not numeric: {}", e))])),
+                Ok(c) => c.f64().unwrap().into_iter().flatten().collect(),
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Column not numeric: {}",
+                        e
+                    ))]));
+                }
             },
-            Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!("Column not found: {}", e))])),
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Column not found: {}",
+                    e
+                ))]));
+            }
         };
 
         let weights: Vec<f64> = match df.column(&request.weights) {
             Ok(c) => match c.cast(&DataType::Float64) {
-                Ok(c) => c.f64().unwrap().into_iter().filter_map(|v| v).collect(),
-                Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!("Weights not numeric: {}", e))])),
+                Ok(c) => c.f64().unwrap().into_iter().flatten().collect(),
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Weights not numeric: {}",
+                        e
+                    ))]));
+                }
             },
-            Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!("Weight column not found: {}", e))])),
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Weight column not found: {}",
+                    e
+                ))]));
+            }
         };
 
         let result = match weighted_mean(&values, &weights, true) {
             Ok(r) => r,
-            Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!("Weighted mean failed: {}", e))])),
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Weighted mean failed: {}",
+                    e
+                ))]));
+            }
         };
 
         let output = serde_json::json!({
@@ -20449,12 +22800,14 @@ impl AnalyticsServer {
         });
 
         Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&output).unwrap()
+            serde_json::to_string_pretty(&output).unwrap(),
         )]))
     }
 
     /// Compute weighted covariance matrix.
-    #[tool(description = "Compute weighted covariance matrix and optionally weighted means. Uses frequency or probability weights to weight observations differently.")]
+    #[tool(
+        description = "Compute weighted covariance matrix and optionally weighted means. Uses frequency or probability weights to weight observations differently."
+    )]
     async fn stats_cov_wt(
         &self,
         Parameters(request): Parameters<CovWtRequest>,
@@ -20465,7 +22818,8 @@ impl AnalyticsServer {
             Some(ds) => ds,
             None => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Dataset '{}' not found.", request.dataset
+                    "Dataset '{}' not found.",
+                    request.dataset
                 ))]));
             }
         };
@@ -20479,10 +22833,20 @@ impl AnalyticsServer {
         let df = dataset.df();
         let weights: Vec<f64> = match df.column(&request.weights) {
             Ok(c) => match c.cast(&DataType::Float64) {
-                Ok(c) => c.f64().unwrap().into_iter().filter_map(|v| v).collect(),
-                Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!("Weights not numeric: {}", e))])),
+                Ok(c) => c.f64().unwrap().into_iter().flatten().collect(),
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Weights not numeric: {}",
+                        e
+                    ))]));
+                }
             },
-            Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!("Weight column not found: {}", e))])),
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Weight column not found: {}",
+                    e
+                ))]));
+            }
         };
 
         // Flatten matrix to row-major slice
@@ -20491,9 +22855,21 @@ impl AnalyticsServer {
         let flat_data: Vec<f64> = data.iter().copied().collect();
 
         let method_str = request.method.as_deref();
-        let result = match run_cov_wt(&flat_data, n_rows, n_cols, Some(&weights), false, method_str) {
+        let result = match run_cov_wt(
+            &flat_data,
+            n_rows,
+            n_cols,
+            Some(&weights),
+            false,
+            method_str,
+        ) {
             Ok(r) => r,
-            Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!("cov.wt failed: {}", e))])),
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "cov.wt failed: {}",
+                    e
+                ))]));
+            }
         };
 
         let output = serde_json::json!({
@@ -20504,12 +22880,14 @@ impl AnalyticsServer {
         });
 
         Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&output).unwrap()
+            serde_json::to_string_pretty(&output).unwrap(),
         )]))
     }
 
     /// Mauchly's test for sphericity.
-    #[tool(description = "Mauchly's test for sphericity - tests whether the variances of differences between repeated measures are equal. Required assumption for repeated measures ANOVA. Returns test statistic, p-value, and Greenhouse-Geisser/Huynh-Feldt epsilon corrections.")]
+    #[tool(
+        description = "Mauchly's test for sphericity - tests whether the variances of differences between repeated measures are equal. Required assumption for repeated measures ANOVA. Returns test statistic, p-value, and Greenhouse-Geisser/Huynh-Feldt epsilon corrections."
+    )]
     async fn stats_mauchly_test(
         &self,
         Parameters(request): Parameters<MauchlyTestRequest>,
@@ -20520,7 +22898,8 @@ impl AnalyticsServer {
             Some(ds) => ds,
             None => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Dataset '{}' not found.", request.dataset
+                    "Dataset '{}' not found.",
+                    request.dataset
                 ))]));
             }
         };
@@ -20537,7 +22916,12 @@ impl AnalyticsServer {
 
         let result = match run_mauchly_test(&flat_data, n_rows, n_cols) {
             Ok(r) => r,
-            Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!("Mauchly's test failed: {}", e))])),
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Mauchly's test failed: {}",
+                    e
+                ))]));
+            }
         };
 
         let output = serde_json::json!({
@@ -20556,12 +22940,14 @@ impl AnalyticsServer {
         });
 
         Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&output).unwrap()
+            serde_json::to_string_pretty(&output).unwrap(),
         )]))
     }
 
     /// Stepwise model selection.
-    #[tool(description = "Stepwise regression model selection using AIC or BIC. Can perform forward selection, backward elimination, or both. Returns the best model and selection history.")]
+    #[tool(
+        description = "Stepwise regression model selection using AIC or BIC. Can perform forward selection, backward elimination, or both. Returns the best model and selection history."
+    )]
     async fn regression_step(
         &self,
         Parameters(request): Parameters<StepRequest>,
@@ -20572,7 +22958,8 @@ impl AnalyticsServer {
             Some(ds) => ds,
             None => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Dataset '{}' not found.", request.dataset
+                    "Dataset '{}' not found.",
+                    request.dataset
                 ))]));
             }
         };
@@ -20584,9 +22971,22 @@ impl AnalyticsServer {
         let scope_lower: Vec<&str> = vec![];
         let scope_upper: Vec<&str> = request.predictors.iter().map(|s| s.as_str()).collect();
 
-        let result = match run_step(dataset, &request.response, &scope_lower, &scope_upper, direction_str, use_bic, true) {
+        let result = match run_step(
+            dataset,
+            &request.response,
+            &scope_lower,
+            &scope_upper,
+            direction_str,
+            use_bic,
+            true,
+        ) {
             Ok(r) => r,
-            Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!("Stepwise selection failed: {}", e))])),
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Stepwise selection failed: {}",
+                    e
+                ))]));
+            }
         };
 
         let output = serde_json::json!({
@@ -20609,12 +23009,14 @@ impl AnalyticsServer {
         });
 
         Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&output).unwrap()
+            serde_json::to_string_pretty(&output).unwrap(),
         )]))
     }
 
     /// Lag a time series.
-    #[tool(description = "Shift a time series by k positions. Positive k shifts values backward (lag), negative k shifts forward (lead). Returns the lagged series with NA padding.")]
+    #[tool(
+        description = "Shift a time series by k positions. Positive k shifts values backward (lag), negative k shifts forward (lead). Returns the lagged series with NA padding."
+    )]
     async fn timeseries_lag(
         &self,
         Parameters(request): Parameters<LagRequest>,
@@ -20627,7 +23029,8 @@ impl AnalyticsServer {
             Some(ds) => ds,
             None => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Dataset '{}' not found.", request.dataset
+                    "Dataset '{}' not found.",
+                    request.dataset
                 ))]));
             }
         };
@@ -20635,16 +23038,36 @@ impl AnalyticsServer {
         let df = dataset.df();
         let values: Vec<f64> = match df.column(&request.column) {
             Ok(c) => match c.cast(&DataType::Float64) {
-                Ok(c) => c.f64().unwrap().into_iter().map(|v| v.unwrap_or(f64::NAN)).collect(),
-                Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!("Column not numeric: {}", e))])),
+                Ok(c) => c
+                    .f64()
+                    .unwrap()
+                    .into_iter()
+                    .map(|v| v.unwrap_or(f64::NAN))
+                    .collect(),
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Column not numeric: {}",
+                        e
+                    ))]));
+                }
             },
-            Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!("Column not found: {}", e))])),
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Column not found: {}",
+                    e
+                ))]));
+            }
         };
 
         let k = request.k.unwrap_or(1);
         let result = match ts_lag(&values, k) {
             Ok(r) => r,
-            Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!("Lag failed: {}", e))])),
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Lag failed: {}",
+                    e
+                ))]));
+            }
         };
 
         let output = serde_json::json!({
@@ -20655,12 +23078,14 @@ impl AnalyticsServer {
         });
 
         Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&output).unwrap()
+            serde_json::to_string_pretty(&output).unwrap(),
         )]))
     }
 
     /// Embed a time series into a matrix.
-    #[tool(description = "Create a lag embedding matrix from a time series. Each row contains consecutive values, useful for building AR models or phase space reconstruction.")]
+    #[tool(
+        description = "Create a lag embedding matrix from a time series. Each row contains consecutive values, useful for building AR models or phase space reconstruction."
+    )]
     async fn timeseries_embed(
         &self,
         Parameters(request): Parameters<EmbedRequest>,
@@ -20673,7 +23098,8 @@ impl AnalyticsServer {
             Some(ds) => ds,
             None => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Dataset '{}' not found.", request.dataset
+                    "Dataset '{}' not found.",
+                    request.dataset
                 ))]));
             }
         };
@@ -20681,15 +23107,35 @@ impl AnalyticsServer {
         let df = dataset.df();
         let values: Vec<f64> = match df.column(&request.column) {
             Ok(c) => match c.cast(&DataType::Float64) {
-                Ok(c) => c.f64().unwrap().into_iter().map(|v| v.unwrap_or(f64::NAN)).collect(),
-                Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!("Column not numeric: {}", e))])),
+                Ok(c) => c
+                    .f64()
+                    .unwrap()
+                    .into_iter()
+                    .map(|v| v.unwrap_or(f64::NAN))
+                    .collect(),
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Column not numeric: {}",
+                        e
+                    ))]));
+                }
             },
-            Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!("Column not found: {}", e))])),
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Column not found: {}",
+                    e
+                ))]));
+            }
         };
 
         let result = match embed(&values, request.dimension) {
             Ok(r) => r,
-            Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!("Embedding failed: {}", e))])),
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Embedding failed: {}",
+                    e
+                ))]));
+            }
         };
 
         let output = serde_json::json!({
@@ -20699,12 +23145,14 @@ impl AnalyticsServer {
         });
 
         Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&output).unwrap()
+            serde_json::to_string_pretty(&output).unwrap(),
         )]))
     }
 
     /// Inverse of differencing.
-    #[tool(description = "Compute the inverse of differencing (cumulative sum). Reconstructs the original series from differences given initial values.")]
+    #[tool(
+        description = "Compute the inverse of differencing (cumulative sum). Reconstructs the original series from differences given initial values."
+    )]
     async fn timeseries_diffinv(
         &self,
         Parameters(request): Parameters<DiffinvRequest>,
@@ -20717,7 +23165,8 @@ impl AnalyticsServer {
             Some(ds) => ds,
             None => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Dataset '{}' not found.", request.dataset
+                    "Dataset '{}' not found.",
+                    request.dataset
                 ))]));
             }
         };
@@ -20725,10 +23174,25 @@ impl AnalyticsServer {
         let df = dataset.df();
         let values: Vec<f64> = match df.column(&request.column) {
             Ok(c) => match c.cast(&DataType::Float64) {
-                Ok(c) => c.f64().unwrap().into_iter().map(|v| v.unwrap_or(f64::NAN)).collect(),
-                Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!("Column not numeric: {}", e))])),
+                Ok(c) => c
+                    .f64()
+                    .unwrap()
+                    .into_iter()
+                    .map(|v| v.unwrap_or(f64::NAN))
+                    .collect(),
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Column not numeric: {}",
+                        e
+                    ))]));
+                }
             },
-            Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!("Column not found: {}", e))])),
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Column not found: {}",
+                    e
+                ))]));
+            }
         };
 
         let xi = request.xi.as_deref();
@@ -20737,7 +23201,12 @@ impl AnalyticsServer {
 
         let result = match diffinv(&values, lag_val, differences, xi) {
             Ok(r) => r,
-            Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!("diffinv failed: {}", e))])),
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "diffinv failed: {}",
+                    e
+                ))]));
+            }
         };
 
         let output = serde_json::json!({
@@ -20748,12 +23217,14 @@ impl AnalyticsServer {
         });
 
         Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&output).unwrap()
+            serde_json::to_string_pretty(&output).unwrap(),
         )]))
     }
 
     /// Linear filtering of time series.
-    #[tool(description = "Apply a linear filter to a time series using convolution or recursive filtering. Useful for smoothing, differencing, or implementing ARMA models.")]
+    #[tool(
+        description = "Apply a linear filter to a time series using convolution or recursive filtering. Useful for smoothing, differencing, or implementing ARMA models."
+    )]
     async fn timeseries_filter(
         &self,
         Parameters(request): Parameters<FilterRequest>,
@@ -20766,7 +23237,8 @@ impl AnalyticsServer {
             Some(ds) => ds,
             None => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Dataset '{}' not found.", request.dataset
+                    "Dataset '{}' not found.",
+                    request.dataset
                 ))]));
             }
         };
@@ -20774,31 +23246,57 @@ impl AnalyticsServer {
         let df = dataset.df();
         let values: Vec<f64> = match df.column(&request.column) {
             Ok(c) => match c.cast(&DataType::Float64) {
-                Ok(c) => c.f64().unwrap().into_iter().map(|v| v.unwrap_or(f64::NAN)).collect(),
-                Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!("Column not numeric: {}", e))])),
+                Ok(c) => c
+                    .f64()
+                    .unwrap()
+                    .into_iter()
+                    .map(|v| v.unwrap_or(f64::NAN))
+                    .collect(),
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Column not numeric: {}",
+                        e
+                    ))]));
+                }
             },
-            Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!("Column not found: {}", e))])),
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Column not found: {}",
+                    e
+                ))]));
+            }
         };
 
         let method = match request.method.as_deref() {
             Some("recursive") => FilterMethod::Recursive,
             Some("convolution") | None => FilterMethod::Convolution,
-            Some(other) => return Ok(CallToolResult::error(vec![Content::text(format!(
-                "Unknown method '{}'. Use 'convolution' or 'recursive'.", other
-            ))])),
+            Some(other) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Unknown method '{}'. Use 'convolution' or 'recursive'.",
+                    other
+                ))]));
+            }
         };
 
         let sides = match request.sides {
             Some(1) => FilterSides::One,
             Some(2) | None => FilterSides::Two,
-            Some(other) => return Ok(CallToolResult::error(vec![Content::text(format!(
-                "Invalid sides '{}'. Use 1 (one-sided) or 2 (two-sided).", other
-            ))])),
+            Some(other) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Invalid sides '{}'. Use 1 (one-sided) or 2 (two-sided).",
+                    other
+                ))]));
+            }
         };
 
         let result = match ts_filter(&values, &request.filter, method, sides, None) {
             Ok(r) => r,
-            Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!("Filter failed: {}", e))])),
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Filter failed: {}",
+                    e
+                ))]));
+            }
         };
 
         let output = serde_json::json!({
@@ -20810,12 +23308,14 @@ impl AnalyticsServer {
         });
 
         Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&output).unwrap()
+            serde_json::to_string_pretty(&output).unwrap(),
         )]))
     }
 
     /// Extract a window from time series.
-    #[tool(description = "Extract a contiguous window (subset) from a time series by specifying start and end indices.")]
+    #[tool(
+        description = "Extract a contiguous window (subset) from a time series by specifying start and end indices."
+    )]
     async fn timeseries_window(
         &self,
         Parameters(request): Parameters<WindowRequest>,
@@ -20828,7 +23328,8 @@ impl AnalyticsServer {
             Some(ds) => ds,
             None => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Dataset '{}' not found.", request.dataset
+                    "Dataset '{}' not found.",
+                    request.dataset
                 ))]));
             }
         };
@@ -20836,15 +23337,35 @@ impl AnalyticsServer {
         let df = dataset.df();
         let values: Vec<f64> = match df.column(&request.column) {
             Ok(c) => match c.cast(&DataType::Float64) {
-                Ok(c) => c.f64().unwrap().into_iter().map(|v| v.unwrap_or(f64::NAN)).collect(),
-                Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!("Column not numeric: {}", e))])),
+                Ok(c) => c
+                    .f64()
+                    .unwrap()
+                    .into_iter()
+                    .map(|v| v.unwrap_or(f64::NAN))
+                    .collect(),
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Column not numeric: {}",
+                        e
+                    ))]));
+                }
             },
-            Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!("Column not found: {}", e))])),
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Column not found: {}",
+                    e
+                ))]));
+            }
         };
 
         let result = match ts_window(&values, request.start, request.end) {
             Ok(r) => r,
-            Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!("Window extraction failed: {}", e))])),
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Window extraction failed: {}",
+                    e
+                ))]));
+            }
         };
 
         let output = serde_json::json!({
@@ -20855,12 +23376,14 @@ impl AnalyticsServer {
         });
 
         Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&output).unwrap()
+            serde_json::to_string_pretty(&output).unwrap(),
         )]))
     }
 
     /// Compute theoretical ACF for ARMA model.
-    #[tool(description = "Compute the theoretical autocorrelation function (ACF) or partial ACF for an ARMA(p,q) model given AR and MA coefficients.")]
+    #[tool(
+        description = "Compute the theoretical autocorrelation function (ACF) or partial ACF for an ARMA(p,q) model given AR and MA coefficients."
+    )]
     async fn timeseries_arma_acf(
         &self,
         Parameters(request): Parameters<ArmaAcfRequest>,
@@ -20872,7 +23395,12 @@ impl AnalyticsServer {
 
         let result = match arma_acf(&ar, &ma, lag_max, pacf) {
             Ok(r) => r,
-            Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!("ARMAacf failed: {}", e))])),
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "ARMAacf failed: {}",
+                    e
+                ))]));
+            }
         };
 
         let output = serde_json::json!({
@@ -20885,12 +23413,14 @@ impl AnalyticsServer {
         });
 
         Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&output).unwrap()
+            serde_json::to_string_pretty(&output).unwrap(),
         )]))
     }
 
     /// Convert ARMA to MA (psi weights).
-    #[tool(description = "Convert ARMA model to its infinite MA representation (psi weights). The psi weights show the impulse response function of the model.")]
+    #[tool(
+        description = "Convert ARMA model to its infinite MA representation (psi weights). The psi weights show the impulse response function of the model."
+    )]
     async fn timeseries_arma_to_ma(
         &self,
         Parameters(request): Parameters<ArmaToMaRequest>,
@@ -20901,7 +23431,12 @@ impl AnalyticsServer {
 
         let result = match arma_to_ma(&ar, &ma, lag_max) {
             Ok(r) => r,
-            Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!("ARMAtoMA failed: {}", e))])),
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "ARMAtoMA failed: {}",
+                    e
+                ))]));
+            }
         };
 
         let output = serde_json::json!({
@@ -20912,19 +23447,26 @@ impl AnalyticsServer {
         });
 
         Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&output).unwrap()
+            serde_json::to_string_pretty(&output).unwrap(),
         )]))
     }
 
     /// Convert ACF to AR coefficients.
-    #[tool(description = "Compute AR coefficients from autocorrelation function using the Yule-Walker equations. Also returns partial autocorrelations.")]
+    #[tool(
+        description = "Compute AR coefficients from autocorrelation function using the Yule-Walker equations. Also returns partial autocorrelations."
+    )]
     async fn timeseries_acf_to_ar(
         &self,
         Parameters(request): Parameters<Acf2ArRequest>,
     ) -> Result<CallToolResult, McpError> {
         let result = match acf_to_ar(&request.acf) {
             Ok(r) => r,
-            Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!("acf2AR failed: {}", e))])),
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "acf2AR failed: {}",
+                    e
+                ))]));
+            }
         };
 
         let output = serde_json::json!({
@@ -20935,12 +23477,14 @@ impl AnalyticsServer {
         });
 
         Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&output).unwrap()
+            serde_json::to_string_pretty(&output).unwrap(),
         )]))
     }
 
     /// Simulate from ARIMA model.
-    #[tool(description = "Simulate a time series from an ARIMA(p,d,q) model. Generates random innovations and applies the ARMA recursion with optional differencing.")]
+    #[tool(
+        description = "Simulate a time series from an ARIMA(p,d,q) model. Generates random innovations and applies the ARMA recursion with optional differencing."
+    )]
     async fn timeseries_arima_sim(
         &self,
         Parameters(request): Parameters<ArimaSimRequest>,
@@ -20951,7 +23495,12 @@ impl AnalyticsServer {
 
         let result = match arima_sim(&ar, &ma, d, request.n, None, None, request.seed) {
             Ok(r) => r,
-            Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!("arima.sim failed: {}", e))])),
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "arima.sim failed: {}",
+                    e
+                ))]));
+            }
         };
 
         let output = serde_json::json!({
@@ -20967,12 +23516,14 @@ impl AnalyticsServer {
         });
 
         Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&output).unwrap()
+            serde_json::to_string_pretty(&output).unwrap(),
         )]))
     }
 
     /// Running median smoothing.
-    #[tool(description = "Apply running median smoother to a time series. More robust to outliers than running mean. Uses Tukey's median polish for the smoothing.")]
+    #[tool(
+        description = "Apply running median smoother to a time series. More robust to outliers than running mean. Uses Tukey's median polish for the smoothing."
+    )]
     async fn timeseries_runmed(
         &self,
         Parameters(request): Parameters<RunmedRequest>,
@@ -20985,7 +23536,8 @@ impl AnalyticsServer {
             Some(ds) => ds,
             None => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Dataset '{}' not found.", request.dataset
+                    "Dataset '{}' not found.",
+                    request.dataset
                 ))]));
             }
         };
@@ -20993,24 +23545,47 @@ impl AnalyticsServer {
         let df = dataset.df();
         let values: Vec<f64> = match df.column(&request.column) {
             Ok(c) => match c.cast(&DataType::Float64) {
-                Ok(c) => c.f64().unwrap().into_iter().map(|v| v.unwrap_or(f64::NAN)).collect(),
-                Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!("Column not numeric: {}", e))])),
+                Ok(c) => c
+                    .f64()
+                    .unwrap()
+                    .into_iter()
+                    .map(|v| v.unwrap_or(f64::NAN))
+                    .collect(),
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Column not numeric: {}",
+                        e
+                    ))]));
+                }
             },
-            Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!("Column not found: {}", e))])),
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Column not found: {}",
+                    e
+                ))]));
+            }
         };
 
         let endrule = match request.endrule.as_deref() {
             Some("constant") => EndRule::Constant,
             Some("median") => EndRule::Median,
             Some("keep") | None => EndRule::Keep,
-            Some(other) => return Ok(CallToolResult::error(vec![Content::text(format!(
-                "Unknown endrule '{}'. Use 'keep', 'constant', or 'median'.", other
-            ))])),
+            Some(other) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Unknown endrule '{}'. Use 'keep', 'constant', or 'median'.",
+                    other
+                ))]));
+            }
         };
 
         let result = match runmed(&values, request.k, endrule) {
             Ok(r) => r,
-            Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!("runmed failed: {}", e))])),
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "runmed failed: {}",
+                    e
+                ))]));
+            }
         };
 
         let output = serde_json::json!({
@@ -21022,7 +23597,7 @@ impl AnalyticsServer {
         });
 
         Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&output).unwrap()
+            serde_json::to_string_pretty(&output).unwrap(),
         )]))
     }
 
@@ -21031,7 +23606,9 @@ impl AnalyticsServer {
     // ========================================================================
 
     /// Query a SQLite database and load results as a dataset.
-    #[tool(description = "Execute a SQL query against a SQLite database and load the results as a dataset. The resulting dataset can then be analyzed using other tools.")]
+    #[tool(
+        description = "Execute a SQL query against a SQLite database and load the results as a dataset. The resulting dataset can then be analyzed using other tools."
+    )]
     async fn db_sqlite_query(
         &self,
         Parameters(request): Parameters<SqliteQueryRequest>,
@@ -21054,10 +23631,13 @@ impl AnalyticsServer {
 
         // Generate name
         let name = request.name.unwrap_or_else(|| {
-            format!("sqlite_query_{}", std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs())
+            format!(
+                "sqlite_query_{}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs()
+            )
         });
 
         // Store dataset
@@ -21104,7 +23684,8 @@ impl AnalyticsServer {
 
         let output = format!(
             "Tables in SQLite database:\n\n{}",
-            tables.iter()
+            tables
+                .iter()
                 .map(|t| format!("  - {}", t))
                 .collect::<Vec<_>>()
                 .join("\n")
@@ -21114,7 +23695,9 @@ impl AnalyticsServer {
     }
 
     /// Get schema for a SQLite table.
-    #[tool(description = "Get the schema (column names and types) for a table in a SQLite database.")]
+    #[tool(
+        description = "Get the schema (column names and types) for a table in a SQLite database."
+    )]
     async fn db_sqlite_schema(
         &self,
         Parameters(request): Parameters<SqliteSchemaRequest>,
@@ -21139,7 +23722,8 @@ impl AnalyticsServer {
         let output = format!(
             "Schema for table '{}':\n\n{}",
             request.table_name,
-            schema.iter()
+            schema
+                .iter()
                 .map(|(name, dtype)| format!("  - {} ({})", name, dtype))
                 .collect::<Vec<_>>()
                 .join("\n")
@@ -21149,7 +23733,9 @@ impl AnalyticsServer {
     }
 
     /// Query a DuckDB database and load results as a dataset.
-    #[tool(description = "Execute a SQL query against a DuckDB database and load the results as a dataset. DuckDB supports advanced analytics SQL including window functions, CTEs, and more.")]
+    #[tool(
+        description = "Execute a SQL query against a DuckDB database and load the results as a dataset. DuckDB supports advanced analytics SQL including window functions, CTEs, and more."
+    )]
     async fn db_duckdb_query(
         &self,
         Parameters(request): Parameters<DuckDBQueryRequest>,
@@ -21172,10 +23758,13 @@ impl AnalyticsServer {
 
         // Generate name
         let name = request.name.unwrap_or_else(|| {
-            format!("duckdb_query_{}", std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs())
+            format!(
+                "duckdb_query_{}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs()
+            )
         });
 
         // Store dataset
@@ -21222,7 +23811,8 @@ impl AnalyticsServer {
 
         let output = format!(
             "Tables in DuckDB database:\n\n{}",
-            tables.iter()
+            tables
+                .iter()
                 .map(|t| format!("  - {}", t))
                 .collect::<Vec<_>>()
                 .join("\n")
@@ -21232,7 +23822,9 @@ impl AnalyticsServer {
     }
 
     /// Get schema for a DuckDB table.
-    #[tool(description = "Get the schema (column names and types) for a table in a DuckDB database.")]
+    #[tool(
+        description = "Get the schema (column names and types) for a table in a DuckDB database."
+    )]
     async fn db_duckdb_schema(
         &self,
         Parameters(request): Parameters<DuckDBSchemaRequest>,
@@ -21257,7 +23849,8 @@ impl AnalyticsServer {
         let output = format!(
             "Schema for table '{}':\n\n{}",
             request.table_name,
-            schema.iter()
+            schema
+                .iter()
                 .map(|(name, dtype)| format!("  - {} ({})", name, dtype))
                 .collect::<Vec<_>>()
                 .join("\n")
@@ -21267,7 +23860,9 @@ impl AnalyticsServer {
     }
 
     /// Query a Parquet or CSV file directly using DuckDB SQL.
-    #[tool(description = "Execute a SQL query directly on a Parquet or CSV file using DuckDB. This is powerful for filtering, aggregating, or joining large files before loading them as datasets. Use {file} as a placeholder for the file path in your query.")]
+    #[tool(
+        description = "Execute a SQL query directly on a Parquet or CSV file using DuckDB. This is powerful for filtering, aggregating, or joining large files before loading them as datasets. Use {file} as a placeholder for the file path in your query."
+    )]
     async fn db_query_file(
         &self,
         Parameters(request): Parameters<DuckDBFileQueryRequest>,
@@ -21290,10 +23885,13 @@ impl AnalyticsServer {
 
         // Generate name
         let name = request.name.unwrap_or_else(|| {
-            format!("file_query_{}", std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs())
+            format!(
+                "file_query_{}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs()
+            )
         });
 
         // Store in datasets
@@ -21323,7 +23921,9 @@ impl AnalyticsServer {
     // ========================================================================
 
     /// Generate a histogram for a numeric column.
-    #[tool(description = "Generate a histogram visualization for a numeric column. Returns a base64-encoded PNG image along with bin statistics.")]
+    #[tool(
+        description = "Generate a histogram visualization for a numeric column. Returns a base64-encoded PNG image along with bin statistics."
+    )]
     async fn viz_histogram(
         &self,
         Parameters(request): Parameters<HistogramRequest>,
@@ -21354,7 +23954,7 @@ impl AnalyticsServer {
 
         let values: Vec<f64> = match col.cast(&DataType::Float64) {
             Ok(c) => match c.f64() {
-                Ok(f) => f.into_iter().filter_map(|v| v).filter(|v| v.is_finite()).collect(),
+                Ok(f) => f.into_iter().flatten().filter(|v| v.is_finite()).collect(),
                 Err(e) => {
                     return Ok(CallToolResult::error(vec![Content::text(format!(
                         "Not a numeric column: {}",
@@ -21403,7 +24003,9 @@ impl AnalyticsServer {
     }
 
     /// Generate a scatter plot for two numeric columns.
-    #[tool(description = "Generate a scatter plot visualization showing the relationship between two numeric columns. Returns a base64-encoded PNG image.")]
+    #[tool(
+        description = "Generate a scatter plot visualization showing the relationship between two numeric columns. Returns a base64-encoded PNG image."
+    )]
     async fn viz_scatter(
         &self,
         Parameters(request): Parameters<ScatterPlotRequest>,
@@ -21508,7 +24110,9 @@ impl AnalyticsServer {
     }
 
     /// Generate a line chart for time series or sequential data.
-    #[tool(description = "Generate a line chart visualization for time series or sequential data. Supports multiple Y series. Returns a base64-encoded PNG image.")]
+    #[tool(
+        description = "Generate a line chart visualization for time series or sequential data. Supports multiple Y series. Returns a base64-encoded PNG image."
+    )]
     async fn viz_line(
         &self,
         Parameters(request): Parameters<LineChartRequest>,
@@ -21617,7 +24221,9 @@ impl AnalyticsServer {
     }
 
     /// Generate a box plot for comparing distributions.
-    #[tool(description = "Generate a box plot visualization comparing the distributions of one or more numeric columns. Shows median, quartiles, and outliers. Returns a base64-encoded PNG image.")]
+    #[tool(
+        description = "Generate a box plot visualization comparing the distributions of one or more numeric columns. Shows median, quartiles, and outliers. Returns a base64-encoded PNG image."
+    )]
     async fn viz_boxplot(
         &self,
         Parameters(request): Parameters<BoxPlotRequest>,
@@ -21652,7 +24258,7 @@ impl AnalyticsServer {
 
             let values: Vec<f64> = match col.cast(&DataType::Float64) {
                 Ok(c) => match c.f64() {
-                    Ok(f) => f.into_iter().filter_map(|v| v).filter(|v| v.is_finite()).collect(),
+                    Ok(f) => f.into_iter().flatten().filter(|v| v.is_finite()).collect(),
                     Err(e) => {
                         return Ok(CallToolResult::error(vec![Content::text(format!(
                             "Column '{}' not numeric: {}",
@@ -21682,7 +24288,8 @@ impl AnalyticsServer {
 
         match box_plot(&groups, config) {
             Ok(result) => {
-                let mut description = String::from("Box plot generated successfully.\n\nStatistics:");
+                let mut description =
+                    String::from("Box plot generated successfully.\n\nStatistics:");
                 for stat in &result.statistics {
                     description.push_str(&format!(
                         "\n{}:\n  Min: {:.4}, Q1: {:.4}, Median: {:.4}, Q3: {:.4}, Max: {:.4}",
@@ -21702,7 +24309,9 @@ impl AnalyticsServer {
     }
 
     /// Generate a correlation heatmap.
-    #[tool(description = "Generate a correlation heatmap visualization for numeric columns. Uses a diverging blue-white-red colormap. Returns a base64-encoded PNG image.")]
+    #[tool(
+        description = "Generate a correlation heatmap visualization for numeric columns. Uses a diverging blue-white-red colormap. Returns a base64-encoded PNG image."
+    )]
     async fn viz_heatmap(
         &self,
         Parameters(request): Parameters<HeatmapRequest>,
@@ -21738,7 +24347,8 @@ impl AnalyticsServer {
         // Filter to specified columns if provided
         let (matrix, columns) = if let Some(ref selected_cols) = request.columns {
             // Find indices of requested columns
-            let indices: Vec<usize> = selected_cols.iter()
+            let indices: Vec<usize> = selected_cols
+                .iter()
                 .filter_map(|name| corr_result.columns.iter().position(|c| c == name))
                 .collect();
 
@@ -21749,10 +24359,12 @@ impl AnalyticsServer {
             }
 
             // Build filtered matrix
-            let filtered_matrix: Vec<Vec<f64>> = indices.iter()
+            let filtered_matrix: Vec<Vec<f64>> = indices
+                .iter()
                 .map(|&i| indices.iter().map(|&j| corr_result.matrix[i][j]).collect())
                 .collect();
-            let filtered_cols: Vec<String> = indices.iter()
+            let filtered_cols: Vec<String> = indices
+                .iter()
                 .map(|&i| corr_result.columns[i].clone())
                 .collect();
 
@@ -21787,12 +24399,14 @@ impl AnalyticsServer {
     }
 
     /// Generate an interactive scatter plot with Plotly.js.
-    #[tool(description = "Generate an interactive scatter plot visualization using Plotly.js. Returns HTML that can be saved to a file and opened in a browser. Supports grouping data by a categorical column for colored traces. Interactive features include zoom, pan, and hover.")]
+    #[tool(
+        description = "Generate an interactive scatter plot visualization using Plotly.js. Returns HTML that can be saved to a file and opened in a browser. Supports grouping data by a categorical column for colored traces. Interactive features include zoom, pan, and hover."
+    )]
     async fn viz_scatter_interactive(
         &self,
         Parameters(request): Parameters<ScatterInteractiveRequest>,
     ) -> Result<CallToolResult, McpError> {
-        use p2a_core::visualization::{scatter_interactive, InteractiveConfig};
+        use p2a_core::visualization::{InteractiveConfig, scatter_interactive};
 
         let datasets = self.datasets.read().await;
         let dataset = match datasets.get(&request.dataset) {
@@ -21840,12 +24454,14 @@ impl AnalyticsServer {
     }
 
     /// Generate an interactive histogram with Plotly.js.
-    #[tool(description = "Generate an interactive histogram visualization using Plotly.js. Returns HTML that can be saved to a file and opened in a browser. Supports grouping data by a categorical column for overlaid histograms. Interactive features include zoom, pan, and hover.")]
+    #[tool(
+        description = "Generate an interactive histogram visualization using Plotly.js. Returns HTML that can be saved to a file and opened in a browser. Supports grouping data by a categorical column for overlaid histograms. Interactive features include zoom, pan, and hover."
+    )]
     async fn viz_histogram_interactive(
         &self,
         Parameters(request): Parameters<HistogramInteractiveRequest>,
     ) -> Result<CallToolResult, McpError> {
-        use p2a_core::visualization::{histogram_interactive, InteractiveConfig};
+        use p2a_core::visualization::{InteractiveConfig, histogram_interactive};
 
         let datasets = self.datasets.read().await;
         let dataset = match datasets.get(&request.dataset) {
@@ -21891,12 +24507,14 @@ impl AnalyticsServer {
     }
 
     /// Generate an interactive line chart with Plotly.js.
-    #[tool(description = "Generate an interactive line chart visualization using Plotly.js. Returns HTML that can be saved to a file and opened in a browser. Interactive features include zoom, pan, and hover.")]
+    #[tool(
+        description = "Generate an interactive line chart visualization using Plotly.js. Returns HTML that can be saved to a file and opened in a browser. Interactive features include zoom, pan, and hover."
+    )]
     async fn viz_line_interactive(
         &self,
         Parameters(request): Parameters<LineInteractiveRequest>,
     ) -> Result<CallToolResult, McpError> {
-        use p2a_core::visualization::{line_interactive, InteractiveConfig};
+        use p2a_core::visualization::{InteractiveConfig, line_interactive};
 
         let datasets = self.datasets.read().await;
         let dataset = match datasets.get(&request.dataset) {
@@ -21916,12 +24534,7 @@ impl AnalyticsServer {
             ..Default::default()
         };
 
-        match line_interactive(
-            dataset.df(),
-            &request.x_column,
-            &request.y_column,
-            config,
-        ) {
+        match line_interactive(dataset.df(), &request.x_column, &request.y_column, config) {
             Ok(result) => {
                 let description = format!(
                     "Interactive line chart generated successfully.\nX: {}\nY: {}\nPoints: {}\n\nHTML output ({} bytes) - save to a .html file and open in browser.",
@@ -21943,7 +24556,9 @@ impl AnalyticsServer {
     }
 
     /// Generate an event study plot for treatment effect visualization.
-    #[tool(description = "Generate an event study plot showing treatment effects over time with confidence intervals. Used for visualizing DiD or panel event study results. Shows point estimates with CI bands and reference lines at t=0 and y=0.")]
+    #[tool(
+        description = "Generate an event study plot showing treatment effects over time with confidence intervals. Used for visualizing DiD or panel event study results. Shows point estimates with CI bands and reference lines at t=0 and y=0."
+    )]
     async fn viz_event_study(
         &self,
         Parameters(request): Parameters<EventStudyRequest>,
@@ -21965,11 +24580,14 @@ impl AnalyticsServer {
 
         // Helper to extract numeric column
         let extract_numeric = |col_name: &str| -> Result<Vec<f64>, String> {
-            let col = df.column(col_name)
+            let col = df
+                .column(col_name)
                 .map_err(|e| format!("Column '{}' not found: {}", col_name, e))?;
-            let casted = col.cast(&DataType::Float64)
+            let casted = col
+                .cast(&DataType::Float64)
                 .map_err(|e| format!("Column '{}' not numeric: {}", col_name, e))?;
-            let arr = casted.f64()
+            let arr = casted
+                .f64()
                 .map_err(|e| format!("Column '{}' error: {}", col_name, e))?;
             Ok(arr.into_iter().map(|v| v.unwrap_or(f64::NAN)).collect())
         };
@@ -22015,7 +24633,9 @@ impl AnalyticsServer {
     }
 
     /// Generate a coefficient plot with confidence intervals.
-    #[tool(description = "Generate a coefficient plot showing regression coefficients with confidence intervals (error bars). Useful for visualizing regression results. Shows vertical zero line for reference.")]
+    #[tool(
+        description = "Generate a coefficient plot showing regression coefficients with confidence intervals (error bars). Useful for visualizing regression results. Shows vertical zero line for reference."
+    )]
     async fn viz_coefficient(
         &self,
         Parameters(request): Parameters<CoefficientPlotRequest>,
@@ -22040,7 +24660,8 @@ impl AnalyticsServer {
             Ok(c) => c,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Name column '{}' not found: {}", request.name_column, e
+                    "Name column '{}' not found: {}",
+                    request.name_column, e
                 ))]));
             }
         };
@@ -22051,11 +24672,14 @@ impl AnalyticsServer {
 
         // Helper to extract numeric column
         let extract_numeric = |col_name: &str| -> Result<Vec<f64>, String> {
-            let col = df.column(col_name)
+            let col = df
+                .column(col_name)
                 .map_err(|e| format!("Column '{}' not found: {}", col_name, e))?;
-            let casted = col.cast(&DataType::Float64)
+            let casted = col
+                .cast(&DataType::Float64)
                 .map_err(|e| format!("Column '{}' not numeric: {}", col_name, e))?;
-            let arr = casted.f64()
+            let arr = casted
+                .f64()
                 .map_err(|e| format!("Column '{}' error: {}", col_name, e))?;
             Ok(arr.into_iter().map(|v| v.unwrap_or(f64::NAN)).collect())
         };
@@ -22098,7 +24722,9 @@ impl AnalyticsServer {
     }
 
     /// Generate an IRF (Impulse Response Function) plot.
-    #[tool(description = "Generate an Impulse Response Function (IRF) plot from VAR models. Shows how a variable responds to a shock over time. Optionally includes confidence bands.")]
+    #[tool(
+        description = "Generate an Impulse Response Function (IRF) plot from VAR models. Shows how a variable responds to a shock over time. Optionally includes confidence bands."
+    )]
     async fn viz_irf(
         &self,
         Parameters(request): Parameters<IrfPlotRequest>,
@@ -22120,11 +24746,14 @@ impl AnalyticsServer {
 
         // Helper to extract numeric column
         let extract_numeric = |col_name: &str| -> Result<Vec<f64>, String> {
-            let col = df.column(col_name)
+            let col = df
+                .column(col_name)
                 .map_err(|e| format!("Column '{}' not found: {}", col_name, e))?;
-            let casted = col.cast(&DataType::Float64)
+            let casted = col
+                .cast(&DataType::Float64)
                 .map_err(|e| format!("Column '{}' not numeric: {}", col_name, e))?;
-            let arr = casted.f64()
+            let arr = casted
+                .f64()
                 .map_err(|e| format!("Column '{}' error: {}", col_name, e))?;
             Ok(arr.into_iter().map(|v| v.unwrap_or(f64::NAN)).collect())
         };
@@ -22166,7 +24795,15 @@ impl AnalyticsServer {
 
         let has_ci = ci_lower.is_some() && ci_upper.is_some();
 
-        match irf_plot(&horizon, &response, ci_lower.as_deref(), ci_upper.as_deref(), shock_label, response_label, config) {
+        match irf_plot(
+            &horizon,
+            &response,
+            ci_lower.as_deref(),
+            ci_upper.as_deref(),
+            shock_label,
+            response_label,
+            config,
+        ) {
             Ok(result) => {
                 let description = format!(
                     "IRF plot generated successfully.\nHorizons: {}\nHas CI bands: {}\nShock: {}\nResponse: {}",
@@ -22188,7 +24825,9 @@ impl AnalyticsServer {
     }
 
     /// Generate residual diagnostic plots for regression model validation.
-    #[tool(description = "Generate four diagnostic plots for regression analysis: (1) Residuals vs Fitted, (2) Normal Q-Q plot, (3) Scale-Location, (4) Residuals vs Leverage. Also calculates Cook's distance for identifying influential observations. Returns four base64-encoded PNG images.")]
+    #[tool(
+        description = "Generate four diagnostic plots for regression analysis: (1) Residuals vs Fitted, (2) Normal Q-Q plot, (3) Scale-Location, (4) Residuals vs Leverage. Also calculates Cook's distance for identifying influential observations. Returns four base64-encoded PNG images."
+    )]
     async fn viz_residual_diagnostics(
         &self,
         Parameters(request): Parameters<ResidualDiagnosticsRequest>,
@@ -22210,11 +24849,14 @@ impl AnalyticsServer {
 
         // Helper to extract numeric column
         let extract_numeric = |col_name: &str| -> Result<Vec<f64>, String> {
-            let col = df.column(col_name)
+            let col = df
+                .column(col_name)
                 .map_err(|e| format!("Column '{}' not found: {}", col_name, e))?;
-            let casted = col.cast(&DataType::Float64)
+            let casted = col
+                .cast(&DataType::Float64)
                 .map_err(|e| format!("Column '{}' not numeric: {}", col_name, e))?;
-            let arr = casted.f64()
+            let arr = casted
+                .f64()
                 .map_err(|e| format!("Column '{}' error: {}", col_name, e))?;
             Ok(arr.into_iter().map(|v| v.unwrap_or(f64::NAN)).collect())
         };
@@ -22243,7 +24885,9 @@ impl AnalyticsServer {
         match residual_diagnostics(&fitted, &residuals, leverage.as_deref(), config) {
             Ok(result) => {
                 // Find observations with high Cook's distance
-                let high_influence: Vec<usize> = result.cooks_distance.iter()
+                let high_influence: Vec<usize> = result
+                    .cooks_distance
+                    .iter()
                     .enumerate()
                     .filter(|(_, d)| **d > 0.5)
                     .map(|(i, _)| i)
@@ -22255,7 +24899,11 @@ impl AnalyticsServer {
                      High influence points (Cook's D > 0.5): {}\n\
                      Plots: Residuals vs Fitted, Normal Q-Q, Scale-Location, Residuals vs Leverage",
                     result.n_observations,
-                    if high_influence.is_empty() { "None".to_string() } else { format!("{:?}", high_influence) }
+                    if high_influence.is_empty() {
+                        "None".to_string()
+                    } else {
+                        format!("{:?}", high_influence)
+                    }
                 );
                 Ok(CallToolResult::success(vec![
                     Content::text(description),
@@ -22273,7 +24921,9 @@ impl AnalyticsServer {
     }
 
     /// Generate a dendrogram visualization from hierarchical clustering results.
-    #[tool(description = "Generate a dendrogram (tree diagram) from hierarchical clustering results. Shows how clusters are merged at each level with merge distances. Takes a linkage matrix from hierarchical clustering output.")]
+    #[tool(
+        description = "Generate a dendrogram (tree diagram) from hierarchical clustering results. Shows how clusters are merged at each level with merge distances. Takes a linkage matrix from hierarchical clustering output."
+    )]
     async fn viz_dendrogram(
         &self,
         Parameters(request): Parameters<DendrogramRequest>,
@@ -22281,7 +24931,8 @@ impl AnalyticsServer {
         use p2a_core::dendrogram;
 
         // Convert linkage matrix from Vec<Vec<f64>> to Vec<(usize, usize, f64, usize)>
-        let linkage: Vec<(usize, usize, f64, usize)> = request.linkage_matrix
+        let linkage: Vec<(usize, usize, f64, usize)> = request
+            .linkage_matrix
             .iter()
             .filter_map(|row| {
                 if row.len() >= 4 {
@@ -22311,9 +24962,7 @@ impl AnalyticsServer {
             Ok(result) => {
                 let description = format!(
                     "Dendrogram generated successfully.\nSamples: {}\nMerge steps: {}\nMax distance: {:.4}",
-                    result.n_samples,
-                    result.n_merges,
-                    result.max_distance
+                    result.n_samples, result.n_merges, result.max_distance
                 );
                 Ok(CallToolResult::success(vec![
                     Content::text(description),
@@ -22328,7 +24977,9 @@ impl AnalyticsServer {
     }
 
     /// Batch process multiple datasets with the same operation.
-    #[tool(description = "Run the same analysis (describe, correlation, or OLS regression) on multiple datasets at once. Useful for comparing results across datasets or processing survey waves.")]
+    #[tool(
+        description = "Run the same analysis (describe, correlation, or OLS regression) on multiple datasets at once. Useful for comparing results across datasets or processing survey waves."
+    )]
     async fn batch_process(
         &self,
         Parameters(request): Parameters<BatchProcessRequest>,
@@ -22337,17 +24988,18 @@ impl AnalyticsServer {
 
         if request.datasets.is_empty() {
             return Ok(CallToolResult::error(vec![Content::text(
-                "At least one dataset must be specified".to_string()
+                "At least one dataset must be specified".to_string(),
             )]));
         }
 
         let datasets = self.datasets.read().await;
         let mut results = Vec::new();
-        let mut combined_stats: Option<Vec<(String, Vec<f64>)>> = if request.combine_results.unwrap_or(false) {
-            Some(Vec::new())
-        } else {
-            None
-        };
+        let mut combined_stats: Option<Vec<(String, Vec<f64>)>> =
+            if request.combine_results.unwrap_or(false) {
+                Some(Vec::new())
+            } else {
+                None
+            };
 
         for ds_name in &request.datasets {
             let dataset = match datasets.get(ds_name) {
@@ -22366,7 +25018,8 @@ impl AnalyticsServer {
                         cols.clone()
                     } else {
                         // Get all numeric columns
-                        df.get_columns().iter()
+                        df.get_columns()
+                            .iter()
                             .filter(|c| c.dtype().is_primitive_numeric())
                             .map(|c| c.name().to_string())
                             .collect()
@@ -22379,19 +25032,21 @@ impl AnalyticsServer {
                         if let Ok(col) = df.column(col_name) {
                             if let Ok(casted) = col.cast(&DataType::Float64) {
                                 if let Ok(arr) = casted.f64() {
-                                    let values: Vec<f64> = arr.into_iter()
-                                        .filter_map(|v| v)
-                                        .collect();
+                                    let values: Vec<f64> = arr.into_iter().flatten().collect();
                                     if !values.is_empty() {
                                         let n = values.len();
                                         let sum: f64 = values.iter().sum();
                                         let mean = sum / n as f64;
-                                        let variance: f64 = values.iter()
-                                            .map(|v| (v - mean).powi(2))
-                                            .sum::<f64>() / (n - 1).max(1) as f64;
+                                        let variance: f64 =
+                                            values.iter().map(|v| (v - mean).powi(2)).sum::<f64>()
+                                                / (n - 1).max(1) as f64;
                                         let std_dev = variance.sqrt();
-                                        let min = values.iter().copied().fold(f64::INFINITY, f64::min);
-                                        let max = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+                                        let min =
+                                            values.iter().copied().fold(f64::INFINITY, f64::min);
+                                        let max = values
+                                            .iter()
+                                            .copied()
+                                            .fold(f64::NEG_INFINITY, f64::max);
 
                                         stats_output.push_str(&format!(
                                             "  {}: n={}, mean={:.4}, std={:.4}, min={:.4}, max={:.4}\n",
@@ -22399,7 +25054,10 @@ impl AnalyticsServer {
                                         ));
 
                                         if let Some(ref mut combined) = combined_stats {
-                                            combined.push((format!("{}:{}", ds_name, col_name), vec![n as f64, mean, std_dev, min, max]));
+                                            combined.push((
+                                                format!("{}:{}", ds_name, col_name),
+                                                vec![n as f64, mean, std_dev, min, max],
+                                            ));
                                         }
                                     }
                                 }
@@ -22414,14 +25072,17 @@ impl AnalyticsServer {
                         Ok(corr) => {
                             format!("Dataset: {}\n{:?}", ds_name, corr)
                         }
-                        Err(e) => format!("Dataset '{}': Error - {}", ds_name, e)
+                        Err(e) => format!("Dataset '{}': Error - {}", ds_name, e),
                     }
                 }
                 "ols" => {
                     // Run OLS regression
                     if let Some(ref cols) = request.columns {
                         if cols.len() < 2 {
-                            format!("Dataset '{}': OLS requires at least 2 columns (dependent + independent)", ds_name)
+                            format!(
+                                "Dataset '{}': OLS requires at least 2 columns (dependent + independent)",
+                                ds_name
+                            )
                         } else {
                             let y_col = &cols[0];
                             let x_cols: Vec<&str> = cols[1..].iter().map(|s| s.as_str()).collect();
@@ -22429,24 +25090,40 @@ impl AnalyticsServer {
                             match run_ols(dataset, y_col, &x_cols, true, CovarianceType::HC1) {
                                 Ok(ols_result) => {
                                     let mut output = format!("Dataset: {}\n{:-<60}\n", ds_name, "");
-                                    output.push_str(&format!("R²: {:.4}, Adj R²: {:.4}\n", ols_result.r_squared, ols_result.adj_r_squared));
-                                    output.push_str(&format!("F-stat: {:.4}\n", ols_result.f_statistic));
+                                    output.push_str(&format!(
+                                        "R²: {:.4}, Adj R²: {:.4}\n",
+                                        ols_result.r_squared, ols_result.adj_r_squared
+                                    ));
+                                    output.push_str(&format!(
+                                        "F-stat: {:.4}\n",
+                                        ols_result.f_statistic
+                                    ));
                                     for coef in &ols_result.coefficients {
                                         output.push_str(&format!(
                                             "  {}: coef={:.4}, se={:.4}, t={:.4}, p={:.4}\n",
-                                            coef.name, coef.estimate, coef.std_error, coef.t_value, coef.p_value
+                                            coef.name,
+                                            coef.estimate,
+                                            coef.std_error,
+                                            coef.t_value,
+                                            coef.p_value
                                         ));
                                     }
                                     output
                                 }
-                                Err(e) => format!("Dataset '{}': Error - {}", ds_name, e)
+                                Err(e) => format!("Dataset '{}': Error - {}", ds_name, e),
                             }
                         }
                     } else {
-                        format!("Dataset '{}': OLS requires columns to be specified", ds_name)
+                        format!(
+                            "Dataset '{}': OLS requires columns to be specified",
+                            ds_name
+                        )
                     }
                 }
-                other => format!("Unknown operation: '{}'. Use 'describe', 'correlation', or 'ols'.", other)
+                other => format!(
+                    "Unknown operation: '{}'. Use 'describe', 'correlation', or 'ols'.",
+                    other
+                ),
             };
 
             results.push(result);
@@ -22478,7 +25155,9 @@ impl AnalyticsServer {
     }
 
     /// Compare the same columns across multiple datasets.
-    #[tool(description = "Compare statistics for specific columns across multiple datasets. Useful for comparing distributions, means, and correlations between different datasets (e.g., treatment vs control, before vs after).")]
+    #[tool(
+        description = "Compare statistics for specific columns across multiple datasets. Useful for comparing distributions, means, and correlations between different datasets (e.g., treatment vs control, before vs after)."
+    )]
     async fn compare_datasets(
         &self,
         Parameters(request): Parameters<CompareDatasetRequest>,
@@ -22487,13 +25166,13 @@ impl AnalyticsServer {
 
         if request.datasets.len() < 2 {
             return Ok(CallToolResult::error(vec![Content::text(
-                "At least two datasets must be specified for comparison".to_string()
+                "At least two datasets must be specified for comparison".to_string(),
             )]));
         }
 
         if request.columns.is_empty() {
             return Ok(CallToolResult::error(vec![Content::text(
-                "At least one column must be specified for comparison".to_string()
+                "At least one column must be specified for comparison".to_string(),
             )]));
         }
 
@@ -22506,7 +25185,8 @@ impl AnalyticsServer {
         output.push_str(&format!("Comparison type: {}\n\n", comparison_type));
 
         // Collect statistics for each dataset and column
-        let mut all_stats: HashMap<String, HashMap<String, (usize, f64, f64, f64, f64)>> = HashMap::new();
+        let mut all_stats: HashMap<String, HashMap<String, (usize, f64, f64, f64, f64)>> =
+            HashMap::new();
 
         for ds_name in &request.datasets {
             let dataset = match datasets.get(ds_name) {
@@ -22524,16 +25204,14 @@ impl AnalyticsServer {
                 if let Ok(col) = df.column(col_name) {
                     if let Ok(casted) = col.cast(&DataType::Float64) {
                         if let Ok(arr) = casted.f64() {
-                            let values: Vec<f64> = arr.into_iter()
-                                .filter_map(|v| v)
-                                .collect();
+                            let values: Vec<f64> = arr.into_iter().flatten().collect();
                             if !values.is_empty() {
                                 let n = values.len();
                                 let sum: f64 = values.iter().sum();
                                 let mean = sum / n as f64;
-                                let variance: f64 = values.iter()
-                                    .map(|v| (v - mean).powi(2))
-                                    .sum::<f64>() / (n - 1).max(1) as f64;
+                                let variance: f64 =
+                                    values.iter().map(|v| (v - mean).powi(2)).sum::<f64>()
+                                        / (n - 1).max(1) as f64;
                                 let std_dev = variance.sqrt();
                                 let min = values.iter().copied().fold(f64::INFINITY, f64::min);
                                 let max = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
@@ -22552,17 +25230,24 @@ impl AnalyticsServer {
                 // Side-by-side comparison table
                 for col_name in &request.columns {
                     output.push_str(&format!("\nColumn: {}\n{}\n", col_name, "-".repeat(60)));
-                    output.push_str(&format!("{:<20} {:>10} {:>12} {:>12} {:>12} {:>12}\n",
-                        "Dataset", "N", "Mean", "Std Dev", "Min", "Max"));
+                    output.push_str(&format!(
+                        "{:<20} {:>10} {:>12} {:>12} {:>12} {:>12}\n",
+                        "Dataset", "N", "Mean", "Std Dev", "Min", "Max"
+                    ));
                     output.push_str(&format!("{}\n", "-".repeat(80)));
 
                     for ds_name in &request.datasets {
                         if let Some(ds_stats) = all_stats.get(ds_name) {
                             if let Some((n, mean, std, min, max)) = ds_stats.get(col_name) {
-                                output.push_str(&format!("{:<20} {:>10} {:>12.4} {:>12.4} {:>12.4} {:>12.4}\n",
-                                    ds_name, n, mean, std, min, max));
+                                output.push_str(&format!(
+                                    "{:<20} {:>10} {:>12.4} {:>12.4} {:>12.4} {:>12.4}\n",
+                                    ds_name, n, mean, std, min, max
+                                ));
                             } else {
-                                output.push_str(&format!("{:<20} Column not found or not numeric\n", ds_name));
+                                output.push_str(&format!(
+                                    "{:<20} Column not found or not numeric\n",
+                                    ds_name
+                                ));
                             }
                         }
                     }
@@ -22573,7 +25258,7 @@ impl AnalyticsServer {
                         let ds2 = &request.datasets[1];
                         if let (Some(stats1), Some(stats2)) = (
                             all_stats.get(ds1).and_then(|s| s.get(col_name)),
-                            all_stats.get(ds2).and_then(|s| s.get(col_name))
+                            all_stats.get(ds2).and_then(|s| s.get(col_name)),
                         ) {
                             let mean_diff = stats2.1 - stats1.1;
                             let pct_diff = if stats1.1.abs() > 1e-10 {
@@ -22581,8 +25266,10 @@ impl AnalyticsServer {
                             } else {
                                 f64::NAN
                             };
-                            output.push_str(&format!("\nDifference ({} - {}): mean diff = {:.4} ({:.2}%)\n",
-                                ds2, ds1, mean_diff, pct_diff));
+                            output.push_str(&format!(
+                                "\nDifference ({} - {}): mean diff = {:.4} ({:.2}%)\n",
+                                ds2, ds1, mean_diff, pct_diff
+                            ));
                         }
                     }
                 }
@@ -22590,13 +25277,21 @@ impl AnalyticsServer {
             "distribution" => {
                 // Distribution comparison (basic)
                 for col_name in &request.columns {
-                    output.push_str(&format!("\nColumn: {} - Distribution Comparison\n{}\n", col_name, "-".repeat(60)));
+                    output.push_str(&format!(
+                        "\nColumn: {} - Distribution Comparison\n{}\n",
+                        col_name,
+                        "-".repeat(60)
+                    ));
 
                     for ds_name in &request.datasets {
                         if let Some(ds_stats) = all_stats.get(ds_name) {
                             if let Some((n, mean, std, min, max)) = ds_stats.get(col_name) {
                                 let range = max - min;
-                                let cv = if mean.abs() > 1e-10 { std / mean.abs() } else { f64::NAN };
+                                let cv = if mean.abs() > 1e-10 {
+                                    std / mean.abs()
+                                } else {
+                                    f64::NAN
+                                };
                                 output.push_str(&format!(
                                     "{}: n={}, range={:.4}, CV={:.4}\n",
                                     ds_name, n, range, cv
@@ -22638,7 +25333,9 @@ impl AnalyticsServer {
     // ========================================================================
 
     /// Filter rows in a dataset based on a condition.
-    #[tool(description = "Filter rows in a dataset based on a column condition. Supports operators: 'eq', 'ne', 'gt', 'ge', 'lt', 'le', 'contains', 'starts_with', 'ends_with'. The value is parsed based on the column type.")]
+    #[tool(
+        description = "Filter rows in a dataset based on a column condition. Supports operators: 'eq', 'ne', 'gt', 'ge', 'lt', 'le', 'contains', 'starts_with', 'ends_with'. The value is parsed based on the column type."
+    )]
     async fn munge_filter(
         &self,
         Parameters(request): Parameters<FilterDatasetRequest>,
@@ -22665,7 +25362,9 @@ impl AnalyticsServer {
             }
         };
 
-        let result_name = request.result_name.unwrap_or_else(|| request.dataset.clone());
+        let result_name = request
+            .result_name
+            .unwrap_or_else(|| request.dataset.clone());
         let n_rows = result.nrows();
         let n_cols = result.ncols();
 
@@ -22708,7 +25407,9 @@ impl AnalyticsServer {
             }
         };
 
-        let result_name = request.result_name.unwrap_or_else(|| request.dataset.clone());
+        let result_name = request
+            .result_name
+            .unwrap_or_else(|| request.dataset.clone());
         let n_rows = result.nrows();
         let n_cols = result.ncols();
 
@@ -22751,7 +25452,9 @@ impl AnalyticsServer {
             }
         };
 
-        let result_name = request.result_name.unwrap_or_else(|| request.dataset.clone());
+        let result_name = request
+            .result_name
+            .unwrap_or_else(|| request.dataset.clone());
         let n_rows = result.nrows();
         let n_cols = result.ncols();
 
@@ -22761,7 +25464,10 @@ impl AnalyticsServer {
 
         Ok(CallToolResult::success(vec![Content::text(format!(
             "Dropped {} columns, saved as '{}' ({} rows, {} columns remaining)",
-            request.columns.len(), result_name, n_rows, n_cols
+            request.columns.len(),
+            result_name,
+            n_rows,
+            n_cols
         ))]))
     }
 
@@ -22783,7 +25489,9 @@ impl AnalyticsServer {
             }
         };
 
-        let renames: Vec<(&str, &str)> = request.renames.iter()
+        let renames: Vec<(&str, &str)> = request
+            .renames
+            .iter()
             .filter_map(|pair| {
                 if pair.len() >= 2 {
                     Some((pair[0].as_str(), pair[1].as_str()))
@@ -22803,7 +25511,9 @@ impl AnalyticsServer {
             }
         };
 
-        let result_name = request.result_name.unwrap_or_else(|| request.dataset.clone());
+        let result_name = request
+            .result_name
+            .unwrap_or_else(|| request.dataset.clone());
 
         drop(datasets);
         let mut datasets = self.datasets.write().await;
@@ -22811,7 +25521,8 @@ impl AnalyticsServer {
 
         Ok(CallToolResult::success(vec![Content::text(format!(
             "Renamed {} columns, saved as '{}'",
-            renames.len(), result_name
+            renames.len(),
+            result_name
         ))]))
     }
 
@@ -22847,7 +25558,9 @@ impl AnalyticsServer {
             }
         };
 
-        let result_name = request.result_name.unwrap_or_else(|| request.dataset.clone());
+        let result_name = request
+            .result_name
+            .unwrap_or_else(|| request.dataset.clone());
         let n_rows = result.nrows();
 
         drop(datasets);
@@ -22857,14 +25570,20 @@ impl AnalyticsServer {
         Ok(CallToolResult::success(vec![Content::text(format!(
             "Sorted by {:?} ({}), saved as '{}' ({} rows)",
             request.by,
-            if descending { "descending" } else { "ascending" },
+            if descending {
+                "descending"
+            } else {
+                "ascending"
+            },
             result_name,
             n_rows
         ))]))
     }
 
     /// Join two datasets on key columns.
-    #[tool(description = "Join two datasets on key columns. Supports 'left', 'right', 'inner', and 'full' join types.")]
+    #[tool(
+        description = "Join two datasets on key columns. Supports 'left', 'right', 'inner', and 'full' join types."
+    )]
     async fn munge_join(
         &self,
         Parameters(request): Parameters<JoinDatasetsRequest>,
@@ -22892,7 +25611,9 @@ impl AnalyticsServer {
         };
 
         let left_on: Vec<&str> = request.left_on.iter().map(|s| s.as_str()).collect();
-        let right_on_vec: Option<Vec<&str>> = request.right_on.as_ref()
+        let right_on_vec: Option<Vec<&str>> = request
+            .right_on
+            .as_ref()
             .map(|v| v.iter().map(|s| s.as_str()).collect());
         let right_on: Option<&[&str]> = right_on_vec.as_deref();
         let suffix: Option<&str> = request.suffix.as_deref();
@@ -22921,7 +25642,9 @@ impl AnalyticsServer {
             }
         };
 
-        let result_name = request.result_name.unwrap_or_else(|| format!("{}_{}", request.left, request.right));
+        let result_name = request
+            .result_name
+            .unwrap_or_else(|| format!("{}_{}", request.left, request.right));
         let n_rows = result.nrows();
         let n_cols = result.ncols();
 
@@ -22936,7 +25659,9 @@ impl AnalyticsServer {
     }
 
     /// Concatenate multiple datasets vertically.
-    #[tool(description = "Concatenate (row-bind) multiple datasets vertically. All datasets must have the same columns.")]
+    #[tool(
+        description = "Concatenate (row-bind) multiple datasets vertically. All datasets must have the same columns."
+    )]
     async fn munge_concat(
         &self,
         Parameters(request): Parameters<ConcatDatasetsRequest>,
@@ -22966,7 +25691,9 @@ impl AnalyticsServer {
             }
         };
 
-        let result_name = request.result_name.unwrap_or_else(|| "concatenated".to_string());
+        let result_name = request
+            .result_name
+            .unwrap_or_else(|| "concatenated".to_string());
         let n_rows = result.nrows();
         let n_cols = result.ncols();
 
@@ -22976,12 +25703,17 @@ impl AnalyticsServer {
 
         Ok(CallToolResult::success(vec![Content::text(format!(
             "Concatenated {} datasets, saved as '{}' ({} rows, {} columns)",
-            request.datasets.len(), result_name, n_rows, n_cols
+            request.datasets.len(),
+            result_name,
+            n_rows,
+            n_cols
         ))]))
     }
 
     /// Group by columns and compute aggregations.
-    #[tool(description = "Group a dataset by columns and compute aggregations. Supported functions: 'count', 'sum', 'mean', 'median', 'min', 'max', 'std', 'var', 'first', 'last'.")]
+    #[tool(
+        description = "Group a dataset by columns and compute aggregations. Supported functions: 'count', 'sum', 'mean', 'median', 'min', 'max', 'std', 'var', 'first', 'last'."
+    )]
     async fn munge_group_by(
         &self,
         Parameters(request): Parameters<GroupByRequest>,
@@ -23044,7 +25776,9 @@ impl AnalyticsServer {
             }
         };
 
-        let result_name = request.result_name.unwrap_or_else(|| format!("{}_grouped", request.dataset));
+        let result_name = request
+            .result_name
+            .unwrap_or_else(|| format!("{}_grouped", request.dataset));
         let n_rows = result.nrows();
         let n_cols = result.ncols();
 
@@ -23054,12 +25788,18 @@ impl AnalyticsServer {
 
         Ok(CallToolResult::success(vec![Content::text(format!(
             "Grouped by {:?} with {} aggregations, saved as '{}' ({} groups, {} columns)",
-            request.by, agg_specs.len(), result_name, n_rows, n_cols
+            request.by,
+            agg_specs.len(),
+            result_name,
+            n_rows,
+            n_cols
         ))]))
     }
 
     /// Compute value counts for a column.
-    #[tool(description = "Compute frequency counts for unique values in a column. Optionally normalize to percentages.")]
+    #[tool(
+        description = "Compute frequency counts for unique values in a column. Optionally normalize to percentages."
+    )]
     async fn munge_value_counts(
         &self,
         Parameters(request): Parameters<ValueCountsRequest>,
@@ -23086,18 +25826,24 @@ impl AnalyticsServer {
             }
         };
 
-        let result_name = request.result_name.unwrap_or_else(|| format!("{}_value_counts", request.column));
+        let result_name = request
+            .result_name
+            .unwrap_or_else(|| format!("{}_value_counts", request.column));
         let n_rows = result.nrows();
 
         // Format output for display
         let mut output = format!(
             "Value Counts for '{}'\n{}\n",
-            request.column, "=".repeat(40)
+            request.column,
+            "=".repeat(40)
         );
 
         // Show first few rows
         let show_n = 10.min(n_rows);
-        output.push_str(&format!("Showing top {} of {} unique values:\n\n", show_n, n_rows));
+        output.push_str(&format!(
+            "Showing top {} of {} unique values:\n\n",
+            show_n, n_rows
+        ));
 
         let df = result.df();
         for i in 0..show_n {
@@ -23121,7 +25867,9 @@ impl AnalyticsServer {
     }
 
     /// Pivot a dataset from long to wide format.
-    #[tool(description = "Pivot a dataset from long to wide format. Index columns remain as rows, 'on' column values become new column names, and 'values' column fills those columns.")]
+    #[tool(
+        description = "Pivot a dataset from long to wide format. Index columns remain as rows, 'on' column values become new column names, and 'values' column fills those columns."
+    )]
     async fn munge_pivot(
         &self,
         Parameters(request): Parameters<PivotDatasetRequest>,
@@ -23150,7 +25898,9 @@ impl AnalyticsServer {
             }
         };
 
-        let result_name = request.result_name.unwrap_or_else(|| format!("{}_pivoted", request.dataset));
+        let result_name = request
+            .result_name
+            .unwrap_or_else(|| format!("{}_pivoted", request.dataset));
         let n_rows = result.nrows();
         let n_cols = result.ncols();
 
@@ -23165,7 +25915,9 @@ impl AnalyticsServer {
     }
 
     /// Melt a dataset from wide to long format.
-    #[tool(description = "Melt a dataset from wide to long format. ID variables remain as-is, value variables are unpivoted into rows.")]
+    #[tool(
+        description = "Melt a dataset from wide to long format. ID variables remain as-is, value variables are unpivoted into rows."
+    )]
     async fn munge_melt(
         &self,
         Parameters(request): Parameters<MeltDatasetRequest>,
@@ -23197,7 +25949,9 @@ impl AnalyticsServer {
             }
         };
 
-        let result_name = request.result_name.unwrap_or_else(|| format!("{}_melted", request.dataset));
+        let result_name = request
+            .result_name
+            .unwrap_or_else(|| format!("{}_melted", request.dataset));
         let n_rows = result.nrows();
         let n_cols = result.ncols();
 
@@ -23212,7 +25966,9 @@ impl AnalyticsServer {
     }
 
     /// Drop rows with null values.
-    #[tool(description = "Drop rows containing null values. Use 'any' to drop if any column is null, 'all' to drop only if all columns are null.")]
+    #[tool(
+        description = "Drop rows containing null values. Use 'any' to drop if any column is null, 'all' to drop only if all columns are null."
+    )]
     async fn munge_drop_na(
         &self,
         Parameters(request): Parameters<DropNaRequest>,
@@ -23229,7 +25985,9 @@ impl AnalyticsServer {
             }
         };
 
-        let columns: Option<Vec<&str>> = request.columns.as_ref()
+        let columns: Option<Vec<&str>> = request
+            .columns
+            .as_ref()
             .map(|v| v.iter().map(|s| s.as_str()).collect());
         let how = request.how.as_deref().unwrap_or("any");
 
@@ -23244,7 +26002,9 @@ impl AnalyticsServer {
             }
         };
 
-        let result_name = request.result_name.unwrap_or_else(|| request.dataset.clone());
+        let result_name = request
+            .result_name
+            .unwrap_or_else(|| request.dataset.clone());
         let n_rows = result.nrows();
         let dropped = orig_rows - n_rows;
 
@@ -23259,7 +26019,9 @@ impl AnalyticsServer {
     }
 
     /// Fill null values using a strategy.
-    #[tool(description = "Fill null values using a strategy: 'mean', 'median', 'mode', 'forward', 'backward', or a constant value.")]
+    #[tool(
+        description = "Fill null values using a strategy: 'mean', 'median', 'mode', 'forward', 'backward', or a constant value."
+    )]
     async fn munge_fill_na(
         &self,
         Parameters(request): Parameters<FillNaRequest>,
@@ -23276,7 +26038,9 @@ impl AnalyticsServer {
             }
         };
 
-        let columns: Option<Vec<&str>> = request.columns.as_ref()
+        let columns: Option<Vec<&str>> = request
+            .columns
+            .as_ref()
             .map(|v| v.iter().map(|s| s.as_str()).collect());
 
         let strategy = match request.strategy.to_lowercase().as_str() {
@@ -23301,7 +26065,9 @@ impl AnalyticsServer {
             }
         };
 
-        let result_name = request.result_name.unwrap_or_else(|| request.dataset.clone());
+        let result_name = request
+            .result_name
+            .unwrap_or_else(|| request.dataset.clone());
 
         drop(datasets);
         let mut datasets = self.datasets.write().await;
@@ -23314,7 +26080,9 @@ impl AnalyticsServer {
     }
 
     /// Remove duplicate rows.
-    #[tool(description = "Remove duplicate rows from a dataset. Specify which duplicate to keep: 'first', 'last', or 'none'.")]
+    #[tool(
+        description = "Remove duplicate rows from a dataset. Specify which duplicate to keep: 'first', 'last', or 'none'."
+    )]
     async fn munge_deduplicate(
         &self,
         Parameters(request): Parameters<DeduplicateRequest>,
@@ -23331,7 +26099,9 @@ impl AnalyticsServer {
             }
         };
 
-        let columns: Option<Vec<&str>> = request.columns.as_ref()
+        let columns: Option<Vec<&str>> = request
+            .columns
+            .as_ref()
             .map(|v| v.iter().map(|s| s.as_str()).collect());
         let keep = request.keep.as_deref().unwrap_or("first");
 
@@ -23346,7 +26116,9 @@ impl AnalyticsServer {
             }
         };
 
-        let result_name = request.result_name.unwrap_or_else(|| request.dataset.clone());
+        let result_name = request
+            .result_name
+            .unwrap_or_else(|| request.dataset.clone());
         let n_rows = result.nrows();
         let removed = orig_rows - n_rows;
 
@@ -23365,7 +26137,9 @@ impl AnalyticsServer {
     // =========================================================================
 
     /// Trim whitespace from string columns.
-    #[tool(description = "Trim leading and trailing whitespace from string columns. If no columns specified, trims all string columns.")]
+    #[tool(
+        description = "Trim leading and trailing whitespace from string columns. If no columns specified, trims all string columns."
+    )]
     async fn str_trim(
         &self,
         Parameters(request): Parameters<TrimRequest>,
@@ -23382,7 +26156,9 @@ impl AnalyticsServer {
             }
         };
 
-        let columns: Option<Vec<&str>> = request.columns.as_ref()
+        let columns: Option<Vec<&str>> = request
+            .columns
+            .as_ref()
             .map(|v| v.iter().map(|s| s.as_str()).collect());
 
         let result = match trim(dataset, columns.as_deref()) {
@@ -23395,13 +26171,16 @@ impl AnalyticsServer {
             }
         };
 
-        let result_name = request.result_name.unwrap_or_else(|| request.dataset.clone());
+        let result_name = request
+            .result_name
+            .unwrap_or_else(|| request.dataset.clone());
 
         drop(datasets);
         let mut datasets = self.datasets.write().await;
         datasets.insert(result_name.clone(), result);
 
-        let cols_desc = request.columns
+        let cols_desc = request
+            .columns
             .as_ref()
             .map(|c| c.join(", "))
             .unwrap_or_else(|| "all string columns".to_string());
@@ -23440,7 +26219,9 @@ impl AnalyticsServer {
             }
         };
 
-        let result_name = request.result_name.unwrap_or_else(|| request.dataset.clone());
+        let result_name = request
+            .result_name
+            .unwrap_or_else(|| request.dataset.clone());
 
         drop(datasets);
         let mut datasets = self.datasets.write().await;
@@ -23480,7 +26261,9 @@ impl AnalyticsServer {
             }
         };
 
-        let result_name = request.result_name.unwrap_or_else(|| request.dataset.clone());
+        let result_name = request
+            .result_name
+            .unwrap_or_else(|| request.dataset.clone());
 
         drop(datasets);
         let mut datasets = self.datasets.write().await;
@@ -23493,7 +26276,9 @@ impl AnalyticsServer {
     }
 
     /// Replace exact values in a column.
-    #[tool(description = "Replace exact values in a column with a new value. For pattern-based replacement, use str_regex_replace.")]
+    #[tool(
+        description = "Replace exact values in a column with a new value. For pattern-based replacement, use str_regex_replace."
+    )]
     async fn str_replace_value(
         &self,
         Parameters(request): Parameters<ReplaceValueRequest>,
@@ -23510,7 +26295,12 @@ impl AnalyticsServer {
             }
         };
 
-        let result = match replace(dataset, &request.column, &request.old_value, &request.new_value) {
+        let result = match replace(
+            dataset,
+            &request.column,
+            &request.old_value,
+            &request.new_value,
+        ) {
             Ok(ds) => ds,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -23520,7 +26310,9 @@ impl AnalyticsServer {
             }
         };
 
-        let result_name = request.result_name.unwrap_or_else(|| request.dataset.clone());
+        let result_name = request
+            .result_name
+            .unwrap_or_else(|| request.dataset.clone());
 
         drop(datasets);
         let mut datasets = self.datasets.write().await;
@@ -23537,7 +26329,9 @@ impl AnalyticsServer {
     // =========================================================================
 
     /// Replace substrings matching a regex pattern.
-    #[tool(description = "Replace substrings matching a regex pattern with a replacement string. Supports capture groups ($1, $2, etc.) in the replacement.")]
+    #[tool(
+        description = "Replace substrings matching a regex pattern with a replacement string. Supports capture groups ($1, $2, etc.) in the replacement."
+    )]
     async fn str_regex_replace(
         &self,
         Parameters(request): Parameters<RegexReplaceRequest>,
@@ -23554,7 +26348,12 @@ impl AnalyticsServer {
             }
         };
 
-        let result = match regex_replace(dataset, &request.column, &request.pattern, &request.replacement) {
+        let result = match regex_replace(
+            dataset,
+            &request.column,
+            &request.pattern,
+            &request.replacement,
+        ) {
             Ok(ds) => ds,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -23564,7 +26363,9 @@ impl AnalyticsServer {
             }
         };
 
-        let result_name = request.result_name.unwrap_or_else(|| request.dataset.clone());
+        let result_name = request
+            .result_name
+            .unwrap_or_else(|| request.dataset.clone());
 
         drop(datasets);
         let mut datasets = self.datasets.write().await;
@@ -23577,7 +26378,9 @@ impl AnalyticsServer {
     }
 
     /// Extract substrings matching a regex pattern into a new column.
-    #[tool(description = "Extract substrings matching a regex pattern into a new column. Use capture groups () to specify what to extract, or extract the whole match.")]
+    #[tool(
+        description = "Extract substrings matching a regex pattern into a new column. Use capture groups () to specify what to extract, or extract the whole match."
+    )]
     async fn str_regex_extract(
         &self,
         Parameters(request): Parameters<RegexExtractRequest>,
@@ -23596,7 +26399,13 @@ impl AnalyticsServer {
 
         let group = request.group.unwrap_or(1);
 
-        let result = match regex_extract(dataset, &request.column, &request.pattern, &request.new_column, group) {
+        let result = match regex_extract(
+            dataset,
+            &request.column,
+            &request.pattern,
+            &request.new_column,
+            group,
+        ) {
             Ok(ds) => ds,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -23606,7 +26415,9 @@ impl AnalyticsServer {
             }
         };
 
-        let result_name = request.result_name.unwrap_or_else(|| request.dataset.clone());
+        let result_name = request
+            .result_name
+            .unwrap_or_else(|| request.dataset.clone());
 
         drop(datasets);
         let mut datasets = self.datasets.write().await;
@@ -23619,7 +26430,9 @@ impl AnalyticsServer {
     }
 
     /// Count regex pattern matches in each row.
-    #[tool(description = "Count the number of times a regex pattern matches in each row, creating a new integer column with the counts.")]
+    #[tool(
+        description = "Count the number of times a regex pattern matches in each row, creating a new integer column with the counts."
+    )]
     async fn str_regex_count(
         &self,
         Parameters(request): Parameters<RegexCountRequest>,
@@ -23636,7 +26449,12 @@ impl AnalyticsServer {
             }
         };
 
-        let result = match regex_count(dataset, &request.column, &request.pattern, &request.new_column) {
+        let result = match regex_count(
+            dataset,
+            &request.column,
+            &request.pattern,
+            &request.new_column,
+        ) {
             Ok(ds) => ds,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -23646,7 +26464,9 @@ impl AnalyticsServer {
             }
         };
 
-        let result_name = request.result_name.unwrap_or_else(|| request.dataset.clone());
+        let result_name = request
+            .result_name
+            .unwrap_or_else(|| request.dataset.clone());
 
         drop(datasets);
         let mut datasets = self.datasets.write().await;
@@ -23663,7 +26483,9 @@ impl AnalyticsServer {
     // =========================================================================
 
     /// Split a string column into multiple columns.
-    #[tool(description = "Split a string column by a pattern (supports regex) into multiple columns named prefix_0, prefix_1, etc.")]
+    #[tool(
+        description = "Split a string column by a pattern (supports regex) into multiple columns named prefix_0, prefix_1, etc."
+    )]
     async fn str_split(
         &self,
         Parameters(request): Parameters<StrSplitRequest>,
@@ -23680,7 +26502,13 @@ impl AnalyticsServer {
             }
         };
 
-        let result = match str_split(dataset, &request.column, &request.pattern, request.max_splits, &request.prefix) {
+        let result = match str_split(
+            dataset,
+            &request.column,
+            &request.pattern,
+            request.max_splits,
+            &request.prefix,
+        ) {
             Ok(ds) => ds,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -23690,7 +26518,9 @@ impl AnalyticsServer {
             }
         };
 
-        let result_name = request.result_name.unwrap_or_else(|| request.dataset.clone());
+        let result_name = request
+            .result_name
+            .unwrap_or_else(|| request.dataset.clone());
 
         drop(datasets);
         let mut datasets = self.datasets.write().await;
@@ -23703,7 +26533,9 @@ impl AnalyticsServer {
     }
 
     /// Concatenate multiple string columns.
-    #[tool(description = "Concatenate multiple string columns into a new column, optionally with a separator between values.")]
+    #[tool(
+        description = "Concatenate multiple string columns into a new column, optionally with a separator between values."
+    )]
     async fn str_concat(
         &self,
         Parameters(request): Parameters<StrConcatRequest>,
@@ -23733,7 +26565,9 @@ impl AnalyticsServer {
             }
         };
 
-        let result_name = request.result_name.unwrap_or_else(|| request.dataset.clone());
+        let result_name = request
+            .result_name
+            .unwrap_or_else(|| request.dataset.clone());
 
         drop(datasets);
         let mut datasets = self.datasets.write().await;
@@ -23741,12 +26575,16 @@ impl AnalyticsServer {
 
         Ok(CallToolResult::success(vec![Content::text(format!(
             "Concatenated {} columns into '{}', saved as '{}'",
-            request.columns.len(), request.new_column, result_name
+            request.columns.len(),
+            request.new_column,
+            result_name
         ))]))
     }
 
     /// Get string lengths.
-    #[tool(description = "Create a new column containing the length (number of characters) of each string in the source column.")]
+    #[tool(
+        description = "Create a new column containing the length (number of characters) of each string in the source column."
+    )]
     async fn str_length(
         &self,
         Parameters(request): Parameters<StrLengthRequest>,
@@ -23773,7 +26611,9 @@ impl AnalyticsServer {
             }
         };
 
-        let result_name = request.result_name.unwrap_or_else(|| request.dataset.clone());
+        let result_name = request
+            .result_name
+            .unwrap_or_else(|| request.dataset.clone());
 
         drop(datasets);
         let mut datasets = self.datasets.write().await;
@@ -23786,7 +26626,9 @@ impl AnalyticsServer {
     }
 
     /// Extract a substring from a string column.
-    #[tool(description = "Extract a substring from each string in a column. Supports negative indices to count from end.")]
+    #[tool(
+        description = "Extract a substring from each string in a column. Supports negative indices to count from end."
+    )]
     async fn str_substring(
         &self,
         Parameters(request): Parameters<StrSubstringRequest>,
@@ -23813,13 +26655,16 @@ impl AnalyticsServer {
             }
         };
 
-        let result_name = request.result_name.unwrap_or_else(|| request.dataset.clone());
+        let result_name = request
+            .result_name
+            .unwrap_or_else(|| request.dataset.clone());
 
         drop(datasets);
         let mut datasets = self.datasets.write().await;
         datasets.insert(result_name.clone(), result);
 
-        let length_desc = request.length
+        let length_desc = request
+            .length
             .map(|l| format!(", length {}", l))
             .unwrap_or_else(|| " to end".to_string());
 
@@ -23830,7 +26675,9 @@ impl AnalyticsServer {
     }
 
     /// Create lag or lead columns for time series data.
-    #[tool(description = "Create lag or lead columns for time series or panel data. Lag shifts values forward (past values), lead shifts values backward (future values).")]
+    #[tool(
+        description = "Create lag or lead columns for time series or panel data. Lag shifts values forward (past values), lead shifts values backward (future values)."
+    )]
     async fn munge_lag_lead(
         &self,
         Parameters(request): Parameters<LagLeadRequest>,
@@ -23848,7 +26695,9 @@ impl AnalyticsServer {
         };
 
         let periods = request.periods.unsigned_abs() as usize;
-        let group_by_cols: Option<Vec<&str>> = request.group_by.as_ref()
+        let group_by_cols: Option<Vec<&str>> = request
+            .group_by
+            .as_ref()
             .map(|v| v.iter().map(|s| s.as_str()).collect());
 
         let direction = request.direction.as_deref().unwrap_or("lag");
@@ -23873,7 +26722,9 @@ impl AnalyticsServer {
             }
         };
 
-        let result_name = request.result_name.unwrap_or_else(|| request.dataset.clone());
+        let result_name = request
+            .result_name
+            .unwrap_or_else(|| request.dataset.clone());
         let new_col = format!("{}_{}{}", request.column, direction, periods);
 
         drop(datasets);
@@ -23887,7 +26738,9 @@ impl AnalyticsServer {
     }
 
     /// Standardize or normalize columns.
-    #[tool(description = "Standardize (z-score) or normalize (0-1 range) numeric columns. Standardize subtracts mean and divides by std. Normalize scales to [0, 1].")]
+    #[tool(
+        description = "Standardize (z-score) or normalize (0-1 range) numeric columns. Standardize subtracts mean and divides by std. Normalize scales to [0, 1]."
+    )]
     async fn munge_standardize(
         &self,
         Parameters(request): Parameters<StandardizeRequest>,
@@ -23928,7 +26781,9 @@ impl AnalyticsServer {
             }
         };
 
-        let result_name = request.result_name.unwrap_or_else(|| request.dataset.clone());
+        let result_name = request
+            .result_name
+            .unwrap_or_else(|| request.dataset.clone());
 
         drop(datasets);
         let mut datasets = self.datasets.write().await;
@@ -23936,12 +26791,16 @@ impl AnalyticsServer {
 
         Ok(CallToolResult::success(vec![Content::text(format!(
             "Applied {} to {} columns, saved as '{}'",
-            method, request.columns.len(), result_name
+            method,
+            request.columns.len(),
+            result_name
         ))]))
     }
 
     /// Bin a continuous variable into discrete categories.
-    #[tool(description = "Bin a continuous variable into discrete categories. Strategies: 'uniform' (equal width), 'quantile' (equal frequency), or 'custom' (specify break points).")]
+    #[tool(
+        description = "Bin a continuous variable into discrete categories. Strategies: 'uniform' (equal width), 'quantile' (equal frequency), or 'custom' (specify break points)."
+    )]
     async fn munge_bin(
         &self,
         Parameters(request): Parameters<BinColumnRequest>,
@@ -23967,9 +26826,7 @@ impl AnalyticsServer {
                 let n_bins = request.bins.first().map(|&v| v as usize).unwrap_or(5);
                 BinStrategy::Quantile(n_bins)
             }
-            "custom" => {
-                BinStrategy::Custom(request.bins.clone())
-            }
+            "custom" => BinStrategy::Custom(request.bins.clone()),
             _ => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
                     "Unknown strategy: '{}'. Use 'uniform', 'quantile', or 'custom'.",
@@ -23978,7 +26835,10 @@ impl AnalyticsServer {
             }
         };
 
-        let labels = request.labels.as_ref().map(|v| v.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+        let labels = request
+            .labels
+            .as_ref()
+            .map(|v| v.iter().map(|s| s.as_str()).collect::<Vec<_>>());
 
         let result = match bin(dataset, &request.column, strategy, labels.as_deref()) {
             Ok(ds) => ds,
@@ -23990,7 +26850,9 @@ impl AnalyticsServer {
             }
         };
 
-        let result_name = request.result_name.unwrap_or_else(|| request.dataset.clone());
+        let result_name = request
+            .result_name
+            .unwrap_or_else(|| request.dataset.clone());
 
         drop(datasets);
         let mut datasets = self.datasets.write().await;
@@ -24003,7 +26865,9 @@ impl AnalyticsServer {
     }
 
     /// One-hot encode a categorical column.
-    #[tool(description = "One-hot encode a categorical column, creating binary indicator columns for each category. Use drop_first=true to avoid multicollinearity in regression.")]
+    #[tool(
+        description = "One-hot encode a categorical column, creating binary indicator columns for each category. Use drop_first=true to avoid multicollinearity in regression."
+    )]
     async fn munge_one_hot_encode(
         &self,
         Parameters(request): Parameters<OneHotEncodeRequest>,
@@ -24032,7 +26896,9 @@ impl AnalyticsServer {
             }
         };
 
-        let result_name = request.result_name.unwrap_or_else(|| request.dataset.clone());
+        let result_name = request
+            .result_name
+            .unwrap_or_else(|| request.dataset.clone());
         let n_cols = result.ncols();
 
         drop(datasets);
@@ -24046,7 +26912,9 @@ impl AnalyticsServer {
     }
 
     /// Compute differences or percent changes.
-    #[tool(description = "Compute differences or percent changes for a column. Useful for time series and panel data analysis.")]
+    #[tool(
+        description = "Compute differences or percent changes for a column. Useful for time series and panel data analysis."
+    )]
     async fn munge_diff(
         &self,
         Parameters(request): Parameters<DiffRequest>,
@@ -24087,7 +26955,9 @@ impl AnalyticsServer {
             }
         };
 
-        let result_name = request.result_name.unwrap_or_else(|| request.dataset.clone());
+        let result_name = request
+            .result_name
+            .unwrap_or_else(|| request.dataset.clone());
         let new_col = format!("{}_{}{}", request.column, diff_type, periods);
 
         drop(datasets);
@@ -24101,7 +26971,9 @@ impl AnalyticsServer {
     }
 
     /// Sample rows from a dataset.
-    #[tool(description = "Randomly sample rows from a dataset. Useful for creating training/test splits or working with large datasets.")]
+    #[tool(
+        description = "Randomly sample rows from a dataset. Useful for creating training/test splits or working with large datasets."
+    )]
     async fn munge_sample(
         &self,
         Parameters(request): Parameters<SampleDatasetRequest>,
@@ -24131,7 +27003,9 @@ impl AnalyticsServer {
             }
         };
 
-        let result_name = request.result_name.unwrap_or_else(|| format!("{}_sample", request.dataset));
+        let result_name = request
+            .result_name
+            .unwrap_or_else(|| format!("{}_sample", request.dataset));
         let n_rows = result.nrows();
 
         drop(datasets);
@@ -24145,7 +27019,9 @@ impl AnalyticsServer {
     }
 
     /// Create a new column by computation.
-    #[tool(description = "Create a new column by applying arithmetic operations or functions. Supports: arithmetic (+, -, *, /), functions (log, exp, sqrt, abs, square), or constant values.")]
+    #[tool(
+        description = "Create a new column by applying arithmetic operations or functions. Supports: arithmetic (+, -, *, /), functions (log, exp, sqrt, abs, square), or constant values."
+    )]
     async fn munge_mutate(
         &self,
         Parameters(request): Parameters<MutateColumnRequest>,
@@ -24177,13 +27053,16 @@ impl AnalyticsServer {
                     }
                     None => {
                         return Ok(CallToolResult::error(vec![Content::text(
-                            "Arithmetic expressions require an 'operator' field.".to_string()
+                            "Arithmetic expressions require an 'operator' field.".to_string(),
                         )]));
                     }
                 };
 
                 let right = request.right.as_deref().ok_or_else(|| {
-                    McpError::invalid_request("Arithmetic expressions require a 'right' field", None)
+                    McpError::invalid_request(
+                        "Arithmetic expressions require a 'right' field",
+                        None,
+                    )
                 })?;
 
                 MutateExpr::Arithmetic(request.left.clone(), op, right.to_string())
@@ -24192,9 +27071,7 @@ impl AnalyticsServer {
                 let func = request.operator.as_deref().unwrap_or("log");
                 MutateExpr::Function(func.to_string(), request.left.clone())
             }
-            "constant" => {
-                MutateExpr::Constant(request.left.clone())
-            }
+            "constant" => MutateExpr::Constant(request.left.clone()),
             other => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
                     "Unknown expression type: '{}'. Use 'arithmetic', 'function', or 'constant'.",
@@ -24213,7 +27090,9 @@ impl AnalyticsServer {
             }
         };
 
-        let result_name = request.result_name.unwrap_or_else(|| request.dataset.clone());
+        let result_name = request
+            .result_name
+            .unwrap_or_else(|| request.dataset.clone());
 
         drop(datasets);
         let mut datasets = self.datasets.write().await;
@@ -24226,7 +27105,9 @@ impl AnalyticsServer {
     }
 
     /// Export the current analysis session to a JSON file.
-    #[tool(description = "Export the current session including all loaded datasets and their metadata. Can save to file or return as string. Useful for saving your analysis state to resume later.")]
+    #[tool(
+        description = "Export the current session including all loaded datasets and their metadata. Can save to file or return as string. Useful for saving your analysis state to resume later."
+    )]
     async fn export_session(
         &self,
         Parameters(request): Parameters<ExportSessionRequest>,
@@ -24239,7 +27120,10 @@ impl AnalyticsServer {
 
         let mut session_data = serde_json::Map::new();
         session_data.insert("version".to_string(), serde_json::json!("1.0"));
-        session_data.insert("created_at".to_string(), serde_json::json!(chrono::Utc::now().to_rfc3339()));
+        session_data.insert(
+            "created_at".to_string(),
+            serde_json::json!(chrono::Utc::now().to_rfc3339()),
+        );
 
         let mut datasets_json = serde_json::Map::new();
         for (name, dataset) in datasets.iter() {
@@ -24247,7 +27131,8 @@ impl AnalyticsServer {
             let mut ds_info = serde_json::Map::new();
 
             // Save schema
-            let schema: Vec<serde_json::Value> = df.get_columns()
+            let schema: Vec<serde_json::Value> = df
+                .get_columns()
                 .iter()
                 .map(|col| {
                     serde_json::json!({
@@ -24266,26 +27151,24 @@ impl AnalyticsServer {
                 for col in df.get_columns() {
                     let col_name = col.name().to_string();
                     let values: Vec<serde_json::Value> = (0..col.len())
-                        .map(|i| {
-                            match col.get(i) {
-                                Ok(av) => match av {
-                                    AnyValue::Null => serde_json::Value::Null,
-                                    AnyValue::Boolean(b) => serde_json::json!(b),
-                                    AnyValue::Int8(v) => serde_json::json!(v),
-                                    AnyValue::Int16(v) => serde_json::json!(v),
-                                    AnyValue::Int32(v) => serde_json::json!(v),
-                                    AnyValue::Int64(v) => serde_json::json!(v),
-                                    AnyValue::UInt8(v) => serde_json::json!(v),
-                                    AnyValue::UInt16(v) => serde_json::json!(v),
-                                    AnyValue::UInt32(v) => serde_json::json!(v),
-                                    AnyValue::UInt64(v) => serde_json::json!(v),
-                                    AnyValue::Float32(v) => serde_json::json!(v),
-                                    AnyValue::Float64(v) => serde_json::json!(v),
-                                    AnyValue::String(s) => serde_json::json!(s),
-                                    _ => serde_json::json!(format!("{:?}", av)),
-                                },
-                                Err(_) => serde_json::Value::Null,
-                            }
+                        .map(|i| match col.get(i) {
+                            Ok(av) => match av {
+                                AnyValue::Null => serde_json::Value::Null,
+                                AnyValue::Boolean(b) => serde_json::json!(b),
+                                AnyValue::Int8(v) => serde_json::json!(v),
+                                AnyValue::Int16(v) => serde_json::json!(v),
+                                AnyValue::Int32(v) => serde_json::json!(v),
+                                AnyValue::Int64(v) => serde_json::json!(v),
+                                AnyValue::UInt8(v) => serde_json::json!(v),
+                                AnyValue::UInt16(v) => serde_json::json!(v),
+                                AnyValue::UInt32(v) => serde_json::json!(v),
+                                AnyValue::UInt64(v) => serde_json::json!(v),
+                                AnyValue::Float32(v) => serde_json::json!(v),
+                                AnyValue::Float64(v) => serde_json::json!(v),
+                                AnyValue::String(s) => serde_json::json!(s),
+                                _ => serde_json::json!(format!("{:?}", av)),
+                            },
+                            Err(_) => serde_json::Value::Null,
                         })
                         .collect();
                     columns_data.insert(col_name, serde_json::json!(values));
@@ -24297,12 +27180,14 @@ impl AnalyticsServer {
         }
         session_data.insert("datasets".to_string(), serde_json::json!(datasets_json));
 
-        let json_output = serde_json::to_string_pretty(&session_data)
-            .map_err(|e| McpError::internal_error(format!("JSON serialization failed: {}", e), None))?;
+        let json_output = serde_json::to_string_pretty(&session_data).map_err(|e| {
+            McpError::internal_error(format!("JSON serialization failed: {}", e), None)
+        })?;
 
         if let Some(file_path) = request.file_path {
-            fs::write(&file_path, &json_output)
-                .map_err(|e| McpError::internal_error(format!("Failed to write session file: {}", e), None))?;
+            fs::write(&file_path, &json_output).map_err(|e| {
+                McpError::internal_error(format!("Failed to write session file: {}", e), None)
+            })?;
 
             Ok(CallToolResult::success(vec![Content::text(format!(
                 "Session exported successfully to: {}\n\
@@ -24324,7 +27209,9 @@ impl AnalyticsServer {
     }
 
     /// Import a previously exported analysis session.
-    #[tool(description = "Import a previously exported session from a JSON file. Can merge with existing session or replace it. Restores all datasets with their original names.")]
+    #[tool(
+        description = "Import a previously exported session from a JSON file. Can merge with existing session or replace it. Restores all datasets with their original names."
+    )]
     async fn import_session(
         &self,
         Parameters(request): Parameters<ImportSessionRequest>,
@@ -24332,15 +27219,19 @@ impl AnalyticsServer {
         use p2a_core::polars::prelude::*;
         use std::fs;
 
-        let json_content = fs::read_to_string(&request.file_path)
-            .map_err(|e| McpError::internal_error(format!("Failed to read session file: {}", e), None))?;
+        let json_content = fs::read_to_string(&request.file_path).map_err(|e| {
+            McpError::internal_error(format!("Failed to read session file: {}", e), None)
+        })?;
 
         let session: serde_json::Value = serde_json::from_str(&json_content)
             .map_err(|e| McpError::internal_error(format!("Invalid JSON: {}", e), None))?;
 
-        let datasets_obj = session.get("datasets")
+        let datasets_obj = session
+            .get("datasets")
             .and_then(|v| v.as_object())
-            .ok_or_else(|| McpError::internal_error("Invalid session format: missing 'datasets' field", None))?;
+            .ok_or_else(|| {
+                McpError::internal_error("Invalid session format: missing 'datasets' field", None)
+            })?;
 
         let merge = request.merge.unwrap_or(false);
         let mut datasets = self.datasets.write().await;
@@ -24373,30 +27264,32 @@ impl AnalyticsServer {
 
                         let series: Series = match first_non_null {
                             Some(serde_json::Value::Number(n)) if n.is_f64() => {
-                                let vals: Vec<Option<f64>> = arr.iter()
-                                    .map(|v| v.as_f64())
-                                    .collect();
+                                let vals: Vec<Option<f64>> =
+                                    arr.iter().map(|v| v.as_f64()).collect();
                                 Series::new(col_name.into(), vals)
                             }
                             Some(serde_json::Value::Number(_)) => {
-                                let vals: Vec<Option<i64>> = arr.iter()
-                                    .map(|v| v.as_i64())
-                                    .collect();
+                                let vals: Vec<Option<i64>> =
+                                    arr.iter().map(|v| v.as_i64()).collect();
                                 Series::new(col_name.into(), vals)
                             }
                             Some(serde_json::Value::Bool(_)) => {
-                                let vals: Vec<Option<bool>> = arr.iter()
-                                    .map(|v| v.as_bool())
-                                    .collect();
+                                let vals: Vec<Option<bool>> =
+                                    arr.iter().map(|v| v.as_bool()).collect();
                                 Series::new(col_name.into(), vals)
                             }
                             _ => {
                                 // Default to string
-                                let vals: Vec<Option<String>> = arr.iter()
+                                let vals: Vec<Option<String>> = arr
+                                    .iter()
                                     .map(|v| {
-                                        if v.is_null() { None }
-                                        else if let Some(s) = v.as_str() { Some(s.to_string()) }
-                                        else { Some(v.to_string()) }
+                                        if v.is_null() {
+                                            None
+                                        } else if let Some(s) = v.as_str() {
+                                            Some(s.to_string())
+                                        } else {
+                                            Some(v.to_string())
+                                        }
                                     })
                                     .collect();
                                 Series::new(col_name.into(), vals)
@@ -24444,7 +27337,9 @@ impl AnalyticsServer {
     }
 
     /// Set the global random seed for ML reproducibility.
-    #[tool(description = "Set a global random seed for ML operations (kmeans, random_forest, tsne). When set, ML tools will use this seed as a fallback if no per-tool seed is specified. Clear by calling with no seed value.")]
+    #[tool(
+        description = "Set a global random seed for ML operations (kmeans, random_forest, tsne). When set, ML tools will use this seed as a fallback if no per-tool seed is specified. Clear by calling with no seed value."
+    )]
     async fn set_seed(
         &self,
         Parameters(request): Parameters<SetSeedRequest>,
@@ -24465,7 +27360,9 @@ impl AnalyticsServer {
     }
 
     /// Get the current global random seed.
-    #[tool(description = "Get the current global random seed setting and list which ML tools support seeded reproducibility.")]
+    #[tool(
+        description = "Get the current global random seed setting and list which ML tools support seeded reproducibility."
+    )]
     async fn get_seed(
         &self,
         Parameters(_request): Parameters<GetSeedRequest>,
@@ -24493,7 +27390,9 @@ impl AnalyticsServer {
     }
 
     /// Generate random data with specified distributions.
-    #[tool(description = "Generate a random dataset with specified columns and distributions. Supports: uniform (min, max), normal (mean, std), binomial (n, p), poisson (lambda), exponential (rate), bernoulli (p), categorical (categories, optional weights), uniform_int (min, max), sequence (start), constant (value), constant_string (value). Example column: {\"name\": \"x\", \"distribution\": {\"type\": \"normal\", \"mean\": 0, \"std\": 1}}")]
+    #[tool(
+        description = "Generate a random dataset with specified columns and distributions. Supports: uniform (min, max), normal (mean, std), binomial (n, p), poisson (lambda), exponential (rate), bernoulli (p), categorical (categories, optional weights), uniform_int (min, max), sequence (start), constant (value), constant_string (value). Example column: {\"name\": \"x\", \"distribution\": {\"type\": \"normal\", \"mean\": 0, \"std\": 1}}"
+    )]
     async fn generate_random_data(
         &self,
         Parameters(request): Parameters<GenerateRandomDataRequest>,
@@ -24537,7 +27436,8 @@ impl AnalyticsServer {
             Ok(ds) => ds,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Failed to generate random data: {}", e
+                    "Failed to generate random data: {}",
+                    e
                 ))]));
             }
         };
@@ -24545,7 +27445,12 @@ impl AnalyticsServer {
         // Get dataset info
         let n_rows = dataset.df().height();
         let n_cols = dataset.df().width();
-        let col_names: Vec<String> = dataset.df().get_column_names().into_iter().map(|s| s.to_string()).collect();
+        let col_names: Vec<String> = dataset
+            .df()
+            .get_column_names()
+            .into_iter()
+            .map(|s| s.to_string())
+            .collect();
 
         // Determine dataset name
         let name = request.name.unwrap_or_else(|| "generated".to_string());
@@ -24567,7 +27472,8 @@ impl AnalyticsServer {
             n_rows,
             n_cols,
             col_names.join(", "),
-            seed.map(|s| s.to_string()).unwrap_or_else(|| "random".to_string()),
+            seed.map(|s| s.to_string())
+                .unwrap_or_else(|| "random".to_string()),
             name
         );
 
@@ -24579,7 +27485,9 @@ impl AnalyticsServer {
     // ========================================================================
 
     /// Compute Tukey's five-number summary.
-    #[tool(description = "Compute Tukey's five-number summary: minimum, lower-hinge (Q1), median, upper-hinge (Q3), and maximum. The hinges follow Tukey's definition used in boxplots. Useful for understanding data distribution and identifying outliers.")]
+    #[tool(
+        description = "Compute Tukey's five-number summary: minimum, lower-hinge (Q1), median, upper-hinge (Q3), and maximum. The hinges follow Tukey's definition used in boxplots. Useful for understanding data distribution and identifying outliers."
+    )]
     async fn stats_fivenum(
         &self,
         Parameters(request): Parameters<FivenumRequest>,
@@ -24624,7 +27532,9 @@ impl AnalyticsServer {
     }
 
     /// Compute interquartile range.
-    #[tool(description = "Compute the interquartile range (IQR = Q3 - Q1). The IQR is a robust measure of spread that is resistant to outliers. Uses R's default quantile type 7 unless specified otherwise.")]
+    #[tool(
+        description = "Compute the interquartile range (IQR = Q3 - Q1). The IQR is a robust measure of spread that is resistant to outliers. Uses R's default quantile type 7 unless specified otherwise."
+    )]
     async fn stats_iqr(
         &self,
         Parameters(request): Parameters<IqrRequest>,
@@ -24664,7 +27574,9 @@ impl AnalyticsServer {
     }
 
     /// Compute median absolute deviation.
-    #[tool(description = "Compute the median absolute deviation (MAD), a robust measure of variability. MAD = median(|x - center|) * constant. Default uses median as center and constant=1.4826 (consistent estimator of std for normal data). Unlike standard deviation, MAD is resistant to outliers.")]
+    #[tool(
+        description = "Compute the median absolute deviation (MAD), a robust measure of variability. MAD = median(|x - center|) * constant. Default uses median as center and constant=1.4826 (consistent estimator of std for normal data). Unlike standard deviation, MAD is resistant to outliers."
+    )]
     async fn stats_mad(
         &self,
         Parameters(request): Parameters<MadRequest>,
@@ -24690,7 +27602,11 @@ impl AnalyticsServer {
         let center = if request.center.as_deref() == Some("mean") {
             let sum: f64 = values.iter().filter(|x| !x.is_nan()).sum();
             let count = values.iter().filter(|x| !x.is_nan()).count();
-            if count > 0 { Some(sum / count as f64) } else { None }
+            if count > 0 {
+                Some(sum / count as f64)
+            } else {
+                None
+            }
         } else {
             None // Will use median by default
         };
@@ -24716,7 +27632,9 @@ impl AnalyticsServer {
     }
 
     /// Compute empirical cumulative distribution function.
-    #[tool(description = "Compute the empirical cumulative distribution function (ECDF). Returns the proportion of observations less than or equal to each value. Useful for visualizing distributions and computing percentiles. If 'at' is specified, evaluates ECDF at those points; otherwise returns ECDF at all unique data values.")]
+    #[tool(
+        description = "Compute the empirical cumulative distribution function (ECDF). Returns the proportion of observations less than or equal to each value. Useful for visualizing distributions and computing percentiles. If 'at' is specified, evaluates ECDF at those points; otherwise returns ECDF at all unique data values."
+    )]
     async fn stats_ecdf(
         &self,
         Parameters(request): Parameters<EcdfRequest>,
@@ -24765,7 +27683,9 @@ impl AnalyticsServer {
     }
 
     /// Estimate kernel density.
-    #[tool(description = "Estimate probability density function using kernel density estimation (KDE). Smooths the empirical distribution using a kernel function. Bandwidth can be specified or auto-selected using Silverman's rule of thumb. Returns density estimates at n evaluation points spanning the data range.")]
+    #[tool(
+        description = "Estimate probability density function using kernel density estimation (KDE). Smooths the empirical distribution using a kernel function. Bandwidth can be specified or auto-selected using Silverman's rule of thumb. Returns density estimates at n evaluation points spanning the data range."
+    )]
     async fn stats_density(
         &self,
         Parameters(request): Parameters<DensityRequest>,
@@ -24790,8 +27710,19 @@ impl AnalyticsServer {
         let kernel = request.kernel.as_deref().unwrap_or("gaussian");
 
         // Validate kernel
-        if !["gaussian", "normal", "epanechnikov", "rectangular", "uniform",
-             "triangular", "biweight", "quartic", "cosine"].contains(&kernel) {
+        if ![
+            "gaussian",
+            "normal",
+            "epanechnikov",
+            "rectangular",
+            "uniform",
+            "triangular",
+            "biweight",
+            "quartic",
+            "cosine",
+        ]
+        .contains(&kernel)
+        {
             return Ok(CallToolResult::error(vec![Content::text(format!(
                 "Unknown kernel '{}'. Supported: gaussian, epanechnikov, rectangular, triangular, biweight, cosine.",
                 kernel
@@ -24825,7 +27756,9 @@ impl AnalyticsServer {
     // ========================================================================
 
     /// Perform spline interpolation.
-    #[tool(description = "Perform cubic spline interpolation. Fits a smooth piecewise cubic polynomial through the data points. Methods: 'fmm' (Forsythe-Malcolm-Moler, default), 'natural' (second derivatives zero at endpoints), 'periodic' (for cyclic data), 'hyman' (monotone-preserving). If xout is provided, returns interpolated values; otherwise returns spline coefficients.")]
+    #[tool(
+        description = "Perform cubic spline interpolation. Fits a smooth piecewise cubic polynomial through the data points. Methods: 'fmm' (Forsythe-Malcolm-Moler, default), 'natural' (second derivatives zero at endpoints), 'periodic' (for cyclic data), 'hyman' (monotone-preserving). If xout is provided, returns interpolated values; otherwise returns spline coefficients."
+    )]
     async fn stats_spline(
         &self,
         Parameters(request): Parameters<SplineRequest>,
@@ -24886,7 +27819,9 @@ impl AnalyticsServer {
     }
 
     /// Perform linear interpolation/approximation.
-    #[tool(description = "Perform linear interpolation or constant interpolation. Linear interpolation connects points with straight lines; constant interpolation uses step functions. Specify 'rule' to control extrapolation behavior: 'na' returns NA outside range, 'const' uses boundary values, 'extrapolate' extends linearly.")]
+    #[tool(
+        description = "Perform linear interpolation or constant interpolation. Linear interpolation connects points with straight lines; constant interpolation uses step functions. Specify 'rule' to control extrapolation behavior: 'na' returns NA outside range, 'const' uses boundary values, 'extrapolate' extends linearly."
+    )]
     async fn stats_approx(
         &self,
         Parameters(request): Parameters<ApproxRequest>,
@@ -24960,13 +27895,15 @@ impl AnalyticsServer {
     // ========================================================================
 
     /// Fit a Generalized Least Squares model.
-    #[tool(description = "Fit a Generalized Least Squares (GLS) regression model. GLS extends OLS to handle correlated or heteroscedastic errors. Correlation structures: 'ar1' (autoregressive), 'compound_symmetry' (equal correlation), 'identity' (OLS). For AR(1), rho can be specified or auto-estimated from OLS residuals. Returns coefficients, standard errors, t-values, p-values, and model fit statistics.")]
+    #[tool(
+        description = "Fit a Generalized Least Squares (GLS) regression model. GLS extends OLS to handle correlated or heteroscedastic errors. Correlation structures: 'ar1' (autoregressive), 'compound_symmetry' (equal correlation), 'identity' (OLS). For AR(1), rho can be specified or auto-estimated from OLS residuals. Returns coefficients, standard errors, t-values, p-values, and model fit statistics."
+    )]
     async fn regression_gls(
         &self,
         Parameters(request): Parameters<GlsRequest>,
     ) -> Result<CallToolResult, McpError> {
-        use p2a_core::linalg::design::DesignMatrix;
         use ndarray::Array1;
+        use p2a_core::linalg::design::DesignMatrix;
 
         let datasets = self.datasets.read().await;
 
@@ -25095,7 +28032,9 @@ impl AnalyticsServer {
     }
 
     /// Fit a smoothing spline.
-    #[tool(description = "Fit a smoothing spline to data. Smoothing splines balance goodness-of-fit against smoothness using a penalty on curvature. The smoothing parameter (spar) or degrees of freedom (df) controls the tradeoff. If neither is specified, uses generalized cross-validation (GCV) to automatically select optimal smoothing. Returns fitted values, effective degrees of freedom, and GCV score.")]
+    #[tool(
+        description = "Fit a smoothing spline to data. Smoothing splines balance goodness-of-fit against smoothness using a penalty on curvature. The smoothing parameter (spar) or degrees of freedom (df) controls the tradeoff. If neither is specified, uses generalized cross-validation (GCV) to automatically select optimal smoothing. Returns fitted values, effective degrees of freedom, and GCV score."
+    )]
     async fn regression_smooth_spline(
         &self,
         Parameters(request): Parameters<SmoothSplineRequest>,
@@ -25174,10 +28113,12 @@ fn extract_column_f64(dataset: &Dataset, column: &str) -> Result<Vec<f64>, Strin
     use p2a_core::polars::prelude::*;
 
     let df = dataset.df();
-    let col = df.column(column)
+    let col = df
+        .column(column)
         .map_err(|e| format!("Column '{}' not found: {}", column, e))?;
 
-    let values: Vec<f64> = col.cast(&DataType::Float64)
+    let values: Vec<f64> = col
+        .cast(&DataType::Float64)
         .map_err(|e| format!("Cannot convert column '{}' to numeric: {}", column, e))?
         .f64()
         .map_err(|e| format!("Column '{}' is not numeric: {}", column, e))?
@@ -25206,10 +28147,12 @@ fn extract_numeric_matrix(
     let mut data = ndarray::Array2::zeros((n_rows, n_cols));
 
     for (j, col_name) in columns.iter().enumerate() {
-        let col = df.column(col_name)
+        let col = df
+            .column(col_name)
             .map_err(|e| format!("Column '{}' not found: {}", col_name, e))?;
 
-        let values: Vec<f64> = col.cast(&DataType::Float64)
+        let values: Vec<f64> = col
+            .cast(&DataType::Float64)
             .map_err(|e| format!("Cannot convert column '{}' to numeric: {}", col_name, e))?
             .f64()
             .map_err(|e| format!("Column '{}' is not numeric: {}", col_name, e))?
@@ -25274,7 +28217,11 @@ mod tests {
     /// Helper to create a server with a pre-loaded dataset
     async fn server_with_dataset(name: &str, dataset: Dataset) -> AnalyticsServer {
         let server = AnalyticsServer::new();
-        server.datasets.write().await.insert(name.to_string(), dataset);
+        server
+            .datasets
+            .write()
+            .await
+            .insert(name.to_string(), dataset);
         server
     }
 
@@ -25296,7 +28243,8 @@ mod tests {
             "id" => [1, 2, 3, 4, 5],
             "name" => ["Alice", "Bob", "  Charlie  ", "Diana", "Eve"],
             "score" => [Some(85.5), Some(90.0), None, Some(92.0), Some(88.0)],
-        }.unwrap();
+        }
+        .unwrap();
 
         let server = server_with_dataset("test", Dataset::new(test_df)).await;
 
@@ -25304,7 +28252,10 @@ mod tests {
             dataset: "test".to_string(),
         };
 
-        let result = server.data_quality_profile(Parameters(request)).await.unwrap();
+        let result = server
+            .data_quality_profile(Parameters(request))
+            .await
+            .unwrap();
 
         // Should return success with profile info
         assert!(!result.is_error.unwrap_or(false));
@@ -25318,7 +28269,8 @@ mod tests {
     async fn test_preview_cleaning_trim() {
         let test_df = df! {
             "email" => ["  alice@test.com", "bob@test.com  ", " charlie@test.com "],
-        }.unwrap();
+        }
+        .unwrap();
 
         let server = server_with_dataset("test", Dataset::new(test_df)).await;
 
@@ -25349,7 +28301,8 @@ mod tests {
         let test_df = df! {
             "email" => ["  alice@test.com", "bob@test.com  ", " charlie@test.com "],
             "value" => [Some(1.0), None, None],
-        }.unwrap();
+        }
+        .unwrap();
 
         let server = server_with_dataset("test", Dataset::new(test_df)).await;
 
@@ -25373,7 +28326,8 @@ mod tests {
         let test_df = df! {
             "email" => ["  alice@test.com", "bob@test.com"],
             "value" => [Some(1.0), Some(2.0)],
-        }.unwrap();
+        }
+        .unwrap();
 
         let server = server_with_dataset("test", Dataset::new(test_df)).await;
 
@@ -25396,7 +28350,8 @@ mod tests {
     async fn test_cleaning_session_workflow() {
         let test_df = df! {
             "email" => ["  alice@test.com", "bob@test.com  ", " charlie@test.com "],
-        }.unwrap();
+        }
+        .unwrap();
 
         let server = server_with_dataset("test", Dataset::new(test_df)).await;
 
@@ -25406,7 +28361,10 @@ mod tests {
             session_name: Some("test_session".to_string()),
         };
 
-        let result = server.cleaning_session_start(Parameters(start_request)).await.unwrap();
+        let result = server
+            .cleaning_session_start(Parameters(start_request))
+            .await
+            .unwrap();
         assert!(!result.is_error.unwrap_or(false));
 
         // Extract session ID from result
@@ -25414,7 +28372,8 @@ mod tests {
         assert!(text.contains("Cleaning session started"));
 
         // Parse session ID from the response
-        let session_id = text.lines()
+        let session_id = text
+            .lines()
             .find(|line| line.contains("Session ID:"))
             .and_then(|line| line.split(": ").nth(1))
             .map(|s| s.trim().to_string())
@@ -25425,7 +28384,10 @@ mod tests {
             session_id: session_id.clone(),
         };
 
-        let result = server.cleaning_session_status(Parameters(status_request)).await.unwrap();
+        let result = server
+            .cleaning_session_status(Parameters(status_request))
+            .await
+            .unwrap();
         assert!(!result.is_error.unwrap_or(false));
 
         // 3. List checkpoints
@@ -25433,7 +28395,10 @@ mod tests {
             session_id: session_id.clone(),
         };
 
-        let result = server.cleaning_session_checkpoints(Parameters(checkpoints_request)).await.unwrap();
+        let result = server
+            .cleaning_session_checkpoints(Parameters(checkpoints_request))
+            .await
+            .unwrap();
         assert!(!result.is_error.unwrap_or(false));
         let text = get_text_content(&result.content[0]).expect("Expected text content");
         assert!(text.contains("Session Checkpoints"));
@@ -25444,13 +28409,17 @@ mod tests {
     async fn test_list_cleaning_sessions() {
         let test_df = df! {
             "x" => [1, 2, 3],
-        }.unwrap();
+        }
+        .unwrap();
 
         let server = server_with_dataset("test", Dataset::new(test_df)).await;
 
         // First, list should be empty
         let list_request = ListCleaningSessionsRequest {};
-        let result = server.list_cleaning_sessions(Parameters(list_request)).await.unwrap();
+        let result = server
+            .list_cleaning_sessions(Parameters(list_request))
+            .await
+            .unwrap();
 
         let text = get_text_content(&result.content[0]).expect("Expected text content");
         assert!(text.contains("No active cleaning sessions"));
@@ -25460,11 +28429,17 @@ mod tests {
             dataset: "test".to_string(),
             session_name: None,
         };
-        server.cleaning_session_start(Parameters(start_request)).await.unwrap();
+        server
+            .cleaning_session_start(Parameters(start_request))
+            .await
+            .unwrap();
 
         // Now list should show the session
         let list_request = ListCleaningSessionsRequest {};
-        let result = server.list_cleaning_sessions(Parameters(list_request)).await.unwrap();
+        let result = server
+            .list_cleaning_sessions(Parameters(list_request))
+            .await
+            .unwrap();
 
         let text = get_text_content(&result.content[0]).expect("Expected text content");
         assert!(text.contains("Active Cleaning Sessions"));
@@ -25475,11 +28450,13 @@ mod tests {
     async fn test_verify_cleaning() {
         let original_df = df! {
             "email" => ["  alice@test.com", "bob@test.com  "],
-        }.unwrap();
+        }
+        .unwrap();
 
         let cleaned_df = df! {
             "email" => ["alice@test.com", "bob@test.com"],
-        }.unwrap();
+        }
+        .unwrap();
 
         let server = AnalyticsServer::new();
         {

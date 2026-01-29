@@ -129,9 +129,17 @@ impl fmt::Display for NlsResult {
         writeln!(f, "==============================================")?;
         writeln!(f, "No. Observations: {}", self.n_obs)?;
         writeln!(f, "No. Parameters: {}", self.n_params)?;
-        writeln!(f, "Residual Std. Error: {:.6} on {} degrees of freedom", self.sigma, self.df)?;
+        writeln!(
+            f,
+            "Residual Std. Error: {:.6} on {} degrees of freedom",
+            self.sigma, self.df
+        )?;
         writeln!(f, "Residual Sum of Squares: {:.6}", self.rss)?;
-        writeln!(f, "Converged: {} (iterations: {})", self.converged, self.iterations)?;
+        writeln!(
+            f,
+            "Converged: {} (iterations: {})",
+            self.converged, self.iterations
+        )?;
         if let Some(lambda) = self.final_lambda {
             writeln!(f, "Final Lambda: {:.2e}", lambda)?;
         }
@@ -214,10 +222,7 @@ pub fn nls(
 
     if n < k {
         return Err(EconError::InvalidSpecification {
-            message: format!(
-                "More parameters ({}) than observations ({})",
-                k, n
-            ),
+            message: format!("More parameters ({}) than observations ({})", k, n),
         });
     }
 
@@ -235,7 +240,11 @@ pub fn nls(
     let weights = if let Some(ref w) = config.weights {
         if w.len() != n {
             return Err(EconError::InvalidSpecification {
-                message: format!("Weights length ({}) doesn't match data length ({})", w.len(), n),
+                message: format!(
+                    "Weights length ({}) doesn't match data length ({})",
+                    w.len(),
+                    n
+                ),
             });
         }
         Some(Array1::from_vec(w.clone()))
@@ -253,8 +262,10 @@ pub fn nls(
         for i in 0..k {
             if lower[i] > upper[i] {
                 return Err(EconError::InvalidSpecification {
-                    message: format!("Lower bound {} exceeds upper bound {} for parameter {}",
-                        lower[i], upper[i], param_names[i]),
+                    message: format!(
+                        "Lower bound {} exceeds upper bound {} for parameter {}",
+                        lower[i], upper[i], param_names[i]
+                    ),
                 });
             }
         }
@@ -310,7 +321,8 @@ pub fn nls(
                         Ok(d) => {
                             // Try the step
                             let theta_new = &theta - &d;
-                            let theta_bounded = apply_bounds(&theta_new, &config.lower, &config.upper);
+                            let theta_bounded =
+                                apply_bounds(&theta_new, &config.lower, &config.upper);
                             let residuals_new = compute_residuals(x, y, &theta_bounded, model, n);
                             let rss_new = compute_rss(&residuals_new, &weights);
 
@@ -378,7 +390,11 @@ pub fn nls(
 
     // Compute final statistics
     let df = n - k;
-    let sigma = if df > 0 { (rss / df as f64).sqrt() } else { f64::NAN };
+    let sigma = if df > 0 {
+        (rss / df as f64).sqrt()
+    } else {
+        f64::NAN
+    };
 
     // Compute variance-covariance matrix
     let jacobian_final = compute_jacobian(x, y, &theta, model, n, k, config.diff_step);
@@ -397,13 +413,27 @@ pub fn nls(
     };
 
     // Compute t-statistics and p-values
-    let t_stats: Vec<f64> = theta.iter()
+    let t_stats: Vec<f64> = theta
+        .iter()
         .zip(std_errors.iter())
-        .map(|(&b, &se)| if se.is_finite() && se > 0.0 { b / se } else { f64::NAN })
+        .map(|(&b, &se)| {
+            if se.is_finite() && se > 0.0 {
+                b / se
+            } else {
+                f64::NAN
+            }
+        })
         .collect();
 
-    let p_values: Vec<f64> = t_stats.iter()
-        .map(|&t| if t.is_finite() { t_test_p_value(t, df as f64) } else { f64::NAN })
+    let p_values: Vec<f64> = t_stats
+        .iter()
+        .map(|&t| {
+            if t.is_finite() {
+                t_test_p_value(t, df as f64)
+            } else {
+                f64::NAN
+            }
+        })
         .collect();
 
     // Compute fitted values
@@ -431,7 +461,11 @@ pub fn nls(
         iterations,
         converged,
         convergence_code,
-        final_lambda: if config.algorithm == NlsAlgorithm::LevenbergMarquardt { Some(lambda) } else { None },
+        final_lambda: if config.algorithm == NlsAlgorithm::LevenbergMarquardt {
+            Some(lambda)
+        } else {
+            None
+        },
         vcov,
     })
 }
@@ -472,7 +506,8 @@ pub fn nls_multi(
         return Err(EconError::InvalidSpecification {
             message: format!(
                 "Parameter names length ({}) doesn't match start values length ({})",
-                param_names.len(), k
+                param_names.len(),
+                k
             ),
         });
     }
@@ -502,41 +537,42 @@ pub fn nls_multi(
         let jtr = jacobian.t().dot(&residuals);
 
         match config.algorithm {
-            NlsAlgorithm::GaussNewton => {
-                match solve_normal_equations(&jtj, &jtr, 0.0) {
-                    Ok(delta) => {
-                        let theta_new = &theta - &delta;
-                        theta = apply_bounds(&theta_new, &config.lower, &config.upper);
+            NlsAlgorithm::GaussNewton => match solve_normal_equations(&jtj, &jtr, 0.0) {
+                Ok(delta) => {
+                    let theta_new = &theta - &delta;
+                    theta = apply_bounds(&theta_new, &config.lower, &config.upper);
 
-                        let residuals_new = compute_residuals_multi(x, y, &theta, model);
-                        let rss_new = compute_rss(&residuals_new, &weights);
+                    let residuals_new = compute_residuals_multi(x, y, &theta, model);
+                    let rss_new = compute_rss(&residuals_new, &weights);
 
-                        let rel_change = (rss - rss_new).abs() / (rss + 1e-10);
-                        residuals = residuals_new;
-                        rss = rss_new;
+                    let rel_change = (rss - rss_new).abs() / (rss + 1e-10);
+                    residuals = residuals_new;
+                    rss = rss_new;
 
-                        if rel_change < config.tolerance {
-                            converged = true;
-                            convergence_code = 0;
-                            break;
-                        }
-                    }
-                    Err(_) => {
-                        convergence_code = 2;
+                    if rel_change < config.tolerance {
+                        converged = true;
+                        convergence_code = 0;
                         break;
                     }
                 }
-            }
+                Err(_) => {
+                    convergence_code = 2;
+                    break;
+                }
+            },
             NlsAlgorithm::LevenbergMarquardt => {
                 let diag_jtj = jtj.diag().to_owned();
 
                 let mut step_accepted = false;
-                for _ in 0..50 { // Max attempts to find good lambda
+                for _ in 0..50 {
+                    // Max attempts to find good lambda
                     match solve_lm_equations(&jtj, &jtr, lambda, &diag_jtj) {
                         Ok(d) => {
                             let theta_new = &theta - &d;
-                            let theta_bounded = apply_bounds(&theta_new, &config.lower, &config.upper);
-                            let residuals_new = compute_residuals_multi(x, y, &theta_bounded, model);
+                            let theta_bounded =
+                                apply_bounds(&theta_new, &config.lower, &config.upper);
+                            let residuals_new =
+                                compute_residuals_multi(x, y, &theta_bounded, model);
                             let rss_new = compute_rss(&residuals_new, &weights);
 
                             if rss_new < rss {
@@ -580,7 +616,11 @@ pub fn nls_multi(
     }
 
     let df = n - k;
-    let sigma = if df > 0 { (rss / df as f64).sqrt() } else { f64::NAN };
+    let sigma = if df > 0 {
+        (rss / df as f64).sqrt()
+    } else {
+        f64::NAN
+    };
 
     let jacobian_final = compute_jacobian_multi(x, y, &theta, model, config.diff_step);
     let jtj_final = jacobian_final.t().dot(&jacobian_final);
@@ -591,16 +631,30 @@ pub fn nls_multi(
             let se: Vec<f64> = vcov.diag().iter().map(|v| v.max(0.0).sqrt()).collect();
             (Some(vcov), se)
         }
-        Err(_) => (None, vec![f64::NAN; k])
+        Err(_) => (None, vec![f64::NAN; k]),
     };
 
-    let t_stats: Vec<f64> = theta.iter()
+    let t_stats: Vec<f64> = theta
+        .iter()
         .zip(std_errors.iter())
-        .map(|(&b, &se)| if se.is_finite() && se > 0.0 { b / se } else { f64::NAN })
+        .map(|(&b, &se)| {
+            if se.is_finite() && se > 0.0 {
+                b / se
+            } else {
+                f64::NAN
+            }
+        })
         .collect();
 
-    let p_values: Vec<f64> = t_stats.iter()
-        .map(|&t| if t.is_finite() { t_test_p_value(t, df as f64) } else { f64::NAN })
+    let p_values: Vec<f64> = t_stats
+        .iter()
+        .map(|&t| {
+            if t.is_finite() {
+                t_test_p_value(t, df as f64)
+            } else {
+                f64::NAN
+            }
+        })
         .collect();
 
     let fitted: Vec<f64> = (0..n)
@@ -624,7 +678,11 @@ pub fn nls_multi(
         iterations,
         converged,
         convergence_code,
-        final_lambda: if config.algorithm == NlsAlgorithm::LevenbergMarquardt { Some(lambda) } else { None },
+        final_lambda: if config.algorithm == NlsAlgorithm::LevenbergMarquardt {
+            Some(lambda)
+        } else {
+            None
+        },
         vcov,
     })
 }
@@ -660,7 +718,15 @@ pub fn run_nls(
     start: &Array1<f64>,
     param_names: &[&str],
 ) -> EconResult<NlsResult> {
-    run_nls_with_config(dataset, y_col, x_col, model, start, param_names, NlsConfig::default())
+    run_nls_with_config(
+        dataset,
+        y_col,
+        x_col,
+        model,
+        start,
+        param_names,
+        NlsConfig::default(),
+    )
 }
 
 /// Run NLS from a Dataset with custom configuration.
@@ -675,17 +741,19 @@ pub fn run_nls_with_config(
 ) -> EconResult<NlsResult> {
     use crate::linalg::design::DesignMatrix;
 
-    let y = DesignMatrix::extract_column(dataset.df(), y_col)
-        .map_err(|e| EconError::ColumnNotFound {
+    let y = DesignMatrix::extract_column(dataset.df(), y_col).map_err(|e| {
+        EconError::ColumnNotFound {
             column: y_col.to_string(),
             available: vec![format!("{:?}", e)],
-        })?;
+        }
+    })?;
 
-    let x = DesignMatrix::extract_column(dataset.df(), x_col)
-        .map_err(|e| EconError::ColumnNotFound {
+    let x = DesignMatrix::extract_column(dataset.df(), x_col).map_err(|e| {
+        EconError::ColumnNotFound {
             column: x_col.to_string(),
             available: vec![format!("{:?}", e)],
-        })?;
+        }
+    })?;
 
     nls(&x, &y, model, start, param_names, config)
 }
@@ -731,7 +799,8 @@ fn compute_residuals_multi(
 /// Compute (weighted) residual sum of squares
 fn compute_rss(residuals: &Array1<f64>, weights: &Option<Array1<f64>>) -> f64 {
     match weights {
-        Some(w) => residuals.iter()
+        Some(w) => residuals
+            .iter()
             .zip(w.iter())
             .map(|(&r, &wi)| wi * r * r)
             .sum(),
@@ -742,7 +811,7 @@ fn compute_rss(residuals: &Array1<f64>, weights: &Option<Array1<f64>>) -> f64 {
 /// Compute Jacobian matrix using central differences
 fn compute_jacobian(
     x: &Array1<f64>,
-    y: &Array1<f64>,
+    _y: &Array1<f64>,
     theta: &Array1<f64>,
     model: ModelFn,
     n: usize,
@@ -819,11 +888,10 @@ fn solve_normal_equations(
         }
     }
 
-    let (inv, _) = safe_inverse(&augmented.view())
-        .map_err(|e| EconError::SingularMatrix {
-            context: "Normal equations in NLS".to_string(),
-            suggestion: format!("Try different starting values or increase lambda: {:?}", e),
-        })?;
+    let (inv, _) = safe_inverse(&augmented.view()).map_err(|e| EconError::SingularMatrix {
+        context: "Normal equations in NLS".to_string(),
+        suggestion: format!("Try different starting values or increase lambda: {:?}", e),
+    })?;
 
     Ok(inv.dot(jtr))
 }
@@ -842,11 +910,10 @@ fn solve_lm_equations(
         augmented[[i, i]] += lambda * diag[i].max(1e-10);
     }
 
-    let (inv, _) = safe_inverse(&augmented.view())
-        .map_err(|e| EconError::SingularMatrix {
-            context: "L-M equations in NLS".to_string(),
-            suggestion: format!("Lambda may be too small: {:?}", e),
-        })?;
+    let (inv, _) = safe_inverse(&augmented.view()).map_err(|e| EconError::SingularMatrix {
+        context: "L-M equations in NLS".to_string(),
+        suggestion: format!("Lambda may be too small: {:?}", e),
+    })?;
 
     Ok(inv.dot(jtr))
 }
@@ -858,13 +925,12 @@ fn apply_bounds(
     upper: &Option<Vec<f64>>,
 ) -> Array1<f64> {
     match (lower, upper) {
-        (Some(lo), Some(hi)) => {
-            theta.iter()
-                .zip(lo.iter())
-                .zip(hi.iter())
-                .map(|((&t, &l), &u)| t.max(l).min(u))
-                .collect()
-        }
+        (Some(lo), Some(hi)) => theta
+            .iter()
+            .zip(lo.iter())
+            .zip(hi.iter())
+            .map(|((&t, &l), &u)| t.max(l).min(u))
+            .collect(),
         _ => theta.clone(),
     }
 }
@@ -941,15 +1007,13 @@ pub fn model_asymptotic(x: &Array1<f64>, theta: &Array1<f64>) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use polars::prelude::*;
     use crate::data::Dataset;
+    use polars::prelude::*;
 
     fn create_exponential_decay_data() -> (Array1<f64>, Array1<f64>) {
         // True model: y = 10 * exp(-0.5 * x) + 2 + noise
         let x = Array1::from_vec(vec![0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0]);
-        let y = Array1::from_vec(vec![
-            11.8, 9.7, 8.0, 6.5, 5.7, 4.8, 4.2, 3.7, 3.4, 3.1, 2.9
-        ]);
+        let y = Array1::from_vec(vec![11.8, 9.7, 8.0, 6.5, 5.7, 4.8, 4.2, 3.7, 3.4, 3.1, 2.9]);
         (x, y)
     }
 
@@ -966,19 +1030,30 @@ mod tests {
         let start = Array1::from_vec(vec![8.0, 0.3, 1.0]); // Initial guesses
 
         let result = nls(
-            &x, &y,
+            &x,
+            &y,
             model_exponential_decay,
             &start,
             &["a", "b", "c"],
-            NlsConfig::default()
-        ).unwrap();
+            NlsConfig::default(),
+        )
+        .unwrap();
 
         assert!(result.converged, "Should converge");
 
         // Check parameters are close to true values (a=10, b=0.5, c=2)
-        assert!((result.coefficients[0] - 10.0).abs() < 2.0, "a should be close to 10");
-        assert!((result.coefficients[1] - 0.5).abs() < 0.2, "b should be close to 0.5");
-        assert!((result.coefficients[2] - 2.0).abs() < 1.0, "c should be close to 2");
+        assert!(
+            (result.coefficients[0] - 10.0).abs() < 2.0,
+            "a should be close to 10"
+        );
+        assert!(
+            (result.coefficients[1] - 0.5).abs() < 0.2,
+            "b should be close to 0.5"
+        );
+        assert!(
+            (result.coefficients[2] - 2.0).abs() < 1.0,
+            "c should be close to 2"
+        );
     }
 
     #[test]
@@ -992,12 +1067,14 @@ mod tests {
         };
 
         let result = nls(
-            &x, &y,
+            &x,
+            &y,
             model_exponential_decay,
             &start,
             &["a", "b", "c"],
-            config
-        ).unwrap();
+            config,
+        )
+        .unwrap();
 
         // Gauss-Newton may or may not converge depending on starting values
         // Just check it ran
@@ -1010,18 +1087,26 @@ mod tests {
         let start = Array1::from_vec(vec![150.0, 0.05]); // Initial guesses
 
         let result = nls(
-            &x, &y,
+            &x,
+            &y,
             model_michaelis_menten,
             &start,
             &["Vmax", "Km"],
-            NlsConfig::default()
-        ).unwrap();
+            NlsConfig::default(),
+        )
+        .unwrap();
 
         assert!(result.converged, "Should converge");
 
         // Check parameters are close to true values (Vmax=200, Km=0.1)
-        assert!((result.coefficients[0] - 200.0).abs() < 20.0, "Vmax should be close to 200");
-        assert!((result.coefficients[1] - 0.1).abs() < 0.05, "Km should be close to 0.1");
+        assert!(
+            (result.coefficients[0] - 200.0).abs() < 20.0,
+            "Vmax should be close to 200"
+        );
+        assert!(
+            (result.coefficients[1] - 0.1).abs() < 0.05,
+            "Km should be close to 0.1"
+        );
     }
 
     #[test]
@@ -1036,12 +1121,14 @@ mod tests {
         };
 
         let result = nls(
-            &x, &y,
+            &x,
+            &y,
             model_exponential_decay,
             &start,
             &["a", "b", "c"],
-            config
-        ).unwrap();
+            config,
+        )
+        .unwrap();
 
         // All parameters should be within bounds
         for (&coef, name) in result.coefficients.iter().zip(&result.param_names) {
@@ -1055,12 +1142,14 @@ mod tests {
         let start = Array1::from_vec(vec![8.0, 0.3, 1.0]);
 
         let result = nls(
-            &x, &y,
+            &x,
+            &y,
             model_exponential_decay,
             &start,
             &["a", "b", "c"],
-            NlsConfig::default()
-        ).unwrap();
+            NlsConfig::default(),
+        )
+        .unwrap();
 
         // Check structure
         assert_eq!(result.n_obs, 11);
@@ -1078,7 +1167,10 @@ mod tests {
         // Check t-stats and p-values are finite
         for (t, p) in result.t_stats.iter().zip(&result.p_values) {
             assert!(t.is_finite(), "t-stat should be finite");
-            assert!(p.is_finite() && *p >= 0.0 && *p <= 1.0, "p-value should be in [0,1]");
+            assert!(
+                p.is_finite() && *p >= 0.0 && *p <= 1.0,
+                "p-value should be in [0,1]"
+            );
         }
     }
 
@@ -1088,12 +1180,14 @@ mod tests {
         let start = Array1::from_vec(vec![8.0, 0.3, 1.0]);
 
         let result = nls(
-            &x, &y,
+            &x,
+            &y,
             model_exponential_decay,
             &start,
             &["a", "b", "c"],
-            NlsConfig::default()
-        ).unwrap();
+            NlsConfig::default(),
+        )
+        .unwrap();
 
         let display = format!("{}", result);
         assert!(display.contains("Nonlinear Least Squares Results"));
@@ -1107,11 +1201,12 @@ mod tests {
         let start = Array1::from_vec(vec![1.0, 1.0, 1.0]); // 3 params, only 2 obs
 
         let result = nls(
-            &x, &y,
+            &x,
+            &y,
             model_exponential_decay,
             &start,
             &["a", "b", "c"],
-            NlsConfig::default()
+            NlsConfig::default(),
         );
 
         assert!(result.is_err());
@@ -1123,11 +1218,12 @@ mod tests {
         let start = Array1::from_vec(vec![8.0, 0.3, 1.0]);
 
         let result = nls(
-            &x, &y,
+            &x,
+            &y,
             model_exponential_decay,
             &start,
             &["a", "b"], // Only 2 names for 3 params
-            NlsConfig::default()
+            NlsConfig::default(),
         );
 
         assert!(result.is_err());
@@ -1139,7 +1235,8 @@ mod tests {
         let df = df! {
             "substrate" => [0.02f64, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0],
             "velocity" => [28.6f64, 65.0, 100.0, 133.3, 166.7, 181.8, 190.5, 196.1]
-        }.unwrap();
+        }
+        .unwrap();
         let dataset = Dataset::new(df);
 
         let start = Array1::from_vec(vec![150.0, 0.05]);
@@ -1150,8 +1247,9 @@ mod tests {
             "substrate",
             model_michaelis_menten,
             &start,
-            &["Vmax", "Km"]
-        ).unwrap();
+            &["Vmax", "Km"],
+        )
+        .unwrap();
 
         assert!(result.converged);
         assert!((result.coefficients[0] - 200.0).abs() < 20.0);
@@ -1179,12 +1277,14 @@ mod tests {
         let start = Array1::from_vec(vec![8.0, 0.3, 1.0]);
 
         let result = nls(
-            &x, &y,
+            &x,
+            &y,
             model_exponential_decay,
             &start,
             &["a", "b", "c"],
-            NlsConfig::default()
-        ).unwrap();
+            NlsConfig::default(),
+        )
+        .unwrap();
 
         // Our L-M may find a better fit than R's Gauss-Newton
         // Key validation: convergence and reasonable parameter estimates
@@ -1196,14 +1296,23 @@ mod tests {
 
         // Check parameters are in reasonable range
         // a (amplitude) should be positive and roughly 8-12
-        assert!(result.coefficients[0] > 5.0 && result.coefficients[0] < 15.0,
-            "a should be in [5, 15], got {}", result.coefficients[0]);
+        assert!(
+            result.coefficients[0] > 5.0 && result.coefficients[0] < 15.0,
+            "a should be in [5, 15], got {}",
+            result.coefficients[0]
+        );
         // b (decay rate) should be positive and roughly 0.3-0.7
-        assert!(result.coefficients[1] > 0.2 && result.coefficients[1] < 1.0,
-            "b should be in [0.2, 1.0], got {}", result.coefficients[1]);
+        assert!(
+            result.coefficients[1] > 0.2 && result.coefficients[1] < 1.0,
+            "b should be in [0.2, 1.0], got {}",
+            result.coefficients[1]
+        );
         // c (offset) should be roughly 1-3
-        assert!(result.coefficients[2] > 0.0 && result.coefficients[2] < 5.0,
-            "c should be in [0, 5], got {}", result.coefficients[2]);
+        assert!(
+            result.coefficients[2] > 0.0 && result.coefficients[2] < 5.0,
+            "c should be in [0, 5], got {}",
+            result.coefficients[2]
+        );
     }
 
     /// Validate Michaelis-Menten against R
@@ -1221,16 +1330,24 @@ mod tests {
         let start = Array1::from_vec(vec![150.0, 0.05]);
 
         let result = nls(
-            &x, &y,
+            &x,
+            &y,
             model_michaelis_menten,
             &start,
             &["Vmax", "Km"],
-            NlsConfig::default()
-        ).unwrap();
+            NlsConfig::default(),
+        )
+        .unwrap();
 
-        assert!((result.coefficients[0] - 200.2).abs() < 5.0,
-            "Vmax: Rust={} vs R=200.2", result.coefficients[0]);
-        assert!((result.coefficients[1] - 0.102).abs() < 0.02,
-            "Km: Rust={} vs R=0.102", result.coefficients[1]);
+        assert!(
+            (result.coefficients[0] - 200.2).abs() < 5.0,
+            "Vmax: Rust={} vs R=200.2",
+            result.coefficients[0]
+        );
+        assert!(
+            (result.coefficients[1] - 0.102).abs() < 0.02,
+            "Km: Rust={} vs R=0.102",
+            result.coefficients[1]
+        );
     }
 }

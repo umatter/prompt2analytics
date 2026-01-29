@@ -26,7 +26,13 @@ pub enum TransportType {
 #[command(version)]
 pub struct CliArgs {
     /// Transport type to use
-    #[arg(short, long, value_enum, default_value = "stdio", env = "P2A_TRANSPORT")]
+    #[arg(
+        short,
+        long,
+        value_enum,
+        default_value = "stdio",
+        env = "P2A_TRANSPORT"
+    )]
     pub transport: TransportType,
 
     /// Host address for HTTP transport
@@ -155,7 +161,9 @@ impl ServerConfig {
             },
             audit: AuditConfig {
                 enabled: args.audit_log,
-                path: args.audit_path.unwrap_or_else(|| "p2a-audit.log".to_string()),
+                path: args
+                    .audit_path
+                    .unwrap_or_else(|| "p2a-audit.log".to_string()),
             },
         }
     }

@@ -3,7 +3,7 @@
 //! Uses platform abstraction to work on web (fetch API) and native (reqwest)
 
 use super::types::*;
-use crate::platform::{create_http_client, HttpClient};
+use crate::platform::{HttpClient, create_http_client};
 use serde::Deserialize;
 
 /// Default API base URL
@@ -61,7 +61,10 @@ impl ApiClient {
         let url = format!("{}{}", self.base_url, endpoint);
         let body_json = serde_json::to_string(body).map_err(|e| e.to_string())?;
         let client = create_http_client();
-        let response = client.post(&url, &body_json).await.map_err(|e| e.to_string())?;
+        let response = client
+            .post(&url, &body_json)
+            .await
+            .map_err(|e| e.to_string())?;
 
         if !response.is_ok() {
             return Err(format!("HTTP error: {}", response.status));
@@ -79,7 +82,10 @@ impl ApiClient {
         let url = format!("{}{}", self.base_url, endpoint);
         let body_json = serde_json::to_string(body).map_err(|e| e.to_string())?;
         let client = create_http_client();
-        let response = client.put(&url, &body_json).await.map_err(|e| e.to_string())?;
+        let response = client
+            .put(&url, &body_json)
+            .await
+            .map_err(|e| e.to_string())?;
 
         if !response.is_ok() {
             return Err(format!("HTTP error: {}", response.status));
@@ -115,7 +121,9 @@ impl ApiClient {
                 .map(|d| d.session_id)
                 .ok_or_else(|| "No session ID in response".to_string())
         } else {
-            Err(response.error.unwrap_or_else(|| "Unknown error".to_string()))
+            Err(response
+                .error
+                .unwrap_or_else(|| "Unknown error".to_string()))
         }
     }
 
@@ -129,7 +137,9 @@ impl ApiClient {
                 .data
                 .ok_or_else(|| "No session info in response".to_string())
         } else {
-            Err(response.error.unwrap_or_else(|| "Unknown error".to_string()))
+            Err(response
+                .error
+                .unwrap_or_else(|| "Unknown error".to_string()))
         }
     }
 
@@ -149,7 +159,9 @@ impl ApiClient {
                 .data
                 .ok_or_else(|| "No tools in response".to_string())
         } else {
-            Err(response.error.unwrap_or_else(|| "Unknown error".to_string()))
+            Err(response
+                .error
+                .unwrap_or_else(|| "Unknown error".to_string()))
         }
     }
 
@@ -165,15 +177,18 @@ impl ApiClient {
             arguments,
         };
 
-        let response: ApiResponse<ToolExecutionResult> =
-            self.post(&format!("/api/tools/{tool_name}"), &request).await?;
+        let response: ApiResponse<ToolExecutionResult> = self
+            .post(&format!("/api/tools/{tool_name}"), &request)
+            .await?;
 
         if response.success {
             response
                 .data
                 .ok_or_else(|| "No tool result in response".to_string())
         } else {
-            Err(response.error.unwrap_or_else(|| "Unknown error".to_string()))
+            Err(response
+                .error
+                .unwrap_or_else(|| "Unknown error".to_string()))
         }
     }
 
@@ -210,7 +225,9 @@ impl ApiClient {
                 .data
                 .ok_or_else(|| "No conversations in response".to_string())
         } else {
-            Err(response.error.unwrap_or_else(|| "Unknown error".to_string()))
+            Err(response
+                .error
+                .unwrap_or_else(|| "Unknown error".to_string()))
         }
     }
 
@@ -225,16 +242,16 @@ impl ApiClient {
             title: title.to_string(),
         };
 
-        let response: ApiResponse<Conversation> = self
-            .post("/api/conversations", &request)
-            .await?;
+        let response: ApiResponse<Conversation> = self.post("/api/conversations", &request).await?;
 
         if response.success {
             response
                 .data
                 .ok_or_else(|| "No conversation in response".to_string())
         } else {
-            Err(response.error.unwrap_or_else(|| "Unknown error".to_string()))
+            Err(response
+                .error
+                .unwrap_or_else(|| "Unknown error".to_string()))
         }
     }
 
@@ -249,7 +266,9 @@ impl ApiClient {
                 .data
                 .ok_or_else(|| "No conversation in response".to_string())
         } else {
-            Err(response.error.unwrap_or_else(|| "Unknown error".to_string()))
+            Err(response
+                .error
+                .unwrap_or_else(|| "Unknown error".to_string()))
         }
     }
 
@@ -267,7 +286,9 @@ impl ApiClient {
                 .data
                 .ok_or_else(|| "No conversation in response".to_string())
         } else {
-            Err(response.error.unwrap_or_else(|| "Unknown error".to_string()))
+            Err(response
+                .error
+                .unwrap_or_else(|| "Unknown error".to_string()))
         }
     }
 
@@ -284,10 +305,7 @@ impl ApiClient {
         };
 
         let response: ApiResponse<Conversation> = self
-            .put(
-                &format!("/api/conversations/{conversation_id}"),
-                &request,
-            )
+            .put(&format!("/api/conversations/{conversation_id}"), &request)
             .await?;
 
         if response.success {
@@ -295,7 +313,9 @@ impl ApiClient {
                 .data
                 .ok_or_else(|| "No conversation in response".to_string())
         } else {
-            Err(response.error.unwrap_or_else(|| "Unknown error".to_string()))
+            Err(response
+                .error
+                .unwrap_or_else(|| "Unknown error".to_string()))
         }
     }
 
@@ -319,7 +339,9 @@ impl ApiClient {
                 .data
                 .ok_or_else(|| "No messages in response".to_string())
         } else {
-            Err(response.error.unwrap_or_else(|| "Unknown error".to_string()))
+            Err(response
+                .error
+                .unwrap_or_else(|| "Unknown error".to_string()))
         }
     }
 
@@ -347,7 +369,9 @@ impl ApiClient {
                 .data
                 .ok_or_else(|| "No message in response".to_string())
         } else {
-            Err(response.error.unwrap_or_else(|| "Unknown error".to_string()))
+            Err(response
+                .error
+                .unwrap_or_else(|| "Unknown error".to_string()))
         }
     }
 
@@ -371,7 +395,9 @@ impl ApiClient {
                 .map(|d| d.deleted_count)
                 .ok_or_else(|| "No count in response".to_string())
         } else {
-            Err(response.error.unwrap_or_else(|| "Unknown error".to_string()))
+            Err(response
+                .error
+                .unwrap_or_else(|| "Unknown error".to_string()))
         }
     }
 
@@ -390,9 +416,8 @@ impl ApiClient {
             provider,
         };
 
-        let response: ApiResponse<GenerateTitleResponse> = self
-            .post("/api/llm/generate-title", &request)
-            .await?;
+        let response: ApiResponse<GenerateTitleResponse> =
+            self.post("/api/llm/generate-title", &request).await?;
 
         if response.success {
             response
@@ -400,7 +425,9 @@ impl ApiClient {
                 .map(|r| r.title)
                 .ok_or_else(|| "No title in response".to_string())
         } else {
-            Err(response.error.unwrap_or_else(|| "Unknown error".to_string()))
+            Err(response
+                .error
+                .unwrap_or_else(|| "Unknown error".to_string()))
         }
     }
 
@@ -420,7 +447,9 @@ impl ApiClient {
                 .data
                 .ok_or_else(|| "No tool calls in response".to_string())
         } else {
-            Err(response.error.unwrap_or_else(|| "Unknown error".to_string()))
+            Err(response
+                .error
+                .unwrap_or_else(|| "Unknown error".to_string()))
         }
     }
 
@@ -438,7 +467,9 @@ impl ApiClient {
                 .data
                 .ok_or_else(|| "No tool calls in response".to_string())
         } else {
-            Err(response.error.unwrap_or_else(|| "Unknown error".to_string()))
+            Err(response
+                .error
+                .unwrap_or_else(|| "Unknown error".to_string()))
         }
     }
 
@@ -458,15 +489,14 @@ impl ApiClient {
                 .data
                 .ok_or_else(|| "No datasets in response".to_string())
         } else {
-            Err(response.error.unwrap_or_else(|| "Unknown error".to_string()))
+            Err(response
+                .error
+                .unwrap_or_else(|| "Unknown error".to_string()))
         }
     }
 
     /// Reload all datasets for a session from their original source paths
-    pub async fn reload_session_datasets(
-        &self,
-        session_id: &str,
-    ) -> Result<ReloadResult, String> {
+    pub async fn reload_session_datasets(&self, session_id: &str) -> Result<ReloadResult, String> {
         let response: ApiResponse<ReloadResult> = self
             .post(
                 &format!("/api/sessions/{session_id}/datasets/reload"),
@@ -479,7 +509,9 @@ impl ApiClient {
                 .data
                 .ok_or_else(|| "No reload result in response".to_string())
         } else {
-            Err(response.error.unwrap_or_else(|| "Unknown error".to_string()))
+            Err(response
+                .error
+                .unwrap_or_else(|| "Unknown error".to_string()))
         }
     }
 }

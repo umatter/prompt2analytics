@@ -84,46 +84,43 @@
 //! - [`cleaning_session`] - Session management for multi-step cleaning workflows
 //! - [`suggestion`] - Smart cleaning suggestions with priority ranking
 
-mod loader;
-mod dataset;
-mod stata;
-mod sas;
+pub mod cleaning_session;
 #[cfg(feature = "database")]
 mod database;
+mod dataset;
+mod loader;
 pub mod munging;
 pub mod quality;
-pub mod verification;
-pub mod cleaning_session;
+mod sas;
+mod stata;
 pub mod suggestion;
+pub mod verification;
 
-pub use loader::DataLoader;
 pub use dataset::{Dataset, DatasetInfo};
-pub use stata::{load_stata, StataError};
-pub use sas::{load_sas, SasError};
+pub use loader::DataLoader;
+pub use sas::{SasError, load_sas};
+pub use stata::{StataError, load_stata};
 
+pub use cleaning_session::{
+    CheckpointInfo, CleaningSession, OperationRecord, SessionCheckpoint, SessionStatus,
+    VerificationReportSummary,
+};
 #[cfg(feature = "database")]
 pub use database::{
-    DatabaseError, QueryResult,
-    query_sqlite, list_sqlite_tables, sqlite_table_schema,
-    query_duckdb, list_duckdb_tables, duckdb_table_schema,
-    query_file_with_duckdb,
+    DatabaseError, QueryResult, duckdb_table_schema, list_duckdb_tables, list_sqlite_tables,
+    query_duckdb, query_file_with_duckdb, query_sqlite, sqlite_table_schema,
 };
 pub use quality::{
-    DataQualityProfile, ColumnProfile, NumericStats, StringStats, DataIssue,
+    ColumnProfile, DataIssue, DataQualityProfile, NumericStats, StringStats,
     generate_quality_profile,
 };
-pub use verification::{
-    CleaningResult, VerificationReport, ChangeExample, QualityDelta,
-    CleaningPreview, CleaningOperation, preview_cleaning, verify_cleaning,
-};
-pub use cleaning_session::{
-    CleaningSession, SessionCheckpoint, OperationRecord, SessionStatus,
-    CheckpointInfo, VerificationReportSummary,
-};
 pub use suggestion::{
-    CleaningSuggestion, SuggestionPriority, CleaningCategory,
-    SuggestionParameters, EstimatedImpact, SuggestionReport, DatasetSummary,
-    generate_suggestions,
+    CleaningCategory, CleaningSuggestion, DatasetSummary, EstimatedImpact, SuggestionParameters,
+    SuggestionPriority, SuggestionReport, generate_suggestions,
+};
+pub use verification::{
+    ChangeExample, CleaningOperation, CleaningPreview, CleaningResult, QualityDelta,
+    VerificationReport, preview_cleaning, verify_cleaning,
 };
 
 // Re-export munging operations at the data module level

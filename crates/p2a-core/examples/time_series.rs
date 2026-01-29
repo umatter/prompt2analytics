@@ -9,14 +9,13 @@
 
 use p2a_core::{
     data::Dataset,
-    stats::{acf, pacf, AcfType},
+    stats::{AcfType, acf, pacf},
 };
 use polars::prelude::*;
 
 #[cfg(feature = "forecasting")]
 use p2a_core::forecasting::{
-    run_arima, forecast_arima,
-    holt_winters, holt_winters_forecast, HoltWintersConfig, SeasonalType,
+    HoltWintersConfig, SeasonalType, forecast_arima, holt_winters, holt_winters_forecast, run_arima,
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -24,18 +23,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create sample quarterly GDP data (seasonally adjusted, in billions)
     let gdp_values: Vec<f64> = vec![
-        18200.0, 18350.0, 18500.0, 18700.0,  // 2019
-        18900.0, 17500.0, 18100.0, 18600.0,  // 2020 (COVID dip)
-        19000.0, 19300.0, 19600.0, 19900.0,  // 2021
-        20200.0, 20400.0, 20600.0, 20800.0,  // 2022
-        21000.0, 21200.0, 21400.0, 21600.0,  // 2023
+        18200.0, 18350.0, 18500.0, 18700.0, // 2019
+        18900.0, 17500.0, 18100.0, 18600.0, // 2020 (COVID dip)
+        19000.0, 19300.0, 19600.0, 19900.0, // 2021
+        20200.0, 20400.0, 20600.0, 20800.0, // 2022
+        21000.0, 21200.0, 21400.0, 21600.0, // 2023
     ];
 
     let quarters: Vec<String> = (0..20)
         .map(|i| format!("{}Q{}", 2019 + i / 4, 1 + i % 4))
         .collect();
 
-    println!("Time series: {} quarterly observations (2019Q1-2023Q4)\n", gdp_values.len());
+    println!(
+        "Time series: {} quarterly observations (2019Q1-2023Q4)\n",
+        gdp_values.len()
+    );
 
     // ACF Analysis
     println!("--- Autocorrelation Function (ACF) ---");
@@ -72,9 +74,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // ARIMA Modeling
         println!("--- ARIMA(1,1,0) Model ---");
         let arima_result = run_arima(&dataset, "gdp", 1, 1, 0)?;
-        println!("ARIMA({},{},{}) fitted on '{}' (n={})",
-            arima_result.p, arima_result.d, arima_result.q,
-            arima_result.column, arima_result.n_obs);
+        println!(
+            "ARIMA({},{},{}) fitted on '{}' (n={})",
+            arima_result.p, arima_result.d, arima_result.q, arima_result.column, arima_result.n_obs
+        );
         println!("AIC: {:.2}", arima_result.aic);
         println!("SSR: {:.2}", arima_result.ssr);
         if !arima_result.ar_coeffs.is_empty() {
@@ -101,7 +104,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("--- Holt-Winters Exponential Smoothing ---");
         let hw_config = HoltWintersConfig {
             seasonal: SeasonalType::Additive,
-            period: 4,  // quarterly data
+            period: 4, // quarterly data
             ..Default::default()
         };
 

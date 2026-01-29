@@ -6,11 +6,11 @@
 use std::sync::Arc;
 
 use axum::{
+    Json, Router,
     extract::{Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
     routing::{delete, get, post},
-    Json, Router,
 };
 use serde::{Deserialize, Serialize};
 use tower_http::cors::{Any, CorsLayer};
@@ -19,7 +19,7 @@ use tower_http::trace::TraceLayer;
 use crate::audit::AuditLogger;
 use crate::config::ServerConfig;
 use crate::server::AnalyticsServer;
-use crate::session::{SessionError, SessionInfo, SessionManager};
+use crate::session::{SessionError, SessionManager};
 use crate::transport::TransportResult;
 
 /// Shared application state for HTTP handlers.
@@ -70,7 +70,10 @@ pub async fn start_http_transport(config: &ServerConfig) -> TransportResult<()> 
                 Some(Arc::new(manager))
             }
             Err(e) => {
-                tracing::warn!("Failed to initialize database, running without persistence: {}", e);
+                tracing::warn!(
+                    "Failed to initialize database, running without persistence: {}",
+                    e
+                );
                 None
             }
         }
@@ -104,9 +107,9 @@ pub async fn start_http_transport(config: &ServerConfig) -> TransportResult<()> 
         crate::transport::TransportError::Http(format!("Failed to bind to {}: {}", addr, e))
     })?;
 
-    axum::serve(listener, app).await.map_err(|e| {
-        crate::transport::TransportError::Http(format!("HTTP server error: {}", e))
-    })?;
+    axum::serve(listener, app)
+        .await
+        .map_err(|e| crate::transport::TransportError::Http(format!("HTTP server error: {}", e)))?;
 
     Ok(())
 }
@@ -121,7 +124,8 @@ pub fn create_router(
     let router = create_base_router(state, config);
 
     // Add conversation routes if persistent manager is available
-    let router = if let Some(manager) = persistent_manager {
+
+    if let Some(manager) = persistent_manager {
         tracing::info!("Adding conversation routes to /api/*");
         let conv_state = super::conversation::ConversationState {
             session_manager: manager,
@@ -130,9 +134,7 @@ pub fn create_router(
     } else {
         tracing::warn!("Conversation routes NOT added (no persistent manager)");
         router
-    };
-
-    router
+    }
 }
 
 /// Create the axum router with all routes (without db feature).
@@ -299,14 +301,24 @@ async fn create_session(
     Json(request): Json<CreateSessionRequest>,
 ) -> impl IntoResponse {
     // First create the in-memory session
-    match state.session_manager.create_session(request.user_id.clone()).await {
+    match state
+        .session_manager
+        .create_session(request.user_id.clone())
+        .await
+    {
         Ok(session_id) => {
             // Also register in persistent storage if available (for conversation support)
             #[cfg(feature = "db")]
             if let Some(ref persistent_manager) = state.persistent_manager {
-                match persistent_manager.register_session(&session_id, request.user_id).await {
+                match persistent_manager
+                    .register_session(&session_id, request.user_id)
+                    .await
+                {
                     Ok(()) => {
-                        tracing::info!("Session {} registered in database for conversation support", session_id);
+                        tracing::info!(
+                            "Session {} registered in database for conversation support",
+                            session_id
+                        );
                     }
                     Err(e) => {
                         tracing::warn!("Failed to register session in database: {}", e);
@@ -338,10 +350,7 @@ async fn list_sessions(State(state): State<AppState>) -> impl IntoResponse {
 }
 
 /// Get session information.
-async fn get_session(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> impl IntoResponse {
+async fn get_session(State(state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
     match state.session_manager.get_session(&id).await {
         Ok(session) => {
             let info = session.info().await;
@@ -439,8 +448,10 @@ async fn list_files(Query(query): Query<ListFilesQuery>) -> impl IntoResponse {
 
                     // Filter to only show directories and supported data files
                     if !is_dir {
-                        let ext = name.split('.').last().unwrap_or("").to_lowercase();
-                        if !["csv", "parquet", "json", "xlsx", "xls", "dta", "sas7bdat"].contains(&ext.as_str()) {
+                        let ext = name.split('.').next_back().unwrap_or("").to_lowercase();
+                        if !["csv", "parquet", "json", "xlsx", "xls", "dta", "sas7bdat"]
+                            .contains(&ext.as_str())
+                        {
                             return None;
                         }
                     }
@@ -455,12 +466,10 @@ async fn list_files(Query(query): Query<ListFilesQuery>) -> impl IntoResponse {
                 .collect();
 
             // Sort: directories first, then files, both alphabetically
-            entries.sort_by(|a, b| {
-                match (a.is_dir, b.is_dir) {
-                    (true, false) => std::cmp::Ordering::Less,
-                    (false, true) => std::cmp::Ordering::Greater,
-                    _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
-                }
+            entries.sort_by(|a, b| match (a.is_dir, b.is_dir) {
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+                _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
             });
 
             entries
@@ -519,7 +528,10 @@ async fn call_tool(
 
     // Execute the tool with session context and timing
     let start = std::time::Instant::now();
-    let tool_result = state.server.call_tool_with_session(&name, request.arguments.clone(), &session).await;
+    let tool_result = state
+        .server
+        .call_tool_with_session(&name, request.arguments.clone(), &session)
+        .await;
     let duration_ms = start.elapsed().as_millis() as u64;
 
     match tool_result {
@@ -592,10 +604,7 @@ async fn call_tool(
                 state.audit_logger.log(entry).await;
             }
 
-            (
-                StatusCode::BAD_REQUEST,
-                Json(ApiResponse::error(e)),
-            )
+            (StatusCode::BAD_REQUEST, Json(ApiResponse::error(e)))
         }
     }
 }
@@ -608,8 +617,8 @@ async fn call_tool(
 mod llm_handlers {
     use super::*;
     use crate::llm::{
-        get_mcp_tool_definitions, get_system_prompt_with_context, LlmProvider, Message, OllamaProvider,
-        OpenAIProvider, ProviderConfig, ProviderType, ToolExecutor,
+        LlmProvider, Message, OllamaProvider, OpenAIProvider, ProviderConfig, ProviderType,
+        ToolExecutor, get_mcp_tool_definitions, get_system_prompt_with_context,
     };
     use crate::session::Session;
 
@@ -702,7 +711,13 @@ mod llm_handlers {
         let mut config = config.unwrap_or_default();
 
         // Fill in API key from environment variable if not provided
-        if config.api_key.is_none() || config.api_key.as_ref().map(|k| k.is_empty()).unwrap_or(false) {
+        if config.api_key.is_none()
+            || config
+                .api_key
+                .as_ref()
+                .map(|k| k.is_empty())
+                .unwrap_or(false)
+        {
             let env_key = match config.provider_type {
                 ProviderType::OpenAI => std::env::var("OPENAI_API_KEY").ok(),
                 ProviderType::Anthropic => std::env::var("ANTHROPIC_API_KEY").ok(),
@@ -764,17 +779,24 @@ mod llm_handlers {
             if datasets.is_empty() {
                 None
             } else {
-                let context_lines: Vec<String> = datasets.iter().map(|(name, ds): (&String, &p2a_core::Dataset)| {
-                    let df = ds.df();
-                    let columns: Vec<String> = df.get_column_names().iter().map(|s| s.to_string()).collect();
-                    format!(
-                        "- **{}**: {} rows × {} columns\n  Columns: {}",
-                        name,
-                        df.height(),
-                        df.width(),
-                        columns.join(", ")
-                    )
-                }).collect();
+                let context_lines: Vec<String> = datasets
+                    .iter()
+                    .map(|(name, ds): (&String, &p2a_core::Dataset)| {
+                        let df = ds.df();
+                        let columns: Vec<String> = df
+                            .get_column_names()
+                            .iter()
+                            .map(|s| s.to_string())
+                            .collect();
+                        format!(
+                            "- **{}**: {} rows × {} columns\n  Columns: {}",
+                            name,
+                            df.height(),
+                            df.width(),
+                            columns.join(", ")
+                        )
+                    })
+                    .collect();
                 Some(context_lines.join("\n"))
             }
         };
@@ -813,9 +835,7 @@ mod llm_handlers {
     }
 
     /// List available LLM models.
-    pub async fn llm_list_models(
-        State(_state): State<AppState>,
-    ) -> impl IntoResponse {
+    pub async fn llm_list_models(State(_state): State<AppState>) -> impl IntoResponse {
         let provider = create_provider(None);
 
         match provider.list_models().await {
@@ -828,7 +848,10 @@ mod llm_handlers {
             ),
             Err(e) => (
                 StatusCode::SERVICE_UNAVAILABLE,
-                Json(ApiResponse::error(format!("LLM provider not available: {}", e))),
+                Json(ApiResponse::error(format!(
+                    "LLM provider not available: {}",
+                    e
+                ))),
             ),
         }
     }
@@ -886,7 +909,11 @@ mod llm_handlers {
                 "User: {}\nAssistant: {}",
                 request.user_message,
                 // Truncate long responses
-                if response.len() > 500 { &response[..500] } else { response }
+                if response.len() > 500 {
+                    &response[..500]
+                } else {
+                    response
+                }
             )
         } else {
             format!("User: {}", request.user_message)
@@ -898,15 +925,21 @@ mod llm_handlers {
         );
 
         let messages = vec![
-            Message::system("You are a helpful assistant that generates concise conversation titles. Respond with only the title, no quotes or punctuation."),
+            Message::system(
+                "You are a helpful assistant that generates concise conversation titles. Respond with only the title, no quotes or punctuation.",
+            ),
             Message::user(prompt),
         ];
 
         // Use chat without tools for simple title generation
-        match provider.chat(&messages, &[], &NoOpToolExecutor, false).await {
+        match provider
+            .chat(&messages, &[], &NoOpToolExecutor, false)
+            .await
+        {
             Ok(response) => {
                 // Clean up the title
-                let title = response.content
+                let title = response
+                    .content
                     .trim()
                     .trim_matches('"')
                     .trim_matches('\'')
@@ -928,7 +961,10 @@ mod llm_handlers {
                 tracing::error!(error = %e, "Failed to generate title");
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ApiResponse::error(format!("Failed to generate title: {}", e))),
+                    Json(ApiResponse::error(format!(
+                        "Failed to generate title: {}",
+                        e
+                    ))),
                 )
             }
         }
@@ -939,7 +975,11 @@ mod llm_handlers {
 
     #[async_trait::async_trait]
     impl ToolExecutor for NoOpToolExecutor {
-        async fn execute(&self, _name: &str, _arguments: serde_json::Value) -> Result<String, String> {
+        async fn execute(
+            &self,
+            _name: &str,
+            _arguments: serde_json::Value,
+        ) -> Result<String, String> {
             Err("Tool execution not available".to_string())
         }
     }
@@ -948,14 +988,32 @@ mod llm_handlers {
     #[derive(Debug, Clone, Serialize)]
     #[serde(tag = "type", rename_all = "snake_case")]
     pub enum ProgressEvent {
-        Status { message: String },
-        ToolStart { tool: String, arguments: serde_json::Value },
-        ToolEnd { tool: String, elapsed_ms: u64, result: Option<String> },
+        Status {
+            message: String,
+        },
+        ToolStart {
+            tool: String,
+            arguments: serde_json::Value,
+        },
+        ToolEnd {
+            tool: String,
+            elapsed_ms: u64,
+            result: Option<String>,
+        },
         /// Tool result with images (for viz tools)
-        ToolResult { tool: String, images: Vec<ImageData> },
-        Content { text: String },
-        Done { message: Message },
-        Error { error: String },
+        ToolResult {
+            tool: String,
+            images: Vec<ImageData>,
+        },
+        Content {
+            text: String,
+        },
+        Done {
+            message: Message,
+        },
+        Error {
+            error: String,
+        },
     }
 
     /// Image data for tool results.
@@ -1043,7 +1101,14 @@ mod llm_handlers {
             arguments: &serde_json::Value,
             result_text: &str,
         ) {
-            Self::capture_dataset_metadata_static(db, session_id, tool_name, arguments, result_text).await;
+            Self::capture_dataset_metadata_static(
+                db,
+                session_id,
+                tool_name,
+                arguments,
+                result_text,
+            )
+            .await;
         }
 
         /// Public static method for capturing dataset metadata.
@@ -1068,7 +1133,11 @@ mod llm_handlers {
 
             // DEBUG: Log the full result text (truncated for very long results)
             let result_preview = if result_text.len() > 2000 {
-                format!("{}...[truncated, total {} bytes]", &result_text[..2000], result_text.len())
+                format!(
+                    "{}...[truncated, total {} bytes]",
+                    &result_text[..2000],
+                    result_text.len()
+                )
             } else {
                 result_text.to_string()
             };
@@ -1246,7 +1315,7 @@ mod llm_handlers {
                 arguments
                     .get("filename")
                     .and_then(|v| v.as_str())
-                    .map(|f| PathBuf::from(f))
+                    .map(PathBuf::from)
                     .and_then(|p| p.extension().map(|e| e.to_string_lossy().to_string()))
                     .unwrap_or_else(|| "unknown".to_string())
             } else if tool_name == "create_dataset" {
@@ -1254,7 +1323,7 @@ mod llm_handlers {
             } else {
                 source_path
                     .as_ref()
-                    .map(|p| PathBuf::from(p))
+                    .map(PathBuf::from)
                     .and_then(|p| p.extension().map(|e| e.to_string_lossy().to_string()))
                     .unwrap_or_else(|| "unknown".to_string())
             };
@@ -1356,13 +1425,19 @@ mod llm_handlers {
             name: &str,
             arguments: serde_json::Value,
         ) -> Result<String, String> {
-            tracing::warn!(">>> StreamingToolExecutor::execute called for tool: {}", name);
+            tracing::warn!(
+                ">>> StreamingToolExecutor::execute called for tool: {}",
+                name
+            );
 
             // Send tool start event with arguments
-            let _ = self.sender.send(ProgressEvent::ToolStart {
-                tool: name.to_string(),
-                arguments: arguments.clone(),
-            }).await;
+            let _ = self
+                .sender
+                .send(ProgressEvent::ToolStart {
+                    tool: name.to_string(),
+                    arguments: arguments.clone(),
+                })
+                .await;
 
             // Create tool call record in DB if persistence is enabled
             #[cfg(feature = "db")]
@@ -1411,7 +1486,8 @@ mod llm_handlers {
             // Extract result text for the ToolEnd event
             let result_text = match &result {
                 Ok(r) => {
-                    let text: String = r.content
+                    let text: String = r
+                        .content
                         .iter()
                         .filter_map(|item| match item {
                             ContentItem::Text { text } => Some(text.clone()),
@@ -1430,11 +1506,14 @@ mod llm_handlers {
             };
 
             // Send tool end event with result
-            let _ = self.sender.send(ProgressEvent::ToolEnd {
-                tool: name.to_string(),
-                elapsed_ms: elapsed.as_millis() as u64,
-                result: result_text,
-            }).await;
+            let _ = self
+                .sender
+                .send(ProgressEvent::ToolEnd {
+                    tool: name.to_string(),
+                    elapsed_ms: elapsed.as_millis() as u64,
+                    result: result_text,
+                })
+                .await;
 
             tracing::info!(tool = %name, elapsed_ms = %elapsed.as_millis(), "Tool execution completed");
 
@@ -1461,7 +1540,10 @@ mod llm_handlers {
                         } else {
                             result_str.clone()
                         };
-                        if let Err(e) = db.complete_tool_call(tc_id, &truncated_result, duration_ms).await {
+                        if let Err(e) = db
+                            .complete_tool_call(tc_id, &truncated_result, duration_ms)
+                            .await
+                        {
                             tracing::warn!("Failed to update tool call record: {}", e);
                         }
                     }
@@ -1470,7 +1552,11 @@ mod llm_handlers {
                     // This is separate from tool call tracking - it only needs db and session_id
                     #[cfg(feature = "db")]
                     if let Some(db) = &self.db {
-                        if (name == "load_dataset" || name == "upload_dataset" || name == "create_dataset") && result.error.is_none() {
+                        if (name == "load_dataset"
+                            || name == "upload_dataset"
+                            || name == "create_dataset")
+                            && result.error.is_none()
+                        {
                             if let Some(session_id) = &self.session_id {
                                 Self::capture_dataset_metadata(
                                     db.clone(),
@@ -1478,7 +1564,8 @@ mod llm_handlers {
                                     name,
                                     &args_for_metadata,
                                     &result_str,
-                                ).await;
+                                )
+                                .await;
                             }
                         }
                     }
@@ -1498,10 +1585,13 @@ mod llm_handlers {
 
                     // If there are images, send them to the frontend
                     if !images.is_empty() {
-                        let _ = self.sender.send(ProgressEvent::ToolResult {
-                            tool: name.to_string(),
-                            images,
-                        }).await;
+                        let _ = self
+                            .sender
+                            .send(ProgressEvent::ToolResult {
+                                tool: name.to_string(),
+                                images,
+                            })
+                            .await;
                     }
 
                     // Return text content only (without base64) for the LLM
@@ -1510,7 +1600,9 @@ mod llm_handlers {
                         .iter()
                         .map(|item| match item {
                             ContentItem::Text { text } => text.clone(),
-                            ContentItem::Image { .. } => "[Image output - displayed in UI]".to_string(),
+                            ContentItem::Image { .. } => {
+                                "[Image output - displayed in UI]".to_string()
+                            }
                         })
                         .collect::<Vec<_>>()
                         .join("\n");
@@ -1534,7 +1626,9 @@ mod llm_handlers {
     pub async fn llm_chat_stream(
         State(state): State<AppState>,
         Json(request): Json<LlmChatRequest>,
-    ) -> axum::response::sse::Sse<impl futures::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>> {
+    ) -> axum::response::sse::Sse<
+        impl futures::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>,
+    > {
         use crate::llm::StreamChunk;
         use tokio::sync::mpsc;
 
@@ -1545,36 +1639,51 @@ mod llm_handlers {
         let tx_clone = tx.clone();
         tokio::spawn(async move {
             // Send initial status
-            let _ = tx_clone.send(ProgressEvent::Status {
-                message: "Starting analysis...".to_string()
-            }).await;
+            let _ = tx_clone
+                .send(ProgressEvent::Status {
+                    message: "Starting analysis...".to_string(),
+                })
+                .await;
 
             tracing::info!(interpret = %request.interpret, conversation_id = ?request.conversation_id, "LLM chat request received");
 
             // Get the session
-            let session = match state_clone.session_manager.get_session(&request.session_id).await {
+            let session = match state_clone
+                .session_manager
+                .get_session(&request.session_id)
+                .await
+            {
                 Ok(s) => s,
                 Err(crate::session::SessionError::NotFound) => {
-                    let _ = tx_clone.send(ProgressEvent::Error {
-                        error: "Session not found".to_string()
-                    }).await;
+                    let _ = tx_clone
+                        .send(ProgressEvent::Error {
+                            error: "Session not found".to_string(),
+                        })
+                        .await;
                     return;
                 }
                 Err(e) => {
-                    let _ = tx_clone.send(ProgressEvent::Error {
-                        error: e.to_string()
-                    }).await;
+                    let _ = tx_clone
+                        .send(ProgressEvent::Error {
+                            error: e.to_string(),
+                        })
+                        .await;
                     return;
                 }
             };
 
             // Get database connection for persistence/tracking
             #[cfg(feature = "db")]
-            let db_connection = state_clone.persistent_manager.as_ref().map(|pm| pm.db().clone());
+            let db_connection = state_clone
+                .persistent_manager
+                .as_ref()
+                .map(|pm| pm.db().clone());
 
             // Normalize conversation_id: treat empty string as None
             #[cfg(feature = "db")]
-            let effective_conversation_id = request.conversation_id.as_ref()
+            let effective_conversation_id = request
+                .conversation_id
+                .as_ref()
                 .filter(|id| !id.is_empty())
                 .cloned();
 
@@ -1605,28 +1714,32 @@ mod llm_handlers {
                 if datasets.is_empty() {
                     None
                 } else {
-                    let context_lines: Vec<String> = datasets.iter().map(|(name, ds): (&String, &p2a_core::Dataset)| {
-                        let df = ds.df();
-                        let columns: Vec<String> = df.get_column_names().iter().map(|s| s.to_string()).collect();
-                        format!(
-                            "- **{}**: {} rows × {} columns\n  Columns: {}",
-                            name,
-                            df.height(),
-                            df.width(),
-                            columns.join(", ")
-                        )
-                    }).collect();
+                    let context_lines: Vec<String> = datasets
+                        .iter()
+                        .map(|(name, ds): (&String, &p2a_core::Dataset)| {
+                            let df = ds.df();
+                            let columns: Vec<String> = df
+                                .get_column_names()
+                                .iter()
+                                .map(|s| s.to_string())
+                                .collect();
+                            format!(
+                                "- **{}**: {} rows × {} columns\n  Columns: {}",
+                                name,
+                                df.height(),
+                                df.width(),
+                                columns.join(", ")
+                            )
+                        })
+                        .collect();
                     Some(context_lines.join("\n"))
                 }
             };
 
             // Create provider and streaming tool executor
             let provider = create_provider(request.provider);
-            let mut tool_executor = StreamingToolExecutor::new(
-                state_clone.server.clone(),
-                session,
-                tx_clone.clone(),
-            );
+            let mut tool_executor =
+                StreamingToolExecutor::new(state_clone.server.clone(), session, tx_clone.clone());
 
             // Track whether we've set up the executor for persistence
             #[cfg(feature = "db")]
@@ -1651,20 +1764,23 @@ mod llm_handlers {
             #[cfg(feature = "db")]
             if !persistence_configured {
                 if let Some(db) = &db_connection {
-                    tool_executor = tool_executor.with_dataset_tracking(
-                        db.clone(),
-                        request.session_id.clone(),
-                    );
+                    tool_executor =
+                        tool_executor.with_dataset_tracking(db.clone(), request.session_id.clone());
                 }
             }
 
             let tools = get_mcp_tool_definitions();
 
-            let _ = tx_clone.send(ProgressEvent::Status {
-                message: format!("Connecting to {} LLM...", provider.provider_type())
-            }).await;
+            let _ = tx_clone
+                .send(ProgressEvent::Status {
+                    message: format!("Connecting to {} LLM...", provider.provider_type()),
+                })
+                .await;
 
-            tracing::info!(has_datasets = dataset_context.is_some(), "Building system prompt with dataset context");
+            tracing::info!(
+                has_datasets = dataset_context.is_some(),
+                "Building system prompt with dataset context"
+            );
 
             // Build message history with dataset context
             let system_prompt = get_system_prompt_with_context(dataset_context.as_deref());
@@ -1693,12 +1809,21 @@ mod llm_handlers {
             });
 
             // Execute streaming chat
-            match provider.chat_stream(&messages, &tools, &tool_executor, request.interpret, stream_callback).await {
+            match provider
+                .chat_stream(
+                    &messages,
+                    &tools,
+                    &tool_executor,
+                    request.interpret,
+                    stream_callback,
+                )
+                .await
+            {
                 Ok(response) => {
                     // Update message content in database if persistence is enabled
                     #[cfg(feature = "db")]
                     if let (Some(db), Some(msg_id)) = (&db_connection, &message_id) {
-                        if let Err(e) = db.update_message_content(&msg_id, &response.content).await {
+                        if let Err(e) = db.update_message_content(msg_id, &response.content).await {
                             tracing::warn!("Failed to update message content: {}", e);
                         } else {
                             tracing::debug!(message_id = %msg_id, "Updated assistant message content");
@@ -1713,19 +1838,23 @@ mod llm_handlers {
                         content_preview = %content_preview,
                         "Sending Done event with message content"
                     );
-                    let _ = tx_clone.send(ProgressEvent::Done { message: response }).await;
+                    let _ = tx_clone
+                        .send(ProgressEvent::Done { message: response })
+                        .await;
                 }
                 Err(e) => {
                     // Update message with error content if persistence is enabled
                     #[cfg(feature = "db")]
                     if let (Some(db), Some(msg_id)) = (&db_connection, &message_id) {
                         let error_content = format!("[Error: {}]", e);
-                        let _ = db.update_message_content(&msg_id, &error_content).await;
+                        let _ = db.update_message_content(msg_id, &error_content).await;
                     }
 
-                    let _ = tx_clone.send(ProgressEvent::Error {
-                        error: e.to_string()
-                    }).await;
+                    let _ = tx_clone
+                        .send(ProgressEvent::Error {
+                            error: e.to_string(),
+                        })
+                        .await;
                 }
             }
         });
@@ -1743,8 +1872,7 @@ mod llm_handlers {
             }
         };
 
-        axum::response::sse::Sse::new(stream)
-            .keep_alive(axum::response::sse::KeepAlive::default())
+        axum::response::sse::Sse::new(stream).keep_alive(axum::response::sse::KeepAlive::default())
     }
 }
 

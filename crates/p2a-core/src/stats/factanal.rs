@@ -18,7 +18,9 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::errors::{EconError, EconResult};
-use crate::linalg::matrix_ops::{eig_symmetric, matmul, matrix_inverse, ndarray_to_faer, faer_to_ndarray};
+use crate::linalg::matrix_ops::{
+    eig_symmetric, faer_to_ndarray, matmul, matrix_inverse, ndarray_to_faer,
+};
 
 /// Rotation method for factor loadings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -161,7 +163,8 @@ pub fn factanal_with_config(
         return Err(EconError::InsufficientData {
             required: p,
             provided: n,
-            context: "Factor analysis requires at least as many observations as variables".to_string(),
+            context: "Factor analysis requires at least as many observations as variables"
+                .to_string(),
         });
     }
 
@@ -236,7 +239,8 @@ pub fn factanal_from_corr(
             (rotated, None)
         }
         RotationMethod::Promax => {
-            let (rotated, phi) = promax_rotation(&loadings.view(), 4.0, config.max_iter, config.tolerance)?;
+            let (rotated, phi) =
+                promax_rotation(&loadings.view(), 4.0, config.max_iter, config.tolerance)?;
             (rotated, Some(phi))
         }
     };
@@ -343,7 +347,8 @@ impl CorrCache {
         // Compute log|R| once - this never changes during optimization
         let (corr_eigenvalues, _) = eig_symmetric(corr)
             .map_err(|e| EconError::Internal(format!("Eigendecomposition failed: {}", e)))?;
-        let log_det_r: f64 = corr_eigenvalues.iter()
+        let log_det_r: f64 = corr_eigenvalues
+            .iter()
             .map(|&x| if x > 1e-10 { x.ln() } else { -23.0 })
             .sum();
         Ok(Self { log_det_r })
@@ -380,11 +385,15 @@ fn optimize_uniquenesses(
         let mut new_psi = Array1::zeros(p);
         for i in 0..p {
             let comm: f64 = (0..n_factors).map(|j| new_loadings[[i, j]].powi(2)).sum();
-            new_psi[i] = (1.0 - comm).max(config.lower_bound).min(1.0 - config.lower_bound);
+            new_psi[i] = (1.0 - comm)
+                .max(config.lower_bound)
+                .min(1.0 - config.lower_bound);
         }
 
         // Check convergence
-        let psi_change: f64 = psi.iter().zip(new_psi.iter())
+        let psi_change: f64 = psi
+            .iter()
+            .zip(new_psi.iter())
             .map(|(old, new)| (old - new).abs())
             .fold(0.0_f64, f64::max);
 
@@ -425,9 +434,12 @@ fn compute_loadings_from_psi_cached(
     let scaled_corr = if p > 50 {
         // Parallel computation for large matrices
         // Compute each row in parallel
-        let rows: Vec<Vec<f64>> = (0..p).into_par_iter()
+        let rows: Vec<Vec<f64>> = (0..p)
+            .into_par_iter()
             .map(|i| {
-                (0..p).map(|j| corr[[i, j]] * psi_inv_sqrt[i] * psi_inv_sqrt[j]).collect()
+                (0..p)
+                    .map(|j| corr[[i, j]] * psi_inv_sqrt[i] * psi_inv_sqrt[j])
+                    .collect()
             })
             .collect();
         let flat: Vec<f64> = rows.into_iter().flatten().collect();
@@ -546,7 +558,8 @@ fn compute_objective_woodbury(
     let log_det_psi: f64 = psi.iter().map(|&x| x.max(1e-10).ln()).sum();
     let (m_eig, _) = eig_symmetric(&ltpil.view())
         .map_err(|e| EconError::Internal(format!("Eigendecomposition failed: {}", e)))?;
-    let log_det_m: f64 = m_eig.iter()
+    let log_det_m: f64 = m_eig
+        .iter()
         .map(|&x| if x > 1e-10 { x.ln() } else { -23.0 })
         .sum();
     let log_det_sigma = log_det_psi + log_det_m;
@@ -623,7 +636,8 @@ fn compute_objective_direct(
         .map_err(|e| EconError::Internal(format!("Eigendecomposition failed: {}", e)))?;
 
     // Log determinant
-    let log_det_sigma: f64 = sigma_eigenvalues.iter()
+    let log_det_sigma: f64 = sigma_eigenvalues
+        .iter()
         .map(|&x| if x > 1e-10 { x.ln() } else { -23.0 })
         .sum();
 
@@ -638,7 +652,8 @@ fn compute_objective_direct(
                     let mut sum = 0.0;
                     for m in 0..p {
                         if sigma_eigenvalues[m] > 1e-10 {
-                            sum += sigma_eigenvectors[[i, m]] * sigma_eigenvectors[[j, m]] / sigma_eigenvalues[m];
+                            sum += sigma_eigenvectors[[i, m]] * sigma_eigenvectors[[j, m]]
+                                / sigma_eigenvalues[m];
                         }
                     }
                     inv[[i, j]] = sum;
@@ -725,8 +740,8 @@ fn varimax_rotation(
                 }
 
                 // Varimax criterion
-                let a = 0.0;
-                let b = 0.0;
+                let _a = 0.0;
+                let _b = 0.0;
                 let mut num = 0.0;
                 let mut denom = 0.0;
 
@@ -807,8 +822,11 @@ fn promax_rotation(
 
     // Find transformation matrix T such that varimax * T ≈ target
     // Using least squares: T = (L'L)^(-1) L' target
-    let lt_l = matmul(&varimax_loadings.t().to_owned().view(), &varimax_loadings.view())
-        .map_err(|e| EconError::Internal(format!("Matrix multiplication failed: {}", e)))?;
+    let lt_l = matmul(
+        &varimax_loadings.t().to_owned().view(),
+        &varimax_loadings.view(),
+    )
+    .map_err(|e| EconError::Internal(format!("Matrix multiplication failed: {}", e)))?;
 
     let lt_target = matmul(&varimax_loadings.t().to_owned().view(), &target.view())
         .map_err(|e| EconError::Internal(format!("Matrix multiplication failed: {}", e)))?;
@@ -823,7 +841,8 @@ fn promax_rotation(
             let mut sum = 0.0;
             for m in 0..k {
                 if lt_l_eigenvalues[m] > 1e-10 {
-                    sum += lt_l_eigenvectors[[i, m]] * lt_l_eigenvectors[[j, m]] / lt_l_eigenvalues[m];
+                    sum +=
+                        lt_l_eigenvectors[[i, m]] * lt_l_eigenvectors[[j, m]] / lt_l_eigenvalues[m];
                 }
             }
             lt_l_inv[[i, j]] = sum;
@@ -882,9 +901,7 @@ fn reorder_loadings(loadings: &Array2<f64>) -> EconResult<Array2<f64>> {
 /// Compute communalities (h² = sum of squared loadings for each variable).
 fn compute_communalities(loadings: &ArrayView2<f64>) -> Array1<f64> {
     let (p, k) = loadings.dim();
-    Array1::from_iter((0..p).map(|i| {
-        (0..k).map(|j| loadings[[i, j]].powi(2)).sum()
-    }))
+    Array1::from_iter((0..p).map(|i| (0..k).map(|j| loadings[[i, j]].powi(2)).sum()))
 }
 
 /// Compute variance proportions and cumulative variance.
@@ -917,7 +934,7 @@ fn compute_factor_scores(
     data: &ArrayView2<f64>,
     loadings: &ArrayView2<f64>,
     uniquenesses: &ArrayView1<f64>,
-    corr: &ArrayView2<f64>,
+    _corr: &ArrayView2<f64>,
     method: ScoresMethod,
 ) -> EconResult<Array2<f64>> {
     let (n, p) = data.dim();
@@ -992,7 +1009,10 @@ fn compute_factor_scores(
 }
 
 /// Compute Σ = ΛΛ' + Ψ
-fn compute_sigma(loadings: &ArrayView2<f64>, uniquenesses: &ArrayView1<f64>) -> EconResult<Array2<f64>> {
+fn compute_sigma(
+    loadings: &ArrayView2<f64>,
+    uniquenesses: &ArrayView1<f64>,
+) -> EconResult<Array2<f64>> {
     let p = loadings.nrows();
 
     let lambda_lambda_t = matmul(loadings, &loadings.t().to_owned().view())
@@ -1050,7 +1070,8 @@ fn correlation_matrix(data: &ArrayView2<f64>) -> EconResult<Array2<f64>> {
 
     // Compute means (parallel for large n)
     let means: Vec<f64> = if n > 1000 {
-        (0..p).into_par_iter()
+        (0..p)
+            .into_par_iter()
             .map(|j| data.column(j).mean().unwrap_or(0.0))
             .collect()
     } else {
@@ -1061,11 +1082,13 @@ fn correlation_matrix(data: &ArrayView2<f64>) -> EconResult<Array2<f64>> {
 
     // Compute standard deviations
     let stds: Vec<f64> = if n > 1000 {
-        (0..p).into_par_iter()
+        (0..p)
+            .into_par_iter()
             .map(|j| {
                 let col = data.column(j);
                 let mean = means[j];
-                let var: f64 = col.iter().map(|&x| (x - mean).powi(2)).sum::<f64>() / (n - 1) as f64;
+                let var: f64 =
+                    col.iter().map(|&x| (x - mean).powi(2)).sum::<f64>() / (n - 1) as f64;
                 var.sqrt().max(1e-10)
             })
             .collect()
@@ -1074,7 +1097,8 @@ fn correlation_matrix(data: &ArrayView2<f64>) -> EconResult<Array2<f64>> {
             .map(|j| {
                 let col = data.column(j);
                 let mean = means[j];
-                let var: f64 = col.iter().map(|&x| (x - mean).powi(2)).sum::<f64>() / (n - 1) as f64;
+                let var: f64 =
+                    col.iter().map(|&x| (x - mean).powi(2)).sum::<f64>() / (n - 1) as f64;
                 var.sqrt().max(1e-10)
             })
             .collect()
@@ -1084,12 +1108,13 @@ fn correlation_matrix(data: &ArrayView2<f64>) -> EconResult<Array2<f64>> {
     // For large datasets and many variables, use parallel computation
     if n > 1000 && p > 10 {
         // Parallel: compute upper triangular entries
-        let num_pairs = p * (p - 1) / 2;
+        let _num_pairs = p * (p - 1) / 2;
         let pair_indices: Vec<(usize, usize)> = (0..p)
             .flat_map(|i| ((i + 1)..p).map(move |j| (i, j)))
             .collect();
 
-        let correlations: Vec<((usize, usize), f64)> = pair_indices.par_iter()
+        let correlations: Vec<((usize, usize), f64)> = pair_indices
+            .par_iter()
             .map(|&(i, j)| {
                 let mut sum = 0.0;
                 for k in 0..n {
@@ -1221,7 +1246,8 @@ mod tests {
     #[test]
     fn test_factanal_basic() {
         let data = create_test_data();
-        let result = factanal(&data.view(), 2, RotationMethod::Varimax, ScoresMethod::None).unwrap();
+        let result =
+            factanal(&data.view(), 2, RotationMethod::Varimax, ScoresMethod::None).unwrap();
 
         assert_eq!(result.n_factors, 2);
         assert_eq!(result.n_vars, 6);
@@ -1237,20 +1263,34 @@ mod tests {
 
         // Communalities should be between 0 and 1
         for &h2 in result.communalities.iter() {
-            assert!(h2 >= 0.0 && h2 <= 1.0, "Communality out of range: {}", h2);
+            assert!(
+                (0.0..=1.0).contains(&h2),
+                "Communality out of range: {}",
+                h2
+            );
         }
 
         // Communalities + uniquenesses should sum to 1
         for i in 0..6 {
             let sum = result.communalities[i] + result.uniquenesses[i];
-            assert!((sum - 1.0).abs() < 0.1, "Communality + uniqueness != 1: {}", sum);
+            assert!(
+                (sum - 1.0).abs() < 0.1,
+                "Communality + uniqueness != 1: {}",
+                sum
+            );
         }
     }
 
     #[test]
     fn test_factanal_with_scores() {
         let data = create_test_data();
-        let result = factanal(&data.view(), 2, RotationMethod::Varimax, ScoresMethod::Regression).unwrap();
+        let result = factanal(
+            &data.view(),
+            2,
+            RotationMethod::Varimax,
+            ScoresMethod::Regression,
+        )
+        .unwrap();
 
         assert!(result.scores.is_some());
         let scores = result.scores.unwrap();
@@ -1274,7 +1314,10 @@ mod tests {
         for i in 0..6 {
             let orig_h2: f64 = (0..2).map(|j| loadings[[i, j]].powi(2)).sum();
             let rot_h2: f64 = (0..2).map(|j| rotated[[i, j]].powi(2)).sum();
-            assert!((orig_h2 - rot_h2).abs() < 0.01, "Communality changed after rotation");
+            assert!(
+                (orig_h2 - rot_h2).abs() < 0.01,
+                "Communality changed after rotation"
+            );
         }
     }
 
@@ -1342,7 +1385,11 @@ mod tests {
         // The exact values depend on the random data, but we can check:
         // 1. Uniquenesses should be in reasonable range (0.1 to 0.5 for well-structured data)
         for &u in result.uniquenesses.iter() {
-            assert!(u > 0.0 && u < 1.0, "Uniqueness out of expected range: {}", u);
+            assert!(
+                u > 0.0 && u < 1.0,
+                "Uniqueness out of expected range: {}",
+                u
+            );
         }
 
         // 2. Each variable should load primarily on one factor
@@ -1351,7 +1398,13 @@ mod tests {
             let l2 = result.loadings[[i, 1]].abs();
             // One loading should be substantially larger than the other
             let max_l = l1.max(l2);
-            assert!(max_l > 0.3, "Variable {} has low loadings: {}, {}", i, l1, l2);
+            assert!(
+                max_l > 0.3,
+                "Variable {} has low loadings: {}, {}",
+                i,
+                l1,
+                l2
+            );
         }
 
         // 3. Convergence check

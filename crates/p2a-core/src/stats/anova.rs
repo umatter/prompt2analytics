@@ -39,7 +39,7 @@ use std::collections::HashMap;
 
 use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
-use crate::traits::{f_test_p_value, SignificanceLevel};
+use crate::traits::{SignificanceLevel, f_test_p_value};
 
 /// Statistics for a single group in ANOVA.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -132,19 +132,29 @@ impl std::fmt::Display for AnovaResult {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "One-Way ANOVA Results")?;
         writeln!(f, "=====================")?;
-        writeln!(f, "Response: {}  |  Factor: {}", self.response_var, self.factor_var)?;
+        writeln!(
+            f,
+            "Response: {}  |  Factor: {}",
+            self.response_var, self.factor_var
+        )?;
         writeln!(f, "N = {}  |  Groups = {}", self.n_obs, self.n_groups)?;
         writeln!(f)?;
 
         // ANOVA Table
         writeln!(f, "ANOVA Table")?;
-        writeln!(f, "───────────────────────────────────────────────────────────────")?;
+        writeln!(
+            f,
+            "───────────────────────────────────────────────────────────────"
+        )?;
         writeln!(
             f,
             "{:>12} {:>12} {:>8} {:>12} {:>10} {:>10}",
             "Source", "SS", "DF", "MS", "F", "Pr(>F)"
         )?;
-        writeln!(f, "───────────────────────────────────────────────────────────────")?;
+        writeln!(
+            f,
+            "───────────────────────────────────────────────────────────────"
+        )?;
         writeln!(
             f,
             "{:>12} {:>12.4} {:>8} {:>12.4} {:>10.4} {:>10.4} {}",
@@ -161,7 +171,10 @@ impl std::fmt::Display for AnovaResult {
             "{:>12} {:>12.4} {:>8} {:>12.4}",
             "Within", self.ss_within, self.df_within, self.ms_within
         )?;
-        writeln!(f, "───────────────────────────────────────────────────────────────")?;
+        writeln!(
+            f,
+            "───────────────────────────────────────────────────────────────"
+        )?;
         writeln!(
             f,
             "{:>12} {:>12.4} {:>8}",
@@ -177,7 +190,11 @@ impl std::fmt::Display for AnovaResult {
 
         // Group means
         writeln!(f, "Group Means:")?;
-        writeln!(f, "{:>15} {:>8} {:>12} {:>12}", "Group", "N", "Mean", "Std.Dev")?;
+        writeln!(
+            f,
+            "{:>15} {:>8} {:>12} {:>12}",
+            "Group", "N", "Mean", "Std.Dev"
+        )?;
         writeln!(f, "───────────────────────────────────────────────────")?;
         for group in &self.groups {
             writeln!(
@@ -190,7 +207,11 @@ impl std::fmt::Display for AnovaResult {
             )?;
         }
         writeln!(f, "───────────────────────────────────────────────────")?;
-        writeln!(f, "{:>15} {:>8} {:>12.4}", "Grand Mean", self.n_obs, self.grand_mean)?;
+        writeln!(
+            f,
+            "{:>15} {:>8} {:>12.4}",
+            "Grand Mean", self.n_obs, self.grand_mean
+        )?;
         writeln!(f)?;
 
         writeln!(f, "Signif. codes: 0 '***' 0.001 '**' 0.01 '*' 0.05 '†' 0.1")?;
@@ -240,12 +261,20 @@ pub fn run_one_way_anova(
     // Validate columns exist
     let response_col = df.column(response).map_err(|_| EconError::ColumnNotFound {
         column: response.to_string(),
-        available: df.get_column_names().iter().map(|s| s.to_string()).collect(),
+        available: df
+            .get_column_names()
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
     })?;
 
     let factor_col = df.column(factor).map_err(|_| EconError::ColumnNotFound {
         column: factor.to_string(),
-        available: df.get_column_names().iter().map(|s| s.to_string()).collect(),
+        available: df
+            .get_column_names()
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
     })?;
 
     // Extract response values as f64
@@ -267,9 +296,12 @@ pub fn run_one_way_anova(
     let mut groups: HashMap<String, Vec<f64>> = HashMap::new();
 
     for i in 0..factor_col.len() {
-        let group_key = format!("{:?}", factor_col.get(i).map_err(|e| {
-            EconError::Internal(format!("Failed to get factor value: {}", e))
-        })?);
+        let group_key = format!(
+            "{:?}",
+            factor_col.get(i).map_err(|e| {
+                EconError::Internal(format!("Failed to get factor value: {}", e))
+            })?
+        );
 
         // Get corresponding y value
         if let Some(&y_val) = y_values.get(i) {
@@ -496,7 +528,11 @@ impl std::fmt::Display for TwoWayAnovaResult {
             self.n_obs, self.levels_a, self.levels_b
         )?;
         if self.with_interaction {
-            writeln!(f, "Model: {} + {} + {}:{}", self.factor_a, self.factor_b, self.factor_a, self.factor_b)?;
+            writeln!(
+                f,
+                "Model: {} + {} + {}:{}",
+                self.factor_a, self.factor_b, self.factor_a, self.factor_b
+            )?;
         } else {
             writeln!(f, "Model: {} + {} (additive)", self.factor_a, self.factor_b)?;
         }
@@ -504,13 +540,19 @@ impl std::fmt::Display for TwoWayAnovaResult {
 
         // ANOVA Table
         writeln!(f, "ANOVA Table")?;
-        writeln!(f, "───────────────────────────────────────────────────────────────────")?;
+        writeln!(
+            f,
+            "───────────────────────────────────────────────────────────────────"
+        )?;
         writeln!(
             f,
             "{:>15} {:>12} {:>6} {:>12} {:>10} {:>10}",
             "Source", "SS", "DF", "MS", "F", "Pr(>F)"
         )?;
-        writeln!(f, "───────────────────────────────────────────────────────────────────")?;
+        writeln!(
+            f,
+            "───────────────────────────────────────────────────────────────────"
+        )?;
 
         writeln!(
             f,
@@ -557,8 +599,15 @@ impl std::fmt::Display for TwoWayAnovaResult {
             "Residuals", self.ss_error, self.df_error, self.ms_error
         )?;
 
-        writeln!(f, "───────────────────────────────────────────────────────────────────")?;
-        writeln!(f, "{:>15} {:>12.4} {:>6}", "Total", self.ss_total, self.df_total)?;
+        writeln!(
+            f,
+            "───────────────────────────────────────────────────────────────────"
+        )?;
+        writeln!(
+            f,
+            "{:>15} {:>12.4} {:>6}",
+            "Total", self.ss_total, self.df_total
+        )?;
         writeln!(f)?;
 
         writeln!(f, "Signif. codes: 0 '***' 0.001 '**' 0.01 '*' 0.05 '†' 0.1")?;
@@ -603,17 +652,29 @@ pub fn run_two_way_anova(
     // Validate columns exist
     let response_col = df.column(response).map_err(|_| EconError::ColumnNotFound {
         column: response.to_string(),
-        available: df.get_column_names().iter().map(|s| s.to_string()).collect(),
+        available: df
+            .get_column_names()
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
     })?;
 
     let factor_a_col = df.column(factor_a).map_err(|_| EconError::ColumnNotFound {
         column: factor_a.to_string(),
-        available: df.get_column_names().iter().map(|s| s.to_string()).collect(),
+        available: df
+            .get_column_names()
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
     })?;
 
     let factor_b_col = df.column(factor_b).map_err(|_| EconError::ColumnNotFound {
         column: factor_b.to_string(),
-        available: df.get_column_names().iter().map(|s| s.to_string()).collect(),
+        available: df
+            .get_column_names()
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
     })?;
 
     // Extract response values
@@ -769,9 +830,23 @@ pub fn run_two_way_anova(
     };
 
     // F-statistics
-    let f_a = if ms_error > 0.0 { ms_a / ms_error } else { f64::NAN };
-    let f_b = if ms_error > 0.0 { ms_b / ms_error } else { f64::NAN };
-    let f_ab = ms_ab.map(|ms| if ms_error > 0.0 { ms / ms_error } else { f64::NAN });
+    let f_a = if ms_error > 0.0 {
+        ms_a / ms_error
+    } else {
+        f64::NAN
+    };
+    let f_b = if ms_error > 0.0 {
+        ms_b / ms_error
+    } else {
+        f64::NAN
+    };
+    let f_ab = ms_ab.map(|ms| {
+        if ms_error > 0.0 {
+            ms / ms_error
+        } else {
+            f64::NAN
+        }
+    });
 
     // P-values
     let p_a = f_test_p_value(f_a, df_a as f64, df_error as f64);
@@ -853,13 +928,19 @@ pub struct RegressionAnovaResult {
 impl std::fmt::Display for RegressionAnovaResult {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "Analysis of Variance Table")?;
-        writeln!(f, "═══════════════════════════════════════════════════════════")?;
+        writeln!(
+            f,
+            "═══════════════════════════════════════════════════════════"
+        )?;
         writeln!(
             f,
             "{:>12} {:>12} {:>6} {:>12} {:>10} {:>10}",
             "Source", "SS", "DF", "MS", "F", "Pr(>F)"
         )?;
-        writeln!(f, "───────────────────────────────────────────────────────────")?;
+        writeln!(
+            f,
+            "───────────────────────────────────────────────────────────"
+        )?;
         writeln!(
             f,
             "{:>12} {:>12.4} {:>6} {:>12.4} {:>10.4} {:>10.4} {}",
@@ -876,8 +957,15 @@ impl std::fmt::Display for RegressionAnovaResult {
             "{:>12} {:>12.4} {:>6} {:>12.4}",
             "Residual", self.ss_residual, self.df_residual, self.ms_residual
         )?;
-        writeln!(f, "───────────────────────────────────────────────────────────")?;
-        writeln!(f, "{:>12} {:>12.4} {:>6}", "Total", self.ss_total, self.df_total)?;
+        writeln!(
+            f,
+            "───────────────────────────────────────────────────────────"
+        )?;
+        writeln!(
+            f,
+            "{:>12} {:>12.4} {:>6}",
+            "Total", self.ss_total, self.df_total
+        )?;
         Ok(())
     }
 }
@@ -989,7 +1077,11 @@ mod tests {
 
         // SST = SSB + SSW
         let ss_diff = (result.ss_total - result.ss_between - result.ss_within).abs();
-        assert!(ss_diff < 1e-10, "SS decomposition failed: diff = {}", ss_diff);
+        assert!(
+            ss_diff < 1e-10,
+            "SS decomposition failed: diff = {}",
+            ss_diff
+        );
     }
 
     #[test]
@@ -1061,35 +1153,43 @@ mod tests {
         assert!(
             (result.ss_between - expected_ss_between).abs() < 1e-3,
             "SS Between mismatch: Rust={}, R={}",
-            result.ss_between, expected_ss_between
+            result.ss_between,
+            expected_ss_between
         );
         assert!(
             (result.ss_within - expected_ss_within).abs() < 1e-3,
             "SS Within mismatch: Rust={}, R={}",
-            result.ss_within, expected_ss_within
+            result.ss_within,
+            expected_ss_within
         );
 
         // Validate degrees of freedom (exact match)
-        assert_eq!(result.df_between, expected_df_between, "DF Between mismatch");
+        assert_eq!(
+            result.df_between, expected_df_between,
+            "DF Between mismatch"
+        );
         assert_eq!(result.df_within, expected_df_within, "DF Within mismatch");
 
         // Validate mean squares (tolerance 1e-3)
         assert!(
             (result.ms_between - expected_ms_between).abs() < 1e-3,
             "MS Between mismatch: Rust={}, R={}",
-            result.ms_between, expected_ms_between
+            result.ms_between,
+            expected_ms_between
         );
         assert!(
             (result.ms_within - expected_ms_within).abs() < 1e-3,
             "MS Within mismatch: Rust={}, R={}",
-            result.ms_within, expected_ms_within
+            result.ms_within,
+            expected_ms_within
         );
 
         // Validate F-statistic (tolerance 1e-3)
         assert!(
             (result.f_statistic - expected_f).abs() < 1e-3,
             "F-statistic mismatch: Rust={}, R={}",
-            result.f_statistic, expected_f
+            result.f_statistic,
+            expected_f
         );
 
         // Validate p-value is very small (both should be < 1e-10)
@@ -1103,7 +1203,8 @@ mod tests {
         assert!(
             (result.eta_squared - expected_eta_sq).abs() < 1e-4,
             "Eta-squared mismatch: Rust={}, R={}",
-            result.eta_squared, expected_eta_sq
+            result.eta_squared,
+            expected_eta_sq
         );
 
         // Validate grand mean (R reports 15.14)
@@ -1145,7 +1246,10 @@ mod tests {
         // Validate p-values are significant
         assert!(result.p_a < 0.001, "Factor A should be significant");
         assert!(result.p_b < 0.001, "Factor B should be significant");
-        assert!(result.p_ab.unwrap() < 0.01, "Interaction should be significant");
+        assert!(
+            result.p_ab.unwrap() < 0.01,
+            "Interaction should be significant"
+        );
 
         // Validate SS decomposition holds
         let ss_total_computed = result.ss_a + result.ss_b + result.ss_ab.unwrap() + result.ss_error;

@@ -57,14 +57,14 @@
 //!
 //! R equivalent: `grf::causal_forest()`
 
-use ndarray::{Array1, Array2, ArrayView1, ArrayView2, s};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
 use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
 use crate::linalg::design::DesignMatrix;
-use crate::traits::estimator::{t_test_p_value, SignificanceLevel};
+use crate::traits::estimator::{SignificanceLevel, t_test_p_value};
 
 /// Configuration for causal forest estimation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -192,7 +192,11 @@ impl fmt::Display for CausalForestResult {
         writeln!(f, "VARIABLE IMPORTANCE:")?;
         for (i, (name, importance)) in self.variable_importance.iter().enumerate() {
             if i >= 10 {
-                writeln!(f, "  ... ({} more variables)", self.variable_importance.len() - 10)?;
+                writeln!(
+                    f,
+                    "  ... ({} more variables)",
+                    self.variable_importance.len() - 10
+                )?;
                 break;
             }
             writeln!(f, "  {:<20} {:.4}", name, importance)?;
@@ -549,7 +553,12 @@ impl CausalTree {
         importances
     }
 
-    fn accumulate_importances(&self, node: &CausalTreeNode, importances: &mut Array1<f64>, weight: f64) {
+    fn accumulate_importances(
+        &self,
+        node: &CausalTreeNode,
+        importances: &mut Array1<f64>,
+        weight: f64,
+    ) {
         if let CausalTreeNode::Split {
             feature_index,
             left,
@@ -958,15 +967,13 @@ pub fn causal_forest_arrays(
         covariate_names
             .iter()
             .enumerate()
-            .map(|(i, name)| {
-                (
-                    name.clone(),
-                    feature_importance_sum[i] / total_importance,
-                )
-            })
+            .map(|(i, name)| (name.clone(), feature_importance_sum[i] / total_importance))
             .collect()
     } else {
-        covariate_names.iter().map(|name| (name.clone(), 0.0)).collect()
+        covariate_names
+            .iter()
+            .map(|name| (name.clone(), 0.0))
+            .collect()
     };
 
     // Sort by importance
@@ -1021,8 +1028,8 @@ fn compute_oob_error(oob_preds: &[Vec<f64>], _y: &ArrayView1<f64>, _w: &ArrayVie
     for preds in oob_preds.iter() {
         if preds.len() > 1 {
             let mean: f64 = preds.iter().sum::<f64>() / preds.len() as f64;
-            let var: f64 = preds.iter().map(|&p| (p - mean).powi(2)).sum::<f64>()
-                / (preds.len() - 1) as f64;
+            let var: f64 =
+                preds.iter().map(|&p| (p - mean).powi(2)).sum::<f64>() / (preds.len() - 1) as f64;
             sum_var += var;
             count += 1;
         }
@@ -1239,7 +1246,11 @@ mod tests {
         assert_eq!(result.variance_estimates.len(), 200);
 
         // ATE should be positive (true ATE is 1 + 2*E[x0] ~ 2)
-        assert!(result.ate > 0.5, "ATE should be positive, got {}", result.ate);
+        assert!(
+            result.ate > 0.5,
+            "ATE should be positive, got {}",
+            result.ate
+        );
 
         // Variable importance: x0 should be most important
         let _x0_importance = result

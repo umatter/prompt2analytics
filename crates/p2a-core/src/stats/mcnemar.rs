@@ -82,11 +82,7 @@ pub fn mcnemar_test(b: u64, c: u64, correct: bool) -> EconResult<McnemarResult> 
         // With continuity correction (Edwards)
         // χ² = (|b - c| - 1)² / (b + c)
         let diff = (b_f - c_f).abs() - 1.0;
-        if diff > 0.0 {
-            diff * diff / n_f
-        } else {
-            0.0
-        }
+        if diff > 0.0 { diff * diff / n_f } else { 0.0 }
     } else {
         // Without continuity correction
         // χ² = (b - c)² / (b + c)
@@ -200,12 +196,23 @@ mod tests {
 
         let result = mcnemar_test(150, 86, true).unwrap();
 
-        println!("With correction: χ² = {}, df = {}, p = {}", result.statistic, result.df, result.p_value);
+        println!(
+            "With correction: χ² = {}, df = {}, p = {}",
+            result.statistic, result.df, result.p_value
+        );
 
         // R gives: χ² = 16.818, df = 1, p-value = 4.115e-05
-        assert!((result.statistic - 16.818).abs() < 0.01, "χ² mismatch: got {}", result.statistic);
+        assert!(
+            (result.statistic - 16.818).abs() < 0.01,
+            "χ² mismatch: got {}",
+            result.statistic
+        );
         assert_eq!(result.df, 1);
-        assert!((result.p_value - 4.115e-05).abs() < 1e-06, "p-value mismatch: got {}", result.p_value);
+        assert!(
+            (result.p_value - 4.115e-05).abs() < 1e-06,
+            "p-value mismatch: got {}",
+            result.p_value
+        );
     }
 
     #[test]
@@ -217,11 +224,22 @@ mod tests {
 
         let result = mcnemar_test(150, 86, false).unwrap();
 
-        println!("No correction: χ² = {}, df = {}, p = {}", result.statistic, result.df, result.p_value);
+        println!(
+            "No correction: χ² = {}, df = {}, p = {}",
+            result.statistic, result.df, result.p_value
+        );
 
         // χ² = (150 - 86)² / 236 = 4096 / 236 = 17.356
-        assert!((result.statistic - 17.356).abs() < 0.01, "χ² mismatch: got {}", result.statistic);
-        assert!((result.p_value - 3.099e-05).abs() < 1e-06, "p-value mismatch: got {}", result.p_value);
+        assert!(
+            (result.statistic - 17.356).abs() < 0.01,
+            "χ² mismatch: got {}",
+            result.statistic
+        );
+        assert!(
+            (result.p_value - 3.099e-05).abs() < 1e-06,
+            "p-value mismatch: got {}",
+            result.p_value
+        );
     }
 
     #[test]

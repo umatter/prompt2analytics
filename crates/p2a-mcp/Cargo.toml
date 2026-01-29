@@ -88,3 +88,6 @@ db = ["surrealdb"]
 full = ["http", "websocket", "auth", "llm", "db"]
 # Embedded feature for desktop/mobile apps - includes everything needed for standalone operation
 embedded = ["http", "llm", "db"]
+
+[lints]
+workspace = true

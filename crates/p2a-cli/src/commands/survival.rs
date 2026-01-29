@@ -2,11 +2,11 @@
 
 use clap::Subcommand;
 use p2a_core::{
-    run_kaplan_meier, run_cox_ph, run_aft, run_competing_risks, log_rank_test,
-    CoxConfig, AftConfig, TiesMethod, AftDistribution,
+    AftConfig, AftDistribution, CoxConfig, TiesMethod, log_rank_test, run_aft, run_competing_risks,
+    run_cox_ph, run_kaplan_meier,
 };
 
-use crate::output::{print_error, OutputFormat};
+use crate::output::{OutputFormat, print_error};
 use crate::session::SessionManager;
 
 #[derive(Subcommand)]
@@ -130,7 +130,15 @@ pub fn execute(
             event,
             group,
             conf,
-        } => execute_km(dataset, time, event, group.as_deref(), *conf, format, session),
+        } => execute_km(
+            dataset,
+            time,
+            event,
+            group.as_deref(),
+            *conf,
+            format,
+            session,
+        ),
         SurvivalCommands::LogRank {
             dataset,
             time,
@@ -144,7 +152,9 @@ pub fn execute(
             covariates,
             ties,
             robust,
-        } => execute_cox(dataset, time, event, covariates, ties, *robust, format, session),
+        } => execute_cox(
+            dataset, time, event, covariates, ties, *robust, format, session,
+        ),
         SurvivalCommands::Aft {
             dataset,
             time,
@@ -223,9 +233,7 @@ fn execute_km(
                                 for i in 0..n {
                                     println!(
                                         "{:<12.4} {:<12.4} {:<12.4}",
-                                        result.times[i],
-                                        result.survival[i],
-                                        result.std_errors[i]
+                                        result.times[i], result.survival[i], result.std_errors[i]
                                     );
                                 }
                             }
@@ -264,42 +272,40 @@ fn execute_log_rank(
     };
 
     match dataset {
-        Some(ds) => {
-            match log_rank_test(ds, time_col, event_col, group_col) {
-                Ok(result) => {
-                    match format {
-                        OutputFormat::Json => {
-                            let json = serde_json::json!({
-                                "method": "Log-rank test",
-                                "chi_squared": result.chi_squared,
-                                "degrees_of_freedom": result.df,
-                                "p_value": result.p_value,
-                                "groups": result.groups,
-                                "n_per_group": result.n_per_group,
-                                "events_per_group": result.events_per_group,
-                            });
-                            println!("{}", serde_json::to_string_pretty(&json)?);
-                        }
-                        _ => {
-                            println!("\nLog-rank Test Results");
-                            println!("{}", "=".repeat(50));
-                            println!("Chi-squared statistic: {:.4}", result.chi_squared);
-                            println!("Degrees of freedom: {}", result.df);
-                            println!("p-value: {:.6}", result.p_value);
-                            println!("Number of groups: {}", result.groups.len());
-                            if result.p_value < 0.05 {
-                                println!("\nConclusion: Significant difference in survival curves (p < 0.05)");
-                            } else {
-                                println!("\nConclusion: No significant difference in survival curves");
-                            }
-                        }
+        Some(ds) => match log_rank_test(ds, time_col, event_col, group_col) {
+            Ok(result) => match format {
+                OutputFormat::Json => {
+                    let json = serde_json::json!({
+                        "method": "Log-rank test",
+                        "chi_squared": result.chi_squared,
+                        "degrees_of_freedom": result.df,
+                        "p_value": result.p_value,
+                        "groups": result.groups,
+                        "n_per_group": result.n_per_group,
+                        "events_per_group": result.events_per_group,
+                    });
+                    println!("{}", serde_json::to_string_pretty(&json)?);
+                }
+                _ => {
+                    println!("\nLog-rank Test Results");
+                    println!("{}", "=".repeat(50));
+                    println!("Chi-squared statistic: {:.4}", result.chi_squared);
+                    println!("Degrees of freedom: {}", result.df);
+                    println!("p-value: {:.6}", result.p_value);
+                    println!("Number of groups: {}", result.groups.len());
+                    if result.p_value < 0.05 {
+                        println!(
+                            "\nConclusion: Significant difference in survival curves (p < 0.05)"
+                        );
+                    } else {
+                        println!("\nConclusion: No significant difference in survival curves");
                     }
                 }
-                Err(e) => {
-                    print_error(&format!("Log-rank test failed: {}", e), format);
-                }
+            },
+            Err(e) => {
+                print_error(&format!("Log-rank test failed: {}", e), format);
             }
-        }
+        },
         None => {
             print_error(&format!("Dataset '{}' not found", dataset_name), format);
         }
@@ -345,44 +351,44 @@ fn execute_cox(
             };
 
             match run_cox_ph(ds, time_col, event_col, &cov_refs, Some(config)) {
-                Ok(result) => {
-                    match format {
-                        OutputFormat::Json => {
-                            let json = serde_json::json!({
-                                "method": "Cox Proportional Hazards",
-                                "variables": result.variables,
-                                "coefficients": result.coefficients,
-                                "std_errors": result.std_errors,
-                                "hazard_ratios": result.hazard_ratios,
-                                "z_stats": result.z_stats,
-                                "p_values": result.p_values,
-                                "log_likelihood": result.log_likelihood,
-                                "concordance": result.concordance,
-                            });
-                            println!("{}", serde_json::to_string_pretty(&json)?);
-                        }
-                        _ => {
-                            println!("\nCox Proportional Hazards Model");
-                            println!("{}", "=".repeat(60));
-                            println!("Log-likelihood: {:.4}", result.log_likelihood);
-                            println!("Concordance: {:.4}", result.concordance);
-                            println!("\n{:<15} {:<10} {:<10} {:<10} {:<10} {:<10}",
-                                "Variable", "Coef", "HR", "Std.Err", "z", "p-value");
-                            println!("{}", "-".repeat(60));
-                            for i in 0..result.variables.len() {
-                                println!(
-                                    "{:<15} {:<10.4} {:<10.4} {:<10.4} {:<10.4} {:<10.4}",
-                                    result.variables[i],
-                                    result.coefficients[i],
-                                    result.hazard_ratios[i],
-                                    result.std_errors[i],
-                                    result.z_stats[i],
-                                    result.p_values[i]
-                                );
-                            }
+                Ok(result) => match format {
+                    OutputFormat::Json => {
+                        let json = serde_json::json!({
+                            "method": "Cox Proportional Hazards",
+                            "variables": result.variables,
+                            "coefficients": result.coefficients,
+                            "std_errors": result.std_errors,
+                            "hazard_ratios": result.hazard_ratios,
+                            "z_stats": result.z_stats,
+                            "p_values": result.p_values,
+                            "log_likelihood": result.log_likelihood,
+                            "concordance": result.concordance,
+                        });
+                        println!("{}", serde_json::to_string_pretty(&json)?);
+                    }
+                    _ => {
+                        println!("\nCox Proportional Hazards Model");
+                        println!("{}", "=".repeat(60));
+                        println!("Log-likelihood: {:.4}", result.log_likelihood);
+                        println!("Concordance: {:.4}", result.concordance);
+                        println!(
+                            "\n{:<15} {:<10} {:<10} {:<10} {:<10} {:<10}",
+                            "Variable", "Coef", "HR", "Std.Err", "z", "p-value"
+                        );
+                        println!("{}", "-".repeat(60));
+                        for i in 0..result.variables.len() {
+                            println!(
+                                "{:<15} {:<10.4} {:<10.4} {:<10.4} {:<10.4} {:<10.4}",
+                                result.variables[i],
+                                result.coefficients[i],
+                                result.hazard_ratios[i],
+                                result.std_errors[i],
+                                result.z_stats[i],
+                                result.p_values[i]
+                            );
                         }
                     }
-                }
+                },
                 Err(e) => {
                     print_error(&format!("Cox PH failed: {}", e), format);
                 }
@@ -433,48 +439,51 @@ fn execute_aft(
             };
 
             match run_aft(ds, time_col, event_col, &cov_refs, Some(config)) {
-                Ok(result) => {
-                    match format {
-                        OutputFormat::Json => {
-                            let json = serde_json::json!({
-                                "method": "Accelerated Failure Time",
-                                "distribution": format!("{}", result.distribution),
-                                "n_obs": result.n_obs,
-                                "n_events": result.n_events,
-                                "variables": result.variables,
-                                "coefficients": result.coefficients,
-                                "std_errors": result.std_errors,
-                                "z_stats": result.z_stats,
-                                "p_values": result.p_values,
-                                "log_likelihood": result.log_likelihood,
-                                "aic": result.aic,
-                                "scale": result.scale,
-                            });
-                            println!("{}", serde_json::to_string_pretty(&json)?);
-                        }
-                        _ => {
-                            println!("\nAccelerated Failure Time Model ({})", result.distribution);
-                            println!("{}", "=".repeat(60));
-                            println!("Observations: {}, Events: {}", result.n_obs, result.n_events);
-                            println!("Log-likelihood: {:.4}", result.log_likelihood);
-                            println!("AIC: {:.4}", result.aic);
-                            println!("Scale parameter: {:.4}", result.scale);
-                            println!("\n{:<15} {:<10} {:<10} {:<10} {:<10}",
-                                "Variable", "Coef", "Std.Err", "z", "p-value");
-                            println!("{}", "-".repeat(55));
-                            for i in 0..result.variables.len() {
-                                println!(
-                                    "{:<15} {:<10.4} {:<10.4} {:<10.4} {:<10.4}",
-                                    result.variables[i],
-                                    result.coefficients[i],
-                                    result.std_errors[i],
-                                    result.z_stats[i],
-                                    result.p_values[i]
-                                );
-                            }
+                Ok(result) => match format {
+                    OutputFormat::Json => {
+                        let json = serde_json::json!({
+                            "method": "Accelerated Failure Time",
+                            "distribution": format!("{}", result.distribution),
+                            "n_obs": result.n_obs,
+                            "n_events": result.n_events,
+                            "variables": result.variables,
+                            "coefficients": result.coefficients,
+                            "std_errors": result.std_errors,
+                            "z_stats": result.z_stats,
+                            "p_values": result.p_values,
+                            "log_likelihood": result.log_likelihood,
+                            "aic": result.aic,
+                            "scale": result.scale,
+                        });
+                        println!("{}", serde_json::to_string_pretty(&json)?);
+                    }
+                    _ => {
+                        println!("\nAccelerated Failure Time Model ({})", result.distribution);
+                        println!("{}", "=".repeat(60));
+                        println!(
+                            "Observations: {}, Events: {}",
+                            result.n_obs, result.n_events
+                        );
+                        println!("Log-likelihood: {:.4}", result.log_likelihood);
+                        println!("AIC: {:.4}", result.aic);
+                        println!("Scale parameter: {:.4}", result.scale);
+                        println!(
+                            "\n{:<15} {:<10} {:<10} {:<10} {:<10}",
+                            "Variable", "Coef", "Std.Err", "z", "p-value"
+                        );
+                        println!("{}", "-".repeat(55));
+                        for i in 0..result.variables.len() {
+                            println!(
+                                "{:<15} {:<10.4} {:<10.4} {:<10.4} {:<10.4}",
+                                result.variables[i],
+                                result.coefficients[i],
+                                result.std_errors[i],
+                                result.z_stats[i],
+                                result.p_values[i]
+                            );
                         }
                     }
-                }
+                },
                 Err(e) => {
                     print_error(&format!("AFT failed: {}", e), format);
                 }
@@ -507,49 +516,45 @@ fn execute_competing_risks(
     };
 
     match dataset {
-        Some(ds) => {
-            match run_competing_risks(ds, time_col, event_type_col, conf_level) {
-                Ok(result) => {
-                    match format {
-                        OutputFormat::Json => {
-                            let json = serde_json::json!({
-                                "method": "Competing Risks Analysis",
-                                "n_obs": result.n_obs,
-                                "n_censored": result.n_censored,
-                                "event_types": result.event_types,
-                                "cumulative_incidence": result.cifs.iter().map(|ci| {
-                                    serde_json::json!({
-                                        "event_type": ci.event_type,
-                                        "times": ci.times,
-                                        "incidence": ci.incidence,
-                                    })
-                                }).collect::<Vec<_>>(),
-                            });
-                            println!("{}", serde_json::to_string_pretty(&json)?);
-                        }
-                        _ => {
-                            println!("\nCompeting Risks Analysis");
-                            println!("{}", "=".repeat(50));
-                            println!("Observations: {}", result.n_obs);
-                            println!("Censored: {}", result.n_censored);
-                            println!("Event types: {:?}", result.event_types);
-                            for ci in &result.cifs {
-                                println!("\nEvent type {} cumulative incidence:", ci.event_type);
-                                println!("{:<12} {:<12}", "Time", "CIF");
-                                println!("{}", "-".repeat(24));
-                                let n = ci.times.len().min(10);
-                                for i in 0..n {
-                                    println!("{:<12.4} {:<12.4}", ci.times[i], ci.incidence[i]);
-                                }
-                            }
+        Some(ds) => match run_competing_risks(ds, time_col, event_type_col, conf_level) {
+            Ok(result) => match format {
+                OutputFormat::Json => {
+                    let json = serde_json::json!({
+                        "method": "Competing Risks Analysis",
+                        "n_obs": result.n_obs,
+                        "n_censored": result.n_censored,
+                        "event_types": result.event_types,
+                        "cumulative_incidence": result.cifs.iter().map(|ci| {
+                            serde_json::json!({
+                                "event_type": ci.event_type,
+                                "times": ci.times,
+                                "incidence": ci.incidence,
+                            })
+                        }).collect::<Vec<_>>(),
+                    });
+                    println!("{}", serde_json::to_string_pretty(&json)?);
+                }
+                _ => {
+                    println!("\nCompeting Risks Analysis");
+                    println!("{}", "=".repeat(50));
+                    println!("Observations: {}", result.n_obs);
+                    println!("Censored: {}", result.n_censored);
+                    println!("Event types: {:?}", result.event_types);
+                    for ci in &result.cifs {
+                        println!("\nEvent type {} cumulative incidence:", ci.event_type);
+                        println!("{:<12} {:<12}", "Time", "CIF");
+                        println!("{}", "-".repeat(24));
+                        let n = ci.times.len().min(10);
+                        for i in 0..n {
+                            println!("{:<12.4} {:<12.4}", ci.times[i], ci.incidence[i]);
                         }
                     }
                 }
-                Err(e) => {
-                    print_error(&format!("Competing risks analysis failed: {}", e), format);
-                }
+            },
+            Err(e) => {
+                print_error(&format!("Competing risks analysis failed: {}", e), format);
             }
-        }
+        },
         None => {
             print_error(&format!("Dataset '{}' not found", dataset_name), format);
         }

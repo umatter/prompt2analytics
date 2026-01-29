@@ -4,4 +4,4 @@
 
 mod html;
 
-pub use html::{HtmlReport, ReportSection, ReportTable, ReportContent, generate_html_report};
+pub use html::{HtmlReport, ReportContent, ReportSection, ReportTable, generate_html_report};

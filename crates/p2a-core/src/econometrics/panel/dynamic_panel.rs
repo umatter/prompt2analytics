@@ -21,17 +21,19 @@
 //! R equivalent: `plm::pgmm()`
 
 use ndarray::{Array1, Array2};
-use serde::{Serialize, Deserialize};
-use statrs::distribution::{Normal, ContinuousCDF};
+use serde::{Deserialize, Serialize};
+use statrs::distribution::{ContinuousCDF, Normal};
 use std::fmt;
 
 use crate::data::Dataset;
-use crate::errors::{EconResult, EconError};
-use crate::linalg::matrix_ops::{xtx, safe_inverse};
+use crate::errors::{EconError, EconResult};
 use crate::linalg::design::DesignMatrix;
+use crate::linalg::matrix_ops::{safe_inverse, xtx};
 use crate::traits::estimator::{SignificanceLevel, chi_squared_p_value};
 
-use super::utils::{extract_entity_ids, extract_time_ids, build_gmm_instrument_matrix, compute_ab_ar_test};
+use super::utils::{
+    build_gmm_instrument_matrix, compute_ab_ar_test, extract_entity_ids, extract_time_ids,
+};
 
 /// GMM transformation type for dynamic panel models.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -163,30 +165,45 @@ impl fmt::Display for GmmResult {
         writeln!(f, "No. Groups: {}", self.n_groups)?;
         writeln!(f, "No. Instruments: {}", self.n_instruments)?;
         writeln!(f)?;
-        writeln!(f, "{:<20} {:>12} {:>12} {:>10} {:>10}",
-                 "Variable", "Coef", "Std Err", "z", "P>|z|")?;
+        writeln!(
+            f,
+            "{:<20} {:>12} {:>12} {:>10} {:>10}",
+            "Variable", "Coef", "Std Err", "z", "P>|z|"
+        )?;
         writeln!(f, "{}", "-".repeat(70))?;
 
         for i in 0..self.variables.len() {
-            writeln!(f, "{:<20} {:>12.4} {:>12.4} {:>10.2} {:>10.3}{}",
-                     self.variables[i],
-                     self.coefficients[i],
-                     self.std_errors[i],
-                     self.z_stats[i],
-                     self.p_values[i],
-                     self.significance[i].stars())?;
+            writeln!(
+                f,
+                "{:<20} {:>12.4} {:>12.4} {:>10.2} {:>10.3}{}",
+                self.variables[i],
+                self.coefficients[i],
+                self.std_errors[i],
+                self.z_stats[i],
+                self.p_values[i],
+                self.significance[i].stars()
+            )?;
         }
 
         writeln!(f, "{}", "-".repeat(70))?;
         writeln!(f)?;
-        writeln!(f, "Sargan Test: chi2({}) = {:.4}, p-value = {:.4}",
-                 self.sargan_df, self.sargan_statistic, self.sargan_p_value)?;
+        writeln!(
+            f,
+            "Sargan Test: chi2({}) = {:.4}, p-value = {:.4}",
+            self.sargan_df, self.sargan_statistic, self.sargan_p_value
+        )?;
         writeln!(f, "  H0: Overidentifying restrictions are valid")?;
         writeln!(f)?;
-        writeln!(f, "Arellano-Bond Test for AR(1): z = {:.4}, p-value = {:.4}",
-                 self.ar1_statistic, self.ar1_p_value)?;
-        writeln!(f, "Arellano-Bond Test for AR(2): z = {:.4}, p-value = {:.4}",
-                 self.ar2_statistic, self.ar2_p_value)?;
+        writeln!(
+            f,
+            "Arellano-Bond Test for AR(1): z = {:.4}, p-value = {:.4}",
+            self.ar1_statistic, self.ar1_p_value
+        )?;
+        writeln!(
+            f,
+            "Arellano-Bond Test for AR(2): z = {:.4}, p-value = {:.4}",
+            self.ar2_statistic, self.ar2_p_value
+        )?;
         writeln!(f, "  H0: No autocorrelation")?;
 
         if !self.warnings.is_empty() {
@@ -236,14 +253,17 @@ pub fn run_gmm(
     let (entity_ids, n_groups) = extract_entity_ids(dataset, entity_col)?;
     let (time_ids, time_values) = extract_time_ids(dataset, time_col)?;
     let n_periods = time_values.len();
-    let n = entity_ids.len();
+    let _n = entity_ids.len();
 
     if n_periods < lags + 3 {
         return Err(EconError::InsufficientData {
             required: lags + 3,
             provided: n_periods,
-            context: format!("GMM estimation requires at least {} time periods for {} lags",
-                           lags + 3, lags),
+            context: format!(
+                "GMM estimation requires at least {} time periods for {} lags",
+                lags + 3,
+                lags
+            ),
         });
     }
 
@@ -256,11 +276,12 @@ pub fn run_gmm(
     }
 
     // Extract y values
-    let y = DesignMatrix::extract_column(dataset.df(), y_col)
-        .map_err(|e| EconError::ColumnNotFound {
+    let y = DesignMatrix::extract_column(dataset.df(), y_col).map_err(|e| {
+        EconError::ColumnNotFound {
             column: y_col.to_string(),
             available: vec![format!("{:?}", e)],
-        })?;
+        }
+    })?;
 
     // Organize data by entity
     let mut y_by_entity: Vec<Vec<f64>> = vec![vec![0.0; n_periods]; n_groups];
@@ -277,7 +298,8 @@ pub fn run_gmm(
 
     // Organize X by entity if present
     let x_by_entity: Option<Vec<Array2<f64>>> = design.as_ref().map(|d| {
-        let mut x_ent: Vec<Array2<f64>> = vec![Array2::zeros((n_periods, d.data.ncols())); n_groups];
+        let mut x_ent: Vec<Array2<f64>> =
+            vec![Array2::zeros((n_periods, d.data.ncols())); n_groups];
         for (idx, (&eid, &tid)) in entity_ids.iter().zip(time_ids.iter()).enumerate() {
             for j in 0..d.data.ncols() {
                 x_ent[eid][[tid, j]] = d.data[[idx, j]];
@@ -306,7 +328,7 @@ pub fn run_gmm(
             // Lagged first differences: Δy_{i,t-1}, Δy_{i,t-2}, ...
             let mut dy_lags = Vec::with_capacity(k_lag);
             for lag in 1..=k_lag {
-                if t >= lag + 1 {
+                if t > lag {
                     let dy_lag_val = y_by_entity[i][t - lag] - y_by_entity[i][t - lag - 1];
                     dy_lags.push(dy_lag_val);
                 } else {
@@ -465,7 +487,9 @@ pub fn run_gmm(
             Ok((inv, cond)) => (inv, cond.is_none()),
             Err(_) => {
                 // Fallback to one-step weighting if singular
-                warnings.push("Optimal weighting matrix singular, using one-step weighting".to_string());
+                warnings.push(
+                    "Optimal weighting matrix singular, using one-step weighting".to_string(),
+                );
                 (ztz_inv.clone(), true)
             }
         };
@@ -473,10 +497,11 @@ pub fn run_gmm(
         let _ = omega_singular; // Silence unused warning if needed
 
         let wzazw_two = wz.dot(&omega_inv).dot(&ztw);
-        let (wzazw_two_inv, _) = safe_inverse(&wzazw_two.view()).map_err(|e| EconError::SingularMatrix {
-            context: "W'Z A Z'W in two-step GMM".to_string(),
-            suggestion: format!("Check for collinearity: {:?}", e),
-        })?;
+        let (wzazw_two_inv, _) =
+            safe_inverse(&wzazw_two.view()).map_err(|e| EconError::SingularMatrix {
+                context: "W'Z A Z'W in two-step GMM".to_string(),
+                suggestion: format!("Check for collinearity: {:?}", e),
+            })?;
 
         let wzazy_two = wz.dot(&omega_inv).dot(&zty);
         let beta_two: Array1<f64> = wzazw_two_inv.dot(&wzazy_two);
@@ -527,18 +552,19 @@ pub fn run_gmm(
 
     // z-statistics and p-values
     let beta_vec: Vec<f64> = beta.to_vec();
-    let z_stats: Vec<f64> = beta_vec.iter()
+    let z_stats: Vec<f64> = beta_vec
+        .iter()
         .zip(std_errors.iter())
         .map(|(&b, &se)| if se > 0.0 { b / se } else { 0.0 })
         .collect();
 
-    let p_values: Vec<f64> = z_stats.iter()
-        .map(|&z| 2.0 * (1.0 - Normal::new(0.0, 1.0)
-            .map(|n| n.cdf(z.abs()))
-            .unwrap_or(0.5)))
+    let p_values: Vec<f64> = z_stats
+        .iter()
+        .map(|&z| 2.0 * (1.0 - Normal::new(0.0, 1.0).map(|n| n.cdf(z.abs())).unwrap_or(0.5)))
         .collect();
 
-    let significance: Vec<SignificanceLevel> = p_values.iter()
+    let significance: Vec<SignificanceLevel> = p_values
+        .iter()
         .map(|&p| SignificanceLevel::from_p_value(p))
         .collect();
 

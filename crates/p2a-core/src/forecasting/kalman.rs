@@ -14,10 +14,10 @@
 //! - R Core Team. Kalman filtering functions in stats package.
 //!   <https://stat.ethz.ch/R-manual/R-devel/library/stats/html/KalmanLike.html>
 
-use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
-use serde::{Deserialize, Serialize};
 use crate::errors::{EconError, EconResult};
 use crate::linalg::matrix_ops::safe_inverse;
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
+use serde::{Deserialize, Serialize};
 
 /// State-space model specification.
 ///
@@ -55,29 +55,43 @@ impl StateSpaceModel {
 
         if transition.ncols() != m {
             return Err(EconError::InvalidSpecification {
-                message: format!("Transition matrix must be square, got {}x{}", m, transition.ncols()),
+                message: format!(
+                    "Transition matrix must be square, got {}x{}",
+                    m,
+                    transition.ncols()
+                ),
             });
         }
 
         if observation.len() != m {
             return Err(EconError::InvalidSpecification {
-                message: format!("Observation vector length ({}) must match state dimension ({})",
-                    observation.len(), m),
+                message: format!(
+                    "Observation vector length ({}) must match state dimension ({})",
+                    observation.len(),
+                    m
+                ),
             });
         }
 
         if selection.nrows() != m {
             return Err(EconError::InvalidSpecification {
-                message: format!("Selection matrix rows ({}) must match state dimension ({})",
-                    selection.nrows(), m),
+                message: format!(
+                    "Selection matrix rows ({}) must match state dimension ({})",
+                    selection.nrows(),
+                    m
+                ),
             });
         }
 
         let r = selection.ncols();
         if state_cov.dim() != (r, r) {
             return Err(EconError::InvalidSpecification {
-                message: format!("State covariance dimensions ({:?}) must be ({}, {})",
-                    state_cov.dim(), r, r),
+                message: format!(
+                    "State covariance dimensions ({:?}) must be ({}, {})",
+                    state_cov.dim(),
+                    r,
+                    r
+                ),
             });
         }
 
@@ -182,15 +196,22 @@ pub fn kalman_filter(
 
     if init_state.len() != m {
         return Err(EconError::InvalidSpecification {
-            message: format!("Initial state length ({}) must match state dimension ({})",
-                init_state.len(), m),
+            message: format!(
+                "Initial state length ({}) must match state dimension ({})",
+                init_state.len(),
+                m
+            ),
         });
     }
 
     if init_cov.dim() != (m, m) {
         return Err(EconError::InvalidSpecification {
-            message: format!("Initial covariance dimensions ({:?}) must be ({}, {})",
-                init_cov.dim(), m, m),
+            message: format!(
+                "Initial covariance dimensions ({:?}) must be ({}, {})",
+                init_cov.dim(),
+                m,
+                m
+            ),
         });
     }
 
@@ -318,10 +339,11 @@ pub fn kalman_smoother(
 
         // Compute smoother gain
         // L = P_{t|t} T' P_{t+1|t}^{-1}
-        let (pred_cov_inv, _) = safe_inverse(&predicted_cov_next.view())
-            .map_err(|e| EconError::InvalidSpecification {
+        let (pred_cov_inv, _) = safe_inverse(&predicted_cov_next.view()).map_err(|e| {
+            EconError::InvalidSpecification {
                 message: format!("Failed to invert predicted covariance: {}", e),
-            })?;
+            }
+        })?;
 
         let smoother_gain = filtered_cov.dot(&model.transition.t()).dot(&pred_cov_inv);
 
@@ -368,7 +390,7 @@ pub fn kalman_forecast(
     }
 
     let n = filter_result.n_obs;
-    let m = filter_result.state_dim;
+    let _m = filter_result.state_dim;
 
     // Start from final filtered state
     let mut state = vec_to_array1(&filter_result.filtered_states[n - 1]);
@@ -474,12 +496,11 @@ mod tests {
         let transition = array![[1.0]];
         let observation = array![1.0];
         let selection = array![[1.0]];
-        let state_cov = array![[0.1]];  // σ²_η
-        let obs_var = 0.2;  // σ²_ε
+        let state_cov = array![[0.1]]; // σ²_η
+        let obs_var = 0.2; // σ²_ε
 
-        let model = StateSpaceModel::new(
-            transition, observation, selection, state_cov, obs_var
-        ).unwrap();
+        let model =
+            StateSpaceModel::new(transition, observation, selection, state_cov, obs_var).unwrap();
 
         // Generate some data
         let y = vec![1.0, 1.5, 2.0, 2.2, 2.5, 3.0, 2.8, 3.2];
@@ -508,9 +529,8 @@ mod tests {
         let state_cov = array![[0.1]];
         let obs_var = 0.2;
 
-        let model = StateSpaceModel::new(
-            transition, observation, selection, state_cov, obs_var
-        ).unwrap();
+        let model =
+            StateSpaceModel::new(transition, observation, selection, state_cov, obs_var).unwrap();
 
         let y = vec![1.0, 1.5, 2.0, 2.2, 2.5];
         let init_state = array![y[0]];
@@ -537,9 +557,8 @@ mod tests {
         let state_cov = array![[0.1]];
         let obs_var = 0.2;
 
-        let model = StateSpaceModel::new(
-            transition, observation, selection, state_cov, obs_var
-        ).unwrap();
+        let model =
+            StateSpaceModel::new(transition, observation, selection, state_cov, obs_var).unwrap();
 
         let y = vec![1.0, 1.5, 2.0, 2.2, 2.5];
         let init_state = array![y[0]];
@@ -568,9 +587,8 @@ mod tests {
         let state_cov = array![[0.1]];
         let obs_var = 0.2;
 
-        let model = StateSpaceModel::new(
-            transition, observation, selection, state_cov, obs_var
-        ).unwrap();
+        let model =
+            StateSpaceModel::new(transition, observation, selection, state_cov, obs_var).unwrap();
 
         // Data with missing value
         let y = vec![1.0, f64::NAN, 2.0, 2.2, 2.5];
@@ -580,7 +598,7 @@ mod tests {
         let result = kalman_filter(&y, &model, init_state.view(), init_cov.view()).unwrap();
 
         assert_eq!(result.n_obs, 5);
-        assert!(result.innovations[1].is_nan());  // Missing observation
+        assert!(result.innovations[1].is_nan()); // Missing observation
         assert!(result.log_likelihood.is_finite());
     }
 
@@ -591,33 +609,22 @@ mod tests {
         // ν_{t+1} = ν_t + ζ_t
         // y_t = μ_t + ε_t
 
-        let transition = array![
-            [1.0, 1.0],
-            [0.0, 1.0]
-        ];
-        let observation = array![1.0, 0.0];  // Observe level only
-        let selection = array![
-            [1.0, 0.0],
-            [0.0, 1.0]
-        ];
-        let state_cov = array![
-            [0.1, 0.0],
-            [0.0, 0.01]
-        ];
+        let transition = array![[1.0, 1.0], [0.0, 1.0]];
+        let observation = array![1.0, 0.0]; // Observe level only
+        let selection = array![[1.0, 0.0], [0.0, 1.0]];
+        let state_cov = array![[0.1, 0.0], [0.0, 0.01]];
         let obs_var = 0.2;
 
-        let model = StateSpaceModel::new(
-            transition, observation, selection, state_cov, obs_var
-        ).unwrap();
+        let model =
+            StateSpaceModel::new(transition, observation, selection, state_cov, obs_var).unwrap();
 
         // Generate trending data
-        let y: Vec<f64> = (0..10).map(|t| 1.0 + 0.5 * t as f64 + 0.1 * (t as f64).sin()).collect();
+        let y: Vec<f64> = (0..10)
+            .map(|t| 1.0 + 0.5 * t as f64 + 0.1 * (t as f64).sin())
+            .collect();
 
-        let init_state = array![y[0], 0.5];  // level = y[0], slope = 0.5
-        let init_cov = array![
-            [1.0, 0.0],
-            [0.0, 0.1]
-        ];
+        let init_state = array![y[0], 0.5]; // level = y[0], slope = 0.5
+        let init_cov = array![[1.0, 0.0], [0.0, 0.1]];
 
         let result = kalman_filter(&y, &model, init_state.view(), init_cov.view()).unwrap();
 

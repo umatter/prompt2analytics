@@ -220,24 +220,24 @@
 //! | `spdep` | [`spatial`] module |
 //! | `vars` | [`run_var`], [`run_vecm`] |
 
-// Enforce documentation on public items (warn, not error, for gradual adoption)
-#![warn(missing_docs)]
+// Documentation lint disabled - handled at workspace level in Cargo.toml
+// #![warn(missing_docs)]
 
 // Foundation modules (pure Rust implementations)
+pub mod errors;
 pub mod linalg;
 pub mod traits;
-pub mod errors;
 
 // Core feature modules (always available)
 pub mod data;
-pub mod stats;
-pub mod regression;
 pub mod econometrics;
-pub mod spatial;
+pub mod export;
 pub mod ml;
+pub mod regression;
 pub mod reports;
 pub mod simulation;
-pub mod export;
+pub mod spatial;
+pub mod stats;
 
 // Optional feature modules
 #[cfg(feature = "forecasting")]
@@ -248,394 +248,976 @@ pub mod visualization;
 
 // Re-export foundational types
 pub use errors::{EconError, EconResult, EstimationWarning};
-pub use traits::{LinearEstimator, SignificanceLevel};
 pub use linalg::{
-    DesignMatrix, DesignError,
+    DesignError,
+    DesignMatrix,
     // Toeplitz matrix construction
-    toeplitz, toeplitz_asymmetric, toeplitz2, toeplitz_acf, toeplitz_to_vec,
+    toeplitz,
+    toeplitz_acf,
+    toeplitz_asymmetric,
+    toeplitz_to_vec,
+    toeplitz2,
 };
+pub use traits::{LinearEstimator, SignificanceLevel};
 
-pub use data::{Dataset, DataLoader, DatasetInfo};
+pub use data::{DataLoader, Dataset, DatasetInfo};
 pub use stats::{
-    DescriptiveStats, CorrelationMatrix, correlation_matrix,
-    AnovaResult, TwoWayAnovaResult, RegressionAnovaResult, GroupStats,
-    run_one_way_anova, run_two_way_anova, anova_from_ols,
-    TTestResult, Alternative, one_sample_t_test, two_sample_t_test, paired_t_test, t_test,
+    AcfResult,
     // ACF/PACF/CCF
-    AcfType, CcfType, AcfResult, PacfResult, CcfResult,
-    acf, pacf, ccf, run_acf, run_pacf, run_ccf,
-    // Chi-squared tests
-    ChiSquaredResult, chisq_test_gof, chisq_test_independence,
-    run_chisq_gof, run_chisq_independence,
-    // Fisher's exact test
-    FisherExactResult, FisherAlternative, fisher_exact_test, fisher_exact_test_int, run_fisher_test,
-    // Wilcoxon tests
-    WilcoxonResult, WilcoxonConfig, wilcoxon_rank_sum, wilcoxon_signed_rank, wilcoxon_test,
-    // Shapiro-Wilk normality test
-    ShapiroWilkResult, shapiro_wilk_test, run_shapiro_wilk,
-    // Kolmogorov-Smirnov test
-    KsTestResult, TheoreticalDistribution, ks_test_one_sample, ks_test_two_sample, ks_test, run_ks_test,
-    // MANOVA
-    ManovaResult, ManovaTestResult, ManovaTestStatistic, manova_one_way, run_manova,
-    // Tukey HSD
-    TukeyHsdResult, PairwiseComparison, tukey_hsd, run_tukey_hsd,
-    // Bartlett's test
-    BartlettResult, BartlettGroupStats, bartlett_test, run_bartlett_test,
-    // Box-Pierce and Ljung-Box tests
-    BoxTestResult, BoxTestType, box_test, run_box_test,
-    // Phillips-Perron unit root test
-    PPTestResult, pp_test, run_pp_test,
-    // F test for comparing two variances
-    VarTestResult, var_test, run_var_test,
-    // Proportion tests
-    PropTestResult, prop_test_one, prop_test_two, prop_test_k,
-    // Exact binomial test
-    BinomTestResult, binom_test,
-    // Fligner-Killeen test for homogeneity of variances
-    FlignerResult, fligner_test, run_fligner_test,
+    AcfType,
+    Alternative,
+    AnovaResult,
     // Ansari-Bradley test for scale parameters
-    AnsariBradleyResult, ansari_test,
-    // Mood test for scale parameters
-    MoodTestResult, mood_test, run_mood_test,
-    // Kruskal-Wallis rank sum test
-    KruskalWallisResult, kruskal_test, run_kruskal_test,
-    // Friedman rank sum test
-    FriedmanResult, friedman_test, run_friedman_test,
-    // Welch's one-way ANOVA
-    OnewayTestResult, oneway_test, run_oneway_test,
-    // McNemar's chi-squared test
-    McnemarResult, mcnemar_test, mcnemar_test_matrix,
-    // Pairwise t-tests with p-value adjustment
-    PairwiseTTestResult, PValueAdjustMethod, pairwise_t_test, run_pairwise_t_test, p_adjust,
-    // Pairwise Wilcoxon tests with p-value adjustment
-    PairwiseWilcoxResult, pairwise_wilcox_test, run_pairwise_wilcox_test,
-    // Quade test for unreplicated blocked data
-    QuadeResult, quade_test, run_quade_test,
-    // Cochran-Mantel-Haenszel test for stratified 2x2 tables
-    MantelHaenszelResult, StratumStats, CmhAlternative, Table2x2,
-    mantelhaen_test, run_mantelhaen_test,
-    // Exact Poisson test
-    PoissonTestResult, PoissonAlternative, poisson_test,
-    // Mahalanobis distance
-    MahalanobisResult, mahalanobis, mahalanobis_single, run_mahalanobis,
+    AnsariBradleyResult,
+    ApproxMethod,
+    ApproxResult,
+    ApproxRule,
+    BartlettGroupStats,
+    // Bartlett's test
+    BartlettResult,
+    // Exact binomial test
+    BinomTestResult,
+    // Box-Pierce and Ljung-Box tests
+    BoxTestResult,
+    BoxTestType,
+    CcfResult,
+    CcfType,
+    // Chi-squared tests
+    ChiSquaredResult,
+    CmhAlternative,
+    ConstrOptimConfig,
+    ConstrOptimResult,
+    ContrastType,
     // Correlation test
-    CorTestResult, CorrelationMethod, cor_test, run_cor_test,
-    // Power analysis
-    PowerTTestResult, PowerPropTestResult, PowerAnovaTestResult,
-    TTestType, PowerAlternative,
-    power_t_test, power_prop_test, power_anova_test,
-    run_power_t_test, run_power_prop_test, run_power_anova_test,
-    // Prop trend test
-    PropTrendTestResult, prop_trend_test, run_prop_trend_test,
+    CorTestResult,
+    CorrelationMatrix,
+    CorrelationMethod,
+    CovWtCenter,
+    CovWtMethod,
+    CovWtResult,
+    DensityKernel,
+    DensityResult,
+    DescriptiveStats,
+    EcdfResult,
+    FisherAlternative,
+    // Fisher's exact test
+    FisherExactResult,
     // Robust/descriptive stats
-    FivenumResult, fivenum, run_fivenum,
-    iqr, run_iqr, quantile,
-    mad, run_mad,
-    EcdfResult, ecdf, run_ecdf,
-    DensityResult, DensityKernel, density, run_density,
-    // Spline interpolation
-    spline, splinefun, approx, approxfun,
-    SplineResult, SplineMethod, ApproxResult, ApproxMethod, ApproxRule,
-    // Weighted statistics
-    weighted_mean, run_weighted_mean,
-    cov_wt, cov_wt_from_slice, run_cov_wt,
-    CovWtResult, CovWtMethod, CovWtCenter,
-    // Mauchly's sphericity test
-    mauchly_test, mauchly_test_from_slice, run_mauchly_test,
-    MauchlyResult,
-    // Median polish
-    medpolish, medpolish_array, run_medpolish,
-    MedpolishResult,
-    // Isotonic regression
-    isoreg, isoreg_y, isoreg_predict, run_isoreg,
+    FivenumResult,
+    // Fligner-Killeen test for homogeneity of variances
+    FlignerResult,
+    // Friedman rank sum test
+    FriedmanResult,
+    GroupStats,
     IsoregResult,
-    // Log-linear models
-    loglin, loglin_independence, loglin_saturated, run_loglin,
+    // Kruskal-Wallis rank sum test
+    KruskalWallisResult,
+    // Kolmogorov-Smirnov test
+    KsTestResult,
     LoglinResult,
+    // Mahalanobis distance
+    MahalanobisResult,
+    // MANOVA
+    ManovaResult,
+    ManovaTestResult,
+    ManovaTestStatistic,
+    // Cochran-Mantel-Haenszel test for stratified 2x2 tables
+    MantelHaenszelResult,
+    MauchlyResult,
+    // McNemar's chi-squared test
+    McnemarResult,
+    MedpolishResult,
+    ModelTablesResult,
+    ModelTablesSE,
+    // Mood test for scale parameters
+    MoodTestResult,
+    // Welch's one-way ANOVA
+    OnewayTestResult,
+    OptimMethod,
+    // Phillips-Perron unit root test
+    PPTestResult,
+    PValueAdjustMethod,
+    PacfResult,
+    PairwiseComparison,
+    // Pairwise t-tests with p-value adjustment
+    PairwiseTTestResult,
+    // Pairwise Wilcoxon tests with p-value adjustment
+    PairwiseWilcoxResult,
+    PoissonAlternative,
+    // Exact Poisson test
+    PoissonTestResult,
+    PowerAlternative,
+    PowerAnovaTestResult,
+    PowerPropTestResult,
+    // Power analysis
+    PowerTTestResult,
+    // Proportion tests
+    PropTestResult,
+    // Prop trend test
+    PropTrendTestResult,
+    // Quade test for unreplicated blocked data
+    QuadeResult,
+    RegressionAnovaResult,
+    SeContrastResult,
+    // Shapiro-Wilk normality test
+    ShapiroWilkResult,
+    SplineMethod,
+    SplineResult,
+    StratumStats,
+    TTestResult,
+    TTestType,
+    Table2x2,
+    TableType,
+    TheoreticalDistribution,
+    // Tukey HSD
+    TukeyHsdResult,
+    TwoWayAnovaResult,
+    TwoWayModelTablesResult,
+    // F test for comparing two variances
+    VarTestResult,
+    WilcoxonConfig,
+    // Wilcoxon tests
+    WilcoxonResult,
+    acf,
+    anova_from_ols,
+    ansari_test,
+    approx,
+    approxfun,
+    bartlett_test,
+    binom_test,
+    box_test,
+    ccf,
+    chisq_test_gof,
+    chisq_test_independence,
     // Constrained optimization
-    constr_optim, run_constr_optim,
-    ConstrOptimResult, ConstrOptimConfig, OptimMethod,
-    // Standard errors for contrasts
-    se_contrast, se_contrast_single, estimate_contrast,
-    contrast_t_statistic, contrast_p_value, generate_contrasts, run_se_contrast,
-    SeContrastResult, ContrastType,
+    constr_optim,
+    contrast_p_value,
+    contrast_t_statistic,
+    cor_test,
+    correlation_matrix,
+    cov_wt,
+    cov_wt_from_slice,
+    density,
+    ecdf,
+    estimate_contrast,
+    fisher_exact_test,
+    fisher_exact_test_int,
+    fivenum,
+    fligner_test,
+    format_model_tables,
+    friedman_test,
+    generate_contrasts,
+    iqr,
+    // Isotonic regression
+    isoreg,
+    isoreg_predict,
+    isoreg_y,
+    kruskal_test,
+    ks_test,
+    ks_test_one_sample,
+    ks_test_two_sample,
+    // Log-linear models
+    loglin,
+    loglin_independence,
+    loglin_saturated,
+    mad,
+    mahalanobis,
+    mahalanobis_single,
+    manova_one_way,
+    mantelhaen_test,
+    // Mauchly's sphericity test
+    mauchly_test,
+    mauchly_test_from_slice,
+    mcnemar_test,
+    mcnemar_test_matrix,
+    // Median polish
+    medpolish,
+    medpolish_array,
     // Model tables
-    model_tables, model_tables_means, model_tables_effects,
-    model_tables_two_way, run_model_tables, format_model_tables,
-    ModelTablesResult, TwoWayModelTablesResult, ModelTablesSE, TableType,
+    model_tables,
+    model_tables_effects,
+    model_tables_means,
+    model_tables_two_way,
+    mood_test,
+    one_sample_t_test,
+    oneway_test,
+    p_adjust,
+    pacf,
+    paired_t_test,
+    pairwise_t_test,
+    pairwise_wilcox_test,
+    poisson_test,
+    power_anova_test,
+    power_prop_test,
+    power_t_test,
+    pp_test,
+    prop_test_k,
+    prop_test_one,
+    prop_test_two,
+    prop_trend_test,
+    quade_test,
+    quantile,
+    run_acf,
+    run_bartlett_test,
+    run_box_test,
+    run_ccf,
+    run_chisq_gof,
+    run_chisq_independence,
+    run_constr_optim,
+    run_cor_test,
+    run_cov_wt,
+    run_density,
+    run_ecdf,
+    run_fisher_test,
+    run_fivenum,
+    run_fligner_test,
+    run_friedman_test,
+    run_iqr,
+    run_isoreg,
+    run_kruskal_test,
+    run_ks_test,
+    run_loglin,
+    run_mad,
+    run_mahalanobis,
+    run_manova,
+    run_mantelhaen_test,
+    run_mauchly_test,
+    run_medpolish,
+    run_model_tables,
+    run_mood_test,
+    run_one_way_anova,
+    run_oneway_test,
+    run_pacf,
+    run_pairwise_t_test,
+    run_pairwise_wilcox_test,
+    run_power_anova_test,
+    run_power_prop_test,
+    run_power_t_test,
+    run_pp_test,
+    run_prop_trend_test,
+    run_quade_test,
+    run_se_contrast,
+    run_shapiro_wilk,
+    run_tukey_hsd,
+    run_two_way_anova,
+    run_var_test,
+    run_weighted_mean,
+    // Standard errors for contrasts
+    se_contrast,
+    se_contrast_single,
+    shapiro_wilk_test,
+    // Spline interpolation
+    spline,
+    splinefun,
+    t_test,
+    tukey_hsd,
+    two_sample_t_test,
+    var_test,
+    // Weighted statistics
+    weighted_mean,
+    wilcoxon_rank_sum,
+    wilcoxon_signed_rank,
+    wilcoxon_test,
 };
 
 // Spectral density estimation (requires spectral-analysis feature)
-#[cfg(feature = "spectral-analysis")]
-pub use stats::{
-    SpectrumConfig, SpectrumResult, spectrum, spectrum_ar, run_spectrum, run_spectrum_ar,
-};
-pub use regression::{
-    OlsResult, run_ols, run_ols_raw, run_ols_clustered, DiagnosticsResult, run_diagnostics,
-    // Breusch-Godfrey test for serial correlation
-    BgTestResult, BgTestType, bg_test, run_bg_test, bg_test_from_ols,
-    // Ramsey's RESET test for functional form
-    ResetTestResult, ResetType, reset_test, run_reset_test, reset_test_from_ols,
-    // Wald test for comparing nested models
-    WaldTestResult, wald_test, run_wald_test, wald_test_from_ols,
-    // Harvey-Collier test for linearity
-    HarveyCollierResult, harvey_collier_test, run_harvey_collier, recursive_residuals,
-    // HAC (Newey-West) standard errors
-    HacResult, HacKernel, vcov_hac, run_vcov_hac,
-    // Bootstrap covariance estimation
-    BootstrapResult, BootstrapType, vcov_bootstrap, run_vcov_bootstrap,
-    // Driscoll-Kraay panel-robust standard errors
-    DriscollKraayResult, vcov_driscoll_kraay, run_vcov_driscoll_kraay,
-    // Nonlinear least squares
-    NlsResult, NlsConfig, NlsAlgorithm, nls, nls_multi, run_nls, run_nls_with_config,
-    model_exponential_decay, model_exponential_growth, model_michaelis_menten,
-    model_logistic_growth, model_power, model_asymptotic, ModelFn,
-    // LOESS (local polynomial regression)
-    LoessResult, LoessConfig, LoessModel, loess, loess_predict, run_loess,
-    // GLS (generalized least squares)
-    GlsResult, CorrelationStructure, gls, gls_ar1_auto, run_gls,
-    // Smoothing spline
-    SmoothSplineResult, SmoothSplineConfig, smooth_spline, smooth_spline_predict, run_smooth_spline,
-    // Stepwise model selection
-    StepResult, StepRecord, StepConfig, StepDirection,
-    Add1Result, Drop1Result, TermEvaluation,
-    step, run_step, add1, drop1,
-    // Tukey's resistant line
-    LineResult, line, run_line,
-    // SuperSmoother
-    SupsmuResult, SupsmuConfig, supsmu, run_supsmu,
-    // Quantile regression
-    QuantRegResult, QuantRegCoefficient, QuantRegConfig, QuantRegAlgorithm,
-    quantreg, run_quantreg, quantreg_multi,
-    // Sensitivity analysis for unmeasured confounding (sensemakr)
-    SensemakrResult, SensitivityBound, ContourData,
-    sensemakr, run_sensemakr, generate_contour_data,
-    partial_r2, robustness_value, robustness_value_alpha,
-    confounding_bias, adjusted_estimate, adjusted_se,
-    // Average marginal effects (AME)
-    MarginalEffectsResult, MarginalEffect, ModelType, ContrastsResult, ContrastEffect,
-    marginal_effects, marginal_effects_ols, marginal_effects_discrete, contrasts,
-    // E-value sensitivity analysis for unmeasured confounding
-    EValueResult, EffectType,
-    evalue_rr, evalue_rr_ci, evalue_or, evalue_hr, evalue_smd, evalue_rd,
-    bias_factor, bounding_factor, could_explain_away,
-};
 pub use econometrics::{
-    PanelResult, HausmanResult, run_fixed_effects, run_random_effects, run_hausman_test,
-    // Panel GLS (FGLS)
-    PanelGlsResult, PanelGlsModel, run_panel_gls, run_fegls, run_pooled_gls,
-    // Arellano-Bond / System GMM (dynamic panel)
-    GmmResult, GmmConfig, GmmTransform, GmmStep, run_gmm, run_arellano_bond,
-    // Variable Coefficients Model (pvcm) and Mean Group (pmg)
-    PvcmResult, PvcmType, run_pvcm, run_pmg,
-    // General GMM (Hansen 1982)
-    GeneralGmmConfig, GeneralGmmResult, GmmMethod, GmmVcov, MomentCondition,
-    run_general_gmm, run_gmm_iv,
-    IVResult, run_iv2sls, FirstStageDiagnostics, run_first_stage_diagnostics,
-    // Sargan test for IV overidentification
-    SarganTestResult, sargan_test, run_sargan_test,
-    DiDResult, run_did,
-    // Staggered DiD (Callaway-Sant'Anna)
-    ComparisonGroup, AttEstimationMethod, StaggeredDidConfig, Aggregation,
-    GroupTimeATT, AggregatedEffect, PreTrendTest, StaggeredDidResult,
-    run_staggered_did,
-    // Goodman-Bacon decomposition for staggered DiD
-    ComparisonType, BaconComponent, BaconEstimatesByType, BaconDecompResult,
-    bacon_decomp,
-    // Extended TWFE (Wooldridge)
-    EtwfeConfig, EtwfeResult, ControlGroup, CohortTimeEffect,
-    EtwfeAggregatedEffect, run_etwfe,
-    DiscreteResult, run_logit, run_probit,
-    // Multinomial logit
-    MultinomResult, run_multinom,
-    // Ordered logit/probit
-    OrderedModelType, OrderedResult, run_ordered_logit, run_ordered_probit,
-    // Negative binomial regression
-    NegBinResult, run_negbin,
-    // Zero-inflated models
-    ZeroInflatedType, ZeroInflResult, run_zip, run_zinb,
-    // Hurdle models
-    HurdleType, HurdleResult, run_hurdle,
-    // McFadden conditional logit (mlogit)
-    MlogitResult, run_mlogit, run_conditional_logit,
-    // Mixed logit / Random parameters logit (gmnl, mixl)
-    RandomDistribution, RandomParameterSpec, MixedLogitConfig, MixedLogitResult,
-    run_mixed_logit, run_gmnl, run_mixl,
-    VarResult, VarmaResult, VecmResult, VarIrfResult, run_var, run_varma, run_vecm, run_var_irf,
-    // Granger causality test
-    GrangerResult, granger_test, run_granger_test, granger_test_bidirectional,
-    HdfeResult, HdfeConfig, FactorInfo, run_hdfe,
-    // GLM with HDFE
-    GlmFamily, FeglmConfig, FeglmResult, run_feglm,
-    // Treatment effects
-    Estimand, DRMethod, IpwConfig, DoublyRobustConfig,
-    PropensityScoreSummary, IpwResult, DoublyRobustResult,
-    run_ipw_treatment, run_doubly_robust,
-    // Covariate Balancing Propensity Score (CBPS)
-    CbpsMethod, CbpsConfig, CbpsResult, BalanceTable, CovariateBalance,
-    run_cbps, cbps,
-    // Targeted Maximum Likelihood Estimation (TMLE)
-    QModel, GModel, TmleConfig, TmleResult, tmle, run_tmle,
-    // Collaborative TMLE (C-TMLE) with data-adaptive covariate selection
-    StoppingRule, SelectionOrder, CVCriterion, CTmleQModel,
-    CTmleConfig, SelectionStep, CTmleResult, CTmleConfigSummary,
-    ctmle, run_ctmle, ctmle_arrays,
-    // Flexible inverse probability weighting (WeightIt)
-    WeightMethod, WeightEstimand, WeightItConfig, WeightItResult,
-    WeightItBalanceTable, WeightItCovariateBalance, EntropyBalanceResult,
-    weightit, entropy_balance,
-    // Propensity Score Matching (MatchIt)
-    MatchMethod, DistanceMethod, MatchCovariateBalance, MatchBalanceTable,
-    MatchInfo, SubclassInfo, MatchResult,
-    match_it, nearest_neighbor_match, cem_match, full_match, subclass_match,
-    // GBM Propensity Score Estimation (twang)
-    StopMethod, TwangEstimand, TwangConfig, TwangCovariateBalance, TwangBalanceTable,
-    DecisionStump, TwangResult, run_twang, twang,
-    // Mediation analysis (IPW-based)
-    MediationConfig, MediationResult, run_mediation_analysis,
-    // Natural Effect Models for mediation (medflex)
-    EffectScale, MedflexConfig, MedflexResult, run_medflex, run_medflex_dataset,
-    // Synthetic control
-    SynthConfig, SynthResult, PredictorSpec, PredictorBalance, TimeEffect,
-    PlaceboResults, VOptimization, TimeAggregation, run_synthetic_control,
-    // Generalized synthetic control (gsynth)
-    GsynthConfig, GsynthResult, GsynthEstimator, GsynthForce, UnitEffect,
-    run_gsynth,
-    // Synthetic Control with Prediction Intervals (SCPI)
-    SCPIConstraint, SCPIConfig, VarianceMethod, PredictionInterval, SCPIResult, run_scpi,
-    // Regression discontinuity
-    KernelType, BandwidthMethod, VceType, RdConfig, RdBandwidth,
-    RdResult, FuzzyRdResult, run_rd, rd_bandwidth, run_fuzzy_rd,
-    // Multi-cutoff RD (rdmulti)
-    RdMultiBandwidth, PoolingWeights, RdMultiConfig, CutoffResult, HeterogeneityTest,
-    RdMultiResult, run_rd_multi, run_rd_multi_dataset,
-    // Survival analysis
-    TiesMethod, AftDistribution,
-    KaplanMeierResult, LogRankResult, CoxConfig, CoxResult, AftConfig, AftResult,
-    CumulativeIncidence, CompetingRisksResult,
-    run_kaplan_meier, log_rank_test, run_cox_ph, run_aft, run_competing_risks,
-    // Panel unit root tests
-    PanelUnitRootTest, PanelModel, PanelUnitRootConfig, PanelUnitRootResult,
-    run_panel_unit_root,
-    // Spatial regression models (SAR, SEM, SAC)
-    SarConfig, SemConfig, SacConfig, SpatialImpacts, SarResult, SemResult, SacResult,
-    run_sar, run_sem, run_sac, run_sar_dataset, run_sem_dataset, run_sac_dataset,
-    // Spatial probit models (spatialprobit package)
-    SpatialProbitModel, SpatialProbitConfig, SpatialProbitImpacts, SpatialProbitResult,
-    run_sar_probit, run_sem_probit,
-    // Spatial GMM with Heteroscedasticity-Robust Estimation (sphet package)
-    SphetModel, SphetSE, SphetConfig, SphetResult, run_sphet, sphet,
-    // Spatial Panel Data Models (splm package)
-    SpatialPanelEffect, SpatialPanelModel, SpatialErrorType,
-    SpmlConfig, SpmlResult, run_spml,
-    SpgmMethod, SpgmMoments, SpgmConfig, SpgmResult, run_spgm,
-    // Stable Balancing Weights (SBW)
-    SBWEstimand, SBWConfig, BalanceStats, SBWResult, run_sbw, sbw,
-    // Treatment Effect Heterogeneity Testing (hettx)
-    HetTestStat, EffectEstimationMethod, HetTxConfig,
-    HetDecomposition, EffectSummary, HetTxResult,
-    run_hettx, run_hettx_dataset,
-    // Regression Standardization / G-computation (stdReg)
-    StdRegModel, StdRegEstimand, SEMethod, StdRegConfig,
-    SubgroupEffect, StdRegResult, run_stdreg, stdreg,
+    AftConfig,
+    AftDistribution,
+    AftResult,
+    AggregatedEffect,
+    Aggregation,
+    AttEstimationMethod,
     // Balke-Pearl bounds for nonparametric IV
-    BPBoundsConfig, CellProbabilities, MarginalProbabilities, BPBoundsResult,
-    run_bp_bounds, bp_bounds_from_probs,
-    // Marginal Treatment Effects (MTE) for IV analysis (ivmte)
-    MTEEstimand, PropensityModel, IVMTEConfig, MTEPoint,
-    TreatmentEffectEstimate, PropensityStageResult, IVMTEResult,
-    run_ivmte, ivmte, run_ivmte_multi_z,
+    BPBoundsConfig,
+    BPBoundsResult,
+    BaconComponent,
+    BaconDecompResult,
+    BaconEstimatesByType,
+    BalanceStats,
+    BalanceTable,
+    BandwidthMethod,
+    CTmleConfig,
+    CTmleConfigSummary,
+    CTmleQModel,
+    CTmleResult,
+    CVCriterion,
+    CbpsConfig,
+    // Covariate Balancing Propensity Score (CBPS)
+    CbpsMethod,
+    CbpsResult,
+    CellProbabilities,
+    CohortTimeEffect,
+    // Staggered DiD (Callaway-Sant'Anna)
+    ComparisonGroup,
+    // Goodman-Bacon decomposition for staggered DiD
+    ComparisonType,
+    CompetingRisksResult,
+    ControlGroup,
+    CovariateBalance,
+    CoxConfig,
+    CoxResult,
+    CumulativeIncidence,
+    CutoffResult,
+    DRMethod,
+    DecisionStump,
+    DiDResult,
+    DiscreteResult,
+    DistanceMethod,
+    DoublyRobustConfig,
+    DoublyRobustResult,
+    EffectEstimationMethod,
+    // Natural Effect Models for mediation (medflex)
+    EffectScale,
+    EffectSummary,
+    EntropyBalanceResult,
+    // Treatment effects
+    Estimand,
+    EtwfeAggregatedEffect,
+    // Extended TWFE (Wooldridge)
+    EtwfeConfig,
+    EtwfeResult,
+    FactorInfo,
+    FeglmConfig,
+    FeglmResult,
+    FirstStageDiagnostics,
+    FuzzyRdResult,
+    GFormulaConfig,
+    GFormulaData,
     // Parametric G-Formula for causal inference with time-varying treatments (gfoRmula)
-    GFormulaIntervention, GFormulaOutcomeType, GFormulaConfig, GFormulaResult,
-    run_gformula, gformula,
+    GFormulaIntervention,
+    GFormulaOutcomeType,
+    GFormulaResult,
+    GModel,
+    // General GMM (Hansen 1982)
+    GeneralGmmConfig,
+    GeneralGmmResult,
+    // GLM with HDFE
+    GlmFamily,
+    GmmConfig,
+    GmmMethod,
+    // Arellano-Bond / System GMM (dynamic panel)
+    GmmResult,
+    GmmStep,
+    GmmTransform,
+    GmmVcov,
+    // Granger causality test
+    GrangerResult,
+    GroupTimeATT,
+    // Generalized synthetic control (gsynth)
+    GsynthConfig,
+    GsynthEstimator,
+    GsynthForce,
+    GsynthResult,
+    HausmanResult,
+    HdfeConfig,
+    HdfeResult,
+    HetDecomposition,
+    // Treatment Effect Heterogeneity Testing (hettx)
+    HetTestStat,
+    HetTxConfig,
+    HetTxResult,
+    HeterogeneityTest,
+    HurdleResult,
+    // Hurdle models
+    HurdleType,
+    IVMTEConfig,
+    IVMTEResult,
+    IVResult,
+    IpwConfig,
+    IpwResult,
+    KaplanMeierResult,
+    // Regression discontinuity
+    KernelType,
+    LogRankResult,
+    // Marginal Treatment Effects (MTE) for IV analysis (ivmte)
+    MTEEstimand,
+    MTEPoint,
+    MarginalProbabilities,
+    MatchBalanceTable,
+    MatchCovariateBalance,
+    MatchInfo,
+    // Propensity Score Matching (MatchIt)
+    MatchMethod,
+    MatchResult,
+    MedflexConfig,
+    MedflexResult,
+    // Mediation analysis (IPW-based)
+    MediationConfig,
+    MediationResult,
+    MixedLogitConfig,
+    MixedLogitResult,
+    // McFadden conditional logit (mlogit)
+    MlogitResult,
+    MomentCondition,
+    // Multinomial logit
+    MultinomResult,
+    // Negative binomial regression
+    NegBinResult,
+    // Ordered logit/probit
+    OrderedModelType,
+    OrderedResult,
+    PanelGlsModel,
+    // Panel GLS (FGLS)
+    PanelGlsResult,
+    PanelModel,
+    PanelResult,
+    PanelUnitRootConfig,
+    PanelUnitRootResult,
+    // Panel unit root tests
+    PanelUnitRootTest,
+    PlaceboResults,
+    PoolingWeights,
+    PreTrendTest,
+    PredictionInterval,
+    PredictorBalance,
+    PredictorSpec,
+    PropensityModel,
+    PropensityScoreSummary,
+    PropensityStageResult,
+    // Variable Coefficients Model (pvcm) and Mean Group (pmg)
+    PvcmResult,
+    PvcmType,
+    // Targeted Maximum Likelihood Estimation (TMLE)
+    QModel,
+    // Mixed logit / Random parameters logit (gmnl, mixl)
+    RandomDistribution,
+    RandomParameterSpec,
+    RdBandwidth,
+    RdConfig,
+    // Multi-cutoff RD (rdmulti)
+    RdMultiBandwidth,
+    RdMultiConfig,
+    RdMultiResult,
+    RdResult,
+    SBWConfig,
+    // Stable Balancing Weights (SBW)
+    SBWEstimand,
+    SBWResult,
+    SCPIConfig,
+    // Synthetic Control with Prediction Intervals (SCPI)
+    SCPIConstraint,
+    SCPIResult,
+    SEMethod,
+    SacConfig,
+    SacResult,
+    // Spatial regression models (SAR, SEM, SAC)
+    SarConfig,
+    SarResult,
+    // Sargan test for IV overidentification
+    SarganTestResult,
+    SelectionOrder,
+    SelectionStep,
+    SemConfig,
+    SemResult,
+    SpatialErrorType,
+    SpatialImpacts,
+    // Spatial Panel Data Models (splm package)
+    SpatialPanelEffect,
+    SpatialPanelModel,
+    SpatialProbitConfig,
+    SpatialProbitImpacts,
+    // Spatial probit models (spatialprobit package)
+    SpatialProbitModel,
+    SpatialProbitResult,
+    SpgmConfig,
+    SpgmMethod,
+    SpgmMoments,
+    SpgmResult,
+    SphetConfig,
+    // Spatial GMM with Heteroscedasticity-Robust Estimation (sphet package)
+    SphetModel,
+    SphetResult,
+    SphetSE,
+    SpmlConfig,
+    SpmlResult,
+    StaggeredDidConfig,
+    StaggeredDidResult,
+    StdRegConfig,
+    StdRegEstimand,
+    // Regression Standardization / G-computation (stdReg)
+    StdRegModel,
+    StdRegResult,
+    // GBM Propensity Score Estimation (twang)
+    StopMethod,
+    // Collaborative TMLE (C-TMLE) with data-adaptive covariate selection
+    StoppingRule,
+    SubclassInfo,
+    SubgroupEffect,
+    // Synthetic control
+    SynthConfig,
+    SynthResult,
+    // Survival analysis
+    TiesMethod,
+    TimeAggregation,
+    TimeEffect,
+    TmleConfig,
+    TmleResult,
+    TreatmentEffectEstimate,
+    TwangBalanceTable,
+    TwangConfig,
+    TwangCovariateBalance,
+    TwangEstimand,
+    TwangResult,
+    UnitEffect,
+    VOptimization,
+    VarIrfResult,
+    VarResult,
+    VarianceMethod,
+    VarmaResult,
+    VceType,
+    VecmResult,
+    WeightEstimand,
+    WeightItBalanceTable,
+    WeightItConfig,
+    WeightItCovariateBalance,
+    WeightItResult,
+    // Flexible inverse probability weighting (WeightIt)
+    WeightMethod,
+    ZeroInflResult,
+    // Zero-inflated models
+    ZeroInflatedType,
+    bacon_decomp,
+    bp_bounds_from_probs,
+    cbps,
+    cem_match,
+    ctmle,
+    ctmle_arrays,
+    entropy_balance,
+    full_match,
+    gformula,
+    granger_test,
+    granger_test_bidirectional,
+    ivmte,
+    log_rank_test,
+    match_it,
+    nearest_neighbor_match,
+    rd_bandwidth,
+    run_aft,
+    run_arellano_bond,
+    run_bp_bounds,
+    run_cbps,
+    run_competing_risks,
+    run_conditional_logit,
+    run_cox_ph,
+    run_ctmle,
+    run_did,
+    run_doubly_robust,
+    run_etwfe,
+    run_feglm,
+    run_fegls,
+    run_first_stage_diagnostics,
+    run_fixed_effects,
+    run_fuzzy_rd,
+    run_general_gmm,
+    run_gformula,
+    run_gmm,
+    run_gmm_iv,
+    run_gmnl,
+    run_granger_test,
+    run_gsynth,
+    run_hausman_test,
+    run_hdfe,
+    run_hettx,
+    run_hettx_dataset,
+    run_hurdle,
+    run_ipw_treatment,
+    run_iv2sls,
+    run_ivmte,
+    run_ivmte_multi_z,
+    run_kaplan_meier,
+    run_logit,
+    run_medflex,
+    run_medflex_dataset,
+    run_mediation_analysis,
+    run_mixed_logit,
+    run_mixl,
+    run_mlogit,
+    run_multinom,
+    run_negbin,
+    run_ordered_logit,
+    run_ordered_probit,
+    run_panel_gls,
+    run_panel_unit_root,
+    run_pmg,
+    run_pooled_gls,
+    run_probit,
+    run_pvcm,
+    run_random_effects,
+    run_rd,
+    run_rd_multi,
+    run_rd_multi_dataset,
+    run_sac,
+    run_sac_dataset,
+    run_sar,
+    run_sar_dataset,
+    run_sar_probit,
+    run_sargan_test,
+    run_sbw,
+    run_scpi,
+    run_sem,
+    run_sem_dataset,
+    run_sem_probit,
+    run_spgm,
+    run_sphet,
+    run_spml,
+    run_staggered_did,
+    run_stdreg,
+    run_synthetic_control,
+    run_tmle,
+    run_twang,
+    run_var,
+    run_var_irf,
+    run_varma,
+    run_vecm,
+    run_zinb,
+    run_zip,
+    sargan_test,
+    sbw,
+    sphet,
+    stdreg,
+    subclass_match,
+    tmle,
+    twang,
+    weightit,
 };
-pub use spatial::{
-    // Neighbors and weights
-    Neighbors, NeighborMethod, SpatialWeights, WeightStyle, SparseWeights,
-    // Diagnostics
-    MoranResult, GearyResult, SpatialLmTests, LmTestResult, MoranAlternative,
-    moran_test, moran_test_residuals, geary_test, spatial_lm_tests,
-    // Local Moran's I (LISA)
-    LisaCluster, LocalMoranObs, LocalMoranResult, localmoran,
+pub use export::{
+    CsvExport, HtmlStyle, HtmlTableBuilder, LatexStyle, LatexTableBuilder, MarkdownStyle,
+    MarkdownTableBuilder,
 };
 #[cfg(feature = "forecasting")]
 pub use forecasting::{
-    ArimaResult, ArimaForecastResult, run_arima, forecast_arima,
-    MstlResult, run_mstl,
-    ChangepointResult, SegmentStats, CostFunction, detect_changepoints, binary_segmentation,
-    run_changepoint, run_binary_segmentation,
-    // Holt-Winters exponential smoothing
-    HoltWintersResult, HoltWintersConfig, HoltWintersCoefficients, SeasonalType,
-    holt_winters, holt_winters_forecast, run_holt_winters,
+    Acf2ArResult,
+    ArConfig,
+    ArMethod,
     // Autoregressive model fitting
-    ArResult, ArConfig, ArMethod, ar, run_ar, run_ar_with_order,
-    // Classical decomposition
-    DecomposeResult, DecomposeConfig, DecomposeType,
-    decompose, run_decompose, run_decompose_with_filter,
-    // Kalman filter
-    StateSpaceModel, KalmanFilterResult, KalmanSmootherResult, KalmanForecastResult,
-    kalman_filter, kalman_smoother, kalman_forecast, kalman_loglik,
-    // Structural time series
-    StructTsType, StructTsConfig, StructTsResult, StructTsCoefficients,
-    struct_ts, run_struct_ts,
-    // STL decomposition
-    StlResult, StlConfig, stl, run_stl, run_stl_with_config,
-    // Time series utilities
-    LagResult, lag, lag_padded,
-    EmbedResult, embed, embed_array,
-    DiffinvResult, diffinv,
-    FilterMethod, FilterSides, FilterResult, filter,
-    WindowResult, window,
-    ArmaAcfResult, arma_acf,
-    ArmaToMaResult, arma_to_ma,
-    Acf2ArResult, acf_to_ar,
-    ArimaSimResult, arima_sim,
-    EndRule, RunmedResult, runmed,
-    // Cumulative periodogram
-    CpgramResult, cpgram, run_cpgram,
-    // GARCH (volatility modeling)
-    GarchConfig, GarchResult, garch, garch_forecast, run_garch,
+    ArResult,
+    ArimaForecastResult,
+    ArimaResult,
+    ArimaSimResult,
+    ArmaAcfResult,
+    ArmaToMaResult,
     // CausalImpact (Bayesian Structural Time Series for causal inference)
-    CausalImpactConfig, CausalImpactSummary, CausalImpactSeries,
-    CausalImpactModel, CausalInference, CausalImpactResult,
-    causal_impact, run_causal_impact,
+    CausalImpactConfig,
+    CausalImpactModel,
+    CausalImpactResult,
+    CausalImpactSeries,
+    CausalImpactSummary,
+    CausalInference,
+    ChangepointResult,
+    CostFunction,
+    // Cumulative periodogram
+    CpgramResult,
+    DecomposeConfig,
+    // Classical decomposition
+    DecomposeResult,
+    DecomposeType,
+    DiffinvResult,
+    EmbedResult,
+    EndRule,
+    FilterMethod,
+    FilterResult,
+    FilterSides,
+    // GARCH (volatility modeling)
+    GarchConfig,
+    GarchResult,
+    HoltWintersCoefficients,
+    HoltWintersConfig,
+    // Holt-Winters exponential smoothing
+    HoltWintersResult,
+    KalmanFilterResult,
+    KalmanForecastResult,
+    KalmanSmootherResult,
+    // Time series utilities
+    LagResult,
+    MstlResult,
+    RunmedResult,
+    SeasonalType,
+    SegmentStats,
+    // Kalman filter
+    StateSpaceModel,
+    StlConfig,
+    // STL decomposition
+    StlResult,
+    StructTsCoefficients,
+    StructTsConfig,
+    StructTsResult,
+    // Structural time series
+    StructTsType,
+    WindowResult,
+    acf_to_ar,
+    ar,
+    arima_sim,
+    arma_acf,
+    arma_to_ma,
+    binary_segmentation,
+    causal_impact,
+    cpgram,
+    decompose,
+    detect_changepoints,
+    diffinv,
+    embed,
+    embed_array,
+    filter,
+    forecast_arima,
+    garch,
+    garch_forecast,
+    holt_winters,
+    holt_winters_forecast,
+    kalman_filter,
+    kalman_forecast,
+    kalman_loglik,
+    kalman_smoother,
+    lag,
+    lag_padded,
+    run_ar,
+    run_ar_with_order,
+    run_arima,
+    run_binary_segmentation,
+    run_causal_impact,
+    run_changepoint,
+    run_cpgram,
+    run_decompose,
+    run_decompose_with_filter,
+    run_garch,
+    run_holt_winters,
+    run_mstl,
+    run_stl,
+    run_stl_with_config,
+    run_struct_ts,
+    runmed,
+    stl,
+    struct_ts,
+    window,
 };
 pub use ml::{
-    KMeansResult, DBSCANResult, HierarchicalResult, Linkage, PCAResult, TsneResult,
-    CmdscaleResult, CutreeResult, RandomForestResult, SvmResult,
-    kmeans, dbscan, hierarchical, pca, pca_transform, pca_inverse_transform, tsne,
-    cmdscale, cmdscale_from_data, run_cmdscale,
-    cutree, cutree_multiple_k, run_cutree,
-    random_forest, linear_svm, svm_predict,
-    // Projection Pursuit Regression
-    ppr, run_ppr, PprResult, PprConfig, SmoothingMethod,
-    // Causal Forests (Wager & Athey 2018)
-    causal_forest, causal_forest_arrays, causal_forest_predict, causal_forest_predict_arrays,
-    average_treatment_effect, run_causal_forest,
-    CausalForestConfig, CausalForestResult,
+    BartCausalConfig,
+    BartCausalResult,
+    CausalForestConfig,
+    CausalForestResult,
+    CmdscaleResult,
+    CutreeResult,
+    DBSCANResult,
+    HierarchicalResult,
+    KMeansResult,
+    Linkage,
+    PCAResult,
+    PprConfig,
+    PprResult,
+    RandomForestResult,
+    SmoothingMethod,
+    SvmResult,
+    TsneResult,
+    average_treatment_effect,
     // BART for Causal Inference (bcf, bartCause)
-    bart_causal, bart_causal_arrays, bart_causal_predict, bart_causal_predict_arrays,
-    run_bart_causal, BartCausalConfig, BartCausalResult,
+    bart_causal,
+    bart_causal_arrays,
+    bart_causal_predict,
+    bart_causal_predict_arrays,
+    // Causal Forests (Wager & Athey 2018)
+    causal_forest,
+    causal_forest_arrays,
+    causal_forest_predict,
+    causal_forest_predict_arrays,
+    cmdscale,
+    cmdscale_from_data,
+    cutree,
+    cutree_multiple_k,
+    dbscan,
+    hierarchical,
+    kmeans,
+    linear_svm,
+    pca,
+    pca_inverse_transform,
+    pca_transform,
+    // Projection Pursuit Regression
+    ppr,
+    random_forest,
+    run_bart_causal,
+    run_causal_forest,
+    run_cmdscale,
+    run_cutree,
+    run_ppr,
+    svm_predict,
+    tsne,
+};
+pub use regression::{
+    Add1Result,
+    // Breusch-Godfrey test for serial correlation
+    BgTestResult,
+    BgTestType,
+    // Bootstrap covariance estimation
+    BootstrapResult,
+    BootstrapType,
+    ContourData,
+    ContrastEffect,
+    ContrastsResult,
+    CorrelationStructure,
+    DiagnosticsResult,
+    // Driscoll-Kraay panel-robust standard errors
+    DriscollKraayResult,
+    Drop1Result,
+    // E-value sensitivity analysis for unmeasured confounding
+    EValueResult,
+    EffectType,
+    // GLS (generalized least squares)
+    GlsResult,
+    HacKernel,
+    // HAC (Newey-West) standard errors
+    HacResult,
+    // Harvey-Collier test for linearity
+    HarveyCollierResult,
+    // Tukey's resistant line
+    LineResult,
+    LoessConfig,
+    LoessModel,
+    // LOESS (local polynomial regression)
+    LoessResult,
+    MarginalEffect,
+    // Average marginal effects (AME)
+    MarginalEffectsResult,
+    ModelFn,
+    ModelType,
+    NlsAlgorithm,
+    NlsConfig,
+    // Nonlinear least squares
+    NlsResult,
+    OlsResult,
+    QuantRegAlgorithm,
+    QuantRegCoefficient,
+    QuantRegConfig,
+    // Quantile regression
+    QuantRegResult,
+    // Ramsey's RESET test for functional form
+    ResetTestResult,
+    ResetType,
+    // Sensitivity analysis for unmeasured confounding (sensemakr)
+    SensemakrResult,
+    SensitivityBound,
+    SmoothSplineConfig,
+    // Smoothing spline
+    SmoothSplineResult,
+    StepConfig,
+    StepDirection,
+    StepRecord,
+    // Stepwise model selection
+    StepResult,
+    SupsmuConfig,
+    // SuperSmoother
+    SupsmuResult,
+    TermEvaluation,
+    // Wald test for comparing nested models
+    WaldTestResult,
+    add1,
+    adjusted_estimate,
+    adjusted_se,
+    bg_test,
+    bg_test_from_ols,
+    bias_factor,
+    bounding_factor,
+    confounding_bias,
+    contrasts,
+    could_explain_away,
+    drop1,
+    evalue_hr,
+    evalue_or,
+    evalue_rd,
+    evalue_rr,
+    evalue_rr_ci,
+    evalue_smd,
+    generate_contour_data,
+    gls,
+    gls_ar1_auto,
+    harvey_collier_test,
+    line,
+    loess,
+    loess_predict,
+    marginal_effects,
+    marginal_effects_discrete,
+    marginal_effects_ols,
+    model_asymptotic,
+    model_exponential_decay,
+    model_exponential_growth,
+    model_logistic_growth,
+    model_michaelis_menten,
+    model_power,
+    nls,
+    nls_multi,
+    partial_r2,
+    quantreg,
+    quantreg_multi,
+    recursive_residuals,
+    reset_test,
+    reset_test_from_ols,
+    robustness_value,
+    robustness_value_alpha,
+    run_bg_test,
+    run_diagnostics,
+    run_gls,
+    run_harvey_collier,
+    run_line,
+    run_loess,
+    run_nls,
+    run_nls_with_config,
+    run_ols,
+    run_ols_clustered,
+    run_ols_raw,
+    run_quantreg,
+    run_reset_test,
+    run_sensemakr,
+    run_smooth_spline,
+    run_step,
+    run_supsmu,
+    run_vcov_bootstrap,
+    run_vcov_driscoll_kraay,
+    run_vcov_hac,
+    run_wald_test,
+    sensemakr,
+    smooth_spline,
+    smooth_spline_predict,
+    step,
+    supsmu,
+    vcov_bootstrap,
+    vcov_driscoll_kraay,
+    vcov_hac,
+    wald_test,
+    wald_test_from_ols,
+};
+pub use reports::{HtmlReport, ReportContent, ReportSection, ReportTable, generate_html_report};
+pub use simulation::{ColumnSpec, Distribution, GenerationError, generate_random_data};
+pub use spatial::{
+    GearyResult,
+    // Local Moran's I (LISA)
+    LisaCluster,
+    LmTestResult,
+    LocalMoranObs,
+    LocalMoranResult,
+    MoranAlternative,
+    // Diagnostics
+    MoranResult,
+    NeighborMethod,
+    // Neighbors and weights
+    Neighbors,
+    SparseWeights,
+    SpatialLmTests,
+    SpatialWeights,
+    WeightStyle,
+    geary_test,
+    localmoran,
+    moran_test,
+    moran_test_residuals,
+    spatial_lm_tests,
+};
+#[cfg(feature = "spectral-analysis")]
+pub use stats::{
+    SpectrumConfig, SpectrumResult, run_spectrum, run_spectrum_ar, spectrum, spectrum_ar,
 };
 #[cfg(feature = "visualization")]
 pub use visualization::{
-    ChartConfig, HistogramResult, ScatterResult, BoxPlotResult, LineChartResult, HeatmapResult,
-    EventStudyResult, CoefficientPlotResult, IrfPlotResult, ResidualDiagnosticsResult, DendrogramResult,
-    histogram, scatter_plot, box_plot, line_chart, correlation_heatmap,
-    event_study_plot, coefficient_plot, irf_plot, residual_diagnostics, dendrogram,
-    VisualizationError,
-};
-pub use reports::{
-    HtmlReport, ReportSection, ReportTable, ReportContent, generate_html_report,
-};
-pub use simulation::{
-    generate_random_data, ColumnSpec, Distribution, GenerationError,
-};
-pub use export::{
-    CsvExport,
-    HtmlTableBuilder, HtmlStyle,
-    LatexTableBuilder, LatexStyle,
-    MarkdownTableBuilder, MarkdownStyle,
+    BoxPlotResult, ChartConfig, CoefficientPlotResult, DendrogramResult, EventStudyResult,
+    HeatmapResult, HistogramResult, IrfPlotResult, LineChartResult, ResidualDiagnosticsResult,
+    ScatterResult, VisualizationError, box_plot, coefficient_plot, correlation_heatmap, dendrogram,
+    event_study_plot, histogram, irf_plot, line_chart, residual_diagnostics, scatter_plot,
 };
 
 /// Re-export polars for downstream use

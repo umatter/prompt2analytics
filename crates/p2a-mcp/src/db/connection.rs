@@ -5,8 +5,8 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use surrealdb::engine::local::{Db, Mem, RocksDb};
 use surrealdb::Surreal;
+use surrealdb::engine::local::{Db, Mem, RocksDb};
 use thiserror::Error;
 
 /// Database connection errors

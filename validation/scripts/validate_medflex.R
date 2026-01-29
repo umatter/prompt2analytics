@@ -1,6 +1,18 @@
 # Validation script for Natural Effect Models (medflex)
 # Compares Rust implementation against R medflex package
 
+# Check for required packages
+if (!requireNamespace("medflex", quietly = TRUE)) {
+  cat("SKIP: medflex package not installed\n")
+  cat("Install with: install.packages('medflex')\n")
+  quit(status = 0)
+}
+
+if (!requireNamespace("boot", quietly = TRUE)) {
+  cat("SKIP: boot package not installed\n")
+  quit(status = 0)
+}
+
 library(medflex)
 library(boot)
 

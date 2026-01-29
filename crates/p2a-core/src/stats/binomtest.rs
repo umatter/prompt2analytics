@@ -113,13 +113,22 @@ impl std::fmt::Display for BinomTestResult {
         // Alternative hypothesis
         let alt_str = match self.alternative {
             Alternative::TwoSided => {
-                format!("true probability of success is not equal to {}", self.null_value)
+                format!(
+                    "true probability of success is not equal to {}",
+                    self.null_value
+                )
             }
             Alternative::Greater => {
-                format!("true probability of success is greater than {}", self.null_value)
+                format!(
+                    "true probability of success is greater than {}",
+                    self.null_value
+                )
             }
             Alternative::Less => {
-                format!("true probability of success is less than {}", self.null_value)
+                format!(
+                    "true probability of success is less than {}",
+                    self.null_value
+                )
             }
         };
         writeln!(f, "Alternative hypothesis: {}", alt_str)?;
@@ -127,7 +136,11 @@ impl std::fmt::Display for BinomTestResult {
 
         // Confidence interval
         writeln!(f, "{:.0}% confidence interval:", self.conf_level * 100.0)?;
-        writeln!(f, "  ({:.6}, {:.6})", self.conf_int_lower, self.conf_int_upper)?;
+        writeln!(
+            f,
+            "  ({:.6}, {:.6})",
+            self.conf_int_lower, self.conf_int_upper
+        )?;
         writeln!(f)?;
 
         // Estimate
@@ -220,7 +233,7 @@ pub fn binom_test(
 
 /// Compute exact p-value for binomial test.
 fn exact_binom_p_value(x: u64, n: u64, p0: f64, alternative: Alternative) -> f64 {
-    use statrs::distribution::{Binomial, DiscreteCDF, Discrete};
+    use statrs::distribution::{Binomial, DiscreteCDF};
 
     let binom = match Binomial::new(p0, n) {
         Ok(d) => d,
@@ -234,11 +247,7 @@ fn exact_binom_p_value(x: u64, n: u64, p0: f64, alternative: Alternative) -> f64
         }
         Alternative::Greater => {
             // P(X >= x) = 1 - P(X <= x-1)
-            if x == 0 {
-                1.0
-            } else {
-                1.0 - binom.cdf(x - 1)
-            }
+            if x == 0 { 1.0 } else { 1.0 - binom.cdf(x - 1) }
         }
         Alternative::TwoSided => {
             // Optimized two-sided p-value using binary search
@@ -252,13 +261,8 @@ fn exact_binom_p_value(x: u64, n: u64, p0: f64, alternative: Alternative) -> f64
 ///
 /// Uses the fact that binomial PMF is unimodal - we only need to find
 /// where in the opposite tail the PMF drops below the observed value.
-fn two_sided_binom_p_value(
-    binom: &statrs::distribution::Binomial,
-    x: u64,
-    n: u64,
-    p0: f64,
-) -> f64 {
-    use statrs::distribution::{DiscreteCDF, Discrete};
+fn two_sided_binom_p_value(binom: &statrs::distribution::Binomial, x: u64, n: u64, p0: f64) -> f64 {
+    use statrs::distribution::{Discrete, DiscreteCDF};
 
     let observed_prob = binom.pmf(x);
     let mean = n as f64 * p0;
@@ -305,11 +309,7 @@ fn two_sided_binom_p_value(
 }
 
 /// Binary search to find the smallest k >= mean where P(X=k) <= threshold.
-fn find_upper_boundary(
-    binom: &statrs::distribution::Binomial,
-    n: u64,
-    threshold: f64,
-) -> u64 {
+fn find_upper_boundary(binom: &statrs::distribution::Binomial, n: u64, threshold: f64) -> u64 {
     use statrs::distribution::Discrete;
     use statrs::statistics::Distribution;
 
@@ -327,11 +327,7 @@ fn find_upper_boundary(
 }
 
 /// Binary search to find the largest k <= mean where P(X=k) <= threshold.
-fn find_lower_boundary(
-    binom: &statrs::distribution::Binomial,
-    n: u64,
-    threshold: f64,
-) -> u64 {
+fn find_lower_boundary(binom: &statrs::distribution::Binomial, n: u64, threshold: f64) -> u64 {
     use statrs::distribution::Discrete;
     use statrs::statistics::Distribution;
 

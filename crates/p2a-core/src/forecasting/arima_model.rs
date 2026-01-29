@@ -41,7 +41,7 @@
 //!
 //! R equivalent: `stats::arima()`, `forecast::auto.arima()`
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 use serde::{Deserialize, Serialize};
@@ -110,7 +110,9 @@ pub fn run_arima(
 
     // Extract time series data
     let df = dataset.df();
-    let col = df.column(column).map_err(|e| anyhow!("Column '{}' not found: {}", column, e))?;
+    let col = df
+        .column(column)
+        .map_err(|e| anyhow!("Column '{}' not found: {}", column, e))?;
 
     let values: Vec<f64> = col
         .f64()
@@ -130,8 +132,8 @@ pub fn run_arima(
 
     // Fit ARIMA model using conditional sum of squares
     // The fit function handles differencing internally via the d parameter
-    let coeffs = estimate::fit(&values, p, d, q)
-        .map_err(|e| anyhow!("ARIMA fitting failed: {:?}", e))?;
+    let coeffs =
+        estimate::fit(&values, p, d, q).map_err(|e| anyhow!("ARIMA fitting failed: {:?}", e))?;
 
     // Split coefficients into AR and MA parts
     // The coefficients are returned as [phi_1, ..., phi_p, theta_1, ..., theta_q]
@@ -149,8 +151,16 @@ pub fn run_arima(
     let intercept = diff_series.iter().sum::<f64>() / diff_series.len() as f64;
 
     // Calculate residuals
-    let phi_opt = if ar_coeffs.is_empty() { None } else { Some(ar_coeffs.as_slice()) };
-    let theta_opt = if ma_coeffs.is_empty() { None } else { Some(ma_coeffs.as_slice()) };
+    let phi_opt = if ar_coeffs.is_empty() {
+        None
+    } else {
+        Some(ar_coeffs.as_slice())
+    };
+    let theta_opt = if ma_coeffs.is_empty() {
+        None
+    } else {
+        Some(ma_coeffs.as_slice())
+    };
     let residuals = estimate::residuals(&diff_series, intercept, phi_opt, theta_opt)
         .map_err(|e| anyhow!("Residual calculation failed: {:?}", e))?;
 
@@ -204,7 +214,9 @@ pub fn forecast_arima(
 
     // Extract original time series
     let df = dataset.df();
-    let col = df.column(column).map_err(|e| anyhow!("Column '{}' not found: {}", column, e))?;
+    let col = df
+        .column(column)
+        .map_err(|e| anyhow!("Column '{}' not found: {}", column, e))?;
 
     let values: Vec<f64> = col
         .f64()
@@ -213,8 +225,16 @@ pub fn forecast_arima(
         .collect();
 
     // Prepare AR and MA coefficients as Option slices
-    let ar_opt = if model.ar_coeffs.is_empty() { None } else { Some(model.ar_coeffs.as_slice()) };
-    let ma_opt = if model.ma_coeffs.is_empty() { None } else { Some(model.ma_coeffs.as_slice()) };
+    let ar_opt = if model.ar_coeffs.is_empty() {
+        None
+    } else {
+        Some(model.ar_coeffs.as_slice())
+    };
+    let ma_opt = if model.ma_coeffs.is_empty() {
+        None
+    } else {
+        Some(model.ma_coeffs.as_slice())
+    };
 
     // Create a zero-noise function for deterministic forecast
     let noise_fn = |_idx: usize, _rng: &mut StdRng| 0.0;
@@ -222,16 +242,8 @@ pub fn forecast_arima(
 
     // Forecast using arima_forecast
     // The function handles differencing internally via the d parameter
-    let forecast = sim::arima_forecast(
-        &values,
-        horizon,
-        ar_opt,
-        ma_opt,
-        d,
-        &noise_fn,
-        &mut rng,
-    )
-    .map_err(|e| anyhow!("Forecasting failed: {:?}", e))?;
+    let forecast = sim::arima_forecast(&values, horizon, ar_opt, ma_opt, d, &noise_fn, &mut rng)
+        .map_err(|e| anyhow!("Forecasting failed: {:?}", e))?;
 
     Ok(ArimaForecastResult {
         column: column.to_string(),

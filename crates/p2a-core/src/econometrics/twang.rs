@@ -260,21 +260,44 @@ impl Default for TwangBalanceTable {
 
 impl fmt::Display for TwangBalanceTable {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "{:<20} {:>12} {:>12} {:>12} {:>10} {:>10}",
-                 "Covariate", "Mean(T)", "Mean(C)", "Std.Eff", "KS", "VarRatio")?;
+        writeln!(
+            f,
+            "{:<20} {:>12} {:>12} {:>12} {:>10} {:>10}",
+            "Covariate", "Mean(T)", "Mean(C)", "Std.Eff", "KS", "VarRatio"
+        )?;
         writeln!(f, "{}", "-".repeat(78))?;
 
         for cov in &self.covariates {
-            let balanced = if cov.std_eff_size.abs() < 0.1 { " " } else { "*" };
-            writeln!(f, "{:<20} {:>12.4} {:>12.4} {:>12.4}{} {:>10.4} {:>10.4}",
-                     cov.name, cov.mean_treated, cov.mean_control,
-                     cov.std_eff_size, balanced, cov.ks_statistic, cov.var_ratio)?;
+            let balanced = if cov.std_eff_size.abs() < 0.1 {
+                " "
+            } else {
+                "*"
+            };
+            writeln!(
+                f,
+                "{:<20} {:>12.4} {:>12.4} {:>12.4}{} {:>10.4} {:>10.4}",
+                cov.name,
+                cov.mean_treated,
+                cov.mean_control,
+                cov.std_eff_size,
+                balanced,
+                cov.ks_statistic,
+                cov.var_ratio
+            )?;
         }
 
         writeln!(f, "{}", "-".repeat(78))?;
-        writeln!(f, "ES.Mean: {:.4}  ES.Max: {:.4}  KS.Mean: {:.4}  KS.Max: {:.4}",
-                 self.es_mean, self.es_max, self.ks_mean, self.ks_max)?;
-        writeln!(f, "Balanced (|ES| < 0.1): {}/{}", self.n_balanced, self.covariates.len())?;
+        writeln!(
+            f,
+            "ES.Mean: {:.4}  ES.Max: {:.4}  KS.Mean: {:.4}  KS.Max: {:.4}",
+            self.es_mean, self.es_max, self.ks_mean, self.ks_max
+        )?;
+        writeln!(
+            f,
+            "Balanced (|ES| < 0.1): {}/{}",
+            self.n_balanced,
+            self.covariates.len()
+        )?;
 
         Ok(())
     }
@@ -399,8 +422,11 @@ impl fmt::Display for TwangResult {
         writeln!(f, "Estimand:    {}", self.estimand)?;
         writeln!(f)?;
         writeln!(f, "Sample:")?;
-        writeln!(f, "  Total:    {}  (Treated: {}, Control: {})",
-                 self.n_obs, self.n_treated, self.n_control)?;
+        writeln!(
+            f,
+            "  Total:    {}  (Treated: {}, Control: {})",
+            self.n_obs, self.n_treated, self.n_control
+        )?;
         writeln!(f)?;
         writeln!(f, "GBM Tuning:")?;
         writeln!(f, "  Optimal Iterations: {}", self.optimal_n_trees)?;
@@ -408,39 +434,64 @@ impl fmt::Display for TwangResult {
         writeln!(f)?;
 
         // Propensity score summary
-        let ps_min = self.propensity_scores.iter().cloned().fold(f64::INFINITY, f64::min);
-        let ps_max = self.propensity_scores.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let ps_min = self
+            .propensity_scores
+            .iter()
+            .cloned()
+            .fold(f64::INFINITY, f64::min);
+        let ps_max = self
+            .propensity_scores
+            .iter()
+            .cloned()
+            .fold(f64::NEG_INFINITY, f64::max);
         let ps_mean: f64 = self.propensity_scores.iter().sum::<f64>() / self.n_obs as f64;
         writeln!(f, "Propensity Score Summary:")?;
-        writeln!(f, "  Mean: {:.4}  Min: {:.4}  Max: {:.4}", ps_mean, ps_min, ps_max)?;
+        writeln!(
+            f,
+            "  Mean: {:.4}  Min: {:.4}  Max: {:.4}",
+            ps_mean, ps_min, ps_max
+        )?;
         writeln!(f)?;
 
         writeln!(f, "Weight Summary:")?;
-        writeln!(f, "  Range:   [{:.4}, {:.4}]", self.min_weight, self.max_weight)?;
-        writeln!(f, "  ESS:     {:.1} (Treated: {:.1}, Control: {:.1})",
-                 self.effective_sample_size, self.ess_treated, self.ess_control)?;
+        writeln!(
+            f,
+            "  Range:   [{:.4}, {:.4}]",
+            self.min_weight, self.max_weight
+        )?;
+        writeln!(
+            f,
+            "  ESS:     {:.1} (Treated: {:.1}, Control: {:.1})",
+            self.effective_sample_size, self.ess_treated, self.ess_control
+        )?;
         writeln!(f)?;
 
         writeln!(f, "Balance Before Weighting:")?;
-        writeln!(f, "  {} = {:.4}",
-                 match self.stop_method {
-                     StopMethod::ESMean => "ES.Mean",
-                     StopMethod::ESMax => "ES.Max",
-                     StopMethod::KSMean => "KS.Mean",
-                     StopMethod::KSMax => "KS.Max",
-                 },
-                 self.balance_before.get_metric(self.stop_method))?;
+        writeln!(
+            f,
+            "  {} = {:.4}",
+            match self.stop_method {
+                StopMethod::ESMean => "ES.Mean",
+                StopMethod::ESMax => "ES.Max",
+                StopMethod::KSMean => "KS.Mean",
+                StopMethod::KSMax => "KS.Max",
+            },
+            self.balance_before.get_metric(self.stop_method)
+        )?;
         writeln!(f)?;
 
         writeln!(f, "Balance After Weighting:")?;
-        writeln!(f, "  {} = {:.4}",
-                 match self.stop_method {
-                     StopMethod::ESMean => "ES.Mean",
-                     StopMethod::ESMax => "ES.Max",
-                     StopMethod::KSMean => "KS.Mean",
-                     StopMethod::KSMax => "KS.Max",
-                 },
-                 self.balance_after.get_metric(self.stop_method))?;
+        writeln!(
+            f,
+            "  {} = {:.4}",
+            match self.stop_method {
+                StopMethod::ESMean => "ES.Mean",
+                StopMethod::ESMax => "ES.Max",
+                StopMethod::KSMean => "KS.Mean",
+                StopMethod::KSMax => "KS.Max",
+            },
+            self.balance_after.get_metric(self.stop_method)
+        )?;
         writeln!(f)?;
 
         writeln!(f, "Covariate Balance (After Weighting):")?;
@@ -542,8 +593,16 @@ pub fn run_twang(
     let (ess_total, ess_treated, ess_control) = compute_twang_ess(&weights, &t);
 
     // Weight summary
-    let max_weight = weights.iter().filter(|&&w| w > 0.0).cloned().fold(f64::NEG_INFINITY, f64::max);
-    let min_weight = weights.iter().filter(|&&w| w > 0.0).cloned().fold(f64::INFINITY, f64::min);
+    let max_weight = weights
+        .iter()
+        .filter(|&&w| w > 0.0)
+        .cloned()
+        .fold(f64::NEG_INFINITY, f64::max);
+    let min_weight = weights
+        .iter()
+        .filter(|&&w| w > 0.0)
+        .cloned()
+        .fold(f64::INFINITY, f64::min);
 
     Ok(TwangResult {
         propensity_scores,
@@ -745,7 +804,11 @@ fn fit_decision_stump(
             // Compute SSE
             let mut sse = 0.0;
             for i in 0..n {
-                let pred = if x[[i, j]] <= threshold { left_mean } else { right_mean };
+                let pred = if x[[i, j]] <= threshold {
+                    left_mean
+                } else {
+                    right_mean
+                };
                 sse += (residuals[i] - pred).powi(2);
             }
 
@@ -954,8 +1017,16 @@ fn compute_twang_balance_internal(
             var_c += weights[i] * (x[[i, j]] - mean_c).powi(2);
         }
 
-        var_t = if w_sum_t > 1.0 { var_t / (w_sum_t - 1.0) } else { 0.0 };
-        var_c = if w_sum_c > 1.0 { var_c / (w_sum_c - 1.0) } else { 0.0 };
+        var_t = if w_sum_t > 1.0 {
+            var_t / (w_sum_t - 1.0)
+        } else {
+            0.0
+        };
+        var_c = if w_sum_c > 1.0 {
+            var_c / (w_sum_c - 1.0)
+        } else {
+            0.0
+        };
 
         // Standardized effect size (using pooled SD)
         let pooled_var = (var_t + var_c) / 2.0;
@@ -1011,10 +1082,12 @@ fn compute_ks_statistic(
     weights: &[f64],
 ) -> f64 {
     // Get weighted values for each group
-    let mut t_vals: Vec<(f64, f64)> = treated_idx.iter()
+    let mut t_vals: Vec<(f64, f64)> = treated_idx
+        .iter()
         .map(|&i| (x[[i, col]], weights[i]))
         .collect();
-    let mut c_vals: Vec<(f64, f64)> = control_idx.iter()
+    let mut c_vals: Vec<(f64, f64)> = control_idx
+        .iter()
         .map(|&i| (x[[i, col]], weights[i]))
         .collect();
 
@@ -1031,7 +1104,9 @@ fn compute_ks_statistic(
     }
 
     // Merge sorted values to compute ECDF differences
-    let mut all_vals: Vec<f64> = t_vals.iter().map(|(v, _)| *v)
+    let mut all_vals: Vec<f64> = t_vals
+        .iter()
+        .map(|(v, _)| *v)
         .chain(c_vals.iter().map(|(v, _)| *v))
         .collect();
     all_vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
@@ -1078,7 +1153,11 @@ fn compute_twang_ess(weights: &[f64], t: &Array1<f64>) -> (f64, f64, f64) {
     let compute_ess = |indices: &[usize]| -> f64 {
         let w_sum: f64 = indices.iter().map(|&i| weights[i]).sum();
         let w_sq_sum: f64 = indices.iter().map(|&i| weights[i].powi(2)).sum();
-        if w_sq_sum > 0.0 { w_sum.powi(2) / w_sq_sum } else { 0.0 }
+        if w_sq_sum > 0.0 {
+            w_sum.powi(2) / w_sq_sum
+        } else {
+            0.0
+        }
     };
 
     let ess_t = compute_ess(&treated_idx);
@@ -1121,7 +1200,8 @@ mod tests {
                 0.3, 0.4, 0.35, 0.5, 0.25, 0.45, 0.2, 0.55, 0.4, 0.35,
                 0.45, 0.5, 0.3, 0.6, 0.35, 0.4, 0.25, 0.55, 0.4, 0.42
             ]
-        }.unwrap();
+        }
+        .unwrap();
         Dataset::new(df)
     }
 
@@ -1160,7 +1240,12 @@ mod tests {
     fn test_twang_stop_methods() {
         let dataset = create_test_dataset();
 
-        for stop_method in [StopMethod::ESMean, StopMethod::ESMax, StopMethod::KSMean, StopMethod::KSMax] {
+        for stop_method in [
+            StopMethod::ESMean,
+            StopMethod::ESMax,
+            StopMethod::KSMean,
+            StopMethod::KSMax,
+        ] {
             let config = TwangConfig {
                 n_trees: 200,
                 shrinkage: 0.1,
@@ -1205,14 +1290,11 @@ mod tests {
 
     #[test]
     fn test_decision_stump() {
-        let x = Array2::from_shape_vec((6, 2), vec![
-            1.0, 0.5,
-            2.0, 0.6,
-            3.0, 0.7,
-            4.0, 0.8,
-            5.0, 0.9,
-            6.0, 1.0,
-        ]).unwrap();
+        let x = Array2::from_shape_vec(
+            (6, 2),
+            vec![1.0, 0.5, 2.0, 0.6, 3.0, 0.7, 4.0, 0.8, 5.0, 0.9, 6.0, 1.0],
+        )
+        .unwrap();
 
         // Residuals: positive for first 3, negative for last 3
         let residuals = Array1::from_vec(vec![1.0, 1.0, 1.0, -1.0, -1.0, -1.0]);
@@ -1222,15 +1304,13 @@ mod tests {
         // Should split on x[0] (feature 0) around 3.5
         assert_eq!(stump.feature_idx, 0);
         assert!(stump.threshold > 2.5 && stump.threshold < 4.5);
-        assert!(stump.left_value > 0.0);  // Positive residuals on left
+        assert!(stump.left_value > 0.0); // Positive residuals on left
         assert!(stump.right_value < 0.0); // Negative residuals on right
     }
 
     #[test]
     fn test_ks_statistic() {
-        let x = Array2::from_shape_vec((6, 1), vec![
-            1.0, 2.0, 3.0, 4.0, 5.0, 6.0
-        ]).unwrap();
+        let x = Array2::from_shape_vec((6, 1), vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).unwrap();
 
         let treated_idx = vec![0, 1, 2];
         let control_idx = vec![3, 4, 5];
@@ -1302,7 +1382,8 @@ mod tests {
         let df = df! {
             "treatment" => [0.0, 0.0, 0.0, 0.0, 0.0],
             "x1" => [1.0, 2.0, 3.0, 4.0, 5.0]
-        }.unwrap();
+        }
+        .unwrap();
         let dataset = Dataset::new(df);
 
         let result = run_twang(&dataset, "treatment", &["x1"], None);
@@ -1331,8 +1412,14 @@ mod tests {
     fn test_convenience_function() {
         let dataset = create_test_dataset();
 
-        let result = twang(&dataset, "treatment", &["x1", "x2"],
-                          StopMethod::ESMax, TwangEstimand::ATT).unwrap();
+        let result = twang(
+            &dataset,
+            "treatment",
+            &["x1", "x2"],
+            StopMethod::ESMax,
+            TwangEstimand::ATT,
+        )
+        .unwrap();
 
         assert_eq!(result.stop_method, StopMethod::ESMax);
         assert_eq!(result.estimand, TwangEstimand::ATT);

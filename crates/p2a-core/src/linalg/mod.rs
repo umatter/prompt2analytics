@@ -6,23 +6,18 @@
 //! - Group-based data transformations (demeaning for panel data)
 //! - Toeplitz matrix construction
 
-pub mod matrix_ops;
 pub mod design;
+pub mod matrix_ops;
 pub mod toeplitz;
 
 pub use matrix_ops::{
-    LinalgError, CONDITION_THRESHOLD,
-    matrix_inverse, pseudoinverse, safe_inverse, cholesky_inverse, condition_number,
-    cholesky, solve, eig_symmetric,
-    matmul, xtx, xty, xtx_inv,
-    ndarray_to_faer, faer_to_ndarray, faer_col_to_ndarray,
+    CONDITION_THRESHOLD, LinalgError, cholesky, cholesky_inverse, condition_number, eig_symmetric,
+    faer_col_to_ndarray, faer_to_ndarray, matmul, matrix_inverse, ndarray_to_faer, pseudoinverse,
+    safe_inverse, solve, xtx, xtx_inv, xty,
 };
 
 pub use design::{
-    DesignError, DesignMatrix,
-    extract_groups, demean_within_groups, quasi_demean_within_groups,
+    DesignError, DesignMatrix, demean_within_groups, extract_groups, quasi_demean_within_groups,
 };
 
-pub use toeplitz::{
-    toeplitz, toeplitz_asymmetric, toeplitz2, toeplitz_acf, toeplitz_to_vec,
-};
+pub use toeplitz::{toeplitz, toeplitz_acf, toeplitz_asymmetric, toeplitz_to_vec, toeplitz2};

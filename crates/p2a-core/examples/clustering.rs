@@ -5,8 +5,8 @@
 //! - DBSCAN density-based clustering
 //! - Cluster validation
 
-use p2a_core::ml::{kmeans, dbscan, KMeansResult, DBSCANResult};
 use ndarray::Array2;
+use p2a_core::ml::{DBSCANResult, KMeansResult, dbscan, kmeans};
 use rand::prelude::*;
 use rand_distr::Normal;
 
@@ -15,7 +15,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Generate synthetic data with 3 clusters
     let data = generate_cluster_data(150, 2, 3);
-    println!("Generated {} data points in 2D with 3 true clusters\n", data.nrows());
+    println!(
+        "Generated {} data points in 2D with 3 true clusters\n",
+        data.nrows()
+    );
 
     // K-means clustering
     println!("--- K-means Clustering (k=3) ---");
@@ -26,7 +29,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n--- K-means with Different k Values ---");
     for k in 2..=5 {
         let result = kmeans(data.view(), k, Some(100), Some(1e-6), Some(10), Some(42))?;
-        println!("k={}: inertia={:.2}, clusters={}", k, result.inertia, result.cluster_sizes.len());
+        println!(
+            "k={}: inertia={:.2}, clusters={}",
+            k,
+            result.inertia,
+            result.cluster_sizes.len()
+        );
     }
 
     // DBSCAN clustering
@@ -42,8 +50,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n--- Comparison ---");
     println!("{:<20} {:>10} {:>12}", "Method", "Clusters", "Inertia");
     println!("{:-<20} {:-<10} {:-<12}", "", "", "");
-    println!("{:<20} {:>10} {:>12.2}", "K-means", kmeans_result.cluster_sizes.len(), kmeans_result.inertia);
-    println!("{:<20} {:>10} {:>12}", "DBSCAN", dbscan_result.n_clusters, "-");
+    println!(
+        "{:<20} {:>10} {:>12.2}",
+        "K-means",
+        kmeans_result.cluster_sizes.len(),
+        kmeans_result.inertia
+    );
+    println!(
+        "{:<20} {:>10} {:>12}",
+        "DBSCAN", dbscan_result.n_clusters, "-"
+    );
 
     // Cluster sizes
     println!("\n--- Cluster Sizes ---");
@@ -100,7 +116,10 @@ fn generate_cluster_data(n: usize, dims: usize, n_clusters: usize) -> Array2<f64
 
 fn print_kmeans_results(result: &KMeansResult) {
     println!("Clusters found: {}", result.cluster_sizes.len());
-    println!("Inertia (within-cluster sum of squares): {:.2}", result.inertia);
+    println!(
+        "Inertia (within-cluster sum of squares): {:.2}",
+        result.inertia
+    );
     println!("Iterations: {}", result.n_iterations);
 
     println!("\nCluster centers:");

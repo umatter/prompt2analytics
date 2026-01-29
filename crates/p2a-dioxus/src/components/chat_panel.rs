@@ -2,11 +2,13 @@
 
 use dioxus::prelude::*;
 
-use crate::api::{api, stream_chat, PersistedToolCall, StreamEvent};
+use crate::api::{PersistedToolCall, StreamEvent, api, stream_chat};
 use crate::app::apply_theme;
 use crate::components::{ChatInput, MessageList, P2aWordmark, SettingsModal};
 use crate::state::settings::Theme;
-use crate::state::{ChatMessage, ChatState, ConversationState, SessionState, Settings, ToolCallInfo};
+use crate::state::{
+    ChatMessage, ChatState, ConversationState, SessionState, Settings, ToolCallInfo,
+};
 
 /// Chat panel component - main chat interface
 #[component]
@@ -42,7 +44,9 @@ pub fn ChatPanel() -> Element {
         // BUT still update synced_conv_id to prevent re-triggering when processing completes
         let is_processing = chat_state.read().is_processing;
         if is_processing {
-            tracing::debug!("[ChatPanel Sync] Skipping - is_processing=true, but updating synced_conv_id");
+            tracing::debug!(
+                "[ChatPanel Sync] Skipping - is_processing=true, but updating synced_conv_id"
+            );
             // Update synced tracking to match current state so we don't re-trigger after processing
             if current_conv_id != synced_id {
                 synced_conv_id.set(current_conv_id.clone());
@@ -53,7 +57,8 @@ pub fn ChatPanel() -> Element {
 
         // Check if conversation changed OR if messages were loaded for current conversation
         let conv_changed = current_conv_id != synced_id;
-        let messages_loaded = current_conv_id == synced_id && current_messages_len > 0 && prev_messages_len == 0;
+        let messages_loaded =
+            current_conv_id == synced_id && current_messages_len > 0 && prev_messages_len == 0;
 
         // Also check if chat_state already has messages (don't clear user's in-progress work)
         let chat_has_messages = !chat_state.read().messages.is_empty();
@@ -61,7 +66,14 @@ pub fn ChatPanel() -> Element {
 
         tracing::debug!(
             "[ChatPanel Sync] conv_changed={}, messages_loaded={}, chat_has_messages={}, chat_message_count={}, current_conv_id={:?}, synced_id={:?}, current_messages_len={}, prev_messages_len={}",
-            conv_changed, messages_loaded, chat_has_messages, chat_message_count, current_conv_id, synced_id, current_messages_len, prev_messages_len
+            conv_changed,
+            messages_loaded,
+            chat_has_messages,
+            chat_message_count,
+            current_conv_id,
+            synced_id,
+            current_messages_len,
+            prev_messages_len
         );
 
         if conv_changed || messages_loaded {
@@ -70,11 +82,15 @@ pub fn ChatPanel() -> Element {
                 let conv_id_for_async = conv_id.clone();
 
                 // Determine if this is a real conversation switch (user selected different conv)
-                let is_switching_conversations = synced_id.is_some() && synced_id != current_conv_id;
+                let is_switching_conversations =
+                    synced_id.is_some() && synced_id != current_conv_id;
 
                 if !current_messages.is_empty() {
                     // Load persisted messages from database
-                    tracing::debug!("[ChatPanel Sync] Loading {} persisted messages", current_messages_len);
+                    tracing::debug!(
+                        "[ChatPanel Sync] Loading {} persisted messages",
+                        current_messages_len
+                    );
                     chat.write().clear_messages();
 
                     for msg in current_messages.iter() {
@@ -88,10 +104,15 @@ pub fn ChatPanel() -> Element {
                         match client.get_conversation_tool_calls(&conv_id_for_async).await {
                             Ok(tool_calls) => {
                                 if !tool_calls.is_empty() {
-                                    tracing::debug!("[ChatPanel] Loaded {} tool calls", tool_calls.len());
+                                    tracing::debug!(
+                                        "[ChatPanel] Loaded {} tool calls",
+                                        tool_calls.len()
+                                    );
 
-                                    let mut tool_calls_by_message: std::collections::HashMap<String, Vec<PersistedToolCall>> =
-                                        std::collections::HashMap::new();
+                                    let mut tool_calls_by_message: std::collections::HashMap<
+                                        String,
+                                        Vec<PersistedToolCall>,
+                                    > = std::collections::HashMap::new();
                                     for tc in tool_calls {
                                         tool_calls_by_message
                                             .entry(tc.message_id.clone())
@@ -102,7 +123,8 @@ pub fn ChatPanel() -> Element {
                                     let mut chat_write = chat.write();
                                     for msg in chat_write.messages.iter_mut() {
                                         if let Some(tcs) = tool_calls_by_message.get(&msg.id) {
-                                            msg.tool_calls = tcs.iter().map(ToolCallInfo::from).collect();
+                                            msg.tool_calls =
+                                                tcs.iter().map(ToolCallInfo::from).collect();
                                         }
                                     }
                                 }
@@ -117,12 +139,16 @@ pub fn ChatPanel() -> Element {
                 } else if is_switching_conversations && !chat_has_messages {
                     // Switching to a new/empty conversation AND chat is already empty
                     // Just update tracking, don't clear (nothing to clear)
-                    tracing::debug!("[ChatPanel Sync] Switching to empty conversation, chat already empty");
+                    tracing::debug!(
+                        "[ChatPanel Sync] Switching to empty conversation, chat already empty"
+                    );
                     synced_messages_len.set(0);
                 } else if is_switching_conversations && chat_has_messages {
                     // Switching to a different conversation that has no persisted messages yet
                     // Clear the old conversation's messages
-                    tracing::debug!("[ChatPanel Sync] Switching conversations, clearing old messages");
+                    tracing::debug!(
+                        "[ChatPanel Sync] Switching conversations, clearing old messages"
+                    );
                     chat.write().clear_messages();
                     synced_messages_len.set(0);
                 }
@@ -145,7 +171,10 @@ pub fn ChatPanel() -> Element {
     let error = chat_state.read().error.clone();
 
     // Get current conversation title
-    let current_conversation = conversation_state.read().get_current_conversation().cloned();
+    let current_conversation = conversation_state
+        .read()
+        .get_current_conversation()
+        .cloned();
 
     // Handle send message
     let handle_send = move |message: String| {
@@ -182,7 +211,8 @@ pub fn ChatPanel() -> Element {
                     }
                     Err(e) => {
                         tracing::error!("[ChatPanel] Session error: {}", e);
-                        chat.write().set_error(Some(format!("Session error: {}", e)));
+                        chat.write()
+                            .set_error(Some(format!("Session error: {}", e)));
                         chat.write().stop_processing();
                         return;
                     }
@@ -200,7 +230,10 @@ pub fn ChatPanel() -> Element {
                     drop(conv_state); // Release the read lock
                     tracing::debug!("[ChatPanel] Creating new conversation");
                     let client = api();
-                    match client.create_conversation(&session_id, "New Conversation").await {
+                    match client
+                        .create_conversation(&session_id, "New Conversation")
+                        .await
+                    {
                         Ok(new_conv) => {
                             let id = new_conv.id.clone();
                             tracing::debug!("[ChatPanel] Created conversation: {}", id);
@@ -221,7 +254,10 @@ pub fn ChatPanel() -> Element {
             tracing::debug!("[ChatPanel] Adding user message and streaming placeholder");
             chat.write().add_user_message(&message);
             chat.write().add_streaming_message();
-            tracing::debug!("[ChatPanel] Messages added, count: {}", chat.read().messages.len());
+            tracing::debug!(
+                "[ChatPanel] Messages added, count: {}",
+                chat.read().messages.len()
+            );
 
             // Persist user message to conversation and update local ID
             if !conversation_id.is_empty() {
@@ -309,8 +345,8 @@ pub fn ChatPanel() -> Element {
                                         Ok(persisted_msg) => {
                                             // Update the local message ID to match the backend ID
                                             // This ensures tool calls can be matched correctly
-                                            if let Some(last) = chat_for_id.write().messages.last_mut() {
-                                                if last.role == "assistant" {
+                                            if let Some(last) = chat_for_id.write().messages.last_mut()
+                                                && last.role == "assistant" {
                                                     tracing::debug!(
                                                         "[ChatPanel] Updating message ID from {} to {}",
                                                         last.id,
@@ -318,7 +354,6 @@ pub fn ChatPanel() -> Element {
                                                     );
                                                     last.id = persisted_msg.id;
                                                 }
-                                            }
                                         }
                                         Err(e) => {
                                             tracing::warn!("[ChatPanel] Failed to persist assistant message: {}", e);
@@ -354,38 +389,48 @@ pub fn ChatPanel() -> Element {
                 let mut conv_state = conv;
 
                 // Check if conversation still has default title
-                let needs_title = conv_state.read()
+                let needs_title = conv_state
+                    .read()
                     .get_current_conversation()
                     .map(|c| c.title == "New Conversation")
                     .unwrap_or(false);
 
                 if needs_title {
                     // Get the assistant's response from chat state
-                    let assistant_response = chat.read()
+                    let assistant_response = chat
+                        .read()
                         .messages
                         .iter()
-                        .filter(|m| m.role == "assistant")
-                        .last()
+                        .rfind(|m| m.role == "assistant")
                         .map(|m| m.content.clone());
 
                     spawn(async move {
                         let client = api();
 
                         // Generate title using LLM
-                        match client.generate_title(
-                            &user_msg,
-                            assistant_response.as_deref(),
-                            Some(settings_clone.to_provider_config()),
-                        ).await {
+                        match client
+                            .generate_title(
+                                &user_msg,
+                                assistant_response.as_deref(),
+                                Some(settings_clone.to_provider_config()),
+                            )
+                            .await
+                        {
                             Ok(new_title) => {
                                 tracing::info!("[ChatPanel] Generated title: {}", new_title);
                                 // Update conversation with new title
-                                match client.update_conversation(&conv_id, Some(&new_title), None).await {
+                                match client
+                                    .update_conversation(&conv_id, Some(&new_title), None)
+                                    .await
+                                {
                                     Ok(updated) => {
                                         conv_state.write().update_conversation(updated);
                                     }
                                     Err(e) => {
-                                        tracing::warn!("[ChatPanel] Failed to update conversation title: {}", e);
+                                        tracing::warn!(
+                                            "[ChatPanel] Failed to update conversation title: {}",
+                                            e
+                                        );
                                     }
                                 }
                             }
@@ -408,14 +453,14 @@ pub fn ChatPanel() -> Element {
 
     // Handle retry - re-send the last user message
     let handle_retry = {
-        let handle_send = handle_send.clone();
+        let handle_send = handle_send;
         move |_| {
             // Find the last user message
-            let last_user_msg = chat_state.read()
+            let last_user_msg = chat_state
+                .read()
                 .messages
                 .iter()
-                .filter(|m| m.role == "user")
-                .last()
+                .rfind(|m| m.role == "user")
                 .map(|m| m.content.clone());
 
             if let Some(msg) = last_user_msg {
@@ -424,10 +469,11 @@ pub fn ChatPanel() -> Element {
                 // Remove the failed assistant message if any (last message that might be incomplete)
                 {
                     let mut chat = chat_state.write();
-                    if let Some(last) = chat.messages.last() {
-                        if last.role == "assistant" && last.content.is_empty() {
-                            chat.messages.pop();
-                        }
+                    if let Some(last) = chat.messages.last()
+                        && last.role == "assistant"
+                        && last.content.is_empty()
+                    {
+                        chat.messages.pop();
                     }
                 }
                 // Re-send the message

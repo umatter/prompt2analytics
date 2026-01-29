@@ -57,7 +57,7 @@ generate_output() {
 # Load dataset first (needed for all subsequent commands)
 # ============================================================
 echo "Loading dataset..."
-$P2A --session "$SESSION_FILE" data load "$DATA_DIR/grunfeld.csv" --name grunfeld > /dev/null 2>&1
+"$P2A" --session "$SESSION_FILE" data load "$DATA_DIR/grunfeld.csv" --name grunfeld > /dev/null 2>&1
 
 # ============================================================
 # CLI Examples

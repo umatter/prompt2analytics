@@ -144,3 +144,6 @@ p2a-mcp = { path = "../p2a-mcp", features = ["embedded"], optional = true }
 
 # Image loading for app icon (desktop only)
 image = { version = "0.25", default-features = false, features = ["png"], optional = true }
+
+[lints]
+workspace = true

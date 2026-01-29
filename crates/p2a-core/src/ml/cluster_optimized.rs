@@ -3,7 +3,7 @@
 //! This module provides high-performance implementations of clustering algorithms
 //! using rayon for parallelization and optimized memory access patterns.
 
-use ndarray::{Array2, ArrayView2, Axis, Zip};
+use ndarray::{Array2, ArrayView2};
 use rayon::prelude::*;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
@@ -30,14 +30,16 @@ pub fn compute_pairwise_distances_parallel(data: &ArrayView2<f64>) -> Array2<f64
     let results: Vec<(usize, usize, f64)> = (0..n)
         .into_par_iter()
         .flat_map(|i| {
-            ((i + 1)..n).map(move |j| {
-                let mut sum = 0.0;
-                for k in 0..d {
-                    let diff = data_ref[i * d + k] - data_ref[j * d + k];
-                    sum += diff * diff;
-                }
-                (i, j, sum.sqrt())
-            }).collect::<Vec<_>>()
+            ((i + 1)..n)
+                .map(move |j| {
+                    let mut sum = 0.0;
+                    for k in 0..d {
+                        let diff = data_ref[i * d + k] - data_ref[j * d + k];
+                        sum += diff * diff;
+                    }
+                    (i, j, sum.sqrt())
+                })
+                .collect::<Vec<_>>()
         })
         .collect();
 
@@ -62,14 +64,16 @@ pub fn compute_pairwise_sq_distances_parallel(data: &ArrayView2<f64>) -> Array2<
     let results: Vec<(usize, usize, f64)> = (0..n)
         .into_par_iter()
         .flat_map(|i| {
-            ((i + 1)..n).map(move |j| {
-                let mut sum = 0.0;
-                for k in 0..d {
-                    let diff = data_ref[i * d + k] - data_ref[j * d + k];
-                    sum += diff * diff;
-                }
-                (i, j, sum)
-            }).collect::<Vec<_>>()
+            ((i + 1)..n)
+                .map(move |j| {
+                    let mut sum = 0.0;
+                    for k in 0..d {
+                        let diff = data_ref[i * d + k] - data_ref[j * d + k];
+                        sum += diff * diff;
+                    }
+                    (i, j, sum)
+                })
+                .collect::<Vec<_>>()
         })
         .collect();
 
@@ -128,7 +132,8 @@ pub fn silhouette_optimized(
 
             // a(i): average distance to other points in same cluster
             let a_i = if cluster_i_indices.len() > 1 {
-                let sum: f64 = cluster_i_indices.iter()
+                let sum: f64 = cluster_i_indices
+                    .iter()
                     .filter(|&&j| j != i)
                     .map(|&j| distances[[i, j]])
                     .sum();
@@ -143,9 +148,11 @@ pub fn silhouette_optimized(
                 if c == cluster_i || cluster_indices[c].is_empty() {
                     continue;
                 }
-                let avg_dist: f64 = cluster_indices[c].iter()
+                let avg_dist: f64 = cluster_indices[c]
+                    .iter()
                     .map(|&j| distances[[i, j]])
-                    .sum::<f64>() / cluster_indices[c].len() as f64;
+                    .sum::<f64>()
+                    / cluster_indices[c].len() as f64;
                 if avg_dist < b_i {
                     b_i = avg_dist;
                 }
@@ -212,9 +219,7 @@ pub fn kmedoids_optimized(
 
         // Compute change in cost (TD) for each possible swap in parallel
         // FastPAM: For each non-medoid candidate, compute total change
-        let candidates: Vec<usize> = (0..n)
-            .filter(|i| !medoid_indices.contains(i))
-            .collect();
+        let candidates: Vec<usize> = (0..n).filter(|i| !medoid_indices.contains(i)).collect();
 
         // Use references to avoid move issues in nested closures
         let distances_ref = &distances;
@@ -227,36 +232,38 @@ pub fn kmedoids_optimized(
             .par_iter()
             .flat_map(|&candidate| {
                 // For each medoid m, compute gain of swapping m with candidate
-                (0..k).map(move |m_idx| {
-                    let _medoid = medoid_indices_ref[m_idx];
-                    let mut gain = 0.0;
+                (0..k)
+                    .map(move |m_idx| {
+                        let _medoid = medoid_indices_ref[m_idx];
+                        let mut gain = 0.0;
 
-                    for i in 0..n {
-                        if i == candidate {
-                            continue;
-                        }
+                        for i in 0..n {
+                            if i == candidate {
+                                continue;
+                            }
 
-                        let d_candidate = distances_ref[[i, candidate]];
+                            let d_candidate = distances_ref[[i, candidate]];
 
-                        if nearest_ref[i] == m_idx {
-                            // Point i is currently assigned to medoid being removed
-                            // New distance = min(d_second[i], d_candidate)
-                            if d_candidate < d_second_ref[i] {
-                                gain += d_nearest_ref[i] - d_candidate;
+                            if nearest_ref[i] == m_idx {
+                                // Point i is currently assigned to medoid being removed
+                                // New distance = min(d_second[i], d_candidate)
+                                if d_candidate < d_second_ref[i] {
+                                    gain += d_nearest_ref[i] - d_candidate;
+                                } else {
+                                    gain += d_nearest_ref[i] - d_second_ref[i];
+                                }
                             } else {
-                                gain += d_nearest_ref[i] - d_second_ref[i];
+                                // Point i is not assigned to medoid being removed
+                                if d_candidate < d_nearest_ref[i] {
+                                    gain += d_nearest_ref[i] - d_candidate;
+                                }
+                                // else: no change
                             }
-                        } else {
-                            // Point i is not assigned to medoid being removed
-                            if d_candidate < d_nearest_ref[i] {
-                                gain += d_nearest_ref[i] - d_candidate;
-                            }
-                            // else: no change
                         }
-                    }
 
-                    (m_idx, candidate, gain)
-                }).collect::<Vec<_>>()
+                        (m_idx, candidate, gain)
+                    })
+                    .collect::<Vec<_>>()
             })
             .collect();
 
@@ -291,7 +298,7 @@ pub fn kmedoids_optimized(
 }
 
 /// BUILD phase with optimized first medoid selection.
-fn build_medoids_fast(distances: &Array2<f64>, k: usize, seed: Option<u64>) -> Vec<usize> {
+fn build_medoids_fast(distances: &Array2<f64>, k: usize, _seed: Option<u64>) -> Vec<usize> {
     let n = distances.nrows();
     let mut medoids = Vec::with_capacity(k);
 
@@ -301,7 +308,8 @@ fn build_medoids_fast(distances: &Array2<f64>, k: usize, seed: Option<u64>) -> V
         .map(|i| distances.row(i).sum())
         .collect();
 
-    let first_medoid = sums.iter()
+    let first_medoid = sums
+        .iter()
         .enumerate()
         .min_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(Ordering::Equal))
         .map(|(i, _)| i)
@@ -310,9 +318,7 @@ fn build_medoids_fast(distances: &Array2<f64>, k: usize, seed: Option<u64>) -> V
     medoids.push(first_medoid);
 
     // Remaining medoids: greedy selection
-    let mut min_dist_to_medoids: Vec<f64> = (0..n)
-        .map(|i| distances[[i, first_medoid]])
-        .collect();
+    let mut min_dist_to_medoids: Vec<f64> = (0..n).map(|i| distances[[i, first_medoid]]).collect();
 
     while medoids.len() < k {
         // Find point with maximum min distance to existing medoids
@@ -336,7 +342,8 @@ fn build_medoids_fast(distances: &Array2<f64>, k: usize, seed: Option<u64>) -> V
             })
             .collect();
 
-        let best = gains.iter()
+        let best = gains
+            .iter()
             .enumerate()
             .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(Ordering::Equal))
             .map(|(i, _)| i)
@@ -359,7 +366,7 @@ fn compute_nearest_medoids(
     medoids: &[usize],
 ) -> (Vec<usize>, Vec<usize>, Vec<f64>, Vec<f64>) {
     let n = distances.nrows();
-    let k = medoids.len();
+    let _k = medoids.len();
 
     let results: Vec<(usize, usize, f64, f64)> = (0..n)
         .into_par_iter()
@@ -449,12 +456,14 @@ pub fn hdbscan_optimized(
     let mr_results: Vec<(usize, usize, f64)> = (0..n)
         .into_par_iter()
         .flat_map(|i| {
-            ((i + 1)..n).map(move |j| {
-                let mr = distances_ref[[i, j]]
-                    .max(core_distances_ref[i])
-                    .max(core_distances_ref[j]);
-                (i, j, mr)
-            }).collect::<Vec<_>>()
+            ((i + 1)..n)
+                .map(move |j| {
+                    let mr = distances_ref[[i, j]]
+                        .max(core_distances_ref[i])
+                        .max(core_distances_ref[j]);
+                    (i, j, mr)
+                })
+                .collect::<Vec<_>>()
         })
         .collect();
 
@@ -471,9 +480,7 @@ pub fn hdbscan_optimized(
     let (labels, n_clusters) = extract_hdbscan_clusters_optimized(&mst, n, mcs);
 
     // Compute outlier scores
-    let outlier_scores: Vec<f64> = core_distances.iter()
-        .map(|&cd| cd / (cd + 1.0))
-        .collect();
+    let outlier_scores: Vec<f64> = core_distances.iter().map(|&cd| cd / (cd + 1.0)).collect();
 
     Ok((labels, outlier_scores, n_clusters))
 }
@@ -500,9 +507,12 @@ fn build_mst_optimized(distances: &Array2<f64>) -> Vec<(usize, usize, f64)> {
                 .into_par_iter()
                 .filter(|&j| !in_tree[j])
                 .map(|j| (j, min_dist[j]))
-                .reduce(|| (0, f64::INFINITY), |a, b| {
-                    if a.1 < b.1 { a } else { b }
-                })
+                .reduce(
+                    || (0, f64::INFINITY),
+                    |a, b| {
+                        if a.1 < b.1 { a } else { b }
+                    },
+                )
         } else {
             let mut min_idx = 0;
             let mut min_val = f64::INFINITY;
@@ -564,9 +574,15 @@ fn extract_hdbscan_clusters_optimized(
     fn union(parent: &mut [usize], rank: &mut [usize], size: &mut [usize], x: usize, y: usize) {
         let px = find(parent, x);
         let py = find(parent, y);
-        if px == py { return; }
+        if px == py {
+            return;
+        }
 
-        let (smaller, larger) = if rank[px] < rank[py] { (px, py) } else { (py, px) };
+        let (smaller, larger) = if rank[px] < rank[py] {
+            (px, py)
+        } else {
+            (py, px)
+        };
         parent[smaller] = larger;
         size[larger] += size[smaller];
         if rank[px] == rank[py] {
@@ -661,7 +677,9 @@ pub fn optics_optimized(
 
     impl Ord for OrderedPoint {
         fn cmp(&self, other: &Self) -> Ordering {
-            other.reachability.partial_cmp(&self.reachability)
+            other
+                .reachability
+                .partial_cmp(&self.reachability)
                 .unwrap_or(Ordering::Equal)
         }
     }
@@ -695,7 +713,10 @@ pub fn optics_optimized(
             for (j, new_reach) in updates {
                 if new_reach < reachability[j] {
                     reachability[j] = new_reach;
-                    seeds.push(OrderedPoint { reachability: new_reach, index: j });
+                    seeds.push(OrderedPoint {
+                        reachability: new_reach,
+                        index: j,
+                    });
                 }
             }
         }
@@ -714,7 +735,10 @@ pub fn optics_optimized(
                         let new_reach = core_distances[p].max(distances[[p, j]]);
                         if new_reach < reachability[j] {
                             reachability[j] = new_reach;
-                            seeds.push(OrderedPoint { reachability: new_reach, index: j });
+                            seeds.push(OrderedPoint {
+                                reachability: new_reach,
+                                index: j,
+                            });
                         }
                     }
                 }
@@ -726,9 +750,7 @@ pub fn optics_optimized(
     let labels = extract_optics_clusters(&ordering, &reachability);
 
     // Reorder reachability
-    let reachability_ordered: Vec<f64> = ordering.iter()
-        .map(|&i| reachability[i])
-        .collect();
+    let reachability_ordered: Vec<f64> = ordering.iter().map(|&i| reachability[i]).collect();
 
     Ok((ordering, reachability_ordered, labels))
 }
@@ -738,7 +760,8 @@ fn extract_optics_clusters(ordering: &[usize], reachability: &[f64]) -> Vec<i32>
     let mut labels = vec![-1i32; n];
 
     // Use median reachability as threshold
-    let mut sorted_reach: Vec<f64> = reachability.iter()
+    let mut sorted_reach: Vec<f64> = reachability
+        .iter()
         .filter(|&&r| r.is_finite())
         .cloned()
         .collect();
@@ -793,7 +816,7 @@ pub fn affinity_propagation_optimized(
     }
 
     let damp = damping.unwrap_or(0.5);
-    if damp < 0.5 || damp >= 1.0 {
+    if !(0.5..1.0).contains(&damp) {
         return Err("Damping must be between 0.5 and 1.0".to_string());
     }
 
@@ -815,7 +838,11 @@ pub fn affinity_propagation_optimized(
             }
         }
         sims.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
-        if sims.is_empty() { 0.0 } else { sims[sims.len() / 2] }
+        if sims.is_empty() {
+            0.0
+        } else {
+            sims[sims.len() / 2]
+        }
     });
 
     for i in 0..n {
@@ -838,13 +865,15 @@ pub fn affinity_propagation_optimized(
         let r_new: Vec<Vec<f64>> = (0..n)
             .into_par_iter()
             .map(|i| {
-                (0..n).map(|k| {
-                    let max_other = (0..n)
-                        .filter(|&kp| kp != k)
-                        .map(|kp| availability[[i, kp]] + similarity[[i, kp]])
-                        .fold(f64::NEG_INFINITY, f64::max);
-                    similarity[[i, k]] - max_other
-                }).collect()
+                (0..n)
+                    .map(|k| {
+                        let max_other = (0..n)
+                            .filter(|&kp| kp != k)
+                            .map(|kp| availability[[i, kp]] + similarity[[i, kp]])
+                            .fold(f64::NEG_INFINITY, f64::max);
+                        similarity[[i, k]] - max_other
+                    })
+                    .collect()
             })
             .collect();
 
@@ -859,21 +888,23 @@ pub fn affinity_propagation_optimized(
         let a_new: Vec<Vec<f64>> = (0..n)
             .into_par_iter()
             .map(|i| {
-                (0..n).map(|k| {
-                    if i == k {
-                        // Self-availability
-                        (0..n)
-                            .filter(|&ip| ip != k)
-                            .map(|ip| responsibility[[ip, k]].max(0.0))
-                            .sum()
-                    } else {
-                        let sum: f64 = (0..n)
-                            .filter(|&ip| ip != i && ip != k)
-                            .map(|ip| responsibility[[ip, k]].max(0.0))
-                            .sum();
-                        (responsibility[[k, k]] + sum).min(0.0)
-                    }
-                }).collect()
+                (0..n)
+                    .map(|k| {
+                        if i == k {
+                            // Self-availability
+                            (0..n)
+                                .filter(|&ip| ip != k)
+                                .map(|ip| responsibility[[ip, k]].max(0.0))
+                                .sum()
+                        } else {
+                            let sum: f64 = (0..n)
+                                .filter(|&ip| ip != i && ip != k)
+                                .map(|ip| responsibility[[ip, k]].max(0.0))
+                                .sum();
+                            (responsibility[[k, k]] + sum).min(0.0)
+                        }
+                    })
+                    .collect()
             })
             .collect();
 
@@ -906,7 +937,8 @@ pub fn affinity_propagation_optimized(
         .map(|k| responsibility[[k, k]] + availability[[k, k]] > 0.0)
         .collect();
 
-    let exemplar_indices: Vec<usize> = exemplar_mask.iter()
+    let exemplar_indices: Vec<usize> = exemplar_mask
+        .iter()
         .enumerate()
         .filter(|&(_, &is_ex)| is_ex)
         .map(|(i, _)| i)
@@ -942,11 +974,7 @@ mod tests {
 
     #[test]
     fn test_parallel_distances() {
-        let data = array![
-            [0.0, 0.0],
-            [1.0, 0.0],
-            [0.0, 1.0],
-        ];
+        let data = array![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0],];
 
         let dist = compute_pairwise_distances_parallel(&data.view());
 
@@ -957,12 +985,7 @@ mod tests {
 
     #[test]
     fn test_silhouette_optimized() {
-        let data = array![
-            [0.0, 0.0],
-            [0.1, 0.1],
-            [10.0, 10.0],
-            [10.1, 10.1],
-        ];
+        let data = array![[0.0, 0.0], [0.1, 0.1], [10.0, 10.0], [10.1, 10.1],];
         let labels = vec![0, 0, 1, 1];
 
         let (widths, avg) = silhouette_optimized(data.view(), &labels).unwrap();
@@ -973,14 +996,10 @@ mod tests {
 
     #[test]
     fn test_kmedoids_optimized() {
-        let data = array![
-            [0.0, 0.0],
-            [0.1, 0.1],
-            [10.0, 10.0],
-            [10.1, 10.1],
-        ];
+        let data = array![[0.0, 0.0], [0.1, 0.1], [10.0, 10.0], [10.1, 10.1],];
 
-        let (labels, medoids, cost, iters) = kmedoids_optimized(data.view(), 2, Some(50), Some(42)).unwrap();
+        let (labels, medoids, cost, _iters) =
+            kmedoids_optimized(data.view(), 2, Some(50), Some(42)).unwrap();
 
         assert_eq!(labels.len(), 4);
         assert_eq!(medoids.len(), 2);

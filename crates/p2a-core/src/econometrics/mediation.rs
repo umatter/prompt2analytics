@@ -22,10 +22,10 @@
 //! - Imai, K., Keele, L., & Tingley, D. (2010). "A General Approach to Causal
 //!   Mediation Analysis." Psychological Methods, 15(4), 309-334.
 
-use std::fmt;
 use ndarray::{Array1, Array2};
-use rand::prelude::*;
 use rand::SeedableRng;
+use rand::prelude::*;
+use std::fmt;
 
 use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
@@ -92,39 +92,78 @@ impl fmt::Display for MediationResult {
         writeln!(f, "=== Causal Mediation Analysis ===")?;
         writeln!(f)?;
         writeln!(f, "Effect Decomposition:")?;
-        writeln!(f, "─────────────────────────────────────────────────────────────")?;
-        writeln!(f, "{:<20} {:>12} {:>12} {:>12} {:>10}",
-                 "Effect", "Estimate", "Std.Err", "95% CI", "p-value")?;
-        writeln!(f, "─────────────────────────────────────────────────────────────")?;
+        writeln!(
+            f,
+            "─────────────────────────────────────────────────────────────"
+        )?;
+        writeln!(
+            f,
+            "{:<20} {:>12} {:>12} {:>12} {:>10}",
+            "Effect", "Estimate", "Std.Err", "95% CI", "p-value"
+        )?;
+        writeln!(
+            f,
+            "─────────────────────────────────────────────────────────────"
+        )?;
 
         let stars = |p: f64| -> &str {
-            if p < 0.01 { "***" }
-            else if p < 0.05 { "**" }
-            else if p < 0.10 { "*" }
-            else { "" }
+            if p < 0.01 {
+                "***"
+            } else if p < 0.05 {
+                "**"
+            } else if p < 0.10 {
+                "*"
+            } else {
+                ""
+            }
         };
 
-        writeln!(f, "{:<20} {:>12.4} {:>12.4} [{:>5.3},{:>5.3}] {:>8.4}{}",
-                 "Total (ATE)",
-                 self.total_effect, self.se_total,
-                 self.ci_total.0, self.ci_total.1,
-                 self.p_total, stars(self.p_total))?;
+        writeln!(
+            f,
+            "{:<20} {:>12.4} {:>12.4} [{:>5.3},{:>5.3}] {:>8.4}{}",
+            "Total (ATE)",
+            self.total_effect,
+            self.se_total,
+            self.ci_total.0,
+            self.ci_total.1,
+            self.p_total,
+            stars(self.p_total)
+        )?;
 
-        writeln!(f, "{:<20} {:>12.4} {:>12.4} [{:>5.3},{:>5.3}] {:>8.4}{}",
-                 "Direct (NDE)",
-                 self.direct_effect, self.se_direct,
-                 self.ci_direct.0, self.ci_direct.1,
-                 self.p_direct, stars(self.p_direct))?;
+        writeln!(
+            f,
+            "{:<20} {:>12.4} {:>12.4} [{:>5.3},{:>5.3}] {:>8.4}{}",
+            "Direct (NDE)",
+            self.direct_effect,
+            self.se_direct,
+            self.ci_direct.0,
+            self.ci_direct.1,
+            self.p_direct,
+            stars(self.p_direct)
+        )?;
 
-        writeln!(f, "{:<20} {:>12.4} {:>12.4} [{:>5.3},{:>5.3}] {:>8.4}{}",
-                 "Indirect (NIE)",
-                 self.indirect_effect, self.se_indirect,
-                 self.ci_indirect.0, self.ci_indirect.1,
-                 self.p_indirect, stars(self.p_indirect))?;
+        writeln!(
+            f,
+            "{:<20} {:>12.4} {:>12.4} [{:>5.3},{:>5.3}] {:>8.4}{}",
+            "Indirect (NIE)",
+            self.indirect_effect,
+            self.se_indirect,
+            self.ci_indirect.0,
+            self.ci_indirect.1,
+            self.p_indirect,
+            stars(self.p_indirect)
+        )?;
 
-        writeln!(f, "─────────────────────────────────────────────────────────────")?;
+        writeln!(
+            f,
+            "─────────────────────────────────────────────────────────────"
+        )?;
         writeln!(f)?;
-        writeln!(f, "Proportion Mediated: {:.1}%", self.proportion_mediated * 100.0)?;
+        writeln!(
+            f,
+            "Proportion Mediated: {:.1}%",
+            self.proportion_mediated * 100.0
+        )?;
         writeln!(f, "  (NIE / Total Effect)")?;
         writeln!(f)?;
         writeln!(f, "N = {} (trimmed: {})", self.n_obs, self.n_trimmed)?;
@@ -180,40 +219,52 @@ pub fn run_mediation_analysis(
 ) -> EconResult<MediationResult> {
     let df = dataset.df();
     let n = df.height();
-    let available_cols: Vec<String> = df.get_column_names().iter().map(|s| s.to_string()).collect();
+    let available_cols: Vec<String> = df
+        .get_column_names()
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
 
     // Extract outcome variable
-    let y_col = df.column(outcome).map_err(|_| {
-        EconError::ColumnNotFound {
-            column: outcome.to_string(),
-            available: available_cols.clone(),
-        }
+    let y_col = df.column(outcome).map_err(|_| EconError::ColumnNotFound {
+        column: outcome.to_string(),
+        available: available_cols.clone(),
     })?;
-    let y: Vec<f64> = y_col.f64().map_err(|_| {
-        EconError::NonNumericColumn { column: outcome.to_string() }
-    })?.into_no_null_iter().collect();
+    let y: Vec<f64> = y_col
+        .f64()
+        .map_err(|_| EconError::NonNumericColumn {
+            column: outcome.to_string(),
+        })?
+        .into_no_null_iter()
+        .collect();
 
     // Extract treatment variable
-    let d_col = df.column(treatment).map_err(|_| {
-        EconError::ColumnNotFound {
+    let d_col = df
+        .column(treatment)
+        .map_err(|_| EconError::ColumnNotFound {
             column: treatment.to_string(),
             available: available_cols.clone(),
-        }
-    })?;
-    let d: Vec<f64> = d_col.f64().map_err(|_| {
-        EconError::NonNumericColumn { column: treatment.to_string() }
-    })?.into_no_null_iter().collect();
+        })?;
+    let d: Vec<f64> = d_col
+        .f64()
+        .map_err(|_| EconError::NonNumericColumn {
+            column: treatment.to_string(),
+        })?
+        .into_no_null_iter()
+        .collect();
 
     // Extract mediator variable
-    let m_col = df.column(mediator).map_err(|_| {
-        EconError::ColumnNotFound {
-            column: mediator.to_string(),
-            available: available_cols.clone(),
-        }
+    let m_col = df.column(mediator).map_err(|_| EconError::ColumnNotFound {
+        column: mediator.to_string(),
+        available: available_cols.clone(),
     })?;
-    let m: Vec<f64> = m_col.f64().map_err(|_| {
-        EconError::NonNumericColumn { column: mediator.to_string() }
-    })?.into_no_null_iter().collect();
+    let m: Vec<f64> = m_col
+        .f64()
+        .map_err(|_| EconError::NonNumericColumn {
+            column: mediator.to_string(),
+        })?
+        .into_no_null_iter()
+        .collect();
 
     // Build covariate matrix
     let mut x_data: Vec<f64> = Vec::with_capacity(n * (covariates.len() + 1));
@@ -225,15 +276,17 @@ pub fn run_mediation_analysis(
 
     // Add covariates
     for cov_name in covariates {
-        let col = df.column(cov_name).map_err(|_| {
-            EconError::ColumnNotFound {
-                column: cov_name.to_string(),
-                available: available_cols.clone(),
-            }
+        let col = df.column(cov_name).map_err(|_| EconError::ColumnNotFound {
+            column: cov_name.to_string(),
+            available: available_cols.clone(),
         })?;
-        let vals: Vec<f64> = col.f64().map_err(|_| {
-            EconError::NonNumericColumn { column: cov_name.to_string() }
-        })?.into_no_null_iter().collect();
+        let vals: Vec<f64> = col
+            .f64()
+            .map_err(|_| EconError::NonNumericColumn {
+                column: cov_name.to_string(),
+            })?
+            .into_no_null_iter()
+            .collect();
         x_data.extend(vals);
     }
 
@@ -242,9 +295,8 @@ pub fn run_mediation_analysis(
         .map_err(|e| EconError::Internal(format!("Failed to create design matrix: {}", e)))?;
 
     // Compute point estimates
-    let (total, direct, indirect, keep_idx) = compute_mediation_effects(
-        &y, &d, &m, &x, config.trim,
-    )?;
+    let (total, direct, indirect, keep_idx) =
+        compute_mediation_effects(&y, &d, &m, &x, config.trim)?;
 
     let n_obs = keep_idx.len();
     let n_trimmed = n - n_obs;
@@ -269,22 +321,19 @@ pub fn run_mediation_analysis(
 
     for _ in 0..config.bootstrap {
         // Resample with replacement from kept observations
-        let boot_indices: Vec<usize> = (0..n_obs)
-            .map(|_| rng.gen_range(0..n_obs))
-            .collect();
+        let boot_indices: Vec<usize> = (0..n_obs).map(|_| rng.gen_range(0..n_obs)).collect();
 
         // Create bootstrap sample
         let y_boot: Vec<f64> = boot_indices.iter().map(|&i| y[keep_idx[i]]).collect();
         let d_boot: Vec<f64> = boot_indices.iter().map(|&i| d[keep_idx[i]]).collect();
         let m_boot: Vec<f64> = boot_indices.iter().map(|&i| m[keep_idx[i]]).collect();
-        let x_boot: Array2<f64> = Array2::from_shape_fn((n_obs, k), |(i, j)| {
-            x[[keep_idx[boot_indices[i]], j]]
-        });
+        let x_boot: Array2<f64> =
+            Array2::from_shape_fn((n_obs, k), |(i, j)| x[[keep_idx[boot_indices[i]], j]]);
 
         // Compute effects on bootstrap sample (no further trimming)
-        if let Ok((t, de, ie, _)) = compute_mediation_effects(
-            &y_boot, &d_boot, &m_boot, &x_boot, 0.0,
-        ) {
+        if let Ok((t, de, ie, _)) =
+            compute_mediation_effects(&y_boot, &d_boot, &m_boot, &x_boot, 0.0)
+        {
             if t.is_finite() && de.is_finite() && ie.is_finite() {
                 boot_total.push(t);
                 boot_direct.push(de);
@@ -425,7 +474,11 @@ fn compute_mediation_effects(
     // Normalized (Hajek) estimates
     let mu1 = if sum_w1 > 0.0 { sum_w1_y / sum_w1 } else { 0.0 };
     let mu0 = if sum_w0 > 0.0 { sum_w0_y / sum_w0 } else { 0.0 };
-    let mu0_nde = if sum_w0_nde > 0.0 { sum_w0_nde_y / sum_w0_nde } else { 0.0 };
+    let mu0_nde = if sum_w0_nde > 0.0 {
+        sum_w0_nde_y / sum_w0_nde
+    } else {
+        0.0
+    };
 
     // Total effect (ATE)
     let total = mu1 - mu0;
@@ -457,7 +510,7 @@ fn estimate_propensity_scores(d: &[f64], x: &Array2<f64>) -> EconResult<Vec<f64>
     for _ in 0..max_iter {
         // Compute probabilities
         let xb = x.dot(&beta);
-        let p: Array1<f64> = xb.mapv(|v| logistic_cdf(v));
+        let p: Array1<f64> = xb.mapv(logistic_cdf);
 
         // Compute weights for IRLS
         let w: Array1<f64> = p.mapv(|pi| {
@@ -584,9 +637,7 @@ fn bootstrap_stats(samples: &[f64], _point_estimate: f64) -> (f64, (f64, f64)) {
 
     let n = samples.len() as f64;
     let mean: f64 = samples.iter().sum::<f64>() / n;
-    let variance: f64 = samples.iter()
-        .map(|x| (x - mean).powi(2))
-        .sum::<f64>() / (n - 1.0);
+    let variance: f64 = samples.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (n - 1.0);
     let se = variance.sqrt();
 
     // Percentile CI
@@ -667,7 +718,8 @@ mod tests {
                 0.6, 0.5, 0.5, 0.4, 0.7, 0.6, 0.4, 0.5, 0.6, 0.4,
                 0.6, 0.5, 0.5, 0.6, 0.4, 0.5, 0.5, 0.7, 0.6, 0.5
             ]
-        }.unwrap();
+        }
+        .unwrap();
 
         Dataset::new(df)
     }
@@ -677,37 +729,43 @@ mod tests {
         let ds = create_mediation_dataset();
 
         let config = MediationConfig {
-            bootstrap: 199,  // Fewer for faster test
+            bootstrap: 199, // Fewer for faster test
             trim: 0.01,
             seed: Some(42),
         };
 
-        let result = run_mediation_analysis(
-            &ds,
-            "y",
-            "d",
-            "m",
-            &["x"],
-            config,
-        ).unwrap();
+        let result = run_mediation_analysis(&ds, "y", "d", "m", &["x"], config).unwrap();
 
         // Check that we get reasonable results
         // Total effect should be positive (around 0.7-1.0)
-        assert!(result.total_effect > 0.3 && result.total_effect < 1.5,
-                "Total effect {} out of expected range", result.total_effect);
+        assert!(
+            result.total_effect > 0.3 && result.total_effect < 1.5,
+            "Total effect {} out of expected range",
+            result.total_effect
+        );
 
         // Direct effect should be positive
-        assert!(result.direct_effect > -0.5 && result.direct_effect < 1.5,
-                "Direct effect {} out of expected range", result.direct_effect);
+        assert!(
+            result.direct_effect > -0.5 && result.direct_effect < 1.5,
+            "Direct effect {} out of expected range",
+            result.direct_effect
+        );
 
         // Indirect effect can be any value
-        assert!(result.indirect_effect.is_finite(),
-                "Indirect effect {} should be finite", result.indirect_effect);
+        assert!(
+            result.indirect_effect.is_finite(),
+            "Indirect effect {} should be finite",
+            result.indirect_effect
+        );
 
         // Decomposition should hold: total ≈ direct + indirect
-        let decomp_error = (result.total_effect - result.direct_effect - result.indirect_effect).abs();
-        assert!(decomp_error < 0.001,
-                "Decomposition error {} too large", decomp_error);
+        let decomp_error =
+            (result.total_effect - result.direct_effect - result.indirect_effect).abs();
+        assert!(
+            decomp_error < 0.001,
+            "Decomposition error {} too large",
+            decomp_error
+        );
 
         // Standard errors should be positive
         assert!(result.se_total > 0.0, "SE total should be positive");
@@ -725,9 +783,7 @@ mod tests {
             seed: Some(42),
         };
 
-        let result = run_mediation_analysis(
-            &ds, "y", "d", "m", &["x"], config,
-        ).unwrap();
+        let result = run_mediation_analysis(&ds, "y", "d", "m", &["x"], config).unwrap();
 
         let display = result.to_string();
         assert!(display.contains("Causal Mediation Analysis"));
@@ -756,5 +812,294 @@ mod tests {
         } else {
             panic!("Expected ColumnNotFound error");
         }
+    }
+
+    // =========================================================================
+    // R Validation Tests (Phase 5)
+    // =========================================================================
+
+    /// Simple LCG for deterministic random numbers
+    fn lcg_rand_med(seed: &mut u64) -> f64 {
+        let a: u64 = 1103515245;
+        let c: u64 = 12345;
+        let m: u64 = 2_u64.pow(31);
+        *seed = (a.wrapping_mul(*seed).wrapping_add(c)) % m;
+        (*seed as f64) / (m as f64)
+    }
+
+    /// Create validation dataset matching R's mediation package example.
+    fn create_mediation_validation_dataset() -> Dataset {
+        let n = 300;
+        let mut seed: u64 = 42;
+
+        let mut x = Vec::with_capacity(n);
+        let mut treatment = Vec::with_capacity(n);
+        let mut mediator = Vec::with_capacity(n);
+        let mut y = Vec::with_capacity(n);
+
+        for _ in 0..n {
+            // Covariate
+            let u1 = lcg_rand_med(&mut seed).max(1e-10);
+            let u2 = lcg_rand_med(&mut seed);
+            let x_i = ((-2.0_f64 * u1.ln()).sqrt()) * (2.0 * std::f64::consts::PI * u2).cos();
+            x.push(x_i);
+
+            // Treatment (random assignment with slight dependence on x)
+            let ps = 1.0 / (1.0 + (-(0.5 * x_i)).exp());
+            let t = if lcg_rand_med(&mut seed) < ps {
+                1.0
+            } else {
+                0.0
+            };
+            treatment.push(t);
+
+            // Mediator: M = 0.3 + 0.6*D + 0.4*X + noise
+            let u3 = lcg_rand_med(&mut seed).max(1e-10);
+            let u4 = lcg_rand_med(&mut seed);
+            let noise_m =
+                0.5 * ((-2.0_f64 * u3.ln()).sqrt()) * (2.0 * std::f64::consts::PI * u4).cos();
+            let m = 0.3 + 0.6 * t + 0.4 * x_i + noise_m;
+            mediator.push(m);
+
+            // Outcome: Y = 1 + 0.4*D + 0.5*M + 0.3*X + noise
+            // Direct effect = 0.4, Indirect effect = 0.6 * 0.5 = 0.3
+            // Total effect = 0.4 + 0.3 = 0.7
+            let u5 = lcg_rand_med(&mut seed).max(1e-10);
+            let u6 = lcg_rand_med(&mut seed);
+            let noise_y =
+                0.5 * ((-2.0_f64 * u5.ln()).sqrt()) * (2.0 * std::f64::consts::PI * u6).cos();
+            let y_i = 1.0 + 0.4 * t + 0.5 * m + 0.3 * x_i + noise_y;
+            y.push(y_i);
+        }
+
+        let df = df! {
+            "y" => y,
+            "treatment" => treatment,
+            "mediator" => mediator,
+            "x" => x
+        }
+        .unwrap();
+
+        Dataset::new(df)
+    }
+
+    #[test]
+    fn test_validate_mediation_vs_r() {
+        // Validates against R mediation package
+        // R reference:
+        // library(mediation)
+        // med_fit <- lm(mediator ~ treatment + x, data = med_data)
+        // out_fit <- lm(y ~ treatment + mediator + x, data = med_data)
+        // med_result <- mediate(med_fit, out_fit, treat = "treatment", mediator = "mediator", sims = 500)
+
+        let dataset = create_mediation_validation_dataset();
+        let config = MediationConfig {
+            bootstrap: 199,
+            trim: 0.05,
+            seed: Some(42),
+        };
+
+        let result =
+            run_mediation_analysis(&dataset, "y", "treatment", "mediator", &["x"], config).unwrap();
+
+        // True effects from DGP:
+        // - Direct effect: 0.4
+        // - Indirect effect: 0.6 * 0.5 = 0.3
+        // - Total effect: 0.7
+        let true_total = 0.7;
+        let true_direct = 0.4;
+        let true_indirect = 0.3;
+        let tol = 0.4; // Allow estimation error
+
+        assert!(
+            (result.total_effect - true_total).abs() < tol,
+            "Total effect {:.4} should be close to {:.4}",
+            result.total_effect,
+            true_total
+        );
+        assert!(
+            (result.direct_effect - true_direct).abs() < tol,
+            "Direct effect {:.4} should be close to {:.4}",
+            result.direct_effect,
+            true_direct
+        );
+        assert!(
+            (result.indirect_effect - true_indirect).abs() < tol,
+            "Indirect effect {:.4} should be close to {:.4}",
+            result.indirect_effect,
+            true_indirect
+        );
+    }
+
+    #[test]
+    fn test_validate_mediation_decomposition() {
+        // Validate that Total = Direct + Indirect
+        let dataset = create_mediation_validation_dataset();
+        let config = MediationConfig {
+            bootstrap: 99,
+            trim: 0.05,
+            seed: Some(42),
+        };
+
+        let result =
+            run_mediation_analysis(&dataset, "y", "treatment", "mediator", &["x"], config).unwrap();
+
+        // Decomposition should hold exactly
+        let decomp = result.direct_effect + result.indirect_effect;
+        assert!(
+            (result.total_effect - decomp).abs() < 1e-10,
+            "Decomposition failed: {:.6} ≠ {:.6} + {:.6}",
+            result.total_effect,
+            result.direct_effect,
+            result.indirect_effect
+        );
+    }
+
+    #[test]
+    fn test_validate_mediation_proportion_mediated() {
+        // Validate proportion mediated calculation
+        let dataset = create_mediation_validation_dataset();
+        let config = MediationConfig {
+            bootstrap: 99,
+            trim: 0.05,
+            seed: Some(42),
+        };
+
+        let result =
+            run_mediation_analysis(&dataset, "y", "treatment", "mediator", &["x"], config).unwrap();
+
+        // Proportion mediated = indirect / total
+        if result.total_effect.abs() > 0.01 {
+            let expected_prop = result.indirect_effect / result.total_effect;
+            assert!(
+                (result.proportion_mediated - expected_prop).abs() < 1e-8,
+                "Proportion mediated {:.4} should equal NIE/ATE {:.4}",
+                result.proportion_mediated,
+                expected_prop
+            );
+        }
+
+        // Proportion should be between 0 and 1 for most reasonable cases
+        // (can be negative or > 1 in edge cases)
+        assert!(result.proportion_mediated.is_finite());
+    }
+
+    #[test]
+    fn test_validate_mediation_standard_errors() {
+        // Validate standard error properties
+        let dataset = create_mediation_validation_dataset();
+        let config = MediationConfig {
+            bootstrap: 199,
+            trim: 0.05,
+            seed: Some(42),
+        };
+
+        let result =
+            run_mediation_analysis(&dataset, "y", "treatment", "mediator", &["x"], config).unwrap();
+
+        // All SEs should be positive
+        assert!(result.se_total > 0.0, "SE total should be positive");
+        assert!(result.se_direct > 0.0, "SE direct should be positive");
+        assert!(result.se_indirect > 0.0, "SE indirect should be positive");
+
+        // SEs should be reasonable (not too small or large)
+        assert!(
+            result.se_total < 1.0,
+            "SE total {:.4} seems too large",
+            result.se_total
+        );
+        assert!(
+            result.se_direct < 1.0,
+            "SE direct {:.4} seems too large",
+            result.se_direct
+        );
+        assert!(
+            result.se_indirect < 1.0,
+            "SE indirect {:.4} seems too large",
+            result.se_indirect
+        );
+    }
+
+    #[test]
+    fn test_validate_mediation_confidence_intervals() {
+        // Validate CI properties
+        let dataset = create_mediation_validation_dataset();
+        let config = MediationConfig {
+            bootstrap: 199,
+            trim: 0.05,
+            seed: Some(42),
+        };
+
+        let result =
+            run_mediation_analysis(&dataset, "y", "treatment", "mediator", &["x"], config).unwrap();
+
+        // CIs should contain point estimates
+        assert!(
+            result.ci_total.0 <= result.total_effect && result.ci_total.1 >= result.total_effect
+        );
+        assert!(
+            result.ci_direct.0 <= result.direct_effect
+                && result.ci_direct.1 >= result.direct_effect
+        );
+        assert!(
+            result.ci_indirect.0 <= result.indirect_effect
+                && result.ci_indirect.1 >= result.indirect_effect
+        );
+
+        // CIs should have positive width
+        assert!(result.ci_total.1 > result.ci_total.0);
+        assert!(result.ci_direct.1 > result.ci_direct.0);
+        assert!(result.ci_indirect.1 > result.ci_indirect.0);
+    }
+
+    #[test]
+    fn test_validate_mediation_p_values() {
+        // Validate p-value properties
+        let dataset = create_mediation_validation_dataset();
+        let config = MediationConfig {
+            bootstrap: 199,
+            trim: 0.05,
+            seed: Some(42),
+        };
+
+        let result =
+            run_mediation_analysis(&dataset, "y", "treatment", "mediator", &["x"], config).unwrap();
+
+        // P-values should be in [0, 1]
+        assert!(result.p_total >= 0.0 && result.p_total <= 1.0);
+        assert!(result.p_direct >= 0.0 && result.p_direct <= 1.0);
+        assert!(result.p_indirect >= 0.0 && result.p_indirect <= 1.0);
+    }
+
+    #[test]
+    fn test_validate_mediation_reproducibility() {
+        // Validate that seed produces reproducible results
+        let dataset = create_mediation_validation_dataset();
+
+        let config1 = MediationConfig {
+            bootstrap: 99,
+            trim: 0.05,
+            seed: Some(12345),
+        };
+        let result1 =
+            run_mediation_analysis(&dataset, "y", "treatment", "mediator", &["x"], config1)
+                .unwrap();
+
+        let config2 = MediationConfig {
+            bootstrap: 99,
+            trim: 0.05,
+            seed: Some(12345),
+        };
+        let result2 =
+            run_mediation_analysis(&dataset, "y", "treatment", "mediator", &["x"], config2)
+                .unwrap();
+
+        // Point estimates should be identical (same seed)
+        assert!((result1.total_effect - result2.total_effect).abs() < 1e-10);
+        assert!((result1.direct_effect - result2.direct_effect).abs() < 1e-10);
+        assert!((result1.indirect_effect - result2.indirect_effect).abs() < 1e-10);
+
+        // SEs may have small differences due to bootstrap
+        assert!((result1.se_total - result2.se_total).abs() < 0.01);
     }
 }

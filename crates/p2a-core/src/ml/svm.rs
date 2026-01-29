@@ -40,16 +40,24 @@ impl std::fmt::Display for SvmResult {
         writeln!(f, "Feature Weights:")?;
 
         // Sort by absolute weight
-        let mut indexed: Vec<(usize, f64)> = self.weights
+        let mut indexed: Vec<(usize, f64)> = self
+            .weights
             .iter()
             .enumerate()
             .map(|(i, &v)| (i, v))
             .collect();
-        indexed.sort_by(|a, b| b.1.abs().partial_cmp(&a.1.abs()).unwrap_or(std::cmp::Ordering::Equal));
+        indexed.sort_by(|a, b| {
+            b.1.abs()
+                .partial_cmp(&a.1.abs())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         for (i, weight) in indexed.iter().take(10) {
             let name = match &self.feature_names {
-                Some(names) => names.get(*i).cloned().unwrap_or_else(|| format!("Feature_{}", i)),
+                Some(names) => names
+                    .get(*i)
+                    .cloned()
+                    .unwrap_or_else(|| format!("Feature_{}", i)),
                 None => format!("Feature_{}", i),
             };
             writeln!(f, "  {}: {:.6}", name, weight)?;
@@ -70,7 +78,11 @@ impl std::fmt::Display for SvmResult {
         // Count predictions per class
         let neg_count = self.predictions.iter().filter(|&&p| p < 0).count();
         let pos_count = self.predictions.len() - neg_count;
-        writeln!(f, "  Class distribution: {} negative, {} positive", neg_count, pos_count)?;
+        writeln!(
+            f,
+            "  Class distribution: {} negative, {} positive",
+            neg_count, pos_count
+        )?;
 
         Ok(())
     }
@@ -150,10 +162,16 @@ pub fn linear_svm(
                 // Compute bounds L and H
                 let (l, h) = if (y[i] - y[j]).abs() < 1e-10 {
                     // y_i == y_j
-                    (f64::max(0.0, alpha[i] + alpha[j] - c_param), f64::min(c_param, alpha[i] + alpha[j]))
+                    (
+                        f64::max(0.0, alpha[i] + alpha[j] - c_param),
+                        f64::min(c_param, alpha[i] + alpha[j]),
+                    )
                 } else {
                     // y_i != y_j
-                    (f64::max(0.0, alpha[j] - alpha[i]), f64::min(c_param, c_param + alpha[j] - alpha[i]))
+                    (
+                        f64::max(0.0, alpha[j] - alpha[i]),
+                        f64::min(c_param, c_param + alpha[j] - alpha[i]),
+                    )
                 };
 
                 if (l - h).abs() < 1e-10 {
@@ -184,9 +202,13 @@ pub fn linear_svm(
                 alpha[i] = alpha_i_old + y[i] * y[j] * (alpha_j_old - alpha[j]);
 
                 // Update bias
-                let b1 = b - e_i - y[i] * (alpha[i] - alpha_i_old) * k_ii
+                let b1 = b
+                    - e_i
+                    - y[i] * (alpha[i] - alpha_i_old) * k_ii
                     - y[j] * (alpha[j] - alpha_j_old) * k_ij;
-                let b2 = b - e_j - y[i] * (alpha[i] - alpha_i_old) * k_ij
+                let b2 = b
+                    - e_j
+                    - y[i] * (alpha[i] - alpha_i_old) * k_ij
                     - y[j] * (alpha[j] - alpha_j_old) * k_jj;
 
                 if alpha[i] > 0.0 && alpha[i] < c_param {
@@ -359,7 +381,12 @@ pub fn svm_predict(
 ) -> Vec<i32> {
     data.outer_iter()
         .map(|row| {
-            let f: f64 = row.iter().zip(weights.iter()).map(|(x, w)| x * w).sum::<f64>() + bias;
+            let f: f64 = row
+                .iter()
+                .zip(weights.iter())
+                .map(|(x, w)| x * w)
+                .sum::<f64>()
+                + bias;
             if f >= 0.0 {
                 class_labels.1
             } else {
@@ -391,20 +418,16 @@ mod tests {
         ];
         let y = array![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0];
 
-        let result = linear_svm(
-            x.view(),
-            y.view(),
-            Some(1.0),
-            Some(100),
-            Some(1e-3),
-            None,
-        ).unwrap();
+        let result =
+            linear_svm(x.view(), y.view(), Some(1.0), Some(100), Some(1e-3), None).unwrap();
 
         assert!(result.n_support_vectors > 0);
         assert_eq!(result.weights.len(), 2);
 
         // Should classify training data correctly (or mostly correctly)
-        let correct: usize = result.predictions.iter()
+        let correct: usize = result
+            .predictions
+            .iter()
             .enumerate()
             .filter(|&(i, p)| {
                 let expected = if i < 4 { 0 } else { 1 };
@@ -421,9 +444,9 @@ mod tests {
         let class_labels = (0, 1);
 
         let data = array![
-            [1.0, 1.0],  // 1+1-3 = -1 -> class 0
-            [2.0, 2.0],  // 2+2-3 = 1 -> class 1
-            [3.0, 0.0],  // 3+0-3 = 0 -> class 1
+            [1.0, 1.0], // 1+1-3 = -1 -> class 0
+            [2.0, 2.0], // 2+2-3 = 1 -> class 1
+            [3.0, 0.0], // 3+0-3 = 0 -> class 1
         ];
 
         let preds = svm_predict(data.view(), &weights, bias, class_labels);
@@ -432,11 +455,7 @@ mod tests {
 
     #[test]
     fn test_svm_requires_two_classes() {
-        let x = array![
-            [1.0, 2.0],
-            [2.0, 3.0],
-            [3.0, 4.0],
-        ];
+        let x = array![[1.0, 2.0], [2.0, 3.0], [3.0, 4.0],];
         let y = array![0.0, 0.0, 0.0]; // Only one class
 
         let result = linear_svm(x.view(), y.view(), None, None, None, None);
@@ -463,7 +482,8 @@ mod tests {
             Some(200),
             Some(1e-4),
             Some(vec!["important".to_string(), "noise".to_string()]),
-        ).unwrap();
+        )
+        .unwrap();
 
         // First weight should be larger in magnitude
         assert!(result.weights[0].abs() > result.weights[1].abs());

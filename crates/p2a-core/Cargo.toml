@@ -183,3 +183,6 @@ name = "bench_batch3"
 
 [[example]]
 name = "hdbscan_bench"
+
+[lints]
+workspace = true

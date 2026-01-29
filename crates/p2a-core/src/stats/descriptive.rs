@@ -1,8 +1,8 @@
 //! Descriptive statistics for datasets.
 
+use crate::data::Dataset;
 use polars::prelude::*;
 use serde::{Deserialize, Serialize};
-use crate::data::Dataset;
 
 /// Check if a DataType is numeric.
 fn is_numeric_dtype(dtype: &DataType) -> bool {
@@ -70,7 +70,7 @@ impl DescriptiveStats {
         let columns = df
             .get_columns()
             .iter()
-            .map(|col| Self::compute_column_stats(col))
+            .map(Self::compute_column_stats)
             .collect::<PolarsResult<Vec<_>>>()?;
 
         Ok(Self {
@@ -124,16 +124,8 @@ impl DescriptiveStats {
         let std = float_series.std(1).unwrap_or(f64::NAN);
 
         // Compute min/max
-        let min = float_series
-            .min::<f64>()
-            .ok()
-            .flatten()
-            .unwrap_or(f64::NAN);
-        let max = float_series
-            .max::<f64>()
-            .ok()
-            .flatten()
-            .unwrap_or(f64::NAN);
+        let min = float_series.min::<f64>().ok().flatten().unwrap_or(f64::NAN);
+        let max = float_series.max::<f64>().ok().flatten().unwrap_or(f64::NAN);
 
         // For quantiles, use a simpler approach - compute from sorted values
         let (q25, median, q75) = compute_quantiles(&float_series);
@@ -154,9 +146,7 @@ impl DescriptiveStats {
         let series = col.as_materialized_series();
         let unique_count = series.n_unique()?;
 
-        Ok(CategoricalStats {
-            unique_count,
-        })
+        Ok(CategoricalStats { unique_count })
     }
 }
 
@@ -168,7 +158,7 @@ fn compute_quantiles(series: &Series) -> (f64, f64, f64) {
     };
 
     // Collect non-null values
-    let mut values: Vec<f64> = f64_series.into_iter().filter_map(|v| v).collect();
+    let mut values: Vec<f64> = f64_series.into_iter().flatten().collect();
 
     if values.is_empty() {
         return (f64::NAN, f64::NAN, f64::NAN);
@@ -195,12 +185,19 @@ impl std::fmt::Display for DescriptiveStats {
 
         for col in &self.columns {
             writeln!(f, "Column: {} ({})", col.name, col.dtype)?;
-            writeln!(f, "  Count: {}, Nulls: {} ({:.1}%)", col.count, col.null_count, col.null_pct)?;
+            writeln!(
+                f,
+                "  Count: {}, Nulls: {} ({:.1}%)",
+                col.count, col.null_count, col.null_pct
+            )?;
 
             if let Some(num) = &col.numeric {
                 writeln!(f, "  Mean: {:.4}, Std: {:.4}", num.mean, num.std)?;
-                writeln!(f, "  Min: {:.4}, 25%: {:.4}, Median: {:.4}, 75%: {:.4}, Max: {:.4}",
-                    num.min, num.q25, num.median, num.q75, num.max)?;
+                writeln!(
+                    f,
+                    "  Min: {:.4}, 25%: {:.4}, Median: {:.4}, 75%: {:.4}, Max: {:.4}",
+                    num.min, num.q25, num.median, num.q75, num.max
+                )?;
             }
 
             if let Some(cat) = &col.categorical {

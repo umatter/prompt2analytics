@@ -1,11 +1,11 @@
 #!/usr/bin/env Rscript
-# generate_benchmark_figure.R
+# fig_benchmark_boxplots.R
 #
 # Generates a two-panel box plot figure comparing R and Rust benchmark times
 # Panel A: R execution times
 # Panel B: p2a (Rust) execution times
 #
-# Usage: Rscript generate_benchmark_figure.R
+# Usage: Rscript fig_benchmark_boxplots.R
 #
 # Output: paper/figures/benchmark_boxplots.pdf
 

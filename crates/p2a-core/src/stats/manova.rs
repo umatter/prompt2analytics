@@ -57,7 +57,7 @@ use std::collections::HashMap;
 
 use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
-use crate::linalg::matrix_ops::{matrix_inverse, eig_symmetric, ndarray_to_faer, faer_to_ndarray};
+use crate::linalg::matrix_ops::{eig_symmetric, faer_to_ndarray, matrix_inverse, ndarray_to_faer};
 use crate::traits::f_test_p_value;
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -65,22 +65,17 @@ use crate::traits::f_test_p_value;
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// Test statistic type for MANOVA.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum ManovaTestStatistic {
     /// Wilks' Lambda (Λ) - most popular in literature
     Wilks,
     /// Pillai's Trace (V) - most robust, recommended for violations of assumptions
+    #[default]
     Pillai,
     /// Hotelling-Lawley Trace (T²)
     HotellingLawley,
     /// Roy's Largest Root (θ)
     Roy,
-}
-
-impl Default for ManovaTestStatistic {
-    fn default() -> Self {
-        ManovaTestStatistic::Pillai // R's default
-    }
 }
 
 /// Individual test result for a single MANOVA statistic.
@@ -333,12 +328,11 @@ pub fn manova_one_way<S: AsRef<str> + Clone>(
 
     // Compute eigenvalues of E⁻¹H
     // First compute E⁻¹
-    let e_inv = matrix_inverse(&sscp_error.view()).map_err(|e| {
-        EconError::Internal(format!("Failed to invert error SSCP matrix: {}", e))
-    })?;
+    let e_inv = matrix_inverse(&sscp_error.view())
+        .map_err(|e| EconError::Internal(format!("Failed to invert error SSCP matrix: {}", e)))?;
 
     // Compute E⁻¹H
-    let e_inv_h = e_inv.dot(&sscp_hypothesis);
+    let _e_inv_h = e_inv.dot(&sscp_hypothesis);
 
     // For eigenvalue computation, we need to handle the non-symmetric E⁻¹H
     // The eigenvalues are the same as those of E^(-1/2) H E^(-1/2), which is symmetric
@@ -398,10 +392,7 @@ pub fn manova_one_way<S: AsRef<str> + Clone>(
 /// Compute generalized eigenvalues of Hx = λEx.
 ///
 /// These are the eigenvalues of E⁻¹H when E is invertible.
-fn compute_generalized_eigenvalues(
-    h: &Array2<f64>,
-    e: &Array2<f64>,
-) -> EconResult<Vec<f64>> {
+fn compute_generalized_eigenvalues(h: &Array2<f64>, e: &Array2<f64>) -> EconResult<Vec<f64>> {
     // Method: Transform to standard eigenvalue problem
     // Hx = λEx can be rewritten as (E⁻¹H)x = λx
     // But E⁻¹H may not be symmetric.
@@ -414,7 +405,9 @@ fn compute_generalized_eigenvalues(
     // Compute Cholesky factorization of E: E = L L^T
     let e_faer = ndarray_to_faer(&e.view());
     let chol = e_faer.llt(faer::Side::Lower).map_err(|_| {
-        EconError::Internal("Cholesky decomposition of E failed (E may not be positive definite)".to_string())
+        EconError::Internal(
+            "Cholesky decomposition of E failed (E may not be positive definite)".to_string(),
+        )
     })?;
 
     // L is the lower triangular Cholesky factor
@@ -443,9 +436,8 @@ fn compute_generalized_eigenvalues(
     let m = l_inv_h.dot(&l_inv.t());
 
     // M should be symmetric, compute its eigenvalues
-    let (eigenvalues, _) = eig_symmetric(&m.view()).map_err(|e| {
-        EconError::Internal(format!("Eigenvalue computation failed: {}", e))
-    })?;
+    let (eigenvalues, _) = eig_symmetric(&m.view())
+        .map_err(|e| EconError::Internal(format!("Eigenvalue computation failed: {}", e)))?;
 
     Ok(eigenvalues.to_vec())
 }
@@ -530,11 +522,7 @@ fn compute_pillai_trace(
     s: usize,
 ) -> ManovaTestResult {
     // Pillai's trace = sum of λᵢ/(1+λᵢ) for i=1..s
-    let trace: f64 = eigenvalues
-        .iter()
-        .take(s)
-        .map(|&e| e / (1.0 + e))
-        .sum();
+    let trace: f64 = eigenvalues.iter().take(s).map(|&e| e / (1.0 + e)).sum();
 
     // F approximation
     // s = min(p, v_h)
@@ -607,7 +595,7 @@ fn compute_hotelling_lawley(
     let df1 = s_f * (2.0 * m + s_f + 1.0);
     let df2 = 2.0 * (s_f * n + 1.0);
 
-    let f_value = if df1 > 0.0 {
+    let _f_value = if df1 > 0.0 {
         (df2 / (s_f * s_f * (2.0 * m + s_f + 1.0))) * trace * s_f
     } else {
         0.0
@@ -702,16 +690,16 @@ fn compute_roy_largest_root(
 /// let result = run_manova(&dataset, &["score1", "score2", "score3"], "treatment")?;
 /// println!("Pillai's Trace: {:.4}, p = {:.4}", result.pillai.statistic, result.pillai.p_value);
 /// ```
-pub fn run_manova(
-    dataset: &Dataset,
-    y_cols: &[&str],
-    group_col: &str,
-) -> EconResult<ManovaResult> {
+pub fn run_manova(dataset: &Dataset, y_cols: &[&str], group_col: &str) -> EconResult<ManovaResult> {
     let df = dataset.df();
     let n = df.height();
 
     // Get available columns for error messages
-    let available_cols: Vec<String> = df.get_column_names().iter().map(|s| s.to_string()).collect();
+    let available_cols: Vec<String> = df
+        .get_column_names()
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
 
     // Validate columns exist
     for col in y_cols {
@@ -749,10 +737,12 @@ pub fn run_manova(
     }
 
     // Extract group labels
-    let group_col_data = df.column(group_col).map_err(|_| EconError::ColumnNotFound {
-        column: group_col.to_string(),
-        available: available_cols.clone(),
-    })?;
+    let group_col_data = df
+        .column(group_col)
+        .map_err(|_| EconError::ColumnNotFound {
+            column: group_col.to_string(),
+            available: available_cols.clone(),
+        })?;
 
     let groups: Vec<String> = (0..n)
         .map(|i| {
@@ -815,19 +805,19 @@ mod tests {
         let y = array![
             // Group A: y1 around 1, y2 around 8, independent noise
             [1.0, 8.0],
-            [1.5, 8.5],  // y1 up, y2 up
-            [0.5, 7.5],  // y1 down, y2 down
-            [1.3, 7.7],  // y1 up, y2 down - breaks correlation
+            [1.5, 8.5], // y1 up, y2 up
+            [0.5, 7.5], // y1 down, y2 down
+            [1.3, 7.7], // y1 up, y2 down - breaks correlation
             // Group B: y1 around 5, y2 around 4
             [5.0, 4.0],
             [5.5, 4.5],
             [4.5, 3.5],
-            [4.7, 4.3],  // y1 down, y2 up - breaks correlation
+            [4.7, 4.3], // y1 down, y2 up - breaks correlation
             // Group C: y1 around 9, y2 around 1
             [9.0, 1.0],
             [9.5, 1.5],
             [8.5, 0.5],
-            [8.7, 1.3]   // y1 down, y2 up - breaks correlation
+            [8.7, 1.3] // y1 down, y2 up - breaks correlation
         ];
         let groups = vec!["A", "A", "A", "A", "B", "B", "B", "B", "C", "C", "C", "C"];
 
@@ -838,7 +828,11 @@ mod tests {
         assert_eq!(result.df_error, 9);
 
         // Clear group separation should be significant
-        assert!(result.pillai.p_value < 0.05, "Pillai should be significant, got p={}", result.pillai.p_value);
+        assert!(
+            result.pillai.p_value < 0.05,
+            "Pillai should be significant, got p={}",
+            result.pillai.p_value
+        );
     }
 
     #[test]
@@ -874,7 +868,10 @@ mod tests {
         // E⁻¹H = (1/2)H = [[2, 1], [1, 2]]
         // Eigenvalues of this are 3 and 1
         assert_eq!(eigenvalues.len(), 2);
-        let max_ev = eigenvalues.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let max_ev = eigenvalues
+            .iter()
+            .cloned()
+            .fold(f64::NEG_INFINITY, f64::max);
         let min_ev = eigenvalues.iter().cloned().fold(f64::INFINITY, f64::min);
         assert!((max_ev - 3.0).abs() < 0.001);
         assert!((min_ev - 1.0).abs() < 0.001);
@@ -954,9 +951,21 @@ mod tests {
         // y1: A~1, B~5, C~9 (increasing)
         // y2: A~8, B~4, C~1 (decreasing)
 
-        assert!(result.wilks.statistic < 0.1, "Wilks Lambda should be small for separated groups, got {}", result.wilks.statistic);
-        assert!(result.wilks.p_value < 0.05, "Wilks test should be significant, got p={}", result.wilks.p_value);
-        assert!(result.pillai.p_value < 0.05, "Pillai test should be significant, got p={}", result.pillai.p_value);
+        assert!(
+            result.wilks.statistic < 0.1,
+            "Wilks Lambda should be small for separated groups, got {}",
+            result.wilks.statistic
+        );
+        assert!(
+            result.wilks.p_value < 0.05,
+            "Wilks test should be significant, got p={}",
+            result.wilks.p_value
+        );
+        assert!(
+            result.pillai.p_value < 0.05,
+            "Pillai test should be significant, got p={}",
+            result.pillai.p_value
+        );
 
         // Check that eigenvalues are positive
         for ev in &result.eigenvalues {

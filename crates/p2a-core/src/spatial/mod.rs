@@ -29,23 +29,25 @@
 //! let result = moran_test(&y, &listw, MoranAlternative::TwoSided)?;
 //! ```
 
+mod diagnostics;
 mod neighbors;
 mod weights;
-mod diagnostics;
 
-pub use neighbors::{
-    Neighbors, NeighborMethod,
-};
-pub use weights::{
-    SpatialWeights, WeightStyle, SparseWeights,
-};
 pub use diagnostics::{
-    MoranResult, GearyResult, SpatialLmTests, LmTestResult,
-    MoranAlternative,
-    moran_test, moran_test_residuals,
-    geary_test,
-    spatial_lm_tests,
+    GearyResult,
     // Local Moran's I (LISA)
-    LisaCluster, LocalMoranObs, LocalMoranResult,
+    LisaCluster,
+    LmTestResult,
+    LocalMoranObs,
+    LocalMoranResult,
+    MoranAlternative,
+    MoranResult,
+    SpatialLmTests,
+    geary_test,
     localmoran,
+    moran_test,
+    moran_test_residuals,
+    spatial_lm_tests,
 };
+pub use neighbors::{NeighborMethod, Neighbors};
+pub use weights::{SparseWeights, SpatialWeights, WeightStyle};

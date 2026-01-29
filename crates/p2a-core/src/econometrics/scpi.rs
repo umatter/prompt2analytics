@@ -40,13 +40,12 @@
 //!     Source: <https://nppackages.github.io/scpi/>
 //!     CRAN: <https://cran.r-project.org/package=scpi>
 
-use ndarray::{s, Array1, Array2, ArrayView1, ArrayView2, Axis};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2, Axis, s};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
 use crate::errors::{EconError, EconResult};
-use crate::linalg::matrix_ops::{xtx, xty, cholesky_inverse, solve};
-use crate::stats::constroptim::{constr_optim, ConstrOptimConfig, OptimMethod};
+use crate::linalg::matrix_ops::{cholesky_inverse, xtx, xty};
 use crate::traits::estimator::SignificanceLevel;
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -57,11 +56,12 @@ use crate::traits::estimator::SignificanceLevel;
 ///
 /// Different constraint types offer trade-offs between interpretability,
 /// sparsity, and bias-variance.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub enum SCPIConstraint {
     /// Simplex constraint: weights sum to 1 and are non-negative.
     /// This is the classic synthetic control constraint (Abadie et al., 2010).
     /// Most interpretable but may have high variance with many donors.
+    #[default]
     Simplex,
 
     /// Lasso (L1) penalty: λ||w||₁.
@@ -86,12 +86,6 @@ pub enum SCPIConstraint {
         /// L1 regularization parameter
         lambda: f64,
     },
-}
-
-impl Default for SCPIConstraint {
-    fn default() -> Self {
-        SCPIConstraint::Simplex
-    }
 }
 
 /// Configuration for SCPI estimation.
@@ -272,7 +266,11 @@ impl fmt::Display for SCPIResult {
         writeln!(f, "  Post-treatment periods: {}", self.n_post_periods)?;
         writeln!(f, "  Donor pool size: {}", self.n_donors)?;
         writeln!(f, "  Effective donors: {}", self.n_effective_donors)?;
-        writeln!(f, "  Significance level: {:.0}%", (1.0 - self.alpha) * 100.0)?;
+        writeln!(
+            f,
+            "  Significance level: {:.0}%",
+            (1.0 - self.alpha) * 100.0
+        )?;
         writeln!(f)?;
 
         writeln!(f, "Pre-Treatment Fit:")?;
@@ -292,10 +290,16 @@ impl fmt::Display for SCPIResult {
         }
         writeln!(f)?;
 
-        writeln!(f, "Treatment Effects with {}% Prediction Intervals:",
-                 ((1.0 - self.alpha) * 100.0) as i32)?;
-        writeln!(f, "{:>8} {:>12} {:>12} {:>12} {:>12}",
-                 "Period", "Effect", "Std.Err", "Lower", "Upper")?;
+        writeln!(
+            f,
+            "Treatment Effects with {}% Prediction Intervals:",
+            ((1.0 - self.alpha) * 100.0) as i32
+        )?;
+        writeln!(
+            f,
+            "{:>8} {:>12} {:>12} {:>12} {:>12}",
+            "Period", "Effect", "Std.Err", "Lower", "Upper"
+        )?;
         writeln!(f, "{}", "-".repeat(60))?;
 
         let sig = SignificanceLevel::from_p_value(self.alpha);
@@ -310,8 +314,11 @@ impl fmt::Display for SCPIResult {
                 ""
             };
 
-            writeln!(f, "{:>8} {:>12.4} {:>12.4} {:>12.4} {:>12.4}{}",
-                     pi.period, effect, se, pi.lower, pi.upper, star)?;
+            writeln!(
+                f,
+                "{:>8} {:>12.4} {:>12.4} {:>12.4} {:>12.4}{}",
+                pi.period, effect, se, pi.lower, pi.upper, star
+            )?;
         }
 
         Ok(())
@@ -399,7 +406,8 @@ pub fn run_scpi(
 
     if treatment_period == 0 {
         return Err(EconError::InvalidSpecification {
-            message: "Treatment period must be > 0 (need at least one pre-treatment period)".to_string(),
+            message: "Treatment period must be > 0 (need at least one pre-treatment period)"
+                .to_string(),
         });
     }
 
@@ -452,8 +460,12 @@ pub fn run_scpi(
 
     // Full synthetic series
     let mut synthetic = Array1::zeros(t_total);
-    synthetic.slice_mut(s![..treatment_period]).assign(&synthetic_pre);
-    synthetic.slice_mut(s![treatment_period..]).assign(&synthetic_post);
+    synthetic
+        .slice_mut(s![..treatment_period])
+        .assign(&synthetic_pre);
+    synthetic
+        .slice_mut(s![treatment_period..])
+        .assign(&synthetic_post);
 
     // Treatment effects (post-treatment only)
     let effect = &y_post - &synthetic_post;
@@ -578,20 +590,14 @@ fn estimate_weights(
     max_iter: usize,
     tolerance: f64,
 ) -> EconResult<Array1<f64>> {
-    let n = x.ncols();
+    let _n = x.ncols();
 
     match constraint {
-        SCPIConstraint::Simplex => {
-            solve_simplex_weights(y, x, max_iter, tolerance)
-        }
+        SCPIConstraint::Simplex => solve_simplex_weights(y, x, max_iter, tolerance),
 
-        SCPIConstraint::Lasso { lambda } => {
-            solve_lasso_weights(y, x, *lambda, max_iter, tolerance)
-        }
+        SCPIConstraint::Lasso { lambda } => solve_lasso_weights(y, x, *lambda, max_iter, tolerance),
 
-        SCPIConstraint::Ridge { lambda } => {
-            solve_ridge_weights(y, x, *lambda)
-        }
+        SCPIConstraint::Ridge { lambda } => solve_ridge_weights(y, x, *lambda),
 
         SCPIConstraint::LassoSimplex { lambda } => {
             solve_lasso_simplex_weights(y, x, *lambda, max_iter, tolerance)
@@ -614,8 +620,8 @@ fn solve_simplex_weights(
 
     // QP: min 0.5 * w' * H * w + c' * w
     // H = X'X, c = -X'y
-    let h = xtx(&x);
-    let c = -xty(&x, &y.to_owned());
+    let h = xtx(x);
+    let c = -xty(x, &y.to_owned());
 
     // Add small regularization for numerical stability
     let mut h_reg = h.clone();
@@ -649,7 +655,11 @@ fn solve_simplex_weights(
         let hd = h_reg.dot(&direction);
         let d_h_d: f64 = direction.iter().zip(hd.iter()).map(|(&d, &h)| d * h).sum();
         let hw_c = h_reg.dot(&w) + &c;
-        let d_hw_c: f64 = direction.iter().zip(hw_c.iter()).map(|(&d, &h)| d * h).sum();
+        let d_hw_c: f64 = direction
+            .iter()
+            .zip(hw_c.iter())
+            .map(|(&d, &h)| d * h)
+            .sum();
 
         let alpha = if d_h_d.abs() > 1e-12 {
             (-d_hw_c / d_h_d).clamp(0.0, 1.0)
@@ -661,7 +671,11 @@ fn solve_simplex_weights(
         let w_new = &w + &(&direction * alpha);
 
         // Check convergence
-        let change: f64 = w_new.iter().zip(w.iter()).map(|(&a, &b)| (a - b).abs()).sum();
+        let change: f64 = w_new
+            .iter()
+            .zip(w.iter())
+            .map(|(&a, &b)| (a - b).abs())
+            .sum();
         w = w_new;
 
         if change < tolerance {
@@ -699,7 +713,7 @@ fn solve_lasso_weights(
         .map(|j| x.column(j).iter().map(|v| v * v).sum())
         .collect();
 
-    let xy: Vec<f64> = (0..n)
+    let _xy: Vec<f64> = (0..n)
         .map(|j| x.column(j).iter().zip(y.iter()).map(|(&x, &y)| x * y).sum())
         .collect();
 
@@ -727,7 +741,11 @@ fn solve_lasso_weights(
         }
 
         // Check convergence
-        let change: f64 = w.iter().zip(w_old.iter()).map(|(&a, &b)| (a - b).abs()).sum();
+        let change: f64 = w
+            .iter()
+            .zip(w_old.iter())
+            .map(|(&a, &b)| (a - b).abs())
+            .sum();
         if change < tolerance {
             break;
         }
@@ -761,7 +779,7 @@ fn solve_ridge_weights(
     let n = x.ncols();
 
     // X'X + λI
-    let mut xtx_reg = xtx(&x);
+    let mut xtx_reg = xtx(x);
     for i in 0..n {
         xtx_reg[[i, i]] += lambda;
     }
@@ -769,12 +787,13 @@ fn solve_ridge_weights(
     // (X'X + λI)⁻¹
     let xtx_inv = cholesky_inverse(&xtx_reg.view()).map_err(|e| {
         EconError::Computation(format!(
-            "Ridge weight estimation failed: Matrix inversion error: {:?}", e
+            "Ridge weight estimation failed: Matrix inversion error: {:?}",
+            e
         ))
     })?;
 
     // X'y
-    let xy = xty(&x, &y.to_owned());
+    let xy = xty(x, &y.to_owned());
 
     // w = (X'X + λI)⁻¹ X'y
     let w = xtx_inv.dot(&xy);
@@ -796,8 +815,8 @@ fn solve_lasso_simplex_weights(
     let rho = 1.0; // ADMM penalty parameter
 
     // Precompute matrices
-    let xtx_mat = xtx(&x);
-    let xy = xty(&x, &y.to_owned());
+    let xtx_mat = xtx(x);
+    let xy = xty(x, &y.to_owned());
 
     // (X'X + ρI)⁻¹
     let mut a_inv_mat = xtx_mat.clone();
@@ -806,7 +825,8 @@ fn solve_lasso_simplex_weights(
     }
     let a_inv = cholesky_inverse(&a_inv_mat.view()).map_err(|e| {
         EconError::Computation(format!(
-            "Lasso-simplex weight estimation failed: Matrix inversion error: {:?}", e
+            "Lasso-simplex weight estimation failed: Matrix inversion error: {:?}",
+            e
         ))
     })?;
 
@@ -850,7 +870,7 @@ fn solve_lasso_simplex_weights(
 ///
 /// Uses Duchi et al. (2008) algorithm.
 fn project_to_simplex(v: &Array1<f64>) -> Array1<f64> {
-    let n = v.len();
+    let _n = v.len();
 
     // Sort in descending order
     let mut sorted: Vec<(usize, f64)> = v.iter().cloned().enumerate().collect();
@@ -963,12 +983,9 @@ fn compute_out_sample_variance(
                 }
 
                 // Re-estimate weights (using simplex by default for LOO)
-                if let Ok(w_loo) = solve_simplex_weights(
-                    &y_train.view(),
-                    &x_train.view(),
-                    1000,
-                    1e-8,
-                ) {
+                if let Ok(w_loo) =
+                    solve_simplex_weights(&y_train.view(), &x_train.view(), 1000, 1e-8)
+                {
                     let pred = x.row(i).dot(&w_loo);
                     let error = y[i] - pred;
                     cv_errors.push(error * error);
@@ -977,7 +994,7 @@ fn compute_out_sample_variance(
 
             if cv_errors.is_empty() {
                 return Err(EconError::Computation(
-                    "LOO-CV variance estimation failed: No valid CV folds".to_string()
+                    "LOO-CV variance estimation failed: No valid CV folds".to_string(),
                 ));
             }
 
@@ -987,7 +1004,7 @@ fn compute_out_sample_variance(
 
         VarianceMethod::KFoldCv => {
             // K-fold cross-validation
-            let fold_size = (t + cv_folds - 1) / cv_folds;
+            let fold_size = t.div_ceil(cv_folds);
             let mut cv_errors = Vec::new();
 
             for fold in 0..cv_folds {
@@ -1000,7 +1017,8 @@ fn compute_out_sample_variance(
 
                 // Split into train/test
                 let test_indices: Vec<usize> = (start..end).collect();
-                let train_indices: Vec<usize> = (0..t).filter(|i| !test_indices.contains(i)).collect();
+                let train_indices: Vec<usize> =
+                    (0..t).filter(|i| !test_indices.contains(i)).collect();
 
                 if train_indices.is_empty() {
                     continue;
@@ -1013,12 +1031,9 @@ fn compute_out_sample_variance(
                 }
 
                 // Re-estimate weights
-                if let Ok(w_fold) = solve_simplex_weights(
-                    &y_train.view(),
-                    &x_train.view(),
-                    1000,
-                    1e-8,
-                ) {
+                if let Ok(w_fold) =
+                    solve_simplex_weights(&y_train.view(), &x_train.view(), 1000, 1e-8)
+                {
                     // Compute test errors
                     for &test_idx in &test_indices {
                         let pred = x.row(test_idx).dot(&w_fold);
@@ -1030,7 +1045,7 @@ fn compute_out_sample_variance(
 
             if cv_errors.is_empty() {
                 return Err(EconError::Computation(
-                    "K-fold CV variance estimation failed: No valid CV folds".to_string()
+                    "K-fold CV variance estimation failed: No valid CV folds".to_string(),
                 ));
             }
 
@@ -1059,7 +1074,7 @@ fn compute_t_critical(alpha: f64, df: usize) -> f64 {
     let z = compute_z_critical(alpha);
 
     // Cornish-Fisher expansion approximation
-    let g1 = 0.0; // Skewness = 0 for t
+    let _g1 = 0.0; // Skewness = 0 for t
     let g2 = 6.0 / df as f64; // Excess kurtosis ≈ 6/df
 
     z + g2 * (z * z - 1.0) / 24.0
@@ -1083,9 +1098,7 @@ fn compute_z_critical(alpha: f64) -> f64 {
     let d2 = 0.189269;
     let d3 = 0.001308;
 
-    let z = t - (c0 + c1 * t + c2 * t * t) / (1.0 + d1 * t + d2 * t * t + d3 * t * t * t);
-
-    z
+    t - (c0 + c1 * t + c2 * t * t) / (1.0 + d1 * t + d2 * t * t + d3 * t * t * t)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1095,15 +1108,15 @@ fn compute_z_critical(alpha: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ndarray::{array, Array2};
     use approx::assert_relative_eq;
+    use ndarray::{Array2, array};
 
     fn generate_test_data() -> (Array1<f64>, Array2<f64>) {
         // Generate simple test data
         // Treated unit: trend + treatment effect after period 7
         let treated = array![
-            10.0, 11.5, 12.8, 14.1, 15.5, 16.9, 18.2,  // Pre-treatment
-            22.0, 23.5, 25.0                            // Post-treatment (with +3 effect)
+            10.0, 11.5, 12.8, 14.1, 15.5, 16.9, 18.2, // Pre-treatment
+            22.0, 23.5, 25.0 // Post-treatment (with +3 effect)
         ];
 
         // Donors: similar trends
@@ -1262,15 +1275,27 @@ mod tests {
         // Check approximate critical values
         // Note: These are approximations; exact values require special functions
         let z_95 = compute_z_critical(0.025);
-        assert!(z_95 > 1.9 && z_95 < 2.1, "z_0.025 should be ~1.96, got {}", z_95);
+        assert!(
+            z_95 > 1.9 && z_95 < 2.1,
+            "z_0.025 should be ~1.96, got {}",
+            z_95
+        );
 
         // The t-distribution approximation is less accurate for small df
         // True t_10,0.025 ≈ 2.228, our approximation is simpler
         let t_10_95 = compute_t_critical(0.025, 10);
-        assert!(t_10_95 > 1.9 && t_10_95 < 2.5, "t_10,0.025 should be ~2.23, got {}", t_10_95);
+        assert!(
+            t_10_95 > 1.9 && t_10_95 < 2.5,
+            "t_10,0.025 should be ~2.23, got {}",
+            t_10_95
+        );
 
         // For large df, should approach z
         let t_100_95 = compute_t_critical(0.025, 100);
-        assert!((t_100_95 - z_95).abs() < 0.1, "t_100 should be close to z, got {}", t_100_95);
+        assert!(
+            (t_100_95 - z_95).abs() < 0.1,
+            "t_100 should be close to z, got {}",
+            t_100_95
+        );
     }
 }

@@ -62,8 +62,8 @@ pub trait HttpClient {
 #[cfg(target_arch = "wasm32")]
 mod web {
     use super::*;
-    use wasm_bindgen::prelude::*;
     use wasm_bindgen::JsCast;
+    use wasm_bindgen::prelude::*;
     use wasm_bindgen_futures::JsFuture;
     use web_sys::{Request, RequestInit, RequestMode, Response};
 
@@ -109,7 +109,8 @@ mod web {
                     .map_err(|e| HttpError(format!("Failed to set header {}: {e:?}", key)))?;
             }
 
-            let window = web_sys::window().ok_or_else(|| HttpError("No window object".to_string()))?;
+            let window =
+                web_sys::window().ok_or_else(|| HttpError("No window object".to_string()))?;
             let resp_value = JsFuture::from(window.fetch_with_request(&request))
                 .await
                 .map_err(|e| HttpError(format!("Fetch error: {e:?}")))?;

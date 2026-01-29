@@ -4,7 +4,7 @@
 //! functions to construct symmetric and asymmetric Toeplitz matrices, matching
 //! R's `toeplitz()` function.
 
-use ndarray::{Array1, Array2};
+use ndarray::Array2;
 
 /// Result type for Toeplitz matrix operations.
 pub type ToeplitzResult<T> = Result<T, String>;
@@ -41,7 +41,7 @@ pub fn toeplitz(x: &[f64]) -> ToeplitzResult<Array2<f64>> {
 
     for i in 0..n {
         for j in 0..n {
-            let idx = if i > j { i - j } else { j - i };
+            let idx = i.abs_diff(j);
             mat[[i, j]] = x[idx];
         }
     }
@@ -152,7 +152,7 @@ pub fn toeplitz2(
         }
         (None, None) => {
             // Default to square matrix if possible
-            let side = (len + 1) / 2;
+            let side = len.div_ceil(2);
             (side, len + 1 - side)
         }
     };

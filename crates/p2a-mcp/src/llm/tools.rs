@@ -146,10 +146,7 @@ pub fn get_system_prompt_with_context(dataset_context: Option<&str>) -> String {
 
     match dataset_context {
         Some(context) if !context.is_empty() => {
-            format!(
-                "{}\n\n## Currently Loaded Datasets\n\n{}",
-                base, context
-            )
+            format!("{}\n\n## Currently Loaded Datasets\n\n{}", base, context)
         }
         _ => base.to_string(),
     }
@@ -739,7 +736,11 @@ mod tests {
     #[test]
     fn test_tool_definitions_complete() {
         let tools = get_mcp_tool_definitions();
-        assert!(tools.len() >= 20, "Expected at least 20 tools, got {}", tools.len());
+        assert!(
+            tools.len() >= 20,
+            "Expected at least 20 tools, got {}",
+            tools.len()
+        );
 
         let tool_names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
         assert!(tool_names.contains(&"load_dataset"));

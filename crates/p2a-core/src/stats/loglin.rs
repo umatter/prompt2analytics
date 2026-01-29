@@ -59,7 +59,11 @@ impl std::fmt::Display for LoglinResult {
         writeln!(f, "  Pearson Chi-squared (X²):   {:.4}", self.pearson)?;
         writeln!(f, "  Degrees of freedom:         {}", self.df)?;
         writeln!(f, "  P-value (LRT):              {:.4}", self.p_value_lrt)?;
-        writeln!(f, "  P-value (Pearson):          {:.4}", self.p_value_pearson)?;
+        writeln!(
+            f,
+            "  P-value (Pearson):          {:.4}",
+            self.p_value_pearson
+        )?;
         writeln!(f)?;
         writeln!(f, "Convergence:")?;
         writeln!(f, "  Converged: {}", self.converged)?;
@@ -67,7 +71,11 @@ impl std::fmt::Display for LoglinResult {
         writeln!(f)?;
 
         // Show interpretation
-        let sig = if self.p_value_lrt < 0.05 { "significant" } else { "not significant" };
+        let sig = if self.p_value_lrt < 0.05 {
+            "significant"
+        } else {
+            "not significant"
+        };
         writeln!(f, "Interpretation:")?;
         writeln!(
             f,
@@ -77,7 +85,10 @@ impl std::fmt::Display for LoglinResult {
         if self.p_value_lrt >= 0.05 {
             writeln!(f, "  This suggests the model adequately fits the data.")?;
         } else {
-            writeln!(f, "  This suggests the model does not adequately fit the data.")?;
+            writeln!(
+                f,
+                "  This suggests the model does not adequately fit the data."
+            )?;
         }
 
         Ok(())
@@ -309,7 +320,8 @@ fn compute_degrees_of_freedom(
     let mut n_params = 1; // grand mean
 
     // Collect unique effects
-    let mut counted_effects: std::collections::HashSet<Vec<usize>> = std::collections::HashSet::new();
+    let mut counted_effects: std::collections::HashSet<Vec<usize>> =
+        std::collections::HashSet::new();
 
     for margin in margins {
         // Add parameters for this margin and all its sub-margins
@@ -322,15 +334,15 @@ fn compute_degrees_of_freedom(
     }
 
     // df = n_cells - 1 - (n_params - 1) = n_cells - n_params
-    if n_params >= n_cells {
-        0
-    } else {
-        n_cells - n_params
-    }
+    n_cells.saturating_sub(n_params)
 }
 
 /// Add a margin and all its sub-margins to the set of effects.
-fn add_margin_params(effects: &mut std::collections::HashSet<Vec<usize>>, margin: &[usize], _dimensions: &[usize]) {
+fn add_margin_params(
+    effects: &mut std::collections::HashSet<Vec<usize>>,
+    margin: &[usize],
+    _dimensions: &[usize],
+) {
     // Add all subsets of the margin (including the margin itself)
     let n = margin.len();
     for mask in 1..(1 << n) {
@@ -349,7 +361,11 @@ fn add_margin_params(effects: &mut std::collections::HashSet<Vec<usize>>, margin
 ///
 /// This is a convenience function for the common case of testing
 /// independence in a 2D contingency table.
-pub fn loglin_independence(table: &[f64], n_rows: usize, n_cols: usize) -> Result<LoglinResult, String> {
+pub fn loglin_independence(
+    table: &[f64],
+    n_rows: usize,
+    n_cols: usize,
+) -> Result<LoglinResult, String> {
     let dimensions = vec![n_rows, n_cols];
     // Independence model: only main effects (no interaction)
     let margins = vec![vec![0], vec![1]];
@@ -405,7 +421,11 @@ mod tests {
 
         // G² and X² should be near 0 for perfect independence
         assert!(result.lrt < 1e-10, "LRT should be ~0, got {}", result.lrt);
-        assert!(result.pearson < 1e-10, "Pearson should be ~0, got {}", result.pearson);
+        assert!(
+            result.pearson < 1e-10,
+            "Pearson should be ~0, got {}",
+            result.pearson
+        );
         assert!(result.p_value_lrt > 0.99);
     }
 
@@ -413,10 +433,10 @@ mod tests {
     fn test_loglin_3way() {
         // 2x2x2 table
         let observed = vec![
-            10.0, 20.0,  // [0,0,*]
-            30.0, 40.0,  // [0,1,*]
-            15.0, 25.0,  // [1,0,*]
-            35.0, 45.0,  // [1,1,*]
+            10.0, 20.0, // [0,0,*]
+            30.0, 40.0, // [0,1,*]
+            15.0, 25.0, // [1,0,*]
+            35.0, 45.0, // [1,1,*]
         ];
         let dimensions = vec![2, 2, 2];
 
@@ -463,8 +483,8 @@ mod tests {
     fn test_compute_margin() {
         // 2x3 table
         let table = vec![
-            1.0, 2.0, 3.0,  // row 0
-            4.0, 5.0, 6.0,  // row 1
+            1.0, 2.0, 3.0, // row 0
+            4.0, 5.0, 6.0, // row 1
         ];
         let dims = vec![2, 3];
 

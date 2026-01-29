@@ -1,12 +1,12 @@
 //! Data loading and inspection commands
 
 use clap::Subcommand;
-use p2a_core::{Dataset, DataLoader};
-use p2a_core::simulation::{generate_random_data, ColumnSpec, Distribution};
+use p2a_core::simulation::{ColumnSpec, Distribution, generate_random_data};
+use p2a_core::{DataLoader, Dataset};
 use polars::prelude::*;
 use std::path::PathBuf;
 
-use crate::output::{format_dataset_summary, print_error, print_message, OutputFormat};
+use crate::output::{OutputFormat, format_dataset_summary, print_error, print_message};
 use crate::session::SessionManager;
 
 #[derive(Subcommand)]
@@ -81,18 +81,21 @@ pub fn execute(
     session: Option<&mut SessionManager>,
 ) -> anyhow::Result<()> {
     match cmd {
-        DataCommands::Load { path, name } => {
-            execute_load(path, name.as_deref(), format, session)
-        }
+        DataCommands::Load { path, name } => execute_load(path, name.as_deref(), format, session),
         DataCommands::List => execute_list(format, session),
         DataCommands::Describe { dataset } => execute_describe(dataset, format, session),
         DataCommands::Head { dataset, n } => execute_head(dataset, *n, format, session),
-        DataCommands::Generate { rows, name, columns, seed } => {
-            execute_generate(*rows, name, columns, *seed, format, session)
-        }
-        DataCommands::Save { dataset, output, format: fmt } => {
-            execute_save(dataset, output, fmt.as_deref(), format, session)
-        }
+        DataCommands::Generate {
+            rows,
+            name,
+            columns,
+            seed,
+        } => execute_generate(*rows, name, columns, *seed, format, session),
+        DataCommands::Save {
+            dataset,
+            output,
+            format: fmt,
+        } => execute_save(dataset, output, fmt.as_deref(), format, session),
     }
 }
 
@@ -103,14 +106,12 @@ fn execute_load(
     session: Option<&mut SessionManager>,
 ) -> anyhow::Result<()> {
     // Determine dataset name from filename if not provided
-    let dataset_name = name
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| {
-            path.file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("dataset")
-                .to_string()
-        });
+    let dataset_name = name.map(|s| s.to_string()).unwrap_or_else(|| {
+        path.file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("dataset")
+            .to_string()
+    });
 
     // Determine file format from extension
     let extension = path
@@ -127,10 +128,7 @@ fn execute_load(
         "dta" => DataLoader::load_stata(path)?,
         "sas7bdat" => DataLoader::load_sas(path)?,
         _ => {
-            print_error(
-                &format!("Unsupported file format: {}", extension),
-                format,
-            );
+            print_error(&format!("Unsupported file format: {}", extension), format);
             return Ok(());
         }
     };
@@ -349,7 +347,10 @@ fn execute_generate(
             Ok(d) => d,
             Err(e) => {
                 print_error(
-                    &format!("Invalid distribution for column '{}': {}", col_input.name, e),
+                    &format!(
+                        "Invalid distribution for column '{}': {}",
+                        col_input.name, e
+                    ),
                     format,
                 );
                 return Ok(());
@@ -439,21 +440,19 @@ fn execute_save(
     };
 
     // Determine format from option or extension
-    let output_format = fmt.or_else(|| {
-        output
-            .extension()
-            .and_then(|ext| ext.to_str())
-    });
+    let output_format = fmt.or_else(|| output.extension().and_then(|ext| ext.to_str()));
 
     let result: Result<&str, String> = match output_format {
         Some("csv") => ds.to_csv(output).map(|_| "CSV").map_err(|e| e.to_string()),
-        Some("parquet") => ds.to_parquet(output).map(|_| "Parquet").map_err(|e| e.to_string()),
-        Some("json") => {
-            ds.to_json_string()
-                .map_err(|e| e.to_string())
-                .and_then(|json| std::fs::write(output, json).map_err(|e| e.to_string()))
-                .map(|_| "JSON")
-        }
+        Some("parquet") => ds
+            .to_parquet(output)
+            .map(|_| "Parquet")
+            .map_err(|e| e.to_string()),
+        Some("json") => ds
+            .to_json_string()
+            .map_err(|e| e.to_string())
+            .and_then(|json| std::fs::write(output, json).map_err(|e| e.to_string()))
+            .map(|_| "JSON"),
         Some(other) => {
             print_error(
                 &format!("Unsupported format '{}'. Use csv, parquet, or json.", other),
@@ -471,29 +470,27 @@ fn execute_save(
     };
 
     match result {
-        Ok(fmt_name) => {
-            match format {
-                OutputFormat::Json => {
-                    let json = serde_json::json!({
-                        "dataset": dataset_name,
-                        "path": output.display().to_string(),
-                        "format": fmt_name,
-                        "rows": ds.nrows(),
-                        "columns": ds.ncols(),
-                    });
-                    println!("{}", serde_json::to_string_pretty(&json)?);
-                }
-                _ => {
-                    println!(
-                        "Successfully exported dataset '{}' to {} format",
-                        dataset_name, fmt_name
-                    );
-                    println!("  Path: {}", output.display());
-                    println!("  Rows: {}", ds.nrows());
-                    println!("  Columns: {}", ds.ncols());
-                }
+        Ok(fmt_name) => match format {
+            OutputFormat::Json => {
+                let json = serde_json::json!({
+                    "dataset": dataset_name,
+                    "path": output.display().to_string(),
+                    "format": fmt_name,
+                    "rows": ds.nrows(),
+                    "columns": ds.ncols(),
+                });
+                println!("{}", serde_json::to_string_pretty(&json)?);
             }
-        }
+            _ => {
+                println!(
+                    "Successfully exported dataset '{}' to {} format",
+                    dataset_name, fmt_name
+                );
+                println!("  Path: {}", output.display());
+                println!("  Rows: {}", ds.nrows());
+                println!("  Columns: {}", ds.ncols());
+            }
+        },
         Err(e) => {
             print_error(&format!("Failed to save dataset: {}", e), format);
         }

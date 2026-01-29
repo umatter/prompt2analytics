@@ -60,16 +60,17 @@ use std::sync::Arc;
 
 use crate::errors::{EconError, EconResult};
 use crate::linalg::matrix_ops::{safe_inverse, xtx, xty};
-use crate::traits::estimator::{logistic_cdf, normal_cdf, SignificanceLevel};
+use crate::traits::estimator::{SignificanceLevel, logistic_cdf, normal_cdf};
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Configuration Types
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// Type of intervention in the g-formula.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, Default)]
 pub enum GFormulaIntervention {
     /// Natural course: observe what happens under actual treatment patterns
+    #[default]
     NaturalCourse,
 
     /// Static intervention: always treat (true) or never treat (false)
@@ -94,19 +95,21 @@ impl fmt::Debug for GFormulaIntervention {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NaturalCourse => write!(f, "NaturalCourse"),
-            Self::Static { treat_all } => f.debug_struct("Static").field("treat_all", treat_all).finish(),
-            Self::Threshold { variable_idx, cutoff, above } => f.debug_struct("Threshold")
+            Self::Static { treat_all } => f
+                .debug_struct("Static")
+                .field("treat_all", treat_all)
+                .finish(),
+            Self::Threshold {
+                variable_idx,
+                cutoff,
+                above,
+            } => f
+                .debug_struct("Threshold")
                 .field("variable_idx", variable_idx)
                 .field("cutoff", cutoff)
                 .field("above", above)
                 .finish(),
         }
-    }
-}
-
-impl Default for GFormulaIntervention {
-    fn default() -> Self {
-        Self::NaturalCourse
     }
 }
 
@@ -302,7 +305,6 @@ pub struct GFormulaResult {
     // ═══════════════════════════════════════════════════════════════════════
     // Main Estimates
     // ═══════════════════════════════════════════════════════════════════════
-
     /// Risk (probability of outcome) under natural course
     pub risk_natural: f64,
     /// Risk under the specified intervention
@@ -317,7 +319,6 @@ pub struct GFormulaResult {
     // ═══════════════════════════════════════════════════════════════════════
     // Standard Errors and Confidence Intervals
     // ═══════════════════════════════════════════════════════════════════════
-
     /// Standard error of risk difference (from bootstrap)
     pub se_risk_difference: f64,
     /// Standard error of log(risk ratio) (from bootstrap)
@@ -340,7 +341,6 @@ pub struct GFormulaResult {
     // ═══════════════════════════════════════════════════════════════════════
     // Simulation Details
     // ═══════════════════════════════════════════════════════════════════════
-
     /// Number of Monte Carlo simulations performed
     pub n_simulations: usize,
     /// Number of bootstrap samples used
@@ -355,7 +355,6 @@ pub struct GFormulaResult {
     // ═══════════════════════════════════════════════════════════════════════
     // Diagnostics
     // ═══════════════════════════════════════════════════════════════════════
-
     /// Type of outcome model used
     pub outcome_type: GFormulaOutcomeType,
     /// Intervention description
@@ -368,7 +367,6 @@ pub struct GFormulaResult {
     // ═══════════════════════════════════════════════════════════════════════
     // Detailed Output (optional, for diagnostics)
     // ═══════════════════════════════════════════════════════════════════════
-
     /// Simulated outcomes under natural course (for diagnostics)
     #[serde(skip)]
     pub simulated_natural: Vec<f64>,
@@ -399,14 +397,33 @@ impl fmt::Display for GFormulaResult {
         writeln!(f, "  Intervention:    {:.4}", self.risk_intervention)?;
         writeln!(f)?;
         writeln!(f, "Causal Effects:")?;
-        writeln!(f, "  Risk Difference: {:.4} (SE: {:.4})", self.risk_difference, self.se_risk_difference)?;
-        writeln!(f, "    {:.0}% CI: [{:.4}, {:.4}]",
-                 self.confidence_level * 100.0, self.ci_lower_rd, self.ci_upper_rd)?;
-        writeln!(f, "    p-value: {:.4}{}", self.p_value_rd, self.significance_rd.stars())?;
+        writeln!(
+            f,
+            "  Risk Difference: {:.4} (SE: {:.4})",
+            self.risk_difference, self.se_risk_difference
+        )?;
+        writeln!(
+            f,
+            "    {:.0}% CI: [{:.4}, {:.4}]",
+            self.confidence_level * 100.0,
+            self.ci_lower_rd,
+            self.ci_upper_rd
+        )?;
+        writeln!(
+            f,
+            "    p-value: {:.4}{}",
+            self.p_value_rd,
+            self.significance_rd.stars()
+        )?;
         writeln!(f)?;
         writeln!(f, "  Risk Ratio:      {:.4}", self.risk_ratio)?;
-        writeln!(f, "    {:.0}% CI: [{:.4}, {:.4}]",
-                 self.confidence_level * 100.0, self.ci_lower_rr, self.ci_upper_rr)?;
+        writeln!(
+            f,
+            "    {:.0}% CI: [{:.4}, {:.4}]",
+            self.confidence_level * 100.0,
+            self.ci_lower_rr,
+            self.ci_upper_rr
+        )?;
 
         if self.odds_ratio.is_finite() && self.odds_ratio > 0.0 {
             writeln!(f)?;
@@ -595,7 +612,8 @@ pub fn run_gformula(data: &GFormulaData, config: GFormulaConfig) -> EconResult<G
 
     // Compute risks
     let risk_natural: f64 = outcomes_natural.iter().sum::<f64>() / config.n_simulations as f64;
-    let risk_intervention: f64 = outcomes_intervention.iter().sum::<f64>() / config.n_simulations as f64;
+    let risk_intervention: f64 =
+        outcomes_intervention.iter().sum::<f64>() / config.n_simulations as f64;
 
     let risk_difference = risk_intervention - risk_natural;
     let risk_ratio = if risk_natural > 0.0 {
@@ -604,8 +622,10 @@ pub fn run_gformula(data: &GFormulaData, config: GFormulaConfig) -> EconResult<G
         f64::INFINITY
     };
 
-    let odds_ratio = if risk_natural > 0.0 && risk_natural < 1.0
-        && risk_intervention > 0.0 && risk_intervention < 1.0
+    let odds_ratio = if risk_natural > 0.0
+        && risk_natural < 1.0
+        && risk_intervention > 0.0
+        && risk_intervention < 1.0
     {
         let odds_int = risk_intervention / (1.0 - risk_intervention);
         let odds_nat = risk_natural / (1.0 - risk_natural);
@@ -618,17 +638,10 @@ pub fn run_gformula(data: &GFormulaData, config: GFormulaConfig) -> EconResult<G
     // Stage 3: Bootstrap for Standard Errors
     // ═══════════════════════════════════════════════════════════════════════
 
-    let bootstrap_results = bootstrap_gformula(
-        data,
-        &config,
-        config.n_bootstrap,
-        seed,
-    )?;
+    let bootstrap_results = bootstrap_gformula(data, &config, config.n_bootstrap, seed)?;
 
-    let (se_rd, ci_lower_rd, ci_upper_rd) = compute_bootstrap_ci(
-        &bootstrap_results,
-        config.confidence_level,
-    );
+    let (se_rd, ci_lower_rd, ci_upper_rd) =
+        compute_bootstrap_ci(&bootstrap_results, config.confidence_level);
 
     // SE for log(RR)
     let bootstrap_log_rr: Vec<f64> = bootstrap_results
@@ -645,7 +658,10 @@ pub fn run_gformula(data: &GFormulaData, config: GFormulaConfig) -> EconResult<G
 
     let se_log_rr = if bootstrap_log_rr.len() > 1 {
         let mean: f64 = bootstrap_log_rr.iter().sum::<f64>() / bootstrap_log_rr.len() as f64;
-        let var: f64 = bootstrap_log_rr.iter().map(|x| (x - mean).powi(2)).sum::<f64>()
+        let var: f64 = bootstrap_log_rr
+            .iter()
+            .map(|x| (x - mean).powi(2))
+            .sum::<f64>()
             / (bootstrap_log_rr.len() - 1) as f64;
         var.sqrt()
     } else {
@@ -654,7 +670,11 @@ pub fn run_gformula(data: &GFormulaData, config: GFormulaConfig) -> EconResult<G
 
     // CI for RR (on log scale, then exponentiate)
     let z_crit = compute_z_critical(config.confidence_level);
-    let log_rr = if risk_ratio > 0.0 { risk_ratio.ln() } else { f64::NAN };
+    let log_rr = if risk_ratio > 0.0 {
+        risk_ratio.ln()
+    } else {
+        f64::NAN
+    };
     let ci_lower_rr = (log_rr - z_crit * se_log_rr).exp();
     let ci_upper_rr = (log_rr + z_crit * se_log_rr).exp();
 
@@ -669,10 +689,20 @@ pub fn run_gformula(data: &GFormulaData, config: GFormulaConfig) -> EconResult<G
 
     // Intervention description
     let intervention_description = match &config.intervention {
-        GFormulaIntervention::NaturalCourse => "Natural course (observed treatment patterns)".to_string(),
-        GFormulaIntervention::Static { treat_all: true } => "Always treat (A=1 at all time points)".to_string(),
-        GFormulaIntervention::Static { treat_all: false } => "Never treat (A=0 at all time points)".to_string(),
-        GFormulaIntervention::Threshold { variable_idx, cutoff, above } => {
+        GFormulaIntervention::NaturalCourse => {
+            "Natural course (observed treatment patterns)".to_string()
+        }
+        GFormulaIntervention::Static { treat_all: true } => {
+            "Always treat (A=1 at all time points)".to_string()
+        }
+        GFormulaIntervention::Static { treat_all: false } => {
+            "Never treat (A=0 at all time points)".to_string()
+        }
+        GFormulaIntervention::Threshold {
+            variable_idx,
+            cutoff,
+            above,
+        } => {
             format!(
                 "Treat if L[{}] {} {:.2}",
                 variable_idx,
@@ -852,7 +882,10 @@ fn fit_treatment_models(
         let y = &data.treatments[t];
         let (_, beta, converged, _) = fit_logistic(&x, y, config.max_iter, config.tolerance)?;
 
-        models.push(TreatmentModel { coefficients: beta, converged });
+        models.push(TreatmentModel {
+            coefficients: beta,
+            converged,
+        });
     }
 
     Ok(models)
@@ -860,10 +893,7 @@ fn fit_treatment_models(
 
 /// Fit outcome model.
 /// Y ~ h(L_T, cumulative A, baseline)
-fn fit_outcome_model(
-    data: &GFormulaData,
-    config: &GFormulaConfig,
-) -> EconResult<OutcomeModel> {
+fn fit_outcome_model(data: &GFormulaData, config: &GFormulaConfig) -> EconResult<OutcomeModel> {
     let n = data.n_subjects();
     let t_max = data.n_time_points();
     let n_baseline = data.n_baseline_covars();
@@ -980,7 +1010,8 @@ fn simulate_gformula<R: Rng>(
                 }
 
                 // Predict
-                let linear_pred: f64 = x_pred.iter()
+                let linear_pred: f64 = x_pred
+                    .iter()
                     .zip(cov_model.coefficients[j].iter())
                     .map(|(x, b)| x * b)
                     .sum();
@@ -1016,7 +1047,8 @@ fn simulate_gformula<R: Rng>(
                         x_pred[1 + n_baseline + n_tv] = a_current;
                     }
 
-                    let linear_pred: f64 = x_pred.iter()
+                    let linear_pred: f64 = x_pred
+                        .iter()
                         .zip(trt_model.coefficients.iter())
                         .map(|(x, b)| x * b)
                         .sum();
@@ -1025,9 +1057,17 @@ fn simulate_gformula<R: Rng>(
                     if u < p { 1.0 } else { 0.0 }
                 }
                 GFormulaIntervention::Static { treat_all } => {
-                    if *treat_all { 1.0 } else { 0.0 }
+                    if *treat_all {
+                        1.0
+                    } else {
+                        0.0
+                    }
                 }
-                GFormulaIntervention::Threshold { variable_idx, cutoff, above } => {
+                GFormulaIntervention::Threshold {
+                    variable_idx,
+                    cutoff,
+                    above,
+                } => {
                     let var_val = if *variable_idx < n_tv {
                         l_current[*variable_idx]
                     } else {
@@ -1035,8 +1075,10 @@ fn simulate_gformula<R: Rng>(
                     };
                     if *above {
                         if var_val > *cutoff { 1.0 } else { 0.0 }
+                    } else if var_val <= *cutoff {
+                        1.0
                     } else {
-                        if var_val <= *cutoff { 1.0 } else { 0.0 }
+                        0.0
                     }
                 }
             };
@@ -1060,7 +1102,8 @@ fn simulate_gformula<R: Rng>(
             x_out[1 + n_baseline + n_tv + t_idx] = a_t;
         }
 
-        let linear_pred: f64 = x_out.iter()
+        let linear_pred: f64 = x_out
+            .iter()
             .zip(outcome_model.coefficients.iter())
             .map(|(x, b)| x * b)
             .sum();
@@ -1154,17 +1197,16 @@ fn bootstrap_gformula(
 
     // Collect successful results
     let mut successful_results = Vec::with_capacity(n_bootstrap);
-    for r in results {
-        if let Ok(res) = r {
-            successful_results.push(res);
-        }
+    for res in results.into_iter().flatten() {
+        successful_results.push(res);
     }
 
     if successful_results.len() < n_bootstrap / 2 {
         return Err(EconError::ConvergenceFailure {
             iterations: n_bootstrap,
             last_change: 0.0,
-            suggestion: "More than half of bootstrap samples failed. Check model specification.".to_string(),
+            suggestion: "More than half of bootstrap samples failed. Check model specification."
+                .to_string(),
         });
     }
 
@@ -1184,7 +1226,8 @@ fn resample_data(data: &GFormulaData, indices: &[usize]) -> EconResult<GFormulaD
     }
 
     // Resample time-varying covariates
-    let time_varying: Vec<Array2<f64>> = data.time_varying_covariates
+    let time_varying: Vec<Array2<f64>> = data
+        .time_varying_covariates
         .iter()
         .map(|tvs| {
             let mut new_tvs = Array2::zeros((n, tvs.ncols()));
@@ -1198,7 +1241,8 @@ fn resample_data(data: &GFormulaData, indices: &[usize]) -> EconResult<GFormulaD
         .collect();
 
     // Resample treatments
-    let treatments: Vec<Array1<f64>> = data.treatments
+    let treatments: Vec<Array1<f64>> = data
+        .treatments
         .iter()
         .map(|a| {
             let mut new_a = Array1::zeros(n);
@@ -1238,7 +1282,10 @@ fn compute_bootstrap_ci(
 
     let ci_lower = rd_values.get(lower_idx).copied().unwrap_or(rd_values[0]);
     let ci_upper_idx = upper_idx.min(n - 1);
-    let ci_upper = rd_values.get(ci_upper_idx).copied().unwrap_or(rd_values[n - 1]);
+    let ci_upper = rd_values
+        .get(ci_upper_idx)
+        .copied()
+        .unwrap_or(rd_values[n - 1]);
 
     // Standard error from bootstrap SD
     let mean: f64 = rd_values.iter().sum::<f64>() / n as f64;
@@ -1282,11 +1329,9 @@ fn compute_z_critical(confidence_level: f64) -> f64 {
 /// Returns (coefficients, residual_sd).
 fn fit_linear(x: &Array2<f64>, y: &Array1<f64>) -> EconResult<(Array1<f64>, f64)> {
     let xtx_mat = xtx(&x.view());
-    let (xtx_inv, _) = safe_inverse(&xtx_mat.view()).map_err(|e| {
-        EconError::SingularMatrix {
-            context: "Linear regression in g-formula".to_string(),
-            suggestion: format!("Check for multicollinearity: {:?}", e),
-        }
+    let (xtx_inv, _) = safe_inverse(&xtx_mat.view()).map_err(|e| EconError::SingularMatrix {
+        context: "Linear regression in g-formula".to_string(),
+        suggestion: format!("Check for multicollinearity: {:?}", e),
     })?;
 
     let xty_vec = xty(&x.view(), y);
@@ -1417,16 +1462,15 @@ mod tests {
             a0[i] = if l0[[i, 0]] > 0.15 { 1.0 } else { 0.0 };
             l1[[i, 0]] = 0.2 * l0[[i, 0]] + 0.1 * a0[i] + 0.05 * ((i % 5) as f64 - 2.0) * 0.1;
             a1[i] = if l1[[i, 0]] > 0.05 { 1.0 } else { 0.0 };
-            y[i] = 0.2 * x + 0.3 * l1[[i, 0]] + 0.4 * a0[i] + 0.3 * a1[i] + 0.1 * ((i % 7) as f64 - 3.0) * 0.1;
+            y[i] = 0.2 * x
+                + 0.3 * l1[[i, 0]]
+                + 0.4 * a0[i]
+                + 0.3 * a1[i]
+                + 0.1 * ((i % 7) as f64 - 3.0) * 0.1;
             y[i] = y[i].max(0.0).min(1.0);
         }
 
-        GFormulaData::new(
-            baseline,
-            vec![l0, l1],
-            vec![a0, a1],
-            y,
-        ).unwrap()
+        GFormulaData::new(baseline, vec![l0, l1], vec![a0, a1], y).unwrap()
     }
 
     #[test]

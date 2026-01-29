@@ -32,7 +32,8 @@ fn detect_result_format(result: &str) -> ResultFormat {
     if lines.len() >= 2 {
         let has_pipes = lines.iter().take(3).all(|line| line.contains('|'));
         let has_separator = lines.iter().any(|line| {
-            line.chars().all(|c| c == '-' || c == '|' || c == ' ' || c == ':')
+            line.chars()
+                .all(|c| c == '-' || c == '|' || c == ' ' || c == ':')
                 && line.contains('-')
         });
         if has_pipes && has_separator {
@@ -47,7 +48,11 @@ fn detect_result_format(result: &str) -> ResultFormat {
 fn get_result_preview(result: &str, max_lines: usize) -> (String, bool) {
     let lines: Vec<&str> = result.lines().collect();
     let has_more = lines.len() > max_lines;
-    let preview = lines.into_iter().take(max_lines).collect::<Vec<_>>().join("\n");
+    let preview = lines
+        .into_iter()
+        .take(max_lines)
+        .collect::<Vec<_>>()
+        .join("\n");
     (preview, has_more)
 }
 

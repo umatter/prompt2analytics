@@ -10,7 +10,10 @@ mod session;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
-use commands::{data, munge, regression, panel, causal, discrete, stats, timeseries, survival, ml, viz, script};
+use commands::{
+    causal, data, discrete, ml, munge, panel, regression, script, spatial, stats, survival,
+    timeseries, viz,
+};
 use output::OutputFormat;
 use session::SessionManager;
 
@@ -74,6 +77,10 @@ pub enum Commands {
     #[command(subcommand)]
     Survival(survival::SurvivalCommands),
 
+    /// Spatial econometrics
+    #[command(subcommand)]
+    Spatial(spatial::SpatialCommands),
+
     /// Machine learning
     #[command(subcommand, visible_alias = "ml")]
     MachineLearning(ml::MlCommands),
@@ -104,13 +111,18 @@ fn main() -> anyhow::Result<()> {
     let result = match &cli.command {
         Commands::Data(cmd) => data::execute(cmd, &cli.format, session_manager.as_mut()),
         Commands::Munge(cmd) => munge::execute(cmd, &cli.format, session_manager.as_mut()),
-        Commands::Regression(cmd) => regression::execute(cmd, &cli.format, session_manager.as_mut()),
+        Commands::Regression(cmd) => {
+            regression::execute(cmd, &cli.format, session_manager.as_mut())
+        }
         Commands::Panel(cmd) => panel::execute(cmd, &cli.format, session_manager.as_mut()),
         Commands::Causal(cmd) => causal::execute(cmd, &cli.format, session_manager.as_mut()),
         Commands::Discrete(cmd) => discrete::execute(cmd, &cli.format, session_manager.as_mut()),
         Commands::Stats(cmd) => stats::execute(cmd, &cli.format, session_manager.as_mut()),
-        Commands::Timeseries(cmd) => timeseries::execute(cmd, &cli.format, session_manager.as_mut()),
+        Commands::Timeseries(cmd) => {
+            timeseries::execute(cmd, &cli.format, session_manager.as_mut())
+        }
         Commands::Survival(cmd) => survival::execute(cmd, &cli.format, session_manager.as_mut()),
+        Commands::Spatial(cmd) => spatial::execute(cmd, &cli.format, session_manager.as_mut()),
         Commands::MachineLearning(cmd) => ml::execute(cmd, &cli.format, session_manager.as_mut()),
         Commands::Visualize(cmd) => viz::execute(cmd, &cli.format, session_manager.as_mut()),
         Commands::Script(cmd) => script::execute(cmd, &cli.format),
@@ -130,8 +142,8 @@ fn main() -> anyhow::Result<()> {
 /// This function creates a small synthetic dataset, runs OLS regression,
 /// and verifies the output. Used for quick installation verification.
 fn run_smoke_test(format: &OutputFormat) -> anyhow::Result<()> {
-    use p2a_core::{Dataset, run_ols};
     use p2a_core::regression::CovarianceType;
+    use p2a_core::{Dataset, run_ols};
     use polars::prelude::*;
 
     println!("Running p2a smoke test...");
@@ -145,7 +157,11 @@ fn run_smoke_test(format: &OutputFormat) -> anyhow::Result<()> {
         "x2" => [0.5, 1.0, 0.7, 1.2, 0.8, 1.5, 1.1, 1.3, 0.9, 1.4],
     }?;
     let dataset = Dataset::new(df);
-    println!("   Created dataset: {} rows x {} columns", dataset.nrows(), dataset.ncols());
+    println!(
+        "   Created dataset: {} rows x {} columns",
+        dataset.nrows(),
+        dataset.ncols()
+    );
 
     // 2. Run OLS regression
     println!("2. Running OLS regression: y ~ x1 + x2...");
@@ -155,22 +171,33 @@ fn run_smoke_test(format: &OutputFormat) -> anyhow::Result<()> {
     // 3. Verify results
     println!("3. Verifying results...");
     if result.n_obs != 10 {
-        anyhow::bail!("Smoke test FAILED: Expected 10 observations, got {}", result.n_obs);
+        anyhow::bail!(
+            "Smoke test FAILED: Expected 10 observations, got {}",
+            result.n_obs
+        );
     }
     if result.r_squared < 0.9 {
-        anyhow::bail!("Smoke test FAILED: Expected R² > 0.9, got {:.4}", result.r_squared);
+        anyhow::bail!(
+            "Smoke test FAILED: Expected R² > 0.9, got {:.4}",
+            result.r_squared
+        );
     }
     if result.coefficients.is_empty() {
         anyhow::bail!("Smoke test FAILED: No coefficients returned");
     }
 
     // Check that x1 has a positive coefficient close to 1
-    let x1_coef = result.coefficients.iter()
+    let x1_coef = result
+        .coefficients
+        .iter()
         .find(|c| c.name == "x1")
         .map(|c| c.estimate)
         .unwrap_or(0.0);
-    if x1_coef < 0.8 || x1_coef > 1.2 {
-        anyhow::bail!("Smoke test FAILED: Expected x1 coefficient ~1.0, got {:.4}", x1_coef);
+    if !(0.8..=1.2).contains(&x1_coef) {
+        anyhow::bail!(
+            "Smoke test FAILED: Expected x1 coefficient ~1.0, got {:.4}",
+            x1_coef
+        );
     }
 
     println!();

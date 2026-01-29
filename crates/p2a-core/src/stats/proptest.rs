@@ -139,7 +139,11 @@ impl std::fmt::Display for PropTestResult {
 
         // Confidence interval
         writeln!(f, "{:.0}% confidence interval:", self.conf_level * 100.0)?;
-        writeln!(f, "  ({:.6}, {:.6})", self.conf_int_lower, self.conf_int_upper)?;
+        writeln!(
+            f,
+            "  ({:.6}, {:.6})",
+            self.conf_int_lower, self.conf_int_upper
+        )?;
         writeln!(f)?;
 
         // Estimates
@@ -327,7 +331,10 @@ pub fn prop_test_two(
     };
 
     Ok(PropTestResult {
-        test_name: format!("2-sample test for equality of proportions {}", correction_str),
+        test_name: format!(
+            "2-sample test for equality of proportions {}",
+            correction_str
+        ),
         alternative,
         correct,
         chi_squared: chi_sq,
@@ -383,10 +390,7 @@ pub fn prop_test_k(
         }
         if successes[i] > trials[i] {
             return Err(EconError::InvalidSpecification {
-                message: format!(
-                    "Successes cannot exceed trials in group {}",
-                    i + 1
-                ),
+                message: format!("Successes cannot exceed trials in group {}", i + 1),
             });
         }
     }
@@ -412,7 +416,8 @@ pub fn prop_test_k(
             chi_sq += (successes[i] as f64 - expected_success).powi(2) / expected_success;
         }
         if expected_failure > 0.0 {
-            chi_sq += ((trials[i] - successes[i]) as f64 - expected_failure).powi(2) / expected_failure;
+            chi_sq +=
+                ((trials[i] - successes[i]) as f64 - expected_failure).powi(2) / expected_failure;
         }
     }
 
@@ -504,7 +509,8 @@ fn wilson_ci(x: u64, n: u64, conf_level: f64, alternative: Alternative) -> (f64,
 
             let denom = 1.0 + z_sq / n_f;
             let center = (p_hat + z_sq / (2.0 * n_f)) / denom;
-            let margin = z * (p_hat * (1.0 - p_hat) / n_f + z_sq / (4.0 * n_f * n_f)).sqrt() / denom;
+            let margin =
+                z * (p_hat * (1.0 - p_hat) / n_f + z_sq / (4.0 * n_f * n_f)).sqrt() / denom;
 
             let lower = (center - margin).max(0.0);
             let upper = (center + margin).min(1.0);
@@ -516,7 +522,8 @@ fn wilson_ci(x: u64, n: u64, conf_level: f64, alternative: Alternative) -> (f64,
 
             let denom = 1.0 + z_sq / n_f;
             let center = (p_hat + z_sq / (2.0 * n_f)) / denom;
-            let margin = z * (p_hat * (1.0 - p_hat) / n_f + z_sq / (4.0 * n_f * n_f)).sqrt() / denom;
+            let margin =
+                z * (p_hat * (1.0 - p_hat) / n_f + z_sq / (4.0 * n_f * n_f)).sqrt() / denom;
 
             let lower = (center - margin).max(0.0);
             (lower, 1.0)
@@ -527,7 +534,8 @@ fn wilson_ci(x: u64, n: u64, conf_level: f64, alternative: Alternative) -> (f64,
 
             let denom = 1.0 + z_sq / n_f;
             let center = (p_hat + z_sq / (2.0 * n_f)) / denom;
-            let margin = z * (p_hat * (1.0 - p_hat) / n_f + z_sq / (4.0 * n_f * n_f)).sqrt() / denom;
+            let margin =
+                z * (p_hat * (1.0 - p_hat) / n_f + z_sq / (4.0 * n_f * n_f)).sqrt() / denom;
 
             let upper = (center + margin).min(1.0);
             (0.0, upper)
@@ -536,14 +544,7 @@ fn wilson_ci(x: u64, n: u64, conf_level: f64, alternative: Alternative) -> (f64,
 }
 
 /// Confidence interval for difference of two proportions (Newcombe-Wilson method).
-fn prop_diff_ci(
-    x1: u64,
-    n1: u64,
-    x2: u64,
-    n2: u64,
-    conf_level: f64,
-    _correct: bool,
-) -> (f64, f64) {
+fn prop_diff_ci(x1: u64, n1: u64, x2: u64, n2: u64, conf_level: f64, _correct: bool) -> (f64, f64) {
     use statrs::distribution::{ContinuousCDF, Normal};
 
     let n1_f = n1 as f64;
@@ -584,8 +585,7 @@ mod tests {
     #[test]
     fn test_prop_test_two_basic() {
         // 30/100 vs 40/100
-        let result =
-            prop_test_two(30, 100, 40, 100, Alternative::TwoSided, 0.95, true).unwrap();
+        let result = prop_test_two(30, 100, 40, 100, Alternative::TwoSided, 0.95, true).unwrap();
 
         assert_eq!(result.df, 1);
         assert_eq!(result.estimates.len(), 2);
@@ -654,8 +654,7 @@ mod tests {
         // X-squared = 1.7802, df = 1, p-value = 0.1821
         // 95% CI: (-0.24147838, 0.04147838)
 
-        let result =
-            prop_test_two(30, 100, 40, 100, Alternative::TwoSided, 0.95, true).unwrap();
+        let result = prop_test_two(30, 100, 40, 100, Alternative::TwoSided, 0.95, true).unwrap();
 
         assert!(
             (result.chi_squared - 1.7802).abs() < 0.1,
@@ -674,8 +673,7 @@ mod tests {
         // R: prop.test(c(30, 40), c(100, 100), correct = FALSE)
         // X-squared = 2.1978, p-value = 0.1382
 
-        let result =
-            prop_test_two(30, 100, 40, 100, Alternative::TwoSided, 0.95, false).unwrap();
+        let result = prop_test_two(30, 100, 40, 100, Alternative::TwoSided, 0.95, false).unwrap();
 
         assert!(
             (result.chi_squared - 2.1978).abs() < 0.01,

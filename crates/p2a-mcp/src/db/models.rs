@@ -7,8 +7,8 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use surrealdb::sql::Datetime;
 use surrealdb::RecordId;
+use surrealdb::sql::Datetime;
 
 /// A conversation (chat session)
 #[derive(Debug, Clone, Serialize, Deserialize)]

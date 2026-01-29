@@ -48,8 +48,8 @@
 //!
 //! R equivalent: `stats::se.contrast()`
 
-use serde::{Deserialize, Serialize};
 use crate::stats::AnovaResult;
+use serde::{Deserialize, Serialize};
 
 /// Result of contrast standard error computation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -149,10 +149,7 @@ pub fn se_contrast(
 }
 
 /// Compute standard error for a single contrast.
-pub fn se_contrast_single(
-    anova: &AnovaResult,
-    contrast: &[f64],
-) -> Result<f64, String> {
+pub fn se_contrast_single(anova: &AnovaResult, contrast: &[f64]) -> Result<f64, String> {
     let result = se_contrast(anova, &[contrast.to_vec()])?;
     Ok(result.se[0])
 }
@@ -359,9 +356,25 @@ mod tests {
         let k = anova.groups.len();
         // Multiple contrasts
         let contrasts = vec![
-            { let mut c = vec![0.0; k]; c[0] = 1.0; c[1] = -1.0; c },  // A vs B
-            { let mut c = vec![0.0; k]; c[1] = 1.0; c[2] = -1.0; c },  // B vs C
-            { let mut c = vec![0.0; k]; c[0] = 0.5; c[1] = 0.5; c[2] = -1.0; c },  // (A+B)/2 vs C
+            {
+                let mut c = vec![0.0; k];
+                c[0] = 1.0;
+                c[1] = -1.0;
+                c
+            }, // A vs B
+            {
+                let mut c = vec![0.0; k];
+                c[1] = 1.0;
+                c[2] = -1.0;
+                c
+            }, // B vs C
+            {
+                let mut c = vec![0.0; k];
+                c[0] = 0.5;
+                c[1] = 0.5;
+                c[2] = -1.0;
+                c
+            }, // (A+B)/2 vs C
         ];
         let result = se_contrast(&anova, &contrasts).unwrap();
 
@@ -402,7 +415,7 @@ mod tests {
 
         // t should be negative (A < B) and significant
         assert!(t < 0.0);
-        assert!(t.abs() > 2.0);  // Should be clearly significant
+        assert!(t.abs() > 2.0); // Should be clearly significant
     }
 
     #[test]

@@ -54,7 +54,10 @@ pub fn ConversationSidebar() -> Element {
             spawn(async move {
                 conv.write().set_operating(true);
                 let state = conv.read().clone();
-                match state.create_conversation(&session_id, "New Conversation").await {
+                match state
+                    .create_conversation(&session_id, "New Conversation")
+                    .await
+                {
                     Ok(conversation) => {
                         let id = conversation.id.clone();
                         conv.write().add_conversation(conversation);
@@ -105,7 +108,10 @@ pub fn ConversationSidebar() -> Element {
         if let Some(conversation_id) = id {
             spawn(async move {
                 let state = conv.read().clone();
-                match state.update_conversation_title(&conversation_id, &title).await {
+                match state
+                    .update_conversation_title(&conversation_id, &title)
+                    .await
+                {
                     Ok(updated) => {
                         conv.write().update_conversation(updated);
                     }
@@ -209,7 +215,9 @@ pub fn ConversationSidebar() -> Element {
 
     // Get conversations to display (filter out archived)
     let state = conversation_state.read();
-    let conversations: Vec<Conversation> = state.conversations.iter()
+    let conversations: Vec<Conversation> = state
+        .conversations
+        .iter()
         .filter(|c| !c.is_archived)
         .cloned()
         .collect();

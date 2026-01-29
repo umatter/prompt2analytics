@@ -270,7 +270,7 @@ pub fn run_kruskal_test(
 
         let value = values.get(i);
         if let Some(v) = value {
-            group_data.entry(group_str).or_insert_with(Vec::new).push(v);
+            group_data.entry(group_str).or_default().push(v);
         }
     }
 
@@ -439,14 +439,7 @@ mod tests {
 
     #[test]
     fn test_rank_computation() {
-        let data = vec![
-            (1.0, 0),
-            (2.0, 0),
-            (2.0, 1),
-            (3.0, 1),
-            (3.0, 2),
-            (3.0, 2),
-        ];
+        let data = vec![(1.0, 0), (2.0, 0), (2.0, 1), (3.0, 1), (3.0, 2), (3.0, 2)];
 
         let (ranks, tie_counts) = compute_ranks_with_ties(&data);
 

@@ -42,7 +42,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
-use crate::traits::{chi_squared_p_value, SignificanceLevel};
+use crate::traits::{SignificanceLevel, chi_squared_p_value};
 
 /// Type of portmanteau test to perform.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -105,15 +105,24 @@ impl std::fmt::Display for BoxTestResult {
             self.significance.stars()
         )?;
         writeln!(f)?;
-        writeln!(f, "Observations: {}  |  Lags: {}  |  fitdf: {}",
-            self.n_obs, self.lag, self.fitdf)?;
+        writeln!(
+            f,
+            "Observations: {}  |  Lags: {}  |  fitdf: {}",
+            self.n_obs, self.lag, self.fitdf
+        )?;
         writeln!(f)?;
         writeln!(f, "H₀: No autocorrelation up to lag {}", self.lag)?;
         writeln!(f, "H₁: Autocorrelation exists at one or more lags")?;
         if self.p_value < 0.05 {
-            writeln!(f, "\nConclusion: Reject H₀ - significant autocorrelation detected.")?;
+            writeln!(
+                f,
+                "\nConclusion: Reject H₀ - significant autocorrelation detected."
+            )?;
         } else {
-            writeln!(f, "\nConclusion: Fail to reject H₀ - no significant autocorrelation.")?;
+            writeln!(
+                f,
+                "\nConclusion: Fail to reject H₀ - no significant autocorrelation."
+            )?;
         }
         Ok(())
     }
@@ -233,9 +242,7 @@ fn compute_autocorrelations_fft(x: &[f64], lag_max: usize) -> Vec<f64> {
     }
 
     // Extract autocorrelations for lags 1 to lag_max and normalize by variance
-    (1..=lag_max)
-        .map(|k| data[k].re / (scale * var))
-        .collect()
+    (1..=lag_max).map(|k| data[k].re / (scale * var)).collect()
 }
 
 /// Perform Box-Pierce or Ljung-Box test on a time series.
@@ -455,9 +462,12 @@ mod tests {
 
         // Ljung-Box should have a larger statistic for same data
         // (due to the (n+2)/(n-k) factor)
-        assert!(lb.statistic >= bp.statistic,
+        assert!(
+            lb.statistic >= bp.statistic,
             "Ljung-Box stat ({}) should be >= Box-Pierce stat ({})",
-            lb.statistic, bp.statistic);
+            lb.statistic,
+            bp.statistic
+        );
 
         // Both should have same df
         assert_eq!(bp.df, lb.df);
@@ -500,8 +510,11 @@ mod tests {
         let result = box_test(&x, Some(10), BoxTestType::LjungBox, 0).unwrap();
 
         // AR(1) with phi=0.9 should have significant autocorrelation
-        assert!(result.p_value < 0.05,
-            "AR(1) process should show significant autocorrelation, got p={}", result.p_value);
+        assert!(
+            result.p_value < 0.05,
+            "AR(1) process should show significant autocorrelation, got p={}",
+            result.p_value
+        );
     }
 
     #[test]
@@ -520,8 +533,14 @@ mod tests {
         assert!(approx_eq(result0.statistic, result2.statistic, 1e-10));
         // For a highly significant test (linear trend has huge statistic),
         // both p-values will be essentially zero, so we just check they're both very small
-        assert!(result0.p_value < 1e-10, "Expected very small p-value for linear trend");
-        assert!(result2.p_value < 1e-10, "Expected very small p-value for linear trend");
+        assert!(
+            result0.p_value < 1e-10,
+            "Expected very small p-value for linear trend"
+        );
+        assert!(
+            result2.p_value < 1e-10,
+            "Expected very small p-value for linear trend"
+        );
     }
 
     #[test]

@@ -178,12 +178,13 @@ pub fn holt_winters(y: &[f64], config: HoltWintersConfig) -> EconResult<HoltWint
     }
 
     // Check for non-positive values in multiplicative model
-    if config.use_seasonal && config.seasonal == SeasonalType::Multiplicative {
-        if y.iter().any(|&v| v <= 0.0) {
-            return Err(EconError::InvalidSpecification {
-                message: "Multiplicative seasonal model requires all positive values".to_string(),
-            });
-        }
+    if config.use_seasonal
+        && config.seasonal == SeasonalType::Multiplicative
+        && y.iter().any(|&v| v <= 0.0)
+    {
+        return Err(EconError::InvalidSpecification {
+            message: "Multiplicative seasonal model requires all positive values".to_string(),
+        });
     }
 
     // Determine which parameters to optimize
@@ -385,13 +386,15 @@ pub fn run_holt_winters(
 ) -> EconResult<HoltWintersResult> {
     // Extract data
     let df = dataset.df();
-    let available_cols: Vec<String> = df.get_column_names().iter().map(|s| s.to_string()).collect();
-    let col = df
-        .column(column)
-        .map_err(|_| EconError::ColumnNotFound {
-            column: column.to_string(),
-            available: available_cols.clone(),
-        })?;
+    let available_cols: Vec<String> = df
+        .get_column_names()
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let col = df.column(column).map_err(|_| EconError::ColumnNotFound {
+        column: column.to_string(),
+        available: available_cols.clone(),
+    })?;
 
     let y: Vec<f64> = col
         .f64()
@@ -449,7 +452,11 @@ fn initialize_components(
     if !use_seasonal {
         // Non-seasonal initialization: R uses x[1] for level, x[2]-x[1] for trend
         let l0 = y[0];
-        let b0 = if use_trend && n >= 2 { y[1] - y[0] } else { 0.0 };
+        let b0 = if use_trend && n >= 2 {
+            y[1] - y[0]
+        } else {
+            0.0
+        };
         return Ok((l0, b0, vec![]));
     }
 
@@ -726,8 +733,7 @@ fn run_filter(
             }
             SeasonalType::Multiplicative => {
                 let y_deseason = if s_prev > 0.0 { y[t] / s_prev } else { y[t] };
-                alpha * y_deseason
-                    + (1.0 - alpha) * (l_prev + if use_trend { b_prev } else { 0.0 })
+                alpha * y_deseason + (1.0 - alpha) * (l_prev + if use_trend { b_prev } else { 0.0 })
             }
         };
 
@@ -858,7 +864,8 @@ fn optimize_parameters(
     };
 
     // Run Nelder-Mead optimization
-    let (optimized, _best_sse) = nelder_mead(&initial, &bounds, full_objective, max_iter, tolerance);
+    let (optimized, _best_sse) =
+        nelder_mead(&initial, &bounds, full_objective, max_iter, tolerance);
 
     // Extract optimized parameters
     let mut result = [alpha, beta, gamma];
@@ -900,10 +907,10 @@ where
     let n = initial.len();
 
     // Nelder-Mead parameters
-    let alpha = 1.0;  // Reflection
-    let gamma = 2.0;  // Expansion
-    let rho = 0.5;    // Contraction
-    let sigma = 0.5;  // Shrink
+    let alpha = 1.0; // Reflection
+    let gamma = 2.0; // Expansion
+    let rho = 0.5; // Contraction
+    let sigma = 0.5; // Shrink
 
     // Helper to clamp point to bounds
     let clamp = |point: &[f64]| -> Vec<f64> {
@@ -1043,7 +1050,8 @@ where
         // Shrink: move all vertices except best towards best
         for &idx in &indices[1..] {
             for j in 0..n {
-                simplex[idx][j] = simplex[best_idx][j] + sigma * (simplex[idx][j] - simplex[best_idx][j]);
+                simplex[idx][j] =
+                    simplex[best_idx][j] + sigma * (simplex[idx][j] - simplex[best_idx][j]);
             }
             simplex[idx] = clamp(&simplex[idx]);
             values[idx] = f(&simplex[idx]);
@@ -1102,7 +1110,9 @@ mod tests {
     #[test]
     fn test_holt_linear() {
         // Test with trend but no seasonality
-        let y: Vec<f64> = (0..20).map(|i| 10.0 + 0.5 * i as f64 + 0.1 * (i % 3) as f64).collect();
+        let y: Vec<f64> = (0..20)
+            .map(|i| 10.0 + 0.5 * i as f64 + 0.1 * (i % 3) as f64)
+            .collect();
 
         let config = HoltWintersConfig {
             alpha: Some(0.4),
@@ -1134,7 +1144,7 @@ mod tests {
     fn test_additive_seasonal() {
         // Create data with clear additive seasonal pattern
         let period = 4;
-        let seasonal_pattern = vec![10.0, -5.0, 0.0, -5.0];
+        let seasonal_pattern = [10.0, -5.0, 0.0, -5.0];
         let mut y = Vec::with_capacity(24);
         for i in 0..24 {
             let trend = 100.0 + 0.5 * i as f64;
@@ -1169,7 +1179,7 @@ mod tests {
     fn test_multiplicative_seasonal() {
         // Create data with multiplicative seasonal pattern
         let period = 4;
-        let seasonal_pattern = vec![1.2, 0.8, 1.0, 1.0];
+        let seasonal_pattern = [1.2, 0.8, 1.0, 1.0];
         let mut y = Vec::with_capacity(24);
         for i in 0..24 {
             let trend = 100.0 + 2.0 * i as f64;
@@ -1198,7 +1208,7 @@ mod tests {
     fn test_parameter_optimization() {
         // Test automatic parameter optimization
         let period = 4;
-        let seasonal_pattern = vec![5.0, -3.0, 2.0, -4.0];
+        let seasonal_pattern = [5.0, -3.0, 2.0, -4.0];
         let mut y = Vec::with_capacity(40);
         for i in 0..40 {
             let trend = 50.0 + 0.3 * i as f64;

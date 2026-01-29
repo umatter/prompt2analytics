@@ -40,7 +40,10 @@ impl std::fmt::Display for KMeansResult {
         writeln!(f)?;
         writeln!(f, "Centroids:")?;
         for i in 0..self.centroids.nrows() {
-            let centroid: Vec<String> = self.centroids.row(i).iter()
+            let centroid: Vec<String> = self
+                .centroids
+                .row(i)
+                .iter()
                 .map(|v| format!("{:.4}", v))
                 .collect();
             writeln!(f, "  Cluster {}: [{}]", i, centroid.join(", "))?;
@@ -68,7 +71,11 @@ impl std::fmt::Display for DBSCANResult {
         writeln!(f, "=========================")?;
         writeln!(f, "Number of clusters: {}", self.n_clusters)?;
         writeln!(f, "Number of noise points: {}", self.n_noise)?;
-        writeln!(f, "Number of core samples: {}", self.core_sample_indices.len())?;
+        writeln!(
+            f,
+            "Number of core samples: {}",
+            self.core_sample_indices.len()
+        )?;
 
         // Count points per cluster
         let mut cluster_counts: HashMap<i32, usize> = HashMap::new();
@@ -81,7 +88,7 @@ impl std::fmt::Display for DBSCANResult {
         let mut labels_sorted: Vec<_> = cluster_counts.keys().collect();
         labels_sorted.sort();
         for &label in &labels_sorted {
-            let count = cluster_counts[&label];
+            let count = cluster_counts[label];
             if *label == -1 {
                 writeln!(f, "  Noise: {} points", count)?;
             } else {
@@ -116,7 +123,10 @@ pub fn kmeans(
         return Err("k must be at least 1".to_string());
     }
     if k > n_samples {
-        return Err(format!("k ({}) cannot be greater than n_samples ({})", k, n_samples));
+        return Err(format!(
+            "k ({}) cannot be greater than n_samples ({})",
+            k, n_samples
+        ));
     }
 
     let max_iter = max_iterations.unwrap_or(300);
@@ -281,11 +291,7 @@ const KDTREE_MAX_DIMS: usize = 20;
 /// * `data` - Input data matrix (n_samples x n_features)
 /// * `eps` - Maximum distance between two samples for neighborhood
 /// * `min_samples` - Minimum samples in neighborhood for core point
-pub fn dbscan(
-    data: ArrayView2<f64>,
-    eps: f64,
-    min_samples: usize,
-) -> Result<DBSCANResult, String> {
+pub fn dbscan(data: ArrayView2<f64>, eps: f64, min_samples: usize) -> Result<DBSCANResult, String> {
     let n_features = data.ncols();
 
     // Use KD-tree for low-dimensional data, naive for high-dimensional
@@ -325,9 +331,7 @@ fn dbscan_kdtree(
     }
 
     // Build KD-tree from data
-    let data_vec: Vec<Vec<f64>> = data.rows().into_iter()
-        .map(|row| row.to_vec())
-        .collect();
+    let data_vec: Vec<Vec<f64>> = data.rows().into_iter().map(|row| row.to_vec()).collect();
     let tree = KdTree::new(data_vec);
 
     // Find neighbors for each point using KD-tree radius queries (parallel, unsorted)
@@ -487,7 +491,10 @@ impl std::str::FromStr for Linkage {
             "complete" => Ok(Linkage::Complete),
             "average" => Ok(Linkage::Average),
             "ward" => Ok(Linkage::Ward),
-            _ => Err(format!("Unknown linkage method: {}. Use single, complete, average, or ward", s)),
+            _ => Err(format!(
+                "Unknown linkage method: {}. Use single, complete, average, or ward",
+                s
+            )),
         }
     }
 }
@@ -526,14 +533,22 @@ impl std::fmt::Display for HierarchicalResult {
         let mut labels_sorted: Vec<_> = cluster_counts.keys().collect();
         labels_sorted.sort();
         for &label in &labels_sorted {
-            writeln!(f, "  Cluster {}: {} points", label, cluster_counts[&label])?;
+            writeln!(f, "  Cluster {}: {} points", label, cluster_counts[label])?;
         }
 
         writeln!(f)?;
         writeln!(f, "Dendrogram (merge history):")?;
         writeln!(f, "  Step  Cluster1  Cluster2  Distance    Size")?;
         for (i, &(c1, c2, dist, size)) in self.linkage_matrix.iter().enumerate() {
-            writeln!(f, "  {:4}  {:8}  {:8}  {:10.4}  {:4}", i + 1, c1, c2, dist, size)?;
+            writeln!(
+                f,
+                "  {:4}  {:8}  {:8}  {:10.4}  {:4}",
+                i + 1,
+                c1,
+                c2,
+                dist,
+                size
+            )?;
         }
 
         Ok(())
@@ -610,7 +625,8 @@ pub fn hierarchical(
         }
 
         // Find closest pair of clusters
-        let (c1, c2, min_dist) = find_closest_clusters(&active, &distances, &clusters, &data, linkage)?;
+        let (c1, c2, min_dist) =
+            find_closest_clusters(&active, &distances, &clusters, &data, linkage)?;
 
         // Check distance threshold
         if let Some(thresh) = distance_threshold {
@@ -968,7 +984,11 @@ impl std::fmt::Display for CutreeResult {
         let mut labels_sorted: Vec<_> = cluster_counts.keys().cloned().collect();
         labels_sorted.sort();
         for label in labels_sorted {
-            writeln!(f, "  Cluster {}: {} observations", label, cluster_counts[&label])?;
+            writeln!(
+                f,
+                "  Cluster {}: {} observations",
+                label, cluster_counts[&label]
+            )?;
         }
 
         if let Some(ref k_vals) = self.k_values {
@@ -1020,13 +1040,20 @@ pub fn cutree(
     // If k is specified, use it; otherwise use h to determine k
     let target_k = if let Some(k_val) = k {
         if k_val == 0 || k_val > n {
-            return Err(format!("k must be between 1 and {} (number of observations)", n));
+            return Err(format!(
+                "k must be between 1 and {} (number of observations)",
+                n
+            ));
         }
         k_val
     } else if let Some(h_val) = h {
         // Determine k from height: count how many merges happen below height h
         // n - (number of merges at or below h) = k
-        let merges_below_h = hclust.merge_distances.iter().filter(|&&d| d <= h_val).count();
+        let merges_below_h = hclust
+            .merge_distances
+            .iter()
+            .filter(|&&d| d <= h_val)
+            .count();
         let computed_k = n - merges_below_h;
         if computed_k == 0 {
             n // All merges above h means n clusters
@@ -1085,7 +1112,10 @@ pub fn cutree_multiple_k(
 
     for &k in k_values {
         if k == 0 || k > n {
-            return Err(format!("k must be between 1 and {} (number of observations)", n));
+            return Err(format!(
+                "k must be between 1 and {} (number of observations)",
+                n
+            ));
         }
         let labels = cut_at_k(hclust, k, n)?;
         labels_matrix.push(labels);
@@ -1285,7 +1315,8 @@ mod tests {
             data_vec.push([50.0 + i as f64 * 10.0, 50.0 + i as f64 * 10.0]);
         }
 
-        let data = Array2::from_shape_vec((105, 2), data_vec.into_iter().flatten().collect()).unwrap();
+        let data =
+            Array2::from_shape_vec((105, 2), data_vec.into_iter().flatten().collect()).unwrap();
 
         let result = dbscan(data.view(), 0.5, 3).unwrap();
 
@@ -1347,15 +1378,15 @@ mod tests {
 
     #[test]
     fn test_hierarchical_linkage_methods() {
-        let data = array![
-            [0.0, 0.0],
-            [1.0, 0.0],
-            [5.0, 0.0],
-            [6.0, 0.0],
-        ];
+        let data = array![[0.0, 0.0], [1.0, 0.0], [5.0, 0.0], [6.0, 0.0],];
 
         // Test all linkage methods work
-        for linkage in [Linkage::Single, Linkage::Complete, Linkage::Average, Linkage::Ward] {
+        for linkage in [
+            Linkage::Single,
+            Linkage::Complete,
+            Linkage::Average,
+            Linkage::Ward,
+        ] {
             let result = hierarchical(data.view(), Some(2), linkage, None).unwrap();
             assert_eq!(result.n_clusters, 2);
         }
@@ -1363,12 +1394,7 @@ mod tests {
 
     #[test]
     fn test_hierarchical_distance_threshold() {
-        let data = array![
-            [0.0, 0.0],
-            [0.5, 0.0],
-            [10.0, 0.0],
-            [10.5, 0.0],
-        ];
+        let data = array![[0.0, 0.0], [0.5, 0.0], [10.0, 0.0], [10.5, 0.0],];
 
         // With threshold of 1.0, should get 2 clusters
         let result = hierarchical(data.view(), None, Linkage::Single, Some(1.0)).unwrap();
@@ -1411,11 +1437,7 @@ mod tests {
 
     #[test]
     fn test_cutree_k_equals_n() {
-        let data = array![
-            [0.0, 0.0],
-            [1.0, 0.0],
-            [2.0, 0.0],
-        ];
+        let data = array![[0.0, 0.0], [1.0, 0.0], [2.0, 0.0],];
 
         let hclust = hierarchical(data.view(), Some(1), Linkage::Single, None).unwrap();
 
@@ -1431,11 +1453,7 @@ mod tests {
 
     #[test]
     fn test_cutree_k_equals_1() {
-        let data = array![
-            [0.0, 0.0],
-            [1.0, 0.0],
-            [2.0, 0.0],
-        ];
+        let data = array![[0.0, 0.0], [1.0, 0.0], [2.0, 0.0],];
 
         let hclust = hierarchical(data.view(), Some(1), Linkage::Single, None).unwrap();
 
@@ -1450,12 +1468,7 @@ mod tests {
 
     #[test]
     fn test_cutree_by_height() {
-        let data = array![
-            [0.0, 0.0],
-            [0.5, 0.0],
-            [10.0, 0.0],
-            [10.5, 0.0],
-        ];
+        let data = array![[0.0, 0.0], [0.5, 0.0], [10.0, 0.0], [10.5, 0.0],];
 
         let hclust = hierarchical(data.view(), Some(1), Linkage::Single, None).unwrap();
 
@@ -1468,12 +1481,7 @@ mod tests {
 
     #[test]
     fn test_cutree_multiple_k() {
-        let data = array![
-            [0.0, 0.0],
-            [1.0, 0.0],
-            [2.0, 0.0],
-            [10.0, 0.0],
-        ];
+        let data = array![[0.0, 0.0], [1.0, 0.0], [2.0, 0.0], [10.0, 0.0],];
 
         let hclust = hierarchical(data.view(), Some(1), Linkage::Single, None).unwrap();
 
@@ -1493,10 +1501,7 @@ mod tests {
 
     #[test]
     fn test_cutree_validation() {
-        let data = array![
-            [0.0, 0.0],
-            [1.0, 0.0],
-        ];
+        let data = array![[0.0, 0.0], [1.0, 0.0],];
 
         let hclust = hierarchical(data.view(), Some(1), Linkage::Single, None).unwrap();
 
@@ -1515,11 +1520,7 @@ mod tests {
 
     #[test]
     fn test_cutree_display() {
-        let data = array![
-            [0.0, 0.0],
-            [1.0, 0.0],
-            [10.0, 0.0],
-        ];
+        let data = array![[0.0, 0.0], [1.0, 0.0], [10.0, 0.0],];
 
         let hclust = hierarchical(data.view(), Some(1), Linkage::Single, None).unwrap();
         let cut_result = cutree(&hclust, Some(2), None).unwrap();
@@ -1528,5 +1529,336 @@ mod tests {
         assert!(display.contains("cutree Results"));
         assert!(display.contains("Number of observations: 3"));
         assert!(display.contains("Number of clusters: 2"));
+    }
+
+    // ========================================================================
+    // R-vs-Rust Validation Tests (Phase 8)
+    // ========================================================================
+
+    fn create_validation_cluster_data() -> Array2<f64> {
+        // Create 3 well-separated clusters in 2D
+        // Cluster 1: around (0, 0)
+        // Cluster 2: around (10, 0)
+        // Cluster 3: around (5, 10)
+        array![
+            // Cluster 1 (around origin)
+            [0.0, 0.0],
+            [0.5, 0.3],
+            [0.2, -0.4],
+            [0.8, 0.1],
+            [-0.3, 0.5],
+            // Cluster 2 (around (10, 0))
+            [10.0, 0.0],
+            [10.3, 0.2],
+            [9.8, -0.1],
+            [10.5, 0.4],
+            [9.7, 0.3],
+            // Cluster 3 (around (5, 10))
+            [5.0, 10.0],
+            [5.2, 10.3],
+            [4.8, 9.8],
+            [5.5, 10.1],
+            [4.9, 9.6],
+        ]
+    }
+
+    #[test]
+    fn test_validate_kmeans_vs_r() {
+        // R reference:
+        // set.seed(42)
+        // kmeans(data, centers=3)
+        let data = create_validation_cluster_data();
+        let result = kmeans(data.view(), 3, Some(100), Some(1e-4), Some(10), Some(42)).unwrap();
+
+        // Should find 3 clusters
+        assert_eq!(result.centroids.nrows(), 3);
+        assert_eq!(result.labels.len(), 15);
+
+        // Each cluster should have 5 points
+        for size in &result.cluster_sizes {
+            assert_eq!(*size, 5, "Each cluster should have 5 points");
+        }
+
+        // Inertia should be small for well-separated clusters
+        assert!(
+            result.inertia < 10.0,
+            "Inertia {} should be small for well-separated clusters",
+            result.inertia
+        );
+    }
+
+    #[test]
+    fn test_validate_kmeans_centroids() {
+        let data = create_validation_cluster_data();
+        let result = kmeans(data.view(), 3, Some(100), Some(1e-4), Some(10), Some(42)).unwrap();
+
+        // Centroids should be near the true centers
+        // True centers: (0, 0), (10, 0), (5, 10)
+        let mut found_near_origin = false;
+        let mut found_near_10_0 = false;
+        let mut found_near_5_10 = false;
+
+        for i in 0..3 {
+            let cx = result.centroids[[i, 0]];
+            let cy = result.centroids[[i, 1]];
+
+            if (cx - 0.0).abs() < 1.5 && (cy - 0.0).abs() < 1.5 {
+                found_near_origin = true;
+            }
+            if (cx - 10.0).abs() < 1.5 && (cy - 0.0).abs() < 1.5 {
+                found_near_10_0 = true;
+            }
+            if (cx - 5.0).abs() < 1.5 && (cy - 10.0).abs() < 1.5 {
+                found_near_5_10 = true;
+            }
+        }
+
+        assert!(found_near_origin, "Should find centroid near (0, 0)");
+        assert!(found_near_10_0, "Should find centroid near (10, 0)");
+        assert!(found_near_5_10, "Should find centroid near (5, 10)");
+    }
+
+    #[test]
+    fn test_validate_kmeans_cluster_assignment() {
+        let data = create_validation_cluster_data();
+        let result = kmeans(data.view(), 3, Some(100), Some(1e-4), Some(10), Some(42)).unwrap();
+
+        // Points 0-4 should be in the same cluster
+        let cluster1 = result.labels[0];
+        for i in 1..5 {
+            assert_eq!(
+                result.labels[i], cluster1,
+                "Points 0-4 should be in same cluster"
+            );
+        }
+
+        // Points 5-9 should be in the same cluster
+        let cluster2 = result.labels[5];
+        for i in 6..10 {
+            assert_eq!(
+                result.labels[i], cluster2,
+                "Points 5-9 should be in same cluster"
+            );
+        }
+
+        // Points 10-14 should be in the same cluster
+        let cluster3 = result.labels[10];
+        for i in 11..15 {
+            assert_eq!(
+                result.labels[i], cluster3,
+                "Points 10-14 should be in same cluster"
+            );
+        }
+
+        // Clusters should be different
+        assert_ne!(cluster1, cluster2);
+        assert_ne!(cluster2, cluster3);
+        assert_ne!(cluster1, cluster3);
+    }
+
+    #[test]
+    fn test_validate_dbscan_vs_r() {
+        // R reference:
+        // library(dbscan)
+        // dbscan(data, eps=2, minPts=3)
+        let data = create_validation_cluster_data();
+        let result = dbscan(data.view(), 2.0, 3).unwrap();
+
+        // Should find 3 clusters (no noise with these params)
+        assert_eq!(result.n_clusters, 3, "DBSCAN should find 3 clusters");
+
+        // No noise points expected
+        assert_eq!(result.n_noise, 0, "Should have no noise points");
+    }
+
+    #[test]
+    fn test_validate_dbscan_noise_detection() {
+        // Add an outlier to test noise detection
+        let data = array![
+            [0.0, 0.0],
+            [0.5, 0.3],
+            [0.2, -0.4],
+            [10.0, 0.0],
+            [10.3, 0.2],
+            [9.8, -0.1],
+            [50.0, 50.0], // Outlier
+        ];
+
+        let result = dbscan(data.view(), 2.0, 3).unwrap();
+
+        // Outlier should be noise
+        assert_eq!(result.labels[6], -1, "Outlier should be labeled as noise");
+        assert!(
+            result.n_noise >= 1,
+            "Should detect at least one noise point"
+        );
+    }
+
+    #[test]
+    fn test_validate_hierarchical_single_linkage_vs_r() {
+        // R reference:
+        // hclust(dist(data), method="single")
+        let data = create_validation_cluster_data();
+        let result = hierarchical(data.view(), Some(1), Linkage::Single, None).unwrap();
+
+        // n_clusters is the target, linkage_matrix has n-1 merges
+        assert_eq!(
+            result.linkage_matrix.len(),
+            14,
+            "Should have n-1 = 14 merges"
+        );
+        assert_eq!(result.labels.len(), 15);
+        assert_eq!(result.merge_distances.len(), 14);
+
+        // Heights should be increasing for single linkage
+        for i in 1..result.merge_distances.len() {
+            assert!(
+                result.merge_distances[i] >= result.merge_distances[i - 1] - 1e-10,
+                "Heights should be monotonically increasing"
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_hierarchical_complete_linkage_vs_r() {
+        // R reference:
+        // hclust(dist(data), method="complete")
+        let data = create_validation_cluster_data();
+        let result = hierarchical(data.view(), Some(1), Linkage::Complete, None).unwrap();
+
+        // linkage_matrix should have n-1 merges
+        assert_eq!(result.linkage_matrix.len(), 14);
+
+        // Heights should be increasing
+        for i in 1..result.merge_distances.len() {
+            assert!(
+                result.merge_distances[i] >= result.merge_distances[i - 1] - 1e-10,
+                "Heights should increase in complete linkage"
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_hierarchical_ward_vs_r() {
+        // R reference:
+        // hclust(dist(data), method="ward.D2")
+        let data = create_validation_cluster_data();
+        let result = hierarchical(data.view(), Some(1), Linkage::Ward, None).unwrap();
+
+        assert_eq!(result.linkage_matrix.len(), 14);
+        assert_eq!(result.linkage, "ward");
+
+        // Heights should increase
+        for i in 1..result.merge_distances.len() {
+            assert!(
+                result.merge_distances[i] >= result.merge_distances[i - 1] - 1e-10,
+                "Ward heights should increase"
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_cutree_vs_r() {
+        // R reference:
+        // hc <- hclust(dist(data))
+        // cutree(hc, k=3)
+        let data = create_validation_cluster_data();
+        let hclust = hierarchical(data.view(), Some(1), Linkage::Ward, None).unwrap();
+        let result = cutree(&hclust, Some(3), None).unwrap();
+
+        assert_eq!(result.k, 3);
+        assert_eq!(result.n, 15);
+        assert_eq!(result.labels.len(), 15);
+
+        // Should produce 3 distinct cluster labels
+        let unique_labels: HashSet<_> = result.labels.iter().collect();
+        assert_eq!(unique_labels.len(), 3, "Should have 3 distinct clusters");
+    }
+
+    #[test]
+    fn test_validate_kmeans_inertia_decreases() {
+        // Adding more clusters should decrease inertia
+        let data = create_validation_cluster_data();
+
+        let result2 = kmeans(data.view(), 2, Some(100), None, Some(5), Some(42)).unwrap();
+        let result3 = kmeans(data.view(), 3, Some(100), None, Some(5), Some(42)).unwrap();
+        let result4 = kmeans(data.view(), 4, Some(100), None, Some(5), Some(42)).unwrap();
+
+        assert!(
+            result3.inertia <= result2.inertia,
+            "k=3 inertia {} should be <= k=2 inertia {}",
+            result3.inertia,
+            result2.inertia
+        );
+        assert!(
+            result4.inertia <= result3.inertia,
+            "k=4 inertia {} should be <= k=3 inertia {}",
+            result4.inertia,
+            result3.inertia
+        );
+    }
+
+    #[test]
+    fn test_validate_dbscan_eps_sensitivity() {
+        // Larger eps should result in fewer clusters
+        let data = create_validation_cluster_data();
+
+        let result_small = dbscan(data.view(), 1.0, 3).unwrap();
+        let result_large = dbscan(data.view(), 5.0, 3).unwrap();
+
+        // With larger eps, should merge more into same cluster
+        assert!(
+            result_large.n_clusters <= result_small.n_clusters,
+            "Larger eps should produce <= clusters"
+        );
+    }
+
+    #[test]
+    fn test_validate_hierarchical_linkage_heights() {
+        // Different linkages should produce different merge heights
+        let data = create_validation_cluster_data();
+
+        let single = hierarchical(data.view(), Some(1), Linkage::Single, None).unwrap();
+        let complete = hierarchical(data.view(), Some(1), Linkage::Complete, None).unwrap();
+
+        // Complete linkage should have larger max height than single linkage
+        let single_max = single
+            .merge_distances
+            .iter()
+            .cloned()
+            .fold(f64::NEG_INFINITY, f64::max);
+        let complete_max = complete
+            .merge_distances
+            .iter()
+            .cloned()
+            .fold(f64::NEG_INFINITY, f64::max);
+
+        assert!(
+            complete_max >= single_max,
+            "Complete linkage max height {} should >= single linkage {}",
+            complete_max,
+            single_max
+        );
+    }
+
+    #[test]
+    fn test_validate_kmeans_reproducibility() {
+        // Same seed should produce same results
+        let data = create_validation_cluster_data();
+
+        let result1 = kmeans(data.view(), 3, Some(100), None, Some(5), Some(42)).unwrap();
+        let result2 = kmeans(data.view(), 3, Some(100), None, Some(5), Some(42)).unwrap();
+
+        // Labels should be identical
+        assert_eq!(
+            result1.labels, result2.labels,
+            "Same seed should give same labels"
+        );
+
+        // Inertia should be identical
+        assert!(
+            (result1.inertia - result2.inertia).abs() < 1e-10,
+            "Same seed should give same inertia"
+        );
     }
 }

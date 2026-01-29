@@ -3,8 +3,8 @@
 //! Provides O(log n) nearest neighbor queries for spatial clustering algorithms.
 //! Enhanced with bounding boxes for dual-tree algorithms (HDBSCAN, OPTICS).
 
-use std::cmp::Ordering;
 use rayon::prelude::*;
+use std::cmp::Ordering;
 
 /// A node in the KD-tree with bounding box for dual-tree pruning.
 #[derive(Debug)]
@@ -61,7 +61,12 @@ impl KdTree {
 
         let root = Self::build_tree(&data, indices, 0, n_dims);
 
-        KdTree { root, data, n_dims, n_points: n }
+        KdTree {
+            root,
+            data,
+            n_dims,
+            n_points: n,
+        }
     }
 
     /// Get the number of points in the tree.
@@ -120,7 +125,11 @@ impl KdTree {
         let right_indices: Vec<usize> = indices[median_idx + 1..].to_vec();
 
         // Store point_indices for small subtrees (enables efficient leaf enumeration)
-        let point_indices = if size <= 32 { indices.clone() } else { Vec::new() };
+        let point_indices = if size <= 32 {
+            indices.clone()
+        } else {
+            Vec::new()
+        };
 
         Some(Box::new(KdNode {
             point_idx,
@@ -198,7 +207,12 @@ impl KdTree {
     /// Find k nearest neighbors of a query point.
     ///
     /// Returns vector of (distance, point_index) sorted by distance.
-    pub fn k_nearest(&self, query: &[f64], k: usize, exclude_self: Option<usize>) -> Vec<(f64, usize)> {
+    pub fn k_nearest(
+        &self,
+        query: &[f64],
+        k: usize,
+        exclude_self: Option<usize>,
+    ) -> Vec<(f64, usize)> {
         let mut neighbors = BoundedHeap::new(k);
 
         if let Some(root) = &self.root {
@@ -246,7 +260,12 @@ impl KdTree {
     }
 
     /// Query all points within a given radius (sorted by distance).
-    pub fn radius_query(&self, query: &[f64], radius: f64, exclude_self: Option<usize>) -> Vec<(f64, usize)> {
+    pub fn radius_query(
+        &self,
+        query: &[f64],
+        radius: f64,
+        exclude_self: Option<usize>,
+    ) -> Vec<(f64, usize)> {
         let mut results = Vec::new();
 
         if let Some(root) = &self.root {
@@ -258,7 +277,12 @@ impl KdTree {
     }
 
     /// Query all points within a given radius (unsorted, faster for DBSCAN).
-    pub fn radius_query_unsorted(&self, query: &[f64], radius: f64, exclude_self: Option<usize>) -> Vec<(f64, usize)> {
+    pub fn radius_query_unsorted(
+        &self,
+        query: &[f64],
+        radius: f64,
+        exclude_self: Option<usize>,
+    ) -> Vec<(f64, usize)> {
         let mut results = Vec::new();
 
         if let Some(root) = &self.root {
@@ -282,7 +306,7 @@ impl KdTree {
             results.push((dist, node.point_idx));
         }
 
-        let split_dist = (query[node.split_dim] - node.split_val).abs();
+        let _split_dist = (query[node.split_dim] - node.split_val).abs();
 
         // Search left subtree if it could contain points within radius
         if query[node.split_dim] - radius <= node.split_val {
@@ -366,7 +390,8 @@ impl BoundedHeap {
     }
 
     fn into_sorted_vec(mut self) -> Vec<(f64, usize)> {
-        self.items.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal));
+        self.items
+            .sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal));
         self.items
     }
 }
@@ -556,10 +581,7 @@ pub fn kruskal_mst(edges: &[(usize, usize, f64)], n: usize) -> Vec<(usize, usize
 ///
 /// Starts with edges within a radius, then expands if graph is disconnected.
 /// Falls back to brute-force bridges if needed.
-pub fn build_connected_mst(
-    tree: &KdTree,
-    core_distances: &[f64],
-) -> Vec<(usize, usize, f64)> {
+pub fn build_connected_mst(tree: &KdTree, core_distances: &[f64]) -> Vec<(usize, usize, f64)> {
     let n = tree.len();
     if n <= 1 {
         return Vec::new();
@@ -797,12 +819,7 @@ mod tests {
 
     #[test]
     fn test_kruskal_mst() {
-        let edges = vec![
-            (0, 1, 1.0),
-            (1, 2, 2.0),
-            (0, 2, 3.0),
-            (2, 3, 1.0),
-        ];
+        let edges = vec![(0, 1, 1.0), (1, 2, 2.0), (0, 2, 3.0), (2, 3, 1.0)];
 
         let mst = kruskal_mst(&edges, 4);
 

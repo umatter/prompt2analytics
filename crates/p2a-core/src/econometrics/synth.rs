@@ -257,11 +257,18 @@ impl fmt::Display for SynthResult {
 
         // Predictor balance
         writeln!(f, "PREDICTOR BALANCE")?;
-        writeln!(f, "{:<25} {:>12} {:>12} {:>12}", "Predictor", "Treated", "Synthetic", "Diff %")?;
+        writeln!(
+            f,
+            "{:<25} {:>12} {:>12} {:>12}",
+            "Predictor", "Treated", "Synthetic", "Diff %"
+        )?;
         writeln!(f, "{}", "-".repeat(63))?;
         for pb in &self.predictor_balance {
-            writeln!(f, "{:<25} {:>12.4} {:>12.4} {:>12.2}%",
-                     pb.predictor, pb.treated_value, pb.synthetic_value, pb.percent_diff)?;
+            writeln!(
+                f,
+                "{:<25} {:>12.4} {:>12.4} {:>12.2}%",
+                pb.predictor, pb.treated_value, pb.synthetic_value, pb.percent_diff
+            )?;
         }
         writeln!(f)?;
 
@@ -277,19 +284,35 @@ impl fmt::Display for SynthResult {
         writeln!(f, "  Cumulative Effect: {:.4}", self.cumulative_effect)?;
         writeln!(f)?;
 
-        writeln!(f, "{:<10} {:>12} {:>12} {:>12}", "Time", "Actual", "Synthetic", "Effect")?;
+        writeln!(
+            f,
+            "{:<10} {:>12} {:>12} {:>12}",
+            "Time", "Actual", "Synthetic", "Effect"
+        )?;
         writeln!(f, "{}", "-".repeat(50))?;
         for te in &self.treatment_effects {
-            writeln!(f, "{:<10} {:>12.4} {:>12.4} {:>12.4}",
-                     te.time, te.actual, te.synthetic, te.effect)?;
+            writeln!(
+                f,
+                "{:<10} {:>12.4} {:>12.4} {:>12.4}",
+                te.time, te.actual, te.synthetic, te.effect
+            )?;
         }
 
         // Placebo inference
         if let Some(ref placebo) = self.placebo_results {
             writeln!(f)?;
             writeln!(f, "PLACEBO INFERENCE")?;
-            writeln!(f, "  Treated Unit Rank: {} / {}", placebo.treated_rank, placebo.n_units)?;
-            writeln!(f, "  Exact P-Value: {:.4}{}", placebo.p_value, placebo.significance.stars())?;
+            writeln!(
+                f,
+                "  Treated Unit Rank: {} / {}",
+                placebo.treated_rank, placebo.n_units
+            )?;
+            writeln!(
+                f,
+                "  Exact P-Value: {:.4}{}",
+                placebo.p_value,
+                placebo.significance.stars()
+            )?;
         }
 
         if !self.warnings.is_empty() {
@@ -451,7 +474,8 @@ pub fn run_synthetic_control(
     }
 
     // Calculate pre-treatment fit
-    let (pre_mspe, pre_rmspe) = calculate_pre_treatment_fit(&synth_data.z1, &synth_data.z0, &w_weights);
+    let (pre_mspe, pre_rmspe) =
+        calculate_pre_treatment_fit(&synth_data.z1, &synth_data.z0, &w_weights);
 
     // Calculate predictor balance
     let predictor_balance = calculate_predictor_balance(
@@ -513,13 +537,7 @@ pub fn run_synthetic_control(
     // Run placebo tests if requested
     let placebo_results = if config.run_placebos {
         match run_placebo_inference(
-            dataset,
-            outcome,
-            unit_col,
-            time_col,
-            predictors,
-            &config,
-            pre_rmspe,
+            dataset, outcome, unit_col, time_col, predictors, &config, pre_rmspe,
         ) {
             Ok(results) => Some(results),
             Err(e) => {
@@ -580,7 +598,9 @@ fn prepare_synth_data(
             available: vec![format!("{:?}", e)],
         })?
         .str()
-        .map_err(|_| EconError::InvalidSpecification { message: format!("Unit column '{}' must be string type", unit_col) })?
+        .map_err(|_| EconError::InvalidSpecification {
+            message: format!("Unit column '{}' must be string type", unit_col),
+        })?
         .into_iter()
         .filter_map(|s: Option<&str>| s.map(|s| s.to_string()))
         .collect::<std::collections::HashSet<_>>()
@@ -594,9 +614,11 @@ fn prepare_synth_data(
             available: vec![format!("{:?}", e)],
         })?
         .i64()
-        .map_err(|_| EconError::InvalidSpecification { message: format!("Time column '{}' must be integer type", time_col) })?
+        .map_err(|_| EconError::InvalidSpecification {
+            message: format!("Time column '{}' must be integer type", time_col),
+        })?
         .into_iter()
-        .filter_map(|t| t)
+        .flatten()
         .collect::<std::collections::HashSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
@@ -606,23 +628,35 @@ fn prepare_synth_data(
 
     // Validate treated unit exists
     if !units.contains(&treated_unit.to_string()) {
-        return Err(EconError::InvalidSpecification { message: format!(
-            "Treated unit '{}' not found in data. Available units: {:?}",
-            treated_unit,
-            units.iter().take(10).collect::<Vec<_>>()
-        ) });
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "Treated unit '{}' not found in data. Available units: {:?}",
+                treated_unit,
+                units.iter().take(10).collect::<Vec<_>>()
+            ),
+        });
     }
 
     // Split into pre and post treatment periods
-    let pre_times: Vec<i64> = times.iter().copied().filter(|&t| t < treatment_time).collect();
-    let post_times: Vec<i64> = times.iter().copied().filter(|&t| t >= treatment_time).collect();
+    let pre_times: Vec<i64> = times
+        .iter()
+        .copied()
+        .filter(|&t| t < treatment_time)
+        .collect();
+    let post_times: Vec<i64> = times
+        .iter()
+        .copied()
+        .filter(|&t| t >= treatment_time)
+        .collect();
 
     if pre_times.is_empty() {
-        return Err(EconError::InvalidSpecification { message: format!(
-            "No pre-treatment periods found. Treatment time {} but earliest data is {}",
-            treatment_time,
-            times.first().unwrap_or(&0)
-        ) });
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "No pre-treatment periods found. Treatment time {} but earliest data is {}",
+                treatment_time,
+                times.first().unwrap_or(&0)
+            ),
+        });
     }
 
     // Get donor units (all except treated)
@@ -630,7 +664,11 @@ fn prepare_synth_data(
 
     // Determine optimization window
     let opt_times: Vec<i64> = match optimization_window {
-        Some((start, end)) => pre_times.iter().copied().filter(|&t| t >= start && t <= end).collect(),
+        Some((start, end)) => pre_times
+            .iter()
+            .copied()
+            .filter(|&t| t >= start && t <= end)
+            .collect(),
         None => pre_times.clone(),
     };
 
@@ -650,7 +688,11 @@ fn prepare_synth_data(
 
     for (p_idx, pred_spec) in predictors.iter().enumerate() {
         let pred_times = match pred_spec.time_window {
-            Some((start, end)) => pre_times.iter().copied().filter(|&t| t >= start && t <= end).collect(),
+            Some((start, end)) => pre_times
+                .iter()
+                .copied()
+                .filter(|&t| t >= start && t <= end)
+                .collect(),
             None => pre_times.clone(),
         };
 
@@ -665,11 +707,27 @@ fn prepare_synth_data(
         predictor_names.push(pred_name);
 
         // Get treated unit predictor value
-        x1[p_idx] = aggregate_predictor(df, &pred_spec.column, unit_col, time_col, treated_unit, &pred_times, &pred_spec.aggregation)?;
+        x1[p_idx] = aggregate_predictor(
+            df,
+            &pred_spec.column,
+            unit_col,
+            time_col,
+            treated_unit,
+            &pred_times,
+            &pred_spec.aggregation,
+        )?;
 
         // Get donor unit predictor values
         for (d_idx, donor) in donor_units.iter().enumerate() {
-            x0[[p_idx, d_idx]] = aggregate_predictor(df, &pred_spec.column, unit_col, time_col, donor, &pred_times, &pred_spec.aggregation)?;
+            x0[[p_idx, d_idx]] = aggregate_predictor(
+                df,
+                &pred_spec.column,
+                unit_col,
+                time_col,
+                donor,
+                &pred_times,
+                &pred_spec.aggregation,
+            )?;
         }
     }
 
@@ -735,10 +793,12 @@ fn aggregate_predictor(
     }
 
     if values.is_empty() {
-        return Err(EconError::InvalidSpecification { message: format!(
-            "No valid values for predictor '{}' for unit '{}' in specified time window",
-            column, unit
-        ) });
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "No valid values for predictor '{}' for unit '{}' in specified time window",
+                column, unit
+            ),
+        });
     }
 
     let result = match aggregation {
@@ -768,7 +828,9 @@ fn get_outcome(
             available: vec![],
         })?
         .str()
-        .map_err(|_| EconError::InvalidSpecification { message: "Unit column must be string".to_string() })?
+        .map_err(|_| EconError::InvalidSpecification {
+            message: "Unit column must be string".to_string(),
+        })?
         .equal(unit);
 
     let time_mask = df
@@ -778,20 +840,23 @@ fn get_outcome(
             available: vec![],
         })?
         .i64()
-        .map_err(|_| EconError::InvalidSpecification { message: "Time column must be integer".to_string() })?
+        .map_err(|_| EconError::InvalidSpecification {
+            message: "Time column must be integer".to_string(),
+        })?
         .equal(time);
 
     let combined_mask = &mask & &time_mask;
 
-    let filtered = df.filter(&combined_mask).map_err(|e| {
-        EconError::InvalidSpecification { message: format!("Filter error: {:?}", e) }
-    })?;
+    let filtered = df
+        .filter(&combined_mask)
+        .map_err(|e| EconError::InvalidSpecification {
+            message: format!("Filter error: {:?}", e),
+        })?;
 
     if filtered.height() == 0 {
-        return Err(EconError::InvalidSpecification { message: format!(
-            "No data for unit '{}' at time {}",
-            unit, time
-        ) });
+        return Err(EconError::InvalidSpecification {
+            message: format!("No data for unit '{}' at time {}", unit, time),
+        });
     }
 
     let val = filtered
@@ -801,9 +866,13 @@ fn get_outcome(
             available: vec![],
         })?
         .f64()
-        .map_err(|_| EconError::InvalidSpecification { message: format!("Outcome '{}' must be numeric", outcome) })?
+        .map_err(|_| EconError::InvalidSpecification {
+            message: format!("Outcome '{}' must be numeric", outcome),
+        })?
         .get(0)
-        .ok_or_else(|| EconError::InvalidSpecification { message: "Missing outcome value".to_string() })?;
+        .ok_or_else(|| EconError::InvalidSpecification {
+            message: "Missing outcome value".to_string(),
+        })?;
 
     Ok(val)
 }
@@ -950,11 +1019,13 @@ fn optimize_synth_weights(
         VOptimization::Equal => Array1::from_elem(k, 1.0 / k as f64),
         VOptimization::Custom(weights) => {
             if weights.len() != k {
-                return Err(EconError::InvalidSpecification { message: format!(
-                    "Custom V weights length ({}) doesn't match number of predictors ({})",
-                    weights.len(),
-                    k
-                ) });
+                return Err(EconError::InvalidSpecification {
+                    message: format!(
+                        "Custom V weights length ({}) doesn't match number of predictors ({})",
+                        weights.len(),
+                        k
+                    ),
+                });
             }
             let sum: f64 = weights.iter().sum();
             Array1::from_vec(weights.iter().map(|&w| w / sum).collect())
@@ -1040,7 +1111,8 @@ fn optimize_synth_weights(
 
         // Check for convergence based on relative improvement this iteration
         if iter > 5 {
-            let relative_improvement = (loss_at_iter_start - best_loss) / loss_at_iter_start.max(1e-10);
+            let relative_improvement =
+                (loss_at_iter_start - best_loss) / loss_at_iter_start.max(1e-10);
             if relative_improvement < convergence_threshold && relative_improvement >= 0.0 {
                 break; // Converged - improvements too small to continue
             }
@@ -1090,15 +1162,17 @@ fn calculate_v_loss(data: &SynthData, w: &Array1<f64>) -> f64 {
 /// Minimize: (1/2) W' H W + c' W
 /// Where H = X₀' V X₀ and c = -X₀' V X₁
 fn solve_weights_qp(
-    x0: &Array2<f64>,  // k × J
-    x1: &Array1<f64>,  // k × 1
-    v: &Array1<f64>,   // k × 1 (diagonal of V)
+    x0: &Array2<f64>, // k × J
+    x1: &Array1<f64>, // k × 1
+    v: &Array1<f64>,  // k × 1 (diagonal of V)
 ) -> EconResult<Array1<f64>> {
     let k = x1.len();
     let j = x0.ncols();
 
     if j == 0 {
-        return Err(EconError::InvalidSpecification { message: "No donor units".to_string() });
+        return Err(EconError::InvalidSpecification {
+            message: "No donor units".to_string(),
+        });
     }
 
     // Build V as diagonal matrix (we work with diagonal directly for efficiency)
@@ -1177,9 +1251,21 @@ fn solve_simplex_constrained_qp(
         // α* = -(d'Hw + c'd) / (d'Hd)
 
         let hd = h.dot(&direction);
-        let d_h_d: f64 = direction.iter().zip(hd.iter()).map(|(&di, &hi)| di * hi).sum();
-        let d_h_w: f64 = direction.iter().zip(h.dot(&w).iter()).map(|(&di, &hi)| di * hi).sum();
-        let c_d: f64 = c.iter().zip(direction.iter()).map(|(&ci, &di)| ci * di).sum();
+        let d_h_d: f64 = direction
+            .iter()
+            .zip(hd.iter())
+            .map(|(&di, &hi)| di * hi)
+            .sum();
+        let d_h_w: f64 = direction
+            .iter()
+            .zip(h.dot(&w).iter())
+            .map(|(&di, &hi)| di * hi)
+            .sum();
+        let c_d: f64 = c
+            .iter()
+            .zip(direction.iter())
+            .map(|(&ci, &di)| ci * di)
+            .sum();
 
         let alpha = if d_h_d.abs() > 1e-12 {
             (-(d_h_w + c_d) / d_h_d).max(0.0).min(1.0)
@@ -1191,7 +1277,11 @@ fn solve_simplex_constrained_qp(
         let w_new = &w + &(&direction * alpha);
 
         // Check convergence
-        let change: f64 = w_new.iter().zip(w.iter()).map(|(&a, &b)| (a - b).abs()).sum();
+        let change: f64 = w_new
+            .iter()
+            .zip(w.iter())
+            .map(|(&a, &b)| (a - b).abs())
+            .sum();
         w = w_new;
 
         if change < tolerance {
@@ -1214,11 +1304,7 @@ fn solve_simplex_constrained_qp(
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// Calculate pre-treatment fit statistics.
-fn calculate_pre_treatment_fit(
-    z1: &Array1<f64>,
-    z0: &Array2<f64>,
-    w: &Array1<f64>,
-) -> (f64, f64) {
+fn calculate_pre_treatment_fit(z1: &Array1<f64>, z0: &Array2<f64>, w: &Array1<f64>) -> (f64, f64) {
     let t0 = z1.len();
     let mut sse = 0.0;
 
@@ -1255,7 +1341,10 @@ fn calculate_predictor_balance(
         };
 
         balance.push(PredictorBalance {
-            predictor: predictor_names.get(i).cloned().unwrap_or_else(|| format!("X{}", i)),
+            predictor: predictor_names
+                .get(i)
+                .cloned()
+                .unwrap_or_else(|| format!("X{}", i)),
             treated_value,
             synthetic_value,
             difference,
@@ -1354,7 +1443,9 @@ fn run_placebo_inference(
             available: vec![format!("{:?}", e)],
         })?
         .str()
-        .map_err(|_| EconError::InvalidSpecification { message: "Unit column must be string".to_string() })?
+        .map_err(|_| EconError::InvalidSpecification {
+            message: "Unit column must be string".to_string(),
+        })?
         .into_iter()
         .filter_map(|s: Option<&str>| s.map(|s| s.to_string()))
         .collect::<std::collections::HashSet<_>>()
@@ -1476,7 +1567,6 @@ fn run_placebo_inference(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use polars::prelude::*;
 
     /// Create a simple panel dataset for testing.
     fn create_test_panel() -> Dataset {
@@ -1510,7 +1600,8 @@ mod tests {
                 4.0, 4.0, 4.0, 4.0, 4.0, 4.0,  // B: mean = 4
                 6.0, 6.0, 6.0, 6.0, 6.0, 6.0,  // C: mean = 6
             ],
-        }.unwrap();
+        }
+        .unwrap();
 
         Dataset::new(df)
     }
@@ -1529,8 +1620,9 @@ mod tests {
             ..Default::default()
         };
 
-        let result = run_synthetic_control(&dataset, "outcome", "unit", "time", &predictors, config)
-            .unwrap();
+        let result =
+            run_synthetic_control(&dataset, "outcome", "unit", "time", &predictors, config)
+                .unwrap();
 
         // Check basic structure
         assert_eq!(result.treated_unit, "A");
@@ -1541,7 +1633,11 @@ mod tests {
 
         // Weights should sum to 1
         let weight_sum: f64 = result.all_unit_weights.iter().map(|(_, w)| w).sum();
-        assert!((weight_sum - 1.0).abs() < 0.01, "Weights should sum to 1, got {}", weight_sum);
+        assert!(
+            (weight_sum - 1.0).abs() < 0.01,
+            "Weights should sum to 1, got {}",
+            weight_sum
+        );
 
         // With equal V weights and predictor x1, optimal weights should be ~0.5 each
         // since A's x1 = 5 = 0.5 * 4 + 0.5 * 6
@@ -1578,8 +1674,9 @@ mod tests {
             ..Default::default()
         };
 
-        let result = run_synthetic_control(&dataset, "outcome", "unit", "time", &predictors, config)
-            .unwrap();
+        let result =
+            run_synthetic_control(&dataset, "outcome", "unit", "time", &predictors, config)
+                .unwrap();
 
         // Should still produce valid results
         assert_eq!(result.n_donors, 2);
@@ -1602,8 +1699,9 @@ mod tests {
             ..Default::default()
         };
 
-        let result = run_synthetic_control(&dataset, "outcome", "unit", "time", &predictors, config)
-            .unwrap();
+        let result =
+            run_synthetic_control(&dataset, "outcome", "unit", "time", &predictors, config)
+                .unwrap();
 
         // Check predictor balance
         assert!(!result.predictor_balance.is_empty());
@@ -1629,7 +1727,8 @@ mod tests {
             ..Default::default()
         };
 
-        let result = run_synthetic_control(&dataset, "outcome", "unit", "time", &predictors, config);
+        let result =
+            run_synthetic_control(&dataset, "outcome", "unit", "time", &predictors, config);
         assert!(result.is_err());
     }
 
@@ -1645,7 +1744,8 @@ mod tests {
             ..Default::default()
         };
 
-        let result = run_synthetic_control(&dataset, "outcome", "unit", "time", &predictors, config);
+        let result =
+            run_synthetic_control(&dataset, "outcome", "unit", "time", &predictors, config);
         assert!(result.is_err());
     }
 
@@ -1687,8 +1787,9 @@ mod tests {
             ..Default::default()
         };
 
-        let result = run_synthetic_control(&dataset, "outcome", "unit", "time", &predictors, config)
-            .unwrap();
+        let result =
+            run_synthetic_control(&dataset, "outcome", "unit", "time", &predictors, config)
+                .unwrap();
 
         // Test Display trait
         let output = format!("{}", result);
@@ -1756,7 +1857,7 @@ pub struct GsynthConfig {
 impl Default for GsynthConfig {
     fn default() -> Self {
         Self {
-            n_factors: 0,  // Auto-select
+            n_factors: 0, // Auto-select
             max_factors: 10,
             cross_validate: true,
             cv_folds: 5,
@@ -1835,11 +1936,22 @@ impl fmt::Display for GsynthResult {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "Generalized Synthetic Control (gsynth)")?;
         writeln!(f, "=======================================")?;
-        writeln!(f, "Treated units: {}, Control units: {}", self.n_treated, self.n_control)?;
-        writeln!(f, "Pre-treatment periods: {}, Post-treatment periods: {}",
-            self.n_pre_periods, self.n_post_periods)?;
+        writeln!(
+            f,
+            "Treated units: {}, Control units: {}",
+            self.n_treated, self.n_control
+        )?;
+        writeln!(
+            f,
+            "Pre-treatment periods: {}, Post-treatment periods: {}",
+            self.n_pre_periods, self.n_post_periods
+        )?;
         writeln!(f, "Factors: {}", self.n_factors)?;
-        writeln!(f, "Estimator: {:?}, Fixed Effects: {:?}", self.estimator, self.force)?;
+        writeln!(
+            f,
+            "Estimator: {:?}, Fixed Effects: {:?}",
+            self.estimator, self.force
+        )?;
         writeln!(f)?;
 
         writeln!(f, "AVERAGE TREATMENT EFFECT ON TREATED (ATT)")?;
@@ -1936,12 +2048,14 @@ pub fn run_gsynth(
     let d = extract_numeric_column(df, d_col)?;
 
     // Build panel structure
-    let unique_units: Vec<String> = units.iter()
+    let unique_units: Vec<String> = units
+        .iter()
         .cloned()
         .collect::<std::collections::HashSet<_>>()
         .into_iter()
         .collect();
-    let mut unique_times: Vec<i64> = times.iter()
+    let mut unique_times: Vec<i64> = times
+        .iter()
         .cloned()
         .collect::<std::collections::HashSet<_>>()
         .into_iter()
@@ -1952,11 +2066,13 @@ pub fn run_gsynth(
     let n_times = unique_times.len();
 
     // Build index mappings
-    let unit_idx: std::collections::HashMap<&str, usize> = unique_units.iter()
+    let unit_idx: std::collections::HashMap<&str, usize> = unique_units
+        .iter()
         .enumerate()
         .map(|(i, u)| (u.as_str(), i))
         .collect();
-    let time_idx: std::collections::HashMap<i64, usize> = unique_times.iter()
+    let time_idx: std::collections::HashMap<i64, usize> = unique_times
+        .iter()
         .enumerate()
         .map(|(i, &t)| (t, i))
         .collect();
@@ -1977,7 +2093,7 @@ pub fn run_gsynth(
     let mut control_units: Vec<usize> = Vec::new();
     let mut treatment_times: Vec<i64> = Vec::new();
 
-    for (ui, unit) in unique_units.iter().enumerate() {
+    for (ui, _unit) in unique_units.iter().enumerate() {
         let ever_treated = (0..n_times).any(|ti| d_mat[[ui, ti]] > 0.5);
         if ever_treated {
             treated_units.push(ui);
@@ -2013,8 +2129,10 @@ pub fn run_gsynth(
 
     if first_treatment_idx < config.min_pre_periods {
         return Err(EconError::InvalidSpecification {
-            message: format!("Need at least {} pre-treatment periods, found {}",
-                config.min_pre_periods, first_treatment_idx),
+            message: format!(
+                "Need at least {} pre-treatment periods, found {}",
+                config.min_pre_periods, first_treatment_idx
+            ),
         });
     }
 
@@ -2041,16 +2159,22 @@ pub fn run_gsynth(
 
     // Select number of factors via cross-validation if requested
     let (n_factors, cv_mspe) = if config.cross_validate && config.n_factors == 0 {
-        select_factors_cv(&y_mat, &control_units, n_pre_periods,
-            config.max_factors, config.cv_folds, &config)?
+        select_factors_cv(
+            &y_mat,
+            &control_units,
+            n_pre_periods,
+            config.max_factors,
+            config.cv_folds,
+            &config,
+        )?
     } else if config.n_factors > 0 {
         (config.n_factors, Vec::new())
     } else {
-        (2, Vec::new())  // Default to 2 factors
+        (2, Vec::new()) // Default to 2 factors
     };
 
     // Estimate IFE model using control units in pre-treatment period
-    let (factors_pre, loadings, beta, residuals) = estimate_ife(
+    let (factors_pre, loadings, beta, _residuals) = estimate_ife(
         &y_mat,
         x_mat.as_ref(),
         &control_units,
@@ -2083,11 +2207,8 @@ pub fn run_gsynth(
         let treatment_idx = time_idx[&treatment_time];
 
         // Estimate loadings for this treated unit from pre-treatment data
-        let unit_loadings = estimate_unit_loadings(
-            &y_mat.row(ui).to_owned(),
-            &factors,
-            treatment_idx,
-        )?;
+        let unit_loadings =
+            estimate_unit_loadings(&y_mat.row(ui).to_owned(), &factors, treatment_idx)?;
 
         // Compute counterfactual and effects
         let mut effects: Vec<(i64, f64)> = Vec::new();
@@ -2097,13 +2218,19 @@ pub fn run_gsynth(
         let pre_mean: f64 = (0..treatment_idx)
             .map(|t| y_mat[[ui, t]])
             .filter(|v| !v.is_nan())
-            .sum::<f64>() / treatment_idx.max(1) as f64;
+            .sum::<f64>()
+            / treatment_idx.max(1) as f64;
 
         // Compute mean of fitted values in pre-treatment
         let pre_fitted_mean: f64 = if n_factors > 0 {
             (0..treatment_idx)
-                .map(|t| (0..n_factors).map(|r| unit_loadings[r] * factors[[t, r]]).sum::<f64>())
-                .sum::<f64>() / treatment_idx.max(1) as f64
+                .map(|t| {
+                    (0..n_factors)
+                        .map(|r| unit_loadings[r] * factors[[t, r]])
+                        .sum::<f64>()
+                })
+                .sum::<f64>()
+                / treatment_idx.max(1) as f64
         } else {
             0.0
         };
@@ -2134,7 +2261,7 @@ pub fn run_gsynth(
                     all_effects.push(effect);
 
                     let rel_time = (ti as i64) - (treatment_idx as i64);
-                    dynamic_effect_map.entry(rel_time).or_insert_with(Vec::new).push(effect);
+                    dynamic_effect_map.entry(rel_time).or_default().push(effect);
                 }
             }
         }
@@ -2162,10 +2289,9 @@ pub fn run_gsynth(
     };
 
     // Dynamic effects (average by relative time)
-    let mut dynamic_effects: Vec<(i64, f64)> = dynamic_effect_map.iter()
-        .map(|(&rel_t, effects)| {
-            (rel_t, effects.iter().sum::<f64>() / effects.len() as f64)
-        })
+    let mut dynamic_effects: Vec<(i64, f64)> = dynamic_effect_map
+        .iter()
+        .map(|(&rel_t, effects)| (rel_t, effects.iter().sum::<f64>() / effects.len() as f64))
         .collect();
     dynamic_effects.sort_by_key(|(t, _)| *t);
 
@@ -2174,8 +2300,15 @@ pub fn run_gsynth(
 
     // Bootstrap for standard errors if requested
     let (att_se, att_ci, p_value) = if config.bootstrap_se {
-        bootstrap_gsynth(&y_mat, &d_mat, &treated_units, &control_units,
-            n_pre_periods, n_factors, &config)?
+        bootstrap_gsynth(
+            &y_mat,
+            &d_mat,
+            &treated_units,
+            &control_units,
+            n_pre_periods,
+            n_factors,
+            &config,
+        )?
     } else {
         (None, None, None)
     };
@@ -2207,7 +2340,11 @@ pub fn run_gsynth(
 fn extract_id_column(df: &DataFrame, col: &str) -> EconResult<Vec<String>> {
     let series = df.column(col).map_err(|_| EconError::ColumnNotFound {
         column: col.to_string(),
-        available: df.get_column_names().iter().map(|s| s.to_string()).collect(),
+        available: df
+            .get_column_names()
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
     })?;
 
     if let Ok(ca) = series.str() {
@@ -2227,7 +2364,11 @@ fn extract_id_column(df: &DataFrame, col: &str) -> EconResult<Vec<String>> {
 fn extract_time_column(df: &DataFrame, col: &str) -> EconResult<Vec<i64>> {
     let series = df.column(col).map_err(|_| EconError::ColumnNotFound {
         column: col.to_string(),
-        available: df.get_column_names().iter().map(|s| s.to_string()).collect(),
+        available: df
+            .get_column_names()
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
     })?;
 
     if let Ok(ca) = series.i64() {
@@ -2247,7 +2388,11 @@ fn extract_time_column(df: &DataFrame, col: &str) -> EconResult<Vec<i64>> {
 fn extract_numeric_column(df: &DataFrame, col: &str) -> EconResult<Vec<f64>> {
     let series = df.column(col).map_err(|_| EconError::ColumnNotFound {
         column: col.to_string(),
-        available: df.get_column_names().iter().map(|s| s.to_string()).collect(),
+        available: df
+            .get_column_names()
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
     })?;
 
     if let Ok(ca) = series.f64() {
@@ -2272,8 +2417,8 @@ fn select_factors_cv(
     n_folds: usize,
     config: &GsynthConfig,
 ) -> EconResult<(usize, Vec<(usize, f64)>)> {
-    use rand::seq::SliceRandom;
     use rand::SeedableRng;
+    use rand::seq::SliceRandom;
 
     let mut rng = rand::rngs::StdRng::seed_from_u64(42);
     let mut indices: Vec<usize> = (0..control_units.len()).collect();
@@ -2287,28 +2432,25 @@ fn select_factors_cv(
 
         for fold in 0..n_folds {
             let start = fold * fold_size;
-            let end = if fold == n_folds - 1 { control_units.len() } else { (fold + 1) * fold_size };
+            let end = if fold == n_folds - 1 {
+                control_units.len()
+            } else {
+                (fold + 1) * fold_size
+            };
 
             let test_indices: Vec<usize> = indices[start..end].to_vec();
-            let train_indices: Vec<usize> = indices.iter()
+            let train_indices: Vec<usize> = indices
+                .iter()
                 .enumerate()
                 .filter(|&(i, _)| i < start || i >= end)
                 .map(|(_, &idx)| idx)
                 .collect();
 
-            let train_units: Vec<usize> = train_indices.iter()
-                .map(|&i| control_units[i])
-                .collect();
+            let train_units: Vec<usize> = train_indices.iter().map(|&i| control_units[i]).collect();
 
             // Estimate on training set
-            let (factors, _, _, _) = match estimate_ife(
-                y_mat,
-                None,
-                &train_units,
-                n_pre,
-                r,
-                config,
-            ) {
+            let (factors, _, _, _) = match estimate_ife(y_mat, None, &train_units, n_pre, r, config)
+            {
                 Ok(res) => res,
                 Err(_) => continue,
             };
@@ -2322,14 +2464,11 @@ fn select_factors_cv(
 
             for &test_idx in &test_indices {
                 let ui = control_units[test_idx];
-                let unit_loadings = match estimate_unit_loadings(
-                    &y_mat.row(ui).to_owned(),
-                    &factors,
-                    n_pre,
-                ) {
-                    Ok(l) => l,
-                    Err(_) => continue,
-                };
+                let unit_loadings =
+                    match estimate_unit_loadings(&y_mat.row(ui).to_owned(), &factors, n_pre) {
+                        Ok(l) => l,
+                        Err(_) => continue,
+                    };
 
                 for ti in 0..n_pre {
                     let y_actual = y_mat[[ui, ti]];
@@ -2355,7 +2494,8 @@ fn select_factors_cv(
     }
 
     // Select r with minimum MSPE
-    let best_r = cv_results.iter()
+    let best_r = cv_results
+        .iter()
         .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
         .map(|&(r, _)| r)
         .unwrap_or(2);
@@ -2388,9 +2528,8 @@ fn estimate_ife(
         GsynthForce::Unit => {
             let mut y_dm = y_control.clone();
             for i in 0..n_control {
-                let row_mean: f64 = y_dm.row(i).iter()
-                    .filter(|&&v| !v.is_nan())
-                    .sum::<f64>() / n_pre as f64;
+                let row_mean: f64 =
+                    y_dm.row(i).iter().filter(|&&v| !v.is_nan()).sum::<f64>() / n_pre as f64;
                 for t in 0..n_pre {
                     y_dm[[i, t]] -= row_mean;
                 }
@@ -2403,7 +2542,8 @@ fn estimate_ife(
                 let col_mean: f64 = (0..n_control)
                     .map(|i| y_dm[[i, t]])
                     .filter(|&v| !v.is_nan())
-                    .sum::<f64>() / n_control as f64;
+                    .sum::<f64>()
+                    / n_control as f64;
                 for i in 0..n_control {
                     y_dm[[i, t]] -= col_mean;
                 }
@@ -2413,9 +2553,8 @@ fn estimate_ife(
         GsynthForce::TwoWay => {
             let mut y_dm = y_control.clone();
             // Grand mean
-            let grand_mean: f64 = y_dm.iter()
-                .filter(|&&v| !v.is_nan())
-                .sum::<f64>() / (n_control * n_pre) as f64;
+            let grand_mean: f64 =
+                y_dm.iter().filter(|&&v| !v.is_nan()).sum::<f64>() / (n_control * n_pre) as f64;
             // Row means
             let row_means: Vec<f64> = (0..n_control)
                 .map(|i| y_dm.row(i).sum() / n_pre as f64)
@@ -2461,8 +2600,11 @@ fn estimate_ife(
 
 /// Extract factors using eigenvalue decomposition of Y'Y.
 /// Returns factors (T x r) and loadings (N x r).
-fn extract_factors_svd(y: &Array2<f64>, n_factors: usize) -> EconResult<(Array2<f64>, Array2<f64>)> {
-    let (n_rows, n_cols) = y.dim();  // N x T (control_units x pre_periods)
+fn extract_factors_svd(
+    y: &Array2<f64>,
+    n_factors: usize,
+) -> EconResult<(Array2<f64>, Array2<f64>)> {
+    let (n_rows, n_cols) = y.dim(); // N x T (control_units x pre_periods)
     let r = n_factors.min(n_rows.min(n_cols));
 
     if r == 0 {
@@ -2476,7 +2618,7 @@ fn extract_factors_svd(y: &Array2<f64>, n_factors: usize) -> EconResult<(Array2<
     // The PC1 normalization convention: factors have unit variance, loadings capture scale.
 
     // Compute Y'Y (T x T) for factor extraction
-    let yty = y.t().dot(y);  // T x T
+    let yty = y.t().dot(y); // T x T
 
     // Simple eigenvalue decomposition via power iteration with deflation
     let mut factors = Array2::<f64>::zeros((n_cols, r));
@@ -2497,7 +2639,9 @@ fn extract_factors_svd(y: &Array2<f64>, n_factors: usize) -> EconResult<(Array2<
             let v_normalized = &v_new / norm;
 
             // Check convergence
-            let diff: f64 = v.iter().zip(v_normalized.iter())
+            let diff: f64 = v
+                .iter()
+                .zip(v_normalized.iter())
                 .map(|(a, b)| (a - b).powi(2))
                 .sum::<f64>()
                 .sqrt();
@@ -2621,24 +2765,24 @@ fn extend_factors_to_all_periods(
     let (ltl_inv, _) = safe_inverse(&ltl_reg.view())?;
 
     // Compute pre-treatment means for unit FE adjustment
-    let pre_means: Vec<f64> = control_units.iter()
+    let pre_means: Vec<f64> = control_units
+        .iter()
         .map(|&ui| (0..n_pre).map(|s| y_mat[[ui, s]]).sum::<f64>() / n_pre as f64)
         .collect();
 
     for t in n_pre..n_times {
         // Extract control outcomes at time t
-        let y_t: Array1<f64> = Array1::from_iter(
-            control_units.iter().map(|&ui| y_mat[[ui, t]])
-        );
+        let y_t: Array1<f64> = Array1::from_iter(control_units.iter().map(|&ui| y_mat[[ui, t]]));
 
         // Handle fixed effects
         let y_t_adj = match config.force {
             GsynthForce::Unit | GsynthForce::TwoWay => {
                 // Subtract unit means from pre-treatment
                 let adj: Array1<f64> = Array1::from_iter(
-                    control_units.iter().enumerate().map(|(i, &ui)| {
-                        y_mat[[ui, t]] - pre_means[i]
-                    })
+                    control_units
+                        .iter()
+                        .enumerate()
+                        .map(|(i, &ui)| y_mat[[ui, t]] - pre_means[i]),
                 );
                 adj
             }
@@ -2708,7 +2852,6 @@ fn bootstrap_gsynth(
 #[cfg(test)]
 mod gsynth_tests {
     use super::*;
-    use polars::prelude::*;
 
     fn create_gsynth_dataset() -> Dataset {
         // Panel data: 3 control units (C1, C2, C3), 2 treated units (T1, T2)
@@ -2754,7 +2897,8 @@ mod gsynth_tests {
             "time" => times,
             "outcome" => outcomes,
             "treated" => treatment
-        }.unwrap();
+        }
+        .unwrap();
 
         Dataset::new(df)
     }
@@ -2765,26 +2909,23 @@ mod gsynth_tests {
         let config = GsynthConfig {
             n_factors: 1,
             cross_validate: false,
-            min_pre_periods: 3,  // Lower for test
+            min_pre_periods: 3, // Lower for test
             ..Default::default()
         };
 
-        let result = run_gsynth(
-            &dataset,
-            "outcome",
-            "treated",
-            "unit",
-            "time",
-            &[],
-            config,
-        ).unwrap();
+        let result =
+            run_gsynth(&dataset, "outcome", "treated", "unit", "time", &[], config).unwrap();
 
         // Should identify 2 treated and 3 control units
         assert_eq!(result.n_treated, 2);
         assert_eq!(result.n_control, 3);
 
         // ATT should be positive (treatment has positive effect)
-        assert!(result.att > 0.0, "ATT should be positive, got {}", result.att);
+        assert!(
+            result.att > 0.0,
+            "ATT should be positive, got {}",
+            result.att
+        );
     }
 
     #[test]
@@ -2793,19 +2934,12 @@ mod gsynth_tests {
         let config = GsynthConfig {
             n_factors: 1,
             cross_validate: false,
-            min_pre_periods: 3,  // Lower for test
+            min_pre_periods: 3, // Lower for test
             ..Default::default()
         };
 
-        let result = run_gsynth(
-            &dataset,
-            "outcome",
-            "treated",
-            "unit",
-            "time",
-            &[],
-            config,
-        ).unwrap();
+        let result =
+            run_gsynth(&dataset, "outcome", "treated", "unit", "time", &[], config).unwrap();
 
         // Should have 2 unit effects
         assert_eq!(result.unit_effects.len(), 2);
@@ -2820,7 +2954,7 @@ mod gsynth_tests {
     fn test_gsynth_cv() {
         let dataset = create_gsynth_dataset();
         let config = GsynthConfig {
-            n_factors: 0,  // Auto-select
+            n_factors: 0, // Auto-select
             cross_validate: true,
             max_factors: 3,
             cv_folds: 2,
@@ -2828,15 +2962,8 @@ mod gsynth_tests {
             ..Default::default()
         };
 
-        let result = run_gsynth(
-            &dataset,
-            "outcome",
-            "treated",
-            "unit",
-            "time",
-            &[],
-            config,
-        ).unwrap();
+        let result =
+            run_gsynth(&dataset, "outcome", "treated", "unit", "time", &[], config).unwrap();
 
         // Should select some number of factors
         assert!(result.n_factors <= 3);

@@ -2,9 +2,9 @@
 //!
 //! Run with: `cargo bench -p p2a-core -- multivariate`
 
-use criterion::{criterion_group, criterion_main, Criterion, BenchmarkId};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use ndarray::Array2;
-use p2a_core::stats::{factanal, RotationMethod, ScoresMethod, cancor, mahalanobis};
+use p2a_core::stats::{RotationMethod, ScoresMethod, cancor, factanal, mahalanobis};
 use rand::Rng;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
@@ -26,7 +26,11 @@ fn generate_factor_data(n: usize, p: usize, k: usize, seed: u64) -> Array2<f64> 
     let vars_per_factor = p / k;
     for j in 0..k {
         let start = j * vars_per_factor;
-        let end = if j == k - 1 { p } else { (j + 1) * vars_per_factor };
+        let end = if j == k - 1 {
+            p
+        } else {
+            (j + 1) * vars_per_factor
+        };
         for i in start..end {
             loadings[[i, j]] = rng.gen_range(0.6..0.9);
             // Add small cross-loadings
@@ -59,64 +63,48 @@ fn factanal_benchmark(c: &mut Criterion) {
     let mut group = c.benchmark_group("FactorAnalysis");
 
     // Different configurations: (n_obs, n_vars, n_factors)
-    let configs = [
-        (100, 6, 2),
-        (500, 10, 3),
-        (1000, 15, 4),
-        (5000, 20, 5),
-    ];
+    let configs = [(100, 6, 2), (500, 10, 3), (1000, 15, 4), (5000, 20, 5)];
 
     for (n, p, k) in configs {
         let data = generate_factor_data(n, p, k, 42);
         let label = format!("n{}_p{}_k{}", n, p, k);
 
         // No rotation benchmark
-        group.bench_with_input(
-            BenchmarkId::new("no_rotation", &label),
-            &data,
-            |b, data| {
-                b.iter(|| {
-                    factanal(&data.view(), k, RotationMethod::None, ScoresMethod::None)
-                        .expect("Factor analysis should succeed")
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("no_rotation", &label), &data, |b, data| {
+            b.iter(|| {
+                factanal(&data.view(), k, RotationMethod::None, ScoresMethod::None)
+                    .expect("Factor analysis should succeed")
+            });
+        });
 
         // Varimax rotation benchmark
-        group.bench_with_input(
-            BenchmarkId::new("varimax", &label),
-            &data,
-            |b, data| {
-                b.iter(|| {
-                    factanal(&data.view(), k, RotationMethod::Varimax, ScoresMethod::None)
-                        .expect("Factor analysis should succeed")
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("varimax", &label), &data, |b, data| {
+            b.iter(|| {
+                factanal(&data.view(), k, RotationMethod::Varimax, ScoresMethod::None)
+                    .expect("Factor analysis should succeed")
+            });
+        });
 
         // Promax rotation benchmark
-        group.bench_with_input(
-            BenchmarkId::new("promax", &label),
-            &data,
-            |b, data| {
-                b.iter(|| {
-                    factanal(&data.view(), k, RotationMethod::Promax, ScoresMethod::None)
-                        .expect("Factor analysis should succeed")
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("promax", &label), &data, |b, data| {
+            b.iter(|| {
+                factanal(&data.view(), k, RotationMethod::Promax, ScoresMethod::None)
+                    .expect("Factor analysis should succeed")
+            });
+        });
 
         // With factor scores (regression method)
-        group.bench_with_input(
-            BenchmarkId::new("with_scores", &label),
-            &data,
-            |b, data| {
-                b.iter(|| {
-                    factanal(&data.view(), k, RotationMethod::Varimax, ScoresMethod::Regression)
-                        .expect("Factor analysis should succeed")
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("with_scores", &label), &data, |b, data| {
+            b.iter(|| {
+                factanal(
+                    &data.view(),
+                    k,
+                    RotationMethod::Varimax,
+                    ScoresMethod::Regression,
+                )
+                .expect("Factor analysis should succeed")
+            });
+        });
     }
 
     group.finish();
@@ -136,7 +124,7 @@ fn generate_cancor_data(n: usize, p: usize, q: usize, seed: u64) -> (Array2<f64>
     let mut x = Array2::zeros((n, p));
     for i in 0..n {
         for j in 0..p {
-            let loading = 0.8 - 0.1 * (j as f64);  // Decreasing correlation
+            let loading = 0.8 - 0.1 * (j as f64); // Decreasing correlation
             x[[i, j]] = loading * common[i] + rng.gen_range(-0.5..0.5);
         }
     }
@@ -145,7 +133,7 @@ fn generate_cancor_data(n: usize, p: usize, q: usize, seed: u64) -> (Array2<f64>
     let mut y = Array2::zeros((n, q));
     for i in 0..n {
         for j in 0..q {
-            let loading = 0.9 - 0.15 * (j as f64);  // Decreasing correlation
+            let loading = 0.9 - 0.15 * (j as f64); // Decreasing correlation
             y[[i, j]] = loading * common[i] + rng.gen_range(-0.5..0.5);
         }
     }
@@ -164,10 +152,7 @@ fn cancor_benchmark(c: &mut Criterion) {
             BenchmarkId::from_parameter(format!("n{}", n)),
             &(x, y),
             |b, (x, y)| {
-                b.iter(|| {
-                    cancor(&x.view(), &y.view(), true, true)
-                        .expect("Cancor should succeed")
-                });
+                b.iter(|| cancor(&x.view(), &y.view(), true, true).expect("Cancor should succeed"));
             },
         );
     }
@@ -180,12 +165,7 @@ fn cancor_variable_scaling_benchmark(c: &mut Criterion) {
 
     // Different variable configurations with n=1000
     let n = 1000;
-    let configs = [
-        (2, 2),
-        (5, 3),
-        (10, 5),
-        (20, 10),
-    ];
+    let configs = [(2, 2), (5, 3), (10, 5), (20, 10)];
 
     for (p, q) in configs {
         let (x, y) = generate_cancor_data(n, p, q, 42);
@@ -194,10 +174,7 @@ fn cancor_variable_scaling_benchmark(c: &mut Criterion) {
             BenchmarkId::from_parameter(format!("p{}_q{}", p, q)),
             &(x, y),
             |b, (x, y)| {
-                b.iter(|| {
-                    cancor(&x.view(), &y.view(), true, true)
-                        .expect("Cancor should succeed")
-                });
+                b.iter(|| cancor(&x.view(), &y.view(), true, true).expect("Cancor should succeed"));
             },
         );
     }
@@ -236,8 +213,7 @@ fn mahalanobis_benchmark(c: &mut Criterion) {
             &data,
             |b, data| {
                 b.iter(|| {
-                    mahalanobis(data.view(), None, None, false)
-                        .expect("Mahalanobis should succeed")
+                    mahalanobis(data.view(), None, None, false).expect("Mahalanobis should succeed")
                 });
             },
         );
@@ -259,8 +235,7 @@ fn mahalanobis_variable_scaling_benchmark(c: &mut Criterion) {
             &data,
             |b, data| {
                 b.iter(|| {
-                    mahalanobis(data.view(), None, None, false)
-                        .expect("Mahalanobis should succeed")
+                    mahalanobis(data.view(), None, None, false).expect("Mahalanobis should succeed")
                 });
             },
         );
@@ -269,5 +244,12 @@ fn mahalanobis_variable_scaling_benchmark(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, factanal_benchmark, cancor_benchmark, cancor_variable_scaling_benchmark, mahalanobis_benchmark, mahalanobis_variable_scaling_benchmark);
+criterion_group!(
+    benches,
+    factanal_benchmark,
+    cancor_benchmark,
+    cancor_variable_scaling_benchmark,
+    mahalanobis_benchmark,
+    mahalanobis_variable_scaling_benchmark
+);
 criterion_main!(benches);

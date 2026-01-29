@@ -43,9 +43,9 @@ pub fn DatasetInspectorModal(props: DatasetInspectorModalProps) -> Element {
                     let clipboard = navigator.clipboard();
                     let name_clone = name.clone();
                     wasm_bindgen_futures::spawn_local(async move {
-                        let _ = wasm_bindgen_futures::JsFuture::from(
-                            clipboard.write_text(&name_clone)
-                        ).await;
+                        let _ =
+                            wasm_bindgen_futures::JsFuture::from(clipboard.write_text(&name_clone))
+                                .await;
                     });
                 }
             }

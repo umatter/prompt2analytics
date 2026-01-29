@@ -246,7 +246,8 @@ mod tests {
 
     #[test]
     fn test_truncate_history() {
-        let long_prompt = "This is a very long prompt that exceeds sixty characters and should be truncated";
+        let long_prompt =
+            "This is a very long prompt that exceeds sixty characters and should be truncated";
         let suggestion = Suggestion::history(long_prompt);
         assert!(suggestion.display_text.ends_with("..."));
         assert!(suggestion.display_text.len() <= 63);

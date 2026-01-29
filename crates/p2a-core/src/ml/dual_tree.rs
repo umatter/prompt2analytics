@@ -11,7 +11,7 @@
 //! - Campello, R.J.G.B., Moulavi, D., and Sander, J. (2013). "Density-Based
 //!   Clustering Based on Hierarchical Density Estimates". PAKDD 2013.
 
-use super::kdtree::{euclidean_distance, KdNode, KdTree, UnionFind};
+use super::kdtree::{KdNode, KdTree, UnionFind, euclidean_distance};
 use rayon::prelude::*;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
@@ -46,7 +46,10 @@ impl Eq for DualTreeEntry {}
 impl Ord for DualTreeEntry {
     fn cmp(&self, other: &Self) -> Ordering {
         // Min-heap: smaller distances first
-        other.min_mr.partial_cmp(&self.min_mr).unwrap_or(Ordering::Equal)
+        other
+            .min_mr
+            .partial_cmp(&self.min_mr)
+            .unwrap_or(Ordering::Equal)
     }
 }
 
@@ -109,10 +112,7 @@ fn collect_nodes_with_indices(root: &KdNode) -> Vec<TreeNodeInfo<'_>> {
 ///
 /// # Returns
 /// * MST edges as (from, to, mutual_reachability_distance)
-pub fn dual_tree_boruvka_mst(
-    tree: &KdTree,
-    core_distances: &[f64],
-) -> DualTreeMstResult {
+pub fn dual_tree_boruvka_mst(tree: &KdTree, core_distances: &[f64]) -> DualTreeMstResult {
     let n = tree.len();
     if n <= 1 {
         return DualTreeMstResult {
@@ -132,17 +132,10 @@ pub fn dual_tree_boruvka_mst(
         iterations += 1;
 
         // Reset minimum edges
-        for e in &mut component_min_edge {
-            *e = None;
-        }
+        component_min_edge.fill(None);
 
         // Use dual-tree traversal to find minimum edge for each component
-        find_component_min_edges_dual_tree(
-            tree,
-            core_distances,
-            &mut uf,
-            &mut component_min_edge,
-        );
+        find_component_min_edges_dual_tree(tree, core_distances, &mut uf, &mut component_min_edge);
 
         // Collect and add edges
         let mut added_any = false;
@@ -215,7 +208,7 @@ fn find_component_min_edges_dual_tree(
     let mut queue = BinaryHeap::new();
 
     // Initial entry: root vs root
-    let min_mr = compute_min_mutual_reachability(&nodes[0].node, &nodes[0].node, core_distances);
+    let min_mr = compute_min_mutual_reachability(nodes[0].node, nodes[0].node, core_distances);
     queue.push(DualTreeEntry {
         min_mr,
         query_node_idx: 0,
@@ -262,8 +255,20 @@ fn find_component_min_edges_dual_tree(
                         .max(core_distances[query_node.point_idx])
                         .max(core_distances[ref_node.point_idx]);
 
-                    update_component_min(component_min_edge, qr, query_node.point_idx, ref_node.point_idx, mr);
-                    update_component_min(component_min_edge, rr, ref_node.point_idx, query_node.point_idx, mr);
+                    update_component_min(
+                        component_min_edge,
+                        qr,
+                        query_node.point_idx,
+                        ref_node.point_idx,
+                        mr,
+                    );
+                    update_component_min(
+                        component_min_edge,
+                        rr,
+                        ref_node.point_idx,
+                        query_node.point_idx,
+                        mr,
+                    );
                 }
             }
         } else if query_node.size <= 16 && ref_node.size <= 16 {
@@ -314,8 +319,20 @@ fn find_component_min_edges_dual_tree(
                         let mr = dist
                             .max(core_distances[query_node.point_idx])
                             .max(core_distances[ref_node.point_idx]);
-                        update_component_min(component_min_edge, qr, query_node.point_idx, ref_node.point_idx, mr);
-                        update_component_min(component_min_edge, rr, ref_node.point_idx, query_node.point_idx, mr);
+                        update_component_min(
+                            component_min_edge,
+                            qr,
+                            query_node.point_idx,
+                            ref_node.point_idx,
+                            mr,
+                        );
+                        update_component_min(
+                            component_min_edge,
+                            rr,
+                            ref_node.point_idx,
+                            query_node.point_idx,
+                            mr,
+                        );
                     }
                 }
                 continue;
@@ -380,11 +397,7 @@ fn update_component_min(
 }
 
 /// Compute minimum possible mutual reachability between two tree nodes.
-fn compute_min_mutual_reachability(
-    node1: &KdNode,
-    node2: &KdNode,
-    _core_distances: &[f64],
-) -> f64 {
+fn compute_min_mutual_reachability(node1: &KdNode, node2: &KdNode, _core_distances: &[f64]) -> f64 {
     // Minimum distance between bounding boxes
     // This is a lower bound on the mutual reachability distance
     KdTree::min_box_distance(&node1.bounds, &node2.bounds)
@@ -444,10 +457,7 @@ fn find_component_bridges(
 /// This is a simpler O(n log n) to O(n²) hybrid approach:
 /// - Use KD-tree for neighbor queries during Prim's
 /// - Works well for moderate n and low dimensions
-pub fn kdtree_prim_mst(
-    tree: &KdTree,
-    core_distances: &[f64],
-) -> Vec<(usize, usize, f64)> {
+pub fn kdtree_prim_mst(tree: &KdTree, core_distances: &[f64]) -> Vec<(usize, usize, f64)> {
     let n = tree.len();
     if n <= 1 {
         return Vec::new();
@@ -570,10 +580,7 @@ mod tests {
         sorted.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(Ordering::Equal));
 
         // First edge should connect the close points (0 and 1)
-        assert!(
-            (sorted[0].0 == 0 && sorted[0].1 == 1) ||
-            (sorted[0].0 == 1 && sorted[0].1 == 0)
-        );
+        assert!((sorted[0].0 == 0 && sorted[0].1 == 1) || (sorted[0].0 == 1 && sorted[0].1 == 0));
     }
 
     #[test]
@@ -628,7 +635,11 @@ mod tests {
         let total_prim: f64 = mst_prim.iter().map(|e| e.2).sum();
         let total_dual: f64 = mst_dual.edges.iter().map(|e| e.2).sum();
 
-        assert!((total_prim - total_dual).abs() < 1e-10,
-            "MST weight mismatch: prim={}, dual={}", total_prim, total_dual);
+        assert!(
+            (total_prim - total_dual).abs() < 1e-10,
+            "MST weight mismatch: prim={}, dual={}",
+            total_prim,
+            total_dual
+        );
     }
 }

@@ -40,9 +40,7 @@ use statrs::distribution::{ContinuousCDF, Normal};
 
 use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
-use crate::forecasting::kalman::{
-    StateSpaceModel, kalman_filter, kalman_forecast,
-};
+use crate::forecasting::kalman::{StateSpaceModel, kalman_filter, kalman_forecast};
 
 /// Configuration for CausalImpact analysis.
 #[derive(Debug, Clone)]
@@ -231,25 +229,33 @@ pub fn causal_impact(
     config: CausalImpactConfig,
 ) -> EconResult<CausalImpactResult> {
     let df = dataset.df();
-    let available: Vec<String> = df.get_column_names().iter().map(|s| s.to_string()).collect();
+    let available: Vec<String> = df
+        .get_column_names()
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
 
     // Extract time column
-    let time_series = df.column(time_col)
-        .map_err(|_| EconError::ColumnNotFound {
-            column: time_col.to_string(),
-            available: available.clone(),
-        })?;
+    let time_series = df.column(time_col).map_err(|_| EconError::ColumnNotFound {
+        column: time_col.to_string(),
+        available: available.clone(),
+    })?;
 
     let time: Vec<i64> = time_series
         .cast(&polars::prelude::DataType::Int64)
-        .map_err(|_| EconError::NonNumericColumn { column: time_col.to_string() })?
+        .map_err(|_| EconError::NonNumericColumn {
+            column: time_col.to_string(),
+        })?
         .i64()
-        .map_err(|_| EconError::NonNumericColumn { column: time_col.to_string() })?
+        .map_err(|_| EconError::NonNumericColumn {
+            column: time_col.to_string(),
+        })?
         .into_no_null_iter()
         .collect();
 
     // Extract response column
-    let response_series = df.column(response_col)
+    let response_series = df
+        .column(response_col)
         .map_err(|_| EconError::ColumnNotFound {
             column: response_col.to_string(),
             available: available.clone(),
@@ -257,7 +263,9 @@ pub fn causal_impact(
 
     let y: Vec<f64> = response_series
         .f64()
-        .map_err(|_| EconError::NonNumericColumn { column: response_col.to_string() })?
+        .map_err(|_| EconError::NonNumericColumn {
+            column: response_col.to_string(),
+        })?
         .into_no_null_iter()
         .collect();
 
@@ -265,14 +273,15 @@ pub fn causal_impact(
     let controls = if let Some(ref control_cols) = config.control_series {
         let mut control_data = Vec::new();
         for col in control_cols {
-            let series = df.column(col)
-                .map_err(|_| EconError::ColumnNotFound {
-                    column: col.to_string(),
-                    available: available.clone(),
-                })?;
+            let series = df.column(col).map_err(|_| EconError::ColumnNotFound {
+                column: col.to_string(),
+                available: available.clone(),
+            })?;
             let values: Vec<f64> = series
                 .f64()
-                .map_err(|_| EconError::NonNumericColumn { column: col.to_string() })?
+                .map_err(|_| EconError::NonNumericColumn {
+                    column: col.to_string(),
+                })?
                 .into_no_null_iter()
                 .collect();
             control_data.push(values);
@@ -283,24 +292,44 @@ pub fn causal_impact(
     };
 
     // Find indices for pre and post periods based on time values
-    let pre_start_idx = time.iter().position(|&t| t >= config.pre_period.0)
+    let pre_start_idx = time
+        .iter()
+        .position(|&t| t >= config.pre_period.0)
         .ok_or_else(|| EconError::InvalidSpecification {
-            message: format!("Pre-period start {} not found in time series", config.pre_period.0),
+            message: format!(
+                "Pre-period start {} not found in time series",
+                config.pre_period.0
+            ),
         })?;
 
-    let pre_end_idx = time.iter().rposition(|&t| t <= config.pre_period.1)
+    let pre_end_idx = time
+        .iter()
+        .rposition(|&t| t <= config.pre_period.1)
         .ok_or_else(|| EconError::InvalidSpecification {
-            message: format!("Pre-period end {} not found in time series", config.pre_period.1),
+            message: format!(
+                "Pre-period end {} not found in time series",
+                config.pre_period.1
+            ),
         })?;
 
-    let post_start_idx = time.iter().position(|&t| t >= config.post_period.0)
+    let post_start_idx = time
+        .iter()
+        .position(|&t| t >= config.post_period.0)
         .ok_or_else(|| EconError::InvalidSpecification {
-            message: format!("Post-period start {} not found in time series", config.post_period.0),
+            message: format!(
+                "Post-period start {} not found in time series",
+                config.post_period.0
+            ),
         })?;
 
-    let post_end_idx = time.iter().rposition(|&t| t <= config.post_period.1)
+    let post_end_idx = time
+        .iter()
+        .rposition(|&t| t <= config.post_period.1)
         .ok_or_else(|| EconError::InvalidSpecification {
-            message: format!("Post-period end {} not found in time series", config.post_period.1),
+            message: format!(
+                "Post-period end {} not found in time series",
+                config.post_period.1
+            ),
         })?;
 
     // Validate periods
@@ -386,11 +415,8 @@ fn run_causal_impact_core(
     });
 
     // Step 2: Fit structural time series model on pre-period data
-    let (model_params, regression_coefs, log_lik) = fit_bsts_model(
-        &y_pre,
-        controls_pre.as_ref(),
-        config,
-    )?;
+    let (model_params, regression_coefs, log_lik) =
+        fit_bsts_model(&y_pre, controls_pre.as_ref(), config)?;
 
     // Step 3: Build state-space model with fitted parameters
     let ssm = build_state_space_model(&model_params, controls, config)?;
@@ -418,7 +444,9 @@ fn run_causal_impact_core(
     )?;
 
     // Step 5: Compute causal effects
-    let z_alpha = Normal::new(0.0, 1.0).unwrap().inverse_cdf(1.0 - config.alpha / 2.0);
+    let z_alpha = Normal::new(0.0, 1.0)
+        .unwrap()
+        .inverse_cdf(1.0 - config.alpha / 2.0);
 
     let mut series = CausalImpactSeries {
         time: time.to_vec(),
@@ -439,8 +467,12 @@ fn run_causal_impact_core(
 
     for i in 0..y.len() {
         let pred_se = predicted_var[i].sqrt();
-        series.predicted_lower.push(predicted[i] - z_alpha * pred_se);
-        series.predicted_upper.push(predicted[i] + z_alpha * pred_se);
+        series
+            .predicted_lower
+            .push(predicted[i] - z_alpha * pred_se);
+        series
+            .predicted_upper
+            .push(predicted[i] + z_alpha * pred_se);
 
         let effect = y[i] - predicted[i];
         series.point_effect.push(effect);
@@ -454,8 +486,12 @@ fn run_causal_impact_core(
 
         let cum_se = cumulative_var.sqrt();
         series.cumulative_effect.push(cumulative);
-        series.cumulative_effect_lower.push(cumulative - z_alpha * cum_se);
-        series.cumulative_effect_upper.push(cumulative + z_alpha * cum_se);
+        series
+            .cumulative_effect_lower
+            .push(cumulative - z_alpha * cum_se);
+        series
+            .cumulative_effect_upper
+            .push(cumulative + z_alpha * cum_se);
     }
 
     // Step 6: Compute summary statistics
@@ -495,9 +531,9 @@ fn run_causal_impact_core(
     };
 
     let p_value = if cumulative_effect >= 0.0 {
-        normal.cdf(-z_cumulative)  // P(effect < 0) under posterior
+        normal.cdf(-z_cumulative) // P(effect < 0) under posterior
     } else {
-        1.0 - normal.cdf(-z_cumulative)  // P(effect > 0) under posterior
+        1.0 - normal.cdf(-z_cumulative) // P(effect > 0) under posterior
     };
 
     let summary = CausalImpactSummary {
@@ -519,9 +555,17 @@ fn run_causal_impact_core(
     let n_params = count_params(config, controls.is_some());
     let model = CausalImpactModel {
         level_variance: model_params[0],
-        slope_variance: if config.include_trend { Some(model_params[1]) } else { None },
+        slope_variance: if config.include_trend {
+            Some(model_params[1])
+        } else {
+            None
+        },
         seasonal_variance: config.seasonal_period.map(|_| {
-            if config.include_trend { model_params[2] } else { model_params[1] }
+            if config.include_trend {
+                model_params[2]
+            } else {
+                model_params[1]
+            }
         }),
         observation_variance: *model_params.last().unwrap(),
         regression_coefficients: regression_coefs.clone(),
@@ -586,9 +630,7 @@ fn fit_bsts_model(
 
     // Optimize using Nelder-Mead
     let objective = |log_params: &[f64]| -> f64 {
-        let params: Vec<f64> = log_params.iter()
-            .map(|&lp| y_var * lp.exp())
-            .collect();
+        let params: Vec<f64> = log_params.iter().map(|&lp| y_var * lp.exp()).collect();
         match compute_bsts_loglik(&y_for_bsts, &params, config) {
             Ok(ll) => -ll,
             Err(_) => 1e20,
@@ -596,21 +638,16 @@ fn fit_bsts_model(
     };
 
     // Transform to log scale for optimization
-    let init_log: Vec<f64> = init_params.iter()
+    let init_log: Vec<f64> = init_params
+        .iter()
         .map(|&p| (p / y_var).max(1e-10).ln())
         .collect();
 
-    let (best_log_params, neg_loglik, _converged) = nelder_mead_optimize(
-        &objective,
-        &init_log,
-        config.max_iter,
-        config.tolerance,
-    );
+    let (best_log_params, neg_loglik, _converged) =
+        nelder_mead_optimize(&objective, &init_log, config.max_iter, config.tolerance);
 
     // Transform back
-    let best_params: Vec<f64> = best_log_params.iter()
-        .map(|&lp| y_var * lp.exp())
-        .collect();
+    let best_params: Vec<f64> = best_log_params.iter().map(|&lp| y_var * lp.exp()).collect();
 
     Ok((best_params, regression_coefs, -neg_loglik))
 }
@@ -639,10 +676,7 @@ fn initialize_variance_params(y_var: f64, config: &CausalImpactConfig) -> Vec<f6
 }
 
 /// Regress y on control variables using OLS.
-fn regress_out_controls(
-    y: &[f64],
-    controls: &Vec<Vec<f64>>,
-) -> EconResult<(Vec<f64>, Vec<f64>)> {
+fn regress_out_controls(y: &[f64], controls: &Vec<Vec<f64>>) -> EconResult<(Vec<f64>, Vec<f64>)> {
     let n = y.len();
     let k = controls.len();
 
@@ -651,9 +685,12 @@ fn regress_out_controls(
     }
 
     // Build design matrix [1, X1, X2, ...]
-    let x = Array2::from_shape_fn((n, k + 1), |(i, j)| {
-        if j == 0 { 1.0 } else { controls[j - 1][i] }
-    });
+    let x = Array2::from_shape_fn(
+        (n, k + 1),
+        |(i, j)| {
+            if j == 0 { 1.0 } else { controls[j - 1][i] }
+        },
+    );
 
     let y_arr = Array1::from_vec(y.to_vec());
 
@@ -665,13 +702,15 @@ fn regress_out_controls(
         .map_err(|e| EconError::SingularMatrix {
             context: format!("Control regression X'X: {}", e),
             suggestion: "Check for perfect multicollinearity in control series".to_string(),
-        })?.0;
+        })?
+        .0;
 
     let beta = xtx_inv.dot(&xty);
 
     // Compute residuals
     let fitted = x.dot(&beta);
-    let residuals: Vec<f64> = y_arr.iter()
+    let residuals: Vec<f64> = y_arr
+        .iter()
         .zip(fitted.iter())
         .map(|(yi, fi)| yi - fi)
         .collect();
@@ -716,23 +755,33 @@ fn build_state_space_model(
             let selection = Array2::from_elem((1, 1), 1.0);
             let state_cov = Array2::from_elem((1, 1), level_var.max(1e-12));
 
-            StateSpaceModel::new(transition, observation, selection, state_cov, obs_var.max(1e-12))
+            StateSpaceModel::new(
+                transition,
+                observation,
+                selection,
+                state_cov,
+                obs_var.max(1e-12),
+            )
         }
 
         // Local linear trend (no seasonality)
         (Some(slope_v), None, None) => {
-            let transition = Array2::from_shape_vec((2, 2), vec![
-                1.0, 1.0,
-                0.0, 1.0,
-            ]).unwrap();
+            let transition = Array2::from_shape_vec((2, 2), vec![1.0, 1.0, 0.0, 1.0]).unwrap();
             let observation = Array1::from_vec(vec![1.0, 0.0]);
             let selection = Array2::eye(2);
-            let state_cov = Array2::from_shape_vec((2, 2), vec![
-                level_var.max(1e-12), 0.0,
-                0.0, slope_v.max(1e-12),
-            ]).unwrap();
+            let state_cov = Array2::from_shape_vec(
+                (2, 2),
+                vec![level_var.max(1e-12), 0.0, 0.0, slope_v.max(1e-12)],
+            )
+            .unwrap();
 
-            StateSpaceModel::new(transition, observation, selection, state_cov, obs_var.max(1e-12))
+            StateSpaceModel::new(
+                transition,
+                observation,
+                selection,
+                state_cov,
+                obs_var.max(1e-12),
+            )
         }
 
         // Local level with seasonality
@@ -753,20 +802,27 @@ fn build_state_space_model(
 
             // Observation: y_t = μ_t + γ_t
             let mut observation = Array1::zeros(m);
-            observation[0] = 1.0;  // Level
-            observation[1] = 1.0;  // Seasonal
+            observation[0] = 1.0; // Level
+            observation[1] = 1.0; // Seasonal
 
             // Selection matrix
             let mut selection = Array2::zeros((m, 2));
-            selection[[0, 0]] = 1.0;  // Level gets innovation
-            selection[[1, 1]] = 1.0;  // Seasonal gets innovation
+            selection[[0, 0]] = 1.0; // Level gets innovation
+            selection[[1, 1]] = 1.0; // Seasonal gets innovation
 
-            let state_cov = Array2::from_shape_vec((2, 2), vec![
-                level_var.max(1e-12), 0.0,
-                0.0, seas_v.max(1e-12),
-            ]).unwrap();
+            let state_cov = Array2::from_shape_vec(
+                (2, 2),
+                vec![level_var.max(1e-12), 0.0, 0.0, seas_v.max(1e-12)],
+            )
+            .unwrap();
 
-            StateSpaceModel::new(transition, observation, selection, state_cov, obs_var.max(1e-12))
+            StateSpaceModel::new(
+                transition,
+                observation,
+                selection,
+                state_cov,
+                obs_var.max(1e-12),
+            )
         }
 
         // Full BSM: level + trend + seasonality
@@ -788,38 +844,58 @@ fn build_state_space_model(
             }
 
             let mut observation = Array1::zeros(m);
-            observation[0] = 1.0;  // Level
-            observation[2] = 1.0;  // Seasonal
+            observation[0] = 1.0; // Level
+            observation[2] = 1.0; // Seasonal
 
             let mut selection = Array2::zeros((m, 3));
             selection[[0, 0]] = 1.0;
             selection[[1, 1]] = 1.0;
             selection[[2, 2]] = 1.0;
 
-            let state_cov = Array2::from_shape_vec((3, 3), vec![
-                level_var.max(1e-12), 0.0, 0.0,
-                0.0, slope_v.max(1e-12), 0.0,
-                0.0, 0.0, seas_v.max(1e-12),
-            ]).unwrap();
+            let state_cov = Array2::from_shape_vec(
+                (3, 3),
+                vec![
+                    level_var.max(1e-12),
+                    0.0,
+                    0.0,
+                    0.0,
+                    slope_v.max(1e-12),
+                    0.0,
+                    0.0,
+                    0.0,
+                    seas_v.max(1e-12),
+                ],
+            )
+            .unwrap();
 
-            StateSpaceModel::new(transition, observation, selection, state_cov, obs_var.max(1e-12))
+            StateSpaceModel::new(
+                transition,
+                observation,
+                selection,
+                state_cov,
+                obs_var.max(1e-12),
+            )
         }
 
         // Local linear trend without seasonal variance (shouldn't happen but handle it)
         (Some(slope_v), None, Some(_)) | (Some(slope_v), Some(_), None) => {
             // Fall back to local linear trend
-            let transition = Array2::from_shape_vec((2, 2), vec![
-                1.0, 1.0,
-                0.0, 1.0,
-            ]).unwrap();
+            let transition = Array2::from_shape_vec((2, 2), vec![1.0, 1.0, 0.0, 1.0]).unwrap();
             let observation = Array1::from_vec(vec![1.0, 0.0]);
             let selection = Array2::eye(2);
-            let state_cov = Array2::from_shape_vec((2, 2), vec![
-                level_var.max(1e-12), 0.0,
-                0.0, slope_v.max(1e-12),
-            ]).unwrap();
+            let state_cov = Array2::from_shape_vec(
+                (2, 2),
+                vec![level_var.max(1e-12), 0.0, 0.0, slope_v.max(1e-12)],
+            )
+            .unwrap();
 
-            StateSpaceModel::new(transition, observation, selection, state_cov, obs_var.max(1e-12))
+            StateSpaceModel::new(
+                transition,
+                observation,
+                selection,
+                state_cov,
+                obs_var.max(1e-12),
+            )
         }
 
         // Level with seasonal period but no seasonal variance (treat as level only)
@@ -829,7 +905,13 @@ fn build_state_space_model(
             let selection = Array2::from_elem((1, 1), 1.0);
             let state_cov = Array2::from_elem((1, 1), level_var.max(1e-12));
 
-            StateSpaceModel::new(transition, observation, selection, state_cov, obs_var.max(1e-12))
+            StateSpaceModel::new(
+                transition,
+                observation,
+                selection,
+                state_cov,
+                obs_var.max(1e-12),
+            )
         }
 
         // Seasonal variance but no period specified (shouldn't happen, treat as level only)
@@ -839,17 +921,19 @@ fn build_state_space_model(
             let selection = Array2::from_elem((1, 1), 1.0);
             let state_cov = Array2::from_elem((1, 1), level_var.max(1e-12));
 
-            StateSpaceModel::new(transition, observation, selection, state_cov, obs_var.max(1e-12))
+            StateSpaceModel::new(
+                transition,
+                observation,
+                selection,
+                state_cov,
+                obs_var.max(1e-12),
+            )
         }
     }
 }
 
 /// Compute log-likelihood for BSTS model.
-fn compute_bsts_loglik(
-    y: &[f64],
-    params: &[f64],
-    config: &CausalImpactConfig,
-) -> EconResult<f64> {
+fn compute_bsts_loglik(y: &[f64], params: &[f64], config: &CausalImpactConfig) -> EconResult<f64> {
     let ssm = build_state_space_model(params, None, config)?;
     let y_var = sample_variance(y);
     let init_state = initialize_state(y, config);
@@ -881,13 +965,16 @@ fn predict_counterfactual(
 
     // If we have controls, adjust y for regression component
     let y_adjusted: Vec<f64> = if let (Some(controls), Some(coefs)) = (controls, regression_coefs) {
-        y.iter().enumerate().map(|(i, &yi)| {
-            let mut adjustment = coefs[0]; // Intercept
-            for (j, control) in controls.iter().enumerate() {
-                adjustment += coefs[j + 1] * control[i];
-            }
-            yi - adjustment
-        }).collect()
+        y.iter()
+            .enumerate()
+            .map(|(i, &yi)| {
+                let mut adjustment = coefs[0]; // Intercept
+                for (j, control) in controls.iter().enumerate() {
+                    adjustment += coefs[j + 1] * control[i];
+                }
+                yi - adjustment
+            })
+            .collect()
     } else {
         y.to_vec()
     };
@@ -1083,7 +1170,11 @@ fn nelder_mead_optimize(
 
     for _iter in 0..max_iter {
         let mut indices: Vec<usize> = (0..=n).collect();
-        indices.sort_by(|&a, &b| values[a].partial_cmp(&values[b]).unwrap_or(std::cmp::Ordering::Equal));
+        indices.sort_by(|&a, &b| {
+            values[a]
+                .partial_cmp(&values[b])
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         let sorted_simplex: Vec<Vec<f64>> = indices.iter().map(|&i| simplex[i].clone()).collect();
         let sorted_values: Vec<f64> = indices.iter().map(|&i| values[i]).collect();
@@ -1128,13 +1219,21 @@ fn nelder_mead_optimize(
             }
         } else {
             let contract_point: Vec<f64> = if f_reflected < values[n] {
-                (0..n).map(|j| centroid[j] + rho * (reflected[j] - centroid[j])).collect()
+                (0..n)
+                    .map(|j| centroid[j] + rho * (reflected[j] - centroid[j]))
+                    .collect()
             } else {
-                (0..n).map(|j| centroid[j] - rho * (centroid[j] - simplex[n][j])).collect()
+                (0..n)
+                    .map(|j| centroid[j] - rho * (centroid[j] - simplex[n][j]))
+                    .collect()
             };
             let f_contracted = objective(&contract_point);
 
-            let threshold = if f_reflected < values[n] { f_reflected } else { values[n] };
+            let threshold = if f_reflected < values[n] {
+                f_reflected
+            } else {
+                values[n]
+            };
             if f_contracted < threshold {
                 simplex[n] = contract_point;
                 values[n] = f_contracted;
@@ -1220,7 +1319,8 @@ mod tests {
         let df = df! {
             "y" => &y,
             "time" => &time,
-        }.unwrap();
+        }
+        .unwrap();
 
         let dataset = Dataset::new(df);
 
@@ -1234,18 +1334,29 @@ mod tests {
         let result = causal_impact(&dataset, "y", "time", config).unwrap();
 
         // Should detect positive effect
-        assert!(result.summary.cumulative_effect > 0.0,
-            "Cumulative effect should be positive, got {}", result.summary.cumulative_effect);
+        assert!(
+            result.summary.cumulative_effect > 0.0,
+            "Cumulative effect should be positive, got {}",
+            result.summary.cumulative_effect
+        );
 
         // Effect should be roughly n_post * treatment_effect
         let expected_cumulative = n_post as f64 * treatment_effect;
-        let relative_error = (result.summary.cumulative_effect - expected_cumulative).abs() / expected_cumulative;
-        assert!(relative_error < 0.5,
-            "Cumulative effect {} should be close to {}", result.summary.cumulative_effect, expected_cumulative);
+        let relative_error =
+            (result.summary.cumulative_effect - expected_cumulative).abs() / expected_cumulative;
+        assert!(
+            relative_error < 0.5,
+            "Cumulative effect {} should be close to {}",
+            result.summary.cumulative_effect,
+            expected_cumulative
+        );
 
         // Should be statistically significant
-        assert!(result.summary.p_value < 0.10,
-            "P-value {} should be small for large effect", result.summary.p_value);
+        assert!(
+            result.summary.p_value < 0.10,
+            "P-value {} should be small for large effect",
+            result.summary.p_value
+        );
 
         // Check series lengths
         assert_eq!(result.series.time.len(), n_pre + n_post);
@@ -1264,7 +1375,8 @@ mod tests {
         let df = df! {
             "y" => &y,
             "time" => &time,
-        }.unwrap();
+        }
+        .unwrap();
 
         let dataset = Dataset::new(df);
 
@@ -1275,12 +1387,16 @@ mod tests {
             (0, (n_pre - 1) as i64),
             (n_pre as i64, (n_pre + n_post - 1) as i64),
             None,
-        ).unwrap();
+        )
+        .unwrap();
 
         // Effect should be close to zero
         let avg_effect_magnitude = result.summary.average_effect.abs();
-        assert!(avg_effect_magnitude < 5.0,
-            "Average effect {} should be close to zero for no treatment", avg_effect_magnitude);
+        assert!(
+            avg_effect_magnitude < 5.0,
+            "Average effect {} should be close to zero for no treatment",
+            avg_effect_magnitude
+        );
 
         // Should not be significant (with some probability of false positive)
         // This is a soft check since we're using random data
@@ -1302,12 +1418,16 @@ mod tests {
         let control: Vec<f64> = (0..n).map(|_| 50.0 + rng.r#gen::<f64>() * 20.0).collect();
 
         // Response is partly driven by control
-        let y: Vec<f64> = control.iter().enumerate().map(|(t, &c)| {
-            let base = 0.5 * c;  // Control effect
-            let effect = if t >= n_pre { 8.0 } else { 0.0 };  // Treatment effect
-            let noise = (rng.r#gen::<f64>() - 0.5) * 2.0;
-            base + effect + noise
-        }).collect();
+        let y: Vec<f64> = control
+            .iter()
+            .enumerate()
+            .map(|(t, &c)| {
+                let base = 0.5 * c; // Control effect
+                let effect = if t >= n_pre { 8.0 } else { 0.0 }; // Treatment effect
+                let noise = (rng.r#gen::<f64>() - 0.5) * 2.0;
+                base + effect + noise
+            })
+            .collect();
 
         let time: Vec<i64> = (0..n as i64).collect();
 
@@ -1315,7 +1435,8 @@ mod tests {
             "y" => &y,
             "time" => &time,
             "control" => &control,
-        }.unwrap();
+        }
+        .unwrap();
 
         let dataset = Dataset::new(df);
 
@@ -1343,14 +1464,15 @@ mod tests {
         let df = df! {
             "y" => &y,
             "time" => &time,
-        }.unwrap();
+        }
+        .unwrap();
 
         let dataset = Dataset::new(df);
 
         // Post period starts before pre period ends (overlap)
         let config = CausalImpactConfig {
             pre_period: (0, 60),
-            post_period: (50, 79),  // Overlaps with pre-period
+            post_period: (50, 79), // Overlaps with pre-period
             ..Default::default()
         };
 
@@ -1365,12 +1487,13 @@ mod tests {
         let df = df! {
             "y" => &y,
             "time" => &time,
-        }.unwrap();
+        }
+        .unwrap();
 
         let dataset = Dataset::new(df);
 
         let config = CausalImpactConfig {
-            pre_period: (0, 4),  // Only 5 observations
+            pre_period: (0, 4), // Only 5 observations
             post_period: (5, 34),
             ..Default::default()
         };
@@ -1389,19 +1512,22 @@ mod tests {
         let mut rng = ChaCha8Rng::seed_from_u64(321);
 
         // Generate trending data
-        let y: Vec<f64> = (0..(n_pre + n_post)).map(|t| {
-            let trend = 100.0 + 0.5 * t as f64;
-            let effect = if t >= n_pre { 15.0 } else { 0.0 };
-            let noise = (rng.r#gen::<f64>() - 0.5) * 2.0;
-            trend + effect + noise
-        }).collect();
+        let y: Vec<f64> = (0..(n_pre + n_post))
+            .map(|t| {
+                let trend = 100.0 + 0.5 * t as f64;
+                let effect = if t >= n_pre { 15.0 } else { 0.0 };
+                let noise = (rng.r#gen::<f64>() - 0.5) * 2.0;
+                trend + effect + noise
+            })
+            .collect();
 
         let time: Vec<i64> = (0..(n_pre + n_post) as i64).collect();
 
         let df = df! {
             "y" => &y,
             "time" => &time,
-        }.unwrap();
+        }
+        .unwrap();
 
         let dataset = Dataset::new(df);
 
@@ -1429,18 +1555,12 @@ mod tests {
         let df = df! {
             "y" => &y,
             "time" => &time,
-        }.unwrap();
+        }
+        .unwrap();
 
         let dataset = Dataset::new(df);
 
-        let result = run_causal_impact(
-            &dataset,
-            "y",
-            "time",
-            (0, 69),
-            (70, 99),
-            None,
-        ).unwrap();
+        let result = run_causal_impact(&dataset, "y", "time", (0, 69), (70, 99), None).unwrap();
 
         // Check model info
         assert_eq!(result.model.n_pre, 70);
@@ -1459,23 +1579,19 @@ mod tests {
         let df = df! {
             "y" => &y,
             "time" => &time,
-        }.unwrap();
+        }
+        .unwrap();
 
         let dataset = Dataset::new(df);
 
-        let result = run_causal_impact(
-            &dataset,
-            "y",
-            "time",
-            (0, 69),
-            (70, 99),
-            None,
-        ).unwrap();
+        let result = run_causal_impact(&dataset, "y", "time", (0, 69), (70, 99), None).unwrap();
 
         // Check inference
         assert!(result.inference.prob_positive >= 0.0 && result.inference.prob_positive <= 1.0);
         assert!(result.inference.prob_negative >= 0.0 && result.inference.prob_negative <= 1.0);
-        assert!((result.inference.prob_positive + result.inference.prob_negative - 1.0).abs() < 1e-10);
+        assert!(
+            (result.inference.prob_positive + result.inference.prob_negative - 1.0).abs() < 1e-10
+        );
         assert!(result.inference.effect_sd > 0.0);
     }
 }

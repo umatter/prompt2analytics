@@ -2,7 +2,7 @@
 
 use dioxus::prelude::*;
 
-use crate::api::{api, DatasetMeta, ToolDefinition};
+use crate::api::{DatasetMeta, ToolDefinition, api};
 use crate::components::AutocompleteDropdown;
 use crate::state::autocomplete::{AutocompleteState, Suggestion};
 use crate::state::{ChatState, SessionState};
@@ -97,11 +97,7 @@ pub fn ChatInput(on_send: EventHandler<String>) -> Element {
                     let selected = autocomplete.read().get_selected().cloned();
                     if let Some(suggestion) = selected {
                         evt.prevent_default();
-                        accept_suggestion(
-                            &mut textarea_value,
-                            &mut autocomplete,
-                            &suggestion,
-                        );
+                        accept_suggestion(&mut textarea_value, &mut autocomplete, &suggestion);
                     } else if key == Key::Enter && !evt.modifiers().shift() {
                         // No selection, send message normally
                         evt.prevent_default();
@@ -173,8 +169,8 @@ pub fn ChatInput(on_send: EventHandler<String>) -> Element {
 
     // Handle input change - detect triggers and update autocomplete
     let handle_input = {
-        let cached_tools = cached_tools.clone();
-        let cached_datasets = cached_datasets.clone();
+        let cached_tools = cached_tools;
+        let cached_datasets = cached_datasets;
         move |evt: Event<FormData>| {
             let value = evt.value();
             textarea_value.set(value.clone());
@@ -361,9 +357,7 @@ fn detect_and_generate_suggestions(
                 let suggestions: Vec<Suggestion> = dataset
                     .column_names
                     .iter()
-                    .filter(|col| {
-                        filter.is_empty() || col.to_lowercase().contains(&filter_lower)
-                    })
+                    .filter(|col| filter.is_empty() || col.to_lowercase().contains(&filter_lower))
                     .take(10)
                     .map(|col| Suggestion::column(col, dataset_name))
                     .collect();
@@ -490,7 +484,11 @@ fn accept_suggestion(
         let before = &current_value[..start];
         let after = if ac.is_column_mode() {
             // In column mode, insert @dataset.column
-            let insert_pos = start + 1 + ac.column_dataset.as_ref().map(|d| d.len()).unwrap_or(0) + 1 + ac.filter_text.len();
+            let insert_pos = start
+                + 1
+                + ac.column_dataset.as_ref().map(|d| d.len()).unwrap_or(0)
+                + 1
+                + ac.filter_text.len();
             if insert_pos < current_value.len() {
                 &current_value[insert_pos..]
             } else {
@@ -510,15 +508,30 @@ fn accept_suggestion(
             '@' => {
                 if ac.is_column_mode() {
                     // Insert full @dataset.column
-                    format!("{}@{} {}", before, suggestion.insert_text, after.trim_start())
+                    format!(
+                        "{}@{} {}",
+                        before,
+                        suggestion.insert_text,
+                        after.trim_start()
+                    )
                 } else {
                     // Insert @dataset (without trailing dot to allow column access)
-                    format!("{}@{} {}", before, suggestion.insert_text, after.trim_start())
+                    format!(
+                        "{}@{} {}",
+                        before,
+                        suggestion.insert_text,
+                        after.trim_start()
+                    )
                 }
             }
             '/' => {
                 // Insert /tool
-                format!("{}/{} {}", before, suggestion.insert_text, after.trim_start())
+                format!(
+                    "{}/{} {}",
+                    before,
+                    suggestion.insert_text,
+                    after.trim_start()
+                )
             }
             _ => current_value,
         }

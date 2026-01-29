@@ -1,14 +1,27 @@
 //! Clustering benchmarks for comparison with R.
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId};
+use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use ndarray::Array2;
 use p2a_core::ml::{
-    silhouette, calinski_harabasz, davies_bouldin, dunn_index, gap_statistic,
-    kmedoids, spectral_clustering, affinity_propagation, hdbscan, optics,
-    gaussian_mixture, rand_index, nmi, kmeans,
-    // Optimized versions
-    silhouette_optimized, kmedoids_optimized, hdbscan_optimized, optics_optimized,
+    affinity_propagation,
     affinity_propagation_optimized,
+    calinski_harabasz,
+    davies_bouldin,
+    dunn_index,
+    gap_statistic,
+    gaussian_mixture,
+    hdbscan,
+    hdbscan_optimized,
+    kmedoids,
+    kmedoids_optimized,
+    nmi,
+    optics,
+    optics_optimized,
+    rand_index,
+    silhouette,
+    // Optimized versions
+    silhouette_optimized,
+    spectral_clustering,
 };
 
 /// Generate cluster data with clear separation (matches R benchmark).
@@ -86,7 +99,8 @@ fn benchmark_davies_bouldin(c: &mut Criterion) {
 fn benchmark_dunn_index(c: &mut Criterion) {
     let mut group = c.benchmark_group("dunn_index");
 
-    for n in [100, 500] {  // Skip 1000 due to O(n^2) complexity
+    for n in [100, 500] {
+        // Skip 1000 due to O(n^2) complexity
         let data = generate_cluster_data(n, 5, 3, 5.0);
         let labels = generate_labels(n, 3);
 
@@ -100,7 +114,7 @@ fn benchmark_dunn_index(c: &mut Criterion) {
 
 fn benchmark_gap_statistic(c: &mut Criterion) {
     let mut group = c.benchmark_group("gap_statistic");
-    group.sample_size(10);  // Reduce samples due to bootstrap cost
+    group.sample_size(10); // Reduce samples due to bootstrap cost
 
     for n in [100, 200] {
         let data = generate_cluster_data(n, 5, 3, 5.0);
@@ -149,13 +163,9 @@ fn benchmark_affinity_propagation(c: &mut Criterion) {
         let data = generate_cluster_data(n, 5, 3, 5.0);
 
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
-            b.iter(|| affinity_propagation(
-                black_box(data.view()),
-                None,
-                Some(0.9),
-                Some(100),
-                Some(10)
-            ))
+            b.iter(|| {
+                affinity_propagation(black_box(data.view()), None, Some(0.9), Some(100), Some(10))
+            })
         });
     }
 
@@ -198,14 +208,7 @@ fn benchmark_gaussian_mixture(c: &mut Criterion) {
         let data = generate_cluster_data(n, 5, 3, 5.0);
 
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
-            b.iter(|| gaussian_mixture(
-                black_box(data.view()),
-                3,
-                None,
-                Some(50),
-                None,
-                Some(42)
-            ))
+            b.iter(|| gaussian_mixture(black_box(data.view()), 3, None, Some(50), None, Some(42)))
         });
     }
 
@@ -311,13 +314,15 @@ fn benchmark_affinity_propagation_optimized(c: &mut Criterion) {
         let data = generate_cluster_data(n, 5, 3, 5.0);
 
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
-            b.iter(|| affinity_propagation_optimized(
-                black_box(data.view()),
-                None,
-                Some(0.9),
-                Some(100),
-                Some(10)
-            ))
+            b.iter(|| {
+                affinity_propagation_optimized(
+                    black_box(data.view()),
+                    None,
+                    Some(0.9),
+                    Some(100),
+                    Some(10),
+                )
+            })
         });
     }
 
@@ -406,23 +411,21 @@ fn benchmark_affinity_propagation_comparison(c: &mut Criterion) {
         let data = generate_cluster_data(n, 5, 3, 5.0);
 
         group.bench_with_input(BenchmarkId::new("original", n), &n, |b, _| {
-            b.iter(|| affinity_propagation(
-                black_box(data.view()),
-                None,
-                Some(0.9),
-                Some(100),
-                Some(10)
-            ))
+            b.iter(|| {
+                affinity_propagation(black_box(data.view()), None, Some(0.9), Some(100), Some(10))
+            })
         });
 
         group.bench_with_input(BenchmarkId::new("optimized", n), &n, |b, _| {
-            b.iter(|| affinity_propagation_optimized(
-                black_box(data.view()),
-                None,
-                Some(0.9),
-                Some(100),
-                Some(10)
-            ))
+            b.iter(|| {
+                affinity_propagation_optimized(
+                    black_box(data.view()),
+                    None,
+                    Some(0.9),
+                    Some(100),
+                    Some(10),
+                )
+            })
         });
     }
 
@@ -435,7 +438,7 @@ fn benchmark_affinity_propagation_comparison(c: &mut Criterion) {
 
 fn benchmark_hdbscan_large_n(c: &mut Criterion) {
     let mut group = c.benchmark_group("hdbscan_large_n");
-    group.sample_size(10);  // Reduce samples for large datasets
+    group.sample_size(10); // Reduce samples for large datasets
 
     // Test the automatic algorithm selection
     for n in [1000, 2000, 5000, 10000] {
@@ -508,9 +511,7 @@ fn benchmark_kdtree_core_distances(c: &mut Criterion) {
 
     for n in [1000, 5000, 10000, 20000] {
         let data = generate_cluster_data(n, 5, 5, 5.0);
-        let data_vecs: Vec<Vec<f64>> = (0..n)
-            .map(|i| data.row(i).to_vec())
-            .collect();
+        let data_vecs: Vec<Vec<f64>> = (0..n).map(|i| data.row(i).to_vec()).collect();
         let tree = KdTree::new(data_vecs);
 
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
@@ -523,16 +524,14 @@ fn benchmark_kdtree_core_distances(c: &mut Criterion) {
 
 // Benchmark MST construction algorithms
 fn benchmark_mst_algorithms(c: &mut Criterion) {
-    use p2a_core::ml::{KdTree, kdtree_prim_mst, dual_tree_boruvka_mst, build_connected_mst};
+    use p2a_core::ml::{KdTree, build_connected_mst, dual_tree_boruvka_mst, kdtree_prim_mst};
 
     let mut group = c.benchmark_group("mst_algorithms");
     group.sample_size(10);
 
     for n in [1000, 2000, 5000] {
         let data = generate_cluster_data(n, 5, 5, 5.0);
-        let data_vecs: Vec<Vec<f64>> = (0..n)
-            .map(|i| data.row(i).to_vec())
-            .collect();
+        let data_vecs: Vec<Vec<f64>> = (0..n).map(|i| data.row(i).to_vec()).collect();
         let tree = KdTree::new(data_vecs);
         let core_dists = tree.compute_core_distances(10);
 
@@ -597,4 +596,9 @@ criterion_group!(
     benchmark_mst_algorithms,
 );
 
-criterion_main!(benches, optimized_benches, comparison_benches, large_n_benches);
+criterion_main!(
+    benches,
+    optimized_benches,
+    comparison_benches,
+    large_n_benches
+);

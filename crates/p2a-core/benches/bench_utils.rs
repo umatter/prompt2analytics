@@ -2,9 +2,9 @@
 //!
 //! Provides distribution statistics and memory tracking similar to R's `bench` package.
 
-use std::time::Instant;
 use memory_stats::memory_stats;
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
+use std::time::Instant;
 
 /// Result from a single benchmark run
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -30,7 +30,7 @@ pub struct BenchmarkResult {
     pub mem_before_bytes: usize,
     pub mem_after_bytes: usize,
     pub mem_peak_bytes: usize,
-    pub mem_alloc_bytes: i64,  // Can be negative if memory was freed
+    pub mem_alloc_bytes: i64, // Can be negative if memory was freed
 
     // All individual timings for distribution analysis
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -105,8 +105,12 @@ where
     let time_p25 = percentile(&times_us, 25.0);
     let time_p75 = percentile(&times_us, 75.0);
     let time_mean = times_us.iter().sum::<f64>() / n_times as f64;
-    let time_std = (times_us.iter().map(|t| (t - time_mean).powi(2)).sum::<f64>()
-                   / (n_times - 1) as f64).sqrt();
+    let time_std = (times_us
+        .iter()
+        .map(|t| (t - time_mean).powi(2))
+        .sum::<f64>()
+        / (n_times - 1) as f64)
+        .sqrt();
 
     let itr_per_sec = 1_000_000.0 / time_median;
 
@@ -127,7 +131,11 @@ where
         mem_after_bytes: mem_after,
         mem_peak_bytes: mem_peak,
         mem_alloc_bytes: mem_after as i64 - mem_before as i64,
-        raw_times_us: if config.capture_raw_times { times_us } else { vec![] },
+        raw_times_us: if config.capture_raw_times {
+            times_us
+        } else {
+            vec![]
+        },
     }
 }
 
@@ -186,8 +194,10 @@ pub fn print_result(result: &BenchmarkResult) {
 
 /// Print summary header
 pub fn print_header() {
-    println!("{:20} {:10} {:>8}  {:>17}  {:>22}  {:>12}  {:>12}",
-        "method", "variant", "n", "median", "IQR", "itr/s", "mem_alloc");
+    println!(
+        "{:20} {:10} {:>8}  {:>17}  {:>22}  {:>12}  {:>12}",
+        "method", "variant", "n", "median", "IQR", "itr/s", "mem_alloc"
+    );
     println!("{}", "-".repeat(100));
 }
 

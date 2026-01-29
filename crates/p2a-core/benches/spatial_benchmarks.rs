@@ -5,16 +5,16 @@
 //! Compares performance of Rust implementations against R's spdep/spatialreg packages.
 //! R benchmarks are in: performance/comparisons/r_comparison/benchmark_spatial.R
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use ndarray::{Array1, Array2};
 use p2a_core::data::Dataset;
 use p2a_core::regression::CovarianceType;
 use p2a_core::spatial::{
-    localmoran, moran_test, spatial_lm_tests, MoranAlternative, Neighbors, SpatialWeights,
-    WeightStyle,
+    MoranAlternative, Neighbors, SpatialWeights, WeightStyle, localmoran, moran_test,
+    spatial_lm_tests,
 };
 use p2a_core::{
-    run_ols, run_sac_dataset, run_sar_dataset, run_sem_dataset, SacConfig, SarConfig, SemConfig,
+    SacConfig, SarConfig, SemConfig, run_ols, run_sac_dataset, run_sar_dataset, run_sem_dataset,
 };
 use polars::prelude::*;
 use rand::Rng;
@@ -36,7 +36,13 @@ fn create_grid_coords(n_side: usize) -> Vec<(f64, f64)> {
 fn create_spatial_data(
     n_side: usize,
     seed: u64,
-) -> (Vec<(f64, f64)>, Vec<f64>, Vec<f64>, Neighbors, SpatialWeights) {
+) -> (
+    Vec<(f64, f64)>,
+    Vec<f64>,
+    Vec<f64>,
+    Neighbors,
+    SpatialWeights,
+) {
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
     let n = n_side * n_side;
 
@@ -134,7 +140,7 @@ fn lm_tests_benchmark(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("lm_tests", n), &n, |b, _| {
             b.iter(|| {
                 let mut lw = listw_clone.clone();
-                spatial_lm_tests(&residuals, &x_mat, &mut lw)
+                spatial_lm_tests(residuals, &x_mat, &mut lw)
             })
         });
     }

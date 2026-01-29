@@ -85,10 +85,10 @@
 
 use ndarray::{Array1, ArrayView1};
 use rand::prelude::*;
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use std::fmt;
 
-use crate::errors::{EconResult, EconError};
+use crate::errors::{EconError, EconResult};
 
 /// Configuration for Balke-Pearl bounds estimation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -278,11 +278,27 @@ impl fmt::Display for CellProbabilities {
         writeln!(f, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")?;
         writeln!(f, "         │  Y=0     │  Y=1     │")?;
         writeln!(f, "─────────┼──────────┼──────────┤")?;
-        writeln!(f, "Z=0, D=0 │ {:>8.4} │ {:>8.4} │", self.p00_z0, self.p01_z0)?;
-        writeln!(f, "Z=0, D=1 │ {:>8.4} │ {:>8.4} │", self.p10_z0, self.p11_z0)?;
+        writeln!(
+            f,
+            "Z=0, D=0 │ {:>8.4} │ {:>8.4} │",
+            self.p00_z0, self.p01_z0
+        )?;
+        writeln!(
+            f,
+            "Z=0, D=1 │ {:>8.4} │ {:>8.4} │",
+            self.p10_z0, self.p11_z0
+        )?;
         writeln!(f, "─────────┼──────────┼──────────┤")?;
-        writeln!(f, "Z=1, D=0 │ {:>8.4} │ {:>8.4} │", self.p00_z1, self.p01_z1)?;
-        writeln!(f, "Z=1, D=1 │ {:>8.4} │ {:>8.4} │", self.p10_z1, self.p11_z1)?;
+        writeln!(
+            f,
+            "Z=1, D=0 │ {:>8.4} │ {:>8.4} │",
+            self.p00_z1, self.p01_z1
+        )?;
+        writeln!(
+            f,
+            "Z=1, D=1 │ {:>8.4} │ {:>8.4} │",
+            self.p10_z1, self.p11_z1
+        )?;
         writeln!(f, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")?;
         writeln!(f, "n(Z=0) = {}, n(Z=1) = {}", self.n_z0, self.n_z1)?;
         Ok(())
@@ -356,17 +372,39 @@ impl fmt::Display for BPBoundsResult {
         writeln!(f, "═══════════════════════════════════════════════════")?;
         writeln!(f)?;
         writeln!(f, "Number of observations: {}", self.n_obs)?;
-        writeln!(f, "Monotonicity assumed:   {}", if self.monotonicity_assumed { "Yes" } else { "No" })?;
-        writeln!(f, "Monotonicity in data:   {}", if self.monotonicity_satisfied { "Yes" } else { "No (potential defiers)" })?;
+        writeln!(
+            f,
+            "Monotonicity assumed:   {}",
+            if self.monotonicity_assumed {
+                "Yes"
+            } else {
+                "No"
+            }
+        )?;
+        writeln!(
+            f,
+            "Monotonicity in data:   {}",
+            if self.monotonicity_satisfied {
+                "Yes"
+            } else {
+                "No (potential defiers)"
+            }
+        )?;
         writeln!(f)?;
 
         writeln!(f, "ACE Bounds:")?;
         writeln!(f, "───────────────────────────────────────────────────")?;
         if let (Some(lower_ci), Some(upper_ci)) = (&self.ace_lower_ci, &self.ace_upper_ci) {
-            writeln!(f, "  Lower Bound: {:>8.4}  [{:>7.4}, {:>7.4}]",
-                     self.ace_lower, lower_ci.0, lower_ci.1)?;
-            writeln!(f, "  Upper Bound: {:>8.4}  [{:>7.4}, {:>7.4}]",
-                     self.ace_upper, upper_ci.0, upper_ci.1)?;
+            writeln!(
+                f,
+                "  Lower Bound: {:>8.4}  [{:>7.4}, {:>7.4}]",
+                self.ace_lower, lower_ci.0, lower_ci.1
+            )?;
+            writeln!(
+                f,
+                "  Upper Bound: {:>8.4}  [{:>7.4}, {:>7.4}]",
+                self.ace_upper, upper_ci.0, upper_ci.1
+            )?;
         } else {
             writeln!(f, "  Lower Bound: {:>8.4}", self.ace_lower)?;
             writeln!(f, "  Upper Bound: {:>8.4}", self.ace_upper)?;
@@ -382,13 +420,22 @@ impl fmt::Display for BPBoundsResult {
         writeln!(f, "Wald (IV) Estimate for Comparison:")?;
         writeln!(f, "───────────────────────────────────────────────────")?;
         if let Some(se) = self.wald_se {
-            writeln!(f, "  Wald Estimate: {:>8.4}  (SE: {:.4})", self.wald_estimate, se)?;
+            writeln!(
+                f,
+                "  Wald Estimate: {:>8.4}  (SE: {:.4})",
+                self.wald_estimate, se
+            )?;
         } else {
             writeln!(f, "  Wald Estimate: {:>8.4}", self.wald_estimate)?;
         }
 
-        let in_bounds = self.wald_estimate >= self.ace_lower && self.wald_estimate <= self.ace_upper;
-        writeln!(f, "  Within bounds: {}", if in_bounds { "Yes" } else { "No" })?;
+        let in_bounds =
+            self.wald_estimate >= self.ace_lower && self.wald_estimate <= self.ace_upper;
+        writeln!(
+            f,
+            "  Within bounds: {}",
+            if in_bounds { "Yes" } else { "No" }
+        )?;
 
         if !self.warnings.is_empty() {
             writeln!(f)?;
@@ -459,7 +506,8 @@ pub fn run_bp_bounds(
     if config.monotonicity && !monotonicity_satisfied {
         warnings.push(
             "Monotonicity assumed but may not hold in data. \
-             Consider results without monotonicity assumption.".to_string()
+             Consider results without monotonicity assumption."
+                .to_string(),
         );
     }
 
@@ -522,7 +570,11 @@ pub fn run_bp_bounds(
         wald_se: Some(wald_se),
         bounds_width,
         n_obs: n,
-        n_bootstrap: if config.bootstrap_ci { Some(config.n_bootstrap) } else { None },
+        n_bootstrap: if config.bootstrap_ci {
+            Some(config.n_bootstrap)
+        } else {
+            None
+        },
         warnings,
     })
 }
@@ -564,24 +616,30 @@ fn compute_bounds_without_monotonicity(probs: &CellProbabilities) -> (f64, f64) 
     // Lower bound: max of 5 terms
     // These come from linear programming constraints on response types
     let lower_candidates = [
-        p00_z1 - p00_z0 - p01_z0 - p10_z0,  // From LP constraint 1
-        p00_z0 - p00_z1 - p01_z1 - p10_z1,  // From LP constraint 2
-        p11_z1 - p11_z0 - p01_z0 - p10_z0,  // From LP constraint 3
-        p11_z0 - p11_z1 - p01_z1 - p10_z1,  // From LP constraint 4
-        -1.0,                                 // Trivial bound
+        p00_z1 - p00_z0 - p01_z0 - p10_z0, // From LP constraint 1
+        p00_z0 - p00_z1 - p01_z1 - p10_z1, // From LP constraint 2
+        p11_z1 - p11_z0 - p01_z0 - p10_z0, // From LP constraint 3
+        p11_z0 - p11_z1 - p01_z1 - p10_z1, // From LP constraint 4
+        -1.0,                              // Trivial bound
     ];
 
     // Upper bound: min of 5 terms
     let upper_candidates = [
-        p11_z1 - p11_z0 + p01_z0 + p10_z0,  // From LP constraint 1
-        p11_z0 - p11_z1 + p01_z1 + p10_z1,  // From LP constraint 2
-        p00_z0 - p00_z1 + p01_z1 + p10_z1,  // From LP constraint 3
-        p00_z1 - p00_z0 + p01_z0 + p10_z0,  // From LP constraint 4
-        1.0,                                 // Trivial bound
+        p11_z1 - p11_z0 + p01_z0 + p10_z0, // From LP constraint 1
+        p11_z0 - p11_z1 + p01_z1 + p10_z1, // From LP constraint 2
+        p00_z0 - p00_z1 + p01_z1 + p10_z1, // From LP constraint 3
+        p00_z1 - p00_z0 + p01_z0 + p10_z0, // From LP constraint 4
+        1.0,                               // Trivial bound
     ];
 
-    let lower = lower_candidates.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-    let upper = upper_candidates.iter().cloned().fold(f64::INFINITY, f64::min);
+    let lower = lower_candidates
+        .iter()
+        .cloned()
+        .fold(f64::NEG_INFINITY, f64::max);
+    let upper = upper_candidates
+        .iter()
+        .cloned()
+        .fold(f64::INFINITY, f64::min);
 
     // Ensure bounds are valid (lower <= upper)
     // This should always hold for valid probability distributions
@@ -603,7 +661,7 @@ fn compute_bounds_without_monotonicity(probs: &CellProbabilities) -> (f64, f64) 
 fn compute_bounds_with_monotonicity(probs: &CellProbabilities) -> (f64, f64) {
     let p00_z0 = probs.p00_z0;
     let p01_z0 = probs.p01_z0;
-    let p10_z0 = probs.p10_z0;
+    let _p10_z0 = probs.p10_z0;
     let p11_z0 = probs.p11_z0;
     let p00_z1 = probs.p00_z1;
     let p01_z1 = probs.p01_z1;
@@ -632,7 +690,10 @@ fn compute_bounds_with_monotonicity(probs: &CellProbabilities) -> (f64, f64) {
 /// ```
 ///
 /// This is the point estimate under the monotonicity assumption.
-fn compute_wald_estimate(probs: &CellProbabilities, marginals: &MarginalProbabilities) -> (f64, f64) {
+fn compute_wald_estimate(
+    probs: &CellProbabilities,
+    marginals: &MarginalProbabilities,
+) -> (f64, f64) {
     let numerator = marginals.p_y1_z1 - marginals.p_y1_z0;
     let denominator = marginals.p_d1_z1 - marginals.p_d1_z0;
 
@@ -705,7 +766,9 @@ fn compute_bootstrap_ci(
         }
 
         // Compute bounds for bootstrap sample
-        if let Ok(probs) = CellProbabilities::from_data(&z_boot.view(), &d_boot.view(), &y_boot.view()) {
+        if let Ok(probs) =
+            CellProbabilities::from_data(&z_boot.view(), &d_boot.view(), &y_boot.view())
+        {
             let (lower, upper) = if config.monotonicity {
                 compute_bounds_with_monotonicity(&probs)
             } else {
@@ -748,10 +811,7 @@ fn compute_bootstrap_ci(
 ///
 /// This function is useful when you have cell probabilities from a contingency
 /// table rather than raw data.
-pub fn bp_bounds_from_probs(
-    probs: CellProbabilities,
-    monotonicity: bool,
-) -> BPBoundsResult {
+pub fn bp_bounds_from_probs(probs: CellProbabilities, monotonicity: bool) -> BPBoundsResult {
     let monotonicity_satisfied = probs.check_monotonicity();
 
     let (ace_lower, ace_upper) = if monotonicity {
@@ -804,30 +864,29 @@ mod tests {
         // Z=0: 20% treatment rate
         // Z=1: 70% treatment rate
         let z = Array1::from_vec(vec![
-            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,  // 20 Z=0
-            1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
-            1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,  // 20 Z=1
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+            0.0, 0.0, 0.0, // 20 Z=0
+            1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+            1.0, 1.0, 1.0, // 20 Z=1
         ]);
 
         // Treatment: Z=0 has 20% D=1 (4/20), Z=1 has 70% D=1 (14/20)
         let d = Array1::from_vec(vec![
             // Z=0: 4 treated (always-takers)
-            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0,
-            // Z=1: 14 treated (always-takers + compliers)
-            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0,
-            1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+            1.0, 1.0, 1.0, // Z=1: 14 treated (always-takers + compliers)
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+            1.0, 1.0, 1.0,
         ]);
 
         // Outcomes: P(Y=1|D=1) ~ 0.6, P(Y=1|D=0) ~ 0.3
         let y = Array1::from_vec(vec![
             // Z=0 group
-            0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0,  // D=0: 30% Y=1
-            0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0, 1.0,  // D=0: 30%, D=1: 75%
+            0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, // D=0: 30% Y=1
+            0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0, 1.0, // D=0: 30%, D=1: 75%
             // Z=1 group
-            0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0, 1.0,  // D=0: 30%, D=1 starts
-            1.0, 1.0, 0.0, 1.0, 1.0, 1.0, 0.0, 1.0, 1.0, 1.0,  // D=1: ~70% Y=1
+            0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0, 1.0, // D=0: 30%, D=1 starts
+            1.0, 1.0, 0.0, 1.0, 1.0, 1.0, 0.0, 1.0, 1.0, 1.0, // D=1: ~70% Y=1
         ]);
 
         (z, d, y)
@@ -842,8 +901,14 @@ mod tests {
         let sum_z0 = probs.p00_z0 + probs.p01_z0 + probs.p10_z0 + probs.p11_z0;
         let sum_z1 = probs.p00_z1 + probs.p01_z1 + probs.p10_z1 + probs.p11_z1;
 
-        assert!((sum_z0 - 1.0).abs() < 1e-10, "Z=0 probabilities should sum to 1");
-        assert!((sum_z1 - 1.0).abs() < 1e-10, "Z=1 probabilities should sum to 1");
+        assert!(
+            (sum_z0 - 1.0).abs() < 1e-10,
+            "Z=0 probabilities should sum to 1"
+        );
+        assert!(
+            (sum_z1 - 1.0).abs() < 1e-10,
+            "Z=1 probabilities should sum to 1"
+        );
 
         // Check counts (updated for new test data)
         assert_eq!(probs.n_z0, 20);
@@ -874,12 +939,18 @@ mod tests {
         let (lower_mono, upper_mono) = compute_bounds_with_monotonicity(&probs);
 
         // Both should be in valid range
-        assert!(lower_mono >= -1.0 && lower_mono <= 1.0);
-        assert!(upper_mono >= -1.0 && upper_mono <= 1.0);
+        assert!((-1.0..=1.0).contains(&lower_mono));
+        assert!((-1.0..=1.0).contains(&upper_mono));
         assert!(lower_no_mono >= -1.0 && upper_no_mono <= 1.0);
 
-        println!("Bounds without monotonicity: [{:.4}, {:.4}]", lower_no_mono, upper_no_mono);
-        println!("Bounds with monotonicity:    [{:.4}, {:.4}]", lower_mono, upper_mono);
+        println!(
+            "Bounds without monotonicity: [{:.4}, {:.4}]",
+            lower_no_mono, upper_no_mono
+        );
+        println!(
+            "Bounds with monotonicity:    [{:.4}, {:.4}]",
+            lower_mono, upper_mono
+        );
     }
 
     #[test]
@@ -900,8 +971,8 @@ mod tests {
         // P(D=1|Z=0) = 2/10 = 0.2
         // P(D=1|Z=1) = 8/10 = 0.8
         // Wald = (0.7 - 0.4) / (0.8 - 0.2) = 0.3 / 0.6 = 0.5
-        let expected_wald = (marginals.p_y1_z1 - marginals.p_y1_z0) /
-                           (marginals.p_d1_z1 - marginals.p_d1_z0);
+        let expected_wald =
+            (marginals.p_y1_z1 - marginals.p_y1_z0) / (marginals.p_d1_z1 - marginals.p_d1_z0);
 
         assert!((wald - expected_wald).abs() < 1e-10);
         println!("Wald estimate: {:.4} (SE: {:.4})", wald, se);
@@ -935,7 +1006,7 @@ mod tests {
         let config = BPBoundsConfig {
             monotonicity: false,
             bootstrap_ci: true,
-            n_bootstrap: 500,  // Smaller for faster test
+            n_bootstrap: 500, // Smaller for faster test
             alpha: 0.05,
             seed: Some(42),
         };
@@ -978,7 +1049,7 @@ mod tests {
 
     #[test]
     fn test_invalid_binary() {
-        let z = Array1::from_vec(vec![0.0, 1.0, 2.0]);  // Invalid: contains 2
+        let z = Array1::from_vec(vec![0.0, 1.0, 2.0]); // Invalid: contains 2
         let d = Array1::from_vec(vec![0.0, 1.0, 1.0]);
         let y = Array1::from_vec(vec![0.0, 1.0, 0.0]);
 
@@ -994,14 +1065,14 @@ mod tests {
         // Z=0: P(D=1) = 0.2, P(Y=1) = 0.3
         // Z=1: P(D=1) = 0.7, P(Y=1) = 0.6
         let probs = CellProbabilities {
-            p00_z0: 0.56,  // D=0, Y=0 | Z=0
-            p01_z0: 0.24,  // D=0, Y=1 | Z=0
-            p10_z0: 0.08,  // D=1, Y=0 | Z=0
-            p11_z0: 0.12,  // D=1, Y=1 | Z=0
-            p00_z1: 0.21,  // D=0, Y=0 | Z=1
-            p01_z1: 0.09,  // D=0, Y=1 | Z=1
-            p10_z1: 0.21,  // D=1, Y=0 | Z=1
-            p11_z1: 0.49,  // D=1, Y=1 | Z=1
+            p00_z0: 0.56, // D=0, Y=0 | Z=0
+            p01_z0: 0.24, // D=0, Y=1 | Z=0
+            p10_z0: 0.08, // D=1, Y=0 | Z=0
+            p11_z0: 0.12, // D=1, Y=1 | Z=0
+            p00_z1: 0.21, // D=0, Y=0 | Z=1
+            p01_z1: 0.09, // D=0, Y=1 | Z=1
+            p10_z1: 0.21, // D=1, Y=0 | Z=1
+            p11_z1: 0.49, // D=1, Y=1 | Z=1
             n_z0: 100,
             n_z1: 100,
         };
@@ -1019,14 +1090,11 @@ mod tests {
     #[test]
     fn test_perfect_compliance() {
         // Perfect compliance: D = Z always
-        let z = Array1::from_vec(vec![
-            0.0, 0.0, 0.0, 0.0, 0.0,
-            1.0, 1.0, 1.0, 1.0, 1.0,
-        ]);
-        let d = z.clone();  // D = Z (perfect compliance)
+        let z = Array1::from_vec(vec![0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0]);
+        let d = z.clone(); // D = Z (perfect compliance)
         let y = Array1::from_vec(vec![
-            0.0, 0.0, 0.0, 1.0, 1.0,  // Z=0, D=0: P(Y=1) = 0.4
-            0.0, 1.0, 1.0, 1.0, 1.0,  // Z=1, D=1: P(Y=1) = 0.8
+            0.0, 0.0, 0.0, 1.0, 1.0, // Z=0, D=0: P(Y=1) = 0.4
+            0.0, 1.0, 1.0, 1.0, 1.0, // Z=1, D=1: P(Y=1) = 0.8
         ]);
 
         let config = BPBoundsConfig {
@@ -1042,7 +1110,10 @@ mod tests {
         assert!((result.wald_estimate - 0.4).abs() < 0.01);
 
         // Bounds should be tight around the true effect
-        println!("Perfect compliance bounds: [{:.4}, {:.4}]", result.ace_lower, result.ace_upper);
+        println!(
+            "Perfect compliance bounds: [{:.4}, {:.4}]",
+            result.ace_lower, result.ace_upper
+        );
         println!("Wald: {:.4}", result.wald_estimate);
     }
 
@@ -1063,15 +1134,15 @@ mod tests {
         // For this test, use synthetic data with known bounds
         let probs = CellProbabilities {
             // Z=0 stratum
-            p00_z0: 0.50,  // D=0, Y=0 | Z=0
-            p01_z0: 0.10,  // D=0, Y=1 | Z=0
-            p10_z0: 0.30,  // D=1, Y=0 | Z=0
-            p11_z0: 0.10,  // D=1, Y=1 | Z=0
+            p00_z0: 0.50, // D=0, Y=0 | Z=0
+            p01_z0: 0.10, // D=0, Y=1 | Z=0
+            p10_z0: 0.30, // D=1, Y=0 | Z=0
+            p11_z0: 0.10, // D=1, Y=1 | Z=0
             // Z=1 stratum
-            p00_z1: 0.10,  // D=0, Y=0 | Z=1
-            p01_z1: 0.05,  // D=0, Y=1 | Z=1
-            p10_z1: 0.70,  // D=1, Y=0 | Z=1
-            p11_z1: 0.15,  // D=1, Y=1 | Z=1
+            p00_z1: 0.10, // D=0, Y=0 | Z=1
+            p01_z1: 0.05, // D=0, Y=1 | Z=1
+            p10_z1: 0.70, // D=1, Y=0 | Z=1
+            p11_z1: 0.15, // D=1, Y=1 | Z=1
             n_z0: 1000,
             n_z1: 1000,
         };
@@ -1080,8 +1151,8 @@ mod tests {
         let (lower, upper) = compute_bounds_without_monotonicity(&probs);
 
         // Bounds should satisfy basic properties
-        assert!(lower >= -1.0 && lower <= 1.0);
-        assert!(upper >= -1.0 && upper <= 1.0);
+        assert!((-1.0..=1.0).contains(&lower));
+        assert!((-1.0..=1.0).contains(&upper));
         assert!(lower <= upper);
 
         // Wald estimate
@@ -1094,15 +1165,21 @@ mod tests {
         // P(D=1|Z=0) = 0.30 + 0.10 = 0.40
         // P(D=1|Z=1) = 0.70 + 0.15 = 0.85
         // Wald = (0.20 - 0.20) / (0.85 - 0.40) = 0.0
-        let expected_wald = (marginals.p_y1_z1 - marginals.p_y1_z0) /
-                           (marginals.p_d1_z1 - marginals.p_d1_z0);
+        let expected_wald =
+            (marginals.p_y1_z1 - marginals.p_y1_z0) / (marginals.p_d1_z1 - marginals.p_d1_z0);
 
         assert!((wald - expected_wald).abs() < 1e-10);
 
         println!("Validation test:");
         println!("  Bounds: [{:.4}, {:.4}]", lower, upper);
         println!("  Wald:   {:.4}", wald);
-        println!("  P(Y=1|Z=0) = {:.4}, P(Y=1|Z=1) = {:.4}", marginals.p_y1_z0, marginals.p_y1_z1);
-        println!("  P(D=1|Z=0) = {:.4}, P(D=1|Z=1) = {:.4}", marginals.p_d1_z0, marginals.p_d1_z1);
+        println!(
+            "  P(Y=1|Z=0) = {:.4}, P(Y=1|Z=1) = {:.4}",
+            marginals.p_y1_z0, marginals.p_y1_z1
+        );
+        println!(
+            "  P(D=1|Z=0) = {:.4}, P(D=1|Z=1) = {:.4}",
+            marginals.p_d1_z0, marginals.p_d1_z1
+        );
     }
 }

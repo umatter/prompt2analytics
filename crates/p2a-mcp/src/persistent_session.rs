@@ -106,10 +106,7 @@ impl PersistentSessionManager {
     }
 
     /// Get a session by ID, loading from DB if not in memory.
-    pub async fn get_session(
-        &self,
-        id: &str,
-    ) -> Result<Arc<Session>, PersistentSessionError> {
+    pub async fn get_session(&self, id: &str) -> Result<Arc<Session>, PersistentSessionError> {
         // Try memory first
         let sessions = self.sessions.read().await;
         if let Some(session) = sessions.get(id).cloned() {
@@ -183,7 +180,7 @@ impl PersistentSessionManager {
             // Also clean up memory cache
             let mut sessions = self.sessions.write().await;
             let old_count = sessions.len();
-            sessions.retain(|id, _| {
+            sessions.retain(|_id, _| {
                 // Keep if exists in DB (will be checked on next access)
                 true
             });
@@ -352,7 +349,10 @@ impl PersistentSessionManager {
         &self,
         conversation_id: &str,
     ) -> Result<Vec<crate::db::ToolCall>, PersistentSessionError> {
-        Ok(self.db.get_tool_calls_for_conversation(conversation_id).await?)
+        Ok(self
+            .db
+            .get_tool_calls_for_conversation(conversation_id)
+            .await?)
     }
 
     /// Get tool calls for a specific message.

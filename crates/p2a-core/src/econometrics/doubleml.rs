@@ -94,14 +94,14 @@
 //! ```
 
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
-use rand::prelude::*;
 use rand::SeedableRng;
+use rand::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
 use crate::errors::{EconError, EconResult};
 use crate::linalg::matrix_ops::{safe_inverse, xtx, xty};
-use crate::traits::estimator::{normal_cdf, SignificanceLevel};
+use crate::traits::estimator::{SignificanceLevel, normal_cdf};
 
 // =============================================================================
 // Configuration Types
@@ -286,18 +286,43 @@ impl fmt::Display for DoubleMLResult {
         writeln!(f, "  theta:      {:>12.4}", self.theta)?;
         writeln!(f, "  Std. Error: {:>12.4}", self.se)?;
         writeln!(f, "  t-stat:     {:>12.2}", self.t_stat)?;
-        writeln!(f, "  p-value:    {:>12.4}{}", self.p_value, self.significance.stars())?;
-        writeln!(f, "  95% CI:     [{:.4}, {:.4}]", self.ci_lower, self.ci_upper)?;
+        writeln!(
+            f,
+            "  p-value:    {:>12.4}{}",
+            self.p_value,
+            self.significance.stars()
+        )?;
+        writeln!(
+            f,
+            "  95% CI:     [{:.4}, {:.4}]",
+            self.ci_lower, self.ci_upper
+        )?;
         writeln!(f)?;
         writeln!(f, "Sample:")?;
         writeln!(f, "  Observations: {}", self.n_obs)?;
         writeln!(f, "  Folds:        {}", self.n_folds)?;
         writeln!(f)?;
         writeln!(f, "Nuisance Model Diagnostics:")?;
-        writeln!(f, "  Outcome model R²:    {:.4}", self.nuisance_diagnostics.outcome_r2)?;
-        writeln!(f, "  Treatment model R²:  {:.4}", self.nuisance_diagnostics.treatment_r2)?;
-        writeln!(f, "  Outcome RMSE:        {:.4}", self.nuisance_diagnostics.outcome_rmse)?;
-        writeln!(f, "  Treatment RMSE:      {:.4}", self.nuisance_diagnostics.treatment_rmse)?;
+        writeln!(
+            f,
+            "  Outcome model R²:    {:.4}",
+            self.nuisance_diagnostics.outcome_r2
+        )?;
+        writeln!(
+            f,
+            "  Treatment model R²:  {:.4}",
+            self.nuisance_diagnostics.treatment_r2
+        )?;
+        writeln!(
+            f,
+            "  Outcome RMSE:        {:.4}",
+            self.nuisance_diagnostics.outcome_rmse
+        )?;
+        writeln!(
+            f,
+            "  Treatment RMSE:      {:.4}",
+            self.nuisance_diagnostics.treatment_rmse
+        )?;
         writeln!(f, "  Jacobian (Var(D-m)): {:.4}", self.jacobian)?;
         writeln!(f)?;
         writeln!(f, "Signif. codes: 0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1")?;
@@ -376,7 +401,8 @@ pub fn run_double_ml(
         return Err(EconError::InvalidSpecification {
             message: format!(
                 "Treatment vector length ({}) must match outcome vector length ({})",
-                d.len(), n
+                d.len(),
+                n
             ),
         });
     }
@@ -384,7 +410,8 @@ pub fn run_double_ml(
         return Err(EconError::InvalidSpecification {
             message: format!(
                 "Covariate matrix rows ({}) must match outcome vector length ({})",
-                x.nrows(), n
+                x.nrows(),
+                n
             ),
         });
     }
@@ -450,8 +477,8 @@ fn run_plr(
     };
 
     // Initialize storage for cross-fitted predictions
-    let mut l_hat = Array1::zeros(n);  // E[Y|X] predictions
-    let mut m_hat = Array1::zeros(n);  // E[D|X] predictions
+    let mut l_hat = Array1::zeros(n); // E[Y|X] predictions
+    let mut m_hat = Array1::zeros(n); // E[D|X] predictions
 
     // Cumulative diagnostics
     let mut total_outcome_ss = 0.0;
@@ -513,29 +540,47 @@ fn run_plr(
         let y_train_mean = y_train.mean().unwrap_or(0.0);
         let d_train_mean = d_train.mean().unwrap_or(0.0);
 
-        total_outcome_ss += y_train.iter().map(|&yi| (yi - y_train_mean).powi(2)).sum::<f64>();
-        total_outcome_rss += y_train.iter().zip(l_pred_train.iter())
-            .map(|(&yi, &li)| (yi - li).powi(2)).sum::<f64>();
+        total_outcome_ss += y_train
+            .iter()
+            .map(|&yi| (yi - y_train_mean).powi(2))
+            .sum::<f64>();
+        total_outcome_rss += y_train
+            .iter()
+            .zip(l_pred_train.iter())
+            .map(|(&yi, &li)| (yi - li).powi(2))
+            .sum::<f64>();
 
-        total_treatment_ss += d_train.iter().map(|&di| (di - d_train_mean).powi(2)).sum::<f64>();
-        total_treatment_rss += d_train.iter().zip(m_pred_train.iter())
-            .map(|(&di, &mi)| (di - mi).powi(2)).sum::<f64>();
+        total_treatment_ss += d_train
+            .iter()
+            .map(|&di| (di - d_train_mean).powi(2))
+            .sum::<f64>();
+        total_treatment_rss += d_train
+            .iter()
+            .zip(m_pred_train.iter())
+            .map(|(&di, &mi)| (di - mi).powi(2))
+            .sum::<f64>();
     }
 
     // Compute residualized variables
     // Y_tilde = Y - l_hat(X)
     // D_tilde = D - m_hat(X)
-    let y_tilde: Array1<f64> = y.iter().zip(l_hat.iter())
+    let y_tilde: Array1<f64> = y
+        .iter()
+        .zip(l_hat.iter())
         .map(|(&yi, &li)| yi - li)
         .collect();
-    let d_tilde: Array1<f64> = d.iter().zip(m_hat.iter())
+    let d_tilde: Array1<f64> = d
+        .iter()
+        .zip(m_hat.iter())
         .map(|(&di, &mi)| di - mi)
         .collect();
 
     // Estimate theta using the orthogonal moment condition:
     // theta_hat = sum(Y_tilde * D_tilde) / sum(D_tilde^2)
     // (Chernozhukov et al. 2018, Eq. 4.1)
-    let numerator: f64 = y_tilde.iter().zip(d_tilde.iter())
+    let numerator: f64 = y_tilde
+        .iter()
+        .zip(d_tilde.iter())
         .map(|(&yt, &dt)| yt * dt)
         .sum();
     let denominator: f64 = d_tilde.iter().map(|&dt| dt * dt).sum();
@@ -552,7 +597,9 @@ fn run_plr(
     // Compute orthogonal scores
     // psi_i = (Y_tilde_i - theta * D_tilde_i) * D_tilde_i
     // (Chernozhukov et al. 2018, Eq. 3.3)
-    let scores: Vec<f64> = y_tilde.iter().zip(d_tilde.iter())
+    let scores: Vec<f64> = y_tilde
+        .iter()
+        .zip(d_tilde.iter())
         .map(|(&yt, &dt)| (yt - theta * dt) * dt)
         .collect();
 
@@ -670,9 +717,14 @@ fn run_irm(
     let k_folds = config.n_folds;
 
     // Validate binary treatment
-    let is_binary = d.iter().all(|&di| (di - 0.0).abs() < 1e-10 || (di - 1.0).abs() < 1e-10);
+    let is_binary = d
+        .iter()
+        .all(|&di| (di - 0.0).abs() < 1e-10 || (di - 1.0).abs() < 1e-10);
     if !is_binary {
-        warnings.push("IRM is designed for binary treatment. Consider using PLR for continuous treatment.".to_string());
+        warnings.push(
+            "IRM is designed for binary treatment. Consider using PLR for continuous treatment."
+                .to_string(),
+        );
     }
 
     let n_treated: usize = d.iter().filter(|&&di| di >= 0.5).count();
@@ -696,9 +748,9 @@ fn run_irm(
     };
 
     // Initialize storage for cross-fitted predictions
-    let mut g1_hat = Array1::zeros(n);  // E[Y|X,D=1] predictions
-    let mut g0_hat = Array1::zeros(n);  // E[Y|X,D=0] predictions
-    let mut m_hat = Array1::zeros(n);   // P(D=1|X) predictions
+    let mut g1_hat = Array1::zeros(n); // E[Y|X,D=1] predictions
+    let mut g0_hat = Array1::zeros(n); // E[Y|X,D=0] predictions
+    let mut m_hat = Array1::zeros(n); // P(D=1|X) predictions
 
     // Diagnostics accumulators
     let mut total_g1_ss = 0.0;
@@ -714,20 +766,23 @@ fn run_irm(
         let train_idx: Vec<usize> = (0..n).filter(|&i| fold_ids[i] != k).collect();
 
         // Split training data by treatment status
-        let train_treated: Vec<usize> = train_idx.iter()
+        let train_treated: Vec<usize> = train_idx
+            .iter()
             .filter(|&&i| d[i] >= 0.5)
             .copied()
             .collect();
-        let train_control: Vec<usize> = train_idx.iter()
-            .filter(|&&i| d[i] < 0.5)
-            .copied()
-            .collect();
+        let train_control: Vec<usize> =
+            train_idx.iter().filter(|&&i| d[i] < 0.5).copied().collect();
 
-        if train_treated.len() < x_design.ncols() + 1 || train_control.len() < x_design.ncols() + 1 {
+        if train_treated.len() < x_design.ncols() + 1 || train_control.len() < x_design.ncols() + 1
+        {
             return Err(EconError::InsufficientData {
                 required: x_design.ncols() + 1,
                 provided: train_treated.len().min(train_control.len()),
-                context: format!("Training data for fold {} (need enough in each treatment group)", k),
+                context: format!(
+                    "Training data for fold {} (need enough in each treatment group)",
+                    k
+                ),
             });
         }
 
@@ -776,21 +831,39 @@ fn run_irm(
         // Accumulate diagnostics
         let y_treated_mean = y_treated.mean().unwrap_or(0.0);
         let g1_pred_train = x_treated.dot(&g1_beta);
-        total_g1_ss += y_treated.iter().map(|&yi| (yi - y_treated_mean).powi(2)).sum::<f64>();
-        total_g1_rss += y_treated.iter().zip(g1_pred_train.iter())
-            .map(|(&yi, &gi)| (yi - gi).powi(2)).sum::<f64>();
+        total_g1_ss += y_treated
+            .iter()
+            .map(|&yi| (yi - y_treated_mean).powi(2))
+            .sum::<f64>();
+        total_g1_rss += y_treated
+            .iter()
+            .zip(g1_pred_train.iter())
+            .map(|(&yi, &gi)| (yi - gi).powi(2))
+            .sum::<f64>();
 
         let y_control_mean = y_control.mean().unwrap_or(0.0);
         let g0_pred_train = x_control.dot(&g0_beta);
-        total_g0_ss += y_control.iter().map(|&yi| (yi - y_control_mean).powi(2)).sum::<f64>();
-        total_g0_rss += y_control.iter().zip(g0_pred_train.iter())
-            .map(|(&yi, &gi)| (yi - gi).powi(2)).sum::<f64>();
+        total_g0_ss += y_control
+            .iter()
+            .map(|&yi| (yi - y_control_mean).powi(2))
+            .sum::<f64>();
+        total_g0_rss += y_control
+            .iter()
+            .zip(g0_pred_train.iter())
+            .map(|(&yi, &gi)| (yi - gi).powi(2))
+            .sum::<f64>();
 
         let d_train_mean = d_train.mean().unwrap_or(0.0);
         let m_pred_train = x_train.dot(&m_beta);
-        total_m_ss += d_train.iter().map(|&di| (di - d_train_mean).powi(2)).sum::<f64>();
-        total_m_rss += d_train.iter().zip(m_pred_train.iter())
-            .map(|(&di, &mi)| (di - mi).powi(2)).sum::<f64>();
+        total_m_ss += d_train
+            .iter()
+            .map(|&di| (di - d_train_mean).powi(2))
+            .sum::<f64>();
+        total_m_rss += d_train
+            .iter()
+            .zip(m_pred_train.iter())
+            .map(|(&di, &mi)| (di - mi).powi(2))
+            .sum::<f64>();
     }
 
     // Compute theta using the AIPW/doubly-robust estimator
@@ -806,11 +879,7 @@ fn run_irm(
         let mi = m_hat[i];
 
         let outcome_diff = g1i - g0i;
-        let ipw_treated = if di >= 0.5 {
-            (yi - g1i) / mi
-        } else {
-            0.0
-        };
+        let ipw_treated = if di >= 0.5 { (yi - g1i) / mi } else { 0.0 };
         let ipw_control = if di < 0.5 {
             (yi - g0i) / (1.0 - mi)
         } else {
@@ -866,7 +935,8 @@ fn run_irm(
     let jacobian = psi_squared_mean;
 
     // Check for extreme propensity scores
-    let n_extreme = m_hat.iter()
+    let n_extreme = m_hat
+        .iter()
         .filter(|&&mi| mi < 2.0 * config.trim || mi > 1.0 - 2.0 * config.trim)
         .count();
     if n_extreme > n / 10 {
@@ -881,7 +951,7 @@ fn run_irm(
         treatment_r2,
         outcome_rmse,
         treatment_rmse,
-        mean_residual_treatment: 0.0,  // Not applicable for IRM
+        mean_residual_treatment: 0.0, // Not applicable for IRM
         var_residual_treatment: jacobian,
     };
 
@@ -958,12 +1028,11 @@ fn add_intercept(x: &ArrayView2<f64>) -> Array2<f64> {
 /// Returns coefficient vector.
 fn fit_ols(x: &ArrayView2<f64>, y: &Array1<f64>) -> EconResult<Array1<f64>> {
     let xtx_mat = xtx(x);
-    let (xtx_inv, _cond_warning) = safe_inverse(&xtx_mat.view()).map_err(|_| {
-        EconError::SingularMatrix {
+    let (xtx_inv, _cond_warning) =
+        safe_inverse(&xtx_mat.view()).map_err(|_| EconError::SingularMatrix {
             context: "OLS in nuisance estimation".to_string(),
             suggestion: "Check for multicollinearity in covariates".to_string(),
-        }
-    })?;
+        })?;
 
     let xty_vec = xty(x, y);
     let beta = xtx_inv.dot(&xty_vec);
@@ -995,7 +1064,7 @@ mod tests {
 
         let mut y = Array1::zeros(n);
         let mut d = Array1::zeros(n);
-        let mut x = Array2::zeros((n, 2));  // Two covariates
+        let mut x = Array2::zeros((n, 2)); // Two covariates
 
         for i in 0..n {
             let x1: f64 = rng.r#gen();
@@ -1049,7 +1118,7 @@ mod tests {
 
             // Potential outcomes
             let y0 = 0.3 * x1 + 0.2 * x2 + noise;
-            let y1 = 0.5 + 0.3 * x1 + 0.2 * x2 + noise;  // ATE = 0.5
+            let y1 = 0.5 + 0.3 * x1 + 0.2 * x2 + noise; // ATE = 0.5
 
             y[i] = if d[i] >= 0.5 { y1 } else { y0 };
         }
@@ -1130,7 +1199,7 @@ mod tests {
 
         // Each fold should have approximately 20 observations
         for c in counts {
-            assert!(c >= 15 && c <= 25, "Fold count {} is unbalanced", c);
+            assert!((15..=25).contains(&c), "Fold count {} is unbalanced", c);
         }
     }
 
@@ -1156,7 +1225,7 @@ mod tests {
         let x = Array2::from_shape_vec((3, 2), vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).unwrap();
 
         let config = DoubleMLConfig {
-            n_folds: 5,  // Can't have 5 folds with 3 observations
+            n_folds: 5, // Can't have 5 folds with 3 observations
             ..Default::default()
         };
 

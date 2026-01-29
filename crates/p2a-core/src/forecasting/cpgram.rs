@@ -141,8 +141,14 @@ pub fn cpgram(x: &[f64], taper: Option<f64>) -> Result<CpgramResult, String> {
     // The KS critical value at 95% is approximately 1.36 / sqrt(n)
     let ks_critical = 1.36 / (m as f64).sqrt();
 
-    let upper_ci: Vec<f64> = freq.iter().map(|&f| (f * 2.0 + ks_critical).min(1.0)).collect();
-    let lower_ci: Vec<f64> = freq.iter().map(|&f| (f * 2.0 - ks_critical).max(0.0)).collect();
+    let upper_ci: Vec<f64> = freq
+        .iter()
+        .map(|&f| (f * 2.0 + ks_critical).min(1.0))
+        .collect();
+    let lower_ci: Vec<f64> = freq
+        .iter()
+        .map(|&f| (f * 2.0 - ks_critical).max(0.0))
+        .collect();
 
     // Compute KS statistic (maximum deviation from expected uniform distribution)
     let expected: Vec<f64> = freq.iter().map(|&f| f * 2.0).collect();
@@ -388,6 +394,6 @@ mod tests {
         let (ks_stat, p_value) = white_noise_test(&x, Some(0.1)).unwrap();
 
         assert!(ks_stat >= 0.0);
-        assert!(p_value >= 0.0 && p_value <= 1.0);
+        assert!((0.0..=1.0).contains(&p_value));
     }
 }

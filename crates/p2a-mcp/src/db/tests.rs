@@ -387,7 +387,8 @@ async fn test_conversation_with_messages() {
 async fn test_upsert_session() {
     let db = test_db().await;
 
-    let session = super::models::DbSession::new("test-session-1".to_string(), Some("user-123".to_string()));
+    let session =
+        super::models::DbSession::new("test-session-1".to_string(), Some("user-123".to_string()));
 
     let created = db
         .upsert_session(&session)
@@ -415,7 +416,8 @@ async fn test_upsert_anonymous_session() {
 async fn test_get_session() {
     let db = test_db().await;
 
-    let session = super::models::DbSession::new("test-session-3".to_string(), Some("user-456".to_string()));
+    let session =
+        super::models::DbSession::new("test-session-3".to_string(), Some("user-456".to_string()));
 
     let created = db
         .upsert_session(&session)
@@ -488,7 +490,10 @@ async fn test_full_conversation_flow() {
     let db = test_db().await;
 
     // Create a session
-    let session_data = super::models::DbSession::new("integration-test-session".to_string(), Some("test-user".to_string()));
+    let session_data = super::models::DbSession::new(
+        "integration-test-session".to_string(),
+        Some("test-user".to_string()),
+    );
     let session = db
         .upsert_session(&session_data)
         .await
@@ -569,13 +574,19 @@ async fn test_multiple_sessions_isolated() {
     let db = test_db().await;
 
     // Create two sessions
-    let session1_data = super::models::DbSession::new("isolation-session-1".to_string(), Some("user-1".to_string()));
+    let session1_data = super::models::DbSession::new(
+        "isolation-session-1".to_string(),
+        Some("user-1".to_string()),
+    );
     let session1 = db
         .upsert_session(&session1_data)
         .await
         .expect("Failed to upsert session 1");
 
-    let session2_data = super::models::DbSession::new("isolation-session-2".to_string(), Some("user-2".to_string()));
+    let session2_data = super::models::DbSession::new(
+        "isolation-session-2".to_string(),
+        Some("user-2".to_string()),
+    );
     let session2 = db
         .upsert_session(&session2_data)
         .await

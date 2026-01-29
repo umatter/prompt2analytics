@@ -2,8 +2,8 @@
 //!
 //! Provides numerically stable matrix operations using the faer library.
 
-use faer::prelude::*;
 use faer::linalg::solvers::Solve;
+use faer::prelude::*;
 use ndarray::{Array1, Array2, ArrayView2};
 use thiserror::Error;
 
@@ -207,7 +207,9 @@ pub fn cholesky(m: &ArrayView2<f64>) -> Result<Array2<f64>, LinalgError> {
     let mat = ndarray_to_faer(m);
 
     // Use faer's llt() for Cholesky decomposition
-    let chol = mat.llt(faer::Side::Lower).map_err(|_| LinalgError::CholeskyFailed)?;
+    let chol = mat
+        .llt(faer::Side::Lower)
+        .map_err(|_| LinalgError::CholeskyFailed)?;
     let l = chol.L();
 
     Ok(faer_ref_to_ndarray(l))
@@ -247,10 +249,13 @@ pub fn eig_symmetric(m: &ArrayView2<f64>) -> Result<(Array1<f64>, Array2<f64>), 
     let mat = ndarray_to_faer(m);
 
     // Use self_adjoint_eigen for symmetric matrices
-    let eig = mat.self_adjoint_eigen(faer::Side::Lower).map_err(|_| LinalgError::EigenFailed)?;
+    let eig = mat
+        .self_adjoint_eigen(faer::Side::Lower)
+        .map_err(|_| LinalgError::EigenFailed)?;
 
     // Extract eigenvalues using self_adjoint_eigenvalues which returns Result<Vec<f64>, EvdError>
-    let eigenvalues_vec = mat.self_adjoint_eigenvalues(faer::Side::Lower)
+    let eigenvalues_vec = mat
+        .self_adjoint_eigenvalues(faer::Side::Lower)
         .map_err(|_| LinalgError::EigenFailed)?;
     let eigenvectors = eig.U();
 
@@ -306,7 +311,9 @@ pub fn cholesky_inverse(m: &ArrayView2<f64>) -> Result<Array2<f64>, LinalgError>
     let mat = ndarray_to_faer(m);
 
     // Use Cholesky decomposition (L * L^T = M)
-    let chol = mat.llt(faer::Side::Lower).map_err(|_| LinalgError::CholeskyFailed)?;
+    let chol = mat
+        .llt(faer::Side::Lower)
+        .map_err(|_| LinalgError::CholeskyFailed)?;
 
     // Solve for inverse: M^{-1} = (L * L^T)^{-1} = L^{-T} * L^{-1}
     // We solve M * X = I for X

@@ -17,13 +17,12 @@
 //! - R Core Team. `stats::mahalanobis()` function.
 //!   <https://stat.ethz.ch/R-manual/R-devel/library/stats/html/mahalanobis.html>
 
-use ndarray::{Array1, Array2, ArrayView1, ArrayView2, Axis};
-use serde::{Deserialize, Serialize};
-use faer::prelude::*;
-use faer::linalg::solvers::Solve;
 use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
 use crate::linalg::matrix_ops::safe_inverse;
+use faer::prelude::*;
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2, Axis};
+use serde::{Deserialize, Serialize};
 
 /// Result from Mahalanobis distance computation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -105,7 +104,8 @@ pub fn mahalanobis(
                 return Err(EconError::InvalidSpecification {
                     message: format!(
                         "Center length ({}) must match number of variables ({})",
-                        c.len(), p
+                        c.len(),
+                        p
                     ),
                 });
             }
@@ -121,7 +121,9 @@ pub fn mahalanobis(
                 return Err(EconError::InvalidSpecification {
                     message: format!(
                         "Covariance matrix dimensions ({:?}) must be ({}, {})",
-                        c.dim(), p, p
+                        c.dim(),
+                        p,
+                        p
                     ),
                 });
             }
@@ -183,11 +185,11 @@ fn compute_distances_cholesky(
     let cov_faer = Mat::from_fn(p, p, |i, j| cov[[i, j]]);
 
     // Compute Cholesky decomposition: Σ = L L'
-    let chol = cov_faer.llt(faer::Side::Lower).map_err(|_| {
-        EconError::InvalidSpecification {
+    let chol = cov_faer
+        .llt(faer::Side::Lower)
+        .map_err(|_| EconError::InvalidSpecification {
             message: "Covariance matrix is not positive definite".to_string(),
-        }
-    })?;
+        })?;
 
     // Get the lower triangular factor L and convert to ndarray
     let l_faer = chol.L();
@@ -300,7 +302,8 @@ pub fn mahalanobis_single(
         return Err(EconError::InvalidSpecification {
             message: format!(
                 "Center length ({}) must match observation length ({})",
-                center.len(), p
+                center.len(),
+                p
             ),
         });
     }
@@ -309,7 +312,9 @@ pub fn mahalanobis_single(
         return Err(EconError::InvalidSpecification {
             message: format!(
                 "Covariance matrix dimensions ({:?}) must be ({}, {})",
-                cov_inv.dim(), p, p
+                cov_inv.dim(),
+                p,
+                p
             ),
         });
     }
@@ -351,7 +356,11 @@ pub fn run_mahalanobis(
     // Extract data into matrix
     let mut data = Array2::zeros((n, p));
     for (j, col_name) in columns.iter().enumerate() {
-        let available: Vec<String> = df.get_column_names().iter().map(|s| s.to_string()).collect();
+        let available: Vec<String> = df
+            .get_column_names()
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         let col = df.column(col_name).map_err(|_| EconError::ColumnNotFound {
             column: col_name.to_string(),
             available: available.clone(),
@@ -388,12 +397,7 @@ mod tests {
         let center = array![0.5, 0.5];
         let cov = array![[1.0, 0.0], [0.0, 1.0]];
 
-        let result = mahalanobis(
-            x.view(),
-            Some(center.view()),
-            Some(cov.view()),
-            false,
-        ).unwrap();
+        let result = mahalanobis(x.view(), Some(center.view()), Some(cov.view()), false).unwrap();
 
         assert_eq!(result.n_obs, 4);
         assert_eq!(result.n_vars, 2);
@@ -412,12 +416,7 @@ mod tests {
         let center = array![1.0, 1.0];
         let cov = array![[1.0, 0.5], [0.5, 1.0]];
 
-        let result = mahalanobis(
-            x.view(),
-            Some(center.view()),
-            Some(cov.view()),
-            false,
-        ).unwrap();
+        let result = mahalanobis(x.view(), Some(center.view()), Some(cov.view()), false).unwrap();
 
         // Both points equidistant from center
         assert!((result.distances[0] - result.distances[1]).abs() < 1e-10);
@@ -426,12 +425,7 @@ mod tests {
     #[test]
     fn test_mahalanobis_auto_center_cov() {
         // Let function compute center and covariance
-        let x = array![
-            [1.0, 2.0],
-            [2.0, 3.0],
-            [3.0, 4.0],
-            [4.0, 5.0],
-        ];
+        let x = array![[1.0, 2.0], [2.0, 3.0], [3.0, 4.0], [4.0, 5.0],];
 
         let result = mahalanobis(x.view(), None, None, false).unwrap();
 
@@ -449,19 +443,11 @@ mod tests {
         let cov = array![[1.0, 0.0], [0.0, 1.0]];
         let cov_inv = array![[1.0, 0.0], [0.0, 1.0]]; // Same for identity
 
-        let result_normal = mahalanobis(
-            x.view(),
-            Some(center.view()),
-            Some(cov.view()),
-            false,
-        ).unwrap();
+        let result_normal =
+            mahalanobis(x.view(), Some(center.view()), Some(cov.view()), false).unwrap();
 
-        let result_inverted = mahalanobis(
-            x.view(),
-            Some(center.view()),
-            Some(cov_inv.view()),
-            true,
-        ).unwrap();
+        let result_inverted =
+            mahalanobis(x.view(), Some(center.view()), Some(cov_inv.view()), true).unwrap();
 
         // Should get same distances
         for i in 0..2 {
@@ -508,12 +494,7 @@ mod tests {
         // cov <- cov(x)
         // mahalanobis(x, center, cov)
 
-        let x = array![
-            [1.0, 2.0],
-            [3.0, 5.0],
-            [2.0, 4.0],
-            [5.0, 3.0],
-        ];
+        let x = array![[1.0, 2.0], [3.0, 5.0], [2.0, 4.0], [5.0, 3.0],];
 
         let result = mahalanobis(x.view(), None, None, false).unwrap();
 
@@ -530,11 +511,7 @@ mod tests {
         assert!(result.distances.iter().all(|&d| d >= 0.0));
 
         // Sum should be close to (n-1)*p = 6.0
-        assert!(
-            (sum - 6.0).abs() < 0.01,
-            "Sum should be ~6.0, got {}",
-            sum
-        );
+        assert!((sum - 6.0).abs() < 0.01, "Sum should be ~6.0, got {}", sum);
 
         // Basic sanity checks - distances should be reasonable
         for (i, d) in result.distances.iter().enumerate() {

@@ -2,9 +2,9 @@
 //!
 //! Tests for a trend in binomial proportions across ordered groups.
 
-use serde::{Deserialize, Serialize};
-use statrs::distribution::{ContinuousCDF, ChiSquared};
 use crate::errors::{EconError, EconResult};
+use serde::{Deserialize, Serialize};
+use statrs::distribution::{ChiSquared, ContinuousCDF};
 
 /// Result of prop.trend.test.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -105,17 +105,24 @@ pub fn prop_trend_test(
     let q_hat = 1.0 - p_hat;
 
     // Weighted mean of scores
-    let s_bar: f64 = scores.iter().zip(n.iter())
+    let s_bar: f64 = scores
+        .iter()
+        .zip(n.iter())
         .map(|(s, &ni)| s * ni as f64)
-        .sum::<f64>() / n_total as f64;
+        .sum::<f64>()
+        / n_total as f64;
 
     // Numerator: sum_i x_i * (s_i - s_bar)
-    let numerator: f64 = x.iter().zip(scores.iter())
+    let numerator: f64 = x
+        .iter()
+        .zip(scores.iter())
         .map(|(&xi, &si)| xi as f64 * (si - s_bar))
         .sum();
 
     // Denominator: sqrt(p_hat * q_hat * sum_i n_i * (s_i - s_bar)^2)
-    let var_s: f64 = n.iter().zip(scores.iter())
+    let var_s: f64 = n
+        .iter()
+        .zip(scores.iter())
         .map(|(&ni, &si)| ni as f64 * (si - s_bar).powi(2))
         .sum();
 
@@ -190,7 +197,7 @@ mod tests {
     fn test_prop_trend_custom_scores() {
         let x = vec![5, 10, 15];
         let n = vec![50, 50, 50];
-        let scores = vec![1.0, 2.0, 4.0];  // Non-linear scores
+        let scores = vec![1.0, 2.0, 4.0]; // Non-linear scores
 
         let result = prop_trend_test(&x, &n, Some(&scores)).unwrap();
 

@@ -9,9 +9,9 @@
 use std::io::Write;
 use std::path::Path;
 
+use crate::econometrics::{DiscreteResult, HausmanResult, PanelResult};
+use crate::ml::{DBSCANResult, KMeansResult, PCAResult};
 use crate::regression::OlsResult;
-use crate::econometrics::{DiscreteResult, PanelResult, HausmanResult};
-use crate::ml::{PCAResult, KMeansResult, DBSCANResult};
 
 /// Trait for exporting results to CSV format.
 pub trait CsvExport {
@@ -57,7 +57,10 @@ impl CsvExport for OlsResult {
         csv.push_str(&format!("f_p_value,{:.6}\n", self.f_p_value));
         csv.push_str(&format!("df_model,{}\n", self.df_model));
         csv.push_str(&format!("df_resid,{}\n", self.df_resid));
-        csv.push_str(&format!("residual_std_error,{:.6}\n", self.residual_std_error));
+        csv.push_str(&format!(
+            "residual_std_error,{:.6}\n",
+            self.residual_std_error
+        ));
 
         csv
     }
@@ -68,7 +71,9 @@ impl CsvExport for DiscreteResult {
         let mut csv = String::new();
 
         // Header
-        csv.push_str("variable,coefficient,std_error,z_stat,p_value,significance,marginal_effect\n");
+        csv.push_str(
+            "variable,coefficient,std_error,z_stat,p_value,significance,marginal_effect\n",
+        );
 
         // Coefficients
         for i in 0..self.variables.len() {
@@ -92,7 +97,10 @@ impl CsvExport for DiscreteResult {
         csv.push_str(&format!("n_obs,{}\n", self.n_obs));
         csv.push_str(&format!("n_positive,{}\n", self.n_positive));
         csv.push_str(&format!("log_likelihood,{:.6}\n", self.log_likelihood));
-        csv.push_str(&format!("log_likelihood_null,{:.6}\n", self.log_likelihood_null));
+        csv.push_str(&format!(
+            "log_likelihood_null,{:.6}\n",
+            self.log_likelihood_null
+        ));
         csv.push_str(&format!("pseudo_r_squared,{:.6}\n", self.pseudo_r_squared));
         csv.push_str(&format!("aic,{:.6}\n", self.aic));
         csv.push_str(&format!("bic,{:.6}\n", self.bic));
@@ -161,7 +169,10 @@ impl CsvExport for HausmanResult {
         csv.push_str(&format!("chi2_statistic,{:.6}\n", self.chi2_statistic));
         csv.push_str(&format!("p_value,{:.6}\n", self.p_value));
         csv.push_str(&format!("df,{}\n", self.df));
-        csv.push_str(&format!("recommendation,{}\n", escape_csv(&self.recommendation)));
+        csv.push_str(&format!(
+            "recommendation,{}\n",
+            escape_csv(&self.recommendation)
+        ));
 
         // Coefficient comparison
         csv.push_str("\n# Coefficient Comparison\n");
@@ -178,8 +189,10 @@ impl CsvExport for HausmanResult {
             let fe_se = self.fe_result.std_errors[i];
 
             let (re_coef, re_se) = if i + re_offset < n_re {
-                (self.re_result.coefficients[i + re_offset],
-                 self.re_result.std_errors[i + re_offset])
+                (
+                    self.re_result.coefficients[i + re_offset],
+                    self.re_result.std_errors[i + re_offset],
+                )
             } else {
                 (f64::NAN, f64::NAN)
             };
@@ -301,10 +314,14 @@ impl CsvExport for DBSCANResult {
         csv.push_str("statistic,value\n");
         csv.push_str(&format!("n_clusters,{}\n", self.n_clusters));
         csv.push_str(&format!("n_noise,{}\n", self.n_noise));
-        csv.push_str(&format!("n_core_points,{}\n", self.core_sample_indices.len()));
+        csv.push_str(&format!(
+            "n_core_points,{}\n",
+            self.core_sample_indices.len()
+        ));
 
         // Compute cluster sizes from labels
-        let mut cluster_sizes: std::collections::HashMap<i32, usize> = std::collections::HashMap::new();
+        let mut cluster_sizes: std::collections::HashMap<i32, usize> =
+            std::collections::HashMap::new();
         for &label in &self.labels {
             if label >= 0 {
                 *cluster_sizes.entry(label).or_insert(0) += 1;

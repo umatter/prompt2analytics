@@ -3,7 +3,7 @@
 use clap::Subcommand;
 use std::path::PathBuf;
 
-use crate::output::{print_error, print_message, OutputFormat};
+use crate::output::{OutputFormat, print_error, print_message};
 use crate::session::Session;
 
 #[derive(Subcommand)]
@@ -75,14 +75,14 @@ fn execute_export(
 
     script.push_str(&format!("# Generated: {}\n", session.updated_at));
     script.push_str(&format!("# p2a version: {}\n", session.version));
-    script.push_str("\n");
+    script.push('\n');
     script.push_str("set -euo pipefail\n");
-    script.push_str("\n");
+    script.push('\n');
 
     // Create a temporary session file for the replay
     let temp_session = format!(".p2a_session_{}.json", uuid::Uuid::new_v4());
     script.push_str(&format!("SESSION_FILE=\"{}\"\n", temp_session));
-    script.push_str("\n");
+    script.push('\n');
 
     // Generate commands from the session
     for record in &session.commands {
@@ -93,13 +93,13 @@ fn execute_export(
         // Reconstruct the command from the record
         let cmd = reconstruct_command(record);
         script.push_str(&format!("p2a --session \"$SESSION_FILE\" {}\n", cmd));
-        script.push_str("\n");
+        script.push('\n');
     }
 
     // Cleanup
     script.push_str("# Cleanup temporary session file\n");
     script.push_str("rm -f \"$SESSION_FILE\"\n");
-    script.push_str("\n");
+    script.push('\n');
     script.push_str("echo \"Script completed successfully\"\n");
 
     // Write the script
@@ -166,7 +166,12 @@ fn execute_history(session_file: &PathBuf, format: &OutputFormat) -> anyhow::Res
 
             println!("Datasets ({}):", session.datasets.len());
             for (name, meta) in &session.datasets {
-                println!("  - {} ({} rows, {} cols)", name, meta.nrows, meta.columns.len());
+                println!(
+                    "  - {} ({} rows, {} cols)",
+                    name,
+                    meta.nrows,
+                    meta.columns.len()
+                );
             }
             println!();
 
@@ -191,15 +196,19 @@ fn execute_run(script_file: &PathBuf, format: &OutputFormat) -> anyhow::Result<(
     use std::process::Command;
 
     if !script_file.exists() {
-        print_error(&format!("Script file not found: {}", script_file.display()), format);
+        print_error(
+            &format!("Script file not found: {}", script_file.display()),
+            format,
+        );
         return Ok(());
     }
 
-    print_message(&format!("Running script: {}", script_file.display()), format);
+    print_message(
+        &format!("Running script: {}", script_file.display()),
+        format,
+    );
 
-    let output = Command::new("bash")
-        .arg(script_file)
-        .output()?;
+    let output = Command::new("bash").arg(script_file).output()?;
 
     // Print stdout
     if !output.stdout.is_empty() {
@@ -252,10 +261,7 @@ fn reconstruct_command(record: &crate::session::CommandRecord) -> String {
 
         // Independent variables
         if let Some(indep_vars) = args.get("indep_vars").and_then(|v| v.as_array()) {
-            let vars: Vec<&str> = indep_vars
-                .iter()
-                .filter_map(|v| v.as_str())
-                .collect();
+            let vars: Vec<&str> = indep_vars.iter().filter_map(|v| v.as_str()).collect();
             if !vars.is_empty() {
                 cmd.push_str(&format!(" -x {}", vars.join(" ")));
             }

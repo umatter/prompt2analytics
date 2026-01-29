@@ -52,7 +52,7 @@
 //! `stats::ARMAacf()`, `stats::ARMAtoMA()`, `stats::acf2AR()`, `stats::arima.sim()`,
 //! `stats::runmed()`
 
-use ndarray::{Array1, Array2};
+use ndarray::Array2;
 use serde::{Deserialize, Serialize};
 
 use crate::errors::{EconError, EconResult};
@@ -276,7 +276,8 @@ pub fn embed_array(x: &[f64], dimension: usize) -> EconResult<Array2<f64>> {
     let n_rows = result.n_rows;
 
     let flat: Vec<f64> = result.matrix.into_iter().flatten().collect();
-    Array2::from_shape_vec((n_rows, dimension), flat).map_err(|e| EconError::Internal(e.to_string()))
+    Array2::from_shape_vec((n_rows, dimension), flat)
+        .map_err(|e| EconError::Internal(e.to_string()))
 }
 
 // ============================================================================
@@ -326,7 +327,12 @@ pub struct DiffinvResult {
 /// # References
 ///
 /// R `stats::diffinv`
-pub fn diffinv(x: &[f64], lag: usize, differences: usize, xi: Option<&[f64]>) -> EconResult<DiffinvResult> {
+pub fn diffinv(
+    x: &[f64],
+    lag: usize,
+    differences: usize,
+    xi: Option<&[f64]>,
+) -> EconResult<DiffinvResult> {
     if lag == 0 {
         return Err(EconError::InvalidSpecification {
             message: "Lag must be at least 1".to_string(),
@@ -708,8 +714,8 @@ pub struct ArmaAcfResult {
 /// - Brockwell, P.J., & Davis, R.A. (1991). *Time Series: Theory and Methods*, Section 3.3
 /// - R `stats::ARMAacf`
 pub fn arma_acf(ar: &[f64], ma: &[f64], lag_max: usize, pacf: bool) -> EconResult<ArmaAcfResult> {
-    let p = ar.len();
-    let q = ma.len();
+    let _p = ar.len();
+    let _q = ma.len();
 
     // Compute autocovariances first
     let acvf = arma_autocovariance(ar, ma, lag_max)?;
@@ -1208,8 +1214,8 @@ pub fn arima_sim(
     n_start: Option<usize>,
     seed: Option<u64>,
 ) -> EconResult<ArimaSimResult> {
-    use rand::{Rng, SeedableRng};
     use rand::rngs::StdRng;
+    use rand::{Rng, SeedableRng};
     use rand_distr::{Distribution, StandardNormal};
 
     let p = ar.len();
@@ -1228,14 +1234,14 @@ pub fn arima_sim(
     // Compute burn-in length if not specified
     let burn_in = n_start.unwrap_or_else(|| {
         // R default: max(p, q) * 10 or at least 100
-        let min_start = (p.max(q) * 10).max(100);
-        min_start
+
+        (p.max(q) * 10).max(100)
     });
 
     let total_length = n + burn_in;
 
     // Generate or use innovations
-    let mut innov: Vec<f64> = if let Some(ext_innov) = innovations {
+    let innov: Vec<f64> = if let Some(ext_innov) = innovations {
         if ext_innov.len() < total_length {
             return Err(EconError::InvalidSpecification {
                 message: format!(
@@ -1527,7 +1533,14 @@ mod tests {
         let x = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
         let filter_coefs = vec![1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0]; // 3-point MA
 
-        let result = filter(&x, &filter_coefs, FilterMethod::Convolution, FilterSides::One, None).unwrap();
+        let result = filter(
+            &x,
+            &filter_coefs,
+            FilterMethod::Convolution,
+            FilterSides::One,
+            None,
+        )
+        .unwrap();
 
         // At index 2: (3 + 2 + 1) / 3 = 2.0
         assert!(approx_eq(result.values[2], 2.0, 1e-10));
@@ -1541,7 +1554,14 @@ mod tests {
         let x = vec![1.0, 1.0, 1.0, 1.0, 1.0];
         let filter_coefs = vec![0.5];
 
-        let result = filter(&x, &filter_coefs, FilterMethod::Recursive, FilterSides::One, None).unwrap();
+        let result = filter(
+            &x,
+            &filter_coefs,
+            FilterMethod::Recursive,
+            FilterSides::One,
+            None,
+        )
+        .unwrap();
 
         // y[0] = x[0] = 1.0
         // y[1] = x[1] + 0.5*y[0] = 1 + 0.5 = 1.5

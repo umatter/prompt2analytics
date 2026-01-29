@@ -3,13 +3,12 @@
 //! Benchmarks string cleaning and regex operations against R's stringi/stringr.
 //! Run with: `cargo bench -p p2a-core -- string`
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
-use p2a_core::data::munging::{
-    trim, to_lowercase, to_uppercase, replace,
-    regex_replace, regex_extract, regex_count,
-    str_split, str_concat, str_length, str_substring,
-};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use p2a_core::Dataset;
+use p2a_core::data::munging::{
+    regex_count, regex_extract, regex_replace, replace, str_concat, str_length, str_split,
+    str_substring, to_lowercase, to_uppercase, trim,
+};
 use polars::prelude::*;
 use rand::Rng;
 use rand::SeedableRng;
@@ -54,7 +53,13 @@ fn generate_string_data(n: usize, seed: u64) -> Dataset {
     // Email-like strings (for regex tests)
     let email: Vec<String> = (0..n)
         .map(|i| {
-            let domains = ["gmail.com", "yahoo.com", "outlook.com", "example.org", "test.net"];
+            let domains = [
+                "gmail.com",
+                "yahoo.com",
+                "outlook.com",
+                "example.org",
+                "test.net",
+            ];
             let domain = domains[rng.gen_range(0..domains.len())];
             format!("user{}@{}", i, domain)
         })
@@ -110,14 +115,18 @@ fn generate_string_data(n: usize, seed: u64) -> Dataset {
     // First and last name columns (for concat tests)
     let first_name: Vec<String> = (0..n)
         .map(|_| {
-            let names = ["John", "Jane", "Bob", "Alice", "Charlie", "Diana", "Eve", "Frank"];
+            let names = [
+                "John", "Jane", "Bob", "Alice", "Charlie", "Diana", "Eve", "Frank",
+            ];
             names[rng.gen_range(0..names.len())].to_string()
         })
         .collect();
 
     let last_name: Vec<String> = (0..n)
         .map(|_| {
-            let names = ["Smith", "Johnson", "Williams", "Brown", "Jones", "Davis", "Miller"];
+            let names = [
+                "Smith", "Johnson", "Williams", "Brown", "Jones", "Davis", "Miller",
+            ];
             names[rng.gen_range(0..names.len())].to_string()
         })
         .collect();
@@ -336,16 +345,9 @@ fn str_substring_benchmark(c: &mut Criterion) {
 // CRITERION SETUP
 // =============================================================================
 
-criterion_group!(
-    trim_benches,
-    trim_benchmark
-);
+criterion_group!(trim_benches, trim_benchmark);
 
-criterion_group!(
-    case_benches,
-    to_lowercase_benchmark,
-    to_uppercase_benchmark
-);
+criterion_group!(case_benches, to_lowercase_benchmark, to_uppercase_benchmark);
 
 criterion_group!(
     replace_benches,

@@ -24,26 +24,21 @@ use crate::errors::{EconError, EconResult};
 use crate::linalg::design::DesignMatrix;
 use crate::traits::estimator::SignificanceLevel;
 
-use super::rd::{run_rd, BandwidthMethod, KernelType, RdConfig, RdResult, VceType};
+use super::rd::{BandwidthMethod, KernelType, RdConfig, RdResult, VceType, run_rd};
 
 /// Bandwidth selection strategy for multiple cutoffs.
 ///
 /// Determines how bandwidths are chosen across different cutoffs.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub enum RdMultiBandwidth {
     /// Use the same bandwidth for all cutoffs.
     /// The global bandwidth is either specified or computed as the average of optimal bandwidths.
     Global(f64),
     /// Use different optimal bandwidth for each cutoff (computed automatically).
+    #[default]
     PerCutoffOptimal,
     /// Use specified bandwidths for each cutoff.
     PerCutoff(Vec<f64>),
-}
-
-impl Default for RdMultiBandwidth {
-    fn default() -> Self {
-        RdMultiBandwidth::PerCutoffOptimal
-    }
 }
 
 /// Weighting scheme for pooling estimates across cutoffs.
@@ -717,11 +712,7 @@ fn compute_pooling_weights(results: &[CutoffResult], scheme: PoolingWeights) -> 
             .iter()
             .map(|r| {
                 let se2 = r.se * r.se;
-                if se2 > 1e-10 {
-                    1.0 / se2
-                } else {
-                    0.0
-                }
+                if se2 > 1e-10 { 1.0 / se2 } else { 0.0 }
             })
             .collect(),
         PoolingWeights::Equal => vec![1.0; n],
@@ -788,11 +779,7 @@ fn compute_heterogeneity_test(results: &[CutoffResult]) -> HeterogeneityTest {
         .map(|r| {
             let diff = r.effect - tau_pooled;
             let var = r.se * r.se;
-            if var > 1e-10 {
-                diff * diff / var
-            } else {
-                0.0
-            }
+            if var > 1e-10 { diff * diff / var } else { 0.0 }
         })
         .sum();
 

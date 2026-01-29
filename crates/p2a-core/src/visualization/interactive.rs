@@ -61,7 +61,7 @@ fn to_rgb_colors(colors: &[(u8, u8, u8)]) -> Vec<Rgb> {
 fn get_colors(custom_colors: &Option<Vec<(u8, u8, u8)>>) -> Vec<Rgb> {
     match custom_colors {
         Some(colors) => to_rgb_colors(colors),
-        None => to_rgb_colors(&PLOTLY_PALETTE.to_vec()),
+        None => to_rgb_colors(PLOTLY_PALETTE.as_ref()),
     }
 }
 
@@ -92,65 +92,53 @@ pub fn scatter_interactive(
 
     // Build the plot using chained method calls
     let plot = match (group_col, &config.title, &config.x_label, &config.y_label) {
-        (Some(gc), Some(title), Some(xl), Some(yl)) => {
-            ScatterPlot::builder()
-                .data(df)
-                .x(x_col)
-                .y(y_col)
-                .group(gc)
-                .plot_title(title)
-                .x_title(xl)
-                .y_title(yl)
-                .colors(colors)
-                .build()
-        }
-        (Some(gc), Some(title), _, _) => {
-            ScatterPlot::builder()
-                .data(df)
-                .x(x_col)
-                .y(y_col)
-                .group(gc)
-                .plot_title(title)
-                .colors(colors)
-                .build()
-        }
-        (Some(gc), None, _, _) => {
-            ScatterPlot::builder()
-                .data(df)
-                .x(x_col)
-                .y(y_col)
-                .group(gc)
-                .colors(colors)
-                .build()
-        }
-        (None, Some(title), Some(xl), Some(yl)) => {
-            ScatterPlot::builder()
-                .data(df)
-                .x(x_col)
-                .y(y_col)
-                .plot_title(title)
-                .x_title(xl)
-                .y_title(yl)
-                .colors(colors)
-                .build()
-        }
-        (None, Some(title), _, _) => {
-            ScatterPlot::builder()
-                .data(df)
-                .x(x_col)
-                .y(y_col)
-                .plot_title(title)
-                .colors(colors)
-                .build()
-        }
-        (None, None, _, _) => {
-            ScatterPlot::builder()
-                .data(df)
-                .x(x_col)
-                .y(y_col)
-                .colors(colors)
-                .build()
-        }
+        (Some(gc), Some(title), Some(xl), Some(yl)) => ScatterPlot::builder()
+            .data(df)
+            .x(x_col)
+            .y(y_col)
+            .group(gc)
+            .plot_title(title)
+            .x_title(xl)
+            .y_title(yl)
+            .colors(colors)
+            .build(),
+        (Some(gc), Some(title), _, _) => ScatterPlot::builder()
+            .data(df)
+            .x(x_col)
+            .y(y_col)
+            .group(gc)
+            .plot_title(title)
+            .colors(colors)
+            .build(),
+        (Some(gc), None, _, _) => ScatterPlot::builder()
+            .data(df)
+            .x(x_col)
+            .y(y_col)
+            .group(gc)
+            .colors(colors)
+            .build(),
+        (None, Some(title), Some(xl), Some(yl)) => ScatterPlot::builder()
+            .data(df)
+            .x(x_col)
+            .y(y_col)
+            .plot_title(title)
+            .x_title(xl)
+            .y_title(yl)
+            .colors(colors)
+            .build(),
+        (None, Some(title), _, _) => ScatterPlot::builder()
+            .data(df)
+            .x(x_col)
+            .y(y_col)
+            .plot_title(title)
+            .colors(colors)
+            .build(),
+        (None, None, _, _) => ScatterPlot::builder()
+            .data(df)
+            .x(x_col)
+            .y(y_col)
+            .colors(colors)
+            .build(),
     };
 
     let html = plot.to_html();
@@ -184,53 +172,34 @@ pub fn histogram_interactive(
     let n_points = df.height();
 
     let plot = match (group_col, &config.title, &config.x_label, &config.y_label) {
-        (Some(gc), Some(title), Some(xl), Some(yl)) => {
-            Histogram::builder()
-                .data(df)
-                .x(col)
-                .group(gc)
-                .plot_title(title)
-                .x_title(xl)
-                .y_title(yl)
-                .build()
-        }
-        (Some(gc), Some(title), _, _) => {
-            Histogram::builder()
-                .data(df)
-                .x(col)
-                .group(gc)
-                .plot_title(title)
-                .build()
-        }
-        (Some(gc), None, _, _) => {
-            Histogram::builder()
-                .data(df)
-                .x(col)
-                .group(gc)
-                .build()
-        }
-        (None, Some(title), Some(xl), Some(yl)) => {
-            Histogram::builder()
-                .data(df)
-                .x(col)
-                .plot_title(title)
-                .x_title(xl)
-                .y_title(yl)
-                .build()
-        }
-        (None, Some(title), _, _) => {
-            Histogram::builder()
-                .data(df)
-                .x(col)
-                .plot_title(title)
-                .build()
-        }
-        (None, None, _, _) => {
-            Histogram::builder()
-                .data(df)
-                .x(col)
-                .build()
-        }
+        (Some(gc), Some(title), Some(xl), Some(yl)) => Histogram::builder()
+            .data(df)
+            .x(col)
+            .group(gc)
+            .plot_title(title)
+            .x_title(xl)
+            .y_title(yl)
+            .build(),
+        (Some(gc), Some(title), _, _) => Histogram::builder()
+            .data(df)
+            .x(col)
+            .group(gc)
+            .plot_title(title)
+            .build(),
+        (Some(gc), None, _, _) => Histogram::builder().data(df).x(col).group(gc).build(),
+        (None, Some(title), Some(xl), Some(yl)) => Histogram::builder()
+            .data(df)
+            .x(col)
+            .plot_title(title)
+            .x_title(xl)
+            .y_title(yl)
+            .build(),
+        (None, Some(title), _, _) => Histogram::builder()
+            .data(df)
+            .x(col)
+            .plot_title(title)
+            .build(),
+        (None, None, _, _) => Histogram::builder().data(df).x(col).build(),
     };
 
     let html = plot.to_html();
@@ -262,31 +231,21 @@ pub fn line_interactive(
     let n_points = df.height();
 
     let plot = match (&config.title, &config.x_label, &config.y_label) {
-        (Some(title), Some(xl), Some(yl)) => {
-            LinePlot::builder()
-                .data(df)
-                .x(x_col)
-                .y(y_col)
-                .plot_title(title)
-                .x_title(xl)
-                .y_title(yl)
-                .build()
-        }
-        (Some(title), _, _) => {
-            LinePlot::builder()
-                .data(df)
-                .x(x_col)
-                .y(y_col)
-                .plot_title(title)
-                .build()
-        }
-        (None, _, _) => {
-            LinePlot::builder()
-                .data(df)
-                .x(x_col)
-                .y(y_col)
-                .build()
-        }
+        (Some(title), Some(xl), Some(yl)) => LinePlot::builder()
+            .data(df)
+            .x(x_col)
+            .y(y_col)
+            .plot_title(title)
+            .x_title(xl)
+            .y_title(yl)
+            .build(),
+        (Some(title), _, _) => LinePlot::builder()
+            .data(df)
+            .x(x_col)
+            .y(y_col)
+            .plot_title(title)
+            .build(),
+        (None, _, _) => LinePlot::builder().data(df).x(x_col).y(y_col).build(),
     };
 
     let html = plot.to_html();

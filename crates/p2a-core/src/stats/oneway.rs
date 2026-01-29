@@ -220,7 +220,7 @@ pub fn oneway_test(groups: &[(String, Vec<f64>)], var_equal: bool) -> EconResult
 
 /// Compute p-value from F distribution
 fn f_test_p_value(statistic: f64, df1: f64, df2: f64) -> f64 {
-    use statrs::distribution::{FisherSnedecor, ContinuousCDF};
+    use statrs::distribution::{ContinuousCDF, FisherSnedecor};
 
     if df1 <= 0.0 || df2 <= 0.0 || statistic.is_nan() || statistic.is_infinite() {
         return f64::NAN;
@@ -285,7 +285,7 @@ pub fn run_oneway_test(
 
         let value = values.get(i);
         if let Some(v) = value {
-            group_data.entry(group_str).or_insert_with(Vec::new).push(v);
+            group_data.entry(group_str).or_default().push(v);
         }
     }
 
@@ -335,7 +335,7 @@ mod tests {
         assert_eq!(result.n_groups, 3);
         assert!(result.var_equal);
         assert_eq!(result.df_num, 2.0);
-        assert_eq!(result.df_denom, 12.0);  // n - k = 15 - 3
+        assert_eq!(result.df_denom, 12.0); // n - k = 15 - 3
         assert!(result.p_value < 0.05);
     }
 
@@ -374,14 +374,28 @@ mod tests {
 
         let result = oneway_test(&groups, false).unwrap();
 
-        println!("F = {}, df1 = {}, df2 = {}, p = {}",
-                 result.statistic, result.df_num, result.df_denom, result.p_value);
+        println!(
+            "F = {}, df1 = {}, df2 = {}, p = {}",
+            result.statistic, result.df_num, result.df_denom, result.p_value
+        );
 
         // R gives: F = 46.645, df1 = 2, df2 = 6.8877, p = 9.905e-05
-        assert!((result.statistic - 46.645).abs() < 0.1, "F mismatch: got {}", result.statistic);
+        assert!(
+            (result.statistic - 46.645).abs() < 0.1,
+            "F mismatch: got {}",
+            result.statistic
+        );
         assert_eq!(result.df_num, 2.0);
-        assert!((result.df_denom - 6.8877).abs() < 0.01, "df2 mismatch: got {}", result.df_denom);
-        assert!((result.p_value - 9.905e-05).abs() < 0.00005, "p-value mismatch: got {}", result.p_value);
+        assert!(
+            (result.df_denom - 6.8877).abs() < 0.01,
+            "df2 mismatch: got {}",
+            result.df_denom
+        );
+        assert!(
+            (result.p_value - 9.905e-05).abs() < 0.00005,
+            "p-value mismatch: got {}",
+            result.p_value
+        );
     }
 
     #[test]
@@ -404,14 +418,24 @@ mod tests {
 
         let result = oneway_test(&groups, true).unwrap();
 
-        println!("Standard ANOVA: F = {}, df1 = {}, df2 = {}, p = {}",
-                 result.statistic, result.df_num, result.df_denom, result.p_value);
+        println!(
+            "Standard ANOVA: F = {}, df1 = {}, df2 = {}, p = {}",
+            result.statistic, result.df_num, result.df_denom, result.p_value
+        );
 
         // R gives: F = 53.575, df1 = 2, df2 = 11, p = 2.134e-06
-        assert!((result.statistic - 53.575).abs() < 0.1, "F mismatch: got {}", result.statistic);
+        assert!(
+            (result.statistic - 53.575).abs() < 0.1,
+            "F mismatch: got {}",
+            result.statistic
+        );
         assert_eq!(result.df_num, 2.0);
         assert_eq!(result.df_denom, 11.0);
-        assert!((result.p_value - 2.134e-06).abs() < 0.000001, "p-value mismatch: got {}", result.p_value);
+        assert!(
+            (result.p_value - 2.134e-06).abs() < 0.000001,
+            "p-value mismatch: got {}",
+            result.p_value
+        );
     }
 
     #[test]
@@ -480,8 +504,8 @@ mod tests {
     fn test_oneway_unequal_variances() {
         // Groups with very different variances
         let groups = vec![
-            ("A".to_string(), vec![5.0, 5.1, 5.0, 5.1, 5.0]),  // low variance
-            ("B".to_string(), vec![1.0, 9.0, 2.0, 8.0, 5.0]),   // high variance
+            ("A".to_string(), vec![5.0, 5.1, 5.0, 5.1, 5.0]), // low variance
+            ("B".to_string(), vec![1.0, 9.0, 2.0, 8.0, 5.0]), // high variance
         ];
 
         let result_welch = oneway_test(&groups, false).unwrap();

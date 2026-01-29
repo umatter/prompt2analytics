@@ -4,19 +4,24 @@
 //! and other operations common to panel data estimators.
 
 use ndarray::{Array1, Array2};
+use statrs::distribution::{ContinuousCDF, Normal};
 use std::collections::HashMap;
-use statrs::distribution::{Normal, ContinuousCDF};
 
 use crate::data::Dataset;
-use crate::errors::{EconResult, EconError};
+use crate::errors::{EconError, EconResult};
 
 /// Extract entity IDs from a DataFrame column and return as Vec<usize>.
 pub fn extract_entity_ids(dataset: &Dataset, entity_var: &str) -> EconResult<(Vec<usize>, usize)> {
     let df = dataset.df();
-    let col = df.column(entity_var)
+    let col = df
+        .column(entity_var)
         .map_err(|_| EconError::ColumnNotFound {
             column: entity_var.to_string(),
-            available: df.get_column_names().iter().map(|s| s.to_string()).collect(),
+            available: df
+                .get_column_names()
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
         })?;
 
     // Create a mapping from unique values to integer IDs
@@ -24,7 +29,8 @@ pub fn extract_entity_ids(dataset: &Dataset, entity_var: &str) -> EconResult<(Ve
     let mut next_id = 0usize;
 
     let ids: Vec<usize> = if let Ok(int_col) = col.i64() {
-        int_col.into_iter()
+        int_col
+            .into_iter()
             .map(|v| {
                 let key = v.unwrap_or(0).to_string();
                 *id_map.entry(key).or_insert_with(|| {
@@ -35,7 +41,8 @@ pub fn extract_entity_ids(dataset: &Dataset, entity_var: &str) -> EconResult<(Ve
             })
             .collect()
     } else if let Ok(str_col) = col.str() {
-        str_col.into_iter()
+        str_col
+            .into_iter()
             .map(|v| {
                 let key = v.unwrap_or("").to_string();
                 *id_map.entry(key).or_insert_with(|| {
@@ -47,11 +54,14 @@ pub fn extract_entity_ids(dataset: &Dataset, entity_var: &str) -> EconResult<(Ve
             .collect()
     } else {
         // Try to cast to string
-        let casted = col.cast(&polars::prelude::DataType::String)
-            .map_err(|e| EconError::Internal(format!("Cannot convert entity column to IDs: {}", e)))?;
-        let str_col = casted.str()
-            .map_err(|e| EconError::Internal(format!("Cannot read entity column as string: {}", e)))?;
-        str_col.into_iter()
+        let casted = col.cast(&polars::prelude::DataType::String).map_err(|e| {
+            EconError::Internal(format!("Cannot convert entity column to IDs: {}", e))
+        })?;
+        let str_col = casted.str().map_err(|e| {
+            EconError::Internal(format!("Cannot read entity column as string: {}", e))
+        })?;
+        str_col
+            .into_iter()
             .map(|v| {
                 let key = v.unwrap_or("").to_string();
                 *id_map.entry(key).or_insert_with(|| {
@@ -68,7 +78,11 @@ pub fn extract_entity_ids(dataset: &Dataset, entity_var: &str) -> EconResult<(Ve
 }
 
 /// Compute entity-level means for demeaning.
-pub fn compute_entity_means(data: &Array1<f64>, entity_ids: &[usize], n_groups: usize) -> Array1<f64> {
+pub fn compute_entity_means(
+    data: &Array1<f64>,
+    entity_ids: &[usize],
+    n_groups: usize,
+) -> Array1<f64> {
     let n = data.len();
     let mut group_sums = vec![0.0; n_groups];
     let mut group_counts = vec![0usize; n_groups];
@@ -79,7 +93,8 @@ pub fn compute_entity_means(data: &Array1<f64>, entity_ids: &[usize], n_groups: 
         group_counts[g] += 1;
     }
 
-    let group_means: Vec<f64> = group_sums.iter()
+    let group_means: Vec<f64> = group_sums
+        .iter()
         .zip(group_counts.iter())
         .map(|(&sum, &count)| if count > 0 { sum / count as f64 } else { 0.0 })
         .collect();
@@ -99,7 +114,11 @@ pub fn demean_by_entity(data: &Array1<f64>, entity_ids: &[usize], n_groups: usiz
 }
 
 /// Demean a matrix by entity (for Fixed Effects).
-pub fn demean_matrix_by_entity(x: &Array2<f64>, entity_ids: &[usize], n_groups: usize) -> Array2<f64> {
+pub fn demean_matrix_by_entity(
+    x: &Array2<f64>,
+    entity_ids: &[usize],
+    n_groups: usize,
+) -> Array2<f64> {
     let (n, k) = x.dim();
     let mut x_demeaned = Array2::zeros((n, k));
 
@@ -115,32 +134,31 @@ pub fn demean_matrix_by_entity(x: &Array2<f64>, entity_ids: &[usize], n_groups: 
 /// Extract time period IDs from a DataFrame column.
 pub fn extract_time_ids(dataset: &Dataset, time_var: &str) -> EconResult<(Vec<usize>, Vec<i64>)> {
     let df = dataset.df();
-    let col = df.column(time_var)
-        .map_err(|_| EconError::ColumnNotFound {
-            column: time_var.to_string(),
-            available: df.get_column_names().iter().map(|s| s.to_string()).collect(),
-        })?;
+    let col = df.column(time_var).map_err(|_| EconError::ColumnNotFound {
+        column: time_var.to_string(),
+        available: df
+            .get_column_names()
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+    })?;
 
     // Extract unique time values and map to indices
     let mut time_values: Vec<i64> = Vec::new();
     let mut time_map: HashMap<i64, usize> = HashMap::new();
 
     let times: Vec<i64> = if let Ok(int_col) = col.i64() {
-        int_col.into_iter()
-            .map(|v| v.unwrap_or(0))
-            .collect()
+        int_col.into_iter().map(|v| v.unwrap_or(0)).collect()
     } else if let Ok(f_col) = col.f64() {
-        f_col.into_iter()
-            .map(|v| v.unwrap_or(0.0) as i64)
-            .collect()
+        f_col.into_iter().map(|v| v.unwrap_or(0.0) as i64).collect()
     } else {
         return Err(EconError::InvalidSpecification {
-            message: "Time variable must be numeric".to_string()
+            message: "Time variable must be numeric".to_string(),
         });
     };
 
     // Get unique sorted times
-    let mut unique_times: Vec<i64> = times.iter().copied().collect();
+    let mut unique_times: Vec<i64> = times.to_vec();
     unique_times.sort_unstable();
     unique_times.dedup();
 
@@ -149,9 +167,7 @@ pub fn extract_time_ids(dataset: &Dataset, time_var: &str) -> EconResult<(Vec<us
         time_values.push(t);
     }
 
-    let time_ids: Vec<usize> = times.iter()
-        .map(|t| *time_map.get(t).unwrap())
-        .collect();
+    let time_ids: Vec<usize> = times.iter().map(|t| *time_map.get(t).unwrap()).collect();
 
     Ok((time_ids, time_values))
 }
@@ -161,7 +177,7 @@ pub fn extract_time_ids(dataset: &Dataset, time_var: &str) -> EconResult<(Vec<us
 /// For period t, valid instruments are y_{i,t-2}, y_{i,t-3}, ..., y_{i,1}
 /// The instrument matrix is block-diagonal across time periods.
 pub fn build_gmm_instrument_matrix(
-    y_lagged: &[Vec<f64>],  // y values by entity, each vec is time series
+    y_lagged: &[Vec<f64>], // y values by entity, each vec is time series
     n_groups: usize,
     n_periods: usize,
     min_lag: usize,
@@ -246,7 +262,8 @@ pub fn compute_ab_ar_test(
     let mut var_e_lag = 0.0;
 
     for i in 0..n_groups {
-        let obs_i: Vec<(usize, &(usize, usize))> = valid_obs.iter()
+        let obs_i: Vec<(usize, &(usize, usize))> = valid_obs
+            .iter()
             .enumerate()
             .filter(|(_, (e, _))| *e == i)
             .collect();
@@ -275,9 +292,11 @@ pub fn compute_ab_ar_test(
         0.0
     };
 
-    let p_value = 2.0 * (1.0 - Normal::new(0.0, 1.0)
-        .map(|n| n.cdf(z_stat.abs()))
-        .unwrap_or(0.5));
+    let p_value = 2.0
+        * (1.0
+            - Normal::new(0.0, 1.0)
+                .map(|n| n.cdf(z_stat.abs()))
+                .unwrap_or(0.5));
 
     (z_stat, p_value)
 }

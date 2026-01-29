@@ -126,7 +126,11 @@ impl fmt::Display for LoessResult {
         writeln!(f, "No. Observations: {}", self.n_obs)?;
         writeln!(f, "Span: {:.4}", self.span)?;
         writeln!(f, "Degree: {}", self.degree)?;
-        writeln!(f, "Family: {}", if self.robust { "symmetric" } else { "gaussian" })?;
+        writeln!(
+            f,
+            "Family: {}",
+            if self.robust { "symmetric" } else { "gaussian" }
+        )?;
         if self.robust {
             writeln!(f, "Robust Iterations: {}", self.robust_iterations)?;
         }
@@ -248,7 +252,8 @@ fn compute_neighborhood_weights(
     };
 
     // Compute distances from x0
-    let mut distances: Vec<(usize, f64)> = x.iter()
+    let mut distances: Vec<(usize, f64)> = x
+        .iter()
         .enumerate()
         .map(|(i, &xi)| (i, (xi - x0).abs()))
         .collect();
@@ -299,7 +304,6 @@ fn loess_fit_at_point(
     degree: usize,
     robust_weights: Option<&[f64]>,
 ) -> EconResult<f64> {
-
     // Get neighborhood weights
     let (indices, weights, _max_dist) = compute_neighborhood_weights(x, x0, span, robust_weights);
 
@@ -345,7 +349,8 @@ fn compute_robust_weights(residuals: &[f64]) -> Vec<f64> {
     }
 
     // Compute bisquare weights
-    residuals.iter()
+    residuals
+        .iter()
         .map(|&r| bisquare_weight(r / scale))
         .collect()
 }
@@ -466,7 +471,11 @@ pub fn loess(x: &[f64], y: &[f64], config: LoessConfig) -> EconResult<LoessResul
     }
 
     // Compute residuals
-    let mut residuals: Vec<f64> = y.iter().zip(fitted.iter()).map(|(yi, fi)| yi - fi).collect();
+    let mut residuals: Vec<f64> = y
+        .iter()
+        .zip(fitted.iter())
+        .map(|(yi, fi)| yi - fi)
+        .collect();
 
     // Robust fitting iterations
     let mut robust_weights: Option<Vec<f64>> = None;
@@ -481,20 +490,29 @@ pub fn loess(x: &[f64], y: &[f64], config: LoessConfig) -> EconResult<LoessResul
             let mut new_fitted = Vec::with_capacity(n);
             for i in 0..n {
                 let f = loess_fit_at_point(
-                    x, y, x[i], config.span, config.degree,
+                    x,
+                    y,
+                    x[i],
+                    config.span,
+                    config.degree,
                     Some(&new_robust_weights),
                 )?;
                 new_fitted.push(f);
             }
 
             // Check convergence
-            let max_change: f64 = fitted.iter()
+            let max_change: f64 = fitted
+                .iter()
                 .zip(new_fitted.iter())
                 .map(|(f1, f2)| (f1 - f2).abs())
                 .fold(0.0, f64::max);
 
             fitted = new_fitted;
-            residuals = y.iter().zip(fitted.iter()).map(|(yi, fi)| yi - fi).collect();
+            residuals = y
+                .iter()
+                .zip(fitted.iter())
+                .map(|(yi, fi)| yi - fi)
+                .collect();
             robust_weights = Some(new_robust_weights);
             iterations = iter + 1;
 
@@ -589,29 +607,37 @@ pub fn run_loess(
     let df = dataset.df();
 
     // Extract columns
-    let x_series = df.column(x_col).map_err(|_| {
-        EconError::ColumnNotFound {
-            column: x_col.to_string(),
-            available: df.get_column_names().iter().map(|s| s.to_string()).collect(),
-        }
+    let x_series = df.column(x_col).map_err(|_| EconError::ColumnNotFound {
+        column: x_col.to_string(),
+        available: df
+            .get_column_names()
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
     })?;
-    let y_series = df.column(y_col).map_err(|_| {
-        EconError::ColumnNotFound {
-            column: y_col.to_string(),
-            available: df.get_column_names().iter().map(|s| s.to_string()).collect(),
-        }
+    let y_series = df.column(y_col).map_err(|_| EconError::ColumnNotFound {
+        column: y_col.to_string(),
+        available: df
+            .get_column_names()
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
     })?;
 
     // Convert to f64 vectors
     let x: Vec<f64> = x_series
         .f64()
-        .map_err(|_| EconError::NonNumericColumn { column: x_col.to_string() })?
+        .map_err(|_| EconError::NonNumericColumn {
+            column: x_col.to_string(),
+        })?
         .into_no_null_iter()
         .collect();
 
     let y: Vec<f64> = y_series
         .f64()
-        .map_err(|_| EconError::NonNumericColumn { column: y_col.to_string() })?
+        .map_err(|_| EconError::NonNumericColumn {
+            column: y_col.to_string(),
+        })?
         .into_no_null_iter()
         .collect();
 
@@ -665,7 +691,10 @@ mod tests {
     fn test_loess_linear_data() {
         // Linear data should be fit well
         let x: Vec<f64> = (0..20).map(|i| i as f64).collect();
-        let y: Vec<f64> = x.iter().map(|&xi| 2.0 * xi + 1.0 + 0.1 * (xi * 10.0).sin()).collect();
+        let y: Vec<f64> = x
+            .iter()
+            .map(|&xi| 2.0 * xi + 1.0 + 0.1 * (xi * 10.0).sin())
+            .collect();
 
         let result = loess(&x, &y, LoessConfig::default()).unwrap();
 
@@ -682,10 +711,26 @@ mod tests {
         let y: Vec<f64> = x.iter().map(|&xi| xi.sin() + 0.1 * xi).collect();
 
         // Small span = less smooth
-        let result_small = loess(&x, &y, LoessConfig { span: 0.3, ..Default::default() }).unwrap();
+        let result_small = loess(
+            &x,
+            &y,
+            LoessConfig {
+                span: 0.3,
+                ..Default::default()
+            },
+        )
+        .unwrap();
 
         // Large span = more smooth
-        let result_large = loess(&x, &y, LoessConfig { span: 0.9, ..Default::default() }).unwrap();
+        let result_large = loess(
+            &x,
+            &y,
+            LoessConfig {
+                span: 0.9,
+                ..Default::default()
+            },
+        )
+        .unwrap();
 
         // Both should complete without error
         assert!(result_small.enp > 0.0);
@@ -700,8 +745,24 @@ mod tests {
         let x: Vec<f64> = (0..30).map(|i| i as f64).collect();
         let y: Vec<f64> = x.iter().map(|&xi| xi * xi / 100.0 + 0.5 * xi).collect();
 
-        let result_linear = loess(&x, &y, LoessConfig { degree: 1, ..Default::default() }).unwrap();
-        let result_quad = loess(&x, &y, LoessConfig { degree: 2, ..Default::default() }).unwrap();
+        let result_linear = loess(
+            &x,
+            &y,
+            LoessConfig {
+                degree: 1,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let result_quad = loess(
+            &x,
+            &y,
+            LoessConfig {
+                degree: 2,
+                ..Default::default()
+            },
+        )
+        .unwrap();
 
         // Both should work
         assert!(result_linear.r_squared > 0.9);
@@ -717,8 +778,24 @@ mod tests {
         y[10] = 100.0; // Far outlier
         y[20] = -50.0; // Another outlier
 
-        let result_normal = loess(&x, &y, LoessConfig { robust: false, ..Default::default() }).unwrap();
-        let result_robust = loess(&x, &y, LoessConfig { robust: true, ..Default::default() }).unwrap();
+        let _result_normal = loess(
+            &x,
+            &y,
+            LoessConfig {
+                robust: false,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let result_robust = loess(
+            &x,
+            &y,
+            LoessConfig {
+                robust: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
 
         // Robust should have lower RSS (outliers downweighted)
         // In this case, robust should better fit the underlying linear trend
@@ -742,8 +819,13 @@ mod tests {
         // Predictions should be close to 2*x + 1 for linear data
         for (i, &xi) in new_x.iter().enumerate() {
             let expected = 2.0 * xi + 1.0;
-            assert!((predictions[i] - expected).abs() < 1.0,
-                    "Prediction at {} = {}, expected ~{}", xi, predictions[i], expected);
+            assert!(
+                (predictions[i] - expected).abs() < 1.0,
+                "Prediction at {} = {}, expected ~{}",
+                xi,
+                predictions[i],
+                expected
+            );
         }
     }
 
@@ -762,11 +844,41 @@ mod tests {
         // Invalid span
         let x = vec![1.0, 2.0, 3.0, 4.0, 5.0];
         let y = vec![1.0, 2.0, 3.0, 4.0, 5.0];
-        assert!(loess(&x, &y, LoessConfig { span: 0.0, ..Default::default() }).is_err());
-        assert!(loess(&x, &y, LoessConfig { span: -0.5, ..Default::default() }).is_err());
+        assert!(
+            loess(
+                &x,
+                &y,
+                LoessConfig {
+                    span: 0.0,
+                    ..Default::default()
+                }
+            )
+            .is_err()
+        );
+        assert!(
+            loess(
+                &x,
+                &y,
+                LoessConfig {
+                    span: -0.5,
+                    ..Default::default()
+                }
+            )
+            .is_err()
+        );
 
         // Invalid degree
-        assert!(loess(&x, &y, LoessConfig { degree: 3, ..Default::default() }).is_err());
+        assert!(
+            loess(
+                &x,
+                &y,
+                LoessConfig {
+                    degree: 3,
+                    ..Default::default()
+                }
+            )
+            .is_err()
+        );
     }
 
     /// Validation test against R's loess function.
@@ -783,12 +895,17 @@ mod tests {
         let x = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
         let y = vec![2.5, 3.8, 6.1, 7.9, 10.2, 12.0, 14.3, 16.1, 18.0, 20.2];
 
-        let result = loess(&x, &y, LoessConfig {
-            span: 0.75,
-            degree: 2,
-            robust: false,
-            ..Default::default()
-        }).unwrap();
+        let result = loess(
+            &x,
+            &y,
+            LoessConfig {
+                span: 0.75,
+                degree: 2,
+                robust: false,
+                ..Default::default()
+            },
+        )
+        .unwrap();
 
         // The data is nearly linear (y ≈ 2x), so fitted values should be close
         // R produces very similar results to raw y for this smooth data
@@ -797,13 +914,24 @@ mod tests {
         assert!(result.rss < 1.0, "RSS too large: {}", result.rss);
 
         // Check R-squared is high
-        assert!(result.r_squared > 0.99, "R-squared too low: {}", result.r_squared);
+        assert!(
+            result.r_squared > 0.99,
+            "R-squared too low: {}",
+            result.r_squared
+        );
 
         // Check fitted values are reasonable (within 0.5 of y for this smooth data)
         for i in 0..10 {
             let diff = (result.fitted[i] - y[i]).abs();
-            assert!(diff < 0.5, "Fitted[{}] = {}, y[{}] = {}, diff = {}",
-                    i, result.fitted[i], i, y[i], diff);
+            assert!(
+                diff < 0.5,
+                "Fitted[{}] = {}, y[{}] = {}, diff = {}",
+                i,
+                result.fitted[i],
+                i,
+                y[i],
+                diff
+            );
         }
     }
 }

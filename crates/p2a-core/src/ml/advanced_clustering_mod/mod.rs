@@ -24,70 +24,120 @@ mod advanced;
 
 // Re-export all public items from advanced module
 pub use advanced::{
+    AffinityPropagationResult,
+
+    AffinityType,
+
+    AgnesLinkage,
+
+    AgnesResult,
+    ClaraResult,
+
+    ClusterStatsResult,
+
     // Algorithm selection
     ClusteringAlgorithm,
 
-    // K-Medoids (PAM)
-    kmedoids, run_kmedoids, KMedoidsResult,
+    CovarianceType,
 
-    // Spectral Clustering
-    spectral_clustering, run_spectral_clustering, SpectralClusteringResult, AffinityType,
+    DianaResult,
+
+    DynamicCutMethod,
+
+    DynamicTreeCutResult,
+    FannyResult,
+
+    FastClusterResult,
+    FastLinkage,
+
+    FcmDistance,
+
+    FlexMixResult,
+
+    FuzzyCMeansResult,
+    GaussianMixtureResult,
+    HdbscanResult,
+
+    KMedoidsResult,
+
+    KPrototypesResult,
+    MiniBatchKMeansResult,
+
+    MultivariateNormalMixEMResult,
+
+    NormalMixEMResult,
+    OpticsResult,
+
+    PvClustResult,
+
+    SKMeansResult,
+
+    SpectralClusteringResult,
+    TrimmedKMeansResult,
 
     // Affinity Propagation
-    affinity_propagation, run_affinity_propagation, AffinityPropagationResult,
-
-    // OPTICS
-    optics, run_optics, OpticsResult,
-
-    // HDBSCAN
-    hdbscan, run_hdbscan, HdbscanResult,
-
-    // Gaussian Mixture Models
-    gaussian_mixture, run_gaussian_mixture, GaussianMixtureResult, CovarianceType,
-
-    // Fuzzy C-Means
-    fuzzy_cmeans, run_fuzzy_cmeans, FuzzyCMeansResult, FcmDistance,
-
-    // Mini-Batch K-Means
-    mini_batch_kmeans, run_mini_batch_kmeans, MiniBatchKMeansResult,
-
-    // Trimmed K-Means
-    trimmed_kmeans, run_trimmed_kmeans, TrimmedKMeansResult,
-
-    // DIANA (Divisive Analysis)
-    diana, run_diana, DianaResult,
-
+    affinity_propagation,
     // AGNES (Agglomerative Nesting)
-    agnes, run_agnes, AgnesResult, AgnesLinkage,
-
-    // FlexMix
-    flexmix, run_flexmix, FlexMixResult,
-
-    // pvclust (Bootstrap Cluster Assessment)
-    pvclust, run_pvclust, PvClustResult,
-
+    agnes,
     // CLARA (Clustering Large Applications)
-    clara, run_clara, ClaraResult,
-
+    clara,
     // Cluster Statistics
-    cluster_stats, run_cluster_stats, ClusterStatsResult,
-
-    // FANNY (Fuzzy Analysis)
-    fanny, run_fanny, FannyResult,
-
-    // Spherical K-Means
-    skmeans, run_skmeans, SKMeansResult,
-
-    // Fast Hierarchical Clustering
-    fastcluster, run_fastcluster, FastClusterResult, FastLinkage,
-
+    cluster_stats,
+    // DIANA (Divisive Analysis)
+    diana,
     // Dynamic Tree Cut
-    dynamic_tree_cut, run_dynamic_tree_cut, DynamicTreeCutResult, DynamicCutMethod,
-
-    // Normal Mixture EM
-    normal_mix_em, run_normal_mix_em, NormalMixEMResult,
-    mvnorm_mix_em, run_mvnorm_mix_em, MultivariateNormalMixEMResult,
-
+    dynamic_tree_cut,
+    // FANNY (Fuzzy Analysis)
+    fanny,
+    // Fast Hierarchical Clustering
+    fastcluster,
+    // FlexMix
+    flexmix,
+    // Fuzzy C-Means
+    fuzzy_cmeans,
+    // Gaussian Mixture Models
+    gaussian_mixture,
+    // HDBSCAN
+    hdbscan,
+    // K-Medoids (PAM)
+    kmedoids,
     // K-Prototypes
-    kprototypes, run_kprototypes, KPrototypesResult,
+    kprototypes,
+    // Mini-Batch K-Means
+    mini_batch_kmeans,
+    mvnorm_mix_em,
+    // Normal Mixture EM
+    normal_mix_em,
+    // OPTICS
+    optics,
+    // pvclust (Bootstrap Cluster Assessment)
+    pvclust,
+    run_affinity_propagation,
+    run_agnes,
+    run_clara,
+    run_cluster_stats,
+    run_diana,
+    run_dynamic_tree_cut,
+    run_fanny,
+    run_fastcluster,
+    run_flexmix,
+    run_fuzzy_cmeans,
+    run_gaussian_mixture,
+    run_hdbscan,
+    run_kmedoids,
+    run_kprototypes,
+    run_mini_batch_kmeans,
+    run_mvnorm_mix_em,
+    run_normal_mix_em,
+    run_optics,
+    run_pvclust,
+    run_skmeans,
+    run_spectral_clustering,
+    run_trimmed_kmeans,
+    // Spherical K-Means
+    skmeans,
+    // Spectral Clustering
+    spectral_clustering,
+    // Trimmed K-Means
+    trimmed_kmeans,
 };

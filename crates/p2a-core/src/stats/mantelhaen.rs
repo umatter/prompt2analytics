@@ -95,11 +95,18 @@ impl std::fmt::Display for MantelHaenszelResult {
         writeln!(f, "{}", self.test_name)?;
         writeln!(f, "{}", "=".repeat(self.test_name.len()))?;
         writeln!(f)?;
-        writeln!(f, "CMH χ² = {:.4}, df = {}, p-value = {:.6}",
-            self.statistic, self.df, self.p_value)?;
+        writeln!(
+            f,
+            "CMH χ² = {:.4}, df = {}, p-value = {:.6}",
+            self.statistic, self.df, self.p_value
+        )?;
         writeln!(f)?;
         writeln!(f, "Common odds ratio: {:.4}", self.common_odds_ratio)?;
-        writeln!(f, "95% CI: ({:.4}, {:.4})", self.odds_ratio_ci.0, self.odds_ratio_ci.1)?;
+        writeln!(
+            f,
+            "95% CI: ({:.4}, {:.4})",
+            self.odds_ratio_ci.0, self.odds_ratio_ci.1
+        )?;
         writeln!(f)?;
         writeln!(f, "Strata: {}, Total N: {}", self.n_strata, self.total_n)?;
         if self.continuity_correction {
@@ -238,8 +245,8 @@ pub fn mantelhaen_test(
     // Compute DELTA = Σ(a_k - E[a_k])
     let mut delta = 0.0;
     let mut variance = 0.0;
-    let mut or_numerator = 0.0;  // Σ(a*d/n)
-    let mut or_denominator = 0.0;  // Σ(b*c/n)
+    let mut or_numerator = 0.0; // Σ(a*d/n)
+    let mut or_denominator = 0.0; // Σ(b*c/n)
     let mut total_n = 0.0;
 
     let mut stratum_stats = Vec::with_capacity(k);
@@ -247,7 +254,7 @@ pub fn mantelhaen_test(
     for (i, table) in tables.iter().enumerate() {
         let n = table.n();
         if n < 1.0 {
-            continue;  // Skip empty strata
+            continue; // Skip empty strata
         }
 
         let exp_a = table.expected_a();
@@ -263,7 +270,7 @@ pub fn mantelhaen_test(
 
         let stratum_name = stratum_names
             .and_then(|names| names.get(i))
-            .map(|s| s.clone())
+            .cloned()
             .unwrap_or_else(|| format!("Stratum{}", i + 1));
 
         stratum_stats.push(StratumStats {
@@ -277,7 +284,11 @@ pub fn mantelhaen_test(
     }
 
     // Apply continuity correction
-    let yates = if correct && delta.abs() >= 0.5 { 0.5 } else { 0.0 };
+    let yates = if correct && delta.abs() >= 0.5 {
+        0.5
+    } else {
+        0.0
+    };
 
     // CMH statistic
     let statistic = if variance > 0.0 {
@@ -324,7 +335,8 @@ pub fn mantelhaen_test(
         "Cochran-Mantel-Haenszel chi-squared test (with continuity correction)"
     } else {
         "Cochran-Mantel-Haenszel chi-squared test"
-    }.to_string();
+    }
+    .to_string();
 
     Ok(MantelHaenszelResult {
         test_name,
@@ -420,25 +432,33 @@ pub fn run_mantelhaen_test(
     let df = dataset.df();
 
     // Extract columns
-    let row_col = df
-        .column(row_var)
-        .map_err(|_| EconError::ColumnNotFound {
-            column: row_var.to_string(),
-            available: df.get_column_names().iter().map(|s| s.to_string()).collect(),
-        })?;
+    let row_col = df.column(row_var).map_err(|_| EconError::ColumnNotFound {
+        column: row_var.to_string(),
+        available: df
+            .get_column_names()
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+    })?;
 
-    let col_col = df
-        .column(col_var)
-        .map_err(|_| EconError::ColumnNotFound {
-            column: col_var.to_string(),
-            available: df.get_column_names().iter().map(|s| s.to_string()).collect(),
-        })?;
+    let col_col = df.column(col_var).map_err(|_| EconError::ColumnNotFound {
+        column: col_var.to_string(),
+        available: df
+            .get_column_names()
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+    })?;
 
     let stratum_col = df
         .column(stratum_var)
         .map_err(|_| EconError::ColumnNotFound {
             column: stratum_var.to_string(),
-            available: df.get_column_names().iter().map(|s| s.to_string()).collect(),
+            available: df
+                .get_column_names()
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
         })?;
 
     // Build stratum -> (row_level, col_level) -> count mapping
@@ -450,24 +470,39 @@ pub fn run_mantelhaen_test(
 
     let n = df.height();
     for i in 0..n {
-        let stratum = format!("{}", stratum_col.get(i).map_err(|e| EconError::InvalidSpecification {
-            message: format!("Error accessing stratum at row {}: {}", i, e),
-        })?);
+        let stratum = format!(
+            "{}",
+            stratum_col
+                .get(i)
+                .map_err(|e| EconError::InvalidSpecification {
+                    message: format!("Error accessing stratum at row {}: {}", i, e),
+                })?
+        );
 
-        let row = format!("{}", row_col.get(i).map_err(|e| EconError::InvalidSpecification {
-            message: format!("Error accessing row variable at row {}: {}", i, e),
-        })?);
+        let row = format!(
+            "{}",
+            row_col
+                .get(i)
+                .map_err(|e| EconError::InvalidSpecification {
+                    message: format!("Error accessing row variable at row {}: {}", i, e),
+                })?
+        );
 
-        let col = format!("{}", col_col.get(i).map_err(|e| EconError::InvalidSpecification {
-            message: format!("Error accessing column variable at row {}: {}", i, e),
-        })?);
+        let col = format!(
+            "{}",
+            col_col
+                .get(i)
+                .map_err(|e| EconError::InvalidSpecification {
+                    message: format!("Error accessing column variable at row {}: {}", i, e),
+                })?
+        );
 
         row_levels.insert(row.clone());
         col_levels.insert(col.clone());
 
         *strata
             .entry(stratum)
-            .or_insert_with(BTreeMap::new)
+            .or_default()
             .entry((row, col))
             .or_insert(0.0) += 1.0;
     }
@@ -480,7 +515,8 @@ pub fn run_mantelhaen_test(
         return Err(EconError::InvalidSpecification {
             message: format!(
                 "Row variable '{}' must have exactly 2 levels, found {}",
-                row_var, row_levels.len()
+                row_var,
+                row_levels.len()
             ),
         });
     }
@@ -489,7 +525,8 @@ pub fn run_mantelhaen_test(
         return Err(EconError::InvalidSpecification {
             message: format!(
                 "Column variable '{}' must have exactly 2 levels, found {}",
-                col_var, col_levels.len()
+                col_var,
+                col_levels.len()
             ),
         });
     }
@@ -499,10 +536,18 @@ pub fn run_mantelhaen_test(
     let mut stratum_names = Vec::with_capacity(strata.len());
 
     for (stratum_name, counts) in strata {
-        let a = *counts.get(&(row_levels[0].clone(), col_levels[0].clone())).unwrap_or(&0.0);
-        let b = *counts.get(&(row_levels[0].clone(), col_levels[1].clone())).unwrap_or(&0.0);
-        let c = *counts.get(&(row_levels[1].clone(), col_levels[0].clone())).unwrap_or(&0.0);
-        let d = *counts.get(&(row_levels[1].clone(), col_levels[1].clone())).unwrap_or(&0.0);
+        let a = *counts
+            .get(&(row_levels[0].clone(), col_levels[0].clone()))
+            .unwrap_or(&0.0);
+        let b = *counts
+            .get(&(row_levels[0].clone(), col_levels[1].clone()))
+            .unwrap_or(&0.0);
+        let c = *counts
+            .get(&(row_levels[1].clone(), col_levels[0].clone()))
+            .unwrap_or(&0.0);
+        let d = *counts
+            .get(&(row_levels[1].clone(), col_levels[1].clone()))
+            .unwrap_or(&0.0);
 
         tables.push(Table2x2::new(a, b, c, d));
         stratum_names.push(stratum_name);
@@ -521,16 +566,23 @@ mod tests {
         // UCBAdmissions data example from R
         // Simplified to 2 strata
         let tables = vec![
-            Table2x2::new(512.0, 313.0, 89.0, 19.0),  // Dept A
-            Table2x2::new(353.0, 207.0, 17.0, 8.0),   // Dept B
+            Table2x2::new(512.0, 313.0, 89.0, 19.0), // Dept A
+            Table2x2::new(353.0, 207.0, 17.0, 8.0),  // Dept B
         ];
         let names = vec!["A".to_string(), "B".to_string()];
 
-        let result = mantelhaen_test(&tables, Some(&names), true, CmhAlternative::TwoSided).unwrap();
+        let result =
+            mantelhaen_test(&tables, Some(&names), true, CmhAlternative::TwoSided).unwrap();
 
-        println!("CMH = {}, df = {}, p = {}", result.statistic, result.df, result.p_value);
+        println!(
+            "CMH = {}, df = {}, p = {}",
+            result.statistic, result.df, result.p_value
+        );
         println!("Common OR = {:.4}", result.common_odds_ratio);
-        println!("95% CI: ({:.4}, {:.4})", result.odds_ratio_ci.0, result.odds_ratio_ci.1);
+        println!(
+            "95% CI: ({:.4}, {:.4})",
+            result.odds_ratio_ci.0, result.odds_ratio_ci.1
+        );
 
         assert_eq!(result.n_strata, 2);
         assert_eq!(result.df, 1);
@@ -556,7 +608,7 @@ mod tests {
         assert!((table.variance_a() - expected_var).abs() < 1e-6);
 
         // OR = (a*d)/(b*c) = (10*40)/(20*30) = 400/600 = 2/3
-        assert!((table.odds_ratio() - 2.0/3.0).abs() < 1e-10);
+        assert!((table.odds_ratio() - 2.0 / 3.0).abs() < 1e-10);
     }
 
     #[test]
@@ -569,7 +621,10 @@ mod tests {
         assert_eq!(result.n_strata, 1);
         assert!(result.statistic > 0.0);
         // With clear association, p should be small
-        println!("Single stratum: CMH = {}, p = {}", result.statistic, result.p_value);
+        println!(
+            "Single stratum: CMH = {}, p = {}",
+            result.statistic, result.p_value
+        );
     }
 
     // ========================================================================
@@ -602,29 +657,51 @@ mod tests {
         // common odds ratio estimate: 7
 
         let tables = vec![
-            Table2x2::new(0.0, 6.0, 0.0, 5.0),   // 1/8: a=0, b=6, c=0, d=5
-            Table2x2::new(3.0, 3.0, 0.0, 6.0),   // 1/4: a=3, b=3, c=0, d=6
-            Table2x2::new(6.0, 0.0, 2.0, 4.0),   // 1/2: a=6, b=0, c=2, d=4
-            Table2x2::new(5.0, 1.0, 6.0, 0.0),   // 1:   a=5, b=1, c=6, d=0
-            Table2x2::new(2.0, 0.0, 5.0, 0.0),   // 4:   a=2, b=0, c=5, d=0
+            Table2x2::new(0.0, 6.0, 0.0, 5.0), // 1/8: a=0, b=6, c=0, d=5
+            Table2x2::new(3.0, 3.0, 0.0, 6.0), // 1/4: a=3, b=3, c=0, d=6
+            Table2x2::new(6.0, 0.0, 2.0, 4.0), // 1/2: a=6, b=0, c=2, d=4
+            Table2x2::new(5.0, 1.0, 6.0, 0.0), // 1:   a=5, b=1, c=6, d=0
+            Table2x2::new(2.0, 0.0, 5.0, 0.0), // 4:   a=2, b=0, c=5, d=0
         ];
-        let names = vec!["1/8".to_string(), "1/4".to_string(), "1/2".to_string(), "1".to_string(), "4".to_string()];
+        let names = vec![
+            "1/8".to_string(),
+            "1/4".to_string(),
+            "1/2".to_string(),
+            "1".to_string(),
+            "4".to_string(),
+        ];
 
-        let result = mantelhaen_test(&tables, Some(&names), true, CmhAlternative::TwoSided).unwrap();
+        let result =
+            mantelhaen_test(&tables, Some(&names), true, CmhAlternative::TwoSided).unwrap();
 
         println!("R validation:");
-        println!("CMH = {:.4}, df = {}, p = {:.5}", result.statistic, result.df, result.p_value);
+        println!(
+            "CMH = {:.4}, df = {}, p = {:.5}",
+            result.statistic, result.df, result.p_value
+        );
         println!("Common OR = {:.4}", result.common_odds_ratio);
-        println!("95% CI: ({:.4}, {:.4})", result.odds_ratio_ci.0, result.odds_ratio_ci.1);
+        println!(
+            "95% CI: ({:.4}, {:.4})",
+            result.odds_ratio_ci.0, result.odds_ratio_ci.1
+        );
 
         // R gives: chi-squared = 3.9286, p = 0.04747, OR = 7, 95% CI: (1.027, 47.73)
-        assert!((result.statistic - 3.9286).abs() < 0.1,
-            "CMH statistic mismatch: got {:.4}, expected 3.9286", result.statistic);
+        assert!(
+            (result.statistic - 3.9286).abs() < 0.1,
+            "CMH statistic mismatch: got {:.4}, expected 3.9286",
+            result.statistic
+        );
         assert_eq!(result.df, 1);
-        assert!((result.p_value - 0.04747).abs() < 0.01,
-            "p-value mismatch: got {:.5}, expected 0.04747", result.p_value);
-        assert!((result.common_odds_ratio - 7.0).abs() < 0.5,
-            "OR mismatch: got {:.4}, expected 7.0", result.common_odds_ratio);
+        assert!(
+            (result.p_value - 0.04747).abs() < 0.01,
+            "p-value mismatch: got {:.5}, expected 0.04747",
+            result.p_value
+        );
+        assert!(
+            (result.common_odds_ratio - 7.0).abs() < 0.5,
+            "OR mismatch: got {:.4}, expected 7.0",
+            result.common_odds_ratio
+        );
     }
 
     #[test]
@@ -639,11 +716,22 @@ mod tests {
         .unwrap();
 
         let dataset = Dataset::new(df);
-        let result = run_mantelhaen_test(&dataset, "exposure", "outcome", "stratum", true, CmhAlternative::TwoSided).unwrap();
+        let result = run_mantelhaen_test(
+            &dataset,
+            "exposure",
+            "outcome",
+            "stratum",
+            true,
+            CmhAlternative::TwoSided,
+        )
+        .unwrap();
 
         assert_eq!(result.n_strata, 2);
         assert_eq!(result.df, 1);
-        println!("Dataset test: CMH = {}, p = {}", result.statistic, result.p_value);
+        println!(
+            "Dataset test: CMH = {}, p = {}",
+            result.statistic, result.p_value
+        );
     }
 
     #[test]
@@ -662,8 +750,10 @@ mod tests {
         assert!((two_sided.statistic - less.statistic).abs() < 1e-10);
 
         // One-sided p-values are half of two-sided (for the correct direction)
-        println!("Two-sided p = {:.4}, Greater p = {:.4}, Less p = {:.4}",
-            two_sided.p_value, greater.p_value, less.p_value);
+        println!(
+            "Two-sided p = {:.4}, Greater p = {:.4}, Less p = {:.4}",
+            two_sided.p_value, greater.p_value, less.p_value
+        );
     }
 
     #[test]

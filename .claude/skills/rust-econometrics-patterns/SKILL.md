@@ -51,6 +51,7 @@ New methods go in the appropriate module under `crates/p2a-core/src/`:
 | `econometrics/iv.rs` | 2SLS with first-stage diagnostics |
 | `econometrics/did.rs` | Difference-in-Differences |
 | `econometrics/discrete.rs` | Logit, Probit (Newton-Raphson MLE) |
+| `econometrics/rd.rs` | Regression Discontinuity (Sharp/Fuzzy RD) |
 | `econometrics/timeseries.rs` | VAR, VARMA, VECM, IRF |
 
 ## API Pattern (Column-Based)

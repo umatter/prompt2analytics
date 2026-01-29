@@ -40,7 +40,7 @@ use std::collections::HashMap;
 
 use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
-use crate::traits::{chi_squared_p_value, SignificanceLevel};
+use crate::traits::{SignificanceLevel, chi_squared_p_value};
 
 /// Result of Bartlett's test for homogeneity of variances.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -81,26 +81,45 @@ impl std::fmt::Display for BartlettResult {
         writeln!(f, "Bartlett Test for Homogeneity of Variances")?;
         writeln!(f, "===========================================")?;
         writeln!(f)?;
-        writeln!(f, "K-squared = {:.4}, df = {}, p-value = {:.4} {}",
-            self.statistic, self.df, self.p_value, self.significance.stars())?;
+        writeln!(
+            f,
+            "K-squared = {:.4}, df = {}, p-value = {:.4} {}",
+            self.statistic,
+            self.df,
+            self.p_value,
+            self.significance.stars()
+        )?;
         writeln!(f)?;
         writeln!(f, "Groups: {}  |  N = {}", self.n_groups, self.n_obs)?;
         writeln!(f, "Pooled variance: {:.4}", self.pooled_variance)?;
         writeln!(f)?;
         writeln!(f, "Group Statistics:")?;
-        writeln!(f, "{:>15} {:>8} {:>12} {:>12}", "Group", "n", "Variance", "Std Dev")?;
+        writeln!(
+            f,
+            "{:>15} {:>8} {:>12} {:>12}",
+            "Group", "n", "Variance", "Std Dev"
+        )?;
         writeln!(f, "{}", "-".repeat(50))?;
         for gs in &self.group_stats {
-            writeln!(f, "{:>15} {:>8} {:>12.4} {:>12.4}",
-                gs.group, gs.n, gs.variance, gs.std_dev)?;
+            writeln!(
+                f,
+                "{:>15} {:>8} {:>12.4} {:>12.4}",
+                gs.group, gs.n, gs.variance, gs.std_dev
+            )?;
         }
         writeln!(f)?;
         writeln!(f, "H₀: All group variances are equal")?;
         writeln!(f, "H₁: At least two group variances differ")?;
         if self.p_value < 0.05 {
-            writeln!(f, "\nConclusion: Reject H₀ - variances are significantly different.")?;
+            writeln!(
+                f,
+                "\nConclusion: Reject H₀ - variances are significantly different."
+            )?;
         } else {
-            writeln!(f, "\nConclusion: Fail to reject H₀ - no significant difference in variances.")?;
+            writeln!(
+                f,
+                "\nConclusion: Fail to reject H₀ - no significant difference in variances."
+            )?;
         }
         Ok(())
     }
@@ -162,9 +181,7 @@ pub fn bartlett_test(groups: &[(String, Vec<f64>)]) -> EconResult<BartlettResult
         let mean: f64 = data.iter().sum::<f64>() / n as f64;
 
         // Calculate sample variance (using n-1 denominator)
-        let variance: f64 = data.iter()
-            .map(|x| (x - mean).powi(2))
-            .sum::<f64>() / (n - 1) as f64;
+        let variance: f64 = data.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (n - 1) as f64;
 
         if variance <= 0.0 {
             return Err(EconError::InvalidSpecification {
@@ -245,12 +262,19 @@ pub fn run_bartlett_test(
     let n_rows = df.height();
 
     // Get response column
-    let response = df.column(response_col).map_err(|_| EconError::ColumnNotFound {
-        column: response_col.to_string(),
-        available: df.get_column_names().iter().map(|s| s.to_string()).collect(),
-    })?;
+    let response = df
+        .column(response_col)
+        .map_err(|_| EconError::ColumnNotFound {
+            column: response_col.to_string(),
+            available: df
+                .get_column_names()
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+        })?;
 
-    let response_values: Vec<Option<f64>> = response.f64()
+    let response_values: Vec<Option<f64>> = response
+        .f64()
         .map_err(|_| EconError::NonNumericColumn {
             column: response_col.to_string(),
         })?
@@ -258,22 +282,31 @@ pub fn run_bartlett_test(
         .collect();
 
     // Get factor column
-    let factor = df.column(factor_col).map_err(|_| EconError::ColumnNotFound {
-        column: factor_col.to_string(),
-        available: df.get_column_names().iter().map(|s| s.to_string()).collect(),
-    })?;
+    let factor = df
+        .column(factor_col)
+        .map_err(|_| EconError::ColumnNotFound {
+            column: factor_col.to_string(),
+            available: df
+                .get_column_names()
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+        })?;
 
     // Extract factor values as strings
     let factor_values: Vec<String> = if let Ok(str_col) = factor.str() {
-        str_col.into_iter()
+        str_col
+            .into_iter()
             .map(|opt| opt.map(|s| s.to_string()).unwrap_or_default())
             .collect()
     } else if let Ok(int_col) = factor.i64() {
-        int_col.into_iter()
+        int_col
+            .into_iter()
             .map(|opt| opt.map(|v| v.to_string()).unwrap_or_default())
             .collect()
     } else if let Ok(float_col) = factor.f64() {
-        float_col.into_iter()
+        float_col
+            .into_iter()
             .map(|opt| opt.map(|v| v.to_string()).unwrap_or_default())
             .collect()
     } else {
@@ -321,22 +354,25 @@ mod tests {
 
         assert_eq!(result.n_groups, 3);
         assert_eq!(result.n_obs, 15);
-        assert_eq!(result.df, 2);  // k - 1 = 3 - 1 = 2
+        assert_eq!(result.df, 2); // k - 1 = 3 - 1 = 2
         assert!(result.statistic >= 0.0);
         assert!(result.p_value >= 0.0 && result.p_value <= 1.0);
 
         // Groups have equal variances (all are 2.5), so p-value should be high
         // (fail to reject H0)
-        assert!(result.p_value > 0.05,
-            "Expected p > 0.05 for equal variances, got {}", result.p_value);
+        assert!(
+            result.p_value > 0.05,
+            "Expected p > 0.05 for equal variances, got {}",
+            result.p_value
+        );
     }
 
     #[test]
     fn test_bartlett_unequal_variances() {
         // Three groups with clearly different variances
         let groups = vec![
-            ("Low".to_string(), vec![1.0, 1.1, 1.2, 0.9, 1.0]),    // small variance
-            ("Med".to_string(), vec![1.0, 2.0, 3.0, 0.0, 2.0]),    // medium variance
+            ("Low".to_string(), vec![1.0, 1.1, 1.2, 0.9, 1.0]), // small variance
+            ("Med".to_string(), vec![1.0, 2.0, 3.0, 0.0, 2.0]), // medium variance
             ("High".to_string(), vec![1.0, 10.0, 20.0, -5.0, 4.0]), // large variance
         ];
 
@@ -345,8 +381,11 @@ mod tests {
         assert_eq!(result.n_groups, 3);
 
         // Variances are very different, so p-value should be low (reject H0)
-        assert!(result.p_value < 0.05,
-            "Expected p < 0.05 for unequal variances, got {}", result.p_value);
+        assert!(
+            result.p_value < 0.05,
+            "Expected p < 0.05 for unequal variances, got {}",
+            result.p_value
+        );
     }
 
     #[test]
@@ -359,14 +398,12 @@ mod tests {
         let result = bartlett_test(&groups).unwrap();
 
         assert_eq!(result.n_groups, 2);
-        assert_eq!(result.df, 1);  // k - 1 = 2 - 1 = 1
+        assert_eq!(result.df, 1); // k - 1 = 2 - 1 = 1
     }
 
     #[test]
     fn test_bartlett_insufficient_groups() {
-        let groups = vec![
-            ("A".to_string(), vec![1.0, 2.0, 3.0]),
-        ];
+        let groups = vec![("A".to_string(), vec![1.0, 2.0, 3.0])];
 
         let result = bartlett_test(&groups);
         assert!(result.is_err());
@@ -375,7 +412,7 @@ mod tests {
     #[test]
     fn test_bartlett_insufficient_observations() {
         let groups = vec![
-            ("A".to_string(), vec![1.0]),  // Only 1 observation
+            ("A".to_string(), vec![1.0]), // Only 1 observation
             ("B".to_string(), vec![2.0, 3.0]),
         ];
 
@@ -434,7 +471,8 @@ mod tests {
         let df = df! {
             "count" => [1.0, 2.0, 3.0, 4.0, 5.0, 2.0, 3.0, 4.0, 5.0, 6.0, 3.0, 4.0, 5.0, 6.0, 7.0],
             "spray" => ["A", "A", "A", "A", "A", "B", "B", "B", "B", "B", "C", "C", "C", "C", "C"]
-        }.unwrap();
+        }
+        .unwrap();
 
         let dataset = Dataset::new(df);
         let result = run_bartlett_test(&dataset, "count", "spray").unwrap();

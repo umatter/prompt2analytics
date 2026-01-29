@@ -96,7 +96,11 @@ impl std::fmt::Display for PPTestResult {
             self.significance.stars()
         )?;
         writeln!(f)?;
-        writeln!(f, "Observations: {}  |  lshort: {}", self.n_obs, self.lshort)?;
+        writeln!(
+            f,
+            "Observations: {}  |  lshort: {}",
+            self.n_obs, self.lshort
+        )?;
         writeln!(f)?;
         writeln!(f, "H₀: The series has a unit root (non-stationary)")?;
         writeln!(f, "H₁: The series is stationary")?;
@@ -142,10 +146,7 @@ fn newey_west_variance(residuals: &[f64], truncation_lag: usize) -> f64 {
     let mut gamma_sum = 0.0;
     for j in 1..=truncation_lag.min(n - 1) {
         // Autocovariance at lag j
-        let gamma_j: f64 = (j..n)
-            .map(|t| residuals[t] * residuals[t - j])
-            .sum::<f64>()
-            / n as f64;
+        let gamma_j: f64 = (j..n).map(|t| residuals[t] * residuals[t - j]).sum::<f64>() / n as f64;
 
         // Bartlett weight
         let w_j = 1.0 - j as f64 / (truncation_lag + 1) as f64;
@@ -170,11 +171,11 @@ fn interpolate_p_value(statistic: f64, n: usize) -> f64 {
     // These are the asymptotic critical values
     // More negative statistic -> stronger rejection of unit root
     const CV_001: f64 = -4.38; // 0.1% significance
-    const CV_01: f64 = -4.04;  // 1% significance
+    const CV_01: f64 = -4.04; // 1% significance
     const CV_025: f64 = -3.73; // 2.5% significance
-    const CV_05: f64 = -3.45;  // 5% significance
-    const CV_10: f64 = -3.15;  // 10% significance
-    const CV_90: f64 = -1.28;  // 90% (very weak evidence against H₀)
+    const CV_05: f64 = -3.45; // 5% significance
+    const CV_10: f64 = -3.15; // 10% significance
+    const CV_90: f64 = -1.28; // 90% (very weak evidence against H₀)
 
     // For finite samples, critical values are slightly more negative
     // Apply small-sample correction (approximately)
@@ -403,7 +404,8 @@ pub fn pp_test(x: &[f64], lshort: bool) -> EconResult<PPTestResult> {
     };
 
     let correction = if lambda_sq > sigma_sq_nw && se_gamma > 0.0 {
-        (lambda_sq - sigma_sq_nw) * t_reg.sqrt() / (2.0 * lambda_sq.sqrt() * se_gamma * t_reg.sqrt())
+        (lambda_sq - sigma_sq_nw) * t_reg.sqrt()
+            / (2.0 * lambda_sq.sqrt() * se_gamma * t_reg.sqrt())
     } else {
         0.0
     };
@@ -518,7 +520,9 @@ mod tests {
     #[test]
     fn test_pp_test_basic() {
         // Simple test with linear trend (should reject unit root)
-        let x: Vec<f64> = (1..=100).map(|i| i as f64 + (i as f64 * 0.1).sin()).collect();
+        let x: Vec<f64> = (1..=100)
+            .map(|i| i as f64 + (i as f64 * 0.1).sin())
+            .collect();
         let result = pp_test(&x, true).unwrap();
 
         assert_eq!(result.n_obs, 100);
@@ -534,7 +538,8 @@ mod tests {
         let mut x = vec![0.0f64; 200];
         let phi = 0.5;
         for i in 1..200 {
-            let noise = ((i as u64).wrapping_mul(1103515245).wrapping_add(12345) % (1 << 16)) as f64
+            let noise = ((i as u64).wrapping_mul(1103515245).wrapping_add(12345) % (1 << 16))
+                as f64
                 / (1u64 << 17) as f64
                 - 0.25;
             x[i] = phi * x[i - 1] + noise;
@@ -555,7 +560,8 @@ mod tests {
         // Random walk (unit root): x_t = x_{t-1} + noise
         let mut x = vec![0.0f64; 200];
         for i in 1..200 {
-            let noise = ((i as u64).wrapping_mul(1103515245).wrapping_add(12345) % (1 << 16)) as f64
+            let noise = ((i as u64).wrapping_mul(1103515245).wrapping_add(12345) % (1 << 16))
+                as f64
                 / (1u64 << 17) as f64
                 - 0.25;
             x[i] = x[i - 1] + noise * 0.1;
@@ -566,10 +572,7 @@ mod tests {
         // Random walk typically fails to reject unit root
         // The statistic should be less negative (closer to zero or positive)
         // Note: This is probabilistic, so we use a loose bound
-        assert!(
-            !result.statistic.is_nan(),
-            "Test statistic should be valid"
-        );
+        assert!(!result.statistic.is_nan(), "Test statistic should be valid");
     }
 
     #[test]
@@ -589,11 +592,15 @@ mod tests {
     #[test]
     fn test_display() {
         // Use non-linear data to avoid singularity (linear trend + noise)
-        let x: Vec<f64> = (1..=50).map(|i| {
-            let noise = ((i as u64).wrapping_mul(1103515245).wrapping_add(12345) % (1 << 16)) as f64
-                / (1u64 << 17) as f64 - 0.25;
-            i as f64 + noise * 2.0
-        }).collect();
+        let x: Vec<f64> = (1..=50)
+            .map(|i| {
+                let noise = ((i as u64).wrapping_mul(1103515245).wrapping_add(12345) % (1 << 16))
+                    as f64
+                    / (1u64 << 17) as f64
+                    - 0.25;
+                i as f64 + noise * 2.0
+            })
+            .collect();
         let result = pp_test(&x, true).unwrap();
         let display = format!("{}", result);
 
@@ -675,11 +682,15 @@ mod tests {
     #[test]
     fn test_lshort_parameter() {
         // Use non-linear data to avoid singularity
-        let x: Vec<f64> = (1..=100).map(|i| {
-            let noise = ((i as u64).wrapping_mul(1103515245).wrapping_add(12345) % (1 << 16)) as f64
-                / (1u64 << 17) as f64 - 0.25;
-            i as f64 + noise * 5.0
-        }).collect();
+        let x: Vec<f64> = (1..=100)
+            .map(|i| {
+                let noise = ((i as u64).wrapping_mul(1103515245).wrapping_add(12345) % (1 << 16))
+                    as f64
+                    / (1u64 << 17) as f64
+                    - 0.25;
+                i as f64 + noise * 5.0
+            })
+            .collect();
 
         let result_short = pp_test(&x, true).unwrap();
         let result_long = pp_test(&x, false).unwrap();
@@ -700,11 +711,15 @@ mod tests {
     #[test]
     fn test_from_dataset() {
         // Use non-linear data to avoid singularity
-        let values: Vec<f64> = (1..=100).map(|i| {
-            let noise = ((i as u64).wrapping_mul(1103515245).wrapping_add(12345) % (1 << 16)) as f64
-                / (1u64 << 17) as f64 - 0.25;
-            i as f64 + noise * 5.0
-        }).collect();
+        let values: Vec<f64> = (1..=100)
+            .map(|i| {
+                let noise = ((i as u64).wrapping_mul(1103515245).wrapping_add(12345) % (1 << 16))
+                    as f64
+                    / (1u64 << 17) as f64
+                    - 0.25;
+                i as f64 + noise * 5.0
+            })
+            .collect();
 
         let df = df! {
             "values" => values

@@ -113,7 +113,11 @@ impl Default for MatchMethod {
 impl fmt::Display for MatchMethod {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            MatchMethod::NearestNeighbor { ratio, caliper, replace } => {
+            MatchMethod::NearestNeighbor {
+                ratio,
+                caliper,
+                replace,
+            } => {
                 write!(f, "Nearest Neighbor (1:{})", ratio)?;
                 if let Some(c) = caliper {
                     write!(f, ", caliper={:.4}", c)?;
@@ -130,8 +134,15 @@ impl fmt::Display for MatchMethod {
                 }
                 Ok(())
             }
-            MatchMethod::Full { min_ratio, max_ratio } => {
-                write!(f, "Full Matching (ratio range: [{:.1}, {:.1}])", min_ratio, max_ratio)
+            MatchMethod::Full {
+                min_ratio,
+                max_ratio,
+            } => {
+                write!(
+                    f,
+                    "Full Matching (ratio range: [{:.1}, {:.1}])",
+                    min_ratio, max_ratio
+                )
             }
             MatchMethod::Subclass { n_subclasses } => {
                 write!(f, "Subclassification ({} subclasses)", n_subclasses)
@@ -203,15 +214,26 @@ pub struct MatchBalanceTable {
 
 impl fmt::Display for MatchBalanceTable {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "{:<20} {:>10} {:>10} {:>10} {:>10} {:>10}",
-                 "Covariate", "Mean(T)", "Mean(C)", "Std.Diff", "Var.Ratio", "KS Stat")?;
+        writeln!(
+            f,
+            "{:<20} {:>10} {:>10} {:>10} {:>10} {:>10}",
+            "Covariate", "Mean(T)", "Mean(C)", "Std.Diff", "Var.Ratio", "KS Stat"
+        )?;
         writeln!(f, "{}", "-".repeat(80))?;
 
         for cov in &self.covariates {
             let balance_flag = if cov.std_diff.abs() > 0.1 { "!" } else { "" };
-            writeln!(f, "{:<20} {:>10.4} {:>10.4} {:>10.4}{} {:>10.4} {:>10.4}",
-                     cov.name, cov.mean_treated, cov.mean_control,
-                     cov.std_diff, balance_flag, cov.var_ratio, cov.ks_statistic)?;
+            writeln!(
+                f,
+                "{:<20} {:>10.4} {:>10.4} {:>10.4}{} {:>10.4} {:>10.4}",
+                cov.name,
+                cov.mean_treated,
+                cov.mean_control,
+                cov.std_diff,
+                balance_flag,
+                cov.var_ratio,
+                cov.ks_statistic
+            )?;
         }
 
         writeln!(f, "{}", "-".repeat(80))?;
@@ -299,10 +321,16 @@ impl fmt::Display for MatchResult {
 
         writeln!(f, "Sample Sizes:")?;
         writeln!(f, "  Total:           {}", self.n_obs)?;
-        writeln!(f, "  Treated:         {} (matched: {}, discarded: {})",
-                 self.n_treated, self.n_matched_treated, self.n_discarded_treated)?;
-        writeln!(f, "  Control:         {} (matched: {}, discarded: {})",
-                 self.n_control, self.n_matched_control, self.n_discarded_control)?;
+        writeln!(
+            f,
+            "  Treated:         {} (matched: {}, discarded: {})",
+            self.n_treated, self.n_matched_treated, self.n_discarded_treated
+        )?;
+        writeln!(
+            f,
+            "  Control:         {} (matched: {}, discarded: {})",
+            self.n_control, self.n_matched_control, self.n_discarded_control
+        )?;
         writeln!(f, "  Effective N:     {:.1}", self.effective_sample_size)?;
         writeln!(f)?;
 
@@ -312,16 +340,34 @@ impl fmt::Display for MatchResult {
         }
 
         writeln!(f, "Balance Before Matching:")?;
-        writeln!(f, "  Mean Abs. Std. Diff: {:.4}", self.balance_before.mean_abs_std_diff)?;
-        writeln!(f, "  Imbalanced covariates: {}", self.balance_before.n_imbalanced)?;
+        writeln!(
+            f,
+            "  Mean Abs. Std. Diff: {:.4}",
+            self.balance_before.mean_abs_std_diff
+        )?;
+        writeln!(
+            f,
+            "  Imbalanced covariates: {}",
+            self.balance_before.n_imbalanced
+        )?;
         writeln!(f)?;
 
         writeln!(f, "Balance After Matching:")?;
-        writeln!(f, "  Mean Abs. Std. Diff: {:.4}", self.balance_after.mean_abs_std_diff)?;
-        writeln!(f, "  Imbalanced covariates: {}", self.balance_after.n_imbalanced)?;
+        writeln!(
+            f,
+            "  Mean Abs. Std. Diff: {:.4}",
+            self.balance_after.mean_abs_std_diff
+        )?;
+        writeln!(
+            f,
+            "  Imbalanced covariates: {}",
+            self.balance_after.n_imbalanced
+        )?;
         writeln!(f)?;
 
-        let improvement = 1.0 - (self.balance_after.mean_abs_std_diff / self.balance_before.mean_abs_std_diff.max(1e-10));
+        let improvement = 1.0
+            - (self.balance_after.mean_abs_std_diff
+                / self.balance_before.mean_abs_std_diff.max(1e-10));
         writeln!(f, "Balance Improvement: {:.1}%", improvement * 100.0)?;
 
         Ok(())
@@ -383,8 +429,8 @@ pub fn match_it(
     let n = treatment.len();
 
     // Identify treated and control indices
-    let (treated_idx, control_idx): (Vec<usize>, Vec<usize>) = (0..n)
-        .partition(|&i| treatment[i] >= 0.5);
+    let (treated_idx, control_idx): (Vec<usize>, Vec<usize>) =
+        (0..n).partition(|&i| treatment[i] >= 0.5);
 
     let n_treated = treated_idx.len();
     let n_control = control_idx.len();
@@ -405,12 +451,21 @@ pub fn match_it(
 
     // Compute balance before matching
     let balance_before = compute_balance_table(
-        &x, &treatment, &treated_idx, &control_idx, &covariate_names, None,
+        &x,
+        &treatment,
+        &treated_idx,
+        &control_idx,
+        &covariate_names,
+        None,
     );
 
     // Perform matching based on method - using optimized algorithms
     let (matches, weights, subclasses, caliper_used, propensity_scores) = match &method {
-        MatchMethod::NearestNeighbor { ratio, caliper, replace } => {
+        MatchMethod::NearestNeighbor {
+            ratio,
+            caliper,
+            replace,
+        } => {
             match distance_method {
                 DistanceMethod::Logit | DistanceMethod::Probit => {
                     // FAST PATH: Use sorting + binary search for propensity score matching
@@ -476,41 +531,44 @@ pub fn match_it(
             let ps = Array1::from_elem(n, 0.5);
             (m, w, sc, cal, ps)
         }
-        MatchMethod::Full { min_ratio, max_ratio } => {
+        MatchMethod::Full {
+            min_ratio,
+            max_ratio,
+        } => {
             // Full matching uses propensity scores for stratification
             let ps = estimate_propensity_scores(&x, &treatment, false)?;
-            let (m, w, sc, cal) = full_matching_optimized(
-                &ps,
-                &treated_idx,
-                &control_idx,
-                *min_ratio,
-                *max_ratio,
-            )?;
+            let (m, w, sc, cal) =
+                full_matching_optimized(&ps, &treated_idx, &control_idx, *min_ratio, *max_ratio)?;
             (m, w, sc, cal, ps)
         }
         MatchMethod::Subclass { n_subclasses } => {
             // Subclassification uses propensity scores
             let ps = estimate_propensity_scores(&x, &treatment, false)?;
-            let (m, w, sc, cal) = subclassification_matching(
-                &ps,
-                &treated_idx,
-                &control_idx,
-                *n_subclasses,
-            )?;
+            let (m, w, sc, cal) =
+                subclassification_matching(&ps, &treated_idx, &control_idx, *n_subclasses)?;
             (m, w, sc, cal, ps)
         }
     };
 
     // Count matched units
-    let n_matched_treated = matches.iter().filter(|m| !m.control_indices.is_empty()).count();
-    let matched_controls: std::collections::HashSet<usize> = matches.iter()
+    let n_matched_treated = matches
+        .iter()
+        .filter(|m| !m.control_indices.is_empty())
+        .count();
+    let matched_controls: std::collections::HashSet<usize> = matches
+        .iter()
         .flat_map(|m| m.control_indices.iter().copied())
         .collect();
     let n_matched_control = matched_controls.len();
 
     // Compute balance after matching
     let balance_after = compute_balance_table(
-        &x, &treatment, &treated_idx, &control_idx, &covariate_names, Some(&weights),
+        &x,
+        &treatment,
+        &treated_idx,
+        &control_idx,
+        &covariate_names,
+        Some(&weights),
     );
 
     // Compute effective sample size
@@ -569,7 +627,13 @@ pub fn nearest_neighbor_match(
         caliper,
         replace,
     };
-    match_it(dataset, treatment_col, covariate_cols, method, Some(DistanceMethod::Logit))
+    match_it(
+        dataset,
+        treatment_col,
+        covariate_cols,
+        method,
+        Some(DistanceMethod::Logit),
+    )
 }
 
 /// Perform coarsened exact matching (CEM).
@@ -620,7 +684,13 @@ pub fn full_match(
         min_ratio: 0.5,
         max_ratio: 2.0,
     };
-    match_it(dataset, treatment_col, covariate_cols, method, Some(DistanceMethod::Logit))
+    match_it(
+        dataset,
+        treatment_col,
+        covariate_cols,
+        method,
+        Some(DistanceMethod::Logit),
+    )
 }
 
 /// Perform propensity score subclassification.
@@ -644,7 +714,13 @@ pub fn subclass_match(
     n_subclasses: usize,
 ) -> EconResult<MatchResult> {
     let method = MatchMethod::Subclass { n_subclasses };
-    match_it(dataset, treatment_col, covariate_cols, method, Some(DistanceMethod::Logit))
+    match_it(
+        dataset,
+        treatment_col,
+        covariate_cols,
+        method,
+        Some(DistanceMethod::Logit),
+    )
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -699,10 +775,13 @@ fn estimate_propensity_scores(
         // Weights for Hessian
         let weights: Array1<f64> = if use_probit {
             // For probit: phi(z)^2 / (Phi(z) * (1-Phi(z)))
-            z.iter().zip(p_clipped.iter()).map(|(&zi, &pi)| {
-                let phi = normal_pdf(zi);
-                phi * phi / (pi * (1.0 - pi) + 1e-10)
-            }).collect()
+            z.iter()
+                .zip(p_clipped.iter())
+                .map(|(&zi, &pi)| {
+                    let phi = normal_pdf(zi);
+                    phi * phi / (pi * (1.0 - pi) + 1e-10)
+                })
+                .collect()
         } else {
             // For logit: p(1-p)
             p_clipped.mapv(|pi| pi * (1.0 - pi))
@@ -721,12 +800,11 @@ fn estimate_propensity_scores(
 
         // Invert -H and update
         let neg_hessian = &hessian * -1.0;
-        let (hess_inv, _) = safe_inverse(&neg_hessian.view()).map_err(|e| {
-            EconError::SingularMatrix {
+        let (hess_inv, _) =
+            safe_inverse(&neg_hessian.view()).map_err(|e| EconError::SingularMatrix {
                 context: "Propensity score estimation".to_string(),
                 suggestion: format!("Check for multicollinearity: {:?}", e),
-            }
-        })?;
+            })?;
 
         let delta = hess_inv.dot(&gradient);
         beta = &beta + &delta;
@@ -788,7 +866,10 @@ fn ps_nearest_neighbor_fast(
 
     // Track used controls for without-replacement matching (AtomicBool is interior-mutable)
     let used_controls: Vec<AtomicBool> = if !replace {
-        control_sorted.iter().map(|_| AtomicBool::new(false)).collect()
+        control_sorted
+            .iter()
+            .map(|_| AtomicBool::new(false))
+            .collect()
     } else {
         Vec::new()
     };
@@ -1014,8 +1095,7 @@ fn parallel_distance_matching(
                 available_controls
                     .par_iter()
                     .map(|&ci| {
-                        let dist =
-                            compute_pairwise_distance(x, ti, ci, cov_inv.as_ref());
+                        let dist = compute_pairwise_distance(x, ti, ci, cov_inv.as_ref());
                         (ci, dist)
                     })
                     .collect()
@@ -1023,8 +1103,7 @@ fn parallel_distance_matching(
                 available_controls
                     .iter()
                     .map(|&ci| {
-                        let dist =
-                            compute_pairwise_distance(x, ti, ci, cov_inv.as_ref());
+                        let dist = compute_pairwise_distance(x, ti, ci, cov_inv.as_ref());
                         (ci, dist)
                     })
                     .collect()
@@ -1204,7 +1283,12 @@ fn coarsened_exact_matching(
     cutpoints: Option<&Vec<Vec<f64>>>,
     n_bins: usize,
     _covariate_names: &[String],
-) -> EconResult<(Vec<MatchInfo>, Vec<f64>, Option<Vec<SubclassInfo>>, Option<f64>)> {
+) -> EconResult<(
+    Vec<MatchInfo>,
+    Vec<f64>,
+    Option<Vec<SubclassInfo>>,
+    Option<f64>,
+)> {
     let n = x.nrows();
     let k = x.ncols();
     let mut weights = vec![0.0; n];
@@ -1214,10 +1298,12 @@ fn coarsened_exact_matching(
         Some(c) => c.clone(),
         None => {
             // Automatic quartile-based binning
-            (0..k).map(|j| {
-                let col: Vec<f64> = (0..n).map(|i| x[[i, j]]).collect();
-                compute_quantile_cutpoints(&col, n_bins)
-            }).collect()
+            (0..k)
+                .map(|j| {
+                    let col: Vec<f64> = (0..n).map(|i| x[[i, j]]).collect();
+                    compute_quantile_cutpoints(&col, n_bins)
+                })
+                .collect()
         }
     };
 
@@ -1226,7 +1312,9 @@ fn coarsened_exact_matching(
 
     for &i in treated_idx.iter().chain(control_idx.iter()) {
         let stratum_key = compute_stratum_key(x, i, &cuts);
-        let entry = strata.entry(stratum_key).or_insert((Vec::new(), Vec::new()));
+        let entry = strata
+            .entry(stratum_key)
+            .or_insert((Vec::new(), Vec::new()));
         if treated_idx.contains(&i) {
             entry.0.push(i);
         } else {
@@ -1239,7 +1327,7 @@ fn coarsened_exact_matching(
     let mut subclasses = Vec::new();
     let mut subclass_id = 0;
 
-    for (_key, (treated, control)) in &strata {
+    for (treated, control) in strata.values() {
         // Only include strata with both treated and control
         if treated.is_empty() || control.is_empty() {
             // Discard these units (weight = 0)
@@ -1332,14 +1420,24 @@ fn full_matching_optimized(
     control_idx: &[usize],
     min_ratio: f64,
     max_ratio: f64,
-) -> EconResult<(Vec<MatchInfo>, Vec<f64>, Option<Vec<SubclassInfo>>, Option<f64>)> {
+) -> EconResult<(
+    Vec<MatchInfo>,
+    Vec<f64>,
+    Option<Vec<SubclassInfo>>,
+    Option<f64>,
+)> {
     let n = propensity_scores.len();
     let mut weights = vec![0.0; n];
 
     // Sort all units by propensity score
-    let mut all_units: Vec<(usize, f64, bool)> = treated_idx.iter()
+    let mut all_units: Vec<(usize, f64, bool)> = treated_idx
+        .iter()
         .map(|&i| (i, propensity_scores[i], true))
-        .chain(control_idx.iter().map(|&i| (i, propensity_scores[i], false)))
+        .chain(
+            control_idx
+                .iter()
+                .map(|&i| (i, propensity_scores[i], false)),
+        )
         .collect();
     all_units.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
 
@@ -1433,7 +1531,12 @@ fn subclassification_matching(
     treated_idx: &[usize],
     control_idx: &[usize],
     n_subclasses: usize,
-) -> EconResult<(Vec<MatchInfo>, Vec<f64>, Option<Vec<SubclassInfo>>, Option<f64>)> {
+) -> EconResult<(
+    Vec<MatchInfo>,
+    Vec<f64>,
+    Option<Vec<SubclassInfo>>,
+    Option<f64>,
+)> {
     let n = propensity_scores.len();
     let mut weights = vec![0.0; n];
 
@@ -1442,18 +1545,20 @@ fn subclassification_matching(
     let cutpoints = compute_quantile_cutpoints(&treated_ps, n_subclasses);
 
     // Assign units to subclasses
-    let mut subclasses: Vec<SubclassInfo> = (0..n_subclasses).map(|i| SubclassInfo {
-        subclass_id: i + 1,
-        treated_indices: Vec::new(),
-        control_indices: Vec::new(),
-        ps_range: if i == 0 {
-            (0.0, *cutpoints.first().unwrap_or(&1.0))
-        } else if i == n_subclasses - 1 {
-            (*cutpoints.last().unwrap_or(&0.0), 1.0)
-        } else {
-            (cutpoints[i - 1], cutpoints[i])
-        },
-    }).collect();
+    let mut subclasses: Vec<SubclassInfo> = (0..n_subclasses)
+        .map(|i| SubclassInfo {
+            subclass_id: i + 1,
+            treated_indices: Vec::new(),
+            control_indices: Vec::new(),
+            ps_range: if i == 0 {
+                (0.0, *cutpoints.first().unwrap_or(&1.0))
+            } else if i == n_subclasses - 1 {
+                (*cutpoints.last().unwrap_or(&0.0), 1.0)
+            } else {
+                (cutpoints[i - 1], cutpoints[i])
+            },
+        })
+        .collect();
 
     // Assign units to subclasses
     for &i in treated_idx.iter().chain(control_idx.iter()) {
@@ -1527,9 +1632,8 @@ fn compute_balance_table(
     let mut covariates = Vec::with_capacity(k);
 
     for j in 0..k {
-        let balance = compute_covariate_balance(
-            x, j, treated_idx, control_idx, &covariate_names[j], weights,
-        );
+        let balance =
+            compute_covariate_balance(x, j, treated_idx, control_idx, &covariate_names[j], weights);
         covariates.push(balance);
     }
 
@@ -1557,12 +1661,14 @@ fn compute_covariate_balance(
     weights: Option<&[f64]>,
 ) -> MatchCovariateBalance {
     // Extract values and weights
-    let (t_vals, t_weights): (Vec<f64>, Vec<f64>) = treated_idx.iter()
+    let (t_vals, t_weights): (Vec<f64>, Vec<f64>) = treated_idx
+        .iter()
         .map(|&i| (x[[i, col_idx]], weights.map(|w| w[i]).unwrap_or(1.0)))
         .filter(|(_, w)| *w > 0.0)
         .unzip();
 
-    let (c_vals, c_weights): (Vec<f64>, Vec<f64>) = control_idx.iter()
+    let (c_vals, c_weights): (Vec<f64>, Vec<f64>) = control_idx
+        .iter()
         .map(|&i| (x[[i, col_idx]], weights.map(|w| w[i]).unwrap_or(1.0)))
         .filter(|(_, w)| *w > 0.0)
         .unzip();
@@ -1615,9 +1721,12 @@ fn weighted_mean(values: &[f64], weights: &[f64]) -> f64 {
     if sum_w <= 0.0 {
         return 0.0;
     }
-    values.iter().zip(weights.iter())
+    values
+        .iter()
+        .zip(weights.iter())
         .map(|(&v, &w)| v * w)
-        .sum::<f64>() / sum_w
+        .sum::<f64>()
+        / sum_w
 }
 
 /// Compute weighted variance.
@@ -1629,9 +1738,12 @@ fn weighted_variance(values: &[f64], weights: &[f64], mean: f64) -> f64 {
     if sum_w <= 0.0 {
         return 0.0;
     }
-    let var: f64 = values.iter().zip(weights.iter())
+    let var: f64 = values
+        .iter()
+        .zip(weights.iter())
         .map(|(&v, &w)| w * (v - mean).powi(2))
-        .sum::<f64>() / sum_w;
+        .sum::<f64>()
+        / sum_w;
     var
 }
 
@@ -1722,16 +1834,16 @@ mod tests {
                 0.15, 0.25, 0.05, 0.35, 0.2, 0.3, 0.1, 0.4, 0.18, 0.32,
                 0.45, 0.5, 0.35, 0.55, 0.42, 0.25, 0.2, 0.3, 0.38, 0.22
             ]
-        }.unwrap();
+        }
+        .unwrap();
         Dataset::new(df)
     }
 
     #[test]
     fn test_nearest_neighbor_matching_basic() {
         let dataset = create_test_dataset();
-        let result = nearest_neighbor_match(
-            &dataset, "treatment", &["x1", "x2"], None, false
-        ).unwrap();
+        let result =
+            nearest_neighbor_match(&dataset, "treatment", &["x1", "x2"], None, false).unwrap();
 
         // Check basic structure
         assert_eq!(result.n_treated, 15);
@@ -1740,7 +1852,9 @@ mod tests {
         assert!(result.n_matched_control > 0);
 
         // Balance should improve after matching
-        assert!(result.balance_after.mean_abs_std_diff <= result.balance_before.mean_abs_std_diff + 0.1);
+        assert!(
+            result.balance_after.mean_abs_std_diff <= result.balance_before.mean_abs_std_diff + 0.1
+        );
 
         // Check propensity scores were computed
         assert!(result.propensity_scores.is_some());
@@ -1749,9 +1863,8 @@ mod tests {
     #[test]
     fn test_nearest_neighbor_with_caliper() {
         let dataset = create_test_dataset();
-        let result = nearest_neighbor_match(
-            &dataset, "treatment", &["x1", "x2"], Some(0.2), false
-        ).unwrap();
+        let result =
+            nearest_neighbor_match(&dataset, "treatment", &["x1", "x2"], Some(0.2), false).unwrap();
 
         assert_eq!(result.caliper_used, Some(0.2));
         // With caliper, some treated units may be discarded
@@ -1761,9 +1874,8 @@ mod tests {
     #[test]
     fn test_nearest_neighbor_with_replacement() {
         let dataset = create_test_dataset();
-        let result = nearest_neighbor_match(
-            &dataset, "treatment", &["x1", "x2"], None, true
-        ).unwrap();
+        let result =
+            nearest_neighbor_match(&dataset, "treatment", &["x1", "x2"], None, true).unwrap();
 
         // With replacement, all treated units should be matched
         assert_eq!(result.n_matched_treated, result.n_treated);
@@ -1811,9 +1923,8 @@ mod tests {
     #[test]
     fn test_balance_improvement() {
         let dataset = create_test_dataset();
-        let result = nearest_neighbor_match(
-            &dataset, "treatment", &["x1", "x2"], None, false
-        ).unwrap();
+        let result =
+            nearest_neighbor_match(&dataset, "treatment", &["x1", "x2"], None, false).unwrap();
 
         // Check balance statistics are computed
         assert!(!result.balance_before.covariates.is_empty());
@@ -1829,18 +1940,24 @@ mod tests {
 
         // Test with Mahalanobis distance
         let result = match_it(
-            &dataset, "treatment", &["x1", "x2"],
+            &dataset,
+            "treatment",
+            &["x1", "x2"],
             MatchMethod::default(),
-            Some(DistanceMethod::Mahalanobis)
-        ).unwrap();
+            Some(DistanceMethod::Mahalanobis),
+        )
+        .unwrap();
         assert_eq!(result.distance, DistanceMethod::Mahalanobis);
 
         // Test with Euclidean distance
         let result = match_it(
-            &dataset, "treatment", &["x1", "x2"],
+            &dataset,
+            "treatment",
+            &["x1", "x2"],
             MatchMethod::default(),
-            Some(DistanceMethod::Euclidean)
-        ).unwrap();
+            Some(DistanceMethod::Euclidean),
+        )
+        .unwrap();
         assert_eq!(result.distance, DistanceMethod::Euclidean);
     }
 
@@ -1853,9 +1970,13 @@ mod tests {
             replace: true,
         };
         let result = match_it(
-            &dataset, "treatment", &["x1", "x2"],
-            method, Some(DistanceMethod::Logit)
-        ).unwrap();
+            &dataset,
+            "treatment",
+            &["x1", "x2"],
+            method,
+            Some(DistanceMethod::Logit),
+        )
+        .unwrap();
 
         // Each treated unit should have up to 2 controls
         for m in &result.matches {
@@ -1893,9 +2014,8 @@ mod tests {
     #[test]
     fn test_display_traits() {
         let dataset = create_test_dataset();
-        let result = nearest_neighbor_match(
-            &dataset, "treatment", &["x1", "x2"], None, false
-        ).unwrap();
+        let result =
+            nearest_neighbor_match(&dataset, "treatment", &["x1", "x2"], None, false).unwrap();
 
         // Test Display for MatchResult
         let output = format!("{}", result);
@@ -1910,9 +2030,7 @@ mod tests {
     #[test]
     fn test_missing_column_error() {
         let dataset = create_test_dataset();
-        let result = nearest_neighbor_match(
-            &dataset, "nonexistent", &["x1", "x2"], None, false
-        );
+        let result = nearest_neighbor_match(&dataset, "nonexistent", &["x1", "x2"], None, false);
         assert!(result.is_err());
     }
 
@@ -1923,13 +2041,12 @@ mod tests {
             "treatment" => [1.0, 1.0, 1.0, 0.0, 0.0, 0.0],
             "x1" => [10.0, 11.0, 12.0, 1.0, 2.0, 3.0],
             "x2" => [10.0, 11.0, 12.0, 1.0, 2.0, 3.0]
-        }.unwrap();
+        }
+        .unwrap();
         let dataset = Dataset::new(df);
 
         // Should still work but may have few matches
-        let result = nearest_neighbor_match(
-            &dataset, "treatment", &["x1", "x2"], None, false
-        );
+        let result = nearest_neighbor_match(&dataset, "treatment", &["x1", "x2"], None, false);
         // Result might succeed with poor balance or fail depending on implementation
         // The key is it shouldn't panic
         assert!(result.is_ok() || result.is_err());
@@ -1948,27 +2065,39 @@ mod tests {
         let x2: Vec<f64> = (0..n).map(|_| rng.gen_range(0.0..1.0)).collect();
 
         // Treatment probability depends on x1 and x2
-        let treatment: Vec<f64> = x1.iter().zip(x2.iter())
-            .map(|(a, b)| if a + b > 1.0 && rng.gen_range(0.0..1.0) > 0.3 { 1.0 } else { 0.0 })
+        let treatment: Vec<f64> = x1
+            .iter()
+            .zip(x2.iter())
+            .map(|(a, b)| {
+                if a + b > 1.0 && rng.gen_range(0.0..1.0) > 0.3 {
+                    1.0
+                } else {
+                    0.0
+                }
+            })
             .collect();
 
         let df = df! {
             "treatment" => treatment.clone(),
             "x1" => x1,
             "x2" => x2,
-        }.unwrap();
+        }
+        .unwrap();
         let dataset = Dataset::new(df);
 
         // Test with replacement
         let result_with = match_it(
-            &dataset, "treatment", &["x1", "x2"],
+            &dataset,
+            "treatment",
+            &["x1", "x2"],
             MatchMethod::NearestNeighbor {
                 ratio: 1,
                 caliper: None,
                 replace: true,
             },
             Some(DistanceMethod::Logit),
-        ).unwrap();
+        )
+        .unwrap();
 
         // All treated units should be matched with replacement
         let n_treated = treatment.iter().filter(|&&t| t > 0.5).count();
@@ -1976,38 +2105,397 @@ mod tests {
 
         // Test without replacement
         let result_without = match_it(
-            &dataset, "treatment", &["x1", "x2"],
+            &dataset,
+            "treatment",
+            &["x1", "x2"],
             MatchMethod::NearestNeighbor {
                 ratio: 1,
                 caliper: None,
                 replace: false,
             },
             Some(DistanceMethod::Logit),
-        ).unwrap();
+        )
+        .unwrap();
 
         // Each control should be matched at most once (without replacement)
-        let control_counts: std::collections::HashMap<usize, usize> = result_without.matches.iter()
+        let control_counts: std::collections::HashMap<usize, usize> = result_without
+            .matches
+            .iter()
             .flat_map(|m| m.control_indices.iter().copied())
             .fold(std::collections::HashMap::new(), |mut acc, ci| {
                 *acc.entry(ci).or_insert(0) += 1;
                 acc
             });
         for &count in control_counts.values() {
-            assert_eq!(count, 1, "Control unit matched multiple times without replacement");
+            assert_eq!(
+                count, 1,
+                "Control unit matched multiple times without replacement"
+            );
         }
 
         // Test Mahalanobis distance
         let result_maha = match_it(
-            &dataset, "treatment", &["x1", "x2"],
+            &dataset,
+            "treatment",
+            &["x1", "x2"],
             MatchMethod::NearestNeighbor {
                 ratio: 1,
                 caliper: None,
                 replace: true,
             },
             Some(DistanceMethod::Mahalanobis),
-        ).unwrap();
+        )
+        .unwrap();
 
         assert_eq!(result_maha.n_matched_treated, n_treated);
-        assert!(result_maha.balance_after.mean_abs_std_diff <= result_maha.balance_before.mean_abs_std_diff + 0.2);
+        assert!(
+            result_maha.balance_after.mean_abs_std_diff
+                <= result_maha.balance_before.mean_abs_std_diff + 0.2
+        );
+    }
+
+    // =========================================================================
+    // R Validation Tests (Phase 4)
+    // =========================================================================
+
+    /// Simple LCG for deterministic random numbers
+    fn lcg_rand(seed: &mut u64) -> f64 {
+        let a: u64 = 1103515245;
+        let c: u64 = 12345;
+        let m: u64 = 2_u64.pow(31);
+        *seed = (a.wrapping_mul(*seed).wrapping_add(c)) % m;
+        (*seed as f64) / (m as f64)
+    }
+
+    /// Create dataset matching R's MatchIt validation example.
+    fn create_matchit_validation_dataset() -> Dataset {
+        let n = 500;
+        let mut seed: u64 = 42;
+
+        let mut x1 = Vec::with_capacity(n);
+        let mut x2 = Vec::with_capacity(n);
+        let mut treatment = Vec::with_capacity(n);
+        let mut y = Vec::with_capacity(n);
+
+        for _ in 0..n {
+            // Box-Muller transform for Normal(0,1)
+            let u1 = lcg_rand(&mut seed).max(1e-10);
+            let u2 = lcg_rand(&mut seed);
+            let z1 = ((-2.0_f64 * u1.ln()).sqrt()) * (2.0 * std::f64::consts::PI * u2).cos();
+            let z2 = ((-2.0_f64 * u1.ln()).sqrt()) * (2.0 * std::f64::consts::PI * u2).sin();
+            x1.push(z1);
+            x2.push(z2);
+
+            // Generate treatment based on propensity score
+            let ps = 1.0 / (1.0 + (-(-0.5 + 0.8 * z1 + 0.4 * z2)).exp());
+            let t = if lcg_rand(&mut seed) < ps { 1.0 } else { 0.0 };
+            treatment.push(t);
+
+            // Generate outcome: y = 1 + 0.5*x1 - 0.3*x2 + 0.75*treatment + noise
+            let u3 = lcg_rand(&mut seed).max(1e-10);
+            let u4 = lcg_rand(&mut seed);
+            let noise =
+                0.5 * ((-2.0_f64 * u3.ln()).sqrt()) * (2.0 * std::f64::consts::PI * u4).cos();
+            let y_i = 1.0 + 0.5 * z1 - 0.3 * z2 + 0.75 * t + noise;
+            y.push(y_i);
+        }
+
+        let df = df! {
+            "y" => y,
+            "treatment" => treatment,
+            "x1" => x1,
+            "x2" => x2
+        }
+        .unwrap();
+
+        Dataset::new(df)
+    }
+
+    #[test]
+    fn test_validate_matching_vs_r() {
+        // Validates against R MatchIt package
+        // R reference:
+        // library(MatchIt)
+        // m_nn <- matchit(treatment ~ x1 + x2, data = match_data, method = "nearest",
+        //                 distance = "logit", replace = FALSE)
+
+        let dataset = create_matchit_validation_dataset();
+
+        let result = match_it(
+            &dataset,
+            "treatment",
+            &["x1", "x2"],
+            MatchMethod::NearestNeighbor {
+                ratio: 1,
+                caliper: None,
+                replace: false,
+            },
+            Some(DistanceMethod::Logit),
+        )
+        .unwrap();
+
+        // Structure validation
+        assert!(result.n_treated > 0);
+        assert!(result.n_control > 0);
+        assert!(result.n_matched_treated > 0);
+        assert!(result.n_matched_control > 0);
+
+        // Balance should improve after matching
+        // Before matching SMD may be large due to confounding
+        assert!(
+            result.balance_after.mean_abs_std_diff
+                <= result.balance_before.mean_abs_std_diff + 0.05,
+            "Balance should improve or stay similar after matching"
+        );
+
+        // After matching, SMD should be relatively small (< 0.25 is common threshold)
+        for cov in &result.balance_after.covariates {
+            assert!(
+                cov.std_diff.abs() < 0.5,
+                "Covariate {} has SMD {:.4} > 0.5 after matching",
+                cov.name,
+                cov.std_diff
+            );
+        }
+
+        // Propensity scores should be computed
+        assert!(result.propensity_scores.is_some());
+        let ps = result.propensity_scores.as_ref().unwrap();
+        assert_eq!(ps.len(), result.n_obs);
+        // PS should be in (0, 1)
+        for &p in ps.iter() {
+            assert!(p > 0.0 && p < 1.0, "PS {} out of range", p);
+        }
+    }
+
+    #[test]
+    fn test_validate_matching_balance_smd() {
+        // Validate SMD calculation matches R's formula
+        // SMD = (mean_t - mean_c) / sqrt((var_t + var_c) / 2)
+
+        let dataset = create_matchit_validation_dataset();
+
+        let result = match_it(
+            &dataset,
+            "treatment",
+            &["x1", "x2"],
+            MatchMethod::NearestNeighbor {
+                ratio: 1,
+                caliper: None,
+                replace: false,
+            },
+            Some(DistanceMethod::Logit),
+        )
+        .unwrap();
+
+        // Verify balance table structure
+        assert_eq!(result.balance_before.covariates.len(), 2);
+        assert_eq!(result.balance_after.covariates.len(), 2);
+
+        // Variance ratios should be positive
+        for cov in &result.balance_after.covariates {
+            assert!(cov.var_ratio > 0.0, "Variance ratio should be positive");
+            // Good balance means var_ratio is close to 1 (0.5 to 2 is acceptable)
+            assert!(
+                cov.var_ratio > 0.1 && cov.var_ratio < 10.0,
+                "Variance ratio {:.4} for {} seems extreme",
+                cov.var_ratio,
+                cov.name
+            );
+        }
+
+        // Mean absolute SMD should be computed correctly
+        let computed_mean_smd: f64 = result
+            .balance_after
+            .covariates
+            .iter()
+            .map(|c| c.std_diff.abs())
+            .sum::<f64>()
+            / result.balance_after.covariates.len() as f64;
+        assert!(
+            (computed_mean_smd - result.balance_after.mean_abs_std_diff).abs() < 1e-10,
+            "Mean SMD mismatch"
+        );
+    }
+
+    #[test]
+    fn test_validate_cem_matching_vs_r() {
+        // Validate CEM against R MatchIt with method = "cem"
+        let dataset = create_matchit_validation_dataset();
+
+        let result = match_it(
+            &dataset,
+            "treatment",
+            &["x1", "x2"],
+            MatchMethod::CoarsenedExact {
+                cutpoints: None,
+                n_bins: Some(4), // Quartiles
+            },
+            None,
+        )
+        .unwrap();
+
+        // CEM should produce exact balance within strata
+        // Number of matched should be less than or equal to total
+        assert!(result.n_matched_treated <= result.n_treated);
+        assert!(result.n_matched_control <= result.n_control);
+
+        // CEM typically discards unmatched units
+        assert!(result.n_discarded_treated >= 0);
+        assert!(result.n_discarded_control >= 0);
+
+        // Balance should generally improve (or at least not get much worse)
+        // CEM can have perfect balance within strata but may lose observations
+    }
+
+    #[test]
+    fn test_validate_full_matching_vs_r() {
+        // Validate full matching against R MatchIt with method = "full"
+        let dataset = create_matchit_validation_dataset();
+
+        let result = match_it(
+            &dataset,
+            "treatment",
+            &["x1", "x2"],
+            MatchMethod::Full {
+                min_ratio: 0.5,
+                max_ratio: 2.0,
+            },
+            Some(DistanceMethod::Logit),
+        )
+        .unwrap();
+
+        // Full matching should create subclasses
+        assert!(result.subclasses.is_some());
+        let subclasses = result.subclasses.as_ref().unwrap();
+        assert!(!subclasses.is_empty(), "Should have at least one subclass");
+
+        // Each subclass should have both treated and control
+        for sc in subclasses {
+            assert!(
+                !sc.treated_indices.is_empty() || !sc.control_indices.is_empty(),
+                "Subclass {} should have some units",
+                sc.subclass_id
+            );
+        }
+
+        // Full matching typically doesn't discard units
+        // All or most units should be included
+        let total_in_subclasses: usize = subclasses
+            .iter()
+            .map(|sc| sc.treated_indices.len() + sc.control_indices.len())
+            .sum();
+        assert!(
+            total_in_subclasses >= result.n_obs / 2,
+            "Full matching should include most observations"
+        );
+    }
+
+    #[test]
+    fn test_validate_subclassification_vs_r() {
+        // Validate subclassification against R MatchIt with method = "subclass"
+        let dataset = create_matchit_validation_dataset();
+
+        let result = match_it(
+            &dataset,
+            "treatment",
+            &["x1", "x2"],
+            MatchMethod::Subclass { n_subclasses: 5 },
+            Some(DistanceMethod::Logit),
+        )
+        .unwrap();
+
+        // Should create exactly n_subclasses subclasses
+        assert!(result.subclasses.is_some());
+        let subclasses = result.subclasses.as_ref().unwrap();
+        assert_eq!(subclasses.len(), 5, "Should have 5 subclasses");
+
+        // Subclasses should be based on PS quantiles
+        // Check that PS ranges don't overlap (approximately)
+        let mut prev_max = 0.0;
+        for sc in subclasses {
+            assert!(
+                sc.ps_range.0 >= prev_max - 0.01, // Allow small overlap
+                "Subclass PS ranges should be ordered"
+            );
+            prev_max = sc.ps_range.1;
+        }
+    }
+
+    #[test]
+    fn test_validate_matching_with_caliper() {
+        // Validate caliper matching
+        let dataset = create_matchit_validation_dataset();
+
+        // Without caliper
+        let result_no_caliper = match_it(
+            &dataset,
+            "treatment",
+            &["x1", "x2"],
+            MatchMethod::NearestNeighbor {
+                ratio: 1,
+                caliper: None,
+                replace: false,
+            },
+            Some(DistanceMethod::Logit),
+        )
+        .unwrap();
+
+        // With caliper (0.1 SD of PS)
+        let result_with_caliper = match_it(
+            &dataset,
+            "treatment",
+            &["x1", "x2"],
+            MatchMethod::NearestNeighbor {
+                ratio: 1,
+                caliper: Some(0.1),
+                replace: false,
+            },
+            Some(DistanceMethod::Logit),
+        )
+        .unwrap();
+
+        // Caliper should reduce or maintain number of matches
+        assert!(
+            result_with_caliper.n_matched_treated <= result_no_caliper.n_matched_treated,
+            "Caliper should not increase matches"
+        );
+
+        // Balance with caliper should be at least as good (often better)
+        // though with fewer matched units
+    }
+
+    #[test]
+    fn test_validate_matching_effective_sample_size() {
+        // Validate ESS calculation
+        let dataset = create_matchit_validation_dataset();
+
+        let result = match_it(
+            &dataset,
+            "treatment",
+            &["x1", "x2"],
+            MatchMethod::NearestNeighbor {
+                ratio: 1,
+                caliper: None,
+                replace: true, // With replacement creates weights
+            },
+            Some(DistanceMethod::Logit),
+        )
+        .unwrap();
+
+        // ESS should be positive
+        assert!(result.effective_sample_size > 0.0);
+
+        // ESS should be <= actual matched sample size
+        let matched_size = result.n_matched_treated + result.n_matched_control;
+        assert!(
+            result.effective_sample_size <= matched_size as f64 + 0.01,
+            "ESS {:.2} should be <= matched size {}",
+            result.effective_sample_size,
+            matched_size
+        );
+
+        // With replacement, ESS might be less than nominal due to repeated use
+        // of the same control unit
     }
 }

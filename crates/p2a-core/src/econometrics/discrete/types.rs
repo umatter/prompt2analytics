@@ -68,11 +68,27 @@ impl fmt::Display for DiscreteResult {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "{} Regression Results", self.model_type)?;
         writeln!(f, "===========================================")?;
-        writeln!(f, "Dep. Variable: {:<20}  No. Observations: {}", self.dep_var, self.n_obs)?;
-        writeln!(f, "Model: {:<23}  Log-Likelihood: {:.4}", self.model_type, self.log_likelihood)?;
-        writeln!(f, "Pseudo R²: {:<19.4}  LL-Null: {:.4}", self.pseudo_r_squared, self.log_likelihood_null)?;
+        writeln!(
+            f,
+            "Dep. Variable: {:<20}  No. Observations: {}",
+            self.dep_var, self.n_obs
+        )?;
+        writeln!(
+            f,
+            "Model: {:<23}  Log-Likelihood: {:.4}",
+            self.model_type, self.log_likelihood
+        )?;
+        writeln!(
+            f,
+            "Pseudo R²: {:<19.4}  LL-Null: {:.4}",
+            self.pseudo_r_squared, self.log_likelihood_null
+        )?;
         writeln!(f, "AIC: {:<25.4}  BIC: {:.4}", self.aic, self.bic)?;
-        writeln!(f, "Converged: {:<17}  Iterations: {}", self.converged, self.iterations)?;
+        writeln!(
+            f,
+            "Converged: {:<17}  Iterations: {}",
+            self.converged, self.iterations
+        )?;
         writeln!(f)?;
 
         // Warnings
@@ -115,7 +131,11 @@ impl fmt::Display for DiscreteResult {
         writeln!(f, "{:<20} {:>12}", "Variable", "dy/dx")?;
         writeln!(f, "{:-<45}", "")?;
         for i in 0..self.variables.len() {
-            writeln!(f, "{:<20} {:>12.6}", &self.variables[i], self.marginal_effects[i])?;
+            writeln!(
+                f,
+                "{:<20} {:>12.6}",
+                &self.variables[i], self.marginal_effects[i]
+            )?;
         }
         writeln!(f, "{:-<45}", "")?;
 

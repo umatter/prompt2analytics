@@ -53,7 +53,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
-use crate::stats::anova::{run_one_way_anova, AnovaResult};
+use crate::stats::anova::{AnovaResult, run_one_way_anova};
 use crate::traits::SignificanceLevel;
 
 /// Result of a pairwise comparison in Tukey HSD test.
@@ -562,9 +562,7 @@ mod tests {
             tukey
                 .comparisons
                 .iter()
-                .find(|c| {
-                    (c.group1 == g1 && c.group2 == g2) || (c.group1 == g2 && c.group2 == g1)
-                })
+                .find(|c| (c.group1 == g1 && c.group2 == g2) || (c.group1 == g2 && c.group2 == g1))
                 .unwrap()
         };
 

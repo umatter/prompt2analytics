@@ -176,16 +176,10 @@ pub fn supsmu(
 
 /// Sort data by x, combining duplicate x values by weighted averaging y.
 #[inline]
-fn sort_and_dedupe(
-    x: &[f64],
-    y: &[f64],
-    w: &[f64],
-) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+fn sort_and_dedupe(x: &[f64], y: &[f64], w: &[f64]) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
     let n = x.len();
     let mut indices: Vec<usize> = (0..n).collect();
-    indices.sort_unstable_by(|&a, &b| {
-        x[a].partial_cmp(&x[b]).unwrap_or(std::cmp::Ordering::Equal)
-    });
+    indices.sort_unstable_by(|&a, &b| x[a].partial_cmp(&x[b]).unwrap_or(std::cmp::Ordering::Equal));
 
     let mut result_x = Vec::with_capacity(n);
     let mut result_y = Vec::with_capacity(n);
@@ -353,13 +347,7 @@ fn local_linear_fit_simple(
 }
 
 /// Fast cross-validation based SuperSmoother with adaptive span selection.
-fn super_smooth_cv_fast(
-    x: &[f64],
-    y: &[f64],
-    w: &[f64],
-    _periodic: bool,
-    bass: f64,
-) -> Vec<f64> {
+fn super_smooth_cv_fast(x: &[f64], y: &[f64], w: &[f64], _periodic: bool, bass: f64) -> Vec<f64> {
     let n = x.len();
 
     // Three candidate spans: tweaks (0.05n, 0.2n, 0.5n)
@@ -504,7 +492,8 @@ mod tests {
 
         assert_eq!(result.n, 100);
         // Smoothed curve should have less variation than noisy input
-        let smooth_var: f64 = result.y.iter().map(|&yi| yi * yi).sum::<f64>() / result.y.len() as f64;
+        let smooth_var: f64 =
+            result.y.iter().map(|&yi| yi * yi).sum::<f64>() / result.y.len() as f64;
 
         // Both should be similar magnitude for sinusoidal data
         assert!(smooth_var > 0.1); // Not completely flat
@@ -535,7 +524,10 @@ mod tests {
     #[test]
     fn test_supsmu_periodic() {
         let x: Vec<f64> = (0..40).map(|i| i as f64 / 40.0).collect();
-        let y: Vec<f64> = x.iter().map(|&xi| (2.0 * std::f64::consts::PI * xi).sin()).collect();
+        let y: Vec<f64> = x
+            .iter()
+            .map(|&xi| (2.0 * std::f64::consts::PI * xi).sin())
+            .collect();
 
         let result = supsmu(&x, &y, None, None, true, 0.0).unwrap();
 
@@ -605,5 +597,186 @@ mod tests {
         for i in 10..90 {
             assert_relative_eq!(smoothed[i], y[i], epsilon = 0.5);
         }
+    }
+
+    // ════════════════════════════════════════════════════════════════════════════
+    // VALIDATION TESTS - Comparing against R reference implementations
+    // ════════════════════════════════════════════════════════════════════════════
+
+    /// Validation test: SuperSmoother vs R's stats::supsmu()
+    ///
+    /// R code (from validation/scripts/validate_regression_diag.R):
+    /// ```r
+    /// set.seed(42)
+    /// n <- 100
+    /// x_ss <- sort(runif(n, 0, 2*pi))
+    /// y_ss <- sin(x_ss) + rnorm(n, 0, 0.3)
+    /// ss_result <- supsmu(x_ss, y_ss)
+    /// ```
+    ///
+    /// Note: SuperSmoother results may vary slightly between implementations
+    /// due to differences in span selection and kernel smoothing algorithms.
+    #[test]
+    fn test_validate_supsmu_sine_wave() {
+        // R reference data (first 20 points from validation/expected/supsmu_test.csv)
+        // These are the x values (sorted) and corresponding smoothed y values from R
+        let r_x = vec![
+            0.00150103148398631,
+            0.00986808318241696,
+            0.0248081443073594,
+            0.0460818039263873,
+            0.0495412745643682,
+            0.235186115714306,
+            0.244645188945531,
+            0.270106571525744,
+            0.517970453811343,
+            0.537916468460057,
+            0.565364258262104,
+            0.738194864527724,
+            0.846135185132482,
+            0.871541687803869,
+            0.882656180115658,
+            0.992147683961996,
+            1.07608552435568,
+            1.19049984701718,
+            1.24036576212128,
+            1.30475980695171,
+        ];
+
+        let r_y_smoothed = vec![
+            0.0883661452085938,
+            0.0945472103290684,
+            0.105584012065869,
+            0.121299688291544,
+            0.123082174979506,
+            0.258431856651885,
+            0.266792865956714,
+            0.286158010782248,
+            0.473148567612824,
+            0.506980139431968,
+            0.527147214878507,
+            0.686015260619008,
+            0.793921464090256,
+            0.811226804925394,
+            0.819648526750607,
+            0.89817317674388,
+            0.928349595033359,
+            0.974034466498514,
+            0.984963099089158,
+            0.985943088180877,
+        ];
+
+        let r_y_original = vec![
+            0.0980786104815091,
+            -0.225283759238369,
+            0.497523855652563,
+            0.238935288003943,
+            0.0764492058598072,
+            0.31598920586739,
+            0.445998738897307,
+            0.293784011682554,
+            -0.402809188340203,
+            0.597812699957159,
+            0.425553036037293,
+            0.72852294743323,
+            0.923271206171999,
+            1.18524319771417,
+            0.554240928373835,
+            1.22796525161796,
+            0.980860486956562,
+            1.24010645395416,
+            1.22212130484766,
+            1.18108395720165,
+        ];
+
+        // Run our implementation on the same data
+        let result = supsmu(&r_x, &r_y_original, None, None, false, 0.0).unwrap();
+
+        // SuperSmoother is an adaptive algorithm with CV-based span selection
+        // Results may differ from R due to implementation details, but:
+        // 1. The output should be smooth (less variance than input)
+        // 2. The trend should follow sin(x)
+
+        // Basic structure check
+        assert_eq!(result.n, r_x.len(), "Should have same number of points");
+
+        // Check that smoothed values are reasonable (between -1.5 and 1.5 for sin)
+        for &y in &result.y {
+            assert!(
+                y > -1.5 && y < 1.5,
+                "Smoothed values should be in reasonable range for sin(x)"
+            );
+        }
+
+        // Check that output is smoother than input (lower variance in differences)
+        let orig_diff_var: f64 = r_y_original
+            .windows(2)
+            .map(|w| (w[1] - w[0]).powi(2))
+            .sum::<f64>()
+            / (r_y_original.len() - 1) as f64;
+
+        let smooth_diff_var: f64 = result
+            .y
+            .windows(2)
+            .map(|w| (w[1] - w[0]).powi(2))
+            .sum::<f64>()
+            / (result.y.len() - 1) as f64;
+
+        assert!(
+            smooth_diff_var < orig_diff_var,
+            "Smoothed data should have lower variance in differences: smooth={:.4}, orig={:.4}",
+            smooth_diff_var,
+            orig_diff_var
+        );
+
+        // Check correlation with R's output (should be highly correlated)
+        // Compute Pearson correlation between our output and R's smoothed output
+        let mean_rust: f64 = result.y.iter().sum::<f64>() / result.y.len() as f64;
+        let mean_r: f64 = r_y_smoothed.iter().sum::<f64>() / r_y_smoothed.len() as f64;
+
+        let cov: f64 = result
+            .y
+            .iter()
+            .zip(r_y_smoothed.iter())
+            .map(|(r, s)| (r - mean_rust) * (s - mean_r))
+            .sum::<f64>();
+
+        let var_rust: f64 = result.y.iter().map(|r| (r - mean_rust).powi(2)).sum();
+        let var_r: f64 = r_y_smoothed.iter().map(|s| (s - mean_r).powi(2)).sum();
+
+        let correlation = cov / (var_rust.sqrt() * var_r.sqrt());
+
+        // SuperSmoother implementations may vary, but correlation should be high
+        assert!(
+            correlation > 0.9,
+            "Correlation with R's supsmu output should be high: got {:.4}",
+            correlation
+        );
+    }
+
+    /// Validation test: SuperSmoother with fixed span
+    #[test]
+    fn test_validate_supsmu_fixed_span() {
+        // Simple data: noisy linear relationship
+        let x: Vec<f64> = (0..50).map(|i| i as f64 / 50.0).collect();
+        let y: Vec<f64> = x
+            .iter()
+            .enumerate()
+            .map(|(i, &xi)| xi + 0.1 * ((i as f64).sin()))
+            .collect();
+
+        // Fixed span = 0.3
+        let result = supsmu(&x, &y, None, Some(0.3), false, 0.0).unwrap();
+
+        assert_eq!(result.n, 50);
+
+        // With fixed span, output should follow the trend
+        // Check that smoothed values are monotonically increasing (roughly)
+        let increases: usize = result.y.windows(2).filter(|w| w[1] >= w[0] - 0.01).count();
+
+        assert!(
+            increases > 40,
+            "For linear data, most smoothed values should be increasing"
+        );
     }
 }

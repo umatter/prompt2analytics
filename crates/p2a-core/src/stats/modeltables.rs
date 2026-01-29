@@ -52,8 +52,8 @@
 //!
 //! R equivalent: `stats::model.tables()`
 
-use serde::{Deserialize, Serialize};
 use crate::stats::AnovaResult;
+use serde::{Deserialize, Serialize};
 
 /// Type of table to compute.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -181,12 +181,7 @@ pub fn model_tables(
     let se = if compute_se {
         // SE for group means: sqrt(MSE / n_i)
         // SE for effects: same as for means in one-way ANOVA
-        Some(
-            group_ns
-                .iter()
-                .map(|&n| (mse / n as f64).sqrt())
-                .collect(),
-        )
+        Some(group_ns.iter().map(|&n| (mse / n as f64).sqrt()).collect())
     } else {
         None
     };
@@ -337,9 +332,12 @@ pub fn model_tables_two_way(
 
     // Compute values based on table type
     let (factor_a_values, factor_b_values, cell_values, interaction) = match table_type {
-        TableType::Means => {
-            (factor_a_means.clone(), factor_b_means.clone(), Some(cell_means.clone()), None)
-        }
+        TableType::Means => (
+            factor_a_means.clone(),
+            factor_b_means.clone(),
+            Some(cell_means.clone()),
+            None,
+        ),
         TableType::Effects => {
             // Main effects: deviation from grand mean
             let a_effects: Vec<f64> = factor_a_means.iter().map(|m| m - grand_mean).collect();
@@ -360,7 +358,12 @@ pub fn model_tables_two_way(
                 })
                 .collect();
 
-            (a_effects, b_effects, Some(cell_effects), Some(interaction_effects))
+            (
+                a_effects,
+                b_effects,
+                Some(cell_effects),
+                Some(interaction_effects),
+            )
         }
     };
 
@@ -368,19 +371,37 @@ pub fn model_tables_two_way(
     let se = if compute_se && mse > 0.0 {
         let factor_a_se: Vec<f64> = factor_a_n
             .iter()
-            .map(|&n| if n > 0 { (mse / n as f64).sqrt() } else { f64::NAN })
+            .map(|&n| {
+                if n > 0 {
+                    (mse / n as f64).sqrt()
+                } else {
+                    f64::NAN
+                }
+            })
             .collect();
 
         let factor_b_se: Vec<f64> = factor_b_n
             .iter()
-            .map(|&n| if n > 0 { (mse / n as f64).sqrt() } else { f64::NAN })
+            .map(|&n| {
+                if n > 0 {
+                    (mse / n as f64).sqrt()
+                } else {
+                    f64::NAN
+                }
+            })
             .collect();
 
         let cell_se: Vec<Vec<f64>> = cell_n
             .iter()
             .map(|row| {
                 row.iter()
-                    .map(|&n| if n > 0 { (mse / n as f64).sqrt() } else { f64::NAN })
+                    .map(|&n| {
+                        if n > 0 {
+                            (mse / n as f64).sqrt()
+                        } else {
+                            f64::NAN
+                        }
+                    })
                     .collect()
             })
             .collect();
@@ -524,7 +545,7 @@ mod tests {
     fn test_model_tables_two_way() {
         // 2x2 factorial design
         let data = vec![
-            vec![vec![1.0, 2.0, 3.0], vec![4.0, 5.0, 6.0]],  // Factor A level 1
+            vec![vec![1.0, 2.0, 3.0], vec![4.0, 5.0, 6.0]], // Factor A level 1
             vec![vec![7.0, 8.0, 9.0], vec![10.0, 11.0, 12.0]], // Factor A level 2
         ];
         let factor_a_names = vec!["A1".to_string(), "A2".to_string()];
@@ -536,7 +557,8 @@ mod tests {
             &factor_b_names,
             TableType::Means,
             true,
-        ).unwrap();
+        )
+        .unwrap();
 
         assert_eq!(result.table_type, "means");
         assert_eq!(result.factor_a_names.len(), 2);
@@ -568,7 +590,8 @@ mod tests {
             &factor_b_names,
             TableType::Effects,
             true,
-        ).unwrap();
+        )
+        .unwrap();
 
         assert_eq!(result.table_type, "effects");
 

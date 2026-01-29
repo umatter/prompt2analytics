@@ -25,7 +25,7 @@
 
 use crate::errors::{EconError, EconResult};
 use serde::{Deserialize, Serialize};
-use statrs::distribution::{ContinuousCDF, DiscreteCDF, Binomial, Poisson};
+use statrs::distribution::{Binomial, ContinuousCDF, DiscreteCDF, Poisson};
 
 /// Alternative hypothesis for the Poisson test.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
@@ -68,12 +68,21 @@ impl std::fmt::Display for PoissonTestResult {
         writeln!(f, "{}", self.method)?;
         writeln!(f, "{}", "=".repeat(self.method.len()))?;
         writeln!(f)?;
-        writeln!(f, "Statistic: {:.0}, Expected: {:.4}", self.statistic, self.parameter)?;
+        writeln!(
+            f,
+            "Statistic: {:.0}, Expected: {:.4}",
+            self.statistic, self.parameter
+        )?;
         writeln!(f, "p-value: {:.6}", self.p_value)?;
         writeln!(f)?;
         writeln!(f, "Estimate: {:.4}", self.estimate)?;
-        writeln!(f, "{:.0}% CI: ({:.4}, {:.4})",
-            self.conf_level * 100.0, self.conf_int.0, self.conf_int.1)?;
+        writeln!(
+            f,
+            "{:.0}% CI: ({:.4}, {:.4})",
+            self.conf_level * 100.0,
+            self.conf_int.0,
+            self.conf_int.1
+        )?;
         writeln!(f)?;
         writeln!(f, "H₀: rate = {:.4}", self.null_value)?;
         Ok(())
@@ -127,7 +136,11 @@ pub fn poisson_test(
 
     if t.len() != x.len() {
         return Err(EconError::InvalidSpecification {
-            message: format!("x and T must have the same length, got {} and {}", x.len(), t.len()),
+            message: format!(
+                "x and T must have the same length, got {} and {}",
+                x.len(),
+                t.len()
+            ),
         });
     }
 
@@ -180,11 +193,7 @@ fn poisson_test_one_sample(
         }
         PoissonAlternative::Greater => {
             // P(X >= x) = 1 - P(X < x) = 1 - P(X <= x-1)
-            if x == 0 {
-                1.0
-            } else {
-                1.0 - pois.cdf(x - 1)
-            }
+            if x == 0 { 1.0 } else { 1.0 - pois.cdf(x - 1) }
         }
         PoissonAlternative::TwoSided => {
             // Two-sided: 2 * min(P(X <= x), P(X >= x))
@@ -237,7 +246,7 @@ fn poisson_test_two_sample(
 
     // P-value from binomial distribution
     let p_value = if n == 0 {
-        1.0  // No events, no evidence
+        1.0 // No events, no evidence
     } else {
         let binom = Binomial::new(p, n).map_err(|_| EconError::InvalidSpecification {
             message: format!("Invalid Binomial parameters: p={}, n={}", p, n),
@@ -258,7 +267,11 @@ fn poisson_test_two_sample(
             }
             PoissonAlternative::TwoSided => {
                 let p_left = binom.cdf(x1);
-                let p_right = if x1 == 0 { 1.0 } else { 1.0 - binom.cdf(x1 - 1) };
+                let p_right = if x1 == 0 {
+                    1.0
+                } else {
+                    1.0 - binom.cdf(x1 - 1)
+                };
                 2.0 * p_left.min(p_right).min(0.5)
             }
         }
@@ -267,7 +280,11 @@ fn poisson_test_two_sample(
     // Rate ratio estimate
     let rate1 = x1 as f64 / t1;
     let rate2 = x2 as f64 / t2;
-    let estimate = if rate2 > 0.0 { rate1 / rate2 } else { f64::INFINITY };
+    let estimate = if rate2 > 0.0 {
+        rate1 / rate2
+    } else {
+        f64::INFINITY
+    };
 
     // Confidence interval for rate ratio using profile likelihood
     let conf_int = rate_ratio_ci(x1, x2, t1, t2, conf_level);
@@ -361,7 +378,11 @@ fn find_rate_ratio_bound(x1: u64, x2: u64, t1: f64, t2: f64, alpha: f64, find_lo
             if find_lower {
                 // For lower bound: we want P(X₁ >= x₁ | H₀)
                 // = 1 - P(X₁ <= x₁ - 1) = 1 - F(x₁ - 1)
-                if x1 == 0 { 1.0 } else { 1.0 - binom.cdf(x1 - 1) }
+                if x1 == 0 {
+                    1.0
+                } else {
+                    1.0 - binom.cdf(x1 - 1)
+                }
             } else {
                 // For upper bound: we want P(X₁ <= x₁ | H₀) = F(x₁)
                 binom.cdf(x1)
@@ -416,12 +437,20 @@ fn find_rate_ratio_bound(x1: u64, x2: u64, t1: f64, t2: f64, alpha: f64, find_lo
             // For lower bound: P increases with r
             // If P(mid) > alpha, we need smaller r: hi = mid
             // If P(mid) < alpha, we need larger r: lo = mid
-            if p > alpha { hi = mid; } else { lo = mid; }
+            if p > alpha {
+                hi = mid;
+            } else {
+                lo = mid;
+            }
         } else {
             // For upper bound: P decreases with r
             // If P(mid) > alpha, we need larger r: lo = mid
             // If P(mid) < alpha, we need smaller r: hi = mid
-            if p > alpha { lo = mid; } else { hi = mid; }
+            if p > alpha {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
         }
 
         // Convergence check
@@ -440,16 +469,20 @@ mod tests {
     #[test]
     fn test_poisson_one_sample_basic() {
         // 137 events in 24.2 time units
-        let result = poisson_test(&[137], &[24.19893], 1.0, PoissonAlternative::TwoSided, 0.95).unwrap();
+        let result =
+            poisson_test(&[137], &[24.19893], 1.0, PoissonAlternative::TwoSided, 0.95).unwrap();
 
         println!("One-sample: x={}, t={:.4}", 137, 24.19893);
         println!("Rate estimate: {:.4}", result.estimate);
         println!("Expected under H0: {:.4}", result.parameter);
         println!("p-value: {:.6}", result.p_value);
-        println!("95% CI: ({:.4}, {:.4})", result.conf_int.0, result.conf_int.1);
+        println!(
+            "95% CI: ({:.4}, {:.4})",
+            result.conf_int.0, result.conf_int.1
+        );
 
         assert_eq!(result.n_samples, 1);
-        assert!((result.estimate - 137.0/24.19893).abs() < 0.01);
+        assert!((result.estimate - 137.0 / 24.19893).abs() < 0.01);
         // Rate should be significantly different from 1.0
         assert!(result.p_value < 0.001);
     }
@@ -457,12 +490,22 @@ mod tests {
     #[test]
     fn test_poisson_two_sample_basic() {
         // Two-sample comparison
-        let result = poisson_test(&[11, 21], &[800.0, 3011.0], 1.0, PoissonAlternative::TwoSided, 0.95).unwrap();
+        let result = poisson_test(
+            &[11, 21],
+            &[800.0, 3011.0],
+            1.0,
+            PoissonAlternative::TwoSided,
+            0.95,
+        )
+        .unwrap();
 
         println!("Two-sample: x1=11, x2=21, t1=800, t2=3011");
         println!("Rate ratio estimate: {:.4}", result.estimate);
         println!("p-value: {:.6}", result.p_value);
-        println!("95% CI: ({:.4}, {:.4})", result.conf_int.0, result.conf_int.1);
+        println!(
+            "95% CI: ({:.4}, {:.4})",
+            result.conf_int.0, result.conf_int.1
+        );
 
         assert_eq!(result.n_samples, 2);
         assert_eq!(result.method, "Comparison of Poisson rates");
@@ -483,7 +526,7 @@ mod tests {
     fn test_poisson_alternatives() {
         let x = 15u64;
         let t = 10.0;
-        let r = 1.0;  // H0: rate = 1.0
+        let r = 1.0; // H0: rate = 1.0
 
         let two_sided = poisson_test(&[x], &[t], r, PoissonAlternative::TwoSided, 0.95).unwrap();
         let greater = poisson_test(&[x], &[t], r, PoissonAlternative::Greater, 0.95).unwrap();
@@ -491,8 +534,10 @@ mod tests {
 
         // Rate estimate = 1.5, which is greater than H0 rate = 1.0
         // So "greater" alternative should have smaller p-value than "less"
-        println!("Two-sided p: {:.4}, Greater p: {:.4}, Less p: {:.4}",
-            two_sided.p_value, greater.p_value, less.p_value);
+        println!(
+            "Two-sided p: {:.4}, Greater p: {:.4}, Less p: {:.4}",
+            two_sided.p_value, greater.p_value, less.p_value
+        );
 
         assert!(greater.p_value < less.p_value);
     }
@@ -505,7 +550,8 @@ mod tests {
         assert!(result.conf_int.0 == 0.0);
 
         // Large count
-        let result = poisson_test(&[1000], &[100.0], 1.0, PoissonAlternative::TwoSided, 0.95).unwrap();
+        let result =
+            poisson_test(&[1000], &[100.0], 1.0, PoissonAlternative::TwoSided, 0.95).unwrap();
         assert!((result.estimate - 10.0).abs() < 0.1);
     }
 
@@ -528,27 +574,43 @@ mod tests {
         // event rate
         //   5.661765
 
-        let result = poisson_test(&[137], &[24.19893], 1.0, PoissonAlternative::TwoSided, 0.95).unwrap();
+        let result =
+            poisson_test(&[137], &[24.19893], 1.0, PoissonAlternative::TwoSided, 0.95).unwrap();
 
         println!("R validation (one-sample):");
         println!("Rate estimate: {:.6}", result.estimate);
         println!("p-value: {:.10}", result.p_value);
-        println!("95% CI: ({:.6}, {:.6})", result.conf_int.0, result.conf_int.1);
+        println!(
+            "95% CI: ({:.6}, {:.6})",
+            result.conf_int.0, result.conf_int.1
+        );
 
         // R gives: rate = 5.661765
-        assert!((result.estimate - 5.661765).abs() < 0.001,
-            "Rate estimate mismatch: got {}", result.estimate);
+        assert!(
+            (result.estimate - 5.661765).abs() < 0.001,
+            "Rate estimate mismatch: got {}",
+            result.estimate
+        );
 
         // R gives: p-value < 2.2e-16
-        assert!(result.p_value < 1e-10,
-            "p-value should be very small, got {}", result.p_value);
+        assert!(
+            result.p_value < 1e-10,
+            "p-value should be very small, got {}",
+            result.p_value
+        );
 
         // R gives: 95% CI (4.739093, 6.665835)
         // Note: Small differences in chi-squared quantile computation lead to ~0.02 differences
-        assert!((result.conf_int.0 - 4.739093).abs() < 0.02,
-            "CI lower mismatch: got {}", result.conf_int.0);
-        assert!((result.conf_int.1 - 6.665835).abs() < 0.02,
-            "CI upper mismatch: got {}", result.conf_int.1);
+        assert!(
+            (result.conf_int.0 - 4.739093).abs() < 0.02,
+            "CI lower mismatch: got {}",
+            result.conf_int.0
+        );
+        assert!(
+            (result.conf_int.1 - 6.665835).abs() < 0.02,
+            "CI upper mismatch: got {}",
+            result.conf_int.1
+        );
     }
 
     #[test]
@@ -565,35 +627,59 @@ mod tests {
         // - Expected X₁ under H₀ = n × p = 32 × 0.2099 ≈ 6.72
         // - P-value computed from Binomial(32, 0.2099)
 
-        let result = poisson_test(&[11, 21], &[800.0, 3011.0], 1.0, PoissonAlternative::TwoSided, 0.95).unwrap();
+        let result = poisson_test(
+            &[11, 21],
+            &[800.0, 3011.0],
+            1.0,
+            PoissonAlternative::TwoSided,
+            0.95,
+        )
+        .unwrap();
 
         println!("R validation (two-sample):");
         println!("Rate ratio: {:.6}", result.estimate);
         println!("Expected count1: {:.4}", result.parameter);
         println!("p-value: {:.4}", result.p_value);
-        println!("95% CI: ({:.6}, {:.6})", result.conf_int.0, result.conf_int.1);
+        println!(
+            "95% CI: ({:.6}, {:.6})",
+            result.conf_int.0, result.conf_int.1
+        );
 
         // Rate ratio = (11/800) / (21/3011) = 0.01375 / 0.00697 ≈ 1.9715
-        assert!((result.estimate - 1.9715).abs() < 0.01,
-            "Rate ratio mismatch: got {}", result.estimate);
+        assert!(
+            (result.estimate - 1.9715).abs() < 0.01,
+            "Rate ratio mismatch: got {}",
+            result.estimate
+        );
 
         // Expected count = 32 * (800/3811) ≈ 6.717
-        assert!((result.parameter - 6.717).abs() < 0.1,
-            "Expected count mismatch: got {}", result.parameter);
+        assert!(
+            (result.parameter - 6.717).abs() < 0.1,
+            "Expected count mismatch: got {}",
+            result.parameter
+        );
 
         // Two-sample test: significant evidence that rates differ
         // CI should not include 1.0 if p < 0.05, or include 1.0 if p > 0.05
-        assert!(result.p_value > 0.05,
-            "p-value indicates non-significant result, got {}", result.p_value);
+        assert!(
+            result.p_value > 0.05,
+            "p-value indicates non-significant result, got {}",
+            result.p_value
+        );
 
         // CI should include 1.0 since p > 0.05
-        assert!(result.conf_int.0 < 1.0 && result.conf_int.1 > 1.0,
-            "CI should include 1.0: ({:.4}, {:.4})", result.conf_int.0, result.conf_int.1);
+        assert!(
+            result.conf_int.0 < 1.0 && result.conf_int.1 > 1.0,
+            "CI should include 1.0: ({:.4}, {:.4})",
+            result.conf_int.0,
+            result.conf_int.1
+        );
     }
 
     #[test]
     fn test_poisson_display() {
-        let result = poisson_test(&[137], &[24.19893], 1.0, PoissonAlternative::TwoSided, 0.95).unwrap();
+        let result =
+            poisson_test(&[137], &[24.19893], 1.0, PoissonAlternative::TwoSided, 0.95).unwrap();
 
         let display = format!("{}", result);
         assert!(display.contains("Exact Poisson test"));

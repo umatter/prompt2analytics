@@ -1,10 +1,10 @@
 // Quick comparison test
-use p2a_core::forecasting::{holt_winters, HoltWintersConfig, SeasonalType};
+use p2a_core::forecasting::{HoltWintersConfig, SeasonalType, holt_winters};
 
 fn main() {
     let y = vec![
-        112.0, 118.0, 132.0, 129.0, 121.0, 135.0, 148.0, 148.0, 136.0, 119.0, 104.0, 118.0,
-        115.0, 126.0, 141.0, 135.0, 125.0, 149.0, 170.0, 170.0, 158.0, 133.0, 114.0, 140.0,
+        112.0, 118.0, 132.0, 129.0, 121.0, 135.0, 148.0, 148.0, 136.0, 119.0, 104.0, 118.0, 115.0,
+        126.0, 141.0, 135.0, 125.0, 149.0, 170.0, 170.0, 158.0, 133.0, 114.0, 140.0,
     ];
 
     // Test 1: Fixed parameters

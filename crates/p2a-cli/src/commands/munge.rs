@@ -1,18 +1,15 @@
 //! Data munging commands for filtering, joining, reshaping, and cleaning data.
 
 use clap::{Subcommand, ValueEnum};
-use p2a_core::data::munging::{
-    filter, select, drop_columns, rename, sort, mutate, sample,
-    drop_na, fill_na, deduplicate, FillStrategy,
-    left_join, right_join, inner_join, full_join, concat,
-    group_by, value_counts, AggFn, AggSpec,
-    pivot, melt,
-    lag, lead, diff, pct_change, standardize, normalize, bin, one_hot_encode,
-    BinStrategy, MutateExpr, ArithOp,
-};
 use p2a_core::Dataset;
+use p2a_core::data::munging::{
+    AggFn, AggSpec, ArithOp, BinStrategy, FillStrategy, MutateExpr, bin, concat, deduplicate, diff,
+    drop_columns, drop_na, fill_na, filter, full_join, group_by, inner_join, lag, lead, left_join,
+    melt, mutate, normalize, one_hot_encode, pct_change, pivot, rename, right_join, sample, select,
+    sort, standardize, value_counts,
+};
 
-use crate::output::{print_error, print_message, OutputFormat};
+use crate::output::{OutputFormat, print_error, print_message};
 use crate::session::SessionManager;
 
 #[derive(Clone, ValueEnum)]
@@ -472,72 +469,239 @@ pub fn execute(
     session: Option<&mut SessionManager>,
 ) -> anyhow::Result<()> {
     match cmd {
-        MungeCommands::Filter { dataset, column, op, value, name } => {
-            execute_filter(dataset, column, op, value, name.as_deref(), format, session)
-        }
-        MungeCommands::Select { dataset, columns, name } => {
-            execute_select(dataset, columns, name.as_deref(), format, session)
-        }
-        MungeCommands::Drop { dataset, columns, name } => {
-            execute_drop(dataset, columns, name.as_deref(), format, session)
-        }
-        MungeCommands::Rename { dataset, renames, name } => {
-            execute_rename(dataset, renames, name.as_deref(), format, session)
-        }
-        MungeCommands::Sort { dataset, by, desc, name } => {
-            execute_sort(dataset, by, *desc, name.as_deref(), format, session)
-        }
-        MungeCommands::Mutate { dataset, new_col, expr, name } => {
-            execute_mutate(dataset, new_col, expr, name.as_deref(), format, session)
-        }
-        MungeCommands::Sample { dataset, n, replace, seed, name } => {
-            execute_sample(dataset, *n, *replace, *seed, name.as_deref(), format, session)
-        }
-        MungeCommands::Join { left, right, on, right_on, join_type, suffix, name } => {
-            execute_join(left, right, on, right_on.as_ref(), join_type, suffix, name.as_deref(), format, session)
-        }
+        MungeCommands::Filter {
+            dataset,
+            column,
+            op,
+            value,
+            name,
+        } => execute_filter(dataset, column, op, value, name.as_deref(), format, session),
+        MungeCommands::Select {
+            dataset,
+            columns,
+            name,
+        } => execute_select(dataset, columns, name.as_deref(), format, session),
+        MungeCommands::Drop {
+            dataset,
+            columns,
+            name,
+        } => execute_drop(dataset, columns, name.as_deref(), format, session),
+        MungeCommands::Rename {
+            dataset,
+            renames,
+            name,
+        } => execute_rename(dataset, renames, name.as_deref(), format, session),
+        MungeCommands::Sort {
+            dataset,
+            by,
+            desc,
+            name,
+        } => execute_sort(dataset, by, *desc, name.as_deref(), format, session),
+        MungeCommands::Mutate {
+            dataset,
+            new_col,
+            expr,
+            name,
+        } => execute_mutate(dataset, new_col, expr, name.as_deref(), format, session),
+        MungeCommands::Sample {
+            dataset,
+            n,
+            replace,
+            seed,
+            name,
+        } => execute_sample(
+            dataset,
+            *n,
+            *replace,
+            *seed,
+            name.as_deref(),
+            format,
+            session,
+        ),
+        MungeCommands::Join {
+            left,
+            right,
+            on,
+            right_on,
+            join_type,
+            suffix,
+            name,
+        } => execute_join(
+            left,
+            right,
+            on,
+            right_on.as_ref(),
+            join_type,
+            suffix,
+            name.as_deref(),
+            format,
+            session,
+        ),
         MungeCommands::Concat { datasets, name } => {
             execute_concat(datasets, name.as_deref(), format, session)
         }
-        MungeCommands::GroupBy { dataset, by, aggs, name } => {
-            execute_group_by(dataset, by, aggs, name.as_deref(), format, session)
-        }
-        MungeCommands::ValueCounts { dataset, column, name } => {
-            execute_value_counts(dataset, column, name.as_deref(), format, session)
-        }
-        MungeCommands::Pivot { dataset, index, on, values, name } => {
-            execute_pivot(dataset, index, on, values, name.as_deref(), format, session)
-        }
-        MungeCommands::Melt { dataset, id_vars, value_vars, var_name, val_name, name } => {
-            execute_melt(dataset, id_vars, value_vars, var_name, val_name, name.as_deref(), format, session)
-        }
-        MungeCommands::DropNa { dataset, columns, how, name } => {
-            execute_drop_na(dataset, columns.as_ref(), how, name.as_deref(), format, session)
-        }
-        MungeCommands::FillNa { dataset, method, columns, value, name } => {
-            execute_fill_na(dataset, method, columns.as_ref(), *value, name.as_deref(), format, session)
-        }
-        MungeCommands::Deduplicate { dataset, subset, keep, name } => {
-            execute_deduplicate(dataset, subset.as_ref(), keep, name.as_deref(), format, session)
-        }
-        MungeCommands::Lag { dataset, column, periods, group_by, name } => {
-            execute_lag(dataset, column, *periods, group_by.as_ref(), name.as_deref(), format, session)
-        }
-        MungeCommands::Lead { dataset, column, periods, group_by, name } => {
-            execute_lead(dataset, column, *periods, group_by.as_ref(), name.as_deref(), format, session)
-        }
-        MungeCommands::Diff { dataset, column, periods, pct, name } => {
-            execute_diff(dataset, column, *periods, *pct, name.as_deref(), format, session)
-        }
-        MungeCommands::Standardize { dataset, columns, normalize, name } => {
-            execute_standardize(dataset, columns, *normalize, name.as_deref(), format, session)
-        }
-        MungeCommands::Bin { dataset, column, method, n_bins, name } => {
-            execute_bin(dataset, column, method, *n_bins, name.as_deref(), format, session)
-        }
-        MungeCommands::OneHot { dataset, column, drop_first, name } => {
-            execute_one_hot(dataset, column, *drop_first, name.as_deref(), format, session)
-        }
+        MungeCommands::GroupBy {
+            dataset,
+            by,
+            aggs,
+            name,
+        } => execute_group_by(dataset, by, aggs, name.as_deref(), format, session),
+        MungeCommands::ValueCounts {
+            dataset,
+            column,
+            name,
+        } => execute_value_counts(dataset, column, name.as_deref(), format, session),
+        MungeCommands::Pivot {
+            dataset,
+            index,
+            on,
+            values,
+            name,
+        } => execute_pivot(dataset, index, on, values, name.as_deref(), format, session),
+        MungeCommands::Melt {
+            dataset,
+            id_vars,
+            value_vars,
+            var_name,
+            val_name,
+            name,
+        } => execute_melt(
+            dataset,
+            id_vars,
+            value_vars,
+            var_name,
+            val_name,
+            name.as_deref(),
+            format,
+            session,
+        ),
+        MungeCommands::DropNa {
+            dataset,
+            columns,
+            how,
+            name,
+        } => execute_drop_na(
+            dataset,
+            columns.as_ref(),
+            how,
+            name.as_deref(),
+            format,
+            session,
+        ),
+        MungeCommands::FillNa {
+            dataset,
+            method,
+            columns,
+            value,
+            name,
+        } => execute_fill_na(
+            dataset,
+            method,
+            columns.as_ref(),
+            *value,
+            name.as_deref(),
+            format,
+            session,
+        ),
+        MungeCommands::Deduplicate {
+            dataset,
+            subset,
+            keep,
+            name,
+        } => execute_deduplicate(
+            dataset,
+            subset.as_ref(),
+            keep,
+            name.as_deref(),
+            format,
+            session,
+        ),
+        MungeCommands::Lag {
+            dataset,
+            column,
+            periods,
+            group_by,
+            name,
+        } => execute_lag(
+            dataset,
+            column,
+            *periods,
+            group_by.as_ref(),
+            name.as_deref(),
+            format,
+            session,
+        ),
+        MungeCommands::Lead {
+            dataset,
+            column,
+            periods,
+            group_by,
+            name,
+        } => execute_lead(
+            dataset,
+            column,
+            *periods,
+            group_by.as_ref(),
+            name.as_deref(),
+            format,
+            session,
+        ),
+        MungeCommands::Diff {
+            dataset,
+            column,
+            periods,
+            pct,
+            name,
+        } => execute_diff(
+            dataset,
+            column,
+            *periods,
+            *pct,
+            name.as_deref(),
+            format,
+            session,
+        ),
+        MungeCommands::Standardize {
+            dataset,
+            columns,
+            normalize,
+            name,
+        } => execute_standardize(
+            dataset,
+            columns,
+            *normalize,
+            name.as_deref(),
+            format,
+            session,
+        ),
+        MungeCommands::Bin {
+            dataset,
+            column,
+            method,
+            n_bins,
+            name,
+        } => execute_bin(
+            dataset,
+            column,
+            method,
+            *n_bins,
+            name.as_deref(),
+            format,
+            session,
+        ),
+        MungeCommands::OneHot {
+            dataset,
+            column,
+            drop_first,
+            name,
+        } => execute_one_hot(
+            dataset,
+            column,
+            *drop_first,
+            name.as_deref(),
+            format,
+            session,
+        ),
     }
 }
 
@@ -553,7 +717,10 @@ macro_rules! get_dataset_clone {
                 }
             },
             None => {
-                print_error("No session active. Use --session <file> to enable dataset storage.", $format);
+                print_error(
+                    "No session active. Use --session <file> to enable dataset storage.",
+                    $format,
+                );
                 return Ok(());
             }
         }
@@ -580,7 +747,10 @@ fn store_result(
     }
 
     print_message(
-        &format!("Created dataset '{}' ({} rows x {} columns)", name, nrows, ncols),
+        &format!(
+            "Created dataset '{}' ({} rows x {} columns)",
+            name, nrows, ncols
+        ),
         format,
     );
 
@@ -661,7 +831,10 @@ fn execute_rename(
     for r in renames {
         let parts: Vec<&str> = r.split('=').collect();
         if parts.len() != 2 {
-            print_error(&format!("Invalid rename format '{}'. Use OLD=NEW", r), format);
+            print_error(
+                &format!("Invalid rename format '{}'. Use OLD=NEW", r),
+                format,
+            );
             return Ok(());
         }
         rename_map.push((parts[0], parts[1]));
@@ -718,12 +891,23 @@ fn execute_mutate(
     let mutate_expr = match parts[0] {
         "copy" if parts.len() == 2 => MutateExpr::Copy(parts[1].to_string()),
         "constant" if parts.len() == 2 => MutateExpr::Constant(parts[1].to_string()),
-        "add" if parts.len() == 3 => MutateExpr::Arithmetic(parts[1].to_string(), ArithOp::Add, parts[2].to_string()),
-        "sub" if parts.len() == 3 => MutateExpr::Arithmetic(parts[1].to_string(), ArithOp::Sub, parts[2].to_string()),
-        "mul" if parts.len() == 3 => MutateExpr::Arithmetic(parts[1].to_string(), ArithOp::Mul, parts[2].to_string()),
-        "div" if parts.len() == 3 => MutateExpr::Arithmetic(parts[1].to_string(), ArithOp::Div, parts[2].to_string()),
+        "add" if parts.len() == 3 => {
+            MutateExpr::Arithmetic(parts[1].to_string(), ArithOp::Add, parts[2].to_string())
+        }
+        "sub" if parts.len() == 3 => {
+            MutateExpr::Arithmetic(parts[1].to_string(), ArithOp::Sub, parts[2].to_string())
+        }
+        "mul" if parts.len() == 3 => {
+            MutateExpr::Arithmetic(parts[1].to_string(), ArithOp::Mul, parts[2].to_string())
+        }
+        "div" if parts.len() == 3 => {
+            MutateExpr::Arithmetic(parts[1].to_string(), ArithOp::Div, parts[2].to_string())
+        }
         _ => {
-            print_error("Invalid expression. Use: copy:COL, constant:VALUE, add:COL1:COL2, sub:COL1:COL2, mul:COL1:COL2, div:COL1:COL2", format);
+            print_error(
+                "Invalid expression. Use: copy:COL, constant:VALUE, add:COL1:COL2, sub:COL1:COL2, mul:COL1:COL2, div:COL1:COL2",
+                format,
+            );
             return Ok(());
         }
     };
@@ -786,7 +970,7 @@ fn execute_join(
 
     let on_cols: Vec<&str> = on.iter().map(|s| s.as_str()).collect();
     let right_on_cols: Option<Vec<&str>> = right_on.map(|v| v.iter().map(|s| s.as_str()).collect());
-    let right_on_ref: Option<&[&str]> = right_on_cols.as_ref().map(|v| v.as_slice());
+    let right_on_ref: Option<&[&str]> = right_on_cols.as_deref();
 
     let result = match join_type {
         JoinType::Left => left_join(&left_ds, &right_ds, &on_cols, right_on_ref, Some(suffix)),
@@ -855,7 +1039,10 @@ fn execute_group_by(
     for agg in aggs {
         let parts: Vec<&str> = agg.split(':').collect();
         if parts.len() != 2 {
-            print_error(&format!("Invalid aggregation format '{}'. Use COLUMN:FUNCTION", agg), format);
+            print_error(
+                &format!("Invalid aggregation format '{}'. Use COLUMN:FUNCTION", agg),
+                format,
+            );
             return Ok(());
         }
         let col = parts[0];
@@ -871,7 +1058,10 @@ fn execute_group_by(
             "last" => AggFn::Last,
             "median" => AggFn::Median,
             _ => {
-                print_error(&format!("Unknown aggregation function '{}'", parts[1]), format);
+                print_error(
+                    &format!("Unknown aggregation function '{}'", parts[1]),
+                    format,
+                );
                 return Ok(());
             }
         };
@@ -962,7 +1152,7 @@ fn execute_drop_na(
     let ds = get_dataset_clone!(dataset, session, format);
 
     let cols: Option<Vec<&str>> = columns.map(|v| v.iter().map(|s| s.as_str()).collect());
-    let cols_ref: Option<&[&str]> = cols.as_ref().map(|v| v.as_slice());
+    let cols_ref: Option<&[&str]> = cols.as_deref();
 
     match drop_na(&ds, cols_ref, how) {
         Ok(result) => store_result(result, output_name, dataset, "dropna", session, format),
@@ -985,7 +1175,7 @@ fn execute_fill_na(
     let ds = get_dataset_clone!(dataset, session, format);
 
     let cols: Option<Vec<&str>> = columns.map(|v| v.iter().map(|s| s.as_str()).collect());
-    let cols_ref: Option<&[&str]> = cols.as_ref().map(|v| v.as_slice());
+    let cols_ref: Option<&[&str]> = cols.as_deref();
 
     let strategy = match method {
         FillMethod::Mean => FillStrategy::Mean,
@@ -1019,7 +1209,7 @@ fn execute_deduplicate(
     let ds = get_dataset_clone!(dataset, session, format);
 
     let cols: Option<Vec<&str>> = subset.map(|v| v.iter().map(|s| s.as_str()).collect());
-    let cols_ref: Option<&[&str]> = cols.as_ref().map(|v| v.as_slice());
+    let cols_ref: Option<&[&str]> = cols.as_deref();
 
     match deduplicate(&ds, cols_ref, keep) {
         Ok(result) => store_result(result, output_name, dataset, "dedup", session, format),
@@ -1042,7 +1232,7 @@ fn execute_lag(
     let ds = get_dataset_clone!(dataset, session, format);
 
     let groups: Option<Vec<&str>> = group_by_cols.map(|v| v.iter().map(|s| s.as_str()).collect());
-    let groups_ref: Option<&[&str]> = groups.as_ref().map(|v| v.as_slice());
+    let groups_ref: Option<&[&str]> = groups.as_deref();
 
     match lag(&ds, column, periods, groups_ref) {
         Ok(result) => store_result(result, output_name, dataset, "lagged", session, format),
@@ -1065,7 +1255,7 @@ fn execute_lead(
     let ds = get_dataset_clone!(dataset, session, format);
 
     let groups: Option<Vec<&str>> = group_by_cols.map(|v| v.iter().map(|s| s.as_str()).collect());
-    let groups_ref: Option<&[&str]> = groups.as_ref().map(|v| v.as_slice());
+    let groups_ref: Option<&[&str]> = groups.as_deref();
 
     match lead(&ds, column, periods, groups_ref) {
         Ok(result) => store_result(result, output_name, dataset, "lead", session, format),
@@ -1094,7 +1284,14 @@ fn execute_diff(
     };
 
     match result {
-        Ok(ds) => store_result(ds, output_name, dataset, if pct { "pct_change" } else { "diff" }, session, format),
+        Ok(ds) => store_result(
+            ds,
+            output_name,
+            dataset,
+            if pct { "pct_change" } else { "diff" },
+            session,
+            format,
+        ),
         Err(e) => {
             print_error(&format!("Diff failed: {}", e), format);
             Ok(())
@@ -1121,7 +1318,18 @@ fn execute_standardize(
     };
 
     match result {
-        Ok(ds) => store_result(ds, output_name, dataset, if do_normalize { "normalized" } else { "standardized" }, session, format),
+        Ok(ds) => store_result(
+            ds,
+            output_name,
+            dataset,
+            if do_normalize {
+                "normalized"
+            } else {
+                "standardized"
+            },
+            session,
+            format,
+        ),
         Err(e) => {
             print_error(&format!("Standardize failed: {}", e), format);
             Ok(())

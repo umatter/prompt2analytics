@@ -2,14 +2,13 @@
 //!
 //! Run with: `cargo bench -p p2a-core -- forecasting`
 
-use criterion::{criterion_group, criterion_main, Criterion, BenchmarkId};
-use p2a_core::{
-    Dataset, run_arima, run_mstl, run_changepoint, run_holt_winters, CostFunction, SeasonalType,
-    ar, ArConfig, ArMethod, decompose, DecomposeConfig, DecomposeType,
-    struct_ts, StructTsConfig, StructTsType,
-    kalman_filter, kalman_smoother, kalman_forecast, StateSpaceModel,
-};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use ndarray::{Array1, Array2};
+use p2a_core::{
+    ArConfig, ArMethod, CostFunction, Dataset, DecomposeConfig, DecomposeType, SeasonalType,
+    StateSpaceModel, StructTsConfig, StructTsType, ar, decompose, kalman_filter, kalman_forecast,
+    kalman_smoother, run_arima, run_changepoint, run_holt_winters, run_mstl, struct_ts,
+};
 use polars::prelude::*;
 use rand::Rng;
 use rand::SeedableRng;
@@ -30,7 +29,8 @@ fn generate_time_series_dataset(n: usize, seed: u64) -> Dataset {
 
     let df = df! {
         "y" => y,
-    }.expect("Failed to create DataFrame");
+    }
+    .expect("Failed to create DataFrame");
 
     Dataset::new(df)
 }
@@ -52,7 +52,8 @@ fn generate_changepoint_dataset(n: usize, n_changes: usize, seed: u64) -> Datase
 
     let df = df! {
         "y" => y,
-    }.expect("Failed to create DataFrame");
+    }
+    .expect("Failed to create DataFrame");
 
     Dataset::new(df)
 }
@@ -64,9 +65,7 @@ fn arima_benchmark(c: &mut Criterion) {
         let dataset = generate_time_series_dataset(n, 42);
 
         group.bench_with_input(BenchmarkId::from_parameter(n), &dataset, |b, data| {
-            b.iter(|| {
-                run_arima(data, "y", 1, 1, 1)
-            });
+            b.iter(|| run_arima(data, "y", 1, 1, 1));
         });
     }
 
@@ -96,9 +95,7 @@ fn changepoint_benchmark(c: &mut Criterion) {
         let dataset = generate_changepoint_dataset(n, 3, 42);
 
         group.bench_with_input(BenchmarkId::from_parameter(n), &dataset, |b, data| {
-            b.iter(|| {
-                run_changepoint(data, "y", Some(1.0), Some(5), CostFunction::MeanChange)
-            });
+            b.iter(|| run_changepoint(data, "y", Some(1.0), Some(5), CostFunction::MeanChange));
         });
     }
 
@@ -125,7 +122,8 @@ fn generate_seasonal_dataset(n: usize, period: usize, seed: u64) -> Dataset {
 
     let df = df! {
         "y" => y,
-    }.expect("Failed to create DataFrame");
+    }
+    .expect("Failed to create DataFrame");
 
     Dataset::new(df)
 }
@@ -160,23 +158,19 @@ fn holt_winters_benchmark(c: &mut Criterion) {
     for n in [48, 120, 240, 480] {
         let dataset = generate_seasonal_dataset(n, 12, 42);
 
-        group.bench_with_input(
-            BenchmarkId::new("fixed_params", n),
-            &dataset,
-            |b, data| {
-                b.iter(|| {
-                    run_holt_winters(
-                        data,
-                        "y",
-                        12,
-                        SeasonalType::Multiplicative,
-                        Some(0.2), // fixed alpha
-                        Some(0.1), // fixed beta
-                        Some(0.3), // fixed gamma
-                    )
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("fixed_params", n), &dataset, |b, data| {
+            b.iter(|| {
+                run_holt_winters(
+                    data,
+                    "y",
+                    12,
+                    SeasonalType::Multiplicative,
+                    Some(0.2), // fixed alpha
+                    Some(0.1), // fixed beta
+                    Some(0.3), // fixed gamma
+                )
+            });
+        });
     }
 
     group.finish();
@@ -190,23 +184,19 @@ fn holt_winters_period_benchmark(c: &mut Criterion) {
         let n = period * 5; // 5 full cycles
         let dataset = generate_seasonal_dataset(n, period, 42);
 
-        group.bench_with_input(
-            BenchmarkId::from_parameter(period),
-            &dataset,
-            |b, data| {
-                b.iter(|| {
-                    run_holt_winters(
-                        data,
-                        "y",
-                        period,
-                        SeasonalType::Multiplicative,
-                        None,
-                        None,
-                        None,
-                    )
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::from_parameter(period), &dataset, |b, data| {
+            b.iter(|| {
+                run_holt_winters(
+                    data,
+                    "y",
+                    period,
+                    SeasonalType::Multiplicative,
+                    None,
+                    None,
+                    None,
+                )
+            });
+        });
     }
 
     group.finish();
@@ -234,18 +224,17 @@ fn ar_yule_walker_benchmark(c: &mut Criterion) {
     for n in [50, 100, 500, 1000] {
         let x = generate_ar2_series(n, 42);
 
-        group.bench_with_input(
-            BenchmarkId::from_parameter(n),
-            &x,
-            |b, data| {
-                b.iter(|| {
-                    ar(data, ArConfig {
+        group.bench_with_input(BenchmarkId::from_parameter(n), &x, |b, data| {
+            b.iter(|| {
+                ar(
+                    data,
+                    ArConfig {
                         method: ArMethod::YuleWalker,
                         ..Default::default()
-                    })
-                });
-            },
-        );
+                    },
+                )
+            });
+        });
     }
 
     group.finish();
@@ -257,18 +246,17 @@ fn ar_burg_benchmark(c: &mut Criterion) {
     for n in [50, 100, 500, 1000] {
         let x = generate_ar2_series(n, 42);
 
-        group.bench_with_input(
-            BenchmarkId::from_parameter(n),
-            &x,
-            |b, data| {
-                b.iter(|| {
-                    ar(data, ArConfig {
+        group.bench_with_input(BenchmarkId::from_parameter(n), &x, |b, data| {
+            b.iter(|| {
+                ar(
+                    data,
+                    ArConfig {
                         method: ArMethod::Burg,
                         ..Default::default()
-                    })
-                });
-            },
-        );
+                    },
+                )
+            });
+        });
     }
 
     group.finish();
@@ -280,18 +268,17 @@ fn ar_ols_benchmark(c: &mut Criterion) {
     for n in [50, 100, 500, 1000] {
         let x = generate_ar2_series(n, 42);
 
-        group.bench_with_input(
-            BenchmarkId::from_parameter(n),
-            &x,
-            |b, data| {
-                b.iter(|| {
-                    ar(data, ArConfig {
+        group.bench_with_input(BenchmarkId::from_parameter(n), &x, |b, data| {
+            b.iter(|| {
+                ar(
+                    data,
+                    ArConfig {
                         method: ArMethod::Ols,
                         ..Default::default()
-                    })
-                });
-            },
-        );
+                    },
+                )
+            });
+        });
     }
 
     group.finish();
@@ -301,12 +288,14 @@ fn ar_ols_benchmark(c: &mut Criterion) {
 fn generate_decompose_series(n: usize, period: usize, seed: u64) -> Vec<f64> {
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
 
-    (0..n).map(|t| {
-        let trend = 100.0 + 0.5 * t as f64;
-        let seasonal = 10.0 * (2.0 * std::f64::consts::PI * t as f64 / period as f64).sin();
-        let noise = (rng.r#gen::<f64>() - 0.5) * 2.0;
-        trend + seasonal + noise
-    }).collect()
+    (0..n)
+        .map(|t| {
+            let trend = 100.0 + 0.5 * t as f64;
+            let seasonal = 10.0 * (2.0 * std::f64::consts::PI * t as f64 / period as f64).sin();
+            let noise = (rng.r#gen::<f64>() - 0.5) * 2.0;
+            trend + seasonal + noise
+        })
+        .collect()
 }
 
 fn decompose_additive_benchmark(c: &mut Criterion) {
@@ -315,15 +304,9 @@ fn decompose_additive_benchmark(c: &mut Criterion) {
     for n in [48, 120, 240, 480, 1200] {
         let x = generate_decompose_series(n, 12, 42);
 
-        group.bench_with_input(
-            BenchmarkId::from_parameter(n),
-            &x,
-            |b, data| {
-                b.iter(|| {
-                    decompose(data, 12, DecomposeConfig::default())
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::from_parameter(n), &x, |b, data| {
+            b.iter(|| decompose(data, 12, DecomposeConfig::default()));
+        });
     }
 
     group.finish();
@@ -335,29 +318,32 @@ fn decompose_multiplicative_benchmark(c: &mut Criterion) {
     // Generate multiplicative data
     fn generate_mult_series(n: usize, period: usize, seed: u64) -> Vec<f64> {
         let mut rng = ChaCha8Rng::seed_from_u64(seed);
-        (0..n).map(|t| {
-            let trend = 100.0 + 0.5 * t as f64;
-            let seasonal = 1.0 + 0.2 * (2.0 * std::f64::consts::PI * t as f64 / period as f64).sin();
-            let noise = 1.0 + (rng.r#gen::<f64>() - 0.5) * 0.02;
-            trend * seasonal * noise
-        }).collect()
+        (0..n)
+            .map(|t| {
+                let trend = 100.0 + 0.5 * t as f64;
+                let seasonal =
+                    1.0 + 0.2 * (2.0 * std::f64::consts::PI * t as f64 / period as f64).sin();
+                let noise = 1.0 + (rng.r#gen::<f64>() - 0.5) * 0.02;
+                trend * seasonal * noise
+            })
+            .collect()
     }
 
     for n in [48, 120, 240, 480, 1200] {
         let x = generate_mult_series(n, 12, 42);
 
-        group.bench_with_input(
-            BenchmarkId::from_parameter(n),
-            &x,
-            |b, data| {
-                b.iter(|| {
-                    decompose(data, 12, DecomposeConfig {
+        group.bench_with_input(BenchmarkId::from_parameter(n), &x, |b, data| {
+            b.iter(|| {
+                decompose(
+                    data,
+                    12,
+                    DecomposeConfig {
                         decompose_type: DecomposeType::Multiplicative,
                         filter: None,
-                    })
-                });
-            },
-        );
+                    },
+                )
+            });
+        });
     }
 
     group.finish();
@@ -401,18 +387,17 @@ fn struct_ts_level_benchmark(c: &mut Criterion) {
     for n in [50, 100, 200, 500] {
         let y = generate_local_level_series(n, 42);
 
-        group.bench_with_input(
-            BenchmarkId::from_parameter(n),
-            &y,
-            |b, data| {
-                b.iter(|| {
-                    struct_ts(data, StructTsConfig {
+        group.bench_with_input(BenchmarkId::from_parameter(n), &y, |b, data| {
+            b.iter(|| {
+                struct_ts(
+                    data,
+                    StructTsConfig {
                         model_type: StructTsType::Level,
                         ..Default::default()
-                    })
-                });
-            },
-        );
+                    },
+                )
+            });
+        });
     }
 
     group.finish();
@@ -424,18 +409,17 @@ fn struct_ts_trend_benchmark(c: &mut Criterion) {
     for n in [50, 100, 200, 500] {
         let y = generate_local_level_series(n, 42);
 
-        group.bench_with_input(
-            BenchmarkId::from_parameter(n),
-            &y,
-            |b, data| {
-                b.iter(|| {
-                    struct_ts(data, StructTsConfig {
+        group.bench_with_input(BenchmarkId::from_parameter(n), &y, |b, data| {
+            b.iter(|| {
+                struct_ts(
+                    data,
+                    StructTsConfig {
                         model_type: StructTsType::Trend,
                         ..Default::default()
-                    })
-                });
-            },
-        );
+                    },
+                )
+            });
+        });
     }
 
     group.finish();
@@ -448,19 +432,18 @@ fn struct_ts_bsm_benchmark(c: &mut Criterion) {
     for n in [48, 96, 144, 240] {
         let y = generate_bsm_series(n, 12, 42);
 
-        group.bench_with_input(
-            BenchmarkId::from_parameter(n),
-            &y,
-            |b, data| {
-                b.iter(|| {
-                    struct_ts(data, StructTsConfig {
+        group.bench_with_input(BenchmarkId::from_parameter(n), &y, |b, data| {
+            b.iter(|| {
+                struct_ts(
+                    data,
+                    StructTsConfig {
                         model_type: StructTsType::BSM,
                         period: Some(12),
                         ..Default::default()
-                    })
-                });
-            },
-        );
+                    },
+                )
+            });
+        });
     }
 
     group.finish();
@@ -473,11 +456,12 @@ fn build_local_level_model() -> StateSpaceModel {
     // level_{t+1} = level_t + eta_t (state)
     StateSpaceModel::new(
         Array2::from_shape_vec((1, 1), vec![1.0]).unwrap(), // Transition T (1x1)
-        Array1::from_vec(vec![1.0]),                         // Observation Z (1x1)
+        Array1::from_vec(vec![1.0]),                        // Observation Z (1x1)
         Array2::from_shape_vec((1, 1), vec![1.0]).unwrap(), // Selection R (1x1)
         Array2::from_shape_vec((1, 1), vec![0.5]).unwrap(), // State cov Q (1x1)
-        1.0,                                                  // Observation var H
-    ).expect("Failed to create model")
+        1.0,                                                // Observation var H
+    )
+    .expect("Failed to create model")
 }
 
 fn kalman_filter_benchmark(c: &mut Criterion) {
@@ -490,15 +474,9 @@ fn kalman_filter_benchmark(c: &mut Criterion) {
     for n in [100, 500, 1000, 5000] {
         let y = generate_local_level_series(n, 42);
 
-        group.bench_with_input(
-            BenchmarkId::from_parameter(n),
-            &y,
-            |b, data| {
-                b.iter(|| {
-                    kalman_filter(data, &model, init_state.view(), init_cov.view())
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::from_parameter(n), &y, |b, data| {
+            b.iter(|| kalman_filter(data, &model, init_state.view(), init_cov.view()));
+        });
     }
 
     group.finish();
@@ -516,15 +494,9 @@ fn kalman_smoother_benchmark(c: &mut Criterion) {
         // Pre-compute filter result for smoother benchmark
         let filter_result = kalman_filter(&y, &model, init_state.view(), init_cov.view()).unwrap();
 
-        group.bench_with_input(
-            BenchmarkId::from_parameter(n),
-            &filter_result,
-            |b, data| {
-                b.iter(|| {
-                    kalman_smoother(data, &model)
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::from_parameter(n), &filter_result, |b, data| {
+            b.iter(|| kalman_smoother(data, &model));
+        });
     }
 
     group.finish();
@@ -543,15 +515,9 @@ fn kalman_forecast_benchmark(c: &mut Criterion) {
         // Pre-compute filter result for forecast benchmark
         let filter_result = kalman_filter(&y, &model, init_state.view(), init_cov.view()).unwrap();
 
-        group.bench_with_input(
-            BenchmarkId::from_parameter(n),
-            &filter_result,
-            |b, data| {
-                b.iter(|| {
-                    kalman_forecast(data, &model, horizon)
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::from_parameter(n), &filter_result, |b, data| {
+            b.iter(|| kalman_forecast(data, &model, horizon));
+        });
     }
 
     group.finish();

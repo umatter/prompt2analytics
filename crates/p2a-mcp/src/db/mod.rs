@@ -43,6 +43,6 @@ mod tests;
 
 pub use connection::{DbConnection, DbError, DbStats};
 pub use models::{
-    Conversation, ConversationWithMessages, DatasetMeta, DbSession, Message, MessageRole,
-    Settings, ToolCall, ToolCallStatus,
+    Conversation, ConversationWithMessages, DatasetMeta, DbSession, Message, MessageRole, Settings,
+    ToolCall, ToolCallStatus,
 };

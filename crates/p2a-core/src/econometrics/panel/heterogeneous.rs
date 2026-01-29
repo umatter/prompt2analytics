@@ -21,15 +21,15 @@
 //! R equivalent: `plm::pvcm()`, `plm::pmg()`
 
 use ndarray::{Array1, Array2};
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
 
 use crate::data::Dataset;
-use crate::errors::{EconResult, EconError};
-use crate::linalg::matrix_ops::{xtx, xty, safe_inverse};
+use crate::errors::{EconError, EconResult};
 use crate::linalg::design::DesignMatrix;
-use crate::traits::estimator::{SignificanceLevel, t_test_p_value, chi_squared_p_value};
+use crate::linalg::matrix_ops::{safe_inverse, xtx, xty};
+use crate::traits::estimator::{SignificanceLevel, chi_squared_p_value, t_test_p_value};
 
 /// Result from a variable coefficients model (pvcm).
 ///
@@ -85,26 +85,42 @@ impl fmt::Display for PvcmResult {
 
         if matches!(self.model_type, PvcmType::Random) {
             writeln!(f, "Overall GLS Coefficients (Swamy estimator):")?;
-            writeln!(f, "{:<20} {:>12} {:>12} {:>10} {:>10}",
-                     "Variable", "Coef", "Std Err", "t", "P>|t|")?;
+            writeln!(
+                f,
+                "{:<20} {:>12} {:>12} {:>10} {:>10}",
+                "Variable", "Coef", "Std Err", "t", "P>|t|"
+            )?;
             writeln!(f, "{}", "-".repeat(70))?;
 
             for i in 0..self.variables.len() {
-                writeln!(f, "{:<20} {:>12.4} {:>12.4} {:>10.2} {:>10.3}{}",
-                         self.variables[i],
-                         self.coefficients[i],
-                         self.std_errors[i],
-                         self.t_stats[i],
-                         self.p_values[i],
-                         self.significance[i].stars())?;
+                writeln!(
+                    f,
+                    "{:<20} {:>12.4} {:>12.4} {:>10.2} {:>10.3}{}",
+                    self.variables[i],
+                    self.coefficients[i],
+                    self.std_errors[i],
+                    self.t_stats[i],
+                    self.p_values[i],
+                    self.significance[i].stars()
+                )?;
             }
             writeln!(f)?;
         }
 
-        writeln!(f, "Homogeneity Test (H0: coefficients are equal across entities):")?;
-        writeln!(f, "  Chi-squared = {:.4}, p-value = {:.4}", self.homogeneity_stat, self.homogeneity_pvalue)?;
+        writeln!(
+            f,
+            "Homogeneity Test (H0: coefficients are equal across entities):"
+        )?;
+        writeln!(
+            f,
+            "  Chi-squared = {:.4}, p-value = {:.4}",
+            self.homogeneity_stat, self.homogeneity_pvalue
+        )?;
         if self.homogeneity_pvalue < 0.05 {
-            writeln!(f, "  -> Reject H0: coefficients vary significantly across entities")?;
+            writeln!(
+                f,
+                "  -> Reject H0: coefficients vary significantly across entities"
+            )?;
         } else {
             writeln!(f, "  -> Fail to reject H0: coefficients may be poolable")?;
         }
@@ -113,8 +129,19 @@ impl fmt::Display for PvcmResult {
         writeln!(f, "Individual Coefficients (first 5 entities shown):")?;
         let mut count = 0;
         for (entity, coeffs) in &self.individual_coefficients {
-            if count >= 5 { break; }
-            writeln!(f, "  {}: {:?}", entity, coeffs.iter().map(|c| format!("{:.4}", c)).collect::<Vec<_>>().join(", "))?;
+            if count >= 5 {
+                break;
+            }
+            writeln!(
+                f,
+                "  {}: {:?}",
+                entity,
+                coeffs
+                    .iter()
+                    .map(|c| format!("{:.4}", c))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )?;
             count += 1;
         }
         if self.n_entities > 5 {
@@ -153,21 +180,31 @@ pub fn run_pvcm(
     model: PvcmType,
 ) -> EconResult<PvcmResult> {
     // Extract full data
-    let y_full = DesignMatrix::extract_column(dataset.df(), y_col)
-        .map_err(|e| EconError::ColumnNotFound {
+    let y_full = DesignMatrix::extract_column(dataset.df(), y_col).map_err(|e| {
+        EconError::ColumnNotFound {
             column: y_col.to_string(),
             available: vec![format!("{:?}", e)],
-        })?;
+        }
+    })?;
 
-    let entity_col_data = dataset.df().column(entity_col)
-        .map_err(|_| EconError::ColumnNotFound {
-            column: entity_col.to_string(),
-            available: dataset.df().get_column_names().iter().map(|s| s.to_string()).collect(),
-        })?;
+    let entity_col_data =
+        dataset
+            .df()
+            .column(entity_col)
+            .map_err(|_| EconError::ColumnNotFound {
+                column: entity_col.to_string(),
+                available: dataset
+                    .df()
+                    .get_column_names()
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect(),
+            })?;
 
-    let entities: Vec<String> = entity_col_data.str()
+    let entities: Vec<String> = entity_col_data
+        .str()
         .map_err(|_| EconError::InvalidSpecification {
-            message: "Entity column must be string type".to_string()
+            message: "Entity column must be string type".to_string(),
         })?
         .into_iter()
         .map(|opt: Option<&str>| opt.unwrap_or("").to_string())
@@ -250,7 +287,7 @@ pub fn run_pvcm(
         return Err(EconError::InsufficientData {
             required: k + 1,
             provided: 0,
-            context: "No entities have enough observations for estimation".to_string()
+            context: "No entities have enough observations for estimation".to_string(),
         });
     }
 
@@ -262,7 +299,7 @@ pub fn run_pvcm(
             for beta in &all_betas {
                 avg_coef = &avg_coef + beta;
             }
-            avg_coef = avg_coef / n_valid_entities as f64;
+            avg_coef /= n_valid_entities as f64;
 
             // Standard error as std dev of individual coefficients
             let mut var_coef: Array1<f64> = Array1::zeros(k);
@@ -270,7 +307,7 @@ pub fn run_pvcm(
                 let diff = beta - &avg_coef;
                 var_coef = &var_coef + &diff.mapv(|d: f64| d * d);
             }
-            var_coef = var_coef / n_valid_entities.max(1) as f64;
+            var_coef /= n_valid_entities.max(1) as f64;
             let se_coef = var_coef.mapv(|v: f64| v.max(0.0).sqrt());
 
             (avg_coef.to_vec(), se_coef.to_vec(), var_coef.to_vec())
@@ -282,7 +319,7 @@ pub fn run_pvcm(
             for beta in &all_betas {
                 beta_bar = &beta_bar + beta;
             }
-            beta_bar = beta_bar / n_valid_entities as f64;
+            beta_bar /= n_valid_entities as f64;
 
             // Estimate Delta (variance of random coefficients)
             // Delta = (1/(N-1)) * sum((beta_i - beta_bar)(beta_i - beta_bar)') - (1/N) * sum(Var(beta_i))
@@ -295,14 +332,14 @@ pub fn run_pvcm(
                     }
                 }
             }
-            delta_mat = delta_mat / (n_valid_entities - 1).max(1) as f64;
+            delta_mat /= (n_valid_entities - 1).max(1) as f64;
 
             // Subtract average of individual variances
             let mut avg_var: Array2<f64> = Array2::zeros((k, k));
             for vcov in &all_vcovs {
                 avg_var = &avg_var + vcov;
             }
-            avg_var = avg_var / n_valid_entities as f64;
+            avg_var /= n_valid_entities as f64;
             delta_mat = delta_mat - avg_var;
 
             // Ensure non-negative diagonal
@@ -323,8 +360,8 @@ pub fn run_pvcm(
             }
 
             // GLS estimate
-            let (sum_w_inv, _) = safe_inverse(&sum_w.view())
-                .map_err(|_| EconError::SingularMatrix {
+            let (sum_w_inv, _) =
+                safe_inverse(&sum_w.view()).map_err(|_| EconError::SingularMatrix {
                     context: "GLS weight matrix in pvcm".to_string(),
                     suggestion: "Check for collinearity".to_string(),
                 })?;
@@ -339,14 +376,17 @@ pub fn run_pvcm(
 
     // Compute t-statistics and p-values
     let df = n.saturating_sub(k);
-    let t_stats: Vec<f64> = coefficients.iter()
+    let t_stats: Vec<f64> = coefficients
+        .iter()
         .zip(std_errors.iter())
         .map(|(b, se): (&f64, &f64)| if *se > 1e-10 { b / se } else { 0.0 })
         .collect();
-    let p_values: Vec<f64> = t_stats.iter()
+    let p_values: Vec<f64> = t_stats
+        .iter()
         .map(|t: &f64| t_test_p_value(*t, df as f64))
         .collect();
-    let significance: Vec<SignificanceLevel> = p_values.iter()
+    let significance: Vec<SignificanceLevel> = p_values
+        .iter()
         .map(|&p| SignificanceLevel::from_p_value(p))
         .collect();
 

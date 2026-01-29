@@ -22,7 +22,7 @@ use std::fmt;
 use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
 use crate::linalg::matrix_ops::safe_inverse;
-use crate::traits::estimator::{chi_squared_p_value, normal_cdf, SignificanceLevel};
+use crate::traits::estimator::{SignificanceLevel, chi_squared_p_value, normal_cdf};
 
 // =============================================================================
 // Core Types
@@ -32,8 +32,8 @@ use crate::traits::estimator::{chi_squared_p_value, normal_cdf, SignificanceLeve
 #[derive(Debug, Clone)]
 struct SurvivalObs {
     time: f64,
-    event: bool,       // true = event observed, false = censored
-    event_type: u8,    // For competing risks: 0 = censored, 1,2,... = event types
+    event: bool,    // true = event observed, false = censored
+    event_type: u8, // For competing risks: 0 = censored, 1,2,... = event types
     covariates: Option<Array1<f64>>,
     group: Option<String>,
 }
@@ -46,7 +46,9 @@ impl Eq for OrderedF64 {}
 
 impl Ord for OrderedF64 {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.0.partial_cmp(&other.0).unwrap_or(std::cmp::Ordering::Equal)
+        self.0
+            .partial_cmp(&other.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
     }
 }
 
@@ -150,25 +152,41 @@ impl fmt::Display for KaplanMeierResult {
         if let Some(ref group) = self.group {
             writeln!(f, "Group: {}", group)?;
         }
-        writeln!(f, "N = {}, Events = {}, Censored = {} ({:.1}%)",
-                 self.n_obs, self.total_events, self.total_censored,
-                 100.0 * self.total_censored as f64 / self.n_obs as f64)?;
+        writeln!(
+            f,
+            "N = {}, Events = {}, Censored = {} ({:.1}%)",
+            self.n_obs,
+            self.total_events,
+            self.total_censored,
+            100.0 * self.total_censored as f64 / self.n_obs as f64
+        )?;
         writeln!(f)?;
 
         if let Some(median) = self.median_survival {
             write!(f, "Median Survival: {:.3}", median)?;
             if let Some((lo, hi)) = self.median_ci {
-                write!(f, " ({:.0}% CI: {:.3} - {:.3})",
-                       self.conf_level * 100.0, lo, hi)?;
+                write!(
+                    f,
+                    " ({:.0}% CI: {:.3} - {:.3})",
+                    self.conf_level * 100.0,
+                    lo,
+                    hi
+                )?;
             }
             writeln!(f)?;
         } else {
-            writeln!(f, "Median Survival: NA (survival > 50% at end of follow-up)")?;
+            writeln!(
+                f,
+                "Median Survival: NA (survival > 50% at end of follow-up)"
+            )?;
         }
         writeln!(f)?;
 
-        writeln!(f, "{:>10} {:>10} {:>10} {:>10} {:>12}",
-                 "Time", "At Risk", "Events", "S(t)", "Std.Err")?;
+        writeln!(
+            f,
+            "{:>10} {:>10} {:>10} {:>10} {:>12}",
+            "Time", "At Risk", "Events", "S(t)", "Std.Err"
+        )?;
         writeln!(f, "{}", "-".repeat(55))?;
 
         // Show first 10 and last 5 time points if many
@@ -187,9 +205,15 @@ impl fmt::Display for KaplanMeierResult {
             if i == usize::MAX {
                 writeln!(f, "{:>10}", "...")?;
             } else {
-                writeln!(f, "{:>10.3} {:>10} {:>10} {:>10.4} {:>12.4}",
-                         self.times[i], self.n_at_risk[i], self.n_events[i],
-                         self.survival[i], self.std_errors[i])?;
+                writeln!(
+                    f,
+                    "{:>10.3} {:>10} {:>10} {:>10.4} {:>12.4}",
+                    self.times[i],
+                    self.n_at_risk[i],
+                    self.n_events[i],
+                    self.survival[i],
+                    self.std_errors[i]
+                )?;
             }
         }
 
@@ -238,7 +262,11 @@ pub fn run_kaplan_meier(
 
     // Extract data
     let df = dataset.df();
-    let available_cols: Vec<String> = df.get_column_names().iter().map(|s| s.to_string()).collect();
+    let available_cols: Vec<String> = df
+        .get_column_names()
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
 
     let times = df
         .column(time_col)
@@ -264,12 +292,10 @@ pub fn run_kaplan_meier(
 
     // Group data
     let groups: Vec<Option<String>> = if let Some(g_col) = group_col {
-        let g = df
-            .column(g_col)
-            .map_err(|_| EconError::ColumnNotFound {
-                column: g_col.to_string(),
-                available: available_cols.clone(),
-            })?;
+        let g = df.column(g_col).map_err(|_| EconError::ColumnNotFound {
+            column: g_col.to_string(),
+            available: available_cols.clone(),
+        })?;
         (0..df.height())
             .map(|i| {
                 g.get(i)
@@ -302,10 +328,7 @@ pub fn run_kaplan_meier(
             group: groups[i].clone(),
         };
 
-        obs_by_group
-            .entry(groups[i].clone())
-            .or_default()
-            .push(obs);
+        obs_by_group.entry(groups[i].clone()).or_default().push(obs);
     }
 
     if obs_by_group.is_empty() {
@@ -422,7 +445,10 @@ fn compute_kaplan_meier(
         // Simple CI for median using CI of S(t)
         let lo = find_quantile_from_bound(&times, &ci_upper, 0.5);
         let hi = find_quantile_from_bound(&times, &ci_lower, 0.5);
-        (lo.unwrap_or(times[0]), hi.unwrap_or(*times.last().unwrap_or(&0.0)))
+        (
+            lo.unwrap_or(times[0]),
+            hi.unwrap_or(*times.last().unwrap_or(&0.0)),
+        )
     });
 
     Ok(KaplanMeierResult {
@@ -489,11 +515,7 @@ fn normal_quantile(p: f64) -> f64 {
 
     let z = t - (c0 + c1 * t + c2 * t * t) / (1.0 + d1 * t + d2 * t * t + d3 * t * t * t);
 
-    if p < 0.5 {
-        -z
-    } else {
-        z
-    }
+    if p < 0.5 { -z } else { z }
 }
 
 // =============================================================================
@@ -538,20 +560,35 @@ impl fmt::Display for LogRankResult {
         writeln!(f, "Log-Rank Test")?;
         writeln!(f, "=============")?;
         writeln!(f)?;
-        writeln!(f, "{:<15} {:>10} {:>10} {:>12} {:>12}",
-                 "Group", "N", "Events", "Expected", "O-E")?;
+        writeln!(
+            f,
+            "{:<15} {:>10} {:>10} {:>12} {:>12}",
+            "Group", "N", "Events", "Expected", "O-E"
+        )?;
         writeln!(f, "{}", "-".repeat(60))?;
 
         for i in 0..self.groups.len() {
-            writeln!(f, "{:<15} {:>10} {:>10} {:>12.2} {:>12.2}",
-                     self.groups[i], self.n_per_group[i], self.events_per_group[i],
-                     self.expected_per_group[i], self.obs_minus_exp[i])?;
+            writeln!(
+                f,
+                "{:<15} {:>10} {:>10} {:>12.2} {:>12.2}",
+                self.groups[i],
+                self.n_per_group[i],
+                self.events_per_group[i],
+                self.expected_per_group[i],
+                self.obs_minus_exp[i]
+            )?;
         }
 
         writeln!(f, "{}", "-".repeat(60))?;
         writeln!(f)?;
-        writeln!(f, "Chi-squared = {:.4}, df = {}, p = {:.4}{}",
-                 self.chi_squared, self.df, self.p_value, self.significance.stars())?;
+        writeln!(
+            f,
+            "Chi-squared = {:.4}, df = {}, p = {:.4}{}",
+            self.chi_squared,
+            self.df,
+            self.p_value,
+            self.significance.stars()
+        )?;
 
         Ok(())
     }
@@ -576,7 +613,11 @@ pub fn log_rank_test(
     group_col: &str,
 ) -> EconResult<LogRankResult> {
     let df = dataset.df();
-    let available_cols: Vec<String> = df.get_column_names().iter().map(|s| s.to_string()).collect();
+    let available_cols: Vec<String> = df
+        .get_column_names()
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
 
     // Extract columns
     let times = df
@@ -644,7 +685,8 @@ pub fn log_rank_test(
 
     // Get distinct event times
     let event_times: Vec<f64> = {
-        let mut times_set: std::collections::BTreeSet<OrderedF64> = std::collections::BTreeSet::new();
+        let mut times_set: std::collections::BTreeSet<OrderedF64> =
+            std::collections::BTreeSet::new();
         for (t, e, _) in &all_obs {
             if *e {
                 times_set.insert(OrderedF64(*t));
@@ -747,11 +789,7 @@ pub fn log_rank_test(
     let chi_squared = if n_groups == 2 {
         // Simple formula for 2 groups
         let var = variance_matrix[[0, 0]];
-        if var > 0.0 {
-            (u[0] * u[0]) / var
-        } else {
-            0.0
-        }
+        if var > 0.0 { (u[0] * u[0]) / var } else { 0.0 }
     } else {
         // General formula using matrix inverse
         match safe_inverse(&variance_matrix.view()) {
@@ -883,32 +921,57 @@ impl fmt::Display for CoxResult {
         writeln!(f, "Ties method: {}", self.ties_method)?;
         writeln!(f)?;
 
-        writeln!(f, "{:<20} {:>10} {:>10} {:>8} {:>8} {:>10} {:>16}",
-                 "Variable", "coef", "se(coef)", "z", "p", "HR", "95% CI HR")?;
+        writeln!(
+            f,
+            "{:<20} {:>10} {:>10} {:>8} {:>8} {:>10} {:>16}",
+            "Variable", "coef", "se(coef)", "z", "p", "HR", "95% CI HR"
+        )?;
         writeln!(f, "{}", "-".repeat(90))?;
 
         for i in 0..self.variables.len() {
-            writeln!(f, "{:<20} {:>10.4} {:>10.4} {:>8.2} {:>8.4}{} {:>10.4} [{:.3}, {:.3}]",
-                     self.variables[i],
-                     self.coefficients[i],
-                     self.std_errors[i],
-                     self.z_stats[i],
-                     self.p_values[i],
-                     self.significance[i].stars(),
-                     self.hazard_ratios[i],
-                     self.hr_ci_lower[i],
-                     self.hr_ci_upper[i])?;
+            writeln!(
+                f,
+                "{:<20} {:>10.4} {:>10.4} {:>8.2} {:>8.4}{} {:>10.4} [{:.3}, {:.3}]",
+                self.variables[i],
+                self.coefficients[i],
+                self.std_errors[i],
+                self.z_stats[i],
+                self.p_values[i],
+                self.significance[i].stars(),
+                self.hazard_ratios[i],
+                self.hr_ci_lower[i],
+                self.hr_ci_upper[i]
+            )?;
         }
 
         writeln!(f, "{}", "-".repeat(90))?;
         writeln!(f)?;
-        writeln!(f, "Concordance = {:.3} (se = {:.3})", self.concordance, self.concordance_se)?;
-        writeln!(f, "Likelihood ratio test = {:.2}, df = {}, p = {:.4}",
-                 self.lr_test, self.variables.len(), self.lr_p_value)?;
-        writeln!(f, "Wald test = {:.2}, df = {}, p = {:.4}",
-                 self.wald_test, self.variables.len(), self.wald_p_value)?;
-        writeln!(f, "Score (logrank) test = {:.2}, df = {}, p = {:.4}",
-                 self.score_test, self.variables.len(), self.score_p_value)?;
+        writeln!(
+            f,
+            "Concordance = {:.3} (se = {:.3})",
+            self.concordance, self.concordance_se
+        )?;
+        writeln!(
+            f,
+            "Likelihood ratio test = {:.2}, df = {}, p = {:.4}",
+            self.lr_test,
+            self.variables.len(),
+            self.lr_p_value
+        )?;
+        writeln!(
+            f,
+            "Wald test = {:.2}, df = {}, p = {:.4}",
+            self.wald_test,
+            self.variables.len(),
+            self.wald_p_value
+        )?;
+        writeln!(
+            f,
+            "Score (logrank) test = {:.2}, df = {}, p = {:.4}",
+            self.score_test,
+            self.variables.len(),
+            self.score_p_value
+        )?;
         writeln!(f)?;
         writeln!(f, "Signif. codes: 0 '***' 0.001 '**' 0.01 '*' 0.05 '†' 0.1")?;
 
@@ -952,7 +1015,11 @@ pub fn run_cox_ph(
 ) -> EconResult<CoxResult> {
     let config = config.unwrap_or_default();
     let df = dataset.df();
-    let available_cols: Vec<String> = df.get_column_names().iter().map(|s| s.to_string()).collect();
+    let available_cols: Vec<String> = df
+        .get_column_names()
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
 
     if x_cols.is_empty() {
         return Err(EconError::InvalidSpecification {
@@ -1050,9 +1117,7 @@ pub fn run_cox_ph(
 
     // Sort by time (descending for efficient risk set computation)
     let mut sorted_indices: Vec<usize> = (0..n).collect();
-    sorted_indices.sort_by(|&a, &b| {
-        obs_data[b].0.partial_cmp(&obs_data[a].0).unwrap()
-    });
+    sorted_indices.sort_by(|&a, &b| obs_data[b].0.partial_cmp(&obs_data[a].0).unwrap());
 
     // Newton-Raphson optimization
     let mut beta: Array1<f64> = Array1::zeros(p);
@@ -1060,13 +1125,20 @@ pub fn run_cox_ph(
     let mut iterations = 0;
 
     // Compute null log-likelihood (beta = 0)
-    let log_likelihood_null = cox_log_likelihood(&obs_data, &x, &Array1::zeros(p), &sorted_indices, config.ties);
+    let log_likelihood_null = cox_log_likelihood(
+        &obs_data,
+        &x,
+        &Array1::zeros(p),
+        &sorted_indices,
+        config.ties,
+    );
 
     for iter in 0..config.max_iter {
         iterations = iter + 1;
 
         // Compute gradient and Hessian
-        let (grad, hess, ll) = cox_gradient_hessian(&obs_data, &x, &beta, &sorted_indices, config.ties);
+        let (grad, hess, ll) =
+            cox_gradient_hessian(&obs_data, &x, &beta, &sorted_indices, config.ties);
 
         // Check convergence
         let grad_norm = grad.iter().map(|g| g.abs()).fold(0.0, f64::max);
@@ -1094,13 +1166,12 @@ pub fn run_cox_ph(
     }
 
     // Final likelihood and information matrix
-    let (_grad, hess, log_likelihood) = cox_gradient_hessian(&obs_data, &x, &beta, &sorted_indices, config.ties);
+    let (_grad, hess, log_likelihood) =
+        cox_gradient_hessian(&obs_data, &x, &beta, &sorted_indices, config.ties);
     let (info_matrix, _) = safe_inverse(&hess.view())?;
 
     // Standard errors
-    let std_errors: Vec<f64> = (0..p)
-        .map(|i| info_matrix[[i, i]].sqrt())
-        .collect();
+    let std_errors: Vec<f64> = (0..p).map(|i| info_matrix[[i, i]].sqrt()).collect();
 
     // z-statistics and p-values
     let z_stats: Vec<f64> = beta
@@ -1137,7 +1208,13 @@ pub fn run_cox_ph(
     let wald_p_value = chi_squared_p_value(wald_test, p as f64);
 
     // Score test (at beta = 0)
-    let (grad_null, hess_null, _) = cox_gradient_hessian(&obs_data, &x, &Array1::zeros(p), &sorted_indices, config.ties);
+    let (grad_null, hess_null, _) = cox_gradient_hessian(
+        &obs_data,
+        &x,
+        &Array1::zeros(p),
+        &sorted_indices,
+        config.ties,
+    );
     let (info_null, _) = safe_inverse(&hess_null.view())?;
     let score_test = grad_null.dot(&info_null.dot(&grad_null));
     let score_p_value = chi_squared_p_value(score_test, p as f64);
@@ -1237,10 +1314,8 @@ fn cox_log_likelihood(
                 let d = event_indices.len();
 
                 if d > 0 {
-                    let sum_exp_events: f64 = event_indices
-                        .iter()
-                        .map(|&tidx| exp_eta[obs[tidx].2])
-                        .sum();
+                    let sum_exp_events: f64 =
+                        event_indices.iter().map(|&tidx| exp_eta[obs[tidx].2]).sum();
 
                     for (k, &eidx) in event_indices.iter().enumerate() {
                         let row_idx = obs[eidx].2;
@@ -1276,8 +1351,8 @@ fn cox_gradient_hessian(
     let exp_eta: Vec<f64> = eta.iter().map(|&e| e.exp()).collect();
 
     // Running sums for risk set computation
-    let mut s0: f64 = 0.0;                           // sum of exp(eta)
-    let mut s1: Array1<f64> = Array1::zeros(p);      // sum of x * exp(eta)
+    let mut s0: f64 = 0.0; // sum of exp(eta)
+    let mut s1: Array1<f64> = Array1::zeros(p); // sum of x * exp(eta)
     let mut s2: Array2<f64> = Array2::zeros((p, p)); // sum of x * x' * exp(eta)
 
     match ties {
@@ -1393,7 +1468,8 @@ fn cox_gradient_hessian(
 
                             for jj in 0..p {
                                 for kk in 0..p {
-                                    hess[[jj, kk]] += s2_adj[[jj, kk]] / s0_adj - x_bar[jj] * x_bar[kk];
+                                    hess[[jj, kk]] +=
+                                        s2_adj[[jj, kk]] / s0_adj - x_bar[jj] * x_bar[kk];
                                 }
                             }
                         }
@@ -1543,19 +1619,25 @@ impl fmt::Display for AftResult {
         writeln!(f, "n = {}, events = {}", self.n_obs, self.n_events)?;
         writeln!(f)?;
 
-        writeln!(f, "{:<20} {:>10} {:>10} {:>8} {:>8} {:>12}",
-                 "Variable", "coef", "se(coef)", "z", "p", "Accel. Factor")?;
+        writeln!(
+            f,
+            "{:<20} {:>10} {:>10} {:>8} {:>8} {:>12}",
+            "Variable", "coef", "se(coef)", "z", "p", "Accel. Factor"
+        )?;
         writeln!(f, "{}", "-".repeat(75))?;
 
         for i in 0..self.variables.len() {
-            writeln!(f, "{:<20} {:>10.4} {:>10.4} {:>8.2} {:>8.4}{} {:>12.4}",
-                     self.variables[i],
-                     self.coefficients[i],
-                     self.std_errors[i],
-                     self.z_stats[i],
-                     self.p_values[i],
-                     self.significance[i].stars(),
-                     self.acceleration_factors[i])?;
+            writeln!(
+                f,
+                "{:<20} {:>10.4} {:>10.4} {:>8.2} {:>8.4}{} {:>12.4}",
+                self.variables[i],
+                self.coefficients[i],
+                self.std_errors[i],
+                self.z_stats[i],
+                self.p_values[i],
+                self.significance[i].stars(),
+                self.acceleration_factors[i]
+            )?;
         }
 
         writeln!(f, "{}", "-".repeat(75))?;
@@ -1601,7 +1683,11 @@ pub fn run_aft(
 ) -> EconResult<AftResult> {
     let config = config.unwrap_or_default();
     let df = dataset.df();
-    let available_cols: Vec<String> = df.get_column_names().iter().map(|s| s.to_string()).collect();
+    let available_cols: Vec<String> = df
+        .get_column_names()
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
 
     // Extract data
     let times = df
@@ -1704,7 +1790,9 @@ pub fn run_aft(
 
     // Initial scale estimate
     let residuals: Array1<f64> = &y - &x.dot(&beta);
-    let mut log_sigma = (residuals.mapv(|r| r.powi(2)).sum() / (n - p) as f64).sqrt().ln();
+    let mut log_sigma = (residuals.mapv(|r| r.powi(2)).sum() / (n - p) as f64)
+        .sqrt()
+        .ln();
 
     let mut converged = false;
     let mut iterations = 0;
@@ -1725,14 +1813,20 @@ pub fn run_aft(
         final_ll = ll;
 
         // Check convergence using relative gradient norm
-        let grad_norm = grad_beta.iter().map(|g| g.abs()).fold(0.0, f64::max).max(grad_sigma.abs());
+        let grad_norm = grad_beta
+            .iter()
+            .map(|g| g.abs())
+            .fold(0.0, f64::max)
+            .max(grad_sigma.abs());
         if grad_norm < config.tolerance {
             converged = true;
             break;
         }
 
         // Construct full Hessian and gradient (reuse allocated buffers)
-        full_hess.slice_mut(ndarray::s![0..p, 0..p]).assign(&hess_bb);
+        full_hess
+            .slice_mut(ndarray::s![0..p, 0..p])
+            .assign(&hess_bb);
         for j in 0..p {
             full_hess[[j, p]] = hess_bs[j];
             full_hess[[p, j]] = hess_bs[j];
@@ -1761,7 +1855,16 @@ pub fn run_aft(
                     let new_log_sigma = log_sigma + delta_sigma * step;
 
                     // Compute new likelihood
-                    new_ll = aft_log_likelihood_fast(&y, &x, &beta, &delta_beta, step, new_log_sigma.exp(), &deltas, config.distribution);
+                    new_ll = aft_log_likelihood_fast(
+                        &y,
+                        &x,
+                        &beta,
+                        &delta_beta,
+                        step,
+                        new_log_sigma.exp(),
+                        &deltas,
+                        config.distribution,
+                    );
 
                     if new_ll >= ll - 1e-10 || step < 1e-10 {
                         // Accept step
@@ -1804,7 +1907,9 @@ pub fn run_aft(
         aft_gradient_hessian(&y, &x, &beta, sigma, &deltas, config.distribution)
     };
 
-    full_hess.slice_mut(ndarray::s![0..p, 0..p]).assign(&hess_bb);
+    full_hess
+        .slice_mut(ndarray::s![0..p, 0..p])
+        .assign(&hess_bb);
     for j in 0..p {
         full_hess[[j, p]] = hess_bs[j];
         full_hess[[p, j]] = hess_bs[j];
@@ -1815,9 +1920,7 @@ pub fn run_aft(
         .map(|(m, _)| m)
         .unwrap_or_else(|_| Array2::eye(p + 1));
 
-    let std_errors: Vec<f64> = (0..p)
-        .map(|i| info_matrix[[i, i]].abs().sqrt())
-        .collect();
+    let std_errors: Vec<f64> = (0..p).map(|i| info_matrix[[i, i]].abs().sqrt()).collect();
 
     let z_stats: Vec<f64> = beta
         .iter()
@@ -2139,7 +2242,7 @@ fn aft_distribution_derivatives(z: f64, dist: AftDistribution) -> (f64, f64, f64
             let denom = 1.0 + exp_z;
             let log_f = z - 2.0 * denom.ln();
             let log_s = -denom.ln();
-            let p = exp_z / denom;  // logistic CDF
+            let p = exp_z / denom; // logistic CDF
             let dlog_f = 1.0 - 2.0 * p;
             let dlog_s = -p;
             let d2log_f = -2.0 * p * (1.0 - p);
@@ -2209,8 +2312,11 @@ impl fmt::Display for CompetingRisksResult {
 
         for cif in &self.cifs {
             writeln!(f, "Event Type {}:", cif.event_type)?;
-            writeln!(f, "{:>10} {:>12} {:>12} {:>12}",
-                     "Time", "CIF", "Std.Err", "95% CI")?;
+            writeln!(
+                f,
+                "{:>10} {:>12} {:>12} {:>12}",
+                "Time", "CIF", "Std.Err", "95% CI"
+            )?;
             writeln!(f, "{}", "-".repeat(50))?;
 
             let n = cif.times.len();
@@ -2228,9 +2334,15 @@ impl fmt::Display for CompetingRisksResult {
                 if i == usize::MAX {
                     writeln!(f, "{:>10}", "...")?;
                 } else {
-                    writeln!(f, "{:>10.3} {:>12.4} {:>12.4} [{:.4}, {:.4}]",
-                             cif.times[i], cif.incidence[i], cif.std_errors[i],
-                             cif.ci_lower[i], cif.ci_upper[i])?;
+                    writeln!(
+                        f,
+                        "{:>10.3} {:>12.4} {:>12.4} [{:.4}, {:.4}]",
+                        cif.times[i],
+                        cif.incidence[i],
+                        cif.std_errors[i],
+                        cif.ci_lower[i],
+                        cif.ci_upper[i]
+                    )?;
                 }
             }
             writeln!(f)?;
@@ -2270,7 +2382,11 @@ pub fn run_competing_risks(
     }
 
     let df = dataset.df();
-    let available_cols: Vec<String> = df.get_column_names().iter().map(|s| s.to_string()).collect();
+    let available_cols: Vec<String> = df
+        .get_column_names()
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
 
     let times = df
         .column(time_col)
@@ -2362,7 +2478,7 @@ pub fn run_competing_risks(
         .collect();
 
     let mut current_risk = n_obs;
-    let mut km_surv = 1.0;  // Kaplan-Meier for overall survival
+    let mut km_surv = 1.0; // Kaplan-Meier for overall survival
     let mut cum_incidence: Vec<f64> = vec![0.0; event_types_vec.len()];
     let mut variance: Vec<f64> = vec![0.0; event_types_vec.len()];
 
@@ -2370,7 +2486,11 @@ pub fn run_competing_risks(
         let t = time.0;
 
         // Total events and censored at this time
-        let total_events: usize = events_at_time.iter().filter(|&(&e, _)| e > 0).map(|(_, &c)| c).sum();
+        let total_events: usize = events_at_time
+            .iter()
+            .filter(|&(&e, _)| e > 0)
+            .map(|(_, &c)| c)
+            .sum();
         let total_censored = *events_at_time.get(&0).unwrap_or(&0);
 
         if current_risk > 0 {
@@ -2442,7 +2562,8 @@ mod tests {
             "event" => [1.0, 0.0, 1.0, 1.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0],
             "group" => ["A", "A", "A", "A", "A", "B", "B", "B", "B", "B"],
             "x1" => [0.5, 1.2, 0.8, 1.5, 2.0, 0.3, 1.1, 0.9, 1.8, 2.2],
-        }.unwrap();
+        }
+        .unwrap();
         Dataset::new(df).with_name("test")
     }
 
@@ -2532,7 +2653,8 @@ mod tests {
         let df = df! {
             "time" => [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
             "event_type" => [1.0, 2.0, 0.0, 1.0, 2.0, 0.0, 1.0, 2.0],
-        }.unwrap();
+        }
+        .unwrap();
         let dataset = Dataset::new(df).with_name("test");
 
         let result = run_competing_risks(&dataset, "time", "event_type", 0.95).unwrap();
@@ -2573,7 +2695,8 @@ mod tests {
         let df = df! {
             "time" => [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0],
             "event" => [1.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0, 0.0, 1.0, 1.0],
-        }.unwrap();
+        }
+        .unwrap();
         Dataset::new(df).with_name("r_km_test")
     }
 
@@ -2605,7 +2728,9 @@ mod tests {
                 assert!(
                     (km.survival[idx] - r_surv).abs() < 0.01,
                     "Survival at t={} should be ~{}, got {}",
-                    r_time, r_surv, km.survival[idx]
+                    r_time,
+                    r_surv,
+                    km.survival[idx]
                 );
             }
         }
@@ -2613,7 +2738,7 @@ mod tests {
         // Median survival should be ~5-6 (between t=5 and t=7 where S crosses 0.5)
         if let Some(med) = km.median_survival {
             assert!(
-                med >= 4.0 && med <= 8.0,
+                (4.0..=8.0).contains(&med),
                 "Median survival should be ~5-6, got {}",
                 med
             );
@@ -2630,7 +2755,8 @@ mod tests {
             "time" => [1.0, 2.0, 3.0, 5.0, 6.0, 7.0, 2.0, 3.0, 4.0, 5.0, 8.0, 9.0],
             "event" => [1.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0, 1.0, 0.0, 1.0, 1.0],
             "group" => ["0", "0", "0", "0", "0", "0", "1", "1", "1", "1", "1", "1"],
-        }.unwrap();
+        }
+        .unwrap();
         Dataset::new(df).with_name("r_logrank_test")
     }
 
@@ -2644,7 +2770,10 @@ mod tests {
         let result = log_rank_test(&dataset, "time", "event", "group").unwrap();
 
         assert_eq!(result.df, 1, "Log-rank df should be 1");
-        assert!(result.chi_squared >= 0.0, "Chi-squared must be non-negative");
+        assert!(
+            result.chi_squared >= 0.0,
+            "Chi-squared must be non-negative"
+        );
         // p-value should be reasonable (not extremely small for this data)
         assert!(
             result.p_value > 0.001,
@@ -2663,7 +2792,8 @@ mod tests {
             "time" => [1.0, 1.0, 2.0, 2.0, 2.0, 3.0, 4.0, 4.0, 5.0, 5.0],
             "event" => [1.0, 1.0, 1.0, 0.0, 1.0, 1.0, 1.0, 0.0, 1.0, 1.0],
             "x" => [0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 0.0, 1.0],
-        }.unwrap();
+        }
+        .unwrap();
         Dataset::new(df).with_name("r_cox_ties_test")
     }
 
@@ -2679,7 +2809,8 @@ mod tests {
             ties: TiesMethod::Efron,
             ..Default::default()
         };
-        let result_efron = run_cox_ph(&dataset, "time", "event", &["x"], Some(config_efron)).unwrap();
+        let result_efron =
+            run_cox_ph(&dataset, "time", "event", &["x"], Some(config_efron)).unwrap();
 
         // Coefficient should be positive (x increases hazard)
         assert!(
@@ -2693,7 +2824,8 @@ mod tests {
             ties: TiesMethod::Breslow,
             ..Default::default()
         };
-        let result_breslow = run_cox_ph(&dataset, "time", "event", &["x"], Some(config_breslow)).unwrap();
+        let result_breslow =
+            run_cox_ph(&dataset, "time", "event", &["x"], Some(config_breslow)).unwrap();
 
         // Both methods should give similar results
         assert!(
@@ -2733,7 +2865,11 @@ mod tests {
         };
         let result = run_aft(&dataset, "time", "event", &["x1"], Some(config)).unwrap();
 
-        assert!(result.scale > 0.0, "AFT scale must be positive, got {}", result.scale);
+        assert!(
+            result.scale > 0.0,
+            "AFT scale must be positive, got {}",
+            result.scale
+        );
         assert!(
             result.shape.unwrap() > 0.0,
             "Weibull shape must be positive, got {:?}",
@@ -2760,7 +2896,7 @@ mod tests {
             AftDistribution::LogLogistic,
         ] {
             let config = AftConfig {
-                distribution: dist.clone(),
+                distribution: dist,
                 ..Default::default()
             };
             let result = run_aft(&dataset, "time", "event", &["x1"], Some(config));
@@ -2784,7 +2920,8 @@ mod tests {
         let df = df! {
             "time" => [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
             "event_type" => [1.0, 2.0, 0.0, 1.0, 2.0, 0.0, 1.0, 2.0],
-        }.unwrap();
+        }
+        .unwrap();
         let dataset = Dataset::new(df).with_name("test");
 
         let result = run_competing_risks(&dataset, "time", "event_type", 0.95).unwrap();
@@ -2802,9 +2939,7 @@ mod tests {
         }
 
         // Sum of final CIFs should be <= 1
-        let final_cif_sum: f64 = result.cifs.iter()
-            .filter_map(|c| c.incidence.last())
-            .sum();
+        let final_cif_sum: f64 = result.cifs.iter().filter_map(|c| c.incidence.last()).sum();
         assert!(
             final_cif_sum <= 1.0 + 0.01,
             "Sum of CIFs at final time should be <= 1, got {}",

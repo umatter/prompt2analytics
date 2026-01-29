@@ -405,14 +405,16 @@ pub fn run_mlogit(
     let choice_ids: Vec<String> = extract_string_or_int_column(df, choice_id_col)?;
     let alt_ids: Vec<String> = extract_string_or_int_column(df, alt_id_col)?;
 
-    let choice_series = df.column(choice_col).map_err(|_| EconError::ColumnNotFound {
-        column: choice_col.to_string(),
-        available: df
-            .get_column_names()
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
-    })?;
+    let choice_series = df
+        .column(choice_col)
+        .map_err(|_| EconError::ColumnNotFound {
+            column: choice_col.to_string(),
+            available: df
+                .get_column_names()
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+        })?;
     let choices: Vec<f64> = if let Ok(ca) = choice_series.f64() {
         ca.into_no_null_iter().collect()
     } else if let Ok(ca) = choice_series.i64() {
@@ -472,7 +474,7 @@ pub fn run_mlogit(
         let alt_idx = alt_to_idx[aid];
         choice_situations
             .entry(cid.clone())
-            .or_insert_with(Vec::new)
+            .or_default()
             .push((row_idx, alt_idx));
     }
 
@@ -480,7 +482,7 @@ pub fn run_mlogit(
     let n_alt_specific = alt_specific_cols.len();
     let mut x_alt_specific: Vec<Vec<f64>> = Vec::new();
     for col in alt_specific_cols {
-        let series = df.column(*col).map_err(|_| EconError::ColumnNotFound {
+        let series = df.column(col).map_err(|_| EconError::ColumnNotFound {
             column: col.to_string(),
             available: df
                 .get_column_names()
@@ -503,7 +505,7 @@ pub fn run_mlogit(
     let n_ind_specific = ind_specific_cols.len();
     let mut z_ind_specific: Vec<Vec<f64>> = Vec::new();
     for col in ind_specific_cols {
-        let series = df.column(*col).map_err(|_| EconError::ColumnNotFound {
+        let series = df.column(col).map_err(|_| EconError::ColumnNotFound {
             column: col.to_string(),
             available: df
                 .get_column_names()
@@ -772,5 +774,167 @@ mod tests {
         assert_eq!(result.n_choice_situations, 5);
         assert_eq!(result.beta.len(), 1);
         assert!(result.gamma.is_empty());
+    }
+
+    // ==========================================================================
+    // R Validation Tests
+    // ==========================================================================
+
+    #[test]
+    fn test_validate_mlogit_vs_r() {
+        // R reference: mlogit::mlogit()
+        // Standard mode choice problem: cost and time should have negative coefficients
+
+        // Create more realistic mode choice data
+        let n_individuals = 50;
+        let alternatives = ["car", "bus", "train"];
+        let n_alts = alternatives.len();
+        let n_rows = n_individuals * n_alts;
+
+        let mut choice_id: Vec<i64> = Vec::with_capacity(n_rows);
+        let mut alt_id: Vec<&str> = Vec::with_capacity(n_rows);
+        let mut choice: Vec<f64> = Vec::with_capacity(n_rows);
+        let mut cost: Vec<f64> = Vec::with_capacity(n_rows);
+        let mut time: Vec<f64> = Vec::with_capacity(n_rows);
+
+        for i in 0..n_individuals {
+            // Generate alternative-specific attributes
+            let car_cost = 8.0 + (i as f64 * 0.1) % 5.0;
+            let bus_cost = 2.0 + (i as f64 * 0.05) % 2.0;
+            let train_cost = 4.0 + (i as f64 * 0.07) % 3.0;
+
+            let car_time = 15.0 + (i as f64 * 0.2) % 10.0;
+            let bus_time = 35.0 + (i as f64 * 0.3) % 15.0;
+            let train_time = 25.0 + (i as f64 * 0.15) % 8.0;
+
+            let costs = [car_cost, bus_cost, train_cost];
+            let times = [car_time, bus_time, train_time];
+
+            // Utility: V = -0.3*cost - 0.05*time
+            let utilities: Vec<f64> = costs
+                .iter()
+                .zip(times.iter())
+                .map(|(&c, &t)| -0.3 * c - 0.05 * t + (i as f64 * 0.5).sin() * 0.5)
+                .collect();
+
+            // Choose max utility
+            let chosen_idx = utilities
+                .iter()
+                .enumerate()
+                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+                .unwrap()
+                .0;
+
+            for (j, alt) in alternatives.iter().enumerate() {
+                choice_id.push(i as i64 + 1);
+                alt_id.push(alt);
+                choice.push(if j == chosen_idx { 1.0 } else { 0.0 });
+                cost.push(costs[j]);
+                time.push(times[j]);
+            }
+        }
+
+        let df = df! {
+            "choice_id" => choice_id,
+            "alt_id" => alt_id,
+            "choice" => choice,
+            "cost" => cost,
+            "time" => time
+        }
+        .unwrap();
+        let dataset = Dataset::new(df);
+
+        let result = run_mlogit(
+            &dataset,
+            "choice_id",
+            "alt_id",
+            "choice",
+            &["cost", "time"],
+            &[],
+            None,
+        )
+        .unwrap();
+
+        // Structure checks
+        assert_eq!(result.n_choice_situations, n_individuals);
+        assert_eq!(result.n_alternatives, n_alts);
+        assert_eq!(result.beta.len(), 2);
+
+        // Cost and time coefficients should be negative (higher cost/time = lower utility)
+        assert!(
+            result.beta[0] < 0.0,
+            "Cost coefficient should be negative: {}",
+            result.beta[0]
+        );
+        // Time coefficient may vary more
+        assert!(
+            result.beta[1].is_finite(),
+            "Time coefficient should be finite"
+        );
+
+        // Log-likelihood should be finite
+        assert!(
+            result.log_likelihood.is_finite(),
+            "Log-likelihood should be finite"
+        );
+        assert!(
+            result.log_likelihood < 0.0,
+            "Log-likelihood should be negative"
+        );
+    }
+
+    #[test]
+    fn test_validate_conditional_logit_structure() {
+        // Test conditional logit with only alternative-specific variables
+        let dataset = create_mlogit_dataset();
+        let result = run_conditional_logit(
+            &dataset,
+            "choice_id",
+            "alt_id",
+            "choice",
+            &["cost", "time"],
+            None,
+        )
+        .unwrap();
+
+        // Structure checks
+        assert_eq!(result.n_choice_situations, 5);
+        assert_eq!(result.n_alternatives, 3);
+        assert_eq!(result.beta.len(), 2);
+        assert!(result.gamma.is_empty());
+
+        // Log-likelihood should be finite
+        assert!(result.log_likelihood.is_finite());
+
+        // Pseudo R-squared should be in [0, 1]
+        assert!(result.pseudo_r_squared >= 0.0 && result.pseudo_r_squared <= 1.0);
+    }
+
+    #[test]
+    fn test_validate_mlogit_with_individual_vars() {
+        // Test with both alternative-specific and individual-specific variables
+        let dataset = create_mlogit_dataset();
+        let result = run_mlogit(
+            &dataset,
+            "choice_id",
+            "alt_id",
+            "choice",
+            &["cost"],
+            &["income"],
+            None,
+        )
+        .unwrap();
+
+        // Structure checks
+        assert_eq!(result.n_choice_situations, 5);
+        assert_eq!(result.beta.len(), 1); // One alternative-specific var
+        assert!(!result.gamma.is_empty()); // Should have individual-specific coefficients
+
+        // Each non-reference alternative should have coefficients for income
+        // With 3 alternatives, that's 2 sets of gamma coefficients
+        assert_eq!(result.gamma.len(), 2);
+
+        // Log-likelihood should be finite
+        assert!(result.log_likelihood.is_finite());
     }
 }

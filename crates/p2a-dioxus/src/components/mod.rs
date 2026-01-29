@@ -19,7 +19,7 @@ pub use chat_panel::ChatPanel;
 pub use conversation_sidebar::ConversationSidebar;
 pub use dataset_inspector::DatasetInspectorModal;
 pub use dataset_sidebar::DatasetSidebar;
-pub use logo::{P2aBadge, P2aIcon, P2aIconMinimal, P2aWordmark};
+pub use logo::{P2aBadge, P2aIconMinimal, P2aWordmark};
 pub use message::Message;
 pub use message_list::MessageList;
 pub use settings_modal::SettingsModal;

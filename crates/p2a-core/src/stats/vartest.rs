@@ -126,10 +126,16 @@ impl std::fmt::Display for VarTestResult {
         // Alternative hypothesis
         let alt_str = match self.alternative {
             Alternative::TwoSided => {
-                format!("true ratio of variances is not equal to {}", self.null_value)
+                format!(
+                    "true ratio of variances is not equal to {}",
+                    self.null_value
+                )
             }
             Alternative::Greater => {
-                format!("true ratio of variances is greater than {}", self.null_value)
+                format!(
+                    "true ratio of variances is greater than {}",
+                    self.null_value
+                )
             }
             Alternative::Less => {
                 format!("true ratio of variances is less than {}", self.null_value)
@@ -140,7 +146,11 @@ impl std::fmt::Display for VarTestResult {
 
         // Confidence interval
         writeln!(f, "{:.0}% confidence interval:", self.conf_level * 100.0)?;
-        writeln!(f, "  ({:.6}, {:.6})", self.conf_int_lower, self.conf_int_upper)?;
+        writeln!(
+            f,
+            "  ({:.6}, {:.6})",
+            self.conf_int_lower, self.conf_int_upper
+        )?;
         writeln!(f)?;
 
         // Estimates
@@ -301,7 +311,11 @@ pub fn run_var_test(
     // Extract x values
     let x_series = df.column(x_col).map_err(|_| EconError::ColumnNotFound {
         column: x_col.to_string(),
-        available: df.get_column_names().iter().map(|s| s.to_string()).collect(),
+        available: df
+            .get_column_names()
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
     })?;
     let x: Vec<f64> = x_series
         .f64()
@@ -314,7 +328,11 @@ pub fn run_var_test(
     // Extract y values
     let y_series = df.column(y_col).map_err(|_| EconError::ColumnNotFound {
         column: y_col.to_string(),
-        available: df.get_column_names().iter().map(|s| s.to_string()).collect(),
+        available: df
+            .get_column_names()
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
     })?;
     let y: Vec<f64> = y_series
         .f64()
@@ -455,8 +473,7 @@ mod tests {
         .unwrap();
         let dataset = Dataset::new(df);
 
-        let result =
-            run_var_test(&dataset, "x", "y", 1.0, Alternative::TwoSided, 0.95).unwrap();
+        let result = run_var_test(&dataset, "x", "y", 1.0, Alternative::TwoSided, 0.95).unwrap();
 
         assert_eq!(result.n_x, 5);
         assert_eq!(result.n_y, 5);
@@ -475,10 +492,16 @@ mod tests {
         let x = vec![1.0, 2.0, 3.0];
         let y = vec![1.0, 2.0, 3.0];
         let result = var_test(&x, &y, 0.0, Alternative::TwoSided, 0.95);
-        assert!(matches!(result, Err(EconError::InvalidSpecification { .. })));
+        assert!(matches!(
+            result,
+            Err(EconError::InvalidSpecification { .. })
+        ));
 
         let result = var_test(&x, &y, -1.0, Alternative::TwoSided, 0.95);
-        assert!(matches!(result, Err(EconError::InvalidSpecification { .. })));
+        assert!(matches!(
+            result,
+            Err(EconError::InvalidSpecification { .. })
+        ));
     }
 
     // ========================================================================

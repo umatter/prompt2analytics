@@ -7,7 +7,7 @@
 
 use p2a_core::{
     data::Dataset,
-    econometrics::{run_fixed_effects, run_random_effects, run_hausman_test},
+    econometrics::{run_fixed_effects, run_hausman_test, run_random_effects},
 };
 use polars::prelude::*;
 
@@ -33,26 +33,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }?;
 
     let dataset = Dataset::new(df);
-    println!("Panel structure: 5 firms × 4 years = {} observations\n", dataset.df().height());
+    println!(
+        "Panel structure: 5 firms × 4 years = {} observations\n",
+        dataset.df().height()
+    );
 
     // Fixed Effects Estimation
     println!("--- Fixed Effects (Within Estimator) ---");
-    let fe_result = run_fixed_effects(
-        &dataset,
-        "investment",
-        &["value", "capital"],
-        "firm",
-    )?;
+    let fe_result = run_fixed_effects(&dataset, "investment", &["value", "capital"], "firm")?;
     println!("{}\n", fe_result);
 
     // Random Effects Estimation
     println!("--- Random Effects (GLS Estimator) ---");
-    let re_result = run_random_effects(
-        &dataset,
-        "investment",
-        &["value", "capital"],
-        "firm",
-    )?;
+    let re_result = run_random_effects(&dataset, "investment", &["value", "capital"], "firm")?;
     println!("{}\n", re_result);
 
     // Compare coefficient estimates
@@ -61,8 +54,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let re_coefs = &re_result.coefficients;
     println!("{:<12} {:>12} {:>12}", "Variable", "FE", "RE");
     println!("{:-<12} {:-<12} {:-<12}", "", "", "");
-    println!("{:<12} {:>12.6} {:>12.6}", "value", fe_coefs[0], re_coefs[1]);  // RE has intercept
-    println!("{:<12} {:>12.6} {:>12.6}", "capital", fe_coefs[1], re_coefs[2]);
+    println!(
+        "{:<12} {:>12.6} {:>12.6}",
+        "value", fe_coefs[0], re_coefs[1]
+    ); // RE has intercept
+    println!(
+        "{:<12} {:>12.6} {:>12.6}",
+        "capital", fe_coefs[1], re_coefs[2]
+    );
     println!();
 
     // Hausman Test
@@ -70,12 +69,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("H0: Random effects is consistent and efficient (RE preferred)");
     println!("H1: Random effects is inconsistent (FE preferred)\n");
 
-    let hausman = run_hausman_test(
-        &dataset,
-        "investment",
-        &["value", "capital"],
-        "firm",
-    )?;
+    let hausman = run_hausman_test(&dataset, "investment", &["value", "capital"], "firm")?;
     println!("{}\n", hausman);
 
     // Interpretation

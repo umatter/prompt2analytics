@@ -57,7 +57,7 @@ use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
 use crate::linalg::design::DesignMatrix;
 use crate::linalg::matrix_ops::{safe_inverse, xtx, xty};
-use crate::traits::estimator::{logistic_cdf, normal_cdf, normal_pdf, SignificanceLevel};
+use crate::traits::estimator::{SignificanceLevel, logistic_cdf, normal_cdf, normal_pdf};
 
 use super::hdfe::FactorInfo;
 
@@ -200,11 +200,7 @@ impl GlmFamily {
                 let phi = normal_pdf(eta);
                 let mu_safe = mu.clamp(1e-10, 1.0 - 1e-10);
                 let var = mu_safe * (1.0 - mu_safe);
-                if var > 1e-10 {
-                    phi * phi / var
-                } else {
-                    1e-10
-                }
+                if var > 1e-10 { phi * phi / var } else { 1e-10 }
             }
             GlmFamily::Poisson => {
                 // For Poisson with log link: w = μ
@@ -534,7 +530,11 @@ impl fmt::Display for FeglmResult {
 /// Weighted demean a vector by a single factor.
 ///
 /// Subtracts the weighted group mean from each observation.
-fn weighted_demean_by_factor(data: &Array1<f64>, weights: &Array1<f64>, factor: &FactorInfo) -> Array1<f64> {
+fn weighted_demean_by_factor(
+    data: &Array1<f64>,
+    weights: &Array1<f64>,
+    factor: &FactorInfo,
+) -> Array1<f64> {
     let n = data.len();
     let mut group_weighted_sums = vec![0.0; factor.n_levels];
     let mut group_weight_sums = vec![0.0; factor.n_levels];
@@ -550,13 +550,11 @@ fn weighted_demean_by_factor(data: &Array1<f64>, weights: &Array1<f64>, factor: 
     let group_means: Vec<f64> = group_weighted_sums
         .iter()
         .zip(group_weight_sums.iter())
-        .map(|(&sum, &w_sum)| {
-            if w_sum > 1e-10 {
-                sum / w_sum
-            } else {
-                0.0
-            }
-        })
+        .map(
+            |(&sum, &w_sum)| {
+                if w_sum > 1e-10 { sum / w_sum } else { 0.0 }
+            },
+        )
         .collect();
 
     // Subtract weighted group means
@@ -569,7 +567,11 @@ fn weighted_demean_by_factor(data: &Array1<f64>, weights: &Array1<f64>, factor: 
 }
 
 /// Perform one round of weighted alternating projections.
-fn weighted_map_step(data: &Array1<f64>, weights: &Array1<f64>, factors: &[FactorInfo]) -> Array1<f64> {
+fn weighted_map_step(
+    data: &Array1<f64>,
+    weights: &Array1<f64>,
+    factors: &[FactorInfo],
+) -> Array1<f64> {
     let mut current = data.clone();
     for factor in factors {
         current = weighted_demean_by_factor(&current, weights, factor);
@@ -866,7 +868,10 @@ pub fn run_feglm(
                     message: format!(
                         "Dependent variable '{}' must be binary with both 0 and 1 values for {}. \
                          Found {} ones out of {} observations.",
-                        y_col, family, n_positive, y.len()
+                        y_col,
+                        family,
+                        n_positive,
+                        y.len()
                     ),
                 });
             }
@@ -1013,13 +1018,11 @@ pub fn run_feglm(
         let xtx_mat = xtx(&x_demeaned.view());
         let xty_vec = xty(&x_demeaned.view(), &z_demeaned);
 
-        let (xtx_inv, _) = safe_inverse(&xtx_mat.view()).map_err(|e| EconError::SingularMatrix {
-            context: format!("X'WX in FEGLM iteration {}", iterations),
-            suggestion: format!(
-                "Check for perfect multicollinearity or separation: {:?}",
-                e
-            ),
-        })?;
+        let (xtx_inv, _) =
+            safe_inverse(&xtx_mat.view()).map_err(|e| EconError::SingularMatrix {
+                context: format!("X'WX in FEGLM iteration {}", iterations),
+                suggestion: format!("Check for perfect multicollinearity or separation: {:?}", e),
+            })?;
 
         let beta_new: Array1<f64> = xtx_inv.dot(&xty_vec);
 
@@ -1485,15 +1488,7 @@ mod tests {
         let dataset = create_binary_panel();
 
         // Single FE should converge quickly
-        let result = run_feglm(
-            &dataset,
-            "y",
-            &["x"],
-            &["firm"],
-            GlmFamily::Logit,
-            None,
-        )
-        .unwrap();
+        let result = run_feglm(&dataset, "y", &["x"], &["firm"], GlmFamily::Logit, None).unwrap();
 
         assert_eq!(result.fe_dimensions.len(), 1);
         assert!(!result.coefficients.is_empty());
@@ -1519,14 +1514,7 @@ mod tests {
     fn test_feglm_no_fe_columns() {
         let dataset = create_binary_panel();
 
-        let result = run_feglm(
-            &dataset,
-            "y",
-            &["x"],
-            &[],
-            GlmFamily::Logit,
-            None,
-        );
+        let result = run_feglm(&dataset, "y", &["x"], &[], GlmFamily::Logit, None);
 
         assert!(result.is_err());
     }
@@ -1534,15 +1522,7 @@ mod tests {
     #[test]
     fn test_feglm_display() {
         let dataset = create_binary_panel();
-        let result = run_feglm(
-            &dataset,
-            "y",
-            &["x"],
-            &["firm"],
-            GlmFamily::Logit,
-            None,
-        )
-        .unwrap();
+        let result = run_feglm(&dataset, "y", &["x"], &["firm"], GlmFamily::Logit, None).unwrap();
 
         let display = format!("{}", result);
         assert!(display.contains("FEGLM"));

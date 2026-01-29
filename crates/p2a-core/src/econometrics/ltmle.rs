@@ -74,7 +74,7 @@ use std::fmt;
 
 use crate::errors::{EconError, EconResult};
 use crate::linalg::matrix_ops::{safe_inverse, xtx, xty};
-use crate::traits::estimator::{logistic_cdf, normal_cdf, SignificanceLevel};
+use crate::traits::estimator::{SignificanceLevel, logistic_cdf, normal_cdf};
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Configuration Types
@@ -215,7 +215,8 @@ impl LtmleData {
         let n = outcomes[0].len();
 
         // Validate all arrays have same number of observations
-        for (t, (y, (a, l))) in outcomes.iter()
+        for (t, (y, (a, l))) in outcomes
+            .iter()
             .zip(treatments.iter().zip(covariates.iter()))
             .enumerate()
         {
@@ -236,7 +237,11 @@ impl LtmleData {
         // Validate treatments are binary
         for (t, a) in treatments.iter().enumerate() {
             for val in a.iter() {
-                if !(*val == 0.0 || *val == 1.0 || (*val - 0.0).abs() < 1e-10 || (*val - 1.0).abs() < 1e-10) {
+                if !(*val == 0.0
+                    || *val == 1.0
+                    || (*val - 0.0).abs() < 1e-10
+                    || (*val - 1.0).abs() < 1e-10)
+                {
                     return Err(EconError::InvalidSpecification {
                         message: format!(
                             "Treatment at time {} must be binary (0 or 1), found value {}",
@@ -335,42 +340,75 @@ pub struct LtmleResult {
 
 impl fmt::Display for LtmleResult {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "Longitudinal Targeted Maximum Likelihood Estimation (LTMLE)")?;
-        writeln!(f, "============================================================")?;
+        writeln!(
+            f,
+            "Longitudinal Targeted Maximum Likelihood Estimation (LTMLE)"
+        )?;
+        writeln!(
+            f,
+            "============================================================"
+        )?;
         writeln!(f)?;
         writeln!(f, "Time Points: {}", self.time_points)?;
         writeln!(f, "Observations: {}", self.n_obs)?;
         writeln!(f)?;
         writeln!(f, "Counterfactual Means:")?;
-        writeln!(f, "  E[Y^{{always treat}}]: {:>10.4} (SE: {:.4})",
-                 self.psi_treated, self.psi_treated_se)?;
-        writeln!(f, "  E[Y^{{never treat}}]:  {:>10.4} (SE: {:.4})",
-                 self.psi_control, self.psi_control_se)?;
+        writeln!(
+            f,
+            "  E[Y^{{always treat}}]: {:>10.4} (SE: {:.4})",
+            self.psi_treated, self.psi_treated_se
+        )?;
+        writeln!(
+            f,
+            "  E[Y^{{never treat}}]:  {:>10.4} (SE: {:.4})",
+            self.psi_control, self.psi_control_se
+        )?;
         writeln!(f)?;
         writeln!(f, "Average Treatment Effect (ATE):")?;
         writeln!(f, "  Estimate:   {:>12.4}", self.ate)?;
         writeln!(f, "  Std. Error: {:>12.4}", self.se)?;
         writeln!(f, "  z-stat:     {:>12.2}", self.z_stat)?;
-        writeln!(f, "  p-value:    {:>12.4}{}", self.p_value, self.significance.stars())?;
-        writeln!(f, "  95% CI:     [{:.4}, {:.4}]", self.ci_lower, self.ci_upper)?;
+        writeln!(
+            f,
+            "  p-value:    {:>12.4}{}",
+            self.p_value,
+            self.significance.stars()
+        )?;
+        writeln!(
+            f,
+            "  95% CI:     [{:.4}, {:.4}]",
+            self.ci_lower, self.ci_upper
+        )?;
         writeln!(f)?;
         writeln!(f, "Treatment Summary by Time:")?;
         for (t, &n) in self.n_treated_by_time.iter().enumerate() {
-            writeln!(f, "  Time {}: {} treated, {} truncated PS",
-                     t + 1, n, self.n_truncated_by_time[t])?;
+            writeln!(
+                f,
+                "  Time {}: {} treated, {} truncated PS",
+                t + 1,
+                n,
+                self.n_truncated_by_time[t]
+            )?;
         }
         writeln!(f)?;
         writeln!(f, "Model Specification:")?;
         writeln!(f, "  Outcome Model (Q): {}", self.q_model_type)?;
-        writeln!(f, "  PS Truncation:     [{:.2}, {:.2}]",
-                 self.gbounds.0, self.gbounds.1)?;
+        writeln!(
+            f,
+            "  PS Truncation:     [{:.2}, {:.2}]",
+            self.gbounds.0, self.gbounds.1
+        )?;
         writeln!(f)?;
         writeln!(f, "Targeting Step:")?;
         for (t, &eps) in self.fluctuation_coefs.iter().enumerate() {
             writeln!(f, "  Time {}: epsilon = {:.6}", t + 1, eps)?;
         }
         writeln!(f)?;
-        writeln!(f, "Convergence: {}", if self.converged { "Yes" } else { "No" })?;
+        writeln!(
+            f,
+            "Convergence: {}",
+            if self.converged { "Yes" } else { "No" }
+        )?;
         writeln!(f)?;
         writeln!(f, "Signif. codes: 0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1")?;
 
@@ -435,7 +473,9 @@ pub fn run_ltmle(data: &LtmleData, config: LtmleConfig) -> EconResult<LtmleResul
 
     if t_max < 2 {
         return Err(EconError::InvalidSpecification {
-            message: "LTMLE requires at least 2 time points. For single time point, use standard TMLE.".to_string(),
+            message:
+                "LTMLE requires at least 2 time points. For single time point, use standard TMLE."
+                    .to_string(),
         });
     }
 
@@ -443,27 +483,33 @@ pub fn run_ltmle(data: &LtmleData, config: LtmleConfig) -> EconResult<LtmleResul
     // Estimate counterfactual mean under "always treat" (psi_1)
     // ═══════════════════════════════════════════════════════════════════════
 
-    let (psi_treated, ic_treated, ps_treated, h_treated, q_star_treated, eps_treated,
-         converged_treated, n_treated_by_time, n_truncated_treated) =
-        estimate_counterfactual_mean(
-            data,
-            InterventionType::AlwaysTreat,
-            &config,
-            &mut warnings
-        )?;
+    let (
+        psi_treated,
+        ic_treated,
+        ps_treated,
+        h_treated,
+        q_star_treated,
+        eps_treated,
+        converged_treated,
+        n_treated_by_time,
+        n_truncated_treated,
+    ) = estimate_counterfactual_mean(data, InterventionType::AlwaysTreat, &config, &mut warnings)?;
 
     // ═══════════════════════════════════════════════════════════════════════
     // Estimate counterfactual mean under "never treat" (psi_0)
     // ═══════════════════════════════════════════════════════════════════════
 
-    let (psi_control, ic_control, _ps_control, _h_control, _q_star_control, _eps_control,
-         converged_control, _n_control_by_time, n_truncated_control) =
-        estimate_counterfactual_mean(
-            data,
-            InterventionType::NeverTreat,
-            &config,
-            &mut warnings
-        )?;
+    let (
+        psi_control,
+        ic_control,
+        _ps_control,
+        _h_control,
+        _q_star_control,
+        _eps_control,
+        converged_control,
+        _n_control_by_time,
+        n_truncated_control,
+    ) = estimate_counterfactual_mean(data, InterventionType::NeverTreat, &config, &mut warnings)?;
 
     // ═══════════════════════════════════════════════════════════════════════
     // Compute ATE = psi_1 - psi_0 and its standard error
@@ -473,30 +519,34 @@ pub fn run_ltmle(data: &LtmleData, config: LtmleConfig) -> EconResult<LtmleResul
 
     // Influence curve for ATE: IC_ATE = IC_1 - IC_0
     // (van der Laan & Rose 2011, Chapter 6)
-    let ic_ate: Array1<f64> = ic_treated.iter()
+    let ic_ate: Array1<f64> = ic_treated
+        .iter()
         .zip(ic_control.iter())
         .map(|(&ic1, &ic0)| ic1 - ic0)
         .collect();
 
     // Variance from influence curve: Var(ATE) = Var(IC) / n
     let ic_mean: f64 = ic_ate.iter().sum::<f64>() / n as f64;
-    let ic_var: f64 = ic_ate.iter()
-        .map(|&ic| (ic - ic_mean).powi(2))
-        .sum::<f64>() / (n - 1).max(1) as f64;
+    let ic_var: f64 =
+        ic_ate.iter().map(|&ic| (ic - ic_mean).powi(2)).sum::<f64>() / (n - 1).max(1) as f64;
     let ate_var = ic_var / n as f64;
     let se = ate_var.sqrt();
 
     // Standard errors for individual counterfactual means
     let ic_1_mean: f64 = ic_treated.iter().sum::<f64>() / n as f64;
-    let ic_1_var: f64 = ic_treated.iter()
+    let ic_1_var: f64 = ic_treated
+        .iter()
         .map(|&ic| (ic - ic_1_mean).powi(2))
-        .sum::<f64>() / (n - 1).max(1) as f64;
+        .sum::<f64>()
+        / (n - 1).max(1) as f64;
     let psi_treated_se = (ic_1_var / n as f64).sqrt();
 
     let ic_0_mean: f64 = ic_control.iter().sum::<f64>() / n as f64;
-    let ic_0_var: f64 = ic_control.iter()
+    let ic_0_var: f64 = ic_control
+        .iter()
         .map(|&ic| (ic - ic_0_mean).powi(2))
-        .sum::<f64>() / (n - 1).max(1) as f64;
+        .sum::<f64>()
+        / (n - 1).max(1) as f64;
     let psi_control_se = (ic_0_var / n as f64).sqrt();
 
     // Wald-type inference
@@ -517,7 +567,8 @@ pub fn run_ltmle(data: &LtmleData, config: LtmleConfig) -> EconResult<LtmleResul
     // Merge truncation counts
     // ═══════════════════════════════════════════════════════════════════════
 
-    let n_truncated_by_time: Vec<usize> = n_truncated_treated.iter()
+    let n_truncated_by_time: Vec<usize> = n_truncated_treated
+        .iter()
         .zip(n_truncated_control.iter())
         .map(|(&a, &b)| a + b)
         .collect();
@@ -570,15 +621,15 @@ fn estimate_counterfactual_mean(
     config: &LtmleConfig,
     warnings: &mut Vec<String>,
 ) -> EconResult<(
-    f64,                    // psi
-    Array1<f64>,           // influence_curve
-    Vec<Array1<f64>>,      // propensity_scores
-    Vec<Array1<f64>>,      // clever_covariates
-    Vec<Array1<f64>>,      // targeted_predictions
-    Vec<f64>,              // fluctuation_coefs
-    bool,                  // converged
-    Vec<usize>,            // n_treated_by_time
-    Vec<usize>,            // n_truncated_by_time
+    f64,              // psi
+    Array1<f64>,      // influence_curve
+    Vec<Array1<f64>>, // propensity_scores
+    Vec<Array1<f64>>, // clever_covariates
+    Vec<Array1<f64>>, // targeted_predictions
+    Vec<f64>,         // fluctuation_coefs
+    bool,             // converged
+    Vec<usize>,       // n_treated_by_time
+    Vec<usize>,       // n_truncated_by_time
 )> {
     let n = data.n_obs();
     let t_max = data.time_points();
@@ -610,7 +661,10 @@ fn estimate_counterfactual_mean(
             fit_logistic_model(&x_t, a_t, config.max_iter, config.tolerance)?;
 
         if !converged {
-            warnings.push(format!("Propensity model at time {} did not converge", t + 1));
+            warnings.push(format!(
+                "Propensity model at time {} did not converge",
+                t + 1
+            ));
             overall_converged = false;
         }
 
@@ -689,13 +743,14 @@ fn estimate_counterfactual_mean(
         }
 
         // Fit initial outcome model Q_t(A_t, L_t) using observed treatment
-        let (q_init_obs, beta_q, q_converged, _iter) = match config.q_model {
-            LtmleQModel::Logistic => {
-                fit_logistic_model(&x_with_a, &pseudo_outcome, config.max_iter, config.tolerance)?
-            }
-            LtmleQModel::Linear => {
-                fit_linear_model(&x_with_a, &pseudo_outcome)?
-            }
+        let (_q_init_obs, beta_q, q_converged, _iter) = match config.q_model {
+            LtmleQModel::Logistic => fit_logistic_model(
+                &x_with_a,
+                &pseudo_outcome,
+                config.max_iter,
+                config.tolerance,
+            )?,
+            LtmleQModel::Linear => fit_linear_model(&x_with_a, &pseudo_outcome)?,
         };
 
         if !q_converged {
@@ -714,9 +769,7 @@ fn estimate_counterfactual_mean(
                 let z = x_with_d.dot(&beta_q);
                 z.mapv(logistic_cdf)
             }
-            LtmleQModel::Linear => {
-                x_with_d.dot(&beta_q)
-            }
+            LtmleQModel::Linear => x_with_d.dot(&beta_q),
         };
 
         // ═══════════════════════════════════════════════════════════════════
@@ -736,17 +789,13 @@ fn estimate_counterfactual_mean(
 
         // Compute targeted predictions Q_t^* under counterfactual
         let q_star: Array1<f64> = match config.q_model {
-            LtmleQModel::Logistic => {
-                (0..n)
-                    .map(|i| {
-                        let logit_q = logit(q_init[i]);
-                        logistic_cdf(logit_q + epsilon * h_t[i])
-                    })
-                    .collect()
-            }
-            LtmleQModel::Linear => {
-                (0..n).map(|i| q_init[i] + epsilon * h_t[i]).collect()
-            }
+            LtmleQModel::Logistic => (0..n)
+                .map(|i| {
+                    let logit_q = logit(q_init[i]);
+                    logistic_cdf(logit_q + epsilon * h_t[i])
+                })
+                .collect(),
+            LtmleQModel::Linear => (0..n).map(|i| q_init[i] + epsilon * h_t[i]).collect(),
         };
 
         targeted_predictions[t] = q_star.clone();
@@ -765,9 +814,7 @@ fn estimate_counterfactual_mean(
     // Simplified influence curve for g-computation estimator
     // IC(O) = Q_1^*(O) - psi
     // This is the influence curve for the substitution estimator
-    let influence_curve: Array1<f64> = (0..n)
-        .map(|i| targeted_predictions[0][i] - psi)
-        .collect();
+    let influence_curve: Array1<f64> = (0..n).map(|i| targeted_predictions[0][i] - psi).collect();
 
     Ok((
         psi,
@@ -890,12 +937,11 @@ fn fit_logistic_model(
 
         // Newton-Raphson update: beta_new = beta - H^{-1} * g
         let neg_hessian = &hessian * -1.0;
-        let (hess_inv, _) = safe_inverse(&neg_hessian.view()).map_err(|e| {
-            EconError::SingularMatrix {
+        let (hess_inv, _) =
+            safe_inverse(&neg_hessian.view()).map_err(|e| EconError::SingularMatrix {
                 context: "Logistic regression Hessian".to_string(),
                 suggestion: format!("Check for multicollinearity: {:?}", e),
-            }
-        })?;
+            })?;
 
         let delta = hess_inv.dot(&gradient);
         beta = &beta + &delta;
@@ -916,11 +962,9 @@ fn fit_linear_model(
     y: &Array1<f64>,
 ) -> EconResult<(Array1<f64>, Array1<f64>, bool, usize)> {
     let xtx_mat = xtx(&x.view());
-    let (xtx_inv, _) = safe_inverse(&xtx_mat.view()).map_err(|e| {
-        EconError::SingularMatrix {
-            context: "Linear regression X'X matrix".to_string(),
-            suggestion: format!("Check for multicollinearity: {:?}", e),
-        }
+    let (xtx_inv, _) = safe_inverse(&xtx_mat.view()).map_err(|e| EconError::SingularMatrix {
+        context: "Linear regression X'X matrix".to_string(),
+        suggestion: format!("Check for multicollinearity: {:?}", e),
     })?;
 
     let xty_vec = xty(&x.view(), y);
@@ -968,9 +1012,7 @@ fn fit_targeting_model(
                 let p_clipped: Array1<f64> = p.mapv(|pi| pi.max(1e-10).min(1.0 - 1e-10));
 
                 // Score: dL/d(epsilon) = sum(H * (Y - p))
-                let score: f64 = (0..n)
-                    .map(|i| h[i] * (y[i] - p_clipped[i]))
-                    .sum();
+                let score: f64 = (0..n).map(|i| h[i] * (y[i] - p_clipped[i])).sum();
 
                 // Check convergence
                 if score.abs() < tolerance {
@@ -999,9 +1041,7 @@ fn fit_targeting_model(
         LtmleQModel::Linear => {
             // OLS with offset Q and covariate H (no intercept)
             // epsilon = sum(H * (Y - Q)) / sum(H^2)
-            let numerator: f64 = (0..n)
-                .map(|i| h[i] * (y[i] - q_init[i]))
-                .sum();
+            let numerator: f64 = (0..n).map(|i| h[i] * (y[i] - q_init[i])).sum();
             let denominator: f64 = h.iter().map(|hi| hi * hi).sum::<f64>();
 
             if denominator.abs() < 1e-10 {
@@ -1039,13 +1079,13 @@ mod tests {
         let n = 100;
 
         // Time 1 covariates (single covariate)
-        let l_1_vec: Vec<f64> = (0..n)
-            .map(|i| (i as f64 % 10.0) / 10.0 + 0.05)
-            .collect();
+        let l_1_vec: Vec<f64> = (0..n).map(|i| (i as f64 % 10.0) / 10.0 + 0.05).collect();
         let l_1 = Array2::from_shape_vec((n, 1), l_1_vec).unwrap();
 
         // Time 1 treatments (based on L_1)
-        let a_1: Array1<f64> = l_1.column(0).iter()
+        let a_1: Array1<f64> = l_1
+            .column(0)
+            .iter()
             .enumerate()
             .map(|(i, l)| {
                 // Deterministic assignment based on index for reproducibility
@@ -1054,21 +1094,21 @@ mod tests {
             .collect();
 
         // Time 2 covariates (depend on A_1 and L_1)
-        let l_2_vec: Vec<f64> = l_1.column(0).iter()
+        let l_2_vec: Vec<f64> = l_1
+            .column(0)
+            .iter()
             .zip(a_1.iter())
             .enumerate()
-            .map(|(i, (l1, a1))| {
-                *l1 + 0.3 * *a1 + (i as f64 % 5.0) / 50.0 - 0.05
-            })
+            .map(|(i, (l1, a1))| *l1 + 0.3 * *a1 + (i as f64 % 5.0) / 50.0 - 0.05)
             .collect();
         let l_2 = Array2::from_shape_vec((n, 1), l_2_vec).unwrap();
 
         // Time 2 treatments (based on L_2)
-        let a_2: Array1<f64> = l_2.column(0).iter()
+        let a_2: Array1<f64> = l_2
+            .column(0)
+            .iter()
             .enumerate()
-            .map(|(i, l)| {
-                if (*l > 0.5) ^ (i % 4 == 0) { 1.0 } else { 0.0 }
-            })
+            .map(|(i, l)| if (*l > 0.5) ^ (i % 4 == 0) { 1.0 } else { 0.0 })
             .collect();
 
         // Outcome at time 2
@@ -1147,21 +1187,35 @@ mod tests {
 
         // ATE should be positive (treatment effect is positive in DGP)
         // The true ATE is approximately 0.4 + 0.5 = 0.9 based on the DGP
-        assert!(result.ate > 0.0, "ATE should be positive, got {}", result.ate);
+        assert!(
+            result.ate > 0.0,
+            "ATE should be positive, got {}",
+            result.ate
+        );
 
         // Standard error should be positive and finite
-        assert!(result.se > 0.0 && result.se.is_finite(),
-                "SE should be positive and finite, got {}", result.se);
+        assert!(
+            result.se > 0.0 && result.se.is_finite(),
+            "SE should be positive and finite, got {}",
+            result.se
+        );
 
         // Confidence interval should be finite
-        assert!(result.ci_lower.is_finite() && result.ci_upper.is_finite(),
-                "CI should be finite: [{}, {}]", result.ci_lower, result.ci_upper);
+        assert!(
+            result.ci_lower.is_finite() && result.ci_upper.is_finite(),
+            "CI should be finite: [{}, {}]",
+            result.ci_lower,
+            result.ci_upper
+        );
 
         // Counterfactual means should be ordered: treated > control
         // (since treatment effect is positive)
-        assert!(result.psi_treated > result.psi_control,
-                "E[Y^1] = {} should be > E[Y^0] = {}",
-                result.psi_treated, result.psi_control);
+        assert!(
+            result.psi_treated > result.psi_control,
+            "E[Y^1] = {} should be > E[Y^0] = {}",
+            result.psi_treated,
+            result.psi_control
+        );
     }
 
     #[test]
@@ -1175,9 +1229,16 @@ mod tests {
         let result = run_ltmle(&data, config).unwrap();
 
         // Should still produce reasonable results
-        assert!(result.ate.is_finite(), "ATE should be finite: {}", result.ate);
-        assert!(result.se > 0.0 && result.se.is_finite(),
-                "SE should be positive and finite: {}", result.se);
+        assert!(
+            result.ate.is_finite(),
+            "ATE should be finite: {}",
+            result.ate
+        );
+        assert!(
+            result.se > 0.0 && result.se.is_finite(),
+            "SE should be positive and finite: {}",
+            result.se
+        );
     }
 
     #[test]
@@ -1193,8 +1254,12 @@ mod tests {
         // All propensity scores should be within bounds
         for (t, ps) in result.propensity_scores.iter().enumerate() {
             for &p in ps.iter() {
-                assert!(p >= 0.1 && p <= 0.9,
-                        "PS at time {} outside bounds [0.1, 0.9]: {}", t + 1, p);
+                assert!(
+                    (0.1..=0.9).contains(&p),
+                    "PS at time {} outside bounds [0.1, 0.9]: {}",
+                    t + 1,
+                    p
+                );
             }
         }
     }
@@ -1206,8 +1271,11 @@ mod tests {
 
         // Influence curve should have mean close to zero
         let ic_mean: f64 = result.influence_curve.iter().sum::<f64>() / result.n_obs as f64;
-        assert!(ic_mean.abs() < 0.2,
-                "IC mean should be close to zero, got {}", ic_mean);
+        assert!(
+            ic_mean.abs() < 0.2,
+            "IC mean should be close to zero, got {}",
+            ic_mean
+        );
 
         // IC should have correct length
         assert_eq!(result.influence_curve.len(), result.n_obs);
@@ -1223,8 +1291,12 @@ mod tests {
 
         // Fluctuation coefficients should be finite
         for (t, &eps) in result.fluctuation_coefs.iter().enumerate() {
-            assert!(eps.is_finite(),
-                    "Fluctuation coef at time {} should be finite: {}", t + 1, eps);
+            assert!(
+                eps.is_finite(),
+                "Fluctuation coef at time {} should be finite: {}",
+                t + 1,
+                eps
+            );
         }
     }
 
@@ -1243,10 +1315,22 @@ mod tests {
 
     #[test]
     fn test_intervention_type_display() {
-        assert_eq!(format!("{}", InterventionType::AlwaysTreat), "Always Treat (A=1)");
-        assert_eq!(format!("{}", InterventionType::NeverTreat), "Never Treat (A=0)");
-        assert_eq!(format!("{}", InterventionType::Static(true)), "Static (A=1)");
-        assert_eq!(format!("{}", InterventionType::Static(false)), "Static (A=0)");
+        assert_eq!(
+            format!("{}", InterventionType::AlwaysTreat),
+            "Always Treat (A=1)"
+        );
+        assert_eq!(
+            format!("{}", InterventionType::NeverTreat),
+            "Never Treat (A=0)"
+        );
+        assert_eq!(
+            format!("{}", InterventionType::Static(true)),
+            "Static (A=1)"
+        );
+        assert_eq!(
+            format!("{}", InterventionType::Static(false)),
+            "Static (A=0)"
+        );
     }
 
     #[test]

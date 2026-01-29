@@ -2,69 +2,101 @@
 //!
 //! Run with: `cargo bench -p p2a-core -- new_methods`
 
-use criterion::{criterion_group, criterion_main, Criterion, BenchmarkId};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use ndarray::Array2;
+use p2a_core::linalg::design::DesignMatrix;
 use p2a_core::{
+    Alternative,
+    ApproxMethod,
+    ApproxRule,
+    BgTestType,
+    CorrelationMethod,
+    DensityKernel,
+    GmmConfig,
+    GmmStep,
+    GmmTransform,
+    GsynthConfig,
+    GsynthForce,
+    HacKernel,
+    HurdleType,
+    Linkage,
+    MixedLogitConfig,
+    PanelGlsModel,
+    PowerAlternative,
+    RandomDistribution,
+    RandomParameterSpec,
+    ResetType,
+    SmoothSplineConfig,
+    SplineMethod,
+    TTestType,
+    approx,
+    cmdscale,
     // cor.test
-    cor_test, CorrelationMethod, Alternative,
-    // power analysis
-    power_t_test, power_prop_test, power_anova_test,
-    TTestType, PowerAlternative,
+    cor_test,
+    cutree,
+    data::Dataset,
+    density,
+    ecdf,
     // robust stats
-    fivenum, iqr, mad, ecdf, density, DensityKernel,
-    // spline/approx
-    spline, approx, SplineMethod, ApproxMethod, ApproxRule,
-    // smooth.spline
-    smooth_spline, SmoothSplineConfig,
-    // prop.trend.test
-    prop_trend_test,
-    // batch 1: medpolish, cmdscale, cutree, isoreg, loglin
-    medpolish, isoreg, loglin,
-    cmdscale, hierarchical, cutree, Linkage,
+    fivenum,
+    forecasting::cpgram::{cpgram, white_noise_test},
+    granger_test,
+    hierarchical,
+    iqr,
+    isoreg,
     // batch 2: toeplitz, line, cpgram, supsmu, constrOptim, ppr, se.contrast, model.tables
     linalg::toeplitz::{toeplitz, toeplitz_asymmetric},
-    regression::{line, supsmu},
-    forecasting::cpgram::{cpgram, white_noise_test},
-    stats::{
-        constroptim::{constr_optim, ConstrOptimConfig, OptimMethod},
-        secontrast::{se_contrast, generate_contrasts, ContrastType},
-        modeltables::{model_tables, model_tables_two_way, TableType},
-        run_one_way_anova,
-    },
-    ml::ppr::{ppr, PprConfig},
-    data::Dataset,
-    // Econometric tests (compare with R's lmtest package)
-    bg_test_from_ols, BgTestType,
-    reset_test_from_ols, ResetType,
-    wald_test_from_ols,
-    vcov_hac, HacKernel,
-    run_ols,
+    loglin,
+    mad,
+    // batch 1: medpolish, cmdscale, cutree, isoreg, loglin
+    medpolish,
+    ml::ppr::{PprConfig, ppr},
+    power_anova_test,
+    power_prop_test,
+    // power analysis
+    power_t_test,
+    // prop.trend.test
+    prop_trend_test,
     regression::CovarianceType,
-    granger_test,
-    // Discrete choice models (compare with R's nnet, MASS, pscl packages)
-    run_multinom,
-    run_ordered_logit,
-    run_negbin,
-    run_zip, run_zinb,
-    // Hurdle models
-    run_hurdle, HurdleType,
+    regression::{line, supsmu},
+    reset_test_from_ols,
+    // Extended TWFE
+    run_etwfe,
     // Panel data methods
-    run_gmm, GmmConfig, GmmTransform, GmmStep,
-    run_panel_gls, PanelGlsModel,
+    run_gmm,
+    // Generalized synthetic control
+    run_gsynth,
+    // Hurdle models
+    run_hurdle,
+    // Mixed logit (random parameters logit)
+    run_mixed_logit,
     // McFadden conditional logit
     run_mlogit,
-    // Mixed logit (random parameters logit)
-    run_mixed_logit, MixedLogitConfig, RandomDistribution, RandomParameterSpec,
-    // Generalized synthetic control
-    run_gsynth, GsynthConfig, GsynthForce,
-    // Extended TWFE
-    run_etwfe, EtwfeConfig, ControlGroup as EtwfeControlGroup,
+    // Discrete choice models (compare with R's nnet, MASS, pscl packages)
+    run_multinom,
+    run_negbin,
+    run_ols,
+    run_ordered_logit,
+    run_panel_gls,
+    run_zinb,
+    run_zip,
+    // smooth.spline
+    smooth_spline,
+    // spline/approx
+    spline,
+    stats::{
+        constroptim::{ConstrOptimConfig, OptimMethod, constr_optim},
+        modeltables::{TableType, model_tables, model_tables_two_way},
+        run_one_way_anova,
+        secontrast::{ContrastType, generate_contrasts, se_contrast},
+    },
+    vcov_hac,
+    wald_test_from_ols,
 };
-use ndarray::{Array1, Array2};
-use p2a_core::linalg::design::DesignMatrix;
+use polars::prelude::*;
 use rand::Rng;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
-use polars::prelude::*;
 
 fn generate_data(n: usize, seed: u64) -> Vec<f64> {
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
@@ -74,7 +106,10 @@ fn generate_data(n: usize, seed: u64) -> Vec<f64> {
 fn generate_correlated_pair(n: usize, seed: u64) -> (Vec<f64>, Vec<f64>) {
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
     let x: Vec<f64> = (0..n).map(|_| rng.r#gen::<f64>() * 10.0).collect();
-    let y: Vec<f64> = x.iter().map(|&xi| xi * 0.7 + rng.r#gen::<f64>() * 3.0).collect();
+    let y: Vec<f64> = x
+        .iter()
+        .map(|&xi| xi * 0.7 + rng.r#gen::<f64>() * 3.0)
+        .collect();
     (x, y)
 }
 
@@ -85,11 +120,27 @@ fn cor_test_benchmark(c: &mut Criterion) {
         let (x, y) = generate_correlated_pair(*size, 42);
 
         group.bench_with_input(BenchmarkId::new("pearson", size), size, |b, _| {
-            b.iter(|| cor_test(&x, &y, CorrelationMethod::Pearson, Alternative::TwoSided, 0.95))
+            b.iter(|| {
+                cor_test(
+                    &x,
+                    &y,
+                    CorrelationMethod::Pearson,
+                    Alternative::TwoSided,
+                    0.95,
+                )
+            })
         });
 
         group.bench_with_input(BenchmarkId::new("spearman", size), size, |b, _| {
-            b.iter(|| cor_test(&x, &y, CorrelationMethod::Spearman, Alternative::TwoSided, 0.95))
+            b.iter(|| {
+                cor_test(
+                    &x,
+                    &y,
+                    CorrelationMethod::Spearman,
+                    Alternative::TwoSided,
+                    0.95,
+                )
+            })
         });
     }
     group.finish();
@@ -99,23 +150,34 @@ fn power_analysis_benchmark(c: &mut Criterion) {
     let mut group = c.benchmark_group("power_analysis");
 
     group.bench_function("power_t_test", |b| {
-        b.iter(|| power_t_test(
-            Some(30.0), Some(0.5), Some(1.0), Some(0.05), None,
-            TTestType::TwoSample, PowerAlternative::TwoSided
-        ))
+        b.iter(|| {
+            power_t_test(
+                Some(30.0),
+                Some(0.5),
+                Some(1.0),
+                Some(0.05),
+                None,
+                TTestType::TwoSample,
+                PowerAlternative::TwoSided,
+            )
+        })
     });
 
     group.bench_function("power_prop_test", |b| {
-        b.iter(|| power_prop_test(
-            Some(100.0), 0.5, Some(0.6), Some(0.05), None,
-            PowerAlternative::TwoSided
-        ))
+        b.iter(|| {
+            power_prop_test(
+                Some(100.0),
+                0.5,
+                Some(0.6),
+                Some(0.05),
+                None,
+                PowerAlternative::TwoSided,
+            )
+        })
     });
 
     group.bench_function("power_anova_test", |b| {
-        b.iter(|| power_anova_test(
-            4, Some(20.0), 1.0, 3.0, Some(0.05), None
-        ))
+        b.iter(|| power_anova_test(4, Some(20.0), 1.0, 3.0, Some(0.05), None))
     });
 
     group.finish();
@@ -164,7 +226,17 @@ fn spline_approx_benchmark(c: &mut Criterion) {
         });
 
         group.bench_with_input(BenchmarkId::new("approx_linear", size), size, |b, _| {
-            b.iter(|| approx(&x, &y, None, Some(100), ApproxMethod::Linear, ApproxRule::Na, 0.5))
+            b.iter(|| {
+                approx(
+                    &x,
+                    &y,
+                    None,
+                    Some(100),
+                    ApproxMethod::Linear,
+                    ApproxRule::Na,
+                    0.5,
+                )
+            })
         });
     }
     group.finish();
@@ -208,9 +280,11 @@ fn medpolish_benchmark(c: &mut Criterion) {
             .map(|_| (0..ncol).map(|_| rng.r#gen::<f64>() * 100.0).collect())
             .collect();
 
-        group.bench_with_input(BenchmarkId::from_parameter(format!("{}x{}", nrow, ncol)), nrow, |b, _| {
-            b.iter(|| medpolish(&data, None, None, false))
-        });
+        group.bench_with_input(
+            BenchmarkId::from_parameter(format!("{}x{}", nrow, ncol)),
+            nrow,
+            |b, _| b.iter(|| medpolish(&data, None, None, false)),
+        );
     }
     group.finish();
 }
@@ -221,7 +295,10 @@ fn isoreg_benchmark(c: &mut Criterion) {
     for size in [100, 1000, 10000].iter() {
         let mut rng = ChaCha8Rng::seed_from_u64(42);
         let x: Vec<f64> = (0..*size).map(|i| i as f64).collect();
-        let y: Vec<f64> = x.iter().map(|&xi| xi * 0.5 + rng.r#gen::<f64>() * 10.0).collect();
+        let y: Vec<f64> = x
+            .iter()
+            .map(|&xi| xi * 0.5 + rng.r#gen::<f64>() * 10.0)
+            .collect();
 
         group.bench_with_input(BenchmarkId::from_parameter(size), size, |b, _| {
             b.iter(|| isoreg(&x, &y))
@@ -331,7 +408,10 @@ fn line_benchmark(c: &mut Criterion) {
     for size in [20, 100, 500, 1000].iter() {
         let mut rng = ChaCha8Rng::seed_from_u64(42);
         let x: Vec<f64> = (0..*size).map(|i| i as f64).collect();
-        let y: Vec<f64> = x.iter().map(|&xi| 2.0 * xi + 5.0 + rng.r#gen::<f64>() * 10.0).collect();
+        let y: Vec<f64> = x
+            .iter()
+            .map(|&xi| 2.0 * xi + 5.0 + rng.r#gen::<f64>() * 10.0)
+            .collect();
 
         group.bench_with_input(BenchmarkId::from_parameter(size), size, |b, _| {
             b.iter(|| line::line(&x, &y, None))
@@ -364,7 +444,10 @@ fn supsmu_benchmark(c: &mut Criterion) {
     for size in [50, 200, 1000].iter() {
         let mut rng = ChaCha8Rng::seed_from_u64(42);
         let x: Vec<f64> = (0..*size).map(|i| i as f64 / *size as f64).collect();
-        let y: Vec<f64> = x.iter().map(|&xi| (xi * 6.28).sin() + rng.r#gen::<f64>() * 0.5).collect();
+        let y: Vec<f64> = x
+            .iter()
+            .map(|&xi| (xi * 6.28).sin() + rng.r#gen::<f64>() * 0.5)
+            .collect();
 
         group.bench_with_input(BenchmarkId::new("auto_span", size), size, |b, _| {
             b.iter(|| supsmu::supsmu(&x, &y, None, None, false, 0.0))
@@ -391,7 +474,16 @@ fn constr_optim_benchmark(c: &mut Criterion) {
             method: OptimMethod::NelderMead,
             ..Default::default()
         };
-        b.iter(|| constr_optim(&[0.0, 0.0], &f, None::<fn(&[f64]) -> Vec<f64>>, &ui, &ci, config.clone()))
+        b.iter(|| {
+            constr_optim(
+                &[0.0, 0.0],
+                f,
+                None::<fn(&[f64]) -> Vec<f64>>,
+                &ui,
+                &ci,
+                config.clone(),
+            )
+        })
     });
 
     group.bench_function("2d_quadratic_bfgs", |b| {
@@ -401,20 +493,36 @@ fn constr_optim_benchmark(c: &mut Criterion) {
             method: OptimMethod::BFGS,
             ..Default::default()
         };
-        b.iter(|| constr_optim(&[0.0, 0.0], &f, Some(&grad), &ui, &ci, config.clone()))
+        b.iter(|| constr_optim(&[0.0, 0.0], f, Some(&grad), &ui, &ci, config.clone()))
     });
 
     // Higher dimensional problem
     group.bench_function("10d_quadratic", |b| {
-        let f10 = |x: &[f64]| x.iter().enumerate().map(|(i, &xi)| (xi - i as f64).powi(2)).sum::<f64>();
-        let ui: Vec<Vec<f64>> = (0..10).map(|i| {
-            let mut row = vec![0.0; 10];
-            row[i] = 1.0;
-            row
-        }).collect();
+        let f10 = |x: &[f64]| {
+            x.iter()
+                .enumerate()
+                .map(|(i, &xi)| (xi - i as f64).powi(2))
+                .sum::<f64>()
+        };
+        let ui: Vec<Vec<f64>> = (0..10)
+            .map(|i| {
+                let mut row = vec![0.0; 10];
+                row[i] = 1.0;
+                row
+            })
+            .collect();
         let ci = vec![0.0; 10]; // x_i >= 0
         let config = ConstrOptimConfig::default();
-        b.iter(|| constr_optim(&vec![5.0; 10], &f10, None::<fn(&[f64]) -> Vec<f64>>, &ui, &ci, config.clone()))
+        b.iter(|| {
+            constr_optim(
+                &[5.0; 10],
+                f10,
+                None::<fn(&[f64]) -> Vec<f64>>,
+                &ui,
+                &ci,
+                config.clone(),
+            )
+        })
     });
 
     group.finish();
@@ -431,20 +539,30 @@ fn ppr_benchmark(c: &mut Criterion) {
         let x = Array2::from_shape_vec((*n, *p), x_data.clone()).unwrap();
 
         // Generate y = sum of first 2 projections + noise
-        let y: Vec<f64> = (0..*n).map(|i| {
-            let row_start = i * *p;
-            let proj1: f64 = (0..*p).map(|j| x_data[row_start + j] * (j as f64 + 1.0) / *p as f64).sum();
-            proj1.sin() + rng.r#gen::<f64>() * 0.1
-        }).collect();
+        let y: Vec<f64> = (0..*n)
+            .map(|i| {
+                let row_start = i * *p;
+                let proj1: f64 = (0..*p)
+                    .map(|j| x_data[row_start + j] * (j as f64 + 1.0) / *p as f64)
+                    .sum();
+                proj1.sin() + rng.r#gen::<f64>() * 0.1
+            })
+            .collect();
 
         let label = format!("n{}_p{}", n, p);
         group.bench_with_input(BenchmarkId::new("nterms1", &label), &label, |b, _| {
-            let config = PprConfig { nterms: 1, ..Default::default() };
+            let config = PprConfig {
+                nterms: 1,
+                ..Default::default()
+            };
             b.iter(|| ppr(x.view(), &y, None, config.clone()))
         });
 
         group.bench_with_input(BenchmarkId::new("nterms3", &label), &label, |b, _| {
-            let config = PprConfig { nterms: 3, ..Default::default() };
+            let config = PprConfig {
+                nterms: 3,
+                ..Default::default()
+            };
             b.iter(|| ppr(x.view(), &y, None, config.clone()))
         });
     }
@@ -460,30 +578,41 @@ fn se_contrast_benchmark(c: &mut Criterion) {
         let n = n_per_group * k;
 
         // Generate data
-        let values: Vec<f64> = (0..n).map(|i| {
-            let group = i / n_per_group;
-            (group as f64 * 5.0) + rng.r#gen::<f64>() * 2.0
-        }).collect();
+        let values: Vec<f64> = (0..n)
+            .map(|i| {
+                let group = i / n_per_group;
+                (group as f64 * 5.0) + rng.r#gen::<f64>() * 2.0
+            })
+            .collect();
         let groups: Vec<String> = (0..n).map(|i| format!("G{}", i / n_per_group)).collect();
 
         let df = df! {
             "value" => &values,
             "group" => &groups
-        }.unwrap();
+        }
+        .unwrap();
         let dataset = Dataset::new(df);
 
         let label = format!("k{}_n{}", k, n_per_group);
-        group.bench_with_input(BenchmarkId::new("treatment_contrasts", &label), &label, |b, _| {
-            let anova = run_one_way_anova(&dataset, "value", "group").unwrap();
-            let contrasts = generate_contrasts(k, ContrastType::Treatment);
-            b.iter(|| se_contrast(&anova, &contrasts))
-        });
+        group.bench_with_input(
+            BenchmarkId::new("treatment_contrasts", &label),
+            &label,
+            |b, _| {
+                let anova = run_one_way_anova(&dataset, "value", "group").unwrap();
+                let contrasts = generate_contrasts(k, ContrastType::Treatment);
+                b.iter(|| se_contrast(&anova, &contrasts))
+            },
+        );
 
-        group.bench_with_input(BenchmarkId::new("helmert_contrasts", &label), &label, |b, _| {
-            let anova = run_one_way_anova(&dataset, "value", "group").unwrap();
-            let contrasts = generate_contrasts(k, ContrastType::Helmert);
-            b.iter(|| se_contrast(&anova, &contrasts))
-        });
+        group.bench_with_input(
+            BenchmarkId::new("helmert_contrasts", &label),
+            &label,
+            |b, _| {
+                let anova = run_one_way_anova(&dataset, "value", "group").unwrap();
+                let contrasts = generate_contrasts(k, ContrastType::Helmert);
+                b.iter(|| se_contrast(&anova, &contrasts))
+            },
+        );
     }
     group.finish();
 }
@@ -496,16 +625,19 @@ fn model_tables_benchmark(c: &mut Criterion) {
         let k = 5; // 5 groups
         let n = n_per_group * k;
 
-        let values: Vec<f64> = (0..n).map(|i| {
-            let grp = i / n_per_group;
-            (grp as f64 * 3.0) + rng.r#gen::<f64>() * 2.0
-        }).collect();
+        let values: Vec<f64> = (0..n)
+            .map(|i| {
+                let grp = i / n_per_group;
+                (grp as f64 * 3.0) + rng.r#gen::<f64>() * 2.0
+            })
+            .collect();
         let groups: Vec<String> = (0..n).map(|i| format!("G{}", i / n_per_group)).collect();
 
         let df = df! {
             "value" => &values,
             "group" => &groups
-        }.unwrap();
+        }
+        .unwrap();
         let dataset = Dataset::new(df);
 
         let label = format!("k{}_n{}", k, n_per_group);
@@ -523,11 +655,17 @@ fn model_tables_benchmark(c: &mut Criterion) {
     // Two-way model tables
     for size in [3, 5, 10].iter() {
         let mut rng = ChaCha8Rng::seed_from_u64(42);
-        let data: Vec<Vec<Vec<f64>>> = (0..*size).map(|i| {
-            (0..*size).map(|j| {
-                (0..5).map(|_| (i + j) as f64 * 2.0 + rng.r#gen::<f64>()).collect()
-            }).collect()
-        }).collect();
+        let data: Vec<Vec<Vec<f64>>> = (0..*size)
+            .map(|i| {
+                (0..*size)
+                    .map(|j| {
+                        (0..5)
+                            .map(|_| (i + j) as f64 * 2.0 + rng.r#gen::<f64>())
+                            .collect()
+                    })
+                    .collect()
+            })
+            .collect();
         let factor_a: Vec<String> = (0..*size).map(|i| format!("A{}", i)).collect();
         let factor_b: Vec<String> = (0..*size).map(|i| format!("B{}", i)).collect();
 
@@ -552,15 +690,20 @@ fn create_regression_dataset(n: usize, seed: u64) -> Dataset {
     let mut e = vec![0.0; n];
     e[0] = rng.r#gen::<f64>() - 0.5;
     for i in 1..n {
-        e[i] = 0.5 * e[i-1] + (rng.r#gen::<f64>() - 0.5);
+        e[i] = 0.5 * e[i - 1] + (rng.r#gen::<f64>() - 0.5);
     }
     let x: Vec<f64> = (0..n).map(|i| i as f64).collect();
-    let y: Vec<f64> = x.iter().zip(e.iter()).map(|(&xi, &ei)| 2.0 + 0.5 * xi + ei).collect();
+    let y: Vec<f64> = x
+        .iter()
+        .zip(e.iter())
+        .map(|(&xi, &ei)| 2.0 + 0.5 * xi + ei)
+        .collect();
 
     let df = df! {
         "y" => &y,
         "x" => &x
-    }.unwrap();
+    }
+    .unwrap();
     Dataset::new(df)
 }
 
@@ -568,7 +711,9 @@ fn create_multivar_dataset(n: usize, seed: u64) -> Dataset {
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
     let x1: Vec<f64> = (0..n).map(|_| rng.r#gen::<f64>() * 10.0).collect();
     let x2: Vec<f64> = (0..n).map(|_| rng.r#gen::<f64>() * 10.0).collect();
-    let y: Vec<f64> = x1.iter().zip(x2.iter())
+    let y: Vec<f64> = x1
+        .iter()
+        .zip(x2.iter())
         .map(|(&xi1, &xi2)| 1.0 + 2.0 * xi1 + 0.5 * xi2 + (rng.r#gen::<f64>() - 0.5) * 2.0)
         .collect();
 
@@ -576,7 +721,8 @@ fn create_multivar_dataset(n: usize, seed: u64) -> Dataset {
         "y" => &y,
         "x1" => &x1,
         "x2" => &x2
-    }.unwrap();
+    }
+    .unwrap();
     Dataset::new(df)
 }
 
@@ -585,19 +731,28 @@ fn create_multinomial_dataset(n: usize, seed: u64) -> Dataset {
     let x: Vec<f64> = (0..n).map(|_| rng.r#gen::<f64>() * 10.0 - 5.0).collect();
 
     // Generate categorical outcome based on x
-    let y: Vec<&str> = x.iter().map(|&xi| {
-        let p_a = 1.0 / (1.0 + (0.5 + 1.0 * xi).exp() + (1.0 + 2.0 * xi).exp());
-        let p_b = (0.5 + 1.0 * xi).exp() / (1.0 + (0.5 + 1.0 * xi).exp() + (1.0 + 2.0 * xi).exp());
-        let u: f64 = rng.r#gen();
-        if u < p_a { "A" }
-        else if u < p_a + p_b { "B" }
-        else { "C" }
-    }).collect();
+    let y: Vec<&str> = x
+        .iter()
+        .map(|&xi| {
+            let p_a = 1.0 / (1.0 + (0.5 + 1.0 * xi).exp() + (1.0 + 2.0 * xi).exp());
+            let p_b =
+                (0.5 + 1.0 * xi).exp() / (1.0 + (0.5 + 1.0 * xi).exp() + (1.0 + 2.0 * xi).exp());
+            let u: f64 = rng.r#gen();
+            if u < p_a {
+                "A"
+            } else if u < p_a + p_b {
+                "B"
+            } else {
+                "C"
+            }
+        })
+        .collect();
 
     let df = df! {
         "y" => &y,
         "x" => &x
-    }.unwrap();
+    }
+    .unwrap();
     Dataset::new(df)
 }
 
@@ -606,17 +761,25 @@ fn create_ordered_dataset(n: usize, seed: u64) -> Dataset {
     let x: Vec<f64> = (0..n).map(|_| rng.r#gen::<f64>() * 6.0 - 3.0).collect();
 
     // Latent variable model with logistic errors
-    let y: Vec<&str> = x.iter().map(|&xi| {
-        let latent = 1.5 * xi + (rng.r#gen::<f64>().ln() - (1.0 - rng.r#gen::<f64>()).ln()); // logistic noise
-        if latent < -1.0 { "Low" }
-        else if latent < 1.0 { "Med" }
-        else { "High" }
-    }).collect();
+    let y: Vec<&str> = x
+        .iter()
+        .map(|&xi| {
+            let latent = 1.5 * xi + (rng.r#gen::<f64>().ln() - (1.0 - rng.r#gen::<f64>()).ln()); // logistic noise
+            if latent < -1.0 {
+                "Low"
+            } else if latent < 1.0 {
+                "Med"
+            } else {
+                "High"
+            }
+        })
+        .collect();
 
     let df = df! {
         "y" => &y,
         "x" => &x
-    }.unwrap();
+    }
+    .unwrap();
     Dataset::new(df)
 }
 
@@ -625,17 +788,21 @@ fn create_count_dataset(n: usize, seed: u64) -> Dataset {
     let x: Vec<f64> = (0..n).map(|_| rng.r#gen::<f64>() * 3.0).collect();
 
     // Negative binomial-like counts
-    let y: Vec<f64> = x.iter().map(|&xi| {
-        let mu = (0.5 + 0.8 * xi).exp();
-        // Simple overdispersed count simulation
-        let count = (mu + rng.r#gen::<f64>() * mu.sqrt() * 2.0).max(0.0).floor();
-        count
-    }).collect();
+    let y: Vec<f64> = x
+        .iter()
+        .map(|&xi| {
+            let mu = (0.5 + 0.8 * xi).exp();
+            // Simple overdispersed count simulation
+
+            (mu + rng.r#gen::<f64>() * mu.sqrt() * 2.0).max(0.0).floor()
+        })
+        .collect();
 
     let df = df! {
         "y" => &y,
         "x" => &x
-    }.unwrap();
+    }
+    .unwrap();
     Dataset::new(df)
 }
 
@@ -644,20 +811,24 @@ fn create_zeroinfl_dataset(n: usize, seed: u64) -> Dataset {
     let x: Vec<f64> = (0..n).map(|_| rng.r#gen::<f64>() * 7.0).collect();
 
     // Zero-inflated counts
-    let y: Vec<f64> = x.iter().map(|&xi| {
-        let zero_prob = 1.0 / (1.0 + (xi - 2.0).exp()); // Higher prob of zero for low x
-        if rng.r#gen::<f64>() < zero_prob {
-            0.0
-        } else {
-            let mu = (0.5 + 0.5 * xi).exp();
-            (mu + rng.r#gen::<f64>() * mu.sqrt()).max(0.0).floor()
-        }
-    }).collect();
+    let y: Vec<f64> = x
+        .iter()
+        .map(|&xi| {
+            let zero_prob = 1.0 / (1.0 + (xi - 2.0).exp()); // Higher prob of zero for low x
+            if rng.r#gen::<f64>() < zero_prob {
+                0.0
+            } else {
+                let mu = (0.5 + 0.5 * xi).exp();
+                (mu + rng.r#gen::<f64>() * mu.sqrt()).max(0.0).floor()
+            }
+        })
+        .collect();
 
     let df = df! {
         "y" => &y,
         "x" => &x
-    }.unwrap();
+    }
+    .unwrap();
     Dataset::new(df)
 }
 
@@ -666,19 +837,20 @@ fn create_granger_dataset(n: usize, seed: u64) -> Dataset {
     // Random walk x
     let mut x = vec![0.0; n];
     for i in 1..n {
-        x[i] = x[i-1] + (rng.r#gen::<f64>() - 0.5);
+        x[i] = x[i - 1] + (rng.r#gen::<f64>() - 0.5);
     }
     // y depends on lagged x
     let mut y = vec![0.0; n];
     y[0] = rng.r#gen::<f64>() - 0.5;
     for i in 1..n {
-        y[i] = 0.3 * x[i-1] + 0.5 * y[i-1] + (rng.r#gen::<f64>() - 0.5);
+        y[i] = 0.3 * x[i - 1] + 0.5 * y[i - 1] + (rng.r#gen::<f64>() - 0.5);
     }
 
     let df = df! {
         "y" => &y,
         "x" => &x
-    }.unwrap();
+    }
+    .unwrap();
     Dataset::new(df)
 }
 
@@ -696,7 +868,9 @@ fn bg_test_benchmark(c: &mut Criterion) {
         let x_matrix = design.data;
 
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
-            b.iter(|| p2a_core::bg_test_from_ols(&ols_result, &x_matrix.view(), 1, BgTestType::Chisq, 0.0))
+            b.iter(|| {
+                p2a_core::bg_test_from_ols(&ols_result, &x_matrix.view(), 1, BgTestType::Chisq, 0.0)
+            })
         });
     }
     group.finish();
@@ -717,7 +891,15 @@ fn reset_test_benchmark(c: &mut Criterion) {
         let y_vec = DesignMatrix::extract_column(df, "y").unwrap();
 
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
-            b.iter(|| reset_test_from_ols(&ols_result, &x_matrix.view(), &y_vec, &[2, 3], ResetType::Fitted))
+            b.iter(|| {
+                reset_test_from_ols(
+                    &ols_result,
+                    &x_matrix.view(),
+                    &y_vec,
+                    &[2, 3],
+                    ResetType::Fitted,
+                )
+            })
         });
     }
     group.finish();
@@ -731,8 +913,10 @@ fn wald_test_benchmark(c: &mut Criterion) {
     for &n in &[100, 500, 1000, 5000] {
         let dataset = create_multivar_dataset(n, 789);
         // Pre-compute both OLS models
-        let ols_unrestricted = run_ols(&dataset, "y", &["x1", "x2"], true, CovarianceType::Standard).unwrap();
-        let ols_restricted = run_ols(&dataset, "y", &["x1"], true, CovarianceType::Standard).unwrap();
+        let ols_unrestricted =
+            run_ols(&dataset, "y", &["x1", "x2"], true, CovarianceType::Standard).unwrap();
+        let ols_restricted =
+            run_ols(&dataset, "y", &["x1"], true, CovarianceType::Standard).unwrap();
 
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
             b.iter(|| wald_test_from_ols(&ols_unrestricted, &ols_restricted, true))
@@ -851,11 +1035,9 @@ fn create_panel_dataset(n_entities: usize, n_periods: usize, seed: u64) -> Datas
     let n_obs = n_entities * n_periods;
 
     let entity_ids: Vec<i64> = (0..n_entities)
-        .flat_map(|e| std::iter::repeat(e as i64 + 1).take(n_periods))
+        .flat_map(|e| std::iter::repeat_n(e as i64 + 1, n_periods))
         .collect();
-    let time_ids: Vec<i64> = (0..n_entities)
-        .flat_map(|_| (1..=n_periods as i64))
-        .collect();
+    let time_ids: Vec<i64> = (0..n_entities).flat_map(|_| 1..=n_periods as i64).collect();
 
     // Generate data with entity fixed effects
     let entity_effects: Vec<f64> = (0..n_entities)
@@ -891,22 +1073,26 @@ fn create_hurdle_dataset(n: usize, seed: u64) -> Dataset {
     let x: Vec<f64> = (0..n).map(|_| rng.r#gen::<f64>() * 5.0 - 2.5).collect();
 
     // Hurdle data: binary part then count part
-    let y: Vec<f64> = x.iter().map(|&xi| {
-        let prob_positive = 1.0 / (1.0 + (-0.5 - 0.8 * xi).exp());
-        if rng.r#gen::<f64>() < prob_positive {
-            // Positive: truncated Poisson-like
-            let mu = (0.8 + 0.5 * xi).exp();
-            let count = (mu + rng.r#gen::<f64>() * mu.sqrt()).max(1.0).floor();
-            count
-        } else {
-            0.0
-        }
-    }).collect();
+    let y: Vec<f64> = x
+        .iter()
+        .map(|&xi| {
+            let prob_positive = 1.0 / (1.0 + (-0.5 - 0.8 * xi).exp());
+            if rng.r#gen::<f64>() < prob_positive {
+                // Positive: truncated Poisson-like
+                let mu = (0.8 + 0.5 * xi).exp();
+
+                (mu + rng.r#gen::<f64>() * mu.sqrt()).max(1.0).floor()
+            } else {
+                0.0
+            }
+        })
+        .collect();
 
     let df = df! {
         "y" => &y,
         "x" => &x
-    }.unwrap();
+    }
+    .unwrap();
     Dataset::new(df)
 }
 
@@ -950,11 +1136,29 @@ fn panel_gls_benchmark(c: &mut Criterion) {
         let dataset = create_panel_dataset(n_e, n_t, 42);
 
         group.bench_with_input(BenchmarkId::new("fe", label), &label, |b, _| {
-            b.iter(|| run_panel_gls(&dataset, "y", &["x"], "entity", "time", Some(PanelGlsModel::FixedEffects)))
+            b.iter(|| {
+                run_panel_gls(
+                    &dataset,
+                    "y",
+                    &["x"],
+                    "entity",
+                    "time",
+                    Some(PanelGlsModel::FixedEffects),
+                )
+            })
         });
 
         group.bench_with_input(BenchmarkId::new("pooling", label), &label, |b, _| {
-            b.iter(|| run_panel_gls(&dataset, "y", &["x"], "entity", "time", Some(PanelGlsModel::Pooling)))
+            b.iter(|| {
+                run_panel_gls(
+                    &dataset,
+                    "y",
+                    &["x"],
+                    "entity",
+                    "time",
+                    Some(PanelGlsModel::Pooling),
+                )
+            })
         });
     }
     group.finish();
@@ -976,10 +1180,10 @@ fn gmm_benchmark(c: &mut Criterion) {
                     &["x"],
                     "entity",
                     "time",
-                    1,  // lags
+                    1, // lags
                     Some(GmmConfig {
                         transform: GmmTransform::Difference,
-                        step: GmmStep::OneStep,  // Use one-step for benchmarking
+                        step: GmmStep::OneStep, // Use one-step for benchmarking
                         max_lag: Some(3),
                         min_lag: 2,
                         collapse: true,
@@ -1005,7 +1209,7 @@ fn create_mlogit_dataset(n_choosers: usize, n_alts: usize, seed: u64) -> Dataset
     for c in 0..n_choosers {
         // Generate utilities for each alternative
         let utilities: Vec<f64> = (0..n_alts)
-            .map(|a| {
+            .map(|_a| {
                 let price = 10.0 + rng.r#gen::<f64>() * 20.0;
                 -0.1 * price + rng.r#gen::<f64>() * 2.0 // Utility decreases with price
             })
@@ -1014,7 +1218,10 @@ fn create_mlogit_dataset(n_choosers: usize, n_alts: usize, seed: u64) -> Dataset
         // Softmax to find chosen alternative
         let max_u = utilities.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
         let exp_sum: f64 = utilities.iter().map(|u| (u - max_u).exp()).sum();
-        let probs: Vec<f64> = utilities.iter().map(|u| (u - max_u).exp() / exp_sum).collect();
+        let probs: Vec<f64> = utilities
+            .iter()
+            .map(|u| (u - max_u).exp() / exp_sum)
+            .collect();
 
         // Sample chosen based on probabilities
         let rand_val: f64 = rng.r#gen();
@@ -1062,17 +1269,7 @@ fn mlogit_benchmark(c: &mut Criterion) {
         let dataset = create_mlogit_dataset(n_choosers, n_alts, 42);
 
         group.bench_with_input(BenchmarkId::from_parameter(label), &label, |b, _| {
-            b.iter(|| {
-                run_mlogit(
-                    &dataset,
-                    "chosen",
-                    "chooser",
-                    "alt",
-                    &["price"],
-                    &[],
-                    None,
-                )
-            })
+            b.iter(|| run_mlogit(&dataset, "chosen", "chooser", "alt", &["price"], &[], None))
         });
     }
     group.finish();
@@ -1111,7 +1308,11 @@ fn create_gsynth_dataset(n_control: usize, n_treated: usize, n_times: usize, see
             unit_ids.push(format!("T{}", i + 1));
             time_ids.push(t as i64);
             let base = 10.0 + unit_fe + t as f64 * 0.5 + rng.r#gen::<f64>() * 0.5;
-            let effect = if t >= treatment_start { treat_effect } else { 0.0 };
+            let effect = if t >= treatment_start {
+                treat_effect
+            } else {
+                0.0
+            };
             outcomes.push(base + effect);
             treatment.push(if t >= treatment_start { 1.0 } else { 0.0 });
         }
@@ -1133,7 +1334,9 @@ fn gsynth_benchmark(c: &mut Criterion) {
     let mut group = c.benchmark_group("gsynth");
 
     // gsynth is computationally intensive, use reasonable sizes
-    for &(n_ctrl, n_treat, n_times, label) in &[(10, 2, 15, 180), (20, 5, 20, 500), (50, 10, 25, 1500)] {
+    for &(n_ctrl, n_treat, n_times, label) in
+        &[(10, 2, 15, 180), (20, 5, 20, 500), (50, 10, 25, 1500)]
+    {
         let dataset = create_gsynth_dataset(n_ctrl, n_treat, n_times, 42);
 
         group.bench_with_input(BenchmarkId::from_parameter(label), &label, |b, _| {
@@ -1190,8 +1393,12 @@ fn create_etwfe_dataset(n_units: usize, n_periods: usize, seed: u64) -> Dataset 
     }
 
     // Generate unit and time fixed effects
-    let unit_fes: Vec<f64> = (0..n_units).map(|_| rng.r#gen::<f64>() * 4.0 - 2.0).collect();
-    let time_fes: Vec<f64> = (0..n_periods).map(|_| rng.r#gen::<f64>() * 2.0 - 1.0).collect();
+    let unit_fes: Vec<f64> = (0..n_units)
+        .map(|_| rng.r#gen::<f64>() * 4.0 - 2.0)
+        .collect();
+    let time_fes: Vec<f64> = (0..n_periods)
+        .map(|_| rng.r#gen::<f64>() * 2.0 - 1.0)
+        .collect();
 
     for u in 0..n_units {
         for t in 0..n_periods {
@@ -1219,7 +1426,8 @@ fn create_etwfe_dataset(n_units: usize, n_periods: usize, seed: u64) -> Dataset 
         "y" => y,
         "treat" => treat,
         "first_treat" => first_treat,
-    }.unwrap();
+    }
+    .unwrap();
 
     Dataset::new(df)
 }
@@ -1309,7 +1517,8 @@ fn create_mixedlogit_dataset(n_choosers: usize, n_alts: usize, seed: u64) -> Dat
         "price" => prices,
         "time" => times,
         "chosen" => chosen,
-    }.unwrap();
+    }
+    .unwrap();
 
     Dataset::new(df)
 }
@@ -1318,7 +1527,8 @@ fn mixed_logit_benchmark(c: &mut Criterion) {
     let mut group = c.benchmark_group("mixed_logit");
     group.sample_size(10);
 
-    for &(n_choosers, n_alts, n_draws) in &[(50, 3, 50), (50, 3, 100), (100, 3, 50), (100, 3, 100)] {
+    for &(n_choosers, n_alts, n_draws) in &[(50, 3, 50), (50, 3, 100), (100, 3, 50), (100, 3, 100)]
+    {
         let dataset = create_mixedlogit_dataset(n_choosers, n_alts, 42);
         let label = format!("n{}_alts{}_draws{}", n_choosers, n_alts, n_draws);
 

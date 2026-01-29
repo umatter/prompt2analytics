@@ -14,15 +14,15 @@
 //! R equivalent: `plm::phtest()`
 
 use ndarray::Array1;
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use std::fmt;
 
 use crate::data::Dataset;
 use crate::errors::EconResult;
 use crate::traits::estimator::chi_squared_p_value;
 
-use super::types::PanelResult;
 use super::linear_models::{run_fixed_effects, run_random_effects};
+use super::types::PanelResult;
 
 /// Result from a Hausman specification test.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -55,16 +55,31 @@ impl fmt::Display for HausmanResult {
 
         // Show coefficient comparison for intuition
         writeln!(f, "Coefficient Comparison:")?;
-        let n_vars = self.fe_result.variables.len().min(self.re_result.variables.len().saturating_sub(1));
-        writeln!(f, "{:<20} {:>12} {:>12} {:>12}",
-                 "Variable", "FE Coef", "RE Coef", "Difference")?;
+        let n_vars = self
+            .fe_result
+            .variables
+            .len()
+            .min(self.re_result.variables.len().saturating_sub(1));
+        writeln!(
+            f,
+            "{:<20} {:>12} {:>12} {:>12}",
+            "Variable", "FE Coef", "RE Coef", "Difference"
+        )?;
         writeln!(f, "{:-<60}", "")?;
         for i in 0..n_vars {
             let fe_coef = self.fe_result.coefficients[i];
-            let re_coef = self.re_result.coefficients.get(i + 1).copied().unwrap_or(0.0); // Skip RE intercept
+            let re_coef = self
+                .re_result
+                .coefficients
+                .get(i + 1)
+                .copied()
+                .unwrap_or(0.0); // Skip RE intercept
             let diff = fe_coef - re_coef;
-            writeln!(f, "{:<20} {:>12.4} {:>12.4} {:>12.4}",
-                     &self.fe_result.variables[i], fe_coef, re_coef, diff)?;
+            writeln!(
+                f,
+                "{:<20} {:>12.4} {:>12.4} {:>12.4}",
+                &self.fe_result.variables[i], fe_coef, re_coef, diff
+            )?;
         }
         writeln!(f)?;
 
@@ -72,10 +87,22 @@ impl fmt::Display for HausmanResult {
 
         // Add interpretation note
         writeln!(f)?;
-        writeln!(f, "Note: The Hausman test compares FE and RE coefficient estimates.")?;
-        writeln!(f, "A significant result (p < 0.05) suggests entity effects are correlated")?;
-        writeln!(f, "with regressors, making RE inconsistent. A non-significant result")?;
-        writeln!(f, "suggests RE is more efficient, but may have low power in small samples.")?;
+        writeln!(
+            f,
+            "Note: The Hausman test compares FE and RE coefficient estimates."
+        )?;
+        writeln!(
+            f,
+            "A significant result (p < 0.05) suggests entity effects are correlated"
+        )?;
+        writeln!(
+            f,
+            "with regressors, making RE inconsistent. A non-significant result"
+        )?;
+        writeln!(
+            f,
+            "suggests RE is more efficient, but may have low power in small samples."
+        )?;
         Ok(())
     }
 }
@@ -128,7 +155,8 @@ pub fn run_hausman_test(
 
     // Hausman statistic: sum of (beta_diff[i]^2 / var_diff[i])
     // This is the diagonal approximation to the full quadratic form
-    let chi2_statistic: f64 = beta_diff.iter()
+    let chi2_statistic: f64 = beta_diff
+        .iter()
         .zip(var_diff_diag.iter())
         .map(|(&b, &v)| if v > 1e-10 { b * b / v } else { 0.0 })
         .sum();
@@ -142,9 +170,11 @@ pub fn run_hausman_test(
     let n_obs = fe_result.n_obs;
 
     let recommendation = if p_value < 0.01 {
-        "Reject H0: Use Fixed Effects (strong evidence of systematic difference in coefficients)".to_string()
+        "Reject H0: Use Fixed Effects (strong evidence of systematic difference in coefficients)"
+            .to_string()
     } else if p_value < 0.05 {
-        "Reject H0: Use Fixed Effects (moderate evidence of systematic difference in coefficients)".to_string()
+        "Reject H0: Use Fixed Effects (moderate evidence of systematic difference in coefficients)"
+            .to_string()
     } else if p_value < 0.10 {
         format!(
             "Marginally fail to reject H0 (p={:.3}). Consider Fixed Effects if correlation between \

@@ -144,22 +144,40 @@ impl std::fmt::Display for TTestResult {
         writeln!(f)?;
 
         // Test statistic
-        writeln!(f, "t = {:.6}, df = {:.2}, p-value = {:.6} {}",
-            self.t_statistic, self.df, self.p_value, self.significance.stars())?;
+        writeln!(
+            f,
+            "t = {:.6}, df = {:.2}, p-value = {:.6} {}",
+            self.t_statistic,
+            self.df,
+            self.p_value,
+            self.significance.stars()
+        )?;
         writeln!(f)?;
 
         // Alternative hypothesis
         let alt_str = match self.alternative {
-            Alternative::TwoSided => format!("true difference in means is not equal to {}", self.null_value),
-            Alternative::Greater => format!("true difference in means is greater than {}", self.null_value),
-            Alternative::Less => format!("true difference in means is less than {}", self.null_value),
+            Alternative::TwoSided => format!(
+                "true difference in means is not equal to {}",
+                self.null_value
+            ),
+            Alternative::Greater => format!(
+                "true difference in means is greater than {}",
+                self.null_value
+            ),
+            Alternative::Less => {
+                format!("true difference in means is less than {}", self.null_value)
+            }
         };
         writeln!(f, "Alternative hypothesis: {}", alt_str)?;
         writeln!(f)?;
 
         // Confidence interval
         writeln!(f, "{:.0}% confidence interval:", self.conf_level * 100.0)?;
-        writeln!(f, "  ({:.6}, {:.6})", self.conf_int_lower, self.conf_int_upper)?;
+        writeln!(
+            f,
+            "  ({:.6}, {:.6})",
+            self.conf_int_lower, self.conf_int_upper
+        )?;
         writeln!(f)?;
 
         // Estimates
@@ -226,9 +244,8 @@ pub fn one_sample_t_test(
     let p_value = compute_p_value(t_stat, df, alternative);
 
     // Compute confidence interval
-    let (ci_lower, ci_upper) = compute_confidence_interval(
-        mean, std_error, df, conf_level, alternative
-    );
+    let (ci_lower, ci_upper) =
+        compute_confidence_interval(mean, std_error, df, conf_level, alternative);
 
     Ok(TTestResult {
         test_name: "One Sample t-test".to_string(),
@@ -312,8 +329,7 @@ pub fn two_sample_t_test(
 
     let (t_stat, df, std_error) = if var_equal {
         // Student's t-test: pooled variance
-        let pooled_var = ((n1 - 1) as f64 * var1 + (n2 - 1) as f64 * var2)
-            / (n1 + n2 - 2) as f64;
+        let pooled_var = ((n1 - 1) as f64 * var1 + (n2 - 1) as f64 * var2) / (n1 + n2 - 2) as f64;
         let se = (pooled_var * (1.0 / n1 as f64 + 1.0 / n2 as f64)).sqrt();
         let t = (mean1 - mean2 - mu) / se;
         let df = (n1 + n2 - 2) as f64;
@@ -336,9 +352,8 @@ pub fn two_sample_t_test(
 
     // Confidence interval for difference in means
     let diff = mean1 - mean2;
-    let (ci_lower, ci_upper) = compute_confidence_interval(
-        diff, std_error, df, conf_level, alternative
-    );
+    let (ci_lower, ci_upper) =
+        compute_confidence_interval(diff, std_error, df, conf_level, alternative);
 
     let test_name = if var_equal {
         "Two Sample t-test (equal variances)"
@@ -395,7 +410,7 @@ pub fn paired_t_test(
 ) -> EconResult<TTestResult> {
     if x.len() != y.len() {
         return Err(EconError::InvalidSpecification {
-            message: "Paired t-test requires samples of equal length".to_string()
+            message: "Paired t-test requires samples of equal length".to_string(),
         });
     }
 
@@ -461,11 +476,17 @@ pub fn t_test(
     // Extract x values
     let x_series = df.column(x_col).map_err(|_| EconError::ColumnNotFound {
         column: x_col.to_string(),
-        available: df.get_column_names().iter().map(|s| s.to_string()).collect(),
+        available: df
+            .get_column_names()
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
     })?;
     let x: Vec<f64> = x_series
         .f64()
-        .map_err(|_| EconError::NonNumericColumn { column: x_col.to_string() })?
+        .map_err(|_| EconError::NonNumericColumn {
+            column: x_col.to_string(),
+        })?
         .into_no_null_iter()
         .collect();
 
@@ -474,11 +495,17 @@ pub fn t_test(
             // Extract y values
             let y_series = df.column(y_name).map_err(|_| EconError::ColumnNotFound {
                 column: y_name.to_string(),
-                available: df.get_column_names().iter().map(|s| s.to_string()).collect(),
+                available: df
+                    .get_column_names()
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect(),
             })?;
             let y: Vec<f64> = y_series
                 .f64()
-                .map_err(|_| EconError::NonNumericColumn { column: y_name.to_string() })?
+                .map_err(|_| EconError::NonNumericColumn {
+                    column: y_name.to_string(),
+                })?
                 .into_no_null_iter()
                 .collect();
 
@@ -491,7 +518,7 @@ pub fn t_test(
         None => {
             if paired {
                 return Err(EconError::InvalidSpecification {
-                    message: "Paired test requires two columns".to_string()
+                    message: "Paired test requires two columns".to_string(),
                 });
             }
             one_sample_t_test(&x, mu, alternative, conf_level)
@@ -654,19 +681,50 @@ mod tests {
         let df = df! {
             "x" => [2.1, 2.5, 2.3, 2.8, 2.6],
             "y" => [3.2, 3.5, 3.1, 3.8, 3.4]
-        }.unwrap();
+        }
+        .unwrap();
         let dataset = Dataset::new(df);
 
         // One-sample
-        let result = t_test(&dataset, "x", None, 2.0, Alternative::TwoSided, false, false, 0.95).unwrap();
+        let result = t_test(
+            &dataset,
+            "x",
+            None,
+            2.0,
+            Alternative::TwoSided,
+            false,
+            false,
+            0.95,
+        )
+        .unwrap();
         assert_eq!(result.n, 5);
 
         // Two-sample
-        let result = t_test(&dataset, "x", Some("y"), 0.0, Alternative::TwoSided, false, false, 0.95).unwrap();
+        let result = t_test(
+            &dataset,
+            "x",
+            Some("y"),
+            0.0,
+            Alternative::TwoSided,
+            false,
+            false,
+            0.95,
+        )
+        .unwrap();
         assert_eq!(result.n_2, Some(5));
 
         // Paired
-        let result = t_test(&dataset, "x", Some("y"), 0.0, Alternative::TwoSided, true, false, 0.95).unwrap();
+        let result = t_test(
+            &dataset,
+            "x",
+            Some("y"),
+            0.0,
+            Alternative::TwoSided,
+            true,
+            false,
+            0.95,
+        )
+        .unwrap();
         assert!(result.test_name.contains("Paired"));
     }
 
@@ -682,7 +740,10 @@ mod tests {
         let x = vec![1.0, 2.0, 3.0];
         let y = vec![1.0, 2.0];
         let result = paired_t_test(&x, &y, 0.0, Alternative::TwoSided, 0.95);
-        assert!(matches!(result, Err(EconError::InvalidSpecification { .. })));
+        assert!(matches!(
+            result,
+            Err(EconError::InvalidSpecification { .. })
+        ));
     }
 
     // ========================================================================
@@ -701,11 +762,17 @@ mod tests {
         let x = vec![2.1, 2.5, 2.3, 2.8, 2.6, 2.4, 2.7];
         let result = one_sample_t_test(&x, 2.0, Alternative::TwoSided, 0.95).unwrap();
 
-        assert!((result.t_statistic - 5.3316).abs() < 0.001,
-            "t-stat mismatch: Rust={}, R=5.3316", result.t_statistic);
+        assert!(
+            (result.t_statistic - 5.3316).abs() < 0.001,
+            "t-stat mismatch: Rust={}, R=5.3316",
+            result.t_statistic
+        );
         assert!((result.df - 6.0).abs() < 0.001);
-        assert!((result.p_value - 0.001775).abs() < 0.0001,
-            "p-value mismatch: Rust={}, R=0.001775", result.p_value);
+        assert!(
+            (result.p_value - 0.001775).abs() < 0.0001,
+            "p-value mismatch: Rust={}, R=0.001775",
+            result.p_value
+        );
         assert!((result.estimate - 2.485714).abs() < 0.0001);
         assert!((result.conf_int_lower - 2.262799).abs() < 0.01);
         assert!((result.conf_int_upper - 2.708629).abs() < 0.01);
@@ -722,12 +789,21 @@ mod tests {
         let y = vec![3.2, 3.5, 3.1, 3.8, 3.4];
         let result = two_sample_t_test(&x, &y, 0.0, Alternative::TwoSided, false, 0.95).unwrap();
 
-        assert!((result.t_statistic - (-5.4636)).abs() < 0.001,
-            "t-stat mismatch: Rust={}, R=-5.4636", result.t_statistic);
-        assert!((result.df - 7.9985).abs() < 0.01,
-            "df mismatch: Rust={}, R=7.9985", result.df);
-        assert!((result.p_value - 0.0005993).abs() < 0.0001,
-            "p-value mismatch: Rust={}, R=0.0005993", result.p_value);
+        assert!(
+            (result.t_statistic - (-5.4636)).abs() < 0.001,
+            "t-stat mismatch: Rust={}, R=-5.4636",
+            result.t_statistic
+        );
+        assert!(
+            (result.df - 7.9985).abs() < 0.01,
+            "df mismatch: Rust={}, R=7.9985",
+            result.df
+        );
+        assert!(
+            (result.p_value - 0.0005993).abs() < 0.0001,
+            "p-value mismatch: Rust={}, R=0.0005993",
+            result.p_value
+        );
         assert!((result.estimate - 2.46).abs() < 0.01);
         assert!((result.estimate_2.unwrap() - 3.40).abs() < 0.01);
     }
@@ -744,11 +820,17 @@ mod tests {
         let after = vec![195.0, 185.0, 202.0, 175.0, 188.0];
         let result = paired_t_test(&before, &after, 0.0, Alternative::TwoSided, 0.95).unwrap();
 
-        assert!((result.t_statistic - 9.4868).abs() < 0.001,
-            "t-stat mismatch: Rust={}, R=9.4868", result.t_statistic);
+        assert!(
+            (result.t_statistic - 9.4868).abs() < 0.001,
+            "t-stat mismatch: Rust={}, R=9.4868",
+            result.t_statistic
+        );
         assert!((result.df - 4.0).abs() < 0.001);
-        assert!((result.p_value - 0.0006889).abs() < 0.0001,
-            "p-value mismatch: Rust={}, R=0.0006889", result.p_value);
+        assert!(
+            (result.p_value - 0.0006889).abs() < 0.0001,
+            "p-value mismatch: Rust={}, R=0.0006889",
+            result.p_value
+        );
         assert!((result.estimate - 6.0).abs() < 0.001);
         assert!((result.conf_int_lower - 4.244022).abs() < 0.1);
         assert!((result.conf_int_upper - 7.755978).abs() < 0.1);

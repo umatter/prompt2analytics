@@ -9,9 +9,9 @@
 //! - R Core Team. `stats::decompose()` function.
 //!   <https://stat.ethz.ch/R-manual/R-devel/library/stats/html/decompose.html>
 
-use serde::{Deserialize, Serialize};
 use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
+use serde::{Deserialize, Serialize};
 
 /// Type of seasonal decomposition.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
@@ -111,12 +111,13 @@ pub fn decompose(x: &[f64], period: usize, config: DecomposeConfig) -> EconResul
     }
 
     // Check for non-positive values in multiplicative decomposition
-    if config.decompose_type == DecomposeType::Multiplicative {
-        if x.iter().any(|&v| v <= 0.0 || !v.is_finite()) {
-            return Err(EconError::InvalidSpecification {
-                message: "Multiplicative decomposition requires all positive, finite values".to_string(),
-            });
-        }
+    if config.decompose_type == DecomposeType::Multiplicative
+        && x.iter().any(|&v| v <= 0.0 || !v.is_finite())
+    {
+        return Err(EconError::InvalidSpecification {
+            message: "Multiplicative decomposition requires all positive, finite values"
+                .to_string(),
+        });
     }
 
     // Step 1: Extract trend using moving average filter
@@ -126,7 +127,8 @@ pub fn decompose(x: &[f64], period: usize, config: DecomposeConfig) -> EconResul
     };
 
     // Step 2: Compute de-trended series
-    let detrended: Vec<f64> = x.iter()
+    let detrended: Vec<f64> = x
+        .iter()
         .zip(trend.iter())
         .map(|(&y, &t)| {
             if t.is_nan() {
@@ -144,12 +146,11 @@ pub fn decompose(x: &[f64], period: usize, config: DecomposeConfig) -> EconResul
     let figure = compute_seasonal_figure(&detrended, period, config.decompose_type);
 
     // Step 4: Extend seasonal figure to full length
-    let seasonal: Vec<f64> = (0..n)
-        .map(|i| figure[i % period])
-        .collect();
+    let seasonal: Vec<f64> = (0..n).map(|i| figure[i % period]).collect();
 
     // Step 5: Compute random component
-    let random: Vec<f64> = x.iter()
+    let random: Vec<f64> = x
+        .iter()
         .zip(trend.iter())
         .zip(seasonal.iter())
         .map(|((&y, &t), &s)| {
@@ -248,7 +249,11 @@ fn apply_filter(x: &[f64], filter: &[f64]) -> EconResult<Vec<f64>> {
 }
 
 /// Compute seasonal figure by averaging de-trended values at each period position.
-fn compute_seasonal_figure(detrended: &[f64], period: usize, decompose_type: DecomposeType) -> Vec<f64> {
+fn compute_seasonal_figure(
+    detrended: &[f64],
+    period: usize,
+    decompose_type: DecomposeType,
+) -> Vec<f64> {
     let mut sums = vec![0.0; period];
     let mut counts = vec![0usize; period];
 
@@ -260,7 +265,8 @@ fn compute_seasonal_figure(detrended: &[f64], period: usize, decompose_type: Dec
     }
 
     // Compute means
-    let mut figure: Vec<f64> = sums.iter()
+    let mut figure: Vec<f64> = sums
+        .iter()
         .zip(counts.iter())
         .map(|(&s, &c)| if c > 0 { s / c as f64 } else { 0.0 })
         .collect();
@@ -305,12 +311,15 @@ pub fn run_decompose(
     decompose_type: DecomposeType,
 ) -> EconResult<DecomposeResult> {
     let df = dataset.df();
-    let available: Vec<String> = df.get_column_names().iter().map(|s| s.to_string()).collect();
-    let col = df.column(column)
-        .map_err(|_| EconError::ColumnNotFound {
-            column: column.to_string(),
-            available: available.clone(),
-        })?;
+    let available: Vec<String> = df
+        .get_column_names()
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let col = df.column(column).map_err(|_| EconError::ColumnNotFound {
+        column: column.to_string(),
+        available: available.clone(),
+    })?;
 
     let x: Vec<f64> = col
         .f64()
@@ -320,10 +329,14 @@ pub fn run_decompose(
         .into_no_null_iter()
         .collect();
 
-    decompose(&x, period, DecomposeConfig {
-        decompose_type,
-        filter: None,
-    })
+    decompose(
+        &x,
+        period,
+        DecomposeConfig {
+            decompose_type,
+            filter: None,
+        },
+    )
 }
 
 /// Convenience function to run decomposition with a custom filter.
@@ -335,12 +348,15 @@ pub fn run_decompose_with_filter(
     filter: Vec<f64>,
 ) -> EconResult<DecomposeResult> {
     let df = dataset.df();
-    let available: Vec<String> = df.get_column_names().iter().map(|s| s.to_string()).collect();
-    let col = df.column(column)
-        .map_err(|_| EconError::ColumnNotFound {
-            column: column.to_string(),
-            available: available.clone(),
-        })?;
+    let available: Vec<String> = df
+        .get_column_names()
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let col = df.column(column).map_err(|_| EconError::ColumnNotFound {
+        column: column.to_string(),
+        available: available.clone(),
+    })?;
 
     let x: Vec<f64> = col
         .f64()
@@ -350,24 +366,35 @@ pub fn run_decompose_with_filter(
         .into_no_null_iter()
         .collect();
 
-    decompose(&x, period, DecomposeConfig {
-        decompose_type,
-        filter: Some(filter),
-    })
+    decompose(
+        &x,
+        period,
+        DecomposeConfig {
+            decompose_type,
+            filter: Some(filter),
+        },
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn generate_seasonal_data(n: usize, period: usize, trend_slope: f64, seasonal_amp: f64) -> Vec<f64> {
+    fn generate_seasonal_data(
+        n: usize,
+        period: usize,
+        trend_slope: f64,
+        seasonal_amp: f64,
+    ) -> Vec<f64> {
         use std::f64::consts::PI;
 
-        (0..n).map(|t| {
-            let trend = 100.0 + trend_slope * t as f64;
-            let seasonal = seasonal_amp * (2.0 * PI * t as f64 / period as f64).sin();
-            trend + seasonal
-        }).collect()
+        (0..n)
+            .map(|t| {
+                let trend = 100.0 + trend_slope * t as f64;
+                let seasonal = seasonal_amp * (2.0 * PI * t as f64 / period as f64).sin();
+                trend + seasonal
+            })
+            .collect()
     }
 
     #[test]
@@ -386,10 +413,16 @@ mod tests {
 
         // Check that seasonal figure sums to approximately zero (additive)
         let figure_sum: f64 = result.figure.iter().sum();
-        assert!(figure_sum.abs() < 1e-10, "Seasonal figure should sum to zero, got {}", figure_sum);
+        assert!(
+            figure_sum.abs() < 1e-10,
+            "Seasonal figure should sum to zero, got {}",
+            figure_sum
+        );
 
         // Check that trend is monotonically increasing (approximately)
-        let valid_trend: Vec<f64> = result.trend.iter()
+        let valid_trend: Vec<f64> = result
+            .trend
+            .iter()
             .filter(|&&t| !t.is_nan())
             .copied()
             .collect();
@@ -405,11 +438,14 @@ mod tests {
         // Generate multiplicative data
         let n = 48;
         let period = 12;
-        let x: Vec<f64> = (0..n).map(|t| {
-            let trend = 100.0 + 0.5 * t as f64;
-            let seasonal = 1.0 + 0.1 * (2.0 * std::f64::consts::PI * t as f64 / period as f64).sin();
-            trend * seasonal
-        }).collect();
+        let x: Vec<f64> = (0..n)
+            .map(|t| {
+                let trend = 100.0 + 0.5 * t as f64;
+                let seasonal =
+                    1.0 + 0.1 * (2.0 * std::f64::consts::PI * t as f64 / period as f64).sin();
+                trend * seasonal
+            })
+            .collect();
 
         let config = DecomposeConfig {
             decompose_type: DecomposeType::Multiplicative,
@@ -420,7 +456,11 @@ mod tests {
 
         // Check that seasonal figure averages to approximately 1 (multiplicative)
         let figure_mean: f64 = result.figure.iter().sum::<f64>() / period as f64;
-        assert!((figure_mean - 1.0).abs() < 1e-10, "Seasonal figure should average to 1, got {}", figure_mean);
+        assert!(
+            (figure_mean - 1.0).abs() < 1e-10,
+            "Seasonal figure should average to 1, got {}",
+            figure_mean
+        );
     }
 
     #[test]
@@ -450,11 +490,13 @@ mod tests {
 
     #[test]
     fn test_decompose_odd_period() {
-        let x: Vec<f64> = (0..100).map(|t| {
-            let trend = 50.0 + 0.3 * t as f64;
-            let seasonal = 5.0 * (2.0 * std::f64::consts::PI * t as f64 / 7.0).sin();
-            trend + seasonal
-        }).collect();
+        let x: Vec<f64> = (0..100)
+            .map(|t| {
+                let trend = 50.0 + 0.3 * t as f64;
+                let seasonal = 5.0 * (2.0 * std::f64::consts::PI * t as f64 / 7.0).sin();
+                trend + seasonal
+            })
+            .collect();
 
         let result = decompose(&x, 7, DecomposeConfig::default()).unwrap();
 
@@ -477,8 +519,13 @@ mod tests {
             if !result.trend[i].is_nan() {
                 let reconstructed = result.trend[i] + result.seasonal[i] + result.random[i];
                 let diff = (result.x[i] - reconstructed).abs();
-                assert!(diff < 1e-10, "Reconstruction failed at index {}: {} vs {}",
-                    i, result.x[i], reconstructed);
+                assert!(
+                    diff < 1e-10,
+                    "Reconstruction failed at index {}: {} vs {}",
+                    i,
+                    result.x[i],
+                    reconstructed
+                );
             }
         }
     }
@@ -493,11 +540,13 @@ mod tests {
         // result$figure  # seasonal pattern
 
         // Generate the same data as R (without noise for deterministic test)
-        let x: Vec<f64> = (1..=48).map(|t| {
-            let trend = 100.0 + 0.5 * t as f64;
-            let seasonal = 10.0 * (2.0 * std::f64::consts::PI * t as f64 / 12.0).sin();
-            trend + seasonal
-        }).collect();
+        let x: Vec<f64> = (1..=48)
+            .map(|t| {
+                let trend = 100.0 + 0.5 * t as f64;
+                let seasonal = 10.0 * (2.0 * std::f64::consts::PI * t as f64 / 12.0).sin();
+                trend + seasonal
+            })
+            .collect();
 
         let result = decompose(&x, 12, DecomposeConfig::default()).unwrap();
 
@@ -507,12 +556,19 @@ mod tests {
             let expected = 10.0 * (2.0 * std::f64::consts::PI * (i + 1) as f64 / 12.0).sin();
             // Allow tolerance for averaging effects at boundaries
             let diff = (f - expected).abs();
-            assert!(diff < 1.5, "Seasonal figure mismatch at position {}: got {}, expected {}",
-                i, f, expected);
+            assert!(
+                diff < 1.5,
+                "Seasonal figure mismatch at position {}: got {}, expected {}",
+                i,
+                f,
+                expected
+            );
         }
 
         // Check trend is roughly linear
-        let valid_trend: Vec<(usize, f64)> = result.trend.iter()
+        let valid_trend: Vec<(usize, f64)> = result
+            .trend
+            .iter()
             .enumerate()
             .filter(|(_, t)| !t.is_nan())
             .map(|(i, t)| (i, *t))
@@ -523,7 +579,11 @@ mod tests {
             let (i2, t2) = valid_trend[valid_trend.len() - 1];
             let slope = (t2 - t1) / (i2 - i1) as f64;
             // Expected slope is 0.5
-            assert!((slope - 0.5).abs() < 0.1, "Trend slope should be ~0.5, got {}", slope);
+            assert!(
+                (slope - 0.5).abs() < 0.1,
+                "Trend slope should be ~0.5, got {}",
+                slope
+            );
         }
     }
 }

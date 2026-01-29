@@ -41,9 +41,9 @@
 //!
 //! R equivalent: `stats::weighted.mean()`, `stats::cov.wt()`
 
+use crate::errors::{EconError, EconResult};
 use ndarray::Array2;
 use serde::{Deserialize, Serialize};
-use crate::errors::{EconError, EconResult};
 
 // ============================================================================
 // weighted.mean - Weighted Arithmetic Mean
@@ -360,20 +360,15 @@ pub fn cov_wt(
 }
 
 /// Options for centering in cov.wt.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub enum CovWtCenter {
     /// Use weighted mean (default)
+    #[default]
     WeightedMean,
     /// Use zero (no centering)
     Zero,
     /// Use custom center values
     Custom(Vec<f64>),
-}
-
-impl Default for CovWtCenter {
-    fn default() -> Self {
-        CovWtCenter::WeightedMean
-    }
 }
 
 /// Simplified interface for cov_wt using slices.
@@ -516,15 +511,16 @@ mod tests {
     #[test]
     fn test_cov_wt_equal_weights_unbiased() {
         // Simple 2-variable case
-        let x = array![
-            [1.0, 4.0],
-            [2.0, 5.0],
-            [3.0, 6.0],
-            [4.0, 7.0],
-            [5.0, 8.0],
-        ];
+        let x = array![[1.0, 4.0], [2.0, 5.0], [3.0, 6.0], [4.0, 7.0], [5.0, 8.0],];
 
-        let result = cov_wt(&x, None, false, CovWtCenter::WeightedMean, CovWtMethod::Unbiased).unwrap();
+        let result = cov_wt(
+            &x,
+            None,
+            false,
+            CovWtCenter::WeightedMean,
+            CovWtMethod::Unbiased,
+        )
+        .unwrap();
 
         // With equal weights (1/5 each), should match regular cov with divisor (n-1)
         // Var(X1) = 2.5, Var(X2) = 2.5, Cov(X1,X2) = 2.5
@@ -539,13 +535,7 @@ mod tests {
 
     #[test]
     fn test_cov_wt_ml_method() {
-        let x = array![
-            [1.0, 4.0],
-            [2.0, 5.0],
-            [3.0, 6.0],
-            [4.0, 7.0],
-            [5.0, 8.0],
-        ];
+        let x = array![[1.0, 4.0], [2.0, 5.0], [3.0, 6.0], [4.0, 7.0], [5.0, 8.0],];
 
         let result = cov_wt(&x, None, false, CovWtCenter::WeightedMean, CovWtMethod::ML).unwrap();
 
@@ -560,15 +550,16 @@ mod tests {
 
     #[test]
     fn test_cov_wt_with_correlation() {
-        let x = array![
-            [1.0, 4.0],
-            [2.0, 5.0],
-            [3.0, 6.0],
-            [4.0, 7.0],
-            [5.0, 8.0],
-        ];
+        let x = array![[1.0, 4.0], [2.0, 5.0], [3.0, 6.0], [4.0, 7.0], [5.0, 8.0],];
 
-        let result = cov_wt(&x, None, true, CovWtCenter::WeightedMean, CovWtMethod::Unbiased).unwrap();
+        let result = cov_wt(
+            &x,
+            None,
+            true,
+            CovWtCenter::WeightedMean,
+            CovWtMethod::Unbiased,
+        )
+        .unwrap();
 
         // Perfect correlation for this data
         let cor = result.cor.unwrap();
@@ -579,14 +570,17 @@ mod tests {
 
     #[test]
     fn test_cov_wt_unequal_weights() {
-        let x = array![
-            [1.0, 10.0],
-            [2.0, 20.0],
-            [3.0, 30.0],
-        ];
+        let x = array![[1.0, 10.0], [2.0, 20.0], [3.0, 30.0],];
         let weights = vec![1.0, 2.0, 1.0]; // More weight on middle observation
 
-        let result = cov_wt(&x, Some(&weights), false, CovWtCenter::WeightedMean, CovWtMethod::Unbiased).unwrap();
+        let result = cov_wt(
+            &x,
+            Some(&weights),
+            false,
+            CovWtCenter::WeightedMean,
+            CovWtMethod::Unbiased,
+        )
+        .unwrap();
 
         // Weighted center: (1*1 + 2*2 + 1*3)/4 = 2.0 for X1
         //                  (1*10 + 2*20 + 1*30)/4 = 20.0 for X2
@@ -600,10 +594,7 @@ mod tests {
 
     #[test]
     fn test_cov_wt_zero_center() {
-        let x = array![
-            [1.0, 2.0],
-            [3.0, 4.0],
-        ];
+        let x = array![[1.0, 2.0], [3.0, 4.0],];
 
         let result = cov_wt(&x, None, false, CovWtCenter::Zero, CovWtMethod::Unbiased).unwrap();
 
@@ -621,5 +612,166 @@ mod tests {
         assert_eq!(result.n_obs, 3);
         assert_eq!(result.cov.len(), 2);
         assert!(result.cor.is_some());
+    }
+
+    // =========================================================================
+    // Validation tests against R
+    // =========================================================================
+
+    #[test]
+    fn test_validate_weighted_mean() {
+        // R: weighted.mean(c(1.0, 2.0, 3.0, 4.0, 5.0), c(1.0, 2.0, 3.0, 2.0, 1.0)) -> 3.0
+        let x = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        let w = vec![1.0, 2.0, 3.0, 2.0, 1.0];
+        let result = weighted_mean(&x, &w, true).unwrap();
+
+        let expected = 3.0;
+        assert!(
+            (result - expected).abs() < 1e-10,
+            "weighted_mean mismatch: Rust={:.6}, R={:.6}",
+            result,
+            expected
+        );
+    }
+
+    #[test]
+    fn test_validate_weighted_mean_equal_weights() {
+        // R: weighted.mean(c(1.0, 2.0, 3.0, 4.0, 5.0), c(1.0, 1.0, 1.0, 1.0, 1.0)) -> 3.0
+        let x = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        let w = vec![1.0, 1.0, 1.0, 1.0, 1.0];
+        let result = weighted_mean(&x, &w, true).unwrap();
+
+        // Should equal simple mean
+        let simple_mean: f64 = x.iter().sum::<f64>() / x.len() as f64;
+        assert!(
+            (result - simple_mean).abs() < 1e-10,
+            "weighted_mean (equal weights) should equal simple mean: {:.6} vs {:.6}",
+            result,
+            simple_mean
+        );
+    }
+
+    #[test]
+    fn test_validate_cov_wt_unbiased() {
+        // R: data <- matrix(c(1, 2, 3, 4, 5, 4, 5, 6, 7, 8), nrow = 5, ncol = 2)
+        // R: cov.wt(data)
+        // R: center = [3.0, 6.0], cov[1,1] = 2.5, cov[2,2] = 2.5, cov[1,2] = 2.5
+        let x = array![[1.0, 4.0], [2.0, 5.0], [3.0, 6.0], [4.0, 7.0], [5.0, 8.0],];
+
+        let result = cov_wt(
+            &x,
+            None,
+            false,
+            CovWtCenter::WeightedMean,
+            CovWtMethod::Unbiased,
+        )
+        .unwrap();
+
+        // Check center
+        assert!(
+            (result.center[0] - 3.0).abs() < 1e-10,
+            "center[0] mismatch: Rust={:.6}, R=3.0",
+            result.center[0]
+        );
+        assert!(
+            (result.center[1] - 6.0).abs() < 1e-10,
+            "center[1] mismatch: Rust={:.6}, R=6.0",
+            result.center[1]
+        );
+
+        // Check covariance
+        assert!(
+            (result.cov[0][0] - 2.5).abs() < 1e-10,
+            "cov[0,0] mismatch: Rust={:.6}, R=2.5",
+            result.cov[0][0]
+        );
+        assert!(
+            (result.cov[1][1] - 2.5).abs() < 1e-10,
+            "cov[1,1] mismatch: Rust={:.6}, R=2.5",
+            result.cov[1][1]
+        );
+        assert!(
+            (result.cov[0][1] - 2.5).abs() < 1e-10,
+            "cov[0,1] mismatch: Rust={:.6}, R=2.5",
+            result.cov[0][1]
+        );
+    }
+
+    #[test]
+    fn test_validate_cov_wt_ml() {
+        // R: cov.wt(data, method = "ML")
+        // R: cov[1,1] = 2.0 (ML uses divisor n, not n-1)
+        let x = array![[1.0, 4.0], [2.0, 5.0], [3.0, 6.0], [4.0, 7.0], [5.0, 8.0],];
+
+        let result = cov_wt(&x, None, false, CovWtCenter::WeightedMean, CovWtMethod::ML).unwrap();
+
+        let expected = 2.0;
+        assert!(
+            (result.cov[0][0] - expected).abs() < 1e-10,
+            "cov_wt ML mismatch: Rust={:.6}, R={:.6}",
+            result.cov[0][0],
+            expected
+        );
+    }
+
+    #[test]
+    fn test_validate_cov_wt_with_weights() {
+        // R: data <- matrix(c(1, 2, 3, 4, 5, 4, 5, 6, 7, 8), nrow = 5, ncol = 2)
+        // R: cov.wt(data, wt = c(1, 2, 3, 2, 1))
+        // Weighted center should equal simple center for this symmetric data: [3.0, 6.0]
+        let x = array![[1.0, 4.0], [2.0, 5.0], [3.0, 6.0], [4.0, 7.0], [5.0, 8.0],];
+        let w = vec![1.0, 2.0, 3.0, 2.0, 1.0];
+
+        let result = cov_wt(
+            &x,
+            Some(&w),
+            false,
+            CovWtCenter::WeightedMean,
+            CovWtMethod::Unbiased,
+        )
+        .unwrap();
+
+        // Weighted center with symmetric weights on symmetric data = simple center
+        assert!(
+            (result.center[0] - 3.0).abs() < 1e-10,
+            "weighted center[0] mismatch: Rust={:.6}, expected=3.0",
+            result.center[0]
+        );
+        assert!(
+            (result.center[1] - 6.0).abs() < 1e-10,
+            "weighted center[1] mismatch: Rust={:.6}, expected=6.0",
+            result.center[1]
+        );
+
+        // Weights should be normalized
+        let sum_wt: f64 = result.wt.iter().sum();
+        assert!(
+            (sum_wt - 1.0).abs() < 1e-10,
+            "weights should be normalized to sum to 1, got {:.6}",
+            sum_wt
+        );
+    }
+
+    #[test]
+    fn test_validate_cov_wt_correlation() {
+        // cov.wt with correlation should have cor[1,2] = 1.0 for perfect correlation
+        let x = array![[1.0, 4.0], [2.0, 5.0], [3.0, 6.0], [4.0, 7.0], [5.0, 8.0],];
+
+        let result = cov_wt(
+            &x,
+            None,
+            true,
+            CovWtCenter::WeightedMean,
+            CovWtMethod::Unbiased,
+        )
+        .unwrap();
+
+        let cor = result.cor.unwrap();
+        assert!((cor[0][0] - 1.0).abs() < 1e-10, "cor[0,0] should be 1.0");
+        assert!((cor[1][1] - 1.0).abs() < 1e-10, "cor[1,1] should be 1.0");
+        assert!(
+            (cor[0][1] - 1.0).abs() < 1e-10,
+            "cor[0,1] should be 1.0 for perfect correlation"
+        );
     }
 }

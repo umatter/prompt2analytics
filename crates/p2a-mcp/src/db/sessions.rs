@@ -1,8 +1,8 @@
 //! Session persistence operations
 
 use chrono::Utc;
-use surrealdb::sql::Datetime;
 use surrealdb::RecordId;
+use surrealdb::sql::Datetime;
 
 use super::connection::{DbConnection, DbError};
 use super::models::{DbSession, Settings};
@@ -224,7 +224,10 @@ impl DbConnection {
         let mut result = self
             .db()
             .query(&query)
-            .bind(("id", RecordId::from(("settings", session_id_owned.as_str()))))
+            .bind((
+                "id",
+                RecordId::from(("settings", session_id_owned.as_str())),
+            ))
             .bind(("provider", provider.map(|s| s.to_string())))
             .bind(("model", model.map(|s| s.to_string())))
             .bind(("temperature", temperature))

@@ -53,7 +53,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
-use crate::traits::{chi_squared_p_value, SignificanceLevel};
+use crate::traits::{SignificanceLevel, chi_squared_p_value};
 
 /// Result of a chi-squared test.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -534,7 +534,11 @@ pub fn run_chisq_gof(
     if df.column(column).is_err() {
         return Err(EconError::ColumnNotFound {
             column: column.to_string(),
-            available: df.get_column_names().iter().map(|s| s.to_string()).collect(),
+            available: df
+                .get_column_names()
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
         });
     }
 
@@ -542,7 +546,7 @@ pub fn run_chisq_gof(
     let lazy = df.clone().lazy();
 
     let result = lazy
-        .select([col(column).value_counts(true, true, "count".into(), false)])
+        .select([col(column).value_counts(true, true, "count", false)])
         .collect()
         .map_err(|e| EconError::InvalidSpecification {
             message: format!("Failed to get value counts: {}", e),
@@ -556,17 +560,18 @@ pub fn run_chisq_gof(
         })?;
 
     // Extract counts as f64 vector
-    let count_col = unnested.column("count").map_err(|e| {
-        EconError::InvalidSpecification {
+    let count_col = unnested
+        .column("count")
+        .map_err(|e| EconError::InvalidSpecification {
             message: format!("Failed to get count column: {}", e),
-        }
-    })?;
+        })?;
 
-    let count_f64 = count_col.cast(&DataType::Float64).map_err(|e| {
-        EconError::InvalidSpecification {
-            message: format!("Failed to cast count column to f64: {}", e),
-        }
-    })?;
+    let count_f64 =
+        count_col
+            .cast(&DataType::Float64)
+            .map_err(|e| EconError::InvalidSpecification {
+                message: format!("Failed to cast count column to f64: {}", e),
+            })?;
 
     let observed: Vec<f64> = count_f64
         .f64()
@@ -606,7 +611,11 @@ pub fn run_chisq_independence(
 
     let df = dataset.df();
 
-    let available_cols: Vec<String> = df.get_column_names().iter().map(|s| s.to_string()).collect();
+    let available_cols: Vec<String> = df
+        .get_column_names()
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
 
     // Get unique values for both columns
     let row_series = df.column(row_col).map_err(|_| EconError::ColumnNotFound {
@@ -620,12 +629,16 @@ pub fn run_chisq_independence(
     })?;
 
     // Get unique values
-    let row_unique = row_series.unique().map_err(|e| EconError::InvalidSpecification {
-        message: format!("Failed to get unique row values: {}", e),
-    })?;
-    let col_unique = col_series.unique().map_err(|e| EconError::InvalidSpecification {
-        message: format!("Failed to get unique column values: {}", e),
-    })?;
+    let row_unique = row_series
+        .unique()
+        .map_err(|e| EconError::InvalidSpecification {
+            message: format!("Failed to get unique row values: {}", e),
+        })?;
+    let col_unique = col_series
+        .unique()
+        .map_err(|e| EconError::InvalidSpecification {
+            message: format!("Failed to get unique column values: {}", e),
+        })?;
 
     let n_rows = row_unique.len();
     let n_cols = col_unique.len();
@@ -677,11 +690,7 @@ pub fn run_chisq_independence(
     for i in 0..grouped.height() {
         let row_val = format!("{:?}", row_data.get(i).unwrap());
         let col_val = format!("{:?}", col_data.get(i).unwrap());
-        let count = count_data
-            .get(i)
-            .unwrap()
-            .try_extract::<u64>()
-            .unwrap_or(0) as f64;
+        let count = count_data.get(i).unwrap().try_extract::<u64>().unwrap_or(0) as f64;
 
         if let (Some(row_idx), Some(col_idx)) = (
             row_values.iter().position(|v| v == &row_val),
@@ -785,10 +794,7 @@ mod tests {
         // chisq.test(M)
         //
         // X-squared = 30.07, df = 2, p-value = 2.954e-07
-        let table = vec![
-            vec![762.0, 327.0, 468.0],
-            vec![484.0, 239.0, 477.0],
-        ];
+        let table = vec![vec![762.0, 327.0, 468.0], vec![484.0, 239.0, 477.0]];
 
         let result = chisq_test_independence(&table, false).unwrap();
 

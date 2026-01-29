@@ -6,54 +6,19 @@
 ## SETUP ----
 library(tidyverse)
 library(jsonlite)
-
-INPUT <- "rust_validation/results/summaries/"
-OUTPUT <- "../figures/"
+source("helpers.R")
 
 ## DATA IMPORT AND PREPARATION ----
-summary_data <- fromJSON(paste0(INPUT, "benchmark_summary.json"), simplifyVector = FALSE)
-
-# Extract methods data and flatten (handle type inconsistencies)
-methods_list <- summary_data$methods
-benchmark_df <- map_dfr(names(methods_list), function(method) {
-  method_results <- methods_list[[method]]
-  map_dfr(method_results, function(r) {
-    tibble(
-      method = method,
-      n = r$n,
-      r_median_us = r$r_median_us,
-      rust_median_us = r$rust_median_us,
-      speedup = r$speedup
-    )
-  })
-})
+benchmark_df <- load_benchmark_summary(paste0(INPUT_BENCHMARK, "benchmark_summary.json"))
 
 # Filter to n=100,000 and prepare for plotting
 speedup_data <- benchmark_df %>%
   filter(n == 100000, speedup > 0) %>%
   mutate(
-    # Add category labels
-    category = case_when(
-      grepl("^ols", method, ignore.case = TRUE) ~ "Regression",
-      grepl("^panel", method, ignore.case = TRUE) ~ "Panel",
-      grepl("logit|probit", method, ignore.case = TRUE) ~ "Discrete",
-      grepl("kmeans|pca|dbscan|hierarchical", method, ignore.case = TRUE) ~ "ML",
-      grepl("arima|mstl|stl|holt|ar$", method, ignore.case = TRUE) ~ "Time Series",
-      grepl("sort|filter|group|select|standardize|lag|lead|diff", method, ignore.case = TRUE) ~ "Munging",
-      TRUE ~ "Other"
-    ),
-    # Clean method labels
-    method_label = method %>%
-      str_replace_all("_", " ") %>%
-      str_replace_all("hc([0-3])", "HC\\1") %>%
-      str_replace("^ols$", "OLS") %>%
-      str_replace("^ols ", "OLS+") %>%
-      str_replace("panel fe", "Panel FE") %>%
-      str_replace("panel re", "Panel RE") %>%
-      str_to_title(),
-    # Flag methods where Rust is faster
+    category = categorize_method(method),
+    method_label = clean_method_label(method),
     faster = speedup >= 1,
-    speedup_label = sprintf("%.1fx", speedup)
+    speedup_label = format_speedup(speedup)
   ) %>%
   arrange(desc(speedup)) %>%
   mutate(method_label = factor(method_label, levels = rev(method_label)))
@@ -83,10 +48,10 @@ p <- ggplot(speedup_data, aes(x = method_label, y = speedup, fill = category)) +
 
 ## WRITE TO DISK ----
 ggsave(
-  paste0(OUTPUT, "benchmark_speedup.pdf"),
+  paste0(OUTPUT_FIGURES, "benchmark_speedup.pdf"),
   plot = p,
   width = 8,
   height = 6
 )
 
-message("Created: ", OUTPUT, "benchmark_speedup.pdf")
+message("Created: ", OUTPUT_FIGURES, "benchmark_speedup.pdf")

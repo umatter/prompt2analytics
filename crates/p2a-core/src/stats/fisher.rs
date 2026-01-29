@@ -58,20 +58,15 @@ use crate::errors::{EconError, EconResult};
 use crate::traits::SignificanceLevel;
 
 /// Alternative hypothesis for Fisher's exact test.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum FisherAlternative {
     /// Two-sided test: odds ratio ≠ 1
+    #[default]
     TwoSided,
     /// One-sided test: odds ratio > 1 (positive association)
     Greater,
     /// One-sided test: odds ratio < 1 (negative association)
     Less,
-}
-
-impl Default for FisherAlternative {
-    fn default() -> Self {
-        FisherAlternative::TwoSided
-    }
 }
 
 impl std::fmt::Display for FisherAlternative {
@@ -140,10 +135,7 @@ impl std::fmt::Display for FisherExactResult {
 
         // Table display
         writeln!(f, "Observed:")?;
-        writeln!(
-            f,
-            "         Col1    Col2    Total"
-        )?;
+        writeln!(f, "         Col1    Col2    Total")?;
         writeln!(
             f,
             "  Row1 {:>6.0}  {:>6.0}  {:>6.0}",
@@ -168,7 +160,10 @@ impl std::fmt::Display for FisherExactResult {
             self.p_value,
             self.significance.stars()
         )?;
-        writeln!(f, "alternative hypothesis: true odds ratio is not equal to 1")?;
+        writeln!(
+            f,
+            "alternative hypothesis: true odds ratio is not equal to 1"
+        )?;
         writeln!(f)?;
 
         // Odds ratio
@@ -295,11 +290,7 @@ pub fn fisher_exact_test(
     let p_value = match alternative {
         FisherAlternative::Greater => {
             // P(X >= a) = sf(a - 1) or 1 - cdf(a - 1)
-            if a_u64 == 0 {
-                1.0
-            } else {
-                hyper.sf(a_u64 - 1)
-            }
+            if a_u64 == 0 { 1.0 } else { hyper.sf(a_u64 - 1) }
         }
         FisherAlternative::Less => {
             // P(X <= a) = cdf(a)
@@ -353,18 +344,14 @@ pub fn fisher_exact_test(
 /// Sums probabilities of all tables with probability ≤ observed probability.
 fn compute_two_sided_pvalue(
     hyper: &Hypergeometric,
-    observed: u64,
+    _observed: u64,
     prob_observed: f64,
     row1: u64,
     col1: u64,
     n: u64,
 ) -> f64 {
     // The support of X is [max(0, row1 + col1 - n), min(row1, col1)]
-    let x_min = if row1 + col1 > n {
-        row1 + col1 - n
-    } else {
-        0
-    };
+    let x_min = (row1 + col1).saturating_sub(n);
     let x_max = row1.min(col1);
 
     let mut p_value = 0.0;
@@ -505,7 +492,7 @@ fn compute_fisher_pvalue_given_or(
     // For simplicity, we use a weighted sum approach
 
     // Support of X
-    let x_min = if row1 + col1 > n { row1 + col1 - n } else { 0 };
+    let x_min = (row1 + col1).saturating_sub(n);
     let x_max = row1.min(col1);
 
     // Compute unnormalized probabilities for non-central hypergeometric
@@ -515,7 +502,7 @@ fn compute_fisher_pvalue_given_or(
 
     // Use log-probabilities for numerical stability
     for x in x_min..=x_max {
-        let row2 = n - row1;
+        let _row2 = n - row1;
         let col2 = n - col1;
 
         // Check validity: need x <= col1, row1-x <= col2
@@ -525,9 +512,7 @@ fn compute_fisher_pvalue_given_or(
         }
 
         // log P(X=x|OR) = log(C(col1, x)) + log(C(col2, row1-x)) + x*log(OR)
-        let log_p = log_binomial(col1, x)
-            + log_binomial(col2, row1 - x)
-            + (x as f64) * or.ln();
+        let log_p = log_binomial(col1, x) + log_binomial(col2, row1 - x) + (x as f64) * or.ln();
         log_probs.push(log_p);
     }
 
@@ -636,7 +621,11 @@ pub fn run_fisher_test(
 
     let df = dataset.df();
 
-    let available_cols: Vec<String> = df.get_column_names().iter().map(|s| s.to_string()).collect();
+    let available_cols: Vec<String> = df
+        .get_column_names()
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
 
     // Validate columns exist
     let row_series = df.column(row_col).map_err(|_| EconError::ColumnNotFound {
@@ -650,13 +639,17 @@ pub fn run_fisher_test(
     })?;
 
     // Get unique values
-    let row_unique = row_series.unique().map_err(|e| EconError::InvalidSpecification {
-        message: format!("Failed to get unique row values: {}", e),
-    })?;
+    let row_unique = row_series
+        .unique()
+        .map_err(|e| EconError::InvalidSpecification {
+            message: format!("Failed to get unique row values: {}", e),
+        })?;
 
-    let col_unique = col_series.unique().map_err(|e| EconError::InvalidSpecification {
-        message: format!("Failed to get unique column values: {}", e),
-    })?;
+    let col_unique = col_series
+        .unique()
+        .map_err(|e| EconError::InvalidSpecification {
+            message: format!("Failed to get unique column values: {}", e),
+        })?;
 
     if row_unique.len() != 2 {
         return Err(EconError::InvalidSpecification {
@@ -712,11 +705,7 @@ pub fn run_fisher_test(
     for i in 0..grouped.height() {
         let row_val = format!("{:?}", row_data.get(i).unwrap());
         let col_val = format!("{:?}", col_data.get(i).unwrap());
-        let count = count_data
-            .get(i)
-            .unwrap()
-            .try_extract::<u64>()
-            .unwrap_or(0) as f64;
+        let count = count_data.get(i).unwrap().try_extract::<u64>().unwrap_or(0) as f64;
 
         if let (Some(row_idx), Some(col_idx)) = (
             row_values.iter().position(|v| v == &row_val),
@@ -748,7 +737,8 @@ mod tests {
     #[test]
     fn test_fisher_integer_wrapper() {
         let table = [[3, 1], [1, 3]];
-        let result = fisher_exact_test_int(&table, FisherAlternative::TwoSided, Some(0.95)).unwrap();
+        let result =
+            fisher_exact_test_int(&table, FisherAlternative::TwoSided, Some(0.95)).unwrap();
 
         assert!(result.p_value > 0.0);
         assert_eq!(result.odds_ratio, 9.0);
@@ -894,22 +884,34 @@ mod tests {
 
         // 95% CI should contain 1 when p > 0.05
         if result.p_value > 0.05 {
-            assert!(lo < 1.0 && hi > 1.0, "95% CI should contain 1 when p > 0.05");
+            assert!(
+                lo < 1.0 && hi > 1.0,
+                "95% CI should contain 1 when p > 0.05"
+            );
         }
     }
 
     #[test]
     fn test_error_handling() {
         // Negative values
-        let result = fisher_exact_test(&[[-1.0, 5.0], [5.0, 5.0]], FisherAlternative::TwoSided, None);
+        let result = fisher_exact_test(
+            &[[-1.0, 5.0], [5.0, 5.0]],
+            FisherAlternative::TwoSided,
+            None,
+        );
         assert!(result.is_err());
 
         // Empty table
-        let result = fisher_exact_test(&[[0.0, 0.0], [0.0, 0.0]], FisherAlternative::TwoSided, None);
+        let result =
+            fisher_exact_test(&[[0.0, 0.0], [0.0, 0.0]], FisherAlternative::TwoSided, None);
         assert!(result.is_err());
 
         // Invalid confidence level
-        let result = fisher_exact_test(&[[1.0, 1.0], [1.0, 1.0]], FisherAlternative::TwoSided, Some(1.5));
+        let result = fisher_exact_test(
+            &[[1.0, 1.0], [1.0, 1.0]],
+            FisherAlternative::TwoSided,
+            Some(1.5),
+        );
         assert!(result.is_err());
     }
 

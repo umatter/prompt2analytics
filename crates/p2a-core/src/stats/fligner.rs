@@ -81,7 +81,12 @@ impl std::fmt::Display for FlignerResult {
         writeln!(f)?;
 
         if !self.group_names.is_empty() {
-            writeln!(f, "Groups: {} (n = {:?})", self.group_names.join(", "), self.group_sizes)?;
+            writeln!(
+                f,
+                "Groups: {} (n = {:?})",
+                self.group_names.join(", "),
+                self.group_sizes
+            )?;
         } else {
             writeln!(f, "Number of groups: {}", self.n_groups)?;
             writeln!(f, "Group sizes: {:?}", self.group_sizes)?;
@@ -231,19 +236,32 @@ pub fn run_fligner_test(
     let df = dataset.df();
 
     // Extract values
-    let value_series = df.column(value_col).map_err(|_| EconError::ColumnNotFound {
-        column: value_col.to_string(),
-        available: df.get_column_names().iter().map(|s| s.to_string()).collect(),
-    })?;
+    let value_series = df
+        .column(value_col)
+        .map_err(|_| EconError::ColumnNotFound {
+            column: value_col.to_string(),
+            available: df
+                .get_column_names()
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+        })?;
 
     // Extract groups
-    let group_series = df.column(group_col).map_err(|_| EconError::ColumnNotFound {
-        column: group_col.to_string(),
-        available: df.get_column_names().iter().map(|s| s.to_string()).collect(),
-    })?;
+    let group_series = df
+        .column(group_col)
+        .map_err(|_| EconError::ColumnNotFound {
+            column: group_col.to_string(),
+            available: df
+                .get_column_names()
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+        })?;
 
     // Get unique groups and build data structure
-    let mut groups_map: std::collections::HashMap<String, Vec<f64>> = std::collections::HashMap::new();
+    let mut groups_map: std::collections::HashMap<String, Vec<f64>> =
+        std::collections::HashMap::new();
 
     let values: Vec<f64> = value_series
         .f64()

@@ -35,7 +35,7 @@ pub fn AutocompleteDropdown(props: AutocompleteDropdownProps) -> Element {
                     is_selected: idx as i32 == state.selected_index,
                     on_click: {
                         let suggestion = suggestion.clone();
-                        let on_select = props.on_select.clone();
+                        let on_select = props.on_select;
                         move |_| {
                             on_select.call(suggestion.clone());
                         }
@@ -60,7 +60,8 @@ fn AutocompleteSuggestionItem(props: AutocompleteSuggestionItemProps) -> Element
     let suggestion = &props.suggestion;
     let is_selected = props.is_selected;
 
-    let base_class = "autocomplete-item flex items-center gap-2 px-3 py-2 cursor-pointer transition-colors";
+    let base_class =
+        "autocomplete-item flex items-center gap-2 px-3 py-2 cursor-pointer transition-colors";
     let selected_class = if is_selected {
         "bg-teal-50 dark:bg-teal-900/30"
     } else {
@@ -140,9 +141,15 @@ fn render_type_icon(suggestion_type: SuggestionType) -> Element {
 /// Get badge class for suggestion type
 fn type_badge_class(suggestion_type: SuggestionType) -> &'static str {
     match suggestion_type {
-        SuggestionType::Dataset => "bg-teal-100 text-teal-700 dark:bg-teal-900/30 dark:text-teal-300",
-        SuggestionType::Column => "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300",
-        SuggestionType::Tool => "bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-300",
+        SuggestionType::Dataset => {
+            "bg-teal-100 text-teal-700 dark:bg-teal-900/30 dark:text-teal-300"
+        }
+        SuggestionType::Column => {
+            "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300"
+        }
+        SuggestionType::Tool => {
+            "bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-300"
+        }
         SuggestionType::History => "bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-300",
     }
 }

@@ -2,9 +2,9 @@
 
 use clap::Subcommand;
 use ndarray::{Array1, Array2};
-use p2a_core::{kmeans, pca, tsne, random_forest};
+use p2a_core::{Linkage, dbscan, hierarchical, kmeans, linear_svm, pca, random_forest, tsne};
 
-use crate::output::{print_error, OutputFormat};
+use crate::output::{OutputFormat, print_error};
 use crate::session::SessionManager;
 
 #[derive(Subcommand)]
@@ -112,6 +112,72 @@ pub enum MlCommands {
         #[arg(long)]
         seed: Option<u64>,
     },
+
+    /// DBSCAN density-based clustering
+    Dbscan {
+        /// Dataset name
+        dataset: String,
+
+        /// Feature columns
+        #[arg(long, num_args = 1..)]
+        cols: Vec<String>,
+
+        /// Maximum distance between samples for neighborhood (epsilon)
+        #[arg(long)]
+        eps: f64,
+
+        /// Minimum samples in neighborhood for a core point
+        #[arg(long, default_value = "5")]
+        min_samples: usize,
+    },
+
+    /// Hierarchical (agglomerative) clustering
+    Hierarchical {
+        /// Dataset name
+        dataset: String,
+
+        /// Feature columns
+        #[arg(long, num_args = 1..)]
+        cols: Vec<String>,
+
+        /// Number of clusters to form
+        #[arg(short, long)]
+        n_clusters: Option<usize>,
+
+        /// Linkage method: single, complete, average, ward
+        #[arg(long, default_value = "ward")]
+        linkage: String,
+
+        /// Distance threshold for cutting the dendrogram
+        #[arg(long)]
+        distance_threshold: Option<f64>,
+    },
+
+    /// Linear Support Vector Machine (SVM)
+    Svm {
+        /// Dataset name
+        dataset: String,
+
+        /// Feature columns
+        #[arg(long, num_args = 1..)]
+        cols: Vec<String>,
+
+        /// Target column (binary classification)
+        #[arg(short = 'y', long)]
+        target: String,
+
+        /// Regularization parameter C (default: 1.0)
+        #[arg(short, long, default_value = "1.0")]
+        c: f64,
+
+        /// Maximum iterations (default: 1000)
+        #[arg(long, default_value = "1000")]
+        max_iter: usize,
+
+        /// Convergence tolerance (default: 1e-3)
+        #[arg(long, default_value = "0.001")]
+        tolerance: f64,
+    },
 }
 
 pub fn execute(
@@ -141,7 +207,17 @@ pub fn execute(
             max_iter,
             learning_rate,
             seed,
-        } => execute_tsne(dataset, cols, *n_components, *perplexity, *max_iter, *learning_rate, *seed, format, session),
+        } => execute_tsne(
+            dataset,
+            cols,
+            *n_components,
+            *perplexity,
+            *max_iter,
+            *learning_rate,
+            *seed,
+            format,
+            session,
+        ),
         MlCommands::RandomForest {
             dataset,
             cols,
@@ -151,7 +227,49 @@ pub fn execute(
             min_samples_split,
             max_features,
             seed,
-        } => execute_random_forest(dataset, cols, target, *n_trees, *max_depth, *min_samples_split, max_features, *seed, format, session),
+        } => execute_random_forest(
+            dataset,
+            cols,
+            target,
+            *n_trees,
+            *max_depth,
+            *min_samples_split,
+            max_features,
+            *seed,
+            format,
+            session,
+        ),
+        MlCommands::Dbscan {
+            dataset,
+            cols,
+            eps,
+            min_samples,
+        } => execute_dbscan(dataset, cols, *eps, *min_samples, format, session),
+        MlCommands::Hierarchical {
+            dataset,
+            cols,
+            n_clusters,
+            linkage,
+            distance_threshold,
+        } => execute_hierarchical(
+            dataset,
+            cols,
+            *n_clusters,
+            linkage,
+            *distance_threshold,
+            format,
+            session,
+        ),
+        MlCommands::Svm {
+            dataset,
+            cols,
+            target,
+            c,
+            max_iter,
+            tolerance,
+        } => execute_svm(
+            dataset, cols, target, *c, *max_iter, *tolerance, format, session,
+        ),
     }
 }
 
@@ -251,17 +369,18 @@ fn execute_kmeans(
                             println!("{}", "=".repeat(50));
                             println!("Features: {:?}", cols);
                             println!("Iterations: {}", result.n_iterations);
-                            println!("Inertia (within-cluster sum of squares): {:.4}", result.inertia);
+                            println!(
+                                "Inertia (within-cluster sum of squares): {:.4}",
+                                result.inertia
+                            );
                             println!("\nCluster sizes:");
                             for (i, size) in result.cluster_sizes.iter().enumerate() {
                                 println!("  Cluster {}: {} observations", i, size);
                             }
                             println!("\nCentroids:");
                             for (i, centroid) in centroids_vec.iter().enumerate() {
-                                let centroid_str: Vec<String> = centroid
-                                    .iter()
-                                    .map(|v| format!("{:.4}", v))
-                                    .collect();
+                                let centroid_str: Vec<String> =
+                                    centroid.iter().map(|v| format!("{:.4}", v)).collect();
                                 println!("  Cluster {}: [{}]", i, centroid_str.join(", "));
                             }
                         }
@@ -314,7 +433,8 @@ fn execute_pca(
                 Ok(result) => {
                     // Convert arrays to Vec for JSON serialization
                     let explained_variance: Vec<f64> = result.explained_variance.to_vec();
-                    let explained_variance_ratio: Vec<f64> = result.explained_variance_ratio.to_vec();
+                    let explained_variance_ratio: Vec<f64> =
+                        result.explained_variance_ratio.to_vec();
 
                     // Compute cumulative variance ratio
                     let mut cumulative = 0.0;
@@ -371,12 +491,12 @@ fn execute_pca(
                                 );
                             }
 
-                            println!("\nPrincipal Components (rows are components, cols are features):");
+                            println!(
+                                "\nPrincipal Components (rows are components, cols are features):"
+                            );
                             for (i, component) in components_vec.iter().enumerate() {
-                                let comp_str: Vec<String> = component
-                                    .iter()
-                                    .map(|v| format!("{:.4}", v))
-                                    .collect();
+                                let comp_str: Vec<String> =
+                                    component.iter().map(|v| format!("{:.4}", v)).collect();
                                 println!("  PC{}: [{}]", i + 1, comp_str.join(", "));
                             }
                         }
@@ -423,7 +543,14 @@ fn execute_tsne(
                 }
             };
 
-            match tsne(data.view(), Some(n_components), Some(perplexity), Some(max_iter), Some(learning_rate), seed) {
+            match tsne(
+                data.view(),
+                Some(n_components),
+                Some(perplexity),
+                Some(max_iter),
+                Some(learning_rate),
+                seed,
+            ) {
                 Ok(result) => {
                     // Convert embedding to Vec<Vec<f64>> for JSON
                     let embedding_vec: Vec<Vec<f64>> = result
@@ -453,7 +580,11 @@ fn execute_tsne(
                             println!("Perplexity: {}", result.perplexity);
                             println!("Iterations: {}", result.n_iterations);
                             println!("KL Divergence: {:.6}", result.kl_divergence);
-                            println!("\nEmbedding shape: {} x {}", embedding_vec.len(), result.n_components);
+                            println!(
+                                "\nEmbedding shape: {} x {}",
+                                embedding_vec.len(),
+                                result.n_components
+                            );
                             println!("(Use JSON output for full embedding data)");
                         }
                     }
@@ -553,7 +684,8 @@ fn execute_random_forest(
                             }
 
                             println!("\nFeature Importances:");
-                            let mut indexed: Vec<(usize, &f64)> = importances.iter().enumerate().collect();
+                            let mut indexed: Vec<(usize, &f64)> =
+                                importances.iter().enumerate().collect();
                             indexed.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap());
                             for (idx, imp) in indexed.iter().take(10) {
                                 println!("  {}: {:.4}", feature_names[*idx], imp);
@@ -562,6 +694,307 @@ fn execute_random_forest(
                     }
                 }
                 Err(e) => print_error(&format!("Random Forest failed: {}", e), format),
+            }
+        }
+        None => print_error(&format!("Dataset '{}' not found", dataset_name), format),
+    }
+    Ok(())
+}
+
+fn execute_dbscan(
+    dataset_name: &str,
+    cols: &[String],
+    eps: f64,
+    min_samples: usize,
+    format: &OutputFormat,
+    session: Option<&mut SessionManager>,
+) -> anyhow::Result<()> {
+    let dataset = match session {
+        Some(mgr) => mgr.get_dataset(dataset_name),
+        None => {
+            print_error("No session active. Use --session <file>.", format);
+            return Ok(());
+        }
+    };
+
+    match dataset {
+        Some(ds) => {
+            let data = match extract_columns_as_array(ds, cols) {
+                Ok(arr) => arr,
+                Err(e) => {
+                    print_error(&format!("Failed to extract data: {}", e), format);
+                    return Ok(());
+                }
+            };
+
+            match dbscan(data.view(), eps, min_samples) {
+                Ok(result) => {
+                    // Count cluster sizes
+                    let mut cluster_sizes: std::collections::HashMap<i32, usize> =
+                        std::collections::HashMap::new();
+                    for &label in &result.labels {
+                        *cluster_sizes.entry(label).or_insert(0) += 1;
+                    }
+
+                    match format {
+                        OutputFormat::Json => {
+                            let json = serde_json::json!({
+                                "method": "DBSCAN",
+                                "eps": eps,
+                                "min_samples": min_samples,
+                                "features": cols,
+                                "n_clusters": result.n_clusters,
+                                "n_noise": result.n_noise,
+                                "n_core_samples": result.core_sample_indices.len(),
+                                "cluster_sizes": cluster_sizes,
+                                "labels": result.labels,
+                            });
+                            println!("{}", serde_json::to_string_pretty(&json)?);
+                        }
+                        _ => {
+                            println!("\nDBSCAN Clustering Results");
+                            println!("{}", "=".repeat(50));
+                            println!("Features: {:?}", cols);
+                            println!("Epsilon (eps): {}", eps);
+                            println!("Min samples: {}", min_samples);
+                            println!("Number of clusters: {}", result.n_clusters);
+                            println!("Number of noise points: {}", result.n_noise);
+                            println!(
+                                "Number of core samples: {}",
+                                result.core_sample_indices.len()
+                            );
+                            println!("\nCluster sizes:");
+                            let mut labels_sorted: Vec<_> = cluster_sizes.keys().cloned().collect();
+                            labels_sorted.sort();
+                            for label in &labels_sorted {
+                                if *label == -1 {
+                                    println!("  Noise: {} points", cluster_sizes[label]);
+                                } else {
+                                    println!(
+                                        "  Cluster {}: {} points",
+                                        label, cluster_sizes[label]
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(e) => print_error(&format!("DBSCAN failed: {}", e), format),
+            }
+        }
+        None => print_error(&format!("Dataset '{}' not found", dataset_name), format),
+    }
+    Ok(())
+}
+
+fn execute_hierarchical(
+    dataset_name: &str,
+    cols: &[String],
+    n_clusters: Option<usize>,
+    linkage_str: &str,
+    distance_threshold: Option<f64>,
+    format: &OutputFormat,
+    session: Option<&mut SessionManager>,
+) -> anyhow::Result<()> {
+    let dataset = match session {
+        Some(mgr) => mgr.get_dataset(dataset_name),
+        None => {
+            print_error("No session active. Use --session <file>.", format);
+            return Ok(());
+        }
+    };
+
+    match dataset {
+        Some(ds) => {
+            let data = match extract_columns_as_array(ds, cols) {
+                Ok(arr) => arr,
+                Err(e) => {
+                    print_error(&format!("Failed to extract data: {}", e), format);
+                    return Ok(());
+                }
+            };
+
+            // Parse linkage method
+            let linkage: Linkage = match linkage_str.parse() {
+                Ok(l) => l,
+                Err(e) => {
+                    print_error(&format!("Invalid linkage method: {}", e), format);
+                    return Ok(());
+                }
+            };
+
+            match hierarchical(data.view(), n_clusters, linkage, distance_threshold) {
+                Ok(result) => {
+                    // Count cluster sizes
+                    let mut cluster_sizes: std::collections::HashMap<usize, usize> =
+                        std::collections::HashMap::new();
+                    for &label in &result.labels {
+                        *cluster_sizes.entry(label).or_insert(0) += 1;
+                    }
+
+                    match format {
+                        OutputFormat::Json => {
+                            let json = serde_json::json!({
+                                "method": "Hierarchical Clustering",
+                                "linkage": result.linkage,
+                                "features": cols,
+                                "n_clusters": result.n_clusters,
+                                "cluster_sizes": cluster_sizes,
+                                "labels": result.labels,
+                                "merge_distances": result.merge_distances,
+                            });
+                            println!("{}", serde_json::to_string_pretty(&json)?);
+                        }
+                        _ => {
+                            println!("\nHierarchical Clustering Results");
+                            println!("{}", "=".repeat(50));
+                            println!("Features: {:?}", cols);
+                            println!("Linkage method: {}", result.linkage);
+                            println!("Number of clusters: {}", result.n_clusters);
+                            println!("\nCluster sizes:");
+                            let mut labels_sorted: Vec<_> = cluster_sizes.keys().collect();
+                            labels_sorted.sort();
+                            for &label in &labels_sorted {
+                                println!("  Cluster {}: {} points", label, cluster_sizes[label]);
+                            }
+                            if !result.merge_distances.is_empty() {
+                                println!("\nDendrogram (last 5 merges):");
+                                for (i, dist) in
+                                    result.merge_distances.iter().rev().take(5).enumerate()
+                                {
+                                    println!(
+                                        "  Merge {}: distance = {:.4}",
+                                        result.merge_distances.len() - i,
+                                        dist
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(e) => print_error(&format!("Hierarchical clustering failed: {}", e), format),
+            }
+        }
+        None => print_error(&format!("Dataset '{}' not found", dataset_name), format),
+    }
+    Ok(())
+}
+
+fn execute_svm(
+    dataset_name: &str,
+    cols: &[String],
+    target_col: &str,
+    c: f64,
+    max_iter: usize,
+    tolerance: f64,
+    format: &OutputFormat,
+    session: Option<&mut SessionManager>,
+) -> anyhow::Result<()> {
+    let dataset = match session {
+        Some(mgr) => mgr.get_dataset(dataset_name),
+        None => {
+            print_error("No session active. Use --session <file>.", format);
+            return Ok(());
+        }
+    };
+
+    match dataset {
+        Some(ds) => {
+            let data = match extract_columns_as_array(ds, cols) {
+                Ok(arr) => arr,
+                Err(e) => {
+                    print_error(&format!("Failed to extract feature data: {}", e), format);
+                    return Ok(());
+                }
+            };
+
+            // Extract target column
+            let target: Array1<f64> = {
+                let col = ds.df().column(target_col);
+                match col {
+                    Ok(c) => match c.f64() {
+                        Ok(ca) => ca.into_no_null_iter().collect(),
+                        Err(e) => {
+                            print_error(&format!("Target column must be numeric: {}", e), format);
+                            return Ok(());
+                        }
+                    },
+                    Err(e) => {
+                        print_error(&format!("Target column not found: {}", e), format);
+                        return Ok(());
+                    }
+                }
+            };
+
+            let feature_names: Vec<String> = cols.to_vec();
+
+            match linear_svm(
+                data.view(),
+                target.view(),
+                Some(c),
+                Some(max_iter),
+                Some(tolerance),
+                Some(feature_names.clone()),
+            ) {
+                Ok(result) => {
+                    // Count predictions per class
+                    let neg_count = result.predictions.iter().filter(|&&p| p < 0).count();
+                    let pos_count = result.predictions.len() - neg_count;
+
+                    match format {
+                        OutputFormat::Json => {
+                            let json = serde_json::json!({
+                                "method": "Linear SVM",
+                                "features": feature_names,
+                                "c": c,
+                                "converged": result.converged,
+                                "n_iterations": result.n_iterations,
+                                "n_support_vectors": result.n_support_vectors,
+                                "weights": result.weights,
+                                "bias": result.bias,
+                                "class_labels": result.class_labels,
+                                "predictions": result.predictions,
+                            });
+                            println!("{}", serde_json::to_string_pretty(&json)?);
+                        }
+                        _ => {
+                            println!("\nLinear SVM Results");
+                            println!("{}", "=".repeat(50));
+                            println!("Features: {:?}", feature_names);
+                            println!("Regularization C: {}", c);
+                            println!("Converged: {}", result.converged);
+                            println!("Iterations: {}", result.n_iterations);
+                            println!("Support vectors: {}", result.n_support_vectors);
+                            println!("Bias: {:.6}", result.bias);
+
+                            if let Some((neg, pos)) = result.class_labels {
+                                println!("\nClass labels: {} (negative), {} (positive)", neg, pos);
+                            }
+
+                            println!("\nFeature Weights (top 10 by magnitude):");
+                            let mut indexed: Vec<(usize, f64)> = result
+                                .weights
+                                .iter()
+                                .enumerate()
+                                .map(|(i, &v)| (i, v))
+                                .collect();
+                            indexed.sort_by(|a, b| {
+                                b.1.abs()
+                                    .partial_cmp(&a.1.abs())
+                                    .unwrap_or(std::cmp::Ordering::Equal)
+                            });
+                            for (idx, weight) in indexed.iter().take(10) {
+                                println!("  {}: {:.6}", feature_names[*idx], weight);
+                            }
+
+                            println!(
+                                "\nPrediction distribution: {} negative, {} positive",
+                                neg_count, pos_count
+                            );
+                        }
+                    }
+                }
+                Err(e) => print_error(&format!("SVM failed: {}", e), format),
             }
         }
         None => print_error(&format!("Dataset '{}' not found", dataset_name), format),

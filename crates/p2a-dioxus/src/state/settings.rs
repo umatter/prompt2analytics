@@ -7,7 +7,7 @@
 //! variables (OPENAI_API_KEY, ANTHROPIC_API_KEY) if not already set.
 
 use crate::api::ProviderConfig;
-use crate::platform::{create_storage, is_native, StorageBackend};
+use crate::platform::{StorageBackend, create_storage, is_native};
 use serde::{Deserialize, Serialize};
 
 /// Storage key for settings
@@ -144,7 +144,10 @@ impl Settings {
         if self.openai_api_key.is_empty() {
             match std::env::var("OPENAI_API_KEY") {
                 Ok(key) if !key.is_empty() => {
-                    tracing::info!("Detected OPENAI_API_KEY from environment ({} chars)", key.len());
+                    tracing::info!(
+                        "Detected OPENAI_API_KEY from environment ({} chars)",
+                        key.len()
+                    );
                     self.openai_api_key = key;
                 }
                 Ok(_) => {
@@ -162,7 +165,10 @@ impl Settings {
         if self.anthropic_api_key.is_empty() {
             match std::env::var("ANTHROPIC_API_KEY") {
                 Ok(key) if !key.is_empty() => {
-                    tracing::info!("Detected ANTHROPIC_API_KEY from environment ({} chars)", key.len());
+                    tracing::info!(
+                        "Detected ANTHROPIC_API_KEY from environment ({} chars)",
+                        key.len()
+                    );
                     self.anthropic_api_key = key;
                 }
                 Ok(_) => {
@@ -284,10 +290,7 @@ impl Settings {
     /// Get validation error message if any
     pub fn validation_error(&self) -> Option<String> {
         if self.provider.requires_api_key() && self.current_api_key().is_empty() {
-            return Some(format!(
-                "{:?} requires an API key",
-                self.provider
-            ));
+            return Some(format!("{:?} requires an API key", self.provider));
         }
 
         if self.current_model().is_empty() {

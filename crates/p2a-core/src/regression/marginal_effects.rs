@@ -76,8 +76,10 @@ use crate::econometrics::{DiscreteModelType, DiscreteResult, run_logit, run_prob
 use crate::errors::{EconError, EconResult};
 use crate::linalg::design::DesignMatrix;
 use crate::linalg::matrix_ops::safe_inverse;
-use crate::regression::ols::{run_ols, CovarianceType, OlsResult};
-use crate::traits::estimator::{logistic_cdf, logistic_pdf, normal_cdf, normal_pdf, SignificanceLevel};
+use crate::regression::ols::{CovarianceType, OlsResult, run_ols};
+use crate::traits::estimator::{
+    SignificanceLevel, logistic_cdf, logistic_pdf, normal_cdf, normal_pdf,
+};
 
 /// Type of model for marginal effects computation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -257,7 +259,10 @@ pub struct ContrastEffect {
 pub fn marginal_effects_ols(ols_result: &OlsResult) -> EconResult<MarginalEffectsResult> {
     let n_obs = ols_result.n_obs;
     let variables = ols_result.variable_names.clone();
-    let has_intercept = variables.get(0).map(|s| s == "(Intercept)").unwrap_or(false);
+    let has_intercept = variables
+        .first()
+        .map(|s| s == "(Intercept)")
+        .unwrap_or(false);
 
     let mut average_marginal = Vec::new();
 
@@ -271,7 +276,7 @@ pub fn marginal_effects_ols(ols_result: &OlsResult) -> EconResult<MarginalEffect
             ci_lower: coef.ci_lower_95,
             ci_upper: coef.ci_upper_95,
             dy_dx: coef.estimate,
-            significance: coef.significance.clone(),
+            significance: coef.significance,
         };
         average_marginal.push(me);
     }
@@ -332,7 +337,10 @@ pub fn marginal_effects_discrete(
 
     let beta = Array1::from_vec(discrete_result.coefficients.clone());
     let variables = discrete_result.variables.clone();
-    let has_intercept = variables.get(0).map(|s| s == "(Intercept)").unwrap_or(false);
+    let has_intercept = variables
+        .first()
+        .map(|s| s == "(Intercept)")
+        .unwrap_or(false);
 
     // Select PDF function based on model type
     let pdf_fn: fn(f64) -> f64 = match discrete_result.model_type {
@@ -527,20 +535,19 @@ fn compute_discrete_vcov(
     // Compute weights for information matrix
     let weights: Array1<f64> = match discrete_result.model_type {
         DiscreteModelType::Logit => p_clipped.mapv(|pi| pi * (1.0 - pi)),
-        DiscreteModelType::Probit => {
-            z.iter()
-                .zip(p_clipped.iter())
-                .map(|(&zi, &pi)| {
-                    let pdf = pdf_fn(zi);
-                    let denom = pi * (1.0 - pi);
-                    if denom > 1e-10 {
-                        pdf * pdf / denom
-                    } else {
-                        1e-10
-                    }
-                })
-                .collect()
-        }
+        DiscreteModelType::Probit => z
+            .iter()
+            .zip(p_clipped.iter())
+            .map(|(&zi, &pi)| {
+                let pdf = pdf_fn(zi);
+                let denom = pi * (1.0 - pi);
+                if denom > 1e-10 {
+                    pdf * pdf / denom
+                } else {
+                    1e-10
+                }
+            })
+            .collect(),
     };
 
     // Information matrix: I = X' W X
@@ -557,10 +564,7 @@ fn compute_discrete_vcov(
     // Invert information matrix to get variance-covariance
     let (vcov, _) = safe_inverse(&info_matrix.view()).map_err(|e| EconError::SingularMatrix {
         context: "Information matrix for marginal effects".to_string(),
-        suggestion: format!(
-            "Model may have separation or multicollinearity: {:?}",
-            e
-        ),
+        suggestion: format!("Model may have separation or multicollinearity: {:?}", e),
     })?;
 
     Ok(vcov)
@@ -816,7 +820,10 @@ mod tests {
 
         // Verify standard errors are positive
         for me_i in &me.average_marginal {
-            assert!(me_i.std_error >= 0.0, "Standard errors should be non-negative");
+            assert!(
+                me_i.std_error >= 0.0,
+                "Standard errors should be non-negative"
+            );
         }
     }
 

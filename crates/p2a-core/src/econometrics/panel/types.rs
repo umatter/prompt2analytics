@@ -2,7 +2,7 @@
 //!
 //! Contains `PanelResult` and `PanelMethod` used across panel estimators.
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use std::fmt;
 
 use crate::traits::estimator::SignificanceLevel;
@@ -78,7 +78,11 @@ impl fmt::Display for PanelResult {
         writeln!(f, "No. Groups: {}", self.n_groups)?;
         writeln!(f, "R-squared: {:.4}", self.r_squared)?;
         writeln!(f, "Adj. R-squared: {:.4}", self.adj_r_squared)?;
-        writeln!(f, "F-statistic: {:.4} (p-value: {:.4})", self.f_stat, self.f_p_value)?;
+        writeln!(
+            f,
+            "F-statistic: {:.4} (p-value: {:.4})",
+            self.f_stat, self.f_p_value
+        )?;
 
         if let Some(sigma_u) = self.sigma_u {
             writeln!(f, "sigma_u: {:.4}", sigma_u)?;
@@ -91,18 +95,24 @@ impl fmt::Display for PanelResult {
         }
 
         writeln!(f)?;
-        writeln!(f, "{:<20} {:>12} {:>12} {:>10} {:>10}",
-                 "Variable", "Coef", "Std Err", "t", "P>|t|")?;
+        writeln!(
+            f,
+            "{:<20} {:>12} {:>12} {:>10} {:>10}",
+            "Variable", "Coef", "Std Err", "t", "P>|t|"
+        )?;
         writeln!(f, "{}", "-".repeat(70))?;
 
         for i in 0..self.variables.len() {
-            writeln!(f, "{:<20} {:>12.4} {:>12.4} {:>10.2} {:>10.3}{}",
-                     self.variables[i],
-                     self.coefficients[i],
-                     self.std_errors[i],
-                     self.t_stats[i],
-                     self.p_values[i],
-                     self.significance[i].stars())?;
+            writeln!(
+                f,
+                "{:<20} {:>12.4} {:>12.4} {:>10.2} {:>10.3}{}",
+                self.variables[i],
+                self.coefficients[i],
+                self.std_errors[i],
+                self.t_stats[i],
+                self.p_values[i],
+                self.significance[i].stars()
+            )?;
         }
 
         writeln!(f, "{}", "-".repeat(70))?;

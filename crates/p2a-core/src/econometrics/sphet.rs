@@ -101,7 +101,7 @@
 //! println!("λ = {}, SE = {}", result.lambda, result.lambda_se);
 //! ```
 
-use ndarray::{s, Array1, Array2};
+use ndarray::{Array1, Array2, s};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -110,7 +110,7 @@ use crate::errors::{EconError, EconResult};
 use crate::linalg::matrix_ops::{safe_inverse, xtx, xty};
 use crate::regression::HacKernel;
 use crate::spatial::SpatialWeights;
-use crate::traits::estimator::{normal_cdf, SignificanceLevel};
+use crate::traits::estimator::{SignificanceLevel, normal_cdf};
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Configuration Types
@@ -275,37 +275,61 @@ impl fmt::Display for SphetResult {
             (self.lambda, self.lambda_se, self.lambda_z, self.lambda_p)
         {
             let sig = SignificanceLevel::from_p_value(p);
-            writeln!(f, "Spatial lag (lambda): {:.6} (SE: {:.6}, z: {:.3}, p: {:.4}){}",
-                     lambda, se, z, p, sig.stars())?;
+            writeln!(
+                f,
+                "Spatial lag (lambda): {:.6} (SE: {:.6}, z: {:.3}, p: {:.4}){}",
+                lambda,
+                se,
+                z,
+                p,
+                sig.stars()
+            )?;
         }
         if let (Some(rho), Some(se), Some(z), Some(p)) =
             (self.rho, self.rho_se, self.rho_z, self.rho_p)
         {
             let sig = SignificanceLevel::from_p_value(p);
-            writeln!(f, "Spatial error (rho): {:.6} (SE: {:.6}, z: {:.3}, p: {:.4}){}",
-                     rho, se, z, p, sig.stars())?;
+            writeln!(
+                f,
+                "Spatial error (rho): {:.6} (SE: {:.6}, z: {:.3}, p: {:.4}){}",
+                rho,
+                se,
+                z,
+                p,
+                sig.stars()
+            )?;
         }
         writeln!(f)?;
 
         writeln!(f, "Coefficients:")?;
-        writeln!(f, "{:>15} {:>12} {:>12} {:>10} {:>10}",
-                 "Variable", "Estimate", "Std.Err", "z-value", "P>|z|")?;
+        writeln!(
+            f,
+            "{:>15} {:>12} {:>12} {:>10} {:>10}",
+            "Variable", "Estimate", "Std.Err", "z-value", "P>|z|"
+        )?;
         writeln!(f, "{}", "-".repeat(65))?;
 
         for i in 0..self.coefficients.len() {
             let sig = SignificanceLevel::from_p_value(self.p_values[i]);
-            writeln!(f, "{:>15} {:>12.6} {:>12.6} {:>10.3} {:>10.4}{}",
-                     self.coef_names[i],
-                     self.coefficients[i],
-                     self.std_errors[i],
-                     self.z_values[i],
-                     self.p_values[i],
-                     sig.stars())?;
+            writeln!(
+                f,
+                "{:>15} {:>12.6} {:>12.6} {:>10.3} {:>10.4}{}",
+                self.coef_names[i],
+                self.coefficients[i],
+                self.std_errors[i],
+                self.z_values[i],
+                self.p_values[i],
+                sig.stars()
+            )?;
         }
         writeln!(f, "{}", "-".repeat(65))?;
         writeln!(f)?;
         writeln!(f, "sigma^2: {:.6}", self.sigma2)?;
-        writeln!(f, "Iterations: {} (converged: {})", self.iterations, self.converged)?;
+        writeln!(
+            f,
+            "Iterations: {} (converged: {})",
+            self.iterations, self.converged
+        )?;
 
         Ok(())
     }
@@ -362,7 +386,8 @@ pub fn run_sphet(
         return Err(EconError::InvalidSpecification {
             message: format!(
                 "Dataset has {} observations but weights matrix has {} observations",
-                n, listw.n()
+                n,
+                listw.n()
             ),
         });
     }
@@ -378,7 +403,11 @@ pub fn run_sphet(
     // Extract y
     let y_series = df.column(y_col).map_err(|_| EconError::ColumnNotFound {
         column: y_col.to_string(),
-        available: df.get_column_names().iter().map(|s| s.to_string()).collect(),
+        available: df
+            .get_column_names()
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
     })?;
     let y: Array1<f64> = y_series
         .f64()
@@ -396,7 +425,11 @@ pub fn run_sphet(
     for (j, &col_name) in x_cols.iter().enumerate() {
         let col = df.column(col_name).map_err(|_| EconError::ColumnNotFound {
             column: col_name.to_string(),
-            available: df.get_column_names().iter().map(|s| s.to_string()).collect(),
+            available: df
+                .get_column_names()
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
         })?;
         let col_f64 = col.f64().map_err(|_| EconError::NonNumericColumn {
             column: col_name.to_string(),
@@ -509,25 +542,30 @@ fn estimate_sar_gmm(
     let sigma2 = rss / (n - k - 1) as f64;
 
     // Standard errors
-    let (vcov_mat, se_delta) = compute_spatial_2sls_se(
-        &z, &h, &residuals, sigma2, &zph_z_inv, config,
-    )?;
+    let (vcov_mat, se_delta) =
+        compute_spatial_2sls_se(&z, &h, &residuals, sigma2, &zph_z_inv, config)?;
 
     // Extract standard errors for β and λ
     let se_beta: Array1<f64> = se_delta.slice(s![..k]).to_owned();
     let se_lambda = se_delta[k];
 
     // Z-values and p-values for β
-    let z_values: Vec<f64> = beta.iter()
+    let z_values: Vec<f64> = beta
+        .iter()
         .zip(se_beta.iter())
         .map(|(&b, &se)| if se > 0.0 { b / se } else { 0.0 })
         .collect();
-    let p_values: Vec<f64> = z_values.iter()
+    let p_values: Vec<f64> = z_values
+        .iter()
         .map(|&z| 2.0 * (1.0 - normal_cdf(z.abs())))
         .collect();
 
     // Z-value and p-value for λ
-    let lambda_z = if se_lambda > 0.0 { lambda / se_lambda } else { 0.0 };
+    let lambda_z = if se_lambda > 0.0 {
+        lambda / se_lambda
+    } else {
+        0.0
+    };
     let lambda_p = 2.0 * (1.0 - normal_cdf(lambda_z.abs()));
 
     // Convert vcov to Vec<Vec<f64>> (just for beta)
@@ -601,10 +639,11 @@ fn estimate_sem_gmm(
 
     // OLS on transformed data
     let xtx_star = xtx(&x_star.view());
-    let (xtx_star_inv, _) = safe_inverse(&xtx_star.view()).map_err(|e| EconError::SingularMatrix {
-        context: "Transformed OLS".to_string(),
-        suggestion: format!("X*'X* singular: {}", e),
-    })?;
+    let (xtx_star_inv, _) =
+        safe_inverse(&xtx_star.view()).map_err(|e| EconError::SingularMatrix {
+            context: "Transformed OLS".to_string(),
+            suggestion: format!("X*'X* singular: {}", e),
+        })?;
     let xty_star = xty(&x_star.view(), &y_star);
     let beta = xtx_star_inv.dot(&xty_star);
 
@@ -619,19 +658,20 @@ fn estimate_sem_gmm(
     let residuals = y - &fitted;
 
     // Standard errors for β
-    let (vcov_mat, se_beta) = compute_sem_se(
-        x, &x_star, &residuals_star, sigma2, &xtx_star_inv, config,
-    )?;
+    let (vcov_mat, se_beta) =
+        compute_sem_se(x, &x_star, &residuals_star, sigma2, &xtx_star_inv, config)?;
 
     // Standard error for ρ (from GM theory)
     let se_rho = compute_rho_se(&residuals_star, listw, sigma2, config)?;
 
     // Z-values and p-values for β
-    let z_values: Vec<f64> = beta.iter()
+    let z_values: Vec<f64> = beta
+        .iter()
         .zip(se_beta.iter())
         .map(|(&b, &se)| if se > 0.0 { b / se } else { 0.0 })
         .collect();
-    let p_values: Vec<f64> = z_values.iter()
+    let p_values: Vec<f64> = z_values
+        .iter()
         .map(|&z| 2.0 * (1.0 - normal_cdf(z.abs())))
         .collect();
 
@@ -752,7 +792,12 @@ fn estimate_sarar_gmm(
 
     // Standard errors
     let (vcov_mat, se_delta) = compute_spatial_2sls_se(
-        &z_star, &h_star, &residuals_star, sigma2, &zph_z_star_inv, config,
+        &z_star,
+        &h_star,
+        &residuals_star,
+        sigma2,
+        &zph_z_star_inv,
+        config,
     )?;
 
     let se_beta: Array1<f64> = se_delta.slice(s![..k]).to_owned();
@@ -760,15 +805,21 @@ fn estimate_sarar_gmm(
     let se_rho = compute_rho_se(&residuals_star, listw, sigma2, config)?;
 
     // Z-values and p-values
-    let z_values: Vec<f64> = beta.iter()
+    let z_values: Vec<f64> = beta
+        .iter()
         .zip(se_beta.iter())
         .map(|(&b, &se)| if se > 0.0 { b / se } else { 0.0 })
         .collect();
-    let p_values: Vec<f64> = z_values.iter()
+    let p_values: Vec<f64> = z_values
+        .iter()
         .map(|&z| 2.0 * (1.0 - normal_cdf(z.abs())))
         .collect();
 
-    let lambda_z = if se_lambda > 0.0 { lambda / se_lambda } else { 0.0 };
+    let lambda_z = if se_lambda > 0.0 {
+        lambda / se_lambda
+    } else {
+        0.0
+    };
     let lambda_p = 2.0 * (1.0 - normal_cdf(lambda_z.abs()));
 
     let rho_z = if se_rho > 0.0 { rho / se_rho } else { 0.0 };
@@ -813,11 +864,7 @@ fn estimate_sarar_gmm(
 ///
 /// Following Kelejian-Prucha, uses powers of W applied to X as instruments
 /// for the endogenous Wy.
-fn build_instruments(
-    x: &Array2<f64>,
-    listw: &SpatialWeights,
-    order: usize,
-) -> Array2<f64> {
+fn build_instruments(x: &Array2<f64>, listw: &SpatialWeights, order: usize) -> Array2<f64> {
     let n = x.nrows();
     let k = x.ncols();
     let n_cols = k * (order + 1);
@@ -849,11 +896,7 @@ fn build_instruments(
 }
 
 /// Transform a matrix: M* = (I - ρW)M
-fn transform_matrix(
-    listw: &SpatialWeights,
-    m: &Array2<f64>,
-    rho: f64,
-) -> Array2<f64> {
+fn transform_matrix(listw: &SpatialWeights, m: &Array2<f64>, rho: f64) -> Array2<f64> {
     let n = m.nrows();
     let k = m.ncols();
     let mut result = Array2::zeros((n, k));
@@ -909,7 +952,11 @@ fn estimate_rho_gm(
     let g4 = uw2u / n_f64;
 
     // g5 = (1/n) (Wu)'(W²u)
-    let wuw2u: f64 = wu.iter().zip(w2u.iter()).map(|(&wui, &w2ui)| wui * w2ui).sum();
+    let wuw2u: f64 = wu
+        .iter()
+        .zip(w2u.iter())
+        .map(|(&wui, &w2ui)| wui * w2ui)
+        .sum();
     let g5 = wuw2u / n_f64;
 
     // Trace terms for the population moment conditions
@@ -942,8 +989,26 @@ fn estimate_rho_gm(
     for _ in 0..config.max_iter {
         let h = 1e-6;
         let f0 = gm_objective(best_rho, g1, g2, g3, g4, g5, tr_wtw / n_f64, tr_w2 / n_f64);
-        let f1 = gm_objective(best_rho + h, g1, g2, g3, g4, g5, tr_wtw / n_f64, tr_w2 / n_f64);
-        let f2 = gm_objective(best_rho - h, g1, g2, g3, g4, g5, tr_wtw / n_f64, tr_w2 / n_f64);
+        let f1 = gm_objective(
+            best_rho + h,
+            g1,
+            g2,
+            g3,
+            g4,
+            g5,
+            tr_wtw / n_f64,
+            tr_w2 / n_f64,
+        );
+        let f2 = gm_objective(
+            best_rho - h,
+            g1,
+            g2,
+            g3,
+            g4,
+            g5,
+            tr_wtw / n_f64,
+            tr_w2 / n_f64,
+        );
 
         let grad = (f1 - f2) / (2.0 * h);
         let hess = (f1 - 2.0 * f0 + f2) / (h * h);
@@ -975,8 +1040,8 @@ fn gm_objective(
     g3: f64,
     g4: f64,
     g5: f64,
-    tr_wtw_n: f64,
-    tr_w2_n: f64,
+    _tr_wtw_n: f64,
+    _tr_w2_n: f64,
 ) -> f64 {
     // σ² estimate given ρ
     let sigma2 = g1 - 2.0 * rho * g2 + rho * rho * g3;
@@ -1014,7 +1079,7 @@ fn compute_spatial_2sls_se(
             // Var(δ̂) = σ² (Z'P_H Z)^{-1}
             let vcov = sigma2 * zph_z_inv;
             let se: Array1<f64> = vcov.diag().iter().map(|&v| v.max(0.0).sqrt()).collect();
-            Ok((vcov.slice(s![..k-1, ..k-1]).to_owned(), se))
+            Ok((vcov.slice(s![..k - 1, ..k - 1]).to_owned(), se))
         }
         SphetSE::Robust => {
             // Heteroscedasticity-robust: Var(δ̂) = (Z'P_H Z)^{-1} Ω̂ (Z'P_H Z)^{-1}
@@ -1036,13 +1101,13 @@ fn compute_spatial_2sls_se(
 
             let vcov = zph_z_inv.dot(&omega).dot(zph_z_inv);
             let se: Array1<f64> = vcov.diag().iter().map(|&v| v.max(0.0).sqrt()).collect();
-            Ok((vcov.slice(s![..k-1, ..k-1]).to_owned(), se))
+            Ok((vcov.slice(s![..k - 1, ..k - 1]).to_owned(), se))
         }
         SphetSE::HAC => {
             // HAC standard errors (Kelejian-Prucha 2007)
-            let bw = config.bandwidth.unwrap_or_else(|| {
-                (4.0 * (n as f64 / 100.0).powf(2.0 / 9.0)).floor() as usize
-            });
+            let bw = config
+                .bandwidth
+                .unwrap_or_else(|| (4.0 * (n as f64 / 100.0).powf(2.0 / 9.0)).floor() as usize);
 
             let hh = xtx(&h.view());
             let (hh_inv, _) = safe_inverse(&hh.view())?;
@@ -1094,7 +1159,7 @@ fn compute_spatial_2sls_se(
 
             let vcov = zph_z_inv.dot(&omega).dot(zph_z_inv);
             let se: Array1<f64> = vcov.diag().iter().map(|&v| v.max(0.0).sqrt()).collect();
-            Ok((vcov.slice(s![..k-1, ..k-1]).to_owned(), se))
+            Ok((vcov.slice(s![..k - 1, ..k - 1]).to_owned(), se))
         }
     }
 }
@@ -1185,7 +1250,9 @@ mod tests {
         let listw = SpatialWeights::from_neighbors(&nb, WeightStyle::RowStd);
 
         // Generate data with spatial structure
-        let x: Vec<f64> = (0..n).map(|i| (i as f64) / 5.0 + 0.1 * (i % 3) as f64).collect();
+        let x: Vec<f64> = (0..n)
+            .map(|i| (i as f64) / 5.0 + 0.1 * (i % 3) as f64)
+            .collect();
         let mut y: Vec<f64> = x.iter().map(|&xi| 2.0 + 1.5 * xi).collect();
 
         // Add spatial autocorrelation
@@ -1309,9 +1376,7 @@ mod tests {
     fn test_build_instruments() {
         let (_, listw) = create_test_data();
 
-        let x = Array2::from_shape_fn((25, 2), |(i, j)| {
-            if j == 0 { 1.0 } else { i as f64 / 5.0 }
-        });
+        let x = Array2::from_shape_fn((25, 2), |(i, j)| if j == 0 { 1.0 } else { i as f64 / 5.0 });
 
         // Order 2: [X, WX, W²X]
         let h = build_instruments(&x, &listw, 2);

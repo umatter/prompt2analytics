@@ -1,6 +1,6 @@
 //! Benchmarks for new causal inference methods
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use p2a_core::data::Dataset;
 use polars::prelude::*;
 use rand::prelude::*;
@@ -15,17 +15,24 @@ fn create_causal_dataset(n: usize) -> Dataset {
     let x3: Vec<f64> = (0..n).map(|_| rng.sample(normal)).collect();
 
     // Propensity score based treatment
-    let treatment: Vec<f64> = x1.iter().zip(x2.iter()).zip(x3.iter())
+    let treatment: Vec<f64> = x1
+        .iter()
+        .zip(x2.iter())
+        .zip(x3.iter())
         .map(|((&a, &b), &c)| {
-            let ps = 1.0 / (1.0 + (-0.5 - 0.3*a - 0.2*b + 0.1*c).exp());
+            let ps = 1.0 / (1.0 + (-0.5 - 0.3 * a - 0.2 * b + 0.1 * c).exp());
             if rng.r#gen::<f64>() < ps { 1.0 } else { 0.0 }
         })
         .collect();
 
     // Outcome with treatment effect
-    let y: Vec<f64> = treatment.iter().zip(x1.iter()).zip(x2.iter()).zip(x3.iter())
+    let y: Vec<f64> = treatment
+        .iter()
+        .zip(x1.iter())
+        .zip(x2.iter())
+        .zip(x3.iter())
         .map(|(((&t, &a), &b), &c)| {
-            2.0 + 0.5*t + 0.3*a + 0.2*b + 0.1*c + rng.sample(normal)
+            2.0 + 0.5 * t + 0.3 * a + 0.2 * b + 0.1 * c + rng.sample(normal)
         })
         .collect();
 
@@ -35,7 +42,8 @@ fn create_causal_dataset(n: usize) -> Dataset {
         "x1" => x1,
         "x2" => x2,
         "x3" => x3,
-    }.unwrap();
+    }
+    .unwrap();
 
     Dataset::new(df)
 }
@@ -50,9 +58,13 @@ fn create_panel_dataset(n_units: usize, n_periods: usize) -> Dataset {
     let mut y = Vec::new();
 
     for u in 0..n_units {
-        let treat_time = if u < n_units / 3 { 4 }
-                        else if u < 2 * n_units / 3 { 6 }
-                        else { 100 }; // Never treated
+        let treat_time = if u < n_units / 3 {
+            4
+        } else if u < 2 * n_units / 3 {
+            6
+        } else {
+            100
+        }; // Never treated
 
         for t in 1..=n_periods {
             unit.push(u as f64);
@@ -68,13 +80,14 @@ fn create_panel_dataset(n_units: usize, n_periods: usize) -> Dataset {
         "time" => time,
         "treated" => treated,
         "y" => y,
-    }.unwrap();
+    }
+    .unwrap();
 
     Dataset::new(df)
 }
 
 fn bench_matching(c: &mut Criterion) {
-    use p2a_core::econometrics::{match_it, MatchMethod};
+    use p2a_core::econometrics::{MatchMethod, match_it};
 
     let dataset = create_causal_dataset(1000);
     let covariates = vec!["x1", "x2", "x3"];
@@ -116,7 +129,7 @@ fn bench_matching(c: &mut Criterion) {
 }
 
 fn bench_weighting(c: &mut Criterion) {
-    use p2a_core::econometrics::{weightit, WeightMethod, WeightItConfig};
+    use p2a_core::econometrics::{WeightItConfig, WeightMethod, weightit};
 
     let dataset = create_causal_dataset(1000);
     let covariates = vec!["x1", "x2", "x3"];
@@ -147,7 +160,7 @@ fn bench_weighting(c: &mut Criterion) {
 }
 
 fn bench_cbps(c: &mut Criterion) {
-    use p2a_core::econometrics::{run_cbps, CbpsConfig, CbpsMethod};
+    use p2a_core::econometrics::{CbpsConfig, CbpsMethod, run_cbps};
 
     let dataset = create_causal_dataset(1000);
     let covariates = vec!["x1", "x2", "x3"];
@@ -183,7 +196,10 @@ fn bench_sensemakr(c: &mut Criterion) {
                 "treatment",
                 &covariates,
                 Some(&["x1"]),
-                None, None, 1.0, 0.05
+                None,
+                None,
+                1.0,
+                0.05,
             )
         })
     });
@@ -192,7 +208,7 @@ fn bench_sensemakr(c: &mut Criterion) {
 }
 
 fn bench_tmle(c: &mut Criterion) {
-    use p2a_core::econometrics::{tmle, TmleConfig};
+    use p2a_core::econometrics::{TmleConfig, tmle};
 
     let dataset = create_causal_dataset(500); // Smaller for TMLE
     let covariates = vec!["x1", "x2", "x3"];
@@ -207,7 +223,7 @@ fn bench_tmle(c: &mut Criterion) {
                 "y",
                 "treatment",
                 &covariates,
-                TmleConfig::default()
+                TmleConfig::default(),
             )
         })
     });
@@ -223,22 +239,14 @@ fn bench_bacon(c: &mut Criterion) {
     let mut group = c.benchmark_group("bacon");
 
     group.bench_function("decomp_50x10", |b| {
-        b.iter(|| {
-            bacon_decomp(
-                black_box(&dataset),
-                "y",
-                "unit",
-                "time",
-                "treated"
-            )
-        })
+        b.iter(|| bacon_decomp(black_box(&dataset), "y", "unit", "time", "treated"))
     });
 
     group.finish();
 }
 
 fn bench_marginal_effects(c: &mut Criterion) {
-    use p2a_core::regression::{marginal_effects, ModelType};
+    use p2a_core::regression::{ModelType, marginal_effects};
 
     let dataset = create_causal_dataset(1000);
     let x_cols = vec!["treatment", "x1", "x2", "x3"];
@@ -246,14 +254,7 @@ fn bench_marginal_effects(c: &mut Criterion) {
     let mut group = c.benchmark_group("marginal_effects");
 
     group.bench_function("ols_n1000", |b| {
-        b.iter(|| {
-            marginal_effects(
-                black_box(&dataset),
-                "y",
-                &x_cols,
-                ModelType::Ols
-            )
-        })
+        b.iter(|| marginal_effects(black_box(&dataset), "y", &x_cols, ModelType::Ols))
     });
 
     group.finish();

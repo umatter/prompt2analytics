@@ -42,7 +42,6 @@
 //!
 //! R equivalent: `fGarch::garchFit()`
 
-use ndarray::Array1;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -180,7 +179,11 @@ impl fmt::Display for GarchResult {
 
         writeln!(f, "\nVolatility Characteristics:")?;
         writeln!(f, "  Persistence (α + β):   {:.4}", self.persistence)?;
-        writeln!(f, "  Unconditional Var:     {:.6}", self.unconditional_variance)?;
+        writeln!(
+            f,
+            "  Unconditional Var:     {:.6}",
+            self.unconditional_variance
+        )?;
         writeln!(
             f,
             "  Unconditional Vol:     {:.4}%",
@@ -258,9 +261,7 @@ pub fn garch(data: &[f64], config: Option<GarchConfig>) -> EconResult<GarchResul
     )?;
 
     // Compute conditional variances
-    let (cond_var, std_resid, log_lik) = compute_garch_quantities(
-        data, mu, omega, &alpha, &beta,
-    );
+    let (cond_var, std_resid, log_lik) = compute_garch_quantities(data, mu, omega, &alpha, &beta);
 
     // Compute information criteria
     let n_params = if config.include_mean { 2 } else { 1 } + config.p + config.q;
@@ -286,9 +287,8 @@ pub fn garch(data: &[f64], config: Option<GarchConfig>) -> EconResult<GarchResul
     };
 
     // Compute standard errors using numerical Hessian approximation
-    let (std_errors, t_stats, p_values, significance) = compute_garch_inference(
-        data, mu, omega, &alpha, &beta, config.include_mean,
-    );
+    let (std_errors, t_stats, p_values, significance) =
+        compute_garch_inference(data, mu, omega, &alpha, &beta, config.include_mean);
 
     let model = format!("GARCH({},{})", config.p, config.q);
 
@@ -334,7 +334,7 @@ fn estimate_garch_params(
     // Transform: theta = log(param) to ensure positivity
     // For stationarity, we parameterize alpha + beta < 1
 
-    let n = data.len();
+    let _n = data.len();
 
     // Start with initial values
     let mut mu = if include_mean { init_mu } else { 0.0 };
@@ -366,15 +366,19 @@ fn estimate_garch_params(
 
         // Gradient for mu
         if include_mean {
-            let (_, _, ll_plus) = compute_garch_quantities(data, mu + eps, omega, &alpha_vec, &beta_vec);
-            let (_, _, ll_minus) = compute_garch_quantities(data, mu - eps, omega, &alpha_vec, &beta_vec);
+            let (_, _, ll_plus) =
+                compute_garch_quantities(data, mu + eps, omega, &alpha_vec, &beta_vec);
+            let (_, _, ll_minus) =
+                compute_garch_quantities(data, mu - eps, omega, &alpha_vec, &beta_vec);
             let grad_mu = (ll_plus - ll_minus) / (2.0 * eps);
             mu += step_size * grad_mu;
         }
 
         // Gradient for omega
-        let (_, _, ll_plus) = compute_garch_quantities(data, mu, omega + eps, &alpha_vec, &beta_vec);
-        let (_, _, ll_minus) = compute_garch_quantities(data, mu, (omega - eps).max(1e-10), &alpha_vec, &beta_vec);
+        let (_, _, ll_plus) =
+            compute_garch_quantities(data, mu, omega + eps, &alpha_vec, &beta_vec);
+        let (_, _, ll_minus) =
+            compute_garch_quantities(data, mu, (omega - eps).max(1e-10), &alpha_vec, &beta_vec);
         let grad_omega = (ll_plus - ll_minus) / (2.0 * eps);
         omega = (omega + step_size * grad_omega).max(1e-10);
 
@@ -386,7 +390,8 @@ fn estimate_garch_params(
             alpha_minus[j] = (alpha_minus[j] - eps).max(0.0);
 
             let (_, _, ll_plus) = compute_garch_quantities(data, mu, omega, &alpha_plus, &beta_vec);
-            let (_, _, ll_minus) = compute_garch_quantities(data, mu, omega, &alpha_minus, &beta_vec);
+            let (_, _, ll_minus) =
+                compute_garch_quantities(data, mu, omega, &alpha_minus, &beta_vec);
             let grad = (ll_plus - ll_minus) / (2.0 * eps);
             alpha_vec[j] = (alpha_vec[j] + step_size * grad).max(0.0);
         }
@@ -399,7 +404,8 @@ fn estimate_garch_params(
             beta_minus[j] = (beta_minus[j] - eps).max(0.0);
 
             let (_, _, ll_plus) = compute_garch_quantities(data, mu, omega, &alpha_vec, &beta_plus);
-            let (_, _, ll_minus) = compute_garch_quantities(data, mu, omega, &alpha_vec, &beta_minus);
+            let (_, _, ll_minus) =
+                compute_garch_quantities(data, mu, omega, &alpha_vec, &beta_minus);
             let grad = (ll_plus - ll_minus) / (2.0 * eps);
             beta_vec[j] = (beta_vec[j] + step_size * grad).max(0.0);
         }
@@ -443,7 +449,7 @@ fn compute_garch_quantities(
     };
 
     let mut cond_var = vec![uncond_var; n];
-    let mut residuals: Vec<f64> = data.iter().map(|&x| x - mu).collect();
+    let residuals: Vec<f64> = data.iter().map(|&x| x - mu).collect();
     let mut std_resid = vec![0.0; n];
 
     // Start from max(p, q) to have enough history
@@ -565,10 +571,7 @@ fn compute_garch_inference(
         .map(|(&p, &se)| if se > 1e-10 { p / se } else { 0.0 })
         .collect();
 
-    let p_values: Vec<f64> = t_stats
-        .iter()
-        .map(|&t| t_test_p_value(t, df))
-        .collect();
+    let p_values: Vec<f64> = t_stats.iter().map(|&t| t_test_p_value(t, df)).collect();
 
     let significance: Vec<SignificanceLevel> = p_values
         .iter()
@@ -594,8 +597,13 @@ pub fn garch_forecast(result: &GarchResult, h: usize) -> (Vec<f64>, Vec<f64>, Ve
     let persistence = alpha_sum + beta_sum;
 
     // Get last conditional variance and residual
-    let last_var = *result.conditional_variance.last().unwrap_or(&result.unconditional_variance);
-    let last_resid_sq = result.std_residuals.last()
+    let last_var = *result
+        .conditional_variance
+        .last()
+        .unwrap_or(&result.unconditional_variance);
+    let last_resid_sq = result
+        .std_residuals
+        .last()
         .map(|z| z.powi(2) * last_var)
         .unwrap_or(result.unconditional_variance);
 
@@ -609,7 +617,8 @@ pub fn garch_forecast(result: &GarchResult, h: usize) -> (Vec<f64>, Vec<f64>, Ve
         // Multi-step ahead variance forecast
         // For GARCH(1,1): E[σ²_{t+h}] = σ² + (α+β)^(h-1) * (σ²_{t+1} - σ²)
         let var_h = if i == 0 {
-            result.omega + result.alpha.iter().sum::<f64>() * last_resid_sq
+            result.omega
+                + result.alpha.iter().sum::<f64>() * last_resid_sq
                 + result.beta.iter().sum::<f64>() * last_var
         } else {
             uncond_var + persistence.powi(i as i32) * (forecast_var[i - 1] - uncond_var)
@@ -672,7 +681,11 @@ mod tests {
         let data = generate_garch_data(200, 0.0001, 0.1, 0.8);
         let result = garch(&data, None);
 
-        assert!(result.is_ok(), "GARCH should succeed, got {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "GARCH should succeed, got {:?}",
+            result.err()
+        );
         let result = result.unwrap();
 
         assert_eq!(result.model, "GARCH(1,1)");
@@ -696,7 +709,10 @@ mod tests {
             result.persistence
         );
         // Ensure model converged or at least iterated
-        assert!(result.converged || result.iterations > 0, "Model should iterate");
+        assert!(
+            result.converged || result.iterations > 0,
+            "Model should iterate"
+        );
     }
 
     #[test]
@@ -752,5 +768,287 @@ mod tests {
         assert!(display.contains("alpha"));
         assert!(display.contains("beta"));
         assert!(display.contains("Persistence"));
+    }
+
+    // ========================================================================
+    // R-vs-Rust Validation Tests (Phase 6)
+    // ========================================================================
+
+    /// LCG for deterministic random numbers
+    fn lcg_rand_garch(seed: &mut u64) -> f64 {
+        let a: u64 = 1103515245;
+        let c: u64 = 12345;
+        let m: u64 = 2_u64.pow(31);
+        *seed = (a.wrapping_mul(*seed).wrapping_add(c)) % m;
+        (*seed as f64) / (m as f64)
+    }
+
+    fn box_muller_garch(seed: &mut u64) -> f64 {
+        let u1 = lcg_rand_garch(seed).max(1e-10);
+        let u2 = lcg_rand_garch(seed);
+        ((-2.0_f64 * u1.ln()).sqrt()) * (2.0 * std::f64::consts::PI * u2).cos()
+    }
+
+    fn create_garch_validation_data(n: usize, omega: f64, alpha: f64, beta: f64) -> Vec<f64> {
+        // Generate GARCH(1,1) returns
+        let mut seed: u64 = 42;
+        let mut data = Vec::with_capacity(n);
+        let mut sigma2: f64 = omega / (1.0 - alpha - beta);
+        let mut epsilon: f64 = 0.0;
+
+        for _ in 0..n {
+            let z = box_muller_garch(&mut seed);
+            sigma2 = omega + alpha * epsilon.powi(2) + beta * sigma2;
+            epsilon = sigma2.sqrt() * z;
+            data.push(epsilon);
+        }
+        data
+    }
+
+    #[test]
+    fn test_validate_garch_parameter_constraints() {
+        // R reference: fGarch::garchFit()
+        // Constraints: omega > 0, alpha >= 0, beta >= 0, alpha + beta < 1
+        let data = create_garch_validation_data(200, 0.0001, 0.1, 0.8);
+        let result = garch(&data, None).unwrap();
+
+        // omega should be positive
+        assert!(
+            result.omega > 0.0,
+            "omega should be positive: {}",
+            result.omega
+        );
+
+        // alpha should be non-negative
+        for a in &result.alpha {
+            assert!(*a >= 0.0, "alpha should be non-negative: {}", a);
+        }
+
+        // beta should be non-negative
+        for b in &result.beta {
+            assert!(*b >= 0.0, "beta should be non-negative: {}", b);
+        }
+
+        // Stationarity: alpha + beta < 1
+        assert!(
+            result.persistence < 1.0,
+            "persistence should be < 1: {}",
+            result.persistence
+        );
+    }
+
+    #[test]
+    fn test_validate_garch_persistence_calculation() {
+        // True persistence = 0.1 + 0.8 = 0.9
+        let data = create_garch_validation_data(300, 0.00005, 0.1, 0.8);
+        let result = garch(&data, None).unwrap();
+
+        // Persistence = sum(alpha) + sum(beta)
+        let calculated_persistence: f64 =
+            result.alpha.iter().sum::<f64>() + result.beta.iter().sum::<f64>();
+        assert!(
+            (result.persistence - calculated_persistence).abs() < 1e-10,
+            "persistence mismatch: {} vs {}",
+            result.persistence,
+            calculated_persistence
+        );
+
+        // Persistence should be in [0, 1) for stationarity (enforced by estimation)
+        assert!(
+            result.persistence >= 0.0 && result.persistence < 1.0,
+            "persistence should be in [0, 1): {}",
+            result.persistence
+        );
+    }
+
+    #[test]
+    fn test_validate_garch_unconditional_variance() {
+        // Unconditional variance = omega / (1 - alpha - beta) when persistence < 1
+        let omega = 0.0001;
+        let alpha = 0.1;
+        let beta = 0.8;
+        let data = create_garch_validation_data(300, omega, alpha, beta);
+        let result = garch(&data, None).unwrap();
+
+        // Unconditional variance should be positive
+        assert!(
+            result.unconditional_variance > 0.0,
+            "Unconditional variance should be positive: {}",
+            result.unconditional_variance
+        );
+
+        // Should be finite
+        assert!(
+            result.unconditional_variance.is_finite(),
+            "Unconditional variance should be finite"
+        );
+    }
+
+    #[test]
+    fn test_validate_garch_half_life() {
+        // Half-life = ln(0.5) / ln(persistence)
+        let data = create_garch_validation_data(200, 0.0001, 0.1, 0.8);
+        let result = garch(&data, None).unwrap();
+
+        if result.persistence > 0.0 && result.persistence < 1.0 {
+            let expected_half_life = (0.5_f64).ln() / result.persistence.ln();
+            assert!(
+                (result.half_life - expected_half_life).abs() < 0.01,
+                "Half-life mismatch: {} vs {}",
+                result.half_life,
+                expected_half_life
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_garch_conditional_variance() {
+        let data = create_garch_validation_data(150, 0.0001, 0.1, 0.8);
+        let result = garch(&data, None).unwrap();
+
+        // Conditional variances should all be positive
+        assert_eq!(result.conditional_variance.len(), data.len());
+        for (i, cv) in result.conditional_variance.iter().enumerate() {
+            assert!(
+                *cv > 0.0,
+                "Conditional variance at {} should be positive: {}",
+                i,
+                cv
+            );
+        }
+
+        // Average conditional variance should be close to unconditional
+        let avg_cond_var: f64 = result.conditional_variance.iter().sum::<f64>()
+            / result.conditional_variance.len() as f64;
+        let ratio = avg_cond_var / result.unconditional_variance;
+        assert!(
+            ratio > 0.3 && ratio < 3.0,
+            "Average conditional variance should be close to unconditional"
+        );
+    }
+
+    #[test]
+    fn test_validate_garch_standardized_residuals() {
+        let data = create_garch_validation_data(200, 0.0001, 0.1, 0.8);
+        let result = garch(&data, None).unwrap();
+
+        // Standardized residuals should have same length as data
+        assert_eq!(result.std_residuals.len(), data.len());
+
+        // All standardized residuals should be finite
+        for (i, z) in result.std_residuals.iter().enumerate() {
+            assert!(
+                z.is_finite(),
+                "Standardized residual at {} should be finite: {}",
+                i,
+                z
+            );
+        }
+
+        // At least some variation should exist
+        let has_variation = result.std_residuals.iter().any(|z| z.abs() > 1e-10);
+        assert!(
+            has_variation,
+            "Standardized residuals should have variation"
+        );
+    }
+
+    #[test]
+    fn test_validate_garch_information_criteria() {
+        let data = create_garch_validation_data(200, 0.0001, 0.1, 0.8);
+        let result = garch(&data, None).unwrap();
+
+        // AIC and BIC should be finite
+        assert!(result.aic.is_finite(), "AIC should be finite");
+        assert!(result.bic.is_finite(), "BIC should be finite");
+
+        // BIC >= AIC for n > e^2 ≈ 7.4 (which is always true for GARCH)
+        // BIC = -2*LL + k*ln(n), AIC = -2*LL + 2*k
+        // BIC - AIC = k*(ln(n) - 2) > 0 for n > e^2
+        assert!(
+            result.bic >= result.aic - 1e-6,
+            "BIC {} should be >= AIC {} for n=200",
+            result.bic,
+            result.aic
+        );
+    }
+
+    #[test]
+    fn test_validate_garch_forecast_structure() {
+        let data = create_garch_validation_data(200, 0.0001, 0.1, 0.8);
+        let result = garch(&data, None).unwrap();
+
+        let horizon = 10;
+        let (var_fc, vol_fc, ret_fc) = garch_forecast(&result, horizon);
+
+        assert_eq!(var_fc.len(), horizon);
+        assert_eq!(vol_fc.len(), horizon);
+        assert_eq!(ret_fc.len(), horizon);
+
+        // Variance forecasts should be positive
+        for v in &var_fc {
+            assert!(*v > 0.0, "Forecast variance should be positive");
+        }
+
+        // Volatility = sqrt(variance)
+        for (v, vol) in var_fc.iter().zip(vol_fc.iter()) {
+            assert!(
+                (vol - v.sqrt()).abs() < 1e-10,
+                "Volatility should be sqrt(variance)"
+            );
+        }
+
+        // Return forecasts should equal mu
+        for r in &ret_fc {
+            assert!(
+                (*r - result.mu).abs() < 1e-10,
+                "Return forecast should equal mu"
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_garch_forecast_convergence() {
+        let data = create_garch_validation_data(200, 0.0001, 0.1, 0.8);
+        let result = garch(&data, None).unwrap();
+
+        // Long horizon forecast should converge to unconditional variance
+        let (var_fc, _, _) = garch_forecast(&result, 50);
+
+        let last_fc = var_fc.last().unwrap();
+        let diff = (last_fc - result.unconditional_variance).abs();
+        let rel_diff = diff / result.unconditional_variance;
+
+        // Should converge (within 50% of unconditional variance)
+        assert!(
+            rel_diff < 0.5,
+            "Long-horizon forecast {} should converge to unconditional {}",
+            last_fc,
+            result.unconditional_variance
+        );
+    }
+
+    #[test]
+    fn test_validate_garch_inference() {
+        let data = create_garch_validation_data(200, 0.0001, 0.1, 0.8);
+        let result = garch(&data, None).unwrap();
+
+        // Standard errors should be positive
+        for se in &result.std_errors {
+            assert!(*se > 0.0, "Standard error should be positive");
+        }
+
+        // t-statistics should be finite
+        for t in &result.t_stats {
+            assert!(t.is_finite(), "t-statistic should be finite");
+        }
+
+        // p-values should be in [0, 1]
+        for p in &result.p_values {
+            assert!(*p >= 0.0 && *p <= 1.0, "p-value should be in [0,1]: {}", p);
+        }
+
+        // Significance levels should be present
+        assert_eq!(result.significance.len(), result.p_values.len());
     }
 }

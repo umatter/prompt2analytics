@@ -304,19 +304,11 @@ pub fn evalue_rr_ci(
             let limit_to_use = if point >= 1.0 {
                 // If RR >= 1, lower limit is closest to null
                 // If lower limit < 1, the CI includes null, so E-value is 1
-                if lo < 1.0 {
-                    1.0
-                } else {
-                    lo
-                }
+                if lo < 1.0 { 1.0 } else { lo }
             } else {
                 // If RR < 1, upper limit is closest to null
                 // If upper limit > 1, the CI includes null, so E-value is 1
-                if hi > 1.0 {
-                    1.0
-                } else {
-                    hi
-                }
+                if hi > 1.0 { 1.0 } else { hi }
             };
             Some(evalue_rr(limit_to_use))
         }
@@ -411,17 +403,11 @@ pub fn evalue_or(
     let evalue_ci = match (rr_lower, rr_upper) {
         (Some(lo), Some(hi)) => {
             let limit_to_use = if rr_point >= 1.0 {
-                if lo < 1.0 {
-                    1.0
-                } else {
-                    lo
-                }
+                if lo < 1.0 { 1.0 } else { lo }
+            } else if hi > 1.0 {
+                1.0
             } else {
-                if hi > 1.0 {
-                    1.0
-                } else {
-                    hi
-                }
+                hi
             };
             Some(evalue_rr(limit_to_use))
         }
@@ -489,13 +475,7 @@ pub fn evalue_hr(
     }
 
     // Same transformation logic as OR
-    let transform = |hr: f64| -> f64 {
-        if rare {
-            hr
-        } else {
-            hr.sqrt()
-        }
-    };
+    let transform = |hr: f64| -> f64 { if rare { hr } else { hr.sqrt() } };
 
     let rr_point = transform(point);
     let rr_lower = ci_lower.map(transform);
@@ -506,17 +486,11 @@ pub fn evalue_hr(
     let evalue_ci = match (rr_lower, rr_upper) {
         (Some(lo), Some(hi)) => {
             let limit_to_use = if rr_point >= 1.0 {
-                if lo < 1.0 {
-                    1.0
-                } else {
-                    lo
-                }
+                if lo < 1.0 { 1.0 } else { lo }
+            } else if hi > 1.0 {
+                1.0
             } else {
-                if hi > 1.0 {
-                    1.0
-                } else {
-                    hi
-                }
+                hi
             };
             Some(evalue_rr(limit_to_use))
         }
@@ -614,17 +588,11 @@ pub fn evalue_smd(smd: f64, se: Option<f64>) -> EconResult<EValueResult> {
     let evalue_ci = match (rr_lower, rr_upper) {
         (Some(lo), Some(hi)) => {
             let limit_to_use = if rr_point >= 1.0 {
-                if lo < 1.0 {
-                    1.0
-                } else {
-                    lo
-                }
+                if lo < 1.0 { 1.0 } else { lo }
+            } else if hi > 1.0 {
+                1.0
             } else {
-                if hi > 1.0 {
-                    1.0
-                } else {
-                    hi
-                }
+                hi
             };
             Some(evalue_rr(limit_to_use))
         }
@@ -706,17 +674,11 @@ pub fn evalue_rd(rd: f64, baseline_risk: f64, se: Option<f64>) -> EconResult<EVa
         let rr_hi = exposed_hi / baseline_risk;
 
         let limit_to_use = if rr >= 1.0 {
-            if rr_lo < 1.0 {
-                1.0
-            } else {
-                rr_lo
-            }
+            if rr_lo < 1.0 { 1.0 } else { rr_lo }
+        } else if rr_hi > 1.0 {
+            1.0
         } else {
-            if rr_hi > 1.0 {
-                1.0
-            } else {
-                rr_hi
-            }
+            rr_hi
         };
 
         (Some(rd_lo), Some(rd_hi), Some(evalue_rr(limit_to_use)))

@@ -4,10 +4,10 @@
 //! using Pearson's product moment correlation coefficient, Kendall's tau, or
 //! Spearman's rho.
 
-use serde::{Deserialize, Serialize};
-use statrs::distribution::{ContinuousCDF, StudentsT, Normal};
 use crate::errors::{EconError, EconResult};
 use crate::stats::Alternative;
+use serde::{Deserialize, Serialize};
+use statrs::distribution::{ContinuousCDF, Normal, StudentsT};
 
 /// Method for computing correlation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -146,7 +146,11 @@ fn pearson_test(
     let df = (n - 2) as f64;
     let t_stat = if (1.0 - r * r).abs() < 1e-15 {
         // Perfect correlation
-        if r > 0.0 { f64::INFINITY } else { f64::NEG_INFINITY }
+        if r > 0.0 {
+            f64::INFINITY
+        } else {
+            f64::NEG_INFINITY
+        }
     } else {
         r * (df / (1.0 - r * r)).sqrt()
     };
@@ -156,12 +160,25 @@ fn pearson_test(
         // For perfect correlation
         match alternative {
             Alternative::TwoSided => 0.0,
-            Alternative::Less => if t_stat > 0.0 { 1.0 } else { 0.0 },
-            Alternative::Greater => if t_stat > 0.0 { 0.0 } else { 1.0 },
+            Alternative::Less => {
+                if t_stat > 0.0 {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
+            Alternative::Greater => {
+                if t_stat > 0.0 {
+                    0.0
+                } else {
+                    1.0
+                }
+            }
         }
     } else {
-        let t_dist = StudentsT::new(0.0, 1.0, df)
-            .map_err(|e| EconError::Computation(format!("Failed to create t distribution: {}", e)))?;
+        let t_dist = StudentsT::new(0.0, 1.0, df).map_err(|e| {
+            EconError::Computation(format!("Failed to create t distribution: {}", e))
+        })?;
 
         match alternative {
             Alternative::TwoSided => 2.0 * (1.0 - t_dist.cdf(t_stat.abs())),
@@ -242,7 +259,11 @@ fn spearman_test(
     // But asymptotically, t = rho * sqrt((n-2)/(1-rho²))
     let df = (n - 2) as f64;
     let t_stat = if (1.0 - rho * rho).abs() < 1e-15 {
-        if rho > 0.0 { f64::INFINITY } else { f64::NEG_INFINITY }
+        if rho > 0.0 {
+            f64::INFINITY
+        } else {
+            f64::NEG_INFINITY
+        }
     } else {
         rho * (df / (1.0 - rho * rho)).sqrt()
     };
@@ -265,7 +286,8 @@ fn spearman_test(
     // The S statistic = sum((rank_x - rank_y)²) relates to rho by:
     // rho = 1 - 6*S / (n*(n²-1))
     let s_stat = {
-        let sum_d2: f64 = x_ranks.iter()
+        let sum_d2: f64 = x_ranks
+            .iter()
             .zip(y_ranks.iter())
             .map(|(rx, ry)| (rx - ry).powi(2))
             .sum();
@@ -433,18 +455,28 @@ pub fn run_cor_test(
         "pearson" => CorrelationMethod::Pearson,
         "spearman" => CorrelationMethod::Spearman,
         "kendall" => CorrelationMethod::Kendall,
-        _ => return Err(EconError::InvalidSpecification {
-            message: format!("Unknown method: {}. Use 'pearson', 'spearman', or 'kendall'", method)
-        }),
+        _ => {
+            return Err(EconError::InvalidSpecification {
+                message: format!(
+                    "Unknown method: {}. Use 'pearson', 'spearman', or 'kendall'",
+                    method
+                ),
+            });
+        }
     };
 
     let alternative = match alternative.to_lowercase().as_str() {
         "two.sided" | "two_sided" | "twosided" => Alternative::TwoSided,
         "less" => Alternative::Less,
         "greater" => Alternative::Greater,
-        _ => return Err(EconError::InvalidSpecification {
-            message: format!("Unknown alternative: {}. Use 'two.sided', 'less', or 'greater'", alternative)
-        }),
+        _ => {
+            return Err(EconError::InvalidSpecification {
+                message: format!(
+                    "Unknown alternative: {}. Use 'two.sided', 'less', or 'greater'",
+                    alternative
+                ),
+            });
+        }
     };
 
     cor_test(x, y, method, alternative, conf_level)
@@ -459,7 +491,14 @@ mod tests {
         let x = vec![1.0, 2.0, 3.0, 4.0, 5.0];
         let y = vec![1.0, 2.0, 3.0, 4.0, 5.0];
 
-        let result = cor_test(&x, &y, CorrelationMethod::Pearson, Alternative::TwoSided, 0.95).unwrap();
+        let result = cor_test(
+            &x,
+            &y,
+            CorrelationMethod::Pearson,
+            Alternative::TwoSided,
+            0.95,
+        )
+        .unwrap();
         assert!((result.estimate - 1.0).abs() < 1e-10);
         assert!(result.p_value < 0.001);
     }
@@ -469,7 +508,14 @@ mod tests {
         let x = vec![1.0, 2.0, 3.0, 4.0, 5.0];
         let y = vec![5.0, 4.0, 3.0, 2.0, 1.0];
 
-        let result = cor_test(&x, &y, CorrelationMethod::Pearson, Alternative::TwoSided, 0.95).unwrap();
+        let result = cor_test(
+            &x,
+            &y,
+            CorrelationMethod::Pearson,
+            Alternative::TwoSided,
+            0.95,
+        )
+        .unwrap();
         assert!((result.estimate + 1.0).abs() < 1e-10);
     }
 
@@ -479,7 +525,14 @@ mod tests {
         let x = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
         let y = vec![5.0, 2.0, 8.0, 1.0, 9.0, 3.0, 7.0, 4.0, 6.0, 10.0];
 
-        let result = cor_test(&x, &y, CorrelationMethod::Pearson, Alternative::TwoSided, 0.95).unwrap();
+        let result = cor_test(
+            &x,
+            &y,
+            CorrelationMethod::Pearson,
+            Alternative::TwoSided,
+            0.95,
+        )
+        .unwrap();
         // Just check it runs and p-value is reasonable
         assert!(result.p_value >= 0.0 && result.p_value <= 1.0);
     }
@@ -489,7 +542,14 @@ mod tests {
         let x = vec![1.0, 2.0, 3.0, 4.0, 5.0];
         let y = vec![1.0, 2.0, 3.0, 4.0, 5.0];
 
-        let result = cor_test(&x, &y, CorrelationMethod::Spearman, Alternative::TwoSided, 0.95).unwrap();
+        let result = cor_test(
+            &x,
+            &y,
+            CorrelationMethod::Spearman,
+            Alternative::TwoSided,
+            0.95,
+        )
+        .unwrap();
         assert!((result.estimate - 1.0).abs() < 1e-10);
     }
 
@@ -498,7 +558,14 @@ mod tests {
         let x = vec![1.0, 2.0, 3.0, 4.0, 5.0];
         let y = vec![1.0, 2.0, 3.0, 4.0, 5.0];
 
-        let result = cor_test(&x, &y, CorrelationMethod::Kendall, Alternative::TwoSided, 0.95).unwrap();
+        let result = cor_test(
+            &x,
+            &y,
+            CorrelationMethod::Kendall,
+            Alternative::TwoSided,
+            0.95,
+        )
+        .unwrap();
         assert!((result.estimate - 1.0).abs() < 1e-10);
     }
 
@@ -507,7 +574,14 @@ mod tests {
         let x = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
         let y = vec![1.2, 2.1, 2.9, 4.1, 4.9, 6.2, 6.8, 8.1, 9.0, 10.1];
 
-        let result = cor_test(&x, &y, CorrelationMethod::Pearson, Alternative::TwoSided, 0.95).unwrap();
+        let result = cor_test(
+            &x,
+            &y,
+            CorrelationMethod::Pearson,
+            Alternative::TwoSided,
+            0.95,
+        )
+        .unwrap();
 
         assert!(result.conf_low.is_some());
         assert!(result.conf_high.is_some());
@@ -526,13 +600,29 @@ mod tests {
         let x = vec![1.0, 2.0, 3.0, 4.0, 5.0];
         let y = vec![1.0, 2.0, 3.0, 4.0, 5.0];
 
-        let result_greater = cor_test(&x, &y, CorrelationMethod::Pearson, Alternative::Greater, 0.95).unwrap();
-        let result_less = cor_test(&x, &y, CorrelationMethod::Pearson, Alternative::Less, 0.95).unwrap();
+        let result_greater = cor_test(
+            &x,
+            &y,
+            CorrelationMethod::Pearson,
+            Alternative::Greater,
+            0.95,
+        )
+        .unwrap();
+        let result_less =
+            cor_test(&x, &y, CorrelationMethod::Pearson, Alternative::Less, 0.95).unwrap();
 
         // For perfect positive correlation, greater should have small p-value
-        assert!(result_greater.p_value < 0.01, "p_value for greater: {}", result_greater.p_value);
+        assert!(
+            result_greater.p_value < 0.01,
+            "p_value for greater: {}",
+            result_greater.p_value
+        );
         // Less should have large p-value (close to 1)
-        assert!(result_less.p_value > 0.9, "p_value for less: {}", result_less.p_value);
+        assert!(
+            result_less.p_value > 0.9,
+            "p_value for less: {}",
+            result_less.p_value
+        );
     }
 
     #[test]
@@ -540,7 +630,13 @@ mod tests {
         let x = vec![1.0, 2.0, 3.0];
         let y = vec![1.0, 2.0];
 
-        let result = cor_test(&x, &y, CorrelationMethod::Pearson, Alternative::TwoSided, 0.95);
+        let result = cor_test(
+            &x,
+            &y,
+            CorrelationMethod::Pearson,
+            Alternative::TwoSided,
+            0.95,
+        );
         assert!(result.is_err());
     }
 
@@ -557,5 +653,225 @@ mod tests {
         let ranks = rank_data(&data);
         // Tied values get average rank: 2.5
         assert_eq!(ranks, vec![1.0, 2.5, 2.5, 4.0]);
+    }
+
+    // =========================================================================
+    // Validation tests against R
+    // =========================================================================
+
+    #[test]
+    fn test_validate_pearson_correlation() {
+        // R: x <- c(1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0)
+        // R: y <- c(1.2, 2.1, 2.9, 4.0, 5.1, 5.9, 7.2, 7.8, 9.1, 10.0)
+        // R: cor.test(x, y, method = "pearson")
+        // R: cor = 0.999071, t = 65.555425, p < 0.0001
+        let x = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
+        let y = vec![1.2, 2.1, 2.9, 4.0, 5.1, 5.9, 7.2, 7.8, 9.1, 10.0];
+
+        let result = cor_test(
+            &x,
+            &y,
+            CorrelationMethod::Pearson,
+            Alternative::TwoSided,
+            0.95,
+        )
+        .unwrap();
+
+        let expected_cor = 0.999071;
+        assert!(
+            (result.estimate - expected_cor).abs() < 0.001,
+            "Pearson cor mismatch: Rust={:.6}, R={:.6}",
+            result.estimate,
+            expected_cor
+        );
+
+        // t-statistic should be large
+        assert!(
+            result.statistic > 50.0,
+            "t-statistic should be large: {:.2}",
+            result.statistic
+        );
+
+        // p-value should be very small
+        assert!(
+            result.p_value < 0.001,
+            "p-value should be small: {:.6}",
+            result.p_value
+        );
+
+        // df should be n - 2 = 8
+        assert_eq!(result.df, Some(8.0), "df should be 8");
+    }
+
+    #[test]
+    fn test_validate_pearson_confidence_interval() {
+        // R: cor.test(x, y) conf.int: [0.995917, 0.999789]
+        let x = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
+        let y = vec![1.2, 2.1, 2.9, 4.0, 5.1, 5.9, 7.2, 7.8, 9.1, 10.0];
+
+        let result = cor_test(
+            &x,
+            &y,
+            CorrelationMethod::Pearson,
+            Alternative::TwoSided,
+            0.95,
+        )
+        .unwrap();
+
+        let expected_low = 0.995917;
+        let expected_high = 0.999789;
+
+        assert!(result.conf_low.is_some(), "conf_low should be Some");
+        assert!(result.conf_high.is_some(), "conf_high should be Some");
+
+        let conf_low = result.conf_low.unwrap();
+        let conf_high = result.conf_high.unwrap();
+
+        // Confidence interval should contain the estimate
+        assert!(
+            conf_low < result.estimate && result.estimate < conf_high,
+            "CI should contain estimate"
+        );
+
+        // CI bounds should be close to R's values
+        assert!(
+            (conf_low - expected_low).abs() < 0.01,
+            "conf_low mismatch: Rust={:.6}, R={:.6}",
+            conf_low,
+            expected_low
+        );
+        assert!(
+            (conf_high - expected_high).abs() < 0.01,
+            "conf_high mismatch: Rust={:.6}, R={:.6}",
+            conf_high,
+            expected_high
+        );
+    }
+
+    #[test]
+    fn test_validate_spearman_rho() {
+        // R: cor.test(x, y, method = "spearman")
+        // R: rho = 1.0 (perfect monotonic relationship)
+        let x = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
+        let y = vec![1.2, 2.1, 2.9, 4.0, 5.1, 5.9, 7.2, 7.8, 9.1, 10.0];
+
+        let result = cor_test(
+            &x,
+            &y,
+            CorrelationMethod::Spearman,
+            Alternative::TwoSided,
+            0.95,
+        )
+        .unwrap();
+
+        let expected_rho = 1.0;
+        assert!(
+            (result.estimate - expected_rho).abs() < 0.01,
+            "Spearman rho mismatch: Rust={:.6}, R={:.6}",
+            result.estimate,
+            expected_rho
+        );
+
+        // S statistic for perfect correlation should be 0
+        assert!(
+            result.statistic.abs() < 1e-10,
+            "S statistic should be 0 for perfect monotonic: {:.4}",
+            result.statistic
+        );
+    }
+
+    #[test]
+    fn test_validate_kendall_tau() {
+        // R: cor.test(x, y, method = "kendall")
+        // R: tau = 1.0 (all pairs concordant)
+        let x = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
+        let y = vec![1.2, 2.1, 2.9, 4.0, 5.1, 5.9, 7.2, 7.8, 9.1, 10.0];
+
+        let result = cor_test(
+            &x,
+            &y,
+            CorrelationMethod::Kendall,
+            Alternative::TwoSided,
+            0.95,
+        )
+        .unwrap();
+
+        let expected_tau = 1.0;
+        assert!(
+            (result.estimate - expected_tau).abs() < 0.01,
+            "Kendall tau mismatch: Rust={:.6}, R={:.6}",
+            result.estimate,
+            expected_tau
+        );
+
+        // p-value should be very small for perfect correlation
+        assert!(
+            result.p_value < 0.001,
+            "Kendall p-value should be small: {:.6}",
+            result.p_value
+        );
+    }
+
+    #[test]
+    fn test_validate_correlation_names() {
+        let x = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        let y = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+
+        let pearson = cor_test(
+            &x,
+            &y,
+            CorrelationMethod::Pearson,
+            Alternative::TwoSided,
+            0.95,
+        )
+        .unwrap();
+        assert_eq!(pearson.estimate_name, "cor");
+        assert_eq!(pearson.statistic_name, "t");
+
+        let spearman = cor_test(
+            &x,
+            &y,
+            CorrelationMethod::Spearman,
+            Alternative::TwoSided,
+            0.95,
+        )
+        .unwrap();
+        assert_eq!(spearman.estimate_name, "rho");
+        assert_eq!(spearman.statistic_name, "S");
+
+        let kendall = cor_test(
+            &x,
+            &y,
+            CorrelationMethod::Kendall,
+            Alternative::TwoSided,
+            0.95,
+        )
+        .unwrap();
+        assert_eq!(kendall.estimate_name, "tau");
+        assert_eq!(kendall.statistic_name, "z");
+    }
+
+    #[test]
+    fn test_validate_run_cor_test_wrapper() {
+        let x = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        let y = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+
+        let result = run_cor_test(&x, &y, "pearson", "two.sided", 0.95).unwrap();
+        assert!(
+            (result.estimate - 1.0).abs() < 1e-10,
+            "Perfect correlation expected"
+        );
+
+        let result = run_cor_test(&x, &y, "spearman", "two_sided", 0.95).unwrap();
+        assert!(
+            (result.estimate - 1.0).abs() < 1e-10,
+            "Perfect rank correlation expected"
+        );
+
+        let result = run_cor_test(&x, &y, "kendall", "twosided", 0.95).unwrap();
+        assert!(
+            (result.estimate - 1.0).abs() < 1e-10,
+            "Perfect Kendall tau expected"
+        );
     }
 }

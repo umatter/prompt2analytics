@@ -7,8 +7,8 @@
 
 use p2a_core::{
     data::Dataset,
-    regression::{run_ols, run_diagnostics, CovarianceType},
     export::LatexTableBuilder,
+    regression::{CovarianceType, run_diagnostics, run_ols},
     traits::LinearEstimator,
 };
 use polars::prelude::*;
@@ -37,7 +37,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &dataset,
         "log_wage",
         &["education", "experience", "experience_sq"],
-        true,  // include intercept
+        true, // include intercept
         CovarianceType::Standard,
     )?;
     println!("{}\n", result_std);
@@ -58,7 +58,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let var_names = ["Intercept", "education", "experience", "experience_sq"];
     let se_std = result_std.std_errors();
     let se_robust = result_robust.std_errors();
-    println!("{:<15} {:>12} {:>12}", "Variable", "Standard SE", "Robust SE");
+    println!(
+        "{:<15} {:>12} {:>12}",
+        "Variable", "Standard SE", "Robust SE"
+    );
     println!("{:-<15} {:-<12} {:-<12}", "", "", "");
     for (i, name) in var_names.iter().enumerate() {
         println!("{:<15} {:>12.6} {:>12.6}", name, se_std[i], se_robust[i]);

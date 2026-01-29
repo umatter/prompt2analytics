@@ -47,7 +47,7 @@
 //!
 //! R equivalent: `etwfe::etwfe()` (Grant McDermott)
 
-use ndarray::{Array1, Array2, Axis};
+use ndarray::{Array1, Array2};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
@@ -56,7 +56,7 @@ use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
 use crate::linalg::design::DesignMatrix;
 use crate::linalg::matrix_ops::{safe_inverse, xtx, xty};
-use crate::traits::estimator::{t_test_p_value, SignificanceLevel};
+use crate::traits::estimator::t_test_p_value;
 
 /// Configuration for ETWFE estimation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -198,30 +198,49 @@ impl fmt::Display for EtwfeResult {
         }
 
         writeln!(f, "\n{:-<70}", "")?;
-        writeln!(f, "Sample: {} obs ({} treated, {} control)",
-            self.n_obs, self.n_treated, self.n_control)?;
-        writeln!(f, "Cohorts: {}, Periods: {}", self.n_cohorts, self.n_periods)?;
+        writeln!(
+            f,
+            "Sample: {} obs ({} treated, {} control)",
+            self.n_obs, self.n_treated, self.n_control
+        )?;
+        writeln!(
+            f,
+            "Cohorts: {}, Periods: {}",
+            self.n_cohorts, self.n_periods
+        )?;
 
         // Overall ATT
         writeln!(f, "\n{:-<70}", "")?;
         writeln!(f, "Overall Average Treatment Effect on the Treated (ATT)")?;
         writeln!(f, "{:-<70}", "")?;
-        writeln!(f, "  Simple Average:   {:>10.4} (SE: {:.4})",
-            self.att_simple, self.att_se)?;
-        writeln!(f, "  Weighted Average: {:>10.4} (SE: {:.4})",
-            self.att_weighted, self.att_weighted_se)?;
+        writeln!(
+            f,
+            "  Simple Average:   {:>10.4} (SE: {:.4})",
+            self.att_simple, self.att_se
+        )?;
+        writeln!(
+            f,
+            "  Weighted Average: {:>10.4} (SE: {:.4})",
+            self.att_weighted, self.att_weighted_se
+        )?;
 
         // Event Study
         if !self.event_study.is_empty() {
             writeln!(f, "\n{:-<70}", "")?;
             writeln!(f, "Event Study (Effects by Time Relative to Treatment)")?;
             writeln!(f, "{:-<70}", "")?;
-            writeln!(f, "{:>8} {:>12} {:>10} {:>12} {:>12}",
-                "Rel.Time", "Estimate", "SE", "95% CI Lo", "95% CI Hi")?;
+            writeln!(
+                f,
+                "{:>8} {:>12} {:>10} {:>12} {:>12}",
+                "Rel.Time", "Estimate", "SE", "95% CI Lo", "95% CI Hi"
+            )?;
             for eff in &self.event_study {
                 let marker = if eff.key == 0 { " *" } else { "" };
-                writeln!(f, "{:>8}{} {:>12.4} {:>10.4} {:>12.4} {:>12.4}",
-                    eff.key, marker, eff.estimate, eff.std_error, eff.ci_lower, eff.ci_upper)?;
+                writeln!(
+                    f,
+                    "{:>8}{} {:>12.4} {:>10.4} {:>12.4} {:>12.4}",
+                    eff.key, marker, eff.estimate, eff.std_error, eff.ci_lower, eff.ci_upper
+                )?;
             }
             writeln!(f, "\n  * Treatment onset (relative time = 0)")?;
         }
@@ -231,11 +250,17 @@ impl fmt::Display for EtwfeResult {
             writeln!(f, "\n{:-<70}", "")?;
             writeln!(f, "Cohort Average Effects")?;
             writeln!(f, "{:-<70}", "")?;
-            writeln!(f, "{:>10} {:>12} {:>10} {:>12} {:>12}",
-                "Cohort", "Estimate", "SE", "95% CI Lo", "95% CI Hi")?;
+            writeln!(
+                f,
+                "{:>10} {:>12} {:>10} {:>12} {:>12}",
+                "Cohort", "Estimate", "SE", "95% CI Lo", "95% CI Hi"
+            )?;
             for eff in &self.cohort_avg {
-                writeln!(f, "{:>10} {:>12.4} {:>10.4} {:>12.4} {:>12.4}",
-                    eff.key, eff.estimate, eff.std_error, eff.ci_lower, eff.ci_upper)?;
+                writeln!(
+                    f,
+                    "{:>10} {:>12.4} {:>10.4} {:>12.4} {:>12.4}",
+                    eff.key, eff.estimate, eff.std_error, eff.ci_lower, eff.ci_upper
+                )?;
             }
         }
 
@@ -276,11 +301,10 @@ pub fn run_etwfe(
     let n = df.height();
 
     // Extract columns
-    let y = DesignMatrix::extract_column(df, y_col)
-        .map_err(|e| EconError::ColumnNotFound {
-            column: y_col.to_string(),
-            available: vec![format!("{:?}", e)],
-        })?;
+    let y = DesignMatrix::extract_column(df, y_col).map_err(|e| EconError::ColumnNotFound {
+        column: y_col.to_string(),
+        available: vec![format!("{:?}", e)],
+    })?;
 
     let units: Vec<String> = extract_string_column(df, unit_col)?;
     let times: Vec<i64> = extract_int_column(df, time_col)?;
@@ -289,7 +313,8 @@ pub fn run_etwfe(
 
     // Identify unique cohorts and time periods
     let unique_times: BTreeSet<i64> = times.iter().copied().collect();
-    let unique_cohorts: BTreeSet<i64> = first_treat.iter()
+    let unique_cohorts: BTreeSet<i64> = first_treat
+        .iter()
         .filter(|&&g| g > 0) // Exclude never-treated (coded as 0 or very large)
         .copied()
         .collect();
@@ -298,10 +323,13 @@ pub fn run_etwfe(
     let n_periods = all_periods.len();
 
     // Determine reference time (first period by default)
-    let ref_time = config.tref.unwrap_or_else(|| *all_periods.first().unwrap_or(&0));
+    let ref_time = config
+        .tref
+        .unwrap_or_else(|| *all_periods.first().unwrap_or(&0));
 
     // Identify never-treated units
-    let never_treated: BTreeSet<String> = units.iter()
+    let _never_treated: BTreeSet<String> = units
+        .iter()
         .zip(first_treat.iter())
         .filter(|(_, g)| **g == 0 || **g == i64::MAX || !unique_cohorts.contains(*g))
         .map(|(u, _)| u.clone())
@@ -372,11 +400,10 @@ pub fn run_etwfe(
 
     // Run OLS on demeaned data
     let xtx_mat = xtx(&x_demeaned.view());
-    let (xtx_inv, _) = safe_inverse(&xtx_mat.view())
-        .map_err(|_| EconError::SingularMatrix {
-            context: "ETWFE design matrix".to_string(),
-            suggestion: "Check for multicollinearity or empty cohort-time cells".to_string(),
-        })?;
+    let (xtx_inv, _) = safe_inverse(&xtx_mat.view()).map_err(|_| EconError::SingularMatrix {
+        context: "ETWFE design matrix".to_string(),
+        suggestion: "Check for multicollinearity or empty cohort-time cells".to_string(),
+    })?;
 
     let xty_vec = xty(&x_demeaned.view(), &y_demeaned);
     let beta: Array1<f64> = xtx_inv.dot(&xty_vec);
@@ -386,7 +413,11 @@ pub fn run_etwfe(
     let residuals = &y_demeaned - &fitted;
     let ssr: f64 = residuals.iter().map(|r| r * r).sum();
     let df_resid = n.saturating_sub(n_params);
-    let sigma2 = if df_resid > 0 { ssr / df_resid as f64 } else { ssr };
+    let sigma2 = if df_resid > 0 {
+        ssr / df_resid as f64
+    } else {
+        ssr
+    };
 
     // Variance-covariance matrix
     let vcov = &xtx_inv * sigma2;
@@ -434,7 +465,11 @@ pub fn run_etwfe(
     let controls_vec = x_cols.map_or(vec![], |c| c.iter().map(|s| s.to_string()).collect());
 
     Ok(EtwfeResult {
-        model: format!("ETWFE ({} cohorts × {} periods)", unique_cohorts.len(), n_periods),
+        model: format!(
+            "ETWFE ({} cohorts × {} periods)",
+            unique_cohorts.len(),
+            n_periods
+        ),
         dep_var: y_col.to_string(),
         controls: controls_vec,
         control_group: config.cgroup,
@@ -539,27 +574,30 @@ fn aggregate_by_relative_time(effects: &[CohortTimeEffect]) -> Vec<AggregatedEff
         by_rel_time.entry(eff.rel_time).or_default().push(eff);
     }
 
-    by_rel_time.into_iter().map(|(rel_time, effs)| {
-        let n = effs.len();
-        let estimate: f64 = effs.iter().map(|e| e.estimate).sum::<f64>() / n as f64;
+    by_rel_time
+        .into_iter()
+        .map(|(rel_time, effs)| {
+            let n = effs.len();
+            let estimate: f64 = effs.iter().map(|e| e.estimate).sum::<f64>() / n as f64;
 
-        // Pooled standard error (simplified)
-        let var_sum: f64 = effs.iter().map(|e| e.std_error.powi(2)).sum();
-        let std_error = (var_sum / (n * n) as f64).sqrt();
+            // Pooled standard error (simplified)
+            let var_sum: f64 = effs.iter().map(|e| e.std_error.powi(2)).sum();
+            let std_error = (var_sum / (n * n) as f64).sqrt();
 
-        let ci_lower = estimate - 1.96 * std_error;
-        let ci_upper = estimate + 1.96 * std_error;
+            let ci_lower = estimate - 1.96 * std_error;
+            let ci_upper = estimate + 1.96 * std_error;
 
-        AggregatedEffect {
-            key: rel_time,
-            agg_type: "Event Study".to_string(),
-            estimate,
-            std_error,
-            ci_lower,
-            ci_upper,
-            n_effects: n,
-        }
-    }).collect()
+            AggregatedEffect {
+                key: rel_time,
+                agg_type: "Event Study".to_string(),
+                estimate,
+                std_error,
+                ci_lower,
+                ci_upper,
+                n_effects: n,
+            }
+        })
+        .collect()
 }
 
 /// Aggregate cohort-time effects by cohort.
@@ -573,34 +611,35 @@ fn aggregate_by_cohort(effects: &[CohortTimeEffect]) -> Vec<AggregatedEffect> {
         }
     }
 
-    by_cohort.into_iter().map(|(cohort, effs)| {
-        let n = effs.len();
-        let estimate: f64 = effs.iter().map(|e| e.estimate).sum::<f64>() / n as f64;
+    by_cohort
+        .into_iter()
+        .map(|(cohort, effs)| {
+            let n = effs.len();
+            let estimate: f64 = effs.iter().map(|e| e.estimate).sum::<f64>() / n as f64;
 
-        let var_sum: f64 = effs.iter().map(|e| e.std_error.powi(2)).sum();
-        let std_error = (var_sum / (n * n) as f64).sqrt();
+            let var_sum: f64 = effs.iter().map(|e| e.std_error.powi(2)).sum();
+            let std_error = (var_sum / (n * n) as f64).sqrt();
 
-        let ci_lower = estimate - 1.96 * std_error;
-        let ci_upper = estimate + 1.96 * std_error;
+            let ci_lower = estimate - 1.96 * std_error;
+            let ci_upper = estimate + 1.96 * std_error;
 
-        AggregatedEffect {
-            key: cohort,
-            agg_type: "Cohort Average".to_string(),
-            estimate,
-            std_error,
-            ci_lower,
-            ci_upper,
-            n_effects: n,
-        }
-    }).collect()
+            AggregatedEffect {
+                key: cohort,
+                agg_type: "Cohort Average".to_string(),
+                estimate,
+                std_error,
+                ci_lower,
+                ci_upper,
+                n_effects: n,
+            }
+        })
+        .collect()
 }
 
 /// Compute overall ATT (simple and weighted averages).
 fn compute_overall_att(effects: &[CohortTimeEffect]) -> (f64, f64, f64, f64) {
     // Only post-treatment effects
-    let post_effects: Vec<&CohortTimeEffect> = effects.iter()
-        .filter(|e| e.rel_time >= 0)
-        .collect();
+    let post_effects: Vec<&CohortTimeEffect> = effects.iter().filter(|e| e.rel_time >= 0).collect();
 
     if post_effects.is_empty() {
         return (0.0, 0.0, 0.0, 0.0);
@@ -615,13 +654,17 @@ fn compute_overall_att(effects: &[CohortTimeEffect]) -> (f64, f64, f64, f64) {
     // Weighted by number of treated observations
     let total_weight: f64 = post_effects.iter().map(|e| e.n_treated as f64).sum();
     if total_weight > 0.0 {
-        let att_weighted: f64 = post_effects.iter()
+        let att_weighted: f64 = post_effects
+            .iter()
             .map(|e| e.estimate * e.n_treated as f64)
-            .sum::<f64>() / total_weight;
+            .sum::<f64>()
+            / total_weight;
 
-        let weighted_var: f64 = post_effects.iter()
+        let weighted_var: f64 = post_effects
+            .iter()
             .map(|e| (e.n_treated as f64).powi(2) * e.std_error.powi(2))
-            .sum::<f64>() / (total_weight * total_weight);
+            .sum::<f64>()
+            / (total_weight * total_weight);
         let att_weighted_se = weighted_var.sqrt();
 
         (att_simple, att_se, att_weighted, att_weighted_se)
@@ -633,22 +676,27 @@ fn compute_overall_att(effects: &[CohortTimeEffect]) -> (f64, f64, f64, f64) {
 // Helper functions for column extraction
 
 fn extract_string_column(df: &polars::frame::DataFrame, col: &str) -> EconResult<Vec<String>> {
-    let column = df.column(col)
-        .map_err(|_| EconError::ColumnNotFound {
-            column: col.to_string(),
-            available: df.get_column_names().iter().map(|s| s.to_string()).collect(),
-        })?;
+    let column = df.column(col).map_err(|_| EconError::ColumnNotFound {
+        column: col.to_string(),
+        available: df
+            .get_column_names()
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+    })?;
 
     // Try string first
     if let Ok(str_col) = column.str() {
-        return Ok(str_col.into_iter()
+        return Ok(str_col
+            .into_iter()
             .map(|opt| opt.unwrap_or("").to_string())
             .collect());
     }
 
     // Try integer and convert to string
     if let Ok(int_col) = column.i64() {
-        return Ok(int_col.into_iter()
+        return Ok(int_col
+            .into_iter()
             .map(|opt| opt.unwrap_or(0).to_string())
             .collect());
     }
@@ -659,29 +707,32 @@ fn extract_string_column(df: &polars::frame::DataFrame, col: &str) -> EconResult
 }
 
 fn extract_int_column(df: &polars::frame::DataFrame, col: &str) -> EconResult<Vec<i64>> {
-    let column = df.column(col)
-        .map_err(|_| EconError::ColumnNotFound {
-            column: col.to_string(),
-            available: df.get_column_names().iter().map(|s| s.to_string()).collect(),
-        })?;
+    let column = df.column(col).map_err(|_| EconError::ColumnNotFound {
+        column: col.to_string(),
+        available: df
+            .get_column_names()
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+    })?;
 
     // Try i64 first
     if let Ok(int_col) = column.i64() {
-        return Ok(int_col.into_iter()
-            .map(|opt| opt.unwrap_or(0))
-            .collect());
+        return Ok(int_col.into_iter().map(|opt| opt.unwrap_or(0)).collect());
     }
 
     // Try i32
     if let Ok(int_col) = column.i32() {
-        return Ok(int_col.into_iter()
+        return Ok(int_col
+            .into_iter()
             .map(|opt| opt.unwrap_or(0) as i64)
             .collect());
     }
 
     // Try f64 and convert
     if let Ok(float_col) = column.f64() {
-        return Ok(float_col.into_iter()
+        return Ok(float_col
+            .into_iter()
             .map(|opt| opt.unwrap_or(0.0) as i64)
             .collect());
     }
@@ -692,26 +743,32 @@ fn extract_int_column(df: &polars::frame::DataFrame, col: &str) -> EconResult<Ve
 }
 
 fn extract_float_column(df: &polars::frame::DataFrame, col: &str) -> EconResult<Vec<f64>> {
-    let column = df.column(col)
-        .map_err(|_| EconError::ColumnNotFound {
-            column: col.to_string(),
-            available: df.get_column_names().iter().map(|s| s.to_string()).collect(),
-        })?;
+    let column = df.column(col).map_err(|_| EconError::ColumnNotFound {
+        column: col.to_string(),
+        available: df
+            .get_column_names()
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+    })?;
 
     if let Ok(float_col) = column.f64() {
-        return Ok(float_col.into_iter()
+        return Ok(float_col
+            .into_iter()
             .map(|opt| opt.unwrap_or(0.0))
             .collect());
     }
 
     if let Ok(int_col) = column.i64() {
-        return Ok(int_col.into_iter()
+        return Ok(int_col
+            .into_iter()
             .map(|opt| opt.unwrap_or(0) as f64)
             .collect());
     }
 
     if let Ok(int_col) = column.i32() {
-        return Ok(int_col.into_iter()
+        return Ok(int_col
+            .into_iter()
             .map(|opt| opt.unwrap_or(0) as f64)
             .collect());
     }
@@ -764,7 +821,8 @@ mod tests {
                     2.2, 2.6, 2.9, 5.8, 6.3,       // D: similar
                     1.0, 1.5, 2.0, 2.5, 3.0,       // E: trend only
                     1.1, 1.6, 2.1, 2.6, 3.1]       // F: trend only
-        }.unwrap();
+        }
+        .unwrap();
         Dataset::new(df)
     }
 
@@ -782,7 +840,11 @@ mod tests {
             None,
         );
 
-        assert!(result.is_ok(), "ETWFE should succeed, got {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "ETWFE should succeed, got {:?}",
+            result.err()
+        );
 
         let result = result.unwrap();
 
@@ -799,8 +861,11 @@ mod tests {
 
         // ATT should be positive (treatment has positive effect)
         // True effect is around 2-3
-        assert!(result.att_simple > 0.0,
-            "ATT should be positive, got {}", result.att_simple);
+        assert!(
+            result.att_simple > 0.0,
+            "ATT should be positive, got {}",
+            result.att_simple
+        );
     }
 
     #[test]
@@ -815,7 +880,8 @@ mod tests {
             "first_treat",
             None,
             None,
-        ).unwrap();
+        )
+        .unwrap();
 
         // Event study should have effects for different relative times
         assert!(!result.event_study.is_empty());
@@ -824,9 +890,12 @@ mod tests {
         for eff in &result.event_study {
             if eff.key < 0 {
                 // Pre-treatment: effect should be relatively small
-                assert!(eff.estimate.abs() < 5.0,
+                assert!(
+                    eff.estimate.abs() < 5.0,
                     "Pre-treatment effect should be small, got {} at rel_time={}",
-                    eff.estimate, eff.key);
+                    eff.estimate,
+                    eff.key
+                );
             }
         }
     }
@@ -843,7 +912,8 @@ mod tests {
             "first_treat",
             None,
             None,
-        ).unwrap();
+        )
+        .unwrap();
 
         let display = format!("{}", result);
         assert!(display.contains("ETWFE"));

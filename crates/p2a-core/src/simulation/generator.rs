@@ -1,9 +1,9 @@
 //! Random data generation implementation.
 
 use polars::prelude::*;
+use rand::SeedableRng;
 use rand::prelude::*;
 use rand::rngs::StdRng;
-use rand::SeedableRng;
 use rand_distr::{Binomial, Exp, Normal, Poisson, Uniform};
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -128,23 +128,26 @@ impl Distribution {
         match self {
             Distribution::Uniform { min, max } => {
                 if min >= max {
-                    return Err(GenerationError::InvalidParameters(
-                        format!("Uniform: min ({}) must be less than max ({})", min, max),
-                    ));
+                    return Err(GenerationError::InvalidParameters(format!(
+                        "Uniform: min ({}) must be less than max ({})",
+                        min, max
+                    )));
                 }
             }
             Distribution::Normal { std, .. } => {
                 if *std <= 0.0 {
-                    return Err(GenerationError::InvalidParameters(
-                        format!("Normal: std ({}) must be positive", std),
-                    ));
+                    return Err(GenerationError::InvalidParameters(format!(
+                        "Normal: std ({}) must be positive",
+                        std
+                    )));
                 }
             }
             Distribution::Binomial { n, p } => {
                 if *p < 0.0 || *p > 1.0 {
-                    return Err(GenerationError::InvalidParameters(
-                        format!("Binomial: p ({}) must be between 0 and 1", p),
-                    ));
+                    return Err(GenerationError::InvalidParameters(format!(
+                        "Binomial: p ({}) must be between 0 and 1",
+                        p
+                    )));
                 }
                 if *n == 0 {
                     return Err(GenerationError::InvalidParameters(
@@ -154,26 +157,32 @@ impl Distribution {
             }
             Distribution::Poisson { lambda } => {
                 if *lambda <= 0.0 {
-                    return Err(GenerationError::InvalidParameters(
-                        format!("Poisson: lambda ({}) must be positive", lambda),
-                    ));
+                    return Err(GenerationError::InvalidParameters(format!(
+                        "Poisson: lambda ({}) must be positive",
+                        lambda
+                    )));
                 }
             }
             Distribution::Exponential { rate } => {
                 if *rate <= 0.0 {
-                    return Err(GenerationError::InvalidParameters(
-                        format!("Exponential: rate ({}) must be positive", rate),
-                    ));
+                    return Err(GenerationError::InvalidParameters(format!(
+                        "Exponential: rate ({}) must be positive",
+                        rate
+                    )));
                 }
             }
             Distribution::Bernoulli { p } => {
                 if *p < 0.0 || *p > 1.0 {
-                    return Err(GenerationError::InvalidParameters(
-                        format!("Bernoulli: p ({}) must be between 0 and 1", p),
-                    ));
+                    return Err(GenerationError::InvalidParameters(format!(
+                        "Bernoulli: p ({}) must be between 0 and 1",
+                        p
+                    )));
                 }
             }
-            Distribution::Categorical { categories, weights } => {
+            Distribution::Categorical {
+                categories,
+                weights,
+            } => {
                 if categories.is_empty() {
                     return Err(GenerationError::InvalidParameters(
                         "Categorical: categories cannot be empty".to_string(),
@@ -202,9 +211,10 @@ impl Distribution {
             }
             Distribution::UniformInt { min, max } => {
                 if min > max {
-                    return Err(GenerationError::InvalidParameters(
-                        format!("UniformInt: min ({}) must be <= max ({})", min, max),
-                    ));
+                    return Err(GenerationError::InvalidParameters(format!(
+                        "UniformInt: min ({}) must be <= max ({})",
+                        min, max
+                    )));
                 }
             }
             Distribution::Sequence { .. } => {}
@@ -357,7 +367,10 @@ fn generate_column(
             Ok(Column::new(name.into(), values))
         }
 
-        Distribution::Categorical { categories, weights } => {
+        Distribution::Categorical {
+            categories,
+            weights,
+        } => {
             let normalized_weights: Vec<f64> = match weights {
                 Some(w) => {
                     let sum: f64 = w.iter().sum();
@@ -393,9 +406,7 @@ fn generate_column(
         }
 
         Distribution::UniformInt { min, max } => {
-            let values: Vec<i64> = (0..n_rows)
-                .map(|_| rng.r#gen_range(*min..=*max))
-                .collect();
+            let values: Vec<i64> = (0..n_rows).map(|_| rng.r#gen_range(*min..=*max)).collect();
             Ok(Column::new(name.into(), values))
         }
 
@@ -422,7 +433,13 @@ mod tests {
 
     #[test]
     fn test_generate_uniform() {
-        let columns = vec![ColumnSpec::new("x", Distribution::Uniform { min: 0.0, max: 10.0 })];
+        let columns = vec![ColumnSpec::new(
+            "x",
+            Distribution::Uniform {
+                min: 0.0,
+                max: 10.0,
+            },
+        )];
         let dataset = generate_random_data(100, columns, Some(42)).unwrap();
 
         assert_eq!(dataset.df().height(), 100);
@@ -432,13 +449,19 @@ mod tests {
         let values = col.f64().unwrap();
 
         for val in values.into_no_null_iter() {
-            assert!(val >= 0.0 && val < 10.0);
+            assert!((0.0..10.0).contains(&val));
         }
     }
 
     #[test]
     fn test_generate_normal() {
-        let columns = vec![ColumnSpec::new("x", Distribution::Normal { mean: 100.0, std: 10.0 })];
+        let columns = vec![ColumnSpec::new(
+            "x",
+            Distribution::Normal {
+                mean: 100.0,
+                std: 10.0,
+            },
+        )];
         let dataset = generate_random_data(1000, columns, Some(42)).unwrap();
 
         let col = dataset.df().column("x").unwrap();
@@ -451,14 +474,17 @@ mod tests {
 
     #[test]
     fn test_generate_binomial() {
-        let columns = vec![ColumnSpec::new("x", Distribution::Binomial { n: 10, p: 0.5 })];
+        let columns = vec![ColumnSpec::new(
+            "x",
+            Distribution::Binomial { n: 10, p: 0.5 },
+        )];
         let dataset = generate_random_data(100, columns, Some(42)).unwrap();
 
         let col = dataset.df().column("x").unwrap();
         let values = col.i64().unwrap();
 
         for val in values.into_no_null_iter() {
-            assert!(val >= 0 && val <= 10);
+            assert!((0..=10).contains(&val));
         }
     }
 
@@ -477,7 +503,10 @@ mod tests {
 
     #[test]
     fn test_generate_exponential() {
-        let columns = vec![ColumnSpec::new("x", Distribution::Exponential { rate: 1.0 })];
+        let columns = vec![ColumnSpec::new(
+            "x",
+            Distribution::Exponential { rate: 1.0 },
+        )];
         let dataset = generate_random_data(100, columns, Some(42)).unwrap();
 
         let col = dataset.df().column("x").unwrap();
@@ -543,14 +572,17 @@ mod tests {
 
     #[test]
     fn test_generate_uniform_int() {
-        let columns = vec![ColumnSpec::new("x", Distribution::UniformInt { min: 1, max: 6 })];
+        let columns = vec![ColumnSpec::new(
+            "x",
+            Distribution::UniformInt { min: 1, max: 6 },
+        )];
         let dataset = generate_random_data(100, columns, Some(42)).unwrap();
 
         let col = dataset.df().column("x").unwrap();
         let values = col.i64().unwrap();
 
         for val in values.into_no_null_iter() {
-            assert!(val >= 1 && val <= 6);
+            assert!((1..=6).contains(&val));
         }
     }
 
@@ -596,8 +628,20 @@ mod tests {
     fn test_generate_multiple_columns() {
         let columns = vec![
             ColumnSpec::new("id", Distribution::Sequence { start: 1 }),
-            ColumnSpec::new("x", Distribution::Normal { mean: 0.0, std: 1.0 }),
-            ColumnSpec::new("y", Distribution::Uniform { min: 0.0, max: 100.0 }),
+            ColumnSpec::new(
+                "x",
+                Distribution::Normal {
+                    mean: 0.0,
+                    std: 1.0,
+                },
+            ),
+            ColumnSpec::new(
+                "y",
+                Distribution::Uniform {
+                    min: 0.0,
+                    max: 100.0,
+                },
+            ),
             ColumnSpec::new(
                 "group",
                 Distribution::Categorical {
@@ -618,7 +662,13 @@ mod tests {
 
     #[test]
     fn test_reproducibility_with_seed() {
-        let columns = vec![ColumnSpec::new("x", Distribution::Normal { mean: 0.0, std: 1.0 })];
+        let columns = vec![ColumnSpec::new(
+            "x",
+            Distribution::Normal {
+                mean: 0.0,
+                std: 1.0,
+            },
+        )];
 
         let dataset1 = generate_random_data(10, columns.clone(), Some(42)).unwrap();
         let dataset2 = generate_random_data(10, columns, Some(42)).unwrap();
@@ -646,15 +696,30 @@ mod tests {
     #[test]
     fn test_invalid_parameters() {
         // Invalid uniform
-        let columns = vec![ColumnSpec::new("x", Distribution::Uniform { min: 10.0, max: 0.0 })];
+        let columns = vec![ColumnSpec::new(
+            "x",
+            Distribution::Uniform {
+                min: 10.0,
+                max: 0.0,
+            },
+        )];
         assert!(generate_random_data(10, columns, None).is_err());
 
         // Invalid normal std
-        let columns = vec![ColumnSpec::new("x", Distribution::Normal { mean: 0.0, std: -1.0 })];
+        let columns = vec![ColumnSpec::new(
+            "x",
+            Distribution::Normal {
+                mean: 0.0,
+                std: -1.0,
+            },
+        )];
         assert!(generate_random_data(10, columns, None).is_err());
 
         // Invalid binomial p
-        let columns = vec![ColumnSpec::new("x", Distribution::Binomial { n: 10, p: 1.5 })];
+        let columns = vec![ColumnSpec::new(
+            "x",
+            Distribution::Binomial { n: 10, p: 1.5 },
+        )];
         assert!(generate_random_data(10, columns, None).is_err());
 
         // Invalid poisson lambda
@@ -672,7 +737,10 @@ mod tests {
         assert!(generate_random_data(10, columns, None).is_err());
 
         // Zero rows
-        let columns = vec![ColumnSpec::new("x", Distribution::Uniform { min: 0.0, max: 1.0 })];
+        let columns = vec![ColumnSpec::new(
+            "x",
+            Distribution::Uniform { min: 0.0, max: 1.0 },
+        )];
         assert!(generate_random_data(0, columns, None).is_err());
 
         // Empty columns

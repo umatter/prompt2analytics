@@ -12,8 +12,8 @@ use std::collections::HashMap;
 use uuid::Uuid;
 
 use super::Dataset;
-use super::quality::{generate_quality_profile, DataQualityProfile};
-use super::verification::{verify_cleaning, VerificationReport};
+use super::quality::{DataQualityProfile, generate_quality_profile};
+use super::verification::{VerificationReport, verify_cleaning};
 
 /// A cleaning session that tracks the state of a data cleaning workflow.
 #[derive(Clone)]
@@ -290,7 +290,10 @@ impl CleaningSession {
             ),
             parameters: {
                 let mut params = HashMap::new();
-                params.insert("from_checkpoint".to_string(), self.current_checkpoint.to_string());
+                params.insert(
+                    "from_checkpoint".to_string(),
+                    self.current_checkpoint.to_string(),
+                );
                 params.insert("to_checkpoint".to_string(), checkpoint_index.to_string());
                 params
             },
@@ -343,13 +346,25 @@ impl CleaningSession {
     }
 
     /// Compare two checkpoints.
-    pub fn compare_checkpoints(&self, index1: usize, index2: usize) -> Result<VerificationReport, String> {
-        let cp1 = self.checkpoints.get(index1)
+    pub fn compare_checkpoints(
+        &self,
+        index1: usize,
+        index2: usize,
+    ) -> Result<VerificationReport, String> {
+        let cp1 = self
+            .checkpoints
+            .get(index1)
             .ok_or_else(|| format!("Checkpoint {} not found", index1))?;
-        let cp2 = self.checkpoints.get(index2)
+        let cp2 = self
+            .checkpoints
+            .get(index2)
             .ok_or_else(|| format!("Checkpoint {} not found", index2))?;
 
-        Ok(verify_cleaning(&cp1.dataset, &cp2.dataset, "checkpoint comparison"))
+        Ok(verify_cleaning(
+            &cp1.dataset,
+            &cp2.dataset,
+            "checkpoint comparison",
+        ))
     }
 
     /// Set session metadata.
@@ -374,16 +389,35 @@ impl CleaningSession {
 
         summary.push_str(&format!("Session ID: {}\n", self.id));
         summary.push_str(&format!("Dataset: {}\n", self.dataset_name));
-        summary.push_str(&format!("Created: {}\n", self.created_at.format("%Y-%m-%d %H:%M:%S UTC")));
-        summary.push_str(&format!("Last updated: {}\n\n", self.updated_at.format("%Y-%m-%d %H:%M:%S UTC")));
+        summary.push_str(&format!(
+            "Created: {}\n",
+            self.created_at.format("%Y-%m-%d %H:%M:%S UTC")
+        ));
+        summary.push_str(&format!(
+            "Last updated: {}\n\n",
+            self.updated_at.format("%Y-%m-%d %H:%M:%S UTC")
+        ));
 
         summary.push_str("Progress:\n");
-        summary.push_str(&format!("  - Checkpoints: {} (current: #{})\n", status.total_checkpoints, status.current_checkpoint));
-        summary.push_str(&format!("  - Operations: {} ({} successful)\n", status.total_operations, status.successful_operations));
-        summary.push_str(&format!("  - Can rollback: {}\n\n", if status.can_rollback { "Yes" } else { "No" }));
+        summary.push_str(&format!(
+            "  - Checkpoints: {} (current: #{})\n",
+            status.total_checkpoints, status.current_checkpoint
+        ));
+        summary.push_str(&format!(
+            "  - Operations: {} ({} successful)\n",
+            status.total_operations, status.successful_operations
+        ));
+        summary.push_str(&format!(
+            "  - Can rollback: {}\n\n",
+            if status.can_rollback { "Yes" } else { "No" }
+        ));
 
         summary.push_str("Data Changes:\n");
-        summary.push_str(&format!("  - Rows: {} → {}", initial.dataset.nrows(), current.dataset.nrows()));
+        summary.push_str(&format!(
+            "  - Rows: {} → {}",
+            initial.dataset.nrows(),
+            current.dataset.nrows()
+        ));
         let row_diff = current.dataset.nrows() as i64 - initial.dataset.nrows() as i64;
         if row_diff != 0 {
             summary.push_str(&format!(" ({:+})", row_diff));
@@ -394,12 +428,27 @@ impl CleaningSession {
             "  - Completeness: {:.1}% → {:.1}% ({:+.1}%)\n",
             initial.quality_profile.completeness_score * 100.0,
             current.quality_profile.completeness_score * 100.0,
-            (current.quality_profile.completeness_score - initial.quality_profile.completeness_score) * 100.0
+            (current.quality_profile.completeness_score
+                - initial.quality_profile.completeness_score)
+                * 100.0
         ));
 
-        let initial_issues: usize = initial.quality_profile.columns.iter().map(|c| c.issues.len()).sum();
-        let current_issues: usize = current.quality_profile.columns.iter().map(|c| c.issues.len()).sum();
-        summary.push_str(&format!("  - Issues: {} → {}\n", initial_issues, current_issues));
+        let initial_issues: usize = initial
+            .quality_profile
+            .columns
+            .iter()
+            .map(|c| c.issues.len())
+            .sum();
+        let current_issues: usize = current
+            .quality_profile
+            .columns
+            .iter()
+            .map(|c| c.issues.len())
+            .sum();
+        summary.push_str(&format!(
+            "  - Issues: {} → {}\n",
+            initial_issues, current_issues
+        ));
 
         if !self.audit_trail.is_empty() {
             summary.push_str("\nRecent Operations:\n");
@@ -414,7 +463,10 @@ impl CleaningSession {
                 ));
             }
             if self.audit_trail.len() > 5 {
-                summary.push_str(&format!("  ... and {} more operations\n", self.audit_trail.len() - 5));
+                summary.push_str(&format!(
+                    "  ... and {} more operations\n",
+                    self.audit_trail.len() - 5
+                ));
             }
         }
 
@@ -437,14 +489,15 @@ pub struct CheckpointInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use polars::prelude::{df, col, IntoLazy, PolarsError};
+    use polars::prelude::{IntoLazy, PolarsError, col, df};
 
     fn create_test_dataset() -> Dataset {
         let test_df = df! {
             "name" => ["  Alice  ", "Bob", " Charlie ", "David"],
             "email" => ["alice@test.com", "bob@test.com ", "charlie@test.com", "david@test.com"],
             "value" => [Some(100), Some(200), None, Some(400)],
-        }.unwrap();
+        }
+        .unwrap();
         Dataset::new(test_df)
     }
 
@@ -483,7 +536,10 @@ mod tests {
             "Remove rows with null values",
             HashMap::new(),
             |ds| {
-                let df = ds.df().clone().lazy()
+                let df = ds
+                    .df()
+                    .clone()
+                    .lazy()
                     .filter(col("value").is_not_null())
                     .collect()
                     .map_err(|e: PolarsError| e.to_string())?;
@@ -510,7 +566,10 @@ mod tests {
             "Remove rows with null values",
             HashMap::new(),
             |ds| {
-                let df = ds.df().clone().lazy()
+                let df = ds
+                    .df()
+                    .clone()
+                    .lazy()
                     .filter(col("value").is_not_null())
                     .collect()
                     .map_err(|e: PolarsError| e.to_string())?;
@@ -543,12 +602,13 @@ mod tests {
         let mut session = CleaningSession::new(dataset, "test_data");
 
         // Apply an operation
-        let _ = session.apply_operation(
-            "test",
-            "Test operation",
-            HashMap::new(),
-            |ds| Ok(ds.clone()),
-        );
+        let _ =
+            session.apply_operation(
+                "test",
+                "Test operation",
+                HashMap::new(),
+                |ds| Ok(ds.clone()),
+            );
 
         let checkpoints = session.list_checkpoints();
         assert_eq!(checkpoints.len(), 2);
@@ -563,12 +623,9 @@ mod tests {
         let dataset = create_test_dataset();
         let mut session = CleaningSession::new(dataset, "test_data");
 
-        let result = session.apply_operation(
-            "invalid",
-            "This will fail",
-            HashMap::new(),
-            |_| Err("Intentional failure".to_string()),
-        );
+        let result = session.apply_operation("invalid", "This will fail", HashMap::new(), |_| {
+            Err("Intentional failure".to_string())
+        });
 
         assert!(result.is_err());
         assert_eq!(session.current_checkpoint, 0); // Should not have changed
@@ -595,18 +652,16 @@ mod tests {
         let mut session = CleaningSession::new(dataset, "test_data");
 
         // Apply an operation that changes the data
-        let _ = session.apply_operation(
-            "filter",
-            "Remove nulls",
-            HashMap::new(),
-            |ds| {
-                let df = ds.df().clone().lazy()
-                    .filter(col("value").is_not_null())
-                    .collect()
-                    .map_err(|e: PolarsError| e.to_string())?;
-                Ok(Dataset::new(df))
-            },
-        );
+        let _ = session.apply_operation("filter", "Remove nulls", HashMap::new(), |ds| {
+            let df = ds
+                .df()
+                .clone()
+                .lazy()
+                .filter(col("value").is_not_null())
+                .collect()
+                .map_err(|e: PolarsError| e.to_string())?;
+            Ok(Dataset::new(df))
+        });
 
         let comparison = session.compare_checkpoints(0, 1);
         assert!(comparison.is_ok());
@@ -624,8 +679,14 @@ mod tests {
         session.set_metadata("analyst", "John Doe");
         session.set_metadata("project", "Sales Cleanup");
 
-        assert_eq!(session.get_metadata("analyst"), Some(&"John Doe".to_string()));
-        assert_eq!(session.get_metadata("project"), Some(&"Sales Cleanup".to_string()));
+        assert_eq!(
+            session.get_metadata("analyst"),
+            Some(&"John Doe".to_string())
+        );
+        assert_eq!(
+            session.get_metadata("project"),
+            Some(&"Sales Cleanup".to_string())
+        );
         assert_eq!(session.get_metadata("nonexistent"), None);
     }
 }

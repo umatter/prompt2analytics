@@ -134,6 +134,13 @@ if (!is.null(result_fd)) {
 }
 
 # Test Case 2: Larger panel for benchmarking
+# Skip benchmarks if SKIP_BENCHMARKS env var is set (for quick validation)
+if (Sys.getenv("SKIP_BENCHMARKS") != "" || Sys.getenv("CI") != "") {
+  cat("\n=== Benchmarks skipped (SKIP_BENCHMARKS or CI mode) ===\n")
+  cat("\n=== Validation Complete ===\n")
+  quit(status = 0)
+}
+
 cat("\n\n=== Performance Benchmarks ===\n")
 
 # Benchmark function

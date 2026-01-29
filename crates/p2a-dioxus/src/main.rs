@@ -37,9 +37,7 @@ fn init_logging() {
         let filter = EnvFilter::try_from_default_env()
             .unwrap_or_else(|_| EnvFilter::new("info,p2a_dioxus=debug,p2a_mcp=info,p2a_core=info"));
 
-        tracing_subscriber::fmt()
-            .with_env_filter(filter)
-            .init();
+        tracing_subscriber::fmt().with_env_filter(filter).init();
     }
 }
 

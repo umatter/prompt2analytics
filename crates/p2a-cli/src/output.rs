@@ -20,7 +20,9 @@ pub enum OutputFormat {
 pub fn format_output<T: Serialize + Display>(value: &T, format: &OutputFormat) -> String {
     match format {
         OutputFormat::Text => value.to_string(),
-        OutputFormat::Json => serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string()),
+        OutputFormat::Json => {
+            serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
+        }
         OutputFormat::Table => value.to_string(), // TODO: Use tabled for structured data
     }
 }
@@ -59,15 +61,13 @@ pub fn format_dataset_summary(
     format: &OutputFormat,
 ) -> String {
     match format {
-        OutputFormat::Json => {
-            serde_json::to_string_pretty(&serde_json::json!({
-                "name": name,
-                "rows": nrows,
-                "columns": ncols,
-                "column_names": columns,
-            }))
-            .unwrap()
-        }
+        OutputFormat::Json => serde_json::to_string_pretty(&serde_json::json!({
+            "name": name,
+            "rows": nrows,
+            "columns": ncols,
+            "column_names": columns,
+        }))
+        .unwrap(),
         OutputFormat::Table | OutputFormat::Text => {
             let mut out = String::new();
             out.push_str(&format!("Dataset: {}\n", name));
@@ -124,7 +124,7 @@ pub fn format_regression_results(
                 "Variable", "Coefficient", "Std. Error", "t-value", "p-value"
             ));
             out.push_str(&"-".repeat(60));
-            out.push_str("\n");
+            out.push('\n');
 
             // Coefficients
             for (name, coef, se, t, p) in coefficients {
@@ -146,7 +146,7 @@ pub fn format_regression_results(
             }
 
             out.push_str(&"-".repeat(60));
-            out.push_str("\n");
+            out.push('\n');
             out.push_str(&format!("R-squared: {:.6}\n", r_squared));
             out.push_str(&format!("Adj. R-squared: {:.6}\n", adj_r_squared));
             out.push_str(&format!("Observations: {}\n", n_obs));

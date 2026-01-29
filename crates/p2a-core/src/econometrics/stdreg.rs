@@ -89,8 +89,8 @@
 //! ```
 
 use ndarray::{Array1, Array2};
-use rand::prelude::*;
 use rand::SeedableRng;
+use rand::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -98,7 +98,7 @@ use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
 use crate::linalg::design::DesignMatrix;
 use crate::linalg::matrix_ops::{safe_inverse, xtx, xty};
-use crate::traits::estimator::{logistic_cdf, normal_cdf, SignificanceLevel};
+use crate::traits::estimator::{SignificanceLevel, logistic_cdf, normal_cdf};
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Configuration Types
@@ -351,13 +351,22 @@ impl fmt::Display for StdRegResult {
         writeln!(f, "Specification:")?;
         writeln!(f, "  Outcome Model:  {}", self.model_type)?;
         writeln!(f, "  Estimand:       {}", self.estimand)?;
-        writeln!(f, "  SE Method:      {} (n = {})", self.se_method, self.n_bootstrap)?;
+        writeln!(
+            f,
+            "  SE Method:      {} (n = {})",
+            self.se_method, self.n_bootstrap
+        )?;
         writeln!(f)?;
         writeln!(f, "Treatment Effect:")?;
         writeln!(f, "  Effect:     {:>12.4}", self.ate)?;
         writeln!(f, "  Std. Error: {:>12.4}", self.se)?;
         writeln!(f, "  z-stat:     {:>12.2}", self.z_stat)?;
-        writeln!(f, "  p-value:    {:>12.4}{}", self.p_value, self.significance.stars())?;
+        writeln!(
+            f,
+            "  p-value:    {:>12.4}{}",
+            self.p_value,
+            self.significance.stars()
+        )?;
         writeln!(
             f,
             "  {:.0}% CI:     [{:.4}, {:.4}]",
@@ -367,8 +376,16 @@ impl fmt::Display for StdRegResult {
         )?;
         writeln!(f)?;
         writeln!(f, "Potential Outcomes:")?;
-        writeln!(f, "  E[Y(1)]:    {:>12.4} (SE: {:.4})", self.ey1, self.ey1_se)?;
-        writeln!(f, "  E[Y(0)]:    {:>12.4} (SE: {:.4})", self.ey0, self.ey0_se)?;
+        writeln!(
+            f,
+            "  E[Y(1)]:    {:>12.4} (SE: {:.4})",
+            self.ey1, self.ey1_se
+        )?;
+        writeln!(
+            f,
+            "  E[Y(0)]:    {:>12.4} (SE: {:.4})",
+            self.ey0, self.ey0_se
+        )?;
         writeln!(f)?;
 
         // Additional measures for binary outcomes
@@ -521,12 +538,9 @@ pub fn run_stdreg(
 
     // Validate outcome for logistic model
     if config.model_type == StdRegModel::Logistic {
-        let y_unique: std::collections::HashSet<u64> = y
-            .iter()
-            .map(|&v| (v * 1000.0).round() as u64)
-            .collect();
-        let is_binary = y_unique.len() == 2
-            && (y_unique.contains(&0) || y_unique.contains(&1000));
+        let y_unique: std::collections::HashSet<u64> =
+            y.iter().map(|&v| (v * 1000.0).round() as u64).collect();
+        let is_binary = y_unique.len() == 2 && (y_unique.contains(&0) || y_unique.contains(&1000));
         if !is_binary {
             warnings.push(format!(
                 "Logistic model specified but outcome '{}' may not be binary. \
@@ -544,7 +558,8 @@ pub fn run_stdreg(
 
     // Build full design matrix: [intercept, X, A] (or with interactions)
     // Note: intercept is already in w
-    let (x_full, coef_names) = build_design_matrix(&w, &a, covariate_cols, config.include_interactions);
+    let (x_full, coef_names) =
+        build_design_matrix(&w, &a, covariate_cols, config.include_interactions);
     let _k = x_full.ncols();
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -635,9 +650,7 @@ pub fn run_stdreg(
     let alpha = 1.0 - config.confidence_level;
 
     // For ATE
-    let (ci_lower, ci_upper) = if config.se_method == SEMethod::Bootstrap
-        && boot_ates.len() >= 20
-    {
+    let (ci_lower, ci_upper) = if config.se_method == SEMethod::Bootstrap && boot_ates.len() >= 20 {
         // Percentile bootstrap CI
         let mut sorted_ates = boot_ates.clone();
         sorted_ates.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
@@ -666,18 +679,14 @@ pub fn run_stdreg(
     // Additional Effect Measures (Binary Outcomes)
     // ═══════════════════════════════════════════════════════════════════════
 
-    let (risk_ratio, risk_ratio_ci, odds_ratio, odds_ratio_ci, nnt) =
-        if config.model_type == StdRegModel::Logistic || is_binary_outcome(&y) {
-            compute_binary_effect_measures(
-                ey1,
-                ey0,
-                &boot_ey1s,
-                &boot_ey0s,
-                config.confidence_level,
-            )
-        } else {
-            (None, None, None, None, None)
-        };
+    let (risk_ratio, risk_ratio_ci, odds_ratio, odds_ratio_ci, nnt) = if config.model_type
+        == StdRegModel::Logistic
+        || is_binary_outcome(&y)
+    {
+        compute_binary_effect_measures(ey1, ey0, &boot_ey1s, &boot_ey0s, config.confidence_level)
+    } else {
+        (None, None, None, None, None)
+    };
 
     // ═══════════════════════════════════════════════════════════════════════
     // Construct Result
@@ -936,12 +945,11 @@ fn fit_logistic_model(
 
         // Newton-Raphson update
         let neg_hessian = &hessian * -1.0;
-        let (hess_inv, _) = safe_inverse(&neg_hessian.view()).map_err(|e| {
-            EconError::SingularMatrix {
+        let (hess_inv, _) =
+            safe_inverse(&neg_hessian.view()).map_err(|e| EconError::SingularMatrix {
                 context: "Logistic regression Hessian".to_string(),
                 suggestion: format!("Check for multicollinearity: {:?}", e),
-            }
-        })?;
+            })?;
 
         let delta = hess_inv.dot(&gradient);
         beta = &beta + &delta;
@@ -1005,12 +1013,11 @@ fn fit_poisson_model(
 
         // Newton-Raphson update
         let neg_hessian = &hessian * -1.0;
-        let (hess_inv, _) = safe_inverse(&neg_hessian.view()).map_err(|e| {
-            EconError::SingularMatrix {
+        let (hess_inv, _) =
+            safe_inverse(&neg_hessian.view()).map_err(|e| EconError::SingularMatrix {
                 context: "Poisson regression Hessian".to_string(),
                 suggestion: format!("Check for multicollinearity: {:?}", e),
-            }
-        })?;
+            })?;
 
         let delta = hess_inv.dot(&gradient);
         beta = &beta + &delta;
@@ -1135,21 +1142,14 @@ fn compute_bootstrap_se(
 
         // Build design matrix
         let dummy_names: Vec<&str> = (0..k_w - 1).map(|_| "x").collect();
-        let (x_boot, _) =
-            build_design_matrix(&w_boot, &a_boot, &dummy_names, include_interactions);
+        let (x_boot, _) = build_design_matrix(&w_boot, &a_boot, &dummy_names, include_interactions);
 
         // Fit model
-        let beta_boot = match fit_outcome_model(
-            &x_boot,
-            &y_boot,
-            &a_boot,
-            model_type,
-            max_iter,
-            tolerance,
-        ) {
-            Ok((b, _, _)) => b,
-            Err(_) => continue,
-        };
+        let beta_boot =
+            match fit_outcome_model(&x_boot, &y_boot, &a_boot, model_type, max_iter, tolerance) {
+                Ok((b, _, _)) => b,
+                Err(_) => continue,
+            };
 
         // Counterfactual predictions
         let (x_1_boot, x_0_boot) =
@@ -1347,13 +1347,7 @@ fn compute_binary_effect_measures(
         let boot_rrs: Vec<f64> = boot_ey1s
             .iter()
             .zip(boot_ey0s.iter())
-            .filter_map(|(&y1, &y0)| {
-                if y0 > 1e-10 {
-                    Some(y1 / y0)
-                } else {
-                    None
-                }
-            })
+            .filter_map(|(&y1, &y0)| if y0 > 1e-10 { Some(y1 / y0) } else { None })
             .collect();
         if boot_rrs.len() >= 20 {
             let mut sorted = boot_rrs.clone();
@@ -1375,11 +1369,7 @@ fn compute_binary_effect_measures(
             .filter_map(|(&y1, &y0)| {
                 let o1 = y1 / (1.0 - y1).max(1e-10);
                 let o0 = y0 / (1.0 - y0).max(1e-10);
-                if o0 > 1e-10 {
-                    Some(o1 / o0)
-                } else {
-                    None
-                }
+                if o0 > 1e-10 { Some(o1 / o0) } else { None }
             })
             .collect();
         if boot_ors.len() >= 20 {
@@ -1512,8 +1502,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result =
-            run_stdreg(&dataset, "y", "treatment", &["x1", "x2"], config).unwrap();
+        let result = run_stdreg(&dataset, "y", "treatment", &["x1", "x2"], config).unwrap();
 
         // Check basic structure
         assert_eq!(result.n_obs, 40);
@@ -1561,8 +1550,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result =
-            run_stdreg(&dataset, "y", "treatment", &["x1", "x2"], config).unwrap();
+        let result = run_stdreg(&dataset, "y", "treatment", &["x1", "x2"], config).unwrap();
 
         // ATT should also be positive
         assert!(
@@ -1585,8 +1573,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result =
-            run_stdreg(&dataset, "y", "treatment", &["x1", "x2"], config).unwrap();
+        let result = run_stdreg(&dataset, "y", "treatment", &["x1", "x2"], config).unwrap();
 
         assert!(result.ate > 0.0, "ATC should be positive");
         assert_eq!(result.estimand, StdRegEstimand::ATC);
@@ -1602,8 +1589,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result =
-            run_stdreg(&dataset, "y", "treatment", &["x1", "x2"], config).unwrap();
+        let result = run_stdreg(&dataset, "y", "treatment", &["x1", "x2"], config).unwrap();
 
         // Delta method should give positive SE
         assert!(result.se > 0.0 && result.se.is_finite());
@@ -1619,8 +1605,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result =
-            run_stdreg(&dataset, "y", "treatment", &["x1", "x2"], config).unwrap();
+        let result = run_stdreg(&dataset, "y", "treatment", &["x1", "x2"], config).unwrap();
 
         // Sandwich SE should be positive
         assert!(result.se > 0.0 && result.se.is_finite());
@@ -1637,8 +1622,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result =
-            run_stdreg(&dataset, "y", "treatment", &["x1", "x2"], config).unwrap();
+        let result = run_stdreg(&dataset, "y", "treatment", &["x1", "x2"], config).unwrap();
 
         // CI should bracket the point estimate
         assert!(
@@ -1668,8 +1652,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result =
-            run_stdreg(&dataset, "y", "treatment", &["x1", "x2"], config).unwrap();
+        let result = run_stdreg(&dataset, "y", "treatment", &["x1", "x2"], config).unwrap();
 
         // Individual effects should be available
         assert_eq!(result.individual_effects.len(), result.n_obs);
@@ -1677,8 +1660,7 @@ mod tests {
         assert_eq!(result.y_hat_0.len(), result.n_obs);
 
         // Average of individual effects should match ATE
-        let mean_ie: f64 =
-            result.individual_effects.iter().sum::<f64>() / result.n_obs as f64;
+        let mean_ie: f64 = result.individual_effects.iter().sum::<f64>() / result.n_obs as f64;
         assert!(
             (mean_ie - result.ate).abs() < 1e-10,
             "Mean individual effect {} should match ATE {}",
@@ -1705,8 +1687,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result =
-            run_stdreg(&dataset, "y", "treatment", &["x1", "x2"], config).unwrap();
+        let result = run_stdreg(&dataset, "y", "treatment", &["x1", "x2"], config).unwrap();
 
         let output = format!("{}", result);
         assert!(output.contains("Regression Standardization"));
@@ -1787,10 +1768,7 @@ mod tests {
         );
 
         // Risk ratio should be > 1 (treatment is beneficial)
-        assert!(
-            result.risk_ratio.unwrap() > 1.0,
-            "Risk ratio should be > 1"
-        );
+        assert!(result.risk_ratio.unwrap() > 1.0, "Risk ratio should be > 1");
     }
 
     #[test]

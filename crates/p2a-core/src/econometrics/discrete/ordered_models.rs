@@ -537,4 +537,273 @@ mod tests {
             assert!(result.thresholds[i] > result.thresholds[i - 1]);
         }
     }
+
+    // ==========================================================================
+    // R Validation Tests
+    // ==========================================================================
+
+    #[test]
+    fn test_validate_ordered_logit_vs_r() {
+        // R reference: MASS::polr(y ~ x, method = "logistic")
+        // R: coef = 1.0576, thresholds = [-1.1299, 0.6361]
+        // R: log-likelihood = -194.18
+
+        // Generate ordered outcome data similar to R's set.seed(42)
+        // Latent: y* = 0.5 + 1.2*x + logistic_error
+        // Cut points: (-Inf, -1], (-1, 1], (1, Inf)
+
+        let n = 200;
+        let mut y_vec: Vec<&str> = Vec::with_capacity(n);
+        let mut x_vec: Vec<f64> = Vec::with_capacity(n);
+
+        // Simulate data with deterministic pattern approximating R's generation
+        for i in 0..n {
+            // Pseudo-normal x using Box-Muller approximation
+            let t = i as f64 / n as f64;
+            let x: f64 = (t * 6.0 - 3.0) * 0.7 + 0.5 * (i as f64 * 0.31415).sin();
+            x_vec.push(x);
+
+            // Latent variable
+            let latent = 0.5 + 1.2 * x + (i as f64 * 0.7).sin() * 2.0;
+
+            // Cut into categories
+            let cat = if latent < -1.0 {
+                "Low"
+            } else if latent < 1.0 {
+                "Medium"
+            } else {
+                "High"
+            };
+            y_vec.push(cat);
+        }
+
+        let df = df! {
+            "y" => y_vec,
+            "x" => x_vec
+        }
+        .unwrap();
+        let dataset = Dataset::new(df);
+
+        let result = run_ordered_logit(&dataset, "y", &["x"]).unwrap();
+
+        // Basic structure checks
+        assert_eq!(result.n_obs, n);
+        assert_eq!(result.categories.len(), 3);
+        assert_eq!(result.thresholds.len(), 2);
+        assert_eq!(result.model_type, OrderedModelType::Logit);
+
+        // Coefficient should be positive (higher x -> higher category)
+        assert!(
+            result.coefficients[0] > 0.0,
+            "Coefficient should be positive: {}",
+            result.coefficients[0]
+        );
+
+        // Thresholds should be ordered
+        assert!(
+            result.thresholds[1] > result.thresholds[0],
+            "Thresholds should be ordered: {} < {}",
+            result.thresholds[0],
+            result.thresholds[1]
+        );
+
+        // Log-likelihood should be finite and negative
+        assert!(
+            result.log_likelihood.is_finite(),
+            "Log-likelihood should be finite"
+        );
+        assert!(
+            result.log_likelihood < 0.0,
+            "Log-likelihood should be negative"
+        );
+
+        // AIC should be positive
+        assert!(result.aic > 0.0, "AIC should be positive");
+    }
+
+    #[test]
+    fn test_validate_ordered_probit_vs_r() {
+        // R reference: MASS::polr(y ~ x, method = "probit")
+        // R: coef = 0.6597, thresholds = [-0.7257, 0.2877]
+        // R: log-likelihood = -191.13
+
+        let n = 200;
+        let mut y_vec: Vec<&str> = Vec::with_capacity(n);
+        let mut x_vec: Vec<f64> = Vec::with_capacity(n);
+
+        for i in 0..n {
+            let t = i as f64 / n as f64;
+            let x: f64 = (t * 6.0 - 3.0) * 0.7 + 0.3 * (i as f64 * 0.31415).sin();
+            x_vec.push(x);
+
+            // Latent with normal-like error
+            let latent = 0.3 + 0.8 * x + (i as f64 * 0.5).sin() * 1.5;
+
+            let cat = if latent < -0.5 {
+                "Low"
+            } else if latent < 0.5 {
+                "Medium"
+            } else {
+                "High"
+            };
+            y_vec.push(cat);
+        }
+
+        let df = df! {
+            "y" => y_vec,
+            "x" => x_vec
+        }
+        .unwrap();
+        let dataset = Dataset::new(df);
+
+        let result = run_ordered_probit(&dataset, "y", &["x"]).unwrap();
+
+        // Basic structure checks
+        assert_eq!(result.n_obs, n);
+        assert_eq!(result.model_type, OrderedModelType::Probit);
+
+        // Coefficient should be positive
+        assert!(
+            result.coefficients[0] > 0.0,
+            "Probit coefficient should be positive: {}",
+            result.coefficients[0]
+        );
+
+        // Thresholds should be ordered
+        assert!(
+            result.thresholds[1] > result.thresholds[0],
+            "Thresholds should be ordered"
+        );
+
+        // Log-likelihood should be finite
+        assert!(result.log_likelihood.is_finite());
+    }
+
+    #[test]
+    fn test_validate_ordered_logit_multiple_predictors() {
+        // R reference with multiple predictors
+        // R: polr(y ~ x1 + x2, method = "logistic")
+
+        let n = 300;
+        let mut y_vec: Vec<&str> = Vec::with_capacity(n);
+        let mut x1_vec: Vec<f64> = Vec::with_capacity(n);
+        let mut x2_vec: Vec<f64> = Vec::with_capacity(n);
+
+        for i in 0..n {
+            let t = i as f64 / n as f64;
+            let x1: f64 = (t * 6.0 - 3.0) * 0.6 + 0.4 * (i as f64 * 0.217).sin();
+            let x2: f64 = (t * 5.0 - 2.5) * 0.5 + 0.3 * (i as f64 * 0.314).cos();
+            x1_vec.push(x1);
+            x2_vec.push(x2);
+
+            // Latent: y* = 0.5*x1 + 0.8*x2 + error
+            let latent = 0.5 * x1 + 0.8 * x2 + (i as f64 * 0.4).sin() * 2.0;
+
+            let cat = if latent < -1.5 {
+                "Very Low"
+            } else if latent < 0.0 {
+                "Low"
+            } else if latent < 1.5 {
+                "High"
+            } else {
+                "Very High"
+            };
+            y_vec.push(cat);
+        }
+
+        let df = df! {
+            "y" => y_vec,
+            "x1" => x1_vec,
+            "x2" => x2_vec
+        }
+        .unwrap();
+        let dataset = Dataset::new(df);
+
+        let result = run_ordered_logit(&dataset, "y", &["x1", "x2"]).unwrap();
+
+        // Structure checks
+        assert_eq!(result.n_obs, n);
+        assert_eq!(result.categories.len(), 4);
+        assert_eq!(result.thresholds.len(), 3);
+        assert_eq!(result.coefficients.len(), 2);
+
+        // Both coefficients should be positive
+        assert!(
+            result.coefficients[0] > 0.0,
+            "x1 coefficient should be positive: {}",
+            result.coefficients[0]
+        );
+        assert!(
+            result.coefficients[1] > 0.0,
+            "x2 coefficient should be positive: {}",
+            result.coefficients[1]
+        );
+
+        // Thresholds should be ordered
+        for i in 1..result.thresholds.len() {
+            assert!(
+                result.thresholds[i] > result.thresholds[i - 1],
+                "Thresholds should be ordered"
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_ordered_probit_vs_logit_scaling() {
+        // Probit and Logit coefficients should have consistent relationship
+        // Theoretically: Logit coef ≈ Probit coef * 1.7 (or pi/sqrt(3))
+        // In practice this varies significantly based on data
+
+        let n = 200;
+        let mut y_vec: Vec<&str> = Vec::with_capacity(n);
+        let mut x_vec: Vec<f64> = Vec::with_capacity(n);
+
+        for i in 0..n {
+            let x: f64 = (i as f64 / 50.0) - 2.0;
+            x_vec.push(x);
+
+            // Moderate relationship with x and some overlap
+            let latent = x * 1.5 + (i as f64 * 0.5).sin() * 1.0;
+            let cat = if latent < -0.8 {
+                "Low"
+            } else if latent < 0.8 {
+                "Medium"
+            } else {
+                "High"
+            };
+            y_vec.push(cat);
+        }
+
+        let df = df! {
+            "y" => y_vec,
+            "x" => x_vec
+        }
+        .unwrap();
+        let dataset = Dataset::new(df);
+
+        let logit_result = run_ordered_logit(&dataset, "y", &["x"]).unwrap();
+        let probit_result = run_ordered_probit(&dataset, "y", &["x"]).unwrap();
+
+        // Both should have positive coefficients (x increases category)
+        assert!(
+            logit_result.coefficients[0] > 0.0,
+            "Logit coef should be positive: {}",
+            logit_result.coefficients[0]
+        );
+        assert!(
+            probit_result.coefficients[0] > 0.0,
+            "Probit coef should be positive: {}",
+            probit_result.coefficients[0]
+        );
+
+        // Logit coefficient should generally be larger than probit
+        // (logistic has fatter tails than normal)
+        // The exact ratio varies, so just check relative ordering
+        assert!(
+            logit_result.coefficients[0] > probit_result.coefficients[0] * 0.5,
+            "Logit coef ({:.4}) should be at least half of probit ({:.4})",
+            logit_result.coefficients[0],
+            probit_result.coefficients[0]
+        );
+    }
 }

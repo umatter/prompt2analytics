@@ -197,7 +197,12 @@ impl fmt::Display for SpectrumResult {
         writeln!(f)?;
 
         if let Some((peak_freq, peak_spec)) = self.peak_frequency() {
-            writeln!(f, "Peak Frequency: {:.4} (period = {:.2})", peak_freq, 1.0 / peak_freq)?;
+            writeln!(
+                f,
+                "Peak Frequency: {:.4} (period = {:.2})",
+                peak_freq,
+                1.0 / peak_freq
+            )?;
             writeln!(f, "Peak Spectral Density: {:.4}", peak_spec)?;
         }
 
@@ -324,9 +329,7 @@ pub fn spectrum(x: &[f64], config: SpectrumConfig) -> EconResult<SpectrumResult>
     let n_freq = n_used / 2;
 
     // Prepare FFT input: convert real signal to complex
-    let mut fft_input: Vec<Complex<f64>> = y.iter()
-        .map(|&v| Complex::new(v, 0.0))
-        .collect();
+    let mut fft_input: Vec<Complex<f64>> = y.iter().map(|&v| Complex::new(v, 0.0)).collect();
 
     // Compute FFT
     let mut planner = FftPlanner::new();
@@ -349,7 +352,11 @@ pub fn spectrum(x: &[f64], config: SpectrumConfig) -> EconResult<SpectrumResult>
 
         // Scale by 2 for one-sided spectrum (positive frequencies only)
         // except at Nyquist if n_used is even
-        let scale = if j == n_freq && n_used % 2 == 0 { 1.0 } else { 2.0 };
+        let scale = if j == n_freq && n_used % 2 == 0 {
+            1.0
+        } else {
+            2.0
+        };
         raw_periodogram.push(power * scale);
     }
 
@@ -421,7 +428,11 @@ fn detrend(x: &[f64]) -> Vec<f64> {
     // var(t) = sum(t^2)/n - mean_t^2
     let var_t = sum_t2 / n_f - mean_t * mean_t;
 
-    let slope = if var_t > 1e-15 { cov_tx / (n_f * var_t) } else { 0.0 };
+    let slope = if var_t > 1e-15 {
+        cov_tx / (n_f * var_t)
+    } else {
+        0.0
+    };
     let intercept = mean_x - slope * mean_t;
 
     // Return residuals
@@ -526,7 +537,11 @@ fn apply_single_daniell(x: &[f64], span: usize) -> Vec<f64> {
             }
         }
 
-        result.push(if weight_sum > 0.0 { sum / weight_sum } else { x[i] });
+        result.push(if weight_sum > 0.0 {
+            sum / weight_sum
+        } else {
+            x[i]
+        });
     }
 
     result
@@ -555,7 +570,11 @@ fn apply_single_daniell(x: &[f64], span: usize) -> Vec<f64> {
 ///
 /// - Brockwell & Davis (1991), Section 4.4
 /// - R `spec.ar`
-pub fn spectrum_ar(x: &[f64], order: Option<usize>, n_freq: Option<usize>) -> EconResult<SpectrumResult> {
+pub fn spectrum_ar(
+    x: &[f64],
+    order: Option<usize>,
+    n_freq: Option<usize>,
+) -> EconResult<SpectrumResult> {
     let n = x.len();
 
     if n < 4 {
@@ -602,14 +621,18 @@ pub fn spectrum_ar(x: &[f64], order: Option<usize>, n_freq: Option<usize>) -> Ec
         }
 
         let denom = re * re + im * im;
-        let s = if denom > 1e-15 { innovation_var / denom } else { innovation_var };
+        let s = if denom > 1e-15 {
+            innovation_var / denom
+        } else {
+            innovation_var
+        };
         spec.push(s);
     }
 
     Ok(SpectrumResult {
         freq,
         spec,
-        bandwidth: 0.0, // AR spectrum is smooth, bandwidth not applicable
+        bandwidth: 0.0,    // AR spectrum is smooth, bandwidth not applicable
         df: f64::INFINITY, // Smooth estimate, infinite df
         n_obs: n,
         n_used: n,
@@ -831,7 +854,9 @@ mod tests {
     #[test]
     fn test_spectrum_basic() {
         // Test with a simple series
-        let x: Vec<f64> = (0..100).map(|i| (2.0 * PI * i as f64 / 10.0).sin()).collect();
+        let x: Vec<f64> = (0..100)
+            .map(|i| (2.0 * PI * i as f64 / 10.0).sin())
+            .collect();
         let config = SpectrumConfig::default();
         let result = spectrum(&x, config).unwrap();
 
@@ -857,16 +882,20 @@ mod tests {
     fn test_spectrum_white_noise() {
         // White noise should have approximately flat spectrum
         let x: Vec<f64> = vec![
-            0.1, -0.3, 0.2, -0.1, 0.4, -0.2, 0.1, -0.3, 0.2, 0.1,
-            0.3, -0.1, 0.0, 0.2, -0.4, 0.1, -0.2, 0.3, -0.1, 0.2,
+            0.1, -0.3, 0.2, -0.1, 0.4, -0.2, 0.1, -0.3, 0.2, 0.1, 0.3, -0.1, 0.0, 0.2, -0.4, 0.1,
+            -0.2, 0.3, -0.1, 0.2,
         ];
 
         let config = SpectrumConfig::with_spans(vec![3, 3]);
         let result = spectrum(&x, config).unwrap();
 
         // Check that spectrum values don't vary too wildly (roughly flat)
-        let mean_spec: f64 = result.spec.iter().sum::<f64>() / result.spec.len() as f64;
-        let max_spec = result.spec.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let _mean_spec: f64 = result.spec.iter().sum::<f64>() / result.spec.len() as f64;
+        let max_spec = result
+            .spec
+            .iter()
+            .cloned()
+            .fold(f64::NEG_INFINITY, f64::max);
         let min_spec = result.spec.iter().cloned().fold(f64::INFINITY, f64::min);
 
         // For white noise, ratio of max to min shouldn't be extreme after smoothing
@@ -909,17 +938,14 @@ mod tests {
         // First and last 2 points should be tapered (10% of 20 = 2)
         assert!(x[0] < 1.0, "First point should be tapered down");
         assert!(x[1] < 1.0, "Second point should be tapered");
-        assert!(x[10].abs() > 0.5, "Middle points should not be heavily tapered");
+        assert!(
+            x[10].abs() > 0.5,
+            "Middle points should not be heavily tapered"
+        );
 
         // Symmetry check
-        assert!(
-            approx_eq(x[0], x[19], 1e-10),
-            "Taper should be symmetric"
-        );
-        assert!(
-            approx_eq(x[1], x[18], 1e-10),
-            "Taper should be symmetric"
-        );
+        assert!(approx_eq(x[0], x[19], 1e-10), "Taper should be symmetric");
+        assert!(approx_eq(x[1], x[18], 1e-10), "Taper should be symmetric");
     }
 
     #[test]
@@ -951,7 +977,9 @@ mod tests {
     #[test]
     fn test_spectrum_ar() {
         // Test AR spectral estimation
-        let x: Vec<f64> = (0..100).map(|i| (2.0 * PI * i as f64 / 10.0).sin()).collect();
+        let x: Vec<f64> = (0..100)
+            .map(|i| (2.0 * PI * i as f64 / 10.0).sin())
+            .collect();
         let result = spectrum_ar(&x, Some(5), Some(100)).unwrap();
 
         assert_eq!(result.freq.len(), 100);
@@ -1044,7 +1072,9 @@ mod tests {
     #[test]
     fn test_validate_spectrum_against_r() {
         // Generate sine wave with period 10 (frequency 0.1)
-        let x: Vec<f64> = (1..=100).map(|i| (2.0 * PI * i as f64 / 10.0).sin()).collect();
+        let x: Vec<f64> = (1..=100)
+            .map(|i| (2.0 * PI * i as f64 / 10.0).sin())
+            .collect();
 
         let config = SpectrumConfig::with_spans(vec![3, 3]);
         let result = spectrum(&x, config).unwrap();
@@ -1100,7 +1130,9 @@ mod tests {
     #[test]
     fn test_validate_spectrum_comprehensive_against_r() {
         // Generate sine wave with period 10 (frequency 0.1) - same as R
-        let x: Vec<f64> = (1..=100).map(|i| (2.0 * PI * i as f64 / 10.0).sin()).collect();
+        let x: Vec<f64> = (1..=100)
+            .map(|i| (2.0 * PI * i as f64 / 10.0).sin())
+            .collect();
 
         let config = SpectrumConfig {
             spans: Some(vec![3, 3]),
@@ -1120,10 +1152,7 @@ mod tests {
         );
 
         // Check number of frequencies (should be n/2 = 50)
-        assert_eq!(
-            result.freq.len(), 50,
-            "Should have n/2 = 50 frequencies"
-        );
+        assert_eq!(result.freq.len(), 50, "Should have n/2 = 50 frequencies");
 
         // Check that frequencies span (0, 0.5]
         assert!(
@@ -1186,9 +1215,9 @@ mod tests {
     #[test]
     fn test_validate_two_frequency_spectrum() {
         // Signal with two frequencies: f=0.2 (period 5) and f=0.1 (period 10)
-        let x: Vec<f64> = (1..=50).map(|i| {
-            (2.0 * PI * i as f64 / 5.0).cos() + 0.5 * (2.0 * PI * i as f64 / 10.0).cos()
-        }).collect();
+        let x: Vec<f64> = (1..=50)
+            .map(|i| (2.0 * PI * i as f64 / 5.0).cos() + 0.5 * (2.0 * PI * i as f64 / 10.0).cos())
+            .collect();
 
         let config = SpectrumConfig::with_spans(vec![3]);
         let result = spectrum(&x, config).unwrap();
@@ -1198,7 +1227,7 @@ mod tests {
         indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
 
         let peak1_freq = result.freq[indexed[0].0];
-        let peak2_freq = result.freq[indexed[1].0];
+        let _peak2_freq = result.freq[indexed[1].0];
 
         // The dominant frequency should be at or near 0.2 (the larger amplitude component)
         assert!(
@@ -1215,7 +1244,11 @@ mod tests {
         assert!(
             has_secondary,
             "Should have peaks near both 0.1 and 0.2, top frequencies: {:?}",
-            indexed.iter().take(5).map(|(i, _)| result.freq[*i]).collect::<Vec<_>>()
+            indexed
+                .iter()
+                .take(5)
+                .map(|(i, _)| result.freq[*i])
+                .collect::<Vec<_>>()
         );
     }
 
@@ -1227,7 +1260,7 @@ mod tests {
         let mut seed: u64 = 42;
         for _ in 0..100 {
             seed = seed.wrapping_mul(1103515245).wrapping_add(12345);
-            let val = ((seed >> 16) as f64 / 32768.0 - 1.0);
+            let val = (seed >> 16) as f64 / 32768.0 - 1.0;
             x.push(val);
         }
 
@@ -1237,16 +1270,16 @@ mod tests {
         // For white noise, coefficient of variation should be moderate
         // (not as flat as theoretical but not highly peaked either)
         let mean_spec: f64 = result.spec.iter().sum::<f64>() / result.spec.len() as f64;
-        let var_spec: f64 = result.spec.iter().map(|s| (s - mean_spec).powi(2)).sum::<f64>()
+        let var_spec: f64 = result
+            .spec
+            .iter()
+            .map(|s| (s - mean_spec).powi(2))
+            .sum::<f64>()
             / result.spec.len() as f64;
         let cv = var_spec.sqrt() / mean_spec;
 
         // R shows CV ≈ 0.35 for white noise with spans=c(5,5)
         // Allow broader range due to different implementations
-        assert!(
-            cv < 2.0,
-            "White noise CV {} should be < 2.0 (R ≈ 0.35)",
-            cv
-        );
+        assert!(cv < 2.0, "White noise CV {} should be < 2.0 (R ≈ 0.35)", cv);
     }
 }

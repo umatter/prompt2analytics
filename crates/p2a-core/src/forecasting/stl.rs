@@ -12,9 +12,9 @@
 //!   <https://stat.ethz.ch/R-manual/R-devel/library/stats/html/stl.html>
 //! - Implementation uses the `stlrs` crate (Rust port of original Fortran code).
 
-use serde::{Deserialize, Serialize};
 use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
+use serde::{Deserialize, Serialize};
 
 /// Configuration for STL decomposition.
 #[derive(Debug, Clone)]
@@ -241,7 +241,8 @@ pub fn stl(x: &[f64], config: StlConfig) -> EconResult<StlResult> {
     }
 
     // Perform decomposition
-    let result = params.fit(&x_f32, period)
+    let result = params
+        .fit(&x_f32, period)
         .map_err(|e| EconError::Computation(format!("STL decomposition failed: {}", e)))?;
 
     // Extract components and convert back to f64
@@ -282,7 +283,8 @@ fn calculate_strength(component: &[f64], remainder: &[f64]) -> f64 {
     }
 
     let var_r = variance(remainder);
-    let combined: Vec<f64> = component.iter()
+    let combined: Vec<f64> = component
+        .iter()
         .zip(remainder.iter())
         .map(|(c, r)| c + r)
         .collect();
@@ -325,12 +327,15 @@ pub fn run_stl(
     robust: bool,
 ) -> EconResult<StlResult> {
     let df = dataset.df();
-    let available: Vec<String> = df.get_column_names().iter().map(|s| s.to_string()).collect();
-    let col = df.column(column)
-        .map_err(|_| EconError::ColumnNotFound {
-            column: column.to_string(),
-            available: available.clone(),
-        })?;
+    let available: Vec<String> = df
+        .get_column_names()
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let col = df.column(column).map_err(|_| EconError::ColumnNotFound {
+        column: column.to_string(),
+        available: available.clone(),
+    })?;
 
     let x: Vec<f64> = col
         .f64()
@@ -351,12 +356,15 @@ pub fn run_stl_with_config(
     config: StlConfig,
 ) -> EconResult<StlResult> {
     let df = dataset.df();
-    let available: Vec<String> = df.get_column_names().iter().map(|s| s.to_string()).collect();
-    let col = df.column(column)
-        .map_err(|_| EconError::ColumnNotFound {
-            column: column.to_string(),
-            available: available.clone(),
-        })?;
+    let available: Vec<String> = df
+        .get_column_names()
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let col = df.column(column).map_err(|_| EconError::ColumnNotFound {
+        column: column.to_string(),
+        available: available.clone(),
+    })?;
 
     let x: Vec<f64> = col
         .f64()
@@ -373,20 +381,28 @@ pub fn run_stl_with_config(
 mod tests {
     use super::*;
 
-    fn generate_seasonal_data(n: usize, period: usize, trend_slope: f64, seasonal_amp: f64, noise_sd: f64) -> Vec<f64> {
-        use std::f64::consts::PI;
+    fn generate_seasonal_data(
+        n: usize,
+        period: usize,
+        trend_slope: f64,
+        seasonal_amp: f64,
+        noise_sd: f64,
+    ) -> Vec<f64> {
         use rand::SeedableRng;
         use rand_distr::{Distribution, Normal};
+        use std::f64::consts::PI;
 
         let mut rng = rand::rngs::StdRng::seed_from_u64(42);
         let normal = Normal::new(0.0, noise_sd).unwrap();
 
-        (0..n).map(|t| {
-            let trend = 100.0 + trend_slope * t as f64;
-            let seasonal = seasonal_amp * (2.0 * PI * t as f64 / period as f64).sin();
-            let noise = normal.sample(&mut rng);
-            trend + seasonal + noise
-        }).collect()
+        (0..n)
+            .map(|t| {
+                let trend = 100.0 + trend_slope * t as f64;
+                let seasonal = seasonal_amp * (2.0 * PI * t as f64 / period as f64).sin();
+                let noise = normal.sample(&mut rng);
+                trend + seasonal + noise
+            })
+            .collect()
     }
 
     #[test]
@@ -408,7 +424,13 @@ mod tests {
         for i in 0..result.n_obs {
             let reconstructed = result.trend[i] + result.seasonal[i] + result.remainder[i];
             let diff = (result.x[i] - reconstructed).abs();
-            assert!(diff < 1e-4, "Reconstruction failed at index {}: {} vs {}", i, result.x[i], reconstructed);
+            assert!(
+                diff < 1e-4,
+                "Reconstruction failed at index {}: {} vs {}",
+                i,
+                result.x[i],
+                reconstructed
+            );
         }
     }
 
@@ -416,8 +438,8 @@ mod tests {
     fn test_stl_robust() {
         // Add outliers
         let mut x = generate_seasonal_data(120, 12, 0.5, 10.0, 1.0);
-        x[30] += 50.0;  // Outlier
-        x[60] -= 50.0;  // Outlier
+        x[30] += 50.0; // Outlier
+        x[60] -= 50.0; // Outlier
 
         let config = StlConfig::new(12).robust(true);
         let result = stl(&x, config).unwrap();
@@ -437,20 +459,26 @@ mod tests {
     #[test]
     fn test_stl_strength() {
         // Strong seasonality, weak trend
-        let x1: Vec<f64> = (0..120).map(|t| {
-            10.0 * (2.0 * std::f64::consts::PI * t as f64 / 12.0).sin()
-        }).collect();
+        let x1: Vec<f64> = (0..120)
+            .map(|t| 10.0 * (2.0 * std::f64::consts::PI * t as f64 / 12.0).sin())
+            .collect();
 
         let result1 = stl(&x1, StlConfig::new(12)).unwrap();
-        assert!(result1.seasonal_strength > 0.8, "Expected strong seasonality, got {}", result1.seasonal_strength);
+        assert!(
+            result1.seasonal_strength > 0.8,
+            "Expected strong seasonality, got {}",
+            result1.seasonal_strength
+        );
 
         // Strong trend, weak seasonality
-        let x2: Vec<f64> = (0..120).map(|t| {
-            100.0 + 2.0 * t as f64
-        }).collect();
+        let x2: Vec<f64> = (0..120).map(|t| 100.0 + 2.0 * t as f64).collect();
 
         let result2 = stl(&x2, StlConfig::new(12)).unwrap();
-        assert!(result2.trend_strength > 0.8, "Expected strong trend, got {}", result2.trend_strength);
+        assert!(
+            result2.trend_strength > 0.8,
+            "Expected strong trend, got {}",
+            result2.trend_strength
+        );
     }
 
     #[test]
@@ -499,29 +527,49 @@ mod tests {
         // Trend should be ~100 + 0.5*t
 
         // Generate deterministic data (no noise)
-        let x: Vec<f64> = (1..=120).map(|t| {
-            100.0 + 0.5 * t as f64 + 10.0 * (2.0 * std::f64::consts::PI * t as f64 / 12.0).sin()
-        }).collect();
+        let x: Vec<f64> = (1..=120)
+            .map(|t| {
+                100.0 + 0.5 * t as f64 + 10.0 * (2.0 * std::f64::consts::PI * t as f64 / 12.0).sin()
+            })
+            .collect();
 
         let result = stl(&x, StlConfig::new(12)).unwrap();
 
         // Check trend is approximately linear
-        let first_trend = result.trend[10];  // Skip boundary effects
+        let first_trend = result.trend[10]; // Skip boundary effects
         let last_trend = result.trend[109];
         let expected_slope = 0.5;
         let actual_slope = (last_trend - first_trend) / (109.0 - 10.0);
-        assert!((actual_slope - expected_slope).abs() < 0.1,
-            "Trend slope should be ~0.5, got {}", actual_slope);
+        assert!(
+            (actual_slope - expected_slope).abs() < 0.1,
+            "Trend slope should be ~0.5, got {}",
+            actual_slope
+        );
 
         // Check seasonal amplitude is approximately 10
-        let seasonal_max = result.seasonal.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-        let seasonal_min = result.seasonal.iter().cloned().fold(f64::INFINITY, f64::min);
+        let seasonal_max = result
+            .seasonal
+            .iter()
+            .cloned()
+            .fold(f64::NEG_INFINITY, f64::max);
+        let seasonal_min = result
+            .seasonal
+            .iter()
+            .cloned()
+            .fold(f64::INFINITY, f64::min);
         let seasonal_range = seasonal_max - seasonal_min;
-        assert!(seasonal_range > 15.0 && seasonal_range < 25.0,
-            "Seasonal range should be ~20 (amplitude 10), got {}", seasonal_range);
+        assert!(
+            seasonal_range > 15.0 && seasonal_range < 25.0,
+            "Seasonal range should be ~20 (amplitude 10), got {}",
+            seasonal_range
+        );
 
         // Check remainder is small
         let remainder_var = variance(&result.remainder);
-        assert!(remainder_var < 1.0, "Remainder variance should be small, got {}", remainder_var);
+        assert!(
+            remainder_var < 1.0,
+            "Remainder variance should be small, got {}",
+            remainder_var
+        );
     }
 }
