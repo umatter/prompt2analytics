@@ -230,6 +230,7 @@ pub mod traits;
 
 // Core feature modules (always available)
 pub mod data;
+pub mod diagnostics;
 pub mod econometrics;
 pub mod export;
 pub mod ml;

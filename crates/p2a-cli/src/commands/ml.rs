@@ -273,7 +273,7 @@ pub fn execute(
     }
 }
 
-/// Extract multiple columns from a Dataset as an Array2<f64>
+/// Extract multiple columns from a Dataset as an `Array2<f64>`
 fn extract_columns_as_array(
     dataset: &p2a_core::Dataset,
     cols: &[String],

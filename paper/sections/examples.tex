@@ -296,6 +296,144 @@ proactive issue identification.
 
 
 %% -----------------------------------------------------------------------------
+\subsection{Realistic interaction patterns} \label{sec:examples-realistic}
+
+The preceding examples present successful interactions, but realistic use
+involves corrections, clarifications, and iterative refinement. Our extended
+evaluation (Section~\ref{sec:local}) reveals that multi-turn accuracy drops
+to 50--60\% and parameter extraction F1 ranges from 41--59\%---users should
+expect to correct or clarify requests frequently. This section illustrates
+typical interaction patterns including failures and recovery.
+
+\subsubsection{Ambiguous specification requiring clarification}
+
+\begin{Sinput}
+User: Run a regression with firm effects.
+\end{Sinput}
+
+\begin{Soutput}
+I can estimate this model, but need clarification:
+
+1. **Dependent variable**: Which column should be the outcome?
+2. **Independent variables**: Which predictors should be included?
+3. **Fixed vs Random effects**: Should firm effects be treated as fixed
+   (within estimator) or random (GLS)?
+
+Please specify, e.g., "Regress inv on value and capital with firm fixed effects"
+\end{Soutput}
+
+\begin{Sinput}
+User: Regress inv on value with firm fixed effects.
+\end{Sinput}
+
+\begin{Soutput}
+**Fixed Effects (Within) Estimation**
+Dependent variable: inv
+Entity fixed effects: firm (10 levels)
+
+| Variable |    Coef |  Std Err |      t | P>|t| |
+|----------|--------:|---------:|-------:|------:|
+| value    |   0.095 |    0.010 |  9.747 | 0.000 |
+
+R-squared (within): 0.334
+\end{Soutput}
+
+\subsubsection{Incorrect method selection}
+
+When users describe analyses ambiguously, the LLM may select inappropriate methods:
+
+\begin{Sinput}
+User: Estimate the causal effect of capital on investment.
+\end{Sinput}
+
+\begin{Soutput}
+**OLS Regression Results**
+Dependent variable: inv
+
+| Variable    |    Coef |  Std Err |      t | P>|t| |
+|-------------|--------:|---------:|-------:|------:|
+| (Intercept) | -17.892 |   11.312 | -1.582 | 0.115 |
+| capital     |   0.234 |    0.012 | 19.524 | 0.000 |
+
+A one-unit increase in capital is associated with a 0.234 increase in
+investment.
+\end{Soutput}
+
+\begin{Sinput}
+User: That's just correlation. I need the causal effect - capital is
+      endogenous due to simultaneity with investment decisions.
+\end{Sinput}
+
+\begin{Soutput}
+You're right - capital and investment are jointly determined, making OLS
+estimates biased. For causal identification, you would need:
+
+1. **Instrumental Variables**: A valid instrument affecting capital but
+   not investment directly
+2. **Panel methods**: Firm fixed effects can address time-invariant
+   confounding, though not simultaneity
+3. **Lagged variables**: Using lagged capital may reduce (but not eliminate)
+   simultaneity bias
+
+The system implements IV/2SLS if you have instruments. Without instruments,
+I can only provide associational estimates with appropriate caveats.
+
+**Important**: This system executes statistical methods but does not validate
+identification strategies. Causal claims require justification beyond the
+statistical procedure.
+\end{Soutput}
+
+\subsubsection{Parameter extraction failure}
+
+The LLM sometimes extracts parameters incorrectly from natural language:
+
+\begin{Sinput}
+User: Use HC2 standard errors and cluster by firm.
+\end{Sinput}
+
+\begin{Soutput}
+**OLS Regression Results** (HC2 robust standard errors)
+...
+\end{Soutput}
+
+\begin{Sinput}
+User: I asked for clustering by firm, not just robust SEs.
+\end{Sinput}
+
+\begin{Soutput}
+I apologize for the error. Let me re-run with clustered standard errors:
+
+**OLS Regression Results** (Clustered by firm, 10 clusters)
+
+| Variable    |    Coef | Cluster SE |      t | P>|t| |
+|-------------|--------:|-----------:|-------:|------:|
+| (Intercept) | -42.714 |     23.624 | -1.808 | 0.104 |
+| value       |   0.116 |      0.013 |  8.844 | 0.000 |
+| capital     |   0.231 |      0.068 |  3.409 | 0.008 |
+
+**Note**: With only 10 clusters, clustered standard errors may be
+downward biased. Consider wild cluster bootstrap for more reliable inference.
+\end{Soutput}
+
+\subsubsection{Expected interaction frequency}
+
+Based on our extended evaluation, users should anticipate:
+\begin{itemize}
+  \item 2--3 clarifying exchanges per analytical workflow
+  \item Explicit specification reduces errors (e.g., naming variables directly
+        rather than using pronouns like ``the same variables'')
+  \item Parameter verification is advisable before interpreting results
+  \item Complex multi-turn analyses (4+ turns) complete successfully only
+        30--50\% of the time without corrections
+\end{itemize}
+
+These limitations reflect fundamental challenges in natural language
+understanding, not implementation deficiencies. Users gain most value from
+the system by treating it as an assistant requiring supervision rather than
+an autonomous analyst.
+
+
+%% -----------------------------------------------------------------------------
 \subsection{Error handling and recovery} \label{sec:examples-errors}
 
 The system handles common failure modes with explanatory guidance. Two

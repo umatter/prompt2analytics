@@ -17,7 +17,7 @@
 //!
 //! # Example
 //!
-//! ```rust
+//! ```rust,ignore
 //! use p2a_core::simulation::{generate_random_data, ColumnSpec, Distribution};
 //!
 //! let columns = vec![

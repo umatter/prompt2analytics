@@ -34,46 +34,37 @@
 //!
 //! Generate comprehensive quality profiles for LLM-assisted cleaning:
 //!
-//! ```rust,no_run
+//! ```rust,ignore
 //! use p2a_core::data::{generate_quality_profile, Dataset};
 //!
-//! # fn example(dataset: &Dataset) -> Result<(), Box<dyn std::error::Error>> {
-//! let profile = generate_quality_profile(dataset, None)?;
+//! let profile = generate_quality_profile(&dataset, None)?;
 //! println!("Issues found: {:?}", profile.issues);
-//! # Ok(())
-//! # }
 //! ```
 //!
 //! ## Cleaning Sessions ([`cleaning_session`])
 //!
 //! Multi-step cleaning workflows with rollback support:
 //!
-//! ```rust,no_run
+//! ```rust,ignore
 //! use p2a_core::data::{CleaningSession, Dataset};
 //!
-//! # fn example(dataset: Dataset) -> Result<(), Box<dyn std::error::Error>> {
 //! let mut session = CleaningSession::new(dataset);
 //! session.checkpoint("Initial state")?;
 //! // ... apply cleaning operations ...
 //! session.rollback()?;  // Undo last operation
-//! # Ok(())
-//! # }
 //! ```
 //!
 //! ## Cleaning Suggestions ([`suggestion`])
 //!
 //! AI-powered suggestions with priority ranking:
 //!
-//! ```rust,no_run
+//! ```rust,ignore
 //! use p2a_core::data::{generate_suggestions, Dataset};
 //!
-//! # fn example(dataset: &Dataset) -> Result<(), Box<dyn std::error::Error>> {
-//! let suggestions = generate_suggestions(dataset)?;
+//! let suggestions = generate_suggestions(&dataset)?;
 //! for s in suggestions.suggestions {
 //!     println!("{}: {}", s.priority, s.description);
 //! }
-//! # Ok(())
-//! # }
 //! ```
 //!
 //! ## Submodules

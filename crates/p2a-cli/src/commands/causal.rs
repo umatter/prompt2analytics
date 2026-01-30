@@ -29,6 +29,11 @@ use p2a_core::{
     TmleConfig,
     VOptimization,
     VceType,
+    // Diagnostics
+    diagnostics::{
+        WarningSeverity, did_diagnostics, ipw_diagnostics, iv_diagnostics, matching_diagnostics,
+        rd_diagnostics, staggered_did_diagnostics,
+    },
     // Propensity Score Matching
     match_it,
     run_did,
@@ -782,6 +787,31 @@ fn execute_iv(
                                     println!("  Warning: Some instruments may be weak (F < 10)");
                                 }
                             }
+
+                            // Run identification diagnostics
+                            if let Ok(diag_report) = iv_diagnostics(ds, &result) {
+                                let warnings: Vec<_> = diag_report
+                                    .warnings
+                                    .iter()
+                                    .filter(|w| w.severity >= WarningSeverity::Caution)
+                                    .collect();
+                                if !warnings.is_empty() {
+                                    println!("\nIdentification warnings:");
+                                    for w in warnings {
+                                        println!(
+                                            "  [{}] {}: {}",
+                                            match w.severity {
+                                                WarningSeverity::Critical => "CRITICAL",
+                                                WarningSeverity::Warning => "WARNING",
+                                                WarningSeverity::Caution => "CAUTION",
+                                                WarningSeverity::Info => "INFO",
+                                            },
+                                            w.title,
+                                            w.message
+                                        );
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -865,6 +895,30 @@ fn execute_did(
                             "  Post-treatment (control): {:.4}",
                             result.control_post_mean
                         );
+
+                        // Run identification diagnostics
+                        let diag_report = did_diagnostics(&result);
+                        let warnings: Vec<_> = diag_report
+                            .warnings
+                            .iter()
+                            .filter(|w| w.severity >= WarningSeverity::Caution)
+                            .collect();
+                        if !warnings.is_empty() {
+                            println!("\nIdentification warnings:");
+                            for w in warnings {
+                                println!(
+                                    "  [{}] {}: {}",
+                                    match w.severity {
+                                        WarningSeverity::Critical => "CRITICAL",
+                                        WarningSeverity::Warning => "WARNING",
+                                        WarningSeverity::Caution => "CAUTION",
+                                        WarningSeverity::Info => "INFO",
+                                    },
+                                    w.title,
+                                    w.message
+                                );
+                            }
+                        }
                     }
                 },
                 Err(e) => {
@@ -1048,6 +1102,30 @@ fn execute_ipw(
                             "N: {} (treated: {}, control: {})",
                             result.n_obs, result.n_treated, result.n_control
                         );
+
+                        // Run identification diagnostics
+                        let diag_report = ipw_diagnostics(&result);
+                        let warnings: Vec<_> = diag_report
+                            .warnings
+                            .iter()
+                            .filter(|w| w.severity >= WarningSeverity::Caution)
+                            .collect();
+                        if !warnings.is_empty() {
+                            println!("\nIdentification warnings:");
+                            for w in warnings {
+                                println!(
+                                    "  [{}] {}: {}",
+                                    match w.severity {
+                                        WarningSeverity::Critical => "CRITICAL",
+                                        WarningSeverity::Warning => "WARNING",
+                                        WarningSeverity::Caution => "CAUTION",
+                                        WarningSeverity::Info => "INFO",
+                                    },
+                                    w.title,
+                                    w.message
+                                );
+                            }
+                        }
                     }
                 },
                 Err(e) => print_error(&format!("IPW failed: {}", e), format),
@@ -1298,6 +1376,30 @@ fn execute_rd(
                             "Bandwidth h: left={:.4}, right={:.4}",
                             result.h_left, result.h_right
                         );
+
+                        // Run identification diagnostics
+                        let diag_report = rd_diagnostics(&result);
+                        let warnings: Vec<_> = diag_report
+                            .warnings
+                            .iter()
+                            .filter(|w| w.severity >= WarningSeverity::Caution)
+                            .collect();
+                        if !warnings.is_empty() {
+                            println!("\nIdentification warnings:");
+                            for w in warnings {
+                                println!(
+                                    "  [{}] {}: {}",
+                                    match w.severity {
+                                        WarningSeverity::Critical => "CRITICAL",
+                                        WarningSeverity::Warning => "WARNING",
+                                        WarningSeverity::Caution => "CAUTION",
+                                        WarningSeverity::Info => "INFO",
+                                    },
+                                    w.title,
+                                    w.message
+                                );
+                            }
+                        }
                     }
                 },
                 Err(e) => print_error(&format!("RD estimation failed: {}", e), format),
@@ -1372,6 +1474,30 @@ fn execute_fuzzy_rd(
                             "95% CI: [{:.6}, {:.6}]",
                             result.ci_fuzzy.0, result.ci_fuzzy.1
                         );
+
+                        // Run identification diagnostics on the outcome RD
+                        let diag_report = rd_diagnostics(&result.outcome_rd);
+                        let warnings: Vec<_> = diag_report
+                            .warnings
+                            .iter()
+                            .filter(|w| w.severity >= WarningSeverity::Caution)
+                            .collect();
+                        if !warnings.is_empty() {
+                            println!("\nIdentification warnings:");
+                            for w in warnings {
+                                println!(
+                                    "  [{}] {}: {}",
+                                    match w.severity {
+                                        WarningSeverity::Critical => "CRITICAL",
+                                        WarningSeverity::Warning => "WARNING",
+                                        WarningSeverity::Caution => "CAUTION",
+                                        WarningSeverity::Info => "INFO",
+                                    },
+                                    w.title,
+                                    w.message
+                                );
+                            }
+                        }
                     }
                 },
                 Err(e) => print_error(&format!("Fuzzy RD estimation failed: {}", e), format),
@@ -1478,6 +1604,30 @@ fn execute_staggered_did(
                     }
                     _ => {
                         println!("{}", result);
+
+                        // Run identification diagnostics
+                        let diag_report = staggered_did_diagnostics(&result);
+                        let warnings: Vec<_> = diag_report
+                            .warnings
+                            .iter()
+                            .filter(|w| w.severity >= WarningSeverity::Caution)
+                            .collect();
+                        if !warnings.is_empty() {
+                            println!("\nIdentification warnings:");
+                            for w in warnings {
+                                println!(
+                                    "  [{}] {}: {}",
+                                    match w.severity {
+                                        WarningSeverity::Critical => "CRITICAL",
+                                        WarningSeverity::Warning => "WARNING",
+                                        WarningSeverity::Caution => "CAUTION",
+                                        WarningSeverity::Info => "INFO",
+                                    },
+                                    w.title,
+                                    w.message
+                                );
+                            }
+                        }
                     }
                 },
                 Err(e) => print_error(&format!("Staggered DiD failed: {}", e), format),
@@ -1766,6 +1916,30 @@ fn execute_matching(
                         println!("{}", result);
                         println!("\nDetailed Balance After Matching:");
                         println!("{}", result.balance_after);
+
+                        // Run identification diagnostics
+                        let diag_report = matching_diagnostics(&result);
+                        let warnings: Vec<_> = diag_report
+                            .warnings
+                            .iter()
+                            .filter(|w| w.severity >= WarningSeverity::Caution)
+                            .collect();
+                        if !warnings.is_empty() {
+                            println!("\nIdentification warnings:");
+                            for w in warnings {
+                                println!(
+                                    "  [{}] {}: {}",
+                                    match w.severity {
+                                        WarningSeverity::Critical => "CRITICAL",
+                                        WarningSeverity::Warning => "WARNING",
+                                        WarningSeverity::Caution => "CAUTION",
+                                        WarningSeverity::Info => "INFO",
+                                    },
+                                    w.title,
+                                    w.message
+                                );
+                            }
+                        }
                     }
                 },
                 Err(e) => print_error(&format!("Matching failed: {}", e), format),

@@ -11,13 +11,13 @@ plain English: ``run a regression of wages on education and experience,'' ``test
 whether these two groups have different means,'' or ``fit an ARIMA model to this
 time series.'' While natural language interfaces to statistical software have
 been explored for decades---from early database query systems
-\citep{Androutsopoulos+etal:1995} to commercial tools like SPSS and SAS---LLMs
-represent a qualitative advance in flexibility and accessibility. This shift
+\citep{Androutsopoulos+etal:1995} to commercial tools like SPSS and SAS---large
+language models (LLMs) represent a qualitative advance in flexibility and accessibility. This shift
 promises to lower barriers to data analysis but also raises significant concerns
 about accuracy, reproducibility, and data privacy.
 
-This paper introduces the concept of \emph{chat-first data analytics}: an
-approach that applies established tool-augmented language model techniques
+This paper describes \emph{chat-first data analytics}: an application of
+established tool-augmented language model techniques
 \citep{Schick+etal:2023, Yao+etal:2023} to statistical and econometric analysis.
 Natural language conversation serves as the primary interface
 to statistical methods, while rigorous, pre-implemented algorithms perform the
@@ -31,7 +31,7 @@ that scientific work demands.
 
 \subsection{The current landscape}
 
-The use of large language models (LLMs) for data analysis has grown rapidly
+The use of LLMs for data analysis has grown rapidly
 \citep{Nejjar+etal:2024, Sun+etal:2025:Survey, Korinek:2025}. The appeal is
 clear: natural language eliminates the need to learn programming syntax, allowing
 domain experts to describe analytical goals directly.
@@ -48,11 +48,22 @@ flows to third-party servers with unclear policies---and \emph{reproducibility}-
 conversational sessions are ephemeral, with the same prompt yielding different
 code as models update.
 
+These concerns are not confined to research settings. Enterprise analytics vendors
+have similarly retreated from ``chat with your data'' approaches after encountering
+systematic failures: inconsistent metric definitions across data sources, hidden
+business logic inaccessible to language models, and outputs that fail basic audit
+requirements. When identical questions yield different answers depending on which
+dataset is queried, or when results cannot be traced back to underlying
+calculations, user trust erodes rapidly. The pattern suggests that free-form
+conversational interfaces to data---whether for business intelligence or
+statistical analysis---require architectural constraints that naive
+implementations lack.
+
 \subsection{The opportunity}
 
 Despite these concerns, the underlying demand is legitimate and likely to
-persist. Researchers want to focus on their substantive questions---does
-education affect wages? did the policy reduce crime? is this treatment
+persist. Researchers want to focus on their substantive questions---Does
+education affect wages? Did the policy reduce crime? Is this treatment
 effective?---rather than on implementation details. The cognitive burden of
 translating analytical intent into software-specific syntax is real, and
 anything that reduces this burden frees mental resources for the questions
@@ -94,11 +105,12 @@ is the goal of chat-first data analytics.
 
 \subsection{Chat-first data analytics}
 
-We define \emph{chat-first data analytics} as an approach that extends the
-natural language interface paradigm---developed for database queries, data
+We use \emph{chat-first data analytics} to describe an approach that extends
+the natural language interface paradigm---developed for database queries, data
 visualization, and general-purpose AI assistants---to statistical and
-econometric analysis. This approach has two defining properties and one
-important design choice:
+econometric analysis. This represents an application of established techniques
+to a new domain rather than a novel paradigm. The approach has two defining
+properties and one important design choice:
 
 \begin{enumerate}
   \item \textbf{Natural language as the primary interface.} Users describe
@@ -195,7 +207,7 @@ welcome via pull requests; the repository includes contribution guidelines
 and a code of conduct.
 
 \begin{center}
-\url{https://github.com/prompt2analytics/prompt2analytics}
+\url{https://github.com/umatter/prompt2analytics}
 \end{center}
 
 \noindent Supplementary materials accompanying this paper include:

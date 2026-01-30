@@ -149,19 +149,46 @@ either decline gracefully or suggest alternatives. Detection rates range
 from 40--60\%, with most undetected cases resulting in selection of a
 superficially similar but incorrect method.
 
-Table~\ref{tab:extended-eval} in Appendix~\ref{app:extended-eval} provides
-complete results. Figure~\ref{fig:robustness-radar} visualizes the
-multi-dimensional performance profile for each model.
+Table~\ref{tab:extended-eval-summary-main} summarizes the key metrics from
+the extended evaluation, highlighting the gap between controlled single-turn
+evaluation and realistic usage patterns.
+
+\begin{table}[htbp]
+\centering
+\caption{Extended evaluation results: the gap between controlled benchmarks
+and realistic use. Single-turn accuracy (87--100\%) substantially overstates
+practical capability. Values show range across 10 evaluated models.}
+\label{tab:extended-eval-summary-main}
+\small
+\begin{tabular}{lcc}
+\toprule
+Metric & Range & Best Model \\
+\midrule
+Single-turn tool selection & 90.8--100\% & Qwen 2.5 72B, Claude 3.5 Haiku \\
+Multi-turn accuracy & 47--60\% & Llama 3.3 70B (59.7\%) \\
+Conversation completion & 0--35\% & Llama 3.3 70B (35\%) \\
+Naturalistic prompt robustness & 58--70\% & Claude 3.5 Haiku (69.7\%) \\
+Parameter extraction F1 & 41--59\% & Qwen 2.5 72B (59.1\%) \\
+Interpretation accuracy & 68--87\% & GPT-4.1 Nano (87.2\%) \\
+Out-of-scope detection & 40--60\% & Llama 3.3 70B (60\%) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Figure~\ref{fig:robustness-radar} in Appendix~\ref{app:extended-eval}
+visualizes the multi-dimensional performance profile for each model.
 
 \textbf{Implications.} The extended evaluation reveals that single-turn
 accuracy substantially overstates real-world capability. Multi-turn
 accuracy of 50--60\% means users should expect to correct or clarify
-requests frequently. Parameter extraction errors occur in roughly half
-of interactions. These findings reinforce the importance of the
-conversation transcript and result verification discussed below. For
-production deployment, larger models (70B+ parameters) provide meaningful
-improvements in robustness, though even the best models require user
-oversight for complex analytical workflows.
+requests in roughly half of multi-turn interactions. Parameter extraction
+errors (F1 of 41--59\%) mean users should verify that extracted parameters
+match their intent before interpreting results. These findings reinforce
+the importance of explicit specification, result verification, and treating
+the system as an assistant requiring supervision rather than an autonomous
+analyst. For production deployment, larger models (70B+ parameters) provide
+meaningful improvements in robustness, though even the best models require
+user oversight for complex analytical workflows.
 
 \subsection{Failure modes and error handling}
 
@@ -320,6 +347,82 @@ professional GPUs with 24+ GB VRAM, multi-GPU configurations, or
 partial CPU offloading that significantly increases inference latency.
 Users with limited RAM can configure Ollama to offload model layers
 to disk, trading response time for reduced memory consumption.
+
+\subsubsection{Data processing requirements}
+
+Beyond LLM memory, users must budget RAM for dataset operations. Unlike
+interpreted languages that incur overhead for object metadata, \proglang{Rust}
+processes data in compact columnar format via \pkg{polars}. Table~\ref{tab:hardware-data}
+provides guidance on RAM requirements for data processing.
+
+\begin{table}[htbp]
+\centering
+\caption{RAM requirements for data processing operations. Values represent
+peak memory during analysis (loading, transformation, estimation). Actual
+requirements depend on column count and operation complexity; values assume
+typical econometric datasets with 10--50 columns. Matrix-intensive operations
+(HDFE, GMM, bootstrap) require additional working memory shown in the third column.}
+\label{tab:hardware-data}
+\small
+\begin{tabular}{lrrrl}
+\toprule
+Rows & File size & Base RAM & Matrix ops & Notes \\
+\midrule
+1,000 & $<$1 MB & 50 MB & +20 MB & Standard laptop \\
+10,000 & 1--10 MB & 100 MB & +100 MB & Standard laptop \\
+100,000 & 10--100 MB & 500 MB & +500 MB & Consumer hardware \\
+1,000,000 & 100 MB--1 GB & 2 GB & +2 GB & Workstation \\
+10,000,000 & 1--10 GB & 10 GB & +8 GB & High-memory system \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Memory requirements scale roughly linearly with observation count for most
+operations. The primary memory consumers are:
+\begin{itemize}
+  \item \emph{Design matrices}: For $n$ observations and $k$ predictors,
+    the design matrix requires $8nk$ bytes (64-bit floats). With HDFE,
+    the demeaned matrix requires similar space.
+  \item \emph{Covariance matrices}: Computing $(X'X)^{-1}$ requires $8k^2$
+    bytes plus working space for Cholesky decomposition.
+  \item \emph{Bootstrap samples}: Residual bootstrap with $B$ replications
+    stores coefficients ($8kB$ bytes), not full samples.
+  \item \emph{Panel transformations}: Within-group demeaning creates a
+    transformed dataset approximately equal in size to the original.
+\end{itemize}
+
+For combined LLM and data processing, sum the requirements from
+Tables~\ref{tab:models} and \ref{tab:hardware-data}. A typical configuration
+analyzing 100,000 observations with a 7B model requires approximately
+8--10~GB total RAM (8~GB LLM + 1~GB data processing).
+
+Table~\ref{tab:hardware-summary} provides system recommendations for
+common deployment scenarios.
+
+\begin{table}[htbp]
+\centering
+\caption{Recommended system configurations for local deployment. RAM values
+include both LLM and data processing headroom. GPU requirements assume
+CUDA-capable NVIDIA cards; AMD and Intel GPUs are supported via Ollama's
+ROCm and OneAPI backends respectively but may have performance differences.}
+\label{tab:hardware-summary}
+\small
+\begin{tabular}{llrrr}
+\toprule
+Scenario & Model & RAM & GPU VRAM & Storage \\
+\midrule
+Minimal (laptop) & Ministral 3B & 16 GB & 6 GB & 5 GB \\
+Consumer (desktop) & Qwen 2.5 7B & 16 GB & 8 GB & 10 GB \\
+Professional & Llama 3.3 70B & 64 GB & 48 GB & 50 GB \\
+Server (large data) & Qwen 2.5 72B & 128 GB & 2$\times$24 GB & 60 GB \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Storage requirements include the \pkg{prompt2analytics} binary ($\sim$50~MB),
+model weights (see Table~\ref{tab:models}), and working space for datasets.
+CPU-only inference is viable for smaller models but increases latency by
+5--10$\times$ compared to GPU inference.
 
 \subsection{Privacy guarantees}
 

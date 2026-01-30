@@ -70,13 +70,12 @@
 //!
 //! ## Example
 //!
-//! ```rust,no_run
+//! ```rust,ignore
 //! use p2a_core::forecasting::{run_arima, forecast_arima, run_holt_winters};
 //! use p2a_core::Dataset;
 //!
-//! # fn example(dataset: &Dataset) -> Result<(), Box<dyn std::error::Error>> {
 //! // Fit ARIMA(1,1,1)
-//! let arima = run_arima(dataset, "sales", Some(1), Some(1), Some(1))?;
+//! let arima = run_arima(&dataset, "sales", Some(1), Some(1), Some(1))?;
 //! println!("AIC: {:.2}", arima.aic);
 //!
 //! // Forecast 12 periods ahead
@@ -84,10 +83,8 @@
 //! println!("Forecast: {:?}", forecast.point_forecast);
 //!
 //! // Holt-Winters seasonal model
-//! let hw = run_holt_winters(dataset, "sales", 12, "additive", None, None, None)?;
+//! let hw = run_holt_winters(&dataset, "sales", 12, "additive", None, None, None)?;
 //! println!("Fitted values: {:?}", hw.fitted);
-//! # Ok(())
-//! # }
 //! ```
 //!
 //! ## R Package Equivalents

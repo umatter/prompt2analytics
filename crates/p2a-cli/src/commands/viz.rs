@@ -334,7 +334,7 @@ pub enum VizCommands {
     },
 }
 
-/// Extract a column from a Dataset as Vec<f64>
+/// Extract a column from a Dataset as `Vec<f64>`
 fn extract_column(dataset: &p2a_core::Dataset, col: &str) -> Result<Vec<f64>, String> {
     let df = dataset.df();
     let column = df
@@ -1257,7 +1257,7 @@ fn execute_dendrogram(
     Ok(())
 }
 
-/// Extract multiple columns from a Dataset as an Array2<f64>
+/// Extract multiple columns from a Dataset as an `Array2<f64>`
 fn extract_columns_as_array(
     dataset: &p2a_core::Dataset,
     cols: &[String],

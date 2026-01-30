@@ -10,9 +10,12 @@ approximately 75 method configurations spanning regression, econometrics,
 machine learning, and forecasting. Benchmark methodology follows
 Section~\ref{sec:comparison}; see Appendix~\ref{app:benchmark-methodology}
 for complete details.%
-\footnote{A notable omission is \pkg{fixest} \citep{Berge:2018}, which likely
-exceeds \pkg{prompt2analytics} for HDFE problems. All performance claims compare
-against \pkg{plm} and \pkg{lfe}, not \pkg{fixest}.}
+\footnote{A notable omission is \pkg{fixest} \citep{Berge:2018}, which is
+substantially faster than both \pkg{plm} and \pkg{lfe} for panel methods.
+Informal benchmarks suggest \pkg{fixest} also outperforms \pkg{prompt2analytics}
+for HDFE problems at large scale due to its highly optimized C++ implementation
+of the alternating projections algorithm. Users prioritizing raw speed for
+panel econometrics over natural language interfaces should consider \pkg{fixest}.}
 
 \subsection{Benchmark results} \label{sec:benchmark-results}
 
@@ -65,7 +68,15 @@ maturity rather than fundamental language performance.
 \textbf{OLS without robust standard errors} is sufficiently fast in both
 languages that CLI startup overhead dominates computation time at moderate
 sample sizes. The ``slowdown'' disappears when measured as pure computation
-time (excluding process initialization).
+time (excluding process initialization). To quantify this: the \code{p2a}
+CLI incurs approximately 12--15~ms of startup overhead (binary loading,
+argument parsing, polars initialization), while \proglang{R}'s equivalent
+overhead is approximately 50~ms but is excluded from \pkg{bench} timings
+which measure only the timed expression. For methods completing in under
+20~ms, the Rust CLI overhead dominates; for methods taking over 100~ms,
+it becomes negligible. Table~\ref{tab:benchmark-full} reports wall-clock
+time including CLI overhead; the MCP server interface avoids this overhead
+entirely since the server runs persistently.
 
 The general pattern is that \pkg{prompt2analytics} excels at computationally
 intensive iterative methods (panel fixed effects, robust standard errors, HDFE)

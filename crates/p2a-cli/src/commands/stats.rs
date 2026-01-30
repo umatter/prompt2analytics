@@ -650,7 +650,7 @@ pub fn execute(
     }
 }
 
-/// Helper to extract a column as Vec<f64>
+/// Helper to extract a column as `Vec<f64>`
 fn extract_column(dataset: &p2a_core::Dataset, col: &str) -> Result<Vec<f64>, String> {
     let df = dataset.df();
     let column = df

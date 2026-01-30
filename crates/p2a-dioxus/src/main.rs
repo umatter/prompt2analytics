@@ -19,7 +19,7 @@ use platform::platform_name;
 
 /// Initialize logging based on platform
 fn init_logging() {
-    #[cfg(target_arch = "wasm32")]
+    #[cfg(feature = "web")]
     {
         use tracing::Level;
         use tracing_wasm::WASMLayerConfigBuilder;
@@ -30,7 +30,7 @@ fn init_logging() {
         tracing_wasm::set_as_global_default_with_config(config);
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(any(feature = "desktop", feature = "mobile"))]
     {
         use tracing_subscriber::EnvFilter;
 
@@ -43,7 +43,7 @@ fn init_logging() {
 
 /// Start the embedded backend server on native platforms
 /// Returns the server handle which must be kept alive for the duration of the app
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(feature = "desktop", feature = "mobile"))]
 fn start_embedded_backend() -> Option<p2a_mcp::EmbeddedServer> {
     use p2a_mcp::EmbeddedServerConfig;
 
@@ -103,7 +103,7 @@ fn main() {
     );
 
     // On native platforms, start the embedded backend
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(any(feature = "desktop", feature = "mobile"))]
     let _server = {
         tracing::info!("Starting embedded p2a-mcp backend...");
         let server = start_embedded_backend();
@@ -114,7 +114,7 @@ fn main() {
     };
 
     // Launch the Dioxus app with platform-specific configuration
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(feature = "desktop")]
     {
         use dioxus::desktop::{Config, WindowBuilder};
 
@@ -136,14 +136,19 @@ fn main() {
             .launch(app::App);
     }
 
-    #[cfg(target_arch = "wasm32")]
+    #[cfg(feature = "mobile")]
+    {
+        dioxus::launch(app::App);
+    }
+
+    #[cfg(feature = "web")]
     {
         dioxus::launch(app::App);
     }
 }
 
 /// Load the application icon from embedded PNG data
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(feature = "desktop")]
 fn load_icon() -> Option<dioxus::desktop::tao::window::Icon> {
     use dioxus::desktop::tao::window::Icon;
 

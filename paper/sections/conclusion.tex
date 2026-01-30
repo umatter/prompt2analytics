@@ -4,11 +4,12 @@
 
 \section{Conclusion} \label{sec:conclusion}
 
-This paper has introduced chat-first data analytics as an approach to statistical
-computation that combines natural language interfaces with pre-implemented,
-verified statistical methods. The key insight is that language models excel at
-interpreting user intent and selecting appropriate methods, but should not be
-trusted with numerical computation. By separating interpretation from execution,
+This paper has described chat-first data analytics, an application of established
+tool-augmented language model techniques to statistical computation. The approach
+combines natural language interfaces with pre-implemented, verified statistical
+methods. The key insight---that language models excel at interpreting user intent
+and selecting appropriate methods, but should not be trusted with numerical
+computation---builds on prior work in tool-augmented LLMs \citep{Schick+etal:2023}. By separating interpretation from execution,
 chat-first systems can provide the accessibility of conversational interfaces
 while maintaining the reliability that scientific work demands.
 
@@ -54,9 +55,9 @@ practical capability. Extended evaluation shows multi-turn accuracy of 50--60\%,
 parameter extraction F1 of 41--59\%, and out-of-scope detection rates of 40--60\%
 (Appendix~\ref{app:extended-eval}). User study validation remains unaddressed.
 
-\textbf{Method coverage.} Unimplemented methods include quantile regression,
-Heckman selection, spatial econometrics, GMM, dynamic panel models, matching
-estimators, and Bayesian methods. See Section~\ref{sec:design} for the complete list.
+\textbf{Method coverage.} While coverage is broad (200+ methods), some categories
+remain unimplemented: Heckman selection and Bayesian methods. See
+Section~\ref{sec:design} for details.
 
 \textbf{Scalability.} Data are loaded entirely into memory; datasets exceeding
 available RAM require external preprocessing.
@@ -88,9 +89,9 @@ properties (e.g., residuals orthogonal to regressors) would complement
 numerical accuracy validation.
 
 \textbf{Method expansion.} High-priority additions include Bayesian inference
-(providing posterior distributions rather than point estimates), quantile
-regression, sample selection corrections, and spatial econometric methods.
-The modular architecture facilitates these extensions.
+(providing posterior distributions rather than point estimates) and Heckman
+sample selection corrections. The modular architecture facilitates these
+extensions.
 
 \textbf{Workflow integration.} Integration with \proglang{R} and \proglang{Python}
 via foreign function interfaces would enable users to call \proglang{Rust}
@@ -214,8 +215,8 @@ for coverage of expected elements and absence of common errors (e.g., confusing
 correlation with causation, misinterpreting log coefficients).
 
 \textbf{Out-of-scope detection.} Twenty prompts request methods outside the
-\pkg{prompt2analytics} scope (Bayesian inference, GARCH, quantile regression,
-spatial econometrics, etc.). Correct responses either decline the request or
+\pkg{prompt2analytics} scope (Bayesian inference, Heckman selection, structural
+equation modeling, etc.). Correct responses either decline the request or
 suggest the closest available alternative; incorrect responses select an
 inappropriate tool.
 
@@ -274,7 +275,8 @@ Common failure patterns across dimensions include:
     (robust SE type, clustering specification, interaction terms).
   \item \emph{Overconfident tool selection}: When facing out-of-scope requests,
     models rarely decline; instead, they select superficially similar tools
-    (e.g., OLS for quantile regression, VAR for Bayesian VAR).
+    (e.g., frequentist regression for Bayesian regression, standard VAR for
+    Bayesian VAR).
   \item \emph{Interpretation shortcuts}: Models sometimes provide accurate but
     incomplete interpretations, omitting important caveats about statistical
     vs.\ practical significance or the limitations of specific tests.
@@ -378,6 +380,73 @@ For Claude Desktop, add to \code{claude\_desktop\_config.json}:
     }
   }
 }
+\end{verbatim}
+
+\subsection{Pre-compiled binaries}
+
+For users who prefer not to install the Rust toolchain, pre-compiled binaries
+are available for common platforms:
+
+\begin{itemize}
+  \item \textbf{Linux (x86\_64-unknown-linux-gnu)}: Statically linked binary,
+    no runtime dependencies except glibc 2.17+
+  \item \textbf{macOS (aarch64-apple-darwin)}: Universal binary for Apple Silicon
+  \item \textbf{macOS (x86\_64-apple-darwin)}: Intel Mac binary
+  \item \textbf{Windows (x86\_64-pc-windows-msvc)}: MSVC-linked binary
+\end{itemize}
+
+\noindent Download from the GitHub releases page:
+\code{https://github.com/umatter/prompt2analytics/releases}
+
+After downloading, extract and run directly:
+\begin{verbatim}
+# Linux/macOS
+chmod +x p2a-mcp
+./p2a-mcp --transport stdio
+
+# Windows
+p2a-mcp.exe --transport stdio
+\end{verbatim}
+
+\subsection{Docker deployment}
+
+For isolated, reproducible deployment without any local installation:
+
+\begin{verbatim}
+# Pull the official image
+docker pull ghcr.io/umatter/prompt2analytics:latest
+
+# Run with local data directory mounted
+docker run -v /path/to/data:/data \
+  -p 8080:8080 \
+  ghcr.io/umatter/prompt2analytics:latest \
+  --transport http --host 0.0.0.0 --port 8080
+
+# Or use docker-compose for persistent deployment
+docker-compose up -d
+\end{verbatim}
+
+The Docker image includes:
+\begin{itemize}
+  \item Pre-built \code{p2a-mcp} and \code{p2a} binaries
+  \item Ollama with Llama 3.1 8B pre-downloaded
+  \item All BLAS dependencies (OpenBLAS)
+  \item Example datasets for testing
+\end{itemize}
+
+The \code{Dockerfile} in the repository root can be customized for specific needs:
+\begin{verbatim}
+FROM rust:1.85-bookworm AS builder
+WORKDIR /app
+COPY . .
+RUN apt-get update && apt-get install -y libopenblas-dev
+RUN cargo build --release -p p2a-mcp -p p2a-cli
+
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y libopenblas0 ca-certificates
+COPY --from=builder /app/target/release/p2a-mcp /usr/local/bin/
+COPY --from=builder /app/target/release/p2a /usr/local/bin/
+ENTRYPOINT ["p2a-mcp"]
 \end{verbatim}
 
 \subsection{Model selection guidance}
@@ -559,6 +628,67 @@ All benchmarks run on identical hardware: an Intel Core i7-1260P processor
 with 64GB RAM running Linux, with \proglang{R} 4.5.2 using OpenBLAS and
 \proglang{Rust} 1.92.0 compiled in release mode with link-time optimization.
 
+\subsection{Validation tolerances} \label{app:validation-tolerances}
+
+Numerical validation against \proglang{R} reference implementations uses
+sample-size-dependent tolerances. We use absolute tolerances for quantities
+with known scale (e.g., test statistics) and relative tolerances for
+unbounded quantities (e.g., coefficient estimates).
+
+\begin{table}[htbp]
+\centering
+\caption{Validation tolerances by method category and sample size.
+Absolute tolerances ($\varepsilon_{\mathrm{abs}}$) apply to test statistics,
+$p$-values, and bounded quantities. Relative tolerances
+($\varepsilon_{\mathrm{rel}}$) apply to coefficient estimates and standard errors.}
+\label{tab:validation-tolerances}
+\small
+\begin{tabular}{llccc}
+\toprule
+Category & Quantity & Small ($n < 100$) & Medium & Large ($n > 10{,}000$) \\
+\midrule
+\multicolumn{5}{l}{\textit{Coefficients and standard errors}} \\
+OLS coefficients & Relative & $10^{-6}$ & $10^{-8}$ & $10^{-10}$ \\
+Robust SEs (HC0/HC1) & Relative & $10^{-6}$ & $10^{-8}$ & $10^{-8}$ \\
+Robust SEs (HC2/HC3) & Relative & $10^{-5}$ & $10^{-7}$ & $10^{-7}$ \\
+Panel FE/RE & Relative & $10^{-5}$ & $10^{-6}$ & $10^{-6}$ \\
+MLE (logit/probit) & Relative & $10^{-4}$ & $10^{-6}$ & $10^{-6}$ \\
+\addlinespace
+\multicolumn{5}{l}{\textit{Test statistics and fit measures}} \\
+$t$-statistics, $F$-statistics & Absolute & $10^{-4}$ & $10^{-6}$ & $10^{-6}$ \\
+$R^2$, within $R^2$ & Absolute & $10^{-4}$ & $10^{-6}$ & $10^{-6}$ \\
+$p$-values & Absolute & $10^{-4}$ & $10^{-6}$ & $10^{-6}$ \\
+Log-likelihood & Absolute & $10^{-2}$ & $10^{-4}$ & $10^{-4}$ \\
+\addlinespace
+\multicolumn{5}{l}{\textit{Hypothesis tests}} \\
+Test statistics & Absolute & $10^{-4}$ & $10^{-6}$ & $10^{-6}$ \\
+Critical values & Absolute & $10^{-4}$ & $10^{-4}$ & $10^{-4}$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Rationale for tolerances.} Looser tolerances for small samples reflect
+increased sensitivity to algorithmic differences when matrices are
+ill-conditioned. HC2/HC3 standard errors use looser tolerances because
+leverage calculation involves $h_{ii} = x_i'(X'X)^{-1}x_i$, which accumulates
+rounding errors differently depending on whether leverage is extracted from
+QR decomposition (as in \pkg{sandwich}) or computed via direct matrix
+multiplication (as in \pkg{prompt2analytics}). Both approaches are numerically
+valid; the tolerance reflects implementation variation rather than error.
+
+MLE methods use looser small-sample tolerances because convergence criteria
+differ between implementations: \proglang{R}'s \fct{glm} uses relative
+change in deviance, while \pkg{prompt2analytics} uses absolute change in
+log-likelihood. Final parameter estimates can differ at the tolerance boundary
+while both satisfying their respective convergence criteria.
+
+\textbf{Tolerance verification.} Tolerances were determined empirically by
+running validation tests across sample sizes from $n = 10$ to $n = 100{,}000$
+and identifying the tightest tolerance that passes consistently. Edge cases
+(singular matrices, near-separation in logit/probit, small cluster counts)
+are tested separately with method-specific tolerances documented in the
+test code. All 334 validation tests pass at the specified tolerances.
+
 
 \section{Related work: Statistical interfaces} \label{app:related-work}
 \setcounter{table}{0}
@@ -658,9 +788,11 @@ units as controls. \cite{deChaisemartin+DHaultfoeuille:2020} and
 \cite{Sun+Abraham:2021} propose alternative estimators robust to treatment
 effect heterogeneity.
 
-\pkg{prompt2analytics} does not implement staggered DiD estimators.
-Users with staggered treatment adoption should use \pkg{fixest}'s
-\fct{sunab} function, the \pkg{did} package, or \pkg{did2s} in \proglang{R}.
+\pkg{prompt2analytics} implements staggered DiD via Callaway-Sant'Anna
+\citep{Callaway+SantAnna:2021}, Goodman-Bacon decomposition, and extended
+TWFE \citep{Wooldridge:2021}. Users with complex staggered designs may also
+consult \pkg{fixest}'s \fct{sunab} function or the \pkg{did} package in
+\proglang{R} for additional diagnostics.
 
 \subsection{Random effects}
 
@@ -693,11 +825,10 @@ cointegration testing, but do not implement structural VAR identification.
 
 \subsection{Methods not implemented}
 
-The current implementation focuses on foundational methods. Unimplemented
-categories include: sample selection (Heckman), quantile regression, spatial
-econometrics, GMM and structural estimation, dynamic panel models
-(Arellano-Bond, Arellano-Bover), matching estimators, synthetic control,
-user-facing bootstrap inference, Bayesian methods, and nonparametric methods.
+The current implementation is comprehensive, covering 200+ methods. Remaining
+unimplemented categories include: sample selection (Heckman) and Bayesian methods.
+Users requiring these should use \proglang{R} (e.g., \pkg{sampleSelection},
+\pkg{rstanarm}) or \proglang{Stata}.
 
 
 \section{Extended examples} \label{app:extended-examples}

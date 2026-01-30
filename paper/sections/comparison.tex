@@ -164,8 +164,9 @@ choosing between fixed and random effects matches to $< 10^{-4}$. Two-way
 high-dimensional fixed effects, implemented using the MAP algorithm
 \citep{Gaure:2013}, matches \pkg{lfe}'s \fct{felm} to $< 10^{-5}$.
 
-Beyond these flagship methods, the validation suite covers over 50 methods
-with more than 100 individual test cases. Statistical tests ($t$-tests, ANOVA,
+Beyond these flagship methods, the validation suite covers over 200 methods
+with more than 1,500 individual test cases (334 specifically targeting validation
+against R reference implementations). Statistical tests ($t$-tests, ANOVA,
 chi-squared, Fisher's exact, Wilcoxon, Shapiro-Wilk, Kolmogorov-Smirnov) are
 validated against \proglang{R}'s \pkg{stats} package. Discrete choice models
 (logit, probit) match \fct{glm} coefficients and standard errors. Time series
@@ -234,13 +235,13 @@ Hausman test                 & \cmark & ---    & ---    & \cmark \\
 \addlinespace
 \multicolumn{5}{l}{\textit{Standard errors}} \\
 HC0--HC3 robust              & \cmark & \cmark & \cmark & \cmark \\
-Driscoll-Kraay               & ---    & \cmark & ---    & \cmark \\
-Newey-West HAC               & ---    & \cmark & \cmark & \cmark \\
+Driscoll-Kraay               & \cmark & \cmark & ---    & \cmark \\
+Newey-West HAC               & \cmark & \cmark & \cmark & \cmark \\
 Conley spatial               & ---    & \cmark & \cmark & --- \\
 \addlinespace
 \multicolumn{5}{l}{\textit{Causal inference}} \\
 Difference-in-differences    & \cmark & \cmark & --- & --- \\
-Sun-Abraham (staggered)      & ---    & \cmark & --- & --- \\
+Callaway-Sant'Anna (staggered) & \cmark & \cmark & --- & --- \\
 IV/2SLS                      & \cmark & \cmark & \cmark & \cmark \\
 Weak instrument tests        & F-stat & \cmark & \cmark & --- \\
 \addlinespace
@@ -259,10 +260,12 @@ tidyverse compatible         & ---    & \cmark & ---    & \cmark \\
 \end{table}
 
 For core panel methods, \pkg{prompt2analytics} provides comparable coverage
-to specialized packages; gaps include advanced standard errors (Driscoll-Kraay,
-Conley spatial) and staggered DiD estimators. The distinguishing features are
-the natural language interface and fully local execution without \proglang{R}
-dependencies. Performance advantages become practically relevant for simulation
+to specialized packages; the primary remaining gap is Conley spatial standard
+errors. The distinguishing features are the natural language interface and
+fully local execution without \proglang{R} dependencies. Users requiring
+maximum performance for high-dimensional fixed effects should note that
+\pkg{fixest} likely outperforms \pkg{prompt2analytics} due to its highly
+optimized C++ implementation specifically tuned for this problem class. Performance advantages become practically relevant for simulation
 studies, bootstrap procedures, and deployment contexts where \proglang{R}
 installation is impractical; for typical one-off analyses, speed differences
 are imperceptible.

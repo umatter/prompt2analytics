@@ -242,6 +242,11 @@ use p2a_core::{
     },
     dbscan,
     decompose,
+    // Diagnostics
+    diagnostics::{
+        IdentificationReport, WarningSeverity, did_diagnostics, ipw_diagnostics, iv_diagnostics,
+        matching_diagnostics, rd_diagnostics, staggered_did_diagnostics,
+    },
     diffinv,
     embed,
     entropy_balance,
@@ -7995,6 +8000,44 @@ pub struct SmoothSplineRequest {
 }
 
 // ============================================================================
+// Helper Functions
+// ============================================================================
+
+/// Format diagnostic warnings from an identification report for output.
+fn format_diagnostic_warnings(report: &IdentificationReport) -> String {
+    let warnings: Vec<_> = report
+        .warnings
+        .iter()
+        .filter(|w| w.severity >= WarningSeverity::Caution)
+        .collect();
+
+    if warnings.is_empty() {
+        return String::new();
+    }
+
+    let mut output = String::from("\n\n--- Identification Diagnostics ---\n");
+    for w in warnings {
+        let severity_str = match w.severity {
+            WarningSeverity::Critical => "CRITICAL",
+            WarningSeverity::Warning => "WARNING",
+            WarningSeverity::Caution => "CAUTION",
+            WarningSeverity::Info => "INFO",
+        };
+        output.push_str(&format!(
+            "\n[{}] {}\n{}\n",
+            severity_str, w.title, w.message
+        ));
+        if !w.remediation.is_empty() {
+            output.push_str("Suggested actions:\n");
+            for r in &w.remediation {
+                output.push_str(&format!("  - {}\n", r));
+            }
+        }
+    }
+    output
+}
+
+// ============================================================================
 // Tool Router Implementation
 // ============================================================================
 
@@ -15392,9 +15435,13 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(
-            result.to_string(),
-        )]))
+        // Run identification diagnostics
+        let mut output = result.to_string();
+        if let Ok(diag_report) = iv_diagnostics(dataset, &result) {
+            output.push_str(&format_diagnostic_warnings(&diag_report));
+        }
+
+        Ok(CallToolResult::success(vec![Content::text(output)]))
     }
 
     /// Run first-stage diagnostics for IV/2SLS.
@@ -15695,9 +15742,12 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(
-            result.to_string(),
-        )]))
+        // Run identification diagnostics
+        let mut output = result.to_string();
+        let diag_report = did_diagnostics(&result);
+        output.push_str(&format_diagnostic_warnings(&diag_report));
+
+        Ok(CallToolResult::success(vec![Content::text(output)]))
     }
 
     /// Run Callaway-Sant'Anna staggered difference-in-differences.
@@ -15766,9 +15816,12 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(
-            result.to_string(),
-        )]))
+        // Run identification diagnostics
+        let mut output = result.to_string();
+        let diag_report = staggered_did_diagnostics(&result);
+        output.push_str(&format_diagnostic_warnings(&diag_report));
+
+        Ok(CallToolResult::success(vec![Content::text(output)]))
     }
 
     /// Perform Goodman-Bacon decomposition for staggered DiD.
@@ -15932,9 +15985,12 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(
-            result.to_string(),
-        )]))
+        // Run identification diagnostics
+        let mut output = result.to_string();
+        let diag_report = ipw_diagnostics(&result);
+        output.push_str(&format_diagnostic_warnings(&diag_report));
+
+        Ok(CallToolResult::success(vec![Content::text(output)]))
     }
 
     /// Run Doubly Robust (AIPW) treatment effect estimation.
@@ -16480,10 +16536,12 @@ impl AnalyticsServer {
                 }
             };
 
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "{}",
-            result
-        ))]))
+        // Run identification diagnostics
+        let mut output = result.to_string();
+        let diag_report = matching_diagnostics(&result);
+        output.push_str(&format_diagnostic_warnings(&diag_report));
+
+        Ok(CallToolResult::success(vec![Content::text(output)]))
     }
 
     /// Run Targeted Maximum Likelihood Estimation (TMLE) for causal inference.
@@ -17665,9 +17723,12 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(
-            result.to_string(),
-        )]))
+        // Run identification diagnostics
+        let mut output = result.to_string();
+        let diag_report = rd_diagnostics(&result);
+        output.push_str(&format_diagnostic_warnings(&diag_report));
+
+        Ok(CallToolResult::success(vec![Content::text(output)]))
     }
 
     /// Compute RD bandwidth only.
@@ -17796,9 +17857,12 @@ impl AnalyticsServer {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(
-            result.to_string(),
-        )]))
+        // Run identification diagnostics on the outcome RD
+        let mut output = result.to_string();
+        let diag_report = rd_diagnostics(&result.outcome_rd);
+        output.push_str(&format_diagnostic_warnings(&diag_report));
+
+        Ok(CallToolResult::success(vec![Content::text(output)]))
     }
 
     /// Run Multi-Cutoff Regression Discontinuity estimation.

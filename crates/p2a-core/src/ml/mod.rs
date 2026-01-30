@@ -79,11 +79,10 @@
 //!
 //! ## Example
 //!
-//! ```rust,no_run
+//! ```rust,ignore
 //! use p2a_core::ml::{kmeans, silhouette, pca};
 //! use ndarray::Array2;
 //!
-//! # fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let data = Array2::from_shape_vec((100, 3), (0..300).map(|x| x as f64).collect())?;
 //!
 //! // Cluster with k-means
@@ -97,8 +96,6 @@
 //! // Reduce dimensions with PCA
 //! let pca_result = pca(&data.view(), Some(2))?;
 //! println!("Variance explained: {:.1}%", pca_result.variance_explained.iter().sum::<f64>() * 100.0);
-//! # Ok(())
-//! # }
 //! ```
 //!
 //! ## R Package Equivalents

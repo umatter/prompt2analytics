@@ -180,3 +180,11 @@ unused_comparisons = "allow"
 [workspace.lints.rustdoc]
 # Allow missing documentation during development
 missing_docs = "allow"
+# Allow bare URLs in documentation (common in references sections)
+bare_urls = "allow"
+# Allow broken intra-doc links (brackets in math notation)
+broken_intra_doc_links = "allow"
+# Allow links to private items in documentation
+private_intra_doc_links = "allow"
+# Allow invalid HTML tags (e.g., <f64> in type signatures)
+invalid_html_tags = "allow"
