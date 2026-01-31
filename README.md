@@ -7,7 +7,7 @@
 
 A comprehensive analytics toolkit exposing econometrics, machine learning, and visualization capabilities through multiple interfaces:
 - **CLI (`p2a`)**: Direct command-line execution for scripted workflows
-- **MCP Server**: Model Context Protocol integration for AI assistants (60+ tools)
+- **MCP Server**: Model Context Protocol integration for AI assistants (250+ tools)
 - **Dioxus App**: Cross-platform frontend (web, desktop) with LLM-powered natural language analysis
 
 **Requirements**: Rust 1.85+ (edition 2024)
@@ -21,6 +21,7 @@ A comprehensive analytics toolkit exposing econometrics, machine learning, and v
 - **Causal Inference**: Difference-in-Differences, Regression Discontinuity (Sharp/Fuzzy RD)
 - **Discrete Choice**: Logit, Probit, FEGLM (GLM with high-dimensional fixed effects)
 - **Regression Diagnostics**: Jarque-Bera, Breusch-Pagan, Durbin-Watson, VIF
+- **Identification Diagnostics**: Automated checks for IV, DiD, RD, and matching estimators with severity-ranked warnings and remediation suggestions
 
 ### Time Series
 - **Univariate**: ARIMA modeling and forecasting, MSTL decomposition
@@ -67,7 +68,11 @@ A comprehensive analytics toolkit exposing econometrics, machine learning, and v
 
 **Linux (Ubuntu/Debian):**
 ```bash
-sudo apt-get install libopenblas-dev libwebkit2gtk-4.1-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev
+# Core dependencies
+sudo apt-get install libopenblas-dev
+
+# For Dioxus desktop app
+sudo apt-get install libwebkit2gtk-4.1-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev libgtk-3-dev libxdo-dev
 ```
 
 **macOS:**
@@ -227,6 +232,7 @@ prompt2analytics/
 │   │   ├── stats/         # Descriptive statistics, correlation
 │   │   ├── regression/    # OLS, diagnostics
 │   │   ├── econometrics/  # Panel, IV, DiD, RD, discrete choice, time series
+│   │   ├── diagnostics/   # Identification diagnostics (IV, DiD, RD, matching)
 │   │   ├── forecasting/   # ARIMA, MSTL, changepoint
 │   │   ├── ml/            # Clustering, PCA, t-SNE, Random Forest, SVM
 │   │   ├── visualization/ # Static (plotters) and interactive (plotlars) charts
@@ -245,25 +251,30 @@ prompt2analytics/
 └── paper/                 # JSS article materials
 ```
 
-## MCP Tools
+## MCP Tools (256 total)
 
-| Category | Tools |
-|----------|-------|
-| Data | `load_dataset`, `create_dataset`, `list_datasets`, `describe_dataset`, `head_dataset` |
+The MCP server exposes 256 analytics tools. Key categories include:
+
+| Category | Example Tools |
+|----------|---------------|
+| Data Management | `load_dataset`, `create_dataset`, `list_datasets`, `describe_dataset`, `head_dataset`, `export_dataset` |
 | Data Quality | `data_quality_profile`, `preview_cleaning`, `verify_cleaning`, `suggest_cleaning` |
-| Cleaning Sessions | `cleaning_session_start`, `cleaning_session_apply`, `cleaning_rollback`, `cleaning_session_checkpoints` |
-| Statistics | `compute_correlation` |
-| Regression | `regression_ols`, `regression_diagnostics`, `regression_clustered` |
-| Panel | `panel_fixed_effects`, `panel_random_effects`, `hausman_test`, `feglm` |
-| IV | `iv_2sls`, `iv_first_stage` |
-| Causal | `diff_in_diff`, `rd_estimate`, `rd_bw`, `rd_fuzzy` |
-| Discrete | `logit`, `probit` |
-| Time Series | `ts_var`, `ts_varma`, `ts_vecm`, `ts_var_irf`, `ts_arima_fit`, `ts_arima_forecast`, `ts_mstl`, `ts_changepoint` |
+| Cleaning Sessions | `cleaning_session_start`, `cleaning_session_apply`, `cleaning_rollback` |
+| Statistics | `compute_correlation`, `hypothesis_t_test`, `hypothesis_chisq_*`, `hypothesis_wilcoxon`, `anova_*` |
+| Regression | `regression_ols`, `regression_gls`, `regression_clustered`, `regression_quantile`, `regression_nls` |
+| Panel | `panel_fixed_effects`, `panel_random_effects`, `hausman_test`, `panel_gmm`, `feglm` |
+| IV/2SLS | `iv_2sls`, `iv_first_stage`, `iv_diagnostics` |
+| Causal Inference | `diff_in_diff`, `staggered_did`, `rd_estimate`, `rd_fuzzy`, `synth_control`, `matching_*`, `ipw_*` |
+| Discrete Choice | `logit`, `probit`, `multinomial_logit`, `ordered_probit`, `poisson`, `negbin`, `zip`, `zinb` |
+| Time Series | `ts_arima_*`, `ts_var*`, `ts_vecm`, `ts_mstl`, `ts_changepoint`, `ts_garch`, `ts_kalman_*` |
+| Spatial | `spatial_neighbors`, `spatial_sar`, `spatial_sem`, `spatial_sac`, `moran_test` |
 | ML | `ml_kmeans`, `ml_dbscan`, `ml_hierarchical`, `ml_pca`, `ml_tsne`, `ml_random_forest`, `ml_svm` |
-| Database | `db_sqlite_query`, `db_sqlite_tables`, `db_sqlite_schema`, `db_duckdb_query`, `db_duckdb_tables`, `db_duckdb_schema` |
-| Visualization | `viz_histogram`, `viz_scatter`, `viz_line`, `viz_boxplot`, `viz_heatmap`, `viz_event_study`, `viz_coefficient`, `viz_irf`, `viz_residual_diagnostics`, `viz_dendrogram` |
-| Interactive Viz | `viz_scatter_interactive`, `viz_histogram_interactive`, `viz_line_interactive` |
-| Utilities | `generate_report`, `batch_process`, `compare_datasets`, `export_session`, `import_session`, `set_seed`, `get_seed` |
+| Database | `db_sqlite_query`, `db_duckdb_query`, `db_*_tables`, `db_*_schema` |
+| Visualization | `viz_histogram`, `viz_scatter`, `viz_line`, `viz_boxplot`, `viz_heatmap`, `viz_*_interactive` |
+| Power Analysis | `power_t_test`, `power_prop_test`, `power_anova_test` |
+| Utilities | `generate_random_data`, `set_seed`, `generate_report` |
+
+For a complete list, see the tool definitions in `crates/p2a-mcp/src/server.rs`.
 
 ## Development
 
