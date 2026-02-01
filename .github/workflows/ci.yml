@@ -42,8 +42,11 @@ jobs:
             libgtk-3-dev \
             libxdo-dev
 
-      - name: Run tests
-        run: cargo test --workspace --all-features
+      - name: Run tests (core crates)
+        run: cargo test --workspace --all-features --exclude p2a-dioxus
+
+      - name: Run tests (p2a-dioxus desktop)
+        run: cargo test -p p2a-dioxus --features desktop
 
   clippy:
     name: Clippy
@@ -78,8 +81,11 @@ jobs:
             libgtk-3-dev \
             libxdo-dev
 
-      - name: Run Clippy
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - name: Run Clippy (core crates)
+        run: cargo clippy --workspace --all-targets --all-features --exclude p2a-dioxus -- -D warnings
+
+      - name: Run Clippy (p2a-dioxus desktop)
+        run: cargo clippy -p p2a-dioxus --all-targets --features desktop -- -D warnings
 
   fmt:
     name: Format
@@ -126,8 +132,11 @@ jobs:
             libgtk-3-dev \
             libxdo-dev
 
-      - name: Build all crates
-        run: cargo build --workspace --all-features
+      - name: Build core crates
+        run: cargo build --workspace --all-features --exclude p2a-dioxus
+
+      - name: Build p2a-dioxus (desktop)
+        run: cargo build -p p2a-dioxus --features desktop
 
       - name: Build release binaries
         run: |
@@ -164,19 +173,20 @@ jobs:
             libjavascriptcoregtk-4.1-dev \
             libgtk-3-dev
 
-      - name: Install cargo-tarpaulin
-        run: cargo install cargo-tarpaulin
+      - name: Install LLVM tools and cargo-llvm-cov
+        run: |
+          rustup component add llvm-tools-preview
+          cargo install cargo-llvm-cov
 
       - name: Generate coverage
         run: |
-          cargo tarpaulin -p p2a-core --lib --out Xml --skip-clean \
-            --exclude-files "*/polars-*/*" "*/arrow-*/*" "*/.cargo/*"
+          cargo llvm-cov -p p2a-core --lib --lcov --output-path lcov.info
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v4
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
-          files: ./cobertura.xml
+          files: ./lcov.info
           fail_ci_if_error: false
           verbose: true
 
