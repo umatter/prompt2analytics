@@ -25,7 +25,7 @@ pub enum NeighborMethod {
 ///
 /// # Example
 ///
-/// ```rust,ignore
+/// ```
 /// use p2a_core::spatial::Neighbors;
 ///
 /// // Create from coordinates using k-nearest neighbors
@@ -59,7 +59,9 @@ impl Neighbors {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```
+    /// use p2a_core::spatial::Neighbors;
+    ///
     /// let nb = Neighbors::from_indices(vec![
     ///     vec![1, 2],    // Observation 0 has neighbors 1 and 2
     ///     vec![0, 2, 3], // Observation 1 has neighbors 0, 2, and 3
@@ -102,7 +104,9 @@ impl Neighbors {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```
+    /// use p2a_core::spatial::Neighbors;
+    ///
     /// let coords = vec![(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)];
     /// let nb = Neighbors::from_knn(&coords, 2);
     /// ```
@@ -155,7 +159,9 @@ impl Neighbors {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```
+    /// use p2a_core::spatial::Neighbors;
+    ///
     /// let coords = vec![(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)];
     /// let nb = Neighbors::from_distance(&coords, 0.0, 1.5); // Neighbors within distance 1.5
     /// ```

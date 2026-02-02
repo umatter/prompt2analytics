@@ -12,6 +12,14 @@ use crate::session::SessionManager;
 #[derive(Subcommand)]
 pub enum SurvivalCommands {
     /// Kaplan-Meier survival curve estimation
+    #[command(after_help = "\
+EXAMPLES:
+    # Basic survival curve
+    p2a --session s.json survival km mydata -t time -e status
+
+    # Stratified by treatment group
+    p2a --session s.json survival km mydata -t time -e status -g treatment
+")]
     Km {
         /// Dataset name
         dataset: String,
@@ -34,6 +42,10 @@ pub enum SurvivalCommands {
     },
 
     /// Log-rank test comparing survival curves between groups
+    #[command(after_help = "\
+EXAMPLES:
+    p2a --session s.json survival log-rank mydata -t time -e status -g treatment
+")]
     LogRank {
         /// Dataset name
         dataset: String,
@@ -52,6 +64,14 @@ pub enum SurvivalCommands {
     },
 
     /// Cox Proportional Hazards regression
+    #[command(after_help = "\
+EXAMPLES:
+    # Cox PH with robust standard errors
+    p2a --session s.json survival cox mydata -t time -e status -x age treatment stage --robust
+
+    # Using Efron ties handling
+    p2a --session s.json survival cox mydata -t time -e status -x age bmi --ties efron
+")]
     Cox {
         /// Dataset name
         dataset: String,
@@ -78,6 +98,14 @@ pub enum SurvivalCommands {
     },
 
     /// Accelerated Failure Time model
+    #[command(after_help = "\
+EXAMPLES:
+    # Weibull AFT (default)
+    p2a --session s.json survival aft mydata -t time -e status -x age treatment
+
+    # Log-normal distribution
+    p2a --session s.json survival aft mydata -t time -e status -x age --dist lognormal
+")]
     Aft {
         /// Dataset name
         dataset: String,
@@ -100,6 +128,11 @@ pub enum SurvivalCommands {
     },
 
     /// Competing risks analysis (cumulative incidence)
+    #[command(after_help = "\
+EXAMPLES:
+    # Event types: 0=censored, 1=death, 2=relapse
+    p2a --session s.json survival competing-risks mydata -t time -e event_type
+")]
     CompetingRisks {
         /// Dataset name
         dataset: String,

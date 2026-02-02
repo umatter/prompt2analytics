@@ -12,6 +12,14 @@ use crate::session::SessionManager;
 #[derive(Subcommand)]
 pub enum DataCommands {
     /// Load a dataset from a file
+    #[command(after_help = "\
+EXAMPLES:
+    # Load CSV and auto-name from filename
+    p2a --session s.json data load sales.csv
+
+    # Load with custom name
+    p2a --session s.json data load data/monthly.csv --name monthly_sales
+")]
     Load {
         /// Path to the data file (CSV, Parquet, Excel, Stata, SAS)
         path: PathBuf,
@@ -41,6 +49,13 @@ pub enum DataCommands {
     },
 
     /// Generate random data with specified distributions
+    #[command(after_help = "\
+EXAMPLES:
+    # Generate normal and uniform columns
+    p2a --session s.json data generate -n 1000 -d simdata \\
+        --columns '[{\"name\":\"x\",\"distribution\":{\"type\":\"normal\",\"mean\":0,\"std\":1}},
+                    {\"name\":\"e\",\"distribution\":{\"type\":\"uniform\",\"min\":-1,\"max\":1}}]'
+")]
     Generate {
         /// Number of rows to generate
         #[arg(short = 'n', long, default_value = "100")]
@@ -61,6 +76,14 @@ pub enum DataCommands {
     },
 
     /// Save/export a dataset to a file
+    #[command(after_help = "\
+EXAMPLES:
+    # Export to CSV
+    p2a --session s.json data save mydata --output results.csv
+
+    # Export to Parquet
+    p2a --session s.json data save mydata --output results.parquet
+")]
     Save {
         /// Dataset name
         dataset: String,

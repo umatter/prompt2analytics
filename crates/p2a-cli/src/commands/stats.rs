@@ -68,6 +68,14 @@ impl From<TTestAlternative> for Alternative {
 #[derive(Subcommand)]
 pub enum StatsCommands {
     /// One-sample t-test
+    #[command(after_help = "\
+EXAMPLES:
+    # Test if mean differs from 0
+    p2a --session s.json stats t-test-one mydata --col score --mu 0
+
+    # One-sided test at 99% confidence
+    p2a --session s.json stats t-test-one mydata --col income --mu 50000 -a greater --conf-level 0.99
+")]
     TTestOne {
         /// Dataset name
         dataset: String,
@@ -90,6 +98,14 @@ pub enum StatsCommands {
     },
 
     /// Two-sample t-test (independent samples)
+    #[command(after_help = "\
+EXAMPLES:
+    # Compare means of two groups
+    p2a --session s.json stats t-test-two mydata --col1 treatment_score --col2 control_score
+
+    # Assume equal variances
+    p2a --session s.json stats t-test-two mydata --col1 group_a --col2 group_b --equal-var
+")]
     TTestTwo {
         /// Dataset name
         dataset: String,
@@ -112,6 +128,11 @@ pub enum StatsCommands {
     },
 
     /// Paired t-test
+    #[command(after_help = "\
+EXAMPLES:
+    # Before-after comparison
+    p2a --session s.json stats t-test-paired mydata --col1 pre_score --col2 post_score
+")]
     TTestPaired {
         /// Dataset name
         dataset: String,
@@ -130,6 +151,11 @@ pub enum StatsCommands {
     },
 
     /// Chi-squared goodness-of-fit test
+    #[command(after_help = "\
+EXAMPLES:
+    # Test if observed frequencies match expected uniform distribution
+    p2a --session s.json stats chisq-gof mydata --observed counts
+")]
     ChisqGof {
         /// Dataset name
         dataset: String,
@@ -140,6 +166,11 @@ pub enum StatsCommands {
     },
 
     /// Chi-squared test of independence
+    #[command(after_help = "\
+EXAMPLES:
+    # Test independence between gender and preference
+    p2a --session s.json stats chisq-indep mydata --row-var gender --col-var preference
+")]
     ChisqIndep {
         /// Dataset name
         dataset: String,
@@ -154,6 +185,11 @@ pub enum StatsCommands {
     },
 
     /// Fisher's exact test for 2x2 tables
+    #[command(after_help = "\
+EXAMPLES:
+    # Exact test for small sample 2x2 table
+    p2a --session s.json stats fisher mydata --row-var treatment --col-var outcome
+")]
     Fisher {
         /// Dataset name
         dataset: String,
@@ -168,6 +204,11 @@ pub enum StatsCommands {
     },
 
     /// Shapiro-Wilk normality test
+    #[command(after_help = "\
+EXAMPLES:
+    # Test if residuals are normally distributed
+    p2a --session s.json stats shapiro mydata --col residuals
+")]
     Shapiro {
         /// Dataset name
         dataset: String,
@@ -178,6 +219,14 @@ pub enum StatsCommands {
     },
 
     /// Wilcoxon rank-sum test (Mann-Whitney U)
+    #[command(after_help = "\
+EXAMPLES:
+    # Rank-sum test (unpaired)
+    p2a --session s.json stats wilcoxon mydata --col1 group_a --col2 group_b
+
+    # Signed-rank test (paired)
+    p2a --session s.json stats wilcoxon mydata --col1 before --col2 after --paired
+")]
     Wilcoxon {
         /// Dataset name
         dataset: String,
@@ -200,6 +249,11 @@ pub enum StatsCommands {
     },
 
     /// Bartlett's test for homogeneity of variances
+    #[command(after_help = "\
+EXAMPLES:
+    # Test equal variances across groups
+    p2a --session s.json stats bartlett mydata --col score --group treatment
+")]
     Bartlett {
         /// Dataset name
         dataset: String,
@@ -214,6 +268,11 @@ pub enum StatsCommands {
     },
 
     /// Kruskal-Wallis rank-sum test
+    #[command(after_help = "\
+EXAMPLES:
+    # Non-parametric ANOVA alternative
+    p2a --session s.json stats kruskal mydata --col score --group treatment
+")]
     Kruskal {
         /// Dataset name
         dataset: String,
@@ -228,6 +287,10 @@ pub enum StatsCommands {
     },
 
     /// Five-number summary (min, Q1, median, Q3, max)
+    #[command(after_help = "\
+EXAMPLES:
+    p2a --session s.json stats fivenum mydata --col income
+")]
     Fivenum {
         /// Dataset name
         dataset: String,
@@ -238,6 +301,10 @@ pub enum StatsCommands {
     },
 
     /// Interquartile range
+    #[command(after_help = "\
+EXAMPLES:
+    p2a --session s.json stats iqr mydata --col price
+")]
     Iqr {
         /// Dataset name
         dataset: String,
@@ -248,6 +315,10 @@ pub enum StatsCommands {
     },
 
     /// Median Absolute Deviation
+    #[command(after_help = "\
+EXAMPLES:
+    p2a --session s.json stats mad mydata --col returns
+")]
     Mad {
         /// Dataset name
         dataset: String,
@@ -258,6 +329,14 @@ pub enum StatsCommands {
     },
 
     /// Autocorrelation function
+    #[command(after_help = "\
+EXAMPLES:
+    # Compute ACF up to lag 20
+    p2a --session s.json stats acf mydata --col returns --lag-max 20
+
+    # Compute PACF instead
+    p2a --session s.json stats acf mydata --col returns --partial
+")]
     Acf {
         /// Dataset name
         dataset: String,
@@ -276,6 +355,10 @@ pub enum StatsCommands {
     },
 
     /// One-way ANOVA
+    #[command(after_help = "\
+EXAMPLES:
+    p2a --session s.json stats anova mydata --response score --factor treatment
+")]
     Anova {
         /// Dataset name
         dataset: String,
@@ -290,6 +373,11 @@ pub enum StatsCommands {
     },
 
     /// Two-way ANOVA
+    #[command(after_help = "\
+EXAMPLES:
+    # Two-way ANOVA with interaction
+    p2a --session s.json stats anova-two mydata --response yield --factor-a fertilizer --factor-b irrigation --interaction
+")]
     AnovaTwo {
         /// Dataset name
         dataset: String,
@@ -312,6 +400,10 @@ pub enum StatsCommands {
     },
 
     /// Tukey's HSD post-hoc test
+    #[command(after_help = "\
+EXAMPLES:
+    p2a --session s.json stats tukey mydata --response score --factor group
+")]
     Tukey {
         /// Dataset name
         dataset: String,
@@ -330,6 +422,11 @@ pub enum StatsCommands {
     },
 
     /// Friedman rank sum test for blocked data
+    #[command(after_help = "\
+EXAMPLES:
+    # Repeated measures non-parametric test
+    p2a --session s.json stats friedman mydata --value score --group treatment --block subject_id
+")]
     Friedman {
         /// Dataset name
         dataset: String,
@@ -348,6 +445,10 @@ pub enum StatsCommands {
     },
 
     /// Partial autocorrelation function
+    #[command(after_help = "\
+EXAMPLES:
+    p2a --session s.json stats pacf mydata --col returns --lag-max 15
+")]
     Pacf {
         /// Dataset name
         dataset: String,
@@ -362,6 +463,10 @@ pub enum StatsCommands {
     },
 
     /// Cross-correlation function
+    #[command(after_help = "\
+EXAMPLES:
+    p2a --session s.json stats ccf mydata --x gdp --y unemployment --lag-max 12
+")]
     Ccf {
         /// Dataset name
         dataset: String,
@@ -380,6 +485,14 @@ pub enum StatsCommands {
     },
 
     /// Ljung-Box or Box-Pierce test for autocorrelation
+    #[command(after_help = "\
+EXAMPLES:
+    # Ljung-Box test (default)
+    p2a --session s.json stats box-test mydata --col residuals --lag 10
+
+    # Box-Pierce test, adjusting for ARMA(1,1) fit
+    p2a --session s.json stats box-test mydata --col residuals --lag 10 --box-pierce --fitdf 2
+")]
     BoxTest {
         /// Dataset name
         dataset: String,
@@ -402,6 +515,10 @@ pub enum StatsCommands {
     },
 
     /// Kolmogorov-Smirnov two-sample test
+    #[command(after_help = "\
+EXAMPLES:
+    p2a --session s.json stats ks-test mydata --x sample_a --y sample_b
+")]
     KsTest {
         /// Dataset name
         dataset: String,
@@ -420,6 +537,10 @@ pub enum StatsCommands {
     },
 
     /// Phillips-Perron unit root test
+    #[command(after_help = "\
+EXAMPLES:
+    p2a --session s.json stats pp-test mydata --col gdp
+")]
     PpTest {
         /// Dataset name
         dataset: String,
@@ -434,6 +555,14 @@ pub enum StatsCommands {
     },
 
     /// Power analysis for t-test
+    #[command(after_help = "\
+EXAMPLES:
+    # Find required sample size for 80% power
+    p2a stats power-t --delta 0.5 --power 0.8
+
+    # Find achievable power with n=50
+    p2a stats power-t --n 50 --delta 0.5
+")]
     PowerT {
         /// Sample size per group (leave unset to solve for it)
         #[arg(short, long)]

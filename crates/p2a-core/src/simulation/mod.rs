@@ -17,9 +17,10 @@
 //!
 //! # Example
 //!
-//! ```rust,ignore
+//! ```
 //! use p2a_core::simulation::{generate_random_data, ColumnSpec, Distribution};
 //!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let columns = vec![
 //!     ColumnSpec::new("id", Distribution::Sequence { start: 1 }),
 //!     ColumnSpec::new("x", Distribution::Normal { mean: 0.0, std: 1.0 }),
@@ -31,6 +32,8 @@
 //! ];
 //!
 //! let dataset = generate_random_data(1000, columns, Some(42))?;
+//! # Ok(())
+//! # }
 //! ```
 
 mod generator;

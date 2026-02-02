@@ -40,6 +40,17 @@ impl From<RobustSE> for CovarianceType {
 #[derive(Subcommand)]
 pub enum RegressionCommands {
     /// Ordinary Least Squares regression
+    #[command(after_help = "\
+EXAMPLES:
+    # Simple regression
+    p2a reg ols mydata -y price -x sqft
+
+    # Multiple regression with HC1 robust SEs
+    p2a reg ols mydata -y price -x sqft bedrooms bathrooms --robust hc1
+
+    # Without intercept
+    p2a reg ols mydata -y price -x sqft --intercept false
+")]
     Ols {
         /// Dataset name
         dataset: String,
@@ -62,6 +73,14 @@ pub enum RegressionCommands {
     },
 
     /// Clustered standard errors regression
+    #[command(after_help = "\
+EXAMPLES:
+    # Cluster by firm
+    p2a reg clustered mydata -y revenue -x employees --cluster firm_id
+
+    # Two-way clustering (firm and year)
+    p2a reg clustered mydata -y revenue -x employees --cluster firm_id --cluster2 year
+")]
     Clustered {
         /// Dataset name
         dataset: String,
@@ -84,6 +103,11 @@ pub enum RegressionCommands {
     },
 
     /// Run regression diagnostics
+    #[command(after_help = "\
+EXAMPLES:
+    # Full diagnostics (Jarque-Bera, Breusch-Pagan, Durbin-Watson, VIF)
+    p2a reg diagnostics mydata -y price -x sqft bedrooms bathrooms
+")]
     Diagnostics {
         /// Dataset name
         dataset: String,
@@ -98,6 +122,14 @@ pub enum RegressionCommands {
     },
 
     /// Quantile regression
+    #[command(after_help = "\
+EXAMPLES:
+    # Median regression (tau = 0.5)
+    p2a reg quantreg mydata -y price -x sqft bedrooms
+
+    # 90th percentile regression
+    p2a reg quantreg mydata -y price -x sqft bedrooms -t 0.9
+")]
     Quantreg {
         /// Dataset name
         dataset: String,
@@ -120,6 +152,14 @@ pub enum RegressionCommands {
     },
 
     /// LOESS (local polynomial regression)
+    #[command(after_help = "\
+EXAMPLES:
+    # Default LOESS (span=0.75, degree=2)
+    p2a reg loess mydata -y price -x sqft
+
+    # More local fit with lower span
+    p2a reg loess mydata -y price -x sqft --span 0.3 --degree 1
+")]
     Loess {
         /// Dataset name
         dataset: String,
@@ -142,6 +182,17 @@ pub enum RegressionCommands {
     },
 
     /// Nonlinear Least Squares regression
+    #[command(after_help = "\
+EXAMPLES:
+    # Exponential decay: y = a * exp(-b * x)
+    p2a reg nls mydata -y response -x time --model exponential_decay --start 10,0.5
+
+    # Michaelis-Menten: y = Vmax * x / (Km + x)
+    p2a reg nls mydata -y rate -x substrate --model michaelis_menten --start 100,5
+
+    # Logistic growth: y = K / (1 + exp(-r * (x - x0)))
+    p2a reg nls mydata -y population -x time --model logistic_growth --start 1000,0.5,10
+")]
     Nls {
         /// Dataset name
         dataset: String,
@@ -164,6 +215,14 @@ pub enum RegressionCommands {
     },
 
     /// Generalized Least Squares regression
+    #[command(after_help = "\
+EXAMPLES:
+    # Auto-detect AR(1) correlation
+    p2a reg gls mydata -y gdp -x investment exports --correlation ar1_auto
+
+    # Fixed AR(1) with rho=0.7
+    p2a reg gls mydata -y gdp -x investment --correlation ar1 --rho 0.7
+")]
     Gls {
         /// Dataset name
         dataset: String,
@@ -190,6 +249,17 @@ pub enum RegressionCommands {
     },
 
     /// Stepwise regression model selection
+    #[command(after_help = "\
+EXAMPLES:
+    # Bidirectional stepwise with AIC
+    p2a reg step mydata -y price -x sqft bedrooms bathrooms age pool
+
+    # Forward selection with BIC
+    p2a reg step mydata -y price -x sqft bedrooms bathrooms --direction forward --use-bic
+
+    # Backward elimination keeping sqft always
+    p2a reg step mydata -y price -x sqft bedrooms bathrooms --direction backward --required-vars sqft
+")]
     Step {
         /// Dataset name
         dataset: String,
@@ -220,6 +290,14 @@ pub enum RegressionCommands {
     },
 
     /// Smoothing spline regression
+    #[command(after_help = "\
+EXAMPLES:
+    # Auto-select smoothing via cross-validation
+    p2a reg smooth-spline mydata -y response -x time
+
+    # Fixed degrees of freedom
+    p2a reg smooth-spline mydata -y response -x time --df 5
+")]
     SmoothSpline {
         /// Dataset name
         dataset: String,
@@ -238,6 +316,14 @@ pub enum RegressionCommands {
     },
 
     /// Friedman's SuperSmoother
+    #[command(after_help = "\
+EXAMPLES:
+    # Auto-select span via cross-validation
+    p2a reg supsmu mydata -y response -x time
+
+    # Fixed span with bass smoothing
+    p2a reg supsmu mydata -y response -x time --span 0.05 --bass 5
+")]
     Supsmu {
         /// Dataset name
         dataset: String,
@@ -260,6 +346,14 @@ pub enum RegressionCommands {
     },
 
     /// Tukey's resistant line (robust regression)
+    #[command(after_help = "\
+EXAMPLES:
+    # Basic resistant line
+    p2a reg line mydata -y price -x sqft
+
+    # With additional polishing iterations
+    p2a reg line mydata -y price -x sqft --iter 3
+")]
     Line {
         /// Dataset name
         dataset: String,
@@ -278,6 +372,14 @@ pub enum RegressionCommands {
     },
 
     /// HAC (Newey-West) standard errors for OLS
+    #[command(after_help = "\
+EXAMPLES:
+    # Auto-select bandwidth
+    p2a reg hac mydata -y returns -x market_return
+
+    # Fixed lag length
+    p2a reg hac mydata -y returns -x market_return smb hml --lags 4
+")]
     Hac {
         /// Dataset name
         dataset: String,

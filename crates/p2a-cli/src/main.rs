@@ -22,6 +22,24 @@ use session::SessionManager;
 #[command(name = "p2a")]
 #[command(author, version, about, long_about = None)]
 #[command(propagate_version = true)]
+#[command(after_help = "\
+EXAMPLES:
+    # Load a dataset and run OLS regression
+    p2a --session analysis.json data load data.csv --name mydata
+    p2a --session analysis.json reg ols mydata -y price -x sqft bedrooms
+
+    # Panel fixed effects with clustered SEs
+    p2a panel fe mydata -y revenue -x employees --entity firm_id
+
+    # Difference-in-differences
+    p2a causal did mydata -y outcome --treat treatment --post post_period
+
+    # K-means clustering
+    p2a ml kmeans mydata --cols x1 x2 x3 -k 3
+
+    # Create a scatter plot
+    p2a viz scatter mydata -x income -y spending -f plot.png
+")]
 pub struct Cli {
     /// Output format: text, json, or table
     #[arg(short = 'F', long = "format", global = true, default_value = "text")]

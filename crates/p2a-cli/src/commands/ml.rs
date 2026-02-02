@@ -10,6 +10,14 @@ use crate::session::SessionManager;
 #[derive(Subcommand)]
 pub enum MlCommands {
     /// K-means clustering
+    #[command(after_help = "\
+EXAMPLES:
+    # Cluster into 3 groups
+    p2a --session s.json ml kmeans mydata --cols x1 x2 x3 -k 3
+
+    # With reproducible seed
+    p2a --session s.json ml kmeans mydata --cols income age --k 5 --seed 42
+")]
     Kmeans {
         /// Dataset name
         dataset: String,
@@ -32,6 +40,14 @@ pub enum MlCommands {
     },
 
     /// Principal Component Analysis
+    #[command(after_help = "\
+EXAMPLES:
+    # Keep top 3 components
+    p2a --session s.json ml pca mydata --cols x1 x2 x3 x4 x5 -n 3
+
+    # All components with transformed data
+    p2a --session s.json ml pca mydata --cols x1 x2 x3 --transform
+")]
     Pca {
         /// Dataset name
         dataset: String,
@@ -50,6 +66,15 @@ pub enum MlCommands {
     },
 
     /// t-SNE dimensionality reduction
+    #[command(after_help = "\
+EXAMPLES:
+    # 2D embedding (default)
+    p2a --session s.json ml tsne mydata --cols x1 x2 x3 x4 x5
+
+    # Custom perplexity and learning rate
+    p2a --session s.json ml tsne mydata --cols feature1 feature2 feature3 \\
+        --perplexity 50 --learning-rate 100 --seed 42
+")]
     Tsne {
         /// Dataset name
         dataset: String,
@@ -80,6 +105,15 @@ pub enum MlCommands {
     },
 
     /// Random Forest regression/classification
+    #[command(after_help = "\
+EXAMPLES:
+    # Random forest with 100 trees
+    p2a --session s.json ml random-forest mydata --cols x1 x2 x3 -y target --n-trees 100
+
+    # Custom depth and features
+    p2a --session s.json ml random-forest mydata --cols age income education \\
+        -y outcome --max-depth 5 --max-features sqrt --seed 42
+")]
     RandomForest {
         /// Dataset name
         dataset: String,
@@ -114,6 +148,10 @@ pub enum MlCommands {
     },
 
     /// DBSCAN density-based clustering
+    #[command(after_help = "\
+EXAMPLES:
+    p2a --session s.json ml dbscan mydata --cols x y --eps 0.5 --min-samples 5
+")]
     Dbscan {
         /// Dataset name
         dataset: String,
@@ -132,6 +170,14 @@ pub enum MlCommands {
     },
 
     /// Hierarchical (agglomerative) clustering
+    #[command(after_help = "\
+EXAMPLES:
+    # Ward linkage with 4 clusters
+    p2a --session s.json ml hierarchical mydata --cols x1 x2 x3 -n 4 --linkage ward
+
+    # Cut by distance threshold
+    p2a --session s.json ml hierarchical mydata --cols x1 x2 --distance-threshold 2.5
+")]
     Hierarchical {
         /// Dataset name
         dataset: String,
@@ -154,6 +200,11 @@ pub enum MlCommands {
     },
 
     /// Linear Support Vector Machine (SVM)
+    #[command(after_help = "\
+EXAMPLES:
+    # Binary classification
+    p2a --session s.json ml svm mydata --cols x1 x2 x3 -y label -c 1.0
+")]
     Svm {
         /// Dataset name
         dataset: String,

@@ -42,8 +42,9 @@ pub struct SparseWeights {
 ///
 /// # Example
 ///
-/// ```rust,ignore
+/// ```
 /// use p2a_core::spatial::{Neighbors, SpatialWeights, WeightStyle};
+/// use ndarray::array;
 ///
 /// // Create neighbors
 /// let coords = vec![(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)];
@@ -81,7 +82,10 @@ impl SpatialWeights {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```
+    /// use p2a_core::spatial::{Neighbors, SpatialWeights, WeightStyle};
+    ///
+    /// let coords = vec![(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)];
     /// let nb = Neighbors::from_knn(&coords, 3);
     /// let listw = SpatialWeights::from_neighbors(&nb, WeightStyle::RowStd);
     /// ```

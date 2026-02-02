@@ -83,9 +83,13 @@
 //!
 //! # Example
 //!
-//! ```rust,ignore
+//! ```ignore
 //! use p2a_core::spatial::{Neighbors, SpatialWeights, WeightStyle};
 //! use p2a_core::econometrics::sphet::{run_sphet, SphetConfig, SphetModel};
+//! use p2a_core::data::Dataset;
+//!
+//! // Assuming dataset is loaded with columns "y", "x1", "x2" and coordinates
+//! let coords = vec![(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)];
 //!
 //! // Create spatial weights
 //! let nb = Neighbors::from_knn(&coords, 5);
@@ -359,7 +363,11 @@ impl fmt::Display for SphetResult {
 ///
 /// # Example
 ///
-/// ```rust,ignore
+/// ```ignore
+/// use p2a_core::spatial::{Neighbors, SpatialWeights, WeightStyle};
+/// use p2a_core::econometrics::sphet::{run_sphet, SphetConfig, SphetModel};
+///
+/// // Assuming dataset, coords, and listw are already set up
 /// let config = SphetConfig {
 ///     model: SphetModel::SARAR,
 ///     het: true,

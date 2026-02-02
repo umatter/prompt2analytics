@@ -34,37 +34,62 @@
 //!
 //! Generate comprehensive quality profiles for LLM-assisted cleaning:
 //!
-//! ```rust,ignore
+//! ```
 //! use p2a_core::data::{generate_quality_profile, Dataset};
+//! use polars::prelude::*;
 //!
-//! let profile = generate_quality_profile(&dataset, None)?;
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let df = df! {
+//!     "x" => [1.0, 2.0, f64::NAN, 4.0],
+//!     "y" => [Some("a"), Some("b"), None, Some("d")]
+//! }?;
+//! let dataset = Dataset::new(df);
+//! let profile = generate_quality_profile(&dataset);
 //! println!("Issues found: {:?}", profile.issues);
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! ## Cleaning Sessions ([`cleaning_session`])
 //!
 //! Multi-step cleaning workflows with rollback support:
 //!
-//! ```rust,ignore
+//! ```
 //! use p2a_core::data::{CleaningSession, Dataset};
+//! use polars::prelude::*;
 //!
-//! let mut session = CleaningSession::new(dataset);
-//! session.checkpoint("Initial state")?;
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let df = df! { "x" => [1, 2, 3] }?;
+//! let dataset = Dataset::new(df);
+//! let mut session = CleaningSession::new(dataset, "mydata");
+//! session.checkpoint("Initial state");
 //! // ... apply cleaning operations ...
-//! session.rollback()?;  // Undo last operation
+//! session.rollback();  // Undo last operation
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! ## Cleaning Suggestions ([`suggestion`])
 //!
 //! AI-powered suggestions with priority ranking:
 //!
-//! ```rust,ignore
-//! use p2a_core::data::{generate_suggestions, Dataset};
+//! ```
+//! use p2a_core::data::{generate_quality_profile, generate_suggestions, Dataset};
+//! use polars::prelude::*;
 //!
-//! let suggestions = generate_suggestions(&dataset)?;
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let df = df! {
+//!     "x" => [1.0, 2.0, f64::NAN, 4.0],
+//!     "y" => [Some("a"), Some("b"), None, Some("d")]
+//! }?;
+//! let dataset = Dataset::new(df);
+//! let profile = generate_quality_profile(&dataset);
+//! let suggestions = generate_suggestions(&profile);
 //! for s in suggestions.suggestions {
-//!     println!("{}: {}", s.priority, s.description);
+//!     println!("{:?}: {}", s.priority, s.description);
 //! }
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! ## Submodules

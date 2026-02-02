@@ -15,6 +15,11 @@ use crate::session::SessionManager;
 #[derive(Subcommand)]
 pub enum PanelCommands {
     /// Fixed Effects estimation
+    #[command(after_help = "\
+EXAMPLES:
+    # Entity fixed effects
+    p2a panel fe mydata -y revenue -x employees capital --entity firm_id
+")]
     Fe {
         /// Dataset name
         dataset: String,
@@ -33,6 +38,11 @@ pub enum PanelCommands {
     },
 
     /// Random Effects estimation
+    #[command(after_help = "\
+EXAMPLES:
+    # Random effects with GLS
+    p2a panel re mydata -y revenue -x employees capital --entity firm_id
+")]
     Re {
         /// Dataset name
         dataset: String,
@@ -51,6 +61,11 @@ pub enum PanelCommands {
     },
 
     /// Hausman test (Fixed vs Random Effects)
+    #[command(after_help = "\
+EXAMPLES:
+    # Test FE vs RE (H0: RE consistent)
+    p2a panel hausman mydata -y revenue -x employees capital --entity firm_id
+")]
     Hausman {
         /// Dataset name
         dataset: String,
@@ -69,6 +84,14 @@ pub enum PanelCommands {
     },
 
     /// High-dimensional Fixed Effects
+    #[command(after_help = "\
+EXAMPLES:
+    # Two-way fixed effects (firm + year)
+    p2a panel hdfe mydata -y revenue -x employees --fe firm_id year
+
+    # Three-way fixed effects
+    p2a panel hdfe mydata -y wage -x experience --fe worker_id firm_id year
+")]
     Hdfe {
         /// Dataset name
         dataset: String,
@@ -87,6 +110,14 @@ pub enum PanelCommands {
     },
 
     /// Fixed Effects GLM (logit, probit, poisson with HDFE)
+    #[command(after_help = "\
+EXAMPLES:
+    # Logit with fixed effects
+    p2a panel feglm mydata -y employed -x age education --fe industry year --family logit
+
+    # Poisson FE for count data
+    p2a panel feglm mydata -y patents -x rd_spending --fe firm_id --family poisson
+")]
     Feglm {
         /// Dataset name
         dataset: String,
@@ -109,6 +140,11 @@ pub enum PanelCommands {
     },
 
     /// Arellano-Bond GMM estimation for dynamic panels
+    #[command(after_help = "\
+EXAMPLES:
+    # Dynamic panel with lagged dependent variable
+    p2a panel gmm mydata -y investment -x sales cash_flow --entity firm_id --time year
+")]
     Gmm {
         /// Dataset name
         dataset: String,
@@ -131,6 +167,14 @@ pub enum PanelCommands {
     },
 
     /// Panel Variable Coefficients Model (Swamy estimator)
+    #[command(after_help = "\
+EXAMPLES:
+    # Variable coefficients (within model)
+    p2a panel pvcm mydata -y gdp -x investment exports --entity country --model within
+
+    # Random coefficient model
+    p2a panel pvcm mydata -y gdp -x investment exports --entity country --model random
+")]
     Pvcm {
         /// Dataset name
         dataset: String,
@@ -153,6 +197,11 @@ pub enum PanelCommands {
     },
 
     /// Pooled Mean Group estimator
+    #[command(after_help = "\
+EXAMPLES:
+    # PMG for heterogeneous panels
+    p2a panel pmg mydata -y consumption -x income wealth --entity country
+")]
     Pmg {
         /// Dataset name
         dataset: String,
@@ -171,6 +220,14 @@ pub enum PanelCommands {
     },
 
     /// Panel GLS (Feasible GLS)
+    #[command(after_help = "\
+EXAMPLES:
+    # FGLS with FE
+    p2a panel gls mydata -y revenue -x employees --entity firm_id --time year --model fe
+
+    # First-difference estimation
+    p2a panel gls mydata -y revenue -x employees --entity firm_id --time year --model fd
+")]
     Gls {
         /// Dataset name
         dataset: String,
@@ -197,6 +254,14 @@ pub enum PanelCommands {
     },
 
     /// Panel unit root tests (LLC, IPS, Hadri)
+    #[command(after_help = "\
+EXAMPLES:
+    # Levin-Lin-Chu test
+    p2a panel unit-root mydata -v gdp --unit country --time year --test llc
+
+    # Im-Pesaran-Shin test with 2 lags
+    p2a panel unit-root mydata -v gdp --unit country --time year --test ips --lags 2
+")]
     UnitRoot {
         /// Dataset name
         dataset: String,

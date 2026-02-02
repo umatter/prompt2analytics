@@ -39,6 +39,14 @@ use crate::session::SessionManager;
 #[derive(Subcommand)]
 pub enum TimeseriesCommands {
     /// ARIMA model estimation and forecasting
+    #[command(after_help = "\
+EXAMPLES:
+    # Fit ARIMA(1,1,1)
+    p2a ts arima mydata --col sales -p 1 -d 1 -q 1
+
+    # With 12-step forecast
+    p2a ts arima mydata --col sales -p 1 -d 1 -q 1 --horizon 12
+")]
     Arima {
         /// Dataset name
         dataset: String,
@@ -79,6 +87,11 @@ pub enum TimeseriesCommands {
     },
 
     /// Vector Autoregression
+    #[command(after_help = "\
+EXAMPLES:
+    # VAR(2) with two variables
+    p2a ts var mydata --cols gdp inflation --lags 2
+")]
     Var {
         /// Dataset name
         dataset: String,
@@ -169,6 +182,14 @@ pub enum TimeseriesCommands {
     },
 
     /// GARCH volatility model
+    #[command(after_help = "\
+EXAMPLES:
+    # GARCH(1,1) for returns
+    p2a ts garch mydata --col returns -p 1 -q 1
+
+    # With volatility forecast
+    p2a ts garch mydata --col returns -p 1 -q 1 --horizon 5
+")]
     Garch {
         /// Dataset name
         dataset: String,
@@ -191,6 +212,14 @@ pub enum TimeseriesCommands {
     },
 
     /// Holt-Winters exponential smoothing
+    #[command(after_help = "\
+EXAMPLES:
+    # Additive seasonal (monthly data)
+    p2a ts holt-winters mydata --col sales --period 12
+
+    # Multiplicative seasonal
+    p2a ts holt-winters mydata --col sales --period 12 --seasonal multiplicative
+")]
     HoltWinters {
         /// Dataset name
         dataset: String,
@@ -213,6 +242,11 @@ pub enum TimeseriesCommands {
     },
 
     /// Granger causality test
+    #[command(after_help = "\
+EXAMPLES:
+    # Test if x Granger-causes y
+    p2a ts granger mydata --x money_supply --y inflation --lags 4
+")]
     Granger {
         /// Dataset name
         dataset: String,
@@ -253,6 +287,14 @@ pub enum TimeseriesCommands {
     },
 
     /// STL decomposition (Seasonal-Trend using LOESS)
+    #[command(after_help = "\
+EXAMPLES:
+    # STL for monthly data
+    p2a ts stl mydata --col sales --period 12
+
+    # With robust fitting
+    p2a ts stl mydata --col sales --period 12 --robust true
+")]
     Stl {
         /// Dataset name
         dataset: String,
@@ -307,6 +349,17 @@ pub enum TimeseriesCommands {
     },
 
     /// Bayesian structural time series causal inference (CausalImpact)
+    #[command(after_help = "\
+EXAMPLES:
+    # Estimate causal impact of intervention
+    p2a ts causal-impact mydata --response sales --time date \\
+        --pre-start 1 --pre-end 100 --post-start 101 --post-end 150
+
+    # With control series
+    p2a ts causal-impact mydata --response sales --time date \\
+        --pre-start 1 --pre-end 100 --post-start 101 --post-end 150 \\
+        --controls competitor_sales,market_index
+")]
     CausalImpact {
         /// Dataset name
         dataset: String,

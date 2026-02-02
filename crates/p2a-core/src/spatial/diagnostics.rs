@@ -164,11 +164,20 @@ pub struct SpatialLmTests {
 ///
 /// # Example
 ///
-/// ```rust,ignore
-/// use p2a_core::spatial::{moran_test, MoranAlternative};
+/// ```
+/// use p2a_core::spatial::{Neighbors, SpatialWeights, WeightStyle, moran_test, MoranAlternative};
+/// use ndarray::array;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let coords = vec![(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)];
+/// let nb = Neighbors::from_knn(&coords, 2);
+/// let listw = SpatialWeights::from_neighbors(&nb, WeightStyle::RowStd);
+/// let y = array![1.0, 2.0, 1.5, 2.5];
 ///
 /// let result = moran_test(&y, &listw, MoranAlternative::TwoSided)?;
 /// println!("Moran's I = {}, p-value = {}", result.statistic, result.p_value);
+/// # Ok(())
+/// # }
 /// ```
 pub fn moran_test(
     x: &Array1<f64>,
@@ -435,8 +444,15 @@ pub fn geary_test(x: &Array1<f64>, listw: &SpatialWeights) -> EconResult<GearyRe
 ///
 /// # Example
 ///
-/// ```rust,ignore
-/// use p2a_core::spatial::localmoran;
+/// ```
+/// use p2a_core::spatial::{Neighbors, SpatialWeights, WeightStyle, localmoran, LisaCluster};
+/// use ndarray::array;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let coords = vec![(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)];
+/// let nb = Neighbors::from_knn(&coords, 2);
+/// let listw = SpatialWeights::from_neighbors(&nb, WeightStyle::RowStd);
+/// let y = array![1.0, 2.0, 1.5, 2.5];
 ///
 /// let result = localmoran(&y, &listw, 0.05, 0)?;
 /// for (i, obs) in result.local_stats.iter().enumerate() {
@@ -444,6 +460,8 @@ pub fn geary_test(x: &Array1<f64>, listw: &SpatialWeights) -> EconResult<GearyRe
 ///         println!("Location {}: {:?}, p={:.4}", i, obs.cluster, obs.p_value);
 ///     }
 /// }
+/// # Ok(())
+/// # }
 /// ```
 ///
 /// # Reference

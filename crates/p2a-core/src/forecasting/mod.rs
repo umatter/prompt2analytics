@@ -70,20 +70,22 @@
 //!
 //! ## Example
 //!
-//! ```rust,ignore
-//! use p2a_core::forecasting::{run_arima, forecast_arima, run_holt_winters};
-//! use p2a_core::Dataset;
+//! ```ignore
+//! use p2a_core::forecasting::{run_arima, forecast_arima, run_holt_winters, SeasonalType};
+//! use p2a_core::data::Dataset;
 //!
-//! // Fit ARIMA(1,1,1)
-//! let arima = run_arima(&dataset, "sales", Some(1), Some(1), Some(1))?;
+//! // Assuming dataset is loaded with a "sales" time series column
+//!
+//! // Fit ARIMA(1,1,1) to sales column
+//! let arima = run_arima(&dataset, "sales", 1, 1, 1)?;
 //! println!("AIC: {:.2}", arima.aic);
 //!
 //! // Forecast 12 periods ahead
-//! let forecast = forecast_arima(&arima, 12)?;
+//! let forecast = forecast_arima(&dataset, "sales", 1, 1, 1, 12)?;
 //! println!("Forecast: {:?}", forecast.point_forecast);
 //!
-//! // Holt-Winters seasonal model
-//! let hw = run_holt_winters(&dataset, "sales", 12, "additive", None, None, None)?;
+//! // Holt-Winters seasonal model (period=12 for monthly data)
+//! let hw = run_holt_winters(&dataset, "sales", 12, SeasonalType::Additive, None, None, None)?;
 //! println!("Fitted values: {:?}", hw.fitted);
 //! ```
 //!

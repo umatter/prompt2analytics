@@ -26,6 +26,16 @@ pub enum SpatialCommands {
     /// Spatial Autoregressive Model (SAR / lagsarlm)
     ///
     /// Estimates: y = rho * W * y + X * beta + epsilon
+    #[command(after_help = "\
+EXAMPLES:
+    # SAR with 5 nearest neighbors
+    p2a --session s.json spatial sar mydata -y price -x sqft bedrooms \\
+        --coord-x longitude --coord-y latitude -k 5
+
+    # Spatial Durbin model with impacts
+    p2a --session s.json spatial sar mydata -y price -x sqft bedrooms \\
+        --coord-x lon --coord-y lat --durbin --impacts
+")]
     Sar {
         /// Dataset name
         dataset: String,
@@ -66,6 +76,11 @@ pub enum SpatialCommands {
     /// Spatial Error Model (SEM / errorsarlm)
     ///
     /// Estimates: y = X * beta + u, where u = lambda * W * u + epsilon
+    #[command(after_help = "\
+EXAMPLES:
+    p2a --session s.json spatial sem mydata -y price -x sqft bedrooms \\
+        --coord-x longitude --coord-y latitude -k 5
+")]
     Sem {
         /// Dataset name
         dataset: String,
@@ -98,6 +113,11 @@ pub enum SpatialCommands {
     /// Spatial Autoregressive Combined Model (SAC / SARAR)
     ///
     /// Estimates: y = rho * W * y + X * beta + u, where u = lambda * W * u + epsilon
+    #[command(after_help = "\
+EXAMPLES:
+    p2a --session s.json spatial sac mydata -y price -x sqft bedrooms \\
+        --coord-x longitude --coord-y latitude -k 5
+")]
     Sac {
         /// Dataset name
         dataset: String,
@@ -128,6 +148,12 @@ pub enum SpatialCommands {
     },
 
     /// Moran's I test for spatial autocorrelation
+    #[command(after_help = "\
+EXAMPLES:
+    # Test for spatial clustering in residuals
+    p2a --session s.json spatial moran mydata -y residuals \\
+        --coord-x longitude --coord-y latitude -k 5
+")]
     Moran {
         /// Dataset name
         dataset: String,

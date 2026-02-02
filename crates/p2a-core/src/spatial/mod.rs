@@ -14,9 +14,11 @@
 //!
 //! # Example
 //!
-//! ```rust,ignore
-//! use p2a_core::spatial::{Neighbors, SpatialWeights, WeightStyle, moran_test};
+//! ```
+//! use p2a_core::spatial::{Neighbors, SpatialWeights, WeightStyle, moran_test, MoranAlternative};
+//! use ndarray::array;
 //!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! // Create k-nearest neighbors from coordinates
 //! let coords = vec![(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)];
 //! let nb = Neighbors::from_knn(&coords, 2);
@@ -27,6 +29,8 @@
 //! // Test for spatial autocorrelation
 //! let y = array![1.0, 2.0, 1.5, 2.5];
 //! let result = moran_test(&y, &listw, MoranAlternative::TwoSided)?;
+//! # Ok(())
+//! # }
 //! ```
 
 mod diagnostics;

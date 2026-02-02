@@ -13,6 +13,11 @@ use crate::session::SessionManager;
 #[derive(Subcommand)]
 pub enum DiscreteCommands {
     /// Logit (logistic regression)
+    #[command(after_help = "\
+EXAMPLES:
+    # Binary logit
+    p2a discrete logit mydata -y employed -x age education income
+")]
     Logit {
         /// Dataset name
         dataset: String,
@@ -27,6 +32,11 @@ pub enum DiscreteCommands {
     },
 
     /// Probit regression
+    #[command(after_help = "\
+EXAMPLES:
+    # Binary probit
+    p2a discrete probit mydata -y employed -x age education income
+")]
     Probit {
         /// Dataset name
         dataset: String,
@@ -41,6 +51,11 @@ pub enum DiscreteCommands {
     },
 
     /// Ordered Logit (proportional odds model)
+    #[command(after_help = "\
+EXAMPLES:
+    # Ordered logit for satisfaction ratings (1-5)
+    p2a discrete o-logit mydata -y satisfaction -x age income service_quality
+")]
     OLogit {
         /// Dataset name
         dataset: String,
@@ -69,6 +84,11 @@ pub enum DiscreteCommands {
     },
 
     /// Multinomial Logit
+    #[command(after_help = "\
+EXAMPLES:
+    # Multinomial choice model
+    p2a discrete mlogit mydata -y transport_mode -x income distance age
+")]
     Mlogit {
         /// Dataset name
         dataset: String,
@@ -87,6 +107,11 @@ pub enum DiscreteCommands {
     },
 
     /// Negative Binomial regression (count data with overdispersion)
+    #[command(after_help = "\
+EXAMPLES:
+    # Count data with overdispersion
+    p2a discrete negbin mydata -y doctor_visits -x age income chronic_conditions
+")]
     Negbin {
         /// Dataset name
         dataset: String,
@@ -115,6 +140,14 @@ pub enum DiscreteCommands {
     },
 
     /// Zero-Inflated Poisson (ZIP) model
+    #[command(after_help = "\
+EXAMPLES:
+    # ZIP with same covariates for both parts
+    p2a discrete zip mydata -y patents -x rd_spending firm_size
+
+    # ZIP with different covariates for zero-inflation
+    p2a discrete zip mydata -y patents -x rd_spending firm_size -z age industry
+")]
     Zip {
         /// Dataset name
         dataset: String,
@@ -173,6 +206,11 @@ pub enum DiscreteCommands {
     },
 
     /// Conditional Logit (McFadden's choice model for panel/choice data)
+    #[command(after_help = "\
+EXAMPLES:
+    # Discrete choice model for mode choice
+    p2a discrete clogit mydata --choice-id trip_id --alt-id mode -y chosen -x travel_time cost
+")]
     Clogit {
         /// Dataset name
         dataset: String,

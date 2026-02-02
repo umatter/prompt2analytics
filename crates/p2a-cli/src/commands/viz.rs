@@ -20,6 +20,10 @@ use crate::session::SessionManager;
 #[derive(Subcommand)]
 pub enum VizCommands {
     /// Create a histogram
+    #[command(after_help = "\
+EXAMPLES:
+    p2a --session s.json viz histogram mydata --col income -f hist.png --bins 50
+")]
     Histogram {
         /// Dataset name
         dataset: String,
@@ -42,6 +46,10 @@ pub enum VizCommands {
     },
 
     /// Create a scatter plot
+    #[command(after_help = "\
+EXAMPLES:
+    p2a --session s.json viz scatter mydata -x age -y income -f scatter.png --title 'Age vs Income'
+")]
     Scatter {
         /// Dataset name
         dataset: String,
@@ -64,6 +72,10 @@ pub enum VizCommands {
     },
 
     /// Create a line plot
+    #[command(after_help = "\
+EXAMPLES:
+    p2a --session s.json viz line mydata -x date -y price -f timeseries.png
+")]
     Line {
         /// Dataset name
         dataset: String,
@@ -86,6 +98,14 @@ pub enum VizCommands {
     },
 
     /// Create a box plot
+    #[command(after_help = "\
+EXAMPLES:
+    # Single box
+    p2a --session s.json viz box mydata -y score -f boxplot.png
+
+    # Grouped by category
+    p2a --session s.json viz box mydata -y score -g treatment -f boxplot.png
+")]
     Box {
         /// Dataset name
         dataset: String,
@@ -108,6 +128,10 @@ pub enum VizCommands {
     },
 
     /// Create a correlation heatmap
+    #[command(after_help = "\
+EXAMPLES:
+    p2a --session s.json viz heatmap mydata --cols x1 x2 x3 x4 -f corr.png
+")]
     Heatmap {
         /// Dataset name
         dataset: String,
@@ -126,6 +150,10 @@ pub enum VizCommands {
     },
 
     /// Create a coefficient plot (forest plot) from regression
+    #[command(after_help = "\
+EXAMPLES:
+    p2a --session s.json viz coefplot mydata -y outcome -x x1 x2 x3 -f coef.png
+")]
     Coefplot {
         /// Dataset name
         dataset: String,
@@ -152,6 +180,11 @@ pub enum VizCommands {
     },
 
     /// Create residual diagnostic plots from regression
+    #[command(after_help = "\
+EXAMPLES:
+    # Creates 4 diagnostic plots: residuals, Q-Q, scale-location, leverage
+    p2a --session s.json viz residuals mydata -y outcome -x x1 x2 -f resid.png
+")]
     Residuals {
         /// Dataset name
         dataset: String,
@@ -174,6 +207,10 @@ pub enum VizCommands {
     },
 
     /// Create a dendrogram from hierarchical clustering
+    #[command(after_help = "\
+EXAMPLES:
+    p2a --session s.json viz dendrogram mydata --cols x1 x2 x3 --linkage ward -f tree.png
+")]
     Dendrogram {
         /// Dataset name
         dataset: String,
@@ -196,6 +233,11 @@ pub enum VizCommands {
     },
 
     /// Create an event study plot
+    #[command(after_help = "\
+EXAMPLES:
+    p2a --session s.json viz event-study results --time-col period \\
+        --estimate-col estimate --ci-lower-col ci_low --ci-upper-col ci_high -f event.png
+")]
     EventStudy {
         /// Dataset name
         dataset: String,
@@ -226,6 +268,11 @@ pub enum VizCommands {
     },
 
     /// Create an impulse response function plot
+    #[command(after_help = "\
+EXAMPLES:
+    p2a --session s.json viz irf irf_data --horizon-col h --response-col response \\
+        --ci-lower-col lower --ci-upper-col upper -f irf.png
+")]
     Irf {
         /// Dataset name
         dataset: String,
@@ -264,6 +311,14 @@ pub enum VizCommands {
     },
 
     /// Create an interactive scatter plot (HTML output with Plotly)
+    #[command(after_help = "\
+EXAMPLES:
+    # Interactive scatter with hover
+    p2a --session s.json viz scatter-interactive mydata -x age -y income -f scatter.html
+
+    # Color by group
+    p2a --session s.json viz scatter-interactive mydata -x x -y y -g category -f plot.html
+")]
     ScatterInteractive {
         /// Dataset name
         dataset: String,
@@ -290,6 +345,10 @@ pub enum VizCommands {
     },
 
     /// Create an interactive histogram (HTML output with Plotly)
+    #[command(after_help = "\
+EXAMPLES:
+    p2a --session s.json viz histogram-interactive mydata --col income -f hist.html
+")]
     HistogramInteractive {
         /// Dataset name
         dataset: String,
@@ -312,6 +371,10 @@ pub enum VizCommands {
     },
 
     /// Create an interactive line plot (HTML output with Plotly)
+    #[command(after_help = "\
+EXAMPLES:
+    p2a --session s.json viz line-interactive mydata -x date -y price -f line.html
+")]
     LineInteractive {
         /// Dataset name
         dataset: String,

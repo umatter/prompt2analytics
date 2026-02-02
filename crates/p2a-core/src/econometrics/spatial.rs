@@ -21,11 +21,15 @@
 //!
 //! # Example
 //!
-//! ```rust,ignore
+//! ```ignore
 //! use p2a_core::spatial::{Neighbors, SpatialWeights, WeightStyle};
 //! use p2a_core::econometrics::spatial::{run_sar, SarConfig};
+//! use p2a_core::data::Dataset;
 //!
-//! // Create spatial weights
+//! // Assuming dataset is loaded with columns "y", "x1", "x2" and coordinates
+//! let coords = vec![(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)];
+//!
+//! // Create spatial weights from coordinates
 //! let nb = Neighbors::from_knn(&coords, 5);
 //! let mut listw = SpatialWeights::from_neighbors(&nb, WeightStyle::RowStd);
 //!

@@ -60,6 +60,11 @@ use crate::session::SessionManager;
 #[derive(Subcommand)]
 pub enum CausalCommands {
     /// Two-Stage Least Squares (Instrumental Variables)
+    #[command(after_help = "\
+EXAMPLES:
+    # IV regression with education instrumented by distance to college
+    p2a causal iv mydata -y wage --exog experience --endog education --instruments distance_college
+")]
     Iv {
         /// Dataset name
         dataset: String,
@@ -82,6 +87,14 @@ pub enum CausalCommands {
     },
 
     /// Difference-in-Differences
+    #[command(after_help = "\
+EXAMPLES:
+    # Classic 2x2 DiD
+    p2a causal did mydata -y outcome --treat treatment --post post_period
+
+    # DiD with controls
+    p2a causal did mydata -y outcome --treat treatment --post post_period -x age income
+")]
     Did {
         /// Dataset name
         dataset: String,
@@ -104,6 +117,16 @@ pub enum CausalCommands {
     },
 
     /// Synthetic Control Method (Abadie et al.)
+    #[command(after_help = "\
+EXAMPLES:
+    # Synthetic control for California tobacco program
+    p2a causal synth mydata -y cigsale --unit state --time year --treated California \\
+        --treatment-time 1989 -p income beer retprice
+
+    # With placebo tests
+    p2a causal synth mydata -y gdp --unit country --time year --treated Spain \\
+        --treatment-time 1986 -p population unemployment --placebos
+")]
     Synth {
         /// Dataset name
         dataset: String,
@@ -142,6 +165,14 @@ pub enum CausalCommands {
     },
 
     /// Inverse Probability Weighting treatment effect
+    #[command(after_help = "\
+EXAMPLES:
+    # IPW for ATE with default trimming
+    p2a causal ipw mydata -y outcome -t treatment -x age income education
+
+    # IPW for ATT with custom trimming
+    p2a causal ipw mydata -y outcome -t treatment -x age income --estimand att --trim 0.1
+")]
     Ipw {
         /// Dataset name
         dataset: String,
@@ -172,6 +203,14 @@ pub enum CausalCommands {
     },
 
     /// Doubly robust treatment effect (AIPW)
+    #[command(after_help = "\
+EXAMPLES:
+    # AIPW (doubly robust)
+    p2a causal doubly-robust mydata -y outcome -t treatment -x age income --method aipw
+
+    # Regression-only method for ATT
+    p2a causal doubly-robust mydata -y outcome -t treatment -x age income --method regression --estimand att
+")]
     DoublyRobust {
         /// Dataset name
         dataset: String,
@@ -206,6 +245,11 @@ pub enum CausalCommands {
     },
 
     /// Causal mediation analysis
+    #[command(after_help = "\
+EXAMPLES:
+    # Mediation analysis (treatment -> mediator -> outcome)
+    p2a causal mediation mydata -y outcome -t treatment -m mediator -x age income
+")]
     Mediation {
         /// Dataset name
         dataset: String,
@@ -232,6 +276,14 @@ pub enum CausalCommands {
     },
 
     /// Regression Discontinuity (sharp design)
+    #[command(after_help = "\
+EXAMPLES:
+    # Sharp RD with MSE-optimal bandwidth
+    p2a causal rd mydata -y test_score -r running_var -c 50
+
+    # With local quadratic polynomial
+    p2a causal rd mydata -y test_score -r running_var -c 50 -p 2
+")]
     Rd {
         /// Dataset name
         dataset: String,
@@ -262,6 +314,11 @@ pub enum CausalCommands {
     },
 
     /// Fuzzy Regression Discontinuity
+    #[command(after_help = "\
+EXAMPLES:
+    # Fuzzy RD (imperfect compliance at cutoff)
+    p2a causal fuzzy-rd mydata -y outcome -r score -t enrolled -c 60
+")]
     FuzzyRd {
         /// Dataset name
         dataset: String,
@@ -292,6 +349,16 @@ pub enum CausalCommands {
     },
 
     /// Staggered Difference-in-Differences (Callaway-Sant'Anna)
+    #[command(after_help = "\
+EXAMPLES:
+    # Staggered DiD with never-treated comparison
+    p2a causal staggered-did mydata -y outcome --treatment-time first_treat \\
+        --time year --unit state
+
+    # With doubly-robust estimation and covariates
+    p2a causal staggered-did mydata -y outcome --treatment-time first_treat \\
+        --time year --unit state -x population gdp --method dr
+")]
     StaggeredDid {
         /// Dataset name
         dataset: String,
@@ -330,6 +397,14 @@ pub enum CausalCommands {
     },
 
     /// Targeted Maximum Likelihood Estimation (TMLE)
+    #[command(after_help = "\
+EXAMPLES:
+    # TMLE for ATE
+    p2a causal tmle mydata -y outcome -t treatment -x age income education
+
+    # With custom propensity score truncation
+    p2a causal tmle mydata -y outcome -t treatment -x age income --truncate-lower 0.05 --truncate-upper 0.95
+")]
     Tmle {
         /// Dataset name
         dataset: String,
@@ -360,6 +435,15 @@ pub enum CausalCommands {
     },
 
     /// Generalized Synthetic Control (gsynth)
+    #[command(after_help = "\
+EXAMPLES:
+    # Interactive FE with auto-selected factors
+    p2a causal gsynth mydata -y gdp -d treatment --unit country --time year
+
+    # Matrix completion estimator with bootstrap SEs
+    p2a causal gsynth mydata -y gdp -d treatment --unit country --time year \\
+        --estimator mc --bootstrap-se
+")]
     Gsynth {
         /// Dataset name
         dataset: String,
@@ -406,6 +490,17 @@ pub enum CausalCommands {
     },
 
     /// Propensity Score Matching (MatchIt)
+    #[command(after_help = "\
+EXAMPLES:
+    # Nearest neighbor 1:1 matching with caliper
+    p2a causal matching mydata -t treatment -x age income education --caliper 0.25
+
+    # Coarsened exact matching
+    p2a causal matching mydata -t treatment -x age income education --method cem
+
+    # Full matching
+    p2a causal matching mydata -t treatment -x age income --method full
+")]
     Matching {
         /// Dataset name
         dataset: String,
@@ -444,6 +539,15 @@ pub enum CausalCommands {
     },
 
     /// Regression Standardization / G-computation (stdReg)
+    #[command(after_help = "\
+EXAMPLES:
+    # G-computation for ATE with bootstrap SEs
+    p2a causal stdreg mydata -y outcome -t treatment -x age income
+
+    # Logistic outcome model for ATT
+    p2a causal stdreg mydata -y binary_outcome -t treatment -x age income \\
+        --model logistic --estimand att
+")]
     Stdreg {
         /// Dataset name
         dataset: String,

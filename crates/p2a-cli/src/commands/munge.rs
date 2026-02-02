@@ -39,6 +39,14 @@ pub enum BinMethod {
 #[derive(Subcommand)]
 pub enum MungeCommands {
     /// Filter rows based on a condition
+    #[command(after_help = "\
+EXAMPLES:
+    # Numeric comparison
+    p2a --session s.json munge filter mydata --column age --op gt --value 30
+
+    # String contains
+    p2a --session s.json munge filter mydata --column name --op contains --value 'Smith'
+")]
     Filter {
         /// Dataset name
         dataset: String,
@@ -61,6 +69,10 @@ pub enum MungeCommands {
     },
 
     /// Select specific columns
+    #[command(after_help = "\
+EXAMPLES:
+    p2a --session s.json munge select mydata --columns id name age --name subset
+")]
     Select {
         /// Dataset name
         dataset: String,
@@ -75,6 +87,10 @@ pub enum MungeCommands {
     },
 
     /// Drop columns from a dataset
+    #[command(after_help = "\
+EXAMPLES:
+    p2a --session s.json munge drop mydata --columns temp_col unused_col
+")]
     Drop {
         /// Dataset name
         dataset: String,
@@ -89,6 +105,10 @@ pub enum MungeCommands {
     },
 
     /// Rename columns
+    #[command(after_help = "\
+EXAMPLES:
+    p2a --session s.json munge rename mydata --renames old_name=new_name col1=column_one
+")]
     Rename {
         /// Dataset name
         dataset: String,
@@ -103,6 +123,14 @@ pub enum MungeCommands {
     },
 
     /// Sort by columns
+    #[command(after_help = "\
+EXAMPLES:
+    # Ascending sort
+    p2a --session s.json munge sort mydata --by date
+
+    # Descending sort by multiple columns
+    p2a --session s.json munge sort mydata --by score rank --desc
+")]
     Sort {
         /// Dataset name
         dataset: String,
@@ -121,6 +149,17 @@ pub enum MungeCommands {
     },
 
     /// Create or compute a new column
+    #[command(after_help = "\
+EXAMPLES:
+    # Copy a column
+    p2a --session s.json munge mutate mydata --new-col backup --expr 'copy:original'
+
+    # Arithmetic: add two columns
+    p2a --session s.json munge mutate mydata --new-col total --expr 'add:price:tax'
+
+    # Constant value
+    p2a --session s.json munge mutate mydata --new-col flag --expr 'constant:1'
+")]
     Mutate {
         /// Dataset name
         dataset: String,
@@ -139,6 +178,14 @@ pub enum MungeCommands {
     },
 
     /// Take a random sample of rows
+    #[command(after_help = "\
+EXAMPLES:
+    # Random 100 rows
+    p2a --session s.json munge sample mydata -n 100
+
+    # With replacement and seed
+    p2a --session s.json munge sample mydata -n 1000 --replace --seed 42
+")]
     Sample {
         /// Dataset name
         dataset: String,
@@ -161,6 +208,14 @@ pub enum MungeCommands {
     },
 
     /// Join two datasets
+    #[command(after_help = "\
+EXAMPLES:
+    # Left join on id
+    p2a --session s.json munge join left_data right_data --on id -t left
+
+    # Inner join on different column names
+    p2a --session s.json munge join orders customers --on customer_id --right-on id -t inner
+")]
     Join {
         /// Left dataset name
         left: String,
@@ -190,6 +245,10 @@ pub enum MungeCommands {
     },
 
     /// Concatenate datasets vertically
+    #[command(after_help = "\
+EXAMPLES:
+    p2a --session s.json munge concat data_2020 data_2021 data_2022 --name all_years
+")]
     Concat {
         /// Dataset names to concatenate
         #[arg(num_args = 2..)]
@@ -201,6 +260,11 @@ pub enum MungeCommands {
     },
 
     /// Group by and aggregate
+    #[command(after_help = "\
+EXAMPLES:
+    p2a --session s.json munge group-by mydata --by region year \\
+        --aggs revenue:sum units:mean price:median
+")]
     GroupBy {
         /// Dataset name
         dataset: String,
@@ -219,6 +283,10 @@ pub enum MungeCommands {
     },
 
     /// Count value frequencies
+    #[command(after_help = "\
+EXAMPLES:
+    p2a --session s.json munge value-counts mydata --column category
+")]
     ValueCounts {
         /// Dataset name
         dataset: String,
@@ -233,6 +301,10 @@ pub enum MungeCommands {
     },
 
     /// Pivot from long to wide format
+    #[command(after_help = "\
+EXAMPLES:
+    p2a --session s.json munge pivot mydata --index id date --on variable --values value
+")]
     Pivot {
         /// Dataset name
         dataset: String,
@@ -255,6 +327,11 @@ pub enum MungeCommands {
     },
 
     /// Melt from wide to long format
+    #[command(after_help = "\
+EXAMPLES:
+    p2a --session s.json munge melt mydata --id-vars id name \\
+        --value-vars jan feb mar --var-name month --val-name sales
+")]
     Melt {
         /// Dataset name
         dataset: String,
@@ -281,6 +358,14 @@ pub enum MungeCommands {
     },
 
     /// Drop rows with missing values
+    #[command(after_help = "\
+EXAMPLES:
+    # Drop rows with any NA
+    p2a --session s.json munge drop-na mydata
+
+    # Only check specific columns
+    p2a --session s.json munge drop-na mydata --columns income age
+")]
     DropNa {
         /// Dataset name
         dataset: String,
@@ -299,6 +384,17 @@ pub enum MungeCommands {
     },
 
     /// Fill missing values
+    #[command(after_help = "\
+EXAMPLES:
+    # Fill with mean
+    p2a --session s.json munge fill-na mydata --method mean
+
+    # Fill with constant
+    p2a --session s.json munge fill-na mydata --method constant --value 0
+
+    # Forward fill specific columns
+    p2a --session s.json munge fill-na mydata --method forward --columns price volume
+")]
     FillNa {
         /// Dataset name
         dataset: String,
@@ -321,6 +417,14 @@ pub enum MungeCommands {
     },
 
     /// Remove duplicate rows
+    #[command(after_help = "\
+EXAMPLES:
+    # Remove exact duplicates
+    p2a --session s.json munge deduplicate mydata
+
+    # Keep last occurrence based on id
+    p2a --session s.json munge deduplicate mydata --subset id --keep last
+")]
     Deduplicate {
         /// Dataset name
         dataset: String,
@@ -339,6 +443,14 @@ pub enum MungeCommands {
     },
 
     /// Create lag of a column
+    #[command(after_help = "\
+EXAMPLES:
+    # Lag by 1 period
+    p2a --session s.json munge lag mydata --column price
+
+    # Panel data lag by entity
+    p2a --session s.json munge lag mydata --column gdp --periods 2 --group-by country
+")]
     Lag {
         /// Dataset name
         dataset: String,
@@ -361,6 +473,10 @@ pub enum MungeCommands {
     },
 
     /// Create lead of a column
+    #[command(after_help = "\
+EXAMPLES:
+    p2a --session s.json munge lead mydata --column price --periods 1
+")]
     Lead {
         /// Dataset name
         dataset: String,
@@ -383,6 +499,14 @@ pub enum MungeCommands {
     },
 
     /// Compute difference of a column
+    #[command(after_help = "\
+EXAMPLES:
+    # First difference
+    p2a --session s.json munge diff mydata --column gdp
+
+    # Percentage change
+    p2a --session s.json munge diff mydata --column price --pct
+")]
     Diff {
         /// Dataset name
         dataset: String,
@@ -405,6 +529,14 @@ pub enum MungeCommands {
     },
 
     /// Standardize (z-score) columns
+    #[command(after_help = "\
+EXAMPLES:
+    # Z-score standardization
+    p2a --session s.json munge standardize mydata --columns x1 x2 x3
+
+    # Min-max normalization (0-1)
+    p2a --session s.json munge standardize mydata --columns x1 x2 --normalize
+")]
     Standardize {
         /// Dataset name
         dataset: String,
@@ -423,6 +555,14 @@ pub enum MungeCommands {
     },
 
     /// Bin a continuous column
+    #[command(after_help = "\
+EXAMPLES:
+    # Equal-width bins
+    p2a --session s.json munge bin mydata --column age --method equal-width -n 5
+
+    # Quantile bins
+    p2a --session s.json munge bin mydata --column income --method quantile -n 10
+")]
     Bin {
         /// Dataset name
         dataset: String,
@@ -445,6 +585,14 @@ pub enum MungeCommands {
     },
 
     /// One-hot encode a categorical column
+    #[command(after_help = "\
+EXAMPLES:
+    # One-hot encode category
+    p2a --session s.json munge one-hot mydata --column category
+
+    # Drop first to avoid multicollinearity
+    p2a --session s.json munge one-hot mydata --column region --drop-first
+")]
     OneHot {
         /// Dataset name
         dataset: String,

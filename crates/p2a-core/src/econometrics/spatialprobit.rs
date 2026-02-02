@@ -262,10 +262,11 @@ impl SpatialProbitResult {
 ///
 /// # Example
 ///
-/// ```rust,ignore
+/// ```ignore
 /// use p2a_core::spatial::{Neighbors, SpatialWeights, WeightStyle};
 /// use p2a_core::econometrics::spatialprobit::{run_sar_probit, SpatialProbitConfig};
 ///
+/// // Assuming dataset and coords are already set up
 /// let nb = Neighbors::from_knn(&coords, 5);
 /// let mut listw = SpatialWeights::from_neighbors(&nb, WeightStyle::RowStd);
 ///

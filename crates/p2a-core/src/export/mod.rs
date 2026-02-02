@@ -20,12 +20,13 @@
 //! - Multi-model comparison tables
 //! - Custom notes and captions
 //!
-//! ```rust,ignore
+//! ```ignore
 //! use p2a_core::export::{LatexTableBuilder, LatexStyle};
+//! use p2a_core::regression::OlsResult;
 //!
+//! // Given an OlsResult from regression
 //! let latex = LatexTableBuilder::new()
-//!     .style(LatexStyle::AER)  // American Economic Review style
-//!     .add_model("Model 1", &ols_result)
+//!     .add_model("Model 1", ols_result)
 //!     .caption("Regression Results")
 //!     .label("tab:results")
 //!     .build();
@@ -35,12 +36,13 @@
 //!
 //! GitHub-flavored markdown tables for documentation:
 //!
-//! ```rust,ignore
-//! use p2a_core::export::{MarkdownTableBuilder, MarkdownStyle};
+//! ```ignore
+//! use p2a_core::export::MarkdownTableBuilder;
+//! use p2a_core::regression::OlsResult;
 //!
+//! // Given an OlsResult from regression
 //! let md = MarkdownTableBuilder::new()
-//!     .style(MarkdownStyle::GitHub)
-//!     .add_model("OLS", &ols_result)
+//!     .add_model("OLS", ols_result)
 //!     .build();
 //! ```
 //!
@@ -48,12 +50,13 @@
 //!
 //! Self-contained HTML with embedded CSS styling:
 //!
-//! ```rust,ignore
-//! use p2a_core::export::{HtmlTableBuilder, HtmlStyle};
+//! ```ignore
+//! use p2a_core::export::HtmlTableBuilder;
+//! use p2a_core::regression::OlsResult;
 //!
+//! // Given an OlsResult from regression
 //! let html = HtmlTableBuilder::new()
-//!     .style(HtmlStyle::Modern)
-//!     .add_model("Results", &ols_result)
+//!     .add_model("Results", ols_result)
 //!     .build();
 //! ```
 //!
@@ -61,10 +64,12 @@
 //!
 //! The [`CsvExport`] trait is implemented for all result types:
 //!
-//! ```rust,ignore
+//! ```ignore
 //! use p2a_core::export::CsvExport;
+//! use p2a_core::regression::OlsResult;
 //!
-//! let csv = result.to_csv();  // Returns CSV string
+//! // Given an OlsResult from regression
+//! let csv = ols_result.to_csv();  // Returns CSV string
 //! ```
 //!
 //! ## Supported Result Types
