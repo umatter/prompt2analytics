@@ -65,11 +65,11 @@ rustup target add wasm32-unknown-unknown
 
 ## Project Overview
 
-prompt2analytics is a Rust workspace (edition 2024, requires Rust 1.85+) exposing 200+ econometrics, statistics, ML, and visualization methods through multiple interfaces:
+prompt2analytics is a Rust workspace (edition 2024, requires Rust 1.85+) exposing 256 econometrics, statistics, ML, and visualization methods through multiple interfaces:
 
 - **p2a-core**: Core analytics library (all algorithms)
 - **p2a-cli**: Command-line interface (`p2a` binary)
-- **p2a-mcp**: MCP server exposing 100+ tools with LLM integration
+- **p2a-mcp**: MCP server exposing 256 tools with LLM integration
 - **p2a-dioxus**: Cross-platform GUI (web via WASM, desktop via native)
 
 ## Architecture Principles
@@ -347,23 +347,96 @@ let result = run_staggered_did(dataset, &config)?;
 
 ## MCP Server (p2a-mcp)
 
+### Module Organization
+
+The MCP server exposes 256 tools organized into modular handler files:
+
+```
+crates/p2a-mcp/src/
+├── server.rs              # AnalyticsServer struct + router composition
+├── tools/
+│   ├── mod.rs             # Re-exports
+│   ├── registry.rs        # Tool metadata for documentation
+│   ├── requests/          # Request structs by category
+│   │   ├── mod.rs
+│   │   ├── causal.rs      # Causal inference requests
+│   │   ├── data.rs        # Data management requests
+│   │   ├── discrete.rs    # Discrete choice requests
+│   │   ├── hypothesis.rs  # Hypothesis testing requests
+│   │   ├── ml.rs          # Machine learning requests
+│   │   ├── munging.rs     # Data munging requests
+│   │   ├── panel.rs       # Panel data requests
+│   │   ├── regression.rs  # Regression requests
+│   │   ├── spatial.rs     # Spatial econometrics requests
+│   │   ├── stats.rs       # Statistics requests
+│   │   ├── timeseries.rs  # Time series requests
+│   │   └── ...            # Other category modules
+│   └── handlers/          # Tool implementations
+│       ├── mod.rs
+│       ├── causal.rs      # 40+ causal inference tools
+│       ├── data.rs        # Data management tools
+│       ├── discrete.rs    # Discrete choice tools
+│       ├── hypothesis.rs  # 20 hypothesis testing tools
+│       ├── ml.rs          # ML tools
+│       ├── munging.rs     # 40+ data munging tools
+│       ├── panel.rs       # Panel data tools
+│       ├── regression.rs  # Regression tools
+│       ├── spatial.rs     # Spatial econometrics tools
+│       ├── stats.rs       # Statistics tools
+│       ├── timeseries.rs  # 30+ time series tools
+│       └── ...            # Other category modules
+```
+
 ### Adding a New Tool
 
-1. Define the request struct with `#[derive(Deserialize, JsonSchema)]`
-2. Add the tool handler in `server.rs`
-3. Register with the `#[tool]` attribute
-
+1. Define the request struct in `tools/requests/<category>.rs`:
 ```rust
-#[derive(Deserialize, JsonSchema)]
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct MyToolRequest {
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
     pub dataset: String,
+    #[schemars(description = "Description of this parameter.")]
     pub param: String,
 }
+```
 
+2. Add the tool handler in `tools/handlers/<category>.rs`:
+```rust
 #[tool(description = "My tool description")]
-async fn my_tool(&self, #[tool(aggr)] request: MyToolRequest) -> Result<String, McpError> {
+async fn my_tool(
+    &self,
+    Parameters(request): Parameters<MyToolRequest>,
+) -> Result<CallToolResult, McpError> {
     // Implementation
+    Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
 }
+```
+
+3. Import the request type in the handler module and ensure it's re-exported from `tools/requests/mod.rs`
+
+### Router Composition
+
+Each handler module defines a router via `#[tool_router(router = <name>_router, vis = "pub")]`.
+These are composed in `server.rs`:
+
+```rust
+let tool_router = Self::tool_router()
+    + Self::utils_router()
+    + Self::database_router()
+    + Self::data_router()
+    + Self::viz_router()
+    + Self::ml_router()
+    + Self::stats_router()
+    + Self::hypothesis_router()
+    + Self::regression_router()
+    + Self::panel_router()
+    + Self::discrete_router()
+    + Self::causal_router()
+    + Self::timeseries_router()
+    + Self::spatial_router()
+    + Self::munging_router()
+    + Self::survival_router()
+    + Self::cleaning_router();
 ```
 
 ### Database Layer (SurrealDB)
@@ -498,7 +571,9 @@ let df = df! {
 - `crates/p2a-core/src/forecasting/garch.rs` - Volatility modeling
 
 **MCP Server:**
-- `crates/p2a-mcp/src/server.rs` - All MCP tool definitions
+- `crates/p2a-mcp/src/server.rs` - AnalyticsServer struct and router composition
+- `crates/p2a-mcp/src/tools/handlers/` - Tool implementations (256 tools across 17 modules)
+- `crates/p2a-mcp/src/tools/requests/` - Request type definitions
 - `crates/p2a-mcp/src/transport/http.rs` - HTTP transport with SSE streaming
 - `crates/p2a-mcp/src/db/` - SurrealDB persistence layer
 

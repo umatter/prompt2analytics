@@ -7,7 +7,7 @@
 
 A comprehensive analytics toolkit exposing econometrics, machine learning, and visualization capabilities through multiple interfaces:
 - **CLI (`p2a`)**: Direct command-line execution for scripted workflows
-- **MCP Server**: Model Context Protocol integration for AI assistants (250+ tools)
+- **MCP Server**: Model Context Protocol integration for AI assistants (256 tools)
 - **Dioxus App**: Cross-platform frontend (web, desktop) with LLM-powered natural language analysis
 
 **Requirements**: Rust 1.85+ (edition 2024)
@@ -108,56 +108,286 @@ The CLI binary will be at `target/release/p2a`.
 
 ### CLI (`p2a`)
 
-The `p2a` command provides direct access to all analytics functions:
+The `p2a` command provides direct access to all analytics functions. Use `--session` to enable reproducibility.
+
+#### Data Management
 
 ```bash
-# Load a dataset
-p2a --session analysis.json data load /path/to/data.csv --name mydata
+# Load datasets (CSV, Parquet, Excel, Stata, SAS)
+p2a --session s.json data load sales.csv --name sales
+p2a --session s.json data load quarterly.parquet --name quarterly
+p2a --session s.json data load survey.dta --name survey
 
-# View data summary
-p2a --session analysis.json data describe mydata
+# View data
+p2a --session s.json data list
+p2a --session s.json data describe sales
+p2a --session s.json data head sales -n 20
 
-# Run OLS regression with robust standard errors
-p2a --session analysis.json reg ols mydata -y price -x sqft bedrooms bathrooms --robust hc1
+# Generate random data for testing
+p2a --session s.json data generate -n 1000 -d simdata \
+    --columns '[{"name":"x","distribution":{"type":"normal","mean":0,"std":1}}]'
 
-# Run clustered standard errors regression
-p2a --session analysis.json reg clustered mydata -y outcome -x treatment control --cluster firm_id
+# Export data
+p2a --session s.json data save sales --output results.parquet
+```
 
-# Panel fixed effects
-p2a --session analysis.json panel fe mydata -y revenue -x employees --entity firm_id
+#### Regression
 
-# Time series ARIMA with forecasting
-p2a --session analysis.json ts arima mydata --col sales -p 1 -d 1 -q 1 --horizon 12
+```bash
+# OLS with robust standard errors
+p2a --session s.json reg ols mydata -y price -x sqft bedrooms --robust hc1
 
-# K-means clustering
-p2a --session analysis.json ml kmeans mydata --cols x1 x2 x3 -k 3
+# Clustered standard errors
+p2a --session s.json reg clustered mydata -y revenue -x employees --cluster firm_id
 
-# Create static visualizations (PNG)
-p2a --session analysis.json viz scatter mydata -x income -y spending -f scatter.png
+# HAC (Newey-West) standard errors for time series
+p2a --session s.json reg hac mydata -y returns -x mkt_rf smb hml --lag 4
 
-# Create interactive visualizations (HTML with Plotly.js)
-p2a --session analysis.json viz scatter-interactive mydata -x income -y spending -f scatter.html
+# Bootstrap standard errors
+p2a --session s.json reg bootstrap mydata -y outcome -x treatment -B 1000
 
-# Export session to reproducible bash script
+# Quantile regression
+p2a --session s.json reg quantile mydata -y wage -x education experience --tau 0.5
+
+# Diagnostics (VIF, Breusch-Pagan, Durbin-Watson)
+p2a --session s.json reg diagnostics mydata -y price -x sqft bedrooms bathrooms
+```
+
+#### Panel Data
+
+```bash
+# Fixed effects
+p2a --session s.json panel fe mydata -y revenue -x employees capital --entity firm_id
+
+# Random effects
+p2a --session s.json panel re mydata -y gdp -x investment --entity country --time year
+
+# Hausman specification test
+p2a --session s.json panel hausman mydata -y outcome -x treatment --entity id --time period
+
+# High-dimensional fixed effects
+p2a --session s.json panel hdfe mydata -y sales -x price --fe firm_id year
+
+# FEGLM (GLM with HDFE)
+p2a --session s.json panel feglm mydata -y count -x treatment --fe firm_id --family poisson
+
+# Arellano-Bond GMM
+p2a --session s.json panel gmm mydata -y growth -x investment --entity country --time year
+```
+
+#### Causal Inference
+
+```bash
+# Instrumental Variables (2SLS)
+p2a --session s.json causal iv mydata -y wage -x education --instruments distance
+
+# Difference-in-Differences
+p2a --session s.json causal did mydata -y outcome --treat treatment --post post_period
+
+# Staggered DiD (Callaway-Sant'Anna)
+p2a --session s.json causal staggered-did mydata -y outcome --unit id --time period --treat first_treat
+
+# Regression Discontinuity (Sharp)
+p2a --session s.json causal rd mydata -y outcome --running score --cutoff 0
+
+# Fuzzy RD
+p2a --session s.json causal fuzzy-rd mydata -y outcome --running score --treat treatment --cutoff 0
+
+# Propensity Score Matching
+p2a --session s.json causal matching mydata -y outcome --treat treatment -x age income education
+
+# IPW and Doubly Robust
+p2a --session s.json causal ipw mydata -y outcome --treat treatment -x age income
+p2a --session s.json causal doubly-robust mydata -y outcome --treat treatment -x age income
+
+# Synthetic Control
+p2a --session s.json causal synth mydata -y gdp --unit state --time year --treat california --treat-time 2000
+```
+
+#### Discrete Choice
+
+```bash
+# Logit and Probit
+p2a --session s.json discrete logit mydata -y hired -x education experience age
+p2a --session s.json discrete probit mydata -y default -x income debt_ratio
+
+# Ordered models
+p2a --session s.json discrete ologit mydata -y satisfaction -x service_quality price
+
+# Multinomial logit
+p2a --session s.json discrete mlogit mydata -y transport_mode -x income distance
+
+# Count models
+p2a --session s.json discrete negbin mydata -y accidents -x age speed
+p2a --session s.json discrete zip mydata -y doctor_visits -x age income
+```
+
+#### Time Series
+
+```bash
+# ARIMA modeling and forecasting
+p2a --session s.json ts arima mydata --col sales -p 1 -d 1 -q 1 --horizon 12
+
+# VAR (Vector Autoregression)
+p2a --session s.json ts var mydata --cols gdp inflation unemployment --lags 2
+
+# GARCH volatility modeling
+p2a --session s.json ts garch mydata --col returns -p 1 -q 1
+
+# Holt-Winters forecasting
+p2a --session s.json ts holt-winters mydata --col sales --seasonal 12
+
+# STL decomposition
+p2a --session s.json ts stl mydata --col sales --period 12
+
+# Granger causality
+p2a --session s.json ts granger mydata --cause money_supply --effect inflation --lags 4
+```
+
+#### Statistics
+
+```bash
+# T-tests
+p2a --session s.json stats t-test-one mydata --col score --mu 0
+p2a --session s.json stats t-test-two mydata --col1 treatment --col2 control
+p2a --session s.json stats t-test-paired mydata --col1 before --col2 after
+
+# ANOVA
+p2a --session s.json stats anova mydata --response score --factor treatment
+p2a --session s.json stats tukey mydata --response score --factor treatment
+
+# Non-parametric tests
+p2a --session s.json stats wilcoxon mydata --col1 group_a --col2 group_b
+p2a --session s.json stats kruskal mydata --col score --group treatment
+
+# Normality and independence
+p2a --session s.json stats shapiro mydata --col residuals
+p2a --session s.json stats box-test mydata --col residuals --lag 10
+
+# Time series diagnostics
+p2a --session s.json stats acf mydata --col returns --lag-max 20
+p2a --session s.json stats pacf mydata --col returns --lag-max 15
+```
+
+#### Spatial Econometrics
+
+```bash
+# SAR (Spatial Lag Model)
+p2a --session s.json spatial sar mydata -y price -x sqft bedrooms \
+    --coord-x longitude --coord-y latitude -k 5
+
+# SEM (Spatial Error Model)
+p2a --session s.json spatial sem mydata -y price -x sqft \
+    --coord-x lon --coord-y lat -k 5
+
+# Moran's I test
+p2a --session s.json spatial moran mydata -y residuals \
+    --coord-x longitude --coord-y latitude -k 5
+```
+
+#### Survival Analysis
+
+```bash
+# Kaplan-Meier curves
+p2a --session s.json survival km mydata -t time -e status -g treatment
+
+# Log-rank test
+p2a --session s.json survival log-rank mydata -t time -e status -g treatment
+
+# Cox Proportional Hazards
+p2a --session s.json survival cox mydata -t time -e status -x age treatment --robust
+```
+
+#### Machine Learning
+
+```bash
+# Clustering
+p2a --session s.json ml kmeans mydata --cols x1 x2 x3 -k 5 --seed 42
+p2a --session s.json ml dbscan mydata --cols x y --eps 0.5 --min-samples 5
+p2a --session s.json ml hierarchical mydata --cols x1 x2 x3 -n 4 --linkage ward
+
+# Dimensionality reduction
+p2a --session s.json ml pca mydata --cols x1 x2 x3 x4 x5 -n 3
+p2a --session s.json ml tsne mydata --cols x1 x2 x3 x4 --perplexity 30
+
+# Supervised learning
+p2a --session s.json ml random-forest mydata --cols x1 x2 x3 -y target --n-trees 100
+p2a --session s.json ml svm mydata --cols x1 x2 x3 -y label -c 1.0
+```
+
+#### Data Munging
+
+```bash
+# Filter and select
+p2a --session s.json munge filter mydata --column age --op gt --value 30
+p2a --session s.json munge select mydata --columns id name income
+
+# Transform
+p2a --session s.json munge mutate mydata --new-col total --expr 'add:price:tax'
+p2a --session s.json munge standardize mydata --columns x1 x2 x3
+
+# Reshape
+p2a --session s.json munge pivot mydata --index id --on year --values sales
+p2a --session s.json munge melt mydata --id-vars id --value-vars jan feb mar
+
+# Join and aggregate
+p2a --session s.json munge join orders customers --on customer_id -t left
+p2a --session s.json munge group-by mydata --by region --aggs revenue:sum units:mean
+
+# Clean
+p2a --session s.json munge drop-na mydata
+p2a --session s.json munge fill-na mydata --method mean
+p2a --session s.json munge deduplicate mydata --subset id
+```
+
+#### Visualization
+
+```bash
+# Static charts (PNG)
+p2a --session s.json viz histogram mydata --col income -f hist.png --bins 50
+p2a --session s.json viz scatter mydata -x age -y income -f scatter.png
+p2a --session s.json viz line mydata -x date -y price -f timeseries.png
+p2a --session s.json viz box mydata -y score -g treatment -f boxplot.png
+p2a --session s.json viz heatmap mydata --cols x1 x2 x3 x4 -f corr.png
+p2a --session s.json viz coefplot mydata -y outcome -x x1 x2 x3 -f coef.png
+p2a --session s.json viz residuals mydata -y outcome -x x1 x2 -f resid.png
+
+# Interactive charts (HTML with Plotly.js)
+p2a --session s.json viz scatter-interactive mydata -x age -y income -f scatter.html
+p2a --session s.json viz histogram-interactive mydata --col income -f hist.html
+p2a --session s.json viz line-interactive mydata -x date -y price -f line.html
+```
+
+#### Session and Scripting
+
+```bash
+# Export session to reproducible script
 p2a script export analysis.json -o analysis.sh
+
+# Run a script
+p2a script run analysis.sh
 ```
 
 **Command categories:**
-- `data` - Load, list, describe, preview datasets
-- `reg` - OLS, clustered SEs, diagnostics
-- `panel` - Fixed effects, random effects, Hausman test, HDFE
-- `causal` - IV/2SLS, difference-in-differences, regression discontinuity
-- `discrete` - Logit, probit
-- `ts` - ARIMA, MSTL, VAR
-- `ml` - K-means, PCA, t-SNE, Random Forest
+- `data` - Load, list, describe, preview, generate, export datasets
+- `reg` - OLS, clustered SEs, HAC, bootstrap, quantile, diagnostics
+- `panel` - Fixed effects, random effects, Hausman, HDFE, FEGLM, GMM
+- `causal` - IV/2SLS, DiD, staggered DiD, RD, matching, IPW, synthetic control, TMLE
+- `discrete` - Logit, probit, ordered, multinomial, count models (Poisson, NegBin, ZIP)
+- `ts` - ARIMA, VAR, GARCH, Holt-Winters, STL, Granger causality
+- `stats` - T-tests, ANOVA, non-parametric tests, ACF/PACF, normality tests
+- `spatial` - SAR, SEM, SAC, Moran's I
+- `survival` - Kaplan-Meier, Cox PH, AFT, log-rank test
+- `ml` - K-means, DBSCAN, hierarchical, PCA, t-SNE, Random Forest, SVM
+- `munge` - Filter, select, join, reshape, aggregate, clean
 - `viz` - Static (PNG) and interactive (HTML) charts
 - `script` - Export/run reproducible scripts
 
-**Output formats:** `--output text` (default), `--output json`, `--output table`
+**Output formats:** `--format text` (default), `--format json`, `--format table`
 
 ### MCP Server
 
-The MCP server exposes 60+ analytics tools via the Model Context Protocol. Configure it in your MCP client (e.g., Claude Desktop):
+The MCP server exposes 256 analytics tools via the Model Context Protocol. Configure it in your MCP client (e.g., Claude Desktop):
 
 ```json
 {
@@ -240,7 +470,7 @@ prompt2analytics/
 │   │   ├── linalg/        # Matrix operations (via faer)
 │   │   └── traits/        # LinearEstimator trait
 │   ├── p2a-cli/           # CLI binary (`p2a`)
-│   ├── p2a-mcp/           # MCP server (60+ tools)
+│   ├── p2a-mcp/           # MCP server (256 tools)
 │   │   └── db/            # SurrealDB persistence layer
 │   └── p2a-dioxus/        # Cross-platform Dioxus app
 │       ├── api/           # HTTP client and SSE streaming
@@ -274,7 +504,7 @@ The MCP server exposes 256 analytics tools. Key categories include:
 | Power Analysis | `power_t_test`, `power_prop_test`, `power_anova_test` |
 | Utilities | `generate_random_data`, `set_seed`, `generate_report` |
 
-For a complete list, see the tool definitions in `crates/p2a-mcp/src/server.rs`.
+For a complete list, see the tool definitions in `crates/p2a-mcp/src/tools/handlers/`.
 
 ## Development
 
