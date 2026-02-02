@@ -42,11 +42,30 @@ jobs:
             libgtk-3-dev \
             libxdo-dev
 
-      - name: Run tests (core crates)
-        run: cargo test --workspace --all-features --exclude p2a-dioxus
+      - name: Run tests with memory monitoring (core crates)
+        run: |
+          # Set memory limit (4GB virtual memory)
+          ulimit -v 4194304 || true
+          # Run tests with memory tracking
+          /usr/bin/time -v cargo test --workspace --all-features --exclude p2a-dioxus 2>&1 | tee test-output.txt
+          # Extract peak memory from output
+          grep -E "Maximum resident set size" test-output.txt || true
+        env:
+          # Limit test parallelism to reduce memory spikes
+          RUST_TEST_THREADS: 4
 
       - name: Run tests (p2a-dioxus desktop)
         run: cargo test -p p2a-dioxus --features desktop
+
+      - name: Report memory usage
+        if: always()
+        run: |
+          echo "## Test Memory Usage" >> $GITHUB_STEP_SUMMARY
+          if [ -f test-output.txt ]; then
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            grep -E "Maximum resident set size|Elapsed|Exit status" test-output.txt >> $GITHUB_STEP_SUMMARY || echo "No memory stats found" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          fi
 
   clippy:
     name: Clippy
