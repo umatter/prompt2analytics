@@ -17,7 +17,8 @@ pub use matrix_ops::{
 };
 
 pub use design::{
-    DesignError, DesignMatrix, demean_within_groups, extract_groups, quasi_demean_within_groups,
+    DesignError, DesignMatrix, demean_within_groups, extract_groups, get_column_names,
+    quasi_demean_within_groups,
 };
 
 pub use toeplitz::{toeplitz, toeplitz_acf, toeplitz_asymmetric, toeplitz_to_vec, toeplitz2};

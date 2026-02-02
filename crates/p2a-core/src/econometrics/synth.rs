@@ -1303,7 +1303,20 @@ fn solve_simplex_constrained_qp(
 // Results Calculation
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Calculate pre-treatment fit statistics.
+/// Calculate pre-treatment fit statistics (MSPE and RMSPE).
+///
+/// Measures how well the synthetic control matches the treated unit in the
+/// pre-treatment period. Lower values indicate better fit.
+///
+/// # Arguments
+/// * `z1` - Treated unit outcomes in pre-treatment period (T₀ × 1)
+/// * `z0` - Donor unit outcomes in pre-treatment period (T₀ × J)
+/// * `w` - Unit weights (J × 1)
+///
+/// # Returns
+/// Tuple of (MSPE, RMSPE) where:
+/// - MSPE = Mean Squared Prediction Error = (1/T₀) Σₜ (Z₁ₜ - Z₀ₜ W)²
+/// - RMSPE = Root Mean Squared Prediction Error = √MSPE
 fn calculate_pre_treatment_fit(z1: &Array1<f64>, z0: &Array2<f64>, w: &Array1<f64>) -> (f64, f64) {
     let t0 = z1.len();
     let mut sse = 0.0;
@@ -1320,7 +1333,24 @@ fn calculate_pre_treatment_fit(z1: &Array1<f64>, z0: &Array2<f64>, w: &Array1<f6
     (mspe, rmspe)
 }
 
-/// Calculate predictor balance between treated and synthetic.
+/// Calculate predictor balance between treated and synthetic control.
+///
+/// Computes how well the synthetic control matches the treated unit on each
+/// predictor variable. This is a key diagnostic for assessing synthetic control quality.
+///
+/// # Arguments
+/// * `x1` - Treated unit predictor values (K × 1)
+/// * `x0` - Donor unit predictor values (K × J)
+/// * `w` - Unit weights (J × 1)
+/// * `predictor_names` - Names of predictor variables
+///
+/// # Returns
+/// Vector of `PredictorBalance` structs containing:
+/// - Predictor name
+/// - Treated unit value
+/// - Synthetic control value (= X₀ × W)
+/// - Absolute difference
+/// - Percent difference (relative to treated value)
 fn calculate_predictor_balance(
     x1: &Array1<f64>,
     x0: &Array2<f64>,
@@ -2408,7 +2438,34 @@ fn extract_numeric_column(df: &DataFrame, col: &str) -> EconResult<Vec<f64>> {
     }
 }
 
-/// Select number of factors via cross-validation.
+/// Select optimal number of factors via k-fold cross-validation.
+///
+/// Implements the cross-validation procedure from Xu (2017) for selecting
+/// the number of latent factors in the interactive fixed effects model.
+///
+/// # Algorithm
+/// 1. Randomly split control units into k folds
+/// 2. For each candidate number of factors r = 0, 1, ..., max_factors:
+///    - For each fold:
+///      - Estimate factors using training units
+///      - Compute prediction MSPE on test units
+///    - Average MSPE across folds
+/// 3. Select r with minimum average MSPE
+///
+/// # Arguments
+/// * `y_mat` - Outcome matrix (N × T)
+/// * `control_units` - Indices of control units
+/// * `n_pre` - Number of pre-treatment periods
+/// * `max_factors` - Maximum number of factors to consider
+/// * `n_folds` - Number of cross-validation folds (default: 5)
+/// * `config` - GSynth configuration
+///
+/// # Returns
+/// Tuple of (optimal_r, cv_results) where cv_results contains (r, MSPE) pairs
+///
+/// # References
+/// Xu, Y. (2017). "Generalized Synthetic Control Method: Causal Inference with
+/// Interactive Fixed Effects Models." Political Analysis, 25(1), 57-76.
 fn select_factors_cv(
     y_mat: &Array2<f64>,
     control_units: &[usize],
@@ -2503,7 +2560,40 @@ fn select_factors_cv(
     Ok((best_r, cv_results))
 }
 
-/// Estimate interactive fixed effects model.
+/// Estimate interactive fixed effects (IFE) model on control units.
+///
+/// Implements the factor model: Y_it = λ_i' f_t + ε_it
+/// where λ_i are unit-specific loadings and f_t are time-varying factors.
+///
+/// # Model
+/// The interactive fixed effects model captures unobserved heterogeneity through
+/// latent factors that vary over time and affect units differently:
+/// - f_t ∈ ℝʳ: r-dimensional factor at time t
+/// - λ_i ∈ ℝʳ: unit i's factor loadings (how sensitive it is to each factor)
+///
+/// # Algorithm
+/// 1. Apply fixed effects transformation based on `config.force`:
+///    - None: No demeaning
+///    - Unit: Subtract unit means (within transformation)
+///    - Time: Subtract time means
+///    - TwoWay: Subtract unit means, time means, add grand mean
+/// 2. Extract factors and loadings via SVD/PCA
+/// 3. Compute residuals
+///
+/// # Arguments
+/// * `y_mat` - Outcome matrix (N × T)
+/// * `x_mat` - Optional covariate matrices (reserved for future use)
+/// * `control_units` - Indices of control units to use for estimation
+/// * `n_pre` - Number of pre-treatment periods
+/// * `n_factors` - Number of factors to extract
+/// * `config` - GSynth configuration
+///
+/// # Returns
+/// Tuple of (factors, loadings, beta_coefficients, residuals)
+/// - factors: T × r matrix of time factors
+/// - loadings: N × r matrix of unit loadings
+/// - beta: Covariate coefficients (empty if no covariates)
+/// - residuals: N × T matrix of residuals
 fn estimate_ife(
     y_mat: &Array2<f64>,
     _x_mat: Option<&Vec<Array2<f64>>>,
@@ -2598,8 +2688,33 @@ fn estimate_ife(
     Ok((factors, loadings, Vec::new(), residuals))
 }
 
-/// Extract factors using eigenvalue decomposition of Y'Y.
-/// Returns factors (T x r) and loadings (N x r).
+/// Extract latent factors and loadings using principal components analysis.
+///
+/// Implements factor extraction via eigenvalue decomposition of Y'Y.
+/// This is the core of the interactive fixed effects model.
+///
+/// # Algorithm
+/// 1. Compute Y'Y (T × T covariance matrix of time points)
+/// 2. Use power iteration with deflation to extract top r eigenvectors
+/// 3. These eigenvectors become the time factors f_t
+/// 4. Loadings λ_i are computed as Y × factors / eigenvalue
+///
+/// # Normalization
+/// Uses PC1 normalization: factors have unit variance, loadings capture scale.
+/// This follows the convention in Bai (2009) for factor models.
+///
+/// # Arguments
+/// * `y` - Demeaned outcome matrix (N × T), where N = control units, T = pre-periods
+/// * `n_factors` - Number of factors to extract (actual may be less if rank-deficient)
+///
+/// # Returns
+/// Tuple of (factors, loadings):
+/// - factors: T × r matrix of time-varying factors
+/// - loadings: N × r matrix of unit-specific factor loadings
+///
+/// # References
+/// - Bai, J. (2009). "Panel Data Models with Interactive Fixed Effects."
+///   Econometrica, 77(4), 1229-1279.
 fn extract_factors_svd(
     y: &Array2<f64>,
     n_factors: usize,
@@ -2689,7 +2804,22 @@ fn extract_factors_svd(
     Ok((factors, loadings))
 }
 
-/// Estimate factor loadings for a single unit.
+/// Estimate factor loadings for a single unit via OLS.
+///
+/// Given factors f_t and a unit's outcome time series y_it,
+/// estimates the unit's factor loadings λ_i by OLS regression:
+///
+///   y_i = F λ_i + ε_i
+///
+/// where F is the T × r factor matrix and λ_i is the r × 1 loading vector.
+///
+/// # Arguments
+/// * `y_unit` - Unit's outcome time series
+/// * `factors` - T × r matrix of time factors
+/// * `n_pre` - Number of pre-treatment periods (uses only these for estimation)
+///
+/// # Returns
+/// Vector of r factor loadings for this unit
 fn estimate_unit_loadings(
     y_unit: &Array1<f64>,
     factors: &Array2<f64>,
@@ -2724,8 +2854,30 @@ fn estimate_unit_loadings(
     Ok(loadings.to_vec())
 }
 
-/// Extend factors from pre-treatment periods to all time periods.
-/// Uses control units to estimate factors for post-treatment periods.
+/// Extend estimated factors from pre-treatment to post-treatment periods.
+///
+/// Factors are initially estimated using only pre-treatment control outcomes.
+/// This function extrapolates factors to post-treatment periods using control
+/// unit outcomes, which are unaffected by treatment.
+///
+/// # Algorithm
+/// For each post-treatment period t:
+/// 1. Extract control unit outcomes y_t = [y_{1t}, ..., y_{Jt}]'
+/// 2. Apply fixed effects adjustment based on config.force
+/// 3. Estimate factor f_t = (Λ'Λ)⁻¹ Λ' y_t
+///
+/// # Arguments
+/// * `y_mat` - Full outcome matrix (N × T)
+/// * `factors_pre` - Pre-treatment factors (T₀ × r)
+/// * `loadings` - Unit loadings estimated from controls (J × r)
+/// * `control_units` - Indices of control units
+/// * `n_pre` - Number of pre-treatment periods
+/// * `n_times` - Total number of time periods
+/// * `n_factors` - Number of factors
+/// * `config` - GSynth configuration
+///
+/// # Returns
+/// Extended factors matrix (T × r) covering all time periods
 fn extend_factors_to_all_periods(
     y_mat: &Array2<f64>,
     factors_pre: &Array2<f64>,

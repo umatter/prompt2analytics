@@ -6,6 +6,116 @@
 use serde::Serialize;
 use thiserror::Error;
 
+// ═══════════════════════════════════════════════════════════════════════════
+// Typo Suggestion Utilities
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Compute Levenshtein edit distance between two strings.
+///
+/// Returns the minimum number of single-character edits (insertions,
+/// deletions, or substitutions) required to transform `a` into `b`.
+fn levenshtein_distance(a: &str, b: &str) -> usize {
+    let a = a.to_lowercase();
+    let b = b.to_lowercase();
+    let a_chars: Vec<char> = a.chars().collect();
+    let b_chars: Vec<char> = b.chars().collect();
+    let m = a_chars.len();
+    let n = b_chars.len();
+
+    if m == 0 {
+        return n;
+    }
+    if n == 0 {
+        return m;
+    }
+
+    // Use two rows instead of full matrix for space efficiency
+    let mut prev: Vec<usize> = (0..=n).collect();
+    let mut curr: Vec<usize> = vec![0; n + 1];
+
+    for i in 1..=m {
+        curr[0] = i;
+        for j in 1..=n {
+            let cost = if a_chars[i - 1] == b_chars[j - 1] {
+                0
+            } else {
+                1
+            };
+            curr[j] = (prev[j] + 1) // deletion
+                .min(curr[j - 1] + 1) // insertion
+                .min(prev[j - 1] + cost); // substitution
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+
+    prev[n]
+}
+
+/// Find column names similar to the target, sorted by similarity.
+///
+/// Returns columns within `max_distance` edits of the target, up to `max_suggestions`.
+/// Useful for providing "Did you mean...?" suggestions on typos.
+///
+/// # Arguments
+/// * `target` - The column name that wasn't found
+/// * `available` - List of available column names
+/// * `max_distance` - Maximum edit distance to consider (default: 3)
+/// * `max_suggestions` - Maximum number of suggestions to return (default: 3)
+///
+/// # Example
+/// ```
+/// use p2a_core::errors::suggest_similar_columns;
+/// let available = vec!["sqft".to_string(), "price".to_string(), "bedrooms".to_string()];
+/// let suggestions = suggest_similar_columns("sqfeet", &available, 3, 3);
+/// assert_eq!(suggestions, vec!["sqft"]);
+/// ```
+pub fn suggest_similar_columns(
+    target: &str,
+    available: &[String],
+    max_distance: usize,
+    max_suggestions: usize,
+) -> Vec<String> {
+    let mut scored: Vec<(usize, &String)> = available
+        .iter()
+        .map(|col| (levenshtein_distance(target, col), col))
+        .filter(|(dist, _)| *dist > 0 && *dist <= max_distance)
+        .collect();
+
+    // Sort by distance (closest first)
+    scored.sort_by_key(|(dist, _)| *dist);
+
+    scored
+        .into_iter()
+        .take(max_suggestions)
+        .map(|(_, col)| col.clone())
+        .collect()
+}
+
+/// Format a "Did you mean...?" suggestion string.
+///
+/// Returns `None` if no similar columns found.
+pub fn format_suggestions(target: &str, available: &[String]) -> Option<String> {
+    let suggestions = suggest_similar_columns(target, available, 3, 3);
+    if suggestions.is_empty() {
+        None
+    } else if suggestions.len() == 1 {
+        Some(format!("Did you mean '{}'?", suggestions[0]))
+    } else {
+        Some(format!("Did you mean one of: {:?}?", suggestions))
+    }
+}
+
+/// Format the ColumnNotFound error message with typo suggestions.
+fn format_column_not_found_error(column: &str, available: &[String]) -> String {
+    let base = format!("Column '{}' not found in dataset.", column);
+
+    if let Some(suggestion) = format_suggestions(column, available) {
+        format!("{} {} Available columns: {:?}", base, suggestion, available)
+    } else {
+        format!("{} Available columns: {:?}", base, available)
+    }
+}
+
 /// Main error type for econometric operations.
 #[derive(Debug, Error)]
 pub enum EconError {
@@ -37,7 +147,7 @@ pub enum EconError {
         context: String,
     },
 
-    #[error("Column '{column}' not found in dataset. Available columns: {available:?}")]
+    #[error("{}", format_column_not_found_error(column, available))]
     ColumnNotFound {
         column: String,
         available: Vec<String>,
@@ -306,5 +416,74 @@ mod tests {
         let msg = warning.message();
         assert!(msg.contains("education"));
         assert!(msg.contains("15.3"));
+    }
+
+    #[test]
+    fn test_levenshtein_distance() {
+        // Same string
+        assert_eq!(levenshtein_distance("hello", "hello"), 0);
+        // One substitution
+        assert_eq!(levenshtein_distance("hello", "hallo"), 1);
+        // One insertion
+        assert_eq!(levenshtein_distance("hello", "helloo"), 1);
+        // One deletion
+        assert_eq!(levenshtein_distance("hello", "helo"), 1);
+        // Multiple edits
+        assert_eq!(levenshtein_distance("kitten", "sitting"), 3);
+        // Case insensitive
+        assert_eq!(levenshtein_distance("Hello", "HELLO"), 0);
+        // Empty strings
+        assert_eq!(levenshtein_distance("", "abc"), 3);
+        assert_eq!(levenshtein_distance("abc", ""), 3);
+    }
+
+    #[test]
+    fn test_suggest_similar_columns() {
+        let available = vec![
+            "sqft".to_string(),
+            "price".to_string(),
+            "bedrooms".to_string(),
+            "bathrooms".to_string(),
+        ];
+
+        // Typo: sqfeet -> sqft (distance 2)
+        let suggestions = suggest_similar_columns("sqfeet", &available, 3, 3);
+        assert_eq!(suggestions, vec!["sqft"]);
+
+        // Typo: bedroom -> bedrooms (distance 1)
+        let suggestions = suggest_similar_columns("bedroom", &available, 3, 3);
+        assert_eq!(suggestions, vec!["bedrooms"]);
+
+        // No close match
+        let suggestions = suggest_similar_columns("xyz", &available, 2, 3);
+        assert!(suggestions.is_empty());
+
+        // Exact match excluded (distance 0)
+        let suggestions = suggest_similar_columns("price", &available, 3, 3);
+        assert!(suggestions.is_empty());
+    }
+
+    #[test]
+    fn test_column_not_found_with_suggestion() {
+        let err = EconError::ColumnNotFound {
+            column: "sqfeet".to_string(),
+            available: vec!["sqft".to_string(), "price".to_string()],
+        };
+        let msg = format!("{}", err);
+        assert!(msg.contains("sqfeet"));
+        assert!(msg.contains("Did you mean 'sqft'?"));
+        assert!(msg.contains("Available columns"));
+    }
+
+    #[test]
+    fn test_column_not_found_no_suggestion() {
+        let err = EconError::ColumnNotFound {
+            column: "xyz".to_string(),
+            available: vec!["sqft".to_string(), "price".to_string()],
+        };
+        let msg = format!("{}", err);
+        assert!(msg.contains("xyz"));
+        assert!(!msg.contains("Did you mean"));
+        assert!(msg.contains("Available columns"));
     }
 }

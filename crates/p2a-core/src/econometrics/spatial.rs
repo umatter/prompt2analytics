@@ -941,9 +941,49 @@ pub fn run_sac_dataset(
     run_sac(dataset, y_col, x_cols, listw, config)
 }
 
-/// Optimize (ρ, λ) for SAC model using grid search + coordinate descent.
+/// Optimize spatial parameters (ρ, λ) for SAC/SARAR model.
 ///
-/// Pre-computes Wy, W²y, and WX to avoid repeated sparse multiplications.
+/// The Spatial Autoregressive Combined (SAC) model has both spatial lag
+/// and spatial error components:
+///
+///   y = ρWy + Xβ + u, where u = λWu + ε
+///
+/// # Likelihood
+/// Maximizes the concentrated log-likelihood:
+///
+///   L_c(ρ,λ) = const - (n/2)ln(σ²(ρ,λ)) + ln|I - ρW| + ln|I - λW|
+///
+/// # Algorithm
+/// 1. Pre-compute Wy, W²y (= WWy), and WX (constant across iterations)
+/// 2. Grid search over (ρ, λ) parameter space for initial values
+/// 3. Coordinate descent refinement:
+///    - Fix λ, optimize ρ
+///    - Fix ρ, optimize λ
+///    - Repeat until convergence
+/// 4. For each (ρ, λ) candidate, compute transformed variables:
+///    - y* = y - ρWy - λ(Wy - ρW²y)
+///    - X* = X - λWX
+///    - OLS on transformed system for β
+///
+/// # Efficiency
+/// Pre-computing W²y avoids the expensive sparse matrix product W(Wy).
+/// Using eigenvalues for log-determinants avoids matrix decomposition.
+///
+/// # Arguments
+/// * `y` - Outcome vector (n × 1)
+/// * `wy` - Pre-computed Wy (n × 1)
+/// * `wwy` - Pre-computed W²y (n × 1)
+/// * `x` - Design matrix (n × k)
+/// * `wx` - Pre-computed WX (n × k)
+/// * `eigenvalues` - Eigenvalues of W for log-determinant computation
+/// * `param_min` - Lower bound for both ρ and λ
+/// * `param_max` - Upper bound for both ρ and λ
+/// * `tol` - Convergence tolerance
+/// * `max_iter` - Maximum coordinate descent iterations
+/// * `grid_resolution` - Number of grid points per dimension for initial search
+///
+/// # Returns
+/// Tuple of (ρ_optimal, λ_optimal, log_likelihood)
 fn optimize_sac(
     y: &Array1<f64>,
     wy: &Array1<f64>,
@@ -1154,9 +1194,38 @@ fn compute_sac_standard_errors(
 // Internal optimization functions
 // ============================================================================
 
-/// Optimize ρ for SAR model using golden section search.
+/// Optimize spatial autoregressive parameter ρ for SAR model.
 ///
-/// OPTIMIZED: Pre-computes (X'X)^{-1} and eigenvalues outside the loop.
+/// Maximizes the concentrated log-likelihood via golden section search:
+///
+///   L_c(ρ) = const - (n/2)ln(σ²(ρ)) + ln|I - ρW|
+///
+/// where σ²(ρ) = (1/n) * RSS(ρ) is the concentrated variance.
+///
+/// # Model
+/// SAR: y = ρWy + Xβ + ε
+///
+/// # Algorithm
+/// 1. Pre-compute (X'X)⁻¹ and W eigenvalues (constant across iterations)
+/// 2. For each ρ candidate:
+///    - Compute y_tilde = y - ρWy
+///    - Compute β = (X'X)⁻¹ X'y_tilde
+///    - Compute RSS and σ²
+///    - Compute log|I - ρW| = Σ ln(1 - ρλᵢ) using eigenvalues λᵢ
+/// 3. Use golden section search to find ρ minimizing negative log-likelihood
+///
+/// # Arguments
+/// * `y` - Outcome vector (n × 1)
+/// * `wy` - Pre-computed spatial lag Wy (n × 1)
+/// * `x` - Design matrix (n × k)
+/// * `listw` - Spatial weights (provides eigenvalues for log-determinant)
+/// * `rho_min` - Lower bound for ρ (typically 1/λ_min)
+/// * `rho_max` - Upper bound for ρ (typically 1/λ_max)
+/// * `tol` - Convergence tolerance
+/// * `max_iter` - Maximum iterations
+///
+/// # Returns
+/// Tuple of (ρ_optimal, log_likelihood)
 fn optimize_rho_sar(
     y: &Array1<f64>,
     wy: &Array1<f64>,
@@ -1245,9 +1314,40 @@ fn optimize_rho_sar(
     Ok((rho_opt, ll_opt))
 }
 
-/// Optimize λ for SEM model using golden section search.
+/// Optimize spatial error parameter λ for SEM model.
 ///
-/// OPTIMIZED: Pre-computes eigenvalues and Wy/WX outside the loop.
+/// Maximizes the concentrated log-likelihood via golden section search:
+///
+///   L_c(λ) = const - (n/2)ln(σ²(λ)) + ln|I - λW|
+///
+/// # Model
+/// SEM: y = Xβ + u, where u = λWu + ε
+/// Equivalently: (I - λW)y = (I - λW)Xβ + ε
+///
+/// # Algorithm
+/// 1. Pre-compute W eigenvalues and Wy, WX (constant across iterations)
+/// 2. For each λ candidate:
+///    - Transform: y* = y - λWy, X* = X - λWX
+///    - Compute β = (X*'X*)⁻¹ X*'y*
+///    - Compute RSS and σ²
+///    - Compute log|I - λW| = Σ ln(1 - λeᵢ) using eigenvalues eᵢ
+/// 3. Use golden section search to find λ minimizing negative log-likelihood
+///
+/// # Efficiency
+/// Pre-computing Wy and WX avoids repeated sparse matrix multiplications.
+/// Only the linear combinations change during optimization.
+///
+/// # Arguments
+/// * `y` - Outcome vector (n × 1)
+/// * `x` - Design matrix (n × k)
+/// * `listw` - Spatial weights (provides lag and eigenvalues)
+/// * `lambda_min` - Lower bound for λ
+/// * `lambda_max` - Upper bound for λ
+/// * `tol` - Convergence tolerance
+/// * `max_iter` - Maximum iterations
+///
+/// # Returns
+/// Tuple of (λ_optimal, log_likelihood)
 fn optimize_lambda_sem(
     y: &Array1<f64>,
     x: &Array2<f64>,
@@ -1347,9 +1447,31 @@ fn optimize_lambda_sem(
     Ok((lambda_opt, ll_opt))
 }
 
-/// Compute standard errors for SAR model parameters.
+/// Compute asymptotic standard errors for SAR model parameters.
 ///
-/// OPTIMIZED: Uses sparse trace computations instead of O(n³) dense matrix multiplication.
+/// Uses the inverse of the Fisher information matrix to compute standard errors
+/// for β (regression coefficients) and ρ (spatial autoregressive parameter).
+///
+/// # Standard Error Formulas
+/// - Var(β) ≈ σ² (X'X)⁻¹ (simplified, ignores spatial autocorrelation)
+/// - Var(ρ) derived from: I_ρρ = (1/σ²)[tr(WA + A'W) + (Wỹ)'(Wỹ)/σ²]
+///   where A = W(I - ρW)⁻¹
+///
+/// # Efficiency
+/// Uses sparse trace computations tr(W²) and tr(W'W) which are O(m)
+/// where m = number of non-zero entries, instead of O(n³) dense computation.
+///
+/// # Arguments
+/// * `x` - Design matrix (n × k)
+/// * `_wy` - Spatial lag Wy (reserved for future use)
+/// * `sigma2` - Estimated error variance
+/// * `_rho` - Estimated spatial parameter (reserved for future use)
+/// * `listw` - Spatial weights (provides trace computations)
+/// * `xtx_inv` - Pre-computed (X'X)⁻¹
+/// * `_n` - Number of observations (reserved for future use)
+///
+/// # Returns
+/// Tuple of (standard_errors_beta, standard_error_rho)
 fn compute_sar_standard_errors(
     x: &Array2<f64>,
     _wy: &Array1<f64>,
@@ -1381,9 +1503,33 @@ fn compute_sar_standard_errors(
     Ok((se_beta, se_rho))
 }
 
-/// Compute standard errors for SEM model parameters.
+/// Compute asymptotic standard errors for SEM model parameters.
 ///
-/// OPTIMIZED: Uses sparse trace computations instead of O(n³) dense matrix multiplication.
+/// Standard errors for the Spatial Error Model parameters β and λ.
+///
+/// # Model
+/// SEM: y = Xβ + u, where u = λWu + ε
+///
+/// # Standard Error Formulas
+/// - Var(β) ≈ σ² (X*'X*)⁻¹ where X* = (I - λW)X
+/// - Var(λ) derived from the information matrix element:
+///   I_λλ = (1/σ²)[tr(W²) + tr(W'W)]
+///
+/// # Efficiency
+/// Uses sparse trace computations which are O(m) instead of O(n³)
+/// where m = number of non-zero entries in W.
+///
+/// # Arguments
+/// * `x` - Original design matrix (n × k)
+/// * `_x_star` - Transformed design matrix X* = (I - λW)X (reserved)
+/// * `sigma2` - Estimated error variance
+/// * `_lambda` - Estimated spatial error parameter (reserved)
+/// * `listw` - Spatial weights (provides trace computations)
+/// * `xtx_inv` - Pre-computed (X*'X*)⁻¹ from transformed system
+/// * `_n` - Number of observations (reserved)
+///
+/// # Returns
+/// Tuple of (standard_errors_beta, standard_error_lambda)
 fn compute_sem_standard_errors(
     x: &Array2<f64>,
     _x_star: &Array2<f64>,

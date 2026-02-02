@@ -54,7 +54,7 @@ use std::fmt;
 
 use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
-use crate::linalg::design::DesignMatrix;
+use crate::linalg::design::{get_column_names, DesignMatrix};
 use crate::linalg::matrix_ops::{safe_inverse, xtx, xty};
 use crate::traits::estimator::t_test_p_value;
 
@@ -301,9 +301,9 @@ pub fn run_etwfe(
     let n = df.height();
 
     // Extract columns
-    let y = DesignMatrix::extract_column(df, y_col).map_err(|e| EconError::ColumnNotFound {
+    let y = DesignMatrix::extract_column(df, y_col).map_err(|_| EconError::ColumnNotFound {
         column: y_col.to_string(),
-        available: vec![format!("{:?}", e)],
+        available: get_column_names(df),
     })?;
 
     let units: Vec<String> = extract_string_column(df, unit_col)?;

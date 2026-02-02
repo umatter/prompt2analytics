@@ -55,7 +55,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
-use crate::linalg::design::DesignMatrix;
+use crate::linalg::design::{get_column_names, DesignMatrix};
 use crate::linalg::matrix_ops::safe_inverse;
 use crate::traits::estimator::logistic_cdf;
 
@@ -419,10 +419,10 @@ pub fn match_it(
     let distance_method = distance.unwrap_or_default();
 
     // Extract treatment indicator
-    let treatment = DesignMatrix::extract_column(dataset.df(), treatment_col).map_err(|e| {
+    let treatment = DesignMatrix::extract_column(dataset.df(), treatment_col).map_err(|_| {
         EconError::ColumnNotFound {
             column: treatment_col.to_string(),
-            available: vec![format!("{:?}", e)],
+            available: get_column_names(dataset.df()),
         }
     })?;
 

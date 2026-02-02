@@ -7,6 +7,17 @@ use ndarray::{Array1, Array2};
 use polars::prelude::*;
 use thiserror::Error;
 
+/// Get all column names from a DataFrame as a Vec<String>.
+///
+/// Useful for providing available columns in error messages.
+#[inline]
+pub fn get_column_names(df: &DataFrame) -> Vec<String> {
+    df.get_column_names()
+        .into_iter()
+        .map(|s| s.to_string())
+        .collect()
+}
+
 /// Error type for design matrix construction.
 #[derive(Debug, Error)]
 pub enum DesignError {

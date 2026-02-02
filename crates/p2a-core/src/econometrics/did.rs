@@ -56,7 +56,7 @@ use std::fmt;
 
 use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
-use crate::linalg::design::DesignMatrix;
+use crate::linalg::design::{get_column_names, DesignMatrix};
 use crate::linalg::matrix_ops::{safe_inverse, xtx, xty};
 use crate::traits::estimator::{SignificanceLevel, t_test_p_value};
 
@@ -208,7 +208,7 @@ pub fn run_did(
     let y = DesignMatrix::extract_column(dataset.df(), dep_var).map_err(|e| {
         EconError::ColumnNotFound {
             column: dep_var.to_string(),
-            available: vec![format!("{:?}", e)],
+            available: get_column_names(dataset.df()),
         }
     })?;
 
@@ -216,14 +216,14 @@ pub fn run_did(
     let treatment = DesignMatrix::extract_column(dataset.df(), treatment_var).map_err(|e| {
         EconError::ColumnNotFound {
             column: treatment_var.to_string(),
-            available: vec![format!("{:?}", e)],
+            available: get_column_names(dataset.df()),
         }
     })?;
 
     let post = DesignMatrix::extract_column(dataset.df(), post_var).map_err(|e| {
         EconError::ColumnNotFound {
             column: post_var.to_string(),
-            available: vec![format!("{:?}", e)],
+            available: get_column_names(dataset.df()),
         }
     })?;
 
@@ -272,7 +272,7 @@ pub fn run_did(
             let col_data = DesignMatrix::extract_column(dataset.df(), col_name).map_err(|e| {
                 EconError::ColumnNotFound {
                     column: col_name.to_string(),
-                    available: vec![format!("{:?}", e)],
+                    available: get_column_names(dataset.df()),
                 }
             })?;
             x.column_mut(k_base + i).assign(&col_data);
