@@ -53,6 +53,10 @@ pub struct Cli {
     #[arg(short, long, global = true)]
     pub quiet: bool,
 
+    /// Enable verbose output for debugging (-v for info, -vv for debug, -vvv for trace)
+    #[arg(short, long, global = true, action = clap::ArgAction::Count)]
+    pub verbose: u8,
+
     #[command(subcommand)]
     pub command: Commands,
 }
@@ -117,6 +121,21 @@ pub enum Commands {
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+
+    // Initialize logger based on verbosity level
+    let log_level = match cli.verbose {
+        0 => log::LevelFilter::Warn,  // Default: only warnings and errors
+        1 => log::LevelFilter::Info,  // -v: info messages
+        2 => log::LevelFilter::Debug, // -vv: debug messages
+        _ => log::LevelFilter::Trace, // -vvv+: trace messages
+    };
+
+    env_logger::Builder::new()
+        .filter_level(log_level)
+        .format_timestamp_secs()
+        .init();
+
+    log::debug!("Verbose mode enabled (level: {:?})", log_level);
 
     // Initialize session manager if --session is provided
     let mut session_manager = if let Some(session_path) = &cli.session {

@@ -45,10 +45,12 @@ use p2a_core::{
     wilcoxon_signed_rank,
 };
 
-use crate::output::{OutputFormat, print_error};
+use crate::output::{
+    validate_column_exists, validate_confidence_level, OutputFormat, print_error,
+};
 use crate::session::SessionManager;
 
-#[derive(Clone, ValueEnum)]
+#[derive(Clone, Debug, ValueEnum)]
 pub enum TTestAlternative {
     TwoSided,
     Less,
@@ -800,6 +802,18 @@ fn execute_t_test_one(
     format: &OutputFormat,
     session: Option<&mut SessionManager>,
 ) -> anyhow::Result<()> {
+    log::info!(
+        "Running one-sample t-test: {} (H0: μ = {})",
+        col,
+        mu
+    );
+    log::debug!(
+        "Parameters: dataset={}, alternative={:?}, conf_level={}",
+        dataset_name,
+        alternative,
+        conf_level
+    );
+
     let dataset = match session {
         Some(mgr) => mgr.get_dataset(dataset_name),
         None => {
@@ -810,6 +824,18 @@ fn execute_t_test_one(
 
     match dataset {
         Some(ds) => {
+            // Validate confidence level
+            if let Err(e) = validate_confidence_level(conf_level) {
+                print_error(&e, format);
+                return Ok(());
+            }
+
+            // Validate column exists
+            if let Err(e) = validate_column_exists(ds, col, "test variable") {
+                print_error(&e, format);
+                return Ok(());
+            }
+
             let data = match extract_column(ds, col) {
                 Ok(d) => d,
                 Err(e) => {
@@ -819,8 +845,16 @@ fn execute_t_test_one(
             };
 
             let alt: Alternative = alternative.into();
+            log::debug!("Sample size: {}", data.len());
             match one_sample_t_test(&data, mu, alt, conf_level) {
-                Ok(result) => match format {
+                Ok(result) => {
+                    log::info!(
+                        "t-test completed: t={:.4}, df={:.1}, p={:.6}",
+                        result.t_statistic,
+                        result.df,
+                        result.p_value
+                    );
+                    match format {
                     OutputFormat::Json => {
                         let json = serde_json::json!({
                             "test": "One-sample t-test",
@@ -850,7 +884,8 @@ fn execute_t_test_one(
                         );
                         println!("Sample mean: {:.4}", result.estimate);
                     }
-                },
+                }
+                }
                 Err(e) => print_error(&format!("t-test failed: {}", e), format),
             }
         }

@@ -13,7 +13,10 @@ use p2a_core::{
 };
 use p2a_core::{run_gls, run_line, run_smooth_spline, run_step, run_supsmu, run_vcov_hac};
 
-use crate::output::{OutputFormat, format_regression_results, print_error};
+use crate::output::{
+    format_regression_results, print_error, validate_column_exists, validate_columns_exist,
+    validate_sample_size, OutputFormat,
+};
 use crate::session::SessionManager;
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -528,6 +531,14 @@ fn execute_ols(
     format: &OutputFormat,
     session: Option<&mut SessionManager>,
 ) -> anyhow::Result<()> {
+    log::info!("Running OLS regression: {} ~ {}", dep_var, indep_vars.join(" + "));
+    log::debug!(
+        "Parameters: dataset={}, intercept={}, robust={:?}",
+        dataset_name,
+        intercept,
+        robust
+    );
+
     let dataset = match session {
         Some(mgr) => mgr.get_dataset(dataset_name),
         None => {
@@ -544,8 +555,37 @@ fn execute_ols(
             let x_cols: Vec<&str> = indep_vars.iter().map(|s| s.as_str()).collect();
             let cov_type: CovarianceType = robust.into();
 
+            // Validate dependent variable exists
+            if let Err(e) = validate_column_exists(ds, dep_var, "dependent variable") {
+                print_error(&e, format);
+                return Ok(());
+            }
+
+            // Validate independent variables exist
+            if let Err(e) = validate_columns_exist(ds, &x_cols, "independent variables") {
+                print_error(&e, format);
+                return Ok(());
+            }
+
+            // Validate minimum sample size
+            let min_obs = x_cols.len() + if intercept { 1 } else { 0 } + 1;
+            if let Err(e) = validate_sample_size(ds.nrows(), min_obs, "OLS regression") {
+                print_error(&e, format);
+                return Ok(());
+            }
+
+            log::debug!("Design matrix: {} observations × {} predictors", ds.nrows(), x_cols.len());
+
             match run_ols(ds, dep_var, &x_cols, intercept, cov_type) {
                 Ok(result) => {
+                    log::info!(
+                        "OLS completed: n={}, R²={:.4}, Adj R²={:.4}",
+                        result.n_obs(),
+                        result.r_squared(),
+                        result.adj_r_squared()
+                    );
+                    log::debug!("Degrees of freedom: {}", result.degrees_of_freedom());
+
                     // Build coefficient table
                     let coeffs = result.coefficients();
                     let ses = result.std_errors();

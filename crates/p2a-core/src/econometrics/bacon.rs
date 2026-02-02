@@ -66,7 +66,7 @@ use std::fmt;
 
 use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
-use crate::linalg::design::DesignMatrix;
+use crate::linalg::design::{DesignMatrix, get_column_names};
 use crate::linalg::matrix_ops::{safe_inverse, xtx, xty};
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -384,28 +384,28 @@ pub fn bacon_decomp(
     let y = DesignMatrix::extract_column(dataset.df(), outcome_col).map_err(|e| {
         EconError::ColumnNotFound {
             column: outcome_col.to_string(),
-            available: vec![format!("{:?}", e)],
+            available: get_column_names(dataset.df()),
         }
     })?;
 
     let unit = DesignMatrix::extract_column(dataset.df(), unit_col).map_err(|e| {
         EconError::ColumnNotFound {
             column: unit_col.to_string(),
-            available: vec![format!("{:?}", e)],
+            available: get_column_names(dataset.df()),
         }
     })?;
 
     let time = DesignMatrix::extract_column(dataset.df(), time_col).map_err(|e| {
         EconError::ColumnNotFound {
             column: time_col.to_string(),
-            available: vec![format!("{:?}", e)],
+            available: get_column_names(dataset.df()),
         }
     })?;
 
     let treatment = DesignMatrix::extract_column(dataset.df(), treatment_col).map_err(|e| {
         EconError::ColumnNotFound {
             column: treatment_col.to_string(),
-            available: vec![format!("{:?}", e)],
+            available: get_column_names(dataset.df()),
         }
     })?;
 

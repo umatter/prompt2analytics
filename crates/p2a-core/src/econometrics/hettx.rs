@@ -67,7 +67,7 @@ use std::fmt;
 
 use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
-use crate::linalg::design::DesignMatrix;
+use crate::linalg::design::{DesignMatrix, get_column_names};
 use crate::linalg::matrix_ops::{safe_inverse, xtx, xty};
 use crate::traits::estimator::SignificanceLevel;
 
@@ -429,7 +429,7 @@ pub fn run_hettx_dataset(
     let y = DesignMatrix::extract_column(dataset.df(), outcome_col).map_err(|e| {
         EconError::ColumnNotFound {
             column: outcome_col.to_string(),
-            available: vec![format!("{:?}", e)],
+            available: get_column_names(dataset.df()),
         }
     })?;
 
@@ -437,7 +437,7 @@ pub fn run_hettx_dataset(
     let treatment = DesignMatrix::extract_column(dataset.df(), treatment_col).map_err(|e| {
         EconError::ColumnNotFound {
             column: treatment_col.to_string(),
-            available: vec![format!("{:?}", e)],
+            available: get_column_names(dataset.df()),
         }
     })?;
 

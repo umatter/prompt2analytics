@@ -23,7 +23,7 @@ use std::fmt;
 
 use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
-use crate::linalg::design::DesignMatrix;
+use crate::linalg::design::{DesignMatrix, get_column_names};
 use crate::linalg::matrix_ops::{safe_inverse, xtx, xty};
 use crate::traits::estimator::{SignificanceLevel, logistic_cdf, normal_cdf};
 
@@ -424,7 +424,7 @@ pub fn run_ipw_treatment(
     let y = DesignMatrix::extract_column(dataset.df(), outcome).map_err(|e| {
         EconError::ColumnNotFound {
             column: outcome.to_string(),
-            available: vec![format!("{:?}", e)],
+            available: get_column_names(dataset.df()),
         }
     })?;
 
@@ -432,7 +432,7 @@ pub fn run_ipw_treatment(
     let d = DesignMatrix::extract_column(dataset.df(), treatment).map_err(|e| {
         EconError::ColumnNotFound {
             column: treatment.to_string(),
-            available: vec![format!("{:?}", e)],
+            available: get_column_names(dataset.df()),
         }
     })?;
 
@@ -793,14 +793,14 @@ pub fn run_doubly_robust(
     let y = DesignMatrix::extract_column(dataset.df(), outcome).map_err(|e| {
         EconError::ColumnNotFound {
             column: outcome.to_string(),
-            available: vec![format!("{:?}", e)],
+            available: get_column_names(dataset.df()),
         }
     })?;
 
     let d = DesignMatrix::extract_column(dataset.df(), treatment).map_err(|e| {
         EconError::ColumnNotFound {
             column: treatment.to_string(),
-            available: vec![format!("{:?}", e)],
+            available: get_column_names(dataset.df()),
         }
     })?;
 

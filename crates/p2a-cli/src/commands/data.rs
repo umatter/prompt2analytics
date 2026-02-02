@@ -128,6 +128,8 @@ fn execute_load(
     format: &OutputFormat,
     session: Option<&mut SessionManager>,
 ) -> anyhow::Result<()> {
+    log::info!("Loading dataset from: {}", path.display());
+
     // Determine dataset name from filename if not provided
     let dataset_name = name.map(|s| s.to_string()).unwrap_or_else(|| {
         path.file_stem()
@@ -142,6 +144,12 @@ fn execute_load(
         .and_then(|s| s.to_str())
         .unwrap_or("")
         .to_lowercase();
+
+    log::debug!(
+        "Dataset name: '{}', file extension: '{}'",
+        dataset_name,
+        extension
+    );
 
     // Load the dataset
     let df = match extension.as_str() {
@@ -165,6 +173,14 @@ fn execute_load(
         .into_iter()
         .map(|s| s.to_string())
         .collect();
+
+    log::info!(
+        "Successfully loaded '{}': {} rows × {} columns",
+        dataset_name,
+        nrows,
+        ncols
+    );
+    log::debug!("Columns: {:?}", columns);
 
     // Register with session if available
     if let Some(mgr) = session {
@@ -335,6 +351,9 @@ fn execute_generate(
     format: &OutputFormat,
     session: Option<&mut SessionManager>,
 ) -> anyhow::Result<()> {
+    log::info!("Generating random dataset '{}' with {} rows", name, n_rows);
+    log::debug!("Seed: {:?}", seed);
+
     // Parse the columns JSON
     let col_inputs: Vec<ColumnSpecInput> = match serde_json::from_str(columns_json) {
         Ok(cols) => cols,
@@ -388,9 +407,11 @@ fn execute_generate(
     }
 
     // Generate the data
+    log::debug!("Generating {} column(s)", columns.len());
     let dataset = match generate_random_data(n_rows, columns, seed) {
         Ok(ds) => ds,
         Err(e) => {
+            log::error!("Data generation failed: {}", e);
             print_error(&format!("Failed to generate data: {}", e), format);
             return Ok(());
         }
@@ -404,6 +425,13 @@ fn execute_generate(
         .into_iter()
         .map(|s| s.to_string())
         .collect();
+
+    log::info!(
+        "Generated dataset '{}': {} rows × {} columns",
+        name,
+        nrows,
+        ncols
+    );
 
     // Register with session if available
     if let Some(mgr) = session {
@@ -443,6 +471,8 @@ fn execute_save(
     format: &OutputFormat,
     session: Option<&mut SessionManager>,
 ) -> anyhow::Result<()> {
+    log::info!("Saving dataset '{}' to: {}", dataset_name, output.display());
+
     let dataset = match session {
         Some(mgr) => mgr.get_dataset(dataset_name),
         None => {
@@ -493,28 +523,38 @@ fn execute_save(
     };
 
     match result {
-        Ok(fmt_name) => match format {
-            OutputFormat::Json => {
-                let json = serde_json::json!({
-                    "dataset": dataset_name,
-                    "path": output.display().to_string(),
-                    "format": fmt_name,
-                    "rows": ds.nrows(),
-                    "columns": ds.ncols(),
-                });
-                println!("{}", serde_json::to_string_pretty(&json)?);
+        Ok(fmt_name) => {
+            log::info!(
+                "Successfully saved '{}' to {} ({} rows × {} columns)",
+                dataset_name,
+                output.display(),
+                ds.nrows(),
+                ds.ncols()
+            );
+            match format {
+                OutputFormat::Json => {
+                    let json = serde_json::json!({
+                        "dataset": dataset_name,
+                        "path": output.display().to_string(),
+                        "format": fmt_name,
+                        "rows": ds.nrows(),
+                        "columns": ds.ncols(),
+                    });
+                    println!("{}", serde_json::to_string_pretty(&json)?);
+                }
+                _ => {
+                    println!(
+                        "Successfully exported dataset '{}' to {} format",
+                        dataset_name, fmt_name
+                    );
+                    println!("  Path: {}", output.display());
+                    println!("  Rows: {}", ds.nrows());
+                    println!("  Columns: {}", ds.ncols());
+                }
             }
-            _ => {
-                println!(
-                    "Successfully exported dataset '{}' to {} format",
-                    dataset_name, fmt_name
-                );
-                println!("  Path: {}", output.display());
-                println!("  Rows: {}", ds.nrows());
-                println!("  Columns: {}", ds.ncols());
-            }
-        },
+        }
         Err(e) => {
+            log::error!("Failed to save dataset: {}", e);
             print_error(&format!("Failed to save dataset: {}", e), format);
         }
     }

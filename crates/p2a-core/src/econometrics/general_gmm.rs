@@ -40,7 +40,7 @@ use std::fmt;
 
 use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
-use crate::linalg::design::DesignMatrix;
+use crate::linalg::design::{DesignMatrix, get_column_names};
 use crate::linalg::matrix_ops::{safe_inverse, xtx};
 use crate::regression::HacKernel;
 use crate::traits::estimator::{SignificanceLevel, chi_squared_p_value};
@@ -303,7 +303,7 @@ pub fn run_gmm_iv(
     let y = DesignMatrix::extract_column(dataset.df(), y_col).map_err(|e| {
         EconError::ColumnNotFound {
             column: y_col.to_string(),
-            available: vec![format!("{:?}", e)],
+            available: get_column_names(dataset.df()),
         }
     })?;
 

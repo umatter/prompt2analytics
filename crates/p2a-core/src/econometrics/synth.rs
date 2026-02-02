@@ -29,6 +29,7 @@ use std::fmt;
 
 use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
+use crate::linalg::design::get_column_names;
 use crate::traits::estimator::SignificanceLevel;
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -595,7 +596,7 @@ fn prepare_synth_data(
         .column(unit_col)
         .map_err(|e| EconError::ColumnNotFound {
             column: unit_col.to_string(),
-            available: vec![format!("{:?}", e)],
+            available: get_column_names(dataset.df()),
         })?
         .str()
         .map_err(|_| EconError::InvalidSpecification {
@@ -611,7 +612,7 @@ fn prepare_synth_data(
         .column(time_col)
         .map_err(|e| EconError::ColumnNotFound {
             column: time_col.to_string(),
-            available: vec![format!("{:?}", e)],
+            available: get_column_names(dataset.df()),
         })?
         .i64()
         .map_err(|_| EconError::InvalidSpecification {
@@ -1470,7 +1471,7 @@ fn run_placebo_inference(
         .column(unit_col)
         .map_err(|e| EconError::ColumnNotFound {
             column: unit_col.to_string(),
-            available: vec![format!("{:?}", e)],
+            available: get_column_names(dataset.df()),
         })?
         .str()
         .map_err(|_| EconError::InvalidSpecification {
