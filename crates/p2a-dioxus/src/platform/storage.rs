@@ -80,7 +80,10 @@ mod web {
 // Native implementation (file-based storage)
 // ============================================================================
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(feature = "desktop", feature = "mobile")
+))]
 mod native {
     use super::*;
     use std::fs;
@@ -158,7 +161,10 @@ mod native {
 #[cfg(target_arch = "wasm32")]
 pub type PlatformStorage = web::WebStorage;
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(feature = "desktop", feature = "mobile")
+))]
 pub type PlatformStorage = native::NativeStorage;
 
 /// Create a new platform-appropriate storage backend

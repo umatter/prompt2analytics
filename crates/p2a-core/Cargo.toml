@@ -92,6 +92,7 @@ rand_chacha.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 criterion.workspace = true
 rand_chacha.workspace = true
+tempfile = "3.10"
 memory-stats = "1.2"
 serde_json = { workspace = true }
 chrono = "0.4"
@@ -155,6 +156,14 @@ harness = false
 
 [[bench]]
 name = "clustering_benchmarks"
+harness = false
+
+[[bench]]
+name = "cache_benchmarks"
+harness = false
+
+[[bench]]
+name = "data_loading_benchmarks"
 harness = false
 
 # Examples

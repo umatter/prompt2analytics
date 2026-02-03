@@ -7,7 +7,7 @@
 
 A comprehensive analytics toolkit exposing econometrics, machine learning, and visualization capabilities through multiple interfaces:
 - **CLI (`p2a`)**: Direct command-line execution for scripted workflows
-- **MCP Server**: Model Context Protocol integration for AI assistants (256 tools)
+- **MCP Server**: Model Context Protocol integration for AI assistants (257 tools)
 - **Dioxus App**: Cross-platform frontend (web, desktop) with LLM-powered natural language analysis
 
 **Requirements**: Rust 1.85+ (edition 2024)
@@ -387,7 +387,7 @@ p2a script run analysis.sh
 
 ### MCP Server
 
-The MCP server exposes 256 analytics tools via the Model Context Protocol. Configure it in your MCP client (e.g., Claude Desktop):
+The MCP server exposes 257 analytics tools via the Model Context Protocol. Configure it in your MCP client (e.g., Claude Desktop):
 
 ```json
 {
@@ -470,7 +470,7 @@ prompt2analytics/
 │   │   ├── linalg/        # Matrix operations (via faer)
 │   │   └── traits/        # LinearEstimator trait
 │   ├── p2a-cli/           # CLI binary (`p2a`)
-│   ├── p2a-mcp/           # MCP server (256 tools)
+│   ├── p2a-mcp/           # MCP server (257 tools)
 │   │   └── db/            # SurrealDB persistence layer
 │   └── p2a-dioxus/        # Cross-platform Dioxus app
 │       ├── api/           # HTTP client and SSE streaming
@@ -481,9 +481,9 @@ prompt2analytics/
 └── paper/                 # JSS article materials
 ```
 
-## MCP Tools (256 total)
+## MCP Tools (257 total)
 
-The MCP server exposes 256 analytics tools. Key categories include:
+The MCP server exposes 257 analytics tools. Key categories include:
 
 | Category | Example Tools |
 |----------|---------------|

@@ -113,7 +113,7 @@ pub mod suggestion;
 pub mod verification;
 
 pub use dataset::{Dataset, DatasetInfo};
-pub use loader::DataLoader;
+pub use loader::{CsvChunkIterator, DataLoader, FileInfo};
 pub use sas::{SasError, load_sas};
 pub use stata::{StataError, load_stata};
 

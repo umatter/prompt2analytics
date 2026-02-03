@@ -57,7 +57,10 @@ pub fn DatasetInspectorModal(props: DatasetInspectorModalProps) -> Element {
             copied.set(true);
             // Reset after 2 seconds
             spawn(async move {
-                #[cfg(not(target_arch = "wasm32"))]
+                #[cfg(all(
+                    not(target_arch = "wasm32"),
+                    any(feature = "desktop", feature = "mobile")
+                ))]
                 {
                     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                 }

@@ -612,6 +612,7 @@ pub enum PowerAlt {
 pub fn execute(
     cmd: &StatsCommands,
     format: &OutputFormat,
+    _quiet: bool,
     session: Option<&mut SessionManager>,
 ) -> anyhow::Result<()> {
     match cmd {

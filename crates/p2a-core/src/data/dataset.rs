@@ -97,6 +97,51 @@ impl Dataset {
         self.df.column(name)
     }
 
+    /// Convert to a lazy frame for deferred computation.
+    ///
+    /// Lazy frames allow building up a query plan that is only executed
+    /// when `collect()` is called, enabling query optimization.
+    pub fn lazy(&self) -> LazyFrame {
+        self.df.clone().lazy()
+    }
+
+    /// Sample n random rows from the dataset.
+    ///
+    /// Useful for quick analysis of large datasets.
+    pub fn sample(&self, n: usize, seed: Option<u64>) -> PolarsResult<Dataset> {
+        let df = self.df.sample_n_literal(n, false, false, seed)?;
+        Ok(Dataset {
+            df,
+            name: self.name.clone(),
+            source_path: self.source_path.clone(),
+        })
+    }
+
+    /// Get a filtered subset of the dataset.
+    ///
+    /// Uses lazy evaluation for efficiency.
+    pub fn filter(&self, predicate: Expr) -> PolarsResult<Dataset> {
+        let df = self.df.clone().lazy().filter(predicate).collect()?;
+        Ok(Dataset {
+            df,
+            name: self.name.clone(),
+            source_path: self.source_path.clone(),
+        })
+    }
+
+    /// Select specific columns from the dataset.
+    ///
+    /// Uses lazy evaluation for efficiency.
+    pub fn select_columns(&self, columns: &[&str]) -> PolarsResult<Dataset> {
+        let exprs: Vec<Expr> = columns.iter().map(|c| col(*c)).collect();
+        let df = self.df.clone().lazy().select(exprs).collect()?;
+        Ok(Dataset {
+            df,
+            name: self.name.clone(),
+            source_path: self.source_path.clone(),
+        })
+    }
+
     /// Export the dataset to a CSV file.
     ///
     /// # Arguments

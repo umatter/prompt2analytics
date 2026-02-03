@@ -17,6 +17,7 @@ use crate::output::{
     format_regression_results, print_error, validate_column_exists, validate_columns_exist,
     validate_sample_size, OutputFormat,
 };
+use crate::progress::Progress;
 use crate::session::SessionManager;
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -408,6 +409,7 @@ EXAMPLES:
 pub fn execute(
     cmd: &RegressionCommands,
     format: &OutputFormat,
+    quiet: bool,
     session: Option<&mut SessionManager>,
 ) -> anyhow::Result<()> {
     match cmd {
@@ -418,7 +420,7 @@ pub fn execute(
             intercept,
             robust,
         } => execute_ols(
-            dataset, dep_var, indep_vars, *intercept, *robust, format, session,
+            dataset, dep_var, indep_vars, *intercept, *robust, format, quiet, session,
         ),
         RegressionCommands::Clustered {
             dataset,
@@ -529,6 +531,7 @@ fn execute_ols(
     intercept: bool,
     robust: RobustSE,
     format: &OutputFormat,
+    quiet: bool,
     session: Option<&mut SessionManager>,
 ) -> anyhow::Result<()> {
     log::info!("Running OLS regression: {} ~ {}", dep_var, indep_vars.join(" + "));
@@ -576,8 +579,12 @@ fn execute_ols(
 
             log::debug!("Design matrix: {} observations × {} predictors", ds.nrows(), x_cols.len());
 
+            // Show progress spinner for regression
+            let progress = Progress::spinner("Running OLS regression...", quiet);
+
             match run_ols(ds, dep_var, &x_cols, intercept, cov_type) {
                 Ok(result) => {
+                    progress.finish_and_clear();
                     log::info!(
                         "OLS completed: n={}, R²={:.4}, Adj R²={:.4}",
                         result.n_obs(),
@@ -621,6 +628,7 @@ fn execute_ols(
                     println!("{}", output);
                 }
                 Err(e) => {
+                    progress.finish_and_clear();
                     print_error(&format!("Regression failed: {}", e), format);
                 }
             }

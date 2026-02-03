@@ -4,6 +4,26 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 
 // ============================================================================
+// Server Stats Requests
+// ============================================================================
+
+/// Request to get server memory and performance statistics.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ServerStatsRequest {
+    /// Include per-dataset memory breakdown (default: true)
+    #[schemars(
+        description = "Include per-dataset memory breakdown. Set to false for summary only."
+    )]
+    pub include_datasets: Option<bool>,
+
+    /// Include memory history for trend analysis
+    #[schemars(
+        description = "Include recent memory history snapshots for trend analysis."
+    )]
+    pub include_history: Option<bool>,
+}
+
+// ============================================================================
 // Seed Management Requests
 // ============================================================================
 

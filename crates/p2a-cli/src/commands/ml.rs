@@ -234,6 +234,7 @@ EXAMPLES:
 pub fn execute(
     cmd: &MlCommands,
     format: &OutputFormat,
+    _quiet: bool,
     session: Option<&mut SessionManager>,
 ) -> anyhow::Result<()> {
     match cmd {

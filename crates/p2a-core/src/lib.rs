@@ -229,10 +229,12 @@ pub mod linalg;
 pub mod traits;
 
 // Core feature modules (always available)
+pub mod cache;
 pub mod data;
 pub mod diagnostics;
 pub mod econometrics;
 pub mod export;
+pub mod memory;
 pub mod ml;
 pub mod regression;
 pub mod reports;
@@ -248,7 +250,12 @@ pub mod forecasting;
 pub mod visualization;
 
 // Re-export foundational types
+pub use cache::{CacheKey, CacheStats, ResultCache};
 pub use errors::{EconError, EconResult, EstimationWarning};
+pub use memory::{
+    DatasetMemoryInfo, MemoryProfiler, MemorySnapshot, MemoryStats, MemoryTracker, ProcessMemory,
+    estimate_dataset_memory, format_bytes, get_process_memory,
+};
 pub use linalg::{
     DesignError,
     DesignMatrix,

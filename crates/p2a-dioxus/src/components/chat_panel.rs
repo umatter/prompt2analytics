@@ -4,7 +4,7 @@ use dioxus::prelude::*;
 
 use crate::api::{PersistedToolCall, StreamEvent, api, stream_chat};
 use crate::app::apply_theme;
-use crate::components::{ChatInput, MessageList, P2aWordmark, SettingsModal};
+use crate::components::{ChatInput, ExportMenu, MessageList, P2aWordmark, SettingsModal};
 use crate::state::settings::Theme;
 use crate::state::{
     ChatMessage, ChatState, ConversationState, SessionState, Settings, ToolCallInfo,
@@ -551,6 +551,9 @@ pub fn ChatPanel() -> Element {
                             }
                             "Load Data"
                         }
+
+                        // Export menu
+                        ExportMenu {}
 
                         // Theme toggle button
                         button {

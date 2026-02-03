@@ -91,6 +91,12 @@ impl AnalyticsServer {
         // Get info before moving
         let info: DatasetInfo = (&dataset).into();
 
+        // Track memory usage
+        {
+            let mut profiler = self.memory_profiler.write().await;
+            profiler.track_dataset(&id, &dataset);
+        }
+
         // Store the dataset
         let mut datasets = self.datasets.write().await;
         datasets.insert(id.clone(), dataset);

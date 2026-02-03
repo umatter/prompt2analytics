@@ -187,6 +187,7 @@ EXAMPLES:
 pub fn execute(
     cmd: &SpatialCommands,
     format: &OutputFormat,
+    _quiet: bool,
     session: Option<&mut SessionManager>,
 ) -> anyhow::Result<()> {
     match cmd {

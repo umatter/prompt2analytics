@@ -532,6 +532,8 @@ pub struct AnalyticsServer {
     pub(crate) spatial_weights: Arc<RwLock<HashMap<String, SpatialWeights>>>,
     /// Global random seed for ML reproducibility
     pub(crate) global_seed: Arc<RwLock<Option<u64>>>,
+    /// Memory profiler for tracking dataset memory usage
+    pub(crate) memory_profiler: Arc<RwLock<p2a_core::MemoryProfiler>>,
     /// Tool router for handling tool calls
     tool_router: ToolRouter<Self>,
 }
@@ -6505,6 +6507,7 @@ impl AnalyticsServer {
             cleaning_sessions: Arc::new(RwLock::new(HashMap::new())),
             spatial_weights: Arc::new(RwLock::new(HashMap::new())),
             global_seed: Arc::new(RwLock::new(None)),
+            memory_profiler: Arc::new(RwLock::new(p2a_core::MemoryProfiler::new())),
             tool_router,
         }
     }
@@ -6537,6 +6540,7 @@ impl AnalyticsServer {
             cleaning_sessions: Arc::new(RwLock::new(HashMap::new())),
             spatial_weights: Arc::new(RwLock::new(HashMap::new())),
             global_seed: session.global_seed.clone(),
+            memory_profiler: Arc::new(RwLock::new(p2a_core::MemoryProfiler::new())),
             tool_router,
         }
     }

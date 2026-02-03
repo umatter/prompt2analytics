@@ -10,7 +10,11 @@ use rmcp::{
 };
 
 use crate::server::AnalyticsServer;
-use crate::tools::requests::utils::*;
+use crate::tools::requests::utils::{
+    ColumnSpecInput, ExportSessionRequest, GenerateRandomDataRequest, GenerateReportRequest,
+    GetSeedRequest, ImportSessionRequest, ReportContentInput, ReportSectionInput, ServerStatsRequest,
+    SetSeedRequest,
+};
 
 use p2a_core::{
     HtmlReport, ReportSection, ReportTable,
@@ -72,6 +76,131 @@ impl AnalyticsServer {
             "=".repeat(40),
             seed_status
         );
+
+        Ok(CallToolResult::success(vec![Content::text(output)]))
+    }
+
+    // ========================================================================
+    // Server Stats Tools
+    // ========================================================================
+
+    /// Get server memory and performance statistics.
+    #[tool(
+        description = "Get memory usage statistics for the analytics server. Shows dataset memory consumption, process memory, and memory trends. Useful for monitoring resource usage with large datasets."
+    )]
+    async fn server_stats(
+        &self,
+        Parameters(request): Parameters<ServerStatsRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        use p2a_core::{format_bytes, get_process_memory};
+
+        let include_datasets = request.include_datasets.unwrap_or(true);
+        let include_history = request.include_history.unwrap_or(false);
+
+        let datasets = self.datasets.read().await;
+        let profiler = self.memory_profiler.read().await;
+
+        // Get detailed stats with dataset dimensions
+        let stats = profiler.stats_with_datasets(datasets.iter().map(|(k, v)| (k.as_str(), v)));
+
+        let mut output = String::new();
+        output.push_str("Server Memory Statistics\n");
+        output.push_str(&"=".repeat(50));
+        output.push_str("\n\n");
+
+        // Summary section
+        output.push_str("## Summary\n\n");
+        output.push_str(&format!(
+            "Total Dataset Memory: {}\n",
+            stats.dataset_memory_formatted
+        ));
+        output.push_str(&format!("Datasets Loaded: {}\n", stats.dataset_count));
+        output.push_str(&format!(
+            "Peak Memory: {}\n",
+            format_bytes(profiler.peak_memory())
+        ));
+        output.push_str(&format!(
+            "Uptime: {:.1}s\n",
+            profiler.elapsed().as_secs_f64()
+        ));
+
+        // Process memory (if available)
+        if let Some(ref proc_mem) = stats.process_memory {
+            output.push_str(&format!(
+                "\nProcess RSS: {}\n",
+                proc_mem.rss_formatted
+            ));
+            output.push_str(&format!(
+                "Process Virtual: {}\n",
+                proc_mem.virtual_formatted
+            ));
+        } else if let Some(proc_mem) = get_process_memory() {
+            output.push_str(&format!(
+                "\nProcess RSS: {}\n",
+                proc_mem.rss_formatted
+            ));
+            output.push_str(&format!(
+                "Process Virtual: {}\n",
+                proc_mem.virtual_formatted
+            ));
+        }
+
+        // Per-dataset breakdown
+        if include_datasets && !stats.datasets.is_empty() {
+            output.push_str("\n## Datasets (by memory usage)\n\n");
+            output.push_str(&format!(
+                "{:<30} {:>12} {:>10} {:>10}\n",
+                "Name", "Memory", "Rows", "Cols"
+            ));
+            output.push_str(&"-".repeat(64));
+            output.push('\n');
+
+            for ds in &stats.datasets {
+                output.push_str(&format!(
+                    "{:<30} {:>12} {:>10} {:>10}\n",
+                    if ds.name.len() > 28 {
+                        format!("{}...", &ds.name[..25])
+                    } else {
+                        ds.name.clone()
+                    },
+                    ds.memory_formatted,
+                    ds.rows,
+                    ds.columns
+                ));
+            }
+        }
+
+        // Memory history
+        if include_history {
+            let history = profiler.history();
+            if !history.is_empty() {
+                output.push_str("\n## Recent Memory History\n\n");
+                output.push_str(&format!(
+                    "{:>12} {:>15} {:>10}\n",
+                    "Time (ms)", "Memory", "Datasets"
+                ));
+                output.push_str(&"-".repeat(40));
+                output.push('\n');
+
+                // Show last 10 entries
+                let start = if history.len() > 10 {
+                    history.len() - 10
+                } else {
+                    0
+                };
+                for snapshot in &history[start..] {
+                    output.push_str(&format!(
+                        "{:>12} {:>15} {:>10}\n",
+                        snapshot.time_offset_ms,
+                        format_bytes(snapshot.total_bytes),
+                        snapshot.dataset_count
+                    ));
+                }
+            }
+        }
+
+        drop(datasets);
+        drop(profiler);
 
         Ok(CallToolResult::success(vec![Content::text(output)]))
     }

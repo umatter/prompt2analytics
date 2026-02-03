@@ -421,6 +421,7 @@ fn decode_base64_image(base64_str: &str) -> Result<Vec<u8>, String> {
 pub fn execute(
     cmd: &VizCommands,
     format: &OutputFormat,
+    _quiet: bool,
     session: Option<&mut SessionManager>,
 ) -> anyhow::Result<()> {
     match cmd {

@@ -17,8 +17,8 @@ const SETTINGS_KEY: &str = "p2a-settings";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum Theme {
-    #[default]
     System,
+    #[default]
     Light,
     Dark,
 }
@@ -95,7 +95,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            theme: Theme::System,
+            theme: Theme::Light,
             provider: Provider::Ollama,
             ollama_base_url: "http://localhost:11434".to_string(),
             ollama_model: "llama3.2".to_string(),

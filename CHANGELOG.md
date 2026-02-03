@@ -8,7 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- Tool registry for MCP with 256 documented tools across 21 categories (`tools/registry.rs`)
+- **Memory-safe caching** (`cache.rs`): Thread-safe LRU cache with memory limits, TTL expiration, and automatic eviction
+- **Memory monitoring** (`memory.rs`): Memory usage tracking, pressure detection, and automatic cleanup integration
+- **Benchmark suite**: Performance benchmarks for cache and data loading (`benches/cache_benchmarks.rs`, `benches/data_loading_benchmarks.rs`)
+- Tool registry for MCP with 257 documented tools across 21 categories (`tools/registry.rs`)
 - Documentation generation for MCP tools (`generate_markdown_docs()`)
 - Comprehensive cookbook with CLI examples (`docs/cookbook.md`)
 - MCP tools reference documentation (`docs/mcp/tools-reference.md`)
@@ -57,7 +60,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - JSON output format for programmatic use
 
 #### MCP Server (p2a-mcp)
-- 256 analytics tools exposed via Model Context Protocol
+- 257 analytics tools exposed via Model Context Protocol
 - HTTP transport with SSE streaming for chat
 - Session management with SurrealDB persistence
 - Audit logging support

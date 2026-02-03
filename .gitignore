@@ -1,6 +1,11 @@
 # Build artifacts
 /target/
 
+# Dioxus build artifacts
+dist/
+.dioxus/
+node_modules/
+
 # IDE and editor files
 .idea/
 .vscode/

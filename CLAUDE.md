@@ -65,11 +65,11 @@ rustup target add wasm32-unknown-unknown
 
 ## Project Overview
 
-prompt2analytics is a Rust workspace (edition 2024, requires Rust 1.85+) exposing 256 econometrics, statistics, ML, and visualization methods through multiple interfaces:
+prompt2analytics is a Rust workspace (edition 2024, requires Rust 1.85+) exposing 257 econometrics, statistics, ML, and visualization methods through multiple interfaces:
 
 - **p2a-core**: Core analytics library (all algorithms)
 - **p2a-cli**: Command-line interface (`p2a` binary)
-- **p2a-mcp**: MCP server exposing 256 tools with LLM integration
+- **p2a-mcp**: MCP server exposing 257 tools with LLM integration
 - **p2a-dioxus**: Cross-platform GUI (web via WASM, desktop via native)
 
 ## Architecture Principles
@@ -102,6 +102,8 @@ cargo build -p p2a-core --features spectral-analysis  # Spectral analysis (spect
 ```
 src/
 ├── errors.rs              # EconError, EconResult types
+├── cache.rs               # Thread-safe LRU cache with memory limits and TTL
+├── memory.rs              # Memory monitoring, pressure detection, cleanup
 ├── linalg/
 │   ├── matrix_ops.rs      # xtx, xty, safe_inverse, cholesky (via faer)
 │   └── design.rs          # DesignMatrix, demeaning functions
@@ -349,7 +351,7 @@ let result = run_staggered_did(dataset, &config)?;
 
 ### Module Organization
 
-The MCP server exposes 256 tools organized into modular handler files:
+The MCP server exposes 257 tools organized into modular handler files:
 
 ```
 crates/p2a-mcp/src/
@@ -572,7 +574,7 @@ let df = df! {
 
 **MCP Server:**
 - `crates/p2a-mcp/src/server.rs` - AnalyticsServer struct and router composition
-- `crates/p2a-mcp/src/tools/handlers/` - Tool implementations (256 tools across 17 modules)
+- `crates/p2a-mcp/src/tools/handlers/` - Tool implementations (257 tools across 17 modules)
 - `crates/p2a-mcp/src/tools/requests/` - Request type definitions
 - `crates/p2a-mcp/src/transport/http.rs` - HTTP transport with SSE streaming
 - `crates/p2a-mcp/src/db/` - SurrealDB persistence layer

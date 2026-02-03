@@ -241,7 +241,10 @@ pub mod web {
 // Native implementation (reqwest with streaming)
 // ============================================================================
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(feature = "desktop", feature = "mobile")
+))]
 pub mod native {
     use super::*;
     use futures::StreamExt;
@@ -355,5 +358,8 @@ pub mod native {
 #[cfg(target_arch = "wasm32")]
 pub use web::stream_chat;
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(feature = "desktop", feature = "mobile")
+))]
 pub use native::stream_chat;

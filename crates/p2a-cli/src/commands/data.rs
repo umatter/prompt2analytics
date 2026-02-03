@@ -7,6 +7,7 @@ use polars::prelude::*;
 use std::path::PathBuf;
 
 use crate::output::{OutputFormat, format_dataset_summary, print_error, print_message};
+use crate::progress::Progress;
 use crate::session::SessionManager;
 
 #[derive(Subcommand)]
@@ -101,10 +102,11 @@ EXAMPLES:
 pub fn execute(
     cmd: &DataCommands,
     format: &OutputFormat,
+    quiet: bool,
     session: Option<&mut SessionManager>,
 ) -> anyhow::Result<()> {
     match cmd {
-        DataCommands::Load { path, name } => execute_load(path, name.as_deref(), format, session),
+        DataCommands::Load { path, name } => execute_load(path, name.as_deref(), format, quiet, session),
         DataCommands::List => execute_list(format, session),
         DataCommands::Describe { dataset } => execute_describe(dataset, format, session),
         DataCommands::Head { dataset, n } => execute_head(dataset, *n, format, session),
@@ -113,12 +115,12 @@ pub fn execute(
             name,
             columns,
             seed,
-        } => execute_generate(*rows, name, columns, *seed, format, session),
+        } => execute_generate(*rows, name, columns, *seed, format, quiet, session),
         DataCommands::Save {
             dataset,
             output,
             format: fmt,
-        } => execute_save(dataset, output, fmt.as_deref(), format, session),
+        } => execute_save(dataset, output, fmt.as_deref(), format, quiet, session),
     }
 }
 
@@ -126,6 +128,7 @@ fn execute_load(
     path: &PathBuf,
     name: Option<&str>,
     format: &OutputFormat,
+    quiet: bool,
     session: Option<&mut SessionManager>,
 ) -> anyhow::Result<()> {
     log::info!("Loading dataset from: {}", path.display());
@@ -151,6 +154,12 @@ fn execute_load(
         extension
     );
 
+    // Show progress spinner for file loading
+    let progress = Progress::spinner(
+        &format!("Loading {}...", path.file_name().unwrap_or_default().to_string_lossy()),
+        quiet,
+    );
+
     // Load the dataset
     let df = match extension.as_str() {
         "csv" => DataLoader::load_csv(path)?,
@@ -159,10 +168,13 @@ fn execute_load(
         "dta" => DataLoader::load_stata(path)?,
         "sas7bdat" => DataLoader::load_sas(path)?,
         _ => {
+            progress.finish_and_clear();
             print_error(&format!("Unsupported file format: {}", extension), format);
             return Ok(());
         }
     };
+
+    progress.finish_and_clear();
     let dataset = Dataset::new(df);
 
     let df = dataset.df();
@@ -349,6 +361,7 @@ fn execute_generate(
     columns_json: &str,
     seed: Option<u64>,
     format: &OutputFormat,
+    quiet: bool,
     session: Option<&mut SessionManager>,
 ) -> anyhow::Result<()> {
     log::info!("Generating random dataset '{}' with {} rows", name, n_rows);
@@ -406,11 +419,20 @@ fn execute_generate(
         return Ok(());
     }
 
-    // Generate the data
+    // Generate the data with progress indicator
     log::debug!("Generating {} column(s)", columns.len());
+    let progress = Progress::spinner(
+        &format!("Generating {} rows...", n_rows),
+        quiet,
+    );
+
     let dataset = match generate_random_data(n_rows, columns, seed) {
-        Ok(ds) => ds,
+        Ok(ds) => {
+            progress.finish_and_clear();
+            ds
+        }
         Err(e) => {
+            progress.finish_and_clear();
             log::error!("Data generation failed: {}", e);
             print_error(&format!("Failed to generate data: {}", e), format);
             return Ok(());
@@ -469,6 +491,7 @@ fn execute_save(
     output: &PathBuf,
     fmt: Option<&str>,
     format: &OutputFormat,
+    quiet: bool,
     session: Option<&mut SessionManager>,
 ) -> anyhow::Result<()> {
     log::info!("Saving dataset '{}' to: {}", dataset_name, output.display());
@@ -495,6 +518,12 @@ fn execute_save(
     // Determine format from option or extension
     let output_format = fmt.or_else(|| output.extension().and_then(|ext| ext.to_str()));
 
+    // Show progress spinner for file saving
+    let progress = Progress::spinner(
+        &format!("Saving to {}...", output.file_name().unwrap_or_default().to_string_lossy()),
+        quiet,
+    );
+
     let result: Result<&str, String> = match output_format {
         Some("csv") => ds.to_csv(output).map(|_| "CSV").map_err(|e| e.to_string()),
         Some("parquet") => ds
@@ -507,6 +536,7 @@ fn execute_save(
             .and_then(|json| std::fs::write(output, json).map_err(|e| e.to_string()))
             .map(|_| "JSON"),
         Some(other) => {
+            progress.finish_and_clear();
             print_error(
                 &format!("Unsupported format '{}'. Use csv, parquet, or json.", other),
                 format,
@@ -514,6 +544,7 @@ fn execute_save(
             return Ok(());
         }
         None => {
+            progress.finish_and_clear();
             print_error(
                 "Could not determine output format. Use --format or provide file extension (.csv, .parquet, .json).",
                 format,
@@ -521,6 +552,8 @@ fn execute_save(
             return Ok(());
         }
     };
+
+    progress.finish_and_clear();
 
     match result {
         Ok(fmt_name) => {
