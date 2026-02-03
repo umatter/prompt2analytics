@@ -11,9 +11,13 @@ rust-version.workspace = true
 name = "p2a"
 path = "src/main.rs"
 
+[features]
+default = ["spectral-analysis"]
+spectral-analysis = ["p2a-core/spectral-analysis"]
+
 [dependencies]
 # Core analytics library
-p2a-core = { path = "../p2a-core" }
+p2a-core = { path = "../p2a-core", features = ["full"] }
 
 # CLI framework
 clap = { version = "4.5", features = ["derive", "env", "string"] }
@@ -40,3 +44,18 @@ colored = "2.1"
 # Error handling
 thiserror.workspace = true
 anyhow.workspace = true
+
+# Logging
+log = "0.4"
+env_logger = "0.11"
+
+# Progress indicators
+indicatif = "0.17"
+
+[dev-dependencies]
+assert_cmd = "2.0"
+predicates = "3.1"
+tempfile = "3.10"
+
+[lints]
+workspace = true

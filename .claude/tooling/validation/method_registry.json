@@ -1,0 +1,880 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Registry mapping p2a-core methods to their R equivalents, benchmarks, and validation artifacts",
+  "version": "1.0.0",
+  "last_updated": "2026-01-21",
+  "methods": {
+    "ols": {
+      "display_name": "Ordinary Least Squares",
+      "r_name": "lm",
+      "r_packages": ["stats"],
+      "category": "regression",
+      "rust_module": "crates/p2a-core/src/regression/ols.rs",
+      "rust_function": "run_ols",
+      "r_benchmark_script": "performance/comparisons/r_comparison/benchmark_regression.R",
+      "criterion_benchmark": "crates/p2a-core/benches/regression_benchmarks.rs",
+      "criterion_group": "OLS_Standard",
+      "validation_doc": "validation/regression/ols.md",
+      "test_patterns": ["test_validate_ols", "test_validate_longley"]
+    },
+    "ols_robust": {
+      "display_name": "OLS with Robust Standard Errors",
+      "r_name": "lm + vcovHC",
+      "r_packages": ["stats", "sandwich"],
+      "category": "regression",
+      "rust_module": "crates/p2a-core/src/regression/ols.rs",
+      "rust_function": "run_ols",
+      "r_benchmark_script": "performance/comparisons/r_comparison/benchmark_regression.R",
+      "criterion_benchmark": "crates/p2a-core/benches/regression_benchmarks.rs",
+      "criterion_group": "OLS_RobustSE",
+      "validation_doc": "validation/regression/ols_robust_se.md",
+      "test_patterns": ["test_validate_robust"]
+    },
+    "ols_clustered": {
+      "display_name": "OLS with Clustered Standard Errors",
+      "r_name": "lm + vcovCL",
+      "r_packages": ["stats", "sandwich"],
+      "category": "regression",
+      "rust_module": "crates/p2a-core/src/regression/ols.rs",
+      "rust_function": "run_ols_clustered",
+      "validation_doc": "validation/regression/ols_clustered.md",
+      "test_patterns": ["test_clustered"]
+    },
+    "nls": {
+      "display_name": "Nonlinear Least Squares",
+      "r_name": "nls",
+      "r_packages": ["stats"],
+      "category": "regression",
+      "rust_module": "crates/p2a-core/src/regression/nls.rs",
+      "rust_function": "nls",
+      "r_benchmark_script": "performance/comparisons/r_comparison/benchmark_nls.R",
+      "criterion_benchmark": "crates/p2a-core/benches/regression_benchmarks.rs",
+      "criterion_group": "NLS_ExponentialDecay",
+      "validation_doc": "validation/regression/nls.md",
+      "test_patterns": ["test_validate_nls"]
+    },
+    "loess": {
+      "display_name": "Local Polynomial Regression (LOESS)",
+      "r_name": "loess",
+      "r_packages": ["stats"],
+      "category": "regression",
+      "rust_module": "crates/p2a-core/src/regression/loess.rs",
+      "rust_function": "loess",
+      "r_benchmark_script": "performance/comparisons/r_comparison/benchmark_loess.R",
+      "criterion_benchmark": "crates/p2a-core/benches/regression_benchmarks.rs",
+      "criterion_group": "LOESS_Gaussian",
+      "validation_doc": "validation/regression/loess.md",
+      "test_patterns": ["test_validate_loess"]
+    },
+    "gls": {
+      "display_name": "Generalized Least Squares",
+      "r_name": "gls",
+      "r_packages": ["nlme"],
+      "category": "regression",
+      "rust_module": "crates/p2a-core/src/regression/gls.rs",
+      "rust_function": "gls",
+      "r_benchmark_script": "performance/comparisons/r_comparison/benchmark_gls.R",
+      "criterion_benchmark": "crates/p2a-core/benches/new_methods_benchmarks.rs",
+      "test_patterns": ["test_validate_gls"]
+    },
+    "smooth_spline": {
+      "display_name": "Cubic Smoothing Spline",
+      "r_name": "smooth.spline",
+      "r_packages": ["stats"],
+      "category": "regression",
+      "rust_module": "crates/p2a-core/src/regression/smooth_spline.rs",
+      "rust_function": "smooth_spline",
+      "r_benchmark_script": "performance/comparisons/r_comparison/benchmark_smooth_spline.R",
+      "test_patterns": ["test_smooth_spline"]
+    },
+    "diagnostics": {
+      "display_name": "Regression Diagnostics",
+      "r_name": "various",
+      "r_packages": ["stats", "lmtest", "car"],
+      "category": "regression",
+      "rust_module": "crates/p2a-core/src/regression/diagnostics.rs",
+      "rust_function": "run_diagnostics",
+      "criterion_benchmark": "crates/p2a-core/benches/regression_benchmarks.rs",
+      "criterion_group": "Diagnostics",
+      "validation_doc": "validation/diagnostics/regression_diagnostics.md",
+      "test_patterns": ["test_diagnostics"]
+    },
+    "panel_fe": {
+      "display_name": "Fixed Effects Panel Regression",
+      "r_name": "plm(model='within')",
+      "r_packages": ["plm"],
+      "category": "panel",
+      "rust_module": "crates/p2a-core/src/econometrics/panel.rs",
+      "rust_function": "run_fixed_effects",
+      "r_benchmark_script": "performance/comparisons/r_comparison/benchmark_econometrics.R",
+      "criterion_benchmark": "crates/p2a-core/benches/econometrics_benchmarks.rs",
+      "validation_doc": "validation/econometrics/panel_fe.md",
+      "test_patterns": ["test_validate_fe", "test_fixed_effects"]
+    },
+    "panel_re": {
+      "display_name": "Random Effects Panel Regression",
+      "r_name": "plm(model='random')",
+      "r_packages": ["plm"],
+      "category": "panel",
+      "rust_module": "crates/p2a-core/src/econometrics/panel.rs",
+      "rust_function": "run_random_effects",
+      "r_benchmark_script": "performance/comparisons/r_comparison/benchmark_econometrics.R",
+      "criterion_benchmark": "crates/p2a-core/benches/econometrics_benchmarks.rs",
+      "validation_doc": "validation/econometrics/panel_re.md",
+      "test_patterns": ["test_validate_re", "test_random_effects"]
+    },
+    "hausman": {
+      "display_name": "Hausman Specification Test",
+      "r_name": "phtest",
+      "r_packages": ["plm"],
+      "category": "panel",
+      "rust_module": "crates/p2a-core/src/econometrics/panel.rs",
+      "rust_function": "run_hausman_test",
+      "validation_doc": "validation/econometrics/hausman.md",
+      "test_patterns": ["test_hausman"]
+    },
+    "iv_2sls": {
+      "display_name": "Two-Stage Least Squares (2SLS)",
+      "r_name": "ivreg",
+      "r_packages": ["AER", "ivreg"],
+      "category": "causal",
+      "rust_module": "crates/p2a-core/src/econometrics/iv.rs",
+      "rust_function": "run_iv2sls",
+      "r_benchmark_script": "performance/comparisons/r_comparison/benchmark_econometrics.R",
+      "criterion_benchmark": "crates/p2a-core/benches/econometrics_benchmarks.rs",
+      "validation_doc": "validation/econometrics/iv_2sls.md",
+      "test_patterns": ["test_validate_iv", "test_2sls"]
+    },
+    "did": {
+      "display_name": "Difference-in-Differences",
+      "r_name": "lm_robust",
+      "r_packages": ["estimatr", "did"],
+      "category": "causal",
+      "rust_module": "crates/p2a-core/src/econometrics/did.rs",
+      "rust_function": "run_did",
+      "validation_doc": "validation/econometrics/did.md",
+      "test_patterns": ["test_did", "test_validate_did"]
+    },
+    "synth": {
+      "display_name": "Synthetic Control Method",
+      "r_name": "synth",
+      "r_packages": ["Synth"],
+      "category": "causal",
+      "rust_module": "crates/p2a-core/src/econometrics/synth.rs",
+      "rust_function": "run_synthetic_control",
+      "r_benchmark_script": "performance/comparisons/r_comparison/benchmark_synth.R",
+      "validation_doc": "validation/econometrics/synth.md",
+      "test_patterns": ["test_synth"]
+    },
+    "rd": {
+      "display_name": "Regression Discontinuity Design",
+      "r_name": "rdrobust",
+      "r_packages": ["rdrobust"],
+      "category": "causal",
+      "rust_module": "crates/p2a-core/src/econometrics/rd.rs",
+      "rust_function": "run_rd",
+      "test_patterns": ["test_rd"]
+    },
+    "ipw": {
+      "display_name": "Inverse Probability Weighting",
+      "r_name": "IPW",
+      "r_packages": ["WeightIt", "ipw"],
+      "category": "causal",
+      "rust_module": "crates/p2a-core/src/econometrics/treatment.rs",
+      "rust_function": "run_ipw_treatment",
+      "validation_doc": "validation/econometrics/treatment_ipw.md",
+      "test_patterns": ["test_ipw"]
+    },
+    "doubly_robust": {
+      "display_name": "Doubly Robust Estimation (AIPW)",
+      "r_name": "AIPW",
+      "r_packages": ["AIPW", "causalDML"],
+      "category": "causal",
+      "rust_module": "crates/p2a-core/src/econometrics/treatment.rs",
+      "rust_function": "run_doubly_robust",
+      "validation_doc": "validation/econometrics/treatment_aipw.md",
+      "test_patterns": ["test_doubly_robust", "test_aipw"]
+    },
+    "mediation": {
+      "display_name": "Mediation Analysis",
+      "r_name": "mediate",
+      "r_packages": ["mediation"],
+      "category": "causal",
+      "rust_module": "crates/p2a-core/src/econometrics/mediation.rs",
+      "rust_function": "run_mediation_analysis",
+      "validation_doc": "validation/econometrics/mediation.md",
+      "test_patterns": ["test_mediation"]
+    },
+    "logit": {
+      "display_name": "Logistic Regression",
+      "r_name": "glm(family=binomial(logit))",
+      "r_packages": ["stats"],
+      "category": "discrete",
+      "rust_module": "crates/p2a-core/src/econometrics/discrete.rs",
+      "rust_function": "run_logit",
+      "r_benchmark_script": "performance/comparisons/r_comparison/benchmark_econometrics.R",
+      "criterion_benchmark": "crates/p2a-core/benches/econometrics_benchmarks.rs",
+      "validation_doc": "validation/econometrics/logit.md",
+      "test_patterns": ["test_logit"]
+    },
+    "probit": {
+      "display_name": "Probit Regression",
+      "r_name": "glm(family=binomial(probit))",
+      "r_packages": ["stats"],
+      "category": "discrete",
+      "rust_module": "crates/p2a-core/src/econometrics/discrete.rs",
+      "rust_function": "run_probit",
+      "r_benchmark_script": "performance/comparisons/r_comparison/benchmark_econometrics.R",
+      "criterion_benchmark": "crates/p2a-core/benches/econometrics_benchmarks.rs",
+      "validation_doc": "validation/econometrics/probit.md",
+      "test_patterns": ["test_probit"]
+    },
+    "hdfe": {
+      "display_name": "High-Dimensional Fixed Effects",
+      "r_name": "feols",
+      "r_packages": ["fixest"],
+      "category": "panel",
+      "rust_module": "crates/p2a-core/src/econometrics/hdfe.rs",
+      "rust_function": "run_hdfe",
+      "validation_doc": "validation/econometrics/hdfe.md",
+      "test_patterns": ["test_hdfe"]
+    },
+    "feglm": {
+      "display_name": "Fixed Effects GLM",
+      "r_name": "feglm",
+      "r_packages": ["fixest"],
+      "category": "panel",
+      "rust_module": "crates/p2a-core/src/econometrics/feglm.rs",
+      "rust_function": "run_feglm",
+      "validation_doc": "validation/econometrics/feglm.md",
+      "test_patterns": ["test_feglm"]
+    },
+    "var": {
+      "display_name": "Vector Autoregression",
+      "r_name": "VAR",
+      "r_packages": ["vars"],
+      "category": "timeseries",
+      "rust_module": "crates/p2a-core/src/econometrics/timeseries.rs",
+      "rust_function": "run_var",
+      "validation_doc": "validation/econometrics/timeseries/var.md",
+      "test_patterns": ["test_var"]
+    },
+    "vecm": {
+      "display_name": "Vector Error Correction Model",
+      "r_name": "ca.jo",
+      "r_packages": ["urca", "vars"],
+      "category": "timeseries",
+      "rust_module": "crates/p2a-core/src/econometrics/timeseries.rs",
+      "rust_function": "run_vecm",
+      "validation_doc": "validation/econometrics/timeseries/vecm.md",
+      "test_patterns": ["test_vecm"]
+    },
+    "irf": {
+      "display_name": "Impulse Response Function",
+      "r_name": "irf",
+      "r_packages": ["vars"],
+      "category": "timeseries",
+      "rust_module": "crates/p2a-core/src/econometrics/timeseries.rs",
+      "rust_function": "compute_irf",
+      "validation_doc": "validation/econometrics/timeseries/irf.md",
+      "test_patterns": ["test_irf"]
+    },
+    "kaplan_meier": {
+      "display_name": "Kaplan-Meier Survival Curve",
+      "r_name": "survfit",
+      "r_packages": ["survival"],
+      "category": "survival",
+      "rust_module": "crates/p2a-core/src/econometrics/survival.rs",
+      "rust_function": "run_kaplan_meier",
+      "r_benchmark_script": "performance/comparisons/r_comparison/benchmark_survival.R",
+      "validation_doc": "validation/econometrics/survival.md",
+      "test_patterns": ["test_kaplan_meier"]
+    },
+    "cox_ph": {
+      "display_name": "Cox Proportional Hazards",
+      "r_name": "coxph",
+      "r_packages": ["survival"],
+      "category": "survival",
+      "rust_module": "crates/p2a-core/src/econometrics/survival.rs",
+      "rust_function": "run_cox_ph",
+      "r_benchmark_script": "performance/comparisons/r_comparison/benchmark_survival.R",
+      "validation_doc": "validation/econometrics/survival.md",
+      "test_patterns": ["test_cox"]
+    },
+    "t_test": {
+      "display_name": "Student's t-Test",
+      "r_name": "t.test",
+      "r_packages": ["stats"],
+      "category": "hypothesis",
+      "rust_module": "crates/p2a-core/src/stats/ttest.rs",
+      "rust_function": "one_sample_t_test, two_sample_t_test",
+      "r_benchmark_script": "performance/comparisons/r_comparison/benchmark_hypothesis.R",
+      "criterion_benchmark": "crates/p2a-core/benches/regression_benchmarks.rs",
+      "criterion_group": "TTest_OneSample",
+      "validation_doc": "validation/stats/hypothesis_tests.md",
+      "test_patterns": ["test_t_test"]
+    },
+    "anova": {
+      "display_name": "Analysis of Variance",
+      "r_name": "aov",
+      "r_packages": ["stats"],
+      "category": "hypothesis",
+      "rust_module": "crates/p2a-core/src/stats/anova.rs",
+      "rust_function": "run_one_way_anova, run_two_way_anova",
+      "r_benchmark_script": "performance/comparisons/r_comparison/benchmark_hypothesis.R",
+      "criterion_benchmark": "crates/p2a-core/benches/regression_benchmarks.rs",
+      "criterion_group": "ANOVA_OneWay",
+      "test_patterns": ["test_anova"]
+    },
+    "chisq": {
+      "display_name": "Chi-Squared Test",
+      "r_name": "chisq.test",
+      "r_packages": ["stats"],
+      "category": "hypothesis",
+      "rust_module": "crates/p2a-core/src/stats/chisq.rs",
+      "rust_function": "chisq_test_gof, chisq_test_independence",
+      "criterion_benchmark": "crates/p2a-core/benches/regression_benchmarks.rs",
+      "criterion_group": "ChiSquared_GOF",
+      "validation_doc": "validation/stats/chisq.md",
+      "test_patterns": ["test_chisq"]
+    },
+    "fisher": {
+      "display_name": "Fisher's Exact Test",
+      "r_name": "fisher.test",
+      "r_packages": ["stats"],
+      "category": "hypothesis",
+      "rust_module": "crates/p2a-core/src/stats/fisher.rs",
+      "rust_function": "fisher_exact_test",
+      "r_benchmark_script": "performance/comparisons/r_comparison/benchmark_fisher.R",
+      "criterion_benchmark": "crates/p2a-core/benches/regression_benchmarks.rs",
+      "criterion_group": "FisherExact",
+      "validation_doc": "validation/stats/fisher.md",
+      "test_patterns": ["test_fisher"]
+    },
+    "wilcoxon": {
+      "display_name": "Wilcoxon Rank-Sum and Signed-Rank Tests",
+      "r_name": "wilcox.test",
+      "r_packages": ["stats"],
+      "category": "hypothesis",
+      "rust_module": "crates/p2a-core/src/stats/wilcoxon.rs",
+      "rust_function": "wilcoxon_rank_sum, wilcoxon_signed_rank",
+      "r_benchmark_script": "performance/comparisons/r_comparison/benchmark_wilcoxon.R",
+      "criterion_benchmark": "crates/p2a-core/benches/regression_benchmarks.rs",
+      "criterion_group": "Wilcoxon_RankSum",
+      "validation_doc": "validation/stats/wilcoxon.md",
+      "test_patterns": ["test_wilcoxon"]
+    },
+    "shapiro": {
+      "display_name": "Shapiro-Wilk Normality Test",
+      "r_name": "shapiro.test",
+      "r_packages": ["stats"],
+      "category": "hypothesis",
+      "rust_module": "crates/p2a-core/src/stats/shapiro.rs",
+      "rust_function": "shapiro_wilk_test",
+      "r_benchmark_script": "performance/comparisons/r_comparison/benchmark_shapiro.R",
+      "criterion_benchmark": "crates/p2a-core/benches/regression_benchmarks.rs",
+      "criterion_group": "ShapiroWilk",
+      "validation_doc": "validation/stats/shapiro_wilk.md",
+      "test_patterns": ["test_shapiro"]
+    },
+    "ks_test": {
+      "display_name": "Kolmogorov-Smirnov Test",
+      "r_name": "ks.test",
+      "r_packages": ["stats"],
+      "category": "hypothesis",
+      "rust_module": "crates/p2a-core/src/stats/ks.rs",
+      "rust_function": "ks_test_one_sample, ks_test_two_sample",
+      "r_benchmark_script": "performance/comparisons/r_comparison/benchmark_ks.R",
+      "criterion_benchmark": "crates/p2a-core/benches/regression_benchmarks.rs",
+      "criterion_group": "KS_TwoSample",
+      "validation_doc": "validation/stats/ks_test.md",
+      "test_patterns": ["test_ks"]
+    },
+    "manova": {
+      "display_name": "Multivariate ANOVA",
+      "r_name": "manova",
+      "r_packages": ["stats"],
+      "category": "multivariate",
+      "rust_module": "crates/p2a-core/src/stats/manova.rs",
+      "rust_function": "manova_one_way",
+      "r_benchmark_script": "performance/comparisons/r_comparison/benchmark_manova.R",
+      "criterion_benchmark": "crates/p2a-core/benches/regression_benchmarks.rs",
+      "criterion_group": "MANOVA",
+      "validation_doc": "validation/stats/manova.md",
+      "test_patterns": ["test_manova"]
+    },
+    "tukey_hsd": {
+      "display_name": "Tukey HSD Post-Hoc Test",
+      "r_name": "TukeyHSD",
+      "r_packages": ["stats"],
+      "category": "hypothesis",
+      "rust_module": "crates/p2a-core/src/stats/tukey.rs",
+      "rust_function": "run_tukey_hsd",
+      "r_benchmark_script": "performance/comparisons/r_comparison/benchmark_tukey.R",
+      "criterion_benchmark": "crates/p2a-core/benches/regression_benchmarks.rs",
+      "criterion_group": "TukeyHSD",
+      "validation_doc": "validation/stats/tukey_hsd.md",
+      "test_patterns": ["test_tukey"]
+    },
+    "bartlett": {
+      "display_name": "Bartlett's Test for Homogeneity",
+      "r_name": "bartlett.test",
+      "r_packages": ["stats"],
+      "category": "hypothesis",
+      "rust_module": "crates/p2a-core/src/stats/bartlett.rs",
+      "rust_function": "bartlett_test",
+      "r_benchmark_script": "performance/comparisons/r_comparison/benchmark_bartlett.R",
+      "criterion_benchmark": "crates/p2a-core/benches/regression_benchmarks.rs",
+      "criterion_group": "BartlettTest",
+      "validation_doc": "validation/stats/bartlett.md",
+      "test_patterns": ["test_bartlett"]
+    },
+    "kruskal": {
+      "display_name": "Kruskal-Wallis Test",
+      "r_name": "kruskal.test",
+      "r_packages": ["stats"],
+      "category": "hypothesis",
+      "rust_module": "crates/p2a-core/src/stats/kruskal.rs",
+      "rust_function": "kruskal_test",
+      "r_benchmark_script": "performance/comparisons/r_comparison/benchmark_kruskal.R",
+      "validation_doc": "validation/stats/kruskal.md",
+      "test_patterns": ["test_kruskal"]
+    },
+    "friedman": {
+      "display_name": "Friedman Rank-Sum Test",
+      "r_name": "friedman.test",
+      "r_packages": ["stats"],
+      "category": "hypothesis",
+      "rust_module": "crates/p2a-core/src/stats/friedman.rs",
+      "rust_function": "friedman_test",
+      "r_benchmark_script": "performance/comparisons/r_comparison/benchmark_friedman.R",
+      "validation_doc": "validation/stats/friedman.md",
+      "test_patterns": ["test_friedman"]
+    },
+    "mood": {
+      "display_name": "Mood's Median Test",
+      "r_name": "mood.test",
+      "r_packages": ["stats"],
+      "category": "hypothesis",
+      "rust_module": "crates/p2a-core/src/stats/mood.rs",
+      "rust_function": "mood_test",
+      "r_benchmark_script": "performance/comparisons/r_comparison/benchmark_mood.R",
+      "validation_doc": "validation/stats/mood.md",
+      "test_patterns": ["test_mood"]
+    },
+    "mcnemar": {
+      "display_name": "McNemar's Chi-Squared Test",
+      "r_name": "mcnemar.test",
+      "r_packages": ["stats"],
+      "category": "hypothesis",
+      "rust_module": "crates/p2a-core/src/stats/mcnemar.rs",
+      "rust_function": "mcnemar_test",
+      "r_benchmark_script": "performance/comparisons/r_comparison/benchmark_mcnemar.R",
+      "validation_doc": "validation/stats/mcnemar.md",
+      "test_patterns": ["test_mcnemar"]
+    },
+    "oneway": {
+      "display_name": "Welch's One-Way Test",
+      "r_name": "oneway.test",
+      "r_packages": ["stats"],
+      "category": "hypothesis",
+      "rust_module": "crates/p2a-core/src/stats/oneway.rs",
+      "rust_function": "oneway_test",
+      "r_benchmark_script": "performance/comparisons/r_comparison/benchmark_oneway.R",
+      "validation_doc": "validation/stats/oneway.md",
+      "test_patterns": ["test_oneway"]
+    },
+    "pairwise_t_test": {
+      "display_name": "Pairwise t-Tests",
+      "r_name": "pairwise.t.test",
+      "r_packages": ["stats"],
+      "category": "hypothesis",
+      "rust_module": "crates/p2a-core/src/stats/pairwise.rs",
+      "rust_function": "pairwise_t_test",
+      "r_benchmark_script": "performance/comparisons/r_comparison/benchmark_pairwise_t_test.R",
+      "validation_doc": "validation/stats/pairwise_t_test.md",
+      "test_patterns": ["test_pairwise_t"]
+    },
+    "pairwise_wilcox": {
+      "display_name": "Pairwise Wilcoxon Tests",
+      "r_name": "pairwise.wilcox.test",
+      "r_packages": ["stats"],
+      "category": "hypothesis",
+      "rust_module": "crates/p2a-core/src/stats/pairwise.rs",
+      "rust_function": "pairwise_wilcox_test",
+      "r_benchmark_script": "performance/comparisons/r_comparison/benchmark_pairwise_wilcox.R",
+      "validation_doc": "validation/stats/pairwise_wilcox_test.md",
+      "test_patterns": ["test_pairwise_wilcox"]
+    },
+    "quade": {
+      "display_name": "Quade Test",
+      "r_name": "quade.test",
+      "r_packages": ["stats"],
+      "category": "hypothesis",
+      "rust_module": "crates/p2a-core/src/stats/quade.rs",
+      "rust_function": "quade_test",
+      "r_benchmark_script": "performance/comparisons/r_comparison/benchmark_quade.R",
+      "validation_doc": "validation/stats/quade_test.md",
+      "test_patterns": ["test_quade"]
+    },
+    "mantelhaen": {
+      "display_name": "Cochran-Mantel-Haenszel Test",
+      "r_name": "mantelhaen.test",
+      "r_packages": ["stats"],
+      "category": "hypothesis",
+      "rust_module": "crates/p2a-core/src/stats/mantelhaen.rs",
+      "rust_function": "mantelhaen_test",
+      "r_benchmark_script": "performance/comparisons/r_comparison/benchmark_mantelhaen.R",
+      "validation_doc": "validation/stats/mantelhaen_test.md",
+      "test_patterns": ["test_mantelhaen"]
+    },
+    "poisson_test": {
+      "display_name": "Exact Poisson Test",
+      "r_name": "poisson.test",
+      "r_packages": ["stats"],
+      "category": "hypothesis",
+      "rust_module": "crates/p2a-core/src/stats/poissontest.rs",
+      "rust_function": "poisson_test",
+      "r_benchmark_script": "performance/comparisons/r_comparison/benchmark_poisson.R",
+      "validation_doc": "validation/stats/poisson_test.md",
+      "test_patterns": ["test_poisson"]
+    },
+    "acf": {
+      "display_name": "Autocorrelation Function",
+      "r_name": "acf",
+      "r_packages": ["stats"],
+      "category": "timeseries",
+      "rust_module": "crates/p2a-core/src/stats/acf.rs",
+      "rust_function": "acf, pacf, ccf",
+      "r_benchmark_script": "performance/comparisons/r_comparison/benchmark_acf.R",
+      "criterion_benchmark": "crates/p2a-core/benches/regression_benchmarks.rs",
+      "criterion_group": "ACF",
+      "validation_doc": "validation/stats/acf.md",
+      "test_patterns": ["test_acf"]
+    },
+    "cor_test": {
+      "display_name": "Correlation Test",
+      "r_name": "cor.test",
+      "r_packages": ["stats"],
+      "category": "correlation",
+      "rust_module": "crates/p2a-core/src/stats/cortest.rs",
+      "rust_function": "cor_test",
+      "r_benchmark_script": "performance/comparisons/r_comparison/benchmark_cortest.R",
+      "test_patterns": ["test_cor_test"]
+    },
+    "mahalanobis": {
+      "display_name": "Mahalanobis Distance",
+      "r_name": "mahalanobis",
+      "r_packages": ["stats"],
+      "category": "multivariate",
+      "rust_module": "crates/p2a-core/src/stats/mahalanobis.rs",
+      "rust_function": "mahalanobis",
+      "r_benchmark_script": "performance/comparisons/r_comparison/benchmark_mahalanobis.R",
+      "validation_doc": "validation/multivariate/mahalanobis.md",
+      "test_patterns": ["test_mahalanobis"]
+    },
+    "factanal": {
+      "display_name": "Factor Analysis",
+      "r_name": "factanal",
+      "r_packages": ["stats"],
+      "category": "multivariate",
+      "rust_module": "crates/p2a-core/src/stats/factanal.rs",
+      "rust_function": "factanal",
+      "r_benchmark_script": "performance/comparisons/r_comparison/benchmark_factanal.R",
+      "validation_doc": "validation/multivariate/factanal.md",
+      "test_patterns": ["test_factanal"]
+    },
+    "cancor": {
+      "display_name": "Canonical Correlation",
+      "r_name": "cancor",
+      "r_packages": ["stats"],
+      "category": "multivariate",
+      "rust_module": "crates/p2a-core/src/stats/cancor.rs",
+      "rust_function": "cancor",
+      "r_benchmark_script": "performance/comparisons/r_comparison/benchmark_cancor.R",
+      "validation_doc": "validation/multivariate/cancor.md",
+      "test_patterns": ["test_cancor"]
+    },
+    "spectrum": {
+      "display_name": "Spectral Density Estimation",
+      "r_name": "spec.pgram",
+      "r_packages": ["stats"],
+      "category": "timeseries",
+      "rust_module": "crates/p2a-core/src/stats/spectrum.rs",
+      "rust_function": "spectrum, spectrum_ar",
+      "r_benchmark_script": "performance/comparisons/r_comparison/benchmark_spectrum.R",
+      "criterion_benchmark": "crates/p2a-core/benches/regression_benchmarks.rs",
+      "criterion_group": "Spectrum_Periodogram",
+      "validation_doc": "validation/timeseries/spectrum.md",
+      "test_patterns": ["test_spectrum"]
+    },
+    "box_test": {
+      "display_name": "Box-Pierce and Ljung-Box Tests",
+      "r_name": "Box.test",
+      "r_packages": ["stats"],
+      "category": "timeseries",
+      "rust_module": "crates/p2a-core/src/stats/boxtest.rs",
+      "rust_function": "box_test",
+      "r_benchmark_script": "performance/comparisons/r_comparison/benchmark_boxtest.R",
+      "criterion_benchmark": "crates/p2a-core/benches/regression_benchmarks.rs",
+      "criterion_group": "BoxTest_LjungBox",
+      "validation_doc": "validation/timeseries/boxtest.md",
+      "test_patterns": ["test_box_test"]
+    },
+    "pp_test": {
+      "display_name": "Phillips-Perron Unit Root Test",
+      "r_name": "pp.test",
+      "r_packages": ["tseries", "urca"],
+      "category": "timeseries",
+      "rust_module": "crates/p2a-core/src/stats/pptest.rs",
+      "rust_function": "pp_test",
+      "r_benchmark_script": "performance/comparisons/r_comparison/benchmark_pptest.R",
+      "criterion_benchmark": "crates/p2a-core/benches/regression_benchmarks.rs",
+      "criterion_group": "PPTest_lshort",
+      "validation_doc": "validation/timeseries/pptest.md",
+      "test_patterns": ["test_pp"]
+    },
+    "power_t_test": {
+      "display_name": "Power Analysis for t-Tests",
+      "r_name": "power.t.test",
+      "r_packages": ["stats"],
+      "category": "power",
+      "rust_module": "crates/p2a-core/src/stats/power.rs",
+      "rust_function": "power_t_test",
+      "r_benchmark_script": "performance/comparisons/r_comparison/benchmark_power.R",
+      "test_patterns": ["test_power_t"]
+    },
+    "arima": {
+      "display_name": "ARIMA Time Series Model",
+      "r_name": "arima, auto.arima",
+      "r_packages": ["stats", "forecast"],
+      "category": "forecasting",
+      "rust_module": "crates/p2a-core/src/forecasting/arima_model.rs",
+      "rust_function": "run_arima",
+      "r_benchmark_script": "performance/comparisons/r_comparison/benchmark_forecasting.R",
+      "criterion_benchmark": "crates/p2a-core/benches/forecasting_benchmarks.rs",
+      "validation_doc": "validation/forecasting/arima.md",
+      "test_patterns": ["test_arima"]
+    },
+    "ar": {
+      "display_name": "Autoregressive Model",
+      "r_name": "ar",
+      "r_packages": ["stats"],
+      "category": "forecasting",
+      "rust_module": "crates/p2a-core/src/forecasting/ar.rs",
+      "rust_function": "ar, run_ar",
+      "r_benchmark_script": "performance/comparisons/r_comparison/benchmark_ar.R",
+      "validation_doc": "validation/timeseries/ar.md",
+      "test_patterns": ["test_ar"]
+    },
+    "holt_winters": {
+      "display_name": "Holt-Winters Exponential Smoothing",
+      "r_name": "HoltWinters",
+      "r_packages": ["stats"],
+      "category": "forecasting",
+      "rust_module": "crates/p2a-core/src/forecasting/holtwinters.rs",
+      "rust_function": "holt_winters",
+      "r_benchmark_script": "performance/comparisons/r_comparison/benchmark_holtwinters.R",
+      "validation_doc": "validation/forecasting/holtwinters.md",
+      "test_patterns": ["test_holt_winters"]
+    },
+    "decompose": {
+      "display_name": "Classical Time Series Decomposition",
+      "r_name": "decompose",
+      "r_packages": ["stats"],
+      "category": "forecasting",
+      "rust_module": "crates/p2a-core/src/forecasting/decompose.rs",
+      "rust_function": "decompose",
+      "r_benchmark_script": "performance/comparisons/r_comparison/benchmark_decompose.R",
+      "validation_doc": "validation/timeseries/decompose.md",
+      "test_patterns": ["test_decompose"]
+    },
+    "stl": {
+      "display_name": "STL Decomposition",
+      "r_name": "stl",
+      "r_packages": ["stats"],
+      "category": "forecasting",
+      "rust_module": "crates/p2a-core/src/forecasting/stl.rs",
+      "rust_function": "stl",
+      "r_benchmark_script": "performance/comparisons/r_comparison/benchmark_stl.R",
+      "test_patterns": ["test_stl"]
+    },
+    "mstl": {
+      "display_name": "Multiple Seasonal STL",
+      "r_name": "mstl",
+      "r_packages": ["forecast"],
+      "category": "forecasting",
+      "rust_module": "crates/p2a-core/src/forecasting/mstl.rs",
+      "rust_function": "run_mstl",
+      "validation_doc": "validation/forecasting/mstl.md",
+      "test_patterns": ["test_mstl"]
+    },
+    "struct_ts": {
+      "display_name": "Structural Time Series",
+      "r_name": "StructTS",
+      "r_packages": ["stats"],
+      "category": "forecasting",
+      "rust_module": "crates/p2a-core/src/forecasting/structts.rs",
+      "rust_function": "struct_ts",
+      "r_benchmark_script": "performance/comparisons/r_comparison/benchmark_structts.R",
+      "validation_doc": "validation/forecasting/structts.md",
+      "test_patterns": ["test_struct_ts"]
+    },
+    "kmeans": {
+      "display_name": "K-Means Clustering",
+      "r_name": "kmeans",
+      "r_packages": ["stats"],
+      "category": "ml",
+      "rust_module": "crates/p2a-core/src/ml/clustering.rs",
+      "rust_function": "kmeans",
+      "r_benchmark_script": "performance/comparisons/r_comparison/benchmark_ml.R",
+      "criterion_benchmark": "crates/p2a-core/benches/ml_benchmarks.rs",
+      "validation_doc": "validation/ml/kmeans.md",
+      "test_patterns": ["test_kmeans"]
+    },
+    "dbscan": {
+      "display_name": "DBSCAN Clustering",
+      "r_name": "dbscan",
+      "r_packages": ["dbscan"],
+      "category": "ml",
+      "rust_module": "crates/p2a-core/src/ml/clustering.rs",
+      "rust_function": "dbscan",
+      "r_benchmark_script": "performance/comparisons/r_comparison/benchmark_ml.R",
+      "criterion_benchmark": "crates/p2a-core/benches/ml_benchmarks.rs",
+      "test_patterns": ["test_dbscan"]
+    },
+    "hierarchical": {
+      "display_name": "Hierarchical Clustering",
+      "r_name": "hclust",
+      "r_packages": ["stats"],
+      "category": "ml",
+      "rust_module": "crates/p2a-core/src/ml/clustering.rs",
+      "rust_function": "hierarchical",
+      "r_benchmark_script": "performance/comparisons/r_comparison/benchmark_ml.R",
+      "criterion_benchmark": "crates/p2a-core/benches/ml_benchmarks.rs",
+      "test_patterns": ["test_hierarchical"]
+    },
+    "pca": {
+      "display_name": "Principal Component Analysis",
+      "r_name": "prcomp",
+      "r_packages": ["stats"],
+      "category": "ml",
+      "rust_module": "crates/p2a-core/src/ml/reduction.rs",
+      "rust_function": "pca",
+      "r_benchmark_script": "performance/comparisons/r_comparison/benchmark_ml.R",
+      "criterion_benchmark": "crates/p2a-core/benches/ml_benchmarks.rs",
+      "validation_doc": "validation/ml/pca.md",
+      "test_patterns": ["test_pca"]
+    },
+    "tsne": {
+      "display_name": "t-SNE Dimensionality Reduction",
+      "r_name": "Rtsne",
+      "r_packages": ["Rtsne"],
+      "category": "ml",
+      "rust_module": "crates/p2a-core/src/ml/reduction.rs",
+      "rust_function": "tsne",
+      "r_benchmark_script": "performance/comparisons/r_comparison/benchmark_ml.R",
+      "criterion_benchmark": "crates/p2a-core/benches/ml_benchmarks.rs",
+      "test_patterns": ["test_tsne"]
+    },
+    "random_forest": {
+      "display_name": "Random Forest",
+      "r_name": "randomForest",
+      "r_packages": ["randomForest"],
+      "category": "ml",
+      "rust_module": "crates/p2a-core/src/ml/trees.rs",
+      "rust_function": "random_forest",
+      "r_benchmark_script": "performance/comparisons/r_comparison/benchmark_ml.R",
+      "criterion_benchmark": "crates/p2a-core/benches/ml_benchmarks.rs",
+      "test_patterns": ["test_random_forest"]
+    }
+  },
+  "categories": {
+    "regression": {
+      "display_name": "Regression Analysis",
+      "description": "OLS, NLS, LOESS, GLS, and related regression methods",
+      "criterion_bench_file": "crates/p2a-core/benches/regression_benchmarks.rs",
+      "r_benchmark_file": "performance/comparisons/r_comparison/benchmark_regression.R"
+    },
+    "panel": {
+      "display_name": "Panel Data",
+      "description": "Fixed effects, random effects, HDFE panel methods",
+      "criterion_bench_file": "crates/p2a-core/benches/econometrics_benchmarks.rs",
+      "r_benchmark_file": "performance/comparisons/r_comparison/benchmark_econometrics.R"
+    },
+    "causal": {
+      "display_name": "Causal Inference",
+      "description": "IV, DiD, synthetic control, treatment effects",
+      "criterion_bench_file": "crates/p2a-core/benches/econometrics_benchmarks.rs"
+    },
+    "discrete": {
+      "display_name": "Discrete Choice",
+      "description": "Logit, probit, and other discrete outcome models",
+      "criterion_bench_file": "crates/p2a-core/benches/econometrics_benchmarks.rs"
+    },
+    "timeseries": {
+      "display_name": "Time Series",
+      "description": "VAR, VECM, ACF, spectral analysis",
+      "criterion_bench_file": "crates/p2a-core/benches/econometrics_benchmarks.rs"
+    },
+    "survival": {
+      "display_name": "Survival Analysis",
+      "description": "Kaplan-Meier, Cox PH, AFT models"
+    },
+    "hypothesis": {
+      "display_name": "Hypothesis Tests",
+      "description": "t-tests, ANOVA, chi-squared, nonparametric tests",
+      "criterion_bench_file": "crates/p2a-core/benches/hypothesis_benchmarks.rs",
+      "r_benchmark_file": "performance/comparisons/r_comparison/benchmark_hypothesis.R"
+    },
+    "multivariate": {
+      "display_name": "Multivariate Analysis",
+      "description": "MANOVA, factor analysis, canonical correlation",
+      "criterion_bench_file": "crates/p2a-core/benches/multivariate_benchmarks.rs"
+    },
+    "correlation": {
+      "display_name": "Correlation Analysis",
+      "description": "Correlation tests and matrices"
+    },
+    "power": {
+      "display_name": "Power Analysis",
+      "description": "Sample size and power calculations"
+    },
+    "forecasting": {
+      "display_name": "Forecasting",
+      "description": "ARIMA, Holt-Winters, STL, Kalman filter",
+      "criterion_bench_file": "crates/p2a-core/benches/forecasting_benchmarks.rs",
+      "r_benchmark_file": "performance/comparisons/r_comparison/benchmark_forecasting.R"
+    },
+    "ml": {
+      "display_name": "Machine Learning",
+      "description": "Clustering, dimensionality reduction, random forests",
+      "criterion_bench_file": "crates/p2a-core/benches/ml_benchmarks.rs",
+      "r_benchmark_file": "performance/comparisons/r_comparison/benchmark_ml.R"
+    }
+  },
+  "tolerances": {
+    "coefficients": {
+      "small_sample": 1e-6,
+      "medium_sample": 1e-8,
+      "large_sample": 1e-10
+    },
+    "standard_errors": {
+      "small_sample": 1e-4,
+      "medium_sample": 1e-6,
+      "large_sample": 1e-8
+    },
+    "p_values": {
+      "small_sample": 0.01,
+      "medium_sample": 0.001,
+      "large_sample": 0.0001
+    },
+    "iterative_methods": 1e-5
+  },
+  "performance_requirements": {
+    "description": "Minimum speedup factors over R",
+    "n_1000": 1.5,
+    "n_10000": 2.0,
+    "n_100000": 3.0
+  }
+}

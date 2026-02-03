@@ -66,7 +66,7 @@ pub fn lag(
     let result = if let Some(groups) = group_by {
         // Validate group columns
         for g in groups {
-            if df.column(*g).is_err() {
+            if df.column(g).is_err() {
                 return Err(MungeError::ColumnNotFound(g.to_string()));
             }
         }
@@ -79,7 +79,7 @@ pub fn lag(
                 col(column)
                     .shift(lit(periods as i64))
                     .over(group_exprs)
-                    .alias(&lagged_name)
+                    .alias(&lagged_name),
             )
             .collect()
             .map_err(|e| MungeError::FeatureError(e.to_string()))?
@@ -87,11 +87,7 @@ pub fn lag(
         // Simple shift without grouping
         df.clone()
             .lazy()
-            .with_column(
-                col(column)
-                    .shift(lit(periods as i64))
-                    .alias(&lagged_name)
-            )
+            .with_column(col(column).shift(lit(periods as i64)).alias(&lagged_name))
             .collect()
             .map_err(|e| MungeError::FeatureError(e.to_string()))?
     };
@@ -133,7 +129,7 @@ pub fn lead(
     let result = if let Some(groups) = group_by {
         // Validate group columns
         for g in groups {
-            if df.column(*g).is_err() {
+            if df.column(g).is_err() {
                 return Err(MungeError::ColumnNotFound(g.to_string()));
             }
         }
@@ -146,7 +142,7 @@ pub fn lead(
                 col(column)
                     .shift(lit(-(periods as i64)))
                     .over(group_exprs)
-                    .alias(&lead_name)
+                    .alias(&lead_name),
             )
             .collect()
             .map_err(|e| MungeError::FeatureError(e.to_string()))?
@@ -154,11 +150,7 @@ pub fn lead(
         // Simple negative shift without grouping
         df.clone()
             .lazy()
-            .with_column(
-                col(column)
-                    .shift(lit(-(periods as i64)))
-                    .alias(&lead_name)
-            )
+            .with_column(col(column).shift(lit(-(periods as i64))).alias(&lead_name))
             .collect()
             .map_err(|e| MungeError::FeatureError(e.to_string()))?
     };
@@ -183,11 +175,7 @@ pub fn lead(
 ///
 /// let with_diff = diff(&data, "price", 1)?;
 /// ```
-pub fn diff(
-    dataset: &Dataset,
-    column: &str,
-    periods: usize,
-) -> MungeResult<Dataset> {
+pub fn diff(dataset: &Dataset, column: &str, periods: usize) -> MungeResult<Dataset> {
     let df = dataset.df();
 
     // Validate column exists
@@ -198,12 +186,10 @@ pub fn diff(
     let diff_name = format!("{}_diff{}", column, periods);
 
     // Calculate difference as: current - lagged
-    let result = df.clone()
+    let result = df
+        .clone()
         .lazy()
-        .with_column(
-            (col(column) - col(column).shift(lit(periods as i64)))
-                .alias(&diff_name)
-        )
+        .with_column((col(column) - col(column).shift(lit(periods as i64))).alias(&diff_name))
         .collect()
         .map_err(|e| MungeError::FeatureError(e.to_string()))?;
 
@@ -227,11 +213,7 @@ pub fn diff(
 ///
 /// let with_pct = pct_change(&data, "price", 1)?;
 /// ```
-pub fn pct_change(
-    dataset: &Dataset,
-    column: &str,
-    periods: usize,
-) -> MungeResult<Dataset> {
+pub fn pct_change(dataset: &Dataset, column: &str, periods: usize) -> MungeResult<Dataset> {
     let df = dataset.df();
 
     // Validate column exists
@@ -243,12 +225,10 @@ pub fn pct_change(
 
     // Calculate (current - lagged) / lagged
     let lagged = col(column).shift(lit(periods as i64));
-    let result = df.clone()
+    let result = df
+        .clone()
         .lazy()
-        .with_column(
-            ((col(column) - lagged.clone()) / lagged)
-                .alias(&pct_name)
-        )
+        .with_column(((col(column) - lagged.clone()) / lagged).alias(&pct_name))
         .collect()
         .map_err(|e| MungeError::FeatureError(e.to_string()))?;
 
@@ -276,7 +256,7 @@ pub fn standardize(dataset: &Dataset, columns: &[&str]) -> MungeResult<Dataset> 
 
     // Validate columns exist
     for col_name in columns {
-        if df.column(*col_name).is_err() {
+        if df.column(col_name).is_err() {
             return Err(MungeError::ColumnNotFound(col_name.to_string()));
         }
     }
@@ -291,7 +271,8 @@ pub fn standardize(dataset: &Dataset, columns: &[&str]) -> MungeResult<Dataset> 
         exprs.push(((c - mean) / std).alias(&standardized_name));
     }
 
-    let result = df.clone()
+    let result = df
+        .clone()
         .lazy()
         .with_columns(exprs)
         .collect()
@@ -321,7 +302,7 @@ pub fn normalize(dataset: &Dataset, columns: &[&str]) -> MungeResult<Dataset> {
 
     // Validate columns exist
     for col_name in columns {
-        if df.column(*col_name).is_err() {
+        if df.column(col_name).is_err() {
             return Err(MungeError::ColumnNotFound(col_name.to_string()));
         }
     }
@@ -336,7 +317,8 @@ pub fn normalize(dataset: &Dataset, columns: &[&str]) -> MungeResult<Dataset> {
         exprs.push(((c - min.clone()) / (max - min)).alias(&normalized_name));
     }
 
-    let result = df.clone()
+    let result = df
+        .clone()
         .lazy()
         .with_columns(exprs)
         .collect()
@@ -381,12 +363,15 @@ pub fn bin(
     let df = dataset.df();
 
     // Validate column exists
-    let col_data = df.column(column)
+    let col_data = df
+        .column(column)
         .map_err(|_| MungeError::ColumnNotFound(column.to_string()))?;
 
-    let float_col = col_data.cast(&DataType::Float64)
+    let float_col = col_data
+        .cast(&DataType::Float64)
         .map_err(|e| MungeError::FeatureError(e.to_string()))?;
-    let float_ca = float_col.f64()
+    let float_ca = float_col
+        .f64()
         .map_err(|e| MungeError::FeatureError(e.to_string()))?;
 
     // Calculate bin edges based on strategy
@@ -395,7 +380,9 @@ pub fn bin(
             let min = float_ca.min().unwrap_or(0.0);
             let max = float_ca.max().unwrap_or(1.0);
             let step = (max - min) / (*n as f64);
-            (0..=*n).map(|i| min + (i as f64) * step).collect::<Vec<_>>()
+            (0..=*n)
+                .map(|i| min + (i as f64) * step)
+                .collect::<Vec<_>>()
         }
         BinStrategy::Quantile(n) => {
             let mut edges = vec![f64::NEG_INFINITY];
@@ -419,7 +406,9 @@ pub fn bin(
         if lbls.len() != n_bins {
             return Err(MungeError::FeatureError(format!(
                 "Expected {} labels for {} bins, got {}",
-                n_bins, n_bins, lbls.len()
+                n_bins,
+                n_bins,
+                lbls.len()
             )));
         }
     }
@@ -456,7 +445,8 @@ pub fn bin(
 
     let bin_col = Column::new(bin_name.into(), bin_values);
     let mut result = df.clone();
-    result.with_column(bin_col)
+    result
+        .with_column(bin_col)
         .map_err(|e| MungeError::FeatureError(e.to_string()))?;
 
     Ok(Dataset::new(result))
@@ -477,25 +467,24 @@ pub fn bin(
 ///
 /// let encoded = one_hot_encode(&data, "region", true)?;
 /// ```
-pub fn one_hot_encode(
-    dataset: &Dataset,
-    column: &str,
-    drop_first: bool,
-) -> MungeResult<Dataset> {
+pub fn one_hot_encode(dataset: &Dataset, column: &str, drop_first: bool) -> MungeResult<Dataset> {
     let df = dataset.df();
 
     // Validate column exists
-    let col_data = df.column(column)
+    let col_data = df
+        .column(column)
         .map_err(|_| MungeError::ColumnNotFound(column.to_string()))?;
 
     // Get unique values as strings
-    let unique = col_data.unique()
+    let unique = col_data
+        .unique()
         .map_err(|e| MungeError::FeatureError(e.to_string()))?;
 
     // Convert to string representation
     let unique_str: Vec<String> = (0..unique.len())
         .map(|i| {
-            unique.get(i)
+            unique
+                .get(i)
                 .map(|v| format!("{}", v))
                 .unwrap_or_else(|_| "null".to_string())
         })
@@ -511,14 +500,16 @@ pub fn one_hot_encode(
         let mut dummy_values: Vec<i32> = Vec::with_capacity(df.height());
 
         for row_idx in 0..df.height() {
-            let val = col_data.get(row_idx)
+            let val = col_data
+                .get(row_idx)
                 .map(|v| format!("{}", v))
                 .unwrap_or_else(|_| "null".to_string());
             dummy_values.push(if val == *cat { 1 } else { 0 });
         }
 
         let dummy_col = Column::new(dummy_name.into(), dummy_values);
-        result.with_column(dummy_col)
+        result
+            .with_column(dummy_col)
             .map_err(|e| MungeError::FeatureError(e.to_string()))?;
     }
 
@@ -540,11 +531,7 @@ pub fn one_hot_encode(
 ///
 /// let with_cumsum = cumsum(&data, "value", false)?;
 /// ```
-pub fn cumsum(
-    dataset: &Dataset,
-    column: &str,
-    reverse: bool,
-) -> MungeResult<Dataset> {
+pub fn cumsum(dataset: &Dataset, column: &str, reverse: bool) -> MungeResult<Dataset> {
     let df = dataset.df();
 
     // Validate column exists
@@ -554,11 +541,10 @@ pub fn cumsum(
 
     let cumsum_name = format!("{}_cumsum", column);
 
-    let result = df.clone()
+    let result = df
+        .clone()
         .lazy()
-        .with_column(
-            col(column).cum_sum(reverse).alias(&cumsum_name)
-        )
+        .with_column(col(column).cum_sum(reverse).alias(&cumsum_name))
         .collect()
         .map_err(|e| MungeError::FeatureError(e.to_string()))?;
 
@@ -572,11 +558,7 @@ pub fn cumsum(
 /// * `dataset` - Dataset containing the column
 /// * `column` - Column to cumprod
 /// * `reverse` - Whether to compute in reverse order
-pub fn cumprod(
-    dataset: &Dataset,
-    column: &str,
-    reverse: bool,
-) -> MungeResult<Dataset> {
+pub fn cumprod(dataset: &Dataset, column: &str, reverse: bool) -> MungeResult<Dataset> {
     let df = dataset.df();
 
     // Validate column exists
@@ -586,11 +568,10 @@ pub fn cumprod(
 
     let cumprod_name = format!("{}_cumprod", column);
 
-    let result = df.clone()
+    let result = df
+        .clone()
         .lazy()
-        .with_column(
-            col(column).cum_prod(reverse).alias(&cumprod_name)
-        )
+        .with_column(col(column).cum_prod(reverse).alias(&cumprod_name))
         .collect()
         .map_err(|e| MungeError::FeatureError(e.to_string()))?;
 
@@ -604,11 +585,7 @@ pub fn cumprod(
 /// * `dataset` - Dataset containing the column
 /// * `column` - Column to rank
 /// * `descending` - Whether to rank in descending order
-pub fn rank(
-    dataset: &Dataset,
-    column: &str,
-    descending: bool,
-) -> MungeResult<Dataset> {
+pub fn rank(dataset: &Dataset, column: &str, descending: bool) -> MungeResult<Dataset> {
     let df = dataset.df();
 
     // Validate column exists
@@ -623,11 +600,10 @@ pub fn rank(
         ..Default::default()
     };
 
-    let result = df.clone()
+    let result = df
+        .clone()
         .lazy()
-        .with_column(
-            col(column).rank(opts, None).alias(&rank_name)
-        )
+        .with_column(col(column).rank(opts, None).alias(&rank_name))
         .collect()
         .map_err(|e| MungeError::FeatureError(e.to_string()))?;
 
@@ -791,9 +767,11 @@ mod tests {
         let result = one_hot_encode(&ds, "category", false).unwrap();
 
         // Should have one column per category
-        assert!(result.df().column("category_\"a\"").is_ok() ||
-                result.df().column("category_\"b\"").is_ok() ||
-                result.df().column("category_\"c\"").is_ok());
+        assert!(
+            result.df().column("category_\"a\"").is_ok()
+                || result.df().column("category_\"b\"").is_ok()
+                || result.df().column("category_\"c\"").is_ok()
+        );
     }
 
     #[test]
@@ -807,7 +785,10 @@ mod tests {
         let result = one_hot_encode(&ds, "category", true).unwrap();
 
         // Should have one fewer column than categories (3 - 1 = 2)
-        let n_dummy_cols = result.df().get_columns().iter()
+        let n_dummy_cols = result
+            .df()
+            .get_columns()
+            .iter()
             .filter(|c| c.name().starts_with("category_"))
             .count();
         assert_eq!(n_dummy_cols, 2);

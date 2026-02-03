@@ -1,0 +1,3 @@
+"method","variable","coefficient","std_error"
+"AB-twostep","lag(y,1)",0.538935938217498,0.0372603148441359
+"AB-twostep","x",1.63879773545029,0.0621927924929381

@@ -2,6 +2,8 @@
 
 This folder contains teaching materials for business analytics courses using prompt2analytics (p2a).
 
+**Requirements**: Rust 1.85+ (for building from source), or use pre-built binaries
+
 **Available languages:** English (en), German/Swiss (de-CH)
 
 ## Contents

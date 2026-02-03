@@ -1,0 +1,11 @@
+{
+  "method": "panel_fe",
+  "n": 200,
+  "iterations": 100,
+  "timing": {
+    "min_us": 5461,
+    "median_us": 9166,
+    "mean_us": 9009,
+    "max_us": 13818
+  }
+}

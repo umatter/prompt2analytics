@@ -1,7 +1,7 @@
 //! Session recording and management for reproducibility
 
 use chrono::{DateTime, Utc};
-use p2a_core::{Dataset, DataLoader};
+use p2a_core::{DataLoader, Dataset};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -217,14 +217,24 @@ impl SessionManager {
     }
 
     /// Register a loaded dataset
-    pub fn register_dataset(&mut self, name: &str, source_path: PathBuf, format: &str, dataset: &Dataset) {
+    pub fn register_dataset(
+        &mut self,
+        name: &str,
+        source_path: PathBuf,
+        format: &str,
+        dataset: &Dataset,
+    ) {
         let df = dataset.df();
         let meta = DatasetMeta {
             name: name.to_string(),
             source_path,
             format: format.to_string(),
             nrows: df.height(),
-            columns: df.get_column_names().iter().map(|s| s.to_string()).collect(),
+            columns: df
+                .get_column_names()
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
             loaded_at: Utc::now(),
         };
         self.session.register_dataset(meta);

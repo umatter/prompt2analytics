@@ -1,6 +1,6 @@
 //! MSTL (Multiple Seasonal-Trend decomposition using LOESS).
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use augurs_core::Fit;
 use serde::{Deserialize, Serialize};
 
@@ -32,16 +32,14 @@ pub struct MstlResult {
 ///
 /// # Returns
 /// `MstlResult` containing the decomposition components.
-pub fn run_mstl(
-    dataset: &Dataset,
-    column: &str,
-    periods: &[usize],
-) -> Result<MstlResult> {
+pub fn run_mstl(dataset: &Dataset, column: &str, periods: &[usize]) -> Result<MstlResult> {
     use augurs_mstl::{MSTLModel, NaiveTrend};
 
     // Extract time series data
     let df = dataset.df();
-    let col = df.column(column).map_err(|e| anyhow!("Column '{}' not found: {}", column, e))?;
+    let col = df
+        .column(column)
+        .map_err(|e| anyhow!("Column '{}' not found: {}", column, e))?;
 
     let values: Vec<f64> = col
         .f64()
@@ -69,7 +67,8 @@ pub fn run_mstl(
     let mstl = MSTLModel::new(periods_vec, NaiveTrend::new());
 
     // Fit the decomposition using the Fit trait
-    let fitted = mstl.fit(&values)
+    let fitted = mstl
+        .fit(&values)
         .map_err(|e| anyhow!("MSTL fitting failed: {}", e))?;
 
     // Extract the MSTL result containing the decomposition

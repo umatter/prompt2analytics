@@ -1,0 +1,19 @@
+Category,Method,$n$,R (ms),Rust (ms),Speedup
+Discrete,Logit,"100,000",230.1,75.0,3.1$\times$
+Discrete,Probit,"100,000",180.8,306.4,0.6$\times$
+ML,Kmeans,"100,000",592.4,131.7,4.5$\times$
+ML,Pca,"100,000",18.1,68.5,0.3$\times$
+ML,Dbscan,"100,000",8762.3,71707.0,0.1$\times$
+Munging,Group By,"100,000",30.3,18.6,1.6$\times$
+Munging,Sort,"100,000",12.8,23.4,0.6$\times$
+Munging,Filter,"100,000",9.4,24.8,0.4$\times$
+Munging,Standardize,"100,000",6.1,15.9,0.4$\times$
+Munging,Lag,"100,000",0.7,12.9,0.1$\times$
+Munging,Select,"100,000",0.0,12.8,0.0$\times$
+Panel,Panel Fe,"100,000",194.8,31.7,6.1$\times$
+Panel,Panel Re,"100,000",451.1,114.0,4.0$\times$
+Regression,Ols+Hc2,"100,000",159.8,29.3,5.5$\times$
+Regression,Ols+Hc0,"100,000",137.2,26.0,5.3$\times$
+Regression,Ols+Hc3,"100,000",139.6,27.2,5.1$\times$
+Regression,Ols+Hc1,"100,000",142.3,27.9,5.1$\times$
+Regression,Ols,"100,000",23.1,28.0,0.8$\times$

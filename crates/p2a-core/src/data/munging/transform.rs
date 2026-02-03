@@ -1,7 +1,7 @@
 //! Core data transformation operations: filter, select, rename, mutate, sort.
 
-use polars::prelude::*;
 use polars::prelude::PlSmallStr;
+use polars::prelude::*;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
@@ -180,7 +180,11 @@ pub fn filter(dataset: &Dataset, column: &str, op: &str, value: &str) -> MungeRe
     Ok(Dataset::new(filtered_df))
 }
 
-fn apply_numeric_filter_i64(series: &Column, op: FilterOp, value: i64) -> MungeResult<BooleanChunked> {
+fn apply_numeric_filter_i64(
+    series: &Column,
+    op: FilterOp,
+    value: i64,
+) -> MungeResult<BooleanChunked> {
     let ca = series.i64()?;
     Ok(match op {
         FilterOp::Eq => ca.equal(value),
@@ -190,13 +194,19 @@ fn apply_numeric_filter_i64(series: &Column, op: FilterOp, value: i64) -> MungeR
         FilterOp::Lt => ca.lt(value),
         FilterOp::Le => ca.lt_eq(value),
         // String-only operators should not reach here (caught earlier)
-        _ => return Err(MungeError::InvalidOperator(
-            "String operators not valid for numeric columns".to_string(),
-        )),
+        _ => {
+            return Err(MungeError::InvalidOperator(
+                "String operators not valid for numeric columns".to_string(),
+            ));
+        }
     })
 }
 
-fn apply_numeric_filter_i32(series: &Column, op: FilterOp, value: i32) -> MungeResult<BooleanChunked> {
+fn apply_numeric_filter_i32(
+    series: &Column,
+    op: FilterOp,
+    value: i32,
+) -> MungeResult<BooleanChunked> {
     let ca = series.i32()?;
     Ok(match op {
         FilterOp::Eq => ca.equal(value),
@@ -205,13 +215,19 @@ fn apply_numeric_filter_i32(series: &Column, op: FilterOp, value: i32) -> MungeR
         FilterOp::Ge => ca.gt_eq(value),
         FilterOp::Lt => ca.lt(value),
         FilterOp::Le => ca.lt_eq(value),
-        _ => return Err(MungeError::InvalidOperator(
-            "String operators not valid for numeric columns".to_string(),
-        )),
+        _ => {
+            return Err(MungeError::InvalidOperator(
+                "String operators not valid for numeric columns".to_string(),
+            ));
+        }
     })
 }
 
-fn apply_numeric_filter_u64(series: &Column, op: FilterOp, value: u64) -> MungeResult<BooleanChunked> {
+fn apply_numeric_filter_u64(
+    series: &Column,
+    op: FilterOp,
+    value: u64,
+) -> MungeResult<BooleanChunked> {
     let ca = series.u64()?;
     Ok(match op {
         FilterOp::Eq => ca.equal(value),
@@ -220,13 +236,19 @@ fn apply_numeric_filter_u64(series: &Column, op: FilterOp, value: u64) -> MungeR
         FilterOp::Ge => ca.gt_eq(value),
         FilterOp::Lt => ca.lt(value),
         FilterOp::Le => ca.lt_eq(value),
-        _ => return Err(MungeError::InvalidOperator(
-            "String operators not valid for numeric columns".to_string(),
-        )),
+        _ => {
+            return Err(MungeError::InvalidOperator(
+                "String operators not valid for numeric columns".to_string(),
+            ));
+        }
     })
 }
 
-fn apply_numeric_filter_f64(series: &Column, op: FilterOp, value: f64) -> MungeResult<BooleanChunked> {
+fn apply_numeric_filter_f64(
+    series: &Column,
+    op: FilterOp,
+    value: f64,
+) -> MungeResult<BooleanChunked> {
     let ca = series.f64()?;
     Ok(match op {
         FilterOp::Eq => ca.equal(value),
@@ -235,9 +257,11 @@ fn apply_numeric_filter_f64(series: &Column, op: FilterOp, value: f64) -> MungeR
         FilterOp::Ge => ca.gt_eq(value),
         FilterOp::Lt => ca.lt(value),
         FilterOp::Le => ca.lt_eq(value),
-        _ => return Err(MungeError::InvalidOperator(
-            "String operators not valid for numeric columns".to_string(),
-        )),
+        _ => {
+            return Err(MungeError::InvalidOperator(
+                "String operators not valid for numeric columns".to_string(),
+            ));
+        }
     })
 }
 
@@ -250,38 +274,34 @@ fn apply_string_filter(series: &Column, op: FilterOp, value: &str) -> MungeResul
         FilterOp::Ge => ca.gt_eq(value),
         FilterOp::Lt => ca.lt(value),
         FilterOp::Le => ca.lt_eq(value),
-        FilterOp::Contains => {
-            ca.into_iter()
-                .map(|opt| opt.map(|s| s.contains(value)))
-                .collect()
-        }
-        FilterOp::NotContains => {
-            ca.into_iter()
-                .map(|opt| opt.map(|s| !s.contains(value)))
-                .collect()
-        }
-        FilterOp::StartsWith => {
-            ca.into_iter()
-                .map(|opt| opt.map(|s| s.starts_with(value)))
-                .collect()
-        }
-        FilterOp::EndsWith => {
-            ca.into_iter()
-                .map(|opt| opt.map(|s| s.ends_with(value)))
-                .collect()
-        }
+        FilterOp::Contains => ca
+            .into_iter()
+            .map(|opt| opt.map(|s| s.contains(value)))
+            .collect(),
+        FilterOp::NotContains => ca
+            .into_iter()
+            .map(|opt| opt.map(|s| !s.contains(value)))
+            .collect(),
+        FilterOp::StartsWith => ca
+            .into_iter()
+            .map(|opt| opt.map(|s| s.starts_with(value)))
+            .collect(),
+        FilterOp::EndsWith => ca
+            .into_iter()
+            .map(|opt| opt.map(|s| s.ends_with(value)))
+            .collect(),
         FilterOp::Regex => {
-            let re = Regex::new(value).map_err(|e| MungeError::InvalidExpression(
-                format!("Invalid regex pattern '{}': {}", value, e)
-            ))?;
+            let re = Regex::new(value).map_err(|e| {
+                MungeError::InvalidExpression(format!("Invalid regex pattern '{}': {}", value, e))
+            })?;
             ca.into_iter()
                 .map(|opt| opt.map(|s| re.is_match(s)))
                 .collect()
         }
         FilterOp::NotRegex => {
-            let re = Regex::new(value).map_err(|e| MungeError::InvalidExpression(
-                format!("Invalid regex pattern '{}': {}", value, e)
-            ))?;
+            let re = Regex::new(value).map_err(|e| {
+                MungeError::InvalidExpression(format!("Invalid regex pattern '{}': {}", value, e))
+            })?;
             ca.into_iter()
                 .map(|opt| opt.map(|s| !re.is_match(s)))
                 .collect()
@@ -298,7 +318,7 @@ fn apply_bool_filter(series: &Column, op: FilterOp, value: bool) -> MungeResult<
         _ => {
             return Err(MungeError::InvalidOperator(
                 "Only eq/ne valid for boolean columns".to_string(),
-            ))
+            ));
         }
     };
     Ok(result)
@@ -567,7 +587,10 @@ pub fn sort(dataset: &Dataset, columns: &[&str], descending: &[bool]) -> MungeRe
     // Convert column names to Vec<String> for Polars API
     let col_names: Vec<String> = columns.iter().map(|s| s.to_string()).collect();
 
-    let sorted = df.sort(&col_names, SortMultipleOptions::new().with_order_descending_multi(descending.to_vec()))?;
+    let sorted = df.sort(
+        &col_names,
+        SortMultipleOptions::new().with_order_descending_multi(descending.to_vec()),
+    )?;
     Ok(Dataset::new(sorted))
 }
 
@@ -622,7 +645,12 @@ pub fn sample(
     let sampled = if let Some(n_rows) = n {
         df.sample_n_literal(n_rows, with_replacement, false, seed)?
     } else if let Some(frac) = fraction {
-        df.sample_frac(&Series::new("".into(), &[frac]), with_replacement, false, seed)?
+        df.sample_frac(
+            &Series::new("".into(), &[frac]),
+            with_replacement,
+            false,
+            seed,
+        )?
     } else {
         return Err(MungeError::InvalidExpression(
             "Must specify either n or fraction for sampling".to_string(),
@@ -729,9 +757,11 @@ mod tests {
             MutateExpr::Arithmetic("age".to_string(), ArithOp::Add, "score".to_string()),
         )
         .unwrap();
-        assert!(mutated
-            .column_names()
-            .contains(&"age_plus_score".to_string()));
+        assert!(
+            mutated
+                .column_names()
+                .contains(&"age_plus_score".to_string())
+        );
     }
 
     #[test]

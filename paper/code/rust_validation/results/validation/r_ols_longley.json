@@ -1,0 +1,49 @@
+{
+  "method": "ols",
+  "dataset": "longley.csv",
+  "n": 16,
+  "timestamp": "2026-01-25T22:24:17",
+  "r_version": "4.3.3",
+  "results": {
+    "coefficients": {
+      "(Intercept)": -3449.8915996985,
+      "GNP": -0.031961306865,
+      "Unemployed": -0.019721499421,
+      "Armed.Forces": -0.010199694296,
+      "Population": -0.077537137753,
+      "Year": 1.8141013568
+    },
+    "std_errors": {
+      "(Intercept)": 828.2422838941,
+      "GNP": 0.024202884766,
+      "Unemployed": 0.0038609985788,
+      "Armed.Forces": 0.0019084345563,
+      "Population": 0.16156162387,
+      "Year": 0.42528262108
+    },
+    "t_values": {
+      "(Intercept)": -4.1653169209,
+      "GNP": -1.3205577423,
+      "Unemployed": -5.1078753381,
+      "Armed.Forces": -5.3445344837,
+      "Population": -0.47992299096,
+      "Year": 4.2656371714
+    },
+    "p_values": {
+      "(Intercept)": 0.0019323103903,
+      "GNP": 0.21607272753,
+      "Unemployed": 0.00045872557703,
+      "Armed.Forces": 0.00032613235335,
+      "Population": 0.6416065233,
+      "Year": 0.0016483037595
+    },
+    "r_squared": 0.99546320005,
+    "adj_r_squared": 0.99319480008,
+    "f_statistic": 438.8393633532,
+    "f_statistic_df1": 5,
+    "f_statistic_df2": 10,
+    "residual_std_error": 0.2897150379,
+    "df": 10,
+    "n_obs": 16
+  }
+}

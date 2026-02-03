@@ -1,6 +1,7 @@
 //! Chart generation: histograms, scatter plots, box plots, line charts.
 
-use super::{VisualizationError, DEFAULT_WIDTH, DEFAULT_HEIGHT};
+use super::colors::{CHART_PALETTE, DEFAULT_SERIES_COLOR, OUTLIER_COLOR, TREND_LINE_COLOR};
+use super::{DEFAULT_HEIGHT, DEFAULT_WIDTH, VisualizationError};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use plotters::prelude::*;
 
@@ -73,13 +74,17 @@ pub fn histogram(
     config: ChartConfig,
 ) -> Result<HistogramResult, VisualizationError> {
     if data.is_empty() {
-        return Err(VisualizationError::InvalidData("Empty data array".to_string()));
+        return Err(VisualizationError::InvalidData(
+            "Empty data array".to_string(),
+        ));
     }
 
     // Filter out NaN values
     let clean_data: Vec<f64> = data.iter().copied().filter(|x| x.is_finite()).collect();
     if clean_data.is_empty() {
-        return Err(VisualizationError::InvalidData("No finite values in data".to_string()));
+        return Err(VisualizationError::InvalidData(
+            "No finite values in data".to_string(),
+        ));
     }
 
     let min_val = clean_data.iter().copied().fold(f64::INFINITY, f64::min);
@@ -87,10 +92,12 @@ pub fn histogram(
     let mean_val: f64 = clean_data.iter().sum::<f64>() / clean_data.len() as f64;
 
     // Auto-calculate bins using Sturges' rule if not specified
-    let n_bins = bins.unwrap_or_else(|| {
-        let n = clean_data.len() as f64;
-        (1.0 + 3.322 * n.log10()).ceil() as usize
-    }).max(1);
+    let n_bins = bins
+        .unwrap_or_else(|| {
+            let n = clean_data.len() as f64;
+            (1.0 + 3.322 * n.log10()).ceil() as usize
+        })
+        .max(1);
 
     // Calculate bin edges and counts
     let bin_width = if (max_val - min_val).abs() < 1e-10 {
@@ -119,7 +126,8 @@ pub fn histogram(
     {
         let root = BitMapBackend::with_buffer(&mut buffer, (config.width, config.height))
             .into_drawing_area();
-        root.fill(&WHITE).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+        root.fill(&WHITE)
+            .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
         let title = config.title.as_deref().unwrap_or("Histogram");
         let x_label = config.x_label.as_deref().unwrap_or("Value");
@@ -150,12 +158,16 @@ pub fn histogram(
             let x0 = min_val + i as f64 * bin_width;
             let x1 = x0 + bin_width;
 
-            chart.draw_series(std::iter::once(
-                Rectangle::new([(x0, 0), (x1, count)], BLUE.mix(0.7).filled())
-            )).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+            chart
+                .draw_series(std::iter::once(Rectangle::new(
+                    [(x0, 0), (x1, count)],
+                    DEFAULT_SERIES_COLOR.mix(0.7).filled(),
+                )))
+                .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
         }
 
-        root.present().map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+        root.present()
+            .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
     }
 
     // Encode as PNG then base64
@@ -205,24 +217,31 @@ pub fn scatter_plot(
     config: ChartConfig,
 ) -> Result<ScatterResult, VisualizationError> {
     if x.len() != y.len() {
-        return Err(VisualizationError::InvalidData(
-            format!("X and Y must have same length: {} vs {}", x.len(), y.len())
-        ));
+        return Err(VisualizationError::InvalidData(format!(
+            "X and Y must have same length: {} vs {}",
+            x.len(),
+            y.len()
+        )));
     }
 
     if x.is_empty() {
-        return Err(VisualizationError::InvalidData("Empty data arrays".to_string()));
+        return Err(VisualizationError::InvalidData(
+            "Empty data arrays".to_string(),
+        ));
     }
 
     // Filter out pairs with NaN
-    let points: Vec<(f64, f64)> = x.iter()
+    let points: Vec<(f64, f64)> = x
+        .iter()
         .zip(y.iter())
         .filter(|(xi, yi)| xi.is_finite() && yi.is_finite())
         .map(|(xi, yi)| (*xi, *yi))
         .collect();
 
     if points.is_empty() {
-        return Err(VisualizationError::InvalidData("No finite value pairs".to_string()));
+        return Err(VisualizationError::InvalidData(
+            "No finite value pairs".to_string(),
+        ));
     }
 
     let x_min = points.iter().map(|p| p.0).fold(f64::INFINITY, f64::min);
@@ -243,7 +262,8 @@ pub fn scatter_plot(
     {
         let root = BitMapBackend::with_buffer(&mut buffer, (config.width, config.height))
             .into_drawing_area();
-        root.fill(&WHITE).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+        root.fill(&WHITE)
+            .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
         let title = config.title.as_deref().unwrap_or("Scatter Plot");
         let x_label = config.x_label.as_deref().unwrap_or("X");
@@ -273,12 +293,13 @@ pub fn scatter_plot(
         chart
             .draw_series(
                 points.iter().map(|(xi, yi)| {
-                    Circle::new((*xi, *yi), 4, BLUE.mix(0.7).filled())
+                    Circle::new((*xi, *yi), 4, DEFAULT_SERIES_COLOR.mix(0.7).filled())
                 }),
             )
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
-        root.present().map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+        root.present()
+            .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
     }
 
     let image_base64 = encode_rgb_to_png_base64(&buffer, config.width, config.height)?;
@@ -315,8 +336,11 @@ impl std::fmt::Display for BoxPlotResult {
         writeln!(f, "Box Plot")?;
         writeln!(f, "========")?;
         for stat in &self.statistics {
-            writeln!(f, "{}: min={:.2}, Q1={:.2}, med={:.2}, Q3={:.2}, max={:.2}",
-                stat.label, stat.min, stat.q1, stat.median, stat.q3, stat.max)?;
+            writeln!(
+                f,
+                "{}: min={:.2}, Q1={:.2}, med={:.2}, Q3={:.2}, max={:.2}",
+                stat.label, stat.min, stat.q1, stat.median, stat.q3, stat.max
+            )?;
         }
         writeln!(f)?;
         writeln!(f, "Image (base64): {} bytes", self.image_base64.len())
@@ -333,7 +357,9 @@ pub fn box_plot(
     config: ChartConfig,
 ) -> Result<BoxPlotResult, VisualizationError> {
     if groups.is_empty() {
-        return Err(VisualizationError::InvalidData("No groups provided".to_string()));
+        return Err(VisualizationError::InvalidData(
+            "No groups provided".to_string(),
+        ));
     }
 
     // Calculate statistics for each group
@@ -352,7 +378,9 @@ pub fn box_plot(
     }
 
     if statistics.is_empty() {
-        return Err(VisualizationError::InvalidData("No valid data in groups".to_string()));
+        return Err(VisualizationError::InvalidData(
+            "No valid data in groups".to_string(),
+        ));
     }
 
     let y_min = all_values.iter().copied().fold(f64::INFINITY, f64::min);
@@ -365,7 +393,8 @@ pub fn box_plot(
     {
         let root = BitMapBackend::with_buffer(&mut buffer, (config.width, config.height))
             .into_drawing_area();
-        root.fill(&WHITE).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+        root.fill(&WHITE)
+            .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
         let title = config.title.as_deref().unwrap_or("Box Plot");
         let y_label = config.y_label.as_deref().unwrap_or("Value");
@@ -379,10 +408,7 @@ pub fn box_plot(
             .margin(10)
             .x_label_area_size(40)
             .y_label_area_size(50)
-            .build_cartesian_2d(
-                -0.5..(n_groups - 0.5),
-                (y_min - y_pad)..(y_max + y_pad),
-            )
+            .build_cartesian_2d(-0.5..(n_groups - 0.5), (y_min - y_pad)..(y_max + y_pad))
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
         chart
@@ -403,55 +429,72 @@ pub fn box_plot(
             let x_right = x_center + box_half_width;
 
             // Draw box (Q1 to Q3)
-            chart.draw_series(std::iter::once(Rectangle::new(
-                [(x_left, stat.q1), (x_right, stat.q3)],
-                BLUE.mix(0.5).filled(),
-            ))).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+            chart
+                .draw_series(std::iter::once(Rectangle::new(
+                    [(x_left, stat.q1), (x_right, stat.q3)],
+                    DEFAULT_SERIES_COLOR.mix(0.5).filled(),
+                )))
+                .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
             // Draw box border
-            chart.draw_series(std::iter::once(Rectangle::new(
-                [(x_left, stat.q1), (x_right, stat.q3)],
-                BLACK.stroke_width(1),
-            ))).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+            chart
+                .draw_series(std::iter::once(Rectangle::new(
+                    [(x_left, stat.q1), (x_right, stat.q3)],
+                    BLACK.stroke_width(1),
+                )))
+                .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
             // Draw median line
-            chart.draw_series(LineSeries::new(
-                vec![(x_left, stat.median), (x_right, stat.median)],
-                BLACK.stroke_width(2),
-            )).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+            chart
+                .draw_series(LineSeries::new(
+                    vec![(x_left, stat.median), (x_right, stat.median)],
+                    BLACK.stroke_width(2),
+                ))
+                .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
             // Draw whiskers
             // Lower whisker (vertical line)
-            chart.draw_series(LineSeries::new(
-                vec![(x_center, stat.min), (x_center, stat.q1)],
-                BLACK.stroke_width(1),
-            )).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+            chart
+                .draw_series(LineSeries::new(
+                    vec![(x_center, stat.min), (x_center, stat.q1)],
+                    BLACK.stroke_width(1),
+                ))
+                .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
             // Lower whisker cap
-            chart.draw_series(LineSeries::new(
-                vec![(x_left + 0.1, stat.min), (x_right - 0.1, stat.min)],
-                BLACK.stroke_width(1),
-            )).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+            chart
+                .draw_series(LineSeries::new(
+                    vec![(x_left + 0.1, stat.min), (x_right - 0.1, stat.min)],
+                    BLACK.stroke_width(1),
+                ))
+                .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
             // Upper whisker (vertical line)
-            chart.draw_series(LineSeries::new(
-                vec![(x_center, stat.q3), (x_center, stat.max)],
-                BLACK.stroke_width(1),
-            )).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+            chart
+                .draw_series(LineSeries::new(
+                    vec![(x_center, stat.q3), (x_center, stat.max)],
+                    BLACK.stroke_width(1),
+                ))
+                .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
             // Upper whisker cap
-            chart.draw_series(LineSeries::new(
-                vec![(x_left + 0.1, stat.max), (x_right - 0.1, stat.max)],
-                BLACK.stroke_width(1),
-            )).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+            chart
+                .draw_series(LineSeries::new(
+                    vec![(x_left + 0.1, stat.max), (x_right - 0.1, stat.max)],
+                    BLACK.stroke_width(1),
+                ))
+                .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
             // Draw outliers
-            chart.draw_series(
-                stat.outliers.iter().map(|&outlier| {
-                    Circle::new((x_center, outlier), 3, RED.filled())
-                })
-            ).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+            chart
+                .draw_series(
+                    stat.outliers.iter().map(|&outlier| {
+                        Circle::new((x_center, outlier), 3, OUTLIER_COLOR.filled())
+                    }),
+                )
+                .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
         }
 
-        root.present().map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+        root.present()
+            .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
     }
 
     let image_base64 = encode_rgb_to_png_base64(&buffer, config.width, config.height)?;
@@ -493,7 +536,9 @@ pub fn line_chart(
     config: ChartConfig,
 ) -> Result<LineChartResult, VisualizationError> {
     if series.is_empty() {
-        return Err(VisualizationError::InvalidData("No series provided".to_string()));
+        return Err(VisualizationError::InvalidData(
+            "No series provided".to_string(),
+        ));
     }
 
     // Find global bounds
@@ -516,14 +561,16 @@ pub fn line_chart(
     }
 
     if total_points == 0 {
-        return Err(VisualizationError::InvalidData("No valid data points".to_string()));
+        return Err(VisualizationError::InvalidData(
+            "No valid data points".to_string(),
+        ));
     }
 
     let x_pad = (x_max - x_min).max(0.1) * 0.05;
     let y_pad = (y_max - y_min).max(0.1) * 0.05;
 
-    // Colors for multiple series
-    let colors = [BLUE, RED, GREEN, MAGENTA, CYAN, BLACK];
+    // Colors for multiple series (brand palette)
+    let colors = CHART_PALETTE;
 
     // Create image buffer
     let mut buffer = vec![0u8; (config.width * config.height * 3) as usize];
@@ -531,7 +578,8 @@ pub fn line_chart(
     {
         let root = BitMapBackend::with_buffer(&mut buffer, (config.width, config.height))
             .into_drawing_area();
-        root.fill(&WHITE).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+        root.fill(&WHITE)
+            .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
         let title = config.title.as_deref().unwrap_or("Line Chart");
         let x_label = config.x_label.as_deref().unwrap_or("X");
@@ -560,7 +608,8 @@ pub fn line_chart(
         // Draw each series
         for (idx, (label, x_vals, y_vals)) in series.iter().enumerate() {
             let color = colors[idx % colors.len()];
-            let points: Vec<(f64, f64)> = x_vals.iter()
+            let points: Vec<(f64, f64)> = x_vals
+                .iter()
                 .zip(y_vals.iter())
                 .filter(|(xi, yi)| xi.is_finite() && yi.is_finite())
                 .map(|(xi, yi)| (*xi, *yi))
@@ -570,7 +619,9 @@ pub fn line_chart(
                 .draw_series(LineSeries::new(points, color.stroke_width(2)))
                 .map_err(|e| VisualizationError::PlottingError(e.to_string()))?
                 .label(label)
-                .legend(move |(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], color.stroke_width(2)));
+                .legend(move |(x, y)| {
+                    PathElement::new(vec![(x, y), (x + 20, y)], color.stroke_width(2))
+                });
         }
 
         // Draw legend if multiple series
@@ -583,7 +634,8 @@ pub fn line_chart(
                 .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
         }
 
-        root.present().map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+        root.present()
+            .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
     }
 
     let image_base64 = encode_rgb_to_png_base64(&buffer, config.width, config.height)?;
@@ -634,27 +686,34 @@ pub fn event_study_plot(
     config: ChartConfig,
 ) -> Result<EventStudyResult, VisualizationError> {
     if time.is_empty() || estimates.is_empty() {
-        return Err(VisualizationError::InvalidData("Empty data arrays".to_string()));
+        return Err(VisualizationError::InvalidData(
+            "Empty data arrays".to_string(),
+        ));
     }
 
     let n = time.len();
     if estimates.len() != n || ci_lower.len() != n || ci_upper.len() != n {
         return Err(VisualizationError::InvalidData(
-            "All arrays must have the same length".to_string()
+            "All arrays must have the same length".to_string(),
         ));
     }
 
     // Filter out invalid values and collect valid points
     let mut valid_points: Vec<(f64, f64, f64, f64)> = Vec::new();
     for i in 0..n {
-        if time[i].is_finite() && estimates[i].is_finite()
-            && ci_lower[i].is_finite() && ci_upper[i].is_finite() {
+        if time[i].is_finite()
+            && estimates[i].is_finite()
+            && ci_lower[i].is_finite()
+            && ci_upper[i].is_finite()
+        {
             valid_points.push((time[i], estimates[i], ci_lower[i], ci_upper[i]));
         }
     }
 
     if valid_points.is_empty() {
-        return Err(VisualizationError::InvalidData("No valid data points".to_string()));
+        return Err(VisualizationError::InvalidData(
+            "No valid data points".to_string(),
+        ));
     }
 
     // Sort by time
@@ -663,8 +722,14 @@ pub fn event_study_plot(
     // Calculate bounds
     let x_min = valid_points.first().unwrap().0;
     let x_max = valid_points.last().unwrap().0;
-    let y_min = valid_points.iter().map(|p| p.2).fold(f64::INFINITY, f64::min);
-    let y_max = valid_points.iter().map(|p| p.3).fold(f64::NEG_INFINITY, f64::max);
+    let y_min = valid_points
+        .iter()
+        .map(|p| p.2)
+        .fold(f64::INFINITY, f64::min);
+    let y_max = valid_points
+        .iter()
+        .map(|p| p.3)
+        .fold(f64::NEG_INFINITY, f64::max);
 
     let x_pad = (x_max - x_min).max(1.0) * 0.1;
     let y_pad = (y_max - y_min).max(0.1) * 0.1;
@@ -682,10 +747,14 @@ pub fn event_study_plot(
     {
         let root = BitMapBackend::with_buffer(&mut buffer, (config.width, config.height))
             .into_drawing_area();
-        root.fill(&WHITE).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+        root.fill(&WHITE)
+            .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
         let title = config.title.as_deref().unwrap_or("Event Study");
-        let x_label = config.x_label.as_deref().unwrap_or("Time Relative to Treatment");
+        let x_label = config
+            .x_label
+            .as_deref()
+            .unwrap_or("Time Relative to Treatment");
         let y_label = config.y_label.as_deref().unwrap_or("Treatment Effect");
 
         let mut chart = ChartBuilder::on(&root)
@@ -709,17 +778,21 @@ pub fn event_study_plot(
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
         // Draw horizontal zero line (dashed)
-        chart.draw_series(LineSeries::new(
-            vec![(x_min - x_pad, 0.0), (x_max + x_pad, 0.0)],
-            BLACK.stroke_width(1),
-        )).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+        chart
+            .draw_series(LineSeries::new(
+                vec![(x_min - x_pad, 0.0), (x_max + x_pad, 0.0)],
+                BLACK.stroke_width(1),
+            ))
+            .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
         // Draw vertical treatment line at t=0 if present
         if treatment_period.is_some() {
-            chart.draw_series(LineSeries::new(
-                vec![(0.0, y_min - y_pad), (0.0, y_max + y_pad)],
-                RGBColor(128, 128, 128).stroke_width(1),
-            )).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+            chart
+                .draw_series(LineSeries::new(
+                    vec![(0.0, y_min - y_pad), (0.0, y_max + y_pad)],
+                    RGBColor(128, 128, 128).stroke_width(1),
+                ))
+                .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
         }
 
         // Draw confidence interval as shaded region
@@ -736,28 +809,37 @@ pub fn event_study_plot(
             points
         };
 
-        chart.draw_series(std::iter::once(
-            Polygon::new(ci_polygon, BLUE.mix(0.2).filled())
-        )).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+        chart
+            .draw_series(std::iter::once(Polygon::new(
+                ci_polygon,
+                DEFAULT_SERIES_COLOR.mix(0.2).filled(),
+            )))
+            .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
         // Draw point estimates as line
-        let estimate_points: Vec<(f64, f64)> = valid_points.iter()
+        let estimate_points: Vec<(f64, f64)> = valid_points
+            .iter()
             .map(|&(t, est, _, _)| (t, est))
             .collect();
 
-        chart.draw_series(LineSeries::new(
-            estimate_points.clone(),
-            BLUE.stroke_width(2),
-        )).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+        chart
+            .draw_series(LineSeries::new(
+                estimate_points.clone(),
+                DEFAULT_SERIES_COLOR.stroke_width(2),
+            ))
+            .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
         // Draw point markers
-        chart.draw_series(
-            estimate_points.iter().map(|&(x, y)| {
-                Circle::new((x, y), 4, BLUE.filled())
-            })
-        ).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+        chart
+            .draw_series(
+                estimate_points
+                    .iter()
+                    .map(|&(x, y)| Circle::new((x, y), 4, DEFAULT_SERIES_COLOR.filled())),
+            )
+            .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
-        root.present().map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+        root.present()
+            .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
     }
 
     let image_base64 = encode_rgb_to_png_base64(&buffer, config.width, config.height)?;
@@ -805,13 +887,15 @@ pub fn coefficient_plot(
     horizontal: bool,
 ) -> Result<CoefficientPlotResult, VisualizationError> {
     if names.is_empty() || estimates.is_empty() {
-        return Err(VisualizationError::InvalidData("Empty data arrays".to_string()));
+        return Err(VisualizationError::InvalidData(
+            "Empty data arrays".to_string(),
+        ));
     }
 
     let n = names.len();
     if estimates.len() != n || ci_lower.len() != n || ci_upper.len() != n {
         return Err(VisualizationError::InvalidData(
-            "All arrays must have the same length".to_string()
+            "All arrays must have the same length".to_string(),
         ));
     }
 
@@ -824,12 +908,20 @@ pub fn coefficient_plot(
     }
 
     if valid_coefs.is_empty() {
-        return Err(VisualizationError::InvalidData("No valid coefficients".to_string()));
+        return Err(VisualizationError::InvalidData(
+            "No valid coefficients".to_string(),
+        ));
     }
 
     // Calculate bounds
-    let x_min = valid_coefs.iter().map(|c| c.2).fold(f64::INFINITY, f64::min);
-    let x_max = valid_coefs.iter().map(|c| c.3).fold(f64::NEG_INFINITY, f64::max);
+    let x_min = valid_coefs
+        .iter()
+        .map(|c| c.2)
+        .fold(f64::INFINITY, f64::min);
+    let x_max = valid_coefs
+        .iter()
+        .map(|c| c.3)
+        .fold(f64::NEG_INFINITY, f64::max);
     let x_pad = (x_max - x_min).max(0.1) * 0.1;
 
     // Ensure zero is visible
@@ -842,7 +934,8 @@ pub fn coefficient_plot(
     {
         let root = BitMapBackend::with_buffer(&mut buffer, (config.width, config.height))
             .into_drawing_area();
-        root.fill(&WHITE).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+        root.fill(&WHITE)
+            .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
         let title = config.title.as_deref().unwrap_or("Coefficient Plot");
         let x_label = config.x_label.as_deref().unwrap_or("Estimate");
@@ -856,10 +949,7 @@ pub fn coefficient_plot(
                 .margin(10)
                 .x_label_area_size(40)
                 .y_label_area_size(120) // More space for variable names
-                .build_cartesian_2d(
-                    x_range_min..x_range_max,
-                    -0.5..(n_coefs - 0.5),
-                )
+                .build_cartesian_2d(x_range_min..x_range_max, -0.5..(n_coefs - 0.5))
                 .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
             chart
@@ -867,42 +957,57 @@ pub fn coefficient_plot(
                 .x_desc(x_label)
                 .y_label_formatter(&|y| {
                     let idx = y.round() as usize;
-                    valid_coefs.get(idx).map(|c| c.0.clone()).unwrap_or_default()
+                    valid_coefs
+                        .get(idx)
+                        .map(|c| c.0.clone())
+                        .unwrap_or_default()
                 })
                 .draw()
                 .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
             // Draw vertical zero line
-            chart.draw_series(LineSeries::new(
-                vec![(0.0, -0.5), (0.0, n_coefs - 0.5)],
-                RGBColor(128, 128, 128).stroke_width(1),
-            )).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+            chart
+                .draw_series(LineSeries::new(
+                    vec![(0.0, -0.5), (0.0, n_coefs - 0.5)],
+                    RGBColor(128, 128, 128).stroke_width(1),
+                ))
+                .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
             // Draw each coefficient with error bar
             for (i, (_name, est, lower, upper)) in valid_coefs.iter().enumerate() {
                 let y_pos = i as f64;
 
                 // Draw error bar (horizontal line)
-                chart.draw_series(LineSeries::new(
-                    vec![(*lower, y_pos), (*upper, y_pos)],
-                    BLUE.stroke_width(2),
-                )).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+                chart
+                    .draw_series(LineSeries::new(
+                        vec![(*lower, y_pos), (*upper, y_pos)],
+                        DEFAULT_SERIES_COLOR.stroke_width(2),
+                    ))
+                    .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
                 // Draw caps on error bar
-                chart.draw_series(LineSeries::new(
-                    vec![(*lower, y_pos - 0.1), (*lower, y_pos + 0.1)],
-                    BLUE.stroke_width(2),
-                )).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+                chart
+                    .draw_series(LineSeries::new(
+                        vec![(*lower, y_pos - 0.1), (*lower, y_pos + 0.1)],
+                        DEFAULT_SERIES_COLOR.stroke_width(2),
+                    ))
+                    .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
-                chart.draw_series(LineSeries::new(
-                    vec![(*upper, y_pos - 0.1), (*upper, y_pos + 0.1)],
-                    BLUE.stroke_width(2),
-                )).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+                chart
+                    .draw_series(LineSeries::new(
+                        vec![(*upper, y_pos - 0.1), (*upper, y_pos + 0.1)],
+                        DEFAULT_SERIES_COLOR.stroke_width(2),
+                    ))
+                    .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
                 // Draw point estimate
-                chart.draw_series(std::iter::once(
-                    Circle::new((*est, y_pos), 5, BLUE.filled())
-                )).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+                chart
+                    .draw_series(std::iter::once(Circle::new(
+                        (*est, y_pos),
+                        5,
+                        DEFAULT_SERIES_COLOR.filled(),
+                    )))
+                    .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
             }
         } else {
             // Vertical layout: coefficients on X-axis, values on Y-axis
@@ -914,10 +1019,7 @@ pub fn coefficient_plot(
                 .margin(10)
                 .x_label_area_size(60)
                 .y_label_area_size(60)
-                .build_cartesian_2d(
-                    -0.5..(n_coefs - 0.5),
-                    y_range_min..y_range_max,
-                )
+                .build_cartesian_2d(-0.5..(n_coefs - 0.5), y_range_min..y_range_max)
                 .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
             chart
@@ -925,46 +1027,62 @@ pub fn coefficient_plot(
                 .y_desc(x_label)
                 .x_label_formatter(&|x| {
                     let idx = x.round() as usize;
-                    valid_coefs.get(idx).map(|c| c.0.clone()).unwrap_or_default()
+                    valid_coefs
+                        .get(idx)
+                        .map(|c| c.0.clone())
+                        .unwrap_or_default()
                 })
                 .draw()
                 .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
             // Draw horizontal zero line
-            chart.draw_series(LineSeries::new(
-                vec![(-0.5, 0.0), (n_coefs - 0.5, 0.0)],
-                RGBColor(128, 128, 128).stroke_width(1),
-            )).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+            chart
+                .draw_series(LineSeries::new(
+                    vec![(-0.5, 0.0), (n_coefs - 0.5, 0.0)],
+                    RGBColor(128, 128, 128).stroke_width(1),
+                ))
+                .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
             // Draw each coefficient with error bar
             for (i, (_name, est, lower, upper)) in valid_coefs.iter().enumerate() {
                 let x_pos = i as f64;
 
                 // Draw error bar (vertical line)
-                chart.draw_series(LineSeries::new(
-                    vec![(x_pos, *lower), (x_pos, *upper)],
-                    BLUE.stroke_width(2),
-                )).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+                chart
+                    .draw_series(LineSeries::new(
+                        vec![(x_pos, *lower), (x_pos, *upper)],
+                        DEFAULT_SERIES_COLOR.stroke_width(2),
+                    ))
+                    .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
                 // Draw caps on error bar
-                chart.draw_series(LineSeries::new(
-                    vec![(x_pos - 0.1, *lower), (x_pos + 0.1, *lower)],
-                    BLUE.stroke_width(2),
-                )).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+                chart
+                    .draw_series(LineSeries::new(
+                        vec![(x_pos - 0.1, *lower), (x_pos + 0.1, *lower)],
+                        DEFAULT_SERIES_COLOR.stroke_width(2),
+                    ))
+                    .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
-                chart.draw_series(LineSeries::new(
-                    vec![(x_pos - 0.1, *upper), (x_pos + 0.1, *upper)],
-                    BLUE.stroke_width(2),
-                )).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+                chart
+                    .draw_series(LineSeries::new(
+                        vec![(x_pos - 0.1, *upper), (x_pos + 0.1, *upper)],
+                        DEFAULT_SERIES_COLOR.stroke_width(2),
+                    ))
+                    .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
                 // Draw point estimate
-                chart.draw_series(std::iter::once(
-                    Circle::new((x_pos, *est), 5, BLUE.filled())
-                )).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+                chart
+                    .draw_series(std::iter::once(Circle::new(
+                        (x_pos, *est),
+                        5,
+                        DEFAULT_SERIES_COLOR.filled(),
+                    )))
+                    .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
             }
         }
 
-        root.present().map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+        root.present()
+            .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
     }
 
     let image_base64 = encode_rgb_to_png_base64(&buffer, config.width, config.height)?;
@@ -1023,12 +1141,14 @@ pub fn irf_plot(
     config: ChartConfig,
 ) -> Result<IrfPlotResult, VisualizationError> {
     if horizons.is_empty() || responses.is_empty() {
-        return Err(VisualizationError::InvalidData("Empty data arrays".to_string()));
+        return Err(VisualizationError::InvalidData(
+            "Empty data arrays".to_string(),
+        ));
     }
 
     if horizons.len() != responses.len() {
         return Err(VisualizationError::InvalidData(
-            "Horizons and responses must have same length".to_string()
+            "Horizons and responses must have same length".to_string(),
         ));
     }
 
@@ -1040,7 +1160,7 @@ pub fn irf_plot(
         let upper = ci_upper.unwrap();
         if lower.len() != n || upper.len() != n {
             return Err(VisualizationError::InvalidData(
-                "CI arrays must have same length as horizons".to_string()
+                "CI arrays must have same length as horizons".to_string(),
             ));
         }
     }
@@ -1052,17 +1172,23 @@ pub fn irf_plot(
             let lower = if has_ci {
                 let l = ci_lower.unwrap()[i];
                 if l.is_finite() { Some(l) } else { None }
-            } else { None };
+            } else {
+                None
+            };
             let upper = if has_ci {
                 let u = ci_upper.unwrap()[i];
                 if u.is_finite() { Some(u) } else { None }
-            } else { None };
+            } else {
+                None
+            };
             valid_points.push((horizons[i], responses[i], lower, upper));
         }
     }
 
     if valid_points.is_empty() {
-        return Err(VisualizationError::InvalidData("No valid data points".to_string()));
+        return Err(VisualizationError::InvalidData(
+            "No valid data points".to_string(),
+        ));
     }
 
     // Sort by horizon
@@ -1072,14 +1198,24 @@ pub fn irf_plot(
     let x_min = valid_points.first().unwrap().0;
     let x_max = valid_points.last().unwrap().0;
 
-    let mut y_min = valid_points.iter().map(|p| p.1).fold(f64::INFINITY, f64::min);
-    let mut y_max = valid_points.iter().map(|p| p.1).fold(f64::NEG_INFINITY, f64::max);
+    let mut y_min = valid_points
+        .iter()
+        .map(|p| p.1)
+        .fold(f64::INFINITY, f64::min);
+    let mut y_max = valid_points
+        .iter()
+        .map(|p| p.1)
+        .fold(f64::NEG_INFINITY, f64::max);
 
     // Include CI bounds if present
     if has_ci {
         for p in &valid_points {
-            if let Some(l) = p.2 { y_min = y_min.min(l); }
-            if let Some(u) = p.3 { y_max = y_max.max(u); }
+            if let Some(l) = p.2 {
+                y_min = y_min.min(l);
+            }
+            if let Some(u) = p.3 {
+                y_max = y_max.max(u);
+            }
         }
     }
 
@@ -1096,7 +1232,8 @@ pub fn irf_plot(
     {
         let root = BitMapBackend::with_buffer(&mut buffer, (config.width, config.height))
             .into_drawing_area();
-        root.fill(&WHITE).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+        root.fill(&WHITE)
+            .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
         let title = config.title.as_deref().unwrap_or_else(|| {
             if shock_label.is_some() && response_label.is_some() {
@@ -1129,14 +1266,17 @@ pub fn irf_plot(
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
         // Draw horizontal zero line
-        chart.draw_series(LineSeries::new(
-            vec![(x_min - x_pad, 0.0), (x_max + x_pad, 0.0)],
-            BLACK.stroke_width(1),
-        )).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+        chart
+            .draw_series(LineSeries::new(
+                vec![(x_min - x_pad, 0.0), (x_max + x_pad, 0.0)],
+                BLACK.stroke_width(1),
+            ))
+            .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
         // Draw confidence interval as shaded region if present
         if has_ci {
-            let ci_points_with_bounds: Vec<_> = valid_points.iter()
+            let ci_points_with_bounds: Vec<_> = valid_points
+                .iter()
                 .filter(|p| p.2.is_some() && p.3.is_some())
                 .collect();
 
@@ -1154,30 +1294,36 @@ pub fn irf_plot(
                     points
                 };
 
-                chart.draw_series(std::iter::once(
-                    Polygon::new(ci_polygon, BLUE.mix(0.2).filled())
-                )).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+                chart
+                    .draw_series(std::iter::once(Polygon::new(
+                        ci_polygon,
+                        DEFAULT_SERIES_COLOR.mix(0.2).filled(),
+                    )))
+                    .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
             }
         }
 
         // Draw response line
-        let response_points: Vec<(f64, f64)> = valid_points.iter()
-            .map(|p| (p.0, p.1))
-            .collect();
+        let response_points: Vec<(f64, f64)> = valid_points.iter().map(|p| (p.0, p.1)).collect();
 
-        chart.draw_series(LineSeries::new(
-            response_points.clone(),
-            BLUE.stroke_width(2),
-        )).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+        chart
+            .draw_series(LineSeries::new(
+                response_points.clone(),
+                DEFAULT_SERIES_COLOR.stroke_width(2),
+            ))
+            .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
         // Draw point markers
-        chart.draw_series(
-            response_points.iter().map(|&(x, y)| {
-                Circle::new((x, y), 4, BLUE.filled())
-            })
-        ).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+        chart
+            .draw_series(
+                response_points
+                    .iter()
+                    .map(|&(x, y)| Circle::new((x, y), 4, DEFAULT_SERIES_COLOR.filled())),
+            )
+            .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
-        root.present().map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+        root.present()
+            .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
     }
 
     let image_base64 = encode_rgb_to_png_base64(&buffer, config.width, config.height)?;
@@ -1215,10 +1361,18 @@ impl std::fmt::Display for ResidualDiagnosticsResult {
         writeln!(f, "Observations: {}", self.n_observations)?;
         writeln!(f)?;
         writeln!(f, "Plots Generated:")?;
-        writeln!(f, "  - Residuals vs Fitted: {} bytes", self.residuals_vs_fitted.len())?;
+        writeln!(
+            f,
+            "  - Residuals vs Fitted: {} bytes",
+            self.residuals_vs_fitted.len()
+        )?;
         writeln!(f, "  - Q-Q Plot: {} bytes", self.qq_plot.len())?;
         writeln!(f, "  - Scale-Location: {} bytes", self.scale_location.len())?;
-        writeln!(f, "  - Residuals vs Leverage: {} bytes", self.residuals_vs_leverage.len())
+        writeln!(
+            f,
+            "  - Residuals vs Leverage: {} bytes",
+            self.residuals_vs_leverage.len()
+        )
     }
 }
 
@@ -1242,12 +1396,14 @@ pub fn residual_diagnostics(
     config: ChartConfig,
 ) -> Result<ResidualDiagnosticsResult, VisualizationError> {
     if fitted.is_empty() || residuals.is_empty() {
-        return Err(VisualizationError::InvalidData("Empty data arrays".to_string()));
+        return Err(VisualizationError::InvalidData(
+            "Empty data arrays".to_string(),
+        ));
     }
 
     if fitted.len() != residuals.len() {
         return Err(VisualizationError::InvalidData(
-            "Fitted and residuals must have same length".to_string()
+            "Fitted and residuals must have same length".to_string(),
         ));
     }
 
@@ -1259,7 +1415,9 @@ pub fn residual_diagnostics(
         .collect();
 
     if valid_indices.is_empty() {
-        return Err(VisualizationError::InvalidData("No valid data points".to_string()));
+        return Err(VisualizationError::InvalidData(
+            "No valid data points".to_string(),
+        ));
     }
 
     let fitted_valid: Vec<f64> = valid_indices.iter().map(|&i| fitted[i]).collect();
@@ -1269,13 +1427,18 @@ pub fn residual_diagnostics(
 
     // Calculate standardized residuals
     let mean_residual: f64 = residuals_valid.iter().sum::<f64>() / n_valid as f64;
-    let variance: f64 = residuals_valid.iter()
+    let variance: f64 = residuals_valid
+        .iter()
         .map(|r| (r - mean_residual).powi(2))
-        .sum::<f64>() / (n_valid - 1) as f64;
+        .sum::<f64>()
+        / (n_valid - 1) as f64;
     let std_dev = variance.sqrt();
 
     let standardized_residuals: Vec<f64> = if std_dev > 1e-10 {
-        residuals_valid.iter().map(|r| (r - mean_residual) / std_dev).collect()
+        residuals_valid
+            .iter()
+            .map(|r| (r - mean_residual) / std_dev)
+            .collect()
     } else {
         vec![0.0; n_valid]
     };
@@ -1284,7 +1447,7 @@ pub fn residual_diagnostics(
     let leverage_valid: Vec<f64> = if let Some(lev) = leverage {
         if lev.len() != n {
             return Err(VisualizationError::InvalidData(
-                "Leverage must have same length as fitted".to_string()
+                "Leverage must have same length as fitted".to_string(),
             ));
         }
         valid_indices.iter().map(|&i| lev[i]).collect()
@@ -1293,7 +1456,8 @@ pub fn residual_diagnostics(
         let mean_fitted: f64 = fitted_valid.iter().sum::<f64>() / n_valid as f64;
         let ss_fitted: f64 = fitted_valid.iter().map(|f| (f - mean_fitted).powi(2)).sum();
         if ss_fitted > 1e-10 {
-            fitted_valid.iter()
+            fitted_valid
+                .iter()
                 .map(|f| 1.0 / n_valid as f64 + (f - mean_fitted).powi(2) / ss_fitted)
                 .collect()
         } else {
@@ -1304,7 +1468,8 @@ pub fn residual_diagnostics(
     // Calculate Cook's distance: D_i = (r_i^2 / p) * (h_i / (1 - h_i))
     // where p is number of parameters (approximate with 2 for simple regression)
     let p = 2.0;
-    let cooks_distance: Vec<f64> = standardized_residuals.iter()
+    let cooks_distance: Vec<f64> = standardized_residuals
+        .iter()
         .zip(leverage_valid.iter())
         .map(|(r, h)| {
             let h_clamped = h.min(0.9999);
@@ -1313,11 +1478,15 @@ pub fn residual_diagnostics(
         .collect();
 
     // Generate the four diagnostic plots
-    let residuals_vs_fitted = generate_residuals_vs_fitted(&fitted_valid, &residuals_valid, &config)?;
+    let residuals_vs_fitted =
+        generate_residuals_vs_fitted(&fitted_valid, &residuals_valid, &config)?;
     let qq_plot = generate_qq_plot(&standardized_residuals, &config)?;
     let scale_location = generate_scale_location(&fitted_valid, &standardized_residuals, &config)?;
     let residuals_vs_leverage = generate_residuals_vs_leverage(
-        &leverage_valid, &standardized_residuals, &cooks_distance, &config
+        &leverage_valid,
+        &standardized_residuals,
+        &cooks_distance,
+        &config,
     )?;
 
     Ok(ResidualDiagnosticsResult {
@@ -1354,17 +1523,15 @@ fn generate_residuals_vs_fitted(
     {
         let root = BitMapBackend::with_buffer(&mut buffer, (config.width, config.height))
             .into_drawing_area();
-        root.fill(&WHITE).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+        root.fill(&WHITE)
+            .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
         let mut chart = ChartBuilder::on(&root)
             .caption("Residuals vs Fitted", ("sans-serif", 24))
             .margin(10)
             .x_label_area_size(40)
             .y_label_area_size(50)
-            .build_cartesian_2d(
-                (x_min - x_pad)..(x_max + x_pad),
-                y_min_adj..y_max_adj,
-            )
+            .build_cartesian_2d((x_min - x_pad)..(x_max + x_pad), y_min_adj..y_max_adj)
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
         chart
@@ -1375,25 +1542,37 @@ fn generate_residuals_vs_fitted(
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
         // Draw horizontal zero line
-        chart.draw_series(LineSeries::new(
-            vec![(x_min - x_pad, 0.0), (x_max + x_pad, 0.0)],
-            RGBColor(128, 128, 128).stroke_width(1),
-        )).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+        chart
+            .draw_series(LineSeries::new(
+                vec![(x_min - x_pad, 0.0), (x_max + x_pad, 0.0)],
+                RGBColor(128, 128, 128).stroke_width(1),
+            ))
+            .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
         // Draw points
-        let points: Vec<(f64, f64)> = fitted.iter().zip(residuals.iter()).map(|(&f, &r)| (f, r)).collect();
-        chart.draw_series(
-            points.iter().map(|&(x, y)| Circle::new((x, y), 4, BLUE.mix(0.7).filled()))
-        ).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+        let points: Vec<(f64, f64)> = fitted
+            .iter()
+            .zip(residuals.iter())
+            .map(|(&f, &r)| (f, r))
+            .collect();
+        chart
+            .draw_series(
+                points
+                    .iter()
+                    .map(|&(x, y)| Circle::new((x, y), 4, DEFAULT_SERIES_COLOR.mix(0.7).filled())),
+            )
+            .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
         // Calculate and draw LOWESS-like smooth (simple moving average for demonstration)
         let smoothed = calculate_smooth(&points, 0.3);
         if smoothed.len() > 1 {
-            chart.draw_series(LineSeries::new(smoothed, RED.stroke_width(2)))
+            chart
+                .draw_series(LineSeries::new(smoothed, TREND_LINE_COLOR.stroke_width(2)))
                 .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
         }
 
-        root.present().map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+        root.present()
+            .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
     }
 
     encode_rgb_to_png_base64(&buffer, config.width, config.height)
@@ -1417,8 +1596,14 @@ fn generate_qq_plot(
 
     let x_min = theoretical.first().copied().unwrap_or(-3.0);
     let x_max = theoretical.last().copied().unwrap_or(3.0);
-    let y_min = sorted_residuals.iter().copied().fold(f64::INFINITY, f64::min);
-    let y_max = sorted_residuals.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let y_min = sorted_residuals
+        .iter()
+        .copied()
+        .fold(f64::INFINITY, f64::min);
+    let y_max = sorted_residuals
+        .iter()
+        .copied()
+        .fold(f64::NEG_INFINITY, f64::max);
 
     let range = (x_max - x_min).max(y_max - y_min);
     let x_pad = range * 0.1;
@@ -1429,7 +1614,8 @@ fn generate_qq_plot(
     {
         let root = BitMapBackend::with_buffer(&mut buffer, (config.width, config.height))
             .into_drawing_area();
-        root.fill(&WHITE).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+        root.fill(&WHITE)
+            .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
         let mut chart = ChartBuilder::on(&root)
             .caption("Normal Q-Q", ("sans-serif", 24))
@@ -1452,20 +1638,29 @@ fn generate_qq_plot(
         // Draw reference line (y = x for standardized residuals)
         let line_min = x_min.min(y_min);
         let line_max = x_max.max(y_max);
-        chart.draw_series(LineSeries::new(
-            vec![(line_min, line_min), (line_max, line_max)],
-            RGBColor(128, 128, 128).stroke_width(1),
-        )).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+        chart
+            .draw_series(LineSeries::new(
+                vec![(line_min, line_min), (line_max, line_max)],
+                RGBColor(128, 128, 128).stroke_width(1),
+            ))
+            .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
         // Draw Q-Q points
-        let points: Vec<(f64, f64)> = theoretical.iter().zip(sorted_residuals.iter())
+        let points: Vec<(f64, f64)> = theoretical
+            .iter()
+            .zip(sorted_residuals.iter())
             .map(|(&t, &s)| (t, s))
             .collect();
-        chart.draw_series(
-            points.iter().map(|&(x, y)| Circle::new((x, y), 4, BLUE.mix(0.7).filled()))
-        ).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+        chart
+            .draw_series(
+                points
+                    .iter()
+                    .map(|&(x, y)| Circle::new((x, y), 4, DEFAULT_SERIES_COLOR.mix(0.7).filled())),
+            )
+            .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
-        root.present().map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+        root.present()
+            .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
     }
 
     encode_rgb_to_png_base64(&buffer, config.width, config.height)
@@ -1478,13 +1673,17 @@ fn generate_scale_location(
     config: &ChartConfig,
 ) -> Result<String, VisualizationError> {
     // Calculate sqrt of absolute standardized residuals
-    let sqrt_abs_resid: Vec<f64> = standardized_residuals.iter()
+    let sqrt_abs_resid: Vec<f64> = standardized_residuals
+        .iter()
         .map(|r| r.abs().sqrt())
         .collect();
 
     let x_min = fitted.iter().copied().fold(f64::INFINITY, f64::min);
     let x_max = fitted.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-    let y_max = sqrt_abs_resid.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let y_max = sqrt_abs_resid
+        .iter()
+        .copied()
+        .fold(f64::NEG_INFINITY, f64::max);
 
     let x_pad = (x_max - x_min).max(0.1) * 0.05;
     let y_pad = y_max * 0.1;
@@ -1494,17 +1693,15 @@ fn generate_scale_location(
     {
         let root = BitMapBackend::with_buffer(&mut buffer, (config.width, config.height))
             .into_drawing_area();
-        root.fill(&WHITE).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+        root.fill(&WHITE)
+            .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
         let mut chart = ChartBuilder::on(&root)
             .caption("Scale-Location", ("sans-serif", 24))
             .margin(10)
             .x_label_area_size(40)
             .y_label_area_size(50)
-            .build_cartesian_2d(
-                (x_min - x_pad)..(x_max + x_pad),
-                0.0..(y_max + y_pad),
-            )
+            .build_cartesian_2d((x_min - x_pad)..(x_max + x_pad), 0.0..(y_max + y_pad))
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
         chart
@@ -1515,21 +1712,29 @@ fn generate_scale_location(
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
         // Draw points
-        let points: Vec<(f64, f64)> = fitted.iter().zip(sqrt_abs_resid.iter())
+        let points: Vec<(f64, f64)> = fitted
+            .iter()
+            .zip(sqrt_abs_resid.iter())
             .map(|(&f, &r)| (f, r))
             .collect();
-        chart.draw_series(
-            points.iter().map(|&(x, y)| Circle::new((x, y), 4, BLUE.mix(0.7).filled()))
-        ).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+        chart
+            .draw_series(
+                points
+                    .iter()
+                    .map(|&(x, y)| Circle::new((x, y), 4, DEFAULT_SERIES_COLOR.mix(0.7).filled())),
+            )
+            .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
         // Draw smooth line
         let smoothed = calculate_smooth(&points, 0.3);
         if smoothed.len() > 1 {
-            chart.draw_series(LineSeries::new(smoothed, RED.stroke_width(2)))
+            chart
+                .draw_series(LineSeries::new(smoothed, TREND_LINE_COLOR.stroke_width(2)))
                 .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
         }
 
-        root.present().map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+        root.present()
+            .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
     }
 
     encode_rgb_to_png_base64(&buffer, config.width, config.height)
@@ -1544,8 +1749,14 @@ fn generate_residuals_vs_leverage(
 ) -> Result<String, VisualizationError> {
     let x_min = 0.0;
     let x_max = leverage.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-    let y_min = standardized_residuals.iter().copied().fold(f64::INFINITY, f64::min);
-    let y_max = standardized_residuals.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let y_min = standardized_residuals
+        .iter()
+        .copied()
+        .fold(f64::INFINITY, f64::min);
+    let y_max = standardized_residuals
+        .iter()
+        .copied()
+        .fold(f64::NEG_INFINITY, f64::max);
 
     let x_pad = x_max * 0.1;
     let y_pad = (y_max - y_min).max(0.1) * 0.1;
@@ -1559,17 +1770,15 @@ fn generate_residuals_vs_leverage(
     {
         let root = BitMapBackend::with_buffer(&mut buffer, (config.width, config.height))
             .into_drawing_area();
-        root.fill(&WHITE).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+        root.fill(&WHITE)
+            .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
         let mut chart = ChartBuilder::on(&root)
             .caption("Residuals vs Leverage", ("sans-serif", 24))
             .margin(10)
             .x_label_area_size(40)
             .y_label_area_size(50)
-            .build_cartesian_2d(
-                x_min..(x_max + x_pad),
-                (y_min - y_pad)..(y_max + y_pad),
-            )
+            .build_cartesian_2d(x_min..(x_max + x_pad), (y_min - y_pad)..(y_max + y_pad))
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
         chart
@@ -1580,10 +1789,12 @@ fn generate_residuals_vs_leverage(
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
         // Draw horizontal zero line
-        chart.draw_series(LineSeries::new(
-            vec![(x_min, 0.0), (x_max + x_pad, 0.0)],
-            RGBColor(128, 128, 128).stroke_width(1),
-        )).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+        chart
+            .draw_series(LineSeries::new(
+                vec![(x_min, 0.0), (x_max + x_pad, 0.0)],
+                RGBColor(128, 128, 128).stroke_width(1),
+            ))
+            .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
         // Draw Cook's distance contour lines (approximate)
         if has_influential {
@@ -1601,19 +1812,19 @@ fn generate_residuals_vs_leverage(
                     .collect();
 
                 if contour_points.len() > 1 {
-                    chart.draw_series(LineSeries::new(
-                        contour_points.clone(),
-                        RGBColor(255, 0, 0).stroke_width(1),
-                    )).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+                    chart
+                        .draw_series(LineSeries::new(
+                            contour_points.clone(),
+                            OUTLIER_COLOR.stroke_width(1),
+                        ))
+                        .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
                     // Draw negative contour
-                    let neg_contour: Vec<(f64, f64)> = contour_points.iter()
-                        .map(|&(h, r)| (h, -r))
-                        .collect();
-                    chart.draw_series(LineSeries::new(
-                        neg_contour,
-                        RGBColor(255, 0, 0).stroke_width(1),
-                    )).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+                    let neg_contour: Vec<(f64, f64)> =
+                        contour_points.iter().map(|&(h, r)| (h, -r)).collect();
+                    chart
+                        .draw_series(LineSeries::new(neg_contour, OUTLIER_COLOR.stroke_width(1)))
+                        .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
                 }
             }
         }
@@ -1621,16 +1832,21 @@ fn generate_residuals_vs_leverage(
         // Draw points (color by Cook's distance)
         for i in 0..leverage.len() {
             let color = if cooks_distance[i] > cooks_threshold {
-                RED
+                OUTLIER_COLOR
             } else {
-                BLUE
+                DEFAULT_SERIES_COLOR
             };
-            chart.draw_series(std::iter::once(
-                Circle::new((leverage[i], standardized_residuals[i]), 4, color.mix(0.7).filled())
-            )).map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+            chart
+                .draw_series(std::iter::once(Circle::new(
+                    (leverage[i], standardized_residuals[i]),
+                    4,
+                    color.mix(0.7).filled(),
+                )))
+                .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
         }
 
-        root.present().map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
+        root.present()
+            .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
     }
 
     encode_rgb_to_png_base64(&buffer, config.width, config.height)
@@ -1652,7 +1868,7 @@ fn calculate_smooth(points: &[(f64, f64)], span: f64) -> Vec<(f64, f64)> {
     let mut smoothed = Vec::new();
 
     for i in 0..n {
-        let start = if i >= half_window { i - half_window } else { 0 };
+        let start = i.saturating_sub(half_window);
         let end = (i + half_window + 1).min(n);
 
         let local_points = &sorted_points[start..end];
@@ -1670,8 +1886,12 @@ fn calculate_smooth(points: &[(f64, f64)], span: f64) -> Vec<(f64, f64)> {
 /// Approximation of the standard normal quantile function (inverse CDF).
 fn normal_quantile(p: f64) -> f64 {
     // Rational approximation by Abramowitz and Stegun
-    if p <= 0.0 { return f64::NEG_INFINITY; }
-    if p >= 1.0 { return f64::INFINITY; }
+    if p <= 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    if p >= 1.0 {
+        return f64::INFINITY;
+    }
 
     let p_clamped = p.max(1e-10).min(1.0 - 1e-10);
 
@@ -1738,34 +1958,55 @@ fn calculate_box_stats(label: String, data: &[f64]) -> BoxPlotStats {
     let lower_fence = q1 - 1.5 * iqr;
     let upper_fence = q3 + 1.5 * iqr;
 
-    let min = sorted.iter().copied().find(|&x| x >= lower_fence).unwrap_or(sorted[0]);
-    let max = sorted.iter().rev().copied().find(|&x| x <= upper_fence).unwrap_or(sorted[n - 1]);
+    let min = sorted
+        .iter()
+        .copied()
+        .find(|&x| x >= lower_fence)
+        .unwrap_or(sorted[0]);
+    let max = sorted
+        .iter()
+        .rev()
+        .copied()
+        .find(|&x| x <= upper_fence)
+        .unwrap_or(sorted[n - 1]);
 
-    let outliers: Vec<f64> = sorted.iter()
+    let outliers: Vec<f64> = sorted
+        .iter()
         .copied()
         .filter(|&x| x < lower_fence || x > upper_fence)
         .collect();
 
-    BoxPlotStats { label, min, q1, median, q3, max, outliers }
+    BoxPlotStats {
+        label,
+        min,
+        q1,
+        median,
+        q3,
+        max,
+        outliers,
+    }
 }
 
-fn encode_rgb_to_png_base64(rgb_buffer: &[u8], width: u32, height: u32) -> Result<String, VisualizationError> {
-    use image::{ImageBuffer, Rgb, ImageEncoder, codecs::png::PngEncoder, ColorType};
+fn encode_rgb_to_png_base64(
+    rgb_buffer: &[u8],
+    width: u32,
+    height: u32,
+) -> Result<String, VisualizationError> {
+    use image::{ColorType, ImageBuffer, ImageEncoder, Rgb, codecs::png::PngEncoder};
     use std::io::Cursor;
 
     // Create image from RGB buffer
-    let img: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::from_raw(width, height, rgb_buffer.to_vec())
-        .ok_or_else(|| VisualizationError::EncodingError("Failed to create image buffer".to_string()))?;
+    let img: ImageBuffer<Rgb<u8>, Vec<u8>> =
+        ImageBuffer::from_raw(width, height, rgb_buffer.to_vec()).ok_or_else(|| {
+            VisualizationError::EncodingError("Failed to create image buffer".to_string())
+        })?;
 
     // Encode to PNG
     let mut png_data = Vec::new();
     let encoder = PngEncoder::new(Cursor::new(&mut png_data));
-    encoder.write_image(
-        img.as_raw(),
-        width,
-        height,
-        ColorType::Rgb8,
-    ).map_err(|e: image::ImageError| VisualizationError::EncodingError(e.to_string()))?;
+    encoder
+        .write_image(img.as_raw(), width, height, ColorType::Rgb8)
+        .map_err(|e: image::ImageError| VisualizationError::EncodingError(e.to_string()))?;
 
     Ok(BASE64.encode(&png_data))
 }
@@ -1818,8 +2059,7 @@ pub fn dendrogram(
     // Create drawing area
     let mut buffer = vec![0u8; (width * height * 3) as usize];
     {
-        let root = BitMapBackend::with_buffer(&mut buffer, (width, height))
-            .into_drawing_area();
+        let root = BitMapBackend::with_buffer(&mut buffer, (width, height)).into_drawing_area();
         root.fill(&WHITE)
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
@@ -1882,31 +2122,22 @@ pub fn dendrogram(
             // Draw U-shaped connector:
             // Vertical line from c1 to merge height
             root.draw(&PathElement::new(
-                vec![
-                    (x_scale(x1), y_scale(y1)),
-                    (x_scale(x1), y_scale(new_y)),
-                ],
-                &BLUE,
+                vec![(x_scale(x1), y_scale(y1)), (x_scale(x1), y_scale(new_y))],
+                DEFAULT_SERIES_COLOR,
             ))
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
             // Vertical line from c2 to merge height
             root.draw(&PathElement::new(
-                vec![
-                    (x_scale(x2), y_scale(y2)),
-                    (x_scale(x2), y_scale(new_y)),
-                ],
-                &BLUE,
+                vec![(x_scale(x2), y_scale(y2)), (x_scale(x2), y_scale(new_y))],
+                DEFAULT_SERIES_COLOR,
             ))
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
             // Horizontal line connecting c1 and c2 at merge height
             root.draw(&PathElement::new(
-                vec![
-                    (x_scale(x1), y_scale(*dist)),
-                    (x_scale(x2), y_scale(*dist)),
-                ],
-                &BLUE,
+                vec![(x_scale(x1), y_scale(*dist)), (x_scale(x2), y_scale(*dist))],
+                DEFAULT_SERIES_COLOR,
             ))
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
         }
@@ -1953,7 +2184,7 @@ pub fn dendrogram(
                 (margin_left, margin_top),
                 (margin_left, margin_top + plot_height),
             ],
-            &BLACK,
+            BLACK,
         ))
         .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
@@ -1973,7 +2204,7 @@ pub fn dendrogram(
 
             root.draw(&PathElement::new(
                 vec![(margin_left - 5, y), (margin_left, y)],
-                &BLACK,
+                BLACK,
             ))
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
@@ -2001,7 +2232,10 @@ pub fn dendrogram(
 
 /// Compute the optimal leaf ordering for dendrogram visualization.
 /// Returns the order in which leaves should be placed (left to right).
-fn compute_leaf_order(linkage_matrix: &[(usize, usize, f64, usize)], n_samples: usize) -> Vec<usize> {
+fn compute_leaf_order(
+    linkage_matrix: &[(usize, usize, f64, usize)],
+    n_samples: usize,
+) -> Vec<usize> {
     // Build a tree structure from linkage matrix
     // Each cluster has left and right children (or is a leaf)
 
@@ -2025,7 +2259,10 @@ fn compute_leaf_order(linkage_matrix: &[(usize, usize, f64, usize)], n_samples: 
     }
 
     // The last cluster contains all leaves in order
-    cluster_leaves.last().cloned().unwrap_or_else(|| (0..n_samples).collect())
+    cluster_leaves
+        .last()
+        .cloned()
+        .unwrap_or_else(|| (0..n_samples).collect())
 }
 
 #[cfg(test)]
@@ -2064,12 +2301,15 @@ mod tests {
         let x: Vec<f64> = (0..50).map(|i| i as f64).collect();
         let fitted: Vec<f64> = x.iter().map(|&xi| 2.0 * xi + 10.0).collect();
         // Simulate residuals with some noise
-        let residuals: Vec<f64> = (0..50).map(|i| {
-            let noise = ((i * 7) % 11) as f64 - 5.0; // Deterministic "noise" for reproducibility
-            noise
-        }).collect();
+        let residuals: Vec<f64> = (0..50)
+            .map(|i| {
+                // Deterministic "noise" for reproducibility
+                ((i * 7) % 11) as f64 - 5.0
+            })
+            .collect();
 
-        let result = residual_diagnostics(&fitted, &residuals, None, ChartConfig::default()).unwrap();
+        let result =
+            residual_diagnostics(&fitted, &residuals, None, ChartConfig::default()).unwrap();
 
         assert_eq!(result.n_observations, 50);
         assert!(!result.residuals_vs_fitted.is_empty());
@@ -2085,9 +2325,9 @@ mod tests {
         // Create a simple linkage matrix for 4 samples
         // Format: (cluster1, cluster2, distance, size)
         let linkage_matrix = vec![
-            (0, 1, 1.0, 2),   // Merge samples 0 and 1 -> cluster 4
-            (2, 3, 1.5, 2),   // Merge samples 2 and 3 -> cluster 5
-            (4, 5, 3.0, 4),   // Merge clusters 4 and 5 -> cluster 6
+            (0, 1, 1.0, 2), // Merge samples 0 and 1 -> cluster 4
+            (2, 3, 1.5, 2), // Merge samples 2 and 3 -> cluster 5
+            (4, 5, 3.0, 4), // Merge clusters 4 and 5 -> cluster 6
         ];
 
         let labels = vec![

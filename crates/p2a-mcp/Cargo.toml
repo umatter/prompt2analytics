@@ -7,13 +7,17 @@ authors.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+[lib]
+name = "p2a_mcp"
+path = "src/lib.rs"
+
 [[bin]]
 name = "p2a-mcp"
 path = "src/main.rs"
 
 [dependencies]
 # Core analytics engine
-p2a-core = { path = "../p2a-core" }
+p2a-core = { path = "../p2a-core", features = ["full"] }
 
 # Numerics (for ML tools)
 ndarray.workspace = true
@@ -60,12 +64,16 @@ clap = { version = "4.5", features = ["derive", "env"] }
 # UUID for session IDs
 uuid = { version = "1.11", features = ["v4"] }
 
+# Database persistence (optional)
+surrealdb = { version = "2.4", features = ["kv-rocksdb", "kv-mem"], optional = true }
+
 # JWT authentication (optional)
 jsonwebtoken = { version = "9.3", optional = true }
 
 # LLM integration (optional)
 async-trait = { version = "0.1", optional = true }
 reqwest = { version = "0.12", features = ["json", "stream"], optional = true }
+base64.workspace = true
 
 [dev-dependencies]
 polars.workspace = true
@@ -76,4 +84,10 @@ http = ["axum", "tower", "tower-http", "tokio-stream", "futures", "dirs", "async
 websocket = ["http", "tokio-tungstenite"]
 auth = ["jsonwebtoken"]
 llm = ["async-trait", "reqwest", "futures"]
-full = ["http", "websocket", "auth", "llm"]
+db = ["surrealdb"]
+full = ["http", "websocket", "auth", "llm", "db"]
+# Embedded feature for desktop/mobile apps - includes everything needed for standalone operation
+embedded = ["http", "llm", "db"]
+
+[lints]
+workspace = true

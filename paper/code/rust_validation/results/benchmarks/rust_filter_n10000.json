@@ -1,0 +1,11 @@
+{
+  "method": "filter",
+  "n": 10000,
+  "iterations": 100,
+  "timing": {
+    "min_us": 7545,
+    "median_us": 10086,
+    "mean_us": 10004,
+    "max_us": 13965
+  }
+}

@@ -1,0 +1,126 @@
+{
+  "generated": "2026-01-26 11:48:34",
+  "n_methods": 18,
+  "n_100k": 100000,
+  "summary": {
+    "mean_speedup": 3.2356,
+    "median_speedup": 1.64,
+    "min_speedup": 0,
+    "max_speedup": 12.65,
+    "pct_rust_faster": 55.5556
+  },
+  "by_category": [
+    {
+      "category": "Discrete",
+      "speedup": [[2.62], [2.62], [2]]
+    },
+    {
+      "category": "ML",
+      "speedup": [[4.3567], [0.3], [3]]
+    },
+    {
+      "category": "Munging",
+      "speedup": [[0.5117], [0.34], [6]]
+    },
+    {
+      "category": "Panel",
+      "speedup": [[7.18], [7.18], [2]]
+    },
+    {
+      "category": "Regression",
+      "speedup": [[4.5], [5.13], [5]]
+    }
+  ],
+  "methods": [
+    {
+      "method": "kmeans",
+      "category": "ML",
+      "speedup": 12.65
+    },
+    {
+      "method": "panel_re",
+      "category": "Panel",
+      "speedup": 3.96
+    },
+    {
+      "method": "ols_hc1",
+      "category": "Regression",
+      "speedup": 5.1
+    },
+    {
+      "method": "filter",
+      "category": "Munging",
+      "speedup": 0.3
+    },
+    {
+      "method": "logit",
+      "category": "Discrete",
+      "speedup": 4.65
+    },
+    {
+      "method": "sort",
+      "category": "Munging",
+      "speedup": 0.58
+    },
+    {
+      "method": "group_by",
+      "category": "Munging",
+      "speedup": 1.75
+    },
+    {
+      "method": "panel_fe",
+      "category": "Panel",
+      "speedup": 10.4
+    },
+    {
+      "method": "ols_hc3",
+      "category": "Regression",
+      "speedup": 5.13
+    },
+    {
+      "method": "select",
+      "category": "Munging",
+      "speedup": 0
+    },
+    {
+      "method": "standardize",
+      "category": "Munging",
+      "speedup": 0.38
+    },
+    {
+      "method": "ols_hc0",
+      "category": "Regression",
+      "speedup": 5.28
+    },
+    {
+      "method": "ols_hc2",
+      "category": "Regression",
+      "speedup": 5.46
+    },
+    {
+      "method": "pca",
+      "category": "ML",
+      "speedup": 0.3
+    },
+    {
+      "method": "ols",
+      "category": "Regression",
+      "speedup": 1.53
+    },
+    {
+      "method": "lag",
+      "category": "Munging",
+      "speedup": 0.06
+    },
+    {
+      "method": "probit",
+      "category": "Discrete",
+      "speedup": 0.59
+    },
+    {
+      "method": "dbscan",
+      "category": "ML",
+      "speedup": 0.12
+    }
+  ]
+}

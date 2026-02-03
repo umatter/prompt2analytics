@@ -19,6 +19,7 @@ This document catalogs the reference implementations used to validate prompt2ana
 | AER | 1.2-x | `ivreg()` | [AER](https://cran.r-project.org/package=AER) |
 | sandwich | 3.0-x | `vcovHC()`, `vcovCL()` | [sandwich](https://cran.r-project.org/package=sandwich) |
 | lmtest | 0.9-x | `bptest()`, `dwtest()` | [lmtest](https://cran.r-project.org/package=lmtest) |
+| rdrobust | 2.1-x | `rdrobust()`, `rdbwselect()` | [rdrobust](https://cran.r-project.org/package=rdrobust) |
 
 ### Time Series
 | Package | Version | Functions Used | CRAN |
@@ -84,7 +85,7 @@ scipy 1.11.x
 ### R
 ```r
 install.packages(c(
-  "plm", "lfe", "alpaca", "fixest", "AER", "sandwich", "lmtest",
+  "plm", "lfe", "alpaca", "fixest", "AER", "sandwich", "lmtest", "rdrobust",
   "vars", "forecast", "urca", "changepoint",
   "dbscan", "Rtsne", "randomForest", "e1071"
 ))
@@ -126,6 +127,9 @@ pip install statsmodels linearmodels scikit-learn arch ruptures
 | `random_forest` | R `randomForest` | Python `sklearn.ensemble.RandomForestClassifier` |
 | `linear_svm` | R `e1071::svm` | Python `sklearn.svm.LinearSVC` |
 | `run_diagnostics` | R `lmtest` | - |
+| `run_rd_estimate` | R `rdrobust::rdrobust` | - |
+| `run_rd_bw` | R `rdrobust::rdbwselect` | - |
+| `run_rd_fuzzy` | R `rdrobust::rdrobust` (fuzzy) | - |
 
 ## Citation Format
 

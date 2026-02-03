@@ -1,0 +1,152 @@
+[package]
+name = "p2a-dioxus"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Dioxus cross-platform frontend for prompt2analytics"
+
+[features]
+# Default: no features - use dx CLI for proper feature selection
+# For web: dx serve (auto-selects web target)
+# For desktop: dx serve --platform desktop (or --features desktop)
+default = []
+
+# Web platform (WASM + browser APIs)
+web = [
+    "dioxus/web",
+    "dioxus/launch",
+    "gloo-storage",
+    "gloo-timers",
+    "web-sys",
+    "wasm-bindgen",
+    "wasm-bindgen-futures",
+    "js-sys",
+    "tracing-wasm",
+    "chrono/wasmbind",
+    "uuid/js",
+]
+
+# Desktop platform (native with window + embedded backend)
+desktop = [
+    "dioxus/desktop",
+    "dioxus/launch",
+    "reqwest/stream",
+    "tokio",
+    "tracing-subscriber",
+    "dirs",
+    "p2a-mcp",
+    "image",
+]
+
+# Mobile platform (iOS/Android + embedded backend)
+mobile = [
+    "dioxus/mobile",
+    "dioxus/launch",
+    "reqwest/stream",
+    "tokio",
+    "tracing-subscriber",
+    "dirs",
+    "p2a-mcp",
+]
+
+[dependencies]
+# Dioxus framework - base features, platform selected via features
+# Note: "macro" enables rsx!, "html" enables HTML elements, "hooks/signals" for state
+# "document" enables Stylesheet and other document components
+dioxus = { version = "0.7.3", default-features = false, features = ["macro", "html", "hooks", "signals", "document", "asset"] }
+
+# HTTP client - always needed, but streaming only on native
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+
+# Async utilities
+futures = "0.3"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Markdown parsing
+pulldown-cmark = "0.12"
+
+# Date/time - base features, wasmbind added via web feature
+chrono = { version = "0.4", features = ["serde"] }
+
+# UUID generation - base features, js added via web feature
+uuid = { version = "1.0", features = ["v4"] }
+
+# Logging - always use tracing
+tracing = "0.1"
+
+# Image encoding
+base64.workspace = true
+
+# ============================================================================
+# Web-only dependencies (optional)
+# ============================================================================
+
+# Browser localStorage
+gloo-storage = { version = "0.3", optional = true }
+
+# Browser timers
+gloo-timers = { version = "0.3", optional = true, features = ["futures"] }
+
+# Browser APIs
+web-sys = { version = "0.3", optional = true, features = [
+    "Window",
+    "Document",
+    "Element",
+    "DomTokenList",
+    "MediaQueryList",
+    "HtmlElement",
+    "HtmlTextAreaElement",
+    "HtmlInputElement",
+    "HtmlAnchorElement",
+    "ScrollBehavior",
+    "ScrollIntoViewOptions",
+    "Response",
+    "Headers",
+    "RequestInit",
+    "Request",
+    "RequestMode",
+    "ReadableStream",
+    "ReadableStreamDefaultReader",
+    "AbortController",
+    "AbortSignal",
+    "Blob",
+    "BlobPropertyBag",
+    "Url",
+    "TextDecoder",
+    "Navigator",
+    "Clipboard",
+] }
+
+# WASM bindings
+wasm-bindgen = { version = "0.2", optional = true }
+wasm-bindgen-futures = { version = "0.4", optional = true }
+js-sys = { version = "0.3", optional = true }
+
+# WASM logging
+tracing-wasm = { version = "0.2", optional = true }
+
+# ============================================================================
+# Native-only dependencies (optional)
+# ============================================================================
+
+# Async runtime for native
+tokio = { version = "1.0", features = ["full"], optional = true }
+
+# Native logging
+tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
+
+# User directories for config storage
+dirs = { version = "6.0", optional = true }
+
+# Embedded backend for desktop/mobile (not needed for web)
+p2a-mcp = { path = "../p2a-mcp", features = ["embedded"], optional = true }
+
+# Image loading for app icon (desktop only)
+image = { version = "0.25", default-features = false, features = ["png"], optional = true }
+
+[lints]
+workspace = true

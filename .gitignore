@@ -1,6 +1,11 @@
 # Build artifacts
 /target/
 
+# Dioxus build artifacts
+dist/
+.dioxus/
+node_modules/
+
 # IDE and editor files
 .idea/
 .vscode/
@@ -27,6 +32,7 @@ coverage/
 
 # Personal notes
 _notes/
+TODO.md
 
 # Machine-specific MCP config (absolute paths)
 mcp-config.json
@@ -47,3 +53,33 @@ paper/*.nav
 paper/*.snm
 paper/*.vrb
 _resources/literature/
+
+
+# Other
+docs/DIOXUS_MIGRATION_FEASIBILITY.md
+ideas.md
+next_steps.md
+paper/CODE_REVIEW.md
+
+# Benchmark result files
+crates/p2a-core/rust_*.json
+
+# LLM evaluation results
+paper/code/llm_eval/results/*.jsonl
+paper/code/llm_eval/results/*.md
+
+# Simulated review reports
+paper/_resources/review_reports/
+paper/_resources/
+paper/figures/test.pdf
+paper/code/paper/
+review_reports/
+
+# Generated synthetic datasets
+paper/code/rust_validation/datasets/synthetic_*.csv
+
+# Generated validation reports (timestamped)
+validation/reports/
+
+# Generated output reports
+reports/

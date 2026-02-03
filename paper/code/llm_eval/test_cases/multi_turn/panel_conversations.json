@@ -1,0 +1,154 @@
+{
+  "category": "multi_turn_panel",
+  "description": "Multi-turn conversations testing panel data analysis workflows",
+  "conversations": [
+    {
+      "id": "mt_pan_001",
+      "description": "FE vs RE selection with Hausman test",
+      "dataset_context": "grunfeld dataset: firm, year, inv, value, capital (panel: firm=entity, year=time)",
+      "turns": [
+        {
+          "turn": 1,
+          "user_prompt": "I have panel data on firm investment. Start with a fixed effects model",
+          "expected_tool": "panel_fe",
+          "acceptable_tools": ["panel_fe", "panel_within"],
+          "context_from_previous": false
+        },
+        {
+          "turn": 2,
+          "user_prompt": "Now estimate a random effects model for comparison",
+          "expected_tool": "panel_re",
+          "acceptable_tools": ["panel_re"],
+          "context_from_previous": true
+        },
+        {
+          "turn": 3,
+          "user_prompt": "Run a Hausman test to decide between FE and RE",
+          "expected_tool": "hausman_test",
+          "acceptable_tools": ["hausman_test"],
+          "context_from_previous": true
+        },
+        {
+          "turn": 4,
+          "user_prompt": "Based on the test, estimate the appropriate model with clustered standard errors",
+          "expected_tool": "panel_fe",
+          "acceptable_tools": ["panel_fe", "panel_re", "regression_clustered"],
+          "context_from_previous": true
+        }
+      ]
+    },
+    {
+      "id": "mt_pan_002",
+      "description": "HDFE with multiple fixed effects",
+      "dataset_context": "trade dataset: export_value, distance, gdp_origin, gdp_dest, origin, dest, year",
+      "turns": [
+        {
+          "turn": 1,
+          "user_prompt": "Estimate a gravity model of trade with country fixed effects",
+          "expected_tool": "panel_fe",
+          "acceptable_tools": ["panel_fe", "panel_hdfe"],
+          "context_from_previous": false
+        },
+        {
+          "turn": 2,
+          "user_prompt": "I need to control for both origin and destination country effects simultaneously",
+          "expected_tool": "panel_hdfe",
+          "acceptable_tools": ["panel_hdfe", "panel_twoway"],
+          "context_from_previous": true
+        },
+        {
+          "turn": 3,
+          "user_prompt": "Add year fixed effects as well - so three-way fixed effects",
+          "expected_tool": "panel_hdfe",
+          "acceptable_tools": ["panel_hdfe"],
+          "context_from_previous": true
+        }
+      ]
+    },
+    {
+      "id": "mt_pan_003",
+      "description": "Panel diagnostics workflow",
+      "dataset_context": "employment dataset: emp, wage, output, firm, year",
+      "turns": [
+        {
+          "turn": 1,
+          "user_prompt": "Estimate a fixed effects model of employment on wages and output",
+          "expected_tool": "panel_fe",
+          "acceptable_tools": ["panel_fe"],
+          "context_from_previous": false
+        },
+        {
+          "turn": 2,
+          "user_prompt": "Test for serial correlation in the residuals",
+          "expected_tool": "panel_serial_test",
+          "acceptable_tools": ["panel_serial_test", "hypothesis_durbin_watson"],
+          "context_from_previous": true
+        },
+        {
+          "turn": 3,
+          "user_prompt": "Test for cross-sectional dependence",
+          "expected_tool": "panel_cd_test",
+          "acceptable_tools": ["panel_cd_test", "panel_diagnostics"],
+          "context_from_previous": true
+        }
+      ]
+    },
+    {
+      "id": "mt_pan_004",
+      "description": "Dynamic panel estimation",
+      "dataset_context": "firm_dynamics dataset: profit, investment, assets, firm, year",
+      "turns": [
+        {
+          "turn": 1,
+          "user_prompt": "I suspect there's persistence in profits. Include a lagged dependent variable",
+          "expected_tool": "panel_dynamic",
+          "acceptable_tools": ["panel_dynamic", "panel_fe"],
+          "context_from_previous": false
+        },
+        {
+          "turn": 2,
+          "user_prompt": "Use the Arellano-Bond GMM estimator to handle endogeneity",
+          "expected_tool": "panel_gmm",
+          "acceptable_tools": ["panel_gmm", "panel_dynamic"],
+          "context_from_previous": true
+        },
+        {
+          "turn": 3,
+          "user_prompt": "Test for second-order serial correlation in the differenced residuals",
+          "expected_tool": "panel_ar_test",
+          "acceptable_tools": ["panel_ar_test", "panel_diagnostics"],
+          "context_from_previous": true
+        }
+      ]
+    },
+    {
+      "id": "mt_pan_005",
+      "description": "Two-way FE with time trends",
+      "dataset_context": "state_data: gdp, population, spending, state, year",
+      "turns": [
+        {
+          "turn": 1,
+          "user_prompt": "Estimate state GDP as a function of population and spending with state fixed effects",
+          "expected_tool": "panel_fe",
+          "acceptable_tools": ["panel_fe"],
+          "context_from_previous": false
+        },
+        {
+          "turn": 2,
+          "user_prompt": "Add time fixed effects to control for common shocks",
+          "expected_tool": "panel_twoway",
+          "acceptable_tools": ["panel_twoway", "panel_hdfe"],
+          "context_from_previous": true
+        },
+        {
+          "turn": 3,
+          "user_prompt": "Actually, use state-specific linear time trends instead of year dummies",
+          "expected_tool": "panel_fe",
+          "acceptable_tools": ["panel_fe", "panel_twoway"],
+          "expected_parameter_change": {"time_trends": true},
+          "context_from_previous": true
+        }
+      ]
+    }
+  ]
+}

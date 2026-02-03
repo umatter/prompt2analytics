@@ -1,0 +1,11 @@
+{
+  "method": "logit",
+  "n": 1000,
+  "iterations": 100,
+  "timing": {
+    "min_us": 5987,
+    "median_us": 9567,
+    "mean_us": 9289,
+    "max_us": 14825
+  }
+}

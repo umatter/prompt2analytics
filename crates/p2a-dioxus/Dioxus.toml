@@ -1,0 +1,78 @@
+[application]
+name = "prompt2analytics"
+default_platform = "web"
+
+[web.app]
+title = "prompt2analytics"
+out_dir = "dist/web"
+
+[web.watcher]
+index_on_404 = true
+watch_path = ["src", "assets"]
+
+[web.resource.dev]
+style = ["assets/styles.css"]
+
+[web.resource.release]
+style = ["assets/styles.css"]
+
+[web.wasm_opt]
+level = "4"
+
+[desktop]
+out_dir = "dist/desktop"
+
+[desktop.window]
+title = "prompt2analytics"
+width = 1200
+height = 800
+resizable = true
+decorations = true
+icon = "assets/icons/p2a-icon-256.png"
+
+[desktop.resource.dev]
+style = ["assets/styles.css"]
+
+[desktop.resource.release]
+style = ["assets/styles.css"]
+
+[mobile.ios]
+out_dir = "dist/ios"
+
+[mobile.ios.app]
+bundle_identifier = "io.github.prompt2analytics"
+title = "prompt2analytics"
+
+[mobile.android]
+out_dir = "dist/android"
+
+[mobile.android.app]
+package = "io.github.prompt2analytics"
+title = "prompt2analytics"
+
+[bundle]
+identifier = "io.github.prompt2analytics"
+publisher = "prompt2analytics"
+# App icons (PNG files work for most platforms, ICO/ICNS for better Windows/macOS support)
+icon = ["assets/icons/p2a-icon-32.png", "assets/icons/p2a-icon-128.png", "assets/icons/p2a-icon-256.png", "assets/icons/p2a-icon-512.png"]
+
+# Bundle resources (CSS, images, etc.)
+resources = ["assets/*"]
+
+# Short description shown in package managers
+short_description = "AI-powered analytics platform with natural language interface"
+
+# Long description for detailed package info
+long_description = """
+prompt2analytics is a comprehensive analytics platform that combines:
+- Econometric analysis (OLS, panel data, IV, DiD)
+- Machine learning (clustering, classification, regression)
+- Interactive visualizations
+- Natural language interface powered by LLMs
+"""
+
+# App category for platform app stores/launchers
+category = "Science"
+
+# Copyright notice
+copyright = "Copyright (c) 2024-2025 prompt2analytics contributors"

@@ -1,0 +1,19 @@
+{
+  "method": "pca",
+  "dataset": "synthetic_pca_n100000.csv",
+  "n": 100000,
+  "iterations": 100,
+  "warmup": 5,
+  "timestamp": "2026-01-26T16:03:09",
+  "r_version": "4.3.3",
+  "timing": {
+    "min_us": 15036.7489550263,
+    "median_us": 18064.0164762735,
+    "mean_us": [],
+    "max_us": [],
+    "itr_per_sec": 41.767177145,
+    "mem_alloc": 52804712,
+    "n_gc": 222,
+    "n_itr": 100
+  }
+}

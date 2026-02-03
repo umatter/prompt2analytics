@@ -2,8 +2,8 @@
 //!
 //! Provides numerically stable matrix operations using the faer library.
 
-use faer::prelude::*;
 use faer::linalg::solvers::Solve;
+use faer::prelude::*;
 use ndarray::{Array1, Array2, ArrayView2};
 use thiserror::Error;
 
@@ -149,18 +149,50 @@ pub fn condition_number(m: &ArrayView2<f64>) -> Result<f64, LinalgError> {
 
 /// Safe matrix inverse with pseudoinverse fallback.
 /// Returns the regular inverse if well-conditioned, otherwise uses pseudoinverse.
+///
+/// Optimized to avoid redundant condition number computation.
 pub fn safe_inverse(m: &ArrayView2<f64>) -> Result<(Array2<f64>, Option<f64>), LinalgError> {
-    let cond = condition_number(m)?;
+    let (rows, cols) = m.dim();
+    if rows != cols {
+        return Err(LinalgError::NotSquare { rows, cols });
+    }
 
-    if cond < CONDITION_THRESHOLD {
-        // Well-conditioned: use regular inverse
-        let inv = matrix_inverse(m)?;
-        Ok((inv, None))
-    } else {
+    let mat = ndarray_to_faer(m);
+
+    // Try Cholesky first (faster for symmetric positive definite matrices like X'X)
+    if let Ok(chol) = mat.llt(faer::Side::Lower) {
+        // Solve for inverse: A * A^{-1} = I
+        let n = rows;
+        let mut identity = Mat::<f64>::zeros(n, n);
+        for i in 0..n {
+            identity[(i, i)] = 1.0;
+        }
+        let inv = chol.solve(&identity);
+        return Ok((faer_to_ndarray(&inv), None));
+    }
+
+    // Cholesky failed - matrix might not be positive definite
+    // Fall back to LU decomposition with condition number check
+    let lu = mat.full_piv_lu();
+
+    // Create identity matrix to solve for inverse
+    let n = rows;
+    let mut identity = Mat::<f64>::zeros(n, n);
+    for i in 0..n {
+        identity[(i, i)] = 1.0;
+    }
+
+    let inv = lu.solve(&identity);
+
+    // Check condition number only if Cholesky failed (non-positive-definite case)
+    let cond = condition_number(m)?;
+    if cond > CONDITION_THRESHOLD {
         // Ill-conditioned: use pseudoinverse and return warning
         let pinv = pseudoinverse(m)?;
-        Ok((pinv, Some(cond)))
+        return Ok((pinv, Some(cond)));
     }
+
+    Ok((faer_to_ndarray(&inv), None))
 }
 
 /// Cholesky decomposition: M = L * L^T
@@ -175,7 +207,9 @@ pub fn cholesky(m: &ArrayView2<f64>) -> Result<Array2<f64>, LinalgError> {
     let mat = ndarray_to_faer(m);
 
     // Use faer's llt() for Cholesky decomposition
-    let chol = mat.llt(faer::Side::Lower).map_err(|_| LinalgError::CholeskyFailed)?;
+    let chol = mat
+        .llt(faer::Side::Lower)
+        .map_err(|_| LinalgError::CholeskyFailed)?;
     let l = chol.L();
 
     Ok(faer_ref_to_ndarray(l))
@@ -215,10 +249,13 @@ pub fn eig_symmetric(m: &ArrayView2<f64>) -> Result<(Array1<f64>, Array2<f64>), 
     let mat = ndarray_to_faer(m);
 
     // Use self_adjoint_eigen for symmetric matrices
-    let eig = mat.self_adjoint_eigen(faer::Side::Lower).map_err(|_| LinalgError::EigenFailed)?;
+    let eig = mat
+        .self_adjoint_eigen(faer::Side::Lower)
+        .map_err(|_| LinalgError::EigenFailed)?;
 
     // Extract eigenvalues using self_adjoint_eigenvalues which returns Result<Vec<f64>, EvdError>
-    let eigenvalues_vec = mat.self_adjoint_eigenvalues(faer::Side::Lower)
+    let eigenvalues_vec = mat
+        .self_adjoint_eigenvalues(faer::Side::Lower)
         .map_err(|_| LinalgError::EigenFailed)?;
     let eigenvectors = eig.U();
 
@@ -248,18 +285,52 @@ pub fn matmul(a: &ArrayView2<f64>, b: &ArrayView2<f64>) -> Result<Array2<f64>, L
 }
 
 /// Compute X'X (X transpose times X)
+/// Uses ndarray's native dot product for better performance on larger matrices.
 pub fn xtx(x: &ArrayView2<f64>) -> Array2<f64> {
-    let mat = ndarray_to_faer(x);
-    let result = mat.transpose() * &mat;
-    faer_to_ndarray(&result)
+    // Use pure ndarray for small matrices to avoid conversion overhead
+    let k = x.ncols();
+    if k <= 20 {
+        x.t().dot(x)
+    } else {
+        // Use faer for larger matrices where BLAS benefits outweigh conversion cost
+        let mat = ndarray_to_faer(x);
+        let result = mat.transpose() * &mat;
+        faer_to_ndarray(&result)
+    }
+}
+
+/// Fast inverse using Cholesky decomposition.
+/// Use this for positive definite matrices (like X'X) where we don't need
+/// condition number checks. Much faster than safe_inverse for small matrices.
+pub fn cholesky_inverse(m: &ArrayView2<f64>) -> Result<Array2<f64>, LinalgError> {
+    let (rows, cols) = m.dim();
+    if rows != cols {
+        return Err(LinalgError::NotSquare { rows, cols });
+    }
+
+    let mat = ndarray_to_faer(m);
+
+    // Use Cholesky decomposition (L * L^T = M)
+    let chol = mat
+        .llt(faer::Side::Lower)
+        .map_err(|_| LinalgError::CholeskyFailed)?;
+
+    // Solve for inverse: M^{-1} = (L * L^T)^{-1} = L^{-T} * L^{-1}
+    // We solve M * X = I for X
+    let n = rows;
+    let mut identity = Mat::<f64>::zeros(n, n);
+    for i in 0..n {
+        identity[(i, i)] = 1.0;
+    }
+
+    let inv = chol.solve(&identity);
+    Ok(faer_to_ndarray(&inv))
 }
 
 /// Compute X'y (X transpose times y)
+/// Uses ndarray's native dot product for better performance.
 pub fn xty(x: &ArrayView2<f64>, y: &Array1<f64>) -> Array1<f64> {
-    let mat = ndarray_to_faer(x);
-    let col_y = Col::<f64>::from_fn(y.len(), |i| y[i]);
-    let result = mat.transpose() * &col_y;
-    faer_col_to_ndarray(&result)
+    x.t().dot(y)
 }
 
 /// Compute (X'X)^{-1} with optional condition number warning

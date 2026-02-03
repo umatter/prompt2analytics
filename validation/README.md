@@ -19,7 +19,8 @@ validation/
 ├── econometrics/                      # Panel, IV, DiD, discrete choice
 │   └── timeseries/                    # VAR, VARMA, VECM, IRF
 ├── forecasting/                       # ARIMA, MSTL, changepoint
-├── ml/                                # Clustering, dimensionality reduction
+├── ml/                                # Clustering, dimensionality reduction (cmdscale, cutree)
+├── stats/                             # Statistical methods (medpolish, isoreg, loglin)
 ├── diagnostics/                       # Regression diagnostics
 └── datasets/                          # Reference datasets for testing
 ```
@@ -96,6 +97,10 @@ When implementing a new method:
 | OLS | [ols.md](regression/ols.md) | Pending |
 | Robust SEs (HC0-HC3) | [ols_robust_se.md](regression/ols_robust_se.md) | Pending |
 | Clustered SEs | [ols_clustered.md](regression/ols_clustered.md) | Pending |
+| Tukey's Resistant Line | [line.md](regression/line.md) | **Complete** |
+| Friedman's SuperSmoother | [supsmu.md](regression/supsmu.md) | **Complete** |
+| Sensitivity Analysis (sensemakr) | [sensemakr.md](regression/sensemakr.md) | **Complete** |
+| E-Value (unmeasured confounding) | [evalue.md](regression/evalue.md) | **Complete** |
 
 ### Econometrics
 | Method | File | Status |
@@ -105,12 +110,20 @@ When implementing a new method:
 | Hausman Test | [hausman.md](econometrics/hausman.md) | Pending |
 | IV/2SLS | [iv_2sls.md](econometrics/iv_2sls.md) | Pending |
 | Diff-in-Diff | [did.md](econometrics/did.md) | Pending |
+| Regression Discontinuity (Sharp) | [rd.md](econometrics/rd.md) | Pending |
+| Regression Discontinuity (Fuzzy) | [rd.md](econometrics/rd.md) | Pending |
 | IPW Treatment Effects | [treatment_ipw.md](econometrics/treatment_ipw.md) | Pending |
 | Doubly Robust (AIPW) | [treatment_aipw.md](econometrics/treatment_aipw.md) | Pending |
+| TMLE | [tmle.md](econometrics/tmle.md) | **Complete** |
+| LTMLE (Longitudinal TMLE) | [ltmle.md](econometrics/ltmle.md) | **Complete** |
+| CBPS | [cbps.md](econometrics/cbps.md) | **Complete** |
+| SBW (Stable Balancing Weights) | [sbw.md](econometrics/sbw.md) | **Complete** |
 | Mediation Analysis | [mediation.md](econometrics/mediation.md) | Pending |
+| Natural Effect Models (medflex) | [medflex.md](econometrics/medflex.md) | **Complete** |
 | Logit | [logit.md](econometrics/logit.md) | Pending |
 | Probit | [probit.md](econometrics/probit.md) | Pending |
 | HDFE | [hdfe.md](econometrics/hdfe.md) | **Complete** |
+| Multi-Cutoff RD (rdmulti) | [rdmulti.md](econometrics/rdmulti.md) | **Complete** |
 
 ### Survival Analysis
 | Method | File | Status |
@@ -128,6 +141,7 @@ When implementing a new method:
 | VARMA | [varma.md](econometrics/timeseries/varma.md) | Pending |
 | VECM | [vecm.md](econometrics/timeseries/vecm.md) | Pending |
 | IRF | [irf.md](econometrics/timeseries/irf.md) | Pending |
+| Cumulative Periodogram | [cpgram.md](timeseries/cpgram.md) | **Complete** |
 
 ### Forecasting
 | Method | File | Status |
@@ -142,10 +156,40 @@ When implementing a new method:
 | K-means | [kmeans.md](ml/kmeans.md) | Pending |
 | DBSCAN | [dbscan.md](ml/dbscan.md) | Pending |
 | Hierarchical | [hierarchical.md](ml/hierarchical.md) | Pending |
+| Cutree | [cutree.md](ml/cutree.md) | **Complete** |
 | PCA | [pca.md](ml/pca.md) | Pending |
 | t-SNE | [tsne.md](ml/tsne.md) | Pending |
+| Classical MDS (cmdscale) | [cmdscale.md](ml/cmdscale.md) | **Complete** |
+| Projection Pursuit Regression | [ppr.md](ml/ppr.md) | **Complete** |
 | Random Forest | [random_forest.md](ml/random_forest.md) | Pending |
 | SVM | [svm.md](ml/svm.md) | Pending |
+| Causal Forest | [causal_forest.md](ml/causal_forest.md) | Pending |
+| BART Causal (bartCause) | [bart_causal.md](ml/bart_causal.md) | **Complete** |
+
+### Statistical Methods
+| Method | File | Status |
+|--------|------|--------|
+| Median Polish | [medpolish.md](stats/medpolish.md) | **Complete** |
+| Isotonic Regression | [isoreg.md](stats/isoreg.md) | **Complete** |
+| Log-Linear Models | [loglin.md](stats/loglin.md) | **Complete** |
+| Constrained Optimization | [constroptim.md](stats/constroptim.md) | **Complete** |
+| SE for Contrasts | [secontrast.md](stats/secontrast.md) | **Complete** |
+| Model Tables | [modeltables.md](stats/modeltables.md) | **Complete** |
+
+### Spatial Econometrics
+| Method | File | Status |
+|--------|------|--------|
+| Moran's I Test | [moran.md](spatial/moran.md) | Pending |
+| SAR (Spatial Lag) | [sar.md](spatial/sar.md) | Pending |
+| SEM (Spatial Error) | [sem.md](spatial/sem.md) | Pending |
+| SAR Probit | [spatialprobit.md](econometrics/spatialprobit.md) | **Complete** |
+| SEM Probit | [spatialprobit.md](econometrics/spatialprobit.md) | **Complete** |
+| Spatial GMM (sphet) | [sphet.md](econometrics/sphet.md) | **Complete** |
+
+### Linear Algebra
+| Method | File | Status |
+|--------|------|--------|
+| Toeplitz Matrix | [toeplitz.md](linalg/toeplitz.md) | **Complete** |
 
 ### Diagnostics
 | Method | File | Status |

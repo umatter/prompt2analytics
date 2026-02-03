@@ -1,0 +1,439 @@
+%% =============================================================================
+%% LOCAL DEPLOYMENT
+%% =============================================================================
+
+\section{Fully local deployment} \label{sec:local}
+
+While cloud-hosted language models offer convenience and capability, many
+use cases require complete data isolation: proprietary business data,
+personally identifiable information under privacy regulations, or
+air-gapped environments. This section describes the fully local deployment
+configuration, where all components---including the language model---run
+on the user's machine.
+
+\subsection{Architecture}
+
+Figure~\ref{fig:local-architecture} illustrates the local deployment
+architecture. The key difference from cloud deployment is that the LLM
+runs locally via Ollama \citep{Ollama}, eliminating all external network
+communication. User queries, tool calls, and results never leave the
+local machine.
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.9\textwidth]{figures/local_architecture}
+\caption{Fully local deployment architecture. All components run on the
+user's machine: Ollama hosts the language model, which communicates with
+the MCP server to execute analytics methods in p2a-core. No data or
+queries are transmitted externally.}
+\label{fig:local-architecture}
+\end{figure}
+
+The local configuration requires:
+\begin{itemize}
+  \item Ollama runtime with a function-calling-capable model
+  \item \pkg{prompt2analytics} MCP server
+  \item Sufficient RAM for both the model and data processing
+\end{itemize}
+
+\subsection{Tool-calling capabilities in local models}
+
+The chat-first architecture reduces capability requirements: models need only
+parse requests, select tools from the MCP schema, generate parameters, and
+interpret results---not generate statistical code from scratch. Research shows
+fine-tuned small models can match larger models on targeted tool selection
+\citep{Schick+etal:2023, Patil+Zhang+Song+Gonzalez:2023}, making this
+particularly relevant for chat-first analytics with its well-defined schema.
+
+\subsection{Tool selection evaluation}
+
+We evaluated LLM performance on 87 test cases spanning regression, panel data,
+causal inference, discrete choice, time series, hypothesis testing, machine
+learning, and visualization. Each case presents a natural language prompt; the
+model must select the appropriate tool from the \pkg{prompt2analytics} schema.
+Responses are scored as exact (correct tool), acceptable (valid alternative),
+category (correct domain, wrong method), or failed. Accuracy is computed as
+(exact + acceptable) / total.
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.85\textwidth]{figures/fig_accuracy_comparison}
+\caption{Tool selection accuracy across models. Accuracy is computed as
+(exact + acceptable matches) / total tests. All models were evaluated on
+the complete 87-test benchmark. Claude 3.5 Haiku and Qwen 2.5 72B achieve
+perfect accuracy; even the smallest model (Ministral 3B at 3 billion
+parameters) exceeds 90\%.}
+\label{fig:accuracy-comparison}
+\end{figure}
+
+Figure~\ref{fig:accuracy-comparison} presents overall accuracy by model.
+The results demonstrate that tool selection---unlike code generation---is
+achievable even by smaller models. Claude 3.5 Haiku and Qwen 2.5 72B
+(an open-source model) achieve 100\% accuracy. Notably, Ministral 3B,
+a model small enough to run on consumer hardware with only 6~GB VRAM,
+achieves 90.8\% accuracy, making it viable for local deployment scenarios
+where hardware constraints preclude larger models.
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.95\textwidth]{figures/fig_accuracy_by_category}
+\caption{Accuracy breakdown by test category. Darker cells indicate lower
+accuracy. Most models achieve 100\% on standard categories; errors
+concentrate in edge cases involving ambiguous method selection
+(e.g., logit with fixed effects vs.\ FEGLM).}
+\label{fig:accuracy-category}
+\end{figure}
+
+Figure~\ref{fig:accuracy-category} shows accuracy by category. Performance
+is uniformly high across most categories, with errors concentrated in
+edge cases requiring fine distinctions between related methods. For instance,
+Ministral 3B shows lower accuracy on time series (66.7\%) where distinguishing
+between VAR, VARMA, and VECM specifications proves challenging for the
+smaller model. Specific confusion patterns include: selecting VAR when VECM
+is appropriate (failing to recognize cointegration requirements), choosing
+ARIMA for multivariate series that require VAR, and defaulting to simpler
+univariate methods when the prompt describes multiple interrelated series.
+These errors reflect the subtle distinctions in time series econometrics
+that require understanding whether variables are cointegrated, whether
+the analysis is univariate or multivariate, and whether structural
+relationships should be imposed.
+
+Tables~\ref{tab:model-summary} and \ref{tab:category-accuracy} in
+Appendix~\ref{app:llm-eval} provide detailed breakdowns of model
+performance and per-category accuracy. Appendix~\ref{app:latency}
+reports API response latencies, though these figures reflect cloud-hosted
+inference and do not directly apply to local deployment scenarios.
+
+\subsubsection{Extended robustness evaluation}
+
+The single-turn evaluation on curated prompts establishes baseline tool selection
+accuracy but leaves several questions unanswered: How do models perform across
+multi-turn conversations? Do they handle naturalistic language with typos and
+informal phrasing? Can they extract parameters correctly and interpret results
+accurately? To address these gaps, we conducted an extended evaluation across
+five dimensions using the same 10 models.
+
+\textbf{Multi-turn conversations.} We constructed 20 multi-turn conversations
+totaling 72 turns, where each turn builds on previous context (e.g., ``Now use
+robust standard errors instead''). Accuracy drops substantially compared to
+single-turn: the best-performing model (Llama 3.3 70B) achieves 59.7\% turn
+accuracy and 35\% conversation completion (all turns correct). Most models
+cluster between 47--58\% turn accuracy. This decline reflects the challenge
+of maintaining context---models frequently lose track of prior specifications
+or misinterpret references to earlier results.
+
+\textbf{Naturalistic prompts.} We tested 99 prompts featuring realistic
+variations: typos (``regresion''), informal language (``run a quick OLS''),
+domain jargon (``estimate the ATT''), verbose descriptions, and ambiguous
+phrasing. Accuracy ranges from 58--70\%, with Claude 3.5 Haiku achieving
+the highest robustness (69.7\%). Models handle typos well (65--69\% accuracy)
+but struggle more with ambiguous specifications (42--58\%).
+
+\textbf{Parameter extraction.} Beyond tool selection, LLMs must extract
+variable names, options, and modifiers. We evaluated 49 parameter extraction
+tasks, measuring precision, recall, and F1 score. Average F1 ranges from
+41--59\% across models, with Qwen 2.5 72B achieving the highest score (59.1\%).
+Common errors include omitting optional parameters, misidentifying column
+names from context, and confusing similar parameter types.
+
+\textbf{Interpretation accuracy.} We evaluated whether models correctly
+interpret statistical output across 26 test cases covering coefficient
+interpretation, significance testing, and diagnostic results. Models
+achieve 68--87\% accuracy, with GPT-4.1 Nano performing best (87.2\%).
+Errors typically involve misinterpreting log-transformed coefficients
+or overlooking important caveats about statistical significance.
+
+\textbf{Out-of-scope detection.} When users request methods outside the
+implemented set (e.g., Bayesian inference, GARCH models), the system should
+either decline gracefully or suggest alternatives. Detection rates range
+from 40--60\%, with most undetected cases resulting in selection of a
+superficially similar but incorrect method.
+
+Table~\ref{tab:extended-eval-summary-main} summarizes the key metrics from
+the extended evaluation, highlighting the gap between controlled single-turn
+evaluation and realistic usage patterns.
+
+\begin{table}[htbp]
+\centering
+\caption{Extended evaluation results: the gap between controlled benchmarks
+and realistic use. Single-turn accuracy (87--100\%) substantially overstates
+practical capability. Values show range across 10 evaluated models.}
+\label{tab:extended-eval-summary-main}
+\small
+\begin{tabular}{lcc}
+\toprule
+Metric & Range & Best Model \\
+\midrule
+Single-turn tool selection & 90.8--100\% & Qwen 2.5 72B, Claude 3.5 Haiku \\
+Multi-turn accuracy & 47--60\% & Llama 3.3 70B (59.7\%) \\
+Conversation completion & 0--35\% & Llama 3.3 70B (35\%) \\
+Naturalistic prompt robustness & 58--70\% & Claude 3.5 Haiku (69.7\%) \\
+Parameter extraction F1 & 41--59\% & Qwen 2.5 72B (59.1\%) \\
+Interpretation accuracy & 68--87\% & GPT-4.1 Nano (87.2\%) \\
+Out-of-scope detection & 40--60\% & Llama 3.3 70B (60\%) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Figure~\ref{fig:robustness-radar} in Appendix~\ref{app:extended-eval}
+visualizes the multi-dimensional performance profile for each model.
+
+\textbf{Implications.} The extended evaluation reveals that single-turn
+accuracy substantially overstates real-world capability. Multi-turn
+accuracy of 50--60\% means users should expect to correct or clarify
+requests in roughly half of multi-turn interactions. Parameter extraction
+errors (F1 of 41--59\%) mean users should verify that extracted parameters
+match their intent before interpreting results. These findings reinforce
+the importance of explicit specification, result verification, and treating
+the system as an assistant requiring supervision rather than an autonomous
+analyst. For production deployment, larger models (70B+ parameters) provide
+meaningful improvements in robustness, though even the best models require
+user oversight for complex analytical workflows.
+
+\subsection{Failure modes and error handling}
+
+Understanding system behavior under failure conditions is essential for
+informed use. Three categories of failure merit discussion.
+
+\subsubsection{Method misselection}
+
+When the LLM selects an inappropriate statistical method, the system
+proceeds with the selected method and returns results. Users must
+recognize the mismatch between request and execution. Several patterns
+characterize such errors:
+
+\begin{itemize}
+  \item \emph{Ambiguous specifications}: A request for ``regression with
+    firm effects'' could invoke OLS with dummy variables, within-transformation
+    fixed effects, or random effects. The LLM chooses based on training
+    patterns, which may not match user intent.
+  \item \emph{Similar method confusion}: Requests involving VAR/VECM/VARMA,
+    logit/probit/FEGLM, or IPW/AIPW may trigger closely related but distinct
+    methods.
+  \item \emph{Capability boundaries}: Requests for methods outside the
+    implemented set may map to superficially similar available methods
+    rather than returning ``not supported.''
+\end{itemize}
+
+Users can mitigate misselection by specifying methods explicitly
+(``use a within-transformation fixed effects model'') rather than
+describing goals abstractly. The system's tool call transparency allows
+inspection of which method was actually invoked before results are
+generated.
+
+\subsubsection{Estimation failures}
+
+When statistical estimation fails---due to singular matrices, non-convergence,
+or invalid specifications---the \code{EconError} type returns structured
+error information that the LLM can interpret and explain. Common cases include:
+
+\begin{itemize}
+  \item \emph{Perfect multicollinearity}: The system detects rank-deficient
+    design matrices and reports which columns are linearly dependent.
+  \item \emph{Convergence failures}: Iterative methods (logit, probit, ARIMA)
+    report iteration count, last parameter change, and suggestions for
+    alternative specifications.
+  \item \emph{Insufficient variation}: Panel estimators detect cases with
+    too few entities or time periods for the requested specification.
+  \item \emph{Small cluster warnings}: Clustered standard errors with fewer
+    than 10 clusters trigger warnings about finite-sample bias.
+\end{itemize}
+
+These errors enable the LLM to provide actionable guidance (``try removing
+the collinear variable'' or ``consider robust standard errors instead of
+clustering'') rather than generic failure messages.
+
+\subsubsection{Parameter extraction errors}
+
+Even when the correct method is selected, the LLM may extract incorrect
+parameters from the user's request. Common patterns include:
+
+\begin{itemize}
+  \item \emph{Variable name mismatches}: The LLM may infer variable names
+    that do not exist in the dataset, triggering column-not-found errors.
+  \item \emph{Specification omissions}: Options like robust standard errors
+    or clustering variables may not be extracted from ambiguous phrasing.
+  \item \emph{Incorrect defaults}: The LLM may apply default specifications
+    (e.g., including an intercept) when the user intended otherwise.
+\end{itemize}
+
+The dataset schema---column names and types---is provided to the LLM as
+context, which substantially reduces variable name errors. For specification
+options, explicit phrasing (``with HC1 robust standard errors'') yields
+more reliable extraction than implicit expectations.
+
+\subsubsection{Categorical variable handling}
+
+Categorical (string) variables are automatically converted to dummy variables
+using treatment coding (one level omitted as reference). The system:
+
+\begin{itemize}
+  \item Detects string columns and creates indicator variables for each
+    unique level, dropping the first alphabetically as reference.
+  \item Reports the reference category in output tables.
+  \item Warns when categorical variables have many levels ($>50$), as this
+    inflates the design matrix and may cause memory issues.
+  \item Handles missing categories (levels in test data not seen in training)
+    by raising explicit errors rather than producing undefined behavior.
+\end{itemize}
+
+Users can specify a different reference category via the \code{ref\_level}
+parameter. For ordered categorical variables (ordinal data), the system
+treats them as unordered by default; polynomial contrasts require explicit
+specification.
+
+Section~\ref{sec:examples-errors} demonstrates error handling behavior
+through worked examples showing multicollinearity detection, convergence
+failures, small-cluster warnings, and out-of-scope request handling.
+
+\subsection{Deployment recommendations}
+
+The evaluation results inform practical recommendations for local
+deployment, summarized in Table~\ref{tab:models}. The most striking
+finding is that open-source models can match proprietary alternatives:
+Qwen 2.5 72B achieves 100\% accuracy on our benchmark, identical to
+Claude 3.5 Haiku. This demonstrates that users requiring complete data
+isolation need not sacrifice tool selection quality---fully local
+deployments can perform equivalently to cloud-hosted solutions.
+
+\begin{table}[htbp]
+\centering
+\caption{Recommended models for local deployment. Accuracy figures are
+from our 87-test benchmark. Storage refers to disk space for the quantized
+model file using Q4\_K\_M quantization (4-bit with medium dequantization
+quality), which provides a good balance between size and accuracy. RAM is
+memory required during inference, typically 1.5--2$\times$ storage due to
+KV cache and computational buffers. Higher quantization levels (Q5, Q6, Q8)
+improve accuracy slightly but require proportionally more storage and RAM.}
+\label{tab:models}
+\begin{tabular}{lrrrrl}
+\toprule
+Model & Params & Storage & RAM & Acc.\ (\%) & Notes \\
+\midrule
+\multicolumn{6}{l}{\textit{High accuracy, workstation hardware}} \\
+Qwen 2.5 72B & 72B & 42 GB & 48 GB & 100.0 & Matches proprietary models \\
+Llama 3.3 70B & 70B & 40 GB & 48 GB & 98.8 & Strong open-source option \\
+\midrule
+\multicolumn{6}{l}{\textit{Balanced accuracy, consumer hardware}} \\
+Llama 3.1 8B & 8B & 4.7 GB & 8 GB & --- & BFCL benchmark leader \\
+Qwen 2.5 7B & 7B & 4.4 GB & 8 GB & --- & Strong tool-calling accuracy \\
+\midrule
+\multicolumn{6}{l}{\textit{Viable accuracy, minimal hardware}} \\
+Ministral 3B & 3B & 2.0 GB & 6 GB & 90.8 & Smallest viable model \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+At the other end of the spectrum, Ministral 3B demonstrates that even
+very small models can achieve viable accuracy for tool selection. With
+only 3 billion parameters, this model runs on virtually any modern
+laptop---approximately 6~GB VRAM for GPU inference, or CPU-only with
+8~GB RAM. The 9.2\% error rate concentrates in genuinely ambiguous cases
+such as distinguishing between VAR and VECM specifications or selecting
+among discrete choice models with different fixed effects structures.
+For routine analytical tasks, this accuracy level may be entirely
+acceptable, particularly given the substantial reduction in hardware
+requirements.
+
+Between these extremes, the 7--8B parameter class offers a practical
+middle ground. Models in this range fit comfortably on consumer GPUs
+with 8+ GB VRAM (e.g., NVIDIA RTX 3070/4070) while providing strong
+tool-calling performance on established benchmarks. Apple M-series
+devices with unified memory can also run these models, though memory
+is shared between CPU, GPU, and system functions; a device with 16~GB
+unified memory provides roughly equivalent capacity to a dedicated
+8~GB GPU for model inference. The 70B+ models, by contrast, require either
+professional GPUs with 24+ GB VRAM, multi-GPU configurations, or
+partial CPU offloading that significantly increases inference latency.
+Users with limited RAM can configure Ollama to offload model layers
+to disk, trading response time for reduced memory consumption.
+
+\subsubsection{Data processing requirements}
+
+Beyond LLM memory, users must budget RAM for dataset operations. Unlike
+interpreted languages that incur overhead for object metadata, \proglang{Rust}
+processes data in compact columnar format via \pkg{polars}. Table~\ref{tab:hardware-data}
+provides guidance on RAM requirements for data processing.
+
+\begin{table}[htbp]
+\centering
+\caption{RAM requirements for data processing operations. Values represent
+peak memory during analysis (loading, transformation, estimation). Actual
+requirements depend on column count and operation complexity; values assume
+typical econometric datasets with 10--50 columns. Matrix-intensive operations
+(HDFE, GMM, bootstrap) require additional working memory shown in the third column.}
+\label{tab:hardware-data}
+\small
+\begin{tabular}{lrrrl}
+\toprule
+Rows & File size & Base RAM & Matrix ops & Notes \\
+\midrule
+1,000 & $<$1 MB & 50 MB & +20 MB & Standard laptop \\
+10,000 & 1--10 MB & 100 MB & +100 MB & Standard laptop \\
+100,000 & 10--100 MB & 500 MB & +500 MB & Consumer hardware \\
+1,000,000 & 100 MB--1 GB & 2 GB & +2 GB & Workstation \\
+10,000,000 & 1--10 GB & 10 GB & +8 GB & High-memory system \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Memory requirements scale roughly linearly with observation count for most
+operations. The primary memory consumers are:
+\begin{itemize}
+  \item \emph{Design matrices}: For $n$ observations and $k$ predictors,
+    the design matrix requires $8nk$ bytes (64-bit floats). With HDFE,
+    the demeaned matrix requires similar space.
+  \item \emph{Covariance matrices}: Computing $(X'X)^{-1}$ requires $8k^2$
+    bytes plus working space for Cholesky decomposition.
+  \item \emph{Bootstrap samples}: Residual bootstrap with $B$ replications
+    stores coefficients ($8kB$ bytes), not full samples.
+  \item \emph{Panel transformations}: Within-group demeaning creates a
+    transformed dataset approximately equal in size to the original.
+\end{itemize}
+
+For combined LLM and data processing, sum the requirements from
+Tables~\ref{tab:models} and \ref{tab:hardware-data}. A typical configuration
+analyzing 100,000 observations with a 7B model requires approximately
+8--10~GB total RAM (8~GB LLM + 1~GB data processing).
+
+Table~\ref{tab:hardware-summary} provides system recommendations for
+common deployment scenarios.
+
+\begin{table}[htbp]
+\centering
+\caption{Recommended system configurations for local deployment. RAM values
+include both LLM and data processing headroom. GPU requirements assume
+CUDA-capable NVIDIA cards; AMD and Intel GPUs are supported via Ollama's
+ROCm and OneAPI backends respectively but may have performance differences.}
+\label{tab:hardware-summary}
+\small
+\begin{tabular}{llrrr}
+\toprule
+Scenario & Model & RAM & GPU VRAM & Storage \\
+\midrule
+Minimal (laptop) & Ministral 3B & 16 GB & 6 GB & 5 GB \\
+Consumer (desktop) & Qwen 2.5 7B & 16 GB & 8 GB & 10 GB \\
+Professional & Llama 3.3 70B & 64 GB & 48 GB & 50 GB \\
+Server (large data) & Qwen 2.5 72B & 128 GB & 2$\times$24 GB & 60 GB \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Storage requirements include the \pkg{prompt2analytics} binary ($\sim$50~MB),
+model weights (see Table~\ref{tab:models}), and working space for datasets.
+CPU-only inference is viable for smaller models but increases latency by
+5--10$\times$ compared to GPU inference.
+
+\subsection{Privacy guarantees}
+
+The fully local configuration provides complete data isolation. No network
+requests are made to external services---all model inference occurs on
+the user's hardware, dataset contents never leave the machine, and query
+history remains in local storage. This architecture is suitable for
+analysis of sensitive data where regulatory requirements (such as GDPR,
+HIPAA, or institutional review board protocols) or organizational policy
+prohibit cloud processing. Users deploying this configuration should
+verify that their Ollama installation does not enable telemetry or
+automatic model updates, which could initiate network connections during
+analysis sessions.
+

@@ -6,8 +6,8 @@ use std::sync::Arc;
 
 use axum::{
     extract::{
-        ws::{Message, WebSocket, WebSocketUpgrade},
         State,
+        ws::{Message, WebSocket, WebSocketUpgrade},
     },
     response::IntoResponse,
 };
@@ -24,9 +24,7 @@ use crate::transport::http::ToolResult;
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientMessage {
     /// Authenticate with a session ID
-    Auth {
-        session_id: String,
-    },
+    Auth { session_id: String },
     /// Execute a tool
     Tool {
         id: String,
@@ -56,10 +54,7 @@ pub enum ServerMessage {
         error: Option<String>,
     },
     /// Streaming text chunk (for LLM responses)
-    Text {
-        id: String,
-        content: String,
-    },
+    Text { id: String, content: String },
     /// Tool call indication (LLM wants to call a tool)
     ToolCall {
         id: String,
@@ -73,14 +68,9 @@ pub enum ServerMessage {
         result: ToolResult,
     },
     /// Request completed
-    Done {
-        id: String,
-    },
+    Done { id: String },
     /// Error occurred
-    Error {
-        id: String,
-        message: String,
-    },
+    Error { id: String, message: String },
     /// Pong response
     Pong,
 }
@@ -267,7 +257,11 @@ async fn handle_client_message(
             }
         }
 
-        ClientMessage::Chat { id, message, stream } => {
+        ClientMessage::Chat {
+            id,
+            message,
+            stream,
+        } => {
             if !state.is_authenticated() {
                 tx.send(ServerMessage::Error {
                     id: id.clone(),

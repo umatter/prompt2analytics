@@ -4,6 +4,10 @@ This guide explains the assumptions underlying each econometric method in prompt
 
 ## Table of Contents
 - [OLS Regression](#ols-regression)
+- [Nonlinear Least Squares (NLS)](#nonlinear-least-squares-nls)
+- [Analysis of Variance (ANOVA)](#analysis-of-variance-anova)
+- [Student's t-test](#students-t-test)
+- [Chi-Squared Tests](#chi-squared-tests)
 - [Robust Standard Errors](#robust-standard-errors)
 - [Panel Data Models](#panel-data-models)
 - [High-Dimensional Fixed Effects](#high-dimensional-fixed-effects)
@@ -15,6 +19,7 @@ This guide explains the assumptions underlying each econometric method in prompt
 - [Treatment Effect Estimation](#treatment-effect-estimation)
 - [Causal Mediation Analysis](#causal-mediation-analysis)
 - [Survival Analysis](#survival-analysis)
+- [Autocorrelation Functions (ACF/PACF/CCF)](#autocorrelation-functions-acfpacfccf)
 - [Regression Diagnostics](#regression-diagnostics)
 
 ---
@@ -70,6 +75,558 @@ For OLS to be BLUE (Best Linear Unbiased Estimator):
 - `*` : p < 0.10 (marginally significant)
 - `**` : p < 0.05 (significant)
 - `***` : p < 0.01 (highly significant)
+
+---
+
+## Nonlinear Least Squares (NLS)
+
+### Model
+Fits a nonlinear function f(x, θ) to observed data by minimizing the residual sum of squares:
+```
+RSS(θ) = Σᵢ (yᵢ - f(xᵢ, θ))²
+```
+
+### Algorithms
+
+**Gauss-Newton:**
+- Linearizes the model around current parameters
+- Fast convergence near the optimum
+- May fail if far from solution
+
+**Levenberg-Marquardt (default):**
+- Interpolates between Gauss-Newton and gradient descent
+- More robust to poor starting values
+- Adaptive damping parameter λ
+
+### Pre-defined Models
+
+| Model | Formula | Parameters | Use Case |
+|-------|---------|------------|----------|
+| Exponential Decay | y = a·e^(-bx) + c | [a, b, c] | Radioactive decay, drug elimination |
+| Exponential Growth | y = a·e^(bx) | [a, b] | Population growth, compound interest |
+| Michaelis-Menten | y = Vmax·x/(Km+x) | [Vmax, Km] | Enzyme kinetics |
+| Logistic Growth | y = K/(1+e^(-r(x-x₀))) | [K, r, x₀] | S-curve growth, adoption curves |
+| Power Law | y = a·x^b | [a, b] | Allometric scaling |
+| Asymptotic | y = a - b·e^(-cx) | [a, b, c] | Learning curves |
+
+### Assumptions
+
+1. **Correct functional form**: Model specification matches true relationship
+   - *Violation*: Biased parameter estimates
+   - *Fix*: Try alternative models, examine residual patterns
+
+2. **Independent errors**: E(εᵢεⱼ) = 0 for i ≠ j
+   - *Violation*: Incorrect standard errors
+   - *Fix*: Account for correlation structure
+
+3. **Constant variance**: Var(εᵢ) = σ²
+   - *Violation*: Inefficient estimates
+   - *Fix*: Use weighted NLS
+
+4. **Good starting values**: Initial parameters reasonably close to true values
+   - *Violation*: Convergence to local minimum or failure
+   - *Fix*: Use domain knowledge, try multiple starts
+
+### Interpreting Output
+
+| Statistic | Interpretation |
+|-----------|----------------|
+| Coefficients | Estimated parameter values |
+| Standard Errors | Uncertainty in parameter estimates (asymptotic) |
+| t-statistic | Parameter / SE; tests if parameter = 0 |
+| p-value | Significance of parameter |
+| RSS | Residual sum of squares (lower = better fit) |
+| σ (sigma) | Residual standard error = √(RSS/df) |
+| Convergence | Whether algorithm converged (check if failed) |
+| Iterations | Number of optimization steps |
+
+### Example Usage (MCP Tool)
+```json
+{
+  "tool": "regression_nls",
+  "dataset": "kinetics_data",
+  "y": "reaction_rate",
+  "x": "substrate_conc",
+  "model": "michaelis_menten",
+  "start": [200, 0.1]
+}
+```
+
+### References
+
+- Levenberg, K. (1944). "A Method for the Solution of Certain Non-Linear Problems in Least Squares". *Quarterly of Applied Mathematics*, 2(2), 164-168.
+- Marquardt, D. W. (1963). "An Algorithm for Least-Squares Estimation of Nonlinear Parameters". *SIAM Journal on Applied Mathematics*, 11(2), 431-441.
+- R Documentation: https://stat.ethz.ch/R-manual/R-devel/library/stats/html/nls.html
+
+---
+
+## LOESS (Local Polynomial Regression)
+
+### Model
+
+LOESS (LOcally Estimated Scatterplot Smoothing) is a non-parametric method that fits local polynomial regressions. For each target point x₀, it:
+
+1. Finds the k = span × n nearest neighbors
+2. Computes tricubic distance weights: w(u) = (1 - |u|³)³ for |u| < 1
+3. Fits a weighted polynomial (degree 1 or 2) via weighted least squares
+4. Returns the fitted value at x₀
+
+### Parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `span` | 0.75 | Proportion of data in local neighborhood (0,1] or use all if >1 |
+| `degree` | 2 | Polynomial degree: 1 (linear) or 2 (quadratic) |
+| `robust` | false | Use iterative reweighting for outlier resistance |
+
+### Tricubic Weight Function
+
+```
+w(u) = (1 - |u|³)³  for |u| < 1
+w(u) = 0            for |u| ≥ 1
+```
+
+The distance u is scaled so the maximum distance in the neighborhood equals 1.
+
+### Robust Fitting
+
+For `robust=true` (family="symmetric"), the algorithm applies iterative reweighting using the bisquare function:
+
+1. Fit initial LOESS
+2. Compute residuals rᵢ = yᵢ - ŷᵢ
+3. Compute robust weights: w(u) = (1 - u²)² where u = rᵢ / (6 × MAD)
+4. Refit with combined tricubic × robust weights
+5. Iterate until convergence (default: 4 iterations)
+
+This downweights outliers, providing resistance to anomalous data points.
+
+### Interpreting Output
+
+| Statistic | Interpretation |
+|-----------|----------------|
+| Fitted Values | Smoothed estimates at each x point |
+| Residuals | y - fitted; patterns suggest model adequacy |
+| ENP | Equivalent Number of Parameters (trace of hat matrix) |
+| Residual SE | σ = √(RSS / (n - ENP)); estimate of noise |
+| R² | Proportion of variance explained: 1 - RSS/TSS |
+
+### Choosing Parameters
+
+**Span Selection**:
+- Smaller span (0.2-0.4): More flexible, captures local features, may overfit
+- Larger span (0.6-0.9): Smoother, more regularization, may miss details
+- Cross-validation can help select optimal span
+
+**Degree Selection**:
+- Degree 1 (local linear): Less bias at boundaries, simpler interpretation
+- Degree 2 (local quadratic): Better captures curvature, default choice
+
+### Example Usage (MCP Tool)
+
+```json
+{
+  "tool": "regression_loess",
+  "dataset": "sales_data",
+  "y": "revenue",
+  "x": "time",
+  "span": 0.5,
+  "degree": 2,
+  "robust": false
+}
+```
+
+### When to Use LOESS
+
+| Scenario | Recommended |
+|----------|-------------|
+| Exploring nonlinear relationships | Yes |
+| Data smoothing and trend extraction | Yes |
+| Prediction at original x values | Yes |
+| Prediction far outside data range | No (use parametric models) |
+| Very large datasets (n > 10,000) | Consider kernel smoothing (faster) |
+| Need coefficient interpretations | No (use parametric regression) |
+
+### References
+
+- Cleveland, W. S. (1979). "Robust locally weighted regression and smoothing scatterplots." *Journal of the American Statistical Association*, 74(368), 829-836.
+- Cleveland, W. S., & Devlin, S. J. (1988). "Locally weighted regression: an approach to regression analysis by local fitting." *Journal of the American Statistical Association*, 83(403), 596-610.
+- Cleveland, W. S., Grosse, E., & Shyu, W. M. (1992). "Local regression models." Chapter 8 of *Statistical Models in S*.
+- R Documentation: https://stat.ethz.ch/R-manual/R-devel/library/stats/html/loess.html
+
+---
+
+## Analysis of Variance (ANOVA)
+
+ANOVA tests whether means differ significantly across groups by partitioning total variance into between-group and within-group components.
+
+### One-Way ANOVA
+
+#### Model
+Tests whether the mean of a response variable differs across k groups:
+```
+H₀: μ₁ = μ₂ = ... = μₖ (all group means are equal)
+H₁: At least one mean differs
+```
+
+#### Sum of Squares Decomposition
+```
+SST = SSB + SSW
+
+where:
+  SST (Total)   = Σᵢⱼ (yᵢⱼ - ȳ..)²     Total variation
+  SSB (Between) = Σᵢ nᵢ(ȳᵢ. - ȳ..)²    Variation due to groups
+  SSW (Within)  = Σᵢⱼ (yᵢⱼ - ȳᵢ.)²     Variation within groups
+```
+
+#### F-Statistic
+```
+F = (SSB / (k-1)) / (SSW / (n-k)) = MSB / MSW
+
+where:
+  MSB = Mean Square Between (between-group variance)
+  MSW = Mean Square Within (within-group variance, error)
+  k = number of groups
+  n = total observations
+```
+
+Under H₀, F follows an F(k-1, n-k) distribution.
+
+#### Usage
+```
+/anova_one_way dataset:mydata response:yield factor:treatment
+```
+
+#### Interpreting Output
+
+| Statistic | Interpretation |
+|-----------|----------------|
+| F-statistic | Ratio of between-group to within-group variance |
+| p-value | P(F > observed) if all means are equal |
+| η² (eta-squared) | SSB/SST; proportion of variance explained by groups |
+| ω² (omega-squared) | Less biased effect size estimate |
+
+**Effect Size Guidelines** (Cohen):
+- Small: η² ≈ 0.01
+- Medium: η² ≈ 0.06
+- Large: η² ≈ 0.14
+
+#### Assumptions
+1. **Independence**: Observations are independent
+2. **Normality**: Response is normally distributed within each group (robust to violations with n > 30)
+3. **Homogeneity of Variance**: Equal variance across groups (test with Levene's test)
+
+### Two-Way ANOVA
+
+Tests the effects of two factors and their interaction on a response variable.
+
+#### Model
+```
+yᵢⱼₖ = μ + αᵢ + βⱼ + (αβ)ᵢⱼ + εᵢⱼₖ
+
+where:
+  αᵢ = main effect of factor A
+  βⱼ = main effect of factor B
+  (αβ)ᵢⱼ = interaction effect
+```
+
+#### Usage
+```
+# With interaction (factorial design)
+/anova_two_way dataset:mydata response:yield factor_a:fertilizer factor_b:irrigation interaction:true
+
+# Additive model (no interaction)
+/anova_two_way dataset:mydata response:yield factor_a:fertilizer factor_b:irrigation interaction:false
+```
+
+#### Interpreting Interaction
+- **Significant interaction**: Effect of one factor depends on the level of another
+- **No interaction**: Effects are additive
+
+### ANOVA vs Regression
+
+ANOVA and OLS regression with categorical variables are mathematically equivalent:
+```
+# ANOVA
+/anova_one_way dataset:data response:y factor:group
+
+# Equivalent regression with dummy variables
+/regression_ols dataset:data y:y x:group_B,group_C
+```
+
+The F-statistic from ANOVA equals the F-statistic from the regression testing all group dummies jointly.
+
+### References
+- Fisher, R. A. (1925). *Statistical Methods for Research Workers*. Oliver & Boyd.
+- R equivalent: `aov(y ~ factor, data = df)` or `anova(lm(y ~ factor))`
+
+---
+
+## Student's t-test
+
+The t-test compares means between one or two samples. It's one of the most widely used hypothesis tests in statistics.
+
+### One-Sample t-test
+
+Tests whether a sample mean differs from a hypothesized value μ₀.
+
+**Formula:**
+```
+t = (x̄ - μ₀) / (s / √n)
+df = n - 1
+```
+
+**Usage:**
+```
+/hypothesis_t_test dataset:data x:weight mu:70
+```
+
+**Interpretation:** If p < 0.05, reject H₀ that the population mean equals 70.
+
+### Two-Sample t-test
+
+Tests whether two independent samples have different means.
+
+**Welch's t-test (recommended, default):**
+Does not assume equal variances. Uses Welch-Satterthwaite degrees of freedom approximation.
+
+```
+t = (x̄₁ - x̄₂) / √(s₁²/n₁ + s₂²/n₂)
+
+df = (s₁²/n₁ + s₂²/n₂)² / [(s₁²/n₁)²/(n₁-1) + (s₂²/n₂)²/(n₂-1)]
+```
+
+**Usage:**
+```
+/hypothesis_t_test dataset:data x:treatment_group y:control_group
+```
+
+**Student's t-test (equal variances assumed):**
+Uses pooled variance. Only use when you're confident variances are equal.
+
+```
+/hypothesis_t_test dataset:data x:group1 y:group2 var_equal:true
+```
+
+### Paired t-test
+
+For matched pairs (e.g., before/after measurements on the same subjects).
+
+**Formula:**
+Compute differences d = x - y, then apply one-sample test:
+```
+t = d̄ / (sd / √n)
+df = n - 1
+```
+
+**Usage:**
+```
+/hypothesis_t_test dataset:data x:before y:after paired:true
+```
+
+### One-Sided Tests
+
+Use `alternative` parameter for directional hypotheses:
+
+```
+# Test if mean is greater than hypothesized value
+/hypothesis_t_test dataset:data x:scores mu:50 alternative:greater
+
+# Test if treatment < control
+/hypothesis_t_test dataset:data x:treatment y:control alternative:less
+```
+
+### Output Interpretation
+
+| Component | Description |
+|-----------|-------------|
+| t-statistic | Test statistic (larger \|t\| = stronger evidence against H₀) |
+| df | Degrees of freedom (affects critical values) |
+| p-value | Probability of observing this extreme a result if H₀ true |
+| Confidence interval | Range containing true mean/difference with specified probability |
+| Estimate | Sample mean(s) or difference |
+
+### When to Use Which Test
+
+| Scenario | Test | Command |
+|----------|------|---------|
+| Compare sample to known value | One-sample | `x:col mu:value` |
+| Compare two independent groups | Two-sample Welch | `x:col1 y:col2` |
+| Compare two groups, equal variance | Two-sample Student | `x:col1 y:col2 var_equal:true` |
+| Compare matched pairs | Paired | `x:before y:after paired:true` |
+
+### References
+- Student (W. S. Gosset) (1908). "The probable error of a mean". *Biometrika*, 6(1), 1-25.
+- Welch, B. L. (1947). "The generalization of 'Student's' problem". *Biometrika*, 34(1-2), 28-35.
+- R equivalent: `t.test(x, y, paired = FALSE, var.equal = FALSE)`
+
+---
+
+## Chi-Squared Tests
+
+Pearson's chi-squared test is used for categorical data to test hypotheses about frequency distributions.
+
+### Goodness-of-Fit Test
+
+Tests whether observed frequencies match expected probabilities.
+
+**Hypotheses:**
+- H₀: Observed frequencies follow the expected distribution
+- H₁: Observed frequencies differ from expected
+
+**Test statistic:**
+```
+χ² = Σ (O_i - E_i)² / E_i
+df = k - 1  (where k = number of categories)
+```
+
+**Usage:**
+```
+# Test if distribution is uniform
+/hypothesis_chisq_gof dataset:data column:category
+
+# Test against specific probabilities
+/hypothesis_chisq_gof dataset:data column:category probs:[0.2,0.3,0.5]
+```
+
+**Example: Testing a fair die**
+If you roll a die 100 times and observe counts [16, 18, 22, 14, 15, 15], is the die fair?
+- Expected under fair die: 16.67 for each face
+- If p > 0.05, cannot reject that die is fair
+
+### Test of Independence
+
+Tests whether two categorical variables are independent in a contingency table.
+
+**Hypotheses:**
+- H₀: Row and column variables are independent
+- H₁: Variables are associated
+
+**Test statistic:**
+```
+χ² = Σ (O_ij - E_ij)² / E_ij
+E_ij = (row_i_total × col_j_total) / grand_total
+df = (r - 1)(c - 1)
+```
+
+**Usage:**
+```
+/hypothesis_chisq_independence dataset:data row_var:gender col_var:party
+```
+
+### Yates' Continuity Correction
+
+For 2×2 tables, the chi-squared approximation may be poor. Yates' correction adjusts:
+```
+χ² = Σ (|O_ij - E_ij| - 0.5)² / E_ij
+```
+
+Applied by default for 2×2 tables. Disable with `correct:false`:
+```
+/hypothesis_chisq_independence dataset:data row_var:treatment col_var:outcome correct:false
+```
+
+### Interpreting Results
+
+| Component | Interpretation |
+|-----------|----------------|
+| χ² statistic | Larger = more deviation from expected |
+| df | (k-1) for GOF, (r-1)(c-1) for independence |
+| p-value | P(χ² ≥ observed) under H₀ |
+| Residuals | (O - E) / √E; shows which cells deviate |
+| Std residuals | For independence: accounts for marginal proportions |
+
+### When to Use
+
+| Test | Scenario | Example |
+|------|----------|---------|
+| Goodness-of-fit | One categorical variable vs expected distribution | Is die fair? Are blood types distributed as expected? |
+| Independence | Association between two categorical variables | Is party preference related to gender? |
+
+### Assumptions
+
+1. **Independence**: Observations must be independent
+2. **Sample size**: Expected frequencies should be ≥ 5 in each cell (rule of thumb)
+3. **Fixed totals**: Either row totals, column totals, or grand total fixed by design
+
+### References
+- Pearson, K. (1900). "On the criterion that a given system of deviations from the probable..." *Philosophical Magazine*, Series 5, 50(302), 157-175.
+- Yates, F. (1934). "Contingency tables involving small numbers and the χ² test". *Supplement to JRSS*, 1(2), 217-235.
+- R equivalent: `chisq.test(x)` or `chisq.test(table(x, y))`
+
+---
+
+## Shapiro-Wilk Normality Test
+
+The Shapiro-Wilk test assesses whether data comes from a normally distributed population. It is one of the most powerful tests for detecting departures from normality.
+
+### Hypotheses
+
+- **H₀**: The data is normally distributed
+- **H₁**: The data is not normally distributed
+
+### W Statistic
+
+The test statistic W is calculated as:
+
+```
+W = (∑aᵢx₍ᵢ₎)² / ∑(xᵢ - x̄)²
+```
+
+Where:
+- x₍ᵢ₎ is the i-th order statistic (i-th smallest value)
+- x̄ is the sample mean
+- aᵢ are coefficients derived from expected normal order statistics
+
+**Interpretation**:
+- W ranges from 0 to 1
+- Values close to 1 indicate normality
+- Small W values (far from 1) suggest non-normality
+
+### Usage
+
+```
+# Basic normality test on a column
+/hypothesis_shapiro_wilk dataset:data column:residuals
+
+# Test residuals from a regression
+/hypothesis_shapiro_wilk dataset:model_results column:residuals
+```
+
+### Sample Size Constraints
+
+- **Minimum**: n ≥ 3
+- **Maximum**: n ≤ 5000
+
+For larger samples, the test becomes overly sensitive and may reject normality for trivially small departures. Consider using the Kolmogorov-Smirnov test or examining Q-Q plots for large samples.
+
+### Interpreting Results
+
+| p-value | Interpretation |
+|---------|----------------|
+| p > 0.10 | No evidence against normality |
+| 0.05 < p ≤ 0.10 | Weak evidence against normality |
+| 0.01 < p ≤ 0.05 | Moderate evidence against normality |
+| p ≤ 0.01 | Strong evidence against normality |
+
+### Common Use Cases
+
+| Scenario | Purpose |
+|----------|---------|
+| Regression diagnostics | Check if residuals are normally distributed |
+| Before parametric tests | Verify normality assumption for t-tests, ANOVA |
+| Quality control | Verify process data follows normal distribution |
+| Assumption checking | Validate assumptions before statistical modeling |
+
+### Alternatives
+
+- **Kolmogorov-Smirnov test** (`ks.test`): For larger samples or comparing to any distribution
+- **Jarque-Bera test**: Uses skewness and kurtosis, available in regression diagnostics
+- **Q-Q plots**: Visual assessment of normality
+
+### References
+- Shapiro, S. S. & Wilk, M. B. (1965). "An analysis of variance test for normality (complete samples)". *Biometrika*, 52(3-4), 591-611.
+- Royston, P. (1995). "Remark AS R94: A remark on Algorithm AS 181: The W-test for normality". *Journal of the Royal Statistical Society Series C*, 44(4), 547-551.
+- R equivalent: `shapiro.test(x)`
 
 ---
 
@@ -1390,6 +1947,466 @@ Standard KM treats competing events as censoring, which:
 - Aalen, O.O. & Johansen, S. (1978). "An Empirical Transition Matrix." *Scandinavian J. Statistics*, 5:141-150.
 - Klein, J.P. & Moeschberger, M.L. (2003). *Survival Analysis: Techniques for Censored and Truncated Data*. Springer.
 - Therneau, T.M. & Grambsch, P.M. (2000). *Modeling Survival Data*. Springer.
+
+---
+
+## Autocorrelation Functions (ACF/PACF/CCF)
+
+Autocorrelation functions are essential tools for time series analysis, helping identify serial correlation patterns, determine ARIMA model orders, and detect relationships between series.
+
+### Sample Autocorrelation Function (ACF)
+
+**Definition**: The ACF measures the correlation between a time series and its lagged values.
+
+**Formulas**:
+
+**Sample Autocovariance**:
+```
+γ̂(k) = (1/n) Σ_{t=1}^{n-|k|} (x_{t+|k|} - x̄)(x_t - x̄)
+```
+
+**Sample Autocorrelation**:
+```
+ρ̂(k) = γ̂(k) / γ̂(0)
+```
+
+**Usage**:
+```
+/timeseries_acf dataset:data column:returns lag_max:20 acf_type:correlation
+```
+
+**Parameters**:
+- `column`: Time series variable
+- `lag_max`: Maximum lag to compute (default: min(10×log₁₀(n), n-1))
+- `acf_type`: `correlation` (normalized) or `covariance` (unnormalized)
+
+**Interpreting Output**:
+
+| Statistic | Interpretation |
+|-----------|----------------|
+| ACF(0) | Always 1.0 (correlation with itself) |
+| ACF(k) | Correlation at lag k; \|ρ̂(k)\| > 1.96/√n suggests significance |
+| Confidence bounds | ±1.96/√n (95% white noise bounds) |
+
+**Applications**:
+- Detect autocorrelation in residuals (model adequacy)
+- Identify MA(q) order: ACF cuts off after lag q
+- Check for seasonality: Peaks at seasonal lags
+
+### Partial Autocorrelation Function (PACF)
+
+**Definition**: The PACF measures the correlation between a time series and its lag-k values, controlling for intermediate lags.
+
+**Durbin-Levinson Recursion**:
+```
+φ_{n,n} = [ρ(n) - Σ_{k=1}^{n-1} φ_{n-1,k} ρ(n-k)] / [1 - Σ_{k=1}^{n-1} φ_{n-1,k} ρ(k)]
+φ_{n,k} = φ_{n-1,k} - φ_{n,n} × φ_{n-1,n-k}  for 1 ≤ k ≤ n-1
+```
+
+**Usage**:
+```
+/timeseries_acf dataset:data column:returns lag_max:20 acf_type:partial
+```
+
+**Interpreting Output**:
+
+| Pattern | Suggests |
+|---------|----------|
+| PACF cuts off after lag p | AR(p) process |
+| PACF decays gradually | MA process |
+| Both decay gradually | ARMA process |
+
+**Applications**:
+- Identify AR(p) order: PACF cuts off after lag p
+- Complement to ACF for ARIMA modeling
+- PACF(1) always equals ACF(1)
+
+### Cross-Correlation Function (CCF)
+
+**Definition**: The CCF measures the correlation between two time series at various lags, revealing lead-lag relationships.
+
+**Formula**:
+```
+ρ̂_{xy}(k) = γ̂_{xy}(k) / √(γ̂_{xx}(0) × γ̂_{yy}(0))
+```
+
+**Usage**:
+```
+/timeseries_ccf dataset:data x:gdp y:unemployment lag_max:10
+```
+
+**Parameters**:
+- `x`, `y`: Two time series variables
+- `lag_max`: Maximum lag in both directions
+
+**Interpreting Output**:
+
+| CCF(k) | Interpretation |
+|--------|----------------|
+| k > 0 | Past values of x predict current y |
+| k < 0 | Past values of y predict current x |
+| k = 0 | Contemporaneous correlation |
+
+**Properties**:
+- CCF(x,y,k) = CCF(y,x,-k)
+- CCF(0) equals the Pearson correlation coefficient
+
+**Applications**:
+- Identify lead-lag relationships between variables
+- Determine transfer function models
+- Cross-correlation analysis in VAR modeling
+
+### Confidence Intervals
+
+**White Noise Bounds** (Bartlett):
+```
+CI = ±z_{α/2} / √n ≈ ±1.96/√n  (for 95% confidence)
+```
+
+**Bartlett's Formula** (for non-white noise):
+```
+Var(ρ̂(k)) ≈ (1/n) Σ_{j=1}^{∞} [ρ(j)² + ρ(j+k)ρ(j-k)]
+```
+
+**Interpretation**: Values outside the confidence bands indicate statistically significant autocorrelation at that lag.
+
+### Typical Patterns
+
+| Process | ACF Pattern | PACF Pattern |
+|---------|-------------|--------------|
+| White noise | All values ≈ 0 | All values ≈ 0 |
+| AR(1), φ > 0 | Exponential decay | Spike at lag 1, then 0 |
+| AR(1), φ < 0 | Alternating decay | Spike at lag 1, then 0 |
+| AR(p) | Exponential/damped sine decay | Cuts off after lag p |
+| MA(1), θ > 0 | Spike at lag 1, then 0 | Alternating decay |
+| MA(q) | Cuts off after lag q | Exponential decay |
+| ARMA(p,q) | Decays after lag q | Decays after lag p |
+| Random walk | Very slow decay | Spike at lag 1 |
+
+### References
+
+- Box, G. E. P., Jenkins, G. M., Reinsel, G. C., & Ljung, G. M. (2015). *Time Series Analysis: Forecasting and Control* (5th ed.). Wiley.
+- Brockwell, P. J., & Davis, R. A. (1991). *Time Series: Theory and Methods* (2nd ed.). Springer.
+- Durbin, J. (1960). "The Fitting of Time-Series Models". *Revue de l'Institut International de Statistique*, 28(3), 233-244.
+- R Documentation: `stats::acf()`, `stats::pacf()`, `stats::ccf()`
+
+---
+
+## Box-Pierce and Ljung-Box Tests
+
+### Overview
+
+The Box-Pierce and Ljung-Box tests are "portmanteau" tests for autocorrelation in time series data. They test whether a series exhibits no autocorrelation up to a specified number of lags, commonly used to check if ARIMA model residuals are white noise.
+
+### Mathematical Formulation
+
+**Box-Pierce statistic**:
+```
+Q_BP = n × Σₖ₌₁ᵐ ρ̂(k)²
+```
+
+**Ljung-Box statistic** (recommended for finite samples):
+```
+Q_LB = n(n+2) × Σₖ₌₁ᵐ ρ̂(k)² / (n-k)
+```
+
+Where:
+- n = sample size
+- m = number of lags tested
+- ρ̂(k) = sample autocorrelation at lag k
+
+### Distribution
+
+Under H₀ (no autocorrelation): Q ~ χ²(m - fitdf)
+
+Where `fitdf` is the number of parameters already estimated (for ARMA(p,q) residuals, set fitdf = p + q).
+
+### API Usage
+
+```rust
+use p2a_core::stats::{box_test, run_box_test, BoxTestType};
+
+// Direct computation
+let x = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
+let result = box_test(&x, Some(5), BoxTestType::LjungBox, 0)?;
+
+// From dataset
+let result = run_box_test(&dataset, "residuals", Some(10), BoxTestType::LjungBox, 2)?;
+```
+
+### Parameters
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `lag` | Number of autocorrelation lags | 1 |
+| `test_type` | `BoxTestType::LjungBox` or `BoxTestType::BoxPierce` | LjungBox |
+| `fitdf` | Degrees of freedom adjustment for ARMA residuals | 0 |
+
+### Interpretation
+
+| Result | Interpretation |
+|--------|----------------|
+| p > 0.05 | Fail to reject H₀; no significant autocorrelation detected (consistent with white noise) |
+| p < 0.05 | Reject H₀; significant autocorrelation detected (not white noise) |
+
+### Example Output
+
+```
+Ljung-Box Test for Autocorrelation
+===========================================
+
+X-squared = 11.1754, df = 5, p-value = 0.0480 *
+
+Observations: 10  |  Lags: 5  |  fitdf: 0
+
+H₀: No autocorrelation up to lag 5
+H₁: Autocorrelation exists at one or more lags
+
+Conclusion: Reject H₀ - significant autocorrelation detected.
+```
+
+### Best Practices
+
+1. **Choose appropriate lag**: Common choices are m = 10 for short series, m = 20 for longer series
+2. **Use Ljung-Box**: Better finite-sample properties than Box-Pierce
+3. **Adjust fitdf for residuals**: When testing ARMA(p,q) residuals, set fitdf = p + q
+4. **Consider Ljung-Box limitations**: Test may have low power against certain alternatives
+
+### References
+
+- Box, G. E. P. & Pierce, D. A. (1970). "Distribution of residual correlations in autoregressive-integrated moving average time series models." *Journal of the American Statistical Association*, 65, 1509-1526.
+- Ljung, G. M. & Box, G. E. P. (1978). "On a measure of lack of fit in time series models." *Biometrika*, 65, 297-303.
+- R Documentation: `stats::Box.test()`
+
+---
+
+## Phillips-Perron Unit Root Test
+
+### Overview
+
+The Phillips-Perron (PP) test examines the null hypothesis that a time series has a unit root (is non-stationary) against the alternative that it is stationary. Unlike the Augmented Dickey-Fuller (ADF) test, the PP test makes a non-parametric correction to the t-statistic to account for serial correlation in the errors.
+
+### Mathematical Formulation
+
+**Regression model**:
+```
+Δyₜ = α + βt + γyₜ₋₁ + uₜ
+```
+
+**Z(τ) test statistic**:
+```
+Z(τ) = τ̂ × √(σ̂²/λ²) - (λ² - σ̂²) × T / (2λ × s)
+```
+
+Where:
+- τ̂ = t-statistic from OLS regression
+- σ̂² = residual variance
+- λ² = Newey-West long-run variance estimate
+- s = standard error of γ̂
+- T = sample size
+
+**Newey-West estimator**:
+```
+λ² = σ̂² + 2 × Σⱼ₌₁ᵐ wⱼ × γ̂ⱼ
+```
+
+With Bartlett weights: wⱼ = 1 - j/(m+1)
+
+**Truncation lag (m)**:
+- lshort=TRUE: trunc(4*(n/100)^0.25)
+- lshort=FALSE: trunc(12*(n/100)^0.25)
+
+### Key Parameters
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `x` | Time series data | required |
+| `lshort` | Use short truncation lag formula | TRUE |
+
+### When to Use
+
+1. **Before time series modeling**: Check stationarity before ARIMA/VAR analysis
+2. **Cointegration analysis**: Test individual series for unit roots
+3. **Economic data**: GDP, prices, exchange rates often have unit roots
+4. **Preference over ADF**: When suspected heteroskedasticity in errors
+
+### Interpretation
+
+| p-value | Interpretation | Action |
+|---------|----------------|--------|
+| < 0.05 | Reject unit root | Series is stationary, proceed with levels |
+| ≥ 0.05 | Cannot reject unit root | Series may be non-stationary, consider differencing |
+
+### Example
+
+```rust
+use p2a_core::stats::pptest::pp_test;
+
+// Test for unit root in GDP series
+let gdp: Vec<f64> = load_gdp_data();
+let result = pp_test(&gdp, true)?;  // lshort = true
+
+println!("{}", result);
+
+if result.p_value < 0.05 {
+    println!("Series is stationary - can use levels");
+} else {
+    println!("Unit root present - consider differencing");
+    // Take first difference: Δy = y_t - y_{t-1}
+}
+```
+
+### MCP Tool
+
+```json
+{
+  "tool": "timeseries_pp_test",
+  "params": {
+    "dataset": "economic_data",
+    "column": "gdp_growth",
+    "lshort": true
+  }
+}
+```
+
+### Best Practices
+
+1. **Choose appropriate series length**: PP test requires sufficient data (n > 50 recommended)
+2. **Consider visual inspection**: Plot the series before testing
+3. **Try both lshort options**: Long truncation lag may be more robust with autocorrelated errors
+4. **Complement with other tests**: Use ADF test for comparison
+5. **Check for structural breaks**: PP test assumes no structural breaks
+
+### References
+
+- Phillips, P. C. B. & Perron, P. (1988). "Testing for a Unit Root in Time Series Regression." *Biometrika*, 75(2), 335-346.
+- Banerjee, A., Dolado, J. J., Galbraith, J. W., & Hendry, D. (1993). *Co-integration, Error Correction, and the Econometric Analysis of Non-Stationary Data*. Oxford University Press.
+- R Documentation: `stats::PP.test()`
+
+---
+
+## Holt-Winters Exponential Smoothing
+
+Holt-Winters exponential smoothing (triple exponential smoothing) is a forecasting method for time series data with trend and seasonality. It extends simple exponential smoothing with components for level, trend, and seasonal patterns.
+
+### Mathematical Formulation
+
+**Additive Seasonality:**
+- Level: a[t] = α(Y[t] - s[t-p]) + (1-α)(a[t-1] + b[t-1])
+- Trend: b[t] = β(a[t] - a[t-1]) + (1-β)b[t-1]
+- Seasonal: s[t] = γ(Y[t] - a[t]) + (1-γ)s[t-p]
+- Forecast: Ŷ[t+h] = a[t] + h·b[t] + s[t-p+1+(h-1) mod p]
+
+**Multiplicative Seasonality:**
+- Level: a[t] = α(Y[t] / s[t-p]) + (1-α)(a[t-1] + b[t-1])
+- Trend: b[t] = β(a[t] - a[t-1]) + (1-β)b[t-1]
+- Seasonal: s[t] = γ(Y[t] / a[t]) + (1-γ)s[t-p]
+- Forecast: Ŷ[t+h] = (a[t] + h·b[t]) × s[t-p+1+(h-1) mod p]
+
+Where:
+- α (alpha): Level smoothing parameter (0-1)
+- β (beta): Trend smoothing parameter (0-1)
+- γ (gamma): Seasonal smoothing parameter (0-1)
+- p: Seasonal period (e.g., 12 for monthly with yearly seasonality)
+
+### Rust API
+
+```rust
+use p2a_core::forecasting::{
+    holt_winters, holt_winters_forecast, run_holt_winters,
+    HoltWintersConfig, HoltWintersResult, SeasonalType,
+};
+
+// Method 1: Low-level function with full control
+let config = HoltWintersConfig {
+    alpha: None,  // Optimize automatically
+    beta: None,   // Optimize automatically
+    gamma: None,  // Optimize automatically
+    seasonal: SeasonalType::Multiplicative,
+    period: 12,
+    use_trend: true,
+    use_seasonal: true,
+    ..Default::default()
+};
+
+let result = holt_winters(&time_series_data, config)?;
+
+// Generate forecasts
+let forecasts = holt_winters_forecast(&result, 12)?;  // 12 periods ahead
+
+// Method 2: Dataset integration
+let result = run_holt_winters(
+    &dataset,
+    "sales",           // Column name
+    12,                // Seasonal period
+    SeasonalType::Multiplicative,
+    None,              // Alpha (optimize)
+    None,              // Beta (optimize)
+    None,              // Gamma (optimize)
+)?;
+```
+
+### MCP Tool
+
+```
+Tool: ts_holt_winters
+
+Parameters:
+- dataset: Name of loaded dataset
+- column: Column with time series values
+- period: Seasonal period (e.g., 12 for monthly, 4 for quarterly)
+- seasonal: "additive" or "multiplicative" (default: "additive")
+- alpha: Optional smoothing parameter for level (0-1)
+- beta: Optional smoothing parameter for trend (0-1)
+- gamma: Optional smoothing parameter for seasonal (0-1)
+- horizon: Optional number of periods to forecast ahead
+```
+
+### Output Interpretation
+
+| Component | Description |
+|-----------|-------------|
+| alpha | Optimized level smoothing parameter |
+| beta | Optimized trend smoothing parameter |
+| gamma | Optimized seasonal smoothing parameter |
+| SSE | Sum of squared errors |
+| level | Final level component values |
+| trend | Final trend component values |
+| seasonal | Seasonal coefficients (one per period) |
+| fitted | In-sample fitted values |
+| residuals | In-sample residuals |
+| forecast | Out-of-sample forecasts (if horizon specified) |
+
+### Choosing Seasonal Type
+
+| Pattern | Seasonal Type | Example |
+|---------|---------------|---------|
+| Constant seasonal variation | Additive | Sales always +$10K in December |
+| Proportional variation | Multiplicative | Sales always +15% in December |
+| All positive data | Either | |
+| Data with zeros/negatives | Additive only | |
+
+### Best Practices
+
+1. **Data requirements**: Need at least 2 full seasonal cycles (2×period observations)
+2. **Initialization**: Uses decomposition-based method for robust starting values
+3. **Parameter bounds**: All smoothing parameters constrained to (0.01, 0.99)
+4. **Multiplicative warning**: Only works with strictly positive data
+5. **Forecast horizon**: Accuracy degrades with longer horizons
+
+### Use Cases
+
+- **Demand forecasting**: Retail sales with seasonal patterns
+- **Capacity planning**: Resource allocation with periodic demand
+- **Budget forecasting**: Revenue/cost projections
+- **Inventory management**: Reorder point calculations
+
+### References
+
+- Holt, C. C. (1957). "Forecasting Trends and Seasonal by Exponentially Weighted Averages". ONR Memorandum 52/1957, Carnegie Institute of Technology.
+- Winters, P. R. (1960). "Forecasting Sales by Exponentially Weighted Moving Averages". *Management Science*, 6(3), 324-342.
+- Hyndman, R. J. & Athanasopoulos, G. (2021). *Forecasting: Principles and Practice* (3rd ed). OTexts. https://otexts.com/fpp3/
+- R Documentation: `stats::HoltWinters()`
 
 ---
 

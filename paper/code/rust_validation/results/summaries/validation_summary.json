@@ -1,0 +1,12 @@
+{
+  "validations": [
+    {
+      "method": "ols",
+      "dataset": "longley",
+      "status": "PASS"
+    }
+  ],
+  "passed": 1,
+  "failed": 0,
+  "total": 1
+}

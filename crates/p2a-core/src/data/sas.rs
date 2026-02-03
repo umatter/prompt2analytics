@@ -2,18 +2,16 @@
 //!
 //! Supports reading SAS data files (.sas7bdat) into Polars DataFrames.
 
-use polars::prelude::*;
 use polars::frame::column::Column;
+use polars::prelude::*;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 use thiserror::Error;
 
 /// Magic number for SAS7BDAT files (32 bytes)
 const SAS_MAGIC: [u8; 32] = [
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0xc2, 0xea, 0x81, 0x60,
-    0xb3, 0x14, 0x11, 0xcf, 0xbd, 0x92, 0x08, 0x00,
-    0x09, 0xc7, 0x31, 0x8c, 0x18, 0x1f, 0x10, 0x11,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xc2, 0xea, 0x81, 0x60,
+    0xb3, 0x14, 0x11, 0xcf, 0xbd, 0x92, 0x08, 0x00, 0x09, 0xc7, 0x31, 0x8c, 0x18, 0x1f, 0x10, 0x11,
 ];
 
 /// Subheader signatures
@@ -85,7 +83,9 @@ impl<R: Read + Seek> SasReader<R> {
         let mut magic = [0u8; 32];
         reader.read_exact(&mut magic)?;
         if magic != SAS_MAGIC {
-            return Err(SasError::InvalidFormat("Invalid SAS7BDAT magic number".into()));
+            return Err(SasError::InvalidFormat(
+                "Invalid SAS7BDAT magic number".into(),
+            ));
         }
 
         // Read alignment and platform info
@@ -160,7 +160,8 @@ impl<R: Read + Seek> SasReader<R> {
 
             // Read page type
             let page_type_offset = if self.is_64bit { 32 } else { 16 };
-            self.reader.seek(SeekFrom::Start((page_offset + page_type_offset) as u64))?;
+            self.reader
+                .seek(SeekFrom::Start((page_offset + page_type_offset) as u64))?;
             let page_type = Self::read_i16(&mut self.reader, self.byte_order)?;
 
             // Only process metadata pages (0) and mixed pages (512)
@@ -170,7 +171,8 @@ impl<R: Read + Seek> SasReader<R> {
 
             // Read subheader count
             let sh_count_offset = if self.is_64bit { 34 } else { 18 };
-            self.reader.seek(SeekFrom::Start((page_offset + sh_count_offset) as u64))?;
+            self.reader
+                .seek(SeekFrom::Start((page_offset + sh_count_offset) as u64))?;
             let subheader_count = Self::read_i16(&mut self.reader, self.byte_order)? as usize;
 
             // Process subheaders
@@ -205,7 +207,8 @@ impl<R: Read + Seek> SasReader<R> {
                 if signature == ROW_SIZE_SIGNATURE {
                     // Row size subheader
                     let row_len_offset = if self.is_64bit { 40 } else { 20 };
-                    self.reader.seek(SeekFrom::Start((sh_abs_offset + row_len_offset) as u64))?;
+                    self.reader
+                        .seek(SeekFrom::Start((sh_abs_offset + row_len_offset) as u64))?;
                     self.row_length = if self.is_64bit {
                         Self::read_i64(&mut self.reader, self.byte_order)? as usize
                     } else {
@@ -213,7 +216,8 @@ impl<R: Read + Seek> SasReader<R> {
                     };
 
                     let row_count_offset = if self.is_64bit { 48 } else { 24 };
-                    self.reader.seek(SeekFrom::Start((sh_abs_offset + row_count_offset) as u64))?;
+                    self.reader
+                        .seek(SeekFrom::Start((sh_abs_offset + row_count_offset) as u64))?;
                     self.row_count = if self.is_64bit {
                         Self::read_i64(&mut self.reader, self.byte_order)? as usize
                     } else {
@@ -233,7 +237,10 @@ impl<R: Read + Seek> SasReader<R> {
 
         // Combine names and attributes
         for (i, (offset, length, col_type)) in col_attrs.iter().enumerate() {
-            let name = col_names.get(i).cloned().unwrap_or_else(|| format!("col_{}", i));
+            let name = col_names
+                .get(i)
+                .cloned()
+                .unwrap_or_else(|| format!("col_{}", i));
             self.columns.push(ColumnInfo {
                 name,
                 col_type: *col_type,
@@ -246,7 +253,12 @@ impl<R: Read + Seek> SasReader<R> {
     }
 
     /// Parse column names from subheader.
-    fn parse_column_names(&mut self, sh_offset: usize, sh_length: usize, names: &mut Vec<String>) -> Result<(), SasError> {
+    fn parse_column_names(
+        &mut self,
+        sh_offset: usize,
+        sh_length: usize,
+        names: &mut Vec<String>,
+    ) -> Result<(), SasError> {
         let int_size = if self.is_64bit { 8 } else { 4 };
         let base_offset = sh_offset + 8 + int_size * 2;
 
@@ -277,7 +289,12 @@ impl<R: Read + Seek> SasReader<R> {
     }
 
     /// Parse column attributes from subheader.
-    fn parse_column_attributes(&mut self, sh_offset: usize, sh_length: usize, attrs: &mut Vec<(usize, usize, ColumnType)>) -> Result<(), SasError> {
+    fn parse_column_attributes(
+        &mut self,
+        sh_offset: usize,
+        sh_length: usize,
+        attrs: &mut Vec<(usize, usize, ColumnType)>,
+    ) -> Result<(), SasError> {
         let _int_size = if self.is_64bit { 8 } else { 4 };
         let base_offset = sh_offset + if self.is_64bit { 16 } else { 12 };
 
@@ -325,7 +342,8 @@ impl<R: Read + Seek> SasReader<R> {
         }
 
         // Clone column info to avoid borrow checker issues
-        let col_info: Vec<(String, ColumnType, usize, usize)> = self.columns
+        let col_info: Vec<(String, ColumnType, usize, usize)> = self
+            .columns
             .iter()
             .map(|c| (c.name.clone(), c.col_type, c.offset, c.length))
             .collect();
@@ -355,7 +373,8 @@ impl<R: Read + Seek> SasReader<R> {
 
             // Read page type
             let page_type_offset = if self.is_64bit { 32 } else { 16 };
-            self.reader.seek(SeekFrom::Start((page_offset + page_type_offset) as u64))?;
+            self.reader
+                .seek(SeekFrom::Start((page_offset + page_type_offset) as u64))?;
             let page_type = Self::read_i16(&mut self.reader, self.byte_order)?;
 
             // Data pages (256) or mixed pages (512)
@@ -369,7 +388,8 @@ impl<R: Read + Seek> SasReader<R> {
             } else {
                 // For mixed pages, skip subheader pointers
                 let sh_count_offset = if self.is_64bit { 34 } else { 18 };
-                self.reader.seek(SeekFrom::Start((page_offset + sh_count_offset) as u64))?;
+                self.reader
+                    .seek(SeekFrom::Start((page_offset + sh_count_offset) as u64))?;
                 let sh_count = Self::read_i16(&mut self.reader, self.byte_order)? as usize;
                 let subheader_ptr_size = if self.is_64bit { 24 } else { 12 };
                 page_offset + page_header_size + sh_count * subheader_ptr_size
@@ -377,18 +397,27 @@ impl<R: Read + Seek> SasReader<R> {
 
             // Read block count for data pages
             let block_count_offset = if self.is_64bit { 36 } else { 20 };
-            self.reader.seek(SeekFrom::Start((page_offset + block_count_offset) as u64))?;
+            self.reader
+                .seek(SeekFrom::Start((page_offset + block_count_offset) as u64))?;
             let block_count = Self::read_i16(&mut self.reader, self.byte_order)? as usize;
 
             // Read rows
             for row_idx in 0..block_count {
-                if numeric_cols.iter().filter(|c| !c.is_empty()).map(|c| c.len()).next().unwrap_or(0) >= self.row_count {
+                if numeric_cols
+                    .iter()
+                    .filter(|c| !c.is_empty())
+                    .map(|c| c.len())
+                    .next()
+                    .unwrap_or(0)
+                    >= self.row_count
+                {
                     break;
                 }
 
                 let row_offset = data_start + row_idx * self.row_length;
 
-                for (col_idx, (_, col_type, col_offset, col_length)) in col_info.iter().enumerate() {
+                for (col_idx, (_, col_type, col_offset, col_length)) in col_info.iter().enumerate()
+                {
                     let value_offset = row_offset + col_offset;
                     self.reader.seek(SeekFrom::Start(value_offset as u64))?;
 
@@ -456,7 +485,11 @@ impl<R: Read + Seek> SasReader<R> {
         self.reader.read_exact(&mut buf)?;
 
         // Trim trailing spaces and nulls
-        let end = buf.iter().rposition(|&b| b != 0 && b != 0x20).map(|i| i + 1).unwrap_or(0);
+        let end = buf
+            .iter()
+            .rposition(|&b| b != 0 && b != 0x20)
+            .map(|i| i + 1)
+            .unwrap_or(0);
 
         if end == 0 {
             Ok(None)
@@ -558,9 +591,9 @@ mod tests {
     /// Create a minimal valid SAS7BDAT file (32-bit, little-endian).
     /// This is a highly simplified structure for testing basic parsing.
     fn create_minimal_sas_file() -> Vec<u8> {
-        let header_length: usize = 8192;  // Standard SAS header
-        let page_size: usize = 4096;      // Single page size
-        let page_count: usize = 2;        // Metadata + data page
+        let header_length: usize = 8192; // Standard SAS header
+        let page_size: usize = 4096; // Single page size
+        let page_count: usize = 2; // Metadata + data page
 
         let mut buf = vec![0u8; header_length + page_size * page_count];
 
@@ -578,19 +611,22 @@ mod tests {
         buf[37] = 0x01;
 
         // Platform (unused, but let's set it)
-        buf[39] = b'1';  // Unix
+        buf[39] = b'1'; // Unix
 
         // Header length at offset 196 (32-bit, no alignment adjustment)
         let header_len_offset = 196;
-        buf[header_len_offset..header_len_offset + 4].copy_from_slice(&(header_length as i32).to_le_bytes());
+        buf[header_len_offset..header_len_offset + 4]
+            .copy_from_slice(&(header_length as i32).to_le_bytes());
 
         // Page size at offset 200
         let page_size_offset = 200;
-        buf[page_size_offset..page_size_offset + 4].copy_from_slice(&(page_size as i32).to_le_bytes());
+        buf[page_size_offset..page_size_offset + 4]
+            .copy_from_slice(&(page_size as i32).to_le_bytes());
 
         // Page count at offset 204 (32-bit format)
         let page_count_offset = 204;
-        buf[page_count_offset..page_count_offset + 4].copy_from_slice(&(page_count as i32).to_le_bytes());
+        buf[page_count_offset..page_count_offset + 4]
+            .copy_from_slice(&(page_count as i32).to_le_bytes());
 
         // === First page (metadata page) at offset header_length ===
         let page0_offset = header_length;
@@ -599,7 +635,7 @@ mod tests {
         buf[page0_offset + 16..page0_offset + 18].copy_from_slice(&0i16.to_le_bytes());
 
         // Subheader count at offset 18
-        buf[page0_offset + 18..page0_offset + 20].copy_from_slice(&4i16.to_le_bytes());  // 4 subheaders
+        buf[page0_offset + 18..page0_offset + 20].copy_from_slice(&4i16.to_le_bytes()); // 4 subheaders
 
         // Page header size for 32-bit is 24 bytes
         // Subheader pointer size for 32-bit is 12 bytes
@@ -609,7 +645,7 @@ mod tests {
 
         // Subheader 1: Row size subheader
         // Offset within page (relative to page start)
-        let sh1_offset: i32 = 72;  // After 4 subheader pointers (24 + 4*12 = 72)
+        let sh1_offset: i32 = 72; // After 4 subheader pointers (24 + 4*12 = 72)
         buf[sh_ptr_base..sh_ptr_base + 4].copy_from_slice(&sh1_offset.to_le_bytes());
         // Length
         buf[sh_ptr_base + 4..sh_ptr_base + 8].copy_from_slice(&32i32.to_le_bytes());
@@ -633,10 +669,10 @@ mod tests {
         let row_sh_base = page0_offset + sh1_offset as usize;
         buf[row_sh_base..row_sh_base + 4].copy_from_slice(&ROW_SIZE_SIGNATURE);
         // Row length at offset 20 (32-bit)
-        let row_length: i32 = 16;  // 2 doubles = 16 bytes per row
+        let row_length: i32 = 16; // 2 doubles = 16 bytes per row
         buf[row_sh_base + 20..row_sh_base + 24].copy_from_slice(&row_length.to_le_bytes());
         // Row count at offset 24
-        let row_count: i32 = 3;  // 3 rows
+        let row_count: i32 = 3; // 3 rows
         buf[row_sh_base + 24..row_sh_base + 28].copy_from_slice(&row_count.to_le_bytes());
 
         // === Column size subheader (F6F6F6F6) ===
@@ -661,15 +697,15 @@ mod tests {
 
         // Column 1: offset=0, width=8, type=1 (numeric)
         let attr1_base = attr_sh_base + 12;
-        buf[attr1_base..attr1_base + 4].copy_from_slice(&0i32.to_le_bytes());  // offset
-        buf[attr1_base + 4..attr1_base + 8].copy_from_slice(&8i32.to_le_bytes());  // width
-        buf[attr1_base + 8] = 1;  // type = numeric
+        buf[attr1_base..attr1_base + 4].copy_from_slice(&0i32.to_le_bytes()); // offset
+        buf[attr1_base + 4..attr1_base + 8].copy_from_slice(&8i32.to_le_bytes()); // width
+        buf[attr1_base + 8] = 1; // type = numeric
 
         // Column 2: offset=8, width=8, type=1 (numeric)
         let attr2_base = attr_sh_base + 24;
-        buf[attr2_base..attr2_base + 4].copy_from_slice(&8i32.to_le_bytes());  // offset
-        buf[attr2_base + 4..attr2_base + 8].copy_from_slice(&8i32.to_le_bytes());  // width
-        buf[attr2_base + 8] = 1;  // type = numeric
+        buf[attr2_base..attr2_base + 4].copy_from_slice(&8i32.to_le_bytes()); // offset
+        buf[attr2_base + 4..attr2_base + 8].copy_from_slice(&8i32.to_le_bytes()); // width
+        buf[attr2_base + 8] = 1; // type = numeric
 
         // === Second page (data page) at offset header_length + page_size ===
         let page1_offset = header_length + page_size;
@@ -705,7 +741,7 @@ mod tests {
         let reader = SasReader::new(cursor).expect("Failed to create SAS reader");
 
         // Verify header parsing
-        assert_eq!(reader.is_64bit, false);
+        assert!(!reader.is_64bit);
         assert_eq!(reader.byte_order, ByteOrder::LittleEndian);
         assert_eq!(reader.header_length, 8192);
         assert_eq!(reader.page_size, 4096);
@@ -720,7 +756,9 @@ mod tests {
         let sas_bytes = create_minimal_sas_file();
         let cursor = Cursor::new(sas_bytes);
         let reader = SasReader::new(cursor).expect("Failed to create SAS reader");
-        let df = reader.read_to_dataframe().expect("Failed to read dataframe");
+        let df = reader
+            .read_to_dataframe()
+            .expect("Failed to read dataframe");
 
         assert_eq!(df.height(), 3);
         assert_eq!(df.width(), 2);

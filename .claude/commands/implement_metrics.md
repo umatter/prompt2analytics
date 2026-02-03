@@ -245,56 +245,33 @@ The user has provided: $ARGUMENTS
 
 ---
 
-### Phase 6: Benchmarking & Performance Comparison (MANDATORY)
+### Phase 6: Prepare Validation Artifacts (MANDATORY)
 
-**Purpose**: Establish performance baselines and compare against R implementations.
+**Purpose**: Prepare the artifacts needed for validation, then delegate to `/validate-method`.
 
-#### 6a. Create Validation Document
+#### 6a. Add Method to Registry
 
-1. Create `validation/[category]/[method].md` following the template structure
-2. Include:
-   - **Reference implementations table**: R/Python/Julia packages used for comparison
-   - **At least 2 test cases**:
-     - Synthetic data with known DGP (verifies coefficient recovery)
-     - Real dataset if available (verifies practical accuracy)
-   - **R/Python code** for reproduction
-   - **Results comparison table** with tolerances
-   - **Link to Rust test functions**
-   - **Performance comparison section** (see 6c below)
+**Add the new method to the validation method registry** at `.claude/tooling/validation/method_registry.json`:
 
-**Template** (see existing files like `validation/econometrics/hdfe.md`):
-```markdown
-# Validation: [Method Name]
-
-## Method Overview
-[Brief description, key parameters]
-
-## Reference Implementations
-| Package | Language | Function | Version Tested |
-|---------|----------|----------|----------------|
-
-## Test Cases
-### Test 1: [Dataset] - [Scenario]
-**R Code**: [reproducible code]
-**Results Comparison**: [table with tolerances]
-**Rust Test**: `crates/p2a-core/src/.../tests::test_validate_...`
-
-## Numerical Precision Summary
-## Known Differences
-
-## Performance Comparison
-| Dataset Size | Rust (p2a) | R (package) | Speedup |
-|--------------|------------|-------------|---------|
-| n=1,000      |            |             |         |
-| n=10,000     |            |             |         |
-| n=100,000    |            |             |         |
-
-## References
+```json
+"[method_id]": {
+  "display_name": "[Method Display Name]",
+  "r_name": "[R function name]",
+  "r_packages": ["package1", "package2"],
+  "category": "[category]",
+  "rust_module": "crates/p2a-core/src/[path]/[file].rs",
+  "rust_function": "[function_name]",
+  "r_benchmark_script": "performance/comparisons/r_comparison/benchmark_[method].R",
+  "criterion_benchmark": "crates/p2a-core/benches/[category]_benchmarks.rs",
+  "criterion_group": "[BenchmarkGroupName]",
+  "validation_doc": "validation/[category]/[method].md",
+  "test_patterns": ["test_validate_[method]"]
+}
 ```
 
-#### 6b. Add Criterion Benchmark (MANDATORY)
+#### 6b. Ensure Criterion Benchmark Exists
 
-**Every new method MUST have performance benchmarks.**
+**Check if Criterion benchmark exists** for the method. If not, add it:
 
 1. **Add Rust benchmark** to `crates/p2a-core/benches/[category]_benchmarks.rs`:
    ```rust
@@ -314,64 +291,156 @@ The user has provided: $ARGUMENTS
        }
        group.finish();
    }
-
-   criterion_group!(benches, [method]_benchmark);
    ```
 
-2. Run: `cargo bench -p p2a-core -- [method_name]`
-3. Save baseline results to `performance/results/`
+2. Register the benchmark in `criterion_group!` macro.
 
-#### 6c. R Performance Comparison (MANDATORY)
+#### 6c. Ensure R Benchmark Script Exists
 
-**Every method MUST include a performance comparison against R.**
+**Check if R benchmark script exists.** If not, the `/validate-method` command will offer to generate one from the template at `.claude/tooling/validation/templates/r_benchmark.R.template`.
 
-1. **Create R benchmark script** in `performance/benchmarks/[method]_r_benchmark.R`:
-   ```r
-   # [Method Name] R Benchmark
-   library(microbenchmark)
-   library(package_name)
+Alternatively, create it manually in `performance/comparisons/r_comparison/benchmark_[method].R`.
 
-   # Benchmark at different dataset sizes
-   sizes <- c(100, 1000, 10000, 100000)
+#### 6d. Create Basic Validation Document Structure
 
-   results <- data.frame(
-     size = integer(),
-     time_ms = numeric()
-   )
+**Create** `validation/[category]/[method].md` with the basic structure:
 
-   for (n in sizes) {
-     set.seed(42)
-     # Generate data of size n...
+```markdown
+# Validation: [Method Name]
 
-     timing <- microbenchmark(
-       function_name(...),
-       times = 10
-     )
+## Method Overview
+[Brief description, key parameters]
 
-     results <- rbind(results, data.frame(
-       size = n,
-       time_ms = median(timing$time) / 1e6  # Convert to ms
-     ))
-   }
+## Reference Implementations
+| Package | Language | Function | Version Tested |
+|---------|----------|----------|----------------|
+| [pkg]   | R        | [func]() | [version]      |
 
-   print(results)
-   write.csv(results, "performance/results/[method]_r_times.csv")
+## Test Cases
+### Test 1: Synthetic Data
+**R Code**: [to be filled by /validate-method]
+**Results Comparison**: [to be filled by /validate-method]
+**Rust Test**: `test_validate_[method]`
+
+## Numerical Precision Summary
+[To be filled by /validate-method]
+
+## Performance Comparison
+[To be filled by /validate-method]
+
+## References
+[Citations from Phase 1]
+```
+
+---
+
+### Phase 7: Run Validation & Benchmarking via /validate-method (MANDATORY)
+
+**This phase delegates to the `/validate-method` command for unified validation and benchmarking.**
+
+#### 7a. Invoke the Validation Command
+
+**Run the `/validate-method` command** for the newly implemented method:
+
+```
+/validate-method [method_id]
+```
+
+This command will automatically:
+
+1. **Discovery**: Look up the method in the registry, verify all artifacts exist
+2. **Validation**: Run Rust tests (`cargo test -p p2a-core -- test_validate_[method]`)
+3. **Benchmarks**: Run Criterion benchmarks and R benchmarks
+4. **Comparison**: Calculate speedup factors and evaluate against requirements
+5. **Report**: Generate validation report and update documentation
+
+#### 7b. Review Validation Results
+
+The `/validate-method` command will output:
+
+```
+=== Validation Results: [Method Name] ===
+
+Test: [Test Case 1]
+  Coefficient β₁: R=[value], Rust=[value], Diff=[diff] [PASS/FAIL]
+  ...
+
+Overall: X/Y checks passed
+
+=== Performance Results: [Method Name] ===
+
+Sample Size | R (us)    | Rust (us) | Speedup | Required | Status
+------------|-----------|-----------|---------|----------|--------
+n=1,000     | [time]    | [time]    | [X]x    | 1.5x     | [PASS/FAIL]
+n=10,000    | [time]    | [time]    | [X]x    | 2.0x     | [PASS/FAIL]
+n=100,000   | [time]    | [time]    | [X]x    | 3.0x     | [PASS/FAIL]
+```
+
+#### 7c. Handle Failures
+
+**If validation fails:**
+- Fix the implementation based on the error messages
+- Re-run `/validate-method [method_id] --mode validate`
+
+**If performance requirements are not met (Rust slower than R):**
+
+1. **Identify bottlenecks** — Common issues:
+   - Unnecessary allocations (use `Vec::with_capacity`, reuse buffers)
+   - Redundant matrix operations (cache intermediate results)
+   - Using `safe_inverse` when Cholesky solve is faster
+   - Repeated column extractions from DataFrame
+
+2. **Apply optimizations** — Consider:
+   - Using `faer` directly for linear algebra
+   - Pre-computing reusable matrices (X'X, X'y)
+   - Using `rayon` for data-parallel operations
+
+3. **Re-benchmark** — Run validation again:
+   ```
+   /validate-method [method_id] --mode benchmark
    ```
 
-2. **Run R benchmark**: `Rscript performance/benchmarks/[method]_r_benchmark.R`
+4. **Document optimization history** in the validation doc if multiple iterations needed.
 
-3. **Document comparison** in validation file:
-   - Include table with Rust vs R execution times
-   - Calculate speedup factor (R_time / Rust_time)
-   - Note any memory usage differences if significant
+#### 7d. Performance Requirements
 
-4. **Expected outcome**: Rust implementation should typically be 5-50x faster than R for compute-intensive methods
+The `/validate-method` command enforces these speedup requirements:
 
-#### 6d. Update Indexes
+| Sample Size | Minimum Speedup | Status |
+|-------------|-----------------|--------|
+| n=1,000     | 1.5x faster     | Required |
+| n=10,000    | 2.0x faster     | Required |
+| n=100,000   | 3.0x faster     | Expected |
 
-1. Add entry to `validation/README.md` method index (mark as "Complete")
-2. Add entry to `validation/reference_implementations.md` if new package used
-3. Update `performance/reports/[category]_performance.md` with benchmark results
+**Exit criteria:**
+- No dataset size shows Rust SLOWER than R
+- At least 2 of 4 sizes show >= 2x speedup
+- n=10,000 shows >= 1.5x speedup
+
+#### 7e. Update Indexes
+
+After successful validation:
+
+1. The `/validate-method` command saves a report to `validation/reports/[method]_[date].md`
+2. Manually update `validation/README.md` index (mark as "Complete")
+3. Update `validation/reference_implementations.md` if new R package used
+4. Update implementation queue status to "completed"
+
+#### 7f. Final Verification
+
+Confirm the `/validate-method` command completed successfully:
+
+```
+✅ IMPLEMENTATION COMPLETE
+
+Method: [Method Name]
+- Validation: All tests passed
+- Performance: Meets speedup requirements
+- Report: validation/reports/[method]_[date].md
+- Registry: Updated with last_validated timestamp
+```
+
+**IMPORTANT**: Implementation is NOT complete until `/validate-method` reports success
 
 ---
 
@@ -391,24 +460,23 @@ After completing all phases, verify ALL items are complete:
 - [ ] Results match R within documented tolerances
 - [ ] Any discrepancies documented with explanation
 
-### Validation Document (Phase 6a)
-- [ ] `validation/[category]/[method].md` created with complete template
-- [ ] At least 2 test cases documented (synthetic + real if available)
-- [ ] R/Python reproduction code included
-- [ ] Results comparison table with explicit tolerances
-- [ ] Performance comparison table included
-
-### Benchmarks (Phase 6b-c)
+### Validation Artifacts (Phase 6)
+- [ ] Method added to `.claude/tooling/validation/method_registry.json`
 - [ ] Criterion benchmark added to `crates/p2a-core/benches/`
-- [ ] R benchmark script created in `performance/benchmarks/`
-- [ ] R benchmark executed and times recorded
-- [ ] Speedup factor calculated and documented
-- [ ] Results saved to `performance/results/`
+- [ ] R benchmark script exists (or will be generated by `/validate-method`)
+- [ ] Basic validation document structure created
 
-### Index Updates (Phase 6d)
+### /validate-method Execution (Phase 7) - MANDATORY
+- [ ] `/validate-method [method_id]` executed successfully
+- [ ] All validation tests passed
+- [ ] All performance requirements met (see speedup table)
+- [ ] Validation report saved to `validation/reports/`
+- [ ] If optimizations needed: re-ran `/validate-method --mode benchmark`
+
+### Index Updates (Phase 7e)
 - [ ] `validation/README.md` index updated (marked "Complete")
 - [ ] `validation/reference_implementations.md` updated if new package
-- [ ] `performance/reports/[category]_performance.md` updated with benchmark results
+- [ ] Implementation queue status updated to "completed"
 
 ---
 
@@ -459,6 +527,8 @@ After completing all phases, verify ALL items are complete:
 - **R Validation**: Every method MUST be validated against R with matching results
 - **Benchmarks**: Every method MUST have Criterion benchmarks
 - **R Comparison**: Every method MUST include performance comparison vs R
+- **Performance**: Rust MUST be faster than R — if not, optimize until it is
+- **/validate-method**: Every implementation MUST end with running `/validate-method [method_id]`
 
 ### Implementation Standards
 - **Check first**: ALWAYS run Phase 0 before any implementation work
@@ -482,12 +552,21 @@ For EVERY new econometric method, the following artifacts MUST be delivered:
 | 3a | MCP tool | `crates/p2a-mcp/src/server.rs` |
 | 4b | R validation script | `validation/scripts/[method]_validation.R` |
 | 4b | Rust validation tests | `test_validate_*` in implementation file |
-| 6a | Validation document | `validation/[category]/[method].md` |
+| 6a | Method registry entry | `.claude/tooling/validation/method_registry.json` |
 | 6b | Criterion benchmark | `crates/p2a-core/benches/` |
-| 6c | R benchmark script | `performance/benchmarks/[method]_r_benchmark.R` |
+| 6c | R benchmark script | `performance/comparisons/r_comparison/benchmark_[method].R` |
+| 6d | Validation document | `validation/[category]/[method].md` |
+| 7 | **/validate-method execution** | Runs all validation and benchmarks automatically |
+| 7 | **Validation report** | `validation/reports/[method]_[date].md` |
 
-**Implementation is NOT complete until all items in the checklist are verified.**
+**Implementation is NOT complete until:**
+1. **`/validate-method [method_id]` executes successfully**
+2. **All validation tests pass** (numerical correctness verified against R)
+3. **Performance requirements met** (Rust faster than R at required speedups)
+4. **If initially slower**, optimizations applied and `/validate-method` re-run
 
 ---
 
 **BEGIN by running Phase 0: Check for existing implementations.**
+
+**END by running Phase 7: Execute `/validate-method [method_id]` to validate and benchmark.**

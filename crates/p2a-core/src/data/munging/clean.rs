@@ -39,11 +39,7 @@ pub enum FillStrategy {
 /// // Drop rows with null in specific columns
 /// let clean = drop_na(&dataset, Some(&["age", "income"]), "any")?;
 /// ```
-pub fn drop_na(
-    dataset: &Dataset,
-    columns: Option<&[&str]>,
-    how: &str,
-) -> MungeResult<Dataset> {
+pub fn drop_na(dataset: &Dataset, columns: Option<&[&str]>, how: &str) -> MungeResult<Dataset> {
     let df = dataset.df();
 
     // Validate columns if specified
@@ -57,7 +53,11 @@ pub fn drop_na(
 
     let cols_to_check: Vec<&str> = match columns {
         Some(cols) => cols.to_vec(),
-        None => df.get_column_names().into_iter().map(|s| s.as_str()).collect(),
+        None => df
+            .get_column_names()
+            .into_iter()
+            .map(|s| s.as_str())
+            .collect(),
     };
 
     // Build null mask
@@ -76,7 +76,7 @@ pub fn drop_na(
                     return Err(MungeError::InvalidExpression(format!(
                         "Invalid 'how' parameter: {}. Use 'any' or 'all'",
                         how
-                    )))
+                    )));
                 }
             },
         });
@@ -123,7 +123,11 @@ pub fn fill_na(
             }
             cols.iter().map(|s| s.to_string()).collect()
         }
-        None => df.get_column_names().iter().map(|s| s.to_string()).collect(),
+        None => df
+            .get_column_names()
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
     };
 
     let mut result_df = df.clone();
@@ -202,7 +206,10 @@ fn fill_with_constant(col: &Column, value: &str) -> MungeResult<Column> {
             let ca = col.str()?;
             let filled: StringChunked = ca
                 .into_iter()
-                .map(|opt| opt.map(|s| s.to_string()).unwrap_or_else(|| value.to_string()))
+                .map(|opt| {
+                    opt.map(|s| s.to_string())
+                        .unwrap_or_else(|| value.to_string())
+                })
                 .collect();
             Ok(filled.with_name(name).into_column())
         }
@@ -297,11 +304,7 @@ fn fill_with_zero(col: &Column) -> MungeResult<Column> {
 /// // Remove duplicates based on id column, keep first
 /// let deduped = deduplicate(&dataset, Some(&["id"]), "first")?;
 /// ```
-pub fn deduplicate(
-    dataset: &Dataset,
-    subset: Option<&[&str]>,
-    keep: &str,
-) -> MungeResult<Dataset> {
+pub fn deduplicate(dataset: &Dataset, subset: Option<&[&str]>, keep: &str) -> MungeResult<Dataset> {
     let df = dataset.df();
 
     // Validate columns if specified
@@ -322,11 +325,12 @@ pub fn deduplicate(
             return Err(MungeError::InvalidExpression(format!(
                 "Invalid 'keep' parameter: {}. Use 'first', 'last', 'none', or 'any'",
                 keep
-            )))
+            )));
         }
     };
 
-    let subset_cols: Option<Vec<String>> = subset.map(|cols| cols.iter().map(|&s| s.to_string()).collect());
+    let subset_cols: Option<Vec<String>> =
+        subset.map(|cols| cols.iter().map(|&s| s.to_string()).collect());
     let unique_df = df.unique::<String, &str>(subset_cols.as_deref(), keep_strategy, None)?;
 
     Ok(Dataset::new(unique_df))
@@ -509,7 +513,15 @@ pub fn replace(
             let ca = col.f64()?;
             let replaced: Float64Chunked = ca
                 .into_iter()
-                .map(|opt| opt.map(|v| if (v - old_val).abs() < f64::EPSILON { new_val } else { v }))
+                .map(|opt| {
+                    opt.map(|v| {
+                        if (v - old_val).abs() < f64::EPSILON {
+                            new_val
+                        } else {
+                            v
+                        }
+                    })
+                })
                 .collect();
             replaced.with_name(name).into_column()
         }
@@ -733,9 +745,8 @@ pub fn regex_extract(
         .into_iter()
         .map(|opt| {
             opt.and_then(|s| {
-                re.captures(s).and_then(|caps| {
-                    caps.get(group).map(|m| m.as_str().to_string())
-                })
+                re.captures(s)
+                    .and_then(|caps| caps.get(group).map(|m| m.as_str().to_string()))
             })
         })
         .collect();
@@ -903,7 +914,8 @@ pub fn str_split(
         .map(|opt| {
             let parts: Vec<String> = match opt {
                 Some(s) => {
-                    let mut parts: Vec<String> = re.splitn(s, n_splits + 1).map(|p| p.to_string()).collect();
+                    let mut parts: Vec<String> =
+                        re.splitn(s, n_splits + 1).map(|p| p.to_string()).collect();
                     if max_splits.is_some() && parts.len() > n_splits + 1 {
                         parts.truncate(n_splits + 1);
                     }
@@ -1027,7 +1039,7 @@ pub fn str_pad(
                 if len >= width {
                     s.to_string()
                 } else {
-                    let padding: String = std::iter::repeat(pad).take(width - len).collect();
+                    let padding: String = std::iter::repeat_n(pad, width - len).collect();
                     match pad_side {
                         "left" | "start" => format!("{}{}", padding, s),
                         _ => format!("{}{}", s, padding),
@@ -1099,11 +1111,7 @@ pub fn str_substring(
 /// * `dataset` - Source dataset
 /// * `column` - Column to measure
 /// * `new_column` - Name for the length column
-pub fn str_length(
-    dataset: &Dataset,
-    column: &str,
-    new_column: &str,
-) -> MungeResult<Dataset> {
+pub fn str_length(dataset: &Dataset, column: &str, new_column: &str) -> MungeResult<Dataset> {
     let df = dataset.df();
 
     let col = df.column(column)?;
@@ -1192,7 +1200,14 @@ mod tests {
         let ds = test_dataset_with_nulls();
         let filled = fill_na(&ds, Some(&["name"]), FillStrategy::Forward).unwrap();
         // Row 2's name should be filled with "Alice" (forward fill)
-        let names: Vec<Option<&str>> = filled.df().column("name").unwrap().str().unwrap().into_iter().collect();
+        let names: Vec<Option<&str>> = filled
+            .df()
+            .column("name")
+            .unwrap()
+            .str()
+            .unwrap()
+            .into_iter()
+            .collect();
         assert_eq!(names[1], Some("Alice"));
     }
 
@@ -1218,7 +1233,10 @@ mod tests {
         .unwrap();
         let ds = Dataset::new(df);
         let casted = cast(&ds, "value", "int").unwrap();
-        assert_eq!(casted.df().column("value").unwrap().dtype(), &DataType::Int64);
+        assert_eq!(
+            casted.df().column("value").unwrap().dtype(),
+            &DataType::Int64
+        );
     }
 
     #[test]

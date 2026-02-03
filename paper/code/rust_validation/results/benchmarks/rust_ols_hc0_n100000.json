@@ -1,0 +1,10 @@
+{
+  "method": "ols_hc0",
+  "n": 100000,
+  "iterations": 20,
+  "timing": {
+    "median_us": 26003,
+    "min_us": 18071,
+    "max_us": 32541
+  }
+}

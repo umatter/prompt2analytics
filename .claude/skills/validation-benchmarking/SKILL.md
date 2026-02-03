@@ -235,35 +235,65 @@ write.csv(
 
 After completing validation and benchmarking, verify:
 
+### Required (All items mandatory)
 - [ ] `validation/[category]/[method].md` created
 - [ ] At least 2 test cases documented (synthetic + real)
 - [ ] R/Python reproduction code included
 - [ ] Results comparison table with explicit tolerances
 - [ ] Rust `test_validate_*` tests pass
 - [ ] `validation/README.md` index updated
-- [ ] (Optional) Criterion benchmark added
-- [ ] (Optional) R comparison script created
-- [ ] (Optional) Performance report updated
+
+### Performance (All items mandatory for new methods)
+- [ ] Criterion benchmark added to `crates/p2a-core/benches/`
+- [ ] R benchmark script created in `performance/comparisons/r_comparison/`
+- [ ] **Rust benchmarks executed** (`cargo bench -p p2a-core -- [method]`)
+- [ ] **R benchmarks executed** (`Rscript benchmark_[method].R`)
+- [ ] Performance table in validation doc filled with **actual numbers**
+- [ ] Speedup factors calculated and documented
 
 ---
 
 ## Quick Commands
 
 ```bash
-# Run validation tests
+# Run validation tests for a specific method
+cargo test -p p2a-core -- test_validate_[method] --nocapture
+
+# Run all validation tests
 cargo test -p p2a-core -- test_validate --nocapture
+
+# Run Rust benchmarks for a specific method (MANDATORY)
+cargo bench -p p2a-core -- [method_name]
 
 # Run all benchmarks
 cargo bench -p p2a-core
 
-# Run specific method benchmark
-cargo bench -p p2a-core -- ols
-
 # View HTML benchmark report
 open target/criterion/report/index.html
 
-# Run R benchmarks
-Rscript performance/comparisons/r_comparison/benchmark_runner.R
+# Run R benchmarks for a specific method (MANDATORY)
+Rscript performance/comparisons/r_comparison/benchmark_[method].R
+
+# Fallback if microbenchmark not available - use system.time() in R
+```
+
+## Phase 7 Execution Template
+
+When implementing a new method, execute these commands in order:
+
+```bash
+# 1. Run Rust validation tests
+cargo test -p p2a-core -- test_validate_[method] --nocapture
+
+# 2. Run Rust performance benchmarks
+cargo bench -p p2a-core -- [method]
+
+# 3. Run R performance benchmarks
+Rscript performance/comparisons/r_comparison/benchmark_[method].R
+
+# 4. Update validation document with actual results
+# Edit: validation/[category]/[method].md
+# Fill in the Performance Comparison table with actual numbers
 ```
 
 ---

@@ -2,19 +2,41 @@
 //!
 //! Run with: `cargo bench -p p2a-core -- econometrics`
 
-use criterion::{criterion_group, criterion_main, Criterion, BenchmarkId};
-use p2a_core::{
-    Dataset, run_fixed_effects, run_hdfe, run_logit, run_probit,
-    run_ipw_treatment, run_doubly_robust, run_mediation_analysis,
-    run_synthetic_control, SynthConfig, PredictorSpec, VOptimization,
-    IpwConfig, DoublyRobustConfig, MediationConfig, Estimand, DRMethod,
-    // FEGLM
-    run_feglm, GlmFamily, FeglmConfig,
-    // Survival analysis
-    run_kaplan_meier, log_rank_test, run_cox_ph, run_aft, run_competing_risks,
-    CoxConfig, AftConfig, TiesMethod, AftDistribution,
-};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use p2a_core::regression::CovarianceType;
+use p2a_core::{
+    AftConfig,
+    AftDistribution,
+    CoxConfig,
+    DRMethod,
+    Dataset,
+    DoublyRobustConfig,
+    Estimand,
+    FeglmConfig,
+    GlmFamily,
+    IpwConfig,
+    MediationConfig,
+    PredictorSpec,
+    SynthConfig,
+    TiesMethod,
+    VOptimization,
+    log_rank_test,
+    run_aft,
+    run_competing_risks,
+    run_cox_ph,
+    run_doubly_robust,
+    // FEGLM
+    run_feglm,
+    run_fixed_effects,
+    run_hdfe,
+    run_ipw_treatment,
+    // Survival analysis
+    run_kaplan_meier,
+    run_logit,
+    run_mediation_analysis,
+    run_probit,
+    run_synthetic_control,
+};
 use polars::prelude::*;
 use rand::Rng;
 use rand::SeedableRng;
@@ -26,15 +48,19 @@ fn generate_panel_data(n_entities: usize, n_periods: usize, seed: u64) -> Datase
     let n = n_entities * n_periods;
 
     let entity: Vec<i64> = (1..=n_entities as i64)
-        .flat_map(|e| std::iter::repeat(e).take(n_periods))
+        .flat_map(|e| std::iter::repeat_n(e, n_periods))
         .collect();
 
     let time: Vec<i64> = (1..=n_entities)
         .flat_map(|_| 1..=n_periods as i64)
         .collect();
 
-    let x1: Vec<f64> = (0..n).map(|_| rng.gen_range(0.0..1.0) * 2.0 - 1.0).collect();
-    let x2: Vec<f64> = (0..n).map(|_| rng.gen_range(0.0..1.0) * 2.0 - 1.0).collect();
+    let x1: Vec<f64> = (0..n)
+        .map(|_| rng.gen_range(0.0..1.0) * 2.0 - 1.0)
+        .collect();
+    let x2: Vec<f64> = (0..n)
+        .map(|_| rng.gen_range(0.0..1.0) * 2.0 - 1.0)
+        .collect();
 
     // y = 1.0*x1 + 0.5*x2 + entity_effect + noise
     let y: Vec<f64> = (0..n)
@@ -50,7 +76,8 @@ fn generate_panel_data(n_entities: usize, n_periods: usize, seed: u64) -> Datase
         "x2" => x2,
         "entity" => entity,
         "time" => time,
-    }.expect("Failed to create DataFrame");
+    }
+    .expect("Failed to create DataFrame");
 
     Dataset::new(df)
 }
@@ -59,8 +86,12 @@ fn generate_panel_data(n_entities: usize, n_periods: usize, seed: u64) -> Datase
 fn generate_binary_data(n: usize, seed: u64) -> Dataset {
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
 
-    let x1: Vec<f64> = (0..n).map(|_| rng.gen_range(0.0..1.0) * 2.0 - 1.0).collect();
-    let x2: Vec<f64> = (0..n).map(|_| rng.gen_range(0.0..1.0) * 2.0 - 1.0).collect();
+    let x1: Vec<f64> = (0..n)
+        .map(|_| rng.gen_range(0.0..1.0) * 2.0 - 1.0)
+        .collect();
+    let x2: Vec<f64> = (0..n)
+        .map(|_| rng.gen_range(0.0..1.0) * 2.0 - 1.0)
+        .collect();
 
     // Probability via logit
     let y: Vec<i64> = (0..n)
@@ -75,7 +106,8 @@ fn generate_binary_data(n: usize, seed: u64) -> Dataset {
         "y" => y,
         "x1" => x1,
         "x2" => x2,
-    }.expect("Failed to create DataFrame");
+    }
+    .expect("Failed to create DataFrame");
 
     Dataset::new(df)
 }
@@ -86,7 +118,7 @@ fn generate_binary_panel_data(n_entities: usize, n_periods: usize, seed: u64) ->
     let n = n_entities * n_periods;
 
     let entity: Vec<i64> = (1..=n_entities as i64)
-        .flat_map(|e| std::iter::repeat(e).take(n_periods))
+        .flat_map(|e| std::iter::repeat_n(e, n_periods))
         .collect();
 
     let time: Vec<i64> = (1..=n_entities)
@@ -102,7 +134,11 @@ fn generate_binary_panel_data(n_entities: usize, n_periods: usize, seed: u64) ->
             let entity_effect = ((entity[i] % 5) as f64 - 2.0) * 0.5;
             let latent = 0.8 * x1[i] + 0.5 * x2[i] + entity_effect;
             let prob = 1.0 / (1.0 + (-latent).exp());
-            if rng.gen_range(0.0..1.0) < prob { 1.0 } else { 0.0 }
+            if rng.gen_range(0.0..1.0) < prob {
+                1.0
+            } else {
+                0.0
+            }
         })
         .collect();
 
@@ -112,7 +148,8 @@ fn generate_binary_panel_data(n_entities: usize, n_periods: usize, seed: u64) ->
         "x2" => x2,
         "entity" => entity,
         "time" => time,
-    }.expect("Failed to create DataFrame");
+    }
+    .expect("Failed to create DataFrame");
 
     Dataset::new(df)
 }
@@ -123,7 +160,7 @@ fn generate_count_panel_data(n_entities: usize, n_periods: usize, seed: u64) -> 
     let n = n_entities * n_periods;
 
     let entity: Vec<i64> = (1..=n_entities as i64)
-        .flat_map(|e| std::iter::repeat(e).take(n_periods))
+        .flat_map(|e| std::iter::repeat_n(e, n_periods))
         .collect();
 
     let time: Vec<i64> = (1..=n_entities)
@@ -158,7 +195,8 @@ fn generate_count_panel_data(n_entities: usize, n_periods: usize, seed: u64) -> 
         "x2" => x2,
         "entity" => entity,
         "time" => time,
-    }.expect("Failed to create DataFrame");
+    }
+    .expect("Failed to create DataFrame");
 
     Dataset::new(df)
 }
@@ -174,15 +212,17 @@ fn generate_treatment_data(n: usize, seed: u64) -> Dataset {
     let treatment: Vec<f64> = (0..n)
         .map(|i| {
             let ps = 1.0 / (1.0 + (-0.5 - 0.3 * x1[i] - 0.2 * x2[i]).exp());
-            if rng.gen_range(0.0..1.0) < ps { 1.0 } else { 0.0 }
+            if rng.gen_range(0.0..1.0) < ps {
+                1.0
+            } else {
+                0.0
+            }
         })
         .collect();
 
     // Outcome with treatment effect = 2.0
     let outcome: Vec<f64> = (0..n)
-        .map(|i| {
-            2.0 * treatment[i] + 1.0 * x1[i] + 0.5 * x2[i] + rng.gen_range(-0.5..0.5)
-        })
+        .map(|i| 2.0 * treatment[i] + 1.0 * x1[i] + 0.5 * x2[i] + rng.gen_range(-0.5..0.5))
         .collect();
 
     let df = df! {
@@ -190,7 +230,8 @@ fn generate_treatment_data(n: usize, seed: u64) -> Dataset {
         "treatment" => treatment,
         "x1" => x1,
         "x2" => x2,
-    }.expect("Failed to create DataFrame");
+    }
+    .expect("Failed to create DataFrame");
 
     Dataset::new(df)
 }
@@ -203,7 +244,13 @@ fn generate_mediation_data(n: usize, seed: u64) -> Dataset {
 
     // Random treatment assignment (50/50)
     let treatment: Vec<f64> = (0..n)
-        .map(|_| if rng.gen_range(0.0..1.0) < 0.5 { 1.0 } else { 0.0 })
+        .map(|_| {
+            if rng.gen_range(0.0..1.0) < 0.5 {
+                1.0
+            } else {
+                0.0
+            }
+        })
         .collect();
 
     // Mediator: M = 0.5*D + 0.3*X + noise
@@ -213,9 +260,7 @@ fn generate_mediation_data(n: usize, seed: u64) -> Dataset {
 
     // Outcome: Y = 0.4*D + 0.6*M + 0.2*X + noise
     let outcome: Vec<f64> = (0..n)
-        .map(|i| {
-            0.4 * treatment[i] + 0.6 * mediator[i] + 0.2 * x[i] + rng.gen_range(-0.5..0.5)
-        })
+        .map(|i| 0.4 * treatment[i] + 0.6 * mediator[i] + 0.2 * x[i] + rng.gen_range(-0.5..0.5))
         .collect();
 
     let df = df! {
@@ -223,13 +268,19 @@ fn generate_mediation_data(n: usize, seed: u64) -> Dataset {
         "treatment" => treatment,
         "mediator" => mediator,
         "x" => x,
-    }.expect("Failed to create DataFrame");
+    }
+    .expect("Failed to create DataFrame");
 
     Dataset::new(df)
 }
 
 /// Generate synthetic control panel data
-fn generate_synth_data(n_donors: usize, n_periods: usize, treatment_time: i64, seed: u64) -> Dataset {
+fn generate_synth_data(
+    n_donors: usize,
+    n_periods: usize,
+    treatment_time: i64,
+    seed: u64,
+) -> Dataset {
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
 
     let mut units = Vec::new();
@@ -268,7 +319,8 @@ fn generate_synth_data(n_donors: usize, n_periods: usize, treatment_time: i64, s
         "time" => times,
         "outcome" => outcomes,
         "x1" => x1_vals,
-    }.expect("Failed to create DataFrame");
+    }
+    .expect("Failed to create DataFrame");
 
     Dataset::new(df)
 }
@@ -279,9 +331,7 @@ fn synth_benchmark(c: &mut Criterion) {
     // Small: 5 donors, 10 periods
     {
         let dataset = generate_synth_data(5, 10, 6, 42);
-        let predictors = vec![
-            PredictorSpec::with_window("outcome", 1, 5),
-        ];
+        let predictors = vec![PredictorSpec::with_window("outcome", 1, 5)];
         let config = SynthConfig {
             treated_unit: "Treated".to_string(),
             treatment_time: 6,
@@ -293,19 +343,21 @@ fn synth_benchmark(c: &mut Criterion) {
             weight_threshold: 1e-4,
         };
 
-        group.bench_with_input(BenchmarkId::new("no_placebos", "5x10"), &(dataset, predictors, config), |b, (data, preds, cfg)| {
-            b.iter(|| {
-                run_synthetic_control(data, "outcome", "unit", "time", preds, cfg.clone())
-            });
-        });
+        group.bench_with_input(
+            BenchmarkId::new("no_placebos", "5x10"),
+            &(dataset, predictors, config),
+            |b, (data, preds, cfg)| {
+                b.iter(|| {
+                    run_synthetic_control(data, "outcome", "unit", "time", preds, cfg.clone())
+                });
+            },
+        );
     }
 
     // Medium: 15 donors, 20 periods
     {
         let dataset = generate_synth_data(15, 20, 12, 42);
-        let predictors = vec![
-            PredictorSpec::with_window("outcome", 1, 11),
-        ];
+        let predictors = vec![PredictorSpec::with_window("outcome", 1, 11)];
         let config = SynthConfig {
             treated_unit: "Treated".to_string(),
             treatment_time: 12,
@@ -317,19 +369,21 @@ fn synth_benchmark(c: &mut Criterion) {
             weight_threshold: 1e-4,
         };
 
-        group.bench_with_input(BenchmarkId::new("no_placebos", "15x20"), &(dataset, predictors, config), |b, (data, preds, cfg)| {
-            b.iter(|| {
-                run_synthetic_control(data, "outcome", "unit", "time", preds, cfg.clone())
-            });
-        });
+        group.bench_with_input(
+            BenchmarkId::new("no_placebos", "15x20"),
+            &(dataset, predictors, config),
+            |b, (data, preds, cfg)| {
+                b.iter(|| {
+                    run_synthetic_control(data, "outcome", "unit", "time", preds, cfg.clone())
+                });
+            },
+        );
     }
 
     // Medium with placebos: 10 donors, 15 periods
     {
         let dataset = generate_synth_data(10, 15, 8, 42);
-        let predictors = vec![
-            PredictorSpec::with_window("outcome", 1, 7),
-        ];
+        let predictors = vec![PredictorSpec::with_window("outcome", 1, 7)];
         let config = SynthConfig {
             treated_unit: "Treated".to_string(),
             treatment_time: 8,
@@ -341,11 +395,15 @@ fn synth_benchmark(c: &mut Criterion) {
             weight_threshold: 1e-4,
         };
 
-        group.bench_with_input(BenchmarkId::new("with_placebos", "10x15"), &(dataset, predictors, config), |b, (data, preds, cfg)| {
-            b.iter(|| {
-                run_synthetic_control(data, "outcome", "unit", "time", preds, cfg.clone())
-            });
-        });
+        group.bench_with_input(
+            BenchmarkId::new("with_placebos", "10x15"),
+            &(dataset, predictors, config),
+            |b, (data, preds, cfg)| {
+                b.iter(|| {
+                    run_synthetic_control(data, "outcome", "unit", "time", preds, cfg.clone())
+                });
+            },
+        );
     }
 
     group.finish();
@@ -359,9 +417,7 @@ fn fixed_effects_benchmark(c: &mut Criterion) {
         let n = n_entities * n_periods;
 
         group.bench_with_input(BenchmarkId::from_parameter(n), &dataset, |b, data| {
-            b.iter(|| {
-                run_fixed_effects(data, "y", &["x1", "x2"], "entity")
-            });
+            b.iter(|| run_fixed_effects(data, "y", &["x1", "x2"], "entity"));
         });
     }
 
@@ -377,7 +433,14 @@ fn hdfe_benchmark(c: &mut Criterion) {
 
         group.bench_with_input(BenchmarkId::from_parameter(n), &dataset, |b, data| {
             b.iter(|| {
-                run_hdfe(data, "y", &["x1", "x2"], &["entity", "time"], None, CovarianceType::Standard)
+                run_hdfe(
+                    data,
+                    "y",
+                    &["x1", "x2"],
+                    &["entity", "time"],
+                    None,
+                    CovarianceType::Standard,
+                )
             });
         });
     }
@@ -392,9 +455,7 @@ fn logit_benchmark(c: &mut Criterion) {
         let dataset = generate_binary_data(n, 42);
 
         group.bench_with_input(BenchmarkId::from_parameter(n), &dataset, |b, data| {
-            b.iter(|| {
-                run_logit(data, "y", &["x1", "x2"])
-            });
+            b.iter(|| run_logit(data, "y", &["x1", "x2"]));
         });
     }
 
@@ -408,9 +469,7 @@ fn probit_benchmark(c: &mut Criterion) {
         let dataset = generate_binary_data(n, 42);
 
         group.bench_with_input(BenchmarkId::from_parameter(n), &dataset, |b, data| {
-            b.iter(|| {
-                run_probit(data, "y", &["x1", "x2"])
-            });
+            b.iter(|| run_probit(data, "y", &["x1", "x2"]));
         });
     }
 
@@ -436,7 +495,14 @@ fn feglm_logit_benchmark(c: &mut Criterion) {
 
         group.bench_with_input(BenchmarkId::new("single_fe", n), &dataset, |b, data| {
             b.iter(|| {
-                run_feglm(data, "y", &["x1", "x2"], &["entity"], GlmFamily::Logit, Some(config.clone()))
+                run_feglm(
+                    data,
+                    "y",
+                    &["x1", "x2"],
+                    &["entity"],
+                    GlmFamily::Logit,
+                    Some(config.clone()),
+                )
             });
         });
     }
@@ -457,7 +523,14 @@ fn feglm_logit_benchmark(c: &mut Criterion) {
 
         group.bench_with_input(BenchmarkId::new("two_way_fe", n), &dataset, |b, data| {
             b.iter(|| {
-                run_feglm(data, "y", &["x1", "x2"], &["entity", "time"], GlmFamily::Logit, Some(config.clone()))
+                run_feglm(
+                    data,
+                    "y",
+                    &["x1", "x2"],
+                    &["entity", "time"],
+                    GlmFamily::Logit,
+                    Some(config.clone()),
+                )
             });
         });
     }
@@ -484,7 +557,14 @@ fn feglm_poisson_benchmark(c: &mut Criterion) {
 
         group.bench_with_input(BenchmarkId::new("two_way_fe", n), &dataset, |b, data| {
             b.iter(|| {
-                run_feglm(data, "y", &["x1", "x2"], &["entity", "time"], GlmFamily::Poisson, Some(config.clone()))
+                run_feglm(
+                    data,
+                    "y",
+                    &["x1", "x2"],
+                    &["entity", "time"],
+                    GlmFamily::Poisson,
+                    Some(config.clone()),
+                )
             });
         });
     }
@@ -502,7 +582,7 @@ fn ipw_benchmark(c: &mut Criterion) {
         let config = IpwConfig {
             trim: 0.05,
             estimand: Estimand::ATE,
-            bootstrap: 99,  // Reduced for speed
+            bootstrap: 99, // Reduced for speed
             normalized: true,
             seed: Some(42),
         };
@@ -527,7 +607,7 @@ fn doubly_robust_benchmark(c: &mut Criterion) {
             method: DRMethod::AIPW,
             trim: 0.05,
             estimand: Estimand::ATE,
-            bootstrap: 99,  // Reduced for speed
+            bootstrap: 99, // Reduced for speed
             seed: Some(42),
         };
 
@@ -548,14 +628,21 @@ fn mediation_benchmark(c: &mut Criterion) {
         let dataset = generate_mediation_data(n, 42);
 
         let config = MediationConfig {
-            bootstrap: 99,  // Reduced for speed
+            bootstrap: 99, // Reduced for speed
             trim: 0.05,
             seed: Some(42),
         };
 
         group.bench_with_input(BenchmarkId::from_parameter(n), &dataset, |b, data| {
             b.iter(|| {
-                run_mediation_analysis(data, "outcome", "treatment", "mediator", &["x"], config.clone())
+                run_mediation_analysis(
+                    data,
+                    "outcome",
+                    "treatment",
+                    "mediator",
+                    &["x"],
+                    config.clone(),
+                )
             });
         });
     }
@@ -614,7 +701,8 @@ fn generate_survival_data(n: usize, censoring_rate: f64, seed: u64) -> Dataset {
         "x1" => x1,
         "x2" => x2,
         "group" => groups,
-    }.expect("Failed to create survival DataFrame");
+    }
+    .expect("Failed to create survival DataFrame");
 
     Dataset::new(df)
 }
@@ -629,7 +717,7 @@ fn generate_competing_risks_data(n: usize, seed: u64) -> Dataset {
     for _ in 0..n {
         // Generate times for each event type
         let time1 = -10.0 * rng.gen_range(0.0001_f64..0.9999).ln(); // Event type 1
-        let time2 = -8.0 * rng.gen_range(0.0001_f64..0.9999).ln();  // Event type 2
+        let time2 = -8.0 * rng.gen_range(0.0001_f64..0.9999).ln(); // Event type 2
         let censor = -15.0 * rng.gen_range(0.0001_f64..0.9999).ln(); // Censoring
 
         // Find which occurs first
@@ -648,7 +736,8 @@ fn generate_competing_risks_data(n: usize, seed: u64) -> Dataset {
     let df = df! {
         "time" => times,
         "event_type" => event_types,
-    }.expect("Failed to create competing risks DataFrame");
+    }
+    .expect("Failed to create competing risks DataFrame");
 
     Dataset::new(df)
 }
@@ -714,7 +803,13 @@ fn cox_ph_benchmark(c: &mut Criterion) {
 
         group.bench_with_input(BenchmarkId::new("efron", n), &dataset, |b, data| {
             b.iter(|| {
-                let result = run_cox_ph(data, "time", "event", &["x1", "x2"], Some(config_efron.clone()));
+                let result = run_cox_ph(
+                    data,
+                    "time",
+                    "event",
+                    &["x1", "x2"],
+                    Some(config_efron.clone()),
+                );
                 std::hint::black_box(result.expect("Cox PH should succeed"))
             });
         });
@@ -729,7 +824,13 @@ fn cox_ph_benchmark(c: &mut Criterion) {
 
         group.bench_with_input(BenchmarkId::new("breslow", n), &dataset, |b, data| {
             b.iter(|| {
-                let result = run_cox_ph(data, "time", "event", &["x1", "x2"], Some(config_breslow.clone()));
+                let result = run_cox_ph(
+                    data,
+                    "time",
+                    "event",
+                    &["x1", "x2"],
+                    Some(config_breslow.clone()),
+                );
                 std::hint::black_box(result.expect("Cox PH should succeed"))
             });
         });
@@ -753,7 +854,13 @@ fn aft_benchmark(c: &mut Criterion) {
 
         group.bench_with_input(BenchmarkId::new("weibull", n), &dataset, |b, data| {
             b.iter(|| {
-                let result = run_aft(data, "time", "event", &["x1", "x2"], Some(config_weibull.clone()));
+                let result = run_aft(
+                    data,
+                    "time",
+                    "event",
+                    &["x1", "x2"],
+                    Some(config_weibull.clone()),
+                );
                 std::hint::black_box(result.expect("AFT should succeed"))
             });
         });
@@ -767,7 +874,13 @@ fn aft_benchmark(c: &mut Criterion) {
 
         group.bench_with_input(BenchmarkId::new("lognormal", n), &dataset, |b, data| {
             b.iter(|| {
-                let result = run_aft(data, "time", "event", &["x1", "x2"], Some(config_lognormal.clone()));
+                let result = run_aft(
+                    data,
+                    "time",
+                    "event",
+                    &["x1", "x2"],
+                    Some(config_lognormal.clone()),
+                );
                 std::hint::black_box(result.expect("AFT should succeed"))
             });
         });

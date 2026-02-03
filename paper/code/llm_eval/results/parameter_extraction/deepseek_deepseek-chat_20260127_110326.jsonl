@@ -1,0 +1,2889 @@
+{
+  "timestamp": "2026-01-27T11:03:32+01:00",
+  "model": "deepseek/deepseek-chat",
+  "test_id": "param_reg_001",
+  "prompt": "Regress investment on firm value and capital with HC2 robust standard errors",
+  "expected_tool": "regression_ols",
+  "selected_tool": "regression_ols",
+  "tool_match": true,
+  "expected_params": {
+    "y_col": {
+      "expected": "inv",
+      "alternatives": [
+        "investment"
+      ]
+    },
+    "x_cols": {
+      "expected": [
+        "value",
+        "capital"
+      ],
+      "order_matters": false
+    },
+    "robust": {
+      "expected": "hc2",
+      "alternatives": [
+        "HC2"
+      ]
+    },
+    "intercept": {
+      "expected": true,
+      "implicit": true
+    }
+  },
+  "selected_args": {
+    "dataset": "grunfeld",
+    "y_col": "inv",
+    "x_cols": [
+      "value",
+      "capital"
+    ],
+    "robust": "hc2",
+    "intercept": true
+  },
+  "param_precision": 1.000,
+  "param_recall": 1.000,
+  "param_f1": 1.000,
+  "param_details": [
+    {
+      "parameter": "intercept",
+      "expected": "true",
+      "selected": "true",
+      "extracted": true,
+      "correct": true,
+      "implicit": true
+    },
+    {
+      "parameter": "robust",
+      "expected": "hc2",
+      "selected": "hc2",
+      "extracted": true,
+      "correct": true,
+      "implicit": false
+    },
+    {
+      "parameter": "x_cols",
+      "expected": "[\n  \"value\",\n  \"capital\"\n]",
+      "selected": "[\n  \"value\",\n  \"capital\"\n]",
+      "extracted": true,
+      "correct": true,
+      "implicit": false
+    },
+    {
+      "parameter": "y_col",
+      "expected": "inv",
+      "selected": "inv",
+      "extracted": true,
+      "correct": true,
+      "implicit": false
+    }
+  ],
+  "param_difficulty": {
+    "y_col": "explicit",
+    "x_cols": "explicit",
+    "robust": "explicit",
+    "intercept": "implicit_default"
+  },
+  "latency_ms": 6239
+}
+{
+  "timestamp": "2026-01-27T11:03:38+01:00",
+  "model": "deepseek/deepseek-chat",
+  "test_id": "param_reg_002",
+  "prompt": "Run OLS without an intercept regressing wages on education and experience",
+  "expected_tool": "regression_ols",
+  "selected_tool": "regression_ols",
+  "tool_match": true,
+  "expected_params": {
+    "y_col": {
+      "expected": "wage",
+      "alternatives": [
+        "wages"
+      ]
+    },
+    "x_cols": {
+      "expected": [
+        "education",
+        "experience"
+      ],
+      "order_matters": false
+    },
+    "intercept": {
+      "expected": false,
+      "alternatives": [
+        false
+      ]
+    },
+    "robust": {
+      "expected": "none",
+      "implicit": true
+    }
+  },
+  "selected_args": {
+    "dataset": "wages dataset",
+    "intercept": false,
+    "robust": "none",
+    "x_cols": [
+      "education",
+      "experience"
+    ],
+    "y_col": "wage"
+  },
+  "param_precision": 1.000,
+  "param_recall": 0.750,
+  "param_f1": 0.857,
+  "param_details": [
+    {
+      "parameter": "intercept",
+      "expected": "false",
+      "selected": "__NOT_FOUND__",
+      "extracted": false,
+      "correct": false,
+      "implicit": false
+    },
+    {
+      "parameter": "robust",
+      "expected": "none",
+      "selected": "none",
+      "extracted": true,
+      "correct": true,
+      "implicit": true
+    },
+    {
+      "parameter": "x_cols",
+      "expected": "[\n  \"education\",\n  \"experience\"\n]",
+      "selected": "[\n  \"education\",\n  \"experience\"\n]",
+      "extracted": true,
+      "correct": true,
+      "implicit": false
+    },
+    {
+      "parameter": "y_col",
+      "expected": "wage",
+      "selected": "wage",
+      "extracted": true,
+      "correct": true,
+      "implicit": false
+    }
+  ],
+  "param_difficulty": {
+    "y_col": "explicit",
+    "x_cols": "explicit",
+    "intercept": "explicit_negation",
+    "robust": "implicit_default"
+  },
+  "latency_ms": 5572
+}
+{
+  "timestamp": "2026-01-27T11:03:43+01:00",
+  "model": "deepseek/deepseek-chat",
+  "test_id": "param_reg_003",
+  "prompt": "Cluster standard errors by firm in a regression of inv on value",
+  "expected_tool": "regression_clustered",
+  "selected_tool": "regression_clustered",
+  "tool_match": true,
+  "expected_params": {
+    "y_col": {
+      "expected": "inv"
+    },
+    "x_cols": {
+      "expected": [
+        "value"
+      ]
+    },
+    "cluster_var": {
+      "expected": "firm",
+      "alternatives": [
+        "firm_id"
+      ]
+    }
+  },
+  "selected_args": {
+    "cluster_col": "firm",
+    "dataset": "grunfeld",
+    "x_cols": [
+      "value"
+    ],
+    "y_col": "inv"
+  },
+  "param_precision": 1.000,
+  "param_recall": 0.666,
+  "param_f1": 0.799,
+  "param_details": [
+    {
+      "parameter": "cluster_var",
+      "expected": "firm",
+      "selected": "__NOT_FOUND__",
+      "extracted": false,
+      "correct": false,
+      "implicit": false
+    },
+    {
+      "parameter": "x_cols",
+      "expected": "[\n  \"value\"\n]",
+      "selected": "[\n  \"value\"\n]",
+      "extracted": true,
+      "correct": true,
+      "implicit": false
+    },
+    {
+      "parameter": "y_col",
+      "expected": "inv",
+      "selected": "inv",
+      "extracted": true,
+      "correct": true,
+      "implicit": false
+    }
+  ],
+  "param_difficulty": {
+    "y_col": "explicit",
+    "x_cols": "explicit",
+    "cluster_var": "explicit"
+  },
+  "latency_ms": 3837
+}
+{
+  "timestamp": "2026-01-27T11:03:48+01:00",
+  "model": "deepseek/deepseek-chat",
+  "test_id": "param_pan_001",
+  "prompt": "Fixed effects regression of investment on value with firm as the entity and year as time",
+  "expected_tool": "panel_fe",
+  "selected_tool": "panel_fixed_effects",
+  "tool_match": false,
+  "expected_params": {
+    "y_col": {
+      "expected": "inv",
+      "alternatives": [
+        "investment"
+      ]
+    },
+    "x_cols": {
+      "expected": [
+        "value"
+      ]
+    },
+    "entity_col": {
+      "expected": "firm"
+    },
+    "time_col": {
+      "expected": "year"
+    }
+  },
+  "selected_args": {
+    "dataset": "grunfeld",
+    "entity_col": "firm",
+    "time_col": "year",
+    "x_cols": [
+      "value"
+    ],
+    "y_col": "inv"
+  },
+  "param_precision": 1.000,
+  "param_recall": 1.000,
+  "param_f1": 1.000,
+  "param_details": [
+    {
+      "parameter": "entity_col",
+      "expected": "firm",
+      "selected": "firm",
+      "extracted": true,
+      "correct": true,
+      "implicit": false
+    },
+    {
+      "parameter": "time_col",
+      "expected": "year",
+      "selected": "year",
+      "extracted": true,
+      "correct": true,
+      "implicit": false
+    },
+    {
+      "parameter": "x_cols",
+      "expected": "[\n  \"value\"\n]",
+      "selected": "[\n  \"value\"\n]",
+      "extracted": true,
+      "correct": true,
+      "implicit": false
+    },
+    {
+      "parameter": "y_col",
+      "expected": "inv",
+      "selected": "inv",
+      "extracted": true,
+      "correct": true,
+      "implicit": false
+    }
+  ],
+  "param_difficulty": {
+    "y_col": "explicit",
+    "x_cols": "explicit",
+    "entity_col": "explicit",
+    "time_col": "explicit"
+  },
+  "latency_ms": 4232
+}
+{
+  "timestamp": "2026-01-27T11:03:55+01:00",
+  "model": "deepseek/deepseek-chat",
+  "test_id": "param_pan_002",
+  "prompt": "Two-way fixed effects with both firm and year dummies",
+  "expected_tool": "panel_twoway",
+  "selected_tool": "panel_hdfe",
+  "tool_match": false,
+  "expected_params": {
+    "entity_col": {
+      "expected": "firm"
+    },
+    "time_col": {
+      "expected": "year"
+    },
+    "entity_fe": {
+      "expected": true,
+      "implicit": true
+    },
+    "time_fe": {
+      "expected": true,
+      "implicit": true
+    }
+  },
+  "selected_args": {
+    "dataset": "grunfeld",
+    "fe_cols": [
+      "firm",
+      "year"
+    ],
+    "x_cols": [
+      "value",
+      "capital"
+    ],
+    "y_col": "inv"
+  },
+  "param_precision": 0,
+  "param_recall": 0.500,
+  "param_f1": 0,
+  "param_details": [
+    {
+      "parameter": "entity_col",
+      "expected": "firm",
+      "selected": "__NOT_FOUND__",
+      "extracted": false,
+      "correct": false,
+      "implicit": false
+    },
+    {
+      "parameter": "entity_fe",
+      "expected": "true",
+      "selected": "__NOT_FOUND__",
+      "extracted": false,
+      "correct": true,
+      "implicit": true
+    },
+    {
+      "parameter": "time_col",
+      "expected": "year",
+      "selected": "__NOT_FOUND__",
+      "extracted": false,
+      "correct": false,
+      "implicit": false
+    },
+    {
+      "parameter": "time_fe",
+      "expected": "true",
+      "selected": "__NOT_FOUND__",
+      "extracted": false,
+      "correct": true,
+      "implicit": true
+    }
+  ],
+  "param_difficulty": {
+    "entity_col": "explicit",
+    "time_col": "explicit",
+    "entity_fe": "implicit_from_context",
+    "time_fe": "implicit_from_context"
+  },
+  "latency_ms": 6556
+}
+{
+  "timestamp": "2026-01-27T11:04:02+01:00",
+  "model": "deepseek/deepseek-chat",
+  "test_id": "param_pan_003",
+  "prompt": "High-dimensional fixed effects for origin, destination, and year",
+  "expected_tool": "panel_hdfe",
+  "selected_tool": "panel_hdfe",
+  "tool_match": true,
+  "expected_params": {
+    "fe_vars": {
+      "expected": [
+        "origin",
+        "dest",
+        "year"
+      ],
+      "order_matters": false,
+      "alternatives": [
+        [
+          "origin",
+          "destination",
+          "year"
+        ]
+      ]
+    }
+  },
+  "selected_args": {
+    "dataset": "trade dataset",
+    "fe_cols": [
+      "origin",
+      "dest",
+      "year"
+    ],
+    "x_cols": [
+      "export_value",
+      "distance",
+      "gdp_origin",
+      "gdp_dest"
+    ],
+    "y_cols": [
+      "export_value"
+    ]
+  },
+  "param_precision": 0,
+  "param_recall": 0,
+  "param_f1": 0,
+  "param_details": [
+    {
+      "parameter": "fe_vars",
+      "expected": "[\n  \"origin\",\n  \"dest\",\n  \"year\"\n]",
+      "selected": "__NOT_FOUND__",
+      "extracted": false,
+      "correct": false,
+      "implicit": false
+    }
+  ],
+  "param_difficulty": {
+    "fe_vars": "explicit_multiple"
+  },
+  "latency_ms": 6667
+}
+{
+  "timestamp": "2026-01-27T11:04:10+01:00",
+  "model": "deepseek/deepseek-chat",
+  "test_id": "param_cau_001",
+  "prompt": "2SLS regression of wages on education using parents_education as an instrument",
+  "expected_tool": "iv_2sls",
+  "selected_tool": "iv_2sls",
+  "tool_match": true,
+  "expected_params": {
+    "y_col": {
+      "expected": "wage",
+      "alternatives": [
+        "wages"
+      ]
+    },
+    "endog_col": {
+      "expected": "education"
+    },
+    "instruments": {
+      "expected": [
+        "parents_education"
+      ],
+      "alternatives": [
+        [
+          "parents_education",
+          "parents_ed"
+        ]
+      ]
+    }
+  },
+  "selected_args": {
+    "dataset": "returns_to_schooling",
+    "y_col": "wage",
+    "endog_cols": [
+      "education"
+    ],
+    "instrument_cols": [
+      "parents_education"
+    ]
+  },
+  "param_precision": 0.500,
+  "param_recall": 0.333,
+  "param_f1": 0.399,
+  "param_details": [
+    {
+      "parameter": "endog_col",
+      "expected": "education",
+      "selected": "[\n  \"education\"\n]",
+      "extracted": true,
+      "correct": false,
+      "implicit": false
+    },
+    {
+      "parameter": "instruments",
+      "expected": "[\n  \"parents_education\"\n]",
+      "selected": "__NOT_FOUND__",
+      "extracted": false,
+      "correct": false,
+      "implicit": false
+    },
+    {
+      "parameter": "y_col",
+      "expected": "wage",
+      "selected": "wage",
+      "extracted": true,
+      "correct": true,
+      "implicit": false
+    }
+  ],
+  "param_difficulty": {
+    "y_col": "explicit",
+    "endog_col": "explicit",
+    "instruments": "explicit"
+  },
+  "latency_ms": 7091
+}
+{
+  "timestamp": "2026-01-27T11:04:17+01:00",
+  "model": "deepseek/deepseek-chat",
+  "test_id": "param_cau_002",
+  "prompt": "Difference-in-differences with treatment=treated, post=post_period, and outcome=earnings",
+  "expected_tool": "diff_in_diff",
+  "selected_tool": "diff_in_diff",
+  "tool_match": true,
+  "expected_params": {
+    "y_col": {
+      "expected": "earnings"
+    },
+    "treat_col": {
+      "expected": "treated",
+      "alternatives": [
+        "treatment"
+      ]
+    },
+    "post_col": {
+      "expected": "post_period",
+      "alternatives": [
+        "post"
+      ]
+    }
+  },
+  "selected_args": {
+    "dataset": "policy_data",
+    "post_col": "post_period",
+    "treat_col": "treated",
+    "y_col": "earnings"
+  },
+  "param_precision": 1.000,
+  "param_recall": 1.000,
+  "param_f1": 1.000,
+  "param_details": [
+    {
+      "parameter": "post_col",
+      "expected": "post_period",
+      "selected": "post_period",
+      "extracted": true,
+      "correct": true,
+      "implicit": false
+    },
+    {
+      "parameter": "treat_col",
+      "expected": "treated",
+      "selected": "treated",
+      "extracted": true,
+      "correct": true,
+      "implicit": false
+    },
+    {
+      "parameter": "y_col",
+      "expected": "earnings",
+      "selected": "earnings",
+      "extracted": true,
+      "correct": true,
+      "implicit": false
+    }
+  ],
+  "param_difficulty": {
+    "y_col": "explicit",
+    "treat_col": "explicit",
+    "post_col": "explicit"
+  },
+  "latency_ms": 6413
+}
+{
+  "timestamp": "2026-01-27T11:04:25+01:00",
+  "model": "deepseek/deepseek-chat",
+  "test_id": "param_cau_003",
+  "prompt": "Sharp RD with cutoff at 50 on the running variable test_score",
+  "expected_tool": "rd_sharp",
+  "selected_tool": "rd_estimate",
+  "tool_match": false,
+  "expected_params": {
+    "running_var": {
+      "expected": "test_score"
+    },
+    "cutoff": {
+      "expected": 50,
+      "alternatives": [
+        50.0
+      ]
+    },
+    "outcome_col": {
+      "expected": "outcome"
+    }
+  },
+  "selected_args": {
+    "cutoff": 50,
+    "dataset": "test_scores",
+    "x_col": "test_score",
+    "y_col": "outcome"
+  },
+  "param_precision": 1.000,
+  "param_recall": 0.333,
+  "param_f1": 0.499,
+  "param_details": [
+    {
+      "parameter": "cutoff",
+      "expected": "50",
+      "selected": "50",
+      "extracted": true,
+      "correct": true,
+      "implicit": false
+    },
+    {
+      "parameter": "outcome_col",
+      "expected": "outcome",
+      "selected": "__NOT_FOUND__",
+      "extracted": false,
+      "correct": false,
+      "implicit": false
+    },
+    {
+      "parameter": "running_var",
+      "expected": "test_score",
+      "selected": "__NOT_FOUND__",
+      "extracted": false,
+      "correct": false,
+      "implicit": false
+    }
+  ],
+  "param_difficulty": {
+    "running_var": "explicit",
+    "cutoff": "explicit_numeric",
+    "outcome_col": "explicit"
+  },
+  "latency_ms": 6980
+}
+{
+  "timestamp": "2026-01-27T11:04:29+01:00",
+  "model": "deepseek/deepseek-chat",
+  "test_id": "param_ts_001",
+  "prompt": "Fit an ARIMA(2,1,1) model to the GDP series",
+  "expected_tool": "ts_arima",
+  "selected_tool": "ts_arima_fit",
+  "tool_match": false,
+  "expected_params": {
+    "series_col": {
+      "expected": "gdp"
+    },
+    "p": {
+      "expected": 2
+    },
+    "d": {
+      "expected": 1
+    },
+    "q": {
+      "expected": 1
+    }
+  },
+  "selected_args": {
+    "d": 1,
+    "dataset": "gdp_quarterly",
+    "p": 2,
+    "q": 1,
+    "y_col": "gdp"
+  },
+  "param_precision": 1.000,
+  "param_recall": 0.750,
+  "param_f1": 0.857,
+  "param_details": [
+    {
+      "parameter": "d",
+      "expected": "1",
+      "selected": "1",
+      "extracted": true,
+      "correct": true,
+      "implicit": false
+    },
+    {
+      "parameter": "p",
+      "expected": "2",
+      "selected": "2",
+      "extracted": true,
+      "correct": true,
+      "implicit": false
+    },
+    {
+      "parameter": "q",
+      "expected": "1",
+      "selected": "1",
+      "extracted": true,
+      "correct": true,
+      "implicit": false
+    },
+    {
+      "parameter": "series_col",
+      "expected": "gdp",
+      "selected": "__NOT_FOUND__",
+      "extracted": false,
+      "correct": false,
+      "implicit": false
+    }
+  ],
+  "param_difficulty": {
+    "series_col": "explicit",
+    "p": "explicit_numeric",
+    "d": "explicit_numeric",
+    "q": "explicit_numeric"
+  },
+  "latency_ms": 3117
+}
+{
+  "timestamp": "2026-01-27T11:04:33+01:00",
+  "model": "deepseek/deepseek-chat",
+  "test_id": "param_ts_002",
+  "prompt": "VAR with 4 lags for gdp, inflation, and interest_rate",
+  "expected_tool": "ts_var",
+  "selected_tool": "ts_var",
+  "tool_match": true,
+  "expected_params": {
+    "vars": {
+      "expected": [
+        "gdp",
+        "inflation",
+        "interest_rate"
+      ],
+      "order_matters": false
+    },
+    "lags": {
+      "expected": 4
+    }
+  },
+  "selected_args": {
+    "dataset": "macro_quarterly",
+    "p": 4,
+    "y_cols": [
+      "gdp",
+      "inflation",
+      "interest_rate"
+    ]
+  },
+  "param_precision": 0,
+  "param_recall": 0,
+  "param_f1": 0,
+  "param_details": [
+    {
+      "parameter": "lags",
+      "expected": "4",
+      "selected": "__NOT_FOUND__",
+      "extracted": false,
+      "correct": false,
+      "implicit": false
+    },
+    {
+      "parameter": "vars",
+      "expected": "[\n  \"gdp\",\n  \"inflation\",\n  \"interest_rate\"\n]",
+      "selected": "__NOT_FOUND__",
+      "extracted": false,
+      "correct": false,
+      "implicit": false
+    }
+  ],
+  "param_difficulty": {
+    "vars": "explicit_multiple",
+    "lags": "explicit_numeric"
+  },
+  "latency_ms": 3598
+}
+{
+  "timestamp": "2026-01-27T11:04:41+01:00",
+  "model": "deepseek/deepseek-chat",
+  "test_id": "param_ts_003",
+  "prompt": "Generate 12-step ahead forecasts with 95% confidence intervals",
+  "expected_tool": "ts_forecast",
+  "selected_tool": "ts_arima_forecast",
+  "tool_match": false,
+  "expected_params": {
+    "horizon": {
+      "expected": 12,
+      "alternatives": [
+        12
+      ]
+    },
+    "ci_level": {
+      "expected": 0.95,
+      "alternatives": [
+        95,
+        "95%"
+      ]
+    }
+  },
+  "selected_args": {
+    "dataset": "gdp_quarterly",
+    "y_col": "gdp",
+    "p": 1,
+    "d": 1,
+    "q": 1,
+    "h": 12
+  },
+  "param_precision": 0,
+  "param_recall": 0,
+  "param_f1": 0,
+  "param_details": [
+    {
+      "parameter": "ci_level",
+      "expected": "0.95",
+      "selected": "__NOT_FOUND__",
+      "extracted": false,
+      "correct": false,
+      "implicit": false
+    },
+    {
+      "parameter": "horizon",
+      "expected": "12",
+      "selected": "__NOT_FOUND__",
+      "extracted": false,
+      "correct": false,
+      "implicit": false
+    }
+  ],
+  "param_difficulty": {
+    "horizon": "explicit_numeric",
+    "ci_level": "explicit_numeric"
+  },
+  "latency_ms": 7935
+}
+{
+  "timestamp": "2026-01-27T11:04:48+01:00",
+  "model": "deepseek/deepseek-chat",
+  "test_id": "param_dis_001",
+  "prompt": "Logit model predicting employed from age, education, and married",
+  "expected_tool": "logit",
+  "selected_tool": "logit",
+  "tool_match": true,
+  "expected_params": {
+    "y_col": {
+      "expected": "employed"
+    },
+    "x_cols": {
+      "expected": [
+        "age",
+        "education",
+        "married"
+      ],
+      "order_matters": false
+    }
+  },
+  "selected_args": {
+    "dataset": "labor_participation",
+    "x_cols": [
+      "age",
+      "education",
+      "married"
+    ],
+    "y_col": "employed"
+  },
+  "param_precision": 1.000,
+  "param_recall": 1.000,
+  "param_f1": 1.000,
+  "param_details": [
+    {
+      "parameter": "x_cols",
+      "expected": "[\n  \"age\",\n  \"education\",\n  \"married\"\n]",
+      "selected": "[\n  \"age\",\n  \"education\",\n  \"married\"\n]",
+      "extracted": true,
+      "correct": true,
+      "implicit": false
+    },
+    {
+      "parameter": "y_col",
+      "expected": "employed",
+      "selected": "employed",
+      "extracted": true,
+      "correct": true,
+      "implicit": false
+    }
+  ],
+  "param_difficulty": {
+    "y_col": "explicit",
+    "x_cols": "explicit_multiple"
+  },
+  "latency_ms": 6293
+}
+{
+  "timestamp": "2026-01-27T11:04:54+01:00",
+  "model": "deepseek/deepseek-chat",
+  "test_id": "param_dis_002",
+  "prompt": "FEGLM with logit link and firm fixed effects",
+  "expected_tool": "feglm",
+  "selected_tool": "feglm",
+  "tool_match": true,
+  "expected_params": {
+    "family": {
+      "expected": "binomial",
+      "alternatives": [
+        "logit"
+      ]
+    },
+    "link": {
+      "expected": "logit",
+      "implicit": true
+    },
+    "fe_var": {
+      "expected": "firm"
+    }
+  },
+  "selected_args": {
+    "dataset": "firm_outcomes",
+    "family": "logit",
+    "fe_cols": [
+      "firm"
+    ],
+    "x_cols": [
+      "r_and_d",
+      "size"
+    ],
+    "y_col": "success"
+  },
+  "param_precision": 2.000,
+  "param_recall": 0.666,
+  "param_f1": 0.999,
+  "param_details": [
+    {
+      "parameter": "family",
+      "expected": "binomial",
+      "selected": "logit",
+      "extracted": true,
+      "correct": true,
+      "implicit": false
+    },
+    {
+      "parameter": "fe_var",
+      "expected": "firm",
+      "selected": "__NOT_FOUND__",
+      "extracted": false,
+      "correct": false,
+      "implicit": false
+    },
+    {
+      "parameter": "link",
+      "expected": "logit",
+      "selected": "__NOT_FOUND__",
+      "extracted": false,
+      "correct": true,
+      "implicit": true
+    }
+  ],
+  "param_difficulty": {
+    "family": "explicit",
+    "link": "implicit_from_family",
+    "fe_var": "explicit"
+  },
+  "latency_ms": 5414
+}
+{
+  "timestamp": "2026-01-27T11:05:02+01:00",
+  "model": "deepseek/deepseek-chat",
+  "test_id": "param_hyp_001",
+  "prompt": "Two-sample t-test comparing group A vs B at alpha=0.01",
+  "expected_tool": "hypothesis_t_test",
+  "selected_tool": "hypothesis_t_test",
+  "tool_match": true,
+  "expected_params": {
+    "group_var": {
+      "expected": "group"
+    },
+    "outcome_var": {
+      "expected": "outcome"
+    },
+    "alpha": {
+      "expected": 0.01
+    }
+  },
+  "selected_args": {
+    "dataset": "experiment",
+    "var_equal": false,
+    "x_col": "group",
+    "y_col": "outcome"
+  },
+  "param_precision": 0,
+  "param_recall": 0,
+  "param_f1": 0,
+  "param_details": [
+    {
+      "parameter": "alpha",
+      "expected": "0.01",
+      "selected": "__NOT_FOUND__",
+      "extracted": false,
+      "correct": false,
+      "implicit": false
+    },
+    {
+      "parameter": "group_var",
+      "expected": "group",
+      "selected": "__NOT_FOUND__",
+      "extracted": false,
+      "correct": false,
+      "implicit": false
+    },
+    {
+      "parameter": "outcome_var",
+      "expected": "outcome",
+      "selected": "__NOT_FOUND__",
+      "extracted": false,
+      "correct": false,
+      "implicit": false
+    }
+  ],
+  "param_difficulty": {
+    "group_var": "explicit",
+    "outcome_var": "explicit",
+    "alpha": "explicit_numeric"
+  },
+  "latency_ms": 7345
+}
+{
+  "timestamp": "2026-01-27T11:05:10+01:00",
+  "model": "deepseek/deepseek-chat",
+  "test_id": "param_hyp_002",
+  "prompt": "One-way ANOVA with 3 groups: control, treatment1, treatment2",
+  "expected_tool": "anova_oneway",
+  "selected_tool": "anova_one_way",
+  "tool_match": false,
+  "expected_params": {
+    "group_var": {
+      "expected": "treatment_group"
+    },
+    "n_groups": {
+      "expected": 3,
+      "implicit": true
+    }
+  },
+  "selected_args": {
+    "dataset": "loaded",
+    "group_col": "treatment_group",
+    "y_col": "outcome"
+  },
+  "param_precision": 0,
+  "param_recall": 0.500,
+  "param_f1": 0,
+  "param_details": [
+    {
+      "parameter": "group_var",
+      "expected": "treatment_group",
+      "selected": "__NOT_FOUND__",
+      "extracted": false,
+      "correct": false,
+      "implicit": false
+    },
+    {
+      "parameter": "n_groups",
+      "expected": "3",
+      "selected": "__NOT_FOUND__",
+      "extracted": false,
+      "correct": true,
+      "implicit": true
+    }
+  ],
+  "param_difficulty": {
+    "group_var": "explicit",
+    "n_groups": "implicit_from_context"
+  },
+  "latency_ms": 7286
+}
+{
+  "timestamp": "2026-01-27T11:05:16+01:00",
+  "model": "deepseek/deepseek-chat",
+  "test_id": "param_ml_001",
+  "prompt": "K-means clustering with k=5 and max 100 iterations",
+  "expected_tool": "ml_kmeans",
+  "selected_tool": "ml_kmeans",
+  "tool_match": true,
+  "expected_params": {
+    "k": {
+      "expected": 5
+    },
+    "max_iter": {
+      "expected": 100
+    }
+  },
+  "selected_args": {
+    "dataset": "customers",
+    "k": 5,
+    "x_cols": [
+      "spending",
+      "frequency",
+      "recency"
+    ],
+    "max_iterations": 100
+  },
+  "param_precision": 1.000,
+  "param_recall": 0.500,
+  "param_f1": 0.666,
+  "param_details": [
+    {
+      "parameter": "k",
+      "expected": "5",
+      "selected": "5",
+      "extracted": true,
+      "correct": true,
+      "implicit": false
+    },
+    {
+      "parameter": "max_iter",
+      "expected": "100",
+      "selected": "__NOT_FOUND__",
+      "extracted": false,
+      "correct": false,
+      "implicit": false
+    }
+  ],
+  "param_difficulty": {
+    "k": "explicit_numeric",
+    "max_iter": "explicit_numeric"
+  },
+  "latency_ms": 5404
+}
+{
+  "timestamp": "2026-01-27T11:05:29+01:00",
+  "model": "deepseek/deepseek-chat",
+  "test_id": "param_ml_002",
+  "prompt": "PCA keeping the first 3 components",
+  "expected_tool": "ml_pca",
+  "selected_tool": "ml_pca",
+  "tool_match": true,
+  "expected_params": {
+    "n_components": {
+      "expected": 3
+    }
+  },
+  "selected_args": {
+    "dataset": "survey_responses",
+    "n_components": 3,
+    "x_cols": [
+      "q1",
+      "q2",
+      "q3",
+      "q4",
+      "q5",
+      "q6",
+      "q7",
+      "q8",
+      "q9",
+      "q10",
+      "q11",
+      "q12",
+      "q13",
+      "q14",
+      "q15",
+      "q16",
+      "q17",
+      "q18",
+      "q19",
+      "q20",
+      "q21",
+      "q22",
+      "q23",
+      "q24",
+      "q25",
+      "q26",
+      "q27",
+      "q28",
+      "q29",
+      "q30",
+      "q31",
+      "q32",
+      "q33",
+      "q34",
+      "q35",
+      "q36",
+      "q37",
+      "q38",
+      "q39",
+      "q40",
+      "q41",
+      "q42",
+      "q43",
+      "q44",
+      "q45",
+      "q46",
+      "q47",
+      "q48",
+      "q49",
+      "q50"
+    ]
+  },
+  "param_precision": 1.000,
+  "param_recall": 1.000,
+  "param_f1": 1.000,
+  "param_details": [
+    {
+      "parameter": "n_components",
+      "expected": "3",
+      "selected": "3",
+      "extracted": true,
+      "correct": true,
+      "implicit": false
+    }
+  ],
+  "param_difficulty": {
+    "n_components": "explicit_numeric"
+  },
+  "latency_ms": 12244
+}
+{
+  "timestamp": "2026-01-27T11:05:41+01:00",
+  "model": "deepseek/deepseek-chat",
+  "test_id": "param_ml_003",
+  "prompt": "t-SNE with perplexity=30 reducing to 2 dimensions",
+  "expected_tool": "ml_tsne",
+  "selected_tool": "ml_tsne",
+  "tool_match": true,
+  "expected_params": {
+    "perplexity": {
+      "expected": 30
+    },
+    "n_components": {
+      "expected": 2,
+      "implicit": true
+    }
+  },
+  "selected_args": {
+    "dataset": "unknown",
+    "x_cols": [
+      "dim1",
+      "dim2",
+      "dim3",
+      "dim4",
+      "dim5",
+      "dim6",
+      "dim7",
+      "dim8",
+      "dim9",
+      "dim10",
+      "dim11",
+      "dim12",
+      "dim13",
+      "dim14",
+      "dim15",
+      "dim16",
+      "dim17",
+      "dim18",
+      "dim19",
+      "dim20",
+      "dim21",
+      "dim22",
+      "dim23",
+      "dim24",
+      "dim25",
+      "dim26",
+      "dim27",
+      "dim28",
+      "dim29",
+      "dim30",
+      "dim31",
+      "dim32",
+      "dim33",
+      "dim34",
+      "dim35",
+      "dim36",
+      "dim37",
+      "dim38",
+      "dim39",
+      "dim40",
+      "dim41",
+      "dim42",
+      "dim43",
+      "dim44",
+      "dim45",
+      "dim46",
+      "dim47",
+      "dim48",
+      "dim49",
+      "dim50",
+      "dim51",
+      "dim52",
+      "dim53",
+      "dim54",
+      "dim55",
+      "dim56",
+      "dim57",
+      "dim58",
+      "dim59",
+      "dim60",
+      "dim61",
+      "dim62",
+      "dim63",
+      "dim64",
+      "dim65",
+      "dim66",
+      "dim67",
+      "dim68",
+      "dim69",
+      "dim70",
+      "dim71",
+      "dim72",
+      "dim73",
+      "dim74",
+      "dim75",
+      "dim76",
+      "dim77",
+      "dim78",
+      "dim79",
+      "dim80",
+      "dim81",
+      "dim82",
+      "dim83",
+      "dim84",
+      "dim85",
+      "dim86",
+      "dim87",
+      "dim88",
+      "dim89",
+      "dim90",
+      "dim91",
+      "dim92",
+      "dim93",
+      "dim94",
+      "dim95",
+      "dim96",
+      "dim97",
+      "dim98",
+      "dim99",
+      "dim100"
+    ],
+    "n_components": 2,
+    "perplexity": 30
+  },
+  "param_precision": 1.000,
+  "param_recall": 1.000,
+  "param_f1": 1.000,
+  "param_details": [
+    {
+      "parameter": "n_components",
+      "expected": "2",
+      "selected": "2",
+      "extracted": true,
+      "correct": true,
+      "implicit": true
+    },
+    {
+      "parameter": "perplexity",
+      "expected": "30",
+      "selected": "30",
+      "extracted": true,
+      "correct": true,
+      "implicit": false
+    }
+  ],
+  "param_difficulty": {
+    "perplexity": "explicit_numeric",
+    "n_components": "explicit_numeric"
+  },
+  "latency_ms": 10541
+}
+{
+  "timestamp": "2026-01-27T11:05:45+01:00",
+  "model": "deepseek/deepseek-chat",
+  "test_id": "param_ml_004",
+  "prompt": "Random forest with 500 trees, max depth 10, predicting churn",
+  "expected_tool": "ml_random_forest",
+  "selected_tool": "ml_random_forest",
+  "tool_match": true,
+  "expected_params": {
+    "n_trees": {
+      "expected": 500,
+      "alternatives": [
+        "n_estimators"
+      ]
+    },
+    "max_depth": {
+      "expected": 10
+    },
+    "target": {
+      "expected": "churned",
+      "alternatives": [
+        "churn"
+      ]
+    }
+  },
+  "selected_args": {
+    "dataset": "customers",
+    "n_trees": 500,
+    "max_depth": 10,
+    "x_cols": [
+      "tenure",
+      "spending",
+      "complaints"
+    ],
+    "y_col": "churned"
+  },
+  "param_precision": 1.000,
+  "param_recall": 0.666,
+  "param_f1": 0.799,
+  "param_details": [
+    {
+      "parameter": "max_depth",
+      "expected": "10",
+      "selected": "10",
+      "extracted": true,
+      "correct": true,
+      "implicit": false
+    },
+    {
+      "parameter": "n_trees",
+      "expected": "500",
+      "selected": "500",
+      "extracted": true,
+      "correct": true,
+      "implicit": false
+    },
+    {
+      "parameter": "target",
+      "expected": "churned",
+      "selected": "__NOT_FOUND__",
+      "extracted": false,
+      "correct": false,
+      "implicit": false
+    }
+  ],
+  "param_difficulty": {
+    "n_trees": "explicit_numeric",
+    "max_depth": "explicit_numeric",
+    "target": "explicit"
+  },
+  "latency_ms": 3882
+}
+{
+  "timestamp": "2026-01-27T11:05:49+01:00",
+  "model": "deepseek/deepseek-chat",
+  "test_id": "param_viz_001",
+  "prompt": "Histogram of income with 25 bins",
+  "expected_tool": "viz_histogram",
+  "selected_tool": "viz_histogram",
+  "tool_match": true,
+  "expected_params": {
+    "column": {
+      "expected": "income"
+    },
+    "bins": {
+      "expected": 25
+    }
+  },
+  "selected_args": {
+    "bins": 25,
+    "dataset": "census",
+    "x_col": "income"
+  },
+  "param_precision": 1.000,
+  "param_recall": 0.500,
+  "param_f1": 0.666,
+  "param_details": [
+    {
+      "parameter": "bins",
+      "expected": "25",
+      "selected": "25",
+      "extracted": true,
+      "correct": true,
+      "implicit": false
+    },
+    {
+      "parameter": "column",
+      "expected": "income",
+      "selected": "__NOT_FOUND__",
+      "extracted": false,
+      "correct": false,
+      "implicit": false
+    }
+  ],
+  "param_difficulty": {
+    "column": "explicit",
+    "bins": "explicit_numeric"
+  },
+  "latency_ms": 3677
+}
+{
+  "timestamp": "2026-01-27T11:05:54+01:00",
+  "model": "deepseek/deepseek-chat",
+  "test_id": "param_viz_002",
+  "prompt": "Scatter plot of education vs income colored by gender",
+  "expected_tool": "viz_scatter",
+  "selected_tool": "viz_scatter",
+  "tool_match": true,
+  "expected_params": {
+    "x_col": {
+      "expected": "education"
+    },
+    "y_col": {
+      "expected": "income"
+    },
+    "color_col": {
+      "expected": "gender",
+      "alternatives": [
+        "hue",
+        "group"
+      ]
+    }
+  },
+  "selected_args": {
+    "dataset": "census",
+    "x_col": "education",
+    "y_col": "income",
+    "group_col": "gender"
+  },
+  "param_precision": 1.000,
+  "param_recall": 0.666,
+  "param_f1": 0.799,
+  "param_details": [
+    {
+      "parameter": "color_col",
+      "expected": "gender",
+      "selected": "__NOT_FOUND__",
+      "extracted": false,
+      "correct": false,
+      "implicit": false
+    },
+    {
+      "parameter": "x_col",
+      "expected": "education",
+      "selected": "education",
+      "extracted": true,
+      "correct": true,
+      "implicit": false
+    },
+    {
+      "parameter": "y_col",
+      "expected": "income",
+      "selected": "income",
+      "extracted": true,
+      "correct": true,
+      "implicit": false
+    }
+  ],
+  "param_difficulty": {
+    "x_col": "explicit",
+    "y_col": "explicit",
+    "color_col": "explicit"
+  },
+  "latency_ms": 3449
+}
+{
+  "timestamp": "2026-01-27T11:06:00+01:00",
+  "model": "deepseek/deepseek-chat",
+  "test_id": "param_reg_004",
+  "prompt": "Regress log wages on years of education",
+  "expected_tool": "regression_ols",
+  "selected_tool": "regression_ols",
+  "tool_match": true,
+  "expected_params": {
+    "y_col": {
+      "expected": "log_wage",
+      "alternatives": [
+        "ln_wage",
+        "lwage"
+      ]
+    },
+    "x_cols": {
+      "expected": [
+        "education"
+      ]
+    }
+  },
+  "selected_args": {
+    "dataset": "wages",
+    "y_col": "log_wage",
+    "x_cols": [
+      "education"
+    ],
+    "intercept": true,
+    "robust": "none"
+  },
+  "param_precision": 1.000,
+  "param_recall": 1.000,
+  "param_f1": 1.000,
+  "param_details": [
+    {
+      "parameter": "x_cols",
+      "expected": "[\n  \"education\"\n]",
+      "selected": "[\n  \"education\"\n]",
+      "extracted": true,
+      "correct": true,
+      "implicit": false
+    },
+    {
+      "parameter": "y_col",
+      "expected": "log_wage",
+      "selected": "log_wage",
+      "extracted": true,
+      "correct": true,
+      "implicit": false
+    }
+  ],
+  "param_difficulty": {
+    "y_col": "requires_inference",
+    "x_cols": "explicit"
+  },
+  "latency_ms": 6129
+}
+{
+  "timestamp": "2026-01-27T11:06:06+01:00",
+  "model": "deepseek/deepseek-chat",
+  "test_id": "param_pan_004",
+  "prompt": "Random effects GLS with firm as the group variable",
+  "expected_tool": "panel_re",
+  "selected_tool": "panel_random_effects",
+  "tool_match": false,
+  "expected_params": {
+    "group_var": {
+      "expected": "firm"
+    },
+    "method": {
+      "expected": "gls",
+      "implicit": true
+    }
+  },
+  "selected_args": {
+    "dataset": "grunfeld",
+    "entity_col": "firm",
+    "x_cols": [
+      "year",
+      "inv",
+      "value",
+      "capital"
+    ],
+    "y_col": "inv"
+  },
+  "param_precision": 0,
+  "param_recall": 0.500,
+  "param_f1": 0,
+  "param_details": [
+    {
+      "parameter": "group_var",
+      "expected": "firm",
+      "selected": "__NOT_FOUND__",
+      "extracted": false,
+      "correct": false,
+      "implicit": false
+    },
+    {
+      "parameter": "method",
+      "expected": "gls",
+      "selected": "__NOT_FOUND__",
+      "extracted": false,
+      "correct": true,
+      "implicit": true
+    }
+  ],
+  "param_difficulty": {
+    "group_var": "explicit",
+    "method": "implicit_default"
+  },
+  "latency_ms": 5548
+}
+{
+  "timestamp": "2026-01-27T11:06:13+01:00",
+  "model": "deepseek/deepseek-chat",
+  "test_id": "param_cau_004",
+  "prompt": "IPW estimator for ATT using age, education, and income as matching variables",
+  "expected_tool": "treatment_ipw",
+  "selected_tool": "treatment_ipw",
+  "tool_match": true,
+  "expected_params": {
+    "covariates": {
+      "expected": [
+        "age",
+        "education",
+        "income"
+      ],
+      "order_matters": false
+    },
+    "estimand": {
+      "expected": "ATT",
+      "alternatives": [
+        "att"
+      ]
+    }
+  },
+  "selected_args": {
+    "dataset": "training",
+    "estimand": "att",
+    "treat_col": "treated",
+    "x_cols": [
+      "age",
+      "education",
+      "income"
+    ],
+    "y_col": "earnings"
+  },
+  "param_precision": 1.000,
+  "param_recall": 0.500,
+  "param_f1": 0.666,
+  "param_details": [
+    {
+      "parameter": "covariates",
+      "expected": "[\n  \"age\",\n  \"education\",\n  \"income\"\n]",
+      "selected": "__NOT_FOUND__",
+      "extracted": false,
+      "correct": false,
+      "implicit": false
+    },
+    {
+      "parameter": "estimand",
+      "expected": "ATT",
+      "selected": "att",
+      "extracted": true,
+      "correct": true,
+      "implicit": false
+    }
+  ],
+  "param_difficulty": {
+    "covariates": "explicit_multiple",
+    "estimand": "explicit"
+  },
+  "latency_ms": 5943
+}
+{
+  "timestamp": "2026-01-27T11:06:19+01:00",
+  "model": "deepseek/deepseek-chat",
+  "test_id": "param_ts_004",
+  "prompt": "IRF for 20 periods with bootstrap confidence bands",
+  "expected_tool": "ts_irf",
+  "selected_tool": "ts_var_irf",
+  "tool_match": false,
+  "expected_params": {
+    "horizon": {
+      "expected": 20
+    },
+    "ci_method": {
+      "expected": "bootstrap",
+      "alternatives": [
+        "boot"
+      ]
+    }
+  },
+  "selected_args": {
+    "dataset": "macro",
+    "horizon": 20,
+    "p": 1,
+    "y_cols": [
+      "gdp",
+      "inflation",
+      "interest_rate"
+    ]
+  },
+  "param_precision": 1.000,
+  "param_recall": 0.500,
+  "param_f1": 0.666,
+  "param_details": [
+    {
+      "parameter": "ci_method",
+      "expected": "bootstrap",
+      "selected": "__NOT_FOUND__",
+      "extracted": false,
+      "correct": false,
+      "implicit": false
+    },
+    {
+      "parameter": "horizon",
+      "expected": "20",
+      "selected": "20",
+      "extracted": true,
+      "correct": true,
+      "implicit": false
+    }
+  ],
+  "param_difficulty": {
+    "horizon": "explicit_numeric",
+    "ci_method": "explicit"
+  },
+  "latency_ms": 5409
+}
+{
+  "timestamp": "2026-01-27T11:06:25+01:00",
+  "model": "deepseek/deepseek-chat",
+  "test_id": "param_hyp_003",
+  "prompt": "Breusch-Pagan test with the LM version not F",
+  "expected_tool": "hypothesis_breusch_pagan",
+  "selected_tool": "regression_diagnostics",
+  "tool_match": false,
+  "expected_params": {
+    "test_stat": {
+      "expected": "lm",
+      "alternatives": [
+        "LM",
+        "chi-squared"
+      ]
+    }
+  },
+  "selected_args": {
+    "dataset": "regression_results",
+    "y_col": "residuals",
+    "x_cols": [
+      "x1",
+      "x2"
+    ]
+  },
+  "param_precision": 0,
+  "param_recall": 0,
+  "param_f1": 0,
+  "param_details": [
+    {
+      "parameter": "test_stat",
+      "expected": "lm",
+      "selected": "__NOT_FOUND__",
+      "extracted": false,
+      "correct": false,
+      "implicit": false
+    }
+  ],
+  "param_difficulty": {
+    "test_stat": "explicit"
+  },
+  "latency_ms": 5571
+}
+{
+  "timestamp": "2026-01-27T11:06:31+01:00",
+  "model": "deepseek/deepseek-chat",
+  "test_id": "param_ml_005",
+  "prompt": "Hierarchical clustering with complete linkage and 4 clusters",
+  "expected_tool": "ml_hierarchical",
+  "selected_tool": "ml_hierarchical",
+  "tool_match": true,
+  "expected_params": {
+    "linkage": {
+      "expected": "complete"
+    },
+    "n_clusters": {
+      "expected": 4
+    }
+  },
+  "selected_args": {
+    "dataset": "customers",
+    "linkage": "complete",
+    "n_clusters": 4,
+    "x_cols": [
+      "spending",
+      "frequency",
+      "recency"
+    ]
+  },
+  "param_precision": 1.000,
+  "param_recall": 1.000,
+  "param_f1": 1.000,
+  "param_details": [
+    {
+      "parameter": "linkage",
+      "expected": "complete",
+      "selected": "complete",
+      "extracted": true,
+      "correct": true,
+      "implicit": false
+    },
+    {
+      "parameter": "n_clusters",
+      "expected": "4",
+      "selected": "4",
+      "extracted": true,
+      "correct": true,
+      "implicit": false
+    }
+  ],
+  "param_difficulty": {
+    "linkage": "explicit",
+    "n_clusters": "explicit_numeric"
+  },
+  "latency_ms": 4938
+}
+{
+  "timestamp": "2026-01-27T11:06:37+01:00",
+  "model": "deepseek/deepseek-chat",
+  "test_id": "param_viz_003",
+  "prompt": "Boxplot of income by education_level with outliers shown",
+  "expected_tool": "viz_boxplot",
+  "selected_tool": "viz_boxplot",
+  "tool_match": true,
+  "expected_params": {
+    "value_col": {
+      "expected": "income"
+    },
+    "group_col": {
+      "expected": "education_level"
+    },
+    "show_outliers": {
+      "expected": true
+    }
+  },
+  "selected_args": {
+    "dataset": "census",
+    "group_col": "education_level",
+    "y_cols": [
+      "income"
+    ]
+  },
+  "param_precision": 1.000,
+  "param_recall": 0.333,
+  "param_f1": 0.499,
+  "param_details": [
+    {
+      "parameter": "group_col",
+      "expected": "education_level",
+      "selected": "education_level",
+      "extracted": true,
+      "correct": true,
+      "implicit": false
+    },
+    {
+      "parameter": "show_outliers",
+      "expected": "true",
+      "selected": "__NOT_FOUND__",
+      "extracted": false,
+      "correct": false,
+      "implicit": false
+    },
+    {
+      "parameter": "value_col",
+      "expected": "income",
+      "selected": "__NOT_FOUND__",
+      "extracted": false,
+      "correct": false,
+      "implicit": false
+    }
+  ],
+  "param_difficulty": {
+    "value_col": "explicit",
+    "group_col": "explicit",
+    "show_outliers": "explicit"
+  },
+  "latency_ms": 5075
+}
+{
+  "timestamp": "2026-01-27T11:06:42+01:00",
+  "model": "deepseek/deepseek-chat",
+  "test_id": "param_reg_005",
+  "prompt": "Multiple regression controlling for age, gender, and region dummies",
+  "expected_tool": "regression_ols",
+  "selected_tool": "regression_ols",
+  "tool_match": true,
+  "expected_params": {
+    "x_cols": {
+      "expected": [
+        "education",
+        "age",
+        "gender",
+        "region"
+      ],
+      "order_matters": false
+    },
+    "categorical": {
+      "expected": [
+        "region"
+      ],
+      "implicit": true
+    }
+  },
+  "selected_args": {
+    "dataset": "wages",
+    "y_col": "wage",
+    "x_cols": [
+      "education",
+      "age",
+      "gender",
+      "region"
+    ],
+    "intercept": true,
+    "robust": "none"
+  },
+  "param_precision": 2.000,
+  "param_recall": 1.000,
+  "param_f1": 1.333,
+  "param_details": [
+    {
+      "parameter": "categorical",
+      "expected": "[\n  \"region\"\n]",
+      "selected": "__NOT_FOUND__",
+      "extracted": false,
+      "correct": true,
+      "implicit": true
+    },
+    {
+      "parameter": "x_cols",
+      "expected": "[\n  \"education\",\n  \"age\",\n  \"gender\",\n  \"region\"\n]",
+      "selected": "[\n  \"education\",\n  \"age\",\n  \"gender\",\n  \"region\"\n]",
+      "extracted": true,
+      "correct": true,
+      "implicit": false
+    }
+  ],
+  "param_difficulty": {
+    "x_cols": "partially_explicit",
+    "categorical": "requires_inference"
+  },
+  "latency_ms": 4184
+}
+{
+  "timestamp": "2026-01-27T11:06:46+01:00",
+  "model": "deepseek/deepseek-chat",
+  "test_id": "param_cau_005",
+  "prompt": "Event study with 3 leads and 5 lags relative to treatment",
+  "expected_tool": "diff_event_study",
+  "selected_tool": "diff_in_diff",
+  "tool_match": false,
+  "expected_params": {
+    "leads": {
+      "expected": 3
+    },
+    "lags": {
+      "expected": 5
+    }
+  },
+  "selected_args": {
+    "dataset": "policy",
+    "post_col": "time_to_treat",
+    "treat_col": "treated",
+    "x_cols": [
+      "state",
+      "year"
+    ],
+    "y_col": "outcome"
+  },
+  "param_precision": 0,
+  "param_recall": 0,
+  "param_f1": 0,
+  "param_details": [
+    {
+      "parameter": "lags",
+      "expected": "5",
+      "selected": "__NOT_FOUND__",
+      "extracted": false,
+      "correct": false,
+      "implicit": false
+    },
+    {
+      "parameter": "leads",
+      "expected": "3",
+      "selected": "__NOT_FOUND__",
+      "extracted": false,
+      "correct": false,
+      "implicit": false
+    }
+  ],
+  "param_difficulty": {
+    "leads": "explicit_numeric",
+    "lags": "explicit_numeric"
+  },
+  "latency_ms": 3579
+}
+{
+  "timestamp": "2026-01-27T11:06:55+01:00",
+  "model": "deepseek/deepseek-chat",
+  "test_id": "param_ts_005",
+  "prompt": "Johansen cointegration test with 2 lags and trend specification 'ct'",
+  "expected_tool": "ts_johansen",
+  "selected_tool": "ts_vecm",
+  "tool_match": false,
+  "expected_params": {
+    "lags": {
+      "expected": 2
+    },
+    "det_order": {
+      "expected": "ct",
+      "alternatives": [
+        "constant_trend",
+        1
+      ]
+    }
+  },
+  "selected_args": {
+    "dataset": "exchange_rates",
+    "r": 1,
+    "y_cols": [
+      "usd_eur",
+      "usd_gbp"
+    ]
+  },
+  "param_precision": 0,
+  "param_recall": 0,
+  "param_f1": 0,
+  "param_details": [
+    {
+      "parameter": "det_order",
+      "expected": "ct",
+      "selected": "__NOT_FOUND__",
+      "extracted": false,
+      "correct": false,
+      "implicit": false
+    },
+    {
+      "parameter": "lags",
+      "expected": "2",
+      "selected": "__NOT_FOUND__",
+      "extracted": false,
+      "correct": false,
+      "implicit": false
+    }
+  ],
+  "param_difficulty": {
+    "lags": "explicit_numeric",
+    "det_order": "explicit"
+  },
+  "latency_ms": 8774
+}
+{
+  "timestamp": "2026-01-27T11:07:00+01:00",
+  "model": "deepseek/deepseek-chat",
+  "test_id": "param_ml_006",
+  "prompt": "DBSCAN with epsilon=0.5 and min_samples=5",
+  "expected_tool": "ml_dbscan",
+  "selected_tool": "ml_dbscan",
+  "tool_match": true,
+  "expected_params": {
+    "eps": {
+      "expected": 0.5,
+      "alternatives": [
+        "epsilon"
+      ]
+    },
+    "min_samples": {
+      "expected": 5,
+      "alternatives": [
+        "min_pts"
+      ]
+    }
+  },
+  "selected_args": {
+    "dataset": "spatial",
+    "eps": 0.5,
+    "min_samples": 5,
+    "x_cols": [
+      "x",
+      "y"
+    ]
+  },
+  "param_precision": 1.000,
+  "param_recall": 1.000,
+  "param_f1": 1.000,
+  "param_details": [
+    {
+      "parameter": "eps",
+      "expected": "0.5",
+      "selected": "0.5",
+      "extracted": true,
+      "correct": true,
+      "implicit": false
+    },
+    {
+      "parameter": "min_samples",
+      "expected": "5",
+      "selected": "5",
+      "extracted": true,
+      "correct": true,
+      "implicit": false
+    }
+  ],
+  "param_difficulty": {
+    "eps": "explicit_numeric",
+    "min_samples": "explicit_numeric"
+  },
+  "latency_ms": 3722
+}
+{
+  "timestamp": "2026-01-27T11:07:05+01:00",
+  "model": "deepseek/deepseek-chat",
+  "test_id": "param_hyp_004",
+  "prompt": "F-test for joint significance of x1, x2, and x3",
+  "expected_tool": "hypothesis_f_test",
+  "selected_tool": "regression_diagnostics",
+  "tool_match": false,
+  "expected_params": {
+    "test_vars": {
+      "expected": [
+        "x1",
+        "x2",
+        "x3"
+      ],
+      "order_matters": false
+    }
+  },
+  "selected_args": {
+    "dataset": "regression_model",
+    "x_cols": [
+      "x1",
+      "x2",
+      "x3"
+    ],
+    "y_col": "coefficients"
+  },
+  "param_precision": 0,
+  "param_recall": 0,
+  "param_f1": 0,
+  "param_details": [
+    {
+      "parameter": "test_vars",
+      "expected": "[\n  \"x1\",\n  \"x2\",\n  \"x3\"\n]",
+      "selected": "__NOT_FOUND__",
+      "extracted": false,
+      "correct": false,
+      "implicit": false
+    }
+  ],
+  "param_difficulty": {
+    "test_vars": "explicit_multiple"
+  },
+  "latency_ms": 5050
+}
+{
+  "timestamp": "2026-01-27T11:07:12+01:00",
+  "model": "deepseek/deepseek-chat",
+  "test_id": "param_viz_004",
+  "prompt": "Time series plot of GDP from 2000 to 2020 with recession shading",
+  "expected_tool": "viz_ts",
+  "selected_tool": "viz_line",
+  "tool_match": false,
+  "expected_params": {
+    "series_col": {
+      "expected": "gdp"
+    },
+    "date_col": {
+      "expected": "date"
+    },
+    "start_date": {
+      "expected": "2000",
+      "alternatives": [
+        "2000-01-01"
+      ]
+    },
+    "end_date": {
+      "expected": "2020",
+      "alternatives": [
+        "2020-12-31"
+      ]
+    },
+    "shade_col": {
+      "expected": "recession",
+      "implicit": true
+    }
+  },
+  "selected_args": {
+    "dataset": "gdp_data",
+    "x_col": "date",
+    "y_cols": [
+      "gdp"
+    ]
+  },
+  "param_precision": 0,
+  "param_recall": 0.200,
+  "param_f1": 0,
+  "param_details": [
+    {
+      "parameter": "date_col",
+      "expected": "date",
+      "selected": "__NOT_FOUND__",
+      "extracted": false,
+      "correct": false,
+      "implicit": false
+    },
+    {
+      "parameter": "end_date",
+      "expected": "2020",
+      "selected": "__NOT_FOUND__",
+      "extracted": false,
+      "correct": false,
+      "implicit": false
+    },
+    {
+      "parameter": "series_col",
+      "expected": "gdp",
+      "selected": "__NOT_FOUND__",
+      "extracted": false,
+      "correct": false,
+      "implicit": false
+    },
+    {
+      "parameter": "shade_col",
+      "expected": "recession",
+      "selected": "__NOT_FOUND__",
+      "extracted": false,
+      "correct": true,
+      "implicit": true
+    },
+    {
+      "parameter": "start_date",
+      "expected": "2000",
+      "selected": "__NOT_FOUND__",
+      "extracted": false,
+      "correct": false,
+      "implicit": false
+    }
+  ],
+  "param_difficulty": {
+    "series_col": "explicit",
+    "date_col": "implicit_from_context",
+    "start_date": "explicit",
+    "end_date": "explicit",
+    "shade_col": "requires_inference"
+  },
+  "latency_ms": 6596
+}
+{
+  "timestamp": "2026-01-27T11:07:19+01:00",
+  "model": "deepseek/deepseek-chat",
+  "test_id": "param_reg_006",
+  "prompt": "WLS regression with weights from the column 'precision'",
+  "expected_tool": "regression_wls",
+  "selected_tool": "regression_ols",
+  "tool_match": false,
+  "expected_params": {
+    "weights_col": {
+      "expected": "precision"
+    }
+  },
+  "selected_args": {
+    "dataset": "meta_analysis",
+    "y_col": "effect",
+    "x_cols": [
+      "study"
+    ],
+    "robust": "none",
+    "intercept": true
+  },
+  "param_precision": 0,
+  "param_recall": 0,
+  "param_f1": 0,
+  "param_details": [
+    {
+      "parameter": "weights_col",
+      "expected": "precision",
+      "selected": "__NOT_FOUND__",
+      "extracted": false,
+      "correct": false,
+      "implicit": false
+    }
+  ],
+  "param_difficulty": {
+    "weights_col": "explicit"
+  },
+  "latency_ms": 6022
+}
+{
+  "timestamp": "2026-01-27T11:07:23+01:00",
+  "model": "deepseek/deepseek-chat",
+  "test_id": "param_cau_006",
+  "prompt": "Synthetic control for unit 'California' with pre-treatment from 1970-1988",
+  "expected_tool": "synthetic_control",
+  "selected_tool": "synthetic_control",
+  "tool_match": true,
+  "expected_params": {
+    "treated_unit": {
+      "expected": "California",
+      "alternatives": [
+        "CA"
+      ]
+    },
+    "pre_start": {
+      "expected": 1970
+    },
+    "pre_end": {
+      "expected": 1988
+    }
+  },
+  "selected_args": {
+    "dataset": "state_data",
+    "unit_col": "state",
+    "time_col": "year",
+    "treated_unit": "California",
+    "treatment_time": 1988,
+    "y_col": "gdp"
+  },
+  "param_precision": 1.000,
+  "param_recall": 0.333,
+  "param_f1": 0.499,
+  "param_details": [
+    {
+      "parameter": "pre_end",
+      "expected": "1988",
+      "selected": "__NOT_FOUND__",
+      "extracted": false,
+      "correct": false,
+      "implicit": false
+    },
+    {
+      "parameter": "pre_start",
+      "expected": "1970",
+      "selected": "__NOT_FOUND__",
+      "extracted": false,
+      "correct": false,
+      "implicit": false
+    },
+    {
+      "parameter": "treated_unit",
+      "expected": "California",
+      "selected": "California",
+      "extracted": true,
+      "correct": true,
+      "implicit": false
+    }
+  ],
+  "param_difficulty": {
+    "treated_unit": "explicit",
+    "pre_start": "explicit_numeric",
+    "pre_end": "explicit_numeric"
+  },
+  "latency_ms": 3181
+}
+{
+  "timestamp": "2026-01-27T11:07:27+01:00",
+  "model": "deepseek/deepseek-chat",
+  "test_id": "param_dis_003",
+  "prompt": "Probit with average marginal effects at the mean",
+  "expected_tool": "probit_margins",
+  "selected_tool": "probit",
+  "tool_match": false,
+  "expected_params": {
+    "margin_type": {
+      "expected": "atmean",
+      "alternatives": [
+        "MEM",
+        "at_mean"
+      ]
+    }
+  },
+  "selected_args": {
+    "dataset": "labor",
+    "x_cols": [
+      "age",
+      "education",
+      "married"
+    ],
+    "y_col": "employed"
+  },
+  "param_precision": 0,
+  "param_recall": 0,
+  "param_f1": 0,
+  "param_details": [
+    {
+      "parameter": "margin_type",
+      "expected": "atmean",
+      "selected": "__NOT_FOUND__",
+      "extracted": false,
+      "correct": false,
+      "implicit": false
+    }
+  ],
+  "param_difficulty": {
+    "margin_type": "explicit"
+  },
+  "latency_ms": 3383
+}
+{
+  "timestamp": "2026-01-27T11:07:34+01:00",
+  "model": "deepseek/deepseek-chat",
+  "test_id": "param_ts_006",
+  "prompt": "STL decomposition with seasonal period of 12 for monthly data",
+  "expected_tool": "ts_stl",
+  "selected_tool": "ts_mstl",
+  "tool_match": false,
+  "expected_params": {
+    "period": {
+      "expected": 12,
+      "alternatives": [
+        "seasonal_period"
+      ]
+    }
+  },
+  "selected_args": {
+    "dataset": "retail",
+    "periods": [
+      12
+    ],
+    "y_col": "sales"
+  },
+  "param_precision": 0,
+  "param_recall": 0,
+  "param_f1": 0,
+  "param_details": [
+    {
+      "parameter": "period",
+      "expected": "12",
+      "selected": "[\n  12\n]",
+      "extracted": true,
+      "correct": false,
+      "implicit": false
+    }
+  ],
+  "param_difficulty": {
+    "period": "explicit_numeric"
+  },
+  "latency_ms": 5939
+}
+{
+  "timestamp": "2026-01-27T11:07:38+01:00",
+  "model": "deepseek/deepseek-chat",
+  "test_id": "param_hyp_005",
+  "prompt": "Power analysis for detecting effect size d=0.5 with n=100 per group",
+  "expected_tool": "power_analysis",
+  "selected_tool": "power_t_test",
+  "tool_match": false,
+  "expected_params": {
+    "effect_size": {
+      "expected": 0.5
+    },
+    "n_per_group": {
+      "expected": 100
+    }
+  },
+  "selected_args": {
+    "delta": 0.5,
+    "n": 100,
+    "type": "two_sample"
+  },
+  "param_precision": 0,
+  "param_recall": 0,
+  "param_f1": 0,
+  "param_details": [
+    {
+      "parameter": "effect_size",
+      "expected": "0.5",
+      "selected": "__NOT_FOUND__",
+      "extracted": false,
+      "correct": false,
+      "implicit": false
+    },
+    {
+      "parameter": "n_per_group",
+      "expected": "100",
+      "selected": "__NOT_FOUND__",
+      "extracted": false,
+      "correct": false,
+      "implicit": false
+    }
+  ],
+  "param_difficulty": {
+    "effect_size": "explicit_numeric",
+    "n_per_group": "explicit_numeric"
+  },
+  "latency_ms": 3563
+}
+{
+  "timestamp": "2026-01-27T11:07:43+01:00",
+  "model": "deepseek/deepseek-chat",
+  "test_id": "param_reg_007",
+  "prompt": "Regress sales on price and advertising with two-way clustered standard errors by store and week",
+  "expected_tool": "regression_clustered",
+  "selected_tool": "regression_clustered",
+  "tool_match": true,
+  "expected_params": {
+    "y_col": {
+      "expected": "sales"
+    },
+    "x_cols": {
+      "expected": [
+        "price",
+        "advertising"
+      ],
+      "order_matters": false
+    },
+    "cluster_var1": {
+      "expected": "store"
+    },
+    "cluster_var2": {
+      "expected": "week"
+    }
+  },
+  "selected_args": {
+    "cluster_col": "store",
+    "cluster_col2": "week",
+    "dataset": "retail_panel",
+    "x_cols": [
+      "price",
+      "advertising"
+    ],
+    "y_col": "sales"
+  },
+  "param_precision": 1.000,
+  "param_recall": 0.500,
+  "param_f1": 0.666,
+  "param_details": [
+    {
+      "parameter": "cluster_var1",
+      "expected": "store",
+      "selected": "__NOT_FOUND__",
+      "extracted": false,
+      "correct": false,
+      "implicit": false
+    },
+    {
+      "parameter": "cluster_var2",
+      "expected": "week",
+      "selected": "__NOT_FOUND__",
+      "extracted": false,
+      "correct": false,
+      "implicit": false
+    },
+    {
+      "parameter": "x_cols",
+      "expected": "[\n  \"price\",\n  \"advertising\"\n]",
+      "selected": "[\n  \"price\",\n  \"advertising\"\n]",
+      "extracted": true,
+      "correct": true,
+      "implicit": false
+    },
+    {
+      "parameter": "y_col",
+      "expected": "sales",
+      "selected": "sales",
+      "extracted": true,
+      "correct": true,
+      "implicit": false
+    }
+  ],
+  "param_difficulty": {
+    "y_col": "explicit",
+    "x_cols": "explicit",
+    "cluster_var1": "explicit",
+    "cluster_var2": "explicit"
+  },
+  "latency_ms": 4064
+}
+{
+  "timestamp": "2026-01-27T11:07:47+01:00",
+  "model": "deepseek/deepseek-chat",
+  "test_id": "param_pan_005",
+  "prompt": "Between-effects estimator for time-invariant characteristics",
+  "expected_tool": "panel_between",
+  "selected_tool": "panel_random_effects",
+  "tool_match": false,
+  "expected_params": {
+    "entity_col": {
+      "expected": "firm"
+    },
+    "method": {
+      "expected": "between"
+    }
+  },
+  "selected_args": {
+    "dataset": "grunfeld",
+    "entity_col": "firm",
+    "x_cols": [
+      "value",
+      "capital"
+    ],
+    "y_col": "inv"
+  },
+  "param_precision": 1.000,
+  "param_recall": 0.500,
+  "param_f1": 0.666,
+  "param_details": [
+    {
+      "parameter": "entity_col",
+      "expected": "firm",
+      "selected": "firm",
+      "extracted": true,
+      "correct": true,
+      "implicit": false
+    },
+    {
+      "parameter": "method",
+      "expected": "between",
+      "selected": "__NOT_FOUND__",
+      "extracted": false,
+      "correct": false,
+      "implicit": false
+    }
+  ],
+  "param_difficulty": {
+    "entity_col": "requires_inference",
+    "method": "explicit"
+  },
+  "latency_ms": 3450
+}
+{
+  "timestamp": "2026-01-27T11:07:56+01:00",
+  "model": "deepseek/deepseek-chat",
+  "test_id": "param_cau_007",
+  "prompt": "Fuzzy RD with compliance rate around 0.7 at cutoff 60",
+  "expected_tool": "rd_fuzzy",
+  "selected_tool": "rd_fuzzy",
+  "tool_match": true,
+  "expected_params": {
+    "cutoff": {
+      "expected": 60
+    },
+    "fuzzy": {
+      "expected": true
+    },
+    "running_var": {
+      "expected": "running_var"
+    }
+  },
+  "selected_args": {
+    "cutoff": 60,
+    "dataset": "scholarship",
+    "treat_col": "treatment_received",
+    "x_col": "running_var",
+    "y_col": "outcome"
+  },
+  "param_precision": 1.000,
+  "param_recall": 0.333,
+  "param_f1": 0.499,
+  "param_details": [
+    {
+      "parameter": "cutoff",
+      "expected": "60",
+      "selected": "60",
+      "extracted": true,
+      "correct": true,
+      "implicit": false
+    },
+    {
+      "parameter": "fuzzy",
+      "expected": "true",
+      "selected": "__NOT_FOUND__",
+      "extracted": false,
+      "correct": false,
+      "implicit": false
+    },
+    {
+      "parameter": "running_var",
+      "expected": "running_var",
+      "selected": "__NOT_FOUND__",
+      "extracted": false,
+      "correct": false,
+      "implicit": false
+    }
+  ],
+  "param_difficulty": {
+    "cutoff": "explicit_numeric",
+    "fuzzy": "explicit",
+    "running_var": "requires_inference"
+  },
+  "latency_ms": 8189
+}
+{
+  "timestamp": "2026-01-27T11:08:02+01:00",
+  "model": "deepseek/deepseek-chat",
+  "test_id": "param_ts_007",
+  "prompt": "VARMA(2,1) model for gdp, inflation, and unemployment",
+  "expected_tool": "ts_varma",
+  "selected_tool": "ts_varma",
+  "tool_match": true,
+  "expected_params": {
+    "vars": {
+      "expected": [
+        "gdp",
+        "inflation",
+        "unemployment"
+      ],
+      "order_matters": false
+    },
+    "p": {
+      "expected": 2
+    },
+    "q": {
+      "expected": 1
+    }
+  },
+  "selected_args": {
+    "dataset": "macro",
+    "p": 2,
+    "q": 1,
+    "y_cols": [
+      "gdp",
+      "inflation",
+      "unemployment"
+    ]
+  },
+  "param_precision": 1.000,
+  "param_recall": 0.666,
+  "param_f1": 0.799,
+  "param_details": [
+    {
+      "parameter": "p",
+      "expected": "2",
+      "selected": "2",
+      "extracted": true,
+      "correct": true,
+      "implicit": false
+    },
+    {
+      "parameter": "q",
+      "expected": "1",
+      "selected": "1",
+      "extracted": true,
+      "correct": true,
+      "implicit": false
+    },
+    {
+      "parameter": "vars",
+      "expected": "[\n  \"gdp\",\n  \"inflation\",\n  \"unemployment\"\n]",
+      "selected": "__NOT_FOUND__",
+      "extracted": false,
+      "correct": false,
+      "implicit": false
+    }
+  ],
+  "param_difficulty": {
+    "vars": "explicit_multiple",
+    "p": "explicit_numeric",
+    "q": "explicit_numeric"
+  },
+  "latency_ms": 5424
+}
+{
+  "timestamp": "2026-01-27T11:08:07+01:00",
+  "model": "deepseek/deepseek-chat",
+  "test_id": "param_ml_007",
+  "prompt": "Gaussian Mixture Model with 3 components and full covariance",
+  "expected_tool": "ml_gmm",
+  "selected_tool": "ml_kmeans",
+  "tool_match": false,
+  "expected_params": {
+    "n_components": {
+      "expected": 3
+    },
+    "covariance_type": {
+      "expected": "full"
+    }
+  },
+  "selected_args": {
+    "dataset": "customer_segments",
+    "k": 3,
+    "x_cols": [
+      "feature1",
+      "feature2",
+      "feature3"
+    ]
+  },
+  "param_precision": 0,
+  "param_recall": 0,
+  "param_f1": 0,
+  "param_details": [
+    {
+      "parameter": "covariance_type",
+      "expected": "full",
+      "selected": "__NOT_FOUND__",
+      "extracted": false,
+      "correct": false,
+      "implicit": false
+    },
+    {
+      "parameter": "n_components",
+      "expected": "3",
+      "selected": "__NOT_FOUND__",
+      "extracted": false,
+      "correct": false,
+      "implicit": false
+    }
+  ],
+  "param_difficulty": {
+    "n_components": "explicit_numeric",
+    "covariance_type": "explicit"
+  },
+  "latency_ms": 5205
+}

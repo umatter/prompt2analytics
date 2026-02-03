@@ -1,0 +1,11 @@
+{
+  "method": "group_by",
+  "n": 10000,
+  "iterations": 100,
+  "timing": {
+    "min_us": 7378,
+    "median_us": 11026,
+    "mean_us": 11147,
+    "max_us": 20019
+  }
+}

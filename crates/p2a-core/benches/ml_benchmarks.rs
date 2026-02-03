@@ -2,9 +2,9 @@
 //!
 //! Run with: `cargo bench -p p2a-core -- ml`
 
-use criterion::{criterion_group, criterion_main, Criterion, BenchmarkId};
-use p2a_core::{kmeans, dbscan, hierarchical, pca, Linkage};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use ndarray::Array2;
+use p2a_core::{Linkage, dbscan, hierarchical, kmeans, pca};
 use rand::Rng;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
@@ -34,9 +34,7 @@ fn kmeans_benchmark(c: &mut Criterion) {
         let data = generate_cluster_data(n, 5, 3, 42);
 
         group.bench_with_input(BenchmarkId::from_parameter(n), &data, |b, d| {
-            b.iter(|| {
-                kmeans(d.view(), 3, Some(100), Some(1e-4), Some(5), Some(42))
-            });
+            b.iter(|| kmeans(d.view(), 3, Some(100), Some(1e-4), Some(5), Some(42)));
         });
     }
 
@@ -50,9 +48,7 @@ fn dbscan_benchmark(c: &mut Criterion) {
         let data = generate_cluster_data(n, 5, 3, 42);
 
         group.bench_with_input(BenchmarkId::from_parameter(n), &data, |b, d| {
-            b.iter(|| {
-                dbscan(d.view(), 0.5, 5)
-            });
+            b.iter(|| dbscan(d.view(), 0.5, 5));
         });
     }
 
@@ -66,9 +62,7 @@ fn hierarchical_benchmark(c: &mut Criterion) {
         let data = generate_cluster_data(n, 5, 3, 42);
 
         group.bench_with_input(BenchmarkId::from_parameter(n), &data, |b, d| {
-            b.iter(|| {
-                hierarchical(d.view(), Some(3), Linkage::Ward, None)
-            });
+            b.iter(|| hierarchical(d.view(), Some(3), Linkage::Ward, None));
         });
     }
 
@@ -82,9 +76,7 @@ fn pca_benchmark(c: &mut Criterion) {
         let data = generate_cluster_data(n, 10, 3, 42);
 
         group.bench_with_input(BenchmarkId::from_parameter(n), &data, |b, d| {
-            b.iter(|| {
-                pca(d.view(), Some(5), false)
-            });
+            b.iter(|| pca(d.view(), Some(5), false));
         });
     }
 

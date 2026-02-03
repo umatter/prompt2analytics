@@ -9,8 +9,8 @@
 use polars::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use super::quality::generate_quality_profile;
 use super::Dataset;
+use super::quality::generate_quality_profile;
 
 /// Result of a cleaning operation with verification.
 #[derive(Clone, Serialize, Deserialize)]
@@ -106,34 +106,54 @@ pub enum CleaningOperation {
     /// Convert to uppercase
     ToUppercase { column: String },
     /// Fill null values
-    FillNa { columns: Option<Vec<String>>, strategy: String, value: Option<String> },
+    FillNa {
+        columns: Option<Vec<String>>,
+        strategy: String,
+        value: Option<String>,
+    },
     /// Drop rows with null values
-    DropNa { columns: Option<Vec<String>>, how: String },
+    DropNa {
+        columns: Option<Vec<String>>,
+        how: String,
+    },
     /// Remove duplicate rows
-    Deduplicate { columns: Option<Vec<String>>, keep: String },
+    Deduplicate {
+        columns: Option<Vec<String>>,
+        keep: String,
+    },
     /// Replace values
-    Replace { column: String, old_value: String, new_value: String },
+    Replace {
+        column: String,
+        old_value: String,
+        new_value: String,
+    },
     /// Filter rows
-    Filter { column: String, operator: String, value: String },
+    Filter {
+        column: String,
+        operator: String,
+        value: String,
+    },
 }
 
 impl CleaningOperation {
     /// Get a human-readable description of the operation.
     pub fn description(&self) -> String {
         match self {
-            CleaningOperation::Trim { columns } => {
-                match columns {
-                    Some(cols) => format!("Trim whitespace from columns: {}", cols.join(", ")),
-                    None => "Trim whitespace from all string columns".to_string(),
-                }
-            }
+            CleaningOperation::Trim { columns } => match columns {
+                Some(cols) => format!("Trim whitespace from columns: {}", cols.join(", ")),
+                None => "Trim whitespace from all string columns".to_string(),
+            },
             CleaningOperation::ToLowercase { column } => {
                 format!("Convert '{}' to lowercase", column)
             }
             CleaningOperation::ToUppercase { column } => {
                 format!("Convert '{}' to uppercase", column)
             }
-            CleaningOperation::FillNa { columns, strategy, value } => {
+            CleaningOperation::FillNa {
+                columns,
+                strategy,
+                value,
+            } => {
                 let cols = match columns {
                     Some(c) => c.join(", "),
                     None => "all columns".to_string(),
@@ -157,10 +177,21 @@ impl CleaningOperation {
                 };
                 format!("Remove duplicates based on {}, keeping {}", cols, keep)
             }
-            CleaningOperation::Replace { column, old_value, new_value } => {
-                format!("Replace '{}' with '{}' in column '{}'", old_value, new_value, column)
+            CleaningOperation::Replace {
+                column,
+                old_value,
+                new_value,
+            } => {
+                format!(
+                    "Replace '{}' with '{}' in column '{}'",
+                    old_value, new_value, column
+                )
             }
-            CleaningOperation::Filter { column, operator, value } => {
+            CleaningOperation::Filter {
+                column,
+                operator,
+                value,
+            } => {
                 format!("Filter rows where {} {} {}", column, operator, value)
             }
         }
@@ -186,21 +217,34 @@ pub fn preview_cleaning(
         CleaningOperation::ToUppercase { column } => {
             preview_case_change(df, column, false, sample_size, row_count)
         }
-        CleaningOperation::FillNa { columns, strategy, value } => {
-            preview_fill_na(df, columns.as_deref(), strategy, value.as_deref(), sample_size, row_count)
-        }
+        CleaningOperation::FillNa {
+            columns,
+            strategy,
+            value,
+        } => preview_fill_na(
+            df,
+            columns.as_deref(),
+            strategy,
+            value.as_deref(),
+            sample_size,
+            row_count,
+        ),
         CleaningOperation::DropNa { columns, how } => {
             preview_drop_na(df, columns.as_deref(), how, sample_size, row_count)
         }
         CleaningOperation::Deduplicate { columns, keep } => {
             preview_deduplicate(df, columns.as_deref(), keep, row_count)
         }
-        CleaningOperation::Replace { column, old_value, new_value } => {
-            preview_replace(df, column, old_value, new_value, sample_size, row_count)
-        }
-        CleaningOperation::Filter { column, operator, value } => {
-            preview_filter(df, column, operator, value, row_count)
-        }
+        CleaningOperation::Replace {
+            column,
+            old_value,
+            new_value,
+        } => preview_replace(df, column, old_value, new_value, sample_size, row_count),
+        CleaningOperation::Filter {
+            column,
+            operator,
+            value,
+        } => preview_filter(df, column, operator, value, row_count),
     }
 }
 
@@ -263,7 +307,10 @@ fn preview_trim(
     };
 
     CleaningPreview {
-        operation: CleaningOperation::Trim { columns: columns.map(|c| c.to_vec()) }.description(),
+        operation: CleaningOperation::Trim {
+            columns: columns.map(|c| c.to_vec()),
+        }
+        .description(),
         rows_affected: total_affected,
         pct_affected,
         sample_changes,
@@ -320,9 +367,13 @@ fn preview_case_change(
     };
 
     let operation = if to_lower {
-        CleaningOperation::ToLowercase { column: column.to_string() }
+        CleaningOperation::ToLowercase {
+            column: column.to_string(),
+        }
     } else {
-        CleaningOperation::ToUppercase { column: column.to_string() }
+        CleaningOperation::ToUppercase {
+            column: column.to_string(),
+        }
     };
 
     CleaningPreview {
@@ -350,7 +401,11 @@ fn preview_fill_na(
 
     let cols_to_check: Vec<String> = match columns {
         Some(cols) => cols.to_vec(),
-        None => df.get_column_names().iter().map(|s| s.to_string()).collect(),
+        None => df
+            .get_column_names()
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
     };
 
     let fill_value = value.unwrap_or("<strategy value>");
@@ -363,16 +418,17 @@ fn preview_fill_na(
                 // Find sample null positions
                 let mut samples_for_col = 0;
                 for idx in 0..col.len() {
-                    if col.get(idx).map(|v| v.is_null()).unwrap_or(false) {
-                        if sample_changes.len() < sample_size && samples_for_col < 2 {
-                            sample_changes.push(ChangeExample {
-                                row_index: idx,
-                                column: col_name.clone(),
-                                before: "null".to_string(),
-                                after: fill_value.to_string(),
-                            });
-                            samples_for_col += 1;
-                        }
+                    if col.get(idx).map(|v| v.is_null()).unwrap_or(false)
+                        && sample_changes.len() < sample_size
+                        && samples_for_col < 2
+                    {
+                        sample_changes.push(ChangeExample {
+                            row_index: idx,
+                            column: col_name.clone(),
+                            before: "null".to_string(),
+                            after: fill_value.to_string(),
+                        });
+                        samples_for_col += 1;
                     }
                 }
             }
@@ -394,7 +450,8 @@ fn preview_fill_na(
             columns: columns.map(|c| c.to_vec()),
             strategy: _strategy.to_string(),
             value: value.map(|v| v.to_string()),
-        }.description(),
+        }
+        .description(),
         rows_affected: total_affected,
         pct_affected,
         sample_changes,
@@ -415,7 +472,11 @@ fn preview_drop_na(
 
     let cols_to_check: Vec<&str> = match columns {
         Some(cols) => cols.iter().map(|s| s.as_str()).collect(),
-        None => df.get_column_names().into_iter().map(|s| s.as_str()).collect(),
+        None => df
+            .get_column_names()
+            .into_iter()
+            .map(|s| s.as_str())
+            .collect(),
     };
 
     // Count rows that would be dropped
@@ -426,7 +487,7 @@ fn preview_drop_na(
         let mut all_null = true;
 
         for col_name in &cols_to_check {
-            if let Ok(col) = df.column(*col_name) {
+            if let Ok(col) = df.column(col_name) {
                 let is_null = col.get(row_idx).map(|v| v.is_null()).unwrap_or(false);
                 if is_null {
                     has_null = true;
@@ -466,7 +527,8 @@ fn preview_drop_na(
         operation: CleaningOperation::DropNa {
             columns: columns.map(|c| c.to_vec()),
             how: how.to_string(),
-        }.description(),
+        }
+        .description(),
         rows_affected: rows_to_drop,
         pct_affected,
         sample_changes: vec![], // No specific changes to show for row deletion
@@ -515,7 +577,8 @@ fn preview_deduplicate(
         operation: CleaningOperation::Deduplicate {
             columns: columns.map(|c| c.to_vec()),
             keep: keep.to_string(),
-        }.description(),
+        }
+        .description(),
         rows_affected: duplicates,
         pct_affected,
         sample_changes: vec![],
@@ -571,7 +634,10 @@ fn preview_replace(
     }
 
     if total_affected == 0 {
-        warnings.push(format!("No values matching '{}' found in column '{}'", old_value, column));
+        warnings.push(format!(
+            "No values matching '{}' found in column '{}'",
+            old_value, column
+        ));
     }
 
     let pct_affected = if row_count > 0 {
@@ -585,7 +651,8 @@ fn preview_replace(
             column: column.to_string(),
             old_value: old_value.to_string(),
             new_value: new_value.to_string(),
-        }.description(),
+        }
+        .description(),
         rows_affected: total_affected,
         pct_affected,
         sample_changes,
@@ -633,9 +700,14 @@ fn preview_filter(
                     Some(match operator {
                         "==" | "eq" | "=" => ca.equal(value),
                         "!=" | "ne" | "<>" => ca.not_equal(value),
-                        "contains" => ca.contains(value, false).unwrap_or_else(|_| BooleanChunked::new(PlSmallStr::from("mask"), &[] as &[bool])),
+                        "contains" => ca.contains(value, false).unwrap_or_else(|_| {
+                            BooleanChunked::new(PlSmallStr::from("mask"), &[] as &[bool])
+                        }),
                         _ => {
-                            warnings.push(format!("Operator '{}' not supported for string columns", operator));
+                            warnings.push(format!(
+                                "Operator '{}' not supported for string columns",
+                                operator
+                            ));
                             return CleaningPreview {
                                 operation: format!("Filter {} {} {}", column, operator, value),
                                 rows_affected: 0,
@@ -651,7 +723,10 @@ fn preview_filter(
                 }
             }
             _ => {
-                warnings.push(format!("Unsupported column type for filtering: {:?}", col.dtype()));
+                warnings.push(format!(
+                    "Unsupported column type for filtering: {:?}",
+                    col.dtype()
+                ));
                 None
             }
         };
@@ -679,7 +754,8 @@ fn preview_filter(
             column: column.to_string(),
             operator: operator.to_string(),
             value: value.to_string(),
-        }.description(),
+        }
+        .description(),
         rows_affected: rows_to_remove,
         pct_affected,
         sample_changes: vec![],
@@ -689,11 +765,7 @@ fn preview_filter(
 }
 
 /// Generate a verification report comparing before and after datasets.
-pub fn verify_cleaning(
-    before: &Dataset,
-    after: &Dataset,
-    _operation: &str,
-) -> VerificationReport {
+pub fn verify_cleaning(before: &Dataset, after: &Dataset, _operation: &str) -> VerificationReport {
     let rows_before = before.nrows();
     let rows_after = after.nrows();
 
@@ -702,11 +774,13 @@ pub fn verify_cleaning(
     let profile_after = generate_quality_profile(after);
 
     // Calculate quality delta
-    let issues_before: Vec<String> = profile_before.all_issues()
+    let issues_before: Vec<String> = profile_before
+        .all_issues()
         .iter()
         .map(|i| i.description())
         .collect();
-    let issues_after: Vec<String> = profile_after.all_issues()
+    let issues_after: Vec<String> = profile_after
+        .all_issues()
         .iter()
         .map(|i| i.description())
         .collect();
@@ -759,7 +833,11 @@ pub fn verify_cleaning(
 }
 
 /// Detect changes between two datasets.
-fn detect_changes(before: &Dataset, after: &Dataset, sample_size: usize) -> (usize, Vec<ChangeExample>) {
+fn detect_changes(
+    before: &Dataset,
+    after: &Dataset,
+    sample_size: usize,
+) -> (usize, Vec<ChangeExample>) {
     let df_before = before.df();
     let df_after = after.df();
 
@@ -771,7 +849,11 @@ fn detect_changes(before: &Dataset, after: &Dataset, sample_size: usize) -> (usi
         return (0, changes);
     }
 
-    let col_names: Vec<String> = df_before.get_column_names().iter().map(|s| s.to_string()).collect();
+    let col_names: Vec<String> = df_before
+        .get_column_names()
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
 
     for col_name in &col_names {
         let col_before = match df_before.column(col_name) {
@@ -813,7 +895,10 @@ impl VerificationReport {
         summary.push_str("Verification Report\n");
         summary.push_str("===================\n\n");
 
-        summary.push_str(&format!("Rows: {} → {} ", self.rows_before, self.rows_after));
+        summary.push_str(&format!(
+            "Rows: {} → {} ",
+            self.rows_before, self.rows_after
+        ));
         if self.rows_removed > 0 {
             summary.push_str(&format!("(-{} removed) ", self.rows_removed));
         }
@@ -834,8 +919,7 @@ impl VerificationReport {
 
         summary.push_str(&format!(
             "Issues: {} → {}\n",
-            self.quality_delta.issues_before,
-            self.quality_delta.issues_after
+            self.quality_delta.issues_before, self.quality_delta.issues_after
         ));
 
         if !self.quality_delta.issues_resolved.is_empty() {
@@ -933,12 +1017,15 @@ mod tests {
         let test_df = df! {
             "name" => ["  Alice  ", "Bob", " Charlie "],
             "value" => [1, 2, 3],
-        }.unwrap();
+        }
+        .unwrap();
 
         let dataset = Dataset::new(test_df);
         let preview = preview_cleaning(
             &dataset,
-            &CleaningOperation::Trim { columns: Some(vec!["name".to_string()]) },
+            &CleaningOperation::Trim {
+                columns: Some(vec!["name".to_string()]),
+            },
             5,
         );
 
@@ -950,12 +1037,15 @@ mod tests {
     fn test_preview_to_lowercase() {
         let test_df = df! {
             "name" => ["ALICE", "bob", "CHARLIE"],
-        }.unwrap();
+        }
+        .unwrap();
 
         let dataset = Dataset::new(test_df);
         let preview = preview_cleaning(
             &dataset,
-            &CleaningOperation::ToLowercase { column: "name".to_string() },
+            &CleaningOperation::ToLowercase {
+                column: "name".to_string(),
+            },
             5,
         );
 
@@ -966,7 +1056,8 @@ mod tests {
     fn test_preview_fill_na() {
         let test_df = df! {
             "value" => [Some(1), None, Some(3), None, Some(5)],
-        }.unwrap();
+        }
+        .unwrap();
 
         let dataset = Dataset::new(test_df);
         let preview = preview_cleaning(
@@ -987,7 +1078,8 @@ mod tests {
         let test_df = df! {
             "a" => [Some(1), None, Some(3)],
             "b" => [Some(10), Some(20), None],
-        }.unwrap();
+        }
+        .unwrap();
 
         let dataset = Dataset::new(test_df);
         let preview = preview_cleaning(
@@ -1007,7 +1099,8 @@ mod tests {
         let test_df = df! {
             "id" => [1, 1, 2, 2, 3],
             "name" => ["A", "A", "B", "B", "C"],
-        }.unwrap();
+        }
+        .unwrap();
 
         let dataset = Dataset::new(test_df);
         let preview = preview_cleaning(
@@ -1026,7 +1119,8 @@ mod tests {
     fn test_preview_replace() {
         let test_df = df! {
             "status" => ["active", "inactive", "active", "pending"],
-        }.unwrap();
+        }
+        .unwrap();
 
         let dataset = Dataset::new(test_df);
         let preview = preview_cleaning(
@@ -1047,12 +1141,14 @@ mod tests {
         let before_df = df! {
             "name" => ["  Alice  ", "Bob"],
             "value" => [1, 2],
-        }.unwrap();
+        }
+        .unwrap();
 
         let after_df = df! {
             "name" => ["Alice", "Bob"],
             "value" => [1, 2],
-        }.unwrap();
+        }
+        .unwrap();
 
         let before = Dataset::new(before_df);
         let after = Dataset::new(after_df);
@@ -1070,14 +1166,12 @@ mod tests {
             operation: "Trim whitespace".to_string(),
             rows_affected: 10,
             pct_affected: 5.0,
-            sample_changes: vec![
-                ChangeExample {
-                    row_index: 0,
-                    column: "name".to_string(),
-                    before: "' Alice '".to_string(),
-                    after: "'Alice'".to_string(),
-                },
-            ],
+            sample_changes: vec![ChangeExample {
+                row_index: 0,
+                column: "name".to_string(),
+                before: "' Alice '".to_string(),
+                after: "'Alice'".to_string(),
+            }],
             estimated_quality_change: 0.5,
             warnings: vec![],
         };

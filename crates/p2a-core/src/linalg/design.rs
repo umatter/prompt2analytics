@@ -7,6 +7,17 @@ use ndarray::{Array1, Array2};
 use polars::prelude::*;
 use thiserror::Error;
 
+/// Get all column names from a DataFrame as a Vec<String>.
+///
+/// Useful for providing available columns in error messages.
+#[inline]
+pub fn get_column_names(df: &DataFrame) -> Vec<String> {
+    df.get_column_names()
+        .into_iter()
+        .map(|s| s.to_string())
+        .collect()
+}
+
 /// Error type for design matrix construction.
 #[derive(Debug, Error)]
 pub enum DesignError {
@@ -178,7 +189,8 @@ pub fn extract_groups(
         .column(group_col)
         .map_err(|_| DesignError::ColumnNotFound(group_col.to_string()))?;
 
-    let mut groups: std::collections::HashMap<String, Vec<usize>> = std::collections::HashMap::new();
+    let mut groups: std::collections::HashMap<String, Vec<usize>> =
+        std::collections::HashMap::new();
 
     // Convert to string representation for grouping
     let str_values: Vec<String> = (0..series.len())
@@ -274,7 +286,6 @@ pub fn quasi_demean_within_groups(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use polars::prelude::*;
 
     fn create_test_df() -> DataFrame {
         df! {

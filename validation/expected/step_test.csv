@@ -1,0 +1,4 @@
+"method","aic","n_vars","has_x1","has_x2","has_x3"
+"forward",125.163887730939,2,TRUE,TRUE,FALSE
+"backward",125.163887730939,2,TRUE,TRUE,FALSE
+"both",125.163887730939,2,TRUE,TRUE,FALSE

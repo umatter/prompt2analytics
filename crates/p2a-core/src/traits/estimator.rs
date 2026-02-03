@@ -4,8 +4,8 @@
 //! across OLS, panel data, IV, and other linear estimators.
 
 use ndarray::{Array1, Array2};
+use serde::{Deserialize, Serialize};
 use statrs::distribution::{ContinuousCDF, StudentsT};
-use serde::{Serialize, Deserialize};
 
 /// Significance level indicators for p-values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -46,6 +46,17 @@ impl SignificanceLevel {
             Self::FivePercent => "*",
             Self::OnePercent => "**",
             Self::TenthPercent => "***",
+        }
+    }
+
+    /// Get a short code for this significance level (for CSV export).
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::NotSignificant => "",
+            Self::TenPercent => "p<0.10",
+            Self::FivePercent => "p<0.05",
+            Self::OnePercent => "p<0.01",
+            Self::TenthPercent => "p<0.001",
         }
     }
 }
@@ -287,11 +298,26 @@ mod tests {
 
     #[test]
     fn test_significance_level() {
-        assert_eq!(SignificanceLevel::from_p_value(0.0001), SignificanceLevel::TenthPercent);
-        assert_eq!(SignificanceLevel::from_p_value(0.005), SignificanceLevel::OnePercent);
-        assert_eq!(SignificanceLevel::from_p_value(0.03), SignificanceLevel::FivePercent);
-        assert_eq!(SignificanceLevel::from_p_value(0.08), SignificanceLevel::TenPercent);
-        assert_eq!(SignificanceLevel::from_p_value(0.15), SignificanceLevel::NotSignificant);
+        assert_eq!(
+            SignificanceLevel::from_p_value(0.0001),
+            SignificanceLevel::TenthPercent
+        );
+        assert_eq!(
+            SignificanceLevel::from_p_value(0.005),
+            SignificanceLevel::OnePercent
+        );
+        assert_eq!(
+            SignificanceLevel::from_p_value(0.03),
+            SignificanceLevel::FivePercent
+        );
+        assert_eq!(
+            SignificanceLevel::from_p_value(0.08),
+            SignificanceLevel::TenPercent
+        );
+        assert_eq!(
+            SignificanceLevel::from_p_value(0.15),
+            SignificanceLevel::NotSignificant
+        );
     }
 
     #[test]

@@ -1,0 +1,86 @@
+{
+  "category": "viz",
+  "description": "Visualization tool selection tests",
+  "tests": [
+    {
+      "id": "viz_001",
+      "prompt": "Create a histogram of the income distribution",
+      "expected_tools": ["viz_histogram"],
+      "acceptable_tools": ["viz_histogram", "viz_histogram_interactive"],
+      "dataset_context": "census dataset: income, age, education",
+      "difficulty": "basic"
+    },
+    {
+      "id": "viz_002",
+      "prompt": "Plot the relationship between education and earnings",
+      "expected_tools": ["viz_scatter"],
+      "acceptable_tools": ["viz_scatter", "viz_scatter_interactive"],
+      "dataset_context": "labor dataset: education_years, annual_earnings",
+      "difficulty": "basic"
+    },
+    {
+      "id": "viz_003",
+      "prompt": "Create a scatter plot colored by gender",
+      "expected_tools": ["viz_scatter"],
+      "acceptable_tools": ["viz_scatter", "viz_scatter_interactive"],
+      "dataset_context": "wage dataset: experience, wage, gender",
+      "difficulty": "basic"
+    },
+    {
+      "id": "viz_004",
+      "prompt": "Generate a line chart showing GDP over time",
+      "expected_tools": ["viz_line"],
+      "acceptable_tools": ["viz_line", "viz_line_interactive"],
+      "dataset_context": "macro dataset: year, gdp",
+      "difficulty": "basic"
+    },
+    {
+      "id": "viz_005",
+      "prompt": "Create box plots comparing distributions across treatment groups",
+      "expected_tools": ["viz_boxplot"],
+      "acceptable_tools": ["viz_boxplot"],
+      "dataset_context": "experiment dataset: outcome, treatment_group",
+      "difficulty": "basic"
+    },
+    {
+      "id": "viz_006",
+      "prompt": "Generate a correlation heatmap for all numeric variables",
+      "expected_tools": ["viz_heatmap"],
+      "acceptable_tools": ["viz_heatmap"],
+      "dataset_context": "multivar dataset: x1, x2, x3, x4, x5",
+      "difficulty": "basic"
+    },
+    {
+      "id": "viz_007",
+      "prompt": "Create an interactive scatter plot that I can zoom and pan",
+      "expected_tools": ["viz_scatter_interactive"],
+      "acceptable_tools": ["viz_scatter_interactive"],
+      "dataset_context": "large dataset: x, y, group",
+      "difficulty": "intermediate"
+    },
+    {
+      "id": "viz_008",
+      "prompt": "Plot the regression coefficients with confidence intervals",
+      "expected_tools": ["viz_coefficient"],
+      "acceptable_tools": ["viz_coefficient"],
+      "dataset_context": "regression results: coefficients, std_errors, variable_names",
+      "difficulty": "intermediate"
+    },
+    {
+      "id": "viz_009",
+      "prompt": "Generate diagnostic plots for the regression model",
+      "expected_tools": ["viz_residual_diagnostics"],
+      "acceptable_tools": ["viz_residual_diagnostics"],
+      "dataset_context": "regression dataset: y, x1, x2, x3",
+      "difficulty": "intermediate"
+    },
+    {
+      "id": "viz_010",
+      "prompt": "Visualize the distribution of residuals with a histogram",
+      "expected_tools": ["viz_histogram"],
+      "acceptable_tools": ["viz_histogram", "viz_histogram_interactive"],
+      "dataset_context": "residuals dataset: resid",
+      "difficulty": "basic"
+    }
+  ]
+}

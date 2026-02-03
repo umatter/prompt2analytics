@@ -139,7 +139,7 @@ impl AggSpec {
 pub fn group_by(dataset: &Dataset, by: &[&str], aggs: &[AggSpec]) -> MungeResult<Dataset> {
     // Validate group by columns exist
     for col in by {
-        if dataset.df().column(*col).is_err() {
+        if dataset.df().column(col).is_err() {
             return Err(MungeError::ColumnNotFound(col.to_string()));
         }
     }
@@ -181,7 +181,7 @@ pub fn group_by(dataset: &Dataset, by: &[&str], aggs: &[AggSpec]) -> MungeResult
                 AggFn::Last => base_expr.last(),
                 AggFn::NUnique => base_expr.n_unique(),
             };
-            agg_expr.alias(&spec.result_name())
+            agg_expr.alias(spec.result_name())
         })
         .collect();
 
@@ -226,13 +226,13 @@ pub fn value_counts(dataset: &Dataset, column: &str) -> MungeResult<Dataset> {
     let lazy = dataset.df().clone().lazy();
 
     let result = lazy
-        .select([col(column).value_counts(true, true, "count".into(), false)])
+        .select([col(column).value_counts(true, true, "count", false)])
         .collect()
         .map_err(|e| MungeError::AggregationError(e.to_string()))?;
 
     // The result is a struct column, we need to unnest it
     let unnested = result
-        .unnest([column])
+        .unnest([column], None)
         .map_err(|e| MungeError::AggregationError(e.to_string()))?;
 
     Ok(Dataset::new(unnested))
@@ -291,7 +291,7 @@ pub fn summarize(dataset: &Dataset, aggs: &[AggSpec]) -> MungeResult<Dataset> {
                 AggFn::Last => base_expr.last(),
                 AggFn::NUnique => base_expr.n_unique(),
             };
-            agg_expr.alias(&spec.result_name())
+            agg_expr.alias(spec.result_name())
         })
         .collect();
 
@@ -329,7 +329,7 @@ pub fn describe(dataset: &Dataset, columns: Option<&[&str]>) -> MungeResult<Data
             // Validate all specified columns exist and are numeric
             for col_name in cols {
                 let column = df
-                    .column(*col_name)
+                    .column(col_name)
                     .map_err(|_| MungeError::ColumnNotFound(col_name.to_string()))?;
                 if !column.dtype().is_primitive_numeric() {
                     return Err(MungeError::TypeMismatch {
@@ -363,11 +363,11 @@ pub fn describe(dataset: &Dataset, columns: Option<&[&str]>) -> MungeResult<Data
     // Statistics: count, mean, std, min, max for each column
     let mut agg_exprs: Vec<Expr> = Vec::new();
     for col_name in &cols_to_describe {
-        agg_exprs.push(col(col_name).count().alias(&format!("{}_count", col_name)));
-        agg_exprs.push(col(col_name).mean().alias(&format!("{}_mean", col_name)));
-        agg_exprs.push(col(col_name).std(1).alias(&format!("{}_std", col_name)));
-        agg_exprs.push(col(col_name).min().alias(&format!("{}_min", col_name)));
-        agg_exprs.push(col(col_name).max().alias(&format!("{}_max", col_name)));
+        agg_exprs.push(col(col_name).count().alias(format!("{}_count", col_name)));
+        agg_exprs.push(col(col_name).mean().alias(format!("{}_mean", col_name)));
+        agg_exprs.push(col(col_name).std(1).alias(format!("{}_std", col_name)));
+        agg_exprs.push(col(col_name).min().alias(format!("{}_min", col_name)));
+        agg_exprs.push(col(col_name).max().alias(format!("{}_max", col_name)));
     }
 
     let result = lazy
@@ -472,7 +472,11 @@ mod tests {
     fn test_group_by_column_not_found() {
         let data = make_sales_data();
 
-        let result = group_by(&data, &["nonexistent"], &[AggSpec::new("revenue", AggFn::Sum)]);
+        let result = group_by(
+            &data,
+            &["nonexistent"],
+            &[AggSpec::new("revenue", AggFn::Sum)],
+        );
         assert!(matches!(result, Err(MungeError::ColumnNotFound(_))));
     }
 

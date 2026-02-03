@@ -1,0 +1,11 @@
+{
+  "method": "standardize",
+  "n": 100000,
+  "iterations": 20,
+  "timing": {
+    "min_us": 11435,
+    "median_us": 15863,
+    "mean_us": 15863,
+    "max_us": 18212
+  }
+}

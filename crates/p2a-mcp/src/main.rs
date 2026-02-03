@@ -11,9 +11,14 @@ use anyhow::Result;
 use clap::Parser;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
+mod audit;
 mod config;
+#[cfg(feature = "db")]
+pub mod db;
 #[cfg(feature = "llm")]
 mod llm;
+#[cfg(feature = "db")]
+pub mod persistent_session;
 mod server;
 mod session;
 mod tools;

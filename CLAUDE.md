@@ -1,50 +1,231 @@
-# Development Guidance for prompt2analytics
+# CLAUDE.md
 
-This file provides context and guidance for AI assistants working on this codebase.
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Build Commands
+
+```bash
+# Build all crates
+cargo build
+
+# Build individual crates
+cargo build -p p2a-core
+cargo build -p p2a-cli
+cargo build -p p2a-mcp
+cargo build -p p2a-dioxus
+
+# Release builds
+cargo build --release -p p2a-cli        # CLI binary at target/release/p2a
+cargo build --release -p p2a-mcp        # MCP server at target/release/p2a-mcp
+
+# Run tests
+cargo test                              # All tests
+cargo test -p p2a-core                  # Core library tests only
+cargo test -p p2a-mcp                   # MCP server tests only
+cargo test test_name                    # Run specific test by name
+cargo test -p p2a-core -- test_validate # Run validation tests only
+
+# Linting
+cargo clippy --all-targets --all-features
+cargo fmt --check                        # Check formatting
+cargo fmt                                # Apply formatting
+
+# Run CLI
+cargo run -p p2a-cli -- <args>
+
+# Run MCP server (HTTP mode for development)
+cargo run -p p2a-mcp --features full -- --transport http --host 127.0.0.1 --port 8080 --cors-permissive
+
+# Dioxus app (web and desktop)
+cd crates/p2a-dioxus && dx serve                      # Web dev server with hot reload
+cd crates/p2a-dioxus && dx serve --platform desktop   # Desktop app
+cd crates/p2a-dioxus && dx build --release            # Production web build
+
+# Build documentation
+cargo doc --no-deps --open
+```
+
+### Prerequisites
+
+**Linux (Ubuntu/Debian):**
+```bash
+sudo apt-get install libopenblas-dev libwebkit2gtk-4.1-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev
+```
+
+**macOS:**
+```bash
+brew install openblas
+```
+
+**Dioxus CLI** (for p2a-dioxus):
+```bash
+cargo install dioxus-cli
+rustup target add wasm32-unknown-unknown
+```
 
 ## Project Overview
 
-prompt2analytics is a Rust-based analytics toolkit that exposes econometrics, ML, and visualization capabilities through multiple interfaces. It consists of four crates:
+prompt2analytics is a Rust workspace (edition 2024, requires Rust 1.85+) exposing 257 econometrics, statistics, ML, and visualization methods through multiple interfaces:
 
 - **p2a-core**: Core analytics library (all algorithms)
-- **p2a-cli**: Command-line interface (`p2a` binary) for direct analytics execution
-- **p2a-mcp**: MCP server exposing 55 tools
-- **p2a-desktop**: Tauri desktop application with LLM integration
+- **p2a-cli**: Command-line interface (`p2a` binary)
+- **p2a-mcp**: MCP server exposing 257 tools with LLM integration
+- **p2a-dioxus**: Cross-platform GUI (web via WASM, desktop via native)
 
 ## Architecture Principles
 
 ### Pure Rust Econometrics
 
-All econometrics are implemented in pure Rust without external econometrics libraries. This design choice was made to:
-1. Avoid dependency version conflicts (especially with ndarray)
-2. Have full control over the API design
-3. Use a column-based API instead of R-style formula parsing
+All econometrics are implemented in pure Rust without external econometrics libraries. This provides:
+1. No dependency version conflicts (especially with ndarray)
+2. Full control over API design
+3. Column-based API instead of R-style formula parsing
 
 Key dependencies for econometrics:
 - `ndarray` 0.16 - Matrix operations
 - `faer` 0.22 - Linear algebra (Cholesky, matrix inverse)
 - `statrs` 0.18 - Statistical distributions
+- `polars` 0.52 - DataFrame operations
+
+### Feature Flags
+
+```bash
+# Build with all features
+cargo build -p p2a-core --all-features
+
+# Specific features
+cargo build -p p2a-core --features spectral-analysis  # Spectral analysis (spectrum, periodogram)
+```
 
 ### Module Organization (p2a-core)
 
 ```
 src/
-├── errors.rs           # EconError, EconResult types
+├── errors.rs              # EconError, EconResult types
+├── cache.rs               # Thread-safe LRU cache with memory limits and TTL
+├── memory.rs              # Memory monitoring, pressure detection, cleanup
 ├── linalg/
-│   ├── matrix_ops.rs   # xtx, xty, safe_inverse, cholesky (via faer)
-│   └── design.rs       # DesignMatrix, demeaning functions
+│   ├── matrix_ops.rs      # xtx, xty, safe_inverse, cholesky (via faer)
+│   └── design.rs          # DesignMatrix, demeaning functions
 ├── traits/
-│   └── estimator.rs    # LinearEstimator trait, p-value helpers
-├── regression/
-│   ├── ols.rs          # OLS with HC0-HC3 robust SEs, clustered SEs
-│   └── diagnostics.rs  # JB, BP, DW, VIF, condition number
-├── econometrics/
-│   ├── panel.rs        # Fixed Effects, Random Effects, Hausman
-│   ├── iv.rs           # 2SLS with first-stage diagnostics
-│   ├── did.rs          # Difference-in-Differences
-│   ├── discrete.rs     # Logit, Probit (Newton-Raphson MLE)
-│   ├── feglm.rs        # GLM with HDFE (IRLS + weighted MAP)
-│   └── timeseries.rs   # VAR, VARMA, VECM, IRF
+│   └── estimator.rs       # LinearEstimator trait, SignificanceLevel, p-value helpers
+│
+├── regression/            # Regression methods
+│   ├── ols.rs             # OLS, HC0-HC3, clustered SEs, HAC (Newey-West), bootstrap, Driscoll-Kraay
+│   ├── diagnostics.rs     # JB, BP, DW, VIF, Breusch-Godfrey, RESET, Wald, Harvey-Collier
+│   ├── nls.rs             # Nonlinear least squares (Levenberg-Marquardt)
+│   ├── loess.rs           # Local polynomial regression (LOESS/LOWESS)
+│   ├── gls.rs             # Generalized least squares (AR1, custom correlation)
+│   ├── smooth_spline.rs   # Smoothing splines with GCV
+│   ├── step.rs            # Stepwise selection (forward, backward, both)
+│   ├── quantreg.rs        # Quantile regression (interior point, simplex)
+│   ├── marginal_effects.rs # Marginal effects and contrasts
+│   ├── sensemakr.rs       # Sensitivity analysis (Cinelli & Hazlett)
+│   └── evalue.rs          # E-values for unmeasured confounding
+│
+├── stats/                 # Statistical tests (50+ methods)
+│   ├── ttest.rs           # One-sample, two-sample, paired t-tests
+│   ├── anova.rs           # One-way, two-way ANOVA
+│   ├── manova.rs          # Multivariate ANOVA (Pillai, Wilks, Hotelling, Roy)
+│   ├── chisq.rs           # Chi-squared (goodness-of-fit, independence)
+│   ├── fisher.rs          # Fisher exact test
+│   ├── wilcoxon.rs        # Wilcoxon rank-sum and signed-rank
+│   ├── kruskal.rs         # Kruskal-Wallis test
+│   ├── friedman.rs        # Friedman test
+│   ├── shapiro.rs         # Shapiro-Wilk normality test
+│   ├── ks.rs              # Kolmogorov-Smirnov test
+│   ├── bartlett.rs        # Bartlett's test for homogeneity of variance
+│   ├── tukey.rs           # Tukey HSD post-hoc test
+│   ├── factanal.rs        # Factor analysis (MLE with rotation)
+│   ├── cancor.rs          # Canonical correlation analysis
+│   ├── acf.rs             # ACF, PACF, CCF
+│   ├── boxtest.rs         # Box-Ljung, Box-Pierce tests
+│   ├── pptest.rs          # Phillips-Perron unit root test
+│   ├── power.rs           # Power analysis (t-test, prop test, ANOVA)
+│   ├── robust.rs          # Robust statistics (fivenum, IQR, MAD, ECDF, density)
+│   ├── spline.rs          # Spline interpolation and approximation
+│   ├── weighted.rs        # Weighted mean and covariance
+│   └── ...                # 30+ more statistical tests
+│
+├── econometrics/          # Econometric methods (60+ methods)
+│   ├── panel.rs           # FE, RE, Hausman, Panel GLS, Arellano-Bond GMM, PVCM, PMG
+│   ├── iv.rs              # 2SLS, first-stage diagnostics, Sargan test
+│   ├── did.rs             # Canonical 2x2 DiD
+│   ├── staggered_did.rs   # Callaway-Sant'Anna staggered DiD
+│   ├── etwfe.rs           # Extended two-way fixed effects (Wooldridge)
+│   ├── bacon.rs           # Goodman-Bacon decomposition
+│   ├── discrete.rs        # Logit, Probit, Multinomial, Ordered, NegBin, ZIP, ZINB, Hurdle, Mixed logit
+│   ├── feglm.rs           # GLM with HDFE (IRLS + weighted MAP)
+│   ├── hdfe.rs            # High-dimensional fixed effects
+│   ├── rd.rs              # Sharp/Fuzzy RD with CCT robust inference
+│   ├── rdmulti.rs         # Multi-cutoff RD
+│   ├── synth.rs           # Synthetic control (classic + gsynth)
+│   ├── scpi.rs            # Synthetic control with prediction intervals
+│   ├── treatment.rs       # IPW, doubly robust estimation
+│   ├── tmle.rs            # Targeted MLE
+│   ├── ctmle.rs           # Collaborative TMLE
+│   ├── ltmle.rs           # Longitudinal TMLE
+│   ├── doubleml.rs        # Double/Debiased ML (PLR, PLIV, IRM, IIVM)
+│   ├── matching.rs        # Propensity score matching (MatchIt)
+│   ├── weightit.rs        # Flexible IPW (entropy balancing)
+│   ├── cbps.rs            # Covariate balancing propensity scores
+│   ├── twang.rs           # GBM propensity scores
+│   ├── mediation.rs       # Causal mediation analysis
+│   ├── medflex.rs         # Natural effect models
+│   ├── survival.rs        # Kaplan-Meier, Cox PH, AFT, competing risks
+│   ├── spatial.rs         # SAR, SEM, SAC models
+│   ├── spatialprobit.rs   # Spatial probit models
+│   ├── splm.rs            # Spatial panel models (SPML, SPGM)
+│   ├── sphet.rs           # Spatial GMM with heteroskedasticity
+│   ├── timeseries.rs      # VAR, VARMA, VECM, IRF, Granger causality
+│   ├── panel_unit_root.rs # LLC, IPS, Hadri panel unit root tests
+│   └── ...                # ivmte, hettx, stdreg, gformula, bpbounds, sbw
+│
+├── forecasting/           # Time series forecasting
+│   ├── arima_model.rs     # ARIMA modeling and forecasting
+│   ├── holtwinters.rs     # Holt-Winters exponential smoothing
+│   ├── ar.rs              # AR model fitting (Yule-Walker, OLS, MLE)
+│   ├── stl.rs             # STL decomposition
+│   ├── mstl.rs            # Multiple seasonal decomposition (MSTL)
+│   ├── decompose.rs       # Classical decomposition (additive/multiplicative)
+│   ├── kalman.rs          # Kalman filter and smoother
+│   ├── structts.rs        # Structural time series (local level, trend, BSM)
+│   ├── changepoint.rs     # PELT and binary segmentation
+│   ├── garch.rs           # GARCH(p,q) volatility modeling
+│   ├── causal_impact.rs   # Bayesian structural time series causal inference
+│   └── tsutils.rs         # lag, embed, diffinv, filter, window, arima_sim, runmed
+│
+├── ml/                    # Machine learning
+│   ├── clustering.rs      # K-means (k-means++), DBSCAN, Hierarchical (Ward, single, complete, average)
+│   ├── reduction.rs       # PCA (via SVD), t-SNE
+│   ├── trees.rs           # Random Forest (CART)
+│   └── svm.rs             # Linear SVM (SMO)
+│
+├── simulation/            # Data simulation
+│   └── generator.rs       # Synthetic data generation for testing
+│
+├── visualization/         # Chart generation
+│   ├── charts.rs          # Static charts (plotters) - PNG output
+│   ├── heatmap.rs         # Correlation heatmaps
+│   └── interactive.rs     # Interactive charts (plotlars/Plotly) - HTML output
+│
+├── export/                # Export formats
+│   ├── latex.rs           # LaTeX tables (OLS, Panel, Discrete)
+│   ├── markdown.rs        # Markdown tables for documentation
+│   ├── html.rs            # Self-contained HTML tables
+│   └── csv.rs             # CsvExport trait for all result types
+│
+├── reports/               # Report generation
+│   └── html.rs            # HTML report builder
+│
+└── data/                  # Data management
+    ├── quality.rs         # DataQualityProfile for LLM-assisted cleaning
+    ├── verification.rs    # Cleaning verification and preview
+    ├── cleaning_session.rs # Rollback-enabled cleaning sessions
+    ├── database.rs        # SQLite and DuckDB connectivity
+    ├── stata.rs           # Stata .dta file support
+    ├── sas.rs             # SAS .sas7bdat file support
+    └── munging/           # Data manipulation (reshape, aggregate, join, transform)
 ```
 
 ### API Design
@@ -60,15 +241,11 @@ pub fn run_ols(
 ) -> Result<OlsResult, EconError>
 ```
 
-**NOT** formula-based like R:
-```rust
-// This is NOT how it works
-run_ols("y ~ x1 + x2")
-```
+**NOT** formula-based like R (`run_ols("y ~ x1 + x2")`)
 
 ### LinearEstimator Trait
 
-All estimators implement the `LinearEstimator` trait for consistent output:
+All estimators implement `LinearEstimator` for consistent output:
 ```rust
 pub trait LinearEstimator {
     fn coefficients(&self) -> &Array1<f64>;
@@ -78,7 +255,6 @@ pub trait LinearEstimator {
     fn residuals(&self) -> Array1<f64>;
     fn n_obs(&self) -> usize;
     fn df(&self) -> usize;
-    // ... and more
 }
 ```
 
@@ -89,10 +265,16 @@ Use `EconError` and `EconResult<T>` from `src/errors.rs`:
 use crate::errors::{EconError, EconResult};
 
 fn my_function() -> EconResult<MyResult> {
-    // ...
     Err(EconError::InvalidInput("message".to_string()))
 }
 ```
+
+Common error variants:
+- `EconError::InvalidInput(String)` - Bad input data
+- `EconError::SingularMatrix` - Non-invertible matrix
+- `EconError::ColumnNotFound(String)` - Missing column
+- `EconError::InsufficientObservations` - Not enough data
+- `EconError::ConvergenceFailure(String)` - Optimization didn't converge
 
 ## Common Patterns
 
@@ -100,7 +282,7 @@ fn my_function() -> EconResult<MyResult> {
 
 Use functions from `linalg/matrix_ops.rs`:
 ```rust
-use crate::linalg::matrix_ops::{xtx, xty, safe_inverse, cholesky};
+use crate::linalg::matrix_ops::{xtx, xty, safe_inverse};
 
 let xtx = xtx(&x);           // X'X
 let xty = xty(&x, &y);       // X'y
@@ -113,25 +295,11 @@ Use helpers from `traits/estimator.rs`:
 ```rust
 use crate::traits::estimator::{t_test_p_value, f_test_p_value, chi_squared_p_value};
 
-let p = t_test_p_value(t_stat, df);
-let p = f_test_p_value(f_stat, df1, df2);
-```
-
-These functions handle edge cases (NaN, Inf) gracefully.
-
-### Design Matrix
-
-Use `DesignMatrix` from `linalg/design.rs` for building regression matrices:
-```rust
-use crate::linalg::design::DesignMatrix;
-
-let dm = DesignMatrix::from_dataset(dataset, x_cols, intercept)?;
-let x = dm.view();
+let p = t_test_p_value(t_stat, df);  // handles NaN, Inf gracefully
 ```
 
 ### Robust Standard Errors
 
-The `CovarianceType` enum controls variance estimation:
 ```rust
 pub enum CovarianceType {
     Standard,  // Homoskedastic
@@ -142,169 +310,215 @@ pub enum CovarianceType {
 }
 ```
 
-## CLI (p2a-cli)
+Additional variance estimators in `regression/ols.rs`:
+- `vcov_hac()` - HAC (Newey-West) for time series
+- `vcov_bootstrap()` - Bootstrap covariance (pairs, residual, wild)
+- `vcov_driscoll_kraay()` - Panel-robust SEs (cross-sectional dependence)
 
-### Command Structure
+### MLE Settings (Discrete Models)
 
-The CLI uses clap with hierarchical subcommands:
-
-```
-p2a [OPTIONS] <COMMAND>
-  data       Data loading and inspection
-  reg        Regression analysis
-  panel      Panel data econometrics
-  causal     Causal inference (IV, DiD)
-  discrete   Discrete choice models
-  ts         Time series analysis
-  ml         Machine learning
-  viz        Visualization
-  script     Session/script management
-```
-
-### Adding a New Command
-
-1. Create or modify the appropriate command module in `commands/`
-2. Add the subcommand enum variant with clap attributes
-3. Implement the execute function
-
-Example in `commands/regression.rs`:
+Logit/Probit use Newton-Raphson with optional backtracking line search:
 ```rust
-#[derive(Subcommand)]
-pub enum RegressionCommands {
-    /// Ordinary Least Squares regression
-    Ols {
-        dataset: String,
-        #[arg(short = 'y', long)]
-        dep_var: String,
-        #[arg(short = 'x', long, num_args = 1..)]
-        indep_vars: Vec<String>,
-        #[arg(long, default_value = "true")]
-        intercept: bool,
-        #[arg(short, long, default_value = "hc1")]
-        robust: RobustSE,
-    },
+pub struct MleSettings {
+    pub max_iter: usize,        // Default: 100
+    pub tolerance: f64,         // Default: 1e-8
+    pub step_size: f64,         // Default: 1.0
+    pub use_line_search: bool,  // Default: true (Armijo backtracking)
+    pub armijo_c: f64,          // Default: 1e-4 (sufficient decrease)
+    pub step_reduction: f64,    // Default: 0.5
+    pub max_line_search: usize, // Default: 20
 }
 ```
 
-### Session Management
+The line search improves convergence for difficult problems (near-separation).
+Multivariate separation is detected via coefficient explosion monitoring.
 
-The CLI maintains session state for dataset persistence across commands:
+### Config Pattern for Complex Methods
+
+Complex methods use a builder-style config:
 ```rust
-pub struct SessionManager {
-    session_path: PathBuf,
-    session: Session,
-    datasets: HashMap<String, Dataset>,
-}
-```
-
-Use `--session <file>` to record commands for reproducibility.
-
-### Data Extraction Patterns
-
-**For regression-type functions** (use Dataset directly):
-```rust
-let x_cols: Vec<&str> = indep_vars.iter().map(|s| s.as_str()).collect();
-run_ols(ds, dep_var, &x_cols, intercept, cov_type)
-```
-
-**For ML functions** (need ArrayView2):
-```rust
-fn extract_columns_as_array(dataset: &Dataset, cols: &[String]) -> Result<Array2<f64>, String> {
-    let df = dataset.df();
-    let mut data = Vec::new();
-    for row_idx in 0..df.height() {
-        for col_name in cols {
-            let value = df.column(col_name)?.f64()?.get(row_idx)?;
-            data.push(value);
-        }
-    }
-    Array2::from_shape_vec((n_rows, n_cols), data)
-}
-
-// Then use: kmeans(data.view(), k, ...)
-```
-
-**For visualization** (need raw Vec<f64>):
-```rust
-fn extract_column(dataset: &Dataset, col: &str) -> Result<Vec<f64>, String> {
-    let column = dataset.df().column(col)?;
-    Ok(column.f64()?.into_no_null_iter().collect())
-}
-
-// Then use: histogram(&data, bins, config)
-```
-
-### Output Formatting
-
-Results support multiple output formats via `OutputFormat`:
-```rust
-match format {
-    OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&json)?),
-    OutputFormat::Table => /* use tabled */,
-    OutputFormat::Text => /* formatted text */,
-}
+let config = StaggeredDidConfig {
+    comparison_group: ComparisonGroup::NeverTreated,
+    estimation_method: AttEstimationMethod::Ipw,
+    anticipation: 0,
+    aggregation: Aggregation::Simple,
+    ..Default::default()
+};
+let result = run_staggered_did(dataset, &config)?;
 ```
 
 ## MCP Server (p2a-mcp)
 
+### Module Organization
+
+The MCP server exposes 257 tools organized into modular handler files:
+
+```
+crates/p2a-mcp/src/
+├── server.rs              # AnalyticsServer struct + router composition
+├── tools/
+│   ├── mod.rs             # Re-exports
+│   ├── registry.rs        # Tool metadata for documentation
+│   ├── requests/          # Request structs by category
+│   │   ├── mod.rs
+│   │   ├── causal.rs      # Causal inference requests
+│   │   ├── data.rs        # Data management requests
+│   │   ├── discrete.rs    # Discrete choice requests
+│   │   ├── hypothesis.rs  # Hypothesis testing requests
+│   │   ├── ml.rs          # Machine learning requests
+│   │   ├── munging.rs     # Data munging requests
+│   │   ├── panel.rs       # Panel data requests
+│   │   ├── regression.rs  # Regression requests
+│   │   ├── spatial.rs     # Spatial econometrics requests
+│   │   ├── stats.rs       # Statistics requests
+│   │   ├── timeseries.rs  # Time series requests
+│   │   └── ...            # Other category modules
+│   └── handlers/          # Tool implementations
+│       ├── mod.rs
+│       ├── causal.rs      # 40+ causal inference tools
+│       ├── data.rs        # Data management tools
+│       ├── discrete.rs    # Discrete choice tools
+│       ├── hypothesis.rs  # 20 hypothesis testing tools
+│       ├── ml.rs          # ML tools
+│       ├── munging.rs     # 40+ data munging tools
+│       ├── panel.rs       # Panel data tools
+│       ├── regression.rs  # Regression tools
+│       ├── spatial.rs     # Spatial econometrics tools
+│       ├── stats.rs       # Statistics tools
+│       ├── timeseries.rs  # 30+ time series tools
+│       └── ...            # Other category modules
+```
+
 ### Adding a New Tool
 
-1. Define the request struct with `#[derive(Deserialize, JsonSchema)]`
-2. Add the tool handler in `server.rs`
-3. Register in the `#[tool]` attribute
-
-Example:
+1. Define the request struct in `tools/requests/<category>.rs`:
 ```rust
-#[derive(Deserialize, JsonSchema)]
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct MyToolRequest {
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
     pub dataset: String,
+    #[schemars(description = "Description of this parameter.")]
     pub param: String,
 }
+```
 
+2. Add the tool handler in `tools/handlers/<category>.rs`:
+```rust
 #[tool(description = "My tool description")]
-async fn my_tool(&self, #[tool(aggr)] request: MyToolRequest) -> Result<String, McpError> {
+async fn my_tool(
+    &self,
+    Parameters(request): Parameters<MyToolRequest>,
+) -> Result<CallToolResult, McpError> {
     // Implementation
+    Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
 }
 ```
 
-### Session State
+3. Import the request type in the handler module and ensure it's re-exported from `tools/requests/mod.rs`
 
-The MCP server maintains a `DatasetStore` for loaded datasets:
+### Router Composition
+
+Each handler module defines a router via `#[tool_router(router = <name>_router, vis = "pub")]`.
+These are composed in `server.rs`:
+
 ```rust
-let datasets = self.datasets.lock().await;
-let dataset = datasets.get(&request.dataset)
-    .ok_or_else(|| McpError::invalid_request("Dataset not found", None))?;
+let tool_router = Self::tool_router()
+    + Self::utils_router()
+    + Self::database_router()
+    + Self::data_router()
+    + Self::viz_router()
+    + Self::ml_router()
+    + Self::stats_router()
+    + Self::hypothesis_router()
+    + Self::regression_router()
+    + Self::panel_router()
+    + Self::discrete_router()
+    + Self::causal_router()
+    + Self::timeseries_router()
+    + Self::spatial_router()
+    + Self::munging_router()
+    + Self::survival_router()
+    + Self::cleaning_router();
 ```
 
-## Desktop Application (p2a-desktop)
+### Database Layer (SurrealDB)
 
-### Architecture
+Persistent storage via embedded SurrealDB (RocksDB backend):
 
-- **Backend**: Rust/Tauri spawns p2a-mcp as subprocess
-- **Frontend**: SvelteKit with Svelte 5 runes
-- **Communication**: JSON-RPC 2.0 over stdin/stdout
+**Important Notes:**
+- Use `surrealdb::sql::Datetime` for timestamps (not chrono types)
+- Use `surrealdb::RecordId` for IDs (not String)
+- For datetime updates, use raw SurrealQL with `time::now()`
 
-### LLM Integration
+## Dioxus App (p2a-dioxus)
 
-Three providers implemented:
-- `OllamaProvider` - Local Ollama server
-- `AnthropicProvider` - Claude API
-- `OpenAIProvider` - GPT models
+Cross-platform GUI using Dioxus 0.7, compiling to WebAssembly (web) or native (desktop).
 
-All implement the `LlmProvider` trait with streaming support.
-
-## Testing
-
-### Running Tests
+### Running
 
 ```bash
-cargo test -p p2a-core        # Core library tests
-cargo test -p p2a-mcp         # MCP server tests
+# Terminal 1: Backend
+cargo run -p p2a-mcp --features full -- --transport http --port 8080 --cors-permissive
+
+# Terminal 2: Dioxus dev server
+cd crates/p2a-dioxus && dx serve
 ```
+
+### State Management
+
+Uses Dioxus signals and context providers:
+- `SessionState` - Backend session ID, loaded datasets, refresh counter
+- `ChatState` - Current messages, streaming state, prompt history, tool calls
+- `ConversationState` - Conversation list and current selection
+- `Settings` - LLM provider configuration (with env var detection)
+
+### Tool Call Display
+
+Tool calls tracked during streaming via SSE events (`ToolStart`, `ToolEnd`). Frontend shows:
+- "Rust Analytics" indicator for messages with tool calls
+- Expandable cards showing arguments and results
+
+## Validation & Benchmarking
+
+### Validation Framework (`validation/`)
+
+All methods validated against R/Python reference implementations. Run validation tests:
+```bash
+cargo test -p p2a-core -- test_validate
+```
+
+### Performance Benchmarks (`performance/`)
+
+Criterion benchmarks with R comparison scripts:
+```bash
+# Rust benchmarks
+cargo bench -p p2a-core --bench comprehensive_benchmarks
+
+# R benchmarks
+cd performance/comparisons/r_comparison && Rscript benchmark_comprehensive.R
+```
+
+## Agentic Engineering Setup
+
+### Slash Commands (`.claude/commands/`)
+
+- `/implement_metrics <url|file>` - Implement new econometric method from documentation
+- `/discover_methods` - Find unimplemented methods from package indices
+- `/implement_next` - Implement next highest-priority method from queue
+- `/validate-method` - Run R vs Rust validation for a method
+
+### Skills (`.claude/skills/`)
+
+Auto-discovered guidance:
+- `econometrics-research` - Finding reference implementations, extracting formulas
+- `rust-econometrics-patterns` - p2a-core API patterns, LinearEstimator trait
+- `validation-benchmarking` - Validation and benchmarking workflow
+
+## Testing Guidelines
 
 ### Test Data
 
-Test datasets should have noise (not perfect linear relationships) to avoid zero residuals:
+Test datasets should have noise to avoid zero residuals:
 ```rust
 // Good: y has noise
 let df = df! {
@@ -322,27 +536,64 @@ let df = df! {
 ## Important Notes
 
 1. **ndarray version**: Pinned to 0.16 for compatibility with faer
-2. **polars version**: Using 0.46; `is_numeric()` was removed, use custom dtype checking
-3. **No formula parsing**: Use column names directly, not R-style formulas
-4. **Serde serialization**: Use `#[serde(skip)]` for large internal matrices in result structs
-5. **Error handling**: Use `EconError` for econometric errors, `McpError` for MCP errors
+2. **polars version**: Using 0.52; `is_numeric()` was removed, use custom dtype checking
+3. **Serde serialization**: Use `#[serde(skip)]` for large internal matrices in result structs
+4. **Visualization**: Two types:
+   - Static (plotters): `histogram()`, `scatter_plot()` - returns base64 PNG
+   - Interactive (plotlars/Plotly): `scatter_interactive()` - returns HTML
+5. **Export formats**: Four export types available via `export/` module:
+   - LaTeX tables (publication-ready, OLS/Panel/Discrete)
+   - Markdown tables (documentation, GitHub)
+   - HTML tables (self-contained with CSS)
+   - CSV via `CsvExport` trait (all result types)
 
-## Files to Know
+## Key Files
 
-### p2a-core
-- `crates/p2a-core/src/regression/ols.rs` - Main OLS implementation
-- `crates/p2a-core/src/linalg/matrix_ops.rs` - Core linear algebra
+**Core Implementation:**
+- `crates/p2a-core/src/regression/ols.rs` - OLS with robust SEs, HAC, bootstrap
+- `crates/p2a-core/src/linalg/matrix_ops.rs` - Linear algebra primitives
 - `crates/p2a-core/src/traits/estimator.rs` - LinearEstimator trait
 
-### p2a-cli
-- `crates/p2a-cli/src/main.rs` - CLI entry point and command routing
-- `crates/p2a-cli/src/commands/` - Subcommand implementations
-- `crates/p2a-cli/src/session.rs` - Session recording for reproducibility
-- `crates/p2a-cli/src/output.rs` - Output formatting (text, JSON, table)
+**Major Econometrics:**
+- `crates/p2a-core/src/econometrics/panel.rs` - Panel data (FE, RE, GMM)
+- `crates/p2a-core/src/econometrics/discrete.rs` - All discrete choice models
+- `crates/p2a-core/src/econometrics/staggered_did.rs` - Callaway-Sant'Anna DiD
+- `crates/p2a-core/src/econometrics/synth.rs` - Synthetic control methods
+- `crates/p2a-core/src/econometrics/tmle.rs` - TMLE family (tmle, ctmle, ltmle)
+- `crates/p2a-core/src/econometrics/spatial.rs` - Spatial econometrics
 
-### p2a-mcp
-- `crates/p2a-mcp/src/server.rs` - All 55 MCP tool definitions
+**Statistics:**
+- `crates/p2a-core/src/stats/mod.rs` - All 50+ statistical tests exported
+- `crates/p2a-core/src/stats/robust.rs` - Robust statistics (IQR, MAD, ECDF)
+- `crates/p2a-core/src/stats/power.rs` - Power analysis
 
-### Documentation
-- `DEVELOPMENT_REPORT.md` - Detailed development history and status
-- `docs/cli-reference.md` - CLI command reference
+**Forecasting:**
+- `crates/p2a-core/src/forecasting/mod.rs` - All forecasting methods exported
+- `crates/p2a-core/src/forecasting/kalman.rs` - State-space models
+- `crates/p2a-core/src/forecasting/garch.rs` - Volatility modeling
+
+**MCP Server:**
+- `crates/p2a-mcp/src/server.rs` - AnalyticsServer struct and router composition
+- `crates/p2a-mcp/src/tools/handlers/` - Tool implementations (257 tools across 17 modules)
+- `crates/p2a-mcp/src/tools/requests/` - Request type definitions
+- `crates/p2a-mcp/src/transport/http.rs` - HTTP transport with SSE streaming
+- `crates/p2a-mcp/src/db/` - SurrealDB persistence layer
+
+**Dioxus App:**
+- `crates/p2a-dioxus/src/components/chat_panel.rs` - Main chat interface
+- `crates/p2a-dioxus/src/state/` - State management (chat, session, settings)
+- `crates/p2a-dioxus/src/api/sse.rs` - SSE streaming for chat
+
+**Documentation:**
+- `DEVELOPMENT_REPORT.md` - Detailed development history and current status
+- `validation/` - Validation against R/Python reference implementations
+- `performance/` - Benchmark results and methodology
+- `docs/guides/TESTING.md` - Test runtime expectations, validation framework
+- `docs/guides/DATA_SECURITY.md` - Data write locations, offline capability
+- `docs/security/PROMPT_INJECTION.md` - MCP security considerations
+
+**Export Module:**
+- `crates/p2a-core/src/export/latex.rs` - LaTeX table builders
+- `crates/p2a-core/src/export/csv.rs` - CsvExport trait implementations
+- `crates/p2a-core/src/export/html.rs` - Self-contained HTML export
+- `crates/p2a-core/src/export/markdown.rs` - Markdown table builders

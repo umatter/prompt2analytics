@@ -1,8 +1,8 @@
 //! Correlation analysis for datasets.
 
+use crate::data::Dataset;
 use polars::prelude::*;
 use serde::{Deserialize, Serialize};
-use crate::data::Dataset;
 
 /// Check if a DataType is numeric.
 fn is_numeric_dtype(dtype: &DataType) -> bool {

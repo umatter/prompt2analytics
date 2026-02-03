@@ -149,7 +149,9 @@ impl OllamaProvider {
 
                     // If interpret is false, return raw tool output without calling LLM again
                     if !interpret {
-                        tracing::info!("interpret=false, returning raw tool output without LLM interpretation");
+                        tracing::info!(
+                            "interpret=false, returning raw tool output without LLM interpretation"
+                        );
                         return Ok(Message {
                             role: MessageRole::Assistant,
                             content: tool_outputs.join("\n\n"),
@@ -195,12 +197,7 @@ impl OllamaProvider {
             }),
         };
 
-        let response = self
-            .client
-            .post(&url)
-            .json(&request_body)
-            .send()
-            .await?;
+        let response = self.client.post(&url).json(&request_body).send().await?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -260,12 +257,7 @@ impl OllamaProvider {
             }),
         };
 
-        let response = self
-            .client
-            .post(&url)
-            .json(&request_body)
-            .send()
-            .await?;
+        let response = self.client.post(&url).json(&request_body).send().await?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -413,9 +405,7 @@ impl LlmProvider for OllamaProvider {
                     let mut tool_outputs = Vec::new();
                     for tc in tool_calls {
                         let result = tool_executor.execute(&tc.name, tc.arguments.clone()).await;
-                        let content = result
-                            .clone()
-                            .unwrap_or_else(|e| format!("Error: {}", e));
+                        let content = result.clone().unwrap_or_else(|e| format!("Error: {}", e));
                         let tool_result = ToolResult {
                             tool_call_id: tc.id.clone(),
                             content: content.clone(),

@@ -1,0 +1,153 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 750 480" width="750" height="480">
+  <defs>
+    <style>
+      .title { font-family: 'Helvetica Neue', Arial, sans-serif; font-size: 18px; font-weight: 600; fill: #333; }
+      .label { font-family: 'Helvetica Neue', Arial, sans-serif; font-size: 13px; fill: #333; }
+      .sublabel { font-family: 'Helvetica Neue', Arial, sans-serif; font-size: 11px; fill: #666; }
+      .section-title { font-family: 'Helvetica Neue', Arial, sans-serif; font-size: 12px; font-weight: 600; fill: #666; letter-spacing: 1px; }
+      .boundary-label { font-family: 'Helvetica Neue', Arial, sans-serif; font-size: 13px; font-weight: 600; fill: #2E7D32; }
+    </style>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M0,0 L0,6 L9,3 z" fill="#666"/>
+    </marker>
+    <marker id="arrow-green" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M0,0 L0,6 L9,3 z" fill="#2E7D32"/>
+    </marker>
+    <marker id="arrow-orange" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M0,0 L0,6 L9,3 z" fill="#E65100"/>
+    </marker>
+  </defs>
+
+  <!-- Background -->
+  <rect width="750" height="480" fill="#fff"/>
+
+  <!-- Title -->
+  <text x="375" y="28" text-anchor="middle" class="title">Fully Local Deployment</text>
+
+  <!-- Local Machine Boundary -->
+  <rect x="110" y="50" width="620" height="390" rx="10" fill="#E8F5E9" fill-opacity="0.4" stroke="#2E7D32" stroke-width="2.5" stroke-dasharray="10,5"/>
+  <text x="420" y="75" text-anchor="middle" class="boundary-label">LOCAL MACHINE (No External Communication)</text>
+
+  <!-- User (outside conceptually but interacting) -->
+  <g transform="translate(45, 230)">
+    <circle cx="0" cy="-14" r="12" fill="none" stroke="#333" stroke-width="2"/>
+    <path d="M-18,16 Q0,0 18,16" fill="none" stroke="#333" stroke-width="2"/>
+    <text x="0" y="42" text-anchor="middle" class="label" font-weight="600">User</text>
+  </g>
+
+  <!-- Chat Interface -->
+  <g transform="translate(130, 105)">
+    <rect x="0" y="0" width="150" height="80" rx="4" fill="#fff" stroke="#333" stroke-width="1.5"/>
+    <!-- Window chrome -->
+    <rect x="0" y="0" width="150" height="20" rx="4" fill="#f5f5f5" stroke="#333" stroke-width="1"/>
+    <circle cx="14" cy="10" r="5" fill="#ff5f57"/>
+    <circle cx="30" cy="10" r="5" fill="#febc2e"/>
+    <circle cx="46" cy="10" r="5" fill="#28c840"/>
+    <text x="75" y="50" text-anchor="middle" class="label">Chat Interface</text>
+    <text x="75" y="68" text-anchor="middle" class="sublabel">Desktop / Web</text>
+  </g>
+
+  <!-- Ollama + Local LLM -->
+  <g transform="translate(130, 220)">
+    <rect x="0" y="0" width="150" height="95" rx="6" fill="#E0F7FA" stroke="#0097A7" stroke-width="2"/>
+    <text x="75" y="20" text-anchor="middle" class="section-title" fill="#0097A7">LOCAL LLM</text>
+    <!-- LLM face icon - same as in chat_flow_v2.svg -->
+    <g transform="translate(40, 44)">
+      <rect x="-16" y="-12" width="32" height="24" rx="12" fill="#E0F7FA" stroke="#0097A7" stroke-width="2"/>
+      <circle cx="-6" cy="0" r="3" fill="#0097A7"/>
+      <circle cx="6" cy="0" r="3" fill="#0097A7"/>
+    </g>
+    <text x="100" y="48" text-anchor="middle" class="label">Ollama</text>
+    <text x="75" y="70" text-anchor="middle" class="sublabel">Llama 3.1 / Mistral / Qwen</text>
+    <text x="75" y="86" text-anchor="middle" class="sublabel" fill="#0097A7">Tool selection</text>
+  </g>
+
+  <!-- MCP Server -->
+  <g transform="translate(330, 160)">
+    <rect x="0" y="0" width="140" height="65" rx="4" fill="#fff" stroke="#666" stroke-width="1.5"/>
+    <!-- Server icon -->
+    <rect x="14" y="14" width="26" height="10" rx="1" fill="none" stroke="#666" stroke-width="1.2"/>
+    <rect x="14" y="28" width="26" height="10" rx="1" fill="none" stroke="#666" stroke-width="1.2"/>
+    <circle cx="35" cy="19" r="2.5" fill="#0097A7"/>
+    <circle cx="35" cy="33" r="2.5" fill="#0097A7"/>
+    <text x="90" y="24" text-anchor="middle" class="label">MCP</text>
+    <text x="90" y="40" text-anchor="middle" class="label">Server</text>
+    <text x="70" y="56" text-anchor="middle" class="sublabel">101 Tools</text>
+  </g>
+
+  <!-- p2a-core Engine -->
+  <g transform="translate(330, 265)">
+    <rect x="0" y="0" width="230" height="95" rx="6" fill="#FFF3E0" stroke="#E65100" stroke-width="2"/>
+    <text x="115" y="20" text-anchor="middle" class="section-title" fill="#E65100">p2a-core ENGINE</text>
+
+    <!-- Method boxes (compact) -->
+    <g transform="translate(12, 32)">
+      <rect x="0" y="0" width="65" height="50" rx="2" fill="#fff" stroke="#E65100" stroke-width="1"/>
+      <text x="32" y="16" text-anchor="middle" class="sublabel" font-weight="600">Regression</text>
+      <text x="32" y="30" text-anchor="middle" class="sublabel">OLS, Panel</text>
+      <text x="32" y="42" text-anchor="middle" class="sublabel">IV, HDFE</text>
+    </g>
+    <g transform="translate(84, 32)">
+      <rect x="0" y="0" width="65" height="50" rx="2" fill="#fff" stroke="#E65100" stroke-width="1"/>
+      <text x="32" y="16" text-anchor="middle" class="sublabel" font-weight="600">Discrete</text>
+      <text x="32" y="30" text-anchor="middle" class="sublabel">Logit, Probit</text>
+      <text x="32" y="42" text-anchor="middle" class="sublabel">MLE</text>
+    </g>
+    <g transform="translate(156, 32)">
+      <rect x="0" y="0" width="65" height="50" rx="2" fill="#fff" stroke="#E65100" stroke-width="1"/>
+      <text x="32" y="16" text-anchor="middle" class="sublabel" font-weight="600">Time Series</text>
+      <text x="32" y="30" text-anchor="middle" class="sublabel">VAR, ARIMA</text>
+      <text x="32" y="42" text-anchor="middle" class="sublabel">VECM</text>
+    </g>
+  </g>
+
+  <!-- Data Store -->
+  <g transform="translate(610, 265)">
+    <!-- Cylinder body -->
+    <path d="M10,18 L10,65 A35,12 0 0,0 80,65 L80,18" fill="#fff" stroke="#333" stroke-width="1.5"/>
+    <!-- Bottom ellipse -->
+    <ellipse cx="45" cy="65" rx="35" ry="12" fill="#fff" stroke="#333" stroke-width="1.5"/>
+    <!-- Top ellipse -->
+    <ellipse cx="45" cy="18" rx="35" ry="12" fill="#f5f5f5" stroke="#333" stroke-width="1.5"/>
+    <text x="45" y="110" text-anchor="middle" class="label" font-weight="600">Local Data</text>
+    <text x="45" y="126" text-anchor="middle" class="sublabel">CSV, Parquet</text>
+  </g>
+
+  <!-- Arrows -->
+  <!-- User to Chat -->
+  <path d="M70,230 L125,160" stroke="#333" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
+
+  <!-- Chat to Ollama -->
+  <path d="M205,185 L205,220" stroke="#0097A7" stroke-width="1.5" fill="none" marker-end="url(#arrow-green)"/>
+
+  <!-- Ollama to MCP -->
+  <path d="M280,270 L330,220" stroke="#666" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
+  <text x="318" y="238" class="sublabel">Tool calls</text>
+
+  <!-- MCP to Core -->
+  <path d="M400,225 L400,265" stroke="#E65100" stroke-width="1.5" fill="none" marker-end="url(#arrow-orange)"/>
+  <text x="412" y="250" class="sublabel" fill="#E65100">Execute</text>
+
+  <!-- Core to Data -->
+  <path d="M560,312 L605,312" stroke="#333" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
+
+  <!-- Key callout -->
+  <g transform="translate(510, 95)">
+    <rect x="0" y="0" width="195" height="55" rx="4" fill="#E8F5E9" stroke="#2E7D32" stroke-width="1.5"/>
+    <text x="97" y="22" text-anchor="middle" class="label" fill="#2E7D32" font-weight="600">Complete Isolation</text>
+    <text x="97" y="38" text-anchor="middle" class="sublabel" fill="#2E7D32">No cloud APIs</text>
+    <text x="97" y="50" text-anchor="middle" class="sublabel" fill="#2E7D32">No external transmission</text>
+  </g>
+
+  <!-- Network crossed out icon -->
+  <g transform="translate(635, 165)">
+    <circle cx="22" cy="22" r="20" fill="none" stroke="#c62828" stroke-width="2"/>
+    <line x1="8" y1="36" x2="36" y2="8" stroke="#c62828" stroke-width="2"/>
+    <!-- WiFi icon inside -->
+    <path d="M12,24 Q22,14 32,24" fill="none" stroke="#666" stroke-width="1.5"/>
+    <path d="M16,29 Q22,22 28,29" fill="none" stroke="#666" stroke-width="1.5"/>
+    <circle cx="22" cy="33" r="2.5" fill="#666"/>
+  </g>
+
+</svg>

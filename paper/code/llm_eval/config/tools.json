@@ -1,0 +1,1260 @@
+{
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "regression_ols",
+        "description": "Run Ordinary Least Squares (OLS) regression. Returns coefficients, standard errors, t-values, p-values, R-squared, and F-statistic.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "dataset": {"type": "string", "description": "Name of the dataset"},
+            "y_col": {"type": "string", "description": "Dependent variable column"},
+            "x_cols": {"type": "array", "items": {"type": "string"}, "description": "Independent variable columns"},
+            "intercept": {"type": "boolean", "description": "Include intercept term"},
+            "robust": {"type": "string", "enum": ["none", "hc0", "hc1", "hc2", "hc3"], "description": "Robust SE type"}
+          },
+          "required": ["dataset", "y_col", "x_cols"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "regression_diagnostics",
+        "description": "Run comprehensive regression diagnostics. Tests include: Jarque-Bera (normality), Breusch-Pagan (heteroskedasticity), Durbin-Watson (autocorrelation), VIF (multicollinearity), and condition number.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "dataset": {"type": "string"},
+            "y_col": {"type": "string"},
+            "x_cols": {"type": "array", "items": {"type": "string"}}
+          },
+          "required": ["dataset", "y_col", "x_cols"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "regression_clustered",
+        "description": "Run OLS regression with clustered standard errors. Supports one-way (firm, state) or two-way (firm + time) clustering. Essential for panel data with correlated errors.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "dataset": {"type": "string"},
+            "y_col": {"type": "string"},
+            "x_cols": {"type": "array", "items": {"type": "string"}},
+            "cluster_col": {"type": "string"},
+            "cluster_col2": {"type": "string"}
+          },
+          "required": ["dataset", "y_col", "x_cols", "cluster_col"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "regression_nls",
+        "description": "Fit a nonlinear regression model using Levenberg-Marquardt algorithm. Supports common models: exponential decay/growth, Michaelis-Menten kinetics, logistic growth, power law, asymptotic.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "dataset": {"type": "string"},
+            "y_col": {"type": "string"},
+            "x_col": {"type": "string"},
+            "model_type": {"type": "string", "enum": ["exponential_decay", "exponential_growth", "michaelis_menten", "logistic", "power", "asymptotic"]}
+          },
+          "required": ["dataset", "y_col", "x_col", "model_type"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "regression_loess",
+        "description": "Fit a LOESS (LOcally Estimated Scatterplot Smoothing) model for non-parametric trend estimation.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "dataset": {"type": "string"},
+            "y_col": {"type": "string"},
+            "x_col": {"type": "string"},
+            "span": {"type": "number"}
+          },
+          "required": ["dataset", "y_col", "x_col"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "panel_fixed_effects",
+        "description": "Run Fixed Effects (within) panel regression. Controls for time-invariant unobserved heterogeneity. Requires panel data with entity identifiers.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "dataset": {"type": "string"},
+            "y_col": {"type": "string"},
+            "x_cols": {"type": "array", "items": {"type": "string"}},
+            "entity_col": {"type": "string"},
+            "time_col": {"type": "string"}
+          },
+          "required": ["dataset", "y_col", "x_cols", "entity_col"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "panel_random_effects",
+        "description": "Run Random Effects (GLS) panel regression. Assumes individual effects are uncorrelated with regressors. More efficient than FE if assumption holds.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "dataset": {"type": "string"},
+            "y_col": {"type": "string"},
+            "x_cols": {"type": "array", "items": {"type": "string"}},
+            "entity_col": {"type": "string"}
+          },
+          "required": ["dataset", "y_col", "x_cols", "entity_col"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "hausman_test",
+        "description": "Run Hausman specification test to choose between Fixed Effects and Random Effects. Tests H0: RE is consistent. If p-value < 0.05, use Fixed Effects.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "dataset": {"type": "string"},
+            "y_col": {"type": "string"},
+            "x_cols": {"type": "array", "items": {"type": "string"}},
+            "entity_col": {"type": "string"}
+          },
+          "required": ["dataset", "y_col", "x_cols", "entity_col"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "panel_hdfe",
+        "description": "Run High-Dimensional Fixed Effects (HDFE) regression with multiple absorbed fixed effects (e.g., firm + year + industry). Uses the Method of Alternating Projections (MAP) for efficient estimation.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "dataset": {"type": "string"},
+            "y_col": {"type": "string"},
+            "x_cols": {"type": "array", "items": {"type": "string"}},
+            "fe_cols": {"type": "array", "items": {"type": "string"}}
+          },
+          "required": ["dataset", "y_col", "x_cols", "fe_cols"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "feglm",
+        "description": "Run Generalized Linear Model with high-dimensional fixed effects (FEGLM). Supports Logit, Probit, Poisson, and Gaussian families with multiple absorbed fixed effects.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "dataset": {"type": "string"},
+            "y_col": {"type": "string"},
+            "x_cols": {"type": "array", "items": {"type": "string"}},
+            "fe_cols": {"type": "array", "items": {"type": "string"}},
+            "family": {"type": "string", "enum": ["logit", "probit", "poisson", "gaussian"]}
+          },
+          "required": ["dataset", "y_col", "x_cols", "fe_cols", "family"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "iv_2sls",
+        "description": "Run Instrumental Variables (2SLS) regression. Use when an explanatory variable is endogenous (correlated with the error term). Requires valid instruments.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "dataset": {"type": "string"},
+            "y_col": {"type": "string"},
+            "endog_cols": {"type": "array", "items": {"type": "string"}},
+            "exog_cols": {"type": "array", "items": {"type": "string"}},
+            "instrument_cols": {"type": "array", "items": {"type": "string"}}
+          },
+          "required": ["dataset", "y_col", "endog_cols", "instrument_cols"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "iv_first_stage",
+        "description": "Run first-stage diagnostics to test instrument strength. Reports F-statistic (F > 10 suggests strong instruments), R-squared, and coefficient estimates.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "dataset": {"type": "string"},
+            "endog_col": {"type": "string"},
+            "exog_cols": {"type": "array", "items": {"type": "string"}},
+            "instrument_cols": {"type": "array", "items": {"type": "string"}}
+          },
+          "required": ["dataset", "endog_col", "instrument_cols"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "diff_in_diff",
+        "description": "Run Difference-in-Differences (DiD) estimation. Estimates causal treatment effects by comparing treated vs control groups before and after treatment.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "dataset": {"type": "string"},
+            "y_col": {"type": "string"},
+            "treat_col": {"type": "string"},
+            "post_col": {"type": "string"},
+            "x_cols": {"type": "array", "items": {"type": "string"}}
+          },
+          "required": ["dataset", "y_col", "treat_col", "post_col"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "treatment_ipw",
+        "description": "Estimate Average Treatment Effect (ATE) or Average Treatment Effect on Treated (ATT) using Inverse Probability Weighting.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "dataset": {"type": "string"},
+            "y_col": {"type": "string"},
+            "treat_col": {"type": "string"},
+            "x_cols": {"type": "array", "items": {"type": "string"}},
+            "estimand": {"type": "string", "enum": ["ate", "att"]}
+          },
+          "required": ["dataset", "y_col", "treat_col", "x_cols"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "treatment_doubly_robust",
+        "description": "Estimate treatment effects using Augmented IPW (doubly robust). Combines propensity score weighting with outcome regression.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "dataset": {"type": "string"},
+            "y_col": {"type": "string"},
+            "treat_col": {"type": "string"},
+            "x_cols": {"type": "array", "items": {"type": "string"}}
+          },
+          "required": ["dataset", "y_col", "treat_col", "x_cols"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "mediation_analysis",
+        "description": "Perform causal mediation analysis to decompose treatment effects into direct and indirect (mediated) effects.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "dataset": {"type": "string"},
+            "y_col": {"type": "string"},
+            "treat_col": {"type": "string"},
+            "mediator_col": {"type": "string"},
+            "x_cols": {"type": "array", "items": {"type": "string"}}
+          },
+          "required": ["dataset", "y_col", "treat_col", "mediator_col"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "synthetic_control",
+        "description": "Run Synthetic Control Method for comparative case studies with a single treated unit.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "dataset": {"type": "string"},
+            "y_col": {"type": "string"},
+            "unit_col": {"type": "string"},
+            "time_col": {"type": "string"},
+            "treated_unit": {"type": "string"},
+            "treatment_time": {"type": "number"}
+          },
+          "required": ["dataset", "y_col", "unit_col", "time_col", "treated_unit", "treatment_time"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "rd_estimate",
+        "description": "Run Sharp Regression Discontinuity (RD) estimation. Implements local polynomial regression with robust bias-corrected inference.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "dataset": {"type": "string"},
+            "y_col": {"type": "string"},
+            "x_col": {"type": "string"},
+            "cutoff": {"type": "number"}
+          },
+          "required": ["dataset", "y_col", "x_col"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "rd_fuzzy",
+        "description": "Run Fuzzy Regression Discontinuity estimation. For cases where treatment probability (not assignment) jumps at the cutoff.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "dataset": {"type": "string"},
+            "y_col": {"type": "string"},
+            "x_col": {"type": "string"},
+            "treat_col": {"type": "string"},
+            "cutoff": {"type": "number"}
+          },
+          "required": ["dataset", "y_col", "x_col", "treat_col"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "logit",
+        "description": "Run Logit (logistic) regression for binary outcomes. Uses MLE with Newton-Raphson. Dependent variable must be 0/1.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "dataset": {"type": "string"},
+            "y_col": {"type": "string"},
+            "x_cols": {"type": "array", "items": {"type": "string"}}
+          },
+          "required": ["dataset", "y_col", "x_cols"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "probit",
+        "description": "Run Probit regression for binary outcomes. Uses MLE with Newton-Raphson. Dependent variable must be 0/1.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "dataset": {"type": "string"},
+            "y_col": {"type": "string"},
+            "x_cols": {"type": "array", "items": {"type": "string"}}
+          },
+          "required": ["dataset", "y_col", "x_cols"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "ts_var",
+        "description": "Run Vector Autoregression (VAR) model for multivariate time series. Returns coefficients, residual covariance, AIC, and BIC.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "dataset": {"type": "string"},
+            "y_cols": {"type": "array", "items": {"type": "string"}},
+            "p": {"type": "integer", "description": "Lag order"}
+          },
+          "required": ["dataset", "y_cols", "p"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "ts_varma",
+        "description": "Run VARMA(p,q) model using Hannan-Rissanen estimation. Combines autoregressive and moving average components for multivariate time series.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "dataset": {"type": "string"},
+            "y_cols": {"type": "array", "items": {"type": "string"}},
+            "p": {"type": "integer"},
+            "q": {"type": "integer"}
+          },
+          "required": ["dataset", "y_cols", "p", "q"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "ts_vecm",
+        "description": "Run VECM using Johansen Maximum Likelihood. For cointegrated I(1) time series. Returns cointegration vectors (beta), adjustment speeds (alpha), and eigenvalues.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "dataset": {"type": "string"},
+            "y_cols": {"type": "array", "items": {"type": "string"}},
+            "r": {"type": "integer", "description": "Cointegration rank"}
+          },
+          "required": ["dataset", "y_cols", "r"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "ts_var_irf",
+        "description": "Compute Impulse Response Functions (IRF) from a VAR model. Shows how variables respond to shocks over time using Cholesky orthogonalization.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "dataset": {"type": "string"},
+            "y_cols": {"type": "array", "items": {"type": "string"}},
+            "p": {"type": "integer"},
+            "horizon": {"type": "integer"}
+          },
+          "required": ["dataset", "y_cols", "p", "horizon"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "ts_arima_fit",
+        "description": "Fit an ARIMA(p,d,q) model to a univariate time series. Returns AR/MA coefficients, residuals, AIC, and model diagnostics.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "dataset": {"type": "string"},
+            "y_col": {"type": "string"},
+            "p": {"type": "integer"},
+            "d": {"type": "integer"},
+            "q": {"type": "integer"}
+          },
+          "required": ["dataset", "y_col", "p", "d", "q"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "ts_arima_forecast",
+        "description": "Forecast future values using an ARIMA(p,d,q) model. Fits the model and generates h-step ahead forecasts.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "dataset": {"type": "string"},
+            "y_col": {"type": "string"},
+            "p": {"type": "integer"},
+            "d": {"type": "integer"},
+            "q": {"type": "integer"},
+            "h": {"type": "integer", "description": "Forecast horizon"}
+          },
+          "required": ["dataset", "y_col", "p", "d", "q", "h"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "ts_mstl",
+        "description": "Perform MSTL (Multiple Seasonal-Trend decomposition using LOESS) on a time series. Extracts trend, seasonal components, and residuals.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "dataset": {"type": "string"},
+            "y_col": {"type": "string"},
+            "periods": {"type": "array", "items": {"type": "integer"}}
+          },
+          "required": ["dataset", "y_col", "periods"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "ts_changepoint",
+        "description": "Detect changepoints (structural breaks) in a time series using PELT or Binary Segmentation.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "dataset": {"type": "string"},
+            "y_col": {"type": "string"},
+            "method": {"type": "string", "enum": ["pelt", "binseg"]},
+            "stat_type": {"type": "string", "enum": ["mean", "variance", "meanvar"]}
+          },
+          "required": ["dataset", "y_col"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "ts_holt_winters",
+        "description": "Fit Holt-Winters exponential smoothing model to a time series with trend and seasonality.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "dataset": {"type": "string"},
+            "y_col": {"type": "string"},
+            "period": {"type": "integer"},
+            "seasonal": {"type": "string", "enum": ["additive", "multiplicative"]}
+          },
+          "required": ["dataset", "y_col", "period"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "timeseries_ar",
+        "description": "Fit an autoregressive model to time series data with automatic order selection via AIC.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "dataset": {"type": "string"},
+            "y_col": {"type": "string"},
+            "max_order": {"type": "integer"}
+          },
+          "required": ["dataset", "y_col"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "timeseries_decompose",
+        "description": "Decompose a time series into trend, seasonal, and random components using moving averages.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "dataset": {"type": "string"},
+            "y_col": {"type": "string"},
+            "period": {"type": "integer"},
+            "type": {"type": "string", "enum": ["additive", "multiplicative"]}
+          },
+          "required": ["dataset", "y_col", "period"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "timeseries_structts",
+        "description": "Fit a structural time series model by maximum likelihood using the Kalman filter.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "dataset": {"type": "string"},
+            "y_col": {"type": "string"},
+            "model_type": {"type": "string", "enum": ["level", "trend", "bsm"]}
+          },
+          "required": ["dataset", "y_col"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "timeseries_acf",
+        "description": "Compute autocorrelation function (ACF), autocovariance, or partial autocorrelation function (PACF) for a time series.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "dataset": {"type": "string"},
+            "y_col": {"type": "string"},
+            "lag_max": {"type": "integer"},
+            "type": {"type": "string", "enum": ["correlation", "covariance", "partial"]}
+          },
+          "required": ["dataset", "y_col"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "timeseries_ccf",
+        "description": "Compute cross-correlation function (CCF) between two time series.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "dataset": {"type": "string"},
+            "x_col": {"type": "string"},
+            "y_col": {"type": "string"},
+            "lag_max": {"type": "integer"}
+          },
+          "required": ["dataset", "x_col", "y_col"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "timeseries_spectrum",
+        "description": "Estimate spectral density (power spectrum) of a time series.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "dataset": {"type": "string"},
+            "y_col": {"type": "string"},
+            "method": {"type": "string", "enum": ["pgram", "ar"]}
+          },
+          "required": ["dataset", "y_col"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "timeseries_box_test",
+        "description": "Test for autocorrelation in a time series using Box-Pierce or Ljung-Box test.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "dataset": {"type": "string"},
+            "y_col": {"type": "string"},
+            "lag": {"type": "integer"},
+            "type": {"type": "string", "enum": ["box_pierce", "ljung_box"]}
+          },
+          "required": ["dataset", "y_col"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "timeseries_pp_test",
+        "description": "Test for unit root in a time series using the Phillips-Perron test.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "dataset": {"type": "string"},
+            "y_col": {"type": "string"}
+          },
+          "required": ["dataset", "y_col"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "hypothesis_t_test",
+        "description": "Run Student's t-test for comparing means. Supports one-sample, two-sample, and paired t-tests.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "dataset": {"type": "string"},
+            "x_col": {"type": "string"},
+            "y_col": {"type": "string"},
+            "mu": {"type": "number"},
+            "paired": {"type": "boolean"},
+            "var_equal": {"type": "boolean"}
+          },
+          "required": ["dataset", "x_col"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "hypothesis_wilcoxon",
+        "description": "Run Wilcoxon non-parametric test for location. Supports one-sample signed rank test, two-sample rank sum test (Mann-Whitney U), and paired signed rank test.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "dataset": {"type": "string"},
+            "x_col": {"type": "string"},
+            "y_col": {"type": "string"},
+            "mu": {"type": "number"},
+            "paired": {"type": "boolean"}
+          },
+          "required": ["dataset", "x_col"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "anova_one_way",
+        "description": "Run one-way Analysis of Variance (ANOVA) to test whether means differ across groups.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "dataset": {"type": "string"},
+            "y_col": {"type": "string"},
+            "group_col": {"type": "string"}
+          },
+          "required": ["dataset", "y_col", "group_col"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "anova_two_way",
+        "description": "Run two-way Analysis of Variance (ANOVA) to test effects of two factors and their interaction.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "dataset": {"type": "string"},
+            "y_col": {"type": "string"},
+            "factor1_col": {"type": "string"},
+            "factor2_col": {"type": "string"}
+          },
+          "required": ["dataset", "y_col", "factor1_col", "factor2_col"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "anova_tukey_hsd",
+        "description": "Run Tukey's HSD post-hoc test after one-way ANOVA to perform pairwise comparisons between all group means.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "dataset": {"type": "string"},
+            "y_col": {"type": "string"},
+            "group_col": {"type": "string"}
+          },
+          "required": ["dataset", "y_col", "group_col"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "hypothesis_kruskal_wallis",
+        "description": "Run Kruskal-Wallis rank sum test - the non-parametric alternative to one-way ANOVA.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "dataset": {"type": "string"},
+            "y_col": {"type": "string"},
+            "group_col": {"type": "string"}
+          },
+          "required": ["dataset", "y_col", "group_col"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "hypothesis_chisq_independence",
+        "description": "Run Pearson's chi-squared test of independence to check if two categorical variables are independent.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "dataset": {"type": "string"},
+            "x_col": {"type": "string"},
+            "y_col": {"type": "string"}
+          },
+          "required": ["dataset", "x_col", "y_col"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "hypothesis_chisq_gof",
+        "description": "Run Pearson's chi-squared goodness-of-fit test to check if observed category frequencies match expected probabilities.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "dataset": {"type": "string"},
+            "x_col": {"type": "string"},
+            "expected_probs": {"type": "array", "items": {"type": "number"}}
+          },
+          "required": ["dataset", "x_col"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "hypothesis_fisher_exact",
+        "description": "Run Fisher's exact test for a 2x2 contingency table. More accurate than chi-squared test for small samples.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "a": {"type": "integer"},
+            "b": {"type": "integer"},
+            "c": {"type": "integer"},
+            "d": {"type": "integer"}
+          },
+          "required": ["a", "b", "c", "d"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "hypothesis_shapiro_wilk",
+        "description": "Run the Shapiro-Wilk test for normality.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "dataset": {"type": "string"},
+            "x_col": {"type": "string"}
+          },
+          "required": ["dataset", "x_col"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "hypothesis_ks_test",
+        "description": "Run the Kolmogorov-Smirnov test. Tests if samples come from the same distribution or a theoretical distribution.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "dataset": {"type": "string"},
+            "x_col": {"type": "string"},
+            "y_col": {"type": "string"},
+            "distribution": {"type": "string", "enum": ["normal", "uniform", "exponential"]}
+          },
+          "required": ["dataset", "x_col"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "hypothesis_cor_test",
+        "description": "Test for association between paired samples using Pearson, Spearman, or Kendall correlation.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "dataset": {"type": "string"},
+            "x_col": {"type": "string"},
+            "y_col": {"type": "string"},
+            "method": {"type": "string", "enum": ["pearson", "spearman", "kendall"]}
+          },
+          "required": ["dataset", "x_col", "y_col"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "compute_correlation",
+        "description": "Compute the Pearson correlation matrix for all numeric columns in a dataset.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "dataset": {"type": "string"}
+          },
+          "required": ["dataset"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "ml_kmeans",
+        "description": "Run K-means clustering to partition data into k clusters. Uses k-means++ initialization.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "dataset": {"type": "string"},
+            "x_cols": {"type": "array", "items": {"type": "string"}},
+            "k": {"type": "integer"}
+          },
+          "required": ["dataset", "x_cols", "k"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "ml_dbscan",
+        "description": "Run DBSCAN (Density-Based Spatial Clustering) clustering. Finds clusters of arbitrary shape and identifies outliers.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "dataset": {"type": "string"},
+            "x_cols": {"type": "array", "items": {"type": "string"}},
+            "eps": {"type": "number"},
+            "min_samples": {"type": "integer"}
+          },
+          "required": ["dataset", "x_cols", "eps", "min_samples"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "ml_pca",
+        "description": "Run Principal Component Analysis (PCA) for dimensionality reduction. Returns principal components, explained variance ratios, and loadings.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "dataset": {"type": "string"},
+            "x_cols": {"type": "array", "items": {"type": "string"}},
+            "n_components": {"type": "integer"}
+          },
+          "required": ["dataset", "x_cols"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "ml_hierarchical",
+        "description": "Run Hierarchical clustering using agglomerative approach. Supports Ward, single, complete, and average linkage methods.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "dataset": {"type": "string"},
+            "x_cols": {"type": "array", "items": {"type": "string"}},
+            "n_clusters": {"type": "integer"},
+            "linkage": {"type": "string", "enum": ["ward", "single", "complete", "average"]}
+          },
+          "required": ["dataset", "x_cols", "n_clusters"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "ml_tsne",
+        "description": "Run t-SNE for visualizing high-dimensional data in 2D or 3D. Preserves local structure while revealing clusters.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "dataset": {"type": "string"},
+            "x_cols": {"type": "array", "items": {"type": "string"}},
+            "n_components": {"type": "integer"},
+            "perplexity": {"type": "number"}
+          },
+          "required": ["dataset", "x_cols"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "ml_random_forest",
+        "description": "Run Random Forest regression. Ensemble of decision trees for robust predictions. Returns feature importances and out-of-bag score.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "dataset": {"type": "string"},
+            "y_col": {"type": "string"},
+            "x_cols": {"type": "array", "items": {"type": "string"}},
+            "n_trees": {"type": "integer"},
+            "max_depth": {"type": "integer"}
+          },
+          "required": ["dataset", "y_col", "x_cols"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "ml_svm",
+        "description": "Run Linear Support Vector Machine (SVM) for binary classification. Uses SMO algorithm.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "dataset": {"type": "string"},
+            "y_col": {"type": "string"},
+            "x_cols": {"type": "array", "items": {"type": "string"}},
+            "c": {"type": "number"}
+          },
+          "required": ["dataset", "y_col", "x_cols"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "multivariate_factanal",
+        "description": "Run Maximum Likelihood Factor Analysis to identify latent factors underlying observed variables.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "dataset": {"type": "string"},
+            "x_cols": {"type": "array", "items": {"type": "string"}},
+            "n_factors": {"type": "integer"},
+            "rotation": {"type": "string", "enum": ["none", "varimax", "promax"]}
+          },
+          "required": ["dataset", "x_cols", "n_factors"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "multivariate_cancor",
+        "description": "Run Canonical Correlation Analysis (CCA) to find linear combinations of two sets of variables that have maximum correlation.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "dataset": {"type": "string"},
+            "x_cols": {"type": "array", "items": {"type": "string"}},
+            "y_cols": {"type": "array", "items": {"type": "string"}}
+          },
+          "required": ["dataset", "x_cols", "y_cols"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "multivariate_mahalanobis",
+        "description": "Compute squared Mahalanobis distance for each observation. Useful for outlier detection.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "dataset": {"type": "string"},
+            "x_cols": {"type": "array", "items": {"type": "string"}}
+          },
+          "required": ["dataset", "x_cols"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "viz_histogram",
+        "description": "Generate a histogram visualization for a numeric column. Returns a base64-encoded PNG image.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "dataset": {"type": "string"},
+            "x_col": {"type": "string"},
+            "bins": {"type": "integer"}
+          },
+          "required": ["dataset", "x_col"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "viz_scatter",
+        "description": "Generate a scatter plot visualization showing the relationship between two numeric columns. Returns a base64-encoded PNG image.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "dataset": {"type": "string"},
+            "x_col": {"type": "string"},
+            "y_col": {"type": "string"},
+            "group_col": {"type": "string"}
+          },
+          "required": ["dataset", "x_col", "y_col"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "viz_line",
+        "description": "Generate a line chart visualization for time series or sequential data. Returns a base64-encoded PNG image.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "dataset": {"type": "string"},
+            "x_col": {"type": "string"},
+            "y_cols": {"type": "array", "items": {"type": "string"}}
+          },
+          "required": ["dataset", "x_col", "y_cols"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "viz_boxplot",
+        "description": "Generate a box plot visualization comparing the distributions of one or more numeric columns. Returns a base64-encoded PNG image.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "dataset": {"type": "string"},
+            "y_cols": {"type": "array", "items": {"type": "string"}},
+            "group_col": {"type": "string"}
+          },
+          "required": ["dataset", "y_cols"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "viz_heatmap",
+        "description": "Generate a correlation heatmap visualization for numeric columns. Returns a base64-encoded PNG image.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "dataset": {"type": "string"},
+            "x_cols": {"type": "array", "items": {"type": "string"}}
+          },
+          "required": ["dataset"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "viz_scatter_interactive",
+        "description": "Generate an interactive scatter plot visualization using Plotly.js. Returns HTML.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "dataset": {"type": "string"},
+            "x_col": {"type": "string"},
+            "y_col": {"type": "string"},
+            "group_col": {"type": "string"}
+          },
+          "required": ["dataset", "x_col", "y_col"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "viz_coefficient",
+        "description": "Generate a coefficient plot showing regression coefficients with confidence intervals (error bars).",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "coefficients": {"type": "array", "items": {"type": "number"}},
+            "std_errors": {"type": "array", "items": {"type": "number"}},
+            "names": {"type": "array", "items": {"type": "string"}}
+          },
+          "required": ["coefficients", "std_errors", "names"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "viz_residual_diagnostics",
+        "description": "Generate four diagnostic plots for regression analysis: Residuals vs Fitted, Normal Q-Q, Scale-Location, Residuals vs Leverage.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "dataset": {"type": "string"},
+            "y_col": {"type": "string"},
+            "x_cols": {"type": "array", "items": {"type": "string"}}
+          },
+          "required": ["dataset", "y_col", "x_cols"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "describe_dataset",
+        "description": "Compute descriptive statistics for all columns in a dataset. Returns count, mean, std, min, quartiles, max for numeric columns.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "dataset": {"type": "string"}
+          },
+          "required": ["dataset"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "load_dataset",
+        "description": "Load a dataset from a file. Supports CSV, Parquet, Excel, Stata, and SAS formats.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "path": {"type": "string"},
+            "name": {"type": "string"}
+          },
+          "required": ["path"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "kaplan_meier",
+        "description": "Run Kaplan-Meier survival curve estimation. Computes the non-parametric product-limit estimator.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "dataset": {"type": "string"},
+            "time_col": {"type": "string"},
+            "event_col": {"type": "string"},
+            "group_col": {"type": "string"}
+          },
+          "required": ["dataset", "time_col", "event_col"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "log_rank",
+        "description": "Run Log-Rank test for comparing survival curves between groups.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "dataset": {"type": "string"},
+            "time_col": {"type": "string"},
+            "event_col": {"type": "string"},
+            "group_col": {"type": "string"}
+          },
+          "required": ["dataset", "time_col", "event_col", "group_col"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "cox_ph",
+        "description": "Run Cox Proportional Hazards (Cox PH) regression model. Semi-parametric regression estimating covariate effects on hazard rate.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "dataset": {"type": "string"},
+            "time_col": {"type": "string"},
+            "event_col": {"type": "string"},
+            "x_cols": {"type": "array", "items": {"type": "string"}}
+          },
+          "required": ["dataset", "time_col", "event_col", "x_cols"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "power_t_test",
+        "description": "Compute power or sample size for t-tests. Use for study design.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "n": {"type": "integer"},
+            "delta": {"type": "number"},
+            "sd": {"type": "number"},
+            "sig_level": {"type": "number"},
+            "power": {"type": "number"},
+            "type": {"type": "string", "enum": ["one_sample", "two_sample", "paired"]}
+          }
+        }
+      }
+    }
+  ]
+}

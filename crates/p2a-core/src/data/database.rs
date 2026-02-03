@@ -59,10 +59,7 @@ impl std::fmt::Display for QueryResult {
 ///
 /// # Returns
 /// QueryResult containing the DataFrame and metadata
-pub fn query_sqlite(
-    db_path: impl AsRef<Path>,
-    query: &str,
-) -> Result<QueryResult, DatabaseError> {
+pub fn query_sqlite(db_path: impl AsRef<Path>, query: &str) -> Result<QueryResult, DatabaseError> {
     let path = db_path.as_ref();
 
     if !path.exists() {
@@ -74,11 +71,7 @@ pub fn query_sqlite(
 
     // Get column information
     let column_count = stmt.column_count();
-    let column_names: Vec<String> = stmt
-        .column_names()
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
+    let column_names: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
 
     // Collect all rows first to determine types
     let mut rows_data: Vec<Vec<rusqlite::types::Value>> = Vec::new();
@@ -102,18 +95,18 @@ pub fn query_sqlite(
         let col_name = &column_names[col_idx];
 
         // Determine column type from first non-null value
-        let col_type = rows_data.iter()
-            .find_map(|row| {
-                match &row[col_idx] {
-                    rusqlite::types::Value::Null => None,
-                    v => Some(v.data_type()),
-                }
+        let col_type = rows_data
+            .iter()
+            .find_map(|row| match &row[col_idx] {
+                rusqlite::types::Value::Null => None,
+                v => Some(v.data_type()),
             })
             .unwrap_or(rusqlite::types::Type::Text);
 
         let series = match col_type {
             rusqlite::types::Type::Integer => {
-                let values: Vec<Option<i64>> = rows_data.iter()
+                let values: Vec<Option<i64>> = rows_data
+                    .iter()
                     .map(|row| match &row[col_idx] {
                         rusqlite::types::Value::Integer(i) => Some(*i),
                         rusqlite::types::Value::Null => None,
@@ -123,7 +116,8 @@ pub fn query_sqlite(
                 Series::new(col_name.as_str().into(), values)
             }
             rusqlite::types::Type::Real => {
-                let values: Vec<Option<f64>> = rows_data.iter()
+                let values: Vec<Option<f64>> = rows_data
+                    .iter()
                     .map(|row| match &row[col_idx] {
                         rusqlite::types::Value::Real(f) => Some(*f),
                         rusqlite::types::Value::Integer(i) => Some(*i as f64),
@@ -134,7 +128,8 @@ pub fn query_sqlite(
                 Series::new(col_name.as_str().into(), values)
             }
             rusqlite::types::Type::Text | rusqlite::types::Type::Blob => {
-                let values: Vec<Option<String>> = rows_data.iter()
+                let values: Vec<Option<String>> = rows_data
+                    .iter()
                     .map(|row| match &row[col_idx] {
                         rusqlite::types::Value::Text(s) => Some(s.clone()),
                         rusqlite::types::Value::Blob(b) => {
@@ -175,9 +170,8 @@ pub fn list_sqlite_tables(db_path: impl AsRef<Path>) -> Result<Vec<String>, Data
     }
 
     let conn = rusqlite::Connection::open(path)?;
-    let mut stmt = conn.prepare(
-        "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
-    )?;
+    let mut stmt =
+        conn.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")?;
 
     let tables: Vec<String> = stmt
         .query_map([], |row| row.get(0))?
@@ -223,10 +217,7 @@ pub fn sqlite_table_schema(
 ///
 /// # Returns
 /// QueryResult containing the DataFrame and metadata
-pub fn query_duckdb(
-    db_path: impl AsRef<Path>,
-    query: &str,
-) -> Result<QueryResult, DatabaseError> {
+pub fn query_duckdb(db_path: impl AsRef<Path>, query: &str) -> Result<QueryResult, DatabaseError> {
     let path = db_path.as_ref();
     let path_str = path.to_string_lossy();
 
@@ -269,17 +260,15 @@ pub fn query_duckdb(
         let col_name = &column_names[col_idx];
 
         // Determine column type from first non-null value
-        let first_non_null = all_rows.iter()
-            .find_map(|row| {
-                match &row[col_idx] {
-                    duckdb::types::Value::Null => None,
-                    v => Some(v.clone()),
-                }
-            });
+        let first_non_null = all_rows.iter().find_map(|row| match &row[col_idx] {
+            duckdb::types::Value::Null => None,
+            v => Some(v.clone()),
+        });
 
         let series = match first_non_null {
             Some(duckdb::types::Value::Boolean(_)) => {
-                let values: Vec<Option<bool>> = all_rows.iter()
+                let values: Vec<Option<bool>> = all_rows
+                    .iter()
                     .map(|row| match &row[col_idx] {
                         duckdb::types::Value::Boolean(b) => Some(*b),
                         duckdb::types::Value::Null => None,
@@ -288,11 +277,12 @@ pub fn query_duckdb(
                     .collect();
                 Series::new(col_name.as_str().into(), values)
             }
-            Some(duckdb::types::Value::TinyInt(_)) |
-            Some(duckdb::types::Value::SmallInt(_)) |
-            Some(duckdb::types::Value::Int(_)) |
-            Some(duckdb::types::Value::BigInt(_)) => {
-                let values: Vec<Option<i64>> = all_rows.iter()
+            Some(duckdb::types::Value::TinyInt(_))
+            | Some(duckdb::types::Value::SmallInt(_))
+            | Some(duckdb::types::Value::Int(_))
+            | Some(duckdb::types::Value::BigInt(_)) => {
+                let values: Vec<Option<i64>> = all_rows
+                    .iter()
                     .map(|row| match &row[col_idx] {
                         duckdb::types::Value::TinyInt(i) => Some(*i as i64),
                         duckdb::types::Value::SmallInt(i) => Some(*i as i64),
@@ -304,9 +294,9 @@ pub fn query_duckdb(
                     .collect();
                 Series::new(col_name.as_str().into(), values)
             }
-            Some(duckdb::types::Value::Float(_)) |
-            Some(duckdb::types::Value::Double(_)) => {
-                let values: Vec<Option<f64>> = all_rows.iter()
+            Some(duckdb::types::Value::Float(_)) | Some(duckdb::types::Value::Double(_)) => {
+                let values: Vec<Option<f64>> = all_rows
+                    .iter()
                     .map(|row| match &row[col_idx] {
                         duckdb::types::Value::Float(f) => Some(*f as f64),
                         duckdb::types::Value::Double(f) => Some(*f),
@@ -322,7 +312,8 @@ pub fn query_duckdb(
             }
             _ => {
                 // Default to string for text, blob, and unknown types
-                let values: Vec<Option<String>> = all_rows.iter()
+                let values: Vec<Option<String>> = all_rows
+                    .iter()
                     .map(|row| match &row[col_idx] {
                         duckdb::types::Value::Text(s) => Some(s.clone()),
                         duckdb::types::Value::Blob(b) => {
@@ -365,7 +356,8 @@ pub fn list_duckdb_tables(db_path: impl AsRef<Path>) -> Result<Vec<String>, Data
     }
 
     let conn = duckdb::Connection::open(path)?;
-    let mut stmt = conn.prepare("SELECT table_name FROM information_schema.tables WHERE table_schema = 'main'")?;
+    let mut stmt = conn
+        .prepare("SELECT table_name FROM information_schema.tables WHERE table_schema = 'main'")?;
 
     let mut tables = Vec::new();
     let mut rows = stmt.query([])?;
@@ -464,17 +456,15 @@ fn query_duckdb_connection(
     for col_idx in 0..column_count {
         let col_name = &column_names[col_idx];
 
-        let first_non_null = all_rows.iter()
-            .find_map(|row| {
-                match &row[col_idx] {
-                    duckdb::types::Value::Null => None,
-                    v => Some(v.clone()),
-                }
-            });
+        let first_non_null = all_rows.iter().find_map(|row| match &row[col_idx] {
+            duckdb::types::Value::Null => None,
+            v => Some(v.clone()),
+        });
 
         let series = match first_non_null {
             Some(duckdb::types::Value::Boolean(_)) => {
-                let values: Vec<Option<bool>> = all_rows.iter()
+                let values: Vec<Option<bool>> = all_rows
+                    .iter()
                     .map(|row| match &row[col_idx] {
                         duckdb::types::Value::Boolean(b) => Some(*b),
                         _ => None,
@@ -482,11 +472,12 @@ fn query_duckdb_connection(
                     .collect();
                 Series::new(col_name.as_str().into(), values)
             }
-            Some(duckdb::types::Value::TinyInt(_)) |
-            Some(duckdb::types::Value::SmallInt(_)) |
-            Some(duckdb::types::Value::Int(_)) |
-            Some(duckdb::types::Value::BigInt(_)) => {
-                let values: Vec<Option<i64>> = all_rows.iter()
+            Some(duckdb::types::Value::TinyInt(_))
+            | Some(duckdb::types::Value::SmallInt(_))
+            | Some(duckdb::types::Value::Int(_))
+            | Some(duckdb::types::Value::BigInt(_)) => {
+                let values: Vec<Option<i64>> = all_rows
+                    .iter()
                     .map(|row| match &row[col_idx] {
                         duckdb::types::Value::TinyInt(i) => Some(*i as i64),
                         duckdb::types::Value::SmallInt(i) => Some(*i as i64),
@@ -497,9 +488,9 @@ fn query_duckdb_connection(
                     .collect();
                 Series::new(col_name.as_str().into(), values)
             }
-            Some(duckdb::types::Value::Float(_)) |
-            Some(duckdb::types::Value::Double(_)) => {
-                let values: Vec<Option<f64>> = all_rows.iter()
+            Some(duckdb::types::Value::Float(_)) | Some(duckdb::types::Value::Double(_)) => {
+                let values: Vec<Option<f64>> = all_rows
+                    .iter()
                     .map(|row| match &row[col_idx] {
                         duckdb::types::Value::Float(f) => Some(*f as f64),
                         duckdb::types::Value::Double(f) => Some(*f),
@@ -513,7 +504,8 @@ fn query_duckdb_connection(
                 Series::new(col_name.as_str().into(), values)
             }
             _ => {
-                let values: Vec<Option<String>> = all_rows.iter()
+                let values: Vec<Option<String>> = all_rows
+                    .iter()
                     .map(|row| match &row[col_idx] {
                         duckdb::types::Value::Text(s) => Some(s.clone()),
                         duckdb::types::Value::Null => None,
@@ -558,12 +550,12 @@ mod tests {
         let _ = fs::remove_file(&db_path);
 
         let conn = rusqlite::Connection::open(&db_path).unwrap();
-        conn.execute(
-            "CREATE TABLE test (id INTEGER, name TEXT, value REAL)",
-            [],
-        ).unwrap();
-        conn.execute("INSERT INTO test VALUES (1, 'Alice', 10.5)", []).unwrap();
-        conn.execute("INSERT INTO test VALUES (2, 'Bob', 20.3)", []).unwrap();
+        conn.execute("CREATE TABLE test (id INTEGER, name TEXT, value REAL)", [])
+            .unwrap();
+        conn.execute("INSERT INTO test VALUES (1, 'Alice', 10.5)", [])
+            .unwrap();
+        conn.execute("INSERT INTO test VALUES (2, 'Bob', 20.3)", [])
+            .unwrap();
         drop(conn);
 
         let result = query_sqlite(&db_path, "SELECT * FROM test").unwrap();
@@ -581,9 +573,12 @@ mod tests {
         conn.execute(
             "CREATE TABLE test (id INTEGER, name VARCHAR, value DOUBLE)",
             [],
-        ).unwrap();
-        conn.execute("INSERT INTO test VALUES (1, 'Alice', 10.5)", []).unwrap();
-        conn.execute("INSERT INTO test VALUES (2, 'Bob', 20.3)", []).unwrap();
+        )
+        .unwrap();
+        conn.execute("INSERT INTO test VALUES (1, 'Alice', 10.5)", [])
+            .unwrap();
+        conn.execute("INSERT INTO test VALUES (2, 'Bob', 20.3)", [])
+            .unwrap();
 
         let result = query_duckdb_connection(&conn, "SELECT * FROM test").unwrap();
         assert_eq!(result.rows, 2);

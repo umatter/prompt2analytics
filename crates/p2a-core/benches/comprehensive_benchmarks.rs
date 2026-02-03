@@ -10,13 +10,14 @@
 
 mod bench_utils;
 
-use bench_utils::{run_benchmark, BenchConfig, BenchmarkResult, print_header, print_result, save_results};
-use p2a_core::{
-    Dataset, run_ols, run_fixed_effects, run_random_effects,
-    run_hdfe, run_logit, run_probit, run_arima, run_mstl,
-    kmeans, pca,
+use bench_utils::{
+    BenchConfig, BenchmarkResult, print_header, print_result, run_benchmark, save_results,
 };
 use p2a_core::regression::CovarianceType;
+use p2a_core::{
+    Dataset, kmeans, pca, run_arima, run_fixed_effects, run_hdfe, run_logit, run_mstl, run_ols,
+    run_probit, run_random_effects,
+};
 use polars::prelude::*;
 use rand::Rng;
 use rand::SeedableRng;
@@ -38,7 +39,7 @@ fn generate_regression_data(n: usize, k: usize, seed: u64) -> Dataset {
             let mut sum = 0.0;
             for col in &columns {
                 if let Ok(val) = col.get(row) {
-                    if let Some(v) = val.try_extract::<f64>().ok() {
+                    if let Ok(v) = val.try_extract::<f64>() {
                         sum += v;
                     }
                 }
@@ -76,7 +77,8 @@ fn generate_panel_data(n_entities: usize, n_periods: usize, seed: u64) -> Datase
         "y" => y,
         "x1" => x1,
         "x2" => x2,
-    }.expect("Failed to create DataFrame");
+    }
+    .expect("Failed to create DataFrame");
 
     Dataset::new(df)
 }
@@ -92,7 +94,11 @@ fn generate_binary_data(n: usize, seed: u64) -> Dataset {
         .map(|i| {
             let linear = -1.0 + 0.5 * x1[i] + 0.3 * x2[i];
             let prob = 1.0 / (1.0 + (-linear).exp());
-            if rng.gen_range(0.0..1.0) < prob { 1.0 } else { 0.0 }
+            if rng.gen_range(0.0..1.0) < prob {
+                1.0
+            } else {
+                0.0
+            }
         })
         .collect();
 
@@ -100,7 +106,8 @@ fn generate_binary_data(n: usize, seed: u64) -> Dataset {
         "y" => y,
         "x1" => x1,
         "x2" => x2,
-    }.expect("Failed to create DataFrame");
+    }
+    .expect("Failed to create DataFrame");
 
     Dataset::new(df)
 }
@@ -120,7 +127,8 @@ fn generate_time_series(n: usize, seed: u64) -> Dataset {
 
     let df = df! {
         "y" => y,
-    }.expect("Failed to create DataFrame");
+    }
+    .expect("Failed to create DataFrame");
 
     Dataset::new(df)
 }
@@ -155,8 +163,10 @@ fn main() {
     let mut results: Vec<BenchmarkResult> = Vec::new();
 
     println!("\n=== p2a Comprehensive Benchmarks ===\n");
-    println!("Configuration: {} warmup, {} measurement iterations\n",
-             config.warmup_iterations, config.measurement_iterations);
+    println!(
+        "Configuration: {} warmup, {} measurement iterations\n",
+        config.warmup_iterations, config.measurement_iterations
+    );
 
     // ============================================
     // Regression Benchmarks
@@ -209,7 +219,14 @@ fn main() {
 
         // HDFE
         let result = run_benchmark("HDFE", "2-way", n, &config, || {
-            run_hdfe(&dataset, "y", &["x1", "x2"], &["entity", "time"], None, CovarianceType::Standard)
+            run_hdfe(
+                &dataset,
+                "y",
+                &["x1", "x2"],
+                &["entity", "time"],
+                None,
+                CovarianceType::Standard,
+            )
         });
         print_result(&result);
         results.push(result);
@@ -308,7 +325,10 @@ fn main() {
     // Print summary
     println!("\n=== Summary ===");
     println!("Total benchmarks: {}", results.len());
-    println!("Iterations per benchmark: {}", config.measurement_iterations);
+    println!(
+        "Iterations per benchmark: {}",
+        config.measurement_iterations
+    );
 
     // Print distribution example
     if let Some(r) = results.first() {

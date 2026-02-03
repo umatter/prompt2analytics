@@ -1,0 +1,12 @@
+method,n,time_ms,notes
+localmoran_analytical,100,0.0037,optimized batch computation
+localmoran_analytical,400,0.0156,optimized batch computation
+localmoran_analytical,1024,0.042,optimized batch computation
+localmoran_perm_99,100,0.205,batch permutation
+localmoran_perm_99,400,0.919,batch permutation
+sac_model,100,10.9,grid search + coordinate descent
+sac_model,400,32.1,grid search + coordinate descent
+sac_model,1024,54.6,grid search + coordinate descent
+lagsarlm,100,0.095,with pre-computed eigenvalues
+lagsarlm,400,0.303,with pre-computed eigenvalues
+lagsarlm,1024,0.829,with pre-computed eigenvalues

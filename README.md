@@ -1,19 +1,27 @@
 # prompt2analytics
 
+[![CI](https://github.com/umatter/prompt2analytics/actions/workflows/ci.yml/badge.svg)](https://github.com/umatter/prompt2analytics/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/umatter/prompt2analytics/branch/main/graph/badge.svg)](https://codecov.io/gh/umatter/prompt2analytics)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Rust](https://img.shields.io/badge/rust-1.85%2B-blue.svg)](https://www.rust-lang.org/)
+
 A comprehensive analytics toolkit exposing econometrics, machine learning, and visualization capabilities through multiple interfaces:
 - **CLI (`p2a`)**: Direct command-line execution for scripted workflows
-- **MCP Server**: Model Context Protocol integration for AI assistants
-- **Desktop App**: Tauri application with LLM-powered natural language analysis
+- **MCP Server**: Model Context Protocol integration for AI assistants (257 tools)
+- **Dioxus App**: Cross-platform frontend (web, desktop) with LLM-powered natural language analysis
+
+**Requirements**: Rust 1.85+ (edition 2024)
 
 ## Features
 
 ### Econometrics (Pure Rust)
 - **OLS Regression** with robust standard errors (HC0-HC3) and clustered SEs
-- **Panel Data**: Fixed Effects, Random Effects, Hausman specification test
+- **Panel Data**: Fixed Effects, Random Effects, Hausman specification test, HDFE
 - **Instrumental Variables**: 2SLS with first-stage diagnostics
-- **Causal Inference**: Difference-in-Differences estimation
-- **Discrete Choice**: Logit and Probit via Newton-Raphson MLE
+- **Causal Inference**: Difference-in-Differences, Regression Discontinuity (Sharp/Fuzzy RD)
+- **Discrete Choice**: Logit, Probit, FEGLM (GLM with high-dimensional fixed effects)
 - **Regression Diagnostics**: Jarque-Bera, Breusch-Pagan, Durbin-Watson, VIF
+- **Identification Diagnostics**: Automated checks for IV, DiD, RD, and matching estimators with severity-ranked warnings and remediation suggestions
 
 ### Time Series
 - **Univariate**: ARIMA modeling and forecasting, MSTL decomposition
@@ -26,14 +34,21 @@ A comprehensive analytics toolkit exposing econometrics, machine learning, and v
 - **Supervised Learning**: Random Forest, Linear SVM
 
 ### Visualization
-- Histograms, scatter plots, line charts, box plots
+- **Static charts** (PNG): Histograms, scatter plots, line charts, box plots
 - Correlation heatmaps, coefficient plots, IRF plots
 - Event study plots, residual diagnostics, dendrograms
-- All charts rendered as base64-encoded PNG
+- **Interactive charts** (HTML/Plotly.js): Scatter, histogram, line with zoom/pan/hover
 
-### Data Sources
-- **Files**: CSV, Parquet, Excel (.xlsx/.xls), Stata (.dta), SAS (.sas7bdat)
+### Data Management
+- **File formats**: CSV, Parquet, Excel (.xlsx/.xls), Stata (.dta), SAS (.sas7bdat)
 - **Databases**: SQLite, DuckDB (with direct file querying)
+- **LLM-assisted cleaning**: Quality profiling, preview/verify operations, rollback-enabled sessions
+
+### Export Formats
+- **LaTeX**: Publication-ready regression tables (OLS, Panel, Discrete)
+- **Markdown**: GitHub-compatible tables for documentation
+- **HTML**: Self-contained tables with embedded CSS
+- **CSV**: Generic export via `CsvExport` trait for all result types
 
 ### Command-Line Interface
 - Full access to all analytics via `p2a` binary
@@ -41,11 +56,11 @@ A comprehensive analytics toolkit exposing econometrics, machine learning, and v
 - Script export for sharing and automation
 - JSON output format for programmatic use
 
-### Desktop Application
-- Tauri 2.0 + SvelteKit interface
+### Dioxus Cross-Platform App
+- Pure Rust frontend compiled to WASM (web) or native (desktop)
 - Multi-provider LLM integration (Ollama, Anthropic, OpenAI)
-- Conversation history with SQLite persistence
-- Natural language data analysis
+- Conversation history with SurrealDB persistence
+- Tool call transparency with expandable details
 
 ## Installation
 
@@ -53,7 +68,11 @@ A comprehensive analytics toolkit exposing econometrics, machine learning, and v
 
 **Linux (Ubuntu/Debian):**
 ```bash
-sudo apt-get install libopenblas-dev libwebkit2gtk-4.1-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev
+# Core dependencies
+sudo apt-get install libopenblas-dev
+
+# For Dioxus desktop app
+sudo apt-get install libwebkit2gtk-4.1-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev libgtk-3-dev libxdo-dev
 ```
 
 **macOS:**
@@ -74,9 +93,13 @@ cargo build --release -p p2a-cli
 # Build the MCP server
 cargo build --release -p p2a-mcp
 
-# Build the desktop application (optional)
-cd crates/p2a-desktop/ui && npm install && cd ../../..
-cargo build --release -p p2a-desktop
+# Build the Dioxus app (web - requires dioxus-cli)
+cargo install dioxus-cli
+rustup target add wasm32-unknown-unknown
+cd crates/p2a-dioxus && dx build --release && cd ../..
+
+# Build the Dioxus app (desktop)
+cd crates/p2a-dioxus && dx build --release --platform desktop && cd ../..
 ```
 
 The CLI binary will be at `target/release/p2a`.
@@ -85,54 +108,286 @@ The CLI binary will be at `target/release/p2a`.
 
 ### CLI (`p2a`)
 
-The `p2a` command provides direct access to all analytics functions:
+The `p2a` command provides direct access to all analytics functions. Use `--session` to enable reproducibility.
+
+#### Data Management
 
 ```bash
-# Load a dataset
-p2a --session analysis.json data load /path/to/data.csv --name mydata
+# Load datasets (CSV, Parquet, Excel, Stata, SAS)
+p2a --session s.json data load sales.csv --name sales
+p2a --session s.json data load quarterly.parquet --name quarterly
+p2a --session s.json data load survey.dta --name survey
 
-# View data summary
-p2a --session analysis.json data describe mydata
+# View data
+p2a --session s.json data list
+p2a --session s.json data describe sales
+p2a --session s.json data head sales -n 20
 
-# Run OLS regression with robust standard errors
-p2a --session analysis.json reg ols mydata -y price -x sqft bedrooms bathrooms --robust hc1
+# Generate random data for testing
+p2a --session s.json data generate -n 1000 -d simdata \
+    --columns '[{"name":"x","distribution":{"type":"normal","mean":0,"std":1}}]'
 
-# Run clustered standard errors regression
-p2a --session analysis.json reg clustered mydata -y outcome -x treatment control --cluster firm_id
+# Export data
+p2a --session s.json data save sales --output results.parquet
+```
 
-# Panel fixed effects
-p2a --session analysis.json panel fe mydata -y revenue -x employees --entity firm_id
+#### Regression
 
-# Time series ARIMA with forecasting
-p2a --session analysis.json ts arima mydata --col sales -p 1 -d 1 -q 1 --horizon 12
+```bash
+# OLS with robust standard errors
+p2a --session s.json reg ols mydata -y price -x sqft bedrooms --robust hc1
 
-# K-means clustering
-p2a --session analysis.json ml kmeans mydata --cols x1 x2 x3 -k 3
+# Clustered standard errors
+p2a --session s.json reg clustered mydata -y revenue -x employees --cluster firm_id
 
-# Create visualizations
-p2a --session analysis.json viz scatter mydata --x income --y spending -o scatter.png
-p2a --session analysis.json viz histogram mydata --col price -o hist.png
+# HAC (Newey-West) standard errors for time series
+p2a --session s.json reg hac mydata -y returns -x mkt_rf smb hml --lag 4
 
-# Export session to reproducible bash script
+# Bootstrap standard errors
+p2a --session s.json reg bootstrap mydata -y outcome -x treatment -B 1000
+
+# Quantile regression
+p2a --session s.json reg quantile mydata -y wage -x education experience --tau 0.5
+
+# Diagnostics (VIF, Breusch-Pagan, Durbin-Watson)
+p2a --session s.json reg diagnostics mydata -y price -x sqft bedrooms bathrooms
+```
+
+#### Panel Data
+
+```bash
+# Fixed effects
+p2a --session s.json panel fe mydata -y revenue -x employees capital --entity firm_id
+
+# Random effects
+p2a --session s.json panel re mydata -y gdp -x investment --entity country --time year
+
+# Hausman specification test
+p2a --session s.json panel hausman mydata -y outcome -x treatment --entity id --time period
+
+# High-dimensional fixed effects
+p2a --session s.json panel hdfe mydata -y sales -x price --fe firm_id year
+
+# FEGLM (GLM with HDFE)
+p2a --session s.json panel feglm mydata -y count -x treatment --fe firm_id --family poisson
+
+# Arellano-Bond GMM
+p2a --session s.json panel gmm mydata -y growth -x investment --entity country --time year
+```
+
+#### Causal Inference
+
+```bash
+# Instrumental Variables (2SLS)
+p2a --session s.json causal iv mydata -y wage -x education --instruments distance
+
+# Difference-in-Differences
+p2a --session s.json causal did mydata -y outcome --treat treatment --post post_period
+
+# Staggered DiD (Callaway-Sant'Anna)
+p2a --session s.json causal staggered-did mydata -y outcome --unit id --time period --treat first_treat
+
+# Regression Discontinuity (Sharp)
+p2a --session s.json causal rd mydata -y outcome --running score --cutoff 0
+
+# Fuzzy RD
+p2a --session s.json causal fuzzy-rd mydata -y outcome --running score --treat treatment --cutoff 0
+
+# Propensity Score Matching
+p2a --session s.json causal matching mydata -y outcome --treat treatment -x age income education
+
+# IPW and Doubly Robust
+p2a --session s.json causal ipw mydata -y outcome --treat treatment -x age income
+p2a --session s.json causal doubly-robust mydata -y outcome --treat treatment -x age income
+
+# Synthetic Control
+p2a --session s.json causal synth mydata -y gdp --unit state --time year --treat california --treat-time 2000
+```
+
+#### Discrete Choice
+
+```bash
+# Logit and Probit
+p2a --session s.json discrete logit mydata -y hired -x education experience age
+p2a --session s.json discrete probit mydata -y default -x income debt_ratio
+
+# Ordered models
+p2a --session s.json discrete ologit mydata -y satisfaction -x service_quality price
+
+# Multinomial logit
+p2a --session s.json discrete mlogit mydata -y transport_mode -x income distance
+
+# Count models
+p2a --session s.json discrete negbin mydata -y accidents -x age speed
+p2a --session s.json discrete zip mydata -y doctor_visits -x age income
+```
+
+#### Time Series
+
+```bash
+# ARIMA modeling and forecasting
+p2a --session s.json ts arima mydata --col sales -p 1 -d 1 -q 1 --horizon 12
+
+# VAR (Vector Autoregression)
+p2a --session s.json ts var mydata --cols gdp inflation unemployment --lags 2
+
+# GARCH volatility modeling
+p2a --session s.json ts garch mydata --col returns -p 1 -q 1
+
+# Holt-Winters forecasting
+p2a --session s.json ts holt-winters mydata --col sales --seasonal 12
+
+# STL decomposition
+p2a --session s.json ts stl mydata --col sales --period 12
+
+# Granger causality
+p2a --session s.json ts granger mydata --cause money_supply --effect inflation --lags 4
+```
+
+#### Statistics
+
+```bash
+# T-tests
+p2a --session s.json stats t-test-one mydata --col score --mu 0
+p2a --session s.json stats t-test-two mydata --col1 treatment --col2 control
+p2a --session s.json stats t-test-paired mydata --col1 before --col2 after
+
+# ANOVA
+p2a --session s.json stats anova mydata --response score --factor treatment
+p2a --session s.json stats tukey mydata --response score --factor treatment
+
+# Non-parametric tests
+p2a --session s.json stats wilcoxon mydata --col1 group_a --col2 group_b
+p2a --session s.json stats kruskal mydata --col score --group treatment
+
+# Normality and independence
+p2a --session s.json stats shapiro mydata --col residuals
+p2a --session s.json stats box-test mydata --col residuals --lag 10
+
+# Time series diagnostics
+p2a --session s.json stats acf mydata --col returns --lag-max 20
+p2a --session s.json stats pacf mydata --col returns --lag-max 15
+```
+
+#### Spatial Econometrics
+
+```bash
+# SAR (Spatial Lag Model)
+p2a --session s.json spatial sar mydata -y price -x sqft bedrooms \
+    --coord-x longitude --coord-y latitude -k 5
+
+# SEM (Spatial Error Model)
+p2a --session s.json spatial sem mydata -y price -x sqft \
+    --coord-x lon --coord-y lat -k 5
+
+# Moran's I test
+p2a --session s.json spatial moran mydata -y residuals \
+    --coord-x longitude --coord-y latitude -k 5
+```
+
+#### Survival Analysis
+
+```bash
+# Kaplan-Meier curves
+p2a --session s.json survival km mydata -t time -e status -g treatment
+
+# Log-rank test
+p2a --session s.json survival log-rank mydata -t time -e status -g treatment
+
+# Cox Proportional Hazards
+p2a --session s.json survival cox mydata -t time -e status -x age treatment --robust
+```
+
+#### Machine Learning
+
+```bash
+# Clustering
+p2a --session s.json ml kmeans mydata --cols x1 x2 x3 -k 5 --seed 42
+p2a --session s.json ml dbscan mydata --cols x y --eps 0.5 --min-samples 5
+p2a --session s.json ml hierarchical mydata --cols x1 x2 x3 -n 4 --linkage ward
+
+# Dimensionality reduction
+p2a --session s.json ml pca mydata --cols x1 x2 x3 x4 x5 -n 3
+p2a --session s.json ml tsne mydata --cols x1 x2 x3 x4 --perplexity 30
+
+# Supervised learning
+p2a --session s.json ml random-forest mydata --cols x1 x2 x3 -y target --n-trees 100
+p2a --session s.json ml svm mydata --cols x1 x2 x3 -y label -c 1.0
+```
+
+#### Data Munging
+
+```bash
+# Filter and select
+p2a --session s.json munge filter mydata --column age --op gt --value 30
+p2a --session s.json munge select mydata --columns id name income
+
+# Transform
+p2a --session s.json munge mutate mydata --new-col total --expr 'add:price:tax'
+p2a --session s.json munge standardize mydata --columns x1 x2 x3
+
+# Reshape
+p2a --session s.json munge pivot mydata --index id --on year --values sales
+p2a --session s.json munge melt mydata --id-vars id --value-vars jan feb mar
+
+# Join and aggregate
+p2a --session s.json munge join orders customers --on customer_id -t left
+p2a --session s.json munge group-by mydata --by region --aggs revenue:sum units:mean
+
+# Clean
+p2a --session s.json munge drop-na mydata
+p2a --session s.json munge fill-na mydata --method mean
+p2a --session s.json munge deduplicate mydata --subset id
+```
+
+#### Visualization
+
+```bash
+# Static charts (PNG)
+p2a --session s.json viz histogram mydata --col income -f hist.png --bins 50
+p2a --session s.json viz scatter mydata -x age -y income -f scatter.png
+p2a --session s.json viz line mydata -x date -y price -f timeseries.png
+p2a --session s.json viz box mydata -y score -g treatment -f boxplot.png
+p2a --session s.json viz heatmap mydata --cols x1 x2 x3 x4 -f corr.png
+p2a --session s.json viz coefplot mydata -y outcome -x x1 x2 x3 -f coef.png
+p2a --session s.json viz residuals mydata -y outcome -x x1 x2 -f resid.png
+
+# Interactive charts (HTML with Plotly.js)
+p2a --session s.json viz scatter-interactive mydata -x age -y income -f scatter.html
+p2a --session s.json viz histogram-interactive mydata --col income -f hist.html
+p2a --session s.json viz line-interactive mydata -x date -y price -f line.html
+```
+
+#### Session and Scripting
+
+```bash
+# Export session to reproducible script
 p2a script export analysis.json -o analysis.sh
+
+# Run a script
+p2a script run analysis.sh
 ```
 
 **Command categories:**
-- `data` - Load, list, describe, preview datasets
-- `reg` - OLS, clustered SEs, diagnostics
-- `panel` - Fixed effects, random effects, Hausman test, HDFE
-- `causal` - IV/2SLS, difference-in-differences
-- `discrete` - Logit, probit
-- `ts` - ARIMA, MSTL, VAR
-- `ml` - K-means, PCA
-- `viz` - Histograms, scatter plots, line charts
+- `data` - Load, list, describe, preview, generate, export datasets
+- `reg` - OLS, clustered SEs, HAC, bootstrap, quantile, diagnostics
+- `panel` - Fixed effects, random effects, Hausman, HDFE, FEGLM, GMM
+- `causal` - IV/2SLS, DiD, staggered DiD, RD, matching, IPW, synthetic control, TMLE
+- `discrete` - Logit, probit, ordered, multinomial, count models (Poisson, NegBin, ZIP)
+- `ts` - ARIMA, VAR, GARCH, Holt-Winters, STL, Granger causality
+- `stats` - T-tests, ANOVA, non-parametric tests, ACF/PACF, normality tests
+- `spatial` - SAR, SEM, SAC, Moran's I
+- `survival` - Kaplan-Meier, Cox PH, AFT, log-rank test
+- `ml` - K-means, DBSCAN, hierarchical, PCA, t-SNE, Random Forest, SVM
+- `munge` - Filter, select, join, reshape, aggregate, clean
+- `viz` - Static (PNG) and interactive (HTML) charts
 - `script` - Export/run reproducible scripts
 
-**Output formats:** `--output text` (default), `--output json`, `--output table`
+**Output formats:** `--format text` (default), `--format json`, `--format table`
 
 ### MCP Server
 
-The MCP server exposes 55 analytics tools via the Model Context Protocol. Configure it in your MCP client (e.g., Claude Desktop):
+The MCP server exposes 257 analytics tools via the Model Context Protocol. Configure it in your MCP client (e.g., Claude Desktop):
 
 ```json
 {
@@ -144,37 +399,57 @@ The MCP server exposes 55 analytics tools via the Model Context Protocol. Config
 }
 ```
 
-### Desktop Application
+### Dioxus App (Web, Desktop)
+
+A cross-platform frontend built with Dioxus 0.7:
 
 ```bash
-./target/release/p2a-desktop
+# Install Dioxus CLI (if not already installed)
+cargo install dioxus-cli
+
+# Install WASM target for web builds
+rustup target add wasm32-unknown-unknown
+
+# Start backend in one terminal
+cargo run -p p2a-mcp --features full -- --transport http --port 8080 --cors-permissive
+
+# Start Dioxus dev server (web) in another terminal
+cd crates/p2a-dioxus
+dx serve
+
+# Or run as desktop app
+dx serve --platform desktop
 ```
 
-The desktop app provides:
-- **Chat Panel**: Natural language interface to analytics tools
-- **Data Panel**: Load and preview datasets
-- **Results Panel**: View analysis results and visualizations
+Open http://localhost:8080 in your browser (web) or the native window (desktop). Features:
+- Chat interface with streaming LLM responses
+- Support for Ollama, Anthropic, and OpenAI providers
+- Conversation management with persistent history (SurrealDB)
+- Dataset sidebar with live metadata view
+- Tool call transparency ("Rust Analytics" indicator)
+- Environment variable detection for API keys
+- Markdown rendering for assistant messages
 
-### Example Commands
+### Example MCP Tool Calls
 
-Load a dataset:
 ```
-/load_dataset path:/path/to/data.csv
-```
+# Load a dataset
+load_dataset path:/path/to/data.csv
 
-Run OLS regression:
-```
-/regression_ols dataset:mydata y:price x:sqft,bedrooms,bathrooms
-```
+# Create an inline dataset
+create_dataset name:test_data csv_content:"x,y\n1,2\n2,4\n3,6"
 
-Generate a scatter plot:
-```
-/viz_scatter dataset:mydata x_column:sqft y_column:price
-```
+# Run OLS regression
+regression_ols dataset:mydata y:price x:sqft,bedrooms,bathrooms
 
-Run panel fixed effects:
-```
-/panel_fixed_effects dataset:panel y:outcome x:treatment entity_col:firm time_col:year
+# Generate a scatter plot
+viz_scatter dataset:mydata x_column:sqft y_column:price
+
+# Run panel fixed effects
+panel_fixed_effects dataset:panel y:outcome x:treatment entity_col:firm time_col:year
+
+# Data quality profiling (for LLM-assisted cleaning)
+data_quality_profile dataset:mydata
 ```
 
 ## Architecture
@@ -182,51 +457,70 @@ Run panel fixed effects:
 ```
 prompt2analytics/
 ├── crates/
-│   ├── p2a-core/          # Core analytics library
-│   │   ├── data/          # Data loading and manipulation
+│   ├── p2a-core/          # Core analytics library (all algorithms)
+│   │   ├── data/          # Data loading, quality profiling, cleaning
 │   │   ├── stats/         # Descriptive statistics, correlation
 │   │   ├── regression/    # OLS, diagnostics
-│   │   ├── econometrics/  # Panel, IV, DiD, discrete choice, time series
+│   │   ├── econometrics/  # Panel, IV, DiD, RD, discrete choice, time series
+│   │   ├── diagnostics/   # Identification diagnostics (IV, DiD, RD, matching)
 │   │   ├── forecasting/   # ARIMA, MSTL, changepoint
 │   │   ├── ml/            # Clustering, PCA, t-SNE, Random Forest, SVM
-│   │   ├── visualization/ # Charts and heatmaps
+│   │   ├── visualization/ # Static (plotters) and interactive (plotlars) charts
+│   │   ├── export/        # LaTeX, Markdown, HTML, CSV export
 │   │   ├── linalg/        # Matrix operations (via faer)
-│   │   ├── traits/        # LinearEstimator trait
-│   │   └── errors.rs      # Error types
+│   │   └── traits/        # LinearEstimator trait
 │   ├── p2a-cli/           # CLI binary (`p2a`)
-│   │   ├── commands/      # Subcommand implementations
-│   │   ├── session.rs     # Session recording
-│   │   ├── script.rs      # Bash script generation
-│   │   └── output.rs      # Output formatting
-│   ├── p2a-mcp/           # MCP server (55 tools)
-│   └── p2a-desktop/       # Tauri desktop application
-│       ├── src/           # Rust backend
-│       └── ui/            # SvelteKit frontend
+│   ├── p2a-mcp/           # MCP server (257 tools)
+│   │   └── db/            # SurrealDB persistence layer
+│   └── p2a-dioxus/        # Cross-platform Dioxus app
+│       ├── api/           # HTTP client and SSE streaming
+│       ├── components/    # UI components
+│       └── state/         # State management (Dioxus signals)
+├── validation/            # Validation against R/Python references
+├── performance/           # Benchmark framework and results
+└── paper/                 # JSS article materials
 ```
 
-## MCP Tools
+## MCP Tools (257 total)
 
-| Category | Tools |
-|----------|-------|
-| Data | `load_dataset`, `list_datasets`, `describe_dataset`, `head_dataset` |
-| Statistics | `compute_correlation` |
-| Regression | `regression_ols`, `regression_diagnostics`, `regression_clustered` |
-| Panel | `panel_fixed_effects`, `panel_random_effects`, `hausman_test` |
-| IV | `iv_2sls`, `iv_first_stage` |
-| Causal | `diff_in_diff` |
-| Discrete | `logit`, `probit` |
-| Time Series | `ts_var`, `ts_varma`, `ts_vecm`, `ts_var_irf`, `ts_arima_fit`, `ts_arima_forecast`, `ts_mstl`, `ts_changepoint` |
+The MCP server exposes 257 analytics tools. Key categories include:
+
+| Category | Example Tools |
+|----------|---------------|
+| Data Management | `load_dataset`, `create_dataset`, `list_datasets`, `describe_dataset`, `head_dataset`, `export_dataset` |
+| Data Quality | `data_quality_profile`, `preview_cleaning`, `verify_cleaning`, `suggest_cleaning` |
+| Cleaning Sessions | `cleaning_session_start`, `cleaning_session_apply`, `cleaning_rollback` |
+| Statistics | `compute_correlation`, `hypothesis_t_test`, `hypothesis_chisq_*`, `hypothesis_wilcoxon`, `anova_*` |
+| Regression | `regression_ols`, `regression_gls`, `regression_clustered`, `regression_quantile`, `regression_nls` |
+| Panel | `panel_fixed_effects`, `panel_random_effects`, `hausman_test`, `panel_gmm`, `feglm` |
+| IV/2SLS | `iv_2sls`, `iv_first_stage`, `iv_diagnostics` |
+| Causal Inference | `diff_in_diff`, `staggered_did`, `rd_estimate`, `rd_fuzzy`, `synth_control`, `matching_*`, `ipw_*` |
+| Discrete Choice | `logit`, `probit`, `multinomial_logit`, `ordered_probit`, `poisson`, `negbin`, `zip`, `zinb` |
+| Time Series | `ts_arima_*`, `ts_var*`, `ts_vecm`, `ts_mstl`, `ts_changepoint`, `ts_garch`, `ts_kalman_*` |
+| Spatial | `spatial_neighbors`, `spatial_sar`, `spatial_sem`, `spatial_sac`, `moran_test` |
 | ML | `ml_kmeans`, `ml_dbscan`, `ml_hierarchical`, `ml_pca`, `ml_tsne`, `ml_random_forest`, `ml_svm` |
-| Database | `db_sqlite_query`, `db_sqlite_tables`, `db_sqlite_schema`, `db_duckdb_query`, `db_duckdb_tables`, `db_duckdb_schema` |
-| Visualization | `viz_histogram`, `viz_scatter`, `viz_line`, `viz_boxplot`, `viz_heatmap`, `viz_event_study`, `viz_coefficient`, `viz_irf`, `viz_residual_diagnostics`, `viz_dendrogram` |
-| Utilities | `generate_report`, `batch_process`, `compare_datasets`, `export_session`, `import_session`, `set_seed`, `get_seed` |
+| Database | `db_sqlite_query`, `db_duckdb_query`, `db_*_tables`, `db_*_schema` |
+| Visualization | `viz_histogram`, `viz_scatter`, `viz_line`, `viz_boxplot`, `viz_heatmap`, `viz_*_interactive` |
+| Power Analysis | `power_t_test`, `power_prop_test`, `power_anova_test` |
+| Utilities | `generate_random_data`, `set_seed`, `generate_report` |
+
+For a complete list, see the tool definitions in `crates/p2a-mcp/src/tools/handlers/`.
 
 ## Development
 
 ### Running Tests
 
 ```bash
-cargo test -p p2a-core
+cargo test                              # All tests
+cargo test -p p2a-core                  # Core library only
+cargo test -p p2a-core -- test_validate # Validation tests
+```
+
+### Linting
+
+```bash
+cargo clippy --all-targets --all-features
+cargo fmt --check
 ```
 
 ### Building Documentation
@@ -237,103 +531,76 @@ cargo doc --no-deps --open
 
 ### Managing Disk Space
 
-The Rust build cache (`target/`) can grow to 100GB+ during active development due to debug builds, incremental compilation, and benchmark artifacts. To reclaim disk space:
+The Rust build cache (`target/`) can grow large. To reclaim disk space:
 
 ```bash
-# Remove all build artifacts (will be regenerated on next build)
 cargo clean
-
-# Check current target size
 du -sh target/
 ```
 
-**Tip for contributors**: Run `cargo clean` periodically, especially after switching branches or completing major features. Debug builds in `target/debug/` are the largest consumers.
-
 ## Docker Deployment
 
-Docker is provided for **deployment** rather than development. For active development, use native tools (`cargo run`, `npm run dev`) for faster iteration.
-
-### Quick Start
+Docker is provided for **deployment** rather than development.
 
 ```bash
-# Build and run all services
+# Build and run the backend
 docker compose up --build
 
-# Or run in detached mode
-docker compose up --build -d
-```
-
-This starts:
-- **Backend** (p2a-mcp): http://localhost:8080
-- **Frontend** (p2a-web): http://localhost:3000
-
-### With Local LLM (Ollama)
-
-```bash
-# Include Ollama for local LLM support
+# With local LLM (Ollama)
 docker compose --profile with-ollama up --build
+
+# Health check
+curl http://localhost:8080/health
 ```
 
-### Health Check
-
-```bash
-curl http://localhost:8080/health   # Backend
-curl http://localhost:3000          # Frontend
-```
-
-### Development Recommendation
-
-For development, run services natively:
+For development, run services natively for faster iteration:
 
 ```bash
 # Terminal 1: Backend
-cargo run -p p2a-mcp --features full -- --transport http --host 127.0.0.1 --port 8080
+cargo run -p p2a-mcp --features full -- --transport http --host 127.0.0.1 --port 8080 --cors-permissive
 
 # Terminal 2: Frontend
-cd p2a-web && npm run dev
+cd crates/p2a-dioxus && dx serve
 ```
-
-This provides faster rebuilds and hot module replacement.
 
 ## Technical Details
 
-- **Matrix Operations**: Uses `faer` for high-performance linear algebra (Cholesky decomposition, matrix inverse)
-- **Statistical Distributions**: Uses `statrs` for t, F, chi-squared, and normal distributions
-- **DataFrames**: Uses `polars` for efficient data manipulation
-- **MCP Protocol**: Uses `rmcp` SDK for Model Context Protocol implementation
+| Component | Library | Version |
+|-----------|---------|---------|
+| Matrix Operations | `faer` | 0.22 |
+| Statistical Distributions | `statrs` | 0.18 |
+| DataFrames | `polars` | 0.52 |
+| Static Visualization | `plotters` | 0.3 |
+| Interactive Visualization | `plotlars` | 0.11 |
+| MCP Protocol | `rmcp` | 0.8 |
+| Database | `surrealdb` | embedded RocksDB |
+| Web Frontend | `dioxus` | 0.7 |
 
 ## Paper
 
 The `paper/` directory contains materials for a Journal of Statistical Software (JSS) article:
 
-```
-paper/
-├── article.tex       # Main manuscript (LaTeX)
-├── article.pdf       # Compiled paper
-├── references.bib    # Bibliography (66+ entries)
-├── Makefile          # Build: make, make clean
-├── code/             # Benchmark analysis scripts
-│   └── analyze_benchmarks.sh  # Generate benchmark figures
-├── figures/          # Figures and logo
-│   └── jsslogo.jpg
-└── style/            # JSS LaTeX style files
-    ├── jss.cls       # JSS document class
-    ├── jss.bst       # JSS BibTeX style
-    └── jss.pdf       # JSS style manual (author guidelines)
-```
-
-Build the paper with `make` in the `paper/` directory (requires pdfLaTeX and BibTeX).
-
-To generate benchmark figures (requires p2a CLI and jq):
 ```bash
-cd paper/code
-./analyze_benchmarks.sh
+# Build the paper (requires pdfLaTeX and BibTeX)
+cd paper && make
+
+# Generate benchmark figures (requires p2a CLI and jq)
+cd paper/code && ./analyze_benchmarks.sh
 ```
 
 ## License
 
 MIT
 
+## Documentation
+
+- `docs/guides/TESTING.md` - Test runtime expectations, validation framework
+- `docs/guides/DATA_SECURITY.md` - Data write locations, privacy
+- `docs/security/PROMPT_INJECTION.md` - MCP security considerations
+
 ## Contributing
 
-Contributions are welcome! Please see the development report (`DEVELOPMENT_REPORT.md`) for architecture details and the current state of the project.
+Contributions are welcome! See:
+- `CLAUDE.md` - Development guidance for Claude Code
+- `DEVELOPMENT_REPORT.md` - Architecture details and current status
+- `validation/` - How to add validation tests

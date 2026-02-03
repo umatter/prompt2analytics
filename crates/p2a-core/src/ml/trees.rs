@@ -15,10 +15,7 @@ enum TreeNode {
         right: Box<TreeNode>,
     },
     /// Leaf node with a prediction value
-    Leaf {
-        value: f64,
-        n_samples: usize,
-    },
+    Leaf { value: f64, n_samples: usize },
 }
 
 /// A single decision tree (CART algorithm for regression).
@@ -33,11 +30,7 @@ pub struct DecisionTree {
 
 impl DecisionTree {
     /// Create a new decision tree.
-    pub fn new(
-        max_depth: usize,
-        min_samples_split: usize,
-        max_features: Option<usize>,
-    ) -> Self {
+    pub fn new(max_depth: usize, min_samples_split: usize, max_features: Option<usize>) -> Self {
         DecisionTree {
             root: None,
             max_depth,
@@ -95,8 +88,22 @@ impl DecisionTree {
                 return self.create_leaf(y, indices);
             }
 
-            let left = self.build_tree(x, y, &left_indices, depth + 1, available_features, rng_state);
-            let right = self.build_tree(x, y, &right_indices, depth + 1, available_features, rng_state);
+            let left = self.build_tree(
+                x,
+                y,
+                &left_indices,
+                depth + 1,
+                available_features,
+                rng_state,
+            );
+            let right = self.build_tree(
+                x,
+                y,
+                &right_indices,
+                depth + 1,
+                available_features,
+                rng_state,
+            );
 
             TreeNode::Split {
                 feature_index: best_feature,
@@ -166,9 +173,8 @@ impl DecisionTree {
             for window in values.windows(2) {
                 let threshold = (window[0] + window[1]) / 2.0;
 
-                let (left_indices, right_indices): (Vec<usize>, Vec<usize>) = indices
-                    .iter()
-                    .partition(|&&i| x[[i, feature]] <= threshold);
+                let (left_indices, right_indices): (Vec<usize>, Vec<usize>) =
+                    indices.iter().partition(|&&i| x[[i, feature]] <= threshold);
 
                 if left_indices.is_empty() || right_indices.is_empty() {
                     continue;
@@ -187,12 +193,7 @@ impl DecisionTree {
     }
 
     /// Compute weighted MSE for a split.
-    fn compute_split_mse(
-        &self,
-        y: &ArrayView1<f64>,
-        left: &[usize],
-        right: &[usize],
-    ) -> f64 {
+    fn compute_split_mse(&self, y: &ArrayView1<f64>, left: &[usize], right: &[usize]) -> f64 {
         let n = (left.len() + right.len()) as f64;
 
         let left_mse = compute_mse(y, left);
@@ -317,7 +318,8 @@ impl std::fmt::Display for RandomForestResult {
         writeln!(f, "Feature Importances:")?;
 
         // Sort by importance
-        let mut indexed: Vec<(usize, f64)> = self.feature_importances
+        let mut indexed: Vec<(usize, f64)> = self
+            .feature_importances
             .iter()
             .enumerate()
             .map(|(i, &v)| (i, v))
@@ -326,14 +328,21 @@ impl std::fmt::Display for RandomForestResult {
 
         for (i, importance) in indexed.iter().take(10) {
             let name = match &self.feature_names {
-                Some(names) => names.get(*i).cloned().unwrap_or_else(|| format!("Feature_{}", i)),
+                Some(names) => names
+                    .get(*i)
+                    .cloned()
+                    .unwrap_or_else(|| format!("Feature_{}", i)),
                 None => format!("Feature_{}", i),
             };
             writeln!(f, "  {}: {:.4}", name, importance)?;
         }
 
         if self.feature_importances.len() > 10 {
-            writeln!(f, "  ... ({} more features)", self.feature_importances.len() - 10)?;
+            writeln!(
+                f,
+                "  ... ({} more features)",
+                self.feature_importances.len() - 10
+            )?;
         }
 
         writeln!(f)?;
@@ -341,8 +350,16 @@ impl std::fmt::Display for RandomForestResult {
 
         // Show prediction statistics
         if !self.predictions.is_empty() {
-            let min = self.predictions.iter().cloned().fold(f64::INFINITY, f64::min);
-            let max = self.predictions.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+            let min = self
+                .predictions
+                .iter()
+                .cloned()
+                .fold(f64::INFINITY, f64::min);
+            let max = self
+                .predictions
+                .iter()
+                .cloned()
+                .fold(f64::NEG_INFINITY, f64::max);
             let mean: f64 = self.predictions.iter().sum::<f64>() / self.predictions.len() as f64;
             writeln!(f, "  Min: {:.4}, Max: {:.4}, Mean: {:.4}", min, max, mean)?;
         }
@@ -450,7 +467,9 @@ fn parse_max_features(max_features: Option<&str>, n_features: usize) -> usize {
         Some("sqrt") => (n_features as f64).sqrt().ceil() as usize,
         Some("log2") => (n_features as f64).log2().ceil() as usize,
         Some("all") => n_features,
-        Some(s) => s.parse().unwrap_or((n_features as f64).sqrt().ceil() as usize),
+        Some(s) => s
+            .parse()
+            .unwrap_or((n_features as f64).sqrt().ceil() as usize),
         None => (n_features as f64).sqrt().ceil() as usize, // Default: sqrt
     }
 }
@@ -529,7 +548,9 @@ fn compute_oob_score(
     let mean_y: f64 = y_true.iter().sum::<f64>() / y_true.len() as f64;
 
     let ss_tot: f64 = y_true.iter().map(|&y| (y - mean_y).powi(2)).sum();
-    let ss_res: f64 = y_true.iter().zip(oob_pred.iter())
+    let ss_res: f64 = y_true
+        .iter()
+        .zip(oob_pred.iter())
         .map(|(&y, &pred)| (y - pred).powi(2))
         .sum();
 
@@ -547,13 +568,7 @@ mod tests {
 
     #[test]
     fn test_decision_tree_basic() {
-        let x = array![
-            [1.0, 2.0],
-            [2.0, 3.0],
-            [3.0, 4.0],
-            [4.0, 5.0],
-            [5.0, 6.0],
-        ];
+        let x = array![[1.0, 2.0], [2.0, 3.0], [3.0, 4.0], [4.0, 5.0], [5.0, 6.0],];
         let y = array![1.0, 2.0, 3.0, 4.0, 5.0];
 
         let mut tree = DecisionTree::new(5, 2, None);
@@ -585,13 +600,14 @@ mod tests {
         let result = random_forest(
             x.view(),
             y.view(),
-            Some(10),  // Small for testing
+            Some(10), // Small for testing
             Some(5),
             Some(2),
             Some("sqrt"),
             Some(42),
             None,
-        ).unwrap();
+        )
+        .unwrap();
 
         assert_eq!(result.n_trees, 10);
         assert_eq!(result.predictions.len(), 10);
@@ -626,8 +642,13 @@ mod tests {
             Some(2),
             Some("all"),
             Some(42),
-            Some(vec!["predictor".to_string(), "noise1".to_string(), "noise2".to_string()]),
-        ).unwrap();
+            Some(vec![
+                "predictor".to_string(),
+                "noise1".to_string(),
+                "noise2".to_string(),
+            ]),
+        )
+        .unwrap();
 
         // First feature should have highest importance
         assert!(result.feature_importances[0] > result.feature_importances[1]);
@@ -649,7 +670,10 @@ mod tests {
         // No overlap between bootstrap unique and oob
         let bootstrap_set: std::collections::HashSet<_> = bootstrap.iter().collect();
         for &idx in &oob {
-            assert!(!bootstrap_set.contains(&idx) || bootstrap.iter().filter(|&&x| x == idx).count() == 0);
+            assert!(
+                !bootstrap_set.contains(&idx)
+                    || bootstrap.iter().filter(|&&x| x == idx).count() == 0
+            );
         }
     }
 }

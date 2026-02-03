@@ -94,7 +94,7 @@ pub fn join(
 ) -> MungeResult<Dataset> {
     // Validate left_on columns exist
     for col in left_on {
-        if left.df().column(*col).is_err() {
+        if left.df().column(col).is_err() {
             return Err(MungeError::ColumnNotFound(col.to_string()));
         }
     }
@@ -107,7 +107,7 @@ pub fn join(
 
     // Validate right_on columns exist
     for col in &right_on_cols {
-        if right.df().column(*col).is_err() {
+        if right.df().column(col).is_err() {
             return Err(MungeError::ColumnNotFound(col.to_string()));
         }
     }
@@ -345,11 +345,13 @@ pub fn hconcat(datasets: &[&Dataset]) -> MungeResult<Dataset> {
 /// let combos = cross_join(&products, &stores, Some("_store"))?;
 /// ```
 pub fn cross_join(left: &Dataset, right: &Dataset, suffix: Option<&str>) -> MungeResult<Dataset> {
+    use polars_ops::frame::join::MaintainOrderJoin;
+
     let suffix_str: PlSmallStr = suffix.unwrap_or("_right").into();
 
     let result = left
         .df()
-        .cross_join(right.df(), Some(suffix_str), None)
+        .cross_join(right.df(), Some(suffix_str), None, MaintainOrderJoin::None)
         .map_err(|e| MungeError::JoinError(format!("Cross join failed: {}", e)))?;
 
     Ok(Dataset::new(result))

@@ -1,0 +1,11 @@
+{
+  "method": "panel_re",
+  "n": 100000,
+  "iterations": 50,
+  "timing": {
+    "min_us": 103086,
+    "median_us": 114032,
+    "mean_us": 117747,
+    "max_us": 188311
+  }
+}

@@ -1,0 +1,1896 @@
+{
+  "timestamp": "2026-01-27T10:47:26+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_cau_001",
+  "category": "causal",
+  "prompt_type": "informal",
+  "prompt": "education is probs endogenous - use instruments",
+  "selected": "iv_2sls",
+  "expected": [
+    "iv_2sls"
+  ],
+  "match_type": "exact",
+  "score": 1.0,
+  "latency_ms": 3672,
+  "linguistic_features": [
+    "informal_register",
+    "abbreviations"
+  ]
+}
+{
+  "timestamp": "2026-01-27T10:47:34+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_cau_002",
+  "category": "causal",
+  "prompt_type": "domain_jargon",
+  "prompt": "Estimate the LATE using parents' education as an instrument for endogenous schooling",
+  "selected": "iv_first_stage",
+  "expected": [
+    "iv_2sls"
+  ],
+  "match_type": "category",
+  "score": 0.3,
+  "latency_ms": 7888,
+  "linguistic_features": [
+    "domain_jargon",
+    "acronyms"
+  ]
+}
+{
+  "timestamp": "2026-01-27T10:47:36+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_cau_003",
+  "category": "causal",
+  "prompt_type": "verbose",
+  "prompt": "I'm concerned that my regressor might be correlated with the error term, which would bias my OLS estimates. I have some variables that I think might serve as valid instruments - they affect the endogenous regressor but shouldn't directly affect the outcome. Can you help me estimate this using instrumental variables?",
+  "selected": "iv_2sls",
+  "expected": [
+    "iv_2sls"
+  ],
+  "match_type": "exact",
+  "score": 1.0,
+  "latency_ms": 1831,
+  "linguistic_features": [
+    "verbose",
+    "explanatory",
+    "problem_description"
+  ]
+}
+{
+  "timestamp": "2026-01-27T10:47:42+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_cau_004",
+  "category": "causal",
+  "prompt_type": "typos",
+  "prompt": "run a differnce in difrences fro the policy efffect",
+  "selected": "diff_in_diff",
+  "expected": [
+    "diff_in_diff"
+  ],
+  "match_type": "exact",
+  "score": 1.0,
+  "latency_ms": 5159,
+  "linguistic_features": [
+    "typos",
+    "misspellings"
+  ]
+}
+{
+  "timestamp": "2026-01-27T10:50:02+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_cau_005",
+  "category": "causal",
+  "prompt_type": "informal",
+  "prompt": "DiD with state and year FE",
+  "selected": "null",
+  "expected": [
+    "diff_in_diff"
+  ],
+  "match_type": "none",
+  "score": 0.0,
+  "latency_ms": 139093,
+  "linguistic_features": [
+    "informal_register",
+    "acronyms",
+    "shorthand"
+  ]
+}
+{
+  "timestamp": "2026-01-27T10:50:12+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_cau_006",
+  "category": "causal",
+  "prompt_type": "domain_jargon",
+  "prompt": "Check for parallel trends using an event study with leads and lags",
+  "selected": "diff_in_diff",
+  "expected": [
+    "diff_event_study"
+  ],
+  "match_type": "acceptable",
+  "score": 0.7,
+  "latency_ms": 9518,
+  "linguistic_features": [
+    "domain_jargon",
+    "technical_terminology"
+  ]
+}
+{
+  "timestamp": "2026-01-27T10:52:33+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_cau_007",
+  "category": "causal",
+  "prompt_type": "ambiguous",
+  "prompt": "test if the policy had a causal effect",
+  "selected": "null",
+  "expected": [
+    "diff_in_diff"
+  ],
+  "match_type": "none",
+  "score": 0.0,
+  "latency_ms": 140783,
+  "linguistic_features": [
+    "ambiguous",
+    "vague"
+  ]
+}
+{
+  "timestamp": "2026-01-27T10:52:40+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_cau_008",
+  "category": "causal",
+  "prompt_type": "verbose",
+  "prompt": "Some states implemented this policy in 2015 while others didn't. I want to compare how outcomes changed in the treated states versus the control states before and after the policy was implemented. This should help me identify the causal effect assuming the parallel trends assumption holds.",
+  "selected": "diff_in_diff",
+  "expected": [
+    "diff_in_diff"
+  ],
+  "match_type": "exact",
+  "score": 1.0,
+  "latency_ms": 6217,
+  "linguistic_features": [
+    "verbose",
+    "explanatory",
+    "assumptions_mentioned"
+  ]
+}
+{
+  "timestamp": "2026-01-27T10:52:56+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_cau_009",
+  "category": "causal",
+  "prompt_type": "informal",
+  "prompt": "need to match treated and control units on covariates first",
+  "selected": "regression_ols",
+  "expected": [
+    "treatment_psm"
+  ],
+  "match_type": "none",
+  "score": 0.0,
+  "latency_ms": 15165,
+  "linguistic_features": [
+    "informal_register"
+  ]
+}
+{
+  "timestamp": "2026-01-27T10:53:08+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_cau_010",
+  "category": "causal",
+  "prompt_type": "domain_jargon",
+  "prompt": "Estimate the ATT using propensity score reweighting",
+  "selected": "treatment_ipw",
+  "expected": [
+    "treatment_ipw"
+  ],
+  "match_type": "exact",
+  "score": 1.0,
+  "latency_ms": 11477,
+  "linguistic_features": [
+    "domain_jargon",
+    "acronyms"
+  ]
+}
+{
+  "timestamp": "2026-01-27T10:53:10+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_cau_011",
+  "category": "causal",
+  "prompt_type": "typos",
+  "prompt": "regressoin discontinuty with triangualr kernal",
+  "selected": "rd_estimate",
+  "expected": [
+    "rd_sharp"
+  ],
+  "match_type": "acceptable",
+  "score": 0.7,
+  "latency_ms": 1690,
+  "linguistic_features": [
+    "typos",
+    "misspellings"
+  ]
+}
+{
+  "timestamp": "2026-01-27T10:53:15+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_cau_012",
+  "category": "causal",
+  "prompt_type": "verbose",
+  "prompt": "Students who score above a certain threshold on a test get a scholarship. I want to estimate the effect of this scholarship on their future outcomes by looking at students just above and just below the cutoff, since they should be similar except for the scholarship.",
+  "selected": "diff_in_diff",
+  "expected": [
+    "rd_sharp"
+  ],
+  "match_type": "category",
+  "score": 0.3,
+  "latency_ms": 4298,
+  "linguistic_features": [
+    "verbose",
+    "scenario_description"
+  ]
+}
+{
+  "timestamp": "2026-01-27T10:53:20+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_cau_013",
+  "category": "causal",
+  "prompt_type": "informal",
+  "prompt": "create a synthetic california using the other states as donors",
+  "selected": "synthetic_control",
+  "expected": [
+    "synthetic_control"
+  ],
+  "match_type": "exact",
+  "score": 1.0,
+  "latency_ms": 4690,
+  "linguistic_features": [
+    "informal_register",
+    "specific_reference"
+  ]
+}
+{
+  "timestamp": "2026-01-27T10:53:23+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_dis_001",
+  "category": "discrete",
+  "prompt_type": "informal",
+  "prompt": "my dependent var is binary - use logit",
+  "selected": "logit",
+  "expected": [
+    "logit"
+  ],
+  "match_type": "exact",
+  "score": 1.0,
+  "latency_ms": 2324,
+  "linguistic_features": [
+    "informal_register",
+    "abbreviations"
+  ]
+}
+{
+  "timestamp": "2026-01-27T10:53:32+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_dis_002",
+  "category": "discrete",
+  "prompt_type": "domain_jargon",
+  "prompt": "Estimate the log-odds of labor force participation as a function of demographics",
+  "selected": "logit",
+  "expected": [
+    "logit"
+  ],
+  "match_type": "exact",
+  "score": 1.0,
+  "latency_ms": 8165,
+  "linguistic_features": [
+    "domain_jargon",
+    "technical_terminology"
+  ]
+}
+{
+  "timestamp": "2026-01-27T10:53:37+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_dis_003",
+  "category": "discrete",
+  "prompt_type": "verbose",
+  "prompt": "My outcome variable is either 0 or 1, representing whether someone is employed or not. I want to model the probability of being employed as a function of age, education, and other characteristics. Since it's a binary outcome, I think I need some kind of limited dependent variable model.",
+  "selected": "logit",
+  "expected": [
+    "logit"
+  ],
+  "match_type": "exact",
+  "score": 1.0,
+  "latency_ms": 4697,
+  "linguistic_features": [
+    "verbose",
+    "explanatory",
+    "problem_description"
+  ]
+}
+{
+  "timestamp": "2026-01-27T10:53:40+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_dis_004",
+  "category": "discrete",
+  "prompt_type": "typos",
+  "prompt": "estaimte a porbit model fro credit defualt",
+  "selected": "probit",
+  "expected": [
+    "probit"
+  ],
+  "match_type": "exact",
+  "score": 1.0,
+  "latency_ms": 1832,
+  "linguistic_features": [
+    "typos",
+    "misspellings"
+  ]
+}
+{
+  "timestamp": "2026-01-27T10:53:46+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_dis_005",
+  "category": "discrete",
+  "prompt_type": "informal",
+  "prompt": "need marginal effects not just coefficients",
+  "selected": "regression_ols",
+  "expected": [
+    "logit_margins"
+  ],
+  "match_type": "none",
+  "score": 0.0,
+  "latency_ms": 5903,
+  "linguistic_features": [
+    "informal_register",
+    "requirement_statement"
+  ]
+}
+{
+  "timestamp": "2026-01-27T10:53:50+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_dis_006",
+  "category": "discrete",
+  "prompt_type": "domain_jargon",
+  "prompt": "Calculate AME for each covariate in the participation model",
+  "selected": "regression_ols",
+  "expected": [
+    "logit_margins"
+  ],
+  "match_type": "none",
+  "score": 0.0,
+  "latency_ms": 2776,
+  "linguistic_features": [
+    "domain_jargon",
+    "acronyms"
+  ]
+}
+{
+  "timestamp": "2026-01-27T10:53:52+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_dis_007",
+  "category": "discrete",
+  "prompt_type": "ambiguous",
+  "prompt": "predict probability of default",
+  "selected": "logit",
+  "expected": [
+    "logit"
+  ],
+  "match_type": "exact",
+  "score": 1.0,
+  "latency_ms": 1914,
+  "linguistic_features": [
+    "ambiguous",
+    "multiple_valid_interpretations"
+  ]
+}
+{
+  "timestamp": "2026-01-27T10:53:55+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_dis_008",
+  "category": "discrete",
+  "prompt_type": "verbose",
+  "prompt": "I'm interested in understanding not just whether the variables are significant, but how much a one-unit change in each variable actually changes the probability of the outcome. The raw logit coefficients are hard to interpret directly since they're in log-odds units.",
+  "selected": "logit",
+  "expected": [
+    "logit_margins"
+  ],
+  "match_type": "category",
+  "score": 0.3,
+  "latency_ms": 2021,
+  "linguistic_features": [
+    "verbose",
+    "interpretation_focused"
+  ]
+}
+{
+  "timestamp": "2026-01-27T10:53:58+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_dis_009",
+  "category": "discrete",
+  "prompt_type": "informal",
+  "prompt": "logit with firm fixed effects - lots of firms",
+  "selected": "feglm",
+  "expected": [
+    "feglm"
+  ],
+  "match_type": "exact",
+  "score": 1.0,
+  "latency_ms": 2117,
+  "linguistic_features": [
+    "informal_register",
+    "shorthand"
+  ]
+}
+{
+  "timestamp": "2026-01-27T10:54:01+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_dis_010",
+  "category": "discrete",
+  "prompt_type": "domain_jargon",
+  "prompt": "Estimate a conditional logit with HDFE using IRLS",
+  "selected": "feglm",
+  "expected": [
+    "feglm"
+  ],
+  "match_type": "exact",
+  "score": 1.0,
+  "latency_ms": 2883,
+  "linguistic_features": [
+    "domain_jargon",
+    "acronyms",
+    "technical_terminology"
+  ]
+}
+{
+  "timestamp": "2026-01-27T10:54:19+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_dis_011",
+  "category": "discrete",
+  "prompt_type": "typos",
+  "prompt": "probit modle wiht normal distribtuion assumptoin",
+  "selected": "probit",
+  "expected": [
+    "probit"
+  ],
+  "match_type": "exact",
+  "score": 1.0,
+  "latency_ms": 16862,
+  "linguistic_features": [
+    "typos",
+    "misspellings"
+  ]
+}
+{
+  "timestamp": "2026-01-27T10:54:22+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_dis_012",
+  "category": "discrete",
+  "prompt_type": "ambiguous",
+  "prompt": "0/1 outcome model",
+  "selected": "logit",
+  "expected": [
+    "logit"
+  ],
+  "match_type": "exact",
+  "score": 1.0,
+  "latency_ms": 3193,
+  "linguistic_features": [
+    "ambiguous",
+    "minimal_context"
+  ]
+}
+{
+  "timestamp": "2026-01-27T10:54:25+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_hyp_001",
+  "category": "hypothesis",
+  "prompt_type": "informal",
+  "prompt": "is there a diff between group A and B means",
+  "selected": "hypothesis_t_test",
+  "expected": [
+    "hypothesis_t_test"
+  ],
+  "match_type": "exact",
+  "score": 1.0,
+  "latency_ms": 2038,
+  "linguistic_features": [
+    "informal_register",
+    "abbreviations"
+  ]
+}
+{
+  "timestamp": "2026-01-27T10:54:31+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_hyp_002",
+  "category": "hypothesis",
+  "prompt_type": "domain_jargon",
+  "prompt": "Conduct a two-sample t-test assuming unequal variances",
+  "selected": "hypothesis_t_test",
+  "expected": [
+    "hypothesis_welch"
+  ],
+  "match_type": "acceptable",
+  "score": 0.7,
+  "latency_ms": 5120,
+  "linguistic_features": [
+    "domain_jargon",
+    "specific_assumptions"
+  ]
+}
+{
+  "timestamp": "2026-01-27T10:54:34+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_hyp_003",
+  "category": "hypothesis",
+  "prompt_type": "verbose",
+  "prompt": "I have three different treatment groups and I want to know if there's a statistically significant difference in the average outcome across these groups. I think I need something more than a t-test since I have more than two groups to compare.",
+  "selected": "anova_one_way",
+  "expected": [
+    "anova_oneway"
+  ],
+  "match_type": "category",
+  "score": 0.3,
+  "latency_ms": 2747,
+  "linguistic_features": [
+    "verbose",
+    "reasoning",
+    "seeking_guidance"
+  ]
+}
+{
+  "timestamp": "2026-01-27T10:54:37+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_hyp_004",
+  "category": "hypothesis",
+  "prompt_type": "typos",
+  "prompt": "anova wiht mulitple grops",
+  "selected": "anova_one_way",
+  "expected": [
+    "anova_oneway"
+  ],
+  "match_type": "category",
+  "score": 0.3,
+  "latency_ms": 2919,
+  "linguistic_features": [
+    "typos",
+    "misspellings"
+  ]
+}
+{
+  "timestamp": "2026-01-27T10:54:39+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_hyp_005",
+  "category": "hypothesis",
+  "prompt_type": "informal",
+  "prompt": "check if residuals are normal",
+  "selected": "regression_diagnostics",
+  "expected": [
+    "hypothesis_shapiro_wilk"
+  ],
+  "match_type": "none",
+  "score": 0.0,
+  "latency_ms": 1367,
+  "linguistic_features": [
+    "informal_register",
+    "shorthand"
+  ]
+}
+{
+  "timestamp": "2026-01-27T10:54:41+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_hyp_006",
+  "category": "hypothesis",
+  "prompt_type": "domain_jargon",
+  "prompt": "Perform the Jarque-Bera test for departures from normality based on skewness and kurtosis",
+  "selected": "regression_diagnostics",
+  "expected": [
+    "hypothesis_jarque_bera"
+  ],
+  "match_type": "none",
+  "score": 0.0,
+  "latency_ms": 1482,
+  "linguistic_features": [
+    "domain_jargon",
+    "technical_description"
+  ]
+}
+{
+  "timestamp": "2026-01-27T10:54:43+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_hyp_007",
+  "category": "hypothesis",
+  "prompt_type": "ambiguous",
+  "prompt": "test the association between gender and outcome",
+  "selected": "hypothesis_chisq_independence",
+  "expected": [
+    "hypothesis_chi_squared"
+  ],
+  "match_type": "category",
+  "score": 0.3,
+  "latency_ms": 1356,
+  "linguistic_features": [
+    "ambiguous",
+    "multiple_valid_interpretations"
+  ]
+}
+{
+  "timestamp": "2026-01-27T10:54:45+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_hyp_008",
+  "category": "hypothesis",
+  "prompt_type": "verbose",
+  "prompt": "I have a contingency table showing the frequencies of different outcomes across two categorical variables. I want to test whether there's a statistically significant relationship between these two variables, or if the observed frequencies could have occurred by chance.",
+  "selected": "hypothesis_chisq_independence",
+  "expected": [
+    "hypothesis_chi_squared"
+  ],
+  "match_type": "category",
+  "score": 0.3,
+  "latency_ms": 1632,
+  "linguistic_features": [
+    "verbose",
+    "problem_description"
+  ]
+}
+{
+  "timestamp": "2026-01-27T10:54:48+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_hyp_009",
+  "category": "hypothesis",
+  "prompt_type": "informal",
+  "prompt": "bp test for heteroskedasticity",
+  "selected": "regression_diagnostics",
+  "expected": [
+    "hypothesis_breusch_pagan"
+  ],
+  "match_type": "none",
+  "score": 0.0,
+  "latency_ms": 1694,
+  "linguistic_features": [
+    "informal_register",
+    "abbreviations"
+  ]
+}
+{
+  "timestamp": "2026-01-27T10:55:06+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_hyp_010",
+  "category": "hypothesis",
+  "prompt_type": "domain_jargon",
+  "prompt": "Test the null of homoskedasticity using the Breusch-Pagan-Godfrey LM test",
+  "selected": "regression_diagnostics",
+  "expected": [
+    "hypothesis_breusch_pagan"
+  ],
+  "match_type": "none",
+  "score": 0.0,
+  "latency_ms": 17256,
+  "linguistic_features": [
+    "domain_jargon",
+    "full_test_name"
+  ]
+}
+{
+  "timestamp": "2026-01-27T10:55:16+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_hyp_011",
+  "category": "hypothesis",
+  "prompt_type": "typos",
+  "prompt": "durbin wastson test fro autcorrelation",
+  "selected": "regression_diagnostics",
+  "expected": [
+    "hypothesis_durbin_watson"
+  ],
+  "match_type": "none",
+  "score": 0.0,
+  "latency_ms": 9461,
+  "linguistic_features": [
+    "typos",
+    "misspellings"
+  ]
+}
+{
+  "timestamp": "2026-01-27T10:55:25+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_hyp_012",
+  "category": "hypothesis",
+  "prompt_type": "verbose",
+  "prompt": "I'm worried that my regression residuals might be correlated with each other across observations, which would violate one of the key assumptions of OLS. Is there a test I can use to detect whether there's first-order autocorrelation in the residuals?",
+  "selected": "regression_diagnostics",
+  "expected": [
+    "hypothesis_durbin_watson"
+  ],
+  "match_type": "none",
+  "score": 0.0,
+  "latency_ms": 8398,
+  "linguistic_features": [
+    "verbose",
+    "assumption_concerns"
+  ]
+}
+{
+  "timestamp": "2026-01-27T10:55:27+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_ml_001",
+  "category": "ml",
+  "prompt_type": "informal",
+  "prompt": "group customers into like 5 segments",
+  "selected": "ml_kmeans",
+  "expected": [
+    "ml_kmeans"
+  ],
+  "match_type": "exact",
+  "score": 1.0,
+  "latency_ms": 1665,
+  "linguistic_features": [
+    "informal_register",
+    "filler_words"
+  ]
+}
+{
+  "timestamp": "2026-01-27T10:55:37+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_ml_002",
+  "category": "ml",
+  "prompt_type": "domain_jargon",
+  "prompt": "Perform k-means clustering with k=5 using Lloyd's algorithm",
+  "selected": "ml_kmeans",
+  "expected": [
+    "ml_kmeans"
+  ],
+  "match_type": "exact",
+  "score": 1.0,
+  "latency_ms": 9067,
+  "linguistic_features": [
+    "domain_jargon",
+    "algorithm_reference"
+  ]
+}
+{
+  "timestamp": "2026-01-27T10:55:39+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_ml_003",
+  "category": "ml",
+  "prompt_type": "verbose",
+  "prompt": "I have customer data with spending, purchase frequency, and other variables. I want to identify natural groupings or segments in my customer base without specifying the number of groups in advance. Is there a clustering method that can help with this?",
+  "selected": "ml_dbscan",
+  "expected": [
+    "ml_hierarchical"
+  ],
+  "match_type": "acceptable",
+  "score": 0.7,
+  "latency_ms": 1892,
+  "linguistic_features": [
+    "verbose",
+    "problem_description",
+    "uncertainty"
+  ]
+}
+{
+  "timestamp": "2026-01-27T10:55:57+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_ml_004",
+  "category": "ml",
+  "prompt_type": "typos",
+  "prompt": "pricnipal componet anlysis for dimesnion reduciton",
+  "selected": "ml_pca",
+  "expected": [
+    "ml_pca"
+  ],
+  "match_type": "exact",
+  "score": 1.0,
+  "latency_ms": 17704,
+  "linguistic_features": [
+    "typos",
+    "severe_misspellings"
+  ]
+}
+{
+  "timestamp": "2026-01-27T10:56:39+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_ml_005",
+  "category": "ml",
+  "prompt_type": "informal",
+  "prompt": "too many features - compress into fewer dimensions",
+  "selected": "ml_pca",
+  "expected": [
+    "ml_pca"
+  ],
+  "match_type": "exact",
+  "score": 1.0,
+  "latency_ms": 40689,
+  "linguistic_features": [
+    "informal_register",
+    "problem_statement"
+  ]
+}
+{
+  "timestamp": "2026-01-27T10:58:59+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_ml_006",
+  "category": "ml",
+  "prompt_type": "domain_jargon",
+  "prompt": "Extract the first 3 principal components explaining maximum variance",
+  "selected": "null",
+  "expected": [
+    "ml_pca"
+  ],
+  "match_type": "none",
+  "score": 0.0,
+  "latency_ms": 139369,
+  "linguistic_features": [
+    "domain_jargon",
+    "specific_parameters"
+  ]
+}
+{
+  "timestamp": "2026-01-27T10:59:09+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_ml_007",
+  "category": "ml",
+  "prompt_type": "ambiguous",
+  "prompt": "visualize the high-dimensional data",
+  "selected": "ml_tsne",
+  "expected": [
+    "ml_tsne"
+  ],
+  "match_type": "exact",
+  "score": 1.0,
+  "latency_ms": 9358,
+  "linguistic_features": [
+    "ambiguous",
+    "goal_oriented"
+  ]
+}
+{
+  "timestamp": "2026-01-27T10:59:20+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_ml_008",
+  "category": "ml",
+  "prompt_type": "verbose",
+  "prompt": "I want to create a 2D visualization of my high-dimensional data that preserves the local structure and shows natural clusters. I've heard t-SNE is good for this but I'm not sure about the parameters.",
+  "selected": "ml_tsne",
+  "expected": [
+    "ml_tsne"
+  ],
+  "match_type": "exact",
+  "score": 1.0,
+  "latency_ms": 10806,
+  "linguistic_features": [
+    "verbose",
+    "seeking_guidance"
+  ]
+}
+{
+  "timestamp": "2026-01-27T10:59:24+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_ml_009",
+  "category": "ml",
+  "prompt_type": "informal",
+  "prompt": "random forest to predict churn",
+  "selected": "ml_random_forest",
+  "expected": [
+    "ml_random_forest"
+  ],
+  "match_type": "exact",
+  "score": 1.0,
+  "latency_ms": 3201,
+  "linguistic_features": [
+    "informal_register",
+    "direct"
+  ]
+}
+{
+  "timestamp": "2026-01-27T10:59:26+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_ml_010",
+  "category": "ml",
+  "prompt_type": "domain_jargon",
+  "prompt": "Train an RF classifier with 500 trees and max_depth=10, using OOB error estimation",
+  "selected": "ml_random_forest",
+  "expected": [
+    "ml_random_forest"
+  ],
+  "match_type": "exact",
+  "score": 1.0,
+  "latency_ms": 1665,
+  "linguistic_features": [
+    "domain_jargon",
+    "specific_hyperparameters"
+  ]
+}
+{
+  "timestamp": "2026-01-27T10:59:30+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_ml_011",
+  "category": "ml",
+  "prompt_type": "typos",
+  "prompt": "hirarchical clusteirng with wrad linkage",
+  "selected": "ml_hierarchical",
+  "expected": [
+    "ml_hierarchical"
+  ],
+  "match_type": "exact",
+  "score": 1.0,
+  "latency_ms": 3096,
+  "linguistic_features": [
+    "typos",
+    "misspellings"
+  ]
+}
+{
+  "timestamp": "2026-01-27T10:59:34+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_ml_012",
+  "category": "ml",
+  "prompt_type": "verbose",
+  "prompt": "I want to build a predictive model that can identify which customers are likely to churn. I have historical data on whether customers churned along with various features about their behavior. I need something that can handle nonlinear relationships and provide variable importance.",
+  "selected": "ml_random_forest",
+  "expected": [
+    "ml_random_forest"
+  ],
+  "match_type": "exact",
+  "score": 1.0,
+  "latency_ms": 4145,
+  "linguistic_features": [
+    "verbose",
+    "requirements_description"
+  ]
+}
+{
+  "timestamp": "2026-01-27T10:59:37+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_pan_001",
+  "category": "panel",
+  "prompt_type": "informal",
+  "prompt": "i have panel data - need to control for firm specific stuff that doesnt change",
+  "selected": "panel_fixed_effects",
+  "expected": [
+    "panel_fe"
+  ],
+  "match_type": "category",
+  "score": 0.3,
+  "latency_ms": 1935,
+  "linguistic_features": [
+    "informal_register",
+    "vague_technical"
+  ]
+}
+{
+  "timestamp": "2026-01-27T10:59:50+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_pan_002",
+  "category": "panel",
+  "prompt_type": "domain_jargon",
+  "prompt": "Estimate a within transformation model controlling for unobserved heterogeneity",
+  "selected": "panel_fixed_effects",
+  "expected": [
+    "panel_fe"
+  ],
+  "match_type": "category",
+  "score": 0.3,
+  "latency_ms": 12302,
+  "linguistic_features": [
+    "domain_jargon",
+    "technical_terminology"
+  ]
+}
+{
+  "timestamp": "2026-01-27T11:00:03+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_pan_003",
+  "category": "panel",
+  "prompt_type": "typos",
+  "prompt": "estiamte random efects model fro investment on value",
+  "selected": "panel_random_effects",
+  "expected": [
+    "panel_re"
+  ],
+  "match_type": "category",
+  "score": 0.3,
+  "latency_ms": 12750,
+  "linguistic_features": [
+    "typos",
+    "misspellings"
+  ]
+}
+{
+  "timestamp": "2026-01-27T11:00:07+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_pan_004",
+  "category": "panel",
+  "prompt_type": "verbose",
+  "prompt": "I have data that follows the same firms over multiple years, and I'm trying to decide whether I should use fixed effects or random effects. I've heard there's a test that can help me decide between these two approaches. Could you run that test to help me figure out which specification is more appropriate for my data?",
+  "selected": "hausman_test",
+  "expected": [
+    "hausman_test"
+  ],
+  "match_type": "exact",
+  "score": 1.0,
+  "latency_ms": 3236,
+  "linguistic_features": [
+    "verbose",
+    "explanatory",
+    "seeking_guidance"
+  ]
+}
+{
+  "timestamp": "2026-01-27T11:00:11+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_pan_005",
+  "category": "panel",
+  "prompt_type": "informal",
+  "prompt": "need FE but with like multiple fixed effects - firm AND year",
+  "selected": "panel_hdfe",
+  "expected": [
+    "panel_twoway"
+  ],
+  "match_type": "acceptable",
+  "score": 0.7,
+  "latency_ms": 4109,
+  "linguistic_features": [
+    "informal_register",
+    "filler_words"
+  ]
+}
+{
+  "timestamp": "2026-01-27T11:00:14+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_pan_006",
+  "category": "panel",
+  "prompt_type": "domain_jargon",
+  "prompt": "Run a reghdfe style regression absorbing high-dimensional fixed effects",
+  "selected": "panel_hdfe",
+  "expected": [
+    "panel_hdfe"
+  ],
+  "match_type": "exact",
+  "score": 1.0,
+  "latency_ms": 1622,
+  "linguistic_features": [
+    "domain_jargon",
+    "software_reference"
+  ]
+}
+{
+  "timestamp": "2026-01-27T11:00:22+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_pan_007",
+  "category": "panel",
+  "prompt_type": "ambiguous",
+  "prompt": "control for entity and time effects",
+  "selected": "panel_fixed_effects",
+  "expected": [
+    "panel_twoway"
+  ],
+  "match_type": "category",
+  "score": 0.3,
+  "latency_ms": 7382,
+  "linguistic_features": [
+    "ambiguous",
+    "requires_inference"
+  ]
+}
+{
+  "timestamp": "2026-01-27T11:00:27+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_pan_008",
+  "category": "panel",
+  "prompt_type": "typos",
+  "prompt": "hasuamn test for fxied vs ranom effects",
+  "selected": "hausman_test",
+  "expected": [
+    "hausman_test"
+  ],
+  "match_type": "exact",
+  "score": 1.0,
+  "latency_ms": 4583,
+  "linguistic_features": [
+    "typos",
+    "severe_misspellings"
+  ]
+}
+{
+  "timestamp": "2026-01-27T11:00:29+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_pan_009",
+  "category": "panel",
+  "prompt_type": "verbose",
+  "prompt": "My dataset has repeated observations for each firm across different years, which makes it a panel dataset. I want to estimate the effect of firm value on investment, but I'm concerned that there might be firm-specific characteristics that affect both value and investment that I can't observe in my data. How should I handle this?",
+  "selected": "panel_fixed_effects",
+  "expected": [
+    "panel_fe"
+  ],
+  "match_type": "category",
+  "score": 0.3,
+  "latency_ms": 1937,
+  "linguistic_features": [
+    "verbose",
+    "explanatory",
+    "problem_description"
+  ]
+}
+{
+  "timestamp": "2026-01-27T11:00:32+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_pan_010",
+  "category": "panel",
+  "prompt_type": "informal",
+  "prompt": "bunch of fixed effects - like origin country, destination country, and year all at once",
+  "selected": "panel_hdfe",
+  "expected": [
+    "panel_hdfe"
+  ],
+  "match_type": "exact",
+  "score": 1.0,
+  "latency_ms": 2630,
+  "linguistic_features": [
+    "informal_register",
+    "casual_enumeration"
+  ]
+}
+{
+  "timestamp": "2026-01-27T11:00:41+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_pan_011",
+  "category": "panel",
+  "prompt_type": "domain_jargon",
+  "prompt": "Estimate using the GLS random effects estimator with between and within variation",
+  "selected": "panel_random_effects",
+  "expected": [
+    "panel_re"
+  ],
+  "match_type": "category",
+  "score": 0.3,
+  "latency_ms": 8488,
+  "linguistic_features": [
+    "domain_jargon",
+    "technical_terminology"
+  ]
+}
+{
+  "timestamp": "2026-01-27T11:00:47+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_pan_012",
+  "category": "panel",
+  "prompt_type": "ambiguous",
+  "prompt": "demean the data by firm",
+  "selected": "describe_dataset",
+  "expected": [
+    "panel_fe"
+  ],
+  "match_type": "none",
+  "score": 0.0,
+  "latency_ms": 5364,
+  "linguistic_features": [
+    "ambiguous",
+    "technical_shorthand"
+  ]
+}
+{
+  "timestamp": "2026-01-27T11:00:52+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_reg_001",
+  "category": "regression",
+  "prompt_type": "informal",
+  "prompt": "hey can u figure out if firm value affects investment",
+  "selected": "regression_ols",
+  "expected": [
+    "regression_ols"
+  ],
+  "match_type": "exact",
+  "score": 1.0,
+  "latency_ms": 4269,
+  "linguistic_features": [
+    "informal_register",
+    "abbreviations"
+  ]
+}
+{
+  "timestamp": "2026-01-27T11:00:54+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_reg_002",
+  "category": "regression",
+  "prompt_type": "typos",
+  "prompt": "Esitmate teh efect of firm vlaue on investmnet using OLS",
+  "selected": "regression_ols",
+  "expected": [
+    "regression_ols"
+  ],
+  "match_type": "exact",
+  "score": 1.0,
+  "latency_ms": 1651,
+  "linguistic_features": [
+    "typos",
+    "misspellings"
+  ]
+}
+{
+  "timestamp": "2026-01-27T11:00:57+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_reg_003",
+  "category": "regression",
+  "prompt_type": "domain_jargon",
+  "prompt": "Run a Mincerian regression of firm investment on Tobin's q proxy",
+  "selected": "regression_ols",
+  "expected": [
+    "regression_ols"
+  ],
+  "match_type": "exact",
+  "score": 1.0,
+  "latency_ms": 2384,
+  "linguistic_features": [
+    "domain_jargon",
+    "technical_reference"
+  ]
+}
+{
+  "timestamp": "2026-01-27T11:01:05+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_reg_004",
+  "category": "regression",
+  "prompt_type": "verbose",
+  "prompt": "I have this dataset and I've been wondering for a while now whether there might be some kind of relationship between how valuable a firm is and how much it invests. Could you perhaps run some kind of statistical analysis to investigate this potential association? I think a regression might work but I'm not entirely sure.",
+  "selected": "regression_ols",
+  "expected": [
+    "regression_ols"
+  ],
+  "match_type": "exact",
+  "score": 1.0,
+  "latency_ms": 7251,
+  "linguistic_features": [
+    "verbose",
+    "hedging",
+    "uncertainty"
+  ]
+}
+{
+  "timestamp": "2026-01-27T11:01:12+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_reg_005",
+  "category": "regression",
+  "prompt_type": "informal",
+  "prompt": "need robust standard errors on this regression bc heteroskedasticity",
+  "selected": "regression_ols",
+  "expected": [
+    "regression_ols"
+  ],
+  "match_type": "exact",
+  "score": 1.0,
+  "latency_ms": 6538,
+  "linguistic_features": [
+    "informal_register",
+    "abbreviations",
+    "technical_shorthand"
+  ]
+}
+{
+  "timestamp": "2026-01-27T11:01:14+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_reg_006",
+  "category": "regression",
+  "prompt_type": "ambiguous",
+  "prompt": "cluster these by company",
+  "selected": "panel_fixed_effects",
+  "expected": [
+    "regression_clustered"
+  ],
+  "match_type": "none",
+  "score": 0.0,
+  "latency_ms": 1660,
+  "linguistic_features": [
+    "ambiguous",
+    "context_dependent"
+  ]
+}
+{
+  "timestamp": "2026-01-27T11:01:17+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_reg_007",
+  "category": "regression",
+  "prompt_type": "domain_jargon",
+  "prompt": "I need White-Huber standard errors for my investment equation",
+  "selected": "regression_ols",
+  "expected": [
+    "regression_ols"
+  ],
+  "match_type": "exact",
+  "score": 1.0,
+  "latency_ms": 1976,
+  "linguistic_features": [
+    "domain_jargon",
+    "alternative_naming"
+  ]
+}
+{
+  "timestamp": "2026-01-27T11:01:24+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_reg_008",
+  "category": "regression",
+  "prompt_type": "verbose",
+  "prompt": "So basically what I'm trying to do here is I want to understand the relationship between multiple variables and I think the best approach would be to use some kind of multiple regression analysis where we can see how each independent variable contributes to explaining the dependent variable while controlling for the others",
+  "selected": "regression_ols",
+  "expected": [
+    "regression_ols"
+  ],
+  "match_type": "exact",
+  "score": 1.0,
+  "latency_ms": 6705,
+  "linguistic_features": [
+    "verbose",
+    "explanatory",
+    "technical_but_vague"
+  ]
+}
+{
+  "timestamp": "2026-01-27T11:01:31+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_reg_009",
+  "category": "regression",
+  "prompt_type": "typos",
+  "prompt": "calcualte the VIF for multicolinearity chekc",
+  "selected": "regression_diagnostics",
+  "expected": [
+    "regression_vif"
+  ],
+  "match_type": "acceptable",
+  "score": 0.7,
+  "latency_ms": 5785,
+  "linguistic_features": [
+    "typos",
+    "misspellings"
+  ]
+}
+{
+  "timestamp": "2026-01-27T11:01:33+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_reg_010",
+  "category": "regression",
+  "prompt_type": "informal",
+  "prompt": "yo run a quick reg of wages on edu controlling for exp",
+  "selected": "regression_ols",
+  "expected": [
+    "regression_ols"
+  ],
+  "match_type": "exact",
+  "score": 1.0,
+  "latency_ms": 1429,
+  "linguistic_features": [
+    "informal_register",
+    "abbreviations",
+    "casual_language"
+  ]
+}
+{
+  "timestamp": "2026-01-27T11:01:35+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_reg_011",
+  "category": "regression",
+  "prompt_type": "ambiguous",
+  "prompt": "fit a curve to this",
+  "selected": "regression_loess",
+  "expected": [
+    "regression_nls"
+  ],
+  "match_type": "category",
+  "score": 0.3,
+  "latency_ms": 1431,
+  "linguistic_features": [
+    "ambiguous",
+    "vague"
+  ]
+}
+{
+  "timestamp": "2026-01-27T11:01:37+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_reg_012",
+  "category": "regression",
+  "prompt_type": "domain_jargon",
+  "prompt": "Estimate the Cobb-Douglas production function coefficients",
+  "selected": "regression_nls",
+  "expected": [
+    "regression_nls"
+  ],
+  "match_type": "exact",
+  "score": 1.0,
+  "latency_ms": 1932,
+  "linguistic_features": [
+    "domain_jargon",
+    "specific_model_reference"
+  ]
+}
+{
+  "timestamp": "2026-01-27T11:01:47+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_reg_013",
+  "category": "regression",
+  "prompt_type": "verbose",
+  "prompt": "I'm not sure if the relationship between these variables is linear or if there might be some nonlinearity that we should account for. Maybe we should try fitting some kind of nonlinear model? I've heard about things like polynomial regression or maybe even some kind of exponential relationship could work here. What would you suggest?",
+  "selected": "regression_loess",
+  "expected": [
+    "regression_nls"
+  ],
+  "match_type": "category",
+  "score": 0.3,
+  "latency_ms": 9470,
+  "linguistic_features": [
+    "verbose",
+    "uncertainty",
+    "seeking_guidance"
+  ]
+}
+{
+  "timestamp": "2026-01-27T11:01:51+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_ts_001",
+  "category": "timeseries",
+  "prompt_type": "informal",
+  "prompt": "check if gdp is stationary",
+  "selected": "timeseries_pp_test",
+  "expected": [
+    "ts_adf_test"
+  ],
+  "match_type": "category",
+  "score": 0.3,
+  "latency_ms": 2965,
+  "linguistic_features": [
+    "informal_register",
+    "shorthand"
+  ]
+}
+{
+  "timestamp": "2026-01-27T11:01:54+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_ts_002",
+  "category": "timeseries",
+  "prompt_type": "domain_jargon",
+  "prompt": "Conduct an augmented Dickey-Fuller test for a unit root",
+  "selected": "timeseries_pp_test",
+  "expected": [
+    "ts_adf_test"
+  ],
+  "match_type": "category",
+  "score": 0.3,
+  "latency_ms": 3182,
+  "linguistic_features": [
+    "domain_jargon",
+    "formal_test_name"
+  ]
+}
+{
+  "timestamp": "2026-01-27T11:01:58+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_ts_003",
+  "category": "timeseries",
+  "prompt_type": "typos",
+  "prompt": "fti an ARMIA model with autmatic order sleection",
+  "selected": "ts_arima_fit",
+  "expected": [
+    "ts_auto_arima"
+  ],
+  "match_type": "category",
+  "score": 0.3,
+  "latency_ms": 3235,
+  "linguistic_features": [
+    "typos",
+    "misspellings"
+  ]
+}
+{
+  "timestamp": "2026-01-27T11:02:17+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_ts_004",
+  "category": "timeseries",
+  "prompt_type": "verbose",
+  "prompt": "I have quarterly GDP data and I want to forecast future values. I think there might be some autocorrelation in the series, so I probably need some kind of autoregressive model. I'm not sure what lag orders to use though - is there a way to select them automatically?",
+  "selected": "timeseries_ar",
+  "expected": [
+    "ts_auto_arima"
+  ],
+  "match_type": "category",
+  "score": 0.3,
+  "latency_ms": 17993,
+  "linguistic_features": [
+    "verbose",
+    "uncertainty",
+    "seeking_guidance"
+  ]
+}
+{
+  "timestamp": "2026-01-27T11:02:21+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_ts_005",
+  "category": "timeseries",
+  "prompt_type": "informal",
+  "prompt": "var model for gdp inflation and rates",
+  "selected": "ts_var",
+  "expected": [
+    "ts_var"
+  ],
+  "match_type": "exact",
+  "score": 1.0,
+  "latency_ms": 4127,
+  "linguistic_features": [
+    "informal_register",
+    "minimal_context"
+  ]
+}
+{
+  "timestamp": "2026-01-27T11:02:25+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_ts_006",
+  "category": "timeseries",
+  "prompt_type": "domain_jargon",
+  "prompt": "Estimate a VAR(p) with Schwarz IC lag selection and compute IRFs",
+  "selected": "ts_var",
+  "expected": [
+    "ts_var"
+  ],
+  "match_type": "exact",
+  "score": 1.0,
+  "latency_ms": 2916,
+  "linguistic_features": [
+    "domain_jargon",
+    "technical_terminology",
+    "acronyms"
+  ]
+}
+{
+  "timestamp": "2026-01-27T11:02:33+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_ts_007",
+  "category": "timeseries",
+  "prompt_type": "ambiguous",
+  "prompt": "forecast next quarter",
+  "selected": "ts_arima_forecast",
+  "expected": [
+    "ts_forecast"
+  ],
+  "match_type": "category",
+  "score": 0.3,
+  "latency_ms": 7142,
+  "linguistic_features": [
+    "ambiguous",
+    "minimal_context"
+  ]
+}
+{
+  "timestamp": "2026-01-27T11:02:35+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_ts_008",
+  "category": "timeseries",
+  "prompt_type": "verbose",
+  "prompt": "I want to understand the dynamic relationships between multiple macroeconomic variables. Specifically, I'm interested in how a shock to one variable propagates through the system and affects the other variables over time. Can you estimate a model that captures these interdependencies?",
+  "selected": "ts_var",
+  "expected": [
+    "ts_var"
+  ],
+  "match_type": "exact",
+  "score": 1.0,
+  "latency_ms": 1819,
+  "linguistic_features": [
+    "verbose",
+    "conceptual_description"
+  ]
+}
+{
+  "timestamp": "2026-01-27T11:04:56+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_ts_009",
+  "category": "timeseries",
+  "prompt_type": "informal",
+  "prompt": "impulse responses for a 1sd shock to int rates",
+  "selected": "null",
+  "expected": [
+    "ts_irf"
+  ],
+  "match_type": "none",
+  "score": 0.0,
+  "latency_ms": 140884,
+  "linguistic_features": [
+    "informal_register",
+    "abbreviations"
+  ]
+}
+{
+  "timestamp": "2026-01-27T11:05:03+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_ts_010",
+  "category": "timeseries",
+  "prompt_type": "domain_jargon",
+  "prompt": "Test for cointegration using the Johansen trace and max eigenvalue tests",
+  "selected": "ts_vecm",
+  "expected": [
+    "ts_johansen"
+  ],
+  "match_type": "category",
+  "score": 0.3,
+  "latency_ms": 6085,
+  "linguistic_features": [
+    "domain_jargon",
+    "specific_test_names"
+  ]
+}
+{
+  "timestamp": "2026-01-27T11:05:07+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_ts_011",
+  "category": "timeseries",
+  "prompt_type": "typos",
+  "prompt": "decompsoe the sries into trent seasonl and irrgular",
+  "selected": "timeseries_decompose",
+  "expected": [
+    "ts_decompose"
+  ],
+  "match_type": "category",
+  "score": 0.3,
+  "latency_ms": 3249,
+  "linguistic_features": [
+    "typos",
+    "severe_misspellings"
+  ]
+}
+{
+  "timestamp": "2026-01-27T11:05:12+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_ts_012",
+  "category": "timeseries",
+  "prompt_type": "verbose",
+  "prompt": "My sales data has a clear seasonal pattern that repeats every year, along with a general upward trend. I want to separate out these different components so I can analyze the underlying trend without the seasonal fluctuations confounding things.",
+  "selected": "timeseries_decompose",
+  "expected": [
+    "ts_decompose"
+  ],
+  "match_type": "category",
+  "score": 0.3,
+  "latency_ms": 5059,
+  "linguistic_features": [
+    "verbose",
+    "problem_description"
+  ]
+}
+{
+  "timestamp": "2026-01-27T11:05:24+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_ts_013",
+  "category": "timeseries",
+  "prompt_type": "informal",
+  "prompt": "does oil granger-cause stocks or vice versa",
+  "selected": "regression_ols",
+  "expected": [
+    "ts_granger_test"
+  ],
+  "match_type": "none",
+  "score": 0.0,
+  "latency_ms": 11315,
+  "linguistic_features": [
+    "informal_register",
+    "bidirectional_question"
+  ]
+}
+{
+  "timestamp": "2026-01-27T11:05:30+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_viz_001",
+  "category": "viz",
+  "prompt_type": "informal",
+  "prompt": "make a histogram of the income variable",
+  "selected": "viz_histogram",
+  "expected": [
+    "viz_histogram"
+  ],
+  "match_type": "exact",
+  "score": 1.0,
+  "latency_ms": 4915,
+  "linguistic_features": [
+    "informal_register",
+    "direct"
+  ]
+}
+{
+  "timestamp": "2026-01-27T11:05:32+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_viz_002",
+  "category": "viz",
+  "prompt_type": "domain_jargon",
+  "prompt": "Generate a frequency distribution with 20 bins and kernel density overlay",
+  "selected": "viz_histogram",
+  "expected": [
+    "viz_histogram"
+  ],
+  "match_type": "exact",
+  "score": 1.0,
+  "latency_ms": 1626,
+  "linguistic_features": [
+    "domain_jargon",
+    "specific_parameters"
+  ]
+}
+{
+  "timestamp": "2026-01-27T11:05:34+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_viz_003",
+  "category": "viz",
+  "prompt_type": "verbose",
+  "prompt": "I want to see the distribution of income in my dataset. I'm particularly interested in whether it follows a normal distribution or if it's skewed. A graphical representation would be helpful.",
+  "selected": "viz_histogram",
+  "expected": [
+    "viz_histogram"
+  ],
+  "match_type": "exact",
+  "score": 1.0,
+  "latency_ms": 1759,
+  "linguistic_features": [
+    "verbose",
+    "goal_description"
+  ]
+}
+{
+  "timestamp": "2026-01-27T11:05:37+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_viz_004",
+  "category": "viz",
+  "prompt_type": "typos",
+  "prompt": "scater plot of edcuation vs incmoe",
+  "selected": "viz_scatter",
+  "expected": [
+    "viz_scatter"
+  ],
+  "match_type": "exact",
+  "score": 1.0,
+  "latency_ms": 1795,
+  "linguistic_features": [
+    "typos",
+    "misspellings"
+  ]
+}
+{
+  "timestamp": "2026-01-27T11:05:42+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_viz_005",
+  "category": "viz",
+  "prompt_type": "informal",
+  "prompt": "plot x against y with a trend line",
+  "selected": "viz_scatter",
+  "expected": [
+    "viz_scatter"
+  ],
+  "match_type": "exact",
+  "score": 1.0,
+  "latency_ms": 4488,
+  "linguistic_features": [
+    "informal_register",
+    "generic_reference"
+  ]
+}
+{
+  "timestamp": "2026-01-27T11:05:44+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_viz_006",
+  "category": "viz",
+  "prompt_type": "ambiguous",
+  "prompt": "visualize the relationship",
+  "selected": "viz_scatter",
+  "expected": [
+    "viz_scatter"
+  ],
+  "match_type": "exact",
+  "score": 1.0,
+  "latency_ms": 1473,
+  "linguistic_features": [
+    "ambiguous",
+    "minimal_context"
+  ]
+}
+{
+  "timestamp": "2026-01-27T11:05:56+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_viz_007",
+  "category": "viz",
+  "prompt_type": "verbose",
+  "prompt": "I have multiple variables and I want to understand which ones are correlated with each other. Can you create some kind of visualization that shows all the pairwise correlations at once? Maybe something like a matrix or heatmap?",
+  "selected": "compute_correlation",
+  "expected": [
+    "viz_heatmap"
+  ],
+  "match_type": "none",
+  "score": 0.0,
+  "latency_ms": 11913,
+  "linguistic_features": [
+    "verbose",
+    "seeking_guidance"
+  ]
+}
+{
+  "timestamp": "2026-01-27T11:05:59+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_viz_008",
+  "category": "viz",
+  "prompt_type": "informal",
+  "prompt": "boxplots by category",
+  "selected": "viz_boxplot",
+  "expected": [
+    "viz_boxplot"
+  ],
+  "match_type": "exact",
+  "score": 1.0,
+  "latency_ms": 2175,
+  "linguistic_features": [
+    "informal_register",
+    "shorthand"
+  ]
+}
+{
+  "timestamp": "2026-01-27T11:06:05+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_viz_009",
+  "category": "viz",
+  "prompt_type": "domain_jargon",
+  "prompt": "Create a coefficient plot with 95% confidence intervals for the regression output",
+  "selected": "viz_coefficient",
+  "expected": [
+    "viz_coef_plot"
+  ],
+  "match_type": "category",
+  "score": 0.3,
+  "latency_ms": 5158,
+  "linguistic_features": [
+    "domain_jargon",
+    "specific_visualization"
+  ]
+}
+{
+  "timestamp": "2026-01-27T11:06:15+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_viz_010",
+  "category": "viz",
+  "prompt_type": "typos",
+  "prompt": "correaltion hetamap for all variabels",
+  "selected": "viz_heatmap",
+  "expected": [
+    "viz_heatmap"
+  ],
+  "match_type": "exact",
+  "score": 1.0,
+  "latency_ms": 10101,
+  "linguistic_features": [
+    "typos",
+    "misspellings"
+  ]
+}
+{
+  "timestamp": "2026-01-27T11:06:21+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_viz_011",
+  "category": "viz",
+  "prompt_type": "verbose",
+  "prompt": "After running my regression, I want to check the model diagnostics visually. Can you create plots showing the residuals versus fitted values, a Q-Q plot for normality, and maybe some other diagnostic plots?",
+  "selected": "viz_residual_diagnostics",
+  "expected": [
+    "viz_residual_diagnostics"
+  ],
+  "match_type": "exact",
+  "score": 1.0,
+  "latency_ms": 5052,
+  "linguistic_features": [
+    "verbose",
+    "multiple_requests"
+  ]
+}
+{
+  "timestamp": "2026-01-27T11:08:42+01:00",
+  "model": "qwen/qwen3-8b",
+  "test_id": "nat_viz_012",
+  "category": "viz",
+  "prompt_type": "ambiguous",
+  "prompt": "show me the data",
+  "selected": "null",
+  "expected": [
+    "viz_histogram"
+  ],
+  "match_type": "none",
+  "score": 0.0,
+  "latency_ms": 140795,
+  "linguistic_features": [
+    "ambiguous",
+    "extremely_vague"
+  ]
+}

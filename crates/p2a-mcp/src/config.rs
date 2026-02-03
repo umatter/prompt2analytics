@@ -26,7 +26,13 @@ pub enum TransportType {
 #[command(version)]
 pub struct CliArgs {
     /// Transport type to use
-    #[arg(short, long, value_enum, default_value = "stdio", env = "P2A_TRANSPORT")]
+    #[arg(
+        short,
+        long,
+        value_enum,
+        default_value = "stdio",
+        env = "P2A_TRANSPORT"
+    )]
     pub transport: TransportType,
 
     /// Host address for HTTP transport
@@ -66,6 +72,19 @@ pub struct CliArgs {
     /// Maximum number of concurrent sessions
     #[arg(long, default_value = "100", env = "P2A_MAX_SESSIONS")]
     pub max_sessions: usize,
+
+    /// Database path for persistence (when db feature is enabled)
+    #[cfg(feature = "db")]
+    #[arg(long, env = "P2A_DB_PATH")]
+    pub db_path: Option<String>,
+
+    /// Enable audit logging for tool calls
+    #[arg(long, env = "P2A_AUDIT_LOG")]
+    pub audit_log: bool,
+
+    /// Path to audit log file (defaults to p2a-audit.log in current directory)
+    #[arg(long, env = "P2A_AUDIT_PATH")]
+    pub audit_path: Option<String>,
 }
 
 /// Server configuration derived from CLI args and environment.
@@ -77,6 +96,7 @@ pub struct ServerConfig {
     pub session: SessionConfig,
     #[cfg(feature = "auth")]
     pub auth: AuthConfig,
+    pub audit: AuditConfig,
 }
 
 /// HTTP transport configuration.
@@ -86,6 +106,9 @@ pub struct HttpConfig {
     pub addr: SocketAddr,
     pub cors_permissive: bool,
     pub cors_origins: Vec<String>,
+    /// Database path for persistence (None = in-memory)
+    #[cfg(feature = "db")]
+    pub db_path: Option<String>,
 }
 
 /// Session management configuration.
@@ -103,6 +126,15 @@ pub struct AuthConfig {
     pub jwt_secret: Option<String>,
 }
 
+/// Audit logging configuration.
+#[derive(Debug, Clone)]
+pub struct AuditConfig {
+    /// Whether audit logging is enabled
+    pub enabled: bool,
+    /// Path to the audit log file
+    pub path: String,
+}
+
 impl ServerConfig {
     /// Create configuration from CLI arguments.
     pub fn from_args(args: CliArgs) -> Self {
@@ -115,6 +147,8 @@ impl ServerConfig {
                     .expect("Invalid host:port"),
                 cors_permissive: args.cors_permissive,
                 cors_origins: args.cors_origins,
+                #[cfg(feature = "db")]
+                db_path: args.db_path,
             },
             session: SessionConfig {
                 ttl_minutes: args.session_ttl_minutes,
@@ -124,6 +158,12 @@ impl ServerConfig {
             auth: AuthConfig {
                 enabled: args.auth_enabled,
                 jwt_secret: args.jwt_secret,
+            },
+            audit: AuditConfig {
+                enabled: args.audit_log,
+                path: args
+                    .audit_path
+                    .unwrap_or_else(|| "p2a-audit.log".to_string()),
             },
         }
     }
@@ -138,6 +178,8 @@ impl Default for ServerConfig {
                 addr: "127.0.0.1:8080".parse().unwrap(),
                 cors_permissive: false,
                 cors_origins: vec![],
+                #[cfg(feature = "db")]
+                db_path: None,
             },
             session: SessionConfig {
                 ttl_minutes: 60,
@@ -147,6 +189,10 @@ impl Default for ServerConfig {
             auth: AuthConfig {
                 enabled: false,
                 jwt_secret: None,
+            },
+            audit: AuditConfig {
+                enabled: false,
+                path: "p2a-audit.log".to_string(),
             },
         }
     }

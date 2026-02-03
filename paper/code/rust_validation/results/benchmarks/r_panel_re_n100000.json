@@ -1,0 +1,19 @@
+{
+  "method": "panel_re",
+  "dataset": "synthetic_panel_n100000.csv",
+  "n": 100000,
+  "iterations": 50,
+  "warmup": 5,
+  "timestamp": "2026-01-26T10:04:58",
+  "r_version": "4.3.3",
+  "timing": {
+    "min_us": 359087.1619526297,
+    "median_us": 451139.0030384064,
+    "mean_us": [],
+    "max_us": [],
+    "itr_per_sec": 2.2201408476,
+    "mem_alloc": 495245824,
+    "n_gc": 581,
+    "n_itr": 50
+  }
+}

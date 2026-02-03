@@ -60,17 +60,12 @@ use polars_ops::frame::pivot::pivot as polars_pivot;
 /// // 1  | 100  | 110
 /// // 2  | 200  | 220
 /// ```
-pub fn pivot(
-    dataset: &Dataset,
-    index: &[&str],
-    on: &str,
-    values: &str,
-) -> MungeResult<Dataset> {
+pub fn pivot(dataset: &Dataset, index: &[&str], on: &str, values: &str) -> MungeResult<Dataset> {
     let df = dataset.df();
 
     // Validate columns exist
     for col_name in index {
-        if df.column(*col_name).is_err() {
+        if df.column(col_name).is_err() {
             return Err(MungeError::ColumnNotFound(col_name.to_string()));
         }
     }
@@ -87,10 +82,11 @@ pub fn pivot(
         [on],
         Some(index.iter().copied()),
         Some([values]),
-        false,  // sort_columns
-        None,   // aggregate_expr
-        None,   // separator
-    ).map_err(|e: PolarsError| MungeError::ReshapeError(e.to_string()))?;
+        false, // sort_columns
+        None,  // aggregate_expr
+        None,  // separator
+    )
+    .map_err(|e: PolarsError| MungeError::ReshapeError(e.to_string()))?;
 
     Ok(Dataset::new(result))
 }
@@ -138,12 +134,12 @@ pub fn melt(
 
     // Validate columns exist
     for col_name in id_vars {
-        if df.column(*col_name).is_err() {
+        if df.column(col_name).is_err() {
             return Err(MungeError::ColumnNotFound(col_name.to_string()));
         }
     }
     for col_name in value_vars {
-        if df.column(*col_name).is_err() {
+        if df.column(col_name).is_err() {
             return Err(MungeError::ColumnNotFound(col_name.to_string()));
         }
     }
@@ -162,7 +158,9 @@ pub fn melt(
 
     // For each id column, repeat values for each value_var
     for id_col in id_vars {
-        let id_column = df.column(*id_col).map_err(|e| MungeError::ReshapeError(e.to_string()))?;
+        let id_column = df
+            .column(id_col)
+            .map_err(|e| MungeError::ReshapeError(e.to_string()))?;
         // Build index array to repeat each row n_value_cols times
         let mut idx = Vec::with_capacity(n_rows * n_value_cols);
         for i in 0..n_rows {
@@ -171,7 +169,9 @@ pub fn melt(
             }
         }
         let idx_ca = IdxCa::new("".into(), idx);
-        let repeated = id_column.take(&idx_ca).map_err(|e| MungeError::ReshapeError(e.to_string()))?;
+        let repeated = id_column
+            .take(&idx_ca)
+            .map_err(|e| MungeError::ReshapeError(e.to_string()))?;
         columns.push(repeated);
     }
 
@@ -189,7 +189,9 @@ pub fn melt(
     let mut values: Vec<f64> = Vec::with_capacity(n_rows * n_value_cols);
     for row_idx in 0..n_rows {
         for var in value_vars {
-            let val_column = df.column(*var).map_err(|e| MungeError::ReshapeError(e.to_string()))?;
+            let val_column = df
+                .column(var)
+                .map_err(|e| MungeError::ReshapeError(e.to_string()))?;
             // Try to get as f64, handling different types
             let val = if let Ok(f64_col) = val_column.f64() {
                 f64_col.get(row_idx).unwrap_or(f64::NAN)
@@ -254,7 +256,8 @@ pub fn transpose(dataset: &Dataset, header_name: &str) -> MungeResult<Dataset> {
         .collect();
 
     // Clone and transpose the data using Polars
-    let mut transposed = df.clone()
+    let mut transposed = df
+        .clone()
         .transpose(None, None)
         .map_err(|e| MungeError::ReshapeError(e.to_string()))?;
 
@@ -318,7 +321,7 @@ pub fn explode(dataset: &Dataset, column: &str) -> MungeResult<Dataset> {
     let result = df
         .clone()
         .lazy()
-        .explode([col(column)])
+        .explode(cols([column]))
         .collect()
         .map_err(|e| MungeError::ReshapeError(e.to_string()))?;
 
@@ -354,7 +357,7 @@ pub fn stack(
 
     // Validate columns exist
     for col_name in columns {
-        if df.column(*col_name).is_err() {
+        if df.column(col_name).is_err() {
             return Err(MungeError::ColumnNotFound(col_name.to_string()));
         }
     }
@@ -365,12 +368,8 @@ pub fn stack(
         .iter()
         .map(|c| c.name().to_string())
         .collect();
-    let stack_cols: std::collections::HashSet<_> =
-        columns.iter().map(|s| s.to_string()).collect();
-    let id_vars: Vec<String> = all_cols
-        .difference(&stack_cols)
-        .cloned()
-        .collect();
+    let stack_cols: std::collections::HashSet<_> = columns.iter().map(|s| s.to_string()).collect();
+    let id_vars: Vec<String> = all_cols.difference(&stack_cols).cloned().collect();
     let id_vars_refs: Vec<&str> = id_vars.iter().map(|s| s.as_str()).collect();
 
     // Use melt to stack

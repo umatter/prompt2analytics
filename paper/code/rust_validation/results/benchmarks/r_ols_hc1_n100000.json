@@ -1,0 +1,19 @@
+{
+  "method": "ols_robust",
+  "dataset": "synthetic_ols_n100000.csv",
+  "n": 100000,
+  "iterations": 20,
+  "warmup": 3,
+  "timestamp": "2026-01-26T11:48:11",
+  "r_version": "4.3.3",
+  "timing": {
+    "min_us": 128678.6709679291,
+    "median_us": 142267.1165200882,
+    "mean_us": [],
+    "max_us": [],
+    "itr_per_sec": 6.2715278342,
+    "mem_alloc": 82254552,
+    "n_gc": 98,
+    "n_itr": 20
+  }
+}

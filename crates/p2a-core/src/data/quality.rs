@@ -111,19 +111,11 @@ pub struct StringStats {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum DataIssue {
     /// Column has high percentage of null values
-    HighNullRate {
-        column: String,
-        pct: f64,
-    },
+    HighNullRate { column: String, pct: f64 },
     /// Dataset has duplicate rows
-    DuplicateRows {
-        count: usize,
-    },
+    DuplicateRows { count: usize },
     /// Potential duplicate rows based on subset of columns
-    PossibleDuplicates {
-        columns: Vec<String>,
-        count: usize,
-    },
+    PossibleDuplicates { columns: Vec<String>, count: usize },
     /// Column appears to have mixed types (detected via string patterns)
     MixedTypes {
         column: String,
@@ -142,15 +134,9 @@ pub enum DataIssue {
         patterns: Vec<String>,
     },
     /// String column has whitespace issues
-    WhitespaceIssues {
-        column: String,
-        count: usize,
-    },
+    WhitespaceIssues { column: String, count: usize },
     /// Constant column (all same value)
-    ConstantColumn {
-        column: String,
-        value: String,
-    },
+    ConstantColumn { column: String, value: String },
     /// Column has very low cardinality relative to row count
     LowCardinality {
         column: String,
@@ -158,15 +144,9 @@ pub enum DataIssue {
         unique_pct: f64,
     },
     /// Column has very high cardinality (possibly an ID)
-    HighCardinality {
-        column: String,
-        unique_pct: f64,
-    },
+    HighCardinality { column: String, unique_pct: f64 },
     /// Empty strings detected
-    EmptyStrings {
-        column: String,
-        count: usize,
-    },
+    EmptyStrings { column: String, count: usize },
 }
 
 impl DataIssue {
@@ -193,7 +173,12 @@ impl DataIssue {
                     examples.join(", ")
                 )
             }
-            DataIssue::OutlierValues { column, count, lower_bound, upper_bound } => {
+            DataIssue::OutlierValues {
+                column,
+                count,
+                lower_bound,
+                upper_bound,
+            } => {
                 format!(
                     "Column '{}' has {} outliers (expected range: {:.2} to {:.2})",
                     column, count, lower_bound, upper_bound
@@ -215,16 +200,23 @@ impl DataIssue {
             DataIssue::ConstantColumn { column, value } => {
                 format!("Column '{}' is constant (all values = '{}')", column, value)
             }
-            DataIssue::LowCardinality { column, unique_count, unique_pct } => {
+            DataIssue::LowCardinality {
+                column,
+                unique_count,
+                unique_pct,
+            } => {
                 format!(
                     "Column '{}' has low cardinality: {} unique values ({:.1}%)",
-                    column, unique_count, unique_pct * 100.0
+                    column,
+                    unique_count,
+                    unique_pct * 100.0
                 )
             }
             DataIssue::HighCardinality { column, unique_pct } => {
                 format!(
                     "Column '{}' has very high cardinality ({:.1}% unique) - possibly an ID column",
-                    column, unique_pct * 100.0
+                    column,
+                    unique_pct * 100.0
                 )
             }
             DataIssue::EmptyStrings { column, count } => {
@@ -237,13 +229,23 @@ impl DataIssue {
     pub fn severity(&self) -> u8 {
         match self {
             DataIssue::HighNullRate { pct, .. } => {
-                if *pct > 0.5 { 3 } else if *pct > 0.2 { 2 } else { 1 }
+                if *pct > 0.5 {
+                    3
+                } else if *pct > 0.2 {
+                    2
+                } else {
+                    1
+                }
             }
             DataIssue::DuplicateRows { .. } => 2,
             DataIssue::PossibleDuplicates { .. } => 1,
             DataIssue::MixedTypes { .. } => 3,
             DataIssue::OutlierValues { count, .. } => {
-                if *count > 100 { 2 } else { 1 }
+                if *count > 100 {
+                    2
+                } else {
+                    1
+                }
             }
             DataIssue::InconsistentFormat { .. } => 2,
             DataIssue::WhitespaceIssues { .. } => 1,
@@ -259,7 +261,11 @@ impl DataIssue {
 pub fn generate_quality_profile(dataset: &Dataset) -> DataQualityProfile {
     let df = dataset.df();
     let row_count = df.height();
-    let col_names: Vec<String> = df.get_column_names().iter().map(|s| s.to_string()).collect();
+    let col_names: Vec<String> = df
+        .get_column_names()
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
 
     // Calculate duplicate rows
     let duplicate_rows = calculate_duplicate_rows(df);
@@ -286,7 +292,9 @@ pub fn generate_quality_profile(dataset: &Dataset) -> DataQualityProfile {
     // Collect dataset-level issues
     let mut dataset_issues = Vec::new();
     if duplicate_rows > 0 {
-        dataset_issues.push(DataIssue::DuplicateRows { count: duplicate_rows });
+        dataset_issues.push(DataIssue::DuplicateRows {
+            count: duplicate_rows,
+        });
     }
 
     DataQualityProfile {
@@ -355,7 +363,12 @@ fn profile_column(col: &Column, row_count: usize) -> ColumnProfile {
 
     // Type-specific statistics
     let (numeric_stats, string_stats) = match col.dtype() {
-        DataType::Float64 | DataType::Float32 | DataType::Int64 | DataType::Int32 | DataType::Int16 | DataType::Int8 => {
+        DataType::Float64
+        | DataType::Float32
+        | DataType::Int64
+        | DataType::Int32
+        | DataType::Int16
+        | DataType::Int8 => {
             let stats = compute_numeric_stats(col, &name);
             if let Some(ref s) = stats {
                 if s.outlier_count > 0 {
@@ -524,7 +537,12 @@ fn compute_string_stats(col: &Column, _name: &str) -> Option<StringStats> {
         if !has_date_pattern && detect_date_pattern(val) {
             has_date_pattern = true;
         }
-        if !has_numeric_pattern && val.chars().all(|c| c.is_ascii_digit() || c == '.' || c == '-') && !val.is_empty() {
+        if !has_numeric_pattern
+            && val
+                .chars()
+                .all(|c| c.is_ascii_digit() || c == '.' || c == '-')
+            && !val.is_empty()
+        {
             has_numeric_pattern = true;
         }
         if !has_phone_pattern && detect_phone_pattern(val) {
@@ -577,10 +595,10 @@ fn compute_string_stats(col: &Column, _name: &str) -> Option<StringStats> {
 fn detect_date_pattern(s: &str) -> bool {
     // Common date patterns
     let patterns = [
-        r"^\d{4}-\d{2}-\d{2}$",      // YYYY-MM-DD
-        r"^\d{2}/\d{2}/\d{4}$",      // MM/DD/YYYY or DD/MM/YYYY
-        r"^\d{2}-\d{2}-\d{4}$",      // MM-DD-YYYY or DD-MM-YYYY
-        r"^\d{4}/\d{2}/\d{2}$",      // YYYY/MM/DD
+        r"^\d{4}-\d{2}-\d{2}$", // YYYY-MM-DD
+        r"^\d{2}/\d{2}/\d{4}$", // MM/DD/YYYY or DD/MM/YYYY
+        r"^\d{2}-\d{2}-\d{4}$", // MM-DD-YYYY or DD-MM-YYYY
+        r"^\d{4}/\d{2}/\d{2}$", // YYYY/MM/DD
     ];
 
     for pattern in &patterns {
@@ -597,8 +615,9 @@ fn detect_date_pattern(s: &str) -> bool {
 fn detect_phone_pattern(s: &str) -> bool {
     // Simple phone pattern detection
     let digits: String = s.chars().filter(|c| c.is_ascii_digit()).collect();
-    digits.len() >= 10 && digits.len() <= 15 &&
-        (s.contains('-') || s.contains('.') || s.contains(' ') || s.contains('('))
+    digits.len() >= 10
+        && digits.len() <= 15
+        && (s.contains('-') || s.contains('.') || s.contains(' ') || s.contains('('))
 }
 
 /// Calculate the number of duplicate rows in a DataFrame.
@@ -620,21 +639,21 @@ fn get_first_non_null_value(col: &Column) -> String {
     match col.dtype() {
         DataType::String => {
             if let Ok(ca) = col.str() {
-                for val in ca.into_iter().flatten() {
+                if let Some(val) = ca.into_iter().flatten().next() {
                     return val.to_string();
                 }
             }
         }
         DataType::Int64 => {
             if let Ok(ca) = col.i64() {
-                for val in ca.into_iter().flatten() {
+                if let Some(val) = ca.into_iter().flatten().next() {
                     return val.to_string();
                 }
             }
         }
         DataType::Float64 => {
             if let Ok(ca) = col.f64() {
-                for val in ca.into_iter().flatten() {
+                if let Some(val) = ca.into_iter().flatten().next() {
                     return val.to_string();
                 }
             }
@@ -700,7 +719,8 @@ mod tests {
             "id" => [1, 2, 3, 4, 5],
             "name" => ["Alice", "Bob", "Charlie", "Diana", "Eve"],
             "score" => [85.5, 90.0, 78.5, 92.0, 88.0],
-        }.unwrap();
+        }
+        .unwrap();
 
         let dataset = Dataset::new(test_df);
         let profile = generate_quality_profile(&dataset);
@@ -716,14 +736,20 @@ mod tests {
         let test_df = df! {
             "id" => [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
             "value" => [Some(1.0), Some(2.0), None, None, None, None, Some(7.0), None, None, None],
-        }.unwrap();
+        }
+        .unwrap();
 
         let dataset = Dataset::new(test_df);
         let profile = generate_quality_profile(&dataset);
 
         let value_profile = profile.columns.iter().find(|c| c.name == "value").unwrap();
         assert!(value_profile.null_pct > 0.5);
-        assert!(value_profile.issues.iter().any(|i| matches!(i, DataIssue::HighNullRate { .. })));
+        assert!(
+            value_profile
+                .issues
+                .iter()
+                .any(|i| matches!(i, DataIssue::HighNullRate { .. }))
+        );
     }
 
     #[test]
@@ -736,7 +762,12 @@ mod tests {
         let profile = generate_quality_profile(&dataset);
 
         let email_profile = profile.columns.iter().find(|c| c.name == "email").unwrap();
-        assert!(email_profile.issues.iter().any(|i| matches!(i, DataIssue::WhitespaceIssues { count: 3, .. })));
+        assert!(
+            email_profile
+                .issues
+                .iter()
+                .any(|i| matches!(i, DataIssue::WhitespaceIssues { count: 3, .. }))
+        );
     }
 
     #[test]
@@ -744,7 +775,8 @@ mod tests {
         // Values tightly clustered around 10-15, with 1000 as clear outlier
         let test_df = df! {
             "value" => [10.0, 10.5, 11.0, 11.5, 12.0, 12.5, 13.0, 13.5, 14.0, 14.5, 15.0, 1000.0],
-        }.unwrap();
+        }
+        .unwrap();
 
         let dataset = Dataset::new(test_df);
         let profile = generate_quality_profile(&dataset);
@@ -753,8 +785,13 @@ mod tests {
         assert!(value_profile.numeric_stats.is_some());
         let stats = value_profile.numeric_stats.as_ref().unwrap();
         // 1000 should be detected as an outlier
-        assert!(stats.outlier_count > 0, "Expected outliers but found: outlier_count={}, bounds=({}, {})",
-            stats.outlier_count, stats.outlier_lower_bound, stats.outlier_upper_bound);
+        assert!(
+            stats.outlier_count > 0,
+            "Expected outliers but found: outlier_count={}, bounds=({}, {})",
+            stats.outlier_count,
+            stats.outlier_lower_bound,
+            stats.outlier_upper_bound
+        );
     }
 
     #[test]
@@ -762,7 +799,8 @@ mod tests {
         let test_df = df! {
             "id" => [1, 2, 2, 3, 3, 3],
             "name" => ["A", "B", "B", "C", "C", "C"],
-        }.unwrap();
+        }
+        .unwrap();
 
         let dataset = Dataset::new(test_df);
         let profile = generate_quality_profile(&dataset);
@@ -775,13 +813,23 @@ mod tests {
         let test_df = df! {
             "id" => [1, 2, 3, 4, 5],
             "constant" => ["same", "same", "same", "same", "same"],
-        }.unwrap();
+        }
+        .unwrap();
 
         let dataset = Dataset::new(test_df);
         let profile = generate_quality_profile(&dataset);
 
-        let const_profile = profile.columns.iter().find(|c| c.name == "constant").unwrap();
-        assert!(const_profile.issues.iter().any(|i| matches!(i, DataIssue::ConstantColumn { .. })));
+        let const_profile = profile
+            .columns
+            .iter()
+            .find(|c| c.name == "constant")
+            .unwrap();
+        assert!(
+            const_profile
+                .issues
+                .iter()
+                .any(|i| matches!(i, DataIssue::ConstantColumn { .. }))
+        );
     }
 
     #[test]
@@ -789,7 +837,8 @@ mod tests {
         let test_df = df! {
             "email" => ["alice@test.com", "bob@example.org", "charlie@mail.net"],
             "date" => ["2024-01-15", "2024-02-20", "2024-03-25"],
-        }.unwrap();
+        }
+        .unwrap();
 
         let dataset = Dataset::new(test_df);
         let profile = generate_quality_profile(&dataset);
@@ -808,7 +857,8 @@ mod tests {
         let test_df = df! {
             "id" => [1, 2, 3],
             "value" => [Some(1.0), None, Some(3.0)],
-        }.unwrap();
+        }
+        .unwrap();
 
         let dataset = Dataset::new(test_df);
         let profile = generate_quality_profile(&dataset);

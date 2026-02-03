@@ -1,0 +1,162 @@
+{
+  "category": "multi_turn_regression",
+  "description": "Multi-turn conversations testing context retention and refinement in regression workflows",
+  "conversations": [
+    {
+      "id": "mt_reg_001",
+      "description": "Basic OLS to robust SE refinement",
+      "dataset_context": "grunfeld dataset: firm, year, inv, value, capital",
+      "turns": [
+        {
+          "turn": 1,
+          "user_prompt": "Estimate the relationship between firm value and investment",
+          "expected_tool": "regression_ols",
+          "acceptable_tools": ["regression_ols", "regression_clustered"],
+          "context_from_previous": false
+        },
+        {
+          "turn": 2,
+          "user_prompt": "I'm worried about heteroskedasticity. Use robust standard errors instead.",
+          "expected_tool": "regression_ols",
+          "acceptable_tools": ["regression_ols"],
+          "expected_parameter_change": {"robust": "hc1"},
+          "context_from_previous": true
+        },
+        {
+          "turn": 3,
+          "user_prompt": "Now show me diagnostic plots for the residuals",
+          "expected_tool": "viz_residual_diagnostics",
+          "acceptable_tools": ["viz_residual_diagnostics", "viz_qq_plot", "viz_histogram"],
+          "context_from_previous": true
+        }
+      ]
+    },
+    {
+      "id": "mt_reg_002",
+      "description": "OLS to clustered SE workflow",
+      "dataset_context": "grunfeld dataset: firm, year, inv, value, capital (panel structure)",
+      "turns": [
+        {
+          "turn": 1,
+          "user_prompt": "Run a regression of investment on value and capital",
+          "expected_tool": "regression_ols",
+          "acceptable_tools": ["regression_ols", "regression_clustered", "panel_fe"],
+          "context_from_previous": false
+        },
+        {
+          "turn": 2,
+          "user_prompt": "Actually, cluster the standard errors by firm since observations within firms might be correlated",
+          "expected_tool": "regression_clustered",
+          "acceptable_tools": ["regression_clustered"],
+          "context_from_previous": true
+        },
+        {
+          "turn": 3,
+          "user_prompt": "What's the VIF for these variables? I want to check for multicollinearity",
+          "expected_tool": "regression_vif",
+          "acceptable_tools": ["regression_vif", "regression_diagnostics"],
+          "context_from_previous": true
+        },
+        {
+          "turn": 4,
+          "user_prompt": "Create a scatter plot of residuals vs fitted values",
+          "expected_tool": "viz_scatter",
+          "acceptable_tools": ["viz_scatter", "viz_residual_diagnostics"],
+          "context_from_previous": true
+        }
+      ]
+    },
+    {
+      "id": "mt_reg_003",
+      "description": "Nonlinear regression exploration",
+      "dataset_context": "growth dataset: gdp, population, capital, year",
+      "turns": [
+        {
+          "turn": 1,
+          "user_prompt": "Fit a linear regression of GDP on population and capital",
+          "expected_tool": "regression_ols",
+          "acceptable_tools": ["regression_ols"],
+          "context_from_previous": false
+        },
+        {
+          "turn": 2,
+          "user_prompt": "The relationship doesn't look linear. Try a nonlinear specification with log transformations",
+          "expected_tool": "regression_nls",
+          "acceptable_tools": ["regression_nls", "regression_ols"],
+          "context_from_previous": true
+        },
+        {
+          "turn": 3,
+          "user_prompt": "Compare the R-squared values between the two models",
+          "expected_tool": "regression_compare",
+          "acceptable_tools": ["regression_compare", "regression_ols"],
+          "context_from_previous": true
+        }
+      ]
+    },
+    {
+      "id": "mt_reg_004",
+      "description": "Iterative model building with diagnostics",
+      "dataset_context": "wages dataset: wage, education, experience, tenure, female, married",
+      "turns": [
+        {
+          "turn": 1,
+          "user_prompt": "Start with a simple regression of wages on education",
+          "expected_tool": "regression_ols",
+          "acceptable_tools": ["regression_ols"],
+          "context_from_previous": false
+        },
+        {
+          "turn": 2,
+          "user_prompt": "Add experience and tenure to the model",
+          "expected_tool": "regression_ols",
+          "acceptable_tools": ["regression_ols"],
+          "context_from_previous": true
+        },
+        {
+          "turn": 3,
+          "user_prompt": "Test for normality of the residuals",
+          "expected_tool": "hypothesis_jarque_bera",
+          "acceptable_tools": ["hypothesis_jarque_bera", "hypothesis_shapiro_wilk", "regression_diagnostics"],
+          "context_from_previous": true
+        },
+        {
+          "turn": 4,
+          "user_prompt": "Test for heteroskedasticity using the Breusch-Pagan test",
+          "expected_tool": "hypothesis_breusch_pagan",
+          "acceptable_tools": ["hypothesis_breusch_pagan", "regression_diagnostics"],
+          "context_from_previous": true
+        }
+      ]
+    },
+    {
+      "id": "mt_reg_005",
+      "description": "Robust SE type refinement",
+      "dataset_context": "cps dataset: wage, education, experience, region, industry",
+      "turns": [
+        {
+          "turn": 1,
+          "user_prompt": "Regress wages on education and experience with HC1 robust standard errors",
+          "expected_tool": "regression_ols",
+          "acceptable_tools": ["regression_ols"],
+          "context_from_previous": false
+        },
+        {
+          "turn": 2,
+          "user_prompt": "Actually use HC3 instead - I have a small sample",
+          "expected_tool": "regression_ols",
+          "acceptable_tools": ["regression_ols"],
+          "expected_parameter_change": {"robust": "hc3"},
+          "context_from_previous": true
+        },
+        {
+          "turn": 3,
+          "user_prompt": "Show me the confidence intervals for all coefficients",
+          "expected_tool": "regression_confint",
+          "acceptable_tools": ["regression_confint", "regression_ols"],
+          "context_from_previous": true
+        }
+      ]
+    }
+  ]
+}
