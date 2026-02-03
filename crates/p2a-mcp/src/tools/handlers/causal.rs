@@ -80,7 +80,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Run Instrumental Variables (2SLS) regression. Use when an explanatory variable is endogenous (correlated with the error term). Requires valid instruments."
     )]
-    async fn iv_2sls(
+    pub async fn iv_2sls(
         &self,
         Parameters(request): Parameters<IV2SLSRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -131,7 +131,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Run first-stage diagnostics to test instrument strength. Reports F-statistic (F > 10 suggests strong instruments), R-squared, and coefficient estimates. Essential before running 2SLS."
     )]
-    async fn iv_first_stage(
+    pub async fn iv_first_stage(
         &self,
         Parameters(request): Parameters<FirstStageRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -177,7 +177,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Run Sargan test of overidentifying restrictions for IV/2SLS. Tests whether instruments are valid (uncorrelated with error term). H0: instruments are valid. Rejection suggests at least one invalid instrument. Requires more instruments than endogenous variables."
     )]
-    async fn iv_sargan_test(
+    pub async fn iv_sargan_test(
         &self,
         Parameters(request): Parameters<SarganTestRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -216,7 +216,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Compute Balke-Pearl bounds for nonparametric IV analysis. Provides sharp bounds on the Average Causal Effect (ACE) without parametric assumptions. All three variables (instrument Z, treatment D, outcome Y) must be binary (0/1). Returns bounds with optional bootstrap confidence intervals. Also reports the Wald (standard IV) estimate for comparison. Use monotonicity=true if you can assume no defiers (instrument only affects treatment in one direction)."
     )]
-    async fn bp_bounds(
+    pub async fn bp_bounds(
         &self,
         Parameters(request): Parameters<BPBoundsRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -299,7 +299,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Estimate Marginal Treatment Effects (MTE) using the Heckman-Vytlacil framework. MTE reveals heterogeneity in treatment effects across the distribution of unobserved resistance to treatment. Returns MTE curve, ATE, ATT, ATU, and LATE estimates. The MTE framework shows how different IV estimands are weighted averages of the MTE curve, providing deeper insight into treatment effect heterogeneity than standard IV/2SLS."
     )]
-    async fn iv_mte(
+    pub async fn iv_mte(
         &self,
         Parameters(request): Parameters<IVMTERequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -393,7 +393,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Estimate causal effects with staggered treatment adoption using Callaway-Sant'Anna (2021) method. Handles multiple time periods, heterogeneous treatment timing, and dynamic treatment effects. Returns group-time ATTs, event study plots, and overall ATT with pre-trend tests."
     )]
-    async fn staggered_did(
+    pub async fn staggered_did(
         &self,
         Parameters(request): Parameters<StaggeredDiDRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -467,7 +467,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Decompose a two-way fixed effects (TWFE) DiD estimate into weighted 2x2 comparisons using Goodman-Bacon (2021) decomposition. Reveals which comparisons (treated vs. never-treated, treated vs. not-yet-treated, later vs. earlier treated) contribute to the overall estimate and with what weights. Essential for understanding potential biases from 'forbidden' comparisons when treatment effects are heterogeneous over time."
     )]
-    async fn bacon_decomp(
+    pub async fn bacon_decomp(
         &self,
         Parameters(request): Parameters<BaconDecompRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -508,7 +508,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Estimate treatment effects using Extended TWFE (Wooldridge 2021, 2023). Addresses heterogeneous treatment effects in staggered DiD by estimating saturated cohort-by-time interactions. Returns cohort-time ATT estimates, event study by relative time, cohort averages, and overall ATT. Robust to treatment effect heterogeneity across cohorts and over time."
     )]
-    async fn etwfe(
+    pub async fn etwfe(
         &self,
         Parameters(request): Parameters<EtwfeRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -572,7 +572,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Estimate Average Treatment Effect (ATE) or Average Treatment Effect on Treated (ATT) using Inverse Probability Weighting. Uses propensity scores to create pseudo-populations that balance covariates between treatment groups. Returns effect estimate with bootstrap standard errors and confidence intervals."
     )]
-    async fn treatment_ipw(
+    pub async fn treatment_ipw(
         &self,
         Parameters(request): Parameters<IpwRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -632,7 +632,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Estimate treatment effects using Augmented IPW (doubly robust). Combines propensity score weighting with outcome regression. Consistent if either the propensity model OR the outcome model is correctly specified. Returns effect estimate with bootstrap standard errors and model fit diagnostics."
     )]
-    async fn treatment_doubly_robust(
+    pub async fn treatment_doubly_robust(
         &self,
         Parameters(request): Parameters<DoublyRobustRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -696,7 +696,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Estimate causal treatment effects using Double/Debiased Machine Learning. Uses Neyman-orthogonal score functions and K-fold cross-fitting to achieve root-n consistent and asymptotically normal estimates. Supports Partially Linear Regression (PLR: Y = theta*D + g(X) + eps) and Interactive Regression Model (IRM: binary treatment with heterogeneous effects). Returns treatment effect estimate with influence function-based standard errors and diagnostic information."
     )]
-    async fn treatment_double_ml(
+    pub async fn treatment_double_ml(
         &self,
         Parameters(request): Parameters<DoubleMLRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -842,7 +842,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Estimate propensity scores using Covariate Balancing Propensity Score (CBPS). Unlike standard logistic regression, CBPS uses GMM to simultaneously estimate propensity scores AND achieve covariate balance. Returns propensity scores, IPW weights, balance diagnostics before and after weighting, and J-test for overidentification."
     )]
-    async fn treatment_cbps(
+    pub async fn treatment_cbps(
         &self,
         Parameters(request): Parameters<CbpsRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -893,7 +893,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Compute balancing weights for causal inference using WeightIt. Supports multiple methods: 'logistic' (standard propensity score), 'entropy' (entropy balancing for exact mean balance), 'energy' (energy distance minimization), 'stable' (stable balancing weights). Returns weights, balance diagnostics before/after, and effective sample size (ESS). Low ESS indicates high weight variability."
     )]
-    async fn treatment_weightit(
+    pub async fn treatment_weightit(
         &self,
         Parameters(request): Parameters<WeightItRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -955,7 +955,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Compute entropy balancing weights (Hainmueller 2012). Reweights the control group to achieve exact mean balance on specified covariates with the treated group. Minimizes entropy (KL divergence) from uniform weights subject to balance constraints. Useful when exact balance is needed for bias reduction. Returns weights, balance table, and effective sample size."
     )]
-    async fn treatment_entropy_balance(
+    pub async fn treatment_entropy_balance(
         &self,
         Parameters(request): Parameters<EntropyBalanceRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -997,7 +997,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Compute Stable Balancing Weights (SBW) using quadratic programming (Zubizarreta 2015). Directly optimizes for covariate balance rather than modeling the propensity score. Finds weights that minimize variance while achieving exact or approximate balance on covariate means. Advantages: directly targets balance (not propensity score fit), provides stable weights with lower variance than IPW, handles approximate balance when exact is infeasible. Returns weights, balance diagnostics before/after, effective sample size, and optimization details."
     )]
-    async fn treatment_sbw(
+    pub async fn treatment_sbw(
         &self,
         Parameters(request): Parameters<SBWRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -1051,7 +1051,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Estimate propensity scores using Gradient Boosted Machine (GBM) with automatic tuning for covariate balance (twang). Unlike logistic regression, twang uses machine learning and automatically selects the optimal number of iterations based on balance metrics (standardized effect sizes or KS statistics). Particularly useful when you need good balance across many covariates. Returns propensity scores, IPW weights, optimal iteration number, and balance diagnostics before/after weighting."
     )]
-    async fn treatment_twang(
+    pub async fn treatment_twang(
         &self,
         Parameters(request): Parameters<TwangRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -1114,7 +1114,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Perform propensity score matching to create balanced comparison groups for causal inference. Methods: 'nearest' (nearest neighbor matching on propensity score), 'cem' (coarsened exact matching on covariate bins), 'full' (optimal full matching), 'subclass' (propensity score subclassification). Returns matched sample with weights, balance diagnostics (standardized mean differences, variance ratios, KS statistics) before and after matching. Low SMD (<0.1) indicates good balance."
     )]
-    async fn propensity_matching(
+    pub async fn propensity_matching(
         &self,
         Parameters(request): Parameters<MatchItRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -1183,7 +1183,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Estimate Average Treatment Effect (ATE) using TMLE - a doubly robust, semiparametric efficient estimator. TMLE uses a targeting step to optimize the bias-variance tradeoff for the ATE. More efficient than standard AIPW due to the fluctuation model. Returns ATE estimate with influence curve-based standard errors and confidence intervals."
     )]
-    async fn treatment_tmle(
+    pub async fn treatment_tmle(
         &self,
         Parameters(request): Parameters<TmleRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -1244,7 +1244,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Estimate Average Treatment Effect (ATE) using C-TMLE - extends TMLE with data-adaptive covariate selection for the propensity score model. Uses cross-validation to select which covariates to include, reducing finite-sample bias from including too many covariates while maintaining double robustness. Returns ATE estimate, selected covariates, selection path with CV criterion at each step, and influence curve-based standard errors."
     )]
-    async fn collaborative_tmle(
+    pub async fn collaborative_tmle(
         &self,
         Parameters(request): Parameters<CTmleRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -1316,7 +1316,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Estimate causal effects of time-varying treatments using the parametric g-formula (generalized formula). Uses Monte Carlo simulation to estimate counterfactual outcomes under different treatment regimes. Suitable for longitudinal/panel data with time-varying confounders. Returns risk difference, risk ratio, potential outcomes, and bootstrap confidence intervals. Based on Robins (1986) and Hernan & Robins (2020). R equivalent: gfoRmula package."
     )]
-    async fn gformula(
+    pub async fn gformula(
         &self,
         Parameters(request): Parameters<GFormulaRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -1494,7 +1494,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Perform causal mediation analysis to decompose treatment effects into direct and indirect (mediated) effects. Uses IPW-based identification following Huber (2014). Returns Natural Direct Effect (NDE), Natural Indirect Effect (NIE), proportion mediated, and bootstrap inference."
     )]
-    async fn mediation_analysis(
+    pub async fn mediation_analysis(
         &self,
         Parameters(request): Parameters<MediationRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -1548,7 +1548,7 @@ impl AnalyticsServer {
         Unlike IPW-based mediation, this method uses regression models for both mediator and outcome, \
         with optional A*M interaction terms. Returns effect estimates, bootstrap CIs, and model diagnostics."
     )]
-    async fn natural_effects_mediation(
+    pub async fn natural_effects_mediation(
         &self,
         Parameters(request): Parameters<NaturalEffectsRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -1617,7 +1617,7 @@ impl AnalyticsServer {
         Returns unit weights, predictor balance, treatment effects at each post-treatment period, \
         and optional placebo-based inference (p-values)."
     )]
-    async fn synthetic_control(
+    pub async fn synthetic_control(
         &self,
         Parameters(request): Parameters<SyntheticControlRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -1708,7 +1708,7 @@ impl AnalyticsServer {
         Factors f_t and loadings λ_i capture unobserved confounders. Developed by Xu (2017). \
         Returns ATT (average treatment effect on treated), unit-level effects, factor structure, and optional bootstrap inference."
     )]
-    async fn gsynth(
+    pub async fn gsynth(
         &self,
         Parameters(request): Parameters<GsynthRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -1787,7 +1787,7 @@ impl AnalyticsServer {
         Developed by Cattaneo, Feng & Titiunik (2021) in JASA. \
         Returns donor weights, treatment effects with prediction intervals, variance decomposition, and pre-treatment fit statistics."
     )]
-    async fn scpi(
+    pub async fn scpi(
         &self,
         Parameters(request): Parameters<ScpiRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -2029,7 +2029,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Run Sharp Regression Discontinuity (RD) estimation. Implements local polynomial regression with robust bias-corrected inference following Calonico, Cattaneo & Titiunik (2014). Returns conventional, bias-corrected, and robust treatment effect estimates with confidence intervals."
     )]
-    async fn rd_estimate(
+    pub async fn rd_estimate(
         &self,
         Parameters(request): Parameters<RdEstimateRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -2101,7 +2101,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Compute MSE-optimal bandwidth for Regression Discontinuity estimation. Returns bandwidth values without running the full estimation. Useful for inspecting bandwidth selection before estimation."
     )]
-    async fn rd_bw(
+    pub async fn rd_bw(
         &self,
         Parameters(request): Parameters<RdBandwidthRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -2162,7 +2162,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Run Fuzzy Regression Discontinuity estimation. For cases where treatment probability (not assignment) jumps at the cutoff. Uses a Wald estimator (ratio of reduced-form to first-stage). Returns Local Average Treatment Effect (LATE)."
     )]
-    async fn rd_fuzzy(
+    pub async fn rd_fuzzy(
         &self,
         Parameters(request): Parameters<FuzzyRdRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -2235,7 +2235,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Run Multi-Cutoff Regression Discontinuity (rdmulti) estimation. Handles RD designs with multiple cutoffs (different thresholds) sharing the same running variable. Estimates cutoff-specific effects and optionally pools them into a single weighted estimate. Includes a heterogeneity test for whether effects differ across cutoffs. Reference: Cattaneo, Titiunik & Vazquez-Bare (2020)."
     )]
-    async fn rd_multi(
+    pub async fn rd_multi(
         &self,
         Parameters(request): Parameters<RdMultiRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -2326,7 +2326,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Run Difference-in-Differences (DiD) estimation. Estimates causal treatment effects by comparing treated vs control groups before and after treatment."
     )]
-    async fn diff_in_diff(
+    pub async fn diff_in_diff(
         &self,
         Parameters(request): Parameters<DiDRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -2370,7 +2370,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Compute E-values for sensitivity analysis to unmeasured confounding (VanderWeele & Ding 2017). The E-value is the minimum strength of association that an unmeasured confounder would need with both treatment and outcome to fully explain away an observed effect. Supports risk ratios (RR), odds ratios (OR), hazard ratios (HR), standardized mean differences (SMD), and risk differences (RD). A large E-value means considerable confounding would be needed to explain away the effect. Returns E-value for point estimate and confidence interval limit closest to null."
     )]
-    async fn evalue(
+    pub async fn evalue(
         &self,
         Parameters(request): Parameters<EValueRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -2418,7 +2418,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Run general GMM (Generalized Method of Moments) IV estimation following Hansen (1982). Estimates parameters using moment conditions E[z(y - xβ)] = 0. Supports two-step, iterative, and CUE estimation with HAC weighting. Reports J-test for overidentifying restrictions. Use for IV estimation when you have more instruments than endogenous variables."
     )]
-    async fn gmm_iv(
+    pub async fn gmm_iv(
         &self,
         Parameters(request): Parameters<GeneralGmmIvRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -2487,7 +2487,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Estimate causal effects of time-varying treatments using Longitudinal TMLE. LTMLE extends standard TMLE to longitudinal settings with multiple time points where treatments and confounders vary over time. Uses sequential regression (g-computation) combined with a targeting step at each time point to achieve double robustness. Estimates E[Y^{always treat}] - E[Y^{never treat}] under static intervention regimes. Returns ATE estimate, counterfactual means, influence curve-based standard errors, and diagnostics."
     )]
-    async fn ltmle(
+    pub async fn ltmle(
         &self,
         Parameters(request): Parameters<LtmleRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -2659,7 +2659,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Compute average marginal effects (AME) from regression models. For OLS, marginal effects equal coefficients. For Logit/Probit, effects are averaged across observations accounting for nonlinearity. Returns effects, standard errors, z-values, p-values, and confidence intervals."
     )]
-    async fn marginal_effects(
+    pub async fn marginal_effects(
         &self,
         Parameters(request): Parameters<MarginalEffectsRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -2710,7 +2710,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Estimate causal effects using regression standardization (G-computation/parametric g-formula). Fits an outcome model and averages predictions under different treatment values over the covariate distribution. Supports ATE (Average Treatment Effect), ATT (on Treated), ATC (on Controls). Returns effect estimate, potential outcomes E[Y(1)] and E[Y(0)], confidence intervals, and for binary outcomes: risk ratio, odds ratio, and NNT."
     )]
-    async fn regression_standardization(
+    pub async fn regression_standardization(
         &self,
         Parameters(request): Parameters<StdRegRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -2787,7 +2787,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Run sensitivity analysis for unmeasured confounding (Cinelli & Hazlett 2020). Computes robustness value (RV) - the minimum confounding strength needed to nullify the treatment effect. Key outputs: (1) Partial R²: how much variance treatment explains in outcome, (2) RV_q: confounding needed to reduce effect by q%, (3) RV_alpha: confounding needed to make effect insignificant, (4) Benchmark bounds: adjusted estimates under various confounding scenarios. Essential for causal inference to assess how robust findings are to unmeasured confounding."
     )]
-    async fn sensemakr(
+    pub async fn sensemakr(
         &self,
         Parameters(request): Parameters<SensemakrRequest>,
     ) -> Result<CallToolResult, McpError> {

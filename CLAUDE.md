@@ -47,9 +47,29 @@ cargo doc --no-deps --open
 
 ### Prerequisites
 
-**Linux (Ubuntu/Debian):**
+**Linux (Ubuntu/Debian) - x86_64:**
 ```bash
 sudo apt-get install libopenblas-dev libwebkit2gtk-4.1-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev
+```
+
+**Linux (Ubuntu/Debian) - ARM64 (aarch64):**
+```bash
+# Core build dependencies
+sudo apt-get install \
+  libopenblas-dev \
+  libssl-dev \
+  pkg-config \
+  build-essential \
+  clang \
+  libclang-dev
+
+# For Dioxus desktop app
+sudo apt-get install \
+  libwebkit2gtk-4.1-dev \
+  libsoup-3.0-dev \
+  libjavascriptcoregtk-4.1-dev \
+  libgtk-3-dev \
+  libxdo-dev
 ```
 
 **macOS:**
@@ -62,6 +82,14 @@ brew install openblas
 cargo install dioxus-cli
 rustup target add wasm32-unknown-unknown
 ```
+
+### ARM64 Build Notes
+
+On ARM64 (aarch64), the project includes a `.cargo/config.toml` that enables `opt-level = 1` for debug builds. This is required because p2a-mcp is a large binary that exceeds ARM64's ±128MB relocation range in pure debug mode.
+
+- **Debug builds**: Work with `opt-level = 1` (configured automatically)
+- **Release builds**: Work without modification
+- **Desktop builds**: Require `libxdo-dev` for X11 automation support
 
 ## Project Overview
 
@@ -546,6 +574,7 @@ let df = df! {
    - Markdown tables (documentation, GitHub)
    - HTML tables (self-contained with CSS)
    - CSV via `CsvExport` trait (all result types)
+6. **ARM64 builds**: On aarch64-linux, debug builds require `opt-level = 1` due to relocation range limits with large binaries. This is configured in `.cargo/config.toml`. Release builds work without modification.
 
 ## Key Files
 

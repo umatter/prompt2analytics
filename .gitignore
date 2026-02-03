@@ -1,6 +1,9 @@
 # Build artifacts
 /target/
 
+# Platform-specific Cargo config (ARM64 build workarounds)
+.cargo/
+
 # Dioxus build artifacts
 dist/
 .dioxus/

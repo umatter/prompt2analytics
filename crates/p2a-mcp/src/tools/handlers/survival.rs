@@ -27,7 +27,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Run Kaplan-Meier survival curve estimation. Computes the non-parametric product-limit estimator with Greenwood's variance formula for confidence intervals. Optionally computes stratified curves by group. Returns survival probabilities at each event time with standard errors and confidence intervals."
     )]
-    async fn kaplan_meier(
+    pub async fn kaplan_meier(
         &self,
         Parameters(request): Parameters<KaplanMeierRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -72,7 +72,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Run Log-Rank test for comparing survival curves between groups. Tests the null hypothesis that the survival functions are equal across groups. Returns chi-squared statistic, p-value, and expected/observed event counts per group."
     )]
-    async fn log_rank(
+    pub async fn log_rank(
         &self,
         Parameters(request): Parameters<LogRankRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -107,7 +107,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Run Cox Proportional Hazards (Cox PH) regression model. Semi-parametric regression estimating covariate effects on hazard rate without assuming a baseline hazard form. Uses Newton-Raphson optimization. Returns hazard ratios, coefficients, standard errors, confidence intervals, and concordance (C-index)."
     )]
-    async fn cox_ph(
+    pub async fn cox_ph(
         &self,
         Parameters(request): Parameters<CoxPhRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -163,7 +163,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Run Accelerated Failure Time (AFT) parametric survival model. Models log(T) as a linear function of covariates. Supports Weibull, Exponential, Log-Normal, and Log-Logistic distributions. Returns regression coefficients (as acceleration factors), standard errors, shape parameters, and AIC/BIC."
     )]
-    async fn aft(
+    pub async fn aft(
         &self,
         Parameters(request): Parameters<AftRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -220,7 +220,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Run Competing Risks analysis using the Aalen-Johansen estimator. Computes cumulative incidence functions (CIF) for multiple event types in the presence of competing risks. Properly accounts for subjects who experience a different event than the one of interest. Returns CIF curves with confidence intervals for each event type."
     )]
-    async fn competing_risks(
+    pub async fn competing_risks(
         &self,
         Parameters(request): Parameters<CompetingRisksRequest>,
     ) -> Result<CallToolResult, McpError> {

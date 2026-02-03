@@ -31,7 +31,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Generate a histogram visualization for a numeric column. Returns a base64-encoded PNG image along with bin statistics."
     )]
-    async fn viz_histogram(
+    pub async fn viz_histogram(
         &self,
         Parameters(request): Parameters<HistogramRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -112,7 +112,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Generate a scatter plot visualization showing the relationship between two numeric columns. Returns a base64-encoded PNG image."
     )]
-    async fn viz_scatter(
+    pub async fn viz_scatter(
         &self,
         Parameters(request): Parameters<ScatterPlotRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -219,7 +219,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Generate a line chart visualization for time series or sequential data. Supports multiple Y series. Returns a base64-encoded PNG image."
     )]
-    async fn viz_line(
+    pub async fn viz_line(
         &self,
         Parameters(request): Parameters<LineChartRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -330,7 +330,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Generate a box plot visualization comparing the distributions of one or more numeric columns. Shows median, quartiles, and outliers. Returns a base64-encoded PNG image."
     )]
-    async fn viz_boxplot(
+    pub async fn viz_boxplot(
         &self,
         Parameters(request): Parameters<BoxPlotRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -418,7 +418,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Generate a correlation heatmap visualization for numeric columns. Uses a diverging blue-white-red colormap. Returns a base64-encoded PNG image."
     )]
-    async fn viz_heatmap(
+    pub async fn viz_heatmap(
         &self,
         Parameters(request): Parameters<HeatmapRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -512,7 +512,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Generate an interactive scatter plot visualization using Plotly.js. Returns HTML that can be saved to a file and opened in a browser. Supports grouping data by a categorical column for colored traces. Interactive features include zoom, pan, and hover."
     )]
-    async fn viz_scatter_interactive(
+    pub async fn viz_scatter_interactive(
         &self,
         Parameters(request): Parameters<ScatterInteractiveRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -567,7 +567,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Generate an interactive histogram visualization using Plotly.js. Returns HTML that can be saved to a file and opened in a browser. Supports grouping data by a categorical column for overlaid histograms. Interactive features include zoom, pan, and hover."
     )]
-    async fn viz_histogram_interactive(
+    pub async fn viz_histogram_interactive(
         &self,
         Parameters(request): Parameters<HistogramInteractiveRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -620,7 +620,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Generate an interactive line chart visualization using Plotly.js. Returns HTML that can be saved to a file and opened in a browser. Interactive features include zoom, pan, and hover."
     )]
-    async fn viz_line_interactive(
+    pub async fn viz_line_interactive(
         &self,
         Parameters(request): Parameters<LineInteractiveRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -673,7 +673,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Generate an event study plot showing treatment effects over time with confidence intervals. Used for visualizing DiD or panel event study results. Shows point estimates with CI bands and reference lines at t=0 and y=0."
     )]
-    async fn viz_event_study(
+    pub async fn viz_event_study(
         &self,
         Parameters(request): Parameters<EventStudyRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -750,7 +750,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Generate a coefficient plot showing regression coefficients with confidence intervals (error bars). Useful for visualizing regression results. Shows vertical zero line for reference."
     )]
-    async fn viz_coefficient(
+    pub async fn viz_coefficient(
         &self,
         Parameters(request): Parameters<CoefficientPlotRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -839,7 +839,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Generate an Impulse Response Function (IRF) plot from VAR models. Shows how a variable responds to a shock over time. Optionally includes confidence bands."
     )]
-    async fn viz_irf(
+    pub async fn viz_irf(
         &self,
         Parameters(request): Parameters<IrfPlotRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -942,7 +942,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Generate four diagnostic plots for regression analysis: (1) Residuals vs Fitted, (2) Normal Q-Q plot, (3) Scale-Location, (4) Residuals vs Leverage. Also calculates Cook's distance for identifying influential observations. Returns four base64-encoded PNG images."
     )]
-    async fn viz_residual_diagnostics(
+    pub async fn viz_residual_diagnostics(
         &self,
         Parameters(request): Parameters<ResidualDiagnosticsRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -1038,7 +1038,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Generate a dendrogram (tree diagram) from hierarchical clustering results. Shows how clusters are merged at each level with merge distances. Takes a linkage matrix from hierarchical clustering output."
     )]
-    async fn viz_dendrogram(
+    pub async fn viz_dendrogram(
         &self,
         Parameters(request): Parameters<DendrogramRequest>,
     ) -> Result<CallToolResult, McpError> {

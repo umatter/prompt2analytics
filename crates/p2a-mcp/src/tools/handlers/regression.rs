@@ -47,7 +47,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Run Ordinary Least Squares (OLS) regression. Returns coefficients, standard errors, t-values, p-values, R-squared, and F-statistic."
     )]
-    async fn regression_ols(
+    pub async fn regression_ols(
         &self,
         Parameters(request): Parameters<OlsRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -84,7 +84,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Run comprehensive regression diagnostics. Tests include: Jarque-Bera (normality), Breusch-Pagan (heteroskedasticity), Durbin-Watson (autocorrelation), VIF (multicollinearity), and condition number."
     )]
-    async fn regression_diagnostics(
+    pub async fn regression_diagnostics(
         &self,
         Parameters(request): Parameters<DiagnosticsRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -121,7 +121,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Breusch-Godfrey test for higher-order serial correlation in regression residuals. More general than Durbin-Watson as it: (1) tests for AR(p) or MA(p) correlation, (2) allows lagged dependent variables as regressors, (3) is valid regardless of regressor properties. Returns LM statistic and p-value."
     )]
-    async fn regression_bgtest(
+    pub async fn regression_bgtest(
         &self,
         Parameters(request): Parameters<BgTestRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -165,7 +165,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Ramsey's RESET test for functional form misspecification. Tests whether nonlinear terms (powers of fitted values) should be added to the model. Significant result suggests the linear model is misspecified and nonlinear terms may be needed."
     )]
-    async fn regression_resettest(
+    pub async fn regression_resettest(
         &self,
         Parameters(request): Parameters<ResetTestRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -208,7 +208,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Wald test (F-test) for comparing nested linear models. Tests whether variables excluded from the restricted model are jointly significant. Common uses: testing joint significance of multiple coefficients, testing nested model hypotheses, comparing model specifications."
     )]
-    async fn regression_waldtest(
+    pub async fn regression_waldtest(
         &self,
         Parameters(request): Parameters<WaldTestRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -255,7 +255,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Harvey-Collier test for detecting departure from linearity. Uses recursive residuals to test whether the mean of one-step-ahead forecast errors differs from zero. A significant result suggests convex or concave functional misspecification - the linear model may need polynomial terms. Equivalent to R's lmtest::harvtest()."
     )]
-    async fn regression_harvtest(
+    pub async fn regression_harvtest(
         &self,
         Parameters(request): Parameters<HarveyCollierRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -292,7 +292,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Compute HAC (Heteroskedasticity and Autocorrelation Consistent) standard errors using the Newey-West estimator. Essential for time series regression where errors may be both heteroskedastic and autocorrelated. Supports multiple kernel functions and automatic bandwidth selection."
     )]
-    async fn regression_hac(
+    pub async fn regression_hac(
         &self,
         Parameters(request): Parameters<HacRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -337,7 +337,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Compute bootstrap covariance matrix and standard errors for OLS regression. Supports pairs bootstrap (most robust, resamples observations), residual bootstrap (assumes homoskedasticity), and wild bootstrap (robust to heteroskedasticity). Useful when asymptotic standard errors may be unreliable."
     )]
-    async fn regression_bootstrap_cov(
+    pub async fn regression_bootstrap_cov(
         &self,
         Parameters(request): Parameters<BootstrapCovRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -381,7 +381,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Compute Driscoll-Kraay (1998) panel-robust standard errors. Robust to arbitrary cross-sectional correlation (spatial dependence) and serial correlation in panel data. Aggregates score vectors by time period and applies Newey-West HAC correction. Best for panels with large T (many time periods). Returns coefficient estimates with panel-robust SEs, t-stats, and p-values."
     )]
-    async fn regression_driscoll_kraay(
+    pub async fn regression_driscoll_kraay(
         &self,
         Parameters(request): Parameters<DriscollKraayRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -425,7 +425,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Run quantile regression to estimate conditional quantiles instead of conditional means. Useful when the relationship varies across the distribution, or when the error distribution is non-Gaussian. Can estimate single quantile (tau) or multiple quantiles simultaneously."
     )]
-    async fn regression_quantreg(
+    pub async fn regression_quantreg(
         &self,
         Parameters(request): Parameters<QuantRegRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -487,7 +487,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Run OLS regression with clustered standard errors. Supports one-way (firm, state) or two-way (firm + time) clustering. Essential for panel data with correlated errors."
     )]
-    async fn regression_clustered(
+    pub async fn regression_clustered(
         &self,
         Parameters(request): Parameters<OlsClusteredRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -530,7 +530,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Fit a nonlinear regression model using Levenberg-Marquardt algorithm. Supports common models: exponential decay/growth, Michaelis-Menten kinetics, logistic growth, power law, asymptotic. Returns parameter estimates, standard errors, t-values, and convergence info."
     )]
-    async fn regression_nls(
+    pub async fn regression_nls(
         &self,
         Parameters(request): Parameters<NlsRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -672,7 +672,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Fit a LOESS (LOcally Estimated Scatterplot Smoothing) model. LOESS fits local polynomial regressions at each point, weighted by distance from the target point using tricubic weights. Useful for non-parametric trend estimation, data smoothing, and exploring nonlinear relationships. Returns fitted values, residuals, R-squared, and equivalent number of parameters."
     )]
-    async fn regression_loess(
+    pub async fn regression_loess(
         &self,
         Parameters(request): Parameters<LoessRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -739,7 +739,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Friedman's SuperSmoother - a variable-bandwidth smoother that locally adapts to the data. Uses cross-validation to select optimal span at each point. Returns smoothed y values and can handle periodic data."
     )]
-    async fn regression_supsmu(
+    pub async fn regression_supsmu(
         &self,
         Parameters(request): Parameters<SupsmuRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -875,7 +875,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Tukey's resistant line - robust regression using medians instead of means, making it resistant to outliers. Divides data into three groups and uses group medians to determine slope and intercept. Returns coefficients, fitted values, and residuals."
     )]
-    async fn regression_line(
+    pub async fn regression_line(
         &self,
         Parameters(request): Parameters<LineRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -985,7 +985,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Stepwise regression model selection using AIC or BIC. Can perform forward selection, backward elimination, or both. Returns the best model and selection history."
     )]
-    async fn regression_step(
+    pub async fn regression_step(
         &self,
         Parameters(request): Parameters<StepRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -1054,7 +1054,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Fit a Generalized Least Squares (GLS) regression model. GLS extends OLS to handle correlated or heteroscedastic errors. Correlation structures: 'ar1' (autoregressive), 'compound_symmetry' (equal correlation), 'identity' (OLS). For AR(1), rho can be specified or auto-estimated from OLS residuals. Returns coefficients, standard errors, t-values, p-values, and model fit statistics."
     )]
-    async fn regression_gls(
+    pub async fn regression_gls(
         &self,
         Parameters(request): Parameters<GlsRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -1191,7 +1191,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Fit a smoothing spline to data. Smoothing splines balance goodness-of-fit against smoothness using a penalty on curvature. The smoothing parameter (spar) or degrees of freedom (df) controls the tradeoff. If neither is specified, uses generalized cross-validation (GCV) to automatically select optimal smoothing. Returns fitted values, effective degrees of freedom, and GCV score."
     )]
-    async fn regression_smooth_spline(
+    pub async fn regression_smooth_spline(
         &self,
         Parameters(request): Parameters<SmoothSplineRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -1267,7 +1267,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Run regularized regression with elastic net penalty (glmnet). Combines L1 (lasso) and L2 (ridge) penalties. Set alpha=1 for lasso, alpha=0 for ridge, or 0<alpha<1 for elastic net. Returns coefficient path along lambda sequence."
     )]
-    async fn regression_glmnet(
+    pub async fn regression_glmnet(
         &self,
         Parameters(request): Parameters<GlmnetRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -1314,7 +1314,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Run cross-validated elastic net/lasso/ridge regression to select optimal lambda. Returns lambda.min (minimum CV error) and lambda.1se (most regularized within 1 SE of minimum)."
     )]
-    async fn regression_cv_glmnet(
+    pub async fn regression_cv_glmnet(
         &self,
         Parameters(request): Parameters<CvGlmnetRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -1362,7 +1362,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Run ridge regression (L2-penalized linear regression). Shortcut for glmnet with alpha=0. Useful when predictors are highly correlated."
     )]
-    async fn regression_ridge(
+    pub async fn regression_ridge(
         &self,
         Parameters(request): Parameters<RidgeRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -1395,7 +1395,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Run lasso regression (L1-penalized linear regression). Shortcut for glmnet with alpha=1. Performs automatic feature selection by shrinking some coefficients to zero."
     )]
-    async fn regression_lasso(
+    pub async fn regression_lasso(
         &self,
         Parameters(request): Parameters<LassoRequest>,
     ) -> Result<CallToolResult, McpError> {

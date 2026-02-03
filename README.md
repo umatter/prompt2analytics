@@ -66,7 +66,7 @@ A comprehensive analytics toolkit exposing econometrics, machine learning, and v
 
 ### Prerequisites
 
-**Linux (Ubuntu/Debian):**
+**Linux (Ubuntu/Debian) - x86_64:**
 ```bash
 # Core dependencies
 sudo apt-get install libopenblas-dev
@@ -75,10 +75,32 @@ sudo apt-get install libopenblas-dev
 sudo apt-get install libwebkit2gtk-4.1-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev libgtk-3-dev libxdo-dev
 ```
 
+**Linux (Ubuntu/Debian) - ARM64 (aarch64):**
+```bash
+# Core build dependencies (all required for p2a-mcp)
+sudo apt-get install \
+  libopenblas-dev \
+  libssl-dev \
+  pkg-config \
+  build-essential \
+  clang \
+  libclang-dev
+
+# For Dioxus desktop app
+sudo apt-get install \
+  libwebkit2gtk-4.1-dev \
+  libsoup-3.0-dev \
+  libjavascriptcoregtk-4.1-dev \
+  libgtk-3-dev \
+  libxdo-dev
+```
+
 **macOS:**
 ```bash
 brew install openblas
 ```
+
+**ARM64 Note:** On ARM64, debug builds use `opt-level = 1` (configured in `.cargo/config.toml`) to avoid linker relocation errors with large binaries. Release builds work without modification.
 
 ### Building from Source
 

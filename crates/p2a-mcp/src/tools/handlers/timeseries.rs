@@ -44,7 +44,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Compute autocorrelation function (ACF), autocovariance, or partial autocorrelation function (PACF) for a time series. ACF measures correlation between observations at different lags. PACF measures correlation after removing effects of intermediate lags - useful for identifying AR order. Returns values for lags 0 to lag_max with 95% confidence bounds."
     )]
-    async fn timeseries_acf(
+    pub async fn timeseries_acf(
         &self,
         Parameters(request): Parameters<AcfRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -137,7 +137,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Compute cross-correlation function (CCF) between two time series. CCF at lag k estimates correlation between x_{t+k} and y_t. Positive lag k means x leads y; negative lag means y leads x. Useful for identifying lead-lag relationships between variables."
     )]
-    async fn timeseries_ccf(
+    pub async fn timeseries_ccf(
         &self,
         Parameters(request): Parameters<CcfRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -214,7 +214,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Estimate spectral density (power spectrum) of a time series. Returns spectral density at Fourier frequencies showing how variance is distributed across frequency components. Methods: 'pgram' (periodogram with optional smoothing) or 'ar' (AR model-based). Use spans parameter for smoothing raw periodogram (e.g., spans=[3,3] for moderate smoothing). Peak frequency reveals dominant cyclical patterns."
     )]
-    async fn timeseries_spectrum(
+    pub async fn timeseries_spectrum(
         &self,
         Parameters(request): Parameters<SpectrumRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -329,7 +329,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Test for autocorrelation in a time series using Box-Pierce or Ljung-Box test. Tests H₀: no autocorrelation up to specified lag. Commonly used to check whether ARIMA residuals are white noise. Ljung-Box (default) has better finite-sample properties. For ARMA(p,q) residuals, set fitdf=p+q to adjust degrees of freedom. Returns: X-squared statistic, df, p-value, and sample autocorrelations."
     )]
-    async fn timeseries_box_test(
+    pub async fn timeseries_box_test(
         &self,
         Parameters(request): Parameters<BoxTestRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -398,7 +398,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Test for unit root in a time series using the Phillips-Perron test. Tests H₀: series has unit root (non-stationary) vs H₁: series is stationary. Uses Newey-West long-run variance estimator with Bartlett weights for serial correlation correction. Similar to ADF test but makes non-parametric correction. Returns: Z(τ) statistic, truncation lag, p-value, and diagnostics."
     )]
-    async fn timeseries_pp_test(
+    pub async fn timeseries_pp_test(
         &self,
         Parameters(request): Parameters<PPTestRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -468,7 +468,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Run Vector Autoregression (VAR) model for multivariate time series. Returns coefficients, residual covariance, AIC, and BIC."
     )]
-    async fn ts_var(
+    pub async fn ts_var(
         &self,
         Parameters(request): Parameters<VarRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -505,7 +505,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Test Granger causality between two time series variables. Tests whether lagged values of 'cause' help predict 'dependent' after controlling for lagged 'dependent'. Uses F-test comparing restricted (y lags only) vs unrestricted (y and x lags) models."
     )]
-    async fn ts_granger(
+    pub async fn ts_granger(
         &self,
         Parameters(request): Parameters<GrangerRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -545,7 +545,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Run VARMA(p,q) model using Hannan-Rissanen estimation. Combines autoregressive and moving average components for multivariate time series."
     )]
-    async fn ts_varma(
+    pub async fn ts_varma(
         &self,
         Parameters(request): Parameters<VarmaRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -582,7 +582,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Run VECM using Johansen Maximum Likelihood. For cointegrated I(1) time series. Returns cointegration vectors (beta), adjustment speeds (alpha), and eigenvalues."
     )]
-    async fn ts_vecm(
+    pub async fn ts_vecm(
         &self,
         Parameters(request): Parameters<VecmRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -619,7 +619,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Compute Impulse Response Functions (IRF) from a VAR model. Shows how variables respond to shocks over time using Cholesky orthogonalization."
     )]
-    async fn ts_var_irf(
+    pub async fn ts_var_irf(
         &self,
         Parameters(request): Parameters<VarIrfRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -656,7 +656,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Fit an ARIMA(p,d,q) model to a univariate time series. Returns AR/MA coefficients, residuals, AIC, and model diagnostics."
     )]
-    async fn ts_arima_fit(
+    pub async fn ts_arima_fit(
         &self,
         Parameters(request): Parameters<ArimaRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -712,7 +712,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Forecast future values using an ARIMA(p,d,q) model. Fits the model and generates h-step ahead forecasts."
     )]
-    async fn ts_arima_forecast(
+    pub async fn ts_arima_forecast(
         &self,
         Parameters(request): Parameters<ArimaForecastRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -766,7 +766,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Fit a GARCH(p,q) model for time-varying volatility. Estimates the conditional variance equation: σ²_t = ω + Σα_i ε²_{t-i} + Σβ_j σ²_{t-j}. Reports persistence, unconditional variance, and half-life of volatility shocks."
     )]
-    async fn ts_garch_fit(
+    pub async fn ts_garch_fit(
         &self,
         Parameters(request): Parameters<GarchRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -820,7 +820,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Perform MSTL (Multiple Seasonal-Trend decomposition using LOESS) on a time series. Extracts trend, seasonal components, and residuals."
     )]
-    async fn ts_mstl(
+    pub async fn ts_mstl(
         &self,
         Parameters(request): Parameters<MstlRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -902,7 +902,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Detect changepoints (structural breaks) in a time series using PELT or Binary Segmentation. Identifies points where the statistical properties (mean, variance) change significantly. Useful for regime detection, anomaly detection, and segmenting time series into homogeneous periods."
     )]
-    async fn ts_changepoint(
+    pub async fn ts_changepoint(
         &self,
         Parameters(request): Parameters<ChangepointRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -1009,7 +1009,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Fit Holt-Winters exponential smoothing model to a time series with trend and seasonality. Supports both additive (constant seasonal variation) and multiplicative (proportional variation) seasonality. Automatically optimizes smoothing parameters (alpha, beta, gamma) if not provided. Can generate forecasts for future periods. Returns fitted values, residuals, optimized parameters, and seasonal coefficients."
     )]
-    async fn ts_holt_winters(
+    pub async fn ts_holt_winters(
         &self,
         Parameters(request): Parameters<HoltWintersRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -1142,7 +1142,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Fit an autoregressive model to time series data with automatic order selection via AIC. Supports Yule-Walker (default), Burg, and OLS methods. Returns AR coefficients, prediction variance, AIC values, partial autocorrelations, and residuals."
     )]
-    async fn timeseries_ar(
+    pub async fn timeseries_ar(
         &self,
         Parameters(request): Parameters<ArModelRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -1241,7 +1241,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Decompose a time series into trend, seasonal, and random components using moving averages. Implements R's decompose() function. Supports additive (Y = T + S + R) and multiplicative (Y = T × S × R) decomposition."
     )]
-    async fn timeseries_decompose(
+    pub async fn timeseries_decompose(
         &self,
         Parameters(request): Parameters<DecomposeRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -1373,7 +1373,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Fit a structural time series model by maximum likelihood using the Kalman filter. Supports: 'level' (local level/random walk + noise, equivalent to ARIMA(0,1,1)), 'trend' (local linear trend, equivalent to ARIMA(0,2,2)), and 'bsm' (basic structural model with level, trend, and seasonality). Returns variance parameters, smoothed components, fitted values, residuals, log-likelihood, AIC, and BIC."
     )]
-    async fn timeseries_structts(
+    pub async fn timeseries_structts(
         &self,
         Parameters(request): Parameters<StructTsRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -1501,7 +1501,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Estimate the causal effect of an intervention using Bayesian Structural Time Series (BSTS). Uses pre-intervention data to build a counterfactual prediction, then compares with observed post-intervention data to estimate the causal effect. Optionally uses control time series that are correlated with the response but unaffected by the intervention. Returns cumulative/average effects with credible intervals and Bayesian p-value."
     )]
-    async fn causal_impact_analysis(
+    pub async fn causal_impact_analysis(
         &self,
         Parameters(request): Parameters<CausalImpactRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -1626,7 +1626,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Cumulative periodogram (cpgram) - diagnostic tool for testing if a time series is white noise. Plots cumulative sum of periodogram ordinates. For white noise, should follow a uniform distribution. Returns cumulative periodogram, confidence bands, and Kolmogorov-Smirnov test for white noise."
     )]
-    async fn timeseries_cpgram(
+    pub async fn timeseries_cpgram(
         &self,
         Parameters(request): Parameters<CpgramRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -1709,7 +1709,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Construct a Toeplitz matrix - a matrix with constant values along each diagonal. Useful for autocorrelation matrices, circulant matrices, and time series analysis. Can create symmetric or asymmetric Toeplitz matrices."
     )]
-    async fn linalg_toeplitz(
+    pub async fn linalg_toeplitz(
         &self,
         Parameters(request): Parameters<ToeplitzRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -1752,7 +1752,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Shift a time series by k positions. Positive k shifts values backward (lag), negative k shifts forward (lead). Returns the lagged series with NA padding."
     )]
-    async fn timeseries_lag(
+    pub async fn timeseries_lag(
         &self,
         Parameters(request): Parameters<LagRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -1821,7 +1821,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Create a lag embedding matrix from a time series. Each row contains consecutive values, useful for building AR models or phase space reconstruction."
     )]
-    async fn timeseries_embed(
+    pub async fn timeseries_embed(
         &self,
         Parameters(request): Parameters<EmbedRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -1888,7 +1888,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Compute the inverse of differencing (cumulative sum). Reconstructs the original series from differences given initial values."
     )]
-    async fn timeseries_diffinv(
+    pub async fn timeseries_diffinv(
         &self,
         Parameters(request): Parameters<DiffinvRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -1960,7 +1960,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Apply a linear filter to a time series using convolution or recursive filtering. Useful for smoothing, differencing, or implementing ARMA models."
     )]
-    async fn timeseries_filter(
+    pub async fn timeseries_filter(
         &self,
         Parameters(request): Parameters<FilterRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -2051,7 +2051,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Extract a contiguous window (subset) from a time series by specifying start and end indices."
     )]
-    async fn timeseries_window(
+    pub async fn timeseries_window(
         &self,
         Parameters(request): Parameters<WindowRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -2119,7 +2119,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Compute the theoretical autocorrelation function (ACF) or partial ACF for an ARMA(p,q) model given AR and MA coefficients."
     )]
-    async fn timeseries_arma_acf(
+    pub async fn timeseries_arma_acf(
         &self,
         Parameters(request): Parameters<ArmaAcfRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -2156,7 +2156,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Convert ARMA model to its infinite MA representation (psi weights). The psi weights show the impulse response function of the model."
     )]
-    async fn timeseries_arma_to_ma(
+    pub async fn timeseries_arma_to_ma(
         &self,
         Parameters(request): Parameters<ArmaToMaRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -2190,7 +2190,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Compute AR coefficients from autocorrelation function using the Yule-Walker equations. Also returns partial autocorrelations."
     )]
-    async fn timeseries_acf_to_ar(
+    pub async fn timeseries_acf_to_ar(
         &self,
         Parameters(request): Parameters<Acf2ArRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -2220,7 +2220,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Simulate a time series from an ARIMA(p,d,q) model. Generates random innovations and applies the ARMA recursion with optional differencing."
     )]
-    async fn timeseries_arima_sim(
+    pub async fn timeseries_arima_sim(
         &self,
         Parameters(request): Parameters<ArimaSimRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -2259,7 +2259,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Apply running median smoother to a time series. More robust to outliers than running mean. Uses Tukey's median polish for the smoothing."
     )]
-    async fn timeseries_runmed(
+    pub async fn timeseries_runmed(
         &self,
         Parameters(request): Parameters<RunmedRequest>,
     ) -> Result<CallToolResult, McpError> {

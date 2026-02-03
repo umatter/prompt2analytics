@@ -41,7 +41,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Fit log-linear models to multi-way contingency tables using iterative proportional fitting (IPF). Tests association and independence patterns. Equivalent to R's loglin()."
     )]
-    async fn stats_loglin(
+    pub async fn stats_loglin(
         &self,
         Parameters(request): Parameters<LoglinRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -251,7 +251,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Compute cell means or effects tables from one-way or two-way ANOVA. Returns group means or deviations from grand mean with optional standard errors. Equivalent to R's model.tables()."
     )]
-    async fn stats_model_tables(
+    pub async fn stats_model_tables(
         &self,
         Parameters(request): Parameters<ModelTablesRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -471,7 +471,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Compute standard errors for linear contrasts of group means from one-way ANOVA. Can use custom contrasts or generate standard ones (treatment, Helmert, sum, polynomial). Equivalent to R's se.contrast()."
     )]
-    async fn stats_se_contrast(
+    pub async fn stats_se_contrast(
         &self,
         Parameters(request): Parameters<SeContrastRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -553,7 +553,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Compute the weighted arithmetic mean of a numeric column. Equivalent to R's weighted.mean()."
     )]
-    async fn stats_weighted_mean(
+    pub async fn stats_weighted_mean(
         &self,
         Parameters(request): Parameters<WeightedMeanRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -636,7 +636,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Compute the weighted covariance matrix for a set of numeric columns. Can use unbiased (reliability) or ML weighting. Equivalent to R's cov.wt()."
     )]
-    async fn stats_cov_wt(
+    pub async fn stats_cov_wt(
         &self,
         Parameters(request): Parameters<CovWtRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -721,7 +721,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Mauchly's test for sphericity in repeated measures designs. Tests whether the variances of the differences between all combinations of conditions are equal. Includes epsilon corrections (Greenhouse-Geisser, Huynh-Feldt). Equivalent to R's mauchly.test()."
     )]
-    async fn stats_mauchly_test(
+    pub async fn stats_mauchly_test(
         &self,
         Parameters(request): Parameters<MauchlyTestRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -781,7 +781,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Compute Tukey's five-number summary: minimum, lower-hinge (Q1), median, upper-hinge (Q3), and maximum. Equivalent to R's fivenum()."
     )]
-    async fn stats_fivenum(
+    pub async fn stats_fivenum(
         &self,
         Parameters(request): Parameters<FivenumRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -828,7 +828,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Compute the interquartile range (Q3 - Q1) of a numeric column. Supports different quantile types (1-9). Equivalent to R's IQR()."
     )]
-    async fn stats_iqr(
+    pub async fn stats_iqr(
         &self,
         Parameters(request): Parameters<IqrRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -870,7 +870,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Compute the median absolute deviation (MAD), a robust measure of dispersion. By default, scaled by 1.4826 for consistency with the standard deviation of normal distributions. Equivalent to R's mad()."
     )]
-    async fn stats_mad(
+    pub async fn stats_mad(
         &self,
         Parameters(request): Parameters<MadRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -929,7 +929,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Compute the empirical cumulative distribution function (ECDF) for a numeric column. Returns step function values at data points or specified evaluation points. Equivalent to R's ecdf()."
     )]
-    async fn stats_ecdf(
+    pub async fn stats_ecdf(
         &self,
         Parameters(request): Parameters<EcdfRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -981,7 +981,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Estimate the probability density function using kernel density estimation. Supports multiple kernel functions and automatic bandwidth selection. Equivalent to R's density()."
     )]
-    async fn stats_density(
+    pub async fn stats_density(
         &self,
         Parameters(request): Parameters<DensityRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -1052,7 +1052,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Fit a cubic spline through data points for smooth interpolation. Supports natural, FMM (Forsythe-Malcolm-Moler), periodic, and monotone (Hyman) splines. Equivalent to R's spline()."
     )]
-    async fn stats_spline(
+    pub async fn stats_spline(
         &self,
         Parameters(request): Parameters<SplineRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -1114,7 +1114,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Linear or constant (step function) interpolation between data points. Handles points outside the data range with NA or nearest value. Equivalent to R's approx()."
     )]
-    async fn stats_approx(
+    pub async fn stats_approx(
         &self,
         Parameters(request): Parameters<ApproxRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -1189,7 +1189,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Run Multivariate Analysis of Variance (MANOVA) to test whether group means differ across multiple response variables simultaneously. Returns four test statistics: Wilks' Lambda (most popular), Pillai's Trace (most robust, default), Hotelling-Lawley Trace, and Roy's Largest Root. Each with approximate F-statistic and p-value. Use when you have 2+ continuous response variables and want to test group differences while accounting for correlations between responses."
     )]
-    async fn anova_manova(
+    pub async fn anova_manova(
         &self,
         Parameters(request): Parameters<ManovaRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -1292,7 +1292,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Run one-way Analysis of Variance (ANOVA) to test whether means differ across groups. Returns F-statistic, p-value, effect sizes (eta-squared, omega-squared), and group statistics. Use when comparing a continuous response variable across 2+ categorical groups."
     )]
-    async fn anova_one_way(
+    pub async fn anova_one_way(
         &self,
         Parameters(request): Parameters<OneWayAnovaRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -1327,7 +1327,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Run Tukey's HSD post-hoc test after one-way ANOVA to perform pairwise comparisons between all group means. Controls for family-wise error rate using the Studentized range distribution. Returns: difference in means, confidence interval, and adjusted p-value for each pair. Use this after finding a significant ANOVA result to identify which specific groups differ."
     )]
-    async fn anova_tukey_hsd(
+    pub async fn anova_tukey_hsd(
         &self,
         Parameters(request): Parameters<TukeyHsdRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -1410,7 +1410,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Run two-way Analysis of Variance (ANOVA) to test effects of two factors and their interaction on a response variable. Returns F-statistics and p-values for each factor and the interaction term. Use for factorial experimental designs."
     )]
-    async fn anova_two_way(
+    pub async fn anova_two_way(
         &self,
         Parameters(request): Parameters<TwoWayAnovaRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -1453,7 +1453,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Compute the Pearson correlation matrix for all numeric columns in a dataset."
     )]
-    async fn compute_correlation(
+    pub async fn compute_correlation(
         &self,
         Parameters(request): Parameters<CorrelationRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -1496,7 +1496,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Run isotonic (monotonically increasing) least squares regression using the Pool Adjacent Violators Algorithm (PAVA). Returns piecewise constant fitted values that are monotonically non-decreasing. Useful for calibration, dose-response modeling, and trend analysis where monotonicity is assumed."
     )]
-    async fn descriptive_isoreg(
+    pub async fn descriptive_isoreg(
         &self,
         Parameters(request): Parameters<IsoregRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -1612,7 +1612,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Run Tukey's Median Polish for robust two-way decomposition of a matrix. Fits an additive model (constant + row effects + column effects + residuals) iteratively using medians instead of means, making it resistant to outliers. Returns the overall effect, row effects, column effects, and residuals. Useful for exploratory data analysis of two-way tables."
     )]
-    async fn descriptive_medpolish(
+    pub async fn descriptive_medpolish(
         &self,
         Parameters(request): Parameters<MedpolishRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -1727,7 +1727,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Run Canonical Correlation Analysis (CCA) to find linear combinations of two sets of variables that have maximum correlation with each other. Returns canonical correlations (in decreasing order), coefficients for X variables (xcoef), and coefficients for Y variables (ycoef). The canonical variates are X*xcoef and Y*ycoef. Useful for multivariate dimensionality reduction, identifying relationships between variable sets, and understanding shared variance."
     )]
-    async fn multivariate_cancor(
+    pub async fn multivariate_cancor(
         &self,
         Parameters(request): Parameters<CancorRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -1826,7 +1826,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Run Maximum Likelihood Factor Analysis to identify latent factors underlying observed variables. Models correlation structure as x = Λf + e where Λ is the loadings matrix, f are factor scores, and e is error. Returns loadings matrix, uniquenesses (specific variances), communalities (variance explained per variable), variance proportions, chi-squared goodness-of-fit test, and optionally factor scores. Supports varimax (orthogonal) and promax (oblique) rotation."
     )]
-    async fn multivariate_factanal(
+    pub async fn multivariate_factanal(
         &self,
         Parameters(request): Parameters<FactorAnalysisRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -1949,7 +1949,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Compute squared Mahalanobis distance for each observation. The Mahalanobis distance measures how far each observation is from the center of the distribution, accounting for correlations between variables. Useful for outlier detection, multivariate normality assessment, and cluster analysis. Returns squared distances (D²) which follow a chi-squared distribution with p degrees of freedom under multivariate normality."
     )]
-    async fn multivariate_mahalanobis(
+    pub async fn multivariate_mahalanobis(
         &self,
         Parameters(request): Parameters<MahalanobisRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -2035,7 +2035,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Compute power or sample size for balanced one-way ANOVA. Given 4 of {groups, n, between_var, within_var, sig_level, power}, computes the 5th. Use for study design comparing means across multiple groups."
     )]
-    async fn power_anova_test(
+    pub async fn power_anova_test(
         &self,
         Parameters(request): Parameters<PowerAnovaTestRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -2109,7 +2109,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Compute power or sample size for two-sample proportion tests. Given 4 of {n, p1, p2, sig_level, power}, computes the 5th. Use for study design comparing proportions between two groups."
     )]
-    async fn power_prop_test(
+    pub async fn power_prop_test(
         &self,
         Parameters(request): Parameters<PowerPropTestRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -2171,7 +2171,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Compute power or sample size for t-tests. Given 4 of {n, delta, sd, sig_level, power}, computes the 5th. Use for study design to determine required sample size for desired power, or to compute power for a given sample size. Supports one-sample, two-sample, and paired t-tests."
     )]
-    async fn power_t_test(
+    pub async fn power_t_test(
         &self,
         Parameters(request): Parameters<PowerTTestRequest>,
     ) -> Result<CallToolResult, McpError> {

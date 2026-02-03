@@ -30,7 +30,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Run K-means clustering to partition data into k clusters. Uses k-means++ initialization for better convergence. Returns cluster assignments, centroids, and inertia (within-cluster sum of squares)."
     )]
-    async fn ml_kmeans(
+    pub async fn ml_kmeans(
         &self,
         Parameters(request): Parameters<KMeansRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -81,7 +81,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Run DBSCAN (Density-Based Spatial Clustering of Applications with Noise) clustering. Finds clusters of arbitrary shape and identifies outliers as noise points. Does not require specifying number of clusters."
     )]
-    async fn ml_dbscan(
+    pub async fn ml_dbscan(
         &self,
         Parameters(request): Parameters<DBSCANRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -121,7 +121,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Run Hierarchical clustering using agglomerative approach. Supports Ward, single, complete, and average linkage methods. Returns cluster assignments and dendrogram information."
     )]
-    async fn ml_hierarchical(
+    pub async fn ml_hierarchical(
         &self,
         Parameters(request): Parameters<HierarchicalRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -179,7 +179,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Cut a hierarchical clustering dendrogram into groups (cutree). First performs hierarchical clustering, then cuts the resulting tree at a specified number of clusters (k) or height. Returns cluster assignments for each observation. Useful for extracting cluster memberships from a dendrogram."
     )]
-    async fn ml_cutree(
+    pub async fn ml_cutree(
         &self,
         Parameters(request): Parameters<CutreeRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -264,7 +264,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Run Principal Component Analysis (PCA) for dimensionality reduction. Returns principal components, explained variance ratios, and loadings. Useful for understanding data structure and reducing feature dimensionality."
     )]
-    async fn ml_pca(
+    pub async fn ml_pca(
         &self,
         Parameters(request): Parameters<PCARequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -304,7 +304,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Run t-SNE (t-distributed Stochastic Neighbor Embedding) for visualizing high-dimensional data in 2D or 3D. Preserves local structure while revealing clusters. Good for exploratory visualization."
     )]
-    async fn ml_tsne(
+    pub async fn ml_tsne(
         &self,
         Parameters(request): Parameters<TsneRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -355,7 +355,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Classical Multidimensional Scaling (cmdscale) for embedding distances into Euclidean space. Takes a data matrix and computes a low-dimensional configuration that preserves pairwise Euclidean distances. Returns point coordinates and goodness-of-fit measures. Useful for visualizing similarity/dissimilarity data."
     )]
-    async fn ml_cmdscale(
+    pub async fn ml_cmdscale(
         &self,
         Parameters(request): Parameters<CmdscaleRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -429,7 +429,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Run Random Forest regression. Ensemble of decision trees for robust predictions. Returns feature importances, out-of-bag score, and predictions."
     )]
-    async fn ml_random_forest(
+    pub async fn ml_random_forest(
         &self,
         Parameters(request): Parameters<RandomForestRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -516,7 +516,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Run Linear Support Vector Machine (SVM) for binary classification. Uses SMO algorithm. Returns weights, bias, support vector count, and predictions."
     )]
-    async fn ml_svm(
+    pub async fn ml_svm(
         &self,
         Parameters(request): Parameters<SvmRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -597,7 +597,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Projection Pursuit Regression (PPR) - a dimension reduction regression that fits models of the form y = sum(f_k(alpha_k' * x)). Finds optimal projection directions and ridge functions. Returns projection directions, coefficients, fitted values, and goodness-of-fit metrics. Useful for non-linear regression when relationships are complex."
     )]
-    async fn ml_ppr(
+    pub async fn ml_ppr(
         &self,
         Parameters(request): Parameters<PprRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -707,7 +707,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Causal Forest estimates heterogeneous treatment effects (CATE) using random forests adapted for causal inference. Key features: honest splitting (separate data for tree structure vs estimation), local centering, bootstrap variance estimation. Returns: CATE estimates for each unit, ATE with confidence interval, variable importance showing which covariates drive treatment effect heterogeneity. Based on R package 'grf'."
     )]
-    async fn ml_causal_forest(
+    pub async fn ml_causal_forest(
         &self,
         Parameters(request): Parameters<CausalForestRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -783,7 +783,7 @@ impl AnalyticsServer {
     #[tool(
         description = "BART Causal estimates heterogeneous treatment effects using Bayesian Additive Regression Trees methodology. Fits separate response surfaces for treated and control groups, then computes CATE = E[Y|T=1,X] - E[Y|T=0,X]. Uses bootstrap for uncertainty quantification. Returns: ATE with confidence interval, CATE estimates for each unit, variable importance for treatment effect heterogeneity. Simplified frequentist approximation to R's bartCause package."
     )]
-    async fn ml_bart_causal(
+    pub async fn ml_bart_causal(
         &self,
         Parameters(request): Parameters<BartCausalRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -861,7 +861,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Test for treatment effect heterogeneity using Fisherian randomization inference. Tests H0: all individual treatment effects are equal (tau_i = tau). Returns permutation p-value, estimated individual effects, ATE, and optionally decomposes heterogeneity into systematic (explained by covariates) and idiosyncratic components. Based on R package 'hettx' by Ding, Feller & Miratrix."
     )]
-    async fn heterogeneity_test(
+    pub async fn heterogeneity_test(
         &self,
         Parameters(request): Parameters<HetTxRequest>,
     ) -> Result<CallToolResult, McpError> {

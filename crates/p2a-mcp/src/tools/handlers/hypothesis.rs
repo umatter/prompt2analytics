@@ -30,7 +30,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Run Bartlett's test for homogeneity of variances across groups. Tests H₀: all group variances are equal. Suitable for checking the equal variance assumption before ANOVA. Note: Sensitive to non-normality; use Levene's test if data may be non-normal. Returns: K-squared statistic, df, p-value, and group-wise variance estimates."
     )]
-    async fn hypothesis_bartlett_test(
+    pub async fn hypothesis_bartlett_test(
         &self,
         Parameters(request): Parameters<BartlettTestRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -102,7 +102,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Run Pearson's chi-squared goodness-of-fit test to check if observed category frequencies match expected probabilities. Tests H₀: observed frequencies follow the expected distribution. Returns chi-squared statistic, p-value, degrees of freedom, and residuals. Use for categorical data to test if a distribution is uniform or matches specific probabilities."
     )]
-    async fn hypothesis_chisq_gof(
+    pub async fn hypothesis_chisq_gof(
         &self,
         Parameters(request): Parameters<ChiSquaredGofRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -149,7 +149,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Run Pearson's chi-squared test of independence to check if two categorical variables are independent. Creates a contingency table from two columns and tests H₀: row and column variables are independent. For 2×2 tables, Yates' continuity correction is applied by default. Returns chi-squared statistic, p-value, degrees of freedom, expected values, and residuals."
     )]
-    async fn hypothesis_chisq_independence(
+    pub async fn hypothesis_chisq_independence(
         &self,
         Parameters(request): Parameters<ChiSquaredIndependenceRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -198,7 +198,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Test for association between paired samples using Pearson, Spearman, or Kendall correlation. Returns correlation coefficient, test statistic, p-value, and confidence interval (for Pearson). Pearson measures linear association; Spearman and Kendall measure monotonic association and are robust to outliers."
     )]
-    async fn hypothesis_cor_test(
+    pub async fn hypothesis_cor_test(
         &self,
         Parameters(request): Parameters<CorTestRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -305,7 +305,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Run Fisher's exact test for a 2×2 contingency table. Tests independence between two binary categorical variables using exact probability calculations (hypergeometric distribution). More accurate than chi-squared test for small samples. Returns p-value, odds ratio, and optionally a confidence interval. Use when expected cell counts are small (<5) or when exact p-values are needed."
     )]
-    async fn hypothesis_fisher_exact(
+    pub async fn hypothesis_fisher_exact(
         &self,
         Parameters(request): Parameters<FisherExactRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -384,7 +384,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Run Friedman rank sum test for unreplicated blocked data. Non-parametric alternative to one-way repeated measures ANOVA. Tests whether treatments have equal effects across blocks. Returns Q statistic, degrees of freedom, p-value, and rank statistics per treatment."
     )]
-    async fn hypothesis_friedman(
+    pub async fn hypothesis_friedman(
         &self,
         Parameters(request): Parameters<FriedmanTestRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -460,7 +460,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Run Kruskal-Wallis rank sum test - the non-parametric alternative to one-way ANOVA. Tests whether samples from two or more groups have the same median. Uses chi-squared approximation with tie correction. Returns H statistic, degrees of freedom, p-value, and rank statistics per group."
     )]
-    async fn hypothesis_kruskal_wallis(
+    pub async fn hypothesis_kruskal_wallis(
         &self,
         Parameters(request): Parameters<KruskalWallisRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -537,7 +537,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Run the Kolmogorov-Smirnov test. Two-sample test: Tests if two samples come from the same distribution. One-sample test: Tests if a sample comes from a specified theoretical distribution (normal, uniform, exponential). Returns D statistic (maximum absolute difference between CDFs) and p-value. A small p-value suggests the distributions differ."
     )]
-    async fn hypothesis_ks_test(
+    pub async fn hypothesis_ks_test(
         &self,
         Parameters(request): Parameters<KsTestRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -678,7 +678,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Run Cochran-Mantel-Haenszel test for conditional independence in stratified 2×2 tables. Tests whether two binary variables are associated while controlling for a third (stratum) variable. Returns CMH chi-squared statistic, p-value, common odds ratio estimate with confidence interval, and per-stratum statistics."
     )]
-    async fn hypothesis_mantelhaen(
+    pub async fn hypothesis_mantelhaen(
         &self,
         Parameters(request): Parameters<MantelhaenTestRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -785,7 +785,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Run McNemar's chi-squared test for paired nominal data. Tests symmetry in a 2x2 contingency table. Commonly used for comparing two classifiers or before/after studies. Only requires the discordant cells (b and c)."
     )]
-    async fn hypothesis_mcnemar(
+    pub async fn hypothesis_mcnemar(
         &self,
         Parameters(request): Parameters<McnemarTestRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -841,7 +841,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Run Mood's two-sample test for comparing scale parameters between two independent samples. Tests H₀: scale ratio = 1 (equal scales) using squared rank deviations from the mean rank. Non-parametric alternative to F-test for variance comparison. Handles ties using Mielke (1967) variance correction. Returns Z-statistic, p-value, and sample sizes."
     )]
-    async fn hypothesis_mood_test(
+    pub async fn hypothesis_mood_test(
         &self,
         Parameters(request): Parameters<MoodTestRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -952,7 +952,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Run Welch's one-way ANOVA test - compares means of multiple groups without assuming equal variances. This is more robust than standard ANOVA when variances differ. Returns F statistic, numerator and denominator degrees of freedom, p-value, and group statistics."
     )]
-    async fn hypothesis_oneway(
+    pub async fn hypothesis_oneway(
         &self,
         Parameters(request): Parameters<OnewayTestRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -1037,7 +1037,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Run pairwise t-tests between all group levels with p-value adjustment for multiple comparisons. Post-hoc analysis after ANOVA. Options: pool_sd=true uses pooled variance (Student's), false uses Welch's (default). Adjustment methods: 'holm' (default, FWER), 'bonferroni', 'hochberg', 'hommel', 'BH' (FDR), 'BY', 'none'. Returns matrix of adjusted p-values for all pairs."
     )]
-    async fn hypothesis_pairwise_t_test(
+    pub async fn hypothesis_pairwise_t_test(
         &self,
         Parameters(request): Parameters<PairwiseTTestRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -1137,7 +1137,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Run pairwise Wilcoxon rank sum tests between all group levels with p-value adjustment. Non-parametric post-hoc analysis after Kruskal-Wallis test. Does not assume normality. Adjustment methods: 'holm' (default, FWER), 'bonferroni', 'hochberg', 'hommel', 'BH' (FDR), 'BY', 'none'. Returns matrix of adjusted p-values for all pairs."
     )]
-    async fn hypothesis_pairwise_wilcox(
+    pub async fn hypothesis_pairwise_wilcox(
         &self,
         Parameters(request): Parameters<PairwiseWilcoxRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -1234,7 +1234,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Run exact Poisson test for rate parameters. One-sample test: tests whether the rate equals a hypothesized value. Two-sample test: compares the ratio of two rates. Returns test statistic, p-value, rate estimate (or ratio), and confidence interval."
     )]
-    async fn hypothesis_poisson(
+    pub async fn hypothesis_poisson(
         &self,
         Parameters(request): Parameters<PoissonTestRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -1334,7 +1334,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Test for trend in proportions across ordered groups (Cochran-Armitage test). Tests whether proportions increase or decrease linearly with group scores. Commonly used in dose-response studies. Returns chi-squared statistic with 1 df and p-value."
     )]
-    async fn hypothesis_prop_trend_test(
+    pub async fn hypothesis_prop_trend_test(
         &self,
         Parameters(request): Parameters<PropTrendTestRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -1430,7 +1430,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Run Quade test for unreplicated blocked data. Similar to Friedman test but uses weighted rankings based on block ranges, making it more powerful when block effects vary. Returns F statistic, degrees of freedom, p-value, and treatment statistics. Requires complete blocks (one observation per treatment per block)."
     )]
-    async fn hypothesis_quade(
+    pub async fn hypothesis_quade(
         &self,
         Parameters(request): Parameters<QuadeTestRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -1508,7 +1508,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Run the Shapiro-Wilk test for normality. Tests the null hypothesis that a sample came from a normally distributed population. Returns W statistic (values close to 1 indicate normality) and p-value. Sample size must be between 3 and 5000. A small p-value (e.g., < 0.05) suggests data is not normally distributed."
     )]
-    async fn hypothesis_shapiro_wilk(
+    pub async fn hypothesis_shapiro_wilk(
         &self,
         Parameters(request): Parameters<ShapiroWilkRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -1556,7 +1556,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Run Student's t-test for comparing means. Supports: (1) One-sample t-test: compare sample mean to hypothesized value, (2) Two-sample t-test: compare means between two groups (Welch's by default), (3) Paired t-test: compare matched pairs. Returns t-statistic, p-value, confidence interval, and effect estimate."
     )]
-    async fn hypothesis_t_test(
+    pub async fn hypothesis_t_test(
         &self,
         Parameters(request): Parameters<TTestRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -1651,7 +1651,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Run Wilcoxon non-parametric test for location. Supports: (1) One-sample signed rank test: test if median differs from hypothesized value, (2) Two-sample rank sum test (Mann-Whitney U): compare distributions between two groups, (3) Paired signed rank test: compare matched pairs. Does not assume normality. Returns W/V statistic, p-value, and optionally confidence interval and location estimate."
     )]
-    async fn hypothesis_wilcoxon(
+    pub async fn hypothesis_wilcoxon(
         &self,
         Parameters(request): Parameters<WilcoxonTestRequest>,
     ) -> Result<CallToolResult, McpError> {
