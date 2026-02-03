@@ -528,3 +528,133 @@ pub struct SmoothSplineRequest {
     )]
     pub xout: Option<Vec<f64>>,
 }
+
+/// Request for glmnet (elastic net, lasso, ridge) regression.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct GlmnetRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Dependent variable (Y) column name
+    #[schemars(description = "Name of the dependent variable (Y) column.")]
+    pub y: String,
+
+    /// Independent variables (X) column names
+    #[schemars(description = "Names of the independent variable (X) columns.")]
+    pub x: Vec<String>,
+
+    /// Elastic net mixing parameter (0=ridge, 1=lasso)
+    #[schemars(
+        description = "Elastic net mixing parameter: 0 for pure ridge, 1 for lasso (default), between 0-1 for elastic net."
+    )]
+    pub alpha: Option<f64>,
+
+    /// Sequence of lambda values
+    #[schemars(
+        description = "Optional sequence of lambda (regularization) values. If omitted, automatically generates a path."
+    )]
+    pub lambda: Option<Vec<f64>>,
+
+    /// Number of lambda values in path
+    #[schemars(description = "Number of lambda values in the path. Default is 100.")]
+    pub nlambda: Option<usize>,
+
+    /// Whether to standardize predictors
+    #[schemars(description = "Whether to standardize predictors before fitting. Default is true.")]
+    pub standardize: Option<bool>,
+
+    /// Model family: gaussian (linear) or binomial (logistic)
+    #[schemars(
+        description = "Model family: 'gaussian' (default) for linear regression, 'binomial' for logistic regression."
+    )]
+    pub family: Option<String>,
+}
+
+/// Request for cross-validated glmnet.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CvGlmnetRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Dependent variable (Y) column name
+    #[schemars(description = "Name of the dependent variable (Y) column.")]
+    pub y: String,
+
+    /// Independent variables (X) column names
+    #[schemars(description = "Names of the independent variable (X) columns.")]
+    pub x: Vec<String>,
+
+    /// Elastic net mixing parameter (0=ridge, 1=lasso)
+    #[schemars(
+        description = "Elastic net mixing parameter: 0 for pure ridge, 1 for lasso (default), between 0-1 for elastic net."
+    )]
+    pub alpha: Option<f64>,
+
+    /// Number of cross-validation folds
+    #[schemars(description = "Number of cross-validation folds. Default is 10.")]
+    pub nfolds: Option<usize>,
+
+    /// Random seed for reproducibility
+    #[schemars(description = "Random seed for fold assignment reproducibility.")]
+    pub seed: Option<u64>,
+
+    /// Number of lambda values in path
+    #[schemars(description = "Number of lambda values in the path. Default is 100.")]
+    pub nlambda: Option<usize>,
+
+    /// Whether to standardize predictors
+    #[schemars(description = "Whether to standardize predictors before fitting. Default is true.")]
+    pub standardize: Option<bool>,
+
+    /// Model family: gaussian (linear) or binomial (logistic)
+    #[schemars(
+        description = "Model family: 'gaussian' (default) for linear regression, 'binomial' for logistic regression."
+    )]
+    pub family: Option<String>,
+}
+
+/// Request for ridge regression (shortcut for glmnet with alpha=0).
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct RidgeRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Dependent variable (Y) column name
+    #[schemars(description = "Name of the dependent variable (Y) column.")]
+    pub y: String,
+
+    /// Independent variables (X) column names
+    #[schemars(description = "Names of the independent variable (X) columns.")]
+    pub x: Vec<String>,
+
+    /// Sequence of lambda values
+    #[schemars(
+        description = "Optional sequence of lambda (regularization) values. If omitted, automatically generates a path."
+    )]
+    pub lambda: Option<Vec<f64>>,
+}
+
+/// Request for lasso regression (shortcut for glmnet with alpha=1).
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct LassoRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of a previously loaded dataset.")]
+    pub dataset: String,
+
+    /// Dependent variable (Y) column name
+    #[schemars(description = "Name of the dependent variable (Y) column.")]
+    pub y: String,
+
+    /// Independent variables (X) column names
+    #[schemars(description = "Names of the independent variable (X) columns.")]
+    pub x: Vec<String>,
+
+    /// Sequence of lambda values
+    #[schemars(
+        description = "Optional sequence of lambda (regularization) values. If omitted, automatically generates a path."
+    )]
+    pub lambda: Option<Vec<f64>>,
+}

@@ -58,7 +58,10 @@
 //!
 //! | Method | Function | Description |
 //! |--------|----------|-------------|
+//! | **CART** | [`cart`] | Decision trees (classification/regression) |
 //! | **Random Forest** | [`random_forest`] | CART-based ensemble |
+//! | **Gradient Boosting** | [`gbm`] | Gradient boosting machine (GBM) |
+//! | **AdaBoost** | [`adaboost`] | Adaptive boosting (M1, R2, SAMME) |
 //! | **Linear SVM** | [`linear_svm`] | Support vector machine (SMO) |
 //! | **PPR** | [`ppr`] | Projection pursuit regression |
 //!
@@ -119,13 +122,16 @@
 //! | `grf` | [`causal_forest`] |
 //! | `BART` | [`bart_causal`] |
 
+mod adaboost;
 mod advanced_clustering_mod;
 mod bart_causal;
+mod cart;
 mod causal_forest;
 mod cluster_optimized;
 mod cluster_validation;
 mod clustering;
 pub mod dual_tree;
+mod gbm;
 pub mod kdtree;
 pub mod ppr;
 mod reduction;
@@ -242,3 +248,14 @@ pub use reduction::{
 };
 pub use svm::{SvmResult, linear_svm, svm_predict};
 pub use trees::{RandomForestResult, random_forest};
+pub use gbm::{
+    GbmConfig, GbmFamily, GbmResult, gbm, gbm_predict, run_gbm, run_gbm_default,
+};
+pub use cart::{
+    CartConfig, CartMethod, CartNode, CartResult, CartSplit, CpTableRow,
+    cart, cart_predict, cart_prune, run_cart, run_cart_default,
+};
+pub use adaboost::{
+    AdaBoostConfig, AdaBoostLoss, AdaBoostResult, AdaBoostType,
+    adaboost, adaboost_predict, adaboost_predict_class, run_adaboost, run_adaboost_default,
+};

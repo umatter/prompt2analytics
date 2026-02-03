@@ -27,17 +27,18 @@ use rmcp::{
 use crate::server::AnalyticsServer;
 use crate::tools::common::extract_column_f64;
 use crate::tools::requests::regression::{
-    BgTestRequest, BootstrapCovRequest, DiagnosticsRequest, DriscollKraayRequest, GlsRequest,
-    HacRequest, HarveyCollierRequest, LineRequest, LoessRequest, NlsRequest, OlsClusteredRequest,
-    OlsRequest, QuantRegRequest, ResetTestRequest, SmoothSplineRequest, StepRequest, SupsmuRequest,
-    WaldTestRequest,
+    BgTestRequest, BootstrapCovRequest, CvGlmnetRequest, DiagnosticsRequest, DriscollKraayRequest,
+    GlmnetRequest, GlsRequest, HacRequest, HarveyCollierRequest, LassoRequest, LineRequest,
+    LoessRequest, NlsRequest, OlsClusteredRequest, OlsRequest, QuantRegRequest, ResetTestRequest,
+    RidgeRequest, SmoothSplineRequest, StepRequest, SupsmuRequest, WaldTestRequest,
 };
 
 use p2a_core::regression::{
-    bg_test, gls, harvey_collier_test, quantreg_multi, reset_test, run_diagnostics, run_line,
-    run_loess, run_ols, run_ols_clustered, run_quantreg, run_step, run_vcov_bootstrap,
-    run_vcov_driscoll_kraay, run_vcov_hac, smooth_spline, smooth_spline_predict, supsmu, wald_test,
-    BgTestType, CorrelationStructure, CovarianceType, ResetType, SmoothSplineConfig,
+    bg_test, gls, harvey_collier_test, quantreg_multi, reset_test, run_cv_glmnet, run_diagnostics,
+    run_glmnet, run_lasso, run_line, run_loess, run_ols, run_ols_clustered, run_quantreg,
+    run_ridge, run_step, run_vcov_bootstrap, run_vcov_driscoll_kraay, run_vcov_hac, smooth_spline,
+    smooth_spline_predict, supsmu, wald_test, BgTestType, CorrelationStructure, CovarianceType,
+    GlmnetConfig, GlmnetFamily, ResetType, SmoothSplineConfig,
 };
 
 #[tool_router(router = regression_router, vis = "pub")]
@@ -1257,6 +1258,167 @@ impl AnalyticsServer {
             }
             Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
                 "Smooth spline failed: {}",
+                e
+            ))])),
+        }
+    }
+
+    /// Run elastic net/lasso/ridge regression (glmnet).
+    #[tool(
+        description = "Run regularized regression with elastic net penalty (glmnet). Combines L1 (lasso) and L2 (ridge) penalties. Set alpha=1 for lasso, alpha=0 for ridge, or 0<alpha<1 for elastic net. Returns coefficient path along lambda sequence."
+    )]
+    async fn regression_glmnet(
+        &self,
+        Parameters(request): Parameters<GlmnetRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
+
+        let family = match request.family.as_deref() {
+            Some("binomial") => GlmnetFamily::Binomial,
+            _ => GlmnetFamily::Gaussian,
+        };
+
+        let config = GlmnetConfig {
+            alpha: request.alpha.unwrap_or(1.0),
+            lambda: request.lambda,
+            nlambda: request.nlambda.unwrap_or(100),
+            standardize: request.standardize.unwrap_or(true),
+            family,
+            ..Default::default()
+        };
+
+        match run_glmnet(dataset, &request.y, &x_refs, &config) {
+            Ok(result) => Ok(CallToolResult::success(vec![Content::text(
+                result.to_string(),
+            )])),
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
+                "Glmnet failed: {}",
+                e
+            ))])),
+        }
+    }
+
+    /// Run cross-validated glmnet for optimal lambda selection.
+    #[tool(
+        description = "Run cross-validated elastic net/lasso/ridge regression to select optimal lambda. Returns lambda.min (minimum CV error) and lambda.1se (most regularized within 1 SE of minimum)."
+    )]
+    async fn regression_cv_glmnet(
+        &self,
+        Parameters(request): Parameters<CvGlmnetRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
+
+        let family = match request.family.as_deref() {
+            Some("binomial") => GlmnetFamily::Binomial,
+            _ => GlmnetFamily::Gaussian,
+        };
+
+        let config = GlmnetConfig {
+            alpha: request.alpha.unwrap_or(1.0),
+            nlambda: request.nlambda.unwrap_or(100),
+            standardize: request.standardize.unwrap_or(true),
+            family,
+            ..Default::default()
+        };
+
+        let nfolds = request.nfolds.unwrap_or(10);
+
+        match run_cv_glmnet(dataset, &request.y, &x_refs, &config, nfolds, request.seed) {
+            Ok(result) => Ok(CallToolResult::success(vec![Content::text(
+                result.to_string(),
+            )])),
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
+                "CV Glmnet failed: {}",
+                e
+            ))])),
+        }
+    }
+
+    /// Run ridge regression (L2 penalty).
+    #[tool(
+        description = "Run ridge regression (L2-penalized linear regression). Shortcut for glmnet with alpha=0. Useful when predictors are highly correlated."
+    )]
+    async fn regression_ridge(
+        &self,
+        Parameters(request): Parameters<RidgeRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
+
+        match run_ridge(dataset, &request.y, &x_refs, request.lambda) {
+            Ok(result) => Ok(CallToolResult::success(vec![Content::text(
+                result.to_string(),
+            )])),
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
+                "Ridge regression failed: {}",
+                e
+            ))])),
+        }
+    }
+
+    /// Run lasso regression (L1 penalty).
+    #[tool(
+        description = "Run lasso regression (L1-penalized linear regression). Shortcut for glmnet with alpha=1. Performs automatic feature selection by shrinking some coefficients to zero."
+    )]
+    async fn regression_lasso(
+        &self,
+        Parameters(request): Parameters<LassoRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
+
+        match run_lasso(dataset, &request.y, &x_refs, request.lambda) {
+            Ok(result) => Ok(CallToolResult::success(vec![Content::text(
+                result.to_string(),
+            )])),
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
+                "Lasso regression failed: {}",
                 e
             ))])),
         }

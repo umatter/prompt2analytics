@@ -999,13 +999,29 @@ pub use forecasting::{
     window,
 };
 pub use ml::{
+    // AdaBoost
+    AdaBoostConfig,
+    AdaBoostLoss,
+    AdaBoostResult,
+    AdaBoostType,
     BartCausalConfig,
     BartCausalResult,
+    // CART Decision Trees
+    CartConfig,
+    CartMethod,
+    CartNode,
+    CartResult,
+    CartSplit,
     CausalForestConfig,
     CausalForestResult,
     CmdscaleResult,
+    CpTableRow,
     CutreeResult,
     DBSCANResult,
+    // Gradient Boosting Machine
+    GbmConfig,
+    GbmFamily,
+    GbmResult,
     HierarchicalResult,
     KMeansResult,
     Linkage,
@@ -1016,6 +1032,9 @@ pub use ml::{
     SmoothingMethod,
     SvmResult,
     TsneResult,
+    adaboost,
+    adaboost_predict,
+    adaboost_predict_class,
     average_treatment_effect,
     // BART for Causal Inference (bcf, bartCause)
     bart_causal,
@@ -1023,6 +1042,9 @@ pub use ml::{
     bart_causal_predict,
     bart_causal_predict_arrays,
     // Causal Forests (Wager & Athey 2018)
+    cart,
+    cart_predict,
+    cart_prune,
     causal_forest,
     causal_forest_arrays,
     causal_forest_predict,
@@ -1032,6 +1054,8 @@ pub use ml::{
     cutree,
     cutree_multiple_k,
     dbscan,
+    gbm,
+    gbm_predict,
     hierarchical,
     kmeans,
     linear_svm,
@@ -1041,10 +1065,16 @@ pub use ml::{
     // Projection Pursuit Regression
     ppr,
     random_forest,
+    run_adaboost,
+    run_adaboost_default,
     run_bart_causal,
+    run_cart,
+    run_cart_default,
     run_causal_forest,
     run_cmdscale,
     run_cutree,
+    run_gbm,
+    run_gbm_default,
     run_ppr,
     svm_predict,
     tsne,
@@ -1068,6 +1098,12 @@ pub use regression::{
     // E-value sensitivity analysis for unmeasured confounding
     EValueResult,
     EffectType,
+    // Regularized regression (glmnet: elastic net, lasso, ridge)
+    GlmnetCoefficients,
+    GlmnetConfig,
+    GlmnetCvResult,
+    GlmnetFamily,
+    GlmnetResult,
     // GLS (generalized least squares)
     GlsResult,
     HacKernel,
@@ -1190,6 +1226,17 @@ pub use regression::{
     vcov_hac,
     wald_test,
     wald_test_from_ols,
+    // glmnet functions
+    cv_glmnet,
+    glmnet,
+    glmnet_coef,
+    glmnet_predict,
+    lasso,
+    ridge,
+    run_cv_glmnet,
+    run_glmnet,
+    run_lasso,
+    run_ridge,
 };
 pub use reports::{HtmlReport, ReportContent, ReportSection, ReportTable, generate_html_report};
 pub use simulation::{ColumnSpec, Distribution, GenerationError, generate_random_data};
