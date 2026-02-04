@@ -3,10 +3,10 @@
   "source_url": "https://cran.r-project.org/web/views/MachineLearning.html",
   "generated_at": "2026-02-03T00:00:00Z",
   "total_methods": 147,
-  "completed": 38,
+  "completed": 58,
   "in_progress": 0,
   "blocked": 0,
-  "pending": 25,
+  "pending": 5,
   "methods": [
     {
       "rank": 1,
@@ -16,9 +16,11 @@
       "complexity": "Medium",
       "doc_url": "https://glmnet.stanford.edu/reference/glmnet.html",
       "description": "Regularized GLM with elastic net penalty (lasso + ridge). Coordinate descent algorithm with pathwise solution.",
-      "status": "pending",
-      "dependencies": ["ols", "matrix_ops"],
-      "estimated_lines": 500
+      "status": "completed",
+      "completed_at": "2026-02-03T17:00:00Z",
+      "rust_function": "glmnet, run_glmnet",
+      "mcp_tool": "regression_glmnet",
+      "validation": "passed"
     },
     {
       "rank": 2,
@@ -28,9 +30,11 @@
       "complexity": "Complex",
       "doc_url": "https://xgboost.readthedocs.io/en/stable/",
       "description": "Extreme Gradient Boosting with regularization, handling missing values, and parallel computation.",
-      "status": "pending",
-      "dependencies": ["random_forest"],
-      "estimated_lines": 1000
+      "status": "completed",
+      "completed_at": "2026-02-03T17:00:00Z",
+      "rust_function": "xgboost",
+      "mcp_tool": "ml_xgboost",
+      "validation": "pending"
     },
     {
       "rank": 3,
@@ -40,9 +44,11 @@
       "complexity": "Medium",
       "doc_url": "https://cran.r-project.org/web/packages/gbm/gbm.pdf",
       "description": "Gradient Boosting Machine for regression and classification with tree base learners.",
-      "status": "pending",
-      "dependencies": ["random_forest"],
-      "estimated_lines": 600
+      "status": "completed",
+      "completed_at": "2026-02-03T17:00:00Z",
+      "rust_function": "gbm, run_gbm",
+      "mcp_tool": "ml_gbm",
+      "validation": "passed"
     },
     {
       "rank": 4,
@@ -52,9 +58,11 @@
       "complexity": "Complex",
       "doc_url": "https://lightgbm.readthedocs.io/en/latest/",
       "description": "Light Gradient Boosting Machine with histogram-based learning and leaf-wise tree growth.",
-      "status": "pending",
-      "dependencies": ["gbm"],
-      "estimated_lines": 800
+      "status": "completed",
+      "completed_at": "2026-02-03T17:00:00Z",
+      "rust_function": "lightgbm",
+      "mcp_tool": "ml_lightgbm",
+      "validation": "pending"
     },
     {
       "rank": 5,
@@ -64,9 +72,12 @@
       "complexity": "Medium",
       "doc_url": "https://glmnet.stanford.edu/articles/glmnet.html",
       "description": "L1 + L2 penalized regression with alpha parameter controlling mix.",
-      "status": "pending",
-      "dependencies": ["glmnet"],
-      "estimated_lines": 150
+      "status": "completed",
+      "completed_at": "2026-02-03T17:00:00Z",
+      "rust_function": "glmnet (with alpha parameter)",
+      "mcp_tool": "regression_glmnet",
+      "validation": "passed",
+      "notes": "Implemented as part of glmnet"
     },
     {
       "rank": 6,
@@ -76,9 +87,12 @@
       "complexity": "Medium",
       "doc_url": "https://cran.r-project.org/web/packages/lars/lars.pdf",
       "description": "L1-penalized regression with automatic feature selection.",
-      "status": "pending",
-      "dependencies": ["glmnet"],
-      "estimated_lines": 100
+      "status": "completed",
+      "completed_at": "2026-02-03T17:00:00Z",
+      "rust_function": "lasso, run_lasso",
+      "mcp_tool": "regression_lasso",
+      "validation": "passed",
+      "notes": "Implemented as part of glmnet (alpha=1)"
     },
     {
       "rank": 7,
@@ -88,9 +102,12 @@
       "complexity": "Simple",
       "doc_url": "https://www.rdocumentation.org/packages/MASS/topics/lm.ridge",
       "description": "L2-penalized linear regression with closed-form solution.",
-      "status": "pending",
-      "dependencies": ["ols", "matrix_ops"],
-      "estimated_lines": 150
+      "status": "completed",
+      "completed_at": "2026-02-03T17:00:00Z",
+      "rust_function": "ridge, run_ridge",
+      "mcp_tool": "regression_ridge",
+      "validation": "passed",
+      "notes": "Implemented as part of glmnet (alpha=0)"
     },
     {
       "rank": 8,
@@ -100,9 +117,12 @@
       "complexity": "Medium",
       "doc_url": "https://cran.r-project.org/web/packages/rpart/rpart.pdf",
       "description": "CART decision trees with cost-complexity pruning.",
-      "status": "pending",
-      "dependencies": [],
-      "estimated_lines": 400
+      "status": "completed",
+      "completed_at": "2026-02-03T17:30:00Z",
+      "rust_function": "cart, run_cart",
+      "mcp_tool": "ml_cart",
+      "validation": "passed",
+      "notes": "Implemented as cart.rs with full rpart functionality"
     },
     {
       "rank": 9,
@@ -112,9 +132,11 @@
       "complexity": "Medium",
       "doc_url": "https://www.rdocumentation.org/packages/kernlab/topics/ksvm",
       "description": "Support Vector Machines with RBF, polynomial, and sigmoid kernels.",
-      "status": "pending",
-      "dependencies": ["linear_svm"],
-      "estimated_lines": 350
+      "status": "completed",
+      "completed_at": "2026-02-03T17:30:00Z",
+      "rust_function": "kernel_svm",
+      "mcp_tool": "ml_kernel_svm",
+      "validation": "passed"
     },
     {
       "rank": 10,
@@ -124,9 +146,11 @@
       "complexity": "Medium",
       "doc_url": "https://cran.r-project.org/web/packages/adabag/adabag.pdf",
       "description": "Adaptive Boosting for classification with exponential loss.",
-      "status": "pending",
-      "dependencies": ["random_forest"],
-      "estimated_lines": 300
+      "status": "completed",
+      "completed_at": "2026-02-03T17:00:00Z",
+      "rust_function": "adaboost, run_adaboost",
+      "mcp_tool": "ml_adaboost",
+      "validation": "pending"
     },
     {
       "rank": 11,
@@ -136,9 +160,11 @@
       "complexity": "Complex",
       "doc_url": "https://cran.r-project.org/web/packages/mboost/mboost.pdf",
       "description": "Model-based gradient boosting framework for GLMs and additive models.",
-      "status": "pending",
-      "dependencies": ["gbm"],
-      "estimated_lines": 700
+      "status": "completed",
+      "completed_at": "2026-02-03T19:00:00Z",
+      "rust_function": "mboost, run_mboost",
+      "mcp_tool": "ml_mboost",
+      "validation": "passed"
     },
     {
       "rank": 12,
@@ -148,9 +174,11 @@
       "complexity": "Medium",
       "doc_url": "https://cran.r-project.org/web/packages/C50/C50.pdf",
       "description": "C5.0 decision trees and rule-based models with boosting.",
-      "status": "pending",
-      "dependencies": ["rpart"],
-      "estimated_lines": 500
+      "status": "completed",
+      "completed_at": "2026-02-03T19:00:00Z",
+      "rust_function": "c50, run_c50",
+      "mcp_tool": "ml_c50",
+      "validation": "passed"
     },
     {
       "rank": 13,
@@ -160,9 +188,11 @@
       "complexity": "Medium",
       "doc_url": "https://cran.r-project.org/web/packages/Cubist/Cubist.pdf",
       "description": "Rule-based regression with linear models in terminal nodes.",
-      "status": "pending",
-      "dependencies": ["rpart"],
-      "estimated_lines": 400
+      "status": "completed",
+      "completed_at": "2026-02-03T19:00:00Z",
+      "rust_function": "cubist, cubist_predict",
+      "mcp_tool": "ml_cubist",
+      "validation": "passed"
     },
     {
       "rank": 14,
@@ -172,9 +202,11 @@
       "complexity": "Medium",
       "doc_url": "https://cran.r-project.org/web/packages/quantregForest/quantregForest.pdf",
       "description": "Quantile Regression Forests for prediction intervals.",
-      "status": "pending",
-      "dependencies": ["random_forest"],
-      "estimated_lines": 250
+      "status": "completed",
+      "completed_at": "2026-02-03T19:00:00Z",
+      "rust_function": "quantile_rf, predict_quantiles",
+      "mcp_tool": "ml_quantile_rf",
+      "validation": "passed"
     },
     {
       "rank": 15,
@@ -184,9 +216,11 @@
       "complexity": "Medium",
       "doc_url": "https://cran.r-project.org/web/packages/earth/earth.pdf",
       "description": "Multivariate Adaptive Regression Splines with hinge functions.",
-      "status": "pending",
-      "dependencies": ["smooth_spline"],
-      "estimated_lines": 500
+      "status": "completed",
+      "completed_at": "2026-02-03T19:00:00Z",
+      "rust_function": "mars, run_mars",
+      "mcp_tool": "ml_mars",
+      "validation": "passed"
     },
     {
       "rank": 16,
@@ -196,9 +230,11 @@
       "complexity": "Complex",
       "doc_url": "https://cran.r-project.org/web/packages/BART/BART.pdf",
       "description": "Bayesian Additive Regression Trees for prediction.",
-      "status": "pending",
-      "dependencies": ["random_forest"],
-      "estimated_lines": 800
+      "status": "completed",
+      "completed_at": "2026-02-03T19:30:00Z",
+      "rust_function": "bart, bart_arrays",
+      "mcp_tool": "ml_bart",
+      "validation": "passed"
     },
     {
       "rank": 17,
@@ -208,9 +244,11 @@
       "complexity": "Medium",
       "doc_url": "https://cran.r-project.org/web/packages/partykit/partykit.pdf",
       "description": "Conditional inference trees with unbiased variable selection.",
-      "status": "pending",
-      "dependencies": [],
-      "estimated_lines": 450
+      "status": "completed",
+      "completed_at": "2026-02-03T19:00:00Z",
+      "rust_function": "ctree, ctree_predict",
+      "mcp_tool": "ml_ctree",
+      "validation": "passed"
     },
     {
       "rank": 18,
@@ -220,9 +258,11 @@
       "complexity": "Medium",
       "doc_url": "https://cran.r-project.org/web/packages/fastshap/fastshap.pdf",
       "description": "SHapley Additive exPlanations for model interpretation.",
-      "status": "pending",
-      "dependencies": ["random_forest"],
-      "estimated_lines": 600
+      "status": "completed",
+      "completed_at": "2026-02-03T19:00:00Z",
+      "rust_function": "shap_values_model, shap_tree_ensemble",
+      "mcp_tool": "ml_shap_values",
+      "validation": "passed"
     },
     {
       "rank": 19,
@@ -232,9 +272,11 @@
       "complexity": "Simple",
       "doc_url": "https://cran.r-project.org/web/packages/pdp/pdp.pdf",
       "description": "Partial Dependence Plots showing marginal effect of features.",
-      "status": "pending",
-      "dependencies": ["random_forest"],
-      "estimated_lines": 200
+      "status": "completed",
+      "completed_at": "2026-02-03T19:00:00Z",
+      "rust_function": "partial_dependence, partial_dependence_2d",
+      "mcp_tool": "ml_partial_dependence",
+      "validation": "passed"
     },
     {
       "rank": 20,
@@ -244,9 +286,11 @@
       "complexity": "Simple",
       "doc_url": "https://cran.r-project.org/web/packages/ICEbox/ICEbox.pdf",
       "description": "Individual Conditional Expectation curves for local interpretation.",
-      "status": "pending",
-      "dependencies": ["partial_dependence"],
-      "estimated_lines": 150
+      "status": "completed",
+      "completed_at": "2026-02-03T19:30:00Z",
+      "rust_function": "compute_ice_curves, ice_curves_rf",
+      "mcp_tool": "ml_ice_curves",
+      "validation": "passed"
     },
     {
       "rank": 21,

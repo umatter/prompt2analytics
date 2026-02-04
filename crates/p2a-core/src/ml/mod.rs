@@ -58,6 +58,7 @@
 //!
 //! | Method | Function | Description |
 //! |--------|----------|-------------|
+//! | **BART** | [`bart`] | Bayesian Additive Regression Trees (prediction) |
 //! | **CART** | [`cart`] | Decision trees (classification/regression) |
 //! | **Random Forest** | [`random_forest`] | CART-based ensemble |
 //! | **Gradient Boosting** | [`gbm`] | Gradient boosting machine (GBM) |
@@ -120,23 +121,31 @@
 //! | `flexmix` | [`flexmix`] |
 //! | `pvclust` | [`pvclust`] |
 //! | `grf` | [`causal_forest`] |
-//! | `BART` | [`bart_causal`] |
+//! | `BART` | [`bart`], [`bart_causal`] |
 
 mod adaboost;
 mod advanced_clustering_mod;
+mod bart;
 mod bart_causal;
+mod c50;
 mod cart;
 mod causal_forest;
 mod cluster_optimized;
 mod cluster_validation;
 mod clustering;
+mod ctree;
+mod cubist;
 pub mod dual_tree;
 mod gbm;
+mod ice;
 pub mod kdtree;
+mod mboost;
+mod pdp;
 pub mod ppr;
 mod reduction;
+mod shap;
 mod svm;
-mod trees;
+pub mod trees;
 
 pub use advanced_clustering_mod::{
     AffinityPropagationResult,
@@ -215,6 +224,9 @@ pub use advanced_clustering_mod::{
     spectral_clustering,
     trimmed_kmeans,
 };
+pub use bart::{
+    BartConfig, BartResult, bart, bart_arrays, run_bart,
+};
 pub use bart_causal::{
     BartCausalConfig, BartCausalResult, bart_causal, bart_causal_arrays, bart_causal_predict,
     bart_causal_predict_arrays, run_bart_causal,
@@ -247,7 +259,14 @@ pub use reduction::{
     pca_inverse_transform, pca_transform, run_cmdscale, tsne,
 };
 pub use svm::{SvmResult, linear_svm, svm_predict};
-pub use trees::{RandomForestResult, random_forest};
+pub use trees::{
+    DecisionTree, RandomForestModel, RandomForestResult, TreeNode, random_forest,
+    random_forest_with_trees,
+};
+pub use shap::{
+    FeaturePerturbation, ShapConfig, ShapResult, ShapSummary, kernel_shap, shap_kernel,
+    shap_summary, shap_tree_ensemble, shap_values_model, shap_values_random_forest,
+};
 pub use gbm::{
     GbmConfig, GbmFamily, GbmResult, gbm, gbm_predict, run_gbm, run_gbm_default,
 };
@@ -259,3 +278,26 @@ pub use adaboost::{
     AdaBoostConfig, AdaBoostLoss, AdaBoostResult, AdaBoostType,
     adaboost, adaboost_predict, adaboost_predict_class, run_adaboost, run_adaboost_default,
 };
+pub use ctree::{
+    CtreeConfig, CtreeNode, CtreeResult, CtreeSplit,
+    ctree, ctree_predict, ctree_predict_proba, run_ctree, run_ctree_default,
+};
+pub use cubist::{
+    CubistConfig, CubistResult, CubistRule, RuleCondition,
+    cubist, cubist_predict, run_cubist, run_cubist_default,
+};
+pub use c50::{
+    C50Config, C50Node, C50Result, C50Rule, C50RuleCondition, C50Split, ComparisonOp,
+    c50, c50_predict, c50_predict_proba, run_c50, run_c50_default,
+};
+pub use mboost::{
+    CoefficientPathEntry, MboostBaseLearner, MboostConfig, MboostFamily, MboostResult,
+    mboost, mboost_cv, mboost_predict, run_mboost, run_mboost_default,
+};
+// ICE curves (Individual Conditional Expectation) - enhanced version with heterogeneity analysis
+pub use ice::{
+    IceConfig, IceResult, IceSpread,
+    compute_ice_curves, ice_curves_cart, ice_curves_gbm, ice_curves_rf,
+};
+// PDP (Partial Dependence Plot) - original version
+pub use pdp::{ice_curves, partial_dependence};

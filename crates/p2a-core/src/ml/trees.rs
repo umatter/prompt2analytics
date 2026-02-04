@@ -6,7 +6,7 @@ use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 
 /// A node in a decision tree.
 #[derive(Debug, Clone)]
-enum TreeNode {
+pub enum TreeNode {
     /// Internal node with a split
     Split {
         feature_index: usize,
@@ -269,6 +269,11 @@ impl DecisionTree {
             self.accumulate_importances(right, importances, weight * right_weight);
         }
     }
+
+    /// Get a reference to the root node (for TreeSHAP).
+    pub fn root(&self) -> Option<&TreeNode> {
+        self.root.as_ref()
+    }
 }
 
 /// Compute MSE for a set of indices.
@@ -458,6 +463,169 @@ pub fn random_forest(
         n_trees: num_trees,
         oob_score,
         feature_names,
+    })
+}
+
+/// Random Forest model with stored trees (for SHAP computation).
+///
+/// Unlike `RandomForestResult`, this struct retains the individual tree
+/// structures, which is necessary for TreeSHAP computation.
+#[derive(Debug, Clone)]
+pub struct RandomForestModel {
+    /// The individual decision trees
+    pub trees: Vec<DecisionTree>,
+    /// Predictions for training data
+    pub predictions: Vec<f64>,
+    /// Feature importances (mean decrease impurity)
+    pub feature_importances: Vec<f64>,
+    /// Number of trees in the forest
+    pub n_trees: usize,
+    /// Out-of-bag R-squared score (if computed)
+    pub oob_score: Option<f64>,
+    /// Feature names (if provided)
+    pub feature_names: Option<Vec<String>>,
+    /// Base value (mean prediction, used for SHAP)
+    pub base_value: f64,
+}
+
+impl std::fmt::Display for RandomForestModel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "Random Forest Model")?;
+        writeln!(f, "===================")?;
+        writeln!(f, "Number of trees: {}", self.n_trees)?;
+        writeln!(f, "Base value: {:.4}", self.base_value)?;
+
+        if let Some(oob) = self.oob_score {
+            writeln!(f, "Out-of-bag R-squared: {:.4}", oob)?;
+        }
+
+        writeln!(f)?;
+        writeln!(f, "Feature Importances:")?;
+
+        let mut indexed: Vec<(usize, f64)> = self
+            .feature_importances
+            .iter()
+            .enumerate()
+            .map(|(i, &v)| (i, v))
+            .collect();
+        indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        for (i, importance) in indexed.iter().take(10) {
+            let name = match &self.feature_names {
+                Some(names) => names
+                    .get(*i)
+                    .cloned()
+                    .unwrap_or_else(|| format!("Feature_{}", i)),
+                None => format!("Feature_{}", i),
+            };
+            writeln!(f, "  {}: {:.4}", name, importance)?;
+        }
+
+        Ok(())
+    }
+}
+
+/// Run Random Forest regression and retain tree structures.
+///
+/// This function is similar to `random_forest` but returns a `RandomForestModel`
+/// that includes the individual trees, enabling TreeSHAP computation.
+///
+/// # Arguments
+/// * `data` - Input feature matrix (n_samples x n_features)
+/// * `target` - Target values
+/// * `n_trees` - Number of trees (default: 100)
+/// * `max_depth` - Maximum tree depth (default: 10)
+/// * `min_samples_split` - Minimum samples to split (default: 2)
+/// * `max_features` - Max features per split ("sqrt", "log2", "all", or number)
+/// * `seed` - Random seed
+/// * `feature_names` - Optional feature names
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use p2a_core::ml::{random_forest_with_trees, shap_values_model, ShapConfig};
+///
+/// let model = random_forest_with_trees(x.view(), y.view(), Some(50), None, None, None, Some(42), None)?;
+/// let shap = shap_values_model(&model, x.view(), &ShapConfig::default())?;
+/// ```
+pub fn random_forest_with_trees(
+    data: ArrayView2<f64>,
+    target: ArrayView1<f64>,
+    n_trees: Option<usize>,
+    max_depth: Option<usize>,
+    min_samples_split: Option<usize>,
+    max_features: Option<&str>,
+    seed: Option<u64>,
+    feature_names: Option<Vec<String>>,
+) -> Result<RandomForestModel, String> {
+    let n_samples = data.nrows();
+    let n_features = data.ncols();
+
+    if n_samples < 2 {
+        return Err("Need at least 2 samples for Random Forest".to_string());
+    }
+    if n_samples != target.len() {
+        return Err("Data and target must have same number of samples".to_string());
+    }
+
+    let num_trees = n_trees.unwrap_or(100);
+    let tree_max_depth = max_depth.unwrap_or(10);
+    let tree_min_split = min_samples_split.unwrap_or(2);
+
+    let max_feat = parse_max_features(max_features, n_features);
+
+    let mut rng_state = seed.unwrap_or(42);
+
+    let mut trees = Vec::with_capacity(num_trees);
+    let mut oob_predictions: Array2<f64> = Array2::from_elem((n_samples, num_trees), f64::NAN);
+    let mut oob_counts: Array1<usize> = Array1::zeros(n_samples);
+
+    for tree_idx in 0..num_trees {
+        let (bootstrap_indices, oob_indices) = bootstrap_sample(n_samples, &mut rng_state);
+
+        let bootstrap_x = select_rows(&data, &bootstrap_indices);
+        let bootstrap_y = select_elements(&target, &bootstrap_indices);
+
+        let mut tree = DecisionTree::new(tree_max_depth, tree_min_split, Some(max_feat));
+        tree.fit(bootstrap_x.view(), bootstrap_y.view(), None, &mut rng_state);
+
+        for &oob_idx in &oob_indices {
+            let pred = tree.predict_one(&data.row(oob_idx));
+            oob_predictions[[oob_idx, tree_idx]] = pred;
+            oob_counts[oob_idx] += 1;
+        }
+
+        trees.push(tree);
+    }
+
+    // Aggregate predictions
+    let mut predictions = Vec::with_capacity(n_samples);
+    for i in 0..n_samples {
+        let sum: f64 = trees.iter().map(|t| t.predict_one(&data.row(i))).sum();
+        predictions.push(sum / num_trees as f64);
+    }
+
+    // Compute base value (mean prediction)
+    let base_value = predictions.iter().sum::<f64>() / predictions.len() as f64;
+
+    // Compute OOB score
+    let oob_score = compute_oob_score(&oob_predictions.view(), &oob_counts.view(), &target);
+
+    // Aggregate feature importances
+    let mut importances = Array1::zeros(n_features);
+    for tree in &trees {
+        importances = importances + tree.feature_importances();
+    }
+    importances /= num_trees as f64;
+
+    Ok(RandomForestModel {
+        trees,
+        predictions,
+        feature_importances: importances.to_vec(),
+        n_trees: num_trees,
+        oob_score,
+        feature_names,
+        base_value,
     })
 }
 
