@@ -167,6 +167,73 @@ pub type PlatformStorage = web::WebStorage;
 ))]
 pub type PlatformStorage = native::NativeStorage;
 
+// Fallback for builds without platform features (e.g., cargo check)
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    not(feature = "desktop"),
+    not(feature = "mobile")
+))]
+pub type PlatformStorage = StubStorage;
+
+// Stub storage for non-platform builds
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    not(feature = "desktop"),
+    not(feature = "mobile")
+))]
+pub struct StubStorage;
+
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    not(feature = "desktop"),
+    not(feature = "mobile")
+))]
+impl StubStorage {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    not(feature = "desktop"),
+    not(feature = "mobile")
+))]
+impl Default for StubStorage {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    not(feature = "desktop"),
+    not(feature = "mobile")
+))]
+impl StorageBackend for StubStorage {
+    fn get<T: DeserializeOwned>(&self, _key: &str) -> Result<T, StorageError> {
+        Err(StorageError(
+            "Storage not available without platform features".to_string(),
+        ))
+    }
+
+    fn set<T: Serialize>(&self, _key: &str, _value: &T) -> Result<(), StorageError> {
+        Err(StorageError(
+            "Storage not available without platform features".to_string(),
+        ))
+    }
+
+    fn remove(&self, _key: &str) -> Result<(), StorageError> {
+        Err(StorageError(
+            "Storage not available without platform features".to_string(),
+        ))
+    }
+
+    fn contains_key(&self, _key: &str) -> bool {
+        false
+    }
+}
+
 /// Create a new platform-appropriate storage backend
 pub fn create_storage() -> PlatformStorage {
     PlatformStorage::new()

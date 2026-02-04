@@ -4,26 +4,24 @@
 
 \section{Conclusion} \label{sec:conclusion}
 
-This paper has described chat-first data analytics, an application of established
+This paper has described chat-first data analytics, an application of
 tool-augmented language model techniques to statistical computation. The approach
 combines natural language interfaces with pre-implemented, verified statistical
-methods. The key insight---that language models excel at interpreting user intent
-and selecting appropriate methods, but should not be trusted with numerical
-computation---builds on prior work in tool-augmented LLMs \citep{Schick+etal:2023}. By separating interpretation from execution,
-chat-first systems can provide the accessibility of conversational interfaces
-while maintaining the reliability that scientific work demands.
+methods. Language models are good at interpreting user intent and selecting
+appropriate methods, but they should not be trusted with numerical
+computation \citep{Schick+etal:2023}. Separating interpretation from execution
+allows chat-first systems to provide accessible conversational interfaces
+while maintaining the reliability that scientific work requires.
 
-\pkg{prompt2analytics} demonstrates this approach through a foundational
-econometrics library implemented in pure \proglang{Rust}, exposed through the
-Model Context Protocol for integration with language models. The software makes
-several contributions:
+\pkg{prompt2analytics} demonstrates this approach through an econometrics
+library in pure \proglang{Rust}, exposed through the Model Context Protocol
+for integration with language models. The software makes several contributions:
 
 \begin{enumerate}
-  \item \textbf{A foundational econometrics library for \proglang{Rust}.} The
-    \pkg{p2a-core} library provides core methods across regression analysis, panel
+  \item \textbf{An econometrics library for \proglang{Rust}.} The
+    \pkg{p2a-core} library provides methods for regression analysis, panel
     data econometrics, instrumental variables, causal inference, discrete choice,
-    and time series analysis---filling a gap in the \proglang{Rust} ecosystem
-    for applied econometrics.
+    and time series analysis, filling a gap in the \proglang{Rust} ecosystem.
 
   \item \textbf{Validated implementations.} Numerical accuracy is verified
     against established \proglang{R} packages across thousands of test cases,
@@ -35,13 +33,13 @@ several contributions:
     implementations provide 3--6$\times$ speedups over equivalent \proglang{R}
     code.
 
-  \item \textbf{Local LLM viability.} Our evaluation demonstrates that even
+  \item \textbf{Local LLM viability.} Our evaluation shows that even
     small models (3B parameters) can achieve over 90\% accuracy on tool
     selection, enabling fully local deployment for privacy-sensitive applications.
 
-  \item \textbf{MCP as an integration standard.} The software demonstrates that
+  \item \textbf{MCP as an integration standard.} The software shows that
     MCP provides a practical foundation for LLM-assisted scientific computing,
-    separating concerns between language understanding and numerical computation.
+    separating language understanding from numerical computation.
 \end{enumerate}
 
 \subsection{Limitations}
@@ -100,30 +98,28 @@ of compiled code with existing analytical workflows.
 
 \subsection{Broader implications}
 
-Chat-first data analytics represents one instance of a broader pattern: using
+Chat-first data analytics is one instance of a broader pattern: using
 language models as interpreters between human intent and specialized software.
 This pattern applies beyond econometrics to any domain where users express goals
 in natural language and systems execute well-defined operations.
 
 The success of this approach depends on a clear division of labor. Language
 models interpret and explain; specialized software computes. Attempts to
-have language models perform both roles---generating code that computes
-statistical quantities---conflate interpretation with execution and sacrifice
+have language models perform both roles, generating code that computes
+statistical quantities, conflate interpretation with execution and sacrifice
 the reliability that scientific work requires.
 
-The viability of local LLM deployment demonstrated in Section~\ref{sec:local}
+The viability of local LLM deployment shown in Section~\ref{sec:local}
 has implications beyond data privacy. If small models can reliably select among
 pre-implemented methods, the computational requirements for LLM-assisted analysis
-become modest enough for widespread deployment. This democratizes access to
-conversational interfaces without requiring cloud connectivity or powerful
-hardware.
+become modest enough for widespread deployment. Conversational interfaces
+become possible without cloud connectivity or powerful hardware.
 
-Finally, the design of \pkg{prompt2analytics} suggests a template for scientific
+The design of \pkg{prompt2analytics} suggests a template for scientific
 software in the LLM era: implement algorithms in performant, memory-safe languages;
-expose them through structured protocols; and let language models handle the
+expose them through structured protocols; and let language models handle
 translation between human intent and computational execution. This separation
-of concerns preserves the benefits of both paradigms while mitigating their
-respective weaknesses.
+preserves the benefits of both approaches while mitigating their weaknesses.
 
 
 %% =============================================================================

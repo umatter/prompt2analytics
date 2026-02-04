@@ -9,25 +9,23 @@ approach data analysis. Rather than consulting documentation, writing code from
 scratch, or learning domain-specific syntax, users began asking questions in
 plain English: ``run a regression of wages on education and experience,'' ``test
 whether these two groups have different means,'' or ``fit an ARIMA model to this
-time series.'' While natural language interfaces to statistical software have
-been explored for decades---from early database query systems
-\citep{Androutsopoulos+etal:1995} to commercial tools like SPSS and SAS---large
-language models (LLMs) represent a qualitative advance in flexibility and accessibility. This shift
-promises to lower barriers to data analysis but also raises significant concerns
-about accuracy, reproducibility, and data privacy.
+time series.'' Natural language interfaces to statistical software have
+been explored for decades, from early database query systems
+\citep{Androutsopoulos+etal:1995} to commercial tools like SPSS and SAS. Large
+language models (LLMs) are more flexible and accessible than these predecessors,
+but they also raise concerns about accuracy, reproducibility, and data privacy.
 
 This paper describes \emph{chat-first data analytics}: an application of
-established tool-augmented language model techniques
+tool-augmented language model techniques
 \citep{Schick+etal:2023, Yao+etal:2023} to statistical and econometric analysis.
-Natural language conversation serves as the primary interface
-to statistical methods, while rigorous, pre-implemented algorithms perform the
-actual computation. The central insight is that language models excel at
-understanding intent and selecting appropriate methods, but should not be
-trusted to generate correct statistical code. By separating the interpretive
-layer (what does the user want?) from the computational layer (how do we
-compute it correctly?), chat-first analytics can capture the accessibility
-benefits of conversational interfaces while maintaining the reliability
-that scientific work demands.
+Natural language conversation is the primary interface
+to statistical methods, while pre-implemented algorithms perform the
+actual computation. Language models are good at understanding intent and
+selecting appropriate methods, but they should not be trusted to generate
+correct statistical code. Separating interpretation (what does the user want?)
+from computation (how do we compute it correctly?) allows chat-first analytics
+to provide accessible conversational interfaces while maintaining the reliability
+that scientific work requires.
 
 \subsection{The current landscape}
 
@@ -62,46 +60,44 @@ implementations lack.
 \subsection{The opportunity}
 
 Despite these concerns, the underlying demand is legitimate and likely to
-persist. Researchers want to focus on their substantive questions---Does
+persist. Researchers want to focus on their substantive questions (Does
 education affect wages? Did the policy reduce crime? Is this treatment
-effective?---rather than on implementation details. The cognitive burden of
+effective?) rather than on implementation details. The cognitive burden of
 translating analytical intent into software-specific syntax is real, and
-anything that reduces this burden frees mental resources for the questions
+reducing this burden frees mental resources for the questions
 that actually matter.
 
-Moreover, natural language interfaces enable a style of analysis that code-based
-workflows discourage: exploratory dialogue. A researcher might begin with
+Natural language interfaces also enable exploratory dialogue, which code-based
+workflows discourage. A researcher might begin with
 ``show me the relationship between X and Y,'' examine the scatterplot, then ask
 ``control for Z,'' inspect the regression output, and continue ``are there
 outliers driving this?'' Each step builds on the previous, with the language
 model maintaining context across the conversation. This iterative refinement
-mirrors how experienced analysts actually think about data, but code-based
-workflows require explicit state management that interrupts the analytical flow.
+mirrors how experienced analysts actually think about data. Code-based
+workflows require explicit state management that interrupts this flow.
 
-A further opportunity emerges from reconsidering the computational architecture.
+A further opportunity comes from reconsidering the computational architecture.
 When ChatGPT or Claude perform data analysis, they generate \proglang{Python}
 code that executes in ephemeral virtual machines with limited computational
-resources. This architecture reflects the code-generation paradigm: the LLM
-writes a program, and a sandboxed environment runs it. But if we instead
-route requests through a structured protocol like MCP, the computational
-backend need not be constrained by what an LLM can generate or what a
-sandboxed \proglang{Python} environment can efficiently execute. We can
-implement statistical methods in compiled languages optimized for numerical
-performance. \proglang{Rust}, in particular, offers memory safety guarantees
-enforced at compile time alongside performance characteristics comparable to
-\proglang{C} and \proglang{Fortran}---the traditional languages of scientific
-computing. The MCP architecture thus enables high-performance
-analytics that are difficult to achieve under the code-generation paradigm.
+resources. This reflects the code-generation approach: the LLM writes a program,
+and a sandboxed environment runs it. If we instead route requests through a
+structured protocol like MCP, the computational backend need not be constrained
+by what an LLM can generate or what a sandboxed \proglang{Python} environment
+can efficiently execute. We can implement statistical methods in compiled
+languages optimized for numerical performance. \proglang{Rust} offers memory
+safety guarantees enforced at compile time alongside performance comparable to
+\proglang{C} and \proglang{Fortran}, the traditional languages of scientific
+computing. MCP thus enables high-performance analytics that are difficult to
+achieve with code generation.
 
-The opportunity, then, is to design systems that preserve the accessibility and
-interactivity of conversational interfaces while addressing the concerns of
+The opportunity is to design systems that preserve the accessibility and
+interactivity of conversational interfaces while addressing concerns about
 correctness, privacy, reproducibility, and performance. Recent work has begun
 exploring this direction: \cite{Chen+Shen+Ma:2025} develop an ``Econometrics AI
 Agent'' that augments LLMs with domain knowledge to improve completion rates on
 econometric tasks, while \cite{Hong+etal:2024} present a general-purpose ``Data
 Interpreter'' agent. Our approach differs by emphasizing pre-validated
-implementations and local execution rather than enhanced code generation. This
-is the goal of chat-first data analytics.
+implementations and local execution rather than enhanced code generation.
 
 \subsection{Chat-first data analytics}
 
@@ -137,23 +133,23 @@ because the same method invocation produces identical results---the
 stochastic element of the language model affects only interpretation, not
 computation.
 
-The chat-first paradigm differs from both traditional statistical software
+Chat-first differs from both traditional statistical software
 and from naive LLM-assisted analysis. Unlike \proglang{R}, \proglang{Stata},
 or \proglang{Python}, chat-first systems do not require users to learn
 domain-specific syntax. Unlike asking ChatGPT to write code, chat-first
 systems do not trust the language model with numerical computation.
-The language model serves as a translator---converting natural language
-intent into structured method calls---while verified software performs
-the actual analysis. This approach builds on advances in tool-augmented
+The language model is a translator, converting natural language
+intent into structured method calls, while verified software performs
+the actual analysis. This approach builds on tool-augmented
 language models \citep{Schick+etal:2023, Qin+etal:2024, Liu+etal:2025:ToolACE},
-which have demonstrated that LLMs can reliably select and invoke external
-tools when provided with appropriate schemas \citep{Qu+etal:2025}.
+which can reliably select and invoke external tools when provided with
+appropriate schemas \citep{Qu+etal:2025}.
 
 \subsection{This paper}
 
-This paper presents \pkg{prompt2analytics}, a concrete implementation of
-chat-first data analytics. The software comprises a foundational econometrics
-library implemented in pure \proglang{Rust}, exposed through the Model Context
+This paper presents \pkg{prompt2analytics}, an implementation of
+chat-first data analytics. The software includes an econometrics
+library in pure \proglang{Rust}, exposed through the Model Context
 Protocol (MCP) for integration with language models. Users interact through
 natural language; the language model interprets requests and generates
 structured tool calls; the \proglang{Rust} engine executes validated
@@ -183,19 +179,19 @@ discussion of limitations and future directions.
 
 \subsection{The statistical software landscape}
 
-The landscape for econometrics has long been dominated by \proglang{R}
+Econometrics software has long been dominated by \proglang{R}
 \citep{R}, \proglang{Stata}, and increasingly \proglang{Python}.
-\proglang{R} has developed a rich ecosystem with over 200 econometrics-related
-packages \citep{Michelaki+Tsagris:2025}. Numerical accuracy remains a concern
+\proglang{R} has over 200 econometrics-related packages
+\citep{Michelaki+Tsagris:2025}. Numerical accuracy remains a concern
 across platforms \citep{McCullough:1997, McCullough+Vinod:1999}, motivating
 careful validation.
 
-\proglang{Rust} has emerged as a compelling platform for scientific computing,
+\proglang{Rust} has become a reasonable platform for scientific computing,
 combining compiled-language performance with memory safety guarantees enforced
-at compile time \citep{Rust}. The ecosystem has matured rapidly, with
+at compile time \citep{Rust}. The ecosystem has matured, with
 \pkg{polars} for DataFrames \citep{polars} and \pkg{faer} for linear algebra.
-However, until now, no foundational econometrics library has existed for
-\proglang{Rust}---a gap that \pkg{prompt2analytics} addresses.
+Until now, no econometrics library has existed for \proglang{Rust}.
+\pkg{prompt2analytics} addresses this gap.
 
 \subsection{Software availability}
 

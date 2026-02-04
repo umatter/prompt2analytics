@@ -100,9 +100,54 @@ On ARM64 (aarch64), the project includes a `.cargo/config.toml` that enables `op
 prompt2analytics is a Rust workspace (edition 2024, requires Rust 1.85+) exposing 257 econometrics, statistics, ML, and visualization methods through multiple interfaces:
 
 - **p2a-core**: Core analytics library (all algorithms)
-- **p2a-cli**: Command-line interface (`p2a` binary)
+- **p2a-cli**: Command-line interface (`p2a` binary) with session recording, script export, and JSON output
 - **p2a-mcp**: MCP server exposing 257 tools with LLM integration
 - **p2a-dioxus**: Cross-platform GUI (web via WASM, desktop via native)
+
+## CLI (p2a-cli)
+
+The CLI provides direct access to all analytics functions with session-based reproducibility.
+
+### Session Pattern
+
+Use `--session` to record commands for reproducibility:
+```bash
+# All commands in a session are recorded to the JSON file
+p2a --session analysis.json data load sales.csv --name sales
+p2a --session analysis.json reg ols sales -y price -x sqft bedrooms --robust hc1
+p2a --session analysis.json viz scatter sales -x sqft -y price -f scatter.png
+
+# Export session to executable script
+p2a script export analysis.json -o analysis.sh
+
+# Replay a script
+p2a script run analysis.sh
+```
+
+### Command Categories
+
+| Category | Description | Examples |
+|----------|-------------|----------|
+| `data` | Load, describe, generate, export | `data load`, `data describe`, `data head` |
+| `reg` | OLS, clustered SEs, HAC, bootstrap, quantile | `reg ols`, `reg clustered`, `reg hac` |
+| `panel` | FE, RE, Hausman, HDFE, FEGLM, GMM | `panel fe`, `panel re`, `panel hdfe` |
+| `causal` | IV, DiD, RD, matching, IPW, synth | `causal iv`, `causal did`, `causal rd` |
+| `discrete` | Logit, probit, ordered, multinomial, count | `discrete logit`, `discrete mlogit` |
+| `ts` | ARIMA, VAR, GARCH, Holt-Winters, STL | `ts arima`, `ts var`, `ts garch` |
+| `stats` | T-tests, ANOVA, non-parametric, ACF/PACF | `stats t-test-two`, `stats anova` |
+| `spatial` | SAR, SEM, SAC, Moran's I | `spatial sar`, `spatial moran` |
+| `survival` | Kaplan-Meier, Cox PH, log-rank | `survival km`, `survival cox` |
+| `ml` | K-means, DBSCAN, PCA, t-SNE, RF, SVM | `ml kmeans`, `ml pca` |
+| `munge` | Filter, join, reshape, aggregate, clean | `munge filter`, `munge join` |
+| `viz` | Static (PNG) and interactive (HTML) charts | `viz scatter`, `viz histogram` |
+
+### Output Formats
+
+```bash
+p2a --format text ...   # Human-readable (default)
+p2a --format json ...   # Programmatic use
+p2a --format table ...  # Tabular display
+```
 
 ## Architecture Principles
 
@@ -547,6 +592,30 @@ Tool calls tracked during streaming via SSE events (`ToolStart`, `ToolEnd`). Fro
 - "Rust Analytics" indicator for messages with tool calls
 - Expandable cards showing arguments and results
 
+## Docker Deployment
+
+Docker is for **deployment**, not development. For development, run services natively.
+
+```bash
+# Build and run backend
+docker compose up --build
+
+# With local LLM (Ollama)
+docker compose --profile with-ollama up --build
+
+# Health check
+curl http://localhost:8080/health
+```
+
+For development, prefer native execution for faster iteration:
+```bash
+# Terminal 1: Backend
+cargo run -p p2a-mcp --features full -- --transport http --host 127.0.0.1 --port 8080 --cors-permissive
+
+# Terminal 2: Frontend
+cd crates/p2a-dioxus && dx serve
+```
+
 ## Validation & Benchmarking
 
 ### Validation Framework (`validation/`)
@@ -738,6 +807,7 @@ let df = df! {
    - HTML tables (self-contained with CSS)
    - CSV via `CsvExport` trait (all result types)
 6. **ARM64 builds**: On aarch64-linux, debug builds require `opt-level = 1` due to relocation range limits with large binaries. This is configured in `.cargo/config.toml`. Release builds work without modification.
+7. **Disk space**: The `target/` directory can grow large. Use `cargo clean` to reclaim space.
 
 ## Key Files
 

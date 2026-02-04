@@ -1,6 +1,14 @@
-//! Support Vector Machine (Linear SVM).
+//! Support Vector Machine (Linear and Kernel SVM).
 //!
 //! Pure Rust implementation using Sequential Minimal Optimization (SMO).
+//!
+//! Supports multiple kernel functions:
+//! - Linear: K(x, y) = x · y
+//! - RBF (Gaussian): K(x, y) = exp(-gamma * ||x - y||²)
+//! - Polynomial: K(x, y) = (gamma * x · y + coef0)^degree
+//! - Sigmoid: K(x, y) = tanh(gamma * x · y + coef0)
+
+use serde::{Deserialize, Serialize};
 
 use ndarray::{Array1, ArrayView1, ArrayView2};
 
@@ -394,6 +402,486 @@ pub fn svm_predict(
             }
         })
         .collect()
+}
+
+// =============================================================================
+// Kernel SVM
+// =============================================================================
+
+/// Kernel type for SVM.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
+pub enum SvmKernel {
+    /// Linear kernel: K(x, y) = x · y
+    #[default]
+    Linear,
+    /// RBF (Gaussian) kernel: K(x, y) = exp(-gamma * ||x - y||²)
+    Rbf,
+    /// Polynomial kernel: K(x, y) = (gamma * x · y + coef0)^degree
+    Polynomial,
+    /// Sigmoid (tanh) kernel: K(x, y) = tanh(gamma * x · y + coef0)
+    Sigmoid,
+}
+
+impl std::str::FromStr for SvmKernel {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "linear" => Ok(SvmKernel::Linear),
+            "rbf" | "gaussian" => Ok(SvmKernel::Rbf),
+            "polynomial" | "poly" => Ok(SvmKernel::Polynomial),
+            "sigmoid" | "tanh" => Ok(SvmKernel::Sigmoid),
+            _ => Err(format!(
+                "Unknown kernel: {}. Use 'linear', 'rbf', 'polynomial', or 'sigmoid'.",
+                s
+            )),
+        }
+    }
+}
+
+/// Configuration for Kernel SVM.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KernelSvmConfig {
+    /// Kernel type
+    pub kernel: SvmKernel,
+    /// Regularization parameter C (larger = less regularization)
+    pub c: f64,
+    /// Kernel coefficient for RBF, polynomial, sigmoid (default: 1/n_features)
+    pub gamma: Option<f64>,
+    /// Degree for polynomial kernel (default: 3)
+    pub degree: usize,
+    /// Independent term in polynomial and sigmoid kernels (default: 0)
+    pub coef0: f64,
+    /// Maximum iterations for SMO
+    pub max_iter: usize,
+    /// Convergence tolerance
+    pub tolerance: f64,
+}
+
+impl Default for KernelSvmConfig {
+    fn default() -> Self {
+        KernelSvmConfig {
+            kernel: SvmKernel::Rbf,
+            c: 1.0,
+            gamma: None,
+            degree: 3,
+            coef0: 0.0,
+            max_iter: 1000,
+            tolerance: 1e-3,
+        }
+    }
+}
+
+/// Result from Kernel SVM.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KernelSvmResult {
+    /// Predictions on training data
+    pub predictions: Vec<i32>,
+    /// Alpha coefficients for support vectors
+    pub alphas: Vec<f64>,
+    /// Support vector indices
+    pub support_vector_indices: Vec<usize>,
+    /// Bias term
+    pub bias: f64,
+    /// Number of support vectors
+    pub n_support_vectors: usize,
+    /// Number of iterations
+    pub n_iterations: usize,
+    /// Whether algorithm converged
+    pub converged: bool,
+    /// Class labels (original values mapped to -1/+1)
+    pub class_labels: (i32, i32),
+    /// Configuration used
+    pub config: KernelSvmConfig,
+    /// Training accuracy
+    pub train_accuracy: f64,
+    /// Feature names (if provided)
+    pub feature_names: Option<Vec<String>>,
+    /// Support vectors (stored for prediction)
+    #[serde(skip)]
+    support_vectors: Option<ndarray::Array2<f64>>,
+    /// Support vector labels (y values)
+    #[serde(skip)]
+    support_vector_labels: Option<Vec<f64>>,
+}
+
+impl std::fmt::Display for KernelSvmResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "Kernel SVM Results")?;
+        writeln!(f, "==================")?;
+        writeln!(f, "Kernel: {:?}", self.config.kernel)?;
+        writeln!(f, "C: {}", self.config.c)?;
+        if self.config.kernel != SvmKernel::Linear {
+            writeln!(f, "Gamma: {:?}", self.config.gamma)?;
+        }
+        if self.config.kernel == SvmKernel::Polynomial {
+            writeln!(f, "Degree: {}", self.config.degree)?;
+        }
+        writeln!(f)?;
+        writeln!(f, "Converged: {}", self.converged)?;
+        writeln!(f, "Iterations: {}", self.n_iterations)?;
+        writeln!(f, "Support vectors: {}", self.n_support_vectors)?;
+        writeln!(f, "Bias: {:.6}", self.bias)?;
+        writeln!(f, "Training accuracy: {:.2}%", self.train_accuracy * 100.0)?;
+        writeln!(f)?;
+        writeln!(
+            f,
+            "Class labels: {} (negative), {} (positive)",
+            self.class_labels.0, self.class_labels.1
+        )?;
+
+        // Count predictions per class
+        let neg_count = self
+            .predictions
+            .iter()
+            .filter(|&&p| p == self.class_labels.0)
+            .count();
+        let pos_count = self.predictions.len() - neg_count;
+        writeln!(
+            f,
+            "Predictions: {} negative, {} positive",
+            neg_count, pos_count
+        )?;
+
+        Ok(())
+    }
+}
+
+/// Compute kernel value between two vectors.
+fn compute_kernel(
+    x1: &ArrayView1<f64>,
+    x2: &ArrayView1<f64>,
+    kernel: SvmKernel,
+    gamma: f64,
+    degree: usize,
+    coef0: f64,
+) -> f64 {
+    match kernel {
+        SvmKernel::Linear => dot_product(x1, x2),
+        SvmKernel::Rbf => {
+            let sq_dist: f64 = x1.iter().zip(x2.iter()).map(|(a, b)| (a - b).powi(2)).sum();
+            (-gamma * sq_dist).exp()
+        }
+        SvmKernel::Polynomial => {
+            let dot = dot_product(x1, x2);
+            (gamma * dot + coef0).powi(degree as i32)
+        }
+        SvmKernel::Sigmoid => {
+            let dot = dot_product(x1, x2);
+            (gamma * dot + coef0).tanh()
+        }
+    }
+}
+
+/// Compute decision function for kernel SVM at sample i.
+fn compute_decision_kernel(
+    data: &ArrayView2<f64>,
+    alpha: &ArrayView1<f64>,
+    y: &ArrayView1<f64>,
+    b: f64,
+    i: usize,
+    kernel: SvmKernel,
+    gamma: f64,
+    degree: usize,
+    coef0: f64,
+) -> f64 {
+    let n_samples = data.nrows();
+    let mut result = b;
+    let x_i = data.row(i);
+
+    for j in 0..n_samples {
+        if alpha[j] > 1e-8 {
+            let k_ij = compute_kernel(&data.row(j), &x_i, kernel, gamma, degree, coef0);
+            result += alpha[j] * y[j] * k_ij;
+        }
+    }
+
+    result
+}
+
+/// Run Kernel SVM using SMO.
+///
+/// # Arguments
+/// * `data` - Input feature matrix (n_samples x n_features)
+/// * `target` - Binary target values
+/// * `config` - SVM configuration
+/// * `feature_names` - Optional feature names
+pub fn kernel_svm(
+    data: ArrayView2<f64>,
+    target: ArrayView1<f64>,
+    config: &KernelSvmConfig,
+    feature_names: Option<Vec<String>>,
+) -> Result<KernelSvmResult, String> {
+    let n_samples = data.nrows();
+    let n_features = data.ncols();
+
+    if n_samples < 2 {
+        return Err("Need at least 2 samples for SVM".to_string());
+    }
+    if n_samples != target.len() {
+        return Err("Data and target must have same number of samples".to_string());
+    }
+
+    // Convert target to -1/+1
+    let (y, class_labels) = convert_to_binary(&target)?;
+
+    // Set gamma if not specified
+    let gamma = config.gamma.unwrap_or(1.0 / n_features as f64);
+
+    // Initialize alphas and bias
+    let mut alpha: Array1<f64> = Array1::zeros(n_samples);
+    let mut b = 0.0;
+
+    // Precompute kernel matrix for efficiency
+    let mut kernel_matrix = ndarray::Array2::zeros((n_samples, n_samples));
+    for i in 0..n_samples {
+        for j in i..n_samples {
+            let k_ij = compute_kernel(
+                &data.row(i),
+                &data.row(j),
+                config.kernel,
+                gamma,
+                config.degree,
+                config.coef0,
+            );
+            kernel_matrix[[i, j]] = k_ij;
+            kernel_matrix[[j, i]] = k_ij;
+        }
+    }
+
+    let mut n_iterations = 0;
+    let mut converged = false;
+
+    // SMO main loop
+    for iter in 0..config.max_iter {
+        let mut num_changed = 0;
+
+        for i in 0..n_samples {
+            // Compute error E_i = f(x_i) - y_i using kernel matrix
+            let mut f_i = b;
+            for j in 0..n_samples {
+                if alpha[j] > 1e-8 {
+                    f_i += alpha[j] * y[j] * kernel_matrix[[j, i]];
+                }
+            }
+            let e_i = f_i - y[i];
+
+            // Check KKT conditions
+            let r_i = e_i * y[i];
+
+            if (r_i < -config.tolerance && alpha[i] < config.c)
+                || (r_i > config.tolerance && alpha[i] > 0.0)
+            {
+                // Select j using maximum |E_i - E_j| heuristic
+                let mut max_delta = 0.0;
+                let mut j_best = (i + 1) % n_samples;
+
+                for j in 0..n_samples {
+                    if j != i && alpha[j] > 1e-8 && alpha[j] < config.c - 1e-8 {
+                        let mut f_j = b;
+                        for k in 0..n_samples {
+                            if alpha[k] > 1e-8 {
+                                f_j += alpha[k] * y[k] * kernel_matrix[[k, j]];
+                            }
+                        }
+                        let e_j = f_j - y[j];
+                        let delta = (e_i - e_j).abs();
+                        if delta > max_delta {
+                            max_delta = delta;
+                            j_best = j;
+                        }
+                    }
+                }
+
+                let j = j_best;
+
+                // Compute E_j
+                let mut f_j = b;
+                for k in 0..n_samples {
+                    if alpha[k] > 1e-8 {
+                        f_j += alpha[k] * y[k] * kernel_matrix[[k, j]];
+                    }
+                }
+                let e_j = f_j - y[j];
+
+                // Save old alphas
+                let alpha_i_old = alpha[i];
+                let alpha_j_old = alpha[j];
+
+                // Compute bounds L and H
+                let (l, h) = if (y[i] - y[j]).abs() < 1e-10 {
+                    (
+                        f64::max(0.0, alpha[i] + alpha[j] - config.c),
+                        f64::min(config.c, alpha[i] + alpha[j]),
+                    )
+                } else {
+                    (
+                        f64::max(0.0, alpha[j] - alpha[i]),
+                        f64::min(config.c, config.c + alpha[j] - alpha[i]),
+                    )
+                };
+
+                if (l - h).abs() < 1e-10 {
+                    continue;
+                }
+
+                // Compute eta using kernel matrix
+                let k_ii = kernel_matrix[[i, i]];
+                let k_jj = kernel_matrix[[j, j]];
+                let k_ij = kernel_matrix[[i, j]];
+                let eta = 2.0 * k_ij - k_ii - k_jj;
+
+                if eta >= 0.0 {
+                    continue;
+                }
+
+                // Update alpha_j
+                alpha[j] = alpha_j_old - y[j] * (e_i - e_j) / eta;
+                alpha[j] = alpha[j].max(l).min(h);
+
+                if (alpha[j] - alpha_j_old).abs() < 1e-5 {
+                    continue;
+                }
+
+                // Update alpha_i
+                alpha[i] = alpha_i_old + y[i] * y[j] * (alpha_j_old - alpha[j]);
+
+                // Update bias
+                let b1 = b
+                    - e_i
+                    - y[i] * (alpha[i] - alpha_i_old) * k_ii
+                    - y[j] * (alpha[j] - alpha_j_old) * k_ij;
+                let b2 = b
+                    - e_j
+                    - y[i] * (alpha[i] - alpha_i_old) * k_ij
+                    - y[j] * (alpha[j] - alpha_j_old) * k_jj;
+
+                if alpha[i] > 0.0 && alpha[i] < config.c {
+                    b = b1;
+                } else if alpha[j] > 0.0 && alpha[j] < config.c {
+                    b = b2;
+                } else {
+                    b = (b1 + b2) / 2.0;
+                }
+
+                num_changed += 1;
+            }
+        }
+
+        n_iterations = iter + 1;
+
+        if num_changed == 0 {
+            converged = true;
+            break;
+        }
+    }
+
+    // Find support vectors
+    let mut support_vector_indices = Vec::new();
+    let mut alphas = Vec::new();
+
+    for i in 0..n_samples {
+        if alpha[i] > 1e-8 {
+            support_vector_indices.push(i);
+            alphas.push(alpha[i]);
+        }
+    }
+
+    // Store support vectors for prediction
+    let mut sv_data = ndarray::Array2::zeros((support_vector_indices.len(), n_features));
+    let mut sv_labels = Vec::with_capacity(support_vector_indices.len());
+
+    for (idx, &sv_idx) in support_vector_indices.iter().enumerate() {
+        for j in 0..n_features {
+            sv_data[[idx, j]] = data[[sv_idx, j]];
+        }
+        sv_labels.push(y[sv_idx]);
+    }
+
+    // Make predictions
+    let predictions: Vec<i32> = (0..n_samples)
+        .map(|i| {
+            let mut f_i = b;
+            for j in 0..n_samples {
+                if alpha[j] > 1e-8 {
+                    f_i += alpha[j] * y[j] * kernel_matrix[[j, i]];
+                }
+            }
+            if f_i >= 0.0 {
+                class_labels.1
+            } else {
+                class_labels.0
+            }
+        })
+        .collect();
+
+    // Compute training accuracy
+    let correct = predictions
+        .iter()
+        .zip(target.iter())
+        .filter(|(pred, actual)| **pred as f64 == **actual)
+        .count();
+    let train_accuracy = correct as f64 / n_samples as f64;
+
+    let n_sv = support_vector_indices.len();
+
+    Ok(KernelSvmResult {
+        predictions,
+        alphas,
+        support_vector_indices,
+        bias: b,
+        n_support_vectors: n_sv,
+        n_iterations,
+        converged,
+        class_labels,
+        config: config.clone(),
+        train_accuracy,
+        feature_names,
+        support_vectors: Some(sv_data),
+        support_vector_labels: Some(sv_labels),
+    })
+}
+
+/// Predict class labels for new data using a trained kernel SVM.
+pub fn kernel_svm_predict(
+    data: ArrayView2<f64>,
+    result: &KernelSvmResult,
+) -> Result<Vec<i32>, String> {
+    let sv_data = result
+        .support_vectors
+        .as_ref()
+        .ok_or("Support vectors not stored - cannot predict")?;
+    let sv_labels = result
+        .support_vector_labels
+        .as_ref()
+        .ok_or("Support vector labels not stored - cannot predict")?;
+
+    let gamma = result.config.gamma.unwrap_or(1.0 / data.ncols() as f64);
+
+    let predictions: Vec<i32> = data
+        .outer_iter()
+        .map(|x| {
+            let mut f = result.bias;
+            for (idx, (alpha, &y_sv)) in result.alphas.iter().zip(sv_labels.iter()).enumerate() {
+                let k = compute_kernel(
+                    &sv_data.row(idx),
+                    &x,
+                    result.config.kernel,
+                    gamma,
+                    result.config.degree,
+                    result.config.coef0,
+                );
+                f += alpha * y_sv * k;
+            }
+            if f >= 0.0 {
+                result.class_labels.1
+            } else {
+                result.class_labels.0
+            }
+        })
+        .collect();
+
+    Ok(predictions)
 }
 
 #[cfg(test)]

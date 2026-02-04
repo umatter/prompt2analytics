@@ -541,6 +541,44 @@ pub struct AnalyticsServer {
 }
 
 // ============================================================================
+// Helper Functions
+// ============================================================================
+
+/// Format diagnostic warnings from an identification report for output.
+fn format_diagnostic_warnings(report: &IdentificationReport) -> String {
+    let warnings: Vec<_> = report
+        .warnings
+        .iter()
+        .filter(|w| w.severity >= WarningSeverity::Caution)
+        .collect();
+
+    if warnings.is_empty() {
+        return String::new();
+    }
+
+    let mut output = String::from("\n\n--- Identification Diagnostics ---\n");
+    for w in warnings {
+        let severity_str = match w.severity {
+            WarningSeverity::Critical => "CRITICAL",
+            WarningSeverity::Warning => "WARNING",
+            WarningSeverity::Caution => "CAUTION",
+            WarningSeverity::Info => "INFO",
+        };
+        output.push_str(&format!(
+            "\n[{}] {}\n{}\n",
+            severity_str, w.title, w.message
+        ));
+        if !w.remediation.is_empty() {
+            output.push_str("Suggested actions:\n");
+            for r in &w.remediation {
+                output.push_str(&format!("  - {}\n", r));
+            }
+        }
+    }
+    output
+}
+
+// ============================================================================
 // Tool Router Implementation
 // ============================================================================
 
