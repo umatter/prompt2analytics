@@ -17,36 +17,70 @@ use p2a_core::{
     data::{
         Dataset,
         munging::{
-            AggFn, AggSpec, ArithOp, BinStrategy, FillStrategy, MutateExpr,
-            // Transform operations
-            filter, select, drop_columns, rename, sort,
-            // Join operations
-            inner_join, left_join, right_join, full_join, concat,
-            // Aggregate operations
-            group_by, value_counts,
-            // Reshape operations
-            pivot, melt,
+            AggFn,
+            AggSpec,
+            ArithOp,
+            BinStrategy,
+            FillStrategy,
+            MutateExpr,
+            bin,
+            concat,
+            deduplicate,
+            diff,
+            drop_columns,
             // Clean operations
-            drop_na, fill_na, deduplicate,
-            // String operations
-            trim, to_lowercase, to_uppercase, replace,
-            regex_replace, regex_extract, regex_count,
-            str_split, str_concat, str_length, str_substring,
+            drop_na,
+            fill_na,
+            // Transform operations
+            filter,
+            full_join,
+            // Aggregate operations
+            group_by,
+            // Join operations
+            inner_join,
             // Feature engineering
-            lag, lead, diff, pct_change, normalize, standardize, bin, one_hot_encode, sample, mutate,
+            lag,
+            lead,
+            left_join,
+            melt,
+            mutate,
+            normalize,
+            one_hot_encode,
+            pct_change,
+            // Reshape operations
+            pivot,
+            regex_count,
+            regex_extract,
+            regex_replace,
+            rename,
+            replace,
+            right_join,
+            sample,
+            select,
+            sort,
+            standardize,
+            str_concat,
+            str_length,
+            str_split,
+            str_substring,
+            to_lowercase,
+            to_uppercase,
+            // String operations
+            trim,
+            value_counts,
         },
     },
-    regression::{run_ols, CovarianceType},
+    regression::{CovarianceType, run_ols},
     stats::correlation_matrix,
 };
 
 #[tool_router(router = munging_router, vis = "pub")]
 impl AnalyticsServer {
-/// Batch process multiple datasets with the same operation.
+    /// Batch process multiple datasets with the same operation.
     #[tool(
         description = "Run the same analysis (describe, correlation, or OLS regression) on multiple datasets at once. Useful for comparing results across datasets or processing survey waves."
     )]
-    async fn batch_process(
+    pub async fn batch_process(
         &self,
         Parameters(request): Parameters<BatchProcessRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -220,11 +254,11 @@ impl AnalyticsServer {
         Ok(CallToolResult::success(vec![Content::text(output)]))
     }
 
-/// Compare the same columns across multiple datasets.
+    /// Compare the same columns across multiple datasets.
     #[tool(
         description = "Compare statistics for specific columns across multiple datasets. Useful for comparing distributions, means, and correlations between different datasets (e.g., treatment vs control, before vs after)."
     )]
-    async fn compare_datasets(
+    pub async fn compare_datasets(
         &self,
         Parameters(request): Parameters<CompareDatasetRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -394,11 +428,11 @@ impl AnalyticsServer {
         Ok(CallToolResult::success(vec![Content::text(output)]))
     }
 
-/// Filter rows in a dataset based on a condition.
+    /// Filter rows in a dataset based on a condition.
     #[tool(
         description = "Filter rows in a dataset based on a column condition. Supports operators: 'eq', 'ne', 'gt', 'ge', 'lt', 'le', 'contains', 'starts_with', 'ends_with'. The value is parsed based on the column type."
     )]
-    async fn munge_filter(
+    pub async fn munge_filter(
         &self,
         Parameters(request): Parameters<FilterDatasetRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -440,9 +474,9 @@ impl AnalyticsServer {
         ))]))
     }
 
-/// Select specific columns from a dataset.
+    /// Select specific columns from a dataset.
     #[tool(description = "Select (keep) specific columns from a dataset, dropping all others.")]
-    async fn munge_select(
+    pub async fn munge_select(
         &self,
         Parameters(request): Parameters<SelectColumnsRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -485,9 +519,9 @@ impl AnalyticsServer {
         ))]))
     }
 
-/// Drop columns from a dataset.
+    /// Drop columns from a dataset.
     #[tool(description = "Drop (remove) specific columns from a dataset.")]
-    async fn munge_drop_columns(
+    pub async fn munge_drop_columns(
         &self,
         Parameters(request): Parameters<DropColumnsRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -533,9 +567,9 @@ impl AnalyticsServer {
         ))]))
     }
 
-/// Rename columns in a dataset.
+    /// Rename columns in a dataset.
     #[tool(description = "Rename columns in a dataset. Provide pairs of [old_name, new_name].")]
-    async fn munge_rename(
+    pub async fn munge_rename(
         &self,
         Parameters(request): Parameters<RenameColumnsRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -588,9 +622,9 @@ impl AnalyticsServer {
         ))]))
     }
 
-/// Sort a dataset by one or more columns.
+    /// Sort a dataset by one or more columns.
     #[tool(description = "Sort a dataset by one or more columns in ascending or descending order.")]
-    async fn munge_sort(
+    pub async fn munge_sort(
         &self,
         Parameters(request): Parameters<SortDatasetRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -642,11 +676,11 @@ impl AnalyticsServer {
         ))]))
     }
 
-/// Join two datasets on key columns.
+    /// Join two datasets on key columns.
     #[tool(
         description = "Join two datasets on key columns. Supports 'left', 'right', 'inner', and 'full' join types."
     )]
-    async fn munge_join(
+    pub async fn munge_join(
         &self,
         Parameters(request): Parameters<JoinDatasetsRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -720,11 +754,11 @@ impl AnalyticsServer {
         ))]))
     }
 
-/// Concatenate multiple datasets vertically.
+    /// Concatenate multiple datasets vertically.
     #[tool(
         description = "Concatenate (row-bind) multiple datasets vertically. All datasets must have the same columns."
     )]
-    async fn munge_concat(
+    pub async fn munge_concat(
         &self,
         Parameters(request): Parameters<ConcatDatasetsRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -772,11 +806,11 @@ impl AnalyticsServer {
         ))]))
     }
 
-/// Group by columns and compute aggregations.
+    /// Group by columns and compute aggregations.
     #[tool(
         description = "Group a dataset by columns and compute aggregations. Supported functions: 'count', 'sum', 'mean', 'median', 'min', 'max', 'std', 'var', 'first', 'last'."
     )]
-    async fn munge_group_by(
+    pub async fn munge_group_by(
         &self,
         Parameters(request): Parameters<GroupByRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -858,11 +892,11 @@ impl AnalyticsServer {
         ))]))
     }
 
-/// Compute value counts for a column.
+    /// Compute value counts for a column.
     #[tool(
         description = "Compute frequency counts for unique values in a column. Optionally normalize to percentages."
     )]
-    async fn munge_value_counts(
+    pub async fn munge_value_counts(
         &self,
         Parameters(request): Parameters<ValueCountsRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -928,11 +962,11 @@ impl AnalyticsServer {
         Ok(CallToolResult::success(vec![Content::text(output)]))
     }
 
-/// Pivot a dataset from long to wide format.
+    /// Pivot a dataset from long to wide format.
     #[tool(
         description = "Pivot a dataset from long to wide format. Index columns remain as rows, 'on' column values become new column names, and 'values' column fills those columns."
     )]
-    async fn munge_pivot(
+    pub async fn munge_pivot(
         &self,
         Parameters(request): Parameters<PivotDatasetRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -976,11 +1010,11 @@ impl AnalyticsServer {
         ))]))
     }
 
-/// Melt a dataset from wide to long format.
+    /// Melt a dataset from wide to long format.
     #[tool(
         description = "Melt a dataset from wide to long format. ID variables remain as-is, value variables are unpivoted into rows."
     )]
-    async fn munge_melt(
+    pub async fn munge_melt(
         &self,
         Parameters(request): Parameters<MeltDatasetRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -1027,11 +1061,11 @@ impl AnalyticsServer {
         ))]))
     }
 
-/// Drop rows with null values.
+    /// Drop rows with null values.
     #[tool(
         description = "Drop rows containing null values. Use 'any' to drop if any column is null, 'all' to drop only if all columns are null."
     )]
-    async fn munge_drop_na(
+    pub async fn munge_drop_na(
         &self,
         Parameters(request): Parameters<DropNaRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -1080,11 +1114,11 @@ impl AnalyticsServer {
         ))]))
     }
 
-/// Fill null values using a strategy.
+    /// Fill null values using a strategy.
     #[tool(
         description = "Fill null values using a strategy: 'mean', 'median', 'mode', 'forward', 'backward', or a constant value."
     )]
-    async fn munge_fill_na(
+    pub async fn munge_fill_na(
         &self,
         Parameters(request): Parameters<FillNaRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -1141,11 +1175,11 @@ impl AnalyticsServer {
         ))]))
     }
 
-/// Remove duplicate rows.
+    /// Remove duplicate rows.
     #[tool(
         description = "Remove duplicate rows from a dataset. Specify which duplicate to keep: 'first', 'last', or 'none'."
     )]
-    async fn munge_deduplicate(
+    pub async fn munge_deduplicate(
         &self,
         Parameters(request): Parameters<DeduplicateRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -1194,11 +1228,11 @@ impl AnalyticsServer {
         ))]))
     }
 
-/// Trim whitespace from string columns.
+    /// Trim whitespace from string columns.
     #[tool(
         description = "Trim leading and trailing whitespace from string columns. If no columns specified, trims all string columns."
     )]
-    async fn str_trim(
+    pub async fn str_trim(
         &self,
         Parameters(request): Parameters<TrimRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -1249,9 +1283,9 @@ impl AnalyticsServer {
         ))]))
     }
 
-/// Convert string column to lowercase.
+    /// Convert string column to lowercase.
     #[tool(description = "Convert all characters in a string column to lowercase.")]
-    async fn str_to_lowercase(
+    pub async fn str_to_lowercase(
         &self,
         Parameters(request): Parameters<ToLowercaseRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -1291,9 +1325,9 @@ impl AnalyticsServer {
         ))]))
     }
 
-/// Convert string column to uppercase.
+    /// Convert string column to uppercase.
     #[tool(description = "Convert all characters in a string column to uppercase.")]
-    async fn str_to_uppercase(
+    pub async fn str_to_uppercase(
         &self,
         Parameters(request): Parameters<ToUppercaseRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -1333,11 +1367,11 @@ impl AnalyticsServer {
         ))]))
     }
 
-/// Replace exact values in a column.
+    /// Replace exact values in a column.
     #[tool(
         description = "Replace exact values in a column with a new value. For pattern-based replacement, use str_regex_replace."
     )]
-    async fn str_replace_value(
+    pub async fn str_replace_value(
         &self,
         Parameters(request): Parameters<ReplaceValueRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -1382,11 +1416,11 @@ impl AnalyticsServer {
         ))]))
     }
 
-/// Replace substrings matching a regex pattern.
+    /// Replace substrings matching a regex pattern.
     #[tool(
         description = "Replace substrings matching a regex pattern with a replacement string. Supports capture groups ($1, $2, etc.) in the replacement."
     )]
-    async fn str_regex_replace(
+    pub async fn str_regex_replace(
         &self,
         Parameters(request): Parameters<RegexReplaceRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -1431,11 +1465,11 @@ impl AnalyticsServer {
         ))]))
     }
 
-/// Extract substrings matching a regex pattern into a new column.
+    /// Extract substrings matching a regex pattern into a new column.
     #[tool(
         description = "Extract substrings matching a regex pattern into a new column. Use capture groups () to specify what to extract, or extract the whole match."
     )]
-    async fn str_regex_extract(
+    pub async fn str_regex_extract(
         &self,
         Parameters(request): Parameters<RegexExtractRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -1483,11 +1517,11 @@ impl AnalyticsServer {
         ))]))
     }
 
-/// Count regex pattern matches in each row.
+    /// Count regex pattern matches in each row.
     #[tool(
         description = "Count the number of times a regex pattern matches in each row, creating a new integer column with the counts."
     )]
-    async fn str_regex_count(
+    pub async fn str_regex_count(
         &self,
         Parameters(request): Parameters<RegexCountRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -1532,11 +1566,11 @@ impl AnalyticsServer {
         ))]))
     }
 
-/// Split a string column into multiple columns.
+    /// Split a string column into multiple columns.
     #[tool(
         description = "Split a string column by a pattern (supports regex) into multiple columns named prefix_0, prefix_1, etc."
     )]
-    async fn str_split(
+    pub async fn str_split(
         &self,
         Parameters(request): Parameters<StrSplitRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -1582,11 +1616,11 @@ impl AnalyticsServer {
         ))]))
     }
 
-/// Concatenate multiple string columns.
+    /// Concatenate multiple string columns.
     #[tool(
         description = "Concatenate multiple string columns into a new column, optionally with a separator between values."
     )]
-    async fn str_concat(
+    pub async fn str_concat(
         &self,
         Parameters(request): Parameters<StrConcatRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -1631,11 +1665,11 @@ impl AnalyticsServer {
         ))]))
     }
 
-/// Get string lengths.
+    /// Get string lengths.
     #[tool(
         description = "Create a new column containing the length (number of characters) of each string in the source column."
     )]
-    async fn str_length(
+    pub async fn str_length(
         &self,
         Parameters(request): Parameters<StrLengthRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -1675,11 +1709,11 @@ impl AnalyticsServer {
         ))]))
     }
 
-/// Extract a substring from a string column.
+    /// Extract a substring from a string column.
     #[tool(
         description = "Extract a substring from each string in a column. Supports negative indices to count from end."
     )]
-    async fn str_substring(
+    pub async fn str_substring(
         &self,
         Parameters(request): Parameters<StrSubstringRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -1724,11 +1758,11 @@ impl AnalyticsServer {
         ))]))
     }
 
-/// Create lag or lead columns for time series data.
+    /// Create lag or lead columns for time series data.
     #[tool(
         description = "Create lag or lead columns for time series or panel data. Lag shifts values forward (past values), lead shifts values backward (future values)."
     )]
-    async fn munge_lag_lead(
+    pub async fn munge_lag_lead(
         &self,
         Parameters(request): Parameters<LagLeadRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -1787,11 +1821,11 @@ impl AnalyticsServer {
         ))]))
     }
 
-/// Standardize or normalize columns.
+    /// Standardize or normalize columns.
     #[tool(
         description = "Standardize (z-score) or normalize (0-1 range) numeric columns. Standardize subtracts mean and divides by std. Normalize scales to [0, 1]."
     )]
-    async fn munge_standardize(
+    pub async fn munge_standardize(
         &self,
         Parameters(request): Parameters<StandardizeRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -1847,11 +1881,11 @@ impl AnalyticsServer {
         ))]))
     }
 
-/// Bin a continuous variable into discrete categories.
+    /// Bin a continuous variable into discrete categories.
     #[tool(
         description = "Bin a continuous variable into discrete categories. Strategies: 'uniform' (equal width), 'quantile' (equal frequency), or 'custom' (specify break points)."
     )]
-    async fn munge_bin(
+    pub async fn munge_bin(
         &self,
         Parameters(request): Parameters<BinColumnRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -1914,11 +1948,11 @@ impl AnalyticsServer {
         ))]))
     }
 
-/// One-hot encode a categorical column.
+    /// One-hot encode a categorical column.
     #[tool(
         description = "One-hot encode a categorical column, creating binary indicator columns for each category. Use drop_first=true to avoid multicollinearity in regression."
     )]
-    async fn munge_one_hot_encode(
+    pub async fn munge_one_hot_encode(
         &self,
         Parameters(request): Parameters<OneHotEncodeRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -1961,11 +1995,11 @@ impl AnalyticsServer {
         ))]))
     }
 
-/// Compute differences or percent changes.
+    /// Compute differences or percent changes.
     #[tool(
         description = "Compute differences or percent changes for a column. Useful for time series and panel data analysis."
     )]
-    async fn munge_diff(
+    pub async fn munge_diff(
         &self,
         Parameters(request): Parameters<DiffRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -2020,11 +2054,11 @@ impl AnalyticsServer {
         ))]))
     }
 
-/// Sample rows from a dataset.
+    /// Sample rows from a dataset.
     #[tool(
         description = "Randomly sample rows from a dataset. Useful for creating training/test splits or working with large datasets."
     )]
-    async fn munge_sample(
+    pub async fn munge_sample(
         &self,
         Parameters(request): Parameters<SampleDatasetRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -2068,11 +2102,11 @@ impl AnalyticsServer {
         ))]))
     }
 
-/// Create a new column by computation.
+    /// Create a new column by computation.
     #[tool(
         description = "Create a new column by applying arithmetic operations or functions. Supports: arithmetic (+, -, *, /), functions (log, exp, sqrt, abs, square), or constant values."
     )]
-    async fn munge_mutate(
+    pub async fn munge_mutate(
         &self,
         Parameters(request): Parameters<MutateColumnRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -2153,6 +2187,4 @@ impl AnalyticsServer {
             request.new_column, result_name
         ))]))
     }
-
-
 }

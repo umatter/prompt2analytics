@@ -33,11 +33,11 @@
 //! println!("Training MSE: {:.4}", result.train_loss);
 //! ```
 
-use ndarray::{s, Array1, Array2, ArrayView1, ArrayView2};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2, s};
 use serde::{Deserialize, Serialize};
 
-use crate::errors::{EconError, EconResult};
 use crate::Dataset;
+use crate::errors::{EconError, EconResult};
 
 /// Loss function family for GBM.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -263,7 +263,10 @@ impl GbmTree {
 
         // Check if all residuals are the same
         let first_val = residuals[indices[0]];
-        if indices.iter().all(|&i| (residuals[i] - first_val).abs() < 1e-10) {
+        if indices
+            .iter()
+            .all(|&i| (residuals[i] - first_val).abs() < 1e-10)
+        {
             return self.create_leaf(residuals, indices);
         }
 
@@ -530,7 +533,12 @@ fn compute_negative_gradient(
 }
 
 /// Compute loss for current predictions.
-fn compute_loss(y: &ArrayView1<f64>, predictions: &Array1<f64>, family: GbmFamily, huber_delta: f64) -> f64 {
+fn compute_loss(
+    y: &ArrayView1<f64>,
+    predictions: &Array1<f64>,
+    family: GbmFamily,
+    huber_delta: f64,
+) -> f64 {
     let n = y.len() as f64;
 
     match family {
@@ -664,12 +672,18 @@ pub fn gbm(x: ArrayView2<f64>, y: ArrayView1<f64>, config: &GbmConfig) -> EconRe
     let mut total_importances = Array1::zeros(n_features);
 
     // Initial loss
-    train_loss.push(compute_loss(&y, &predictions, config.family, config.huber_delta));
+    train_loss.push(compute_loss(
+        &y,
+        &predictions,
+        config.family,
+        config.huber_delta,
+    ));
 
     // Boosting iterations
     for _ in 0..config.n_trees {
         // Compute negative gradient (pseudo-residuals)
-        let residuals = compute_negative_gradient(&y, &predictions, config.family, config.huber_delta);
+        let residuals =
+            compute_negative_gradient(&y, &predictions, config.family, config.huber_delta);
 
         // Subsample rows if needed
         let (sample_indices, sample_x, sample_residuals) = if config.subsample < 1.0 {
@@ -730,7 +744,12 @@ pub fn gbm(x: ArrayView2<f64>, y: ArrayView1<f64>, config: &GbmConfig) -> EconRe
         trees.push(tree);
 
         // Track loss
-        train_loss.push(compute_loss(&y, &predictions, config.family, config.huber_delta));
+        train_loss.push(compute_loss(
+            &y,
+            &predictions,
+            config.family,
+            config.huber_delta,
+        ));
     }
 
     // Normalize feature importances
@@ -832,17 +851,23 @@ pub fn run_gbm(
     let feature_names = design.column_names;
 
     // Get y column
-    let col_names: Vec<String> = dataset.df().get_column_names().iter().map(|s| s.to_string()).collect();
+    let col_names: Vec<String> = dataset
+        .df()
+        .get_column_names()
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
     let y_series = dataset
         .df()
         .column(y_col)
-        .map_err(|_| EconError::ColumnNotFound { column: y_col.to_string(), available: col_names.clone() })?;
+        .map_err(|_| EconError::ColumnNotFound {
+            column: y_col.to_string(),
+            available: col_names.clone(),
+        })?;
 
     let y: Vec<f64> = y_series
         .f64()
-        .map_err(|_| {
-            EconError::Computation(format!("Column '{}' is not numeric", y_col))
-        })?
+        .map_err(|_| EconError::Computation(format!("Column '{}' is not numeric", y_col)))?
         .into_no_null_iter()
         .collect();
 
@@ -855,11 +880,7 @@ pub fn run_gbm(
 }
 
 /// Convenience function for running GBM with default configuration.
-pub fn run_gbm_default(
-    dataset: &Dataset,
-    y_col: &str,
-    x_cols: &[&str],
-) -> EconResult<GbmResult> {
+pub fn run_gbm_default(dataset: &Dataset, y_col: &str, x_cols: &[&str]) -> EconResult<GbmResult> {
     run_gbm(dataset, y_col, x_cols, &GbmConfig::default())
 }
 

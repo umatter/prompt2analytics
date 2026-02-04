@@ -30,7 +30,7 @@ impl AnalyticsServer {
     #[tool(
         description = "List all currently loaded datasets with their basic information (name, dimensions, column types)."
     )]
-    async fn list_datasets(&self) -> Result<CallToolResult, McpError> {
+    pub async fn list_datasets(&self) -> Result<CallToolResult, McpError> {
         let datasets = self.datasets.read().await;
 
         if datasets.is_empty() {
@@ -63,7 +63,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Load a dataset from a file. Supports CSV, Parquet, Excel (xlsx, xls, xlsb, ods), Stata (dta), and SAS (sas7bdat) formats. Returns dataset information including dimensions and column types."
     )]
-    async fn load_dataset(
+    pub async fn load_dataset(
         &self,
         Parameters(request): Parameters<LoadDatasetRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -132,7 +132,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Export a loaded dataset to a file. Supports CSV, Parquet, and JSON formats. The format is determined by the file extension or can be explicitly specified."
     )]
-    async fn export_dataset(
+    pub async fn export_dataset(
         &self,
         Parameters(request): Parameters<ExportDatasetRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -233,7 +233,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Upload and load a dataset from base64-encoded content. Useful when the client cannot access the filesystem directly. Supports CSV and Parquet formats."
     )]
-    async fn upload_dataset(
+    pub async fn upload_dataset(
         &self,
         Parameters(request): Parameters<UploadDatasetRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -282,8 +282,8 @@ impl AnalyticsServer {
                 let temp_dir = std::env::temp_dir();
                 let temp_path = temp_dir.join(format!("upload_{}.parquet", uuid::Uuid::new_v4()));
 
-                if let Err(e) = std::fs::File::create(&temp_path)
-                    .and_then(|mut f| f.write_all(&decoded))
+                if let Err(e) =
+                    std::fs::File::create(&temp_path).and_then(|mut f| f.write_all(&decoded))
                 {
                     return Ok(CallToolResult::error(vec![Content::text(format!(
                         "Failed to write temp file: {}",
@@ -351,7 +351,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Create a dataset directly from CSV content provided as a string. Useful for creating small datasets without file I/O."
     )]
-    async fn create_dataset(
+    pub async fn create_dataset(
         &self,
         Parameters(request): Parameters<CreateDatasetRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -397,7 +397,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Get summary statistics for a loaded dataset including column types, null counts, and basic statistics for numeric columns."
     )]
-    async fn describe_dataset(
+    pub async fn describe_dataset(
         &self,
         Parameters(request): Parameters<DescribeDatasetRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -445,7 +445,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Preview the first N rows of a loaded dataset (default: 5 rows). Returns data in a formatted table."
     )]
-    async fn head_dataset(
+    pub async fn head_dataset(
         &self,
         Parameters(request): Parameters<HeadDatasetRequest>,
     ) -> Result<CallToolResult, McpError> {

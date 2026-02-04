@@ -22,9 +22,9 @@ use crate::tools::requests::discrete::{
 };
 
 use p2a_core::{
-    run_feglm, run_gmnl, run_hurdle, run_logit, run_mlogit, run_multinom, run_negbin,
-    run_ordered_logit, run_ordered_probit, run_probit, run_zinb, run_zip, FeglmConfig, GlmFamily,
-    HurdleType, MixedLogitConfig, RandomDistribution,
+    FeglmConfig, GlmFamily, HurdleType, MixedLogitConfig, RandomDistribution, run_feglm, run_gmnl,
+    run_hurdle, run_logit, run_mlogit, run_multinom, run_negbin, run_ordered_logit,
+    run_ordered_probit, run_probit, run_zinb, run_zip,
 };
 
 #[tool_router(router = discrete_router, vis = "pub")]
@@ -33,7 +33,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Run Logit (logistic) regression for binary outcomes. Uses MLE with Newton-Raphson. Dependent variable must be 0/1."
     )]
-    async fn logit(
+    pub async fn logit(
         &self,
         Parameters(request): Parameters<LogitRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -70,7 +70,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Run Probit regression for binary outcomes. Uses MLE with Newton-Raphson. Dependent variable must be 0/1."
     )]
-    async fn probit(
+    pub async fn probit(
         &self,
         Parameters(request): Parameters<ProbitRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -107,7 +107,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Run multinomial logit regression for unordered categorical outcomes with 3+ categories. Uses MLE with Newton-Raphson. Equivalent to R's nnet::multinom()."
     )]
-    async fn multinom(
+    pub async fn multinom(
         &self,
         Parameters(request): Parameters<MultinomRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -145,7 +145,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Run McFadden's conditional logit (mlogit) for discrete choice analysis. Supports both alternative-specific variables (with generic coefficients) and individual-specific variables (with alternative-specific coefficients). Data must be in long format with one row per individual-alternative combination. Equivalent to R's mlogit::mlogit()."
     )]
-    async fn mlogit(
+    pub async fn mlogit(
         &self,
         Parameters(request): Parameters<MlogitRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -194,7 +194,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Run mixed logit (random parameters logit) for discrete choice models with heterogeneous preferences. Allows coefficients to vary across individuals according to specified distributions (normal, lognormal, triangular, uniform). Uses Maximum Simulated Likelihood (MSL) with Halton sequences. Equivalent to R's gmnl::gmnl() or mixl::mixl()."
     )]
-    async fn mixed_logit(
+    pub async fn mixed_logit(
         &self,
         Parameters(request): Parameters<MixedLogitRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -264,7 +264,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Run ordered logit or probit regression (proportional odds model) for ordered categorical outcomes. Estimates threshold (cut-point) parameters. Equivalent to R's MASS::polr()."
     )]
-    async fn ordered_model(
+    pub async fn ordered_model(
         &self,
         Parameters(request): Parameters<OrderedRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -306,7 +306,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Run negative binomial regression for count data with overdispersion (variance > mean). Estimates dispersion parameter (theta). Equivalent to R's MASS::glm.nb()."
     )]
-    async fn negbin(
+    pub async fn negbin(
         &self,
         Parameters(request): Parameters<NegBinRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -343,7 +343,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Run zero-inflated Poisson or negative binomial regression for count data with excess zeros. Models both the zero-inflation probability and the count process. Equivalent to R's pscl::zeroinfl()."
     )]
-    async fn zeroinfl(
+    pub async fn zeroinfl(
         &self,
         Parameters(request): Parameters<ZeroInflRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -390,7 +390,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Run a hurdle model (two-part model) for count data with excess zeros. The hurdle model separates the zero vs. positive decision (binary logit) from the count magnitude (truncated Poisson or negative binomial). Unlike zero-inflated models, hurdle assumes all zeros come from the binary part. Equivalent to R's pscl::hurdle()."
     )]
-    async fn hurdle_model(
+    pub async fn hurdle_model(
         &self,
         Parameters(request): Parameters<HurdleModelRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -437,7 +437,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Run Generalized Linear Model with high-dimensional fixed effects (FEGLM). Supports Logit, Probit, Poisson, and Gaussian families with multiple absorbed fixed effects. Uses IRLS + Method of Alternating Projections. Equivalent to R's alpaca::feglm()."
     )]
-    async fn feglm(
+    pub async fn feglm(
         &self,
         Parameters(request): Parameters<FeglmRequest>,
     ) -> Result<CallToolResult, McpError> {

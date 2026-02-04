@@ -190,7 +190,7 @@ pub use supsmu::{SupsmuConfig, SupsmuResult, run_supsmu, supsmu};
 
 // Regularized regression (glmnet)
 pub use glmnet::{
-    GlmnetCoefficients, GlmnetConfig, GlmnetCvResult, GlmnetFamily, GlmnetResult,
-    cv_glmnet, glmnet, glmnet_coef, glmnet_predict, lasso, ridge,
-    run_cv_glmnet, run_glmnet, run_lasso, run_ridge,
+    GlmnetCoefficients, GlmnetConfig, GlmnetCvResult, GlmnetFamily, GlmnetResult, cv_glmnet,
+    glmnet, glmnet_coef, glmnet_predict, lasso, ridge, run_cv_glmnet, run_glmnet, run_lasso,
+    run_ridge,
 };

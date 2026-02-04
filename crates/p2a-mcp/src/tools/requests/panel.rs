@@ -168,7 +168,9 @@ pub struct GmmRequest {
     pub collapse: Option<bool>,
 
     /// Whether to use robust standard errors
-    #[schemars(description = "Whether to use robust (Windmeijer-corrected) standard errors. Default: true.")]
+    #[schemars(
+        description = "Whether to use robust (Windmeijer-corrected) standard errors. Default: true."
+    )]
     pub robust: Option<bool>,
 }
 

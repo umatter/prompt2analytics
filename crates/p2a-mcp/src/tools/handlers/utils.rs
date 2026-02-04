@@ -12,8 +12,8 @@ use rmcp::{
 use crate::server::AnalyticsServer;
 use crate::tools::requests::utils::{
     ColumnSpecInput, ExportSessionRequest, GenerateRandomDataRequest, GenerateReportRequest,
-    GetSeedRequest, ImportSessionRequest, ReportContentInput, ReportSectionInput, ServerStatsRequest,
-    SetSeedRequest,
+    GetSeedRequest, ImportSessionRequest, ReportContentInput, ReportSectionInput,
+    ServerStatsRequest, SetSeedRequest,
 };
 
 use p2a_core::{
@@ -31,7 +31,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Set a global random seed for ML operations (kmeans, random_forest, tsne). When set, ML tools will use this seed as a fallback if no per-tool seed is specified. Clear by calling with no seed value."
     )]
-    async fn set_seed(
+    pub async fn set_seed(
         &self,
         Parameters(request): Parameters<SetSeedRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -54,7 +54,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Get the current global random seed setting and list which ML tools support seeded reproducibility."
     )]
-    async fn get_seed(
+    pub async fn get_seed(
         &self,
         Parameters(_request): Parameters<GetSeedRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -88,7 +88,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Get memory usage statistics for the analytics server. Shows dataset memory consumption, process memory, and memory trends. Useful for monitoring resource usage with large datasets."
     )]
-    async fn server_stats(
+    pub async fn server_stats(
         &self,
         Parameters(request): Parameters<ServerStatsRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -126,19 +126,13 @@ impl AnalyticsServer {
 
         // Process memory (if available)
         if let Some(ref proc_mem) = stats.process_memory {
-            output.push_str(&format!(
-                "\nProcess RSS: {}\n",
-                proc_mem.rss_formatted
-            ));
+            output.push_str(&format!("\nProcess RSS: {}\n", proc_mem.rss_formatted));
             output.push_str(&format!(
                 "Process Virtual: {}\n",
                 proc_mem.virtual_formatted
             ));
         } else if let Some(proc_mem) = get_process_memory() {
-            output.push_str(&format!(
-                "\nProcess RSS: {}\n",
-                proc_mem.rss_formatted
-            ));
+            output.push_str(&format!("\nProcess RSS: {}\n", proc_mem.rss_formatted));
             output.push_str(&format!(
                 "Process Virtual: {}\n",
                 proc_mem.virtual_formatted
@@ -213,7 +207,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Generate a random dataset with specified columns and distributions. Supports: uniform (min, max), normal (mean, std), binomial (n, p), poisson (lambda), exponential (rate), bernoulli (p), categorical (categories, optional weights), uniform_int (min, max), sequence (start), constant (value), constant_string (value). Example column: {\"name\": \"x\", \"distribution\": {\"type\": \"normal\", \"mean\": 0, \"std\": 1}}"
     )]
-    async fn generate_random_data(
+    pub async fn generate_random_data(
         &self,
         Parameters(request): Parameters<GenerateRandomDataRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -308,7 +302,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Generate a self-contained HTML report from analysis results. The report includes proper styling, tables, charts (as embedded images), and is suitable for sharing or printing. Returns the complete HTML document as a string."
     )]
-    async fn generate_report(
+    pub async fn generate_report(
         &self,
         Parameters(request): Parameters<GenerateReportRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -414,7 +408,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Export the current session including all loaded datasets and their metadata. Can save to file or return as string. Useful for saving your analysis state to resume later."
     )]
-    async fn export_session(
+    pub async fn export_session(
         &self,
         Parameters(request): Parameters<ExportSessionRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -518,7 +512,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Import a previously exported session from a JSON file. Can merge with existing session or replace it. Restores all datasets with their original names."
     )]
-    async fn import_session(
+    pub async fn import_session(
         &self,
         Parameters(request): Parameters<ImportSessionRequest>,
     ) -> Result<CallToolResult, McpError> {

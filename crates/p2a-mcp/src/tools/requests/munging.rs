@@ -816,4 +816,3 @@ pub struct MutateColumnRequest {
     #[schemars(description = "Optional name for the result.")]
     pub result_name: Option<String>,
 }
-

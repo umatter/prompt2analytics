@@ -15,9 +15,8 @@ use crate::tools::requests::database::*;
 use p2a_core::{
     Dataset,
     data::{
-        query_sqlite, list_sqlite_tables, sqlite_table_schema,
-        query_duckdb, list_duckdb_tables, duckdb_table_schema,
-        query_file_with_duckdb,
+        duckdb_table_schema, list_duckdb_tables, list_sqlite_tables, query_duckdb,
+        query_file_with_duckdb, query_sqlite, sqlite_table_schema,
     },
 };
 
@@ -31,7 +30,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Execute a SQL query against a SQLite database and load the results as a dataset. The resulting dataset can then be analyzed using other tools."
     )]
-    async fn db_sqlite_query(
+    pub async fn db_sqlite_query(
         &self,
         Parameters(request): Parameters<SqliteQueryRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -84,7 +83,7 @@ impl AnalyticsServer {
 
     /// List tables in a SQLite database.
     #[tool(description = "List all tables in a SQLite database.")]
-    async fn db_sqlite_tables(
+    pub async fn db_sqlite_tables(
         &self,
         Parameters(request): Parameters<SqliteListTablesRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -120,7 +119,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Get the schema (column names and types) for a table in a SQLite database."
     )]
-    async fn db_sqlite_schema(
+    pub async fn db_sqlite_schema(
         &self,
         Parameters(request): Parameters<SqliteSchemaRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -162,7 +161,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Execute a SQL query against a DuckDB database and load the results as a dataset. DuckDB supports advanced analytics SQL including window functions, CTEs, and more."
     )]
-    async fn db_duckdb_query(
+    pub async fn db_duckdb_query(
         &self,
         Parameters(request): Parameters<DuckDBQueryRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -215,7 +214,7 @@ impl AnalyticsServer {
 
     /// List tables in a DuckDB database.
     #[tool(description = "List all tables in a DuckDB database.")]
-    async fn db_duckdb_tables(
+    pub async fn db_duckdb_tables(
         &self,
         Parameters(request): Parameters<DuckDBListTablesRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -251,7 +250,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Get the schema (column names and types) for a table in a DuckDB database."
     )]
-    async fn db_duckdb_schema(
+    pub async fn db_duckdb_schema(
         &self,
         Parameters(request): Parameters<DuckDBSchemaRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -289,7 +288,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Execute a SQL query directly on a Parquet or CSV file using DuckDB. This is powerful for filtering, aggregating, or joining large files before loading them as datasets. Use {file} as a placeholder for the file path in your query."
     )]
-    async fn db_query_file(
+    pub async fn db_query_file(
         &self,
         Parameters(request): Parameters<DuckDBFileQueryRequest>,
     ) -> Result<CallToolResult, McpError> {

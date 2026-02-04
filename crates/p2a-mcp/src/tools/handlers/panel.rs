@@ -17,15 +17,15 @@ use rmcp::{
 
 use crate::server::AnalyticsServer;
 use crate::tools::requests::panel::{
-    GmmRequest, HausmanRequest, PanelFERequest, PanelGlsRequest, PanelHdfeRequest,
-    PanelRERequest, PanelUnitRootRequest, PvcmRequest,
+    GmmRequest, HausmanRequest, PanelFERequest, PanelGlsRequest, PanelHdfeRequest, PanelRERequest,
+    PanelUnitRootRequest, PvcmRequest,
 };
 
 use p2a_core::econometrics::{
-    run_fixed_effects, run_gmm, run_hausman_test, run_panel_gls, run_panel_unit_root, run_pmg,
-    run_pvcm, run_random_effects, run_hdfe, GmmConfig, GmmResult, GmmStep, GmmTransform,
-    HdfeConfig, HdfeResult, PanelGlsModel, PanelGlsResult, PanelModel, PanelUnitRootConfig,
-    PanelUnitRootTest, PvcmType,
+    GmmConfig, GmmResult, GmmStep, GmmTransform, HdfeConfig, HdfeResult, PanelGlsModel,
+    PanelGlsResult, PanelModel, PanelUnitRootConfig, PanelUnitRootTest, PvcmType,
+    run_fixed_effects, run_gmm, run_hausman_test, run_hdfe, run_panel_gls, run_panel_unit_root,
+    run_pmg, run_pvcm, run_random_effects,
 };
 use p2a_core::regression::CovarianceType;
 
@@ -35,7 +35,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Run Fixed Effects (within) panel regression. Controls for time-invariant unobserved heterogeneity. Requires panel data with entity identifiers."
     )]
-    async fn panel_fixed_effects(
+    pub async fn panel_fixed_effects(
         &self,
         Parameters(request): Parameters<PanelFERequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -72,7 +72,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Run Random Effects (GLS) panel regression. Assumes individual effects are uncorrelated with regressors. More efficient than FE if assumption holds."
     )]
-    async fn panel_random_effects(
+    pub async fn panel_random_effects(
         &self,
         Parameters(request): Parameters<PanelRERequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -109,7 +109,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Run Hausman specification test to choose between Fixed Effects and Random Effects. Tests H0: RE is consistent. If p-value < 0.05, use Fixed Effects."
     )]
-    async fn hausman_test(
+    pub async fn hausman_test(
         &self,
         Parameters(request): Parameters<HausmanRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -146,7 +146,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Run Variable Coefficients Model (PVCM) for heterogeneous panel data. Allows slope coefficients to vary across entities. Two modes: 'within' runs separate OLS per entity, 'random' (Swamy 1970) computes a GLS weighted average. Also computes homogeneity test for coefficient equality."
     )]
-    async fn panel_pvcm(
+    pub async fn panel_pvcm(
         &self,
         Parameters(request): Parameters<PvcmRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -194,7 +194,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Run Mean Group (MG) estimator (Pesaran & Smith 1995) for heterogeneous panel data. Computes simple average of individual-specific OLS estimates across entities. Equivalent to PVCM with 'within' model type."
     )]
-    async fn panel_pmg(
+    pub async fn panel_pmg(
         &self,
         Parameters(request): Parameters<PvcmRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -231,7 +231,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Run Arellano-Bond (difference GMM) or Blundell-Bond (system GMM) estimation for dynamic panel data models. Handles endogeneity of lagged dependent variables using lagged levels/differences as instruments. Reports Sargan test for overidentifying restrictions and AR(1)/AR(2) tests for serial correlation."
     )]
-    async fn panel_gmm(
+    pub async fn panel_gmm(
         &self,
         Parameters(request): Parameters<GmmRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -298,7 +298,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Run Panel GLS (Feasible Generalized Least Squares) for panel data with heteroskedasticity and/or cross-sectional correlation. Supports fixed effects GLS, pooled GLS, and first-difference GLS. More efficient than standard FE/RE when error structure is known."
     )]
-    async fn panel_gls(
+    pub async fn panel_gls(
         &self,
         Parameters(request): Parameters<PanelGlsRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -354,7 +354,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Run panel unit root tests to test for stationarity in panel data. Supports LLC (Levin-Lin-Chu), IPS (Im-Pesaran-Shin), Fisher/Maddala-Wu, and Hadri tests. Panel tests have more power than univariate tests by exploiting cross-sectional variation. LLC assumes common unit root, IPS allows heterogeneous roots, Hadri tests null of stationarity."
     )]
-    async fn panel_unit_root(
+    pub async fn panel_unit_root(
         &self,
         Parameters(request): Parameters<PanelUnitRootRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -417,7 +417,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Run High-Dimensional Fixed Effects (HDFE) regression with multiple absorbed fixed effects (e.g., firm + year + industry). Uses the Method of Alternating Projections (MAP) for efficient estimation. Equivalent to R's lfe::felm() or Stata's reghdfe."
     )]
-    async fn panel_hdfe(
+    pub async fn panel_hdfe(
         &self,
         Parameters(request): Parameters<PanelHdfeRequest>,
     ) -> Result<CallToolResult, McpError> {

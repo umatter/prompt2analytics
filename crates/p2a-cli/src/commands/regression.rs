@@ -14,8 +14,8 @@ use p2a_core::{
 use p2a_core::{run_gls, run_line, run_smooth_spline, run_step, run_supsmu, run_vcov_hac};
 
 use crate::output::{
-    format_regression_results, print_error, validate_column_exists, validate_columns_exist,
-    validate_sample_size, OutputFormat,
+    OutputFormat, format_regression_results, print_error, validate_column_exists,
+    validate_columns_exist, validate_sample_size,
 };
 use crate::progress::Progress;
 use crate::session::SessionManager;
@@ -534,7 +534,11 @@ fn execute_ols(
     quiet: bool,
     session: Option<&mut SessionManager>,
 ) -> anyhow::Result<()> {
-    log::info!("Running OLS regression: {} ~ {}", dep_var, indep_vars.join(" + "));
+    log::info!(
+        "Running OLS regression: {} ~ {}",
+        dep_var,
+        indep_vars.join(" + ")
+    );
     log::debug!(
         "Parameters: dataset={}, intercept={}, robust={:?}",
         dataset_name,
@@ -577,7 +581,11 @@ fn execute_ols(
                 return Ok(());
             }
 
-            log::debug!("Design matrix: {} observations × {} predictors", ds.nrows(), x_cols.len());
+            log::debug!(
+                "Design matrix: {} observations × {} predictors",
+                ds.nrows(),
+                x_cols.len()
+            );
 
             // Show progress spinner for regression
             let progress = Progress::spinner("Running OLS regression...", quiet);

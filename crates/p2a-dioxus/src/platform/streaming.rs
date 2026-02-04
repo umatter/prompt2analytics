@@ -352,6 +352,56 @@ pub mod native {
 }
 
 // ============================================================================
+// Stub implementation (fallback for non-platform builds)
+// ============================================================================
+
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    not(feature = "desktop"),
+    not(feature = "mobile")
+))]
+pub mod stub {
+    use super::*;
+
+    /// Stub stream_chat that returns an error (for builds without platform features)
+    pub async fn stream_chat<F>(
+        _base_url: &str,
+        _session_id: &str,
+        _message: &str,
+        _history: Vec<Message>,
+        _provider: ProviderConfig,
+        _interpret: bool,
+        _conversation_id: Option<String>,
+        _on_event: F,
+    ) -> Result<(), StreamError>
+    where
+        F: FnMut(StreamEvent),
+    {
+        Err(StreamError(
+            "Streaming not available without platform features".to_string(),
+        ))
+    }
+
+    /// Stub abort controller for non-platform builds
+    #[derive(Clone, Default)]
+    pub struct StreamAbortController;
+
+    impl StreamAbortController {
+        pub fn new() -> Result<Self, StreamError> {
+            Err(StreamError(
+                "AbortController not available without platform features".to_string(),
+            ))
+        }
+
+        pub fn abort(&self) {}
+
+        pub fn is_cancelled(&self) -> bool {
+            true
+        }
+    }
+}
+
+// ============================================================================
 // Platform-specific re-exports
 // ============================================================================
 
@@ -363,3 +413,10 @@ pub use web::stream_chat;
     any(feature = "desktop", feature = "mobile")
 ))]
 pub use native::stream_chat;
+
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    not(feature = "desktop"),
+    not(feature = "mobile")
+))]
+pub use stub::stream_chat;

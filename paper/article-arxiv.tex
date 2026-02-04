@@ -76,22 +76,22 @@
 %% -- Abstract -----------------------------------------------------------------
 
 \begin{abstract}
-This paper introduces \emph{chat-first data analytics}: an approach in which
-natural language conversation serves as the primary interface to statistical
-methods, while rigorous, pre-implemented algorithms perform the actual computation.
-Unlike approaches where large language models generate statistical code---raising
-concerns about correctness, data privacy, and reproducibility---chat-first
-analytics separates the interpretive layer (understanding user intent) from the
-computational layer (executing validated methods). The language model selects
-appropriate tools; verified implementations produce the results. We present
-\pkg{prompt2analytics}, a software implementation comprising a foundational
-econometrics library in pure \proglang{Rust}, exposed through the Model Context
-Protocol (MCP) for integration with language models. The library covers regression
-analysis with robust and clustered standard errors, panel data models, instrumental
-variables, difference-in-differences, discrete choice, and time series methods.
+This paper introduces \emph{chat-first data analytics}: an approach where
+natural language conversation is the primary interface to statistical
+methods, while pre-implemented algorithms perform the actual computation.
+Unlike approaches where large language models generate statistical code,
+which raises concerns about correctness, data privacy, and reproducibility,
+chat-first analytics separates interpretation (understanding user intent) from
+computation (executing validated methods). The language model selects tools;
+verified implementations produce results. We present \pkg{prompt2analytics},
+a software implementation with an econometrics library in pure \proglang{Rust},
+exposed through the Model Context Protocol (MCP) for integration with language
+models. The library covers regression analysis with robust and clustered
+standard errors, panel data models, instrumental variables,
+difference-in-differences, discrete choice, and time series methods.
 All implementations are validated against established \proglang{R} packages.
-Local deployment via Ollama enables complete data isolation, addressing privacy
-requirements for sensitive data analysis.
+Local deployment via Ollama enables complete data isolation for sensitive
+data analysis.
 \end{abstract}
 
 \medskip

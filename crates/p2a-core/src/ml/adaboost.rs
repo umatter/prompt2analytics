@@ -32,8 +32,8 @@
 use ndarray::{Array1, ArrayView1, ArrayView2};
 use serde::{Deserialize, Serialize};
 
-use crate::errors::{EconError, EconResult};
 use crate::Dataset;
+use crate::errors::{EconError, EconResult};
 
 /// Type of AdaBoost algorithm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -168,7 +168,11 @@ impl std::fmt::Display for AdaBoostResult {
         }
 
         if !self.train_error.is_empty() {
-            writeln!(f, "Final training error: {:.4}", self.train_error.last().unwrap())?;
+            writeln!(
+                f,
+                "Final training error: {:.4}",
+                self.train_error.last().unwrap()
+            )?;
         }
 
         writeln!(f)?;
@@ -188,7 +192,11 @@ impl std::fmt::Display for AdaBoostResult {
                 Some(names) => names.get(*i).cloned().unwrap_or_else(|| format!("X{}", i)),
                 None => format!("X{}", i),
             };
-            let pct = if total > 0.0 { importance / total * 100.0 } else { 0.0 };
+            let pct = if total > 0.0 {
+                importance / total * 100.0
+            } else {
+                0.0
+            };
             writeln!(f, "  {}: {:.1}%", name, pct)?;
         }
 
@@ -311,9 +319,9 @@ fn fit_stump_regression(
     };
 
     // Precompute total weighted sums
-    let mut total_wy = 0.0;  // sum(w * y)
+    let mut total_wy = 0.0; // sum(w * y)
     let mut total_wyy = 0.0; // sum(w * y^2)
-    let mut total_w = 0.0;   // sum(w)
+    let mut total_w = 0.0; // sum(w)
     for i in 0..n_samples {
         let w = weights[i];
         let yi = y[i];
@@ -427,7 +435,11 @@ fn adaboost_m1(
 
         // Update weights
         for i in 0..n_samples {
-            let miss = if (predictions[i] - y[i]).abs() > 0.5 { 1.0 } else { -1.0 };
+            let miss = if (predictions[i] - y[i]).abs() > 0.5 {
+                1.0
+            } else {
+                -1.0
+            };
             weights[i] *= (alpha * miss).exp();
         }
 
@@ -601,10 +613,7 @@ fn adaboost_r2(
 }
 
 /// Compute weighted median predictions from all estimators.
-fn compute_weighted_median_predictions(
-    predictions: &[Array1<f64>],
-    betas: &[f64],
-) -> Array1<f64> {
+fn compute_weighted_median_predictions(predictions: &[Array1<f64>], betas: &[f64]) -> Array1<f64> {
     if predictions.is_empty() {
         return Array1::zeros(0);
     }
@@ -758,11 +767,19 @@ pub fn run_adaboost(
     let x = design.data;
     let feature_names = design.column_names;
 
-    let col_names: Vec<String> = dataset.df().get_column_names().iter().map(|s| s.to_string()).collect();
+    let col_names: Vec<String> = dataset
+        .df()
+        .get_column_names()
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
     let y_series = dataset
         .df()
         .column(y_col)
-        .map_err(|_| EconError::ColumnNotFound { column: y_col.to_string(), available: col_names })?;
+        .map_err(|_| EconError::ColumnNotFound {
+            column: y_col.to_string(),
+            available: col_names,
+        })?;
 
     let y: Vec<f64> = y_series
         .f64()
@@ -850,12 +867,7 @@ mod tests {
 
     #[test]
     fn test_adaboost_predict() {
-        let x_train = array![
-            [1.0, 0.0],
-            [2.0, 0.0],
-            [8.0, 1.0],
-            [9.0, 1.0],
-        ];
+        let x_train = array![[1.0, 0.0], [2.0, 0.0], [8.0, 1.0], [9.0, 1.0],];
         let y_train = array![-1.0, -1.0, 1.0, 1.0];
 
         let config = AdaBoostConfig {
@@ -876,12 +888,7 @@ mod tests {
 
     #[test]
     fn test_adaboost_predict_class() {
-        let x_train = array![
-            [1.0],
-            [2.0],
-            [8.0],
-            [9.0],
-        ];
+        let x_train = array![[1.0], [2.0], [8.0], [9.0],];
         let y_train = array![-1.0, -1.0, 1.0, 1.0];
 
         let config = AdaBoostConfig {
@@ -932,12 +939,7 @@ mod tests {
 
     #[test]
     fn test_adaboost_learning_rate() {
-        let x = array![
-            [1.0],
-            [2.0],
-            [8.0],
-            [9.0],
-        ];
+        let x = array![[1.0], [2.0], [8.0], [9.0],];
         let y = array![-1.0, -1.0, 1.0, 1.0];
 
         let config = AdaBoostConfig {

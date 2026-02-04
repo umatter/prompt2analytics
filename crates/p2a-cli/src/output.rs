@@ -183,10 +183,7 @@ pub fn validate_column_exists(
     // Find similar columns using edit distance
     let suggestions = find_similar_columns(&columns, col_name, 3);
 
-    let mut msg = format!(
-        "Column '{}' not found (for {}).",
-        col_name, purpose
-    );
+    let mut msg = format!("Column '{}' not found (for {}).", col_name, purpose);
 
     if !suggestions.is_empty() {
         msg.push_str("\n  Did you mean one of these?");
@@ -198,7 +195,11 @@ pub fn validate_column_exists(
     msg.push_str(&format!(
         "\n  Available columns: {}",
         if columns.len() > 10 {
-            format!("{}, ... ({} total)", columns[..10].join(", "), columns.len())
+            format!(
+                "{}, ... ({} total)",
+                columns[..10].join(", "),
+                columns.len()
+            )
         } else {
             columns.join(", ")
         }

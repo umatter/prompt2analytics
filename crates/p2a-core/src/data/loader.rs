@@ -210,10 +210,7 @@ impl DataLoader {
     /// # Arguments
     /// * `path` - Path to the CSV file
     /// * `chunk_size` - Number of rows per chunk
-    pub fn iter_csv_chunks(
-        path: impl AsRef<Path>,
-        chunk_size: usize,
-    ) -> CsvChunkIterator {
+    pub fn iter_csv_chunks(path: impl AsRef<Path>, chunk_size: usize) -> CsvChunkIterator {
         CsvChunkIterator {
             path: path.as_ref().to_path_buf(),
             chunk_size,
@@ -237,7 +234,11 @@ impl DataLoader {
         // For CSV, read just the header to get column count
         let (n_columns, column_names) = if extension == "csv" {
             let df = Self::load_csv_with_limit(path, Some(1))?;
-            let names: Vec<String> = df.get_column_names().into_iter().map(|s| s.to_string()).collect();
+            let names: Vec<String> = df
+                .get_column_names()
+                .into_iter()
+                .map(|s| s.to_string())
+                .collect();
             (names.len(), Some(names))
         } else {
             (0, None)

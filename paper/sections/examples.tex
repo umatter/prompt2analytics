@@ -4,11 +4,10 @@
 
 \section{Examples} \label{sec:examples}
 
-This section demonstrates practical usage of \pkg{prompt2analytics} through
+This section demonstrates \pkg{prompt2analytics} through
 two interfaces: the natural language chat interface powered by large language
 models, and the command-line interface for scripted workflows. Both interfaces
-access the same underlying \proglang{Rust} analytics engine, offering users
-flexibility in how they interact with the software.
+access the same underlying \proglang{Rust} analytics engine.
 
 We use two datasets throughout this section:
 \begin{itemize}
@@ -29,7 +28,7 @@ We use two datasets throughout this section:
 The chat interface enables natural language interaction with the analytics
 engine. Users describe their analysis goals in plain language, and the LLM
 translates these requests into structured tool calls executed by the MCP server.
-This interface is particularly valuable for exploratory data analysis and for
+This interface is useful for exploratory data analysis and for
 users less familiar with programming syntax. The examples in this section
 were generated using Claude 3.5 Sonnet via the MCP integration; other models
 (GPT-4o, Llama 3.1 8B, etc.) produce similar results with minor variations
@@ -427,8 +426,8 @@ Based on our extended evaluation, users should anticipate:
         30--50\% of the time without corrections
 \end{itemize}
 
-These limitations reflect fundamental challenges in natural language
-understanding, not implementation deficiencies. Users gain most value from
+These limitations reflect challenges in natural language understanding,
+not implementation deficiencies. Users get the most value from
 the system by treating it as an assistant requiring supervision rather than
 an autonomous analyst.
 
@@ -437,7 +436,7 @@ an autonomous analyst.
 \subsection{Error handling and recovery} \label{sec:examples-errors}
 
 The system handles common failure modes with explanatory guidance. Two
-representative examples illustrate the approach.
+examples illustrate the approach.
 
 \subsubsection{Multicollinearity detection}
 

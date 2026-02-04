@@ -6,14 +6,13 @@
 
 Traditional statistical software requires users to learn domain-specific syntax:
 \proglang{R} formulas, \proglang{Stata} commands, or \proglang{Python} APIs.
-This creates a barrier where the user must translate their analytical intent
-into software-specific instructions. \pkg{prompt2analytics} inverts this
-relationship: users describe their goals in natural language, and the system
-determines the appropriate statistical method.
+Users must translate their analytical intent into software-specific instructions.
+\pkg{prompt2analytics} inverts this: users describe their goals in natural
+language, and the system determines the appropriate statistical method.
 
 \subsection{Chat-first analytics}
 
-The central design principle is \emph{chat-first analytics}:
+The design principle is \emph{chat-first analytics}:
 the primary interface is conversational rather than programmatic. A user
 might request ``estimate the effect of education on wages, controlling for
 experience and industry, with robust standard errors'' without specifying
@@ -37,11 +36,11 @@ alone---the system must select among econometric methods, not just translate
 queries to SQL. Second, we leverage large language models as the interpretive
 layer, providing flexibility that rule-based systems cannot match.
 
-This conversational paradigm offers several advantages. It lowers the barrier
+This conversational approach offers several advantages. It lowers the barrier
 to entry for users unfamiliar with econometric software conventions. It
 allows domain experts to focus on their research questions rather than
 implementation details. And it enables exploratory analysis through
-dialogue---users can refine their analysis iteratively based on results
+dialogue: users can refine their analysis iteratively based on results
 and suggestions from the system.
 
 \subsection{Positioning this work}
@@ -50,21 +49,20 @@ and suggestions from the system.
 statistical software, from the Wilkinson-Rogers formula notation
 \citep{Wilkinson+Rogers:1973} to text-to-SQL systems \citep{Yu+etal:2018} and
 AutoML pipelines \citep{Feurer+etal:2015}. Rather than inventing new notation,
-it accepts natural language descriptions of analytical intent---trading the
+it accepts natural language descriptions of analytical intent, trading the
 precision of formal DSLs for accessibility.
 
-The contribution is primarily software engineering rather than methodological
-innovation: (1) providing a foundational \proglang{Rust} econometrics library,
+The contribution is software engineering rather than methodological
+innovation: (1) providing a \proglang{Rust} econometrics library,
 (2) exposing implementations through a standardized LLM integration protocol,
 and (3) demonstrating that chat-first interfaces to validated backends can
-address correctness and privacy concerns. We do not claim to advance econometric
-theory; the implementations follow established algorithms validated against
-\proglang{R} reference packages. Appendix~\ref{app:related-work} provides
-extended discussion of related work on statistical interfaces.
+address correctness and privacy concerns. The implementations follow established
+algorithms validated against \proglang{R} reference packages.
+Appendix~\ref{app:related-work} discusses related work on statistical interfaces.
 
 \subsection{LLM limitations in chat-first systems}
 
-The chat-first paradigm does not replace statistical expertise. Users
+Chat-first does not replace statistical expertise. Users
 must still understand their data, formulate sensible research questions,
 and interpret results critically. The system assists with method selection
 and execution, not with research design or causal identification.
@@ -131,18 +129,17 @@ with false positives.
 
 \subsection{LLM as method selector}
 
-Large language models serve as the interpretive layer between user intent
+Large language models are the interpretive layer between user intent
 and statistical execution. The LLM parses natural language requests, selects
 appropriate methods from the toolkit, generates structured tool calls, and
-interprets results. This builds on the tool-augmented LLM paradigm
+interprets results. This builds on tool-augmented LLMs
 \citep{Yao+etal:2023, Schick+etal:2023}.
 
-A key distinction from code-generation approaches is that our system does not
-ask the LLM to write statistical code---studies show LLMs generate incorrect
-code frequently \citep{Nejjar+etal:2024}. Instead, we provide pre-implemented,
-verified methods as callable tools. The LLM's constrained role (method selection
-and parameter specification) enables smaller models to perform adequately
-(Section~\ref{sec:local}).
+Unlike code-generation approaches, our system does not ask the LLM to write
+statistical code. Studies show LLMs generate incorrect code frequently
+\citep{Nejjar+etal:2024}. Instead, we provide pre-implemented, verified methods
+as callable tools. The LLM's constrained role (method selection and parameter
+specification) enables smaller models to perform adequately (Section~\ref{sec:local}).
 
 \begin{table}[htbp]
 \centering
@@ -169,7 +166,7 @@ pre-validated implementations.
 \subsection{Why Rust}
 
 \proglang{Rust} compiles to native code with \proglang{C}-level performance
-while guaranteeing memory safety at compile time---eliminating buffer overflows,
+while guaranteeing memory safety at compile time, eliminating buffer overflows,
 use-after-free, and data races that can cause incorrect results in numerical
 software. The ecosystem provides \pkg{polars} for data manipulation,
 \pkg{ndarray} for arrays, and \pkg{faer} for linear algebra. A single
@@ -185,8 +182,8 @@ address agent-to-agent communication: Google's Agent2Agent (A2A) protocol
 \citep{A2A:2025} enables discovery and task delegation between AI agents,
 while IBM's Agent Communication Protocol (ACP) \citep{ACP:2025} provides
 lightweight HTTP-native messaging. A2A and ACP merged under Linux Foundation
-governance in 2025. For single-agent tool invocation---the pattern used in
-\pkg{prompt2analytics}---MCP remains the dominant standard, with adoption
+governance in 2025. For single-agent tool invocation, the pattern used in
+\pkg{prompt2analytics}, MCP remains the dominant standard, with adoption
 by OpenAI, Microsoft, and Google alongside Anthropic.}
 MCP defines a standardized way for language models to discover available
 tools, invoke them with structured parameters, and receive structured results.
@@ -205,12 +202,12 @@ can be updated or extended without modifying the LLM integration.
 
 \subsection{Data locality and privacy}
 
-A key design principle is that bulk data processing occurs locally.
+Bulk data processing occurs locally.
 When a dataset is loaded, only metadata is transmitted to the LLM:
 column names, data types, row counts, and null percentages. The LLM
 uses this schema information to formulate appropriate tool calls.
-Statistical computations---matrix operations, parameter estimation,
-inference---execute entirely on the local machine, with only aggregated
+Statistical computations (matrix operations, parameter estimation,
+inference) execute entirely on the local machine, with only aggregated
 results (coefficients, standard errors, test statistics) returned
 through the LLM.
 

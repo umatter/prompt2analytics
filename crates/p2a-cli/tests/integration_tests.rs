@@ -17,7 +17,9 @@ fn test_help_command() {
         .arg("--help")
         .assert()
         .success()
-        .stdout(predicate::str::contains("Command-line interface for prompt2analytics"))
+        .stdout(predicate::str::contains(
+            "Command-line interface for prompt2analytics",
+        ))
         .stdout(predicate::str::contains("EXAMPLES"));
 }
 
@@ -139,11 +141,8 @@ fn test_data_load_valid_csv() {
     let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
     let csv_path = temp_dir.path().join("test_data.csv");
 
-    std::fs::write(
-        &csv_path,
-        "x,y,z\n1.0,2.0,3.0\n4.0,5.0,6.0\n7.0,8.0,9.0\n",
-    )
-    .expect("Failed to write CSV");
+    std::fs::write(&csv_path, "x,y,z\n1.0,2.0,3.0\n4.0,5.0,6.0\n7.0,8.0,9.0\n")
+        .expect("Failed to write CSV");
 
     p2a()
         .args(["data", "load", csv_path.to_str().unwrap()])

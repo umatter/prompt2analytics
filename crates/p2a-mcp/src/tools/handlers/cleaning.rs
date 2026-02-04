@@ -11,20 +11,17 @@ use rmcp::{
 };
 
 use p2a_core::data::{
-    CleaningSession,
-    CleaningOperation, SuggestionPriority,
-    generate_quality_profile, generate_suggestions,
-    preview_cleaning, verify_cleaning,
-    FillStrategy, deduplicate, drop_na, fill_na, filter, replace,
-    to_lowercase, to_uppercase, trim,
+    CleaningOperation, CleaningSession, FillStrategy, SuggestionPriority, deduplicate, drop_na,
+    fill_na, filter, generate_quality_profile, generate_suggestions, preview_cleaning, replace,
+    to_lowercase, to_uppercase, trim, verify_cleaning,
 };
 
 use crate::server::AnalyticsServer;
 use crate::tools::requests::cleaning::{
-    DataQualityProfileRequest, PreviewCleaningRequest, VerifyCleaningRequest,
-    CleaningSessionStartRequest, CleaningSessionStatusRequest, CleaningRollbackRequest,
-    CleaningSessionApplyRequest, CleaningSessionCheckpointsRequest, SuggestCleaningRequest,
-    ListCleaningSessionsRequest,
+    CleaningRollbackRequest, CleaningSessionApplyRequest, CleaningSessionCheckpointsRequest,
+    CleaningSessionStartRequest, CleaningSessionStatusRequest, DataQualityProfileRequest,
+    ListCleaningSessionsRequest, PreviewCleaningRequest, SuggestCleaningRequest,
+    VerifyCleaningRequest,
 };
 
 #[tool_router(router = cleaning_router, vis = "pub")]
@@ -33,7 +30,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Generate a comprehensive data quality profile for LLM-assisted data cleaning. Returns column-level statistics (nulls, uniques, types), numeric outlier detection, string pattern analysis, and automated issue detection with severity ratings."
     )]
-    async fn data_quality_profile(
+    pub async fn data_quality_profile(
         &self,
         Parameters(request): Parameters<DataQualityProfileRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -118,7 +115,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Preview a data cleaning operation before applying it. Shows how many rows would be affected, sample changes, and warnings. Supports: trim, lowercase, uppercase, fill_na, drop_na, deduplicate, replace, filter."
     )]
-    async fn preview_cleaning(
+    pub async fn preview_cleaning(
         &self,
         Parameters(request): Parameters<PreviewCleaningRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -236,7 +233,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Verify a cleaning operation by comparing the original and cleaned datasets. Returns a detailed report with row counts, quality delta (completeness change, issues resolved/introduced), and sample changes."
     )]
-    async fn verify_cleaning(
+    pub async fn verify_cleaning(
         &self,
         Parameters(request): Parameters<VerifyCleaningRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -273,7 +270,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Start a new cleaning session for a dataset. Returns a session ID that can be used to track progress, apply operations, and rollback changes. Each session maintains checkpoints for undo capability."
     )]
-    async fn cleaning_session_start(
+    pub async fn cleaning_session_start(
         &self,
         Parameters(request): Parameters<CleaningSessionStartRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -320,7 +317,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Get the current status of a cleaning session, including checkpoint count, operations performed, current row count, and completeness score."
     )]
-    async fn cleaning_session_status(
+    pub async fn cleaning_session_status(
         &self,
         Parameters(request): Parameters<CleaningSessionStatusRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -343,7 +340,7 @@ impl AnalyticsServer {
 
     /// List all active cleaning sessions.
     #[tool(description = "List all active cleaning sessions with their current status.")]
-    async fn list_cleaning_sessions(
+    pub async fn list_cleaning_sessions(
         &self,
         Parameters(_request): Parameters<ListCleaningSessionsRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -374,7 +371,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Apply a cleaning operation within a session. Creates a new checkpoint automatically. Returns a verification report showing what changed."
     )]
-    async fn cleaning_session_apply(
+    pub async fn cleaning_session_apply(
         &self,
         Parameters(request): Parameters<CleaningSessionApplyRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -552,7 +549,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Rollback a cleaning session to a previous checkpoint. If no checkpoint index is provided, rolls back to the previous checkpoint (undo last operation)."
     )]
-    async fn cleaning_rollback(
+    pub async fn cleaning_rollback(
         &self,
         Parameters(request): Parameters<CleaningRollbackRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -597,7 +594,7 @@ impl AnalyticsServer {
     #[tool(
         description = "List all checkpoints in a cleaning session, showing the state at each point."
     )]
-    async fn cleaning_session_checkpoints(
+    pub async fn cleaning_session_checkpoints(
         &self,
         Parameters(request): Parameters<CleaningSessionCheckpointsRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -637,7 +634,7 @@ impl AnalyticsServer {
     #[tool(
         description = "Analyze a dataset and generate prioritized cleaning suggestions. Returns specific operations with parameters, estimated impact, and reasoning. Use this to get intelligent recommendations before starting a cleaning workflow."
     )]
-    async fn suggest_cleaning(
+    pub async fn suggest_cleaning(
         &self,
         Parameters(request): Parameters<SuggestCleaningRequest>,
     ) -> Result<CallToolResult, McpError> {

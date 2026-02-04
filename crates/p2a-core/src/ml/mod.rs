@@ -72,6 +72,41 @@
 //! | **Causal Forest** | [`causal_forest`] | Heterogeneous treatment effects (grf) |
 //! | **BART Causal** | [`bart_causal`] | Bayesian trees for causal inference |
 //!
+//! ## Model Interpretability
+//!
+//! | Method | Function | Description |
+//! |--------|----------|-------------|
+//! | **ICE Curves** | [`ice_curves`] | Individual Conditional Expectation |
+//! | **LIME** | [`lime`] | Local Interpretable Model-agnostic Explanations |
+//! | **SHAP** | [`shap_values`] | SHapley Additive exPlanations |
+//!
+//! ## Advanced Tree Methods
+//!
+//! | Method | Function | Description |
+//! |--------|----------|-------------|
+//! | **Quantile RF** | [`quantile_rf`] | Quantile regression forests |
+//! | **CTree** | [`ctree`] | Conditional inference trees |
+//! | **Boruta** | [`boruta`] | Feature selection with shadow features |
+//! | **C5.0** | [`c50`] | C5.0 decision trees |
+//! | **Cubist** | [`cubist`] | Rule-based regression |
+//! | **MARS** | [`mars`] | Multivariate adaptive regression splines |
+//!
+//! ## Association Rules
+//!
+//! | Method | Function | Description |
+//! |--------|----------|-------------|
+//! | **Apriori** | [`apriori`] | Association rule mining |
+//! | **Eclat** | [`eclat`] | Vertical data format mining |
+//!
+//! ## Gradient Boosting Methods
+//!
+//! | Method | Function | Description |
+//! |--------|----------|-------------|
+//! | **XGBoost** | [`xgboost`] | Extreme gradient boosting with L1/L2 regularization |
+//! | **LightGBM** | [`lightgbm`] | Histogram-based gradient boosting |
+//! | **MBoost** | [`mboost`] | Model-based gradient boosting framework |
+//! | **BART** | [`bart`] | Bayesian additive regression trees |
+//!
 //! ## Large-N Performance
 //!
 //! HDBSCAN and OPTICS automatically select optimal algorithms for large datasets:
@@ -121,9 +156,20 @@
 //! | `pvclust` | [`pvclust`] |
 //! | `grf` | [`causal_forest`] |
 //! | `BART` | [`bart_causal`] |
+//! | `iml`, `DALEX` | [`ice_curves`], [`lime`], [`shap_values`] |
+//! | `quantregForest` | [`quantile_rf`] |
+//! | `party` | [`ctree`] |
+//! | `Boruta` | [`boruta`] |
+//! | `C50` | [`c50`] |
+//! | `Cubist` | [`cubist`] |
+//! | `earth` | [`mars`] |
+//! | `arules` | [`apriori`], [`eclat`] |
 
 mod adaboost;
 mod advanced_clustering_mod;
+mod advanced_trees;
+pub mod apriori;
+mod bart;
 mod bart_causal;
 mod cart;
 mod causal_forest;
@@ -131,13 +177,26 @@ mod cluster_optimized;
 mod cluster_validation;
 mod clustering;
 pub mod dual_tree;
+mod evaluation;
+mod evaluation_fast;
 mod gbm;
+mod interpretability;
 pub mod kdtree;
+mod lightgbm;
+mod mboost;
+mod mboost_fast;
 pub mod ppr;
 mod reduction;
 mod svm;
+mod svm_fast;
 mod trees;
+mod xgboost;
+mod xgboost_fast;
 
+pub use adaboost::{
+    AdaBoostConfig, AdaBoostLoss, AdaBoostResult, AdaBoostType, adaboost, adaboost_predict,
+    adaboost_predict_class, run_adaboost, run_adaboost_default,
+};
 pub use advanced_clustering_mod::{
     AffinityPropagationResult,
     AffinityType,
@@ -219,6 +278,10 @@ pub use bart_causal::{
     BartCausalConfig, BartCausalResult, bart_causal, bart_causal_arrays, bart_causal_predict,
     bart_causal_predict_arrays, run_bart_causal,
 };
+pub use cart::{
+    CartConfig, CartMethod, CartNode, CartResult, CartSplit, CpTableRow, cart, cart_predict,
+    cart_prune, run_cart, run_cart_default,
+};
 pub use causal_forest::{
     CausalForestConfig, CausalForestResult, average_treatment_effect, causal_forest,
     causal_forest_arrays, causal_forest_predict, causal_forest_predict_arrays, run_causal_forest,
@@ -240,22 +303,92 @@ pub use clustering::{
     cutree_multiple_k, dbscan, hierarchical, kmeans, run_cutree,
 };
 pub use dual_tree::{DualTreeMstResult, dual_tree_boruvka_mst, kdtree_prim_mst};
+pub use evaluation::{
+    ClassificationMetrics, ConfusionMatrixResult, PartialDependenceResult, RocAucResult,
+    VariableImportanceResult, cart_partial_dependence, cart_variable_importance, confusion_matrix,
+    gbm_partial_dependence, gbm_variable_importance, rf_variable_importance, roc_auc,
+};
+pub use evaluation_fast::{FastRocAucResult, fast_roc_auc, fast_roc_auc_parallel};
+pub use gbm::{GbmConfig, GbmFamily, GbmResult, gbm, gbm_predict, run_gbm, run_gbm_default};
 pub use kdtree::{KdNode, KdTree, UnionFind, build_connected_mst, euclidean_distance, kruskal_mst};
 pub use ppr::{PprConfig, PprResult, SmoothingMethod, ppr, run_ppr};
 pub use reduction::{
     CmdscaleResult, PCAResult, TsneResult, cmdscale, cmdscale_from_data, pca,
     pca_inverse_transform, pca_transform, run_cmdscale, tsne,
 };
-pub use svm::{SvmResult, linear_svm, svm_predict};
+pub use svm::{
+    KernelSvmConfig, KernelSvmResult, SvmKernel, SvmResult, kernel_svm, kernel_svm_predict,
+    linear_svm, svm_predict,
+};
+pub use svm_fast::{FastKernel, FastSvmConfig, FastSvmResult, fast_svm};
 pub use trees::{RandomForestResult, random_forest};
-pub use gbm::{
-    GbmConfig, GbmFamily, GbmResult, gbm, gbm_predict, run_gbm, run_gbm_default,
+
+// Model interpretability
+pub use interpretability::{
+    IceCurvesResult, LimeResult, ShapResult, ice_curves, lime, shap_values,
 };
-pub use cart::{
-    CartConfig, CartMethod, CartNode, CartResult, CartSplit, CpTableRow,
-    cart, cart_predict, cart_prune, run_cart, run_cart_default,
+
+// Advanced tree methods
+pub use advanced_trees::{
+    // Boruta
+    BorutaConfig,
+    BorutaResult,
+    // C5.0
+    C50Config,
+    C50Result,
+    // CTree
+    CtreeConfig,
+    CtreeNode,
+    CtreeResult,
+    // Cubist
+    CubistConfig,
+    CubistResult,
+    CubistRule,
+    FeatureDecision,
+    MarsBasisFunction,
+    // MARS
+    MarsConfig,
+    MarsResult,
+    // Quantile RF
+    QuantileRfConfig,
+    QuantileRfResult,
+    boruta,
+    c50,
+    ctree,
+    cubist,
+    mars,
+    quantile_rf,
 };
-pub use adaboost::{
-    AdaBoostConfig, AdaBoostLoss, AdaBoostResult, AdaBoostType,
-    adaboost, adaboost_predict, adaboost_predict_class, run_adaboost, run_adaboost_default,
+
+// Association rules
+pub use apriori::{
+    AprioriConfig, AprioriResult, AssociationRule, FrequentItemset, apriori, eclat,
+    matrix_to_transactions,
+};
+
+// XGBoost
+pub use xgboost::{XgbConfig, XgbObjective, XgbResult, xgboost as xgb, xgboost_predict};
+
+// LightGBM
+pub use lightgbm::{LgbConfig, LgbObjective, LgbResult, lightgbm as lgb, lightgbm_predict};
+
+// MBoost
+pub use mboost::{
+    MboostBaseLearner, MboostConfig, MboostFamily, MboostResult, mboost, mboost_predict,
+};
+
+// BART
+pub use bart::{
+    BartConfig, BartNode, BartResult, BartTree, bart, bart_predict, bart_predict_intervals,
+};
+
+// Fast XGBoost (histogram-based with parallel processing)
+pub use xgboost_fast::{
+    FastXgbConfig, FastXgbObjective, FastXgbResult, fast_xgboost, fast_xgboost_predict,
+};
+
+// Fast MBoost (optimized componentwise linear with parallel processing)
+pub use mboost_fast::{
+    FastMboostConfig, FastMboostFamily, FastMboostLearner, FastMboostResult, fast_mboost,
+    fast_mboost_predict,
 };

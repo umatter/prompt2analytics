@@ -8,7 +8,7 @@ While cloud-hosted language models offer convenience and capability, many
 use cases require complete data isolation: proprietary business data,
 personally identifiable information under privacy regulations, or
 air-gapped environments. This section describes the fully local deployment
-configuration, where all components---including the language model---run
+configuration, where all components, including the language model, run
 on the user's machine.
 
 \subsection{Architecture}
@@ -40,10 +40,10 @@ The local configuration requires:
 
 The chat-first architecture reduces capability requirements: models need only
 parse requests, select tools from the MCP schema, generate parameters, and
-interpret results---not generate statistical code from scratch. Research shows
+interpret results, not generate statistical code from scratch. Research shows
 fine-tuned small models can match larger models on targeted tool selection
 \citep{Schick+etal:2023, Patil+Zhang+Song+Gonzalez:2023}, making this
-particularly relevant for chat-first analytics with its well-defined schema.
+relevant for chat-first analytics with its well-defined schema.
 
 \subsection{Tool selection evaluation}
 
@@ -179,7 +179,7 @@ Figure~\ref{fig:robustness-radar} in Appendix~\ref{app:extended-eval}
 visualizes the multi-dimensional performance profile for each model.
 
 \textbf{Implications.} The extended evaluation reveals that single-turn
-accuracy substantially overstates real-world capability. Multi-turn
+accuracy overstates real-world capability. Multi-turn
 accuracy of 50--60\% means users should expect to correct or clarify
 requests in roughly half of multi-turn interactions. Parameter extraction
 errors (F1 of 41--59\%) mean users should verify that extracted parameters
@@ -187,7 +187,7 @@ match their intent before interpreting results. These findings reinforce
 the importance of explicit specification, result verification, and treating
 the system as an assistant requiring supervision rather than an autonomous
 analyst. For production deployment, larger models (70B+ parameters) provide
-meaningful improvements in robustness, though even the best models require
+improvements in robustness, though even the best models require
 user oversight for complex analytical workflows.
 
 \subsection{Failure modes and error handling}
@@ -289,11 +289,10 @@ failures, small-cluster warnings, and out-of-scope request handling.
 \subsection{Deployment recommendations}
 
 The evaluation results inform practical recommendations for local
-deployment, summarized in Table~\ref{tab:models}. The most striking
-finding is that open-source models can match proprietary alternatives:
-Qwen 2.5 72B achieves 100\% accuracy on our benchmark, identical to
-Claude 3.5 Haiku. This demonstrates that users requiring complete data
-isolation need not sacrifice tool selection quality---fully local
+deployment, summarized in Table~\ref{tab:models}. Open-source models
+can match proprietary alternatives: Qwen 2.5 72B achieves 100\% accuracy
+on our benchmark, identical to Claude 3.5 Haiku. Users requiring complete
+data isolation need not sacrifice tool selection quality; fully local
 deployments can perform equivalently to cloud-hosted solutions.
 
 \begin{table}[htbp]
@@ -427,10 +426,10 @@ CPU-only inference is viable for smaller models but increases latency by
 \subsection{Privacy guarantees}
 
 The fully local configuration provides complete data isolation. No network
-requests are made to external services---all model inference occurs on
+requests are made to external services. All model inference occurs on
 the user's hardware, dataset contents never leave the machine, and query
 history remains in local storage. This architecture is suitable for
-analysis of sensitive data where regulatory requirements (such as GDPR,
+analysis of sensitive data where regulatory requirements (GDPR,
 HIPAA, or institutional review board protocols) or organizational policy
 prohibit cloud processing. Users deploying this configuration should
 verify that their Ollama installation does not enable telemetry or
