@@ -1078,6 +1078,149 @@ pub fn search_tools(query: &str) -> Vec<ToolInfo> {
         .collect()
 }
 
+/// Search result with relevance score
+#[derive(Debug, Clone, Serialize)]
+pub struct ToolSearchResult {
+    /// The matched tool
+    pub tool: ToolInfo,
+    /// Relevance score (higher is better)
+    pub score: f32,
+    /// Keywords that matched
+    pub matched_keywords: Vec<String>,
+}
+
+/// Advanced search with scoring and category filtering
+pub fn search_tools_scored(
+    query: &str,
+    category: Option<ToolCategory>,
+    limit: usize,
+) -> Vec<ToolSearchResult> {
+    let query_lower = query.to_lowercase();
+    let query_keywords: Vec<&str> = query_lower.split_whitespace().collect();
+
+    // Domain-specific synonyms for better matching
+    let synonyms: std::collections::HashMap<&str, Vec<&str>> = [
+        ("ols", vec!["regression", "linear", "least", "squares"]),
+        ("fe", vec!["fixed", "effects", "within"]),
+        ("re", vec!["random", "effects", "gls"]),
+        ("iv", vec!["instrumental", "variables", "endogenous", "2sls"]),
+        ("did", vec!["difference", "differences", "treatment"]),
+        ("rd", vec!["discontinuity", "regression", "sharp", "fuzzy"]),
+        ("var", vec!["vector", "autoregression", "irf", "impulse"]),
+        ("arima", vec!["autoregressive", "moving", "average", "forecast"]),
+        ("garch", vec!["volatility", "heteroskedasticity", "arch"]),
+        ("hausman", vec!["specification", "test", "fe", "re"]),
+        ("robust", vec!["heteroskedasticity", "hc0", "hc1", "hc2", "hc3"]),
+        ("cluster", vec!["clustered", "standard", "errors", "panel"]),
+        ("serial", vec!["correlation", "autocorrelation", "bgtest"]),
+        ("unit", vec!["root", "stationarity", "adf", "pp"]),
+        ("propensity", vec!["score", "matching", "ipw", "treatment"]),
+        ("synth", vec!["synthetic", "control", "counterfactual"]),
+    ]
+    .into_iter()
+    .collect();
+
+    // Expand query with synonyms
+    let mut expanded_keywords: Vec<String> = query_keywords.iter().map(|s| s.to_string()).collect();
+    for kw in &query_keywords {
+        if let Some(syns) = synonyms.get(*kw) {
+            expanded_keywords.extend(syns.iter().map(|s| s.to_string()));
+        }
+    }
+
+    let registry = get_registry();
+    let mut results: Vec<ToolSearchResult> = Vec::new();
+
+    for tool in registry {
+        // Filter by category if specified
+        if let Some(ref cat) = category {
+            if tool.category != *cat {
+                continue;
+            }
+        }
+
+        // Compute score
+        let name_lower = tool.name.to_lowercase();
+        let desc_lower = tool.description.to_lowercase();
+        let name_parts: Vec<&str> = name_lower.split('_').collect();
+
+        let mut score = 0.0f32;
+        let mut matched_keywords = Vec::new();
+
+        for kw in &expanded_keywords {
+            // Exact name part match (highest weight)
+            if name_parts.contains(&kw.as_str()) {
+                score += 3.0;
+                matched_keywords.push(kw.clone());
+            }
+            // Name contains keyword
+            else if name_lower.contains(kw) {
+                score += 2.0;
+                matched_keywords.push(kw.clone());
+            }
+            // Description contains keyword
+            else if desc_lower.contains(kw) {
+                score += 1.0;
+                matched_keywords.push(kw.clone());
+            }
+        }
+
+        // Bonus for related tools matching query
+        for related in tool.related {
+            let related_lower = related.to_lowercase();
+            for kw in &query_keywords {
+                if related_lower.contains(*kw) {
+                    score += 0.5;
+                }
+            }
+        }
+
+        if score > 0.0 {
+            matched_keywords.sort();
+            matched_keywords.dedup();
+            results.push(ToolSearchResult {
+                tool,
+                score,
+                matched_keywords,
+            });
+        }
+    }
+
+    // Sort by score descending
+    results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+
+    // Return top N
+    results.into_iter().take(limit).collect()
+}
+
+/// Parse category from string
+pub fn parse_category(s: &str) -> Option<ToolCategory> {
+    match s.to_lowercase().as_str() {
+        "data" => Some(ToolCategory::Data),
+        "cleaning" => Some(ToolCategory::Cleaning),
+        "munging" => Some(ToolCategory::Munging),
+        "descriptive" => Some(ToolCategory::Descriptive),
+        "statistics" | "stats" => Some(ToolCategory::Statistics),
+        "regression" => Some(ToolCategory::Regression),
+        "panel" => Some(ToolCategory::Panel),
+        "iv" | "instrumental" => Some(ToolCategory::IV),
+        "did" | "difference" => Some(ToolCategory::DiD),
+        "rd" | "discontinuity" => Some(ToolCategory::RD),
+        "matching" => Some(ToolCategory::Matching),
+        "treatment" => Some(ToolCategory::Treatment),
+        "mediation" => Some(ToolCategory::Mediation),
+        "discrete" => Some(ToolCategory::Discrete),
+        "timeseries" | "time_series" | "ts" => Some(ToolCategory::TimeSeries),
+        "spatial" => Some(ToolCategory::Spatial),
+        "survival" => Some(ToolCategory::Survival),
+        "ml" | "machine_learning" => Some(ToolCategory::MachineLearning),
+        "visualization" | "viz" => Some(ToolCategory::Visualization),
+        "database" | "db" => Some(ToolCategory::Database),
+        "utility" | "utils" => Some(ToolCategory::Utility),
+        _ => None,
+    }
+}
+
 /// Generate markdown documentation for all tools
 pub fn generate_markdown_docs() -> String {
     let mut docs = String::from("# MCP Tools Reference\n\n");

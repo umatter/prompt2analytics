@@ -104,3 +104,7 @@ performance/comparisons/r_comparison/results/r_*_2026*.csv
 performance/comparisons/r_comparison/results/rust_comprehensive_2026*.json
 performance/comparisons/r_comparison/results/figures/
 performance/results/
+
+# Python
+__pycache__/
+*.pyc

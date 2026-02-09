@@ -401,22 +401,154 @@ impl ChatState {
 
     /// Build message history for API request.
     ///
-    /// Note: We intentionally exclude tool_calls from the history because OpenAI
-    /// requires that every assistant message with tool_calls must be followed by
-    /// tool result messages. Since we don't persist tool results, we just include
-    /// the plain text content of each message.
+    /// This method now includes tool calls and their results in the history,
+    /// which is critical for multi-turn conversation accuracy. The LLM needs
+    /// to know what tools were previously called and their results to handle
+    /// follow-up requests like "now run a t-test on those results."
+    ///
+    /// For OpenAI-compatible APIs: assistant messages with tool_calls are
+    /// followed by tool result messages with the corresponding tool_results.
     pub fn build_history(&self) -> Vec<Message> {
-        self.messages
+        let mut history = Vec::new();
+
+        for msg in self.messages.iter().filter(|m| !m.is_streaming) {
+            if msg.role == "user" {
+                // User messages are included as-is
+                if !msg.content.is_empty() {
+                    history.push(Message {
+                        role: "user".to_string(),
+                        content: msg.content.clone(),
+                        tool_calls: None,
+                        tool_results: None,
+                    });
+                }
+            } else if msg.role == "assistant" {
+                // Check if this assistant message has tool calls with results
+                let completed_tool_calls: Vec<_> = msg
+                    .tool_calls
+                    .iter()
+                    .filter(|tc| tc.result.is_some())
+                    .collect();
+
+                if !completed_tool_calls.is_empty() {
+                    // Create tool calls for the assistant message
+                    let tool_calls: Vec<crate::api::ToolCall> = completed_tool_calls
+                        .iter()
+                        .map(|tc| crate::api::ToolCall {
+                            id: tc.id.clone(),
+                            name: tc.name.clone(),
+                            arguments: tc.arguments.clone(),
+                        })
+                        .collect();
+
+                    // Assistant message with tool calls
+                    // Note: For OpenAI format, the content can be empty when there are tool calls
+                    history.push(Message {
+                        role: "assistant".to_string(),
+                        content: msg.content.clone(),
+                        tool_calls: Some(tool_calls),
+                        tool_results: None,
+                    });
+
+                    // Tool result message (required by OpenAI API format)
+                    let tool_results: Vec<crate::api::ToolResult> = completed_tool_calls
+                        .iter()
+                        .map(|tc| {
+                            // Truncate very long results to avoid context overflow
+                            let result_content = tc.result.as_deref().unwrap_or("");
+                            let truncated = if result_content.len() > 2000 {
+                                format!(
+                                    "{}...\n[Result truncated, {} chars total]",
+                                    &result_content[..2000],
+                                    result_content.len()
+                                )
+                            } else {
+                                result_content.to_string()
+                            };
+
+                            crate::api::ToolResult {
+                                tool_call_id: tc.id.clone(),
+                                content: truncated,
+                                is_error: tc.success == Some(false),
+                            }
+                        })
+                        .collect();
+
+                    history.push(Message {
+                        role: "tool".to_string(),
+                        content: String::new(),
+                        tool_calls: None,
+                        tool_results: Some(tool_results),
+                    });
+                } else if !msg.content.is_empty() {
+                    // Assistant message without tool calls - just include content
+                    history.push(Message {
+                        role: "assistant".to_string(),
+                        content: msg.content.clone(),
+                        tool_calls: None,
+                        tool_results: None,
+                    });
+                }
+            }
+        }
+
+        history
+    }
+
+    /// Build a compact summary of conversation context for the system prompt.
+    ///
+    /// This provides a fallback for LLMs that don't support tool messages in history,
+    /// or when we need to reduce context size. It summarizes what tools were called
+    /// and their key results.
+    pub fn build_tool_context_summary(&self) -> Option<String> {
+        let tool_summaries: Vec<String> = self
+            .messages
             .iter()
-            .filter(|m| !m.is_streaming)
-            .filter(|m| m.role == "user" || m.role == "assistant")
-            .filter(|m| !m.content.is_empty())
-            .map(|m| Message {
-                role: m.role.clone(),
-                content: m.content.clone(),
-                tool_calls: None,
-                tool_results: None,
+            .filter(|m| !m.is_streaming && m.role == "assistant")
+            .flat_map(|m| m.tool_calls.iter())
+            .filter(|tc| tc.result.is_some())
+            .map(|tc| {
+                let result_preview = tc
+                    .result
+                    .as_deref()
+                    .map(|r| {
+                        if r.len() > 200 {
+                            format!("{}...", &r[..200])
+                        } else {
+                            r.to_string()
+                        }
+                    })
+                    .unwrap_or_default();
+
+                let status = if tc.success == Some(true) {
+                    "✓"
+                } else if tc.success == Some(false) {
+                    "✗"
+                } else {
+                    "?"
+                };
+
+                format!(
+                    "- {} {}({}): {}",
+                    status,
+                    tc.name,
+                    serde_json::to_string(&tc.arguments)
+                        .unwrap_or_default()
+                        .chars()
+                        .take(100)
+                        .collect::<String>(),
+                    result_preview
+                )
             })
-            .collect()
+            .collect();
+
+        if tool_summaries.is_empty() {
+            None
+        } else {
+            Some(format!(
+                "## Previous Tool Calls in This Conversation\n\n{}",
+                tool_summaries.join("\n")
+            ))
+        }
     }
 }

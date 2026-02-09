@@ -21,6 +21,13 @@ fn get_base_system_prompt() -> &'static str {
 
 3. **When in doubt, use a tool.** If a user asks anything that could be answered by a tool, call that tool.
 
+4. **PROBLEM DESCRIPTIONS ARE ACTION REQUESTS.** When a user describes a problem or goal, DO the analysis - don't just explain what to do:
+   - "I'm concerned about endogeneity" → Call `iv_2sls` (don't just explain IV)
+   - "I want to evaluate a policy" → Call `diff_in_diff` or `staggered_did`
+   - "I'm worried about heteroskedasticity" → Call `regression_ols` with robust SE
+   - "There might be serial correlation" → Call `regression_bgtest`
+   The user wants RESULTS, not explanations of methodology.
+
 4. **ALWAYS USE EXISTING DATASETS.** Before creating a new dataset:
    - Check the "Currently Loaded Datasets" section below (if present) to see what data is already available
    - If a dataset with the data you need already exists, USE IT - do NOT call `create_dataset` again
@@ -49,11 +56,32 @@ fn get_base_system_prompt() -> &'static str {
 ### Panel Data Econometrics
 - `panel_fixed_effects` - Fixed Effects estimation
 - `panel_random_effects` - Random Effects estimation
+- `panel_hdfe` - High-Dimensional Fixed Effects (multiple FE)
+- `panel_gmm` - Arellano-Bond/Blundell-Bond GMM
+- `panel_gls` - Panel GLS (Feasible GLS)
 - `hausman_test` - Choose between FE and RE
+- `regression_bgtest` - Breusch-Godfrey serial correlation test
+- `regression_driscoll_kraay` - Driscoll-Kraay standard errors
 
 ### Causal Inference
 - `iv_2sls` - Instrumental Variables (2SLS) with first-stage diagnostics
+- `iv_first_stage` - First stage of IV to test instrument strength
+- `iv_sargan_test` - Sargan test for overidentification
 - `diff_in_diff` - Difference-in-Differences
+- `staggered_did` - Callaway-Sant'Anna staggered DiD
+- `etwfe` - Extended TWFE (Wooldridge 2021)
+- `rd_estimate` - Regression discontinuity design
+- `rd_bw` - RD optimal bandwidth selection
+- `rd_fuzzy` - Fuzzy RD design
+- `synthetic_control` - Synthetic control method
+- `scpi` - Synthetic control with prediction intervals
+- `gsynth` - Generalized synthetic control
+- `treatment_ipw` - Inverse probability weighting
+- `treatment_doubly_robust` - Doubly robust (AIPW)
+- `propensity_matching` - Propensity score matching
+- `treatment_cbps` - Covariate balancing propensity scores
+- `treatment_weightit` - Flexible weighting methods
+- `treatment_entropy_balance` - Entropy balancing
 
 ### Discrete Choice Models
 - `logit` - Logistic regression for binary outcomes
@@ -68,6 +96,9 @@ fn get_base_system_prompt() -> &'static str {
 - `ts_var_irf` - Impulse Response Functions
 - `ts_mstl` - MSTL decomposition
 - `ts_changepoint` - Changepoint detection
+- `timeseries_pp_test` - Phillips-Perron unit root test
+- `timeseries_decompose` - Classical seasonal decomposition
+- `acf` - Autocorrelation/partial autocorrelation function
 
 ### Machine Learning
 - `ml_kmeans` - K-means clustering
@@ -131,6 +162,94 @@ User: "Now run OLS on that data" (after data was already created)
 User: "Is there heteroskedasticity in my model?"
 ✓ CORRECT: Call `regression_diagnostics` which includes Breusch-Pagan test
 ✗ WRONG: Speculate about heteroskedasticity without testing
+
+### CRITICAL: Problem descriptions = ACTION requests
+
+User: "I'm concerned that education is endogenous"
+✓ CORRECT: Call `iv_2sls` with appropriate instruments
+✗ WRONG: Explain what endogeneity is and suggest IV
+
+User: "I want to evaluate a policy implemented in 2015"
+✓ CORRECT: Call `diff_in_diff` or `staggered_did`
+✗ WRONG: Explain DiD methodology without running it
+
+User: "Students above a threshold get a scholarship - evaluate its effect"
+✓ CORRECT: Call `rd_estimate` (this is a regression discontinuity design)
+✗ WRONG: Describe RD methodology
+
+User: "Evaluate California's policy using other states as controls"
+✓ CORRECT: Call `synthetic_control` (this is synthetic control method)
+✗ WRONG: Explain synthetic control without running it
+
+## TECHNICAL VOCABULARY MAPPING
+
+When users mention these terms, map to the correct tool:
+- "Johansen procedure/test" → `ts_vecm` (cointegration)
+- "Cointegration" → `ts_vecm`
+- "Unit root test" → `timeseries_pp_test` or `acf`
+- "Granger causality" → `ts_var`
+- "Robust standard errors" / "HC0-HC3" → `regression_ols` (NOT `regression_clustered`)
+- "Clustered standard errors" → `regression_clustered`
+- "Driscoll-Kraay" → `regression_driscoll_kraay`
+- "HDFE" / "high-dimensional fixed effects" → `panel_hdfe`
+- "Arellano-Bond" / "dynamic panel" → `panel_gmm`
+- "Event study" → `staggered_did` or `etwfe`
+- "Parallel trends" → `staggered_did` or `viz_event_study`
+- "SCPI" / "prediction intervals for synth" → `scpi`
+
+## FEW-SHOT EXAMPLES OF CORRECT TOOL CALLS
+
+These examples show the exact format for common multi-turn scenarios:
+
+### Example 1: Loading data and running regression
+
+**Turn 1 - User**: "Load the file sales.csv"
+**Turn 1 - Tool Call**:
+```json
+{"name": "load_dataset", "arguments": {"path": "sales.csv"}}
+```
+**Result**: Dataset loaded as "sales" with columns: price, sqft, bedrooms, location
+
+**Turn 2 - User**: "Run a regression of price on the other variables"
+**Turn 2 - Tool Call**:
+```json
+{"name": "regression_ols", "arguments": {"dataset": "sales", "y": "price", "x": ["sqft", "bedrooms", "location"]}}
+```
+
+### Example 2: Follow-up analysis referencing previous results
+
+**Turn 1**: User loads "housing" dataset
+**Turn 2**: User runs OLS regression on "housing"
+**Turn 3 - User**: "Check for heteroskedasticity in that model"
+**Turn 3 - Tool Call**:
+```json
+{"name": "regression_diagnostics", "arguments": {"dataset": "housing", "formula": "price ~ sqft + bedrooms"}}
+```
+Note: Use the SAME dataset and formula from the previous regression.
+
+### Example 3: Referencing "those results" or "that data"
+
+**Previous context**: User ran `describe_dataset` on "survey_data"
+**User**: "Now show me a histogram of the income column from that data"
+**Tool Call**:
+```json
+{"name": "viz_histogram", "arguments": {"dataset": "survey_data", "column": "income"}}
+```
+Note: "that data" refers to "survey_data" from the previous tool call.
+
+### Example 4: Multi-step analysis workflow
+
+**User**: "I want to analyze my panel data. First describe it, then run fixed effects."
+**Tool Calls** (in sequence):
+1. `{"name": "describe_dataset", "arguments": {"dataset": "panel_data"}}`
+2. After seeing the columns, call: `{"name": "panel_fixed_effects", "arguments": {"dataset": "panel_data", "formula": "y ~ x1 + x2", "entity_var": "firm_id"}}`
+
+## CRITICAL REMINDERS
+
+1. **Dataset names must match exactly** - Use the name shown in "Currently Loaded Datasets"
+2. **Column names are case-sensitive** - Use the exact column names from the dataset
+3. **Reference previous context** - When user says "those results" or "that dataset", look at previous tool calls
+4. **Don't recreate data** - If a dataset exists, USE IT - don't call create_dataset again
 
 Remember: Your value is in orchestrating these powerful Rust tools, not in doing mental math. The tools are fast, accurate, and provide publication-quality output. USE THEM. Always check what datasets are already loaded before creating new ones."#
 }
@@ -295,6 +414,75 @@ pub fn get_mcp_tool_definitions() -> Vec<ToolDefinition> {
                 "required": ["dataset", "formula", "entity_var"]
             }),
         },
+        ToolDefinition {
+            name: "panel_hdfe".to_string(),
+            description: "Run High-Dimensional Fixed Effects panel regression with multiple FE.".to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "dataset": { "type": "string" },
+                    "formula": { "type": "string" },
+                    "fe_vars": { "type": "array", "items": { "type": "string" } },
+                    "cluster_var": { "type": "string" }
+                },
+                "required": ["dataset", "formula", "fe_vars"]
+            }),
+        },
+        ToolDefinition {
+            name: "panel_gmm".to_string(),
+            description: "Run Arellano-Bond or Blundell-Bond GMM panel estimation.".to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "dataset": { "type": "string" },
+                    "formula": { "type": "string" },
+                    "entity_var": { "type": "string" },
+                    "time_var": { "type": "string" },
+                    "method": { "type": "string", "description": "difference or system" }
+                },
+                "required": ["dataset", "formula", "entity_var", "time_var"]
+            }),
+        },
+        ToolDefinition {
+            name: "panel_gls".to_string(),
+            description: "Run Panel GLS (Feasible GLS) estimation.".to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "dataset": { "type": "string" },
+                    "formula": { "type": "string" },
+                    "entity_var": { "type": "string" }
+                },
+                "required": ["dataset", "formula", "entity_var"]
+            }),
+        },
+        ToolDefinition {
+            name: "regression_bgtest".to_string(),
+            description: "Run Breusch-Godfrey test for serial correlation.".to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "dataset": { "type": "string" },
+                    "formula": { "type": "string" },
+                    "order": { "type": "integer" }
+                },
+                "required": ["dataset", "formula"]
+            }),
+        },
+        ToolDefinition {
+            name: "regression_driscoll_kraay".to_string(),
+            description: "Run regression with Driscoll-Kraay standard errors for panel data.".to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "dataset": { "type": "string" },
+                    "formula": { "type": "string" },
+                    "time_var": { "type": "string" },
+                    "lag": { "type": "integer" }
+                },
+                "required": ["dataset", "formula", "time_var"]
+            }),
+        },
         // Causal Inference
         ToolDefinition {
             name: "iv_2sls".to_string(),
@@ -322,6 +510,238 @@ pub fn get_mcp_tool_definitions() -> Vec<ToolDefinition> {
                     "post_var": { "type": "string" }
                 },
                 "required": ["dataset", "dep_var", "treatment_var", "post_var"]
+            }),
+        },
+        ToolDefinition {
+            name: "staggered_did".to_string(),
+            description: "Run Callaway-Sant'Anna staggered DiD for heterogeneous treatment timing.".to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "dataset": { "type": "string" },
+                    "dep_var": { "type": "string" },
+                    "treatment_time_var": { "type": "string" },
+                    "entity_var": { "type": "string" },
+                    "time_var": { "type": "string" }
+                },
+                "required": ["dataset", "dep_var", "treatment_time_var", "entity_var", "time_var"]
+            }),
+        },
+        ToolDefinition {
+            name: "etwfe".to_string(),
+            description: "Run Extended Two-Way Fixed Effects (Wooldridge 2021) for staggered DiD.".to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "dataset": { "type": "string" },
+                    "dep_var": { "type": "string" },
+                    "treatment_time_var": { "type": "string" },
+                    "entity_var": { "type": "string" },
+                    "time_var": { "type": "string" }
+                },
+                "required": ["dataset", "dep_var", "treatment_time_var", "entity_var", "time_var"]
+            }),
+        },
+        ToolDefinition {
+            name: "iv_first_stage".to_string(),
+            description: "Run first stage of IV regression to test instrument strength.".to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "dataset": { "type": "string" },
+                    "endog_var": { "type": "string" },
+                    "instruments": { "type": "array", "items": { "type": "string" } },
+                    "controls": { "type": "array", "items": { "type": "string" } }
+                },
+                "required": ["dataset", "endog_var", "instruments"]
+            }),
+        },
+        ToolDefinition {
+            name: "iv_sargan_test".to_string(),
+            description: "Run Sargan test for overidentification in IV regression.".to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "dataset": { "type": "string" },
+                    "endog_formula": { "type": "string" },
+                    "instrument_formula": { "type": "string" }
+                },
+                "required": ["dataset", "endog_formula", "instrument_formula"]
+            }),
+        },
+        ToolDefinition {
+            name: "rd_estimate".to_string(),
+            description: "Run regression discontinuity design estimation.".to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "dataset": { "type": "string" },
+                    "outcome": { "type": "string" },
+                    "running_var": { "type": "string" },
+                    "cutoff": { "type": "number" },
+                    "kernel": { "type": "string" }
+                },
+                "required": ["dataset", "outcome", "running_var"]
+            }),
+        },
+        ToolDefinition {
+            name: "rd_bw".to_string(),
+            description: "Compute optimal bandwidth for RD estimation.".to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "dataset": { "type": "string" },
+                    "outcome": { "type": "string" },
+                    "running_var": { "type": "string" },
+                    "cutoff": { "type": "number" }
+                },
+                "required": ["dataset", "outcome", "running_var"]
+            }),
+        },
+        ToolDefinition {
+            name: "rd_fuzzy".to_string(),
+            description: "Run fuzzy regression discontinuity design.".to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "dataset": { "type": "string" },
+                    "outcome": { "type": "string" },
+                    "treatment": { "type": "string" },
+                    "running_var": { "type": "string" },
+                    "cutoff": { "type": "number" }
+                },
+                "required": ["dataset", "outcome", "treatment", "running_var"]
+            }),
+        },
+        ToolDefinition {
+            name: "synthetic_control".to_string(),
+            description: "Run synthetic control method for causal inference with single treated unit.".to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "dataset": { "type": "string" },
+                    "outcome": { "type": "string" },
+                    "treated_unit": { "type": "string" },
+                    "treatment_time": { "type": "integer" },
+                    "unit_var": { "type": "string" },
+                    "time_var": { "type": "string" }
+                },
+                "required": ["dataset", "outcome", "treated_unit", "treatment_time", "unit_var", "time_var"]
+            }),
+        },
+        ToolDefinition {
+            name: "scpi".to_string(),
+            description: "Run synthetic control with prediction intervals (SCPI).".to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "dataset": { "type": "string" },
+                    "outcome": { "type": "string" },
+                    "treated_unit": { "type": "string" },
+                    "treatment_time": { "type": "integer" },
+                    "unit_var": { "type": "string" },
+                    "time_var": { "type": "string" }
+                },
+                "required": ["dataset", "outcome", "treated_unit", "treatment_time", "unit_var", "time_var"]
+            }),
+        },
+        ToolDefinition {
+            name: "gsynth".to_string(),
+            description: "Run generalized synthetic control method using interactive fixed effects.".to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "dataset": { "type": "string" },
+                    "outcome": { "type": "string" },
+                    "treatment": { "type": "string" },
+                    "unit_var": { "type": "string" },
+                    "time_var": { "type": "string" }
+                },
+                "required": ["dataset", "outcome", "treatment", "unit_var", "time_var"]
+            }),
+        },
+        ToolDefinition {
+            name: "treatment_ipw".to_string(),
+            description: "Estimate treatment effects using inverse probability weighting.".to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "dataset": { "type": "string" },
+                    "outcome": { "type": "string" },
+                    "treatment": { "type": "string" },
+                    "covariates": { "type": "array", "items": { "type": "string" } }
+                },
+                "required": ["dataset", "outcome", "treatment", "covariates"]
+            }),
+        },
+        ToolDefinition {
+            name: "treatment_doubly_robust".to_string(),
+            description: "Estimate treatment effects using doubly robust estimation (AIPW).".to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "dataset": { "type": "string" },
+                    "outcome": { "type": "string" },
+                    "treatment": { "type": "string" },
+                    "covariates": { "type": "array", "items": { "type": "string" } }
+                },
+                "required": ["dataset", "outcome", "treatment", "covariates"]
+            }),
+        },
+        ToolDefinition {
+            name: "propensity_matching".to_string(),
+            description: "Estimate treatment effects using propensity score matching.".to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "dataset": { "type": "string" },
+                    "outcome": { "type": "string" },
+                    "treatment": { "type": "string" },
+                    "covariates": { "type": "array", "items": { "type": "string" } }
+                },
+                "required": ["dataset", "outcome", "treatment", "covariates"]
+            }),
+        },
+        ToolDefinition {
+            name: "treatment_cbps".to_string(),
+            description: "Estimate treatment effects using covariate balancing propensity scores.".to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "dataset": { "type": "string" },
+                    "outcome": { "type": "string" },
+                    "treatment": { "type": "string" },
+                    "covariates": { "type": "array", "items": { "type": "string" } }
+                },
+                "required": ["dataset", "outcome", "treatment", "covariates"]
+            }),
+        },
+        ToolDefinition {
+            name: "treatment_weightit".to_string(),
+            description: "Estimate treatment effects using flexible weighting methods.".to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "dataset": { "type": "string" },
+                    "outcome": { "type": "string" },
+                    "treatment": { "type": "string" },
+                    "covariates": { "type": "array", "items": { "type": "string" } }
+                },
+                "required": ["dataset", "outcome", "treatment", "covariates"]
+            }),
+        },
+        ToolDefinition {
+            name: "treatment_entropy_balance".to_string(),
+            description: "Estimate treatment effects using entropy balancing.".to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "dataset": { "type": "string" },
+                    "outcome": { "type": "string" },
+                    "treatment": { "type": "string" },
+                    "covariates": { "type": "array", "items": { "type": "string" } }
+                },
+                "required": ["dataset", "outcome", "treatment", "covariates"]
             }),
         },
         // Discrete Choice
@@ -587,6 +1007,47 @@ pub fn get_mcp_tool_definitions() -> Vec<ToolDefinition> {
                 "required": ["dataset", "column"]
             }),
         },
+        ToolDefinition {
+            name: "ts_vecm".to_string(),
+            description: "Run Vector Error Correction Model for cointegrated time series.".to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "dataset": { "type": "string" },
+                    "columns": { "type": "array", "items": { "type": "string" } },
+                    "lags": { "type": "integer" },
+                    "r": { "type": "integer", "description": "Cointegration rank" }
+                },
+                "required": ["dataset", "columns", "lags"]
+            }),
+        },
+        ToolDefinition {
+            name: "timeseries_pp_test".to_string(),
+            description: "Run Phillips-Perron unit root test for stationarity.".to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "dataset": { "type": "string" },
+                    "column": { "type": "string" },
+                    "trend": { "type": "string", "description": "none, constant, or trend" }
+                },
+                "required": ["dataset", "column"]
+            }),
+        },
+        ToolDefinition {
+            name: "timeseries_decompose".to_string(),
+            description: "Classical seasonal decomposition (additive or multiplicative).".to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "dataset": { "type": "string" },
+                    "column": { "type": "string" },
+                    "period": { "type": "integer" },
+                    "type": { "type": "string", "description": "additive or multiplicative" }
+                },
+                "required": ["dataset", "column", "period"]
+            }),
+        },
         // Additional ML
         ToolDefinition {
             name: "ml_hierarchical".to_string(),
@@ -717,6 +1178,34 @@ pub fn get_mcp_tool_definitions() -> Vec<ToolDefinition> {
                     "formula": { "type": "string" }
                 },
                 "required": ["dataset", "formula"]
+            }),
+        },
+        ToolDefinition {
+            name: "viz_event_study".to_string(),
+            description: "Generate event study plot with coefficients and confidence intervals.".to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "dataset": { "type": "string" },
+                    "coefficients": { "type": "array", "items": { "type": "number" } },
+                    "standard_errors": { "type": "array", "items": { "type": "number" } },
+                    "time_labels": { "type": "array", "items": { "type": "string" } }
+                },
+                "required": ["dataset"]
+            }),
+        },
+        ToolDefinition {
+            name: "viz_irf".to_string(),
+            description: "Generate impulse response function plot.".to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "dataset": { "type": "string" },
+                    "irf_data": { "type": "object" },
+                    "shock_var": { "type": "string" },
+                    "response_var": { "type": "string" }
+                },
+                "required": ["dataset"]
             }),
         },
     ]

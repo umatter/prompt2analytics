@@ -603,7 +603,8 @@ impl AnalyticsServer {
             + Self::spatial_router()
             + Self::munging_router()
             + Self::survival_router()
-            + Self::cleaning_router();
+            + Self::cleaning_router()
+            + Self::search_router();
 
         Self {
             datasets: Arc::new(RwLock::new(HashMap::new())),
@@ -636,7 +637,8 @@ impl AnalyticsServer {
             + Self::spatial_router()
             + Self::munging_router()
             + Self::survival_router()
-            + Self::cleaning_router();
+            + Self::cleaning_router()
+            + Self::search_router();
 
         Self {
             datasets: session.datasets.clone(),
@@ -1478,6 +1480,41 @@ impl AnalyticsServer {
                     "required": ["dataset", "column"]
                 }),
             },
+            // Tool discovery (meta-tools for scaling beyond 128 tools)
+            ToolDefinition {
+                name: "search_tools".to_string(),
+                description: "Search for analytics tools by natural language description. Use this when you need to find the right tool for an analysis task. Returns matching tools with descriptions and relevance scores.".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "Natural language description of the analysis task"},
+                        "category": {"type": "string", "description": "Optional category filter (data, regression, panel, causal, timeseries, etc.)"},
+                        "limit": {"type": "integer", "description": "Maximum tools to return (default: 10, max: 25)"}
+                    },
+                    "required": ["query"]
+                }),
+            },
+            ToolDefinition {
+                name: "list_tool_categories".to_string(),
+                description: "List all available tool categories with descriptions and tool counts. Use this to understand what types of analyses are available.".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "include_counts": {"type": "boolean", "description": "Include tool counts per category (default: true)"}
+                    }
+                }),
+            },
+            ToolDefinition {
+                name: "tool_info".to_string(),
+                description: "Get detailed information about a specific tool including its full description, parameters, related tools, and R equivalent.".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "tool_name": {"type": "string", "description": "Name of the tool to get information about"}
+                    },
+                    "required": ["tool_name"]
+                }),
+            },
         ]
     }
 
@@ -1880,6 +1917,23 @@ impl AnalyticsServer {
                 let req: OneHotEncodeRequest = serde_json::from_value(arguments)
                     .map_err(|e| format!("Invalid arguments: {}", e))?;
                 session_server.munge_one_hot_encode(Parameters(req)).await
+            }
+            // Tool discovery (meta-tools for scaling beyond 128 tools)
+            "search_tools" => {
+                let req: SearchToolsRequest = serde_json::from_value(arguments)
+                    .map_err(|e| format!("Invalid arguments: {}", e))?;
+                session_server.search_tools(Parameters(req)).await
+            }
+            "list_tool_categories" => {
+                let req: ListToolCategoriesRequest = serde_json::from_value(arguments)
+                    .map_err(|e| format!("Invalid arguments: {}", e))?;
+                session_server.list_tool_categories(Parameters(req)).await
+            }
+            "tool_info" => {
+                let req: crate::tools::handlers::search::ToolInfoRequest =
+                    serde_json::from_value(arguments)
+                        .map_err(|e| format!("Invalid arguments: {}", e))?;
+                session_server.tool_info(Parameters(req)).await
             }
             _ => {
                 return Err(format!("Unknown tool: {}", tool_name));

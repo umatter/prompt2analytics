@@ -42,6 +42,6 @@ pub mod requests;
 pub mod handlers;
 
 pub use registry::{
-    ToolCategory, ToolInfo, category_counts, generate_markdown_docs, get_registry, search_tools,
-    tool_count, tools_by_category,
+    ToolCategory, ToolInfo, ToolSearchResult, category_counts, generate_markdown_docs,
+    get_registry, parse_category, search_tools, search_tools_scored, tool_count, tools_by_category,
 };

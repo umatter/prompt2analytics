@@ -51,3 +51,4 @@ pub mod survival;
 pub mod timeseries;
 pub mod utils;
 pub mod viz;
+pub mod search;

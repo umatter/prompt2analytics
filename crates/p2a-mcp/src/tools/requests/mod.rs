@@ -40,6 +40,7 @@ pub mod survival;
 pub mod timeseries;
 pub mod utils;
 pub mod viz;
+pub mod search;
 
 // Re-export migrated types
 pub use causal::*;
@@ -58,3 +59,4 @@ pub use survival::*;
 pub use timeseries::*;
 pub use utils::*;
 pub use viz::*;
+pub use search::*;
