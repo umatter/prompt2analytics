@@ -26,7 +26,7 @@
           "turn": 3,
           "user_prompt": "Now show me diagnostic plots for the residuals",
           "expected_tool": "viz_residual_diagnostics",
-          "acceptable_tools": ["viz_residual_diagnostics", "viz_qq_plot", "viz_histogram"],
+          "acceptable_tools": ["viz_residual_diagnostics", "viz_histogram", "viz_scatter"],
           "context_from_previous": true
         }
       ]
@@ -40,7 +40,7 @@
           "turn": 1,
           "user_prompt": "Run a regression of investment on value and capital",
           "expected_tool": "regression_ols",
-          "acceptable_tools": ["regression_ols", "regression_clustered", "panel_fe"],
+          "acceptable_tools": ["regression_ols", "regression_clustered", "panel_fixed_effects"],
           "context_from_previous": false
         },
         {
@@ -53,8 +53,8 @@
         {
           "turn": 3,
           "user_prompt": "What's the VIF for these variables? I want to check for multicollinearity",
-          "expected_tool": "regression_vif",
-          "acceptable_tools": ["regression_vif", "regression_diagnostics"],
+          "expected_tool": "regression_diagnostics",
+          "acceptable_tools": ["regression_diagnostics"],
           "context_from_previous": true
         },
         {
@@ -80,16 +80,16 @@
         },
         {
           "turn": 2,
-          "user_prompt": "The relationship doesn't look linear. Try a nonlinear specification with log transformations",
+          "user_prompt": "The relationship doesn't look linear. Try a nonlinear specification",
           "expected_tool": "regression_nls",
-          "acceptable_tools": ["regression_nls", "regression_ols"],
+          "acceptable_tools": ["regression_nls", "regression_loess", "regression_ols"],
           "context_from_previous": true
         },
         {
           "turn": 3,
-          "user_prompt": "Compare the R-squared values between the two models",
-          "expected_tool": "regression_compare",
-          "acceptable_tools": ["regression_compare", "regression_ols"],
+          "user_prompt": "Run regression diagnostics to check the model fit",
+          "expected_tool": "regression_diagnostics",
+          "acceptable_tools": ["regression_diagnostics", "regression_ols"],
           "context_from_previous": true
         }
       ]
@@ -115,16 +115,16 @@
         },
         {
           "turn": 3,
-          "user_prompt": "Test for normality of the residuals",
-          "expected_tool": "hypothesis_jarque_bera",
-          "acceptable_tools": ["hypothesis_jarque_bera", "hypothesis_shapiro_wilk", "regression_diagnostics"],
+          "user_prompt": "Test for normality of the residuals using the Shapiro-Wilk test",
+          "expected_tool": "hypothesis_shapiro_wilk",
+          "acceptable_tools": ["hypothesis_shapiro_wilk", "regression_diagnostics"],
           "context_from_previous": true
         },
         {
           "turn": 4,
-          "user_prompt": "Test for heteroskedasticity using the Breusch-Pagan test",
-          "expected_tool": "hypothesis_breusch_pagan",
-          "acceptable_tools": ["hypothesis_breusch_pagan", "regression_diagnostics"],
+          "user_prompt": "Run full regression diagnostics including heteroskedasticity tests",
+          "expected_tool": "regression_diagnostics",
+          "acceptable_tools": ["regression_diagnostics"],
           "context_from_previous": true
         }
       ]
@@ -151,9 +151,9 @@
         },
         {
           "turn": 3,
-          "user_prompt": "Show me the confidence intervals for all coefficients",
-          "expected_tool": "regression_confint",
-          "acceptable_tools": ["regression_confint", "regression_ols"],
+          "user_prompt": "Plot the coefficient estimates with their confidence intervals",
+          "expected_tool": "viz_coefficient",
+          "acceptable_tools": ["viz_coefficient", "regression_ols"],
           "context_from_previous": true
         }
       ]

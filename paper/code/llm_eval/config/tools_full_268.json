@@ -915,18 +915,6 @@
     {
       "type": "function",
       "function": {
-        "name": "list_tool_categories",
-        "description": "List all available tool categories with descriptions and tool counts. Use this to understand what types of analyses are available before searching for specific tools.",
-        "parameters": {
-          "type": "object",
-          "properties": {},
-          "required": []
-        }
-      }
-    },
-    {
-      "type": "function",
-      "function": {
         "name": "load_dataset",
         "description": "Load a dataset from a file. Supports CSV, Parquet, Excel (xlsx, xls, xlsb, ods), Stata (dta), and SAS (sas7bdat) formats. Returns dataset information including dimensions and column types.",
         "parameters": {
@@ -2127,18 +2115,6 @@
     {
       "type": "function",
       "function": {
-        "name": "search_tools",
-        "description": "Search for analytics tools by natural language description. Use this when you need to find the right tool for an analysis task. Returns matching tools with descriptions and relevance scores. Example queries: 'regression with robust standard errors', 'test for serial correlation', 'panel data fixed effects'.",
-        "parameters": {
-          "type": "object",
-          "properties": {},
-          "required": []
-        }
-      }
-    },
-    {
-      "type": "function",
-      "function": {
         "name": "sem_model",
         "description": "Run Spatial Error Model (SEM): y = X\u03b2 + u, where u = \u03bbWu + \u03b5. Estimates spatial error parameter \u03bb via maximum likelihood. Use when spatial dependence is in the error term (nuisance dependence, e.g., omitted spatially correlated variables). Equivalent to R's spatialreg::errorsarlm().",
         "parameters": {
@@ -2801,18 +2777,6 @@
       "function": {
         "name": "timeseries_window",
         "description": "Extract a contiguous window (subset) from a time series by specifying start and end indices.",
-        "parameters": {
-          "type": "object",
-          "properties": {},
-          "required": []
-        }
-      }
-    },
-    {
-      "type": "function",
-      "function": {
-        "name": "tool_info",
-        "description": "Get detailed information about a specific tool including its full description, parameters, related tools, and R equivalent. Use this after search_tools to learn more about a specific tool before using it.",
         "parameters": {
           "type": "object",
           "properties": {},

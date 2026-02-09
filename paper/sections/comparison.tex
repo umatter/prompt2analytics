@@ -64,15 +64,17 @@ Category & Method & $n$ & \proglang{R} & \pkg{p2a} & Speedup \\
 Several patterns emerge from these results. First, speedup factors are largest
 for methods with significant per-call overhead in \proglang{R}. Panel data
 methods show the largest improvements: fixed effects estimation at
-$n = 100$ is 184$\times$ faster in \pkg{prompt2analytics}, reflecting the
-overhead of \pkg{plm}'s formula parsing, factor handling, and
-data frame manipulation rather than fundamental computational differences.
-This extreme speedup should be interpreted with caution: it primarily reflects
-\pkg{plm}'s known inefficiencies for small samples, not a general 184$\times$
-advantage. As sample size increases and matrix operations begin to dominate,
-speedup factors decrease to more representative levels (5--6$\times$ at
-$n = 10{,}000$). Users should consider the $n = 10{,}000$ results as more
-indicative of typical production performance.
+$n = 100$ is 184$\times$ faster in \pkg{prompt2analytics}. This extreme
+speedup is misleading for practical interpretation: it primarily reflects
+\proglang{R}'s interpreter overhead (formula parsing, factor handling, data frame
+manipulation) rather than differences in numerical computation. At small sample
+sizes, overhead dominates; the same matrix algebra that takes microseconds is
+wrapped in milliseconds of bookkeeping. As sample size increases and matrix
+operations dominate execution time, speedup factors converge to more realistic
+levels: 5--6$\times$ at $n = 10{,}000$. Users should focus on the
+$n = 10{,}000$ results as indicative of typical production performance. The
+$n = 100$ results demonstrate overhead elimination but not sustained computational
+advantage.
 
 Second, methods involving expensive mathematical functions show smaller
 speedups. Probit estimation requires repeated evaluation of the standard
@@ -280,4 +282,26 @@ with missing values, factors, or complex hierarchies may show different
 relative performance. Third, \proglang{R}'s flexibility (formula interface,
 extensive diagnostics, integration with the tidyverse ecosystem) provides
 value not captured in raw timing comparisons or feature checklists.
+
+\subsubsection{Comparison with fixest}
+
+\pkg{fixest} \citep{Berge:2018} was excluded from the performance benchmarks
+in Table~\ref{tab:performance-summary} because its highly optimized C++
+implementation makes direct speed comparison uninformative for most users.
+\pkg{fixest} is specifically engineered for high-dimensional fixed effects
+and will outperform \pkg{prompt2analytics} on HDFE problems, often by a
+substantial margin.
+
+Users who prioritize raw speed for high-dimensional fixed effects estimation
+should use \pkg{fixest} directly---this is the right tool for that job.
+The differentiating value of \pkg{prompt2analytics} is not speed leadership
+on any single method class, but rather: (1)~the natural language interface
+that enables users unfamiliar with \proglang{R} syntax to access validated
+methods, (2)~local execution without \proglang{R} dependencies, and
+(3)~integration across a broad range of econometric methods within a
+unified framework.
+
+For users already proficient in \proglang{R} who work primarily with
+high-dimensional fixed effects, \pkg{fixest} remains the recommended choice.
+\pkg{prompt2analytics} complements rather than replaces specialized tools.
 

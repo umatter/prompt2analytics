@@ -37,22 +37,22 @@
 
 %% Abstract
 \Abstract{
-  This paper introduces \emph{chat-first data analytics}: an approach where
-  natural language conversation is the primary interface to statistical
-  methods, while pre-implemented algorithms perform the actual computation.
-  Unlike approaches where large language models generate statistical code,
-  which raises concerns about correctness, data privacy, and reproducibility,
-  chat-first analytics separates interpretation (understanding user intent) from
-  computation (executing validated methods). The language model selects tools;
-  verified implementations produce results. We present \pkg{prompt2analytics},
-  a software implementation with an econometrics library in pure \proglang{Rust},
-  exposed through the Model Context Protocol (MCP) for integration with language
-  models. The library covers regression analysis with robust and clustered
-  standard errors, panel data models, instrumental variables,
-  difference-in-differences, discrete choice, and time series methods.
-  All implementations are validated against established \proglang{R} packages.
-  Local deployment via Ollama enables complete data isolation for sensitive
-  data analysis.
+  This paper presents \pkg{prompt2analytics}, a software toolkit that applies
+  established tool-augmented language model techniques to econometric analysis.
+  Natural language conversation serves as the interface to statistical methods,
+  while pre-implemented algorithms perform computation---the language model
+  selects tools; verified implementations produce results. This approach
+  addresses concerns about correctness, data privacy, and reproducibility
+  that arise when language models generate statistical code directly.
+  The software contribution includes: (1)~an econometrics library in pure
+  \proglang{Rust} covering regression, panel data, instrumental variables,
+  difference-in-differences, discrete choice, and time series methods;
+  (2)~exposure through the Model Context Protocol (MCP) for LLM integration;
+  and (3)~validation against established \proglang{R} packages. Extended
+  evaluation reveals practical accuracy limitations: multi-turn accuracy
+  ranges from 47--60\% and parameter extraction F1 from 41--59\%, indicating
+  that users should expect to correct requests in realistic workflows.
+  Local deployment via Ollama enables complete data isolation.
 }
 
 %% Keywords (at least one required)

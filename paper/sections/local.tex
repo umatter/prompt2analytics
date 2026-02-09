@@ -55,6 +55,37 @@ Responses are scored as exact (correct tool), acceptable (valid alternative),
 category (correct domain, wrong method), or failed. Accuracy is computed as
 (exact + acceptable) / total.
 
+\subsubsection{Evaluation methodology and reproducibility}
+
+All evaluations used temperature $= 0$ for deterministic outputs. The system
+prompt instructs the model to select a single tool from the provided MCP schema
+and return a structured JSON response with tool name and parameters. The
+complete system prompt is provided in the supplementary materials file
+\code{llm\_eval\_prompts.txt}; the summary form is:
+
+\begin{quote}
+\small
+``You are an assistant that selects statistical tools. Given a user request,
+choose exactly one tool from the available schema and provide the required
+parameters. Respond with valid JSON containing `tool\_name' and `parameters'.''
+\end{quote}
+
+\noindent Model versions used for evaluation (accessed January 2026):
+\begin{itemize}
+  \item Claude 3.5 Haiku: \code{claude-3-5-haiku-20241022}
+  \item Claude 3.5 Sonnet: \code{claude-3-5-sonnet-20241022}
+  \item GPT-4o: \code{gpt-4o-2024-08-06}
+  \item GPT-4.1 Nano: \code{gpt-4.1-nano-2025-04-14}
+  \item Llama 3.1 8B, Llama 3.3 70B: via Ollama (Q4\_K\_M quantization)
+  \item Qwen 2.5 7B, Qwen 2.5 72B: via Ollama (Q4\_K\_M quantization)
+  \item Ministral 3B: via Ollama (Q4\_K\_M quantization)
+\end{itemize}
+
+\noindent We acknowledge that API-served models may change over time and that
+exact replication of results for cloud-hosted models may not be possible.
+Local models evaluated via Ollama use fixed quantization levels, improving
+reproducibility for those configurations.
+
 \begin{figure}[htbp]
 \centering
 \includegraphics[width=0.85\textwidth]{figures/fig_accuracy_comparison}
@@ -115,12 +146,14 @@ five dimensions using the same 10 models.
 
 \textbf{Multi-turn conversations.} We constructed 20 multi-turn conversations
 totaling 72 turns, where each turn builds on previous context (e.g., ``Now use
-robust standard errors instead''). Accuracy drops substantially compared to
-single-turn: the best-performing model (Llama 3.3 70B) achieves 59.7\% turn
-accuracy and 35\% conversation completion (all turns correct). Most models
-cluster between 47--58\% turn accuracy. This decline reflects the challenge
-of maintaining context---models frequently lose track of prior specifications
-or misinterpret references to earlier results.
+robust standard errors instead''). The results surprised us: accuracy depends
+heavily on what goes into the conversation history. When models can see their
+previous tool calls and results, they correctly resolve references like ``those
+results'' or ``the previous model.'' Without this context, they cannot.
+GPT-4o-mini with full context achieves 97.2\% turn accuracy and 90\% conversation
+completion. Qwen3 8B reaches 83.3\% and 60\%. But strip out the tool call
+history, and accuracy drops to 47--60\% across the board. The lesson is simple:
+conversation history must include tool invocations, not just the text exchange.
 
 \textbf{Naturalistic prompts.} We tested 99 prompts featuring realistic
 variations: typos (``regresion''), informal language (``run a quick OLS''),
@@ -149,15 +182,13 @@ either decline gracefully or suggest alternatives. Detection rates range
 from 40--60\%, with most undetected cases resulting in selection of a
 superficially similar but incorrect method.
 
-Table~\ref{tab:extended-eval-summary-main} summarizes the key metrics from
-the extended evaluation, highlighting the gap between controlled single-turn
-evaluation and realistic usage patterns.
+Table~\ref{tab:extended-eval-summary-main} summarizes the results.
 
 \begin{table}[htbp]
 \centering
 \caption{Extended evaluation results: the gap between controlled benchmarks
-and realistic use. Single-turn accuracy (87--100\%) substantially overstates
-practical capability. Values show range across 10 evaluated models.}
+and realistic use. Multi-turn results reflect V3 evaluation with enhanced
+context (tool calls in history). Values show range across evaluated models.}
 \label{tab:extended-eval-summary-main}
 \small
 \begin{tabular}{lcc}
@@ -165,8 +196,8 @@ practical capability. Values show range across 10 evaluated models.}
 Metric & Range & Best Model \\
 \midrule
 Single-turn tool selection & 90.8--100\% & Qwen 2.5 72B, Claude 3.5 Haiku \\
-Multi-turn accuracy & 47--60\% & Llama 3.3 70B (59.7\%) \\
-Conversation completion & 0--35\% & Llama 3.3 70B (35\%) \\
+Multi-turn accuracy & 47--97\% & GPT-4o-mini (97.2\%) \\
+Conversation completion & 15--90\% & GPT-4o-mini (90\%) \\
 Naturalistic prompt robustness & 58--70\% & Claude 3.5 Haiku (69.7\%) \\
 Parameter extraction F1 & 41--59\% & Qwen 2.5 72B (59.1\%) \\
 Interpretation accuracy & 68--87\% & GPT-4.1 Nano (87.2\%) \\
@@ -178,17 +209,14 @@ Out-of-scope detection & 40--60\% & Llama 3.3 70B (60\%) \\
 Figure~\ref{fig:robustness-radar} in Appendix~\ref{app:extended-eval}
 visualizes the multi-dimensional performance profile for each model.
 
-\textbf{Implications.} The extended evaluation reveals that single-turn
-accuracy overstates real-world capability. Multi-turn
-accuracy of 50--60\% means users should expect to correct or clarify
-requests in roughly half of multi-turn interactions. Parameter extraction
-errors (F1 of 41--59\%) mean users should verify that extracted parameters
-match their intent before interpreting results. These findings reinforce
-the importance of explicit specification, result verification, and treating
-the system as an assistant requiring supervision rather than an autonomous
-analyst. For production deployment, larger models (70B+ parameters) provide
-improvements in robustness, though even the best models require
-user oversight for complex analytical workflows.
+\textbf{What this means.} Context management matters more than model choice.
+With tool calls in history, even Qwen3 8B (an 8-billion parameter open model)
+hits 83\% multi-turn accuracy. Without it, 70-billion parameter models struggle
+to break 60\%. Parameter extraction remains the weak point: F1 scores of
+41--59\% mean users should check that the model extracted the right variable
+names and options before trusting results. For practical deployment: include
+tool calls in conversation history, and verify parameters before interpreting
+output.
 
 \subsection{Failure modes and error handling}
 
@@ -294,6 +322,30 @@ can match proprietary alternatives: Qwen 2.5 72B achieves 100\% accuracy
 on our benchmark, identical to Claude 3.5 Haiku. Users requiring complete
 data isolation need not sacrifice tool selection quality; fully local
 deployments can perform equivalently to cloud-hosted solutions.
+
+\subsubsection{Recommendations by use case}
+
+Single-turn and multi-turn usage patterns require different model selection
+considerations:
+
+\begin{itemize}
+  \item \emph{Single-turn analyses} (e.g., one-off regression, hypothesis test):
+    Even smaller models (Ministral 3B, 90.8\% accuracy) perform adequately.
+    Hardware constraints can be relaxed.
+  \item \emph{Multi-turn exploratory workflows} (e.g., iterative specification
+    refinement): Larger models show better context maintenance. Llama 3.3 70B
+    achieves the highest multi-turn accuracy (59.7\%) and conversation completion
+    rate (35\%). Users planning extended conversations should prefer 70B+ models
+    despite higher hardware requirements.
+  \item \emph{Parameter-sensitive analyses}: When accurate extraction of variable
+    names and specification options is critical, Qwen 2.5 72B shows the highest
+    parameter extraction F1 (59.1\%).
+  \item \emph{Result interpretation}: If LLM explanations of statistical output
+    are important, GPT-4.1 Nano achieves the highest interpretation accuracy
+    (87.2\%), though this requires cloud API access.
+\end{itemize}
+
+\noindent Table~\ref{tab:models} provides hardware requirements for each tier.
 
 \begin{table}[htbp]
 \centering

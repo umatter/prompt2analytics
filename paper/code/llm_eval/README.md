@@ -61,13 +61,48 @@ ollama pull llama3.2
 
 Tests context retention across conversation turns (20 conversations, ~72 turns).
 
-```bash
-# All multi-turn categories
-./scripts/run_multi_turn_eval.sh gpt-4o openai all
+#### V1 (Legacy): Plain Text History
 
-# Specific category
-./scripts/run_multi_turn_eval.sh gpt-4o openai regression
+The original evaluation embeds conversation history as plain text with only tool names.
+
+```bash
+./scripts/run_multi_turn_eval.sh gpt-4o openai all
 ```
+
+#### V2 (Recommended): Structured History with Tool Results
+
+The improved V2 evaluation includes:
+- Tool arguments in conversation history
+- Simulated tool results for context
+- OpenAI-compatible message format
+- Proper tool-calling structure
+
+```bash
+# Shell-based V2 evaluation
+./scripts/run_multi_turn_eval_v2.sh gpt-4o openai all
+
+# Python-based V2 evaluation (with actual MCP server)
+python scripts/run_multi_turn_eval_v2.py --model gpt-4o-mini --provider openai
+
+# Compare V1 vs V2 results
+./scripts/compare_eval_versions.sh
+```
+
+**V2 History Format:**
+```json
+[
+  {"role": "user", "content": "Run OLS regression of y on x1, x2"},
+  {"role": "assistant", "content": "", "tool_calls": [
+    {"id": "call_1", "name": "regression_ols", "arguments": {"y_col": "y", "x_cols": ["x1", "x2"]}}
+  ]},
+  {"role": "tool", "tool_call_id": "call_1", "content": "OLS Results: R²=0.847, Coefficients: ..."}
+]
+```
+
+This format enables the LLM to understand:
+- What tool was called (not just the name, but with what parameters)
+- What the result was (enabling "those results" references)
+- Full conversation context for follow-up requests
 
 ### Naturalistic Prompts Evaluation
 
@@ -274,6 +309,11 @@ llm_eval/
 ├── config/
 │   ├── models.json                # Model configurations
 │   └── tools.json                 # MCP tool definitions
+├── test_data/                     # Test datasets for V2 evaluation
+│   ├── grunfeld.csv               # Panel data (firm investment)
+│   ├── wages.csv                  # Cross-section (wage determinants)
+│   ├── growth.csv                 # Time series (GDP growth)
+│   └── cps.csv                    # CPS microdata sample
 ├── test_cases/
 │   ├── regression.json            # Single-turn tests
 │   ├── panel.json
@@ -306,13 +346,17 @@ llm_eval/
 │   └── out_of_scope.json          # OOS detection tests
 ├── scripts/
 │   ├── run_eval.sh                # Single-turn evaluation
-│   ├── run_multi_turn_eval.sh     # Multi-turn evaluation
+│   ├── run_multi_turn_eval.sh     # Multi-turn V1 (legacy)
+│   ├── run_multi_turn_eval_v2.sh  # Multi-turn V2 (shell, with tool results)
+│   ├── run_multi_turn_eval_v2.py  # Multi-turn V2 (Python, with MCP server)
+│   ├── compare_eval_versions.sh   # Compare V1 vs V2 results
 │   ├── run_naturalistic_eval.sh   # Naturalistic evaluation
 │   ├── run_parameter_eval.sh      # Parameter extraction evaluation
 │   ├── run_interpretation_eval.sh # Interpretation evaluation
 │   ├── run_oos_eval.sh            # Out-of-scope evaluation
 │   ├── build_prompt.sh            # Single-turn prompt construction
-│   ├── build_multi_turn_prompt.sh # Multi-turn prompt construction
+│   ├── build_multi_turn_prompt.sh # Multi-turn V1 prompt construction
+│   ├── build_multi_turn_prompt_v2.sh  # Multi-turn V2 prompt construction
 │   ├── call_openai.sh             # OpenAI API wrapper
 │   ├── call_anthropic.sh          # Anthropic API wrapper
 │   ├── call_openrouter.sh         # OpenRouter API wrapper
@@ -324,7 +368,8 @@ llm_eval/
 │   └── generate_report.sh         # Report generation
 └── results/
     ├── *.jsonl                    # Single-turn results
-    ├── multi_turn/                # Multi-turn results
+    ├── multi_turn/                # Multi-turn V1 results
+    ├── multi_turn_v2/             # Multi-turn V2 results (new)
     ├── naturalistic/              # Naturalistic results
     ├── parameter_extraction/      # Parameter extraction results
     ├── interpretation/            # Interpretation results
