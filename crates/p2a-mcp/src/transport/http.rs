@@ -1814,10 +1814,8 @@ mod llm_handlers {
                                                     completed_calls
                                                         .iter()
                                                         .map(|tc| {
-                                                            let result_content = tc
-                                                                .result
-                                                                .as_deref()
-                                                                .unwrap_or("");
+                                                            let result_content =
+                                                                tc.result.as_deref().unwrap_or("");
                                                             // Truncate long results
                                                             let truncated =
                                                                 if result_content.len() > 2000 {
@@ -1839,11 +1837,13 @@ mod llm_handlers {
                                                 history.push(Message::tool_result(tool_results));
                                             } else if !db_msg.content.is_empty() {
                                                 // No tool calls, just content
-                                                history
-                                                    .push(Message::assistant(db_msg.content.clone()));
+                                                history.push(Message::assistant(
+                                                    db_msg.content.clone(),
+                                                ));
                                             }
                                         } else if !db_msg.content.is_empty() {
-                                            history.push(Message::assistant(db_msg.content.clone()));
+                                            history
+                                                .push(Message::assistant(db_msg.content.clone()));
                                         }
                                     }
                                     crate::db::MessageRole::System => {
