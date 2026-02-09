@@ -67,14 +67,17 @@ translating analytical intent into software-specific syntax is real, and
 reducing this burden frees mental resources for the questions
 that actually matter.
 
-Natural language interfaces also enable exploratory dialogue, which code-based
+Natural language interfaces may also enable exploratory dialogue that code-based
 workflows discourage. A researcher might begin with
 ``show me the relationship between X and Y,'' examine the scatterplot, then ask
 ``control for Z,'' inspect the regression output, and continue ``are there
 outliers driving this?'' Each step builds on the previous, with the language
-model maintaining context across the conversation. This iterative refinement
-mirrors how experienced analysts actually think about data. Code-based
-workflows require explicit state management that interrupts this flow.
+model maintaining context across the conversation. This mirrors how experienced
+analysts actually think about data. Our evaluation (Section~\ref{sec:local})
+found that multi-turn accuracy reaches 83--97\% when conversation history
+includes tool calls and their results---a simple fix that makes a large
+difference. Whether this translates to better user experience remains to be
+tested in user studies.
 
 A further opportunity comes from reconsidering the computational architecture.
 When ChatGPT or Claude perform data analysis, they generate \proglang{Python}
@@ -101,11 +104,12 @@ implementations and local execution rather than enhanced code generation.
 
 \subsection{Chat-first data analytics}
 
-We use \emph{chat-first data analytics} to describe an approach that extends
-the natural language interface paradigm---developed for database queries, data
-visualization, and general-purpose AI assistants---to statistical and
-econometric analysis. This represents an application of established techniques
-to a new domain rather than a novel paradigm. The approach has two defining
+We use \emph{chat-first data analytics} to describe an approach that applies
+tool-augmented language model techniques \citep{Schick+etal:2023, Yao+etal:2023}
+to statistical and econometric analysis. This extends the natural language
+interface pattern---developed for database queries, data visualization, and
+general-purpose AI assistants---to a new domain, applying established methods
+rather than introducing novel techniques. The approach has two defining
 properties and one important design choice:
 
 \begin{enumerate}
@@ -165,16 +169,18 @@ All implementations are validated against established \proglang{R} packages
 to ensure numerical accuracy.
 
 The remainder of the paper is organized as follows. Section~\ref{sec:design}
-elaborates the design philosophy underlying chat-first analytics and relates
-it to prior work on natural language interfaces, LLM-based agents, and AutoML.
-Section~\ref{sec:architecture} describes the software architecture of
-\pkg{prompt2analytics}, including the core library organization, user interfaces,
-and communication flow. Section~\ref{sec:examples} demonstrates the chat-first
-workflow through worked examples. Section~\ref{sec:comparison} presents
-validation results comparing \pkg{prompt2analytics} to established \proglang{R}
-packages, and Section~\ref{sec:performance} provides detailed performance
-benchmarks. Section~\ref{sec:local} discusses local LLM deployment for
-complete data isolation. Section~\ref{sec:conclusion} concludes with a
+elaborates the design philosophy and includes practical accuracy expectations
+(Section~\ref{sec:accuracy-expectations}), which readers should consult before
+interpreting the polished examples that follow. Section~\ref{sec:architecture}
+describes the software architecture of \pkg{prompt2analytics}, including the
+core library organization, user interfaces, and communication flow.
+Section~\ref{sec:examples} demonstrates the chat-first workflow through worked
+examples, including realistic failure cases. Section~\ref{sec:comparison}
+presents validation results comparing \pkg{prompt2analytics} to established
+\proglang{R} packages, and Section~\ref{sec:performance} provides detailed
+performance benchmarks. Section~\ref{sec:local} discusses local LLM deployment
+and presents extended evaluation results showing multi-turn accuracy of up to 97\%
+with proper context management, along with other practical considerations. Section~\ref{sec:conclusion} concludes with a
 discussion of limitations and future directions.
 
 \subsection{The statistical software landscape}

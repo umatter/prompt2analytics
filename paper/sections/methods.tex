@@ -12,7 +12,7 @@ language, and the system determines the appropriate statistical method.
 
 \subsection{Chat-first analytics}
 
-The design principle is \emph{chat-first analytics}:
+The design approach is \emph{chat-first analytics}:
 the primary interface is conversational rather than programmatic. A user
 might request ``estimate the effect of education on wages, controlling for
 experience and industry, with robust standard errors'' without specifying
@@ -36,12 +36,16 @@ alone---the system must select among econometric methods, not just translate
 queries to SQL. Second, we leverage large language models as the interpretive
 layer, providing flexibility that rule-based systems cannot match.
 
-This conversational approach offers several advantages. It lowers the barrier
-to entry for users unfamiliar with econometric software conventions. It
+This conversational approach aims to offer several advantages. It may lower the
+barrier to entry for users unfamiliar with econometric software conventions. It
 allows domain experts to focus on their research questions rather than
-implementation details. And it enables exploratory analysis through
+implementation details. And it may enable exploratory analysis through
 dialogue: users can refine their analysis iteratively based on results
-and suggestions from the system.
+and suggestions from the system. However, these benefits remain hypothesized;
+user studies comparing chat-first workflows against traditional interfaces
+are needed to validate accessibility and productivity claims. Our extended
+evaluation (Section~\ref{sec:local}) shows that realistic use requires
+significant user intervention.
 
 \subsection{Positioning this work}
 
@@ -126,6 +130,51 @@ and heuristic checks for common errors (e.g., sample size warnings for
 subgroup analyses). These extensions require additional research and testing
 to ensure warnings are accurate and actionable rather than overwhelming users
 with false positives.
+
+\subsection{Practical accuracy expectations} \label{sec:accuracy-expectations}
+
+Before presenting polished examples (Section~\ref{sec:examples}), readers
+should understand the practical accuracy limitations documented in our
+extended evaluation (Section~\ref{sec:local}). Table~\ref{tab:accuracy-summary-early}
+summarizes key findings that set appropriate expectations for realistic use.
+
+\begin{table}[htbp]
+\centering
+\caption{Summary of LLM accuracy limitations. Single-turn accuracy on curated
+benchmarks substantially overstates practical capability in realistic workflows.
+Values show range across 10 evaluated models.}
+\label{tab:accuracy-summary-early}
+\small
+\begin{tabular}{lcc}
+\toprule
+Metric & Range & Interpretation \\
+\midrule
+Single-turn tool selection & 90.8--100\% & Curated prompts, best case \\
+Multi-turn accuracy & 47--97\% & With enhanced context: up to 97\% \\
+Conversation completion & 15--90\% & With enhanced context: up to 90\% \\
+Parameter extraction F1 & 41--59\% & Variable names, options correctly extracted \\
+Out-of-scope detection & 40--60\% & Correctly declines unsupported requests \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+For users, this means:
+\begin{itemize}
+  \item \emph{Keep tool calls in history}: Multi-turn accuracy jumps from
+    ${\sim}50\%$ to ${\sim}97\%$ when conversation history includes previous
+    tool invocations and their results. This is the single biggest factor.
+  \item \emph{Check parameters}: The model often picks the right tool but
+    extracts wrong variable names or options (F1 of 41--59\%). Glance at
+    what it extracted before trusting results.
+  \item \emph{Be specific}: ``Within-transformation fixed effects with firm-clustered
+    standard errors'' works better than ``regression with firm effects.''
+  \item \emph{Stay in the loop}: Tool selection is reliable now; parameter
+    extraction and interpretation still need a human eye.
+\end{itemize}
+
+\noindent Section~\ref{sec:local} provides full evaluation methodology and results.
+Table~\ref{tab:extended-eval-summary-main} presents per-model breakdowns across
+all evaluation dimensions.
 
 \subsection{LLM as method selector}
 
@@ -341,20 +390,48 @@ Appendix~\ref{app:implementation}.
 
 \subsection{Implementation caveats}
 
-While method coverage is broad, several limitations remain relative to
-state-of-the-art practice:
+While method coverage is broad (200+ methods), several important categories
+remain unimplemented. Table~\ref{tab:method-coverage} summarizes coverage
+gaps and recommends alternative tools for each category.
+
+\begin{table}[htbp]
+\centering
+\caption{Method coverage limitations and recommended alternatives}
+\label{tab:method-coverage}
+\small
+\begin{tabular}{p{3.5cm}p{5cm}p{4cm}}
+\toprule
+Method Category & Status & Recommended Alternative \\
+\midrule
+Bayesian inference & Not implemented & \proglang{R}: \pkg{rstanarm}, \pkg{brms}; \proglang{Python}: PyMC \\
+Heckman selection & Not implemented & \proglang{R}: \pkg{sampleSelection}; \proglang{Stata}: \code{heckman} \\
+Conley spatial SEs & Not implemented & \proglang{R}: \pkg{fixest}, \pkg{lfe} \\
+Full SARIMA (arbitrary seasonal) & Partial support & \proglang{R}: \pkg{forecast} \\
+Quantile IV & Not implemented & \proglang{R}: \pkg{quantreg} \\
+Structural equation modeling & Not implemented & \proglang{R}: \pkg{lavaan} \\
+\addlinespace
+Weak instrument inference & $F$-stat only; no Stock-Yogo CVs & \proglang{R}: \pkg{ivmodel}, \pkg{AER} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Additional method-specific limitations:
 \begin{itemize}
   \item 2SLS reports first-stage $F$-statistics but lacks Stock-Yogo critical
-    values for formal weak instrument inference.
-  \item ARIMA supports non-seasonal and partially seasonal models; full
-    seasonal ARIMA (SARIMA) with arbitrary seasonal periods is not yet
-    implemented.
-  \item Bayesian methods and Heckman selection models are not implemented;
-    users requiring these should use \proglang{R} or \proglang{Stata}.
+    values for formal weak instrument inference. Users with potentially weak
+    instruments should verify results using weak-identification-robust methods
+    in \proglang{R}.
+  \item ARIMA supports non-seasonal and simple seasonal models; full
+    seasonal ARIMA (SARIMA) with arbitrary seasonal periods and automatic
+    order selection is not yet implemented.
+  \item Mixed-effects models support random intercepts and slopes but do not
+    match the full flexibility of \pkg{lme4} for complex random effect structures.
 \end{itemize}
 
-Appendix~\ref{app:implementation} provides detailed documentation of
-method-specific limitations and recommended alternatives for edge cases.
+\noindent Appendix~\ref{app:implementation} provides detailed documentation of
+method-specific limitations and recommended alternatives for edge cases. Users
+whose primary needs fall within unimplemented categories should use the
+recommended specialized tools rather than \pkg{prompt2analytics}.
 
 \subsection{Best practices for effective use}
 
@@ -385,7 +462,9 @@ Before running an analysis through \pkg{prompt2analytics}, users should verify:
 
 \subsubsection{During analysis}
 
-Multi-turn accuracy drops to 50--60\% (Section~\ref{sec:local}), so users should:
+Multi-turn accuracy varies from 47--97\% depending on context management
+(Section~\ref{sec:local}). With proper conversation history, accuracy exceeds
+90\%, but users should still:
 \begin{itemize}
   \item \emph{Verify tool selection}: Check which method was invoked before
     interpreting results. The system reports tool calls explicitly.

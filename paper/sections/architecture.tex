@@ -184,9 +184,14 @@ should use dedicated software.
 
 \textbf{Conversation persistence.} The web application uses SurrealDB, an
 embedded document database, for storing conversation history and settings.
-This choice reflects a preference for zero-configuration deployment: the
-database runs as part of the application binary with no external service
-required. Analytical datasets are held in memory during sessions and not
+SurrealDB was chosen over SQLite for two reasons: (1)~its embedded operation
+requires no external service, enabling zero-configuration deployment where the
+database runs as part of the application binary; and (2)~its document-flexible
+schema accommodates evolving conversation structures without schema migrations
+as the application develops. SQLite would require more rigid schema design;
+SurrealDB's flexible document model simplifies storing nested tool calls,
+results, and metadata that may change across versions. Analytical datasets
+are held in memory during sessions and not
 persisted to the database, limiting storage to lightweight conversation
 metadata.
 

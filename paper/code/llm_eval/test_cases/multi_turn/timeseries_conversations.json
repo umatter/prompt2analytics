@@ -10,36 +10,36 @@
         {
           "turn": 1,
           "user_prompt": "I want to forecast GDP. First, test if the series is stationary",
-          "expected_tool": "ts_adf_test",
-          "acceptable_tools": ["ts_adf_test", "ts_kpss_test", "ts_unit_root"],
+          "expected_tool": "timeseries_pp_test",
+          "acceptable_tools": ["timeseries_pp_test"],
           "context_from_previous": false
         },
         {
           "turn": 2,
           "user_prompt": "The series is non-stationary. Take the first difference and test again",
-          "expected_tool": "ts_adf_test",
-          "acceptable_tools": ["ts_adf_test", "ts_diff"],
+          "expected_tool": "timeseries_pp_test",
+          "acceptable_tools": ["timeseries_pp_test"],
           "context_from_previous": true
         },
         {
           "turn": 3,
           "user_prompt": "Now fit an ARIMA model with automatic order selection",
-          "expected_tool": "ts_arima",
-          "acceptable_tools": ["ts_arima", "ts_auto_arima"],
+          "expected_tool": "ts_arima_fit",
+          "acceptable_tools": ["ts_arima_fit"],
           "context_from_previous": true
         },
         {
           "turn": 4,
           "user_prompt": "Generate forecasts for the next 8 quarters with confidence intervals",
-          "expected_tool": "ts_forecast",
-          "acceptable_tools": ["ts_forecast", "ts_arima"],
+          "expected_tool": "ts_arima_forecast",
+          "acceptable_tools": ["ts_arima_forecast", "ts_arima_fit"],
           "context_from_previous": true
         },
         {
           "turn": 5,
           "user_prompt": "Plot the forecasts along with the historical data",
-          "expected_tool": "viz_forecast",
-          "acceptable_tools": ["viz_forecast", "viz_ts", "viz_line"],
+          "expected_tool": "viz_line",
+          "acceptable_tools": ["viz_line", "viz_ts"],
           "context_from_previous": true
         }
       ]
@@ -59,8 +59,8 @@
         {
           "turn": 2,
           "user_prompt": "Select the optimal lag order using information criteria",
-          "expected_tool": "ts_var_select",
-          "acceptable_tools": ["ts_var_select", "ts_var"],
+          "expected_tool": "ts_var",
+          "acceptable_tools": ["ts_var", "ts_varma"],
           "context_from_previous": true
         },
         {
@@ -73,15 +73,15 @@
         {
           "turn": 4,
           "user_prompt": "Compute impulse response functions for a monetary policy shock",
-          "expected_tool": "ts_irf",
-          "acceptable_tools": ["ts_irf", "ts_var_irf"],
+          "expected_tool": "ts_var_irf",
+          "acceptable_tools": ["ts_var_irf"],
           "context_from_previous": true
         },
         {
           "turn": 5,
           "user_prompt": "Plot the IRFs with confidence bands",
-          "expected_tool": "viz_irf",
-          "acceptable_tools": ["viz_irf", "viz_line"],
+          "expected_tool": "viz_line",
+          "acceptable_tools": ["viz_line", "ts_var_irf"],
           "context_from_previous": true
         }
       ]
@@ -94,15 +94,15 @@
         {
           "turn": 1,
           "user_prompt": "Test whether USD/EUR and USD/GBP exchange rates are cointegrated",
-          "expected_tool": "ts_coint_test",
-          "acceptable_tools": ["ts_coint_test", "ts_johansen"],
+          "expected_tool": "ts_vecm",
+          "acceptable_tools": ["ts_vecm", "ts_var"],
           "context_from_previous": false
         },
         {
           "turn": 2,
           "user_prompt": "Use the Johansen procedure to determine the number of cointegrating relationships",
-          "expected_tool": "ts_johansen",
-          "acceptable_tools": ["ts_johansen", "ts_coint_test"],
+          "expected_tool": "ts_vecm",
+          "acceptable_tools": ["ts_vecm"],
           "context_from_previous": true
         },
         {
@@ -122,29 +122,29 @@
         {
           "turn": 1,
           "user_prompt": "Decompose the sales series into trend, seasonal, and irregular components",
-          "expected_tool": "ts_decompose",
-          "acceptable_tools": ["ts_decompose", "ts_stl"],
+          "expected_tool": "timeseries_decompose",
+          "acceptable_tools": ["timeseries_decompose", "ts_mstl"],
           "context_from_previous": false
         },
         {
           "turn": 2,
           "user_prompt": "Use STL decomposition for more flexibility",
-          "expected_tool": "ts_stl",
-          "acceptable_tools": ["ts_stl", "ts_decompose"],
+          "expected_tool": "ts_mstl",
+          "acceptable_tools": ["ts_mstl", "timeseries_decompose"],
           "context_from_previous": true
         },
         {
           "turn": 3,
           "user_prompt": "Create a seasonally adjusted series",
-          "expected_tool": "ts_seasonal_adjust",
-          "acceptable_tools": ["ts_seasonal_adjust", "ts_stl"],
+          "expected_tool": "ts_mstl",
+          "acceptable_tools": ["ts_mstl", "timeseries_decompose"],
           "context_from_previous": true
         },
         {
           "turn": 4,
           "user_prompt": "Plot the original and seasonally adjusted series together",
-          "expected_tool": "viz_ts",
-          "acceptable_tools": ["viz_ts", "viz_line", "viz_decomposition"],
+          "expected_tool": "viz_line",
+          "acceptable_tools": ["viz_line", "viz_ts"],
           "context_from_previous": true
         }
       ]
@@ -156,23 +156,23 @@
       "turns": [
         {
           "turn": 1,
-          "user_prompt": "Test whether oil prices Granger-cause stock market movements",
-          "expected_tool": "ts_granger_test",
-          "acceptable_tools": ["ts_granger_test", "ts_causality"],
+          "user_prompt": "Test whether oil prices Granger-cause stock market movements using a VAR model",
+          "expected_tool": "ts_var",
+          "acceptable_tools": ["ts_var", "ts_varma"],
           "context_from_previous": false
         },
         {
           "turn": 2,
           "user_prompt": "Test the reverse direction - do stocks Granger-cause oil prices?",
-          "expected_tool": "ts_granger_test",
-          "acceptable_tools": ["ts_granger_test", "ts_causality"],
+          "expected_tool": "ts_var",
+          "acceptable_tools": ["ts_var"],
           "context_from_previous": true
         },
         {
           "turn": 3,
           "user_prompt": "Estimate a bivariate VAR to quantify the relationships",
           "expected_tool": "ts_var",
-          "acceptable_tools": ["ts_var"],
+          "acceptable_tools": ["ts_var", "ts_varma"],
           "context_from_previous": true
         }
       ]

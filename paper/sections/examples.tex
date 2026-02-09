@@ -241,6 +241,10 @@ p2a --session analysis.json panel fe grunfeld \
 # Export session to reproducible script
 p2a script export analysis.json -o reproduce.sh
 \end{Sinput}
+\noindent\textit{Note}: Backslash line continuation (\texttt{\textbackslash})
+works in Bash, Zsh, and most POSIX-compatible shells. Windows Command Prompt
+users should write commands on a single line or use PowerShell's backtick
+(\texttt{`}) for continuation.
 
 All commands support JSON output (\code{-F json}) for programmatic integration.
 Appendix~\ref{app:extended-examples} provides additional CLI examples including
@@ -297,12 +301,11 @@ proactive issue identification.
 %% -----------------------------------------------------------------------------
 \subsection{Realistic interaction patterns} \label{sec:examples-realistic}
 
-The preceding examples present successful interactions, but realistic use
-involves corrections, clarifications, and iterative refinement. Our extended
-evaluation (Section~\ref{sec:local}) reveals that multi-turn accuracy drops
-to 50--60\% and parameter extraction F1 ranges from 41--59\%---users should
-expect to correct or clarify requests frequently. This section illustrates
-typical interaction patterns including failures and recovery.
+The preceding examples show things working. Real use involves more back-and-forth.
+With tool calls in conversation history, multi-turn accuracy is 83--97\%
+(Section~\ref{sec:local}). Parameter extraction is less reliable (F1 of
+41--59\%), so check what the model extracted. This section shows what failures
+look like and how to recover.
 
 \subsubsection{Ambiguous specification requiring clarification}
 
@@ -414,22 +417,115 @@ I apologize for the error. Let me re-run with clustered standard errors:
 downward biased. Consider wild cluster bootstrap for more reliable inference.
 \end{Soutput}
 
-\subsubsection{Expected interaction frequency}
+\subsubsection{What to expect}
 
-Based on our extended evaluation, users should anticipate:
+From our evaluation:
 \begin{itemize}
-  \item 2--3 clarifying exchanges per analytical workflow
-  \item Explicit specification reduces errors (e.g., naming variables directly
-        rather than using pronouns like ``the same variables'')
-  \item Parameter verification is advisable before interpreting results
-  \item Complex multi-turn analyses (4+ turns) complete successfully only
-        30--50\% of the time without corrections
+  \item Multi-turn workflows complete 60--90\% of the time when tool calls
+        are in history (Section~\ref{sec:local})
+  \item Naming variables directly (``regress inv on value'') beats pronouns
+        (``use the same variables'')
+  \item Check extracted parameters before trusting output
 \end{itemize}
 
-These limitations reflect challenges in natural language understanding,
-not implementation deficiencies. Users get the most value from
-the system by treating it as an assistant requiring supervision rather than
-an autonomous analyst.
+The fix for most failures: keep tool calls in conversation history, and glance
+at what the model extracted.
+
+
+%% -----------------------------------------------------------------------------
+\subsection{A realistic multi-turn workflow} \label{sec:examples-failure}
+
+The preceding examples show individual exchanges. Here is a full multi-turn
+workflow showing what can go wrong: wrong method selected, parameters
+extracted incorrectly, user corrections, eventual success.
+
+\begin{Sinput}
+User: Analyze whether the training program affected employee performance.
+      The data has employees observed before and after training, with a
+      control group that didn't receive training.
+\end{Sinput}
+
+\begin{Soutput}
+I'll run a t-test comparing performance between training and control groups.
+
+**Two-sample t-test**
+Training group mean: 3.82
+Control group mean: 3.45
+Difference: 0.37 (95% CI: [0.21, 0.53])
+p-value: 0.000
+
+The training group shows significantly higher performance.
+\end{Soutput}
+
+\begin{Sinput}
+User: That's not right - I need a difference-in-differences analysis,
+      not just a comparison of means. I have before/after data.
+\end{Sinput}
+
+\begin{Soutput}
+You're right, I apologize. Let me run a difference-in-differences estimation
+to properly account for the before/after structure.
+
+**Difference-in-Differences Estimation**
+Treatment indicator: training_group
+Time indicator: post_training
+
+| Variable              |    Coef |  Std Err |      t | P>|t| |
+|-----------------------|--------:|---------:|-------:|------:|
+| post_training         |   0.12  |    0.08  |  1.50  | 0.134 |
+| training_group        |   0.31  |    0.11  |  2.82  | 0.005 |
+| post × training (ATT) |   0.24  |    0.09  |  2.67  | 0.008 |
+
+The ATT estimate is 0.24 performance points.
+\end{Soutput}
+
+\begin{Sinput}
+User: Good, but I asked for clustered standard errors at the employee
+      level to account for repeated observations.
+\end{Sinput}
+
+\begin{Soutput}
+Let me re-run with clustered standard errors:
+
+**Difference-in-Differences** (Clustered by employee, 847 clusters)
+
+| Variable              |    Coef | Cluster SE |      t | P>|t| |
+|-----------------------|--------:|-----------:|-------:|------:|
+| post_training         |   0.12  |      0.11  |  1.09  | 0.276 |
+| training_group        |   0.31  |      0.14  |  2.21  | 0.027 |
+| post × training (ATT) |   0.24  |      0.12  |  2.00  | 0.046 |
+
+With clustered SEs, the ATT remains significant at the 5% level, though
+standard errors are larger than the unclustered estimates.
+\end{Soutput}
+
+\begin{Sinput}
+User: Now check for pre-trends to validate the parallel trends assumption.
+\end{Sinput}
+
+\begin{Soutput}
+**Pre-trend Test**
+Testing whether treatment and control groups had parallel trends
+in the pre-treatment period...
+
+| Pre-period |  Diff |  Std Err |      t | P>|t| |
+|------------|------:|---------:|-------:|------:|
+| t-3        | -0.02 |    0.09  | -0.22  | 0.826 |
+| t-2        |  0.05 |    0.08  |  0.63  | 0.531 |
+| t-1        |  0.01 |    0.08  |  0.13  | 0.900 |
+
+Joint test (H0: all pre-period diffs = 0):
+F-statistic: 0.18, p-value: 0.912
+
+No evidence of differential pre-trends; parallel trends assumption
+is supported (though not proven) by this test.
+\end{Soutput}
+
+This workflow required three correction turns: (1)~correcting method selection
+from t-test to DiD; (2)~adding clustered standard errors; and (3)~requesting
+pre-trend diagnostics. The final result is correct. With tool calls in
+conversation history, these corrections become less common: completion rates
+are 60--90\% versus 0--35\% without (Section~\ref{sec:local}).
 
 
 %% -----------------------------------------------------------------------------

@@ -48,14 +48,22 @@ for integration with language models. The software makes several contributions:
 model concentrates in ambiguous cases; safeguards (result inspection,
 reformulation, clarifying questions) require statistical knowledge to be effective.
 
-\textbf{Evaluation scope.} Single-turn accuracy substantially overstates
-practical capability. Extended evaluation shows multi-turn accuracy of 50--60\%,
-parameter extraction F1 of 41--59\%, and out-of-scope detection rates of 40--60\%
-(Appendix~\ref{app:extended-eval}). User study validation remains unaddressed.
+\textbf{Evaluation scope.} Multi-turn accuracy is 83--97\% when tool calls are
+included in conversation history, but drops to 47--60\% without them. Parameter
+extraction is weaker: F1 of 41--59\%. Out-of-scope detection hovers around
+40--60\% (Section~\ref{sec:local} and Appendix~\ref{app:extended-eval}).
 
-\textbf{Method coverage.} While coverage is broad (200+ methods), some categories
-remain unimplemented: Heckman selection and Bayesian methods. See
-Section~\ref{sec:design} for details.
+\textbf{User study validation.} The practical benefits of chat-first interfaces
+(accessibility, exploratory analysis, reduced cognitive load) remain hypothesized
+rather than demonstrated. Controlled user studies comparing task completion time,
+error rates, and user satisfaction between chat-first and traditional interfaces
+are needed to validate these claims. Such studies were beyond the scope of this
+work but represent an important direction for future research.
+
+\textbf{Method coverage.} While coverage is broad (200+ methods), important
+categories remain unimplemented: Bayesian inference, Heckman selection, Conley
+spatial standard errors, and others. See Table~\ref{tab:method-coverage} in
+Section~\ref{sec:design} for coverage gaps and recommended alternatives.
 
 \textbf{Scalability.} Data are loaded entirely into memory; datasets exceeding
 available RAM require external preprocessing.
@@ -218,10 +226,10 @@ inappropriate tool.
 
 \subsection{Results}
 
-Table~\ref{tab:extended-eval} summarizes performance across all dimensions.
-The multi-turn and parameter extraction results reveal substantially lower
-accuracy than single-turn tool selection, highlighting the gap between
-controlled evaluation and realistic usage patterns.
+Table~\ref{tab:extended-eval} summarizes performance. The main takeaway:
+multi-turn accuracy is 83--97\% with tool calls in history, 47--60\% without.
+Context management explains most of the variance. Parameter extraction
+stays weak regardless (F1 of 41--59\%).
 
 \input{tables/tab_extended_eval_summary}
 
@@ -235,12 +243,10 @@ performance and out-of-scope detection the weakest.}
 \label{fig:robustness-radar}
 \end{figure}
 
-Figure~\ref{fig:robustness-radar} visualizes performance profiles, revealing
-that no single model dominates across all dimensions. Claude 3.5 Haiku shows
-strong single-turn and naturalistic performance but moderate multi-turn
-accuracy. Llama 3.3 70B achieves the best multi-turn coherence. Qwen 2.5 72B
-leads in parameter extraction. These trade-offs suggest that model selection
-should consider the expected usage pattern.
+Figure~\ref{fig:robustness-radar} shows that no model wins everywhere.
+Claude 3.5 Haiku does well on single-turn and naturalistic prompts but not
+multi-turn. Llama 3.3 70B handles multi-turn best. Qwen 2.5 72B extracts
+parameters most reliably. Pick based on how you plan to use it.
 
 \begin{figure}[htbp]
 \centering
@@ -252,20 +258,20 @@ evaluations overstate practical capability.}
 \label{fig:extended-comparison}
 \end{figure}
 
-Figure~\ref{fig:extended-comparison} directly compares controlled vs.\
-realistic evaluation conditions. The 30--40 percentage point drop from
-single-turn to multi-turn accuracy is consistent across models, suggesting
-a fundamental challenge in maintaining conversational context rather than
-a model-specific limitation.
+Figure~\ref{fig:extended-comparison} compares controlled versus realistic
+conditions. With tool calls in history, GPT-4o-mini hits 97\% multi-turn
+accuracy (versus 98\% single-turn)---the gap nearly disappears. Without
+tool calls in history, all models drop 30--40 percentage points. Context
+management, not model size, determines multi-turn performance.
 
 \subsection{Failure analysis}
 
 Common failure patterns across dimensions include:
 
 \begin{itemize}
-  \item \emph{Context drift}: In multi-turn conversations, models frequently
-    ``forget'' prior specifications, reverting to defaults or misinterpreting
-    pronoun references (``use the same variables'' interpreted incorrectly).
+  \item \emph{Context drift}: Without tool calls in history, models ``forget''
+    prior specifications and misread pronoun references. Including tool calls
+    in history fixes this.
   \item \emph{Partial parameter extraction}: Models often extract the primary
     parameters (dependent/independent variables) but omit secondary options
     (robust SE type, clustering specification, interaction terms).

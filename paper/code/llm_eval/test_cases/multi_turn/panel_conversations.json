@@ -10,15 +10,15 @@
         {
           "turn": 1,
           "user_prompt": "I have panel data on firm investment. Start with a fixed effects model",
-          "expected_tool": "panel_fe",
-          "acceptable_tools": ["panel_fe", "panel_within"],
+          "expected_tool": "panel_fixed_effects",
+          "acceptable_tools": ["panel_fixed_effects", "panel_hdfe"],
           "context_from_previous": false
         },
         {
           "turn": 2,
           "user_prompt": "Now estimate a random effects model for comparison",
-          "expected_tool": "panel_re",
-          "acceptable_tools": ["panel_re"],
+          "expected_tool": "panel_random_effects",
+          "acceptable_tools": ["panel_random_effects"],
           "context_from_previous": true
         },
         {
@@ -31,8 +31,8 @@
         {
           "turn": 4,
           "user_prompt": "Based on the test, estimate the appropriate model with clustered standard errors",
-          "expected_tool": "panel_fe",
-          "acceptable_tools": ["panel_fe", "panel_re", "regression_clustered"],
+          "expected_tool": "panel_fixed_effects",
+          "acceptable_tools": ["panel_fixed_effects", "panel_random_effects", "regression_clustered"],
           "context_from_previous": true
         }
       ]
@@ -45,15 +45,15 @@
         {
           "turn": 1,
           "user_prompt": "Estimate a gravity model of trade with country fixed effects",
-          "expected_tool": "panel_fe",
-          "acceptable_tools": ["panel_fe", "panel_hdfe"],
+          "expected_tool": "panel_fixed_effects",
+          "acceptable_tools": ["panel_fixed_effects", "panel_hdfe"],
           "context_from_previous": false
         },
         {
           "turn": 2,
           "user_prompt": "I need to control for both origin and destination country effects simultaneously",
           "expected_tool": "panel_hdfe",
-          "acceptable_tools": ["panel_hdfe", "panel_twoway"],
+          "acceptable_tools": ["panel_hdfe"],
           "context_from_previous": true
         },
         {
@@ -73,22 +73,22 @@
         {
           "turn": 1,
           "user_prompt": "Estimate a fixed effects model of employment on wages and output",
-          "expected_tool": "panel_fe",
-          "acceptable_tools": ["panel_fe"],
+          "expected_tool": "panel_fixed_effects",
+          "acceptable_tools": ["panel_fixed_effects"],
           "context_from_previous": false
         },
         {
           "turn": 2,
-          "user_prompt": "Test for serial correlation in the residuals",
-          "expected_tool": "panel_serial_test",
-          "acceptable_tools": ["panel_serial_test", "hypothesis_durbin_watson"],
+          "user_prompt": "Test for serial correlation in the residuals using the Breusch-Godfrey test",
+          "expected_tool": "regression_bgtest",
+          "acceptable_tools": ["regression_bgtest", "timeseries_box_test"],
           "context_from_previous": true
         },
         {
           "turn": 3,
-          "user_prompt": "Test for cross-sectional dependence",
-          "expected_tool": "panel_cd_test",
-          "acceptable_tools": ["panel_cd_test", "panel_diagnostics"],
+          "user_prompt": "Run the Driscoll-Kraay estimator for panel-robust standard errors",
+          "expected_tool": "regression_driscoll_kraay",
+          "acceptable_tools": ["regression_driscoll_kraay", "regression_clustered"],
           "context_from_previous": true
         }
       ]
@@ -101,22 +101,22 @@
         {
           "turn": 1,
           "user_prompt": "I suspect there's persistence in profits. Include a lagged dependent variable",
-          "expected_tool": "panel_dynamic",
-          "acceptable_tools": ["panel_dynamic", "panel_fe"],
+          "expected_tool": "panel_gmm",
+          "acceptable_tools": ["panel_gmm", "panel_fixed_effects", "regression_ols"],
           "context_from_previous": false
         },
         {
           "turn": 2,
           "user_prompt": "Use the Arellano-Bond GMM estimator to handle endogeneity",
           "expected_tool": "panel_gmm",
-          "acceptable_tools": ["panel_gmm", "panel_dynamic"],
+          "acceptable_tools": ["panel_gmm"],
           "context_from_previous": true
         },
         {
           "turn": 3,
-          "user_prompt": "Test for second-order serial correlation in the differenced residuals",
-          "expected_tool": "panel_ar_test",
-          "acceptable_tools": ["panel_ar_test", "panel_diagnostics"],
+          "user_prompt": "Check the AR(2) test results for serial correlation in the differenced residuals",
+          "expected_tool": "panel_gmm",
+          "acceptable_tools": ["panel_gmm"],
           "context_from_previous": true
         }
       ]
@@ -129,23 +129,22 @@
         {
           "turn": 1,
           "user_prompt": "Estimate state GDP as a function of population and spending with state fixed effects",
-          "expected_tool": "panel_fe",
-          "acceptable_tools": ["panel_fe"],
+          "expected_tool": "panel_fixed_effects",
+          "acceptable_tools": ["panel_fixed_effects"],
           "context_from_previous": false
         },
         {
           "turn": 2,
           "user_prompt": "Add time fixed effects to control for common shocks",
-          "expected_tool": "panel_twoway",
-          "acceptable_tools": ["panel_twoway", "panel_hdfe"],
+          "expected_tool": "panel_hdfe",
+          "acceptable_tools": ["panel_hdfe", "panel_fixed_effects"],
           "context_from_previous": true
         },
         {
           "turn": 3,
-          "user_prompt": "Actually, use state-specific linear time trends instead of year dummies",
-          "expected_tool": "panel_fe",
-          "acceptable_tools": ["panel_fe", "panel_twoway"],
-          "expected_parameter_change": {"time_trends": true},
+          "user_prompt": "Use GLS to account for heteroskedasticity and serial correlation",
+          "expected_tool": "panel_gls",
+          "acceptable_tools": ["panel_gls", "panel_fixed_effects", "regression_gls"],
           "context_from_previous": true
         }
       ]
