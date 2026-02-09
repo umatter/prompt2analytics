@@ -83,3 +83,7 @@ validation/reports/
 
 # Generated output reports
 reports/
+
+# Python
+__pycache__/
+*.pyc

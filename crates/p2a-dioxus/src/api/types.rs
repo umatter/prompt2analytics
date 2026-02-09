@@ -117,6 +117,14 @@ pub struct LlmChatRequest {
     /// Optional conversation ID for persistence
     #[serde(default)]
     pub conversation_id: Option<String>,
+    /// Whether to auto-retrieve history from database when conversation_id
+    /// is provided and history is empty (default: true)
+    #[serde(default = "default_retrieve_history")]
+    pub retrieve_history: bool,
+}
+
+fn default_retrieve_history() -> bool {
+    true
 }
 
 fn default_interpret() -> bool {

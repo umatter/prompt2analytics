@@ -617,8 +617,9 @@ async fn call_tool(
 mod llm_handlers {
     use super::*;
     use crate::llm::{
-        LlmProvider, Message, OllamaProvider, OpenAIProvider, ProviderConfig, ProviderType,
-        ToolExecutor, get_mcp_tool_definitions, get_system_prompt_with_context,
+        AnthropicProvider, LlmProvider, Message, OllamaProvider, OpenAIProvider, ProviderConfig,
+        ProviderType, ToolExecutor, build_enhanced_dataset_context, get_mcp_tool_definitions,
+        get_system_prompt_with_context,
     };
     use crate::session::Session;
 
@@ -637,6 +638,14 @@ mod llm_handlers {
         /// Optional conversation ID for persistence
         #[serde(default)]
         pub conversation_id: Option<String>,
+        /// Whether to auto-retrieve history from database when conversation_id
+        /// is provided and history is empty (default: true)
+        #[serde(default = "default_retrieve_history")]
+        pub retrieve_history: bool,
+    }
+
+    fn default_retrieve_history() -> bool {
+        true
     }
 
     fn default_interpret() -> bool {
@@ -735,8 +744,7 @@ mod llm_handlers {
         match config.provider_type {
             ProviderType::Ollama => Box::new(OllamaProvider::new(config)),
             ProviderType::OpenAI => Box::new(OpenAIProvider::new(config)),
-            // TODO: Add Anthropic provider
-            ProviderType::Anthropic => Box::new(OllamaProvider::new(config)),
+            ProviderType::Anthropic => Box::new(AnthropicProvider::new(config)),
         }
     }
 
@@ -773,32 +781,11 @@ mod llm_handlers {
         let tool_executor = SessionToolExecutor::new(state.server.clone(), session.clone());
         let tools = get_mcp_tool_definitions();
 
-        // Build dataset context from currently loaded datasets
+        // Build enhanced dataset context from currently loaded datasets
+        // This includes data types, sample values, and basic statistics
         let dataset_context = {
             let datasets = session.datasets.read().await;
-            if datasets.is_empty() {
-                None
-            } else {
-                let context_lines: Vec<String> = datasets
-                    .iter()
-                    .map(|(name, ds): (&String, &p2a_core::Dataset)| {
-                        let df = ds.df();
-                        let columns: Vec<String> = df
-                            .get_column_names()
-                            .iter()
-                            .map(|s| s.to_string())
-                            .collect();
-                        format!(
-                            "- **{}**: {} rows × {} columns\n  Columns: {}",
-                            name,
-                            df.height(),
-                            df.width(),
-                            columns.join(", ")
-                        )
-                    })
-                    .collect();
-                Some(context_lines.join("\n"))
-            }
+            build_enhanced_dataset_context(&datasets)
         };
 
         tracing::info!(provider = %provider.provider_type(), num_tools = %tools.len(), has_datasets = dataset_context.is_some(), "Starting LLM chat");
@@ -1708,32 +1695,11 @@ mod llm_handlers {
                 None
             };
 
-            // Build dataset context from currently loaded datasets
+            // Build enhanced dataset context from currently loaded datasets
+            // This includes data types, sample values, and basic statistics
             let dataset_context = {
                 let datasets = session.datasets.read().await;
-                if datasets.is_empty() {
-                    None
-                } else {
-                    let context_lines: Vec<String> = datasets
-                        .iter()
-                        .map(|(name, ds): (&String, &p2a_core::Dataset)| {
-                            let df = ds.df();
-                            let columns: Vec<String> = df
-                                .get_column_names()
-                                .iter()
-                                .map(|s| s.to_string())
-                                .collect();
-                            format!(
-                                "- **{}**: {} rows × {} columns\n  Columns: {}",
-                                name,
-                                df.height(),
-                                df.width(),
-                                columns.join(", ")
-                            )
-                        })
-                        .collect();
-                    Some(context_lines.join("\n"))
-                }
+                build_enhanced_dataset_context(&datasets)
             };
 
             // Create provider and streaming tool executor
@@ -1782,11 +1748,142 @@ mod llm_handlers {
                 "Building system prompt with dataset context"
             );
 
+            // Auto-retrieve history from database if:
+            // 1. conversation_id is provided
+            // 2. history is empty
+            // 3. retrieve_history flag is true (default)
+            #[cfg(feature = "db")]
+            let retrieved_history: Vec<Message> = if request.retrieve_history
+                && request.history.is_empty()
+                && effective_conversation_id.is_some()
+            {
+                if let (Some(db), Some(conv_id)) = (&db_connection, &effective_conversation_id) {
+                    match db.get_messages(conv_id).await {
+                        Ok(db_messages) => {
+                            tracing::info!(
+                                conversation_id = %conv_id,
+                                message_count = db_messages.len(),
+                                "Retrieved conversation history from database"
+                            );
+                            // Convert DB messages to LLM messages, including tool calls
+                            let mut history = Vec::new();
+                            for db_msg in db_messages {
+                                // Get tool calls for this message
+                                let tool_calls_for_msg =
+                                    db.get_tool_calls_for_message(&db_msg.id_string()).await;
+
+                                match db_msg.role {
+                                    crate::db::MessageRole::User => {
+                                        if !db_msg.content.is_empty() {
+                                            history.push(Message::user(db_msg.content.clone()));
+                                        }
+                                    }
+                                    crate::db::MessageRole::Assistant => {
+                                        // Check if this message has completed tool calls
+                                        if let Ok(tool_calls) = &tool_calls_for_msg {
+                                            let completed_calls: Vec<_> = tool_calls
+                                                .iter()
+                                                .filter(|tc| {
+                                                    tc.status == crate::db::ToolCallStatus::Success
+                                                })
+                                                .collect();
+
+                                            if !completed_calls.is_empty() {
+                                                // Create tool calls for the assistant message
+                                                let llm_tool_calls: Vec<crate::llm::ToolCall> =
+                                                    completed_calls
+                                                        .iter()
+                                                        .map(|tc| crate::llm::ToolCall {
+                                                            id: tc.id_string(),
+                                                            name: tc.tool_name.clone(),
+                                                            arguments: serde_json::from_str(
+                                                                &tc.arguments,
+                                                            )
+                                                            .unwrap_or(serde_json::Value::Null),
+                                                        })
+                                                        .collect();
+
+                                                // Assistant message with tool calls
+                                                history.push(Message::assistant_with_tools(
+                                                    db_msg.content.clone(),
+                                                    llm_tool_calls,
+                                                ));
+
+                                                // Tool result message
+                                                let tool_results: Vec<crate::llm::ToolResult> =
+                                                    completed_calls
+                                                        .iter()
+                                                        .map(|tc| {
+                                                            let result_content = tc
+                                                                .result
+                                                                .as_deref()
+                                                                .unwrap_or("");
+                                                            // Truncate long results
+                                                            let truncated =
+                                                                if result_content.len() > 2000 {
+                                                                    format!(
+                                                                        "{}...\n[Truncated]",
+                                                                        &result_content[..2000]
+                                                                    )
+                                                                } else {
+                                                                    result_content.to_string()
+                                                                };
+                                                            crate::llm::ToolResult {
+                                                                tool_call_id: tc.id_string(),
+                                                                content: truncated,
+                                                                is_error: false,
+                                                            }
+                                                        })
+                                                        .collect();
+
+                                                history.push(Message::tool_result(tool_results));
+                                            } else if !db_msg.content.is_empty() {
+                                                // No tool calls, just content
+                                                history
+                                                    .push(Message::assistant(db_msg.content.clone()));
+                                            }
+                                        } else if !db_msg.content.is_empty() {
+                                            history.push(Message::assistant(db_msg.content.clone()));
+                                        }
+                                    }
+                                    crate::db::MessageRole::System => {
+                                        // Skip system messages in history retrieval
+                                    }
+                                }
+                            }
+                            history
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                conversation_id = %conv_id,
+                                error = %e,
+                                "Failed to retrieve conversation history, using empty history"
+                            );
+                            Vec::new()
+                        }
+                    }
+                } else {
+                    Vec::new()
+                }
+            } else {
+                Vec::new()
+            };
+
+            #[cfg(not(feature = "db"))]
+            let retrieved_history: Vec<Message> = Vec::new();
+
+            // Determine which history to use: client-provided takes precedence
+            let history_to_use = if request.history.is_empty() {
+                retrieved_history
+            } else {
+                request.history.clone()
+            };
+
             // Build message history with dataset context
             let system_prompt = get_system_prompt_with_context(dataset_context.as_deref());
             let mut messages = vec![Message::system(system_prompt)];
-            messages.extend(request.history);
-            messages.push(Message::user(request.message));
+            messages.extend(history_to_use);
+            messages.push(Message::user(request.message.clone()));
 
             // Create streaming callback that forwards content chunks
             let tx_for_callback = tx_clone.clone();
