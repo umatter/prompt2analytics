@@ -34,12 +34,12 @@ pub mod ml;
 pub mod munging;
 pub mod panel;
 pub mod regression;
+pub mod search;
 pub mod spatial;
 pub mod stats;
 pub mod survival;
 pub mod timeseries;
 pub mod utils;
-pub mod search;
 pub mod viz;
 
 // Re-export migrated types
@@ -53,10 +53,10 @@ pub use ml::*;
 pub use munging::*;
 pub use panel::*;
 pub use regression::*;
+pub use search::*;
 pub use spatial::*;
 pub use stats::*;
 pub use survival::*;
 pub use timeseries::*;
 pub use utils::*;
-pub use search::*;
 pub use viz::*;

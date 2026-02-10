@@ -1103,14 +1103,23 @@ pub fn search_tools_scored(
         ("ols", vec!["regression", "linear", "least", "squares"]),
         ("fe", vec!["fixed", "effects", "within"]),
         ("re", vec!["random", "effects", "gls"]),
-        ("iv", vec!["instrumental", "variables", "endogenous", "2sls"]),
+        (
+            "iv",
+            vec!["instrumental", "variables", "endogenous", "2sls"],
+        ),
         ("did", vec!["difference", "differences", "treatment"]),
         ("rd", vec!["discontinuity", "regression", "sharp", "fuzzy"]),
         ("var", vec!["vector", "autoregression", "irf", "impulse"]),
-        ("arima", vec!["autoregressive", "moving", "average", "forecast"]),
+        (
+            "arima",
+            vec!["autoregressive", "moving", "average", "forecast"],
+        ),
         ("garch", vec!["volatility", "heteroskedasticity", "arch"]),
         ("hausman", vec!["specification", "test", "fe", "re"]),
-        ("robust", vec!["heteroskedasticity", "hc0", "hc1", "hc2", "hc3"]),
+        (
+            "robust",
+            vec!["heteroskedasticity", "hc0", "hc1", "hc2", "hc3"],
+        ),
         ("cluster", vec!["clustered", "standard", "errors", "panel"]),
         ("serial", vec!["correlation", "autocorrelation", "bgtest"]),
         ("unit", vec!["root", "stationarity", "adf", "pp"]),
@@ -1187,7 +1196,11 @@ pub fn search_tools_scored(
     }
 
     // Sort by score descending
-    results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    results.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     // Return top N
     results.into_iter().take(limit).collect()
