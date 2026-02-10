@@ -49,20 +49,15 @@ impl Default for FastMboostConfig {
 }
 
 /// Base learner types
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub enum FastMboostLearner {
     /// Componentwise linear (one feature at a time)
+    #[default]
     ComponentwiseLinear,
     /// Small decision stumps
     Stump,
     /// Decision trees with limited depth
     Tree { max_depth: usize },
-}
-
-impl Default for FastMboostLearner {
-    fn default() -> Self {
-        Self::ComponentwiseLinear
-    }
 }
 
 /// Loss function families

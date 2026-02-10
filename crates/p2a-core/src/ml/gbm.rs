@@ -957,7 +957,7 @@ mod tests {
 
         // Predictions should be probabilities
         for &p in &result.predictions {
-            assert!(p >= 0.0 && p <= 1.0, "Probability {} out of range", p);
+            assert!((0.0..=1.0).contains(&p), "Probability {} out of range", p);
         }
 
         // Low values should have low probability, high values should have high probability

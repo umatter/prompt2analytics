@@ -535,10 +535,7 @@ pub fn eclat(transactions: &[Vec<String>], config: &AprioriConfig) -> EconResult
 
     for (tid, transaction) in transactions.iter().enumerate() {
         for item in transaction {
-            vertical
-                .entry(item.clone())
-                .or_insert_with(HashSet::new)
-                .insert(tid);
+            vertical.entry(item.clone()).or_default().insert(tid);
         }
     }
 

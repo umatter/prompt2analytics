@@ -167,7 +167,7 @@ pub fn roc_auc(
     }
 
     // Determine positive and negative class values
-    let mut unique_values: Vec<f64> = actual.iter().cloned().collect();
+    let mut unique_values: Vec<f64> = actual.to_vec();
     unique_values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     unique_values.dedup();
 
@@ -199,7 +199,7 @@ pub fn roc_auc(
     let mut thresholds: Vec<f64> = (0..=n_thresh).map(|i| i as f64 / n_thresh as f64).collect();
 
     // Also add unique prediction values as thresholds for more accurate curve
-    let mut pred_thresholds: Vec<f64> = predictions.iter().cloned().collect();
+    let mut pred_thresholds: Vec<f64> = predictions.to_vec();
     pred_thresholds.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     thresholds.extend(pred_thresholds);
     thresholds.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
@@ -331,7 +331,7 @@ pub fn confusion_matrix(
     }
 
     // Determine positive class (assume higher value is positive)
-    let mut unique_actual: Vec<i32> = actual.iter().cloned().collect();
+    let mut unique_actual: Vec<i32> = actual.to_vec();
     unique_actual.sort();
     unique_actual.dedup();
 

@@ -104,7 +104,7 @@ impl Default for AdaBoostConfig {
 
 /// A simple decision stump (single split tree).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct DecisionStump {
+pub(crate) struct DecisionStump {
     /// Feature to split on
     feature: usize,
     /// Threshold value
