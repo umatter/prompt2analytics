@@ -5,8 +5,8 @@
 //! - Managing conversation context window limits
 //! - Summarizing and pruning conversation history
 
-use p2a_core::polars::prelude::*;
 use p2a_core::Dataset;
+use p2a_core::polars::prelude::*;
 use std::collections::HashMap;
 
 /// Maximum number of sample values to include per column
@@ -210,9 +210,7 @@ pub fn truncate_tool_result(result: &str, max_length: usize) -> String {
     let truncate_at = max_length.saturating_sub(50);
 
     // Look for a newline near the truncation point to avoid cutting mid-line
-    let actual_truncate = result[..truncate_at]
-        .rfind('\n')
-        .unwrap_or(truncate_at);
+    let actual_truncate = result[..truncate_at].rfind('\n').unwrap_or(truncate_at);
 
     format!(
         "{}...\n\n[Result truncated: {} chars total, showing first {}]",
@@ -266,7 +264,7 @@ pub fn summarize_tool_call(tool_name: &str, arguments: &serde_json::Value, resul
 // =============================================================================
 
 use super::provider::{Message, MessageRole, ToolCall as LlmToolCall, ToolResult as LlmToolResult};
-use super::tokens::{estimate_message_tokens, estimate_tokens, ContextBudget};
+use super::tokens::{ContextBudget, estimate_message_tokens, estimate_tokens};
 
 /// Context manager for handling conversation history within token limits.
 ///
@@ -429,7 +427,8 @@ impl ContextManager {
                             } else {
                                 user_q.to_string()
                             };
-                            summaries.push(format!("• Q: \"{}\" → A: \"{}\"", user_preview, preview));
+                            summaries
+                                .push(format!("• Q: \"{}\" → A: \"{}\"", user_preview, preview));
                         } else {
                             summaries.push(format!("• Response: \"{}\"", preview));
                         }
@@ -441,7 +440,10 @@ impl ContextManager {
                     if let Some(results) = &msg.tool_results {
                         for result in results {
                             if result.is_error {
-                                summaries.push(format!("  ⚠ Error: {}", &result.content[..result.content.len().min(50)]));
+                                summaries.push(format!(
+                                    "  ⚠ Error: {}",
+                                    &result.content[..result.content.len().min(50)]
+                                ));
                             }
                             // Success results are already summarized above
                         }
@@ -570,10 +572,7 @@ mod tests {
     #[test]
     fn test_context_manager_few_turns() {
         let mut manager = ContextManager::new(ContextConfig::default());
-        let messages = vec![
-            Message::user("Hello"),
-            Message::assistant("Hi!"),
-        ];
+        let messages = vec![Message::user("Hello"), Message::assistant("Hi!")];
 
         let result = manager.process_history(messages, "You are helpful.");
         assert!(result.summary.is_none());

@@ -44,7 +44,10 @@ impl AnthropicProvider {
     }
 
     /// Extract system message and convert remaining messages to Anthropic's format.
-    fn to_anthropic_messages(&self, messages: &[Message]) -> (Option<String>, Vec<AnthropicMessage>) {
+    fn to_anthropic_messages(
+        &self,
+        messages: &[Message],
+    ) -> (Option<String>, Vec<AnthropicMessage>) {
         let mut system_prompt = None;
         let mut result = Vec::new();
 
@@ -363,17 +366,15 @@ impl AnthropicProvider {
                                     }
                                 }
                             }
-                            AnthropicStreamEvent::ContentBlockDelta { delta, .. } => {
-                                match delta {
-                                    AnthropicStreamDelta::TextDelta { text } => {
-                                        text_content.push_str(&text);
-                                        callback(StreamChunk::Text { content: text });
-                                    }
-                                    AnthropicStreamDelta::InputJsonDelta { partial_json } => {
-                                        current_tool_input.push_str(&partial_json);
-                                    }
+                            AnthropicStreamEvent::ContentBlockDelta { delta, .. } => match delta {
+                                AnthropicStreamDelta::TextDelta { text } => {
+                                    text_content.push_str(&text);
+                                    callback(StreamChunk::Text { content: text });
                                 }
-                            }
+                                AnthropicStreamDelta::InputJsonDelta { partial_json } => {
+                                    current_tool_input.push_str(&partial_json);
+                                }
+                            },
                             AnthropicStreamEvent::ContentBlockStop { .. } => {
                                 // If we were building a tool call, finalize it
                                 if !current_tool_id.is_empty() {
@@ -676,12 +677,8 @@ enum AnthropicStreamContentBlock {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum AnthropicStreamDelta {
-    TextDelta {
-        text: String,
-    },
-    InputJsonDelta {
-        partial_json: String,
-    },
+    TextDelta { text: String },
+    InputJsonDelta { partial_json: String },
 }
 
 #[cfg(test)]

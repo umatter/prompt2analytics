@@ -24,11 +24,9 @@ use rmcp::{
 };
 
 use crate::server::AnalyticsServer;
+use crate::tools::registry::{ToolCategory, category_counts, parse_category, search_tools_scored};
 use crate::tools::requests::search::{
     ExecuteToolRequest, ListToolCategoriesRequest, SearchToolsRequest,
-};
-use crate::tools::registry::{
-    ToolCategory, category_counts, parse_category, search_tools_scored,
 };
 
 #[tool_router(router = search_router, vis = "pub")]
@@ -83,10 +81,7 @@ impl AnalyticsServer {
                 output.push_str(&format!("   R equivalent: {}\n", r_equiv));
             }
             if !result.tool.related.is_empty() {
-                output.push_str(&format!(
-                    "   Related: {}\n",
-                    result.tool.related.join(", ")
-                ));
+                output.push_str(&format!("   Related: {}\n", result.tool.related.join(", ")));
             }
             output.push('\n');
         }

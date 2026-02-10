@@ -24,13 +24,13 @@ use crate::tools::requests::ml::*;
 use crate::tools::requests::munging::*;
 use crate::tools::requests::panel::*;
 use crate::tools::requests::regression::*;
+use crate::tools::requests::search::*;
 use crate::tools::requests::spatial::*;
 use crate::tools::requests::stats::*;
 use crate::tools::requests::survival::*;
 use crate::tools::requests::timeseries::*;
 use crate::tools::requests::utils::*;
 use crate::tools::requests::viz::*;
-use crate::tools::requests::search::*;
 
 use p2a_core::{
     AftConfig,
