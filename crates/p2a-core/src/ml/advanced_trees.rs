@@ -1344,7 +1344,7 @@ pub fn c50(x: ArrayView2<f64>, y: &[i64], config: &C50Config) -> EconResult<C50R
     }
 
     // Get unique classes
-    let mut class_labels: Vec<i64> = y.iter().cloned().collect();
+    let mut class_labels: Vec<i64> = y.to_vec();
     class_labels.sort();
     class_labels.dedup();
 
@@ -1445,7 +1445,7 @@ fn build_c50_node(
     let pure = counts.iter().filter(|&&c| c > 0).count() == 1;
     if pure || n < 2 * config.min_cases {
         *n_rules += 1;
-        let class_labels: Vec<i64> = class_to_idx.iter().map(|(k, _)| *k).collect();
+        let class_labels: Vec<i64> = class_to_idx.keys().copied().collect();
         return C50Node::Leaf {
             class: class_labels
                 .iter()
@@ -1553,7 +1553,7 @@ fn build_c50_node(
         }
     } else {
         *n_rules += 1;
-        let class_labels: Vec<i64> = class_to_idx.iter().map(|(k, _)| *k).collect();
+        let class_labels: Vec<i64> = class_to_idx.keys().copied().collect();
         C50Node::Leaf {
             class: class_labels
                 .iter()

@@ -47,7 +47,7 @@ pub fn fast_roc_auc(predictions: &[f64], actual: &[f64]) -> Result<FastRocAucRes
     }
 
     // Determine positive/negative class
-    let mut unique: Vec<f64> = actual.iter().cloned().collect();
+    let mut unique: Vec<f64> = actual.to_vec();
     unique.sort_by(|a, b| a.partial_cmp(b).unwrap());
     unique.dedup();
 
