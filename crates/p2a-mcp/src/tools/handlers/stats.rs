@@ -396,14 +396,14 @@ impl AnalyticsServer {
 
             // Get unique levels
             let levels_a: Vec<String> = {
-                let mut v: Vec<_> = factor_a.iter().cloned().collect();
+                let mut v: Vec<_> = factor_a.to_vec();
                 v.sort();
                 v.dedup();
                 v
             };
 
             let levels_b: Vec<String> = {
-                let mut v: Vec<_> = factor_b.iter().cloned().collect();
+                let mut v: Vec<_> = factor_b.to_vec();
                 v.sort();
                 v.dedup();
                 v
