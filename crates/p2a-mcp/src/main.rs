@@ -30,7 +30,7 @@ use config::{CliArgs, ServerConfig};
 async fn main() -> Result<()> {
     // Parse command-line arguments
     let args = CliArgs::parse();
-    let config = ServerConfig::from_args(args);
+    let config = ServerConfig::from_args(args)?;
 
     // Initialize logging to stderr (so it doesn't interfere with stdio MCP transport)
     tracing_subscriber::registry()

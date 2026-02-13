@@ -463,11 +463,7 @@ impl LgbTree {
 // Core Algorithm
 // ============================================================================
 
-/// Simple LCG random number generator.
-fn lcg_random(state: &mut u64) -> usize {
-    *state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
-    ((*state >> 33) ^ *state) as usize
-}
+use super::lcg_random;
 
 /// Sigmoid function (numerically stable).
 #[inline]

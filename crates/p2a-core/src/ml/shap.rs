@@ -42,6 +42,8 @@
 //! - R package `fastshap` (Greenwell, 2020).
 //!   <https://cran.r-project.org/package=fastshap>
 
+use crate::Dataset;
+use crate::errors::{EconError, EconResult};
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, Axis};
 use serde::Serialize;
 use std::collections::HashMap;
@@ -993,11 +995,7 @@ fn solve_via_pseudoinverse(a: &Array2<f64>, b: &Array1<f64>) -> Result<Array1<f6
     Ok(x)
 }
 
-/// Simple LCG random number generator.
-fn lcg_random(state: &mut u64) -> usize {
-    *state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
-    ((*state >> 33) ^ *state) as usize
-}
+use super::lcg_random;
 
 // ============================================================================
 // Public API
@@ -1181,6 +1179,71 @@ pub fn shap_values_model(
         model.feature_names.clone(),
         config,
     )
+}
+
+/// Compute SHAP values for a Random Forest model using a Dataset.
+///
+/// Convenience wrapper around [`shap_values_model`] that extracts the feature matrix
+/// from a [`Dataset`] using column names.
+///
+/// # Arguments
+/// * `model` - A trained Random Forest model with stored trees
+///   (from [`random_forest_with_trees`](super::random_forest_with_trees))
+/// * `dataset` - Input dataset containing the feature columns
+/// * `x_cols` - Names of the feature columns to explain
+/// * `config` - SHAP configuration
+pub fn run_shap_values_model(
+    model: &super::trees::RandomForestModel,
+    dataset: &Dataset,
+    x_cols: &[&str],
+    config: &ShapConfig,
+) -> EconResult<ShapResult> {
+    use crate::linalg::design::DesignMatrix;
+
+    let design = DesignMatrix::from_dataframe(dataset.df(), x_cols, false)?;
+    let x = design.data;
+
+    shap_values_model(model, x.view(), config).map_err(EconError::Computation)
+}
+
+/// Compute Kernel SHAP values using a Dataset.
+///
+/// Convenience wrapper around [`kernel_shap`] that extracts the feature matrices
+/// from [`Dataset`] objects using column names.
+///
+/// # Arguments
+/// * `predict_fn` - Model prediction function
+/// * `dataset` - Input dataset containing the observations to explain
+/// * `background_dataset` - Background dataset for computing baseline expectations
+/// * `x_cols` - Names of the feature columns
+/// * `config` - SHAP configuration
+pub fn run_kernel_shap<F>(
+    predict_fn: F,
+    dataset: &Dataset,
+    background_dataset: &Dataset,
+    x_cols: &[&str],
+    config: &ShapConfig,
+) -> EconResult<ShapResult>
+where
+    F: Fn(ArrayView2<f64>) -> Vec<f64>,
+{
+    use crate::linalg::design::DesignMatrix;
+
+    let design = DesignMatrix::from_dataframe(dataset.df(), x_cols, false)?;
+    let x = design.data;
+    let feature_names = design.column_names;
+
+    let bg_design = DesignMatrix::from_dataframe(background_dataset.df(), x_cols, false)?;
+    let background = bg_design.data;
+
+    kernel_shap(
+        predict_fn,
+        x.view(),
+        background.view(),
+        config,
+        Some(feature_names),
+    )
+    .map_err(EconError::Computation)
 }
 
 #[cfg(test)]
@@ -1376,5 +1439,41 @@ mod tests {
         let summary = shap_summary(&shap_result);
         assert_eq!(summary.feature_names.len(), 3);
         assert_eq!(summary.n_obs, 15);
+    }
+
+    #[test]
+    fn test_run_kernel_shap_dataset() {
+        use polars::prelude::*;
+
+        let df = df! {
+            "x1" => [1.0, 2.0, 3.0, 4.0, 5.0, 1.5, 2.5, 3.5, 4.5, 5.5],
+            "x2" => [2.0, 3.0, 4.0, 5.0, 6.0, 2.5, 3.5, 4.5, 5.5, 6.5],
+        }
+        .unwrap();
+
+        let dataset = Dataset::new(df.clone());
+        let background = Dataset::new(df);
+
+        // Simple linear prediction function: y = x1 + x2
+        let predict_fn = |x: ArrayView2<f64>| -> Vec<f64> {
+            x.rows().into_iter().map(|row| row[0] + row[1]).collect()
+        };
+
+        let config = ShapConfig {
+            seed: Some(42),
+            ..Default::default()
+        };
+
+        let result =
+            run_kernel_shap(predict_fn, &dataset, &background, &["x1", "x2"], &config).unwrap();
+
+        assert_eq!(result.n_features, 2);
+        assert_eq!(result.shap_values.nrows(), 10);
+        assert_eq!(result.shap_values.ncols(), 2);
+        assert!(result.feature_names.is_some());
+        assert_eq!(
+            result.feature_names.as_ref().unwrap(),
+            &["x1".to_string(), "x2".to_string()]
+        );
     }
 }

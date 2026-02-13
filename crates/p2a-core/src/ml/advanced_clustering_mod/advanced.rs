@@ -18,6 +18,7 @@
 //! - n >= 10,000 && d <= 15: Dual-Tree Boruvka (best scaling)
 //! - d > 15: Parallel brute-force (KD-tree degrades in high dimensions)
 
+use crate::errors::{EconError, EconResult};
 use faer::linalg::solvers::Solve;
 use ndarray::{Array2, ArrayView2, Axis};
 use rand::prelude::*;
@@ -1188,7 +1189,10 @@ pub fn optics(
     // Helper closure to get neighbors
     let get_neighbors = |point_idx: usize, radius: f64| -> Vec<(f64, usize)> {
         if let Some(ref tree) = tree_opt {
-            tree.radius_query(tree.data().get(point_idx).unwrap(), radius, Some(point_idx))
+            match tree.data().get(point_idx) {
+                Some(point) => tree.radius_query(point, radius, Some(point_idx)),
+                None => Vec::new(),
+            }
         } else if let Some(ref dist_matrix) = distances {
             (0..n)
                 .filter(|&j| j != point_idx && dist_matrix[[point_idx, j]] <= radius)
@@ -2532,7 +2536,10 @@ fn compute_distance_matrix(data: &ArrayView2<f64>) -> Array2<f64> {
 
 /// Compute overall data variance.
 fn compute_data_variance(data: &ArrayView2<f64>) -> f64 {
-    let mean = data.mean_axis(Axis(0)).unwrap();
+    let mean = match data.mean_axis(Axis(0)) {
+        Some(m) => m,
+        None => return 0.0,
+    };
     let n = data.nrows();
 
     let mut variance = 0.0;
@@ -3522,16 +3529,18 @@ impl std::fmt::Display for DianaResult {
 /// # References
 ///
 /// - Kaufman & Rousseeuw (1990). "Finding Groups in Data".
-pub fn diana(data: ArrayView2<f64>, n_clusters: Option<usize>) -> Result<DianaResult, String> {
+pub fn diana(data: ArrayView2<f64>, n_clusters: Option<usize>) -> EconResult<DianaResult> {
     let n = data.nrows();
 
     if n == 0 {
-        return Err("Empty data".to_string());
+        return Err(EconError::EmptyDataset);
     }
 
     let target_k = n_clusters.unwrap_or(2);
     if target_k == 0 || target_k > n {
-        return Err(format!("n_clusters must be between 1 and {}", n));
+        return Err(EconError::InvalidSpecification {
+            message: format!("n_clusters must be between 1 and {}", n),
+        });
     }
 
     // Compute distance matrix
@@ -3735,7 +3744,7 @@ fn compute_diana_coefficient(heights: &[f64]) -> f64 {
 }
 
 /// Convenience wrapper for diana.
-pub fn run_diana(data: ArrayView2<f64>, n_clusters: Option<usize>) -> Result<DianaResult, String> {
+pub fn run_diana(data: ArrayView2<f64>, n_clusters: Option<usize>) -> EconResult<DianaResult> {
     diana(data, n_clusters)
 }
 
@@ -6520,7 +6529,9 @@ fn fastcluster_nnchain_optimized(
 
         // Build chain until we find a reciprocal pair
         loop {
-            let current = *chain.last().unwrap();
+            let current = *chain
+                .last()
+                .ok_or_else(|| "Internal error: nearest-neighbor chain is empty".to_string())?;
 
             // Find nearest neighbor of current (update if stale)
             let mut nn = nearest[current];

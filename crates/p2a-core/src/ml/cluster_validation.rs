@@ -14,6 +14,7 @@
 //! - Adjusted Rand Index: Rand Index corrected for chance
 //! - Normalized Mutual Information: Information-theoretic measure
 
+use crate::errors::{EconError, EconResult};
 use ndarray::{Array1, Array2, ArrayView2, Axis};
 use serde::{Deserialize, Serialize};
 
@@ -121,26 +122,30 @@ impl std::fmt::Display for SilhouetteResult {
 /// - Rousseeuw, P.J. (1987). "Silhouettes: A graphical aid to the interpretation
 ///   and validation of cluster analysis". Journal of Computational and Applied
 ///   Mathematics, 20, 53-65.
-pub fn silhouette(data: ArrayView2<f64>, labels: &[usize]) -> Result<SilhouetteResult, String> {
+pub fn silhouette(data: ArrayView2<f64>, labels: &[usize]) -> EconResult<SilhouetteResult> {
     let n = data.nrows();
 
     if labels.len() != n {
-        return Err(format!(
-            "Labels length ({}) does not match data rows ({})",
-            labels.len(),
-            n
-        ));
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "Labels length ({}) does not match data rows ({})",
+                labels.len(),
+                n
+            ),
+        });
     }
 
     if n == 0 {
-        return Err("Empty data".to_string());
+        return Err(EconError::EmptyDataset);
     }
 
     // Find unique clusters and count
     let n_clusters = *labels.iter().max().unwrap_or(&0) + 1;
 
     if n_clusters < 2 {
-        return Err("Need at least 2 clusters for silhouette analysis".to_string());
+        return Err(EconError::InvalidSpecification {
+            message: "Need at least 2 clusters for silhouette analysis".to_string(),
+        });
     }
 
     // Group points by cluster
@@ -360,7 +365,7 @@ pub fn silhouette_from_dist(
 }
 
 /// Convenience wrapper for silhouette.
-pub fn run_silhouette(data: ArrayView2<f64>, labels: &[usize]) -> Result<SilhouetteResult, String> {
+pub fn run_silhouette(data: ArrayView2<f64>, labels: &[usize]) -> EconResult<SilhouetteResult> {
     silhouette(data, labels)
 }
 
@@ -754,25 +759,29 @@ impl std::fmt::Display for DunnIndexResult {
 /// # References
 ///
 /// - Dunn, J.C. (1973). "A Fuzzy Relative of the ISODATA Process".
-pub fn dunn_index(data: ArrayView2<f64>, labels: &[usize]) -> Result<DunnIndexResult, String> {
+pub fn dunn_index(data: ArrayView2<f64>, labels: &[usize]) -> EconResult<DunnIndexResult> {
     let n = data.nrows();
 
     if labels.len() != n {
-        return Err(format!(
-            "Labels length ({}) does not match data rows ({})",
-            labels.len(),
-            n
-        ));
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "Labels length ({}) does not match data rows ({})",
+                labels.len(),
+                n
+            ),
+        });
     }
 
     if n == 0 {
-        return Err("Empty data".to_string());
+        return Err(EconError::EmptyDataset);
     }
 
     let n_clusters = *labels.iter().max().unwrap_or(&0) + 1;
 
     if n_clusters < 2 {
-        return Err("Need at least 2 clusters for Dunn index".to_string());
+        return Err(EconError::InvalidSpecification {
+            message: "Need at least 2 clusters for Dunn index".to_string(),
+        });
     }
 
     // Group points by cluster
@@ -837,7 +846,7 @@ pub fn dunn_index(data: ArrayView2<f64>, labels: &[usize]) -> Result<DunnIndexRe
 }
 
 /// Convenience wrapper for dunn_index.
-pub fn run_dunn_index(data: ArrayView2<f64>, labels: &[usize]) -> Result<DunnIndexResult, String> {
+pub fn run_dunn_index(data: ArrayView2<f64>, labels: &[usize]) -> EconResult<DunnIndexResult> {
     dunn_index(data, labels)
 }
 
@@ -909,19 +918,25 @@ impl std::fmt::Display for RandIndexResult {
 ///
 /// - Rand, W.M. (1971). "Objective criteria for the evaluation of clustering methods".
 /// - Hubert, L. and Arabie, P. (1985). "Comparing partitions".
-pub fn rand_index(labels_true: &[usize], labels_pred: &[usize]) -> Result<RandIndexResult, String> {
+pub fn rand_index(labels_true: &[usize], labels_pred: &[usize]) -> EconResult<RandIndexResult> {
     let n = labels_true.len();
 
     if labels_pred.len() != n {
-        return Err(format!(
-            "Labels length mismatch: {} vs {}",
-            labels_true.len(),
-            labels_pred.len()
-        ));
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "Labels length mismatch: {} vs {}",
+                labels_true.len(),
+                labels_pred.len()
+            ),
+        });
     }
 
     if n < 2 {
-        return Err("Need at least 2 observations".to_string());
+        return Err(EconError::InsufficientData {
+            required: 2,
+            provided: n,
+            context: "Rand index".to_string(),
+        });
     }
 
     // Build contingency table
@@ -996,10 +1011,7 @@ pub fn rand_index(labels_true: &[usize], labels_pred: &[usize]) -> Result<RandIn
 }
 
 /// Convenience wrapper for rand_index.
-pub fn run_rand_index(
-    labels_true: &[usize],
-    labels_pred: &[usize],
-) -> Result<RandIndexResult, String> {
+pub fn run_rand_index(labels_true: &[usize], labels_pred: &[usize]) -> EconResult<RandIndexResult> {
     rand_index(labels_true, labels_pred)
 }
 
@@ -1065,19 +1077,21 @@ pub fn nmi(
     labels_true: &[usize],
     labels_pred: &[usize],
     average_method: Option<&str>,
-) -> Result<NmiResult, String> {
+) -> EconResult<NmiResult> {
     let n = labels_true.len();
 
     if labels_pred.len() != n {
-        return Err(format!(
-            "Labels length mismatch: {} vs {}",
-            labels_true.len(),
-            labels_pred.len()
-        ));
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "Labels length mismatch: {} vs {}",
+                labels_true.len(),
+                labels_pred.len()
+            ),
+        });
     }
 
     if n == 0 {
-        return Err("Empty labels".to_string());
+        return Err(EconError::EmptyDataset);
     }
 
     let method = average_method.unwrap_or("geometric");
@@ -1138,7 +1152,11 @@ pub fn nmi(
         "arithmetic" => (entropy_true + entropy_pred) / 2.0,
         "min" => entropy_true.min(entropy_pred),
         "max" => entropy_true.max(entropy_pred),
-        _ => return Err(format!("Unknown average method: {}", method)),
+        _ => {
+            return Err(EconError::InvalidSpecification {
+                message: format!("Unknown average method: {}", method),
+            });
+        }
     };
 
     let nmi_value = if normalizer > 0.0 {
@@ -1157,7 +1175,7 @@ pub fn nmi(
 }
 
 /// Convenience wrapper for nmi.
-pub fn run_nmi(labels_true: &[usize], labels_pred: &[usize]) -> Result<NmiResult, String> {
+pub fn run_nmi(labels_true: &[usize], labels_pred: &[usize]) -> EconResult<NmiResult> {
     nmi(labels_true, labels_pred, None)
 }
 

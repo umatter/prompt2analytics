@@ -395,9 +395,7 @@ pub fn glmnet(
     };
 
     let (x_scaled, x_mean, x_scale) = if config.standardize {
-        let x_mean: Vec<f64> = (0..p)
-            .map(|j| x.column(j).mean().unwrap_or(0.0))
-            .collect();
+        let x_mean: Vec<f64> = (0..p).map(|j| x.column(j).mean().unwrap_or(0.0)).collect();
         let x_scale: Vec<f64> = (0..p)
             .map(|j| {
                 let col = x.column(j);
@@ -503,10 +501,7 @@ pub fn glmnet(
             let intercept = if config.intercept {
                 match config.family {
                     GlmnetFamily::Gaussian => {
-                        y_mean
-                            - (0..p)
-                                .map(|j| coefs[j] * x_mean[j])
-                                .sum::<f64>()
+                        y_mean - (0..p).map(|j| coefs[j] * x_mean[j]).sum::<f64>()
                     }
                     GlmnetFamily::Binomial => {
                         intercept_val
@@ -887,10 +882,18 @@ impl std::fmt::Display for GlmnetResult {
             self.dependent_var, self.n_features
         )?;
         writeln!(f, "  Family:     {:?}", self.family)?;
-        writeln!(f, "  Alpha:      {:.2} ({})", self.alpha,
-            if self.alpha == 1.0 { "lasso" }
-            else if self.alpha == 0.0 { "ridge" }
-            else { "elastic net" })?;
+        writeln!(
+            f,
+            "  Alpha:      {:.2} ({})",
+            self.alpha,
+            if self.alpha == 1.0 {
+                "lasso"
+            } else if self.alpha == 0.0 {
+                "ridge"
+            } else {
+                "elastic net"
+            }
+        )?;
         writeln!(f, "  N:          {}", self.n_obs)?;
         writeln!(f, "  Lambda path: {} values", self.lambda.len())?;
         writeln!(f)?;

@@ -35,8 +35,8 @@
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 use serde::{Deserialize, Serialize};
 
-use crate::errors::{EconError, EconResult};
 use crate::Dataset;
+use crate::errors::{EconError, EconResult};
 
 /// Method for splitting nodes (determines loss function).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -208,7 +208,11 @@ impl std::fmt::Display for CartResult {
                 Some(names) => names.get(*i).cloned().unwrap_or_else(|| format!("X{}", i)),
                 None => format!("X{}", i),
             };
-            let pct = if total > 0.0 { importance / total * 100.0 } else { 0.0 };
+            let pct = if total > 0.0 {
+                importance / total * 100.0
+            } else {
+                0.0
+            };
             writeln!(f, "  {}: {:.1}%", name, pct)?;
         }
 
@@ -247,7 +251,11 @@ fn build_cart_tree(
     let (yval, dev, class_probs) = compute_node_stats(y, indices, config);
 
     // Check stopping conditions
-    let max_depth = if config.max_depth == 0 { usize::MAX } else { config.max_depth };
+    let max_depth = if config.max_depth == 0 {
+        usize::MAX
+    } else {
+        config.max_depth
+    };
     if depth >= max_depth || n < config.min_split || n <= 2 * config.min_bucket {
         return CartNode {
             id: node_id,
@@ -281,9 +289,15 @@ fn build_cart_tree(
     }
 
     // Find best split
-    if let Some((best_split, left_indices, right_indices)) = find_best_split_cart(x, y, config, indices) {
+    if let Some((best_split, left_indices, right_indices)) =
+        find_best_split_cart(x, y, config, indices)
+    {
         // Check minimum improvement (cp criterion)
-        let improve_ratio = if root_mse > 0.0 { best_split.improve / root_mse } else { 0.0 };
+        let improve_ratio = if root_mse > 0.0 {
+            best_split.improve / root_mse
+        } else {
+            0.0
+        };
         if improve_ratio < config.cp {
             return CartNode {
                 id: node_id,
@@ -300,9 +314,7 @@ fn build_cart_tree(
         }
 
         // Check minimum bucket size
-        if left_indices.len() < config.min_bucket
-            || right_indices.len() < config.min_bucket
-        {
+        if left_indices.len() < config.min_bucket || right_indices.len() < config.min_bucket {
             return CartNode {
                 id: node_id,
                 n,
@@ -324,8 +336,26 @@ fn build_cart_tree(
         let left_id = node_id * 2;
         let right_id = node_id * 2 + 1;
 
-        let left_child = build_cart_tree(x, y, config, &left_indices, depth + 1, left_id, root_mse, importance);
-        let right_child = build_cart_tree(x, y, config, &right_indices, depth + 1, right_id, root_mse, importance);
+        let left_child = build_cart_tree(
+            x,
+            y,
+            config,
+            &left_indices,
+            depth + 1,
+            left_id,
+            root_mse,
+            importance,
+        );
+        let right_child = build_cart_tree(
+            x,
+            y,
+            config,
+            &right_indices,
+            depth + 1,
+            right_id,
+            root_mse,
+            importance,
+        );
 
         CartNode {
             id: node_id,
@@ -355,7 +385,11 @@ fn build_cart_tree(
     }
 }
 
-fn compute_node_stats(y: &ArrayView1<f64>, indices: &[usize], config: &CartConfig) -> (f64, f64, Option<Vec<f64>>) {
+fn compute_node_stats(
+    y: &ArrayView1<f64>,
+    indices: &[usize],
+    config: &CartConfig,
+) -> (f64, f64, Option<Vec<f64>>) {
     match config.method {
         CartMethod::Anova => {
             // Regression: mean and MSE
@@ -481,7 +515,8 @@ fn find_best_split_cart(
         CartMethod::Gini | CartMethod::Entropy => {
             // OPTIMIZED: O(n log n) per feature using incremental class counts
             // Build class counts for the node
-            let mut total_counts: std::collections::HashMap<i64, usize> = std::collections::HashMap::new();
+            let mut total_counts: std::collections::HashMap<i64, usize> =
+                std::collections::HashMap::new();
             for &i in indices {
                 let class = y[i] as i64;
                 *total_counts.entry(class).or_insert(0) += 1;
@@ -569,8 +604,9 @@ fn find_best_split_cart(
 
     // Now partition indices based on best split
     best_split.map(|(split, _)| {
-        let (left_indices, right_indices): (Vec<usize>, Vec<usize>) =
-            indices.iter().partition(|&&i| x[[i, split.feature]] <= split.threshold);
+        let (left_indices, right_indices): (Vec<usize>, Vec<usize>) = indices
+            .iter()
+            .partition(|&&i| x[[i, split.feature]] <= split.threshold);
         (split, left_indices, right_indices)
     })
 }
@@ -582,7 +618,8 @@ fn compute_gini_from_counts(counts: &[usize], n: usize) -> f64 {
         return 0.0;
     }
     let n_f = n as f64;
-    counts.iter()
+    counts
+        .iter()
         .map(|&c| {
             let p = c as f64 / n_f;
             p * (1.0 - p) * n_f
@@ -597,7 +634,8 @@ fn compute_entropy_from_counts(counts: &[usize], n: usize) -> f64 {
         return 0.0;
     }
     let n_f = n as f64;
-    counts.iter()
+    counts
+        .iter()
         .filter(|&&c| c > 0)
         .map(|&c| {
             let p = c as f64 / n_f;
@@ -627,10 +665,14 @@ fn compute_gini(y: &ArrayView1<f64>, indices: &[usize]) -> f64 {
         *counts.entry(class).or_insert(0usize) += 1;
     }
     let n = indices.len() as f64;
-    counts.values().map(|&c| {
-        let p = c as f64 / n;
-        p * (1.0 - p)
-    }).sum::<f64>() * n
+    counts
+        .values()
+        .map(|&c| {
+            let p = c as f64 / n;
+            p * (1.0 - p)
+        })
+        .sum::<f64>()
+        * n
 }
 
 /// Compute entropy.
@@ -644,10 +686,15 @@ fn compute_entropy(y: &ArrayView1<f64>, indices: &[usize]) -> f64 {
         *counts.entry(class).or_insert(0usize) += 1;
     }
     let n = indices.len() as f64;
-    counts.values().filter(|&&c| c > 0).map(|&c| {
-        let p = c as f64 / n;
-        -p * p.ln()
-    }).sum::<f64>() * n
+    counts
+        .values()
+        .filter(|&&c| c > 0)
+        .map(|&c| {
+            let p = c as f64 / n;
+            -p * p.ln()
+        })
+        .sum::<f64>()
+        * n
 }
 
 /// Count tree statistics recursively.
@@ -768,7 +815,7 @@ fn build_cp_table(root: &CartNode, root_mse: f64) -> Vec<CpTableRow> {
             nsplit,
             rel_error: rel_error.max(0.0),
             xerror: rel_error.max(0.0) * 1.1, // Placeholder
-            xstd: 0.1, // Placeholder
+            xstd: 0.1,                        // Placeholder
         });
     }
 
@@ -896,11 +943,19 @@ pub fn run_cart(
     let feature_names = design.column_names;
 
     // Get y column
-    let col_names: Vec<String> = dataset.df().get_column_names().iter().map(|s| s.to_string()).collect();
+    let col_names: Vec<String> = dataset
+        .df()
+        .get_column_names()
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
     let y_series = dataset
         .df()
         .column(y_col)
-        .map_err(|_| EconError::ColumnNotFound { column: y_col.to_string(), available: col_names })?;
+        .map_err(|_| EconError::ColumnNotFound {
+            column: y_col.to_string(),
+            available: col_names,
+        })?;
 
     let y: Vec<f64> = y_series
         .f64()
@@ -985,10 +1040,18 @@ mod tests {
 
         // Predictions should be close to actual classes
         for i in 0..3 {
-            assert!(result.predictions[i] < 0.5, "Sample {} should be class 0", i);
+            assert!(
+                result.predictions[i] < 0.5,
+                "Sample {} should be class 0",
+                i
+            );
         }
         for i in 3..6 {
-            assert!(result.predictions[i] > 0.5, "Sample {} should be class 1", i);
+            assert!(
+                result.predictions[i] > 0.5,
+                "Sample {} should be class 1",
+                i
+            );
         }
     }
 

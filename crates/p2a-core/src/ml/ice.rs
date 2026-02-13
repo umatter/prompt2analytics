@@ -503,11 +503,7 @@ fn compute_ice_spread(ice_curves: &ArrayView2<f64>, pdp_curve: &[f64]) -> IceSpr
     }
 }
 
-/// Simple LCG random number generator for reproducible sampling.
-fn lcg_random(state: &mut u64) -> usize {
-    *state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
-    ((*state >> 33) ^ *state) as usize
-}
+use super::lcg_random;
 
 /// Select rows from a 2D array by indices.
 fn select_rows(data: &ArrayView2<f64>, indices: &[usize]) -> Array2<f64> {
@@ -727,13 +723,7 @@ mod tests {
     fn test_ice_interaction_heterogeneity() {
         // With interactions, ICE curves should NOT be parallel
         // Use data with variance in feature 0, different x1 values across observations
-        let data = array![
-            [1.0, 1.0],
-            [2.0, 2.0],
-            [3.0, 3.0],
-            [4.0, 4.0],
-            [5.0, 5.0],
-        ];
+        let data = array![[1.0, 1.0], [2.0, 2.0], [3.0, 3.0], [4.0, 4.0], [5.0, 5.0],];
 
         let config = IceConfig {
             feature_index: 0,

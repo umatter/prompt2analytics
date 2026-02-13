@@ -15,9 +15,8 @@ use crate::tools::requests::database::*;
 use p2a_core::{
     Dataset,
     data::{
-        query_sqlite, list_sqlite_tables, sqlite_table_schema,
-        query_duckdb, list_duckdb_tables, duckdb_table_schema,
-        query_file_with_duckdb,
+        duckdb_table_schema, list_duckdb_tables, list_sqlite_tables, query_duckdb,
+        query_file_with_duckdb, query_sqlite, sqlite_table_schema,
     },
 };
 

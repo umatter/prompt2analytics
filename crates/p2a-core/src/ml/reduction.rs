@@ -4,6 +4,7 @@
 //!
 //! PCA uses SVD via faer for O(nm²) complexity instead of power iteration.
 
+use crate::errors::{EconError, EconResult};
 use faer::Mat;
 use ndarray::{Array1, Array2, ArrayView2, Axis};
 
@@ -284,14 +285,16 @@ fn outer_product(a: &ndarray::ArrayView1<f64>, b: &ndarray::ArrayView1<f64>) -> 
 }
 
 /// Project new data onto principal components.
-pub fn pca_transform(data: ArrayView2<f64>, pca_result: &PCAResult) -> Result<Array2<f64>, String> {
+pub fn pca_transform(data: ArrayView2<f64>, pca_result: &PCAResult) -> EconResult<Array2<f64>> {
     let n_features = data.ncols();
     if n_features != pca_result.mean.len() {
-        return Err(format!(
-            "Data has {} features, but PCA was fit with {} features",
-            n_features,
-            pca_result.mean.len()
-        ));
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "Data has {} features, but PCA was fit with {} features",
+                n_features,
+                pca_result.mean.len()
+            ),
+        });
     }
 
     // Center using the stored mean
@@ -309,13 +312,15 @@ pub fn pca_transform(data: ArrayView2<f64>, pca_result: &PCAResult) -> Result<Ar
 pub fn pca_inverse_transform(
     transformed: ArrayView2<f64>,
     pca_result: &PCAResult,
-) -> Result<Array2<f64>, String> {
+) -> EconResult<Array2<f64>> {
     let n_components = transformed.ncols();
     if n_components != pca_result.n_components {
-        return Err(format!(
-            "Transformed data has {} components, but PCA has {} components",
-            n_components, pca_result.n_components
-        ));
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "Transformed data has {} components, but PCA has {} components",
+                n_components, pca_result.n_components
+            ),
+        });
     }
 
     // Reconstruct: X_approx = X_transformed @ components + mean

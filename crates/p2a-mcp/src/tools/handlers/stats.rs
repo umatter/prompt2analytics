@@ -18,6 +18,9 @@ use rmcp::{
     ErrorData as McpError, handler::server::wrapper::Parameters, model::*, tool, tool_router,
 };
 
+/// Maximum number of elements allowed in a single matrix allocation.
+const MAX_MATRIX_ELEMENTS: usize = 10_000_000;
+
 use crate::server::AnalyticsServer;
 use crate::tools::common::{extract_column_f64, extract_numeric_matrix};
 use crate::tools::requests::stats::{
@@ -396,14 +399,14 @@ impl AnalyticsServer {
 
             // Get unique levels
             let levels_a: Vec<String> = {
-                let mut v: Vec<_> = factor_a.iter().cloned().collect();
+                let mut v = factor_a.to_vec();
                 v.sort();
                 v.dedup();
                 v
             };
 
             let levels_b: Vec<String> = {
-                let mut v: Vec<_> = factor_b.iter().cloned().collect();
+                let mut v = factor_b.to_vec();
                 v.sort();
                 v.dedup();
                 v
@@ -1637,6 +1640,17 @@ impl AnalyticsServer {
             )]));
         }
 
+        let n_cols = request.columns.len();
+        if n_rows
+            .checked_mul(n_cols)
+            .is_none_or(|total| total > MAX_MATRIX_ELEMENTS)
+        {
+            return Ok(CallToolResult::error(vec![Content::text(format!(
+                "Matrix dimensions too large: {} rows x {} columns exceeds limit of {} elements.",
+                n_rows, n_cols, MAX_MATRIX_ELEMENTS
+            ))]));
+        }
+
         let mut matrix: Vec<Vec<f64>> = Vec::with_capacity(n_rows);
         for row_idx in 0..n_rows {
             let mut row_values: Vec<f64> = Vec::with_capacity(request.columns.len());
@@ -1830,7 +1844,7 @@ impl AnalyticsServer {
         &self,
         Parameters(request): Parameters<FactorAnalysisRequest>,
     ) -> Result<CallToolResult, McpError> {
-        use p2a_core::stats::factanal::{run_factanal, RotationMethod, ScoresMethod};
+        use p2a_core::stats::factanal::{RotationMethod, ScoresMethod, run_factanal};
 
         let datasets = self.datasets.read().await;
 
@@ -2113,7 +2127,7 @@ impl AnalyticsServer {
         &self,
         Parameters(request): Parameters<PowerPropTestRequest>,
     ) -> Result<CallToolResult, McpError> {
-        use p2a_core::stats::power::{power_prop_test, PowerAlternative};
+        use p2a_core::stats::power::{PowerAlternative, power_prop_test};
 
         let alternative = match request.alternative.as_deref() {
             Some("one.sided") | Some("one_sided") | Some("onesided") => PowerAlternative::OneSided,
@@ -2175,7 +2189,7 @@ impl AnalyticsServer {
         &self,
         Parameters(request): Parameters<PowerTTestRequest>,
     ) -> Result<CallToolResult, McpError> {
-        use p2a_core::stats::power::{power_t_test, PowerAlternative, TTestType};
+        use p2a_core::stats::power::{PowerAlternative, TTestType, power_t_test};
 
         let test_type = match request.test_type.as_deref() {
             Some("one.sample") | Some("one_sample") | Some("onesample") => TTestType::OneSample,

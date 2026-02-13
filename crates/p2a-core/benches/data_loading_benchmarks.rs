@@ -11,8 +11,8 @@
 mod bench_utils;
 
 use bench_utils::{BenchConfig, print_header, print_result, run_benchmark, save_results};
-use p2a_core::data::DataLoader;
 use p2a_core::Dataset;
+use p2a_core::data::DataLoader;
 use polars::prelude::*;
 use rand::Rng;
 use rand::SeedableRng;
@@ -171,7 +171,10 @@ fn main() {
             &format!("first{}", n_rows),
             n_rows,
             &config,
-            || DataLoader::load_csv_with_limit(&large_path, Some(n_rows)).expect("Failed to load CSV"),
+            || {
+                DataLoader::load_csv_with_limit(&large_path, Some(n_rows))
+                    .expect("Failed to load CSV")
+            },
         );
         print_result(&bench_result);
         results.push(bench_result);
@@ -213,9 +216,7 @@ fn main() {
     let dataset = generate_dataset(10000, 20, 42);
 
     // Benchmark lazy()
-    let bench_result = run_benchmark("dataset_op", "lazy", 10000, &config, || {
-        dataset.lazy()
-    });
+    let bench_result = run_benchmark("dataset_op", "lazy", 10000, &config, || dataset.lazy());
     print_result(&bench_result);
     results.push(bench_result);
 
@@ -263,8 +264,12 @@ fn main() {
 
     // Calculate speedup of parquet vs csv
     if let (Some(csv_bench), Some(parquet_bench)) = (
-        results.iter().find(|r| r.method == "format_compare" && r.variant == "csv"),
-        results.iter().find(|r| r.method == "format_compare" && r.variant == "parquet"),
+        results
+            .iter()
+            .find(|r| r.method == "format_compare" && r.variant == "csv"),
+        results
+            .iter()
+            .find(|r| r.method == "format_compare" && r.variant == "parquet"),
     ) {
         let speedup = csv_bench.time_median_us / parquet_bench.time_median_us;
         println!(
@@ -280,7 +285,9 @@ fn main() {
     );
     println!(
         "Parquet file size: {} bytes",
-        std::fs::metadata(&parquet_path).map(|m| m.len()).unwrap_or(0)
+        std::fs::metadata(&parquet_path)
+            .map(|m| m.len())
+            .unwrap_or(0)
     );
 
     // Save results

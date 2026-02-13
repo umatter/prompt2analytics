@@ -39,8 +39,8 @@ use std::fmt;
 
 use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
-use crate::linalg::design::get_column_names;
 use crate::linalg::DesignMatrix;
+use crate::linalg::design::get_column_names;
 use crate::linalg::matrix_ops::{safe_inverse, xtx, xty};
 use crate::regression::CovarianceType;
 use crate::traits::estimator::{SignificanceLevel, f_test_p_value, t_test_p_value};

@@ -14,14 +14,14 @@
 use crate::server::AnalyticsServer;
 use crate::tools::requests::hypothesis::*;
 use p2a_core::stats::{
-    run_bartlett_test, run_chisq_gof, run_chisq_independence, run_friedman_test,
-    run_kruskal_test, run_mantelhaen_test, CmhAlternative, mcnemar_test, mood_test,
-    run_oneway_test, run_pairwise_t_test, PValueAdjustMethod, run_pairwise_wilcox_test,
-    poisson_test, PoissonAlternative, run_quade_test, one_sample_t_test, paired_t_test,
-    two_sample_t_test, Alternative,
+    Alternative, CmhAlternative, PValueAdjustMethod, PoissonAlternative, mcnemar_test, mood_test,
+    one_sample_t_test, paired_t_test, poisson_test, run_bartlett_test, run_chisq_gof,
+    run_chisq_independence, run_friedman_test, run_kruskal_test, run_mantelhaen_test,
+    run_oneway_test, run_pairwise_t_test, run_pairwise_wilcox_test, run_quade_test,
+    two_sample_t_test,
 };
 use rmcp::{
-    handler::server::wrapper::Parameters, model::*, tool, tool_router, ErrorData as McpError,
+    ErrorData as McpError, handler::server::wrapper::Parameters, model::*, tool, tool_router,
 };
 
 #[tool_router(router = hypothesis_router, vis = "pub")]
@@ -309,7 +309,7 @@ impl AnalyticsServer {
         &self,
         Parameters(request): Parameters<FisherExactRequest>,
     ) -> Result<CallToolResult, McpError> {
-        use p2a_core::stats::fisher::{run_fisher_test, FisherAlternative};
+        use p2a_core::stats::fisher::{FisherAlternative, run_fisher_test};
 
         let datasets = self.datasets.read().await;
 
@@ -541,7 +541,9 @@ impl AnalyticsServer {
         &self,
         Parameters(request): Parameters<KsTestRequest>,
     ) -> Result<CallToolResult, McpError> {
-        use p2a_core::stats::ks::{ks_test_one_sample, ks_test_two_sample, TheoreticalDistribution};
+        use p2a_core::stats::ks::{
+            TheoreticalDistribution, ks_test_one_sample, ks_test_two_sample,
+        };
 
         let datasets = self.datasets.read().await;
 
@@ -1655,7 +1657,7 @@ impl AnalyticsServer {
         &self,
         Parameters(request): Parameters<WilcoxonTestRequest>,
     ) -> Result<CallToolResult, McpError> {
-        use p2a_core::stats::wilcoxon::{wilcoxon_test, WilcoxonConfig};
+        use p2a_core::stats::wilcoxon::{WilcoxonConfig, wilcoxon_test};
 
         let datasets = self.datasets.read().await;
 

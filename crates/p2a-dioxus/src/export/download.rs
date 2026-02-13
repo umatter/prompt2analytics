@@ -112,7 +112,11 @@ fn trigger_download_native(
 ) -> Result<(), String> {
     // For native, we just write to the current directory
     // A full implementation would use rfd for file dialogs
-    let path = std::path::Path::new(filename);
+    // Strip directory components to prevent path traversal attacks
+    let safe_name = std::path::Path::new(filename)
+        .file_name()
+        .ok_or_else(|| "Invalid filename: no file component found".to_string())?;
+    let path = std::path::Path::new(safe_name);
     std::fs::write(path, content).map_err(|e| format!("Failed to write file: {}", e))?;
     tracing::info!("Exported to: {}", path.display());
     Ok(())
@@ -212,7 +216,7 @@ fn copy_to_clipboard_native(content: &str) -> Result<(), String> {
 /// Generate a filename for the export based on conversation title and format
 pub fn generate_filename(title: Option<&str>, format: ExportFormat) -> String {
     let base = title
-        .map(|t| sanitize_filename(t))
+        .map(sanitize_filename)
         .unwrap_or_else(|| "conversation".to_string());
 
     let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S");

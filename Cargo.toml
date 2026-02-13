@@ -109,7 +109,6 @@ needless_range_loop = "allow"
 ptr_arg = "allow"
 # Allow doc formatting issues
 doc_overindented_list_items = "allow"
-doc_list_item_without_indentation = "allow"
 # Allow comparison lints in test assertions
 absurd_extreme_comparisons = "allow"
 # Allow unwrap after is_none check patterns
@@ -120,16 +119,12 @@ manual_strip = "allow"
 manual_memcpy = "allow"
 # Allow same item push patterns
 same_item_push = "allow"
-# Allow useless comparison lint for usize >= 0 assertions
-useless_comparison = "allow"
+# Allow useless conversion lint
+useless_conversion = "allow"
 # Derive order lints - allow for complex structs
 derive_ord_xor_partial_ord = "allow"
-# Allow unused parens - sometimes needed for clarity
-unused_parens = "allow"
 # Allow int_plus_one patterns
 int_plus_one = "allow"
-# Allow sort_by_key suggestions - sometimes sort_by is clearer
-sort_by_key_borrow = "allow"
 # Allow while_let_on_iterator patterns
 while_let_on_iterator = "allow"
 # Allow only_used_in_recursion
@@ -164,6 +159,8 @@ format_in_format_args = "allow"
 redundant_locals = "allow"
 
 [workspace.lints.rust]
+# Allow unused parens - sometimes needed for clarity
+unused_parens = "allow"
 # Allow deprecated - some Dioxus APIs in transition
 deprecated = "allow"
 # Allow unused variables in development

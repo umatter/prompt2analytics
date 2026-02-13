@@ -3,8 +3,10 @@
 //! Run with: cargo run --release --example ml_benchmark -p p2a-core
 
 use ndarray::{Array1, Array2};
-use p2a_core::ml::{adaboost, cart, gbm, AdaBoostConfig, AdaBoostType, CartConfig, CartMethod, GbmConfig};
-use p2a_core::regression::{glmnet, cv_glmnet, GlmnetConfig};
+use p2a_core::ml::{
+    AdaBoostConfig, AdaBoostType, CartConfig, CartMethod, GbmConfig, adaboost, cart, gbm,
+};
+use p2a_core::regression::{GlmnetConfig, cv_glmnet, glmnet};
 use std::time::Instant;
 
 /// Simple LCG random number generator
@@ -43,13 +45,17 @@ fn generate_data(n: usize, p: usize, seed: u64) -> (Array2<f64>, Array1<f64>, Ar
 
     // y_reg = 3*x1 - 1.5*x2 + noise
     let y_reg = Array1::from_iter(
-        (0..n).map(|i| 3.0 * x[[i, 0]] - 1.5 * x[[i, 1]] + rng.next_normal(0.0, 0.5))
+        (0..n).map(|i| 3.0 * x[[i, 0]] - 1.5 * x[[i, 1]] + rng.next_normal(0.0, 0.5)),
     );
 
     // y_class = sign(x1 + x2)
-    let y_class = Array1::from_iter(
-        (0..n).map(|i| if x[[i, 0]] + x[[i, 1]] > 0.0 { 1.0 } else { -1.0 })
-    );
+    let y_class = Array1::from_iter((0..n).map(|i| {
+        if x[[i, 0]] + x[[i, 1]] > 0.0 {
+            1.0
+        } else {
+            -1.0
+        }
+    }));
 
     (x, y_reg, y_class)
 }
@@ -134,9 +140,13 @@ fn main() {
         println!("  Per run:         {:.4} sec", elapsed.as_secs_f64() / 10.0);
 
         // 5. CART Classification
-        let y_class_01: Array1<f64> = Array1::from_iter(
-            (0..n).map(|i| if x[[i, 0]] + x[[i, 1]] > 0.0 { 1.0 } else { 0.0 })
-        );
+        let y_class_01: Array1<f64> = Array1::from_iter((0..n).map(|i| {
+            if x[[i, 0]] + x[[i, 1]] > 0.0 {
+                1.0
+            } else {
+                0.0
+            }
+        }));
         println!("\nCART classification (depth=5):");
         let cart_class_config = CartConfig {
             method: CartMethod::Gini,

@@ -5,6 +5,7 @@
 //! DBSCAN uses KD-tree acceleration for O(n log n) average complexity
 //! when dimensionality ≤ 20, with parallel neighborhood queries via rayon.
 
+use crate::errors::{EconError, EconResult};
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 use rand::prelude::*;
 use rayon::prelude::*;
@@ -291,7 +292,7 @@ const KDTREE_MAX_DIMS: usize = 20;
 /// * `data` - Input data matrix (n_samples x n_features)
 /// * `eps` - Maximum distance between two samples for neighborhood
 /// * `min_samples` - Minimum samples in neighborhood for core point
-pub fn dbscan(data: ArrayView2<f64>, eps: f64, min_samples: usize) -> Result<DBSCANResult, String> {
+pub fn dbscan(data: ArrayView2<f64>, eps: f64, min_samples: usize) -> EconResult<DBSCANResult> {
     let n_features = data.ncols();
 
     // Use KD-tree for low-dimensional data, naive for high-dimensional
@@ -305,20 +306,20 @@ pub fn dbscan(data: ArrayView2<f64>, eps: f64, min_samples: usize) -> Result<DBS
 /// Run DBSCAN using KD-tree for efficient neighborhood queries.
 ///
 /// Achieves O(n log n) average case for low-dimensional data.
-fn dbscan_kdtree(
-    data: ArrayView2<f64>,
-    eps: f64,
-    min_samples: usize,
-) -> Result<DBSCANResult, String> {
+fn dbscan_kdtree(data: ArrayView2<f64>, eps: f64, min_samples: usize) -> EconResult<DBSCANResult> {
     use super::kdtree::KdTree;
 
     let n_samples = data.nrows();
 
     if eps <= 0.0 {
-        return Err("eps must be positive".to_string());
+        return Err(EconError::InvalidSpecification {
+            message: "eps must be positive".to_string(),
+        });
     }
     if min_samples == 0 {
-        return Err("min_samples must be at least 1".to_string());
+        return Err(EconError::InvalidSpecification {
+            message: "min_samples must be at least 1".to_string(),
+        });
     }
 
     if n_samples == 0 {
@@ -395,18 +396,18 @@ fn dbscan_kdtree(
 /// Run DBSCAN using naive O(n²) pairwise distance computation.
 ///
 /// Used for high-dimensional data where KD-tree is inefficient.
-fn dbscan_naive(
-    data: ArrayView2<f64>,
-    eps: f64,
-    min_samples: usize,
-) -> Result<DBSCANResult, String> {
+fn dbscan_naive(data: ArrayView2<f64>, eps: f64, min_samples: usize) -> EconResult<DBSCANResult> {
     let n_samples = data.nrows();
 
     if eps <= 0.0 {
-        return Err("eps must be positive".to_string());
+        return Err(EconError::InvalidSpecification {
+            message: "eps must be positive".to_string(),
+        });
     }
     if min_samples == 0 {
-        return Err("min_samples must be at least 1".to_string());
+        return Err(EconError::InvalidSpecification {
+            message: "min_samples must be at least 1".to_string(),
+        });
     }
 
     let eps_squared = eps * eps;

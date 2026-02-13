@@ -288,11 +288,7 @@ fn compute_mse(y: &ArrayView1<f64>, indices: &[usize]) -> f64 {
     indices.iter().map(|&i| (y[i] - mean).powi(2)).sum::<f64>() / indices.len() as f64
 }
 
-/// Simple Linear Congruential Generator for reproducible randomness.
-fn lcg_random(state: &mut u64) -> usize {
-    *state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
-    ((*state >> 33) ^ *state) as usize
-}
+use super::lcg_random;
 
 /// Random Forest result.
 #[derive(Debug, Clone)]

@@ -11,9 +11,9 @@
 mod bench_utils;
 
 use bench_utils::{BenchConfig, print_header, print_result, run_benchmark, save_results};
+use p2a_core::Dataset;
 use p2a_core::cache::{CacheKey, ResultCache};
 use p2a_core::memory::{MemoryProfiler, estimate_dataset_memory};
-use p2a_core::Dataset;
 use polars::prelude::*;
 use rand::Rng;
 use rand::SeedableRng;
@@ -169,9 +169,7 @@ fn main() {
             &format!("{}x{}", n_rows, n_cols),
             n_rows * n_cols,
             &config,
-            || {
-                estimate_dataset_memory(&dataset)
-            },
+            || estimate_dataset_memory(&dataset),
         );
         print_result(&bench_result);
         results.push(bench_result);
@@ -199,9 +197,7 @@ fn main() {
         profiler.track_dataset(&format!("dataset_{}", i), &dataset);
     }
 
-    let bench_result = run_benchmark("profiler_stats", "100ds", 100, &config, || {
-        profiler.stats()
-    });
+    let bench_result = run_benchmark("profiler_stats", "100ds", 100, &config, || profiler.stats());
     print_result(&bench_result);
     results.push(bench_result);
 

@@ -56,7 +56,7 @@ use std::fmt;
 
 use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
-use crate::linalg::design::{get_column_names, DesignMatrix};
+use crate::linalg::design::{DesignMatrix, get_column_names};
 use crate::linalg::matrix_ops::{safe_inverse, xtx, xty};
 use crate::traits::estimator::{SignificanceLevel, t_test_p_value};
 

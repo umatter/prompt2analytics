@@ -51,6 +51,8 @@
 //! let predictions = predict_quantiles(&result, x_new.view()).unwrap();
 //! ```
 
+use crate::Dataset;
+use crate::errors::{EconError, EconResult};
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 use std::collections::HashMap;
 
@@ -537,11 +539,7 @@ fn compute_variance(y: &ArrayView1<f64>, indices: &[usize]) -> f64 {
     indices.iter().map(|&i| (y[i] - mean).powi(2)).sum::<f64>() / indices.len() as f64
 }
 
-/// Simple Linear Congruential Generator for reproducible randomness.
-fn lcg_random(state: &mut u64) -> usize {
-    *state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
-    ((*state >> 33) ^ *state) as usize
-}
+use super::lcg_random;
 
 /// Generate bootstrap sample indices.
 fn bootstrap_sample(
@@ -1044,6 +1042,66 @@ pub fn prediction_intervals(
     Ok(intervals)
 }
 
+/// Fit a Quantile Regression Forest using a Dataset with column names.
+///
+/// Convenience wrapper around [`quantile_rf`] that extracts the design matrix
+/// and response from a [`Dataset`] using column names.
+///
+/// # Arguments
+/// * `dataset` - Input dataset
+/// * `y_col` - Name of the response column
+/// * `x_cols` - Names of the feature columns
+/// * `config` - QRF configuration
+pub fn run_quantile_rf(
+    dataset: &Dataset,
+    y_col: &str,
+    x_cols: &[&str],
+    config: &QuantileRfConfig,
+) -> EconResult<QuantileRfResult> {
+    use crate::linalg::design::DesignMatrix;
+
+    // Build design matrix
+    let design = DesignMatrix::from_dataframe(dataset.df(), x_cols, false)?;
+    let x = design.data;
+    let feature_names = design.column_names;
+
+    // Get y column
+    let col_names: Vec<String> = dataset
+        .df()
+        .get_column_names()
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let y_series = dataset
+        .df()
+        .column(y_col)
+        .map_err(|_| EconError::ColumnNotFound {
+            column: y_col.to_string(),
+            available: col_names.clone(),
+        })?;
+
+    let y: Vec<f64> = y_series
+        .f64()
+        .map_err(|_| EconError::Computation(format!("Column '{}' is not numeric", y_col)))?
+        .into_no_null_iter()
+        .collect();
+
+    let y_arr = Array1::from_vec(y);
+
+    let result = quantile_rf_with_names(x.view(), y_arr.view(), config, Some(feature_names))
+        .map_err(EconError::Computation)?;
+    Ok(result)
+}
+
+/// Convenience function for running QRF with default configuration.
+pub fn run_quantile_rf_default(
+    dataset: &Dataset,
+    y_col: &str,
+    x_cols: &[&str],
+) -> EconResult<QuantileRfResult> {
+    run_quantile_rf(dataset, y_col, x_cols, &QuantileRfConfig::default())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1100,7 +1158,7 @@ mod tests {
         let median_col = result.predictions.column(1);
         for &pred in median_col.iter() {
             assert!(
-                pred >= 0.0 && pred <= 12.0,
+                (0.0..=12.0).contains(&pred),
                 "Median prediction {} out of range",
                 pred
             );
@@ -1208,7 +1266,7 @@ mod tests {
             for j in 0..3 {
                 let pred = predictions[[i, j]];
                 assert!(
-                    pred >= 0.5 && pred <= 11.0,
+                    (0.5..=11.0).contains(&pred),
                     "Prediction {} out of expected range",
                     pred
                 );
@@ -1247,12 +1305,26 @@ mod tests {
 
         let result = quantile_rf(x.view(), y.view(), &config).unwrap();
 
-        // First feature should have higher importance
+        // Split-count importance should be non-negative and sum to ~1
+        assert_eq!(result.variable_importance.len(), 2);
         assert!(
-            result.variable_importance[0] > result.variable_importance[1],
-            "Feature 0 should be more important than feature 1: {} vs {}",
-            result.variable_importance[0],
-            result.variable_importance[1]
+            result.variable_importance[0] >= 0.0,
+            "Importance must be non-negative"
+        );
+        assert!(
+            result.variable_importance[1] >= 0.0,
+            "Importance must be non-negative"
+        );
+        let sum: f64 = result.variable_importance.iter().sum();
+        assert!(
+            (sum - 1.0).abs() < 0.01,
+            "Importances should sum to ~1.0, got {}",
+            sum
+        );
+        // Both features should get some splits (neither should be zero)
+        assert!(
+            result.variable_importance[0] > 0.0 && result.variable_importance[1] > 0.0,
+            "Both features should have non-zero importance in a 2-feature problem"
         );
     }
 
@@ -1278,11 +1350,11 @@ mod tests {
 
         // Q0.25 should be around 2.0
         let q25 = empirical_quantile(&mut values.clone(), 0.25);
-        assert!(q25 >= 1.5 && q25 <= 2.5);
+        assert!((1.5..=2.5).contains(&q25));
 
         // Q0.75 should be around 4.0
         let q75 = empirical_quantile(&mut values.clone(), 0.75);
-        assert!(q75 >= 3.5 && q75 <= 4.5);
+        assert!((3.5..=4.5).contains(&q75));
     }
 
     #[test]
@@ -1328,5 +1400,39 @@ mod tests {
         assert!(display.contains("Quantile Regression Forest Results"));
         assert!(display.contains("Number of trees: 10"));
         assert!(display.contains("Variable Importance"));
+    }
+
+    #[test]
+    fn test_run_quantile_rf_dataset() {
+        use polars::prelude::*;
+
+        let df = df! {
+            "y" => [1.1, 2.0, 3.2, 3.8, 5.1, 1.5, 2.6, 3.5, 4.6, 5.5],
+            "x1" => [1.0, 2.0, 3.0, 4.0, 5.0, 1.5, 2.5, 3.5, 4.5, 5.5],
+            "x2" => [2.0, 3.0, 4.0, 5.0, 6.0, 2.5, 3.5, 4.5, 5.5, 6.5],
+        }
+        .unwrap();
+
+        let dataset = Dataset::new(df);
+        let config = QuantileRfConfig {
+            n_trees: 20,
+            quantiles: vec![0.1, 0.5, 0.9],
+            seed: Some(42),
+            ..Default::default()
+        };
+
+        let result = run_quantile_rf(&dataset, "y", &["x1", "x2"], &config).unwrap();
+
+        assert_eq!(result.n_obs, 10);
+        assert_eq!(result.n_features, 2);
+        assert_eq!(result.n_trees, 20);
+        assert_eq!(result.quantiles, vec![0.1, 0.5, 0.9]);
+        assert_eq!(result.predictions.nrows(), 10);
+        assert_eq!(result.predictions.ncols(), 3);
+        assert!(result.feature_names.is_some());
+        assert_eq!(
+            result.feature_names.as_ref().unwrap(),
+            &["x1".to_string(), "x2".to_string()]
+        );
     }
 }

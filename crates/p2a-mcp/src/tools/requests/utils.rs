@@ -17,9 +17,7 @@ pub struct ServerStatsRequest {
     pub include_datasets: Option<bool>,
 
     /// Include memory history for trend analysis
-    #[schemars(
-        description = "Include recent memory history snapshots for trend analysis."
-    )]
+    #[schemars(description = "Include recent memory history snapshots for trend analysis.")]
     pub include_history: Option<bool>,
 }
 

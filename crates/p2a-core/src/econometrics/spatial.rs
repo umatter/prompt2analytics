@@ -43,7 +43,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
-use crate::linalg::matrix_ops::{matrix_inverse, xtx, xty};
+use crate::linalg::matrix_ops::{matrix_inverse, pseudoinverse, xtx, xty};
 use crate::spatial::SpatialWeights;
 
 /// Configuration for SAR model estimation.
@@ -1588,15 +1588,21 @@ fn compute_impacts(
     }
 
     let multiplier = match matrix_inverse(&i_rho_w.view()) {
-        Ok(inv) => inv,
-        Err(_) => {
-            // Return simplified impacts if inversion fails
-            return Ok(SpatialImpacts {
-                direct: beta.slice(ndarray::s![1..]).to_vec(),
-                indirect: vec![0.0; k],
-                total: beta.slice(ndarray::s![1..]).to_vec(),
-                var_names: var_names.to_vec(),
-            });
+        Ok(inv) if !inv.iter().any(|v| v.is_nan() || v.is_infinite()) => inv,
+        _ => {
+            // LU-based inverse failed or produced NaN; fall back to SVD pseudoinverse
+            match pseudoinverse(&i_rho_w.view()) {
+                Ok(pinv) => pinv,
+                Err(_) => {
+                    // Return simplified impacts if all inversion methods fail
+                    return Ok(SpatialImpacts {
+                        direct: beta.slice(ndarray::s![1..]).to_vec(),
+                        indirect: vec![0.0; k],
+                        total: beta.slice(ndarray::s![1..]).to_vec(),
+                        var_names: var_names.to_vec(),
+                    });
+                }
+            }
         }
     };
 

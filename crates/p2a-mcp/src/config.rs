@@ -3,6 +3,7 @@
 //! Supports configuration via CLI arguments, environment variables,
 //! and configuration files.
 
+use anyhow::Context;
 use clap::{Parser, ValueEnum};
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
@@ -137,14 +138,14 @@ pub struct AuditConfig {
 
 impl ServerConfig {
     /// Create configuration from CLI arguments.
-    pub fn from_args(args: CliArgs) -> Self {
-        Self {
+    pub fn from_args(args: CliArgs) -> anyhow::Result<Self> {
+        Ok(Self {
             transport: args.transport,
             #[cfg(feature = "http")]
             http: HttpConfig {
                 addr: format!("{}:{}", args.host, args.port)
                     .parse()
-                    .expect("Invalid host:port"),
+                    .context(format!("Invalid host:port '{}:{}'", args.host, args.port))?,
                 cors_permissive: args.cors_permissive,
                 cors_origins: args.cors_origins,
                 #[cfg(feature = "db")]
@@ -165,7 +166,7 @@ impl ServerConfig {
                     .audit_path
                     .unwrap_or_else(|| "p2a-audit.log".to_string()),
             },
-        }
+        })
     }
 }
 

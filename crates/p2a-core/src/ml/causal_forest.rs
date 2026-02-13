@@ -658,11 +658,7 @@ fn partition_indices(
     indices.iter().partition(|&&i| x[[i, feature]] <= threshold)
 }
 
-/// Simple LCG random number generator for reproducibility.
-fn lcg_random(state: &mut u64) -> usize {
-    *state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
-    ((*state >> 33) ^ *state) as usize
-}
+use super::lcg_random;
 
 /// Generate bootstrap sample indices.
 fn subsample(n_samples: usize, fraction: f64, rng_state: &mut u64) -> (Vec<usize>, Vec<usize>) {

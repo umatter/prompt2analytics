@@ -45,9 +45,7 @@ use p2a_core::{
     wilcoxon_signed_rank,
 };
 
-use crate::output::{
-    validate_column_exists, validate_confidence_level, OutputFormat, print_error,
-};
+use crate::output::{OutputFormat, print_error, validate_column_exists, validate_confidence_level};
 use crate::session::SessionManager;
 
 #[derive(Clone, Debug, ValueEnum)]
@@ -803,11 +801,7 @@ fn execute_t_test_one(
     format: &OutputFormat,
     session: Option<&mut SessionManager>,
 ) -> anyhow::Result<()> {
-    log::info!(
-        "Running one-sample t-test: {} (H0: μ = {})",
-        col,
-        mu
-    );
+    log::info!("Running one-sample t-test: {} (H0: μ = {})", col, mu);
     log::debug!(
         "Parameters: dataset={}, alternative={:?}, conf_level={}",
         dataset_name,
@@ -856,36 +850,36 @@ fn execute_t_test_one(
                         result.p_value
                     );
                     match format {
-                    OutputFormat::Json => {
-                        let json = serde_json::json!({
-                            "test": "One-sample t-test",
-                            "t_statistic": result.t_statistic,
-                            "df": result.df,
-                            "p_value": result.p_value,
-                            "ci_lower": result.conf_int_lower,
-                            "ci_upper": result.conf_int_upper,
-                            "mean": result.estimate,
-                            "null_value": mu,
-                        });
-                        println!("{}", serde_json::to_string_pretty(&json)?);
+                        OutputFormat::Json => {
+                            let json = serde_json::json!({
+                                "test": "One-sample t-test",
+                                "t_statistic": result.t_statistic,
+                                "df": result.df,
+                                "p_value": result.p_value,
+                                "ci_lower": result.conf_int_lower,
+                                "ci_upper": result.conf_int_upper,
+                                "mean": result.estimate,
+                                "null_value": mu,
+                            });
+                            println!("{}", serde_json::to_string_pretty(&json)?);
+                        }
+                        _ => {
+                            println!("\nOne-sample t-test");
+                            println!("{}", "=".repeat(40));
+                            println!("H0: mean = {:.4}", mu);
+                            println!(
+                                "\nt = {:.4}, df = {:.1}, p-value = {:.6}",
+                                result.t_statistic, result.df, result.p_value
+                            );
+                            println!(
+                                "{:.0}% CI: [{:.4}, {:.4}]",
+                                conf_level * 100.0,
+                                result.conf_int_lower,
+                                result.conf_int_upper
+                            );
+                            println!("Sample mean: {:.4}", result.estimate);
+                        }
                     }
-                    _ => {
-                        println!("\nOne-sample t-test");
-                        println!("{}", "=".repeat(40));
-                        println!("H0: mean = {:.4}", mu);
-                        println!(
-                            "\nt = {:.4}, df = {:.1}, p-value = {:.6}",
-                            result.t_statistic, result.df, result.p_value
-                        );
-                        println!(
-                            "{:.0}% CI: [{:.4}, {:.4}]",
-                            conf_level * 100.0,
-                            result.conf_int_lower,
-                            result.conf_int_upper
-                        );
-                        println!("Sample mean: {:.4}", result.estimate);
-                    }
-                }
                 }
                 Err(e) => print_error(&format!("t-test failed: {}", e), format),
             }

@@ -153,21 +153,39 @@ fn main() -> anyhow::Result<()> {
     // Execute the command
     let result = match &cli.command {
         Commands::Data(cmd) => data::execute(cmd, &cli.format, cli.quiet, session_manager.as_mut()),
-        Commands::Munge(cmd) => munge::execute(cmd, &cli.format, cli.quiet, session_manager.as_mut()),
+        Commands::Munge(cmd) => {
+            munge::execute(cmd, &cli.format, cli.quiet, session_manager.as_mut())
+        }
         Commands::Regression(cmd) => {
             regression::execute(cmd, &cli.format, cli.quiet, session_manager.as_mut())
         }
-        Commands::Panel(cmd) => panel::execute(cmd, &cli.format, cli.quiet, session_manager.as_mut()),
-        Commands::Causal(cmd) => causal::execute(cmd, &cli.format, cli.quiet, session_manager.as_mut()),
-        Commands::Discrete(cmd) => discrete::execute(cmd, &cli.format, cli.quiet, session_manager.as_mut()),
-        Commands::Stats(cmd) => stats::execute(cmd, &cli.format, cli.quiet, session_manager.as_mut()),
+        Commands::Panel(cmd) => {
+            panel::execute(cmd, &cli.format, cli.quiet, session_manager.as_mut())
+        }
+        Commands::Causal(cmd) => {
+            causal::execute(cmd, &cli.format, cli.quiet, session_manager.as_mut())
+        }
+        Commands::Discrete(cmd) => {
+            discrete::execute(cmd, &cli.format, cli.quiet, session_manager.as_mut())
+        }
+        Commands::Stats(cmd) => {
+            stats::execute(cmd, &cli.format, cli.quiet, session_manager.as_mut())
+        }
         Commands::Timeseries(cmd) => {
             timeseries::execute(cmd, &cli.format, cli.quiet, session_manager.as_mut())
         }
-        Commands::Survival(cmd) => survival::execute(cmd, &cli.format, cli.quiet, session_manager.as_mut()),
-        Commands::Spatial(cmd) => spatial::execute(cmd, &cli.format, cli.quiet, session_manager.as_mut()),
-        Commands::MachineLearning(cmd) => ml::execute(cmd, &cli.format, cli.quiet, session_manager.as_mut()),
-        Commands::Visualize(cmd) => viz::execute(cmd, &cli.format, cli.quiet, session_manager.as_mut()),
+        Commands::Survival(cmd) => {
+            survival::execute(cmd, &cli.format, cli.quiet, session_manager.as_mut())
+        }
+        Commands::Spatial(cmd) => {
+            spatial::execute(cmd, &cli.format, cli.quiet, session_manager.as_mut())
+        }
+        Commands::MachineLearning(cmd) => {
+            ml::execute(cmd, &cli.format, cli.quiet, session_manager.as_mut())
+        }
+        Commands::Visualize(cmd) => {
+            viz::execute(cmd, &cli.format, cli.quiet, session_manager.as_mut())
+        }
         Commands::Script(cmd) => script::execute(cmd, &cli.format),
         Commands::SmokeTest => run_smoke_test(&cli.format),
     };

@@ -34,9 +34,9 @@ fn test_server_clone() {
 /// Test p2a-core regression functionality (simulates what MCP tools do).
 #[test]
 fn test_core_regression_via_dataset() {
-    use p2a_core::data::Dataset;
-    use p2a_core::regression::{run_ols, CovarianceType};
     use p2a_core::LinearEstimator;
+    use p2a_core::data::Dataset;
+    use p2a_core::regression::{CovarianceType, run_ols};
     use polars::prelude::*;
 
     // Create test data with known relationship: y ≈ 2x + 1
@@ -66,7 +66,7 @@ fn test_core_regression_via_dataset() {
 #[test]
 fn test_missing_column_error() {
     use p2a_core::data::Dataset;
-    use p2a_core::regression::{run_ols, CovarianceType};
+    use p2a_core::regression::{CovarianceType, run_ols};
     use polars::prelude::*;
 
     let df = df! {
@@ -109,7 +109,11 @@ fn test_core_panel_fe() {
     let dataset = Dataset::new(df);
 
     let result = run_fixed_effects(&dataset, "y", &["x"], "entity");
-    assert!(result.is_ok(), "Panel FE should succeed: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Panel FE should succeed: {:?}",
+        result.err()
+    );
 }
 
 /// Test that p2a-core DiD works (used by causal MCP tools).
@@ -169,7 +173,7 @@ fn test_core_descriptive() {
 /// Test hypothesis testing (used by stats MCP tools).
 #[test]
 fn test_core_ttest() {
-    use p2a_core::stats::{two_sample_t_test, Alternative};
+    use p2a_core::stats::{Alternative, two_sample_t_test};
 
     let group1 = vec![1.0, 2.0, 3.0, 4.0, 5.0];
     let group2 = vec![2.0, 3.0, 4.0, 5.0, 6.0];

@@ -137,8 +137,7 @@ impl std::fmt::Display for RuleCondition {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let name = self
             .feature_name
-            .as_ref()
-            .map(|n| n.clone())
+            .clone()
             .unwrap_or_else(|| format!("X{}", self.feature));
         write!(f, "{} {} {:.4}", name, self.operator, self.threshold)
     }
@@ -786,11 +785,7 @@ impl CubistTree {
     }
 }
 
-/// Simple Linear Congruential Generator.
-fn lcg_random(state: &mut u64) -> usize {
-    *state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
-    ((*state >> 33) ^ *state) as usize
-}
+use super::lcg_random;
 
 /// Compute k-nearest neighbors for instance-based correction.
 fn find_k_neighbors(
@@ -1027,8 +1022,7 @@ pub fn cubist_predict(result: &CubistResult, x: ArrayView2<f64>) -> EconResult<V
 
         // Apply instance-based correction if enabled and training data available
         if result.neighbors > 0 {
-            if let (Some(train_x), Some(train_y)) = (&result.training_x, &result.training_y)
-            {
+            if let (Some(train_x), Some(train_y)) = (&result.training_x, &result.training_y) {
                 let knn_pred =
                     find_k_neighbors(&train_x.view(), &train_y.view(), &row, result.neighbors);
                 pred = 0.5 * pred + 0.5 * knn_pred;

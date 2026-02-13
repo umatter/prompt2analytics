@@ -311,7 +311,9 @@ pub struct CtreeRequest {
     pub features: Vec<String>,
 
     /// Target column name
-    #[schemars(description = "Name of the target column (Y variable). Can be numeric (regression) or categorical (classification).")]
+    #[schemars(
+        description = "Name of the target column (Y variable). Can be numeric (regression) or categorical (classification)."
+    )]
     pub target: String,
 
     /// Criterion for splitting (1 - p-value threshold), default: 0.95 meaning p < 0.05
@@ -321,7 +323,9 @@ pub struct CtreeRequest {
     pub mincriterion: Option<f64>,
 
     /// Minimum observations in a node to attempt split, default: 20
-    #[schemars(description = "Minimum number of observations in a node required to attempt a split. Default is 20.")]
+    #[schemars(
+        description = "Minimum number of observations in a node required to attempt a split. Default is 20."
+    )]
     pub minsplit: Option<usize>,
 
     /// Minimum observations in terminal nodes, default: 7
@@ -433,7 +437,9 @@ pub struct ShapValuesRequest {
     pub n_samples: Option<usize>,
 
     /// Whether to compute summary statistics (default: true)
-    #[schemars(description = "Whether to compute global feature importance summary. Default is true.")]
+    #[schemars(
+        description = "Whether to compute global feature importance summary. Default is true."
+    )]
     pub compute_summary: Option<bool>,
 
     /// Random seed for reproducibility
@@ -457,11 +463,15 @@ pub struct CubistRequest {
     pub target: String,
 
     /// Number of committees (boosted ensembles, default: 1)
-    #[schemars(description = "Number of committee models (boosted ensemble). Default is 1 (no boosting). More committees can improve accuracy.")]
+    #[schemars(
+        description = "Number of committee models (boosted ensemble). Default is 1 (no boosting). More committees can improve accuracy."
+    )]
     pub committees: Option<usize>,
 
     /// Number of neighbors for instance-based correction (default: 0)
-    #[schemars(description = "Number of nearest neighbors for prediction adjustment. Default is 0 (no adjustment). Higher values add k-NN smoothing.")]
+    #[schemars(
+        description = "Number of nearest neighbors for prediction adjustment. Default is 0 (no adjustment). Higher values add k-NN smoothing."
+    )]
     pub neighbors: Option<usize>,
 
     /// Maximum tree depth (default: 10)
@@ -497,31 +507,45 @@ pub struct MboostRequest {
     pub x_cols: Vec<String>,
 
     /// Number of boosting iterations (default: 100)
-    #[schemars(description = "Number of boosting iterations (mstop). Default is 100. Larger values may overfit.")]
+    #[schemars(
+        description = "Number of boosting iterations (mstop). Default is 100. Larger values may overfit."
+    )]
     pub mstop: Option<usize>,
 
     /// Learning rate (default: 0.1)
-    #[schemars(description = "Learning rate (nu). Default is 0.1. Smaller values require more iterations but often improve generalization.")]
+    #[schemars(
+        description = "Learning rate (nu). Default is 0.1. Smaller values require more iterations but often improve generalization."
+    )]
     pub nu: Option<f64>,
 
     /// Loss function family
-    #[schemars(description = "Loss function family: 'gaussian' (default, for regression), 'binomial' (for binary classification), or 'poisson' (for count data).")]
+    #[schemars(
+        description = "Loss function family: 'gaussian' (default, for regression), 'binomial' (for binary classification), or 'poisson' (for count data)."
+    )]
     pub family: Option<String>,
 
     /// Base learner type
-    #[schemars(description = "Base learner type: 'linear' (default, L2-boosting) or 'tree' (regression stumps).")]
+    #[schemars(
+        description = "Base learner type: 'linear' (default, L2-boosting) or 'tree' (regression stumps)."
+    )]
     pub base_learner: Option<String>,
 
     /// Maximum tree depth for tree base learner (default: 1)
-    #[schemars(description = "Maximum depth for tree base learner. Default is 1 (stumps). Only used when base_learner='tree'.")]
+    #[schemars(
+        description = "Maximum depth for tree base learner. Default is 1 (stumps). Only used when base_learner='tree'."
+    )]
     pub tree_depth: Option<usize>,
 
     /// Minimum samples for tree splits (default: 5)
-    #[schemars(description = "Minimum samples required for a tree split. Default is 5. Only used when base_learner='tree'.")]
+    #[schemars(
+        description = "Minimum samples required for a tree split. Default is 5. Only used when base_learner='tree'."
+    )]
     pub min_samples_split: Option<usize>,
 
     /// Number of cross-validation folds for early stopping
-    #[schemars(description = "Number of CV folds for finding optimal mstop. If not set, no CV is performed.")]
+    #[schemars(
+        description = "Number of CV folds for finding optimal mstop. If not set, no CV is performed."
+    )]
     pub cv_folds: Option<usize>,
 
     /// Whether to center predictors (default: true)

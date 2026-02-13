@@ -376,4 +376,3 @@ pub struct SpgmRequest {
     )]
     pub spatial_error: Option<bool>,
 }
-

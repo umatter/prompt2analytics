@@ -141,14 +141,12 @@ fn sanitize_arguments(args: &serde_json::Value) -> serde_json::Value {
                         serde_json::Value::String("[BINARY REDACTED]".to_string())
                     }
                     // Truncate long strings
-                    _ if value.is_string() => {
-                        let s = value.as_str().unwrap();
-                        if s.len() > 200 {
+                    _ if value.is_string() => match value.as_str() {
+                        Some(s) if s.len() > 200 => {
                             serde_json::Value::String(format!("{}...[truncated]", &s[..200]))
-                        } else {
-                            value.clone()
                         }
-                    }
+                        _ => value.clone(),
+                    },
                     // Recursively sanitize nested objects
                     _ if value.is_object() => sanitize_arguments(value),
                     // Pass through other values

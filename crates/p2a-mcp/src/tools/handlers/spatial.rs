@@ -13,29 +13,46 @@ use crate::server::AnalyticsServer;
 use crate::tools::requests::spatial::*;
 
 use p2a_core::{
-    // Spatial weights and neighbors
-    Neighbors, SpatialWeights, WeightStyle,
-    // Moran's I test
-    moran_test, MoranAlternative,
-    // Spatial LM tests
-    spatial_lm_tests,
-    // Spatial regression models
-    run_sar, run_sem, run_sphet, SarConfig, SemConfig, SphetConfig,
-    SphetModel, SphetSE,
-    // Spatial probit
-    run_sar_probit, run_sem_probit, SpatialProbitConfig, SpatialErrorType,
-    // Spatial panel
-    run_spml, run_spgm, SpmlConfig, SpgmConfig, SpgmMethod,
-    SpatialPanelEffect, SpatialPanelModel,
-    // Regression
-    regression::{run_ols, CovarianceType},
     // Traits
     LinearEstimator,
+    MoranAlternative,
+    // Spatial weights and neighbors
+    Neighbors,
+    SarConfig,
+    SemConfig,
+    SpatialErrorType,
+    SpatialPanelEffect,
+    SpatialPanelModel,
+    SpatialProbitConfig,
+    SpatialWeights,
+    SpgmConfig,
+    SpgmMethod,
+    SphetConfig,
+    SphetModel,
+    SphetSE,
+    SpmlConfig,
+    WeightStyle,
+    // Moran's I test
+    moran_test,
+    // Regression
+    regression::{CovarianceType, run_ols},
+    // Spatial regression models
+    run_sar,
+    // Spatial probit
+    run_sar_probit,
+    run_sem,
+    run_sem_probit,
+    run_spgm,
+    run_sphet,
+    // Spatial panel
+    run_spml,
+    // Spatial LM tests
+    spatial_lm_tests,
 };
 
 #[tool_router(router = spatial_router, vis = "pub")]
 impl AnalyticsServer {
-/// Create spatial neighbors and weights from coordinates.
+    /// Create spatial neighbors and weights from coordinates.
     #[tool(
         description = "Create spatial neighbors and weights matrix from coordinate data. Supports k-nearest neighbors (knn), distance-based neighbors, and great-circle distance for lon/lat coordinates. The resulting weights are stored for use with spatial tests and models (Moran's I, SAR, SEM). Equivalent to R's spdep::knearneigh() + nb2listw() or dnearneigh() + nb2listw()."
     )]
@@ -171,7 +188,7 @@ impl AnalyticsServer {
         Ok(CallToolResult::success(vec![Content::text(output)]))
     }
 
-/// Run Moran's I test for spatial autocorrelation.
+    /// Run Moran's I test for spatial autocorrelation.
     #[tool(
         description = "Run Moran's I test for spatial autocorrelation on a variable. Tests whether nearby observations tend to have similar values (positive autocorrelation) or dissimilar values (negative autocorrelation). Requires spatial weights created with 'spatial_neighbors'. Equivalent to R's spdep::moran.test()."
     )]
@@ -264,7 +281,7 @@ impl AnalyticsServer {
         }
     }
 
-/// Run spatial LM tests to choose between SAR and SEM models.
+    /// Run spatial LM tests to choose between SAR and SEM models.
     #[tool(
         description = "Run Lagrange Multiplier tests for spatial dependence. Tests for spatial lag (SAR) vs spatial error (SEM) dependence in OLS residuals. Includes robust versions that account for the presence of the other form of spatial dependence. Use to decide between SAR and SEM models. Equivalent to R's spdep::lm.LMtests()."
     )]
@@ -390,7 +407,7 @@ impl AnalyticsServer {
         }
     }
 
-/// Run Spatial Autoregressive Lag (SAR) model.
+    /// Run Spatial Autoregressive Lag (SAR) model.
     #[tool(
         description = "Run Spatial Autoregressive Lag (SAR) model: y = ρWy + Xβ + ε. Estimates spatial lag parameter ρ via maximum likelihood. Use when there is substantive spatial interaction (e.g., neighbors' outcomes affect own outcome). Optionally estimates Spatial Durbin Model (SDM) with spatially lagged covariates. Equivalent to R's spatialreg::lagsarlm()."
     )]
@@ -506,7 +523,7 @@ impl AnalyticsServer {
         }
     }
 
-/// Run Spatial Error Model (SEM).
+    /// Run Spatial Error Model (SEM).
     #[tool(
         description = "Run Spatial Error Model (SEM): y = Xβ + u, where u = λWu + ε. Estimates spatial error parameter λ via maximum likelihood. Use when spatial dependence is in the error term (nuisance dependence, e.g., omitted spatially correlated variables). Equivalent to R's spatialreg::errorsarlm()."
     )]
@@ -600,7 +617,7 @@ impl AnalyticsServer {
         }
     }
 
-/// Run Spatial GMM with heteroscedasticity robustness (sphet).
+    /// Run Spatial GMM with heteroscedasticity robustness (sphet).
     #[tool(
         description = "Run spatial regression via GMM with heteroscedasticity-robust estimation. Implements the Kelejian-Prucha (1998, 1999, 2010) GMM estimator that is robust to heteroscedasticity of unknown form. Supports SAR (lag), SEM (error), and SARAR (combined) models. Unlike ML estimation, GMM does not require normally distributed errors. Returns heteroscedasticity-robust or HAC standard errors. Equivalent to R's sphet::spreg() and sphet::gstslshet()."
     )]
@@ -756,7 +773,7 @@ impl AnalyticsServer {
         }
     }
 
-/// Run SAR Probit model (spatial lag probit for binary outcomes).
+    /// Run SAR Probit model (spatial lag probit for binary outcomes).
     #[tool(
         description = "Run Spatial Autoregressive (SAR) Probit model for binary dependent variables: y* = rho*W*y* + X*beta + epsilon, y = 1(y* > 0). Estimates spatial lag parameter rho via Bayesian MCMC with data augmentation. Use when binary outcomes have substantive spatial interaction (e.g., neighbor's choices affect own choice). Returns posterior means, credible intervals, and spatial impacts (direct, indirect, total effects). Equivalent to R's spatialprobit::sarprobit()."
     )]
@@ -891,7 +908,7 @@ impl AnalyticsServer {
         }
     }
 
-/// Run SEM Probit model (spatial error probit for binary outcomes).
+    /// Run SEM Probit model (spatial error probit for binary outcomes).
     #[tool(
         description = "Run Spatial Error (SEM) Probit model for binary dependent variables: y* = X*beta + u, u = lambda*W*u + epsilon, y = 1(y* > 0). Estimates spatial error parameter lambda via Bayesian MCMC. Use when binary outcomes have spatially correlated unobserved factors (nuisance spatial dependence). Equivalent to R's spatialprobit::semprobit()."
     )]
@@ -1004,7 +1021,7 @@ impl AnalyticsServer {
         }
     }
 
-/// Run Spatial Panel ML model (spml).
+    /// Run Spatial Panel ML model (spml).
     #[tool(
         description = "Run spatial panel data model via Maximum Likelihood. Combines panel data methods (fixed/random effects) with spatial dependence (lag and/or error). Supports: (1) Spatial lag panel models: y = rho*W*y + X*beta + alpha + e, (2) Spatial error panel models: y = X*beta + alpha + u, u = lambda*W*u + e, (3) Combined spatial lag and error. Equivalent to R's splm::spml(). Reference: Millo & Piras (2012), JSS."
     )]
@@ -1158,7 +1175,7 @@ impl AnalyticsServer {
         }
     }
 
-/// Run Spatial Panel GMM model (spgm).
+    /// Run Spatial Panel GMM model (spgm).
     #[tool(
         description = "Run spatial panel data model via Generalized Method of Moments. Uses IV/GMM estimation for spatial lag models and moment conditions for spatial error. More robust to non-normality than ML. Methods: w2sls (fixed effects), g2sls (random effects GLS), b2sls (between), ec2sls (Baltagi's EC2SLS). Equivalent to R's splm::spgm(). Reference: Kapoor, Kelejian & Prucha (2007)."
     )]
@@ -1293,6 +1310,4 @@ impl AnalyticsServer {
             ))])),
         }
     }
-
-
 }

@@ -282,8 +282,8 @@ impl AnalyticsServer {
                 let temp_dir = std::env::temp_dir();
                 let temp_path = temp_dir.join(format!("upload_{}.parquet", uuid::Uuid::new_v4()));
 
-                if let Err(e) = std::fs::File::create(&temp_path)
-                    .and_then(|mut f| f.write_all(&decoded))
+                if let Err(e) =
+                    std::fs::File::create(&temp_path).and_then(|mut f| f.write_all(&decoded))
                 {
                     return Ok(CallToolResult::error(vec![Content::text(format!(
                         "Failed to write temp file: {}",

@@ -6,6 +6,19 @@ use polars::prelude::*;
 use std::path::Path;
 use thiserror::Error;
 
+/// Validate that a string is a safe SQL identifier (table name, column name, etc.).
+/// Only allows alphanumeric characters and underscores.
+fn validate_identifier(name: &str) -> Result<(), DatabaseError> {
+    if !name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+        Ok(())
+    } else {
+        Err(DatabaseError::UnsupportedType(format!(
+            "Invalid SQL identifier: '{}'. Only alphanumeric characters and underscores are allowed.",
+            name
+        )))
+    }
+}
+
 /// Database-related errors.
 #[derive(Debug, Error)]
 pub enum DatabaseError {
@@ -193,6 +206,7 @@ pub fn sqlite_table_schema(
     }
 
     let conn = rusqlite::Connection::open(path)?;
+    validate_identifier(table_name)?;
     let mut stmt = conn.prepare(&format!("PRAGMA table_info({})", table_name))?;
 
     let schema: Vec<(String, String)> = stmt
@@ -383,14 +397,11 @@ pub fn duckdb_table_schema(
     }
 
     let conn = duckdb::Connection::open(path)?;
-    let query = format!(
-        "SELECT column_name, data_type FROM information_schema.columns WHERE table_name = '{}' ORDER BY ordinal_position",
-        table_name
-    );
-    let mut stmt = conn.prepare(&query)?;
+    let query = "SELECT column_name, data_type FROM information_schema.columns WHERE table_name = ? ORDER BY ordinal_position";
+    let mut stmt = conn.prepare(query)?;
 
     let mut schema = Vec::new();
-    let mut rows = stmt.query([])?;
+    let mut rows = stmt.query([table_name])?;
 
     while let Some(row) = rows.next()? {
         let col_name: String = row.get(0)?;
@@ -416,8 +427,9 @@ pub fn query_file_with_duckdb(
     // Use in-memory DuckDB
     let conn = duckdb::Connection::open_in_memory()?;
 
-    // Replace placeholder with actual file path
-    let full_query = query.replace("{file}", &format!("'{}'", path.display()));
+    // Replace placeholder with actual file path, escaping single quotes to prevent injection
+    let sanitized_path = path.display().to_string().replace('\'', "''");
+    let full_query = query.replace("{file}", &format!("'{}'", sanitized_path));
 
     query_duckdb_connection(&conn, &full_query)
 }

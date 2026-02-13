@@ -244,8 +244,7 @@ impl ResultCache {
 
     /// Invalidate all entries for a specific operation.
     pub fn invalidate_operation(&mut self, operation: &str) {
-        self.entries
-            .retain(|key, _| key.operation != operation);
+        self.entries.retain(|key, _| key.operation != operation);
     }
 
     /// Invalidate all entries that reference a specific dataset.

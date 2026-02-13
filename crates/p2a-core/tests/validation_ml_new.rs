@@ -5,10 +5,9 @@
 
 use ndarray::{Array1, Array2};
 use p2a_core::ml::{
-    adaboost, cart, gbm, AdaBoostConfig, AdaBoostType, CartConfig, CartMethod, GbmConfig,
-    GbmFamily,
+    AdaBoostConfig, AdaBoostType, CartConfig, CartMethod, GbmConfig, GbmFamily, adaboost, cart, gbm,
 };
-use p2a_core::regression::{glmnet, GlmnetConfig, GlmnetFamily};
+use p2a_core::regression::{GlmnetConfig, GlmnetFamily, glmnet};
 
 /// Generate test data matching R script (set.seed(42))
 fn generate_test_data() -> (Array2<f64>, Array1<f64>, Array1<f64>) {
@@ -19,26 +18,10 @@ fn generate_test_data() -> (Array2<f64>, Array1<f64>, Array1<f64>) {
         (n, 3),
         vec![
             // x1          x2          x3 (noise)
-            -0.5, -1.2, 0.3,
-            0.8, 0.5, -0.7,
-            -1.2, 0.3, 1.1,
-            1.5, -0.8, -0.2,
-            0.3, 1.0, 0.5,
-            -0.8, -0.5, -1.0,
-            2.0, 0.2, 0.8,
-            -1.5, 1.5, -0.3,
-            0.5, -1.0, 0.1,
-            1.0, 0.8, -0.5,
-            -0.3, -0.3, 0.9,
-            0.9, 1.2, -0.8,
-            -2.0, 0.1, 0.2,
-            1.8, -0.5, 0.6,
-            0.1, 0.9, -0.4,
-            -1.0, -1.5, 0.0,
-            1.2, 0.3, 1.2,
-            -0.7, 0.7, -0.9,
-            0.6, -0.9, 0.4,
-            1.3, 1.1, -0.1,
+            -0.5, -1.2, 0.3, 0.8, 0.5, -0.7, -1.2, 0.3, 1.1, 1.5, -0.8, -0.2, 0.3, 1.0, 0.5, -0.8,
+            -0.5, -1.0, 2.0, 0.2, 0.8, -1.5, 1.5, -0.3, 0.5, -1.0, 0.1, 1.0, 0.8, -0.5, -0.3, -0.3,
+            0.9, 0.9, 1.2, -0.8, -2.0, 0.1, 0.2, 1.8, -0.5, 0.6, 0.1, 0.9, -0.4, -1.0, -1.5, 0.0,
+            1.2, 0.3, 1.2, -0.7, 0.7, -0.9, 0.6, -0.9, 0.4, 1.3, 1.1, -0.1,
         ],
     )
     .unwrap();
@@ -53,14 +36,14 @@ fn generate_test_data() -> (Array2<f64>, Array1<f64>, Array1<f64>) {
         2.0 + 3.0 * (-0.8) - 1.5 * (-0.5) - 0.3,
         2.0 + 3.0 * 2.0 - 1.5 * 0.2 + 0.1,
         2.0 + 3.0 * (-1.5) - 1.5 * 1.5 + 0.0,
-        2.0 + 3.0 * 0.5 - 1.5 * (-1.0) - 0.1,
+        2.0 + 3.0 * 0.5 - (-1.5) - 0.1,
         2.0 + 3.0 * 1.0 - 1.5 * 0.8 + 0.2,
         2.0 + 3.0 * (-0.3) - 1.5 * (-0.3) - 0.2,
         2.0 + 3.0 * 0.9 - 1.5 * 1.2 + 0.1,
         2.0 + 3.0 * (-2.0) - 1.5 * 0.1 - 0.3,
         2.0 + 3.0 * 1.8 - 1.5 * (-0.5) + 0.2,
         2.0 + 3.0 * 0.1 - 1.5 * 0.9 - 0.1,
-        2.0 + 3.0 * (-1.0) - 1.5 * (-1.5) + 0.3,
+        2.0 + (-3.0) - 1.5 * (-1.5) + 0.3,
         2.0 + 3.0 * 1.2 - 1.5 * 0.3 - 0.2,
         2.0 + 3.0 * (-0.7) - 1.5 * 0.7 + 0.1,
         2.0 + 3.0 * 0.6 - 1.5 * (-0.9) - 0.1,
@@ -100,8 +83,14 @@ fn test_glmnet_ridge_vs_r() {
 
     // Ridge should give non-zero coefficients for all features
     assert!(fit.intercept.abs() > 0.1, "Intercept should be non-zero");
-    assert!(fit.coefficients[0].abs() > 0.5, "x1 coefficient should be significant");
-    assert!(fit.coefficients[1].abs() > 0.3, "x2 coefficient should be significant");
+    assert!(
+        fit.coefficients[0].abs() > 0.5,
+        "x1 coefficient should be significant"
+    );
+    assert!(
+        fit.coefficients[1].abs() > 0.3,
+        "x2 coefficient should be significant"
+    );
 
     // x3 (noise) should have smaller coefficient than x1 and x2
     assert!(
@@ -135,7 +124,10 @@ fn test_glmnet_lasso_sparsity_vs_r() {
     println!("  Intercept: {:.4}", fit.intercept);
     println!("  x1: {:.4}", fit.coefficients[0]);
     println!("  x2: {:.4}", fit.coefficients[1]);
-    println!("  x3: {:.4} (noise - should be smaller)", fit.coefficients[2]);
+    println!(
+        "  x3: {:.4} (noise - should be smaller)",
+        fit.coefficients[2]
+    );
 
     let x1_magnitude = fit.coefficients[0].abs();
     let x2_magnitude = fit.coefficients[1].abs();
@@ -183,7 +175,11 @@ fn test_gbm_regression_vs_r() {
     println!("  Final loss: {:.4}", result.final_train_loss);
     println!("  Feature importances: {:?}", result.feature_importances);
 
-    assert!(r_squared > 0.7, "GBM R-squared {} should be > 0.7", r_squared);
+    assert!(
+        r_squared > 0.7,
+        "GBM R-squared {} should be > 0.7",
+        r_squared
+    );
     assert!(
         result.train_loss.last().unwrap() < result.train_loss.first().unwrap(),
         "Training loss should decrease"
@@ -226,7 +222,11 @@ fn test_cart_regression_vs_r() {
     println!("  Leaves: {}", result.n_terminal);
     println!("  Depth: {}", result.depth);
 
-    assert!(r_squared > 0.5, "CART R-squared {} should be > 0.5", r_squared);
+    assert!(
+        r_squared > 0.5,
+        "CART R-squared {} should be > 0.5",
+        r_squared
+    );
     assert!(result.depth <= 5, "Depth should respect max_depth");
 }
 
@@ -234,9 +234,13 @@ fn test_cart_regression_vs_r() {
 fn test_cart_classification_vs_r() {
     let (x, _, _) = generate_test_data();
 
-    let y_class: Array1<f64> = Array1::from_iter(
-        (0..x.nrows()).map(|i| if x[[i, 0]] + x[[i, 1]] > 0.0 { 1.0 } else { 0.0 })
-    );
+    let y_class: Array1<f64> = Array1::from_iter((0..x.nrows()).map(|i| {
+        if x[[i, 0]] + x[[i, 1]] > 0.0 {
+            1.0
+        } else {
+            0.0
+        }
+    }));
 
     let config = CartConfig {
         method: CartMethod::Gini,
@@ -262,7 +266,11 @@ fn test_cart_classification_vs_r() {
     println!("  Nodes: {}", result.n_nodes);
 
     // R achieves 99% accuracy, we should get close
-    assert!(accuracy > 0.85, "CART accuracy {} should be > 0.85", accuracy);
+    assert!(
+        accuracy > 0.85,
+        "CART accuracy {} should be > 0.85",
+        accuracy
+    );
 }
 
 #[test]
@@ -313,9 +321,13 @@ fn test_comparison_summary() {
 
     println!("GLMNET Ridge (lambda=0.1):");
     println!("  R:    [2.0226, 2.9391, -1.4486, -0.0312]");
-    println!("  Rust: [{:.4}, {:.4}, {:.4}, {:.4}]",
-        ridge_fit.intercept, ridge_fit.coefficients[0],
-        ridge_fit.coefficients[1], ridge_fit.coefficients[2]);
+    println!(
+        "  Rust: [{:.4}, {:.4}, {:.4}, {:.4}]",
+        ridge_fit.intercept,
+        ridge_fit.coefficients[0],
+        ridge_fit.coefficients[1],
+        ridge_fit.coefficients[2]
+    );
     println!();
 
     // GBM
@@ -327,8 +339,13 @@ fn test_comparison_summary() {
         ..Default::default()
     };
     let gbm_result = gbm(x.view(), y_reg.view(), &gbm_config).unwrap();
-    let gbm_mse: f64 = gbm_result.predictions.iter().zip(y_reg.iter())
-        .map(|(p, y)| (p - y).powi(2)).sum::<f64>() / y_reg.len() as f64;
+    let gbm_mse: f64 = gbm_result
+        .predictions
+        .iter()
+        .zip(y_reg.iter())
+        .map(|(p, y)| (p - y).powi(2))
+        .sum::<f64>()
+        / y_reg.len() as f64;
 
     println!("GBM (100 trees, depth=3, lr=0.1):");
     println!("  Training MSE - Rust: {:.4}", gbm_mse);
@@ -344,8 +361,13 @@ fn test_comparison_summary() {
         ..Default::default()
     };
     let cart_result = cart(x.view(), y_reg.view(), &cart_config).unwrap();
-    let cart_mse: f64 = cart_result.predictions.iter().zip(y_reg.iter())
-        .map(|(p, y)| (p - y).powi(2)).sum::<f64>() / y_reg.len() as f64;
+    let cart_mse: f64 = cart_result
+        .predictions
+        .iter()
+        .zip(y_reg.iter())
+        .map(|(p, y)| (p - y).powi(2))
+        .sum::<f64>()
+        / y_reg.len() as f64;
     let y_var: f64 = {
         let mean = y_reg.mean().unwrap();
         y_reg.iter().map(|yi| (yi - mean).powi(2)).sum::<f64>() / y_reg.len() as f64
@@ -353,20 +375,33 @@ fn test_comparison_summary() {
 
     println!("CART Regression (depth=5, cp=0.01):");
     println!("  R:    MSE=0.9623, R-squared=0.9179");
-    println!("  Rust: MSE={:.4}, R-squared={:.4}", cart_mse, 1.0 - cart_mse / y_var);
+    println!(
+        "  Rust: MSE={:.4}, R-squared={:.4}",
+        cart_mse,
+        1.0 - cart_mse / y_var
+    );
     println!();
 
     // CART Classification
-    let y_class_01: Array1<f64> = Array1::from_iter(
-        (0..x.nrows()).map(|i| if x[[i, 0]] + x[[i, 1]] > 0.0 { 1.0 } else { 0.0 })
-    );
+    let y_class_01: Array1<f64> = Array1::from_iter((0..x.nrows()).map(|i| {
+        if x[[i, 0]] + x[[i, 1]] > 0.0 {
+            1.0
+        } else {
+            0.0
+        }
+    }));
     let cart_class_config = CartConfig {
         method: CartMethod::Gini,
         ..cart_config.clone()
     };
     let cart_class_result = cart(x.view(), y_class_01.view(), &cart_class_config).unwrap();
-    let cart_acc: f64 = cart_class_result.predictions.iter().zip(y_class_01.iter())
-        .filter(|(p, y)| (p.round() - *y).abs() < 0.01).count() as f64 / y_class_01.len() as f64;
+    let cart_acc: f64 = cart_class_result
+        .predictions
+        .iter()
+        .zip(y_class_01.iter())
+        .filter(|(p, y)| (p.round() - *y).abs() < 0.01)
+        .count() as f64
+        / y_class_01.len() as f64;
 
     println!("CART Classification (Gini):");
     println!("  R:    Accuracy=0.9900");
@@ -382,8 +417,11 @@ fn test_comparison_summary() {
     let ada_result = adaboost(x.view(), y_class.view(), &ada_config).unwrap();
 
     println!("AdaBoost (50 iterations, stumps):");
-    println!("  Rust: Accuracy={:.4}, Estimators={}",
-        ada_result.train_accuracy.unwrap(), ada_result.n_estimators);
+    println!(
+        "  Rust: Accuracy={:.4}, Estimators={}",
+        ada_result.train_accuracy.unwrap(),
+        ada_result.n_estimators
+    );
     println!();
 
     println!("{}", "=".repeat(60));

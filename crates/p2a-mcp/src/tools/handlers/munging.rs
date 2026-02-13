@@ -17,32 +17,66 @@ use p2a_core::{
     data::{
         Dataset,
         munging::{
-            AggFn, AggSpec, ArithOp, BinStrategy, FillStrategy, MutateExpr,
-            // Transform operations
-            filter, select, drop_columns, rename, sort,
-            // Join operations
-            inner_join, left_join, right_join, full_join, concat,
-            // Aggregate operations
-            group_by, value_counts,
-            // Reshape operations
-            pivot, melt,
+            AggFn,
+            AggSpec,
+            ArithOp,
+            BinStrategy,
+            FillStrategy,
+            MutateExpr,
+            bin,
+            concat,
+            deduplicate,
+            diff,
+            drop_columns,
             // Clean operations
-            drop_na, fill_na, deduplicate,
-            // String operations
-            trim, to_lowercase, to_uppercase, replace,
-            regex_replace, regex_extract, regex_count,
-            str_split, str_concat, str_length, str_substring,
+            drop_na,
+            fill_na,
+            // Transform operations
+            filter,
+            full_join,
+            // Aggregate operations
+            group_by,
+            // Join operations
+            inner_join,
             // Feature engineering
-            lag, lead, diff, pct_change, normalize, standardize, bin, one_hot_encode, sample, mutate,
+            lag,
+            lead,
+            left_join,
+            melt,
+            mutate,
+            normalize,
+            one_hot_encode,
+            pct_change,
+            // Reshape operations
+            pivot,
+            regex_count,
+            regex_extract,
+            regex_replace,
+            rename,
+            replace,
+            right_join,
+            sample,
+            select,
+            sort,
+            standardize,
+            str_concat,
+            str_length,
+            str_split,
+            str_substring,
+            to_lowercase,
+            to_uppercase,
+            // String operations
+            trim,
+            value_counts,
         },
     },
-    regression::{run_ols, CovarianceType},
+    regression::{CovarianceType, run_ols},
     stats::correlation_matrix,
 };
 
 #[tool_router(router = munging_router, vis = "pub")]
 impl AnalyticsServer {
-/// Batch process multiple datasets with the same operation.
+    /// Batch process multiple datasets with the same operation.
     #[tool(
         description = "Run the same analysis (describe, correlation, or OLS regression) on multiple datasets at once. Useful for comparing results across datasets or processing survey waves."
     )]
@@ -220,7 +254,7 @@ impl AnalyticsServer {
         Ok(CallToolResult::success(vec![Content::text(output)]))
     }
 
-/// Compare the same columns across multiple datasets.
+    /// Compare the same columns across multiple datasets.
     #[tool(
         description = "Compare statistics for specific columns across multiple datasets. Useful for comparing distributions, means, and correlations between different datasets (e.g., treatment vs control, before vs after)."
     )]
@@ -394,7 +428,7 @@ impl AnalyticsServer {
         Ok(CallToolResult::success(vec![Content::text(output)]))
     }
 
-/// Filter rows in a dataset based on a condition.
+    /// Filter rows in a dataset based on a condition.
     #[tool(
         description = "Filter rows in a dataset based on a column condition. Supports operators: 'eq', 'ne', 'gt', 'ge', 'lt', 'le', 'contains', 'starts_with', 'ends_with'. The value is parsed based on the column type."
     )]
@@ -440,7 +474,7 @@ impl AnalyticsServer {
         ))]))
     }
 
-/// Select specific columns from a dataset.
+    /// Select specific columns from a dataset.
     #[tool(description = "Select (keep) specific columns from a dataset, dropping all others.")]
     pub async fn munge_select(
         &self,
@@ -485,7 +519,7 @@ impl AnalyticsServer {
         ))]))
     }
 
-/// Drop columns from a dataset.
+    /// Drop columns from a dataset.
     #[tool(description = "Drop (remove) specific columns from a dataset.")]
     pub async fn munge_drop_columns(
         &self,
@@ -533,7 +567,7 @@ impl AnalyticsServer {
         ))]))
     }
 
-/// Rename columns in a dataset.
+    /// Rename columns in a dataset.
     #[tool(description = "Rename columns in a dataset. Provide pairs of [old_name, new_name].")]
     pub async fn munge_rename(
         &self,
@@ -588,7 +622,7 @@ impl AnalyticsServer {
         ))]))
     }
 
-/// Sort a dataset by one or more columns.
+    /// Sort a dataset by one or more columns.
     #[tool(description = "Sort a dataset by one or more columns in ascending or descending order.")]
     pub async fn munge_sort(
         &self,
@@ -642,7 +676,7 @@ impl AnalyticsServer {
         ))]))
     }
 
-/// Join two datasets on key columns.
+    /// Join two datasets on key columns.
     #[tool(
         description = "Join two datasets on key columns. Supports 'left', 'right', 'inner', and 'full' join types."
     )]
@@ -720,7 +754,7 @@ impl AnalyticsServer {
         ))]))
     }
 
-/// Concatenate multiple datasets vertically.
+    /// Concatenate multiple datasets vertically.
     #[tool(
         description = "Concatenate (row-bind) multiple datasets vertically. All datasets must have the same columns."
     )]
@@ -772,7 +806,7 @@ impl AnalyticsServer {
         ))]))
     }
 
-/// Group by columns and compute aggregations.
+    /// Group by columns and compute aggregations.
     #[tool(
         description = "Group a dataset by columns and compute aggregations. Supported functions: 'count', 'sum', 'mean', 'median', 'min', 'max', 'std', 'var', 'first', 'last'."
     )]
@@ -858,7 +892,7 @@ impl AnalyticsServer {
         ))]))
     }
 
-/// Compute value counts for a column.
+    /// Compute value counts for a column.
     #[tool(
         description = "Compute frequency counts for unique values in a column. Optionally normalize to percentages."
     )]
@@ -928,7 +962,7 @@ impl AnalyticsServer {
         Ok(CallToolResult::success(vec![Content::text(output)]))
     }
 
-/// Pivot a dataset from long to wide format.
+    /// Pivot a dataset from long to wide format.
     #[tool(
         description = "Pivot a dataset from long to wide format. Index columns remain as rows, 'on' column values become new column names, and 'values' column fills those columns."
     )]
@@ -976,7 +1010,7 @@ impl AnalyticsServer {
         ))]))
     }
 
-/// Melt a dataset from wide to long format.
+    /// Melt a dataset from wide to long format.
     #[tool(
         description = "Melt a dataset from wide to long format. ID variables remain as-is, value variables are unpivoted into rows."
     )]
@@ -1027,7 +1061,7 @@ impl AnalyticsServer {
         ))]))
     }
 
-/// Drop rows with null values.
+    /// Drop rows with null values.
     #[tool(
         description = "Drop rows containing null values. Use 'any' to drop if any column is null, 'all' to drop only if all columns are null."
     )]
@@ -1080,7 +1114,7 @@ impl AnalyticsServer {
         ))]))
     }
 
-/// Fill null values using a strategy.
+    /// Fill null values using a strategy.
     #[tool(
         description = "Fill null values using a strategy: 'mean', 'median', 'mode', 'forward', 'backward', or a constant value."
     )]
@@ -1141,7 +1175,7 @@ impl AnalyticsServer {
         ))]))
     }
 
-/// Remove duplicate rows.
+    /// Remove duplicate rows.
     #[tool(
         description = "Remove duplicate rows from a dataset. Specify which duplicate to keep: 'first', 'last', or 'none'."
     )]
@@ -1194,7 +1228,7 @@ impl AnalyticsServer {
         ))]))
     }
 
-/// Trim whitespace from string columns.
+    /// Trim whitespace from string columns.
     #[tool(
         description = "Trim leading and trailing whitespace from string columns. If no columns specified, trims all string columns."
     )]
@@ -1249,7 +1283,7 @@ impl AnalyticsServer {
         ))]))
     }
 
-/// Convert string column to lowercase.
+    /// Convert string column to lowercase.
     #[tool(description = "Convert all characters in a string column to lowercase.")]
     pub async fn str_to_lowercase(
         &self,
@@ -1291,7 +1325,7 @@ impl AnalyticsServer {
         ))]))
     }
 
-/// Convert string column to uppercase.
+    /// Convert string column to uppercase.
     #[tool(description = "Convert all characters in a string column to uppercase.")]
     pub async fn str_to_uppercase(
         &self,
@@ -1333,7 +1367,7 @@ impl AnalyticsServer {
         ))]))
     }
 
-/// Replace exact values in a column.
+    /// Replace exact values in a column.
     #[tool(
         description = "Replace exact values in a column with a new value. For pattern-based replacement, use str_regex_replace."
     )]
@@ -1382,7 +1416,7 @@ impl AnalyticsServer {
         ))]))
     }
 
-/// Replace substrings matching a regex pattern.
+    /// Replace substrings matching a regex pattern.
     #[tool(
         description = "Replace substrings matching a regex pattern with a replacement string. Supports capture groups ($1, $2, etc.) in the replacement."
     )]
@@ -1431,7 +1465,7 @@ impl AnalyticsServer {
         ))]))
     }
 
-/// Extract substrings matching a regex pattern into a new column.
+    /// Extract substrings matching a regex pattern into a new column.
     #[tool(
         description = "Extract substrings matching a regex pattern into a new column. Use capture groups () to specify what to extract, or extract the whole match."
     )]
@@ -1483,7 +1517,7 @@ impl AnalyticsServer {
         ))]))
     }
 
-/// Count regex pattern matches in each row.
+    /// Count regex pattern matches in each row.
     #[tool(
         description = "Count the number of times a regex pattern matches in each row, creating a new integer column with the counts."
     )]
@@ -1532,7 +1566,7 @@ impl AnalyticsServer {
         ))]))
     }
 
-/// Split a string column into multiple columns.
+    /// Split a string column into multiple columns.
     #[tool(
         description = "Split a string column by a pattern (supports regex) into multiple columns named prefix_0, prefix_1, etc."
     )]
@@ -1582,7 +1616,7 @@ impl AnalyticsServer {
         ))]))
     }
 
-/// Concatenate multiple string columns.
+    /// Concatenate multiple string columns.
     #[tool(
         description = "Concatenate multiple string columns into a new column, optionally with a separator between values."
     )]
@@ -1631,7 +1665,7 @@ impl AnalyticsServer {
         ))]))
     }
 
-/// Get string lengths.
+    /// Get string lengths.
     #[tool(
         description = "Create a new column containing the length (number of characters) of each string in the source column."
     )]
@@ -1675,7 +1709,7 @@ impl AnalyticsServer {
         ))]))
     }
 
-/// Extract a substring from a string column.
+    /// Extract a substring from a string column.
     #[tool(
         description = "Extract a substring from each string in a column. Supports negative indices to count from end."
     )]
@@ -1724,7 +1758,7 @@ impl AnalyticsServer {
         ))]))
     }
 
-/// Create lag or lead columns for time series data.
+    /// Create lag or lead columns for time series data.
     #[tool(
         description = "Create lag or lead columns for time series or panel data. Lag shifts values forward (past values), lead shifts values backward (future values)."
     )]
@@ -1787,7 +1821,7 @@ impl AnalyticsServer {
         ))]))
     }
 
-/// Standardize or normalize columns.
+    /// Standardize or normalize columns.
     #[tool(
         description = "Standardize (z-score) or normalize (0-1 range) numeric columns. Standardize subtracts mean and divides by std. Normalize scales to [0, 1]."
     )]
@@ -1847,7 +1881,7 @@ impl AnalyticsServer {
         ))]))
     }
 
-/// Bin a continuous variable into discrete categories.
+    /// Bin a continuous variable into discrete categories.
     #[tool(
         description = "Bin a continuous variable into discrete categories. Strategies: 'uniform' (equal width), 'quantile' (equal frequency), or 'custom' (specify break points)."
     )]
@@ -1914,7 +1948,7 @@ impl AnalyticsServer {
         ))]))
     }
 
-/// One-hot encode a categorical column.
+    /// One-hot encode a categorical column.
     #[tool(
         description = "One-hot encode a categorical column, creating binary indicator columns for each category. Use drop_first=true to avoid multicollinearity in regression."
     )]
@@ -1961,7 +1995,7 @@ impl AnalyticsServer {
         ))]))
     }
 
-/// Compute differences or percent changes.
+    /// Compute differences or percent changes.
     #[tool(
         description = "Compute differences or percent changes for a column. Useful for time series and panel data analysis."
     )]
@@ -2020,7 +2054,7 @@ impl AnalyticsServer {
         ))]))
     }
 
-/// Sample rows from a dataset.
+    /// Sample rows from a dataset.
     #[tool(
         description = "Randomly sample rows from a dataset. Useful for creating training/test splits or working with large datasets."
     )]
@@ -2068,7 +2102,7 @@ impl AnalyticsServer {
         ))]))
     }
 
-/// Create a new column by computation.
+    /// Create a new column by computation.
     #[tool(
         description = "Create a new column by applying arithmetic operations or functions. Supports: arithmetic (+, -, *, /), functions (log, exp, sqrt, abs, square), or constant values."
     )]
@@ -2153,6 +2187,4 @@ impl AnalyticsServer {
             request.new_column, result_name
         ))]))
     }
-
-
 }

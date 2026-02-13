@@ -337,11 +337,7 @@ impl std::fmt::Display for MboostResult {
     }
 }
 
-/// Simple LCG random number generator for reproducibility.
-fn lcg_random(state: &mut u64) -> usize {
-    *state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
-    ((*state >> 33) ^ *state) as usize
-}
+use super::lcg_random;
 
 /// Sigmoid function for binomial family.
 fn sigmoid(x: f64) -> f64 {
@@ -1202,7 +1198,7 @@ mod tests {
 
         // Predictions should be probabilities
         for &p in &result.predictions {
-            assert!(p >= 0.0 && p <= 1.0, "Prediction {} out of range", p);
+            assert!((0.0..=1.0).contains(&p), "Prediction {} out of range", p);
         }
 
         // Low x values should have low probability

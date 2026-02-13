@@ -792,4 +792,3 @@ pub struct RunmedRequest {
     #[schemars(description = "How to handle ends: 'keep' (default), 'constant', or 'median'.")]
     pub endrule: Option<String>,
 }
-

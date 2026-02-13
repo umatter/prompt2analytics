@@ -12,8 +12,8 @@ use rmcp::{
 use crate::server::AnalyticsServer;
 use crate::tools::requests::utils::{
     ColumnSpecInput, ExportSessionRequest, GenerateRandomDataRequest, GenerateReportRequest,
-    GetSeedRequest, ImportSessionRequest, ReportContentInput, ReportSectionInput, ServerStatsRequest,
-    SetSeedRequest,
+    GetSeedRequest, ImportSessionRequest, ReportContentInput, ReportSectionInput,
+    ServerStatsRequest, SetSeedRequest,
 };
 
 use p2a_core::{
@@ -126,19 +126,13 @@ impl AnalyticsServer {
 
         // Process memory (if available)
         if let Some(ref proc_mem) = stats.process_memory {
-            output.push_str(&format!(
-                "\nProcess RSS: {}\n",
-                proc_mem.rss_formatted
-            ));
+            output.push_str(&format!("\nProcess RSS: {}\n", proc_mem.rss_formatted));
             output.push_str(&format!(
                 "Process Virtual: {}\n",
                 proc_mem.virtual_formatted
             ));
         } else if let Some(proc_mem) = get_process_memory() {
-            output.push_str(&format!(
-                "\nProcess RSS: {}\n",
-                proc_mem.rss_formatted
-            ));
+            output.push_str(&format!("\nProcess RSS: {}\n", proc_mem.rss_formatted));
             output.push_str(&format!(
                 "Process Virtual: {}\n",
                 proc_mem.virtual_formatted

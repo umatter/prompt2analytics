@@ -13,34 +13,62 @@ use crate::server::AnalyticsServer;
 use crate::tools::requests::timeseries::*;
 
 use p2a_core::{
-    // Time series modeling
-    run_var, run_varma, run_vecm, run_var_irf,
-    run_granger_test, granger_test,
-    run_arima, forecast_arima,
-    garch, GarchConfig,
-    run_mstl, run_holt_winters, holt_winters_forecast,
-    ar, ArConfig, ArMethod,
-    decompose, DecomposeConfig, DecomposeType,
-    struct_ts, StructTsConfig, StructTsType,
-    causal_impact, CausalImpactConfig,
-    run_changepoint, run_binary_segmentation, CostFunction,
-    // Time series utilities
-    cpgram, toeplitz, toeplitz_asymmetric, toeplitz_to_vec,
-    lag as ts_lag, embed, diffinv, filter as ts_filter, window as ts_window,
-    arma_acf, arma_to_ma, acf_to_ar, arima_sim, runmed,
-    EndRule, FilterMethod, FilterSides,
+    ArConfig,
+    ArMethod,
+    CausalImpactConfig,
+    CostFunction,
+    DecomposeConfig,
+    DecomposeType,
+    EndRule,
+    FilterMethod,
+    FilterSides,
+    GarchConfig,
     SeasonalType,
+    StructTsConfig,
+    StructTsType,
+    acf_to_ar,
+    ar,
+    arima_sim,
+    arma_acf,
+    arma_to_ma,
+    causal_impact,
+    // Time series utilities
+    cpgram,
+    decompose,
+    diffinv,
+    embed,
+    filter as ts_filter,
+    forecast_arima,
+    garch,
+    granger_test,
+    holt_winters_forecast,
+    lag as ts_lag,
+    run_arima,
+    run_binary_segmentation,
+    run_changepoint,
+    run_granger_test,
+    run_holt_winters,
+    run_mstl,
+    // Time series modeling
+    run_var,
+    run_var_irf,
+    run_varma,
+    run_vecm,
+    runmed,
     stats::{
-        run_acf, run_ccf, run_pacf,
-        run_spectrum, run_spectrum_ar, SpectrumConfig,
-        run_box_test, run_pp_test,
-        AcfType, CcfType, BoxTestType,
+        AcfType, BoxTestType, CcfType, SpectrumConfig, run_acf, run_box_test, run_ccf, run_pacf,
+        run_pp_test, run_spectrum, run_spectrum_ar,
     },
+    struct_ts,
+    toeplitz,
+    toeplitz_asymmetric,
+    toeplitz_to_vec,
+    window as ts_window,
 };
 
 #[tool_router(router = timeseries_router, vis = "pub")]
 impl AnalyticsServer {
-/// - R `stats::acf`: https://stat.ethz.ch/R-manual/R-devel/library/stats/html/acf.html
+    /// - R `stats::acf`: https://stat.ethz.ch/R-manual/R-devel/library/stats/html/acf.html
     #[tool(
         description = "Compute autocorrelation function (ACF), autocovariance, or partial autocorrelation function (PACF) for a time series. ACF measures correlation between observations at different lags. PACF measures correlation after removing effects of intermediate lags - useful for identifying AR order. Returns values for lags 0 to lag_max with 95% confidence bounds."
     )]
@@ -133,7 +161,7 @@ impl AnalyticsServer {
         }
     }
 
-/// - R `stats::ccf`: https://stat.ethz.ch/R-manual/R-devel/library/stats/html/acf.html
+    /// - R `stats::ccf`: https://stat.ethz.ch/R-manual/R-devel/library/stats/html/acf.html
     #[tool(
         description = "Compute cross-correlation function (CCF) between two time series. CCF at lag k estimates correlation between x_{t+k} and y_t. Positive lag k means x leads y; negative lag means y leads x. Useful for identifying lead-lag relationships between variables."
     )]
@@ -210,7 +238,7 @@ impl AnalyticsServer {
         }
     }
 
-/// - R `stats::spectrum`: https://stat.ethz.ch/R-manual/R-devel/library/stats/html/spectrum.html
+    /// - R `stats::spectrum`: https://stat.ethz.ch/R-manual/R-devel/library/stats/html/spectrum.html
     #[tool(
         description = "Estimate spectral density (power spectrum) of a time series. Returns spectral density at Fourier frequencies showing how variance is distributed across frequency components. Methods: 'pgram' (periodogram with optional smoothing) or 'ar' (AR model-based). Use spans parameter for smoothing raw periodogram (e.g., spans=[3,3] for moderate smoothing). Peak frequency reveals dominant cyclical patterns."
     )]
@@ -325,7 +353,7 @@ impl AnalyticsServer {
         ))]))
     }
 
-/// - Ljung, G. M. & Box, G. E. P. (1978). "On a measure of lack of fit in time series models." Biometrika, 65, 297-303.
+    /// - Ljung, G. M. & Box, G. E. P. (1978). "On a measure of lack of fit in time series models." Biometrika, 65, 297-303.
     #[tool(
         description = "Test for autocorrelation in a time series using Box-Pierce or Ljung-Box test. Tests H₀: no autocorrelation up to specified lag. Commonly used to check whether ARIMA residuals are white noise. Ljung-Box (default) has better finite-sample properties. For ARMA(p,q) residuals, set fitdf=p+q to adjust degrees of freedom. Returns: X-squared statistic, df, p-value, and sample autocorrelations."
     )]
@@ -394,7 +422,7 @@ impl AnalyticsServer {
         ))]))
     }
 
-/// - Banerjee, A., Dolado, J. J., Galbraith, J. W., & Hendry, D. (1993). Co-integration, Error Correction, and the Econometric Analysis of Non-Stationary Data. Oxford University Press.
+    /// - Banerjee, A., Dolado, J. J., Galbraith, J. W., & Hendry, D. (1993). Co-integration, Error Correction, and the Econometric Analysis of Non-Stationary Data. Oxford University Press.
     #[tool(
         description = "Test for unit root in a time series using the Phillips-Perron test. Tests H₀: series has unit root (non-stationary) vs H₁: series is stationary. Uses Newey-West long-run variance estimator with Bartlett weights for serial correlation correction. Similar to ADF test but makes non-parametric correction. Returns: Z(τ) statistic, truncation lag, p-value, and diagnostics."
     )]
@@ -464,7 +492,7 @@ impl AnalyticsServer {
         ))]))
     }
 
-/// Run VAR (Vector Autoregression) model.
+    /// Run VAR (Vector Autoregression) model.
     #[tool(
         description = "Run Vector Autoregression (VAR) model for multivariate time series. Returns coefficients, residual covariance, AIC, and BIC."
     )]
@@ -501,7 +529,7 @@ impl AnalyticsServer {
         )]))
     }
 
-/// Granger causality test.
+    /// Granger causality test.
     #[tool(
         description = "Test Granger causality between two time series variables. Tests whether lagged values of 'cause' help predict 'dependent' after controlling for lagged 'dependent'. Uses F-test comparing restricted (y lags only) vs unrestricted (y and x lags) models."
     )]
@@ -541,7 +569,7 @@ impl AnalyticsServer {
         )]))
     }
 
-/// Run VARMA (Vector ARMA) model.
+    /// Run VARMA (Vector ARMA) model.
     #[tool(
         description = "Run VARMA(p,q) model using Hannan-Rissanen estimation. Combines autoregressive and moving average components for multivariate time series."
     )]
@@ -578,7 +606,7 @@ impl AnalyticsServer {
         )]))
     }
 
-/// Run VECM (Vector Error Correction Model).
+    /// Run VECM (Vector Error Correction Model).
     #[tool(
         description = "Run VECM using Johansen Maximum Likelihood. For cointegrated I(1) time series. Returns cointegration vectors (beta), adjustment speeds (alpha), and eigenvalues."
     )]
@@ -615,7 +643,7 @@ impl AnalyticsServer {
         )]))
     }
 
-/// Compute VAR Impulse Response Functions.
+    /// Compute VAR Impulse Response Functions.
     #[tool(
         description = "Compute Impulse Response Functions (IRF) from a VAR model. Shows how variables respond to shocks over time using Cholesky orthogonalization."
     )]
@@ -652,7 +680,7 @@ impl AnalyticsServer {
         )]))
     }
 
-/// Fit an ARIMA model.
+    /// Fit an ARIMA model.
     #[tool(
         description = "Fit an ARIMA(p,d,q) model to a univariate time series. Returns AR/MA coefficients, residuals, AIC, and model diagnostics."
     )]
@@ -708,7 +736,7 @@ impl AnalyticsServer {
         Ok(CallToolResult::success(vec![Content::text(output)]))
     }
 
-/// Forecast using an ARIMA model.
+    /// Forecast using an ARIMA model.
     #[tool(
         description = "Forecast future values using an ARIMA(p,d,q) model. Fits the model and generates h-step ahead forecasts."
     )]
@@ -762,7 +790,7 @@ impl AnalyticsServer {
         Ok(CallToolResult::success(vec![Content::text(output)]))
     }
 
-/// Fit a GARCH model for volatility modeling.
+    /// Fit a GARCH model for volatility modeling.
     #[tool(
         description = "Fit a GARCH(p,q) model for time-varying volatility. Estimates the conditional variance equation: σ²_t = ω + Σα_i ε²_{t-i} + Σβ_j σ²_{t-j}. Reports persistence, unconditional variance, and half-life of volatility shocks."
     )]
@@ -816,7 +844,7 @@ impl AnalyticsServer {
         )]))
     }
 
-/// Run MSTL decomposition.
+    /// Run MSTL decomposition.
     #[tool(
         description = "Perform MSTL (Multiple Seasonal-Trend decomposition using LOESS) on a time series. Extracts trend, seasonal components, and residuals."
     )]
@@ -898,7 +926,7 @@ impl AnalyticsServer {
         Ok(CallToolResult::success(vec![Content::text(output)]))
     }
 
-/// Detect changepoints (structural breaks) in a time series.
+    /// Detect changepoints (structural breaks) in a time series.
     #[tool(
         description = "Detect changepoints (structural breaks) in a time series using PELT or Binary Segmentation. Identifies points where the statistical properties (mean, variance) change significantly. Useful for regime detection, anomaly detection, and segmenting time series into homogeneous periods."
     )]
@@ -1005,7 +1033,7 @@ impl AnalyticsServer {
         Ok(CallToolResult::success(vec![Content::text(output)]))
     }
 
-///   OTexts. https://otexts.com/fpp3/
+    ///   OTexts. https://otexts.com/fpp3/
     #[tool(
         description = "Fit Holt-Winters exponential smoothing model to a time series with trend and seasonality. Supports both additive (constant seasonal variation) and multiplicative (proportional variation) seasonality. Automatically optimizes smoothing parameters (alpha, beta, gamma) if not provided. Can generate forecasts for future periods. Returns fitted values, residuals, optimized parameters, and seasonal coefficients."
     )]
@@ -1138,7 +1166,7 @@ impl AnalyticsServer {
         Ok(CallToolResult::success(vec![Content::text(output)]))
     }
 
-/// Fit an autoregressive (AR) model to time series data.
+    /// Fit an autoregressive (AR) model to time series data.
     #[tool(
         description = "Fit an autoregressive model to time series data with automatic order selection via AIC. Supports Yule-Walker (default), Burg, and OLS methods. Returns AR coefficients, prediction variance, AIC values, partial autocorrelations, and residuals."
     )]
@@ -1237,7 +1265,7 @@ impl AnalyticsServer {
         )]))
     }
 
-/// Perform classical seasonal decomposition by moving averages.
+    /// Perform classical seasonal decomposition by moving averages.
     #[tool(
         description = "Decompose a time series into trend, seasonal, and random components using moving averages. Implements R's decompose() function. Supports additive (Y = T + S + R) and multiplicative (Y = T × S × R) decomposition."
     )]
@@ -1369,7 +1397,7 @@ impl AnalyticsServer {
         )]))
     }
 
-/// Fit a structural time series model.
+    /// Fit a structural time series model.
     #[tool(
         description = "Fit a structural time series model by maximum likelihood using the Kalman filter. Supports: 'level' (local level/random walk + noise, equivalent to ARIMA(0,1,1)), 'trend' (local linear trend, equivalent to ARIMA(0,2,2)), and 'bsm' (basic structural model with level, trend, and seasonality). Returns variance parameters, smoothed components, fitted values, residuals, log-likelihood, AIC, and BIC."
     )]
@@ -1497,7 +1525,7 @@ impl AnalyticsServer {
         )]))
     }
 
-/// CausalImpact analysis using Bayesian Structural Time Series.
+    /// CausalImpact analysis using Bayesian Structural Time Series.
     #[tool(
         description = "Estimate the causal effect of an intervention using Bayesian Structural Time Series (BSTS). Uses pre-intervention data to build a counterfactual prediction, then compares with observed post-intervention data to estimate the causal effect. Optionally uses control time series that are correlated with the response but unaffected by the intervention. Returns cumulative/average effects with credible intervals and Bayesian p-value."
     )]
@@ -1622,7 +1650,7 @@ impl AnalyticsServer {
         )]))
     }
 
-/// Compute cumulative periodogram for white noise test.
+    /// Compute cumulative periodogram for white noise test.
     #[tool(
         description = "Cumulative periodogram (cpgram) - diagnostic tool for testing if a time series is white noise. Plots cumulative sum of periodogram ordinates. For white noise, should follow a uniform distribution. Returns cumulative periodogram, confidence bands, and Kolmogorov-Smirnov test for white noise."
     )]
@@ -1705,7 +1733,7 @@ impl AnalyticsServer {
         )]))
     }
 
-/// Construct a Toeplitz matrix.
+    /// Construct a Toeplitz matrix.
     #[tool(
         description = "Construct a Toeplitz matrix - a matrix with constant values along each diagonal. Useful for autocorrelation matrices, circulant matrices, and time series analysis. Can create symmetric or asymmetric Toeplitz matrices."
     )]
@@ -1748,7 +1776,7 @@ impl AnalyticsServer {
         )]))
     }
 
-/// Lag a time series.
+    /// Lag a time series.
     #[tool(
         description = "Shift a time series by k positions. Positive k shifts values backward (lag), negative k shifts forward (lead). Returns the lagged series with NA padding."
     )]
@@ -1817,7 +1845,7 @@ impl AnalyticsServer {
         )]))
     }
 
-/// Embed a time series into a matrix.
+    /// Embed a time series into a matrix.
     #[tool(
         description = "Create a lag embedding matrix from a time series. Each row contains consecutive values, useful for building AR models or phase space reconstruction."
     )]
@@ -1884,7 +1912,7 @@ impl AnalyticsServer {
         )]))
     }
 
-/// Inverse of differencing.
+    /// Inverse of differencing.
     #[tool(
         description = "Compute the inverse of differencing (cumulative sum). Reconstructs the original series from differences given initial values."
     )]
@@ -1956,7 +1984,7 @@ impl AnalyticsServer {
         )]))
     }
 
-/// Linear filtering of time series.
+    /// Linear filtering of time series.
     #[tool(
         description = "Apply a linear filter to a time series using convolution or recursive filtering. Useful for smoothing, differencing, or implementing ARMA models."
     )]
@@ -2047,7 +2075,7 @@ impl AnalyticsServer {
         )]))
     }
 
-/// Extract a window from time series.
+    /// Extract a window from time series.
     #[tool(
         description = "Extract a contiguous window (subset) from a time series by specifying start and end indices."
     )]
@@ -2115,7 +2143,7 @@ impl AnalyticsServer {
         )]))
     }
 
-/// Compute theoretical ACF for ARMA model.
+    /// Compute theoretical ACF for ARMA model.
     #[tool(
         description = "Compute the theoretical autocorrelation function (ACF) or partial ACF for an ARMA(p,q) model given AR and MA coefficients."
     )]
@@ -2152,7 +2180,7 @@ impl AnalyticsServer {
         )]))
     }
 
-/// Convert ARMA to MA (psi weights).
+    /// Convert ARMA to MA (psi weights).
     #[tool(
         description = "Convert ARMA model to its infinite MA representation (psi weights). The psi weights show the impulse response function of the model."
     )]
@@ -2186,7 +2214,7 @@ impl AnalyticsServer {
         )]))
     }
 
-/// Convert ACF to AR coefficients.
+    /// Convert ACF to AR coefficients.
     #[tool(
         description = "Compute AR coefficients from autocorrelation function using the Yule-Walker equations. Also returns partial autocorrelations."
     )]
@@ -2216,7 +2244,7 @@ impl AnalyticsServer {
         )]))
     }
 
-/// Simulate from ARIMA model.
+    /// Simulate from ARIMA model.
     #[tool(
         description = "Simulate a time series from an ARIMA(p,d,q) model. Generates random innovations and applies the ARMA recursion with optional differencing."
     )]
@@ -2255,7 +2283,7 @@ impl AnalyticsServer {
         )]))
     }
 
-/// Running median smoothing.
+    /// Running median smoothing.
     #[tool(
         description = "Apply running median smoother to a time series. More robust to outliers than running mean. Uses Tukey's median polish for the smoothing."
     )]
@@ -2335,6 +2363,4 @@ impl AnalyticsServer {
             serde_json::to_string_pretty(&output).unwrap(),
         )]))
     }
-
-
 }

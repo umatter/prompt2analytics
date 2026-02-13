@@ -106,7 +106,9 @@ pub fn execute(
     session: Option<&mut SessionManager>,
 ) -> anyhow::Result<()> {
     match cmd {
-        DataCommands::Load { path, name } => execute_load(path, name.as_deref(), format, quiet, session),
+        DataCommands::Load { path, name } => {
+            execute_load(path, name.as_deref(), format, quiet, session)
+        }
         DataCommands::List => execute_list(format, session),
         DataCommands::Describe { dataset } => execute_describe(dataset, format, session),
         DataCommands::Head { dataset, n } => execute_head(dataset, *n, format, session),
@@ -156,7 +158,10 @@ fn execute_load(
 
     // Show progress spinner for file loading
     let progress = Progress::spinner(
-        &format!("Loading {}...", path.file_name().unwrap_or_default().to_string_lossy()),
+        &format!(
+            "Loading {}...",
+            path.file_name().unwrap_or_default().to_string_lossy()
+        ),
         quiet,
     );
 
@@ -421,10 +426,7 @@ fn execute_generate(
 
     // Generate the data with progress indicator
     log::debug!("Generating {} column(s)", columns.len());
-    let progress = Progress::spinner(
-        &format!("Generating {} rows...", n_rows),
-        quiet,
-    );
+    let progress = Progress::spinner(&format!("Generating {} rows...", n_rows), quiet);
 
     let dataset = match generate_random_data(n_rows, columns, seed) {
         Ok(ds) => {
@@ -520,7 +522,10 @@ fn execute_save(
 
     // Show progress spinner for file saving
     let progress = Progress::spinner(
-        &format!("Saving to {}...", output.file_name().unwrap_or_default().to_string_lossy()),
+        &format!(
+            "Saving to {}...",
+            output.file_name().unwrap_or_default().to_string_lossy()
+        ),
         quiet,
     );
 

@@ -15,42 +15,49 @@ use rmcp::{
     ErrorData as McpError, handler::server::wrapper::Parameters, model::*, tool, tool_router,
 };
 
+/// Maximum number of elements allowed in a single matrix allocation.
+/// Prevents denial-of-service via extremely large dimension inputs.
+const MAX_MATRIX_ELEMENTS: usize = 10_000_000;
+
+/// Maximum number of time points allowed for longitudinal methods.
+const MAX_TIME_POINTS: usize = 1_000;
+
 use crate::server::AnalyticsServer;
 use crate::tools::requests::causal::{
-    BPBoundsRequest, BaconDecompRequest, CbpsRequest, CTmleRequest, DiDRequest, DoubleMLRequest,
-    DoublyRobustRequest, EntropyBalanceRequest, EtwfeRequest, EValueRequest, FirstStageRequest,
-    FuzzyRdRequest, GeneralGmmIvRequest, GFormulaRequest, GsynthRequest, IV2SLSRequest, IpwRequest,
-    IVMTERequest, LtmleRequest, MarginalEffectsRequest, MatchItRequest, MediationRequest,
-    NaturalEffectsRequest, RdBandwidthRequest, RdEstimateRequest, RdMultiRequest, SarganTestRequest,
-    SBWRequest, ScpiRequest, SensemakrRequest, StaggeredDiDRequest, StdRegRequest,
-    SyntheticControlRequest, TmleRequest, TwangRequest, WeightItRequest,
+    BPBoundsRequest, BaconDecompRequest, CTmleRequest, CbpsRequest, DiDRequest, DoubleMLRequest,
+    DoublyRobustRequest, EValueRequest, EntropyBalanceRequest, EtwfeRequest, FirstStageRequest,
+    FuzzyRdRequest, GFormulaRequest, GeneralGmmIvRequest, GsynthRequest, IV2SLSRequest,
+    IVMTERequest, IpwRequest, LtmleRequest, MarginalEffectsRequest, MatchItRequest,
+    MediationRequest, NaturalEffectsRequest, RdBandwidthRequest, RdEstimateRequest, RdMultiRequest,
+    SBWRequest, SarganTestRequest, ScpiRequest, SensemakrRequest, StaggeredDiDRequest,
+    StdRegRequest, SyntheticControlRequest, TmleRequest, TwangRequest, WeightItRequest,
 };
 
-use p2a_core::{
-    bacon_decomp, ctmle, entropy_balance, match_it, run_bp_bounds, run_cbps, run_did,
-    run_doubly_robust, run_etwfe, run_first_stage_diagnostics, run_gmm_iv, run_gsynth,
-    run_ipw_treatment, run_iv2sls, run_ivmte, run_mediation_analysis, run_medflex_dataset,
-    run_rd, run_rd_multi_dataset, run_scpi, run_staggered_did, run_stdreg,
-    run_synthetic_control, run_tmle, run_twang, run_gformula, rd_bandwidth, run_fuzzy_rd, sbw,
-    sargan_test, tmle, weightit,
-    AttEstimationMethod, BPBoundsConfig, CbpsConfig, CbpsMethod, ComparisonGroup,
-    ControlGroup as EtwfeControlGroup, CTmleConfig, CTmleQModel, DistanceMethod, DoublyRobustConfig,
-    DRMethod, EffectEstimationMethod, EffectScale, Estimand, EtwfeConfig, GFormulaConfig,
-    GFormulaData, GFormulaIntervention, GFormulaOutcomeType, GeneralGmmConfig, GeneralGmmResult,
-    GmmMethod, GmmVcov, GModel, GsynthConfig, GsynthEstimator, GsynthForce, IpwConfig, IVMTEConfig, KernelType,
-    MatchMethod, MatchResult, MediationConfig, MedflexConfig, MedflexResult, PropensityModel,
-    QModel, RdConfig, RdMultiBandwidth, RdMultiConfig, RdMultiResult, SBWConfig, SBWEstimand,
-    SCPIConfig, SCPIConstraint, SEMethod, SelectionOrder, StaggeredDidConfig, StdRegConfig,
-    StdRegEstimand, StdRegModel, StoppingRule, StopMethod, SynthConfig, TmleConfig, TwangConfig,
-    TimeAggregation, TwangEstimand, VarianceMethod, VceType, VOptimization, WeightEstimand,
-    WeightItConfig, WeightMethod, BandwidthMethod, PoolingWeights, PredictorSpec,
-    diagnostics::{
-        iv_diagnostics, did_diagnostics, ipw_diagnostics, matching_diagnostics, rd_diagnostics,
-        staggered_did_diagnostics,
-    },
-};
 use p2a_core::linalg::design::DesignMatrix;
 use p2a_core::regression::HacKernel;
+use p2a_core::{
+    AttEstimationMethod, BPBoundsConfig, BandwidthMethod, CTmleConfig, CTmleQModel, CbpsConfig,
+    CbpsMethod, ComparisonGroup, ControlGroup as EtwfeControlGroup, DRMethod, DistanceMethod,
+    DoublyRobustConfig, EffectEstimationMethod, EffectScale, Estimand, EtwfeConfig, GFormulaConfig,
+    GFormulaData, GFormulaIntervention, GFormulaOutcomeType, GModel, GeneralGmmConfig,
+    GeneralGmmResult, GmmMethod, GmmVcov, GsynthConfig, GsynthEstimator, GsynthForce, IVMTEConfig,
+    IpwConfig, KernelType, MatchMethod, MatchResult, MedflexConfig, MedflexResult, MediationConfig,
+    PoolingWeights, PredictorSpec, PropensityModel, QModel, RdConfig, RdMultiBandwidth,
+    RdMultiConfig, RdMultiResult, SBWConfig, SBWEstimand, SCPIConfig, SCPIConstraint, SEMethod,
+    SelectionOrder, StaggeredDidConfig, StdRegConfig, StdRegEstimand, StdRegModel, StopMethod,
+    StoppingRule, SynthConfig, TimeAggregation, TmleConfig, TwangConfig, TwangEstimand,
+    VOptimization, VarianceMethod, VceType, WeightEstimand, WeightItConfig, WeightMethod,
+    bacon_decomp, ctmle,
+    diagnostics::{
+        did_diagnostics, ipw_diagnostics, iv_diagnostics, matching_diagnostics, rd_diagnostics,
+        staggered_did_diagnostics,
+    },
+    entropy_balance, match_it, rd_bandwidth, run_bp_bounds, run_cbps, run_did, run_doubly_robust,
+    run_etwfe, run_first_stage_diagnostics, run_fuzzy_rd, run_gformula, run_gmm_iv, run_gsynth,
+    run_ipw_treatment, run_iv2sls, run_ivmte, run_medflex_dataset, run_mediation_analysis, run_rd,
+    run_rd_multi_dataset, run_scpi, run_staggered_did, run_stdreg, run_synthetic_control, run_tmle,
+    run_twang, sargan_test, sbw, tmle, weightit,
+};
 
 // Helper function for formatting diagnostic warnings
 fn format_diagnostic_warnings(report: &p2a_core::diagnostics::IdentificationReport) -> String {
@@ -66,7 +73,10 @@ fn format_diagnostic_warnings(report: &p2a_core::diagnostics::IdentificationRepo
             };
             output.push_str(&format!("{} {}\n", severity_str, warning.message));
             if !warning.remediation.is_empty() {
-                output.push_str(&format!("  Remediation: {}\n", warning.remediation.join("; ")));
+                output.push_str(&format!(
+                    "  Remediation: {}\n",
+                    warning.remediation.join("; ")
+                ));
             }
         }
     }
@@ -75,8 +85,7 @@ fn format_diagnostic_warnings(report: &p2a_core::diagnostics::IdentificationRepo
 
 #[tool_router(router = causal_router, vis = "pub")]
 impl AnalyticsServer {
-
-/// Run IV/2SLS regression.
+    /// Run IV/2SLS regression.
     #[tool(
         description = "Run Instrumental Variables (2SLS) regression. Use when an explanatory variable is endogenous (correlated with the error term). Requires valid instruments."
     )]
@@ -127,7 +136,7 @@ impl AnalyticsServer {
         Ok(CallToolResult::success(vec![Content::text(output)]))
     }
 
-/// Run first-stage diagnostics for IV/2SLS.
+    /// Run first-stage diagnostics for IV/2SLS.
     #[tool(
         description = "Run first-stage diagnostics to test instrument strength. Reports F-statistic (F > 10 suggests strong instruments), R-squared, and coefficient estimates. Essential before running 2SLS."
     )]
@@ -173,7 +182,7 @@ impl AnalyticsServer {
         )]))
     }
 
-/// Run Sargan test of overidentifying restrictions for IV/2SLS.
+    /// Run Sargan test of overidentifying restrictions for IV/2SLS.
     #[tool(
         description = "Run Sargan test of overidentifying restrictions for IV/2SLS. Tests whether instruments are valid (uncorrelated with error term). H0: instruments are valid. Rejection suggests at least one invalid instrument. Requires more instruments than endogenous variables."
     )]
@@ -212,7 +221,7 @@ impl AnalyticsServer {
         )]))
     }
 
-/// Compute Balke-Pearl bounds on the Average Causal Effect (ACE).
+    /// Compute Balke-Pearl bounds on the Average Causal Effect (ACE).
     #[tool(
         description = "Compute Balke-Pearl bounds for nonparametric IV analysis. Provides sharp bounds on the Average Causal Effect (ACE) without parametric assumptions. All three variables (instrument Z, treatment D, outcome Y) must be binary (0/1). Returns bounds with optional bootstrap confidence intervals. Also reports the Wald (standard IV) estimate for comparison. Use monotonicity=true if you can assume no defiers (instrument only affects treatment in one direction)."
     )]
@@ -295,7 +304,7 @@ impl AnalyticsServer {
         )]))
     }
 
-/// Estimate Marginal Treatment Effects (MTE) using instrumental variables.
+    /// Estimate Marginal Treatment Effects (MTE) using instrumental variables.
     #[tool(
         description = "Estimate Marginal Treatment Effects (MTE) using the Heckman-Vytlacil framework. MTE reveals heterogeneity in treatment effects across the distribution of unobserved resistance to treatment. Returns MTE curve, ATE, ATT, ATU, and LATE estimates. The MTE framework shows how different IV estimands are weighted averages of the MTE curve, providing deeper insight into treatment effect heterogeneity than standard IV/2SLS."
     )]
@@ -389,7 +398,7 @@ impl AnalyticsServer {
         )]))
     }
 
-/// Run Callaway-Sant'Anna staggered difference-in-differences.
+    /// Run Callaway-Sant'Anna staggered difference-in-differences.
     #[tool(
         description = "Estimate causal effects with staggered treatment adoption using Callaway-Sant'Anna (2021) method. Handles multiple time periods, heterogeneous treatment timing, and dynamic treatment effects. Returns group-time ATTs, event study plots, and overall ATT with pre-trend tests."
     )]
@@ -463,7 +472,7 @@ impl AnalyticsServer {
         Ok(CallToolResult::success(vec![Content::text(output)]))
     }
 
-/// Perform Goodman-Bacon decomposition for staggered DiD.
+    /// Perform Goodman-Bacon decomposition for staggered DiD.
     #[tool(
         description = "Decompose a two-way fixed effects (TWFE) DiD estimate into weighted 2x2 comparisons using Goodman-Bacon (2021) decomposition. Reveals which comparisons (treated vs. never-treated, treated vs. not-yet-treated, later vs. earlier treated) contribute to the overall estimate and with what weights. Essential for understanding potential biases from 'forbidden' comparisons when treatment effects are heterogeneous over time."
     )]
@@ -504,7 +513,7 @@ impl AnalyticsServer {
         )]))
     }
 
-/// Run Extended Two-Way Fixed Effects (ETWFE) estimation.
+    /// Run Extended Two-Way Fixed Effects (ETWFE) estimation.
     #[tool(
         description = "Estimate treatment effects using Extended TWFE (Wooldridge 2021, 2023). Addresses heterogeneous treatment effects in staggered DiD by estimating saturated cohort-by-time interactions. Returns cohort-time ATT estimates, event study by relative time, cohort averages, and overall ATT. Robust to treatment effect heterogeneity across cohorts and over time."
     )]
@@ -568,7 +577,7 @@ impl AnalyticsServer {
         )]))
     }
 
-/// Run IPW treatment effect estimation.
+    /// Run IPW treatment effect estimation.
     #[tool(
         description = "Estimate Average Treatment Effect (ATE) or Average Treatment Effect on Treated (ATT) using Inverse Probability Weighting. Uses propensity scores to create pseudo-populations that balance covariates between treatment groups. Returns effect estimate with bootstrap standard errors and confidence intervals."
     )]
@@ -628,7 +637,7 @@ impl AnalyticsServer {
         Ok(CallToolResult::success(vec![Content::text(output)]))
     }
 
-/// Run Doubly Robust (AIPW) treatment effect estimation.
+    /// Run Doubly Robust (AIPW) treatment effect estimation.
     #[tool(
         description = "Estimate treatment effects using Augmented IPW (doubly robust). Combines propensity score weighting with outcome regression. Consistent if either the propensity model OR the outcome model is correctly specified. Returns effect estimate with bootstrap standard errors and model fit diagnostics."
     )]
@@ -692,7 +701,7 @@ impl AnalyticsServer {
         )]))
     }
 
-/// Run Double/Debiased Machine Learning (DoubleML) estimation.
+    /// Run Double/Debiased Machine Learning (DoubleML) estimation.
     #[tool(
         description = "Estimate causal treatment effects using Double/Debiased Machine Learning. Uses Neyman-orthogonal score functions and K-fold cross-fitting to achieve root-n consistent and asymptotically normal estimates. Supports Partially Linear Regression (PLR: Y = theta*D + g(X) + eps) and Interactive Regression Model (IRM: binary treatment with heterogeneous effects). Returns treatment effect estimate with influence function-based standard errors and diagnostic information."
     )]
@@ -758,6 +767,14 @@ impl AnalyticsServer {
         // Extract covariates (X)
         let n = y_vec.len();
         let p = request.covariates.len();
+        if n.checked_mul(p)
+            .is_none_or(|total| total > MAX_MATRIX_ELEMENTS)
+        {
+            return Ok(CallToolResult::error(vec![Content::text(format!(
+                "Matrix dimensions too large: {} rows x {} covariates exceeds limit of {} elements.",
+                n, p, MAX_MATRIX_ELEMENTS
+            ))]));
+        }
         let mut x_data = Vec::with_capacity(n * p);
 
         for col_name in &request.covariates {
@@ -838,7 +855,7 @@ impl AnalyticsServer {
         )]))
     }
 
-/// Run Covariate Balancing Propensity Score (CBPS) estimation.
+    /// Run Covariate Balancing Propensity Score (CBPS) estimation.
     #[tool(
         description = "Estimate propensity scores using Covariate Balancing Propensity Score (CBPS). Unlike standard logistic regression, CBPS uses GMM to simultaneously estimate propensity scores AND achieve covariate balance. Returns propensity scores, IPW weights, balance diagnostics before and after weighting, and J-test for overidentification."
     )]
@@ -889,7 +906,7 @@ impl AnalyticsServer {
         )]))
     }
 
-/// Compute flexible inverse probability weights using multiple methods.
+    /// Compute flexible inverse probability weights using multiple methods.
     #[tool(
         description = "Compute balancing weights for causal inference using WeightIt. Supports multiple methods: 'logistic' (standard propensity score), 'entropy' (entropy balancing for exact mean balance), 'energy' (energy distance minimization), 'stable' (stable balancing weights). Returns weights, balance diagnostics before/after, and effective sample size (ESS). Low ESS indicates high weight variability."
     )]
@@ -951,7 +968,7 @@ impl AnalyticsServer {
         )]))
     }
 
-/// Run entropy balancing for exact covariate mean balance.
+    /// Run entropy balancing for exact covariate mean balance.
     #[tool(
         description = "Compute entropy balancing weights (Hainmueller 2012). Reweights the control group to achieve exact mean balance on specified covariates with the treated group. Minimizes entropy (KL divergence) from uniform weights subject to balance constraints. Useful when exact balance is needed for bias reduction. Returns weights, balance table, and effective sample size."
     )]
@@ -993,7 +1010,7 @@ impl AnalyticsServer {
         )]))
     }
 
-/// Compute stable balancing weights for causal inference.
+    /// Compute stable balancing weights for causal inference.
     #[tool(
         description = "Compute Stable Balancing Weights (SBW) using quadratic programming (Zubizarreta 2015). Directly optimizes for covariate balance rather than modeling the propensity score. Finds weights that minimize variance while achieving exact or approximate balance on covariate means. Advantages: directly targets balance (not propensity score fit), provides stable weights with lower variance than IPW, handles approximate balance when exact is infeasible. Returns weights, balance diagnostics before/after, effective sample size, and optimization details."
     )]
@@ -1047,7 +1064,7 @@ impl AnalyticsServer {
         )]))
     }
 
-/// Run twang GBM propensity score estimation.
+    /// Run twang GBM propensity score estimation.
     #[tool(
         description = "Estimate propensity scores using Gradient Boosted Machine (GBM) with automatic tuning for covariate balance (twang). Unlike logistic regression, twang uses machine learning and automatically selects the optimal number of iterations based on balance metrics (standardized effect sizes or KS statistics). Particularly useful when you need good balance across many covariates. Returns propensity scores, IPW weights, optimal iteration number, and balance diagnostics before/after weighting."
     )]
@@ -1110,7 +1127,7 @@ impl AnalyticsServer {
         )]))
     }
 
-/// Run propensity score matching (MatchIt) for causal inference.
+    /// Run propensity score matching (MatchIt) for causal inference.
     #[tool(
         description = "Perform propensity score matching to create balanced comparison groups for causal inference. Methods: 'nearest' (nearest neighbor matching on propensity score), 'cem' (coarsened exact matching on covariate bins), 'full' (optimal full matching), 'subclass' (propensity score subclassification). Returns matched sample with weights, balance diagnostics (standardized mean differences, variance ratios, KS statistics) before and after matching. Low SMD (<0.1) indicates good balance."
     )]
@@ -1179,7 +1196,7 @@ impl AnalyticsServer {
         Ok(CallToolResult::success(vec![Content::text(output)]))
     }
 
-/// Run Targeted Maximum Likelihood Estimation (TMLE) for causal inference.
+    /// Run Targeted Maximum Likelihood Estimation (TMLE) for causal inference.
     #[tool(
         description = "Estimate Average Treatment Effect (ATE) using TMLE - a doubly robust, semiparametric efficient estimator. TMLE uses a targeting step to optimize the bias-variance tradeoff for the ATE. More efficient than standard AIPW due to the fluctuation model. Returns ATE estimate with influence curve-based standard errors and confidence intervals."
     )]
@@ -1240,7 +1257,7 @@ impl AnalyticsServer {
         )]))
     }
 
-/// Run Collaborative Targeted Maximum Likelihood Estimation (C-TMLE) for causal inference.
+    /// Run Collaborative Targeted Maximum Likelihood Estimation (C-TMLE) for causal inference.
     #[tool(
         description = "Estimate Average Treatment Effect (ATE) using C-TMLE - extends TMLE with data-adaptive covariate selection for the propensity score model. Uses cross-validation to select which covariates to include, reducing finite-sample bias from including too many covariates while maintaining double robustness. Returns ATE estimate, selected covariates, selection path with CV criterion at each step, and influence curve-based standard errors."
     )]
@@ -1312,7 +1329,7 @@ impl AnalyticsServer {
         )]))
     }
 
-/// Run Parametric G-Formula for time-varying treatments.
+    /// Run Parametric G-Formula for time-varying treatments.
     #[tool(
         description = "Estimate causal effects of time-varying treatments using the parametric g-formula (generalized formula). Uses Monte Carlo simulation to estimate counterfactual outcomes under different treatment regimes. Suitable for longitudinal/panel data with time-varying confounders. Returns risk difference, risk ratio, potential outcomes, and bootstrap confidence intervals. Based on Robins (1986) and Hernan & Robins (2020). R equivalent: gfoRmula package."
     )]
@@ -1337,6 +1354,14 @@ impl AnalyticsServer {
 
         let n = dataset.df().height();
         let t_max = request.time_points;
+
+        // Validate time points are within reasonable limits
+        if t_max > MAX_TIME_POINTS {
+            return Ok(CallToolResult::error(vec![Content::text(format!(
+                "time_points ({}) exceeds maximum allowed ({})",
+                t_max, MAX_TIME_POINTS
+            ))]));
+        }
 
         // Validate treatment columns match time points
         if request.treatment_cols.len() != t_max {
@@ -1490,7 +1515,7 @@ impl AnalyticsServer {
         )]))
     }
 
-/// Run causal mediation analysis.
+    /// Run causal mediation analysis.
     #[tool(
         description = "Perform causal mediation analysis to decompose treatment effects into direct and indirect (mediated) effects. Uses IPW-based identification following Huber (2014). Returns Natural Direct Effect (NDE), Natural Indirect Effect (NIE), proportion mediated, and bootstrap inference."
     )]
@@ -1540,7 +1565,7 @@ impl AnalyticsServer {
         )]))
     }
 
-/// Run Natural Effect Models for mediation analysis with treatment-mediator interactions.
+    /// Run Natural Effect Models for mediation analysis with treatment-mediator interactions.
     #[tool(
         description = "Perform Natural Effect Models (medflex) mediation analysis that allows for \
         treatment-mediator interactions. Decomposes total effect into Natural Direct Effect (NDE) and \
@@ -1609,7 +1634,7 @@ impl AnalyticsServer {
         )]))
     }
 
-/// Run Synthetic Control Method for comparative case studies.
+    /// Run Synthetic Control Method for comparative case studies.
     #[tool(
         description = "Run Synthetic Control Method for comparative case studies with a single treated unit. \
         Creates a weighted combination of control (donor) units to construct a synthetic counterfactual. \
@@ -1700,7 +1725,7 @@ impl AnalyticsServer {
         )]))
     }
 
-/// Run Generalized Synthetic Control (gsynth) for panel data with multiple treated units.
+    /// Run Generalized Synthetic Control (gsynth) for panel data with multiple treated units.
     #[tool(
         description = "Run Generalized Synthetic Control Method for causal inference with interactive fixed effects. \
         Unlike traditional synthetic control (single treated unit), gsynth handles multiple treated units with staggered adoption. \
@@ -1778,7 +1803,7 @@ impl AnalyticsServer {
         )]))
     }
 
-/// Run Synthetic Control with Prediction Intervals (SCPI).
+    /// Run Synthetic Control with Prediction Intervals (SCPI).
     #[tool(
         description = "Run Synthetic Control with Prediction Intervals (SCPI) for causal inference. \
         Extends the classic synthetic control method (Abadie et al. 2010) with proper uncertainty quantification \
@@ -2025,7 +2050,7 @@ impl AnalyticsServer {
         Ok(CallToolResult::success(vec![Content::text(output)]))
     }
 
-/// Run Sharp Regression Discontinuity estimation.
+    /// Run Sharp Regression Discontinuity estimation.
     #[tool(
         description = "Run Sharp Regression Discontinuity (RD) estimation. Implements local polynomial regression with robust bias-corrected inference following Calonico, Cattaneo & Titiunik (2014). Returns conventional, bias-corrected, and robust treatment effect estimates with confidence intervals."
     )]
@@ -2097,7 +2122,7 @@ impl AnalyticsServer {
         Ok(CallToolResult::success(vec![Content::text(output)]))
     }
 
-/// Compute RD bandwidth only.
+    /// Compute RD bandwidth only.
     #[tool(
         description = "Compute MSE-optimal bandwidth for Regression Discontinuity estimation. Returns bandwidth values without running the full estimation. Useful for inspecting bandwidth selection before estimation."
     )]
@@ -2158,7 +2183,7 @@ impl AnalyticsServer {
         )]))
     }
 
-/// Run Fuzzy Regression Discontinuity estimation.
+    /// Run Fuzzy Regression Discontinuity estimation.
     #[tool(
         description = "Run Fuzzy Regression Discontinuity estimation. For cases where treatment probability (not assignment) jumps at the cutoff. Uses a Wald estimator (ratio of reduced-form to first-stage). Returns Local Average Treatment Effect (LATE)."
     )]
@@ -2231,7 +2256,7 @@ impl AnalyticsServer {
         Ok(CallToolResult::success(vec![Content::text(output)]))
     }
 
-/// Run Multi-Cutoff Regression Discontinuity estimation.
+    /// Run Multi-Cutoff Regression Discontinuity estimation.
     #[tool(
         description = "Run Multi-Cutoff Regression Discontinuity (rdmulti) estimation. Handles RD designs with multiple cutoffs (different thresholds) sharing the same running variable. Estimates cutoff-specific effects and optionally pools them into a single weighted estimate. Includes a heterogeneity test for whether effects differ across cutoffs. Reference: Cattaneo, Titiunik & Vazquez-Bare (2020)."
     )]
@@ -2581,6 +2606,14 @@ impl AnalyticsServer {
             // Parse comma-separated covariate names
             let cov_names: Vec<&str> = cov_list.split(',').map(|s| s.trim()).collect();
             let k = cov_names.len();
+            if n.checked_mul(k)
+                .is_none_or(|total| total > MAX_MATRIX_ELEMENTS)
+            {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Covariate matrix dimensions too large: {} rows x {} covariates exceeds limit of {} elements.",
+                    n, k, MAX_MATRIX_ELEMENTS
+                ))]));
+            }
 
             let mut cov_data = Vec::with_capacity(n * k);
             for row_idx in 0..n {
@@ -2663,7 +2696,7 @@ impl AnalyticsServer {
         &self,
         Parameters(request): Parameters<MarginalEffectsRequest>,
     ) -> Result<CallToolResult, McpError> {
-        use p2a_core::regression::{marginal_effects, ModelType};
+        use p2a_core::regression::{ModelType, marginal_effects};
 
         let datasets = self.datasets.read().await;
 
@@ -2791,7 +2824,7 @@ impl AnalyticsServer {
         &self,
         Parameters(request): Parameters<SensemakrRequest>,
     ) -> Result<CallToolResult, McpError> {
-        use p2a_core::regression::{generate_contour_data, run_ols, run_sensemakr, CovarianceType};
+        use p2a_core::regression::{CovarianceType, generate_contour_data, run_ols, run_sensemakr};
 
         let datasets = self.datasets.read().await;
 

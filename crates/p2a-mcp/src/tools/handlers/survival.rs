@@ -12,13 +12,13 @@ use rmcp::{
 };
 
 use p2a_core::{
-    run_kaplan_meier, log_rank_test, run_cox_ph, run_aft, run_competing_risks,
-    CoxConfig, TiesMethod, AftConfig, AftDistribution,
+    AftConfig, AftDistribution, CoxConfig, TiesMethod, log_rank_test, run_aft, run_competing_risks,
+    run_cox_ph, run_kaplan_meier,
 };
 
 use crate::server::AnalyticsServer;
 use crate::tools::requests::survival::{
-    KaplanMeierRequest, LogRankRequest, CoxPhRequest, AftRequest, CompetingRisksRequest,
+    AftRequest, CompetingRisksRequest, CoxPhRequest, KaplanMeierRequest, LogRankRequest,
 };
 
 #[tool_router(router = survival_router, vis = "pub")]

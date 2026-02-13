@@ -142,11 +142,25 @@ pub mod kdtree;
 mod mboost;
 mod pdp;
 pub mod ppr;
+mod quantile_rf;
 mod reduction;
 mod shap;
 mod svm;
 pub mod trees;
 
+/// Simple Linear Congruential Generator for reproducible randomness.
+///
+/// Used across ML modules for deterministic random sampling (bootstrap,
+/// feature subsampling, bagging, etc.) without external RNG dependencies.
+pub(crate) fn lcg_random(state: &mut u64) -> usize {
+    *state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+    ((*state >> 33) ^ *state) as usize
+}
+
+pub use adaboost::{
+    AdaBoostConfig, AdaBoostLoss, AdaBoostResult, AdaBoostType, adaboost, adaboost_predict,
+    adaboost_predict_class, run_adaboost, run_adaboost_default,
+};
 pub use advanced_clustering_mod::{
     AffinityPropagationResult,
     AffinityType,
@@ -224,12 +238,18 @@ pub use advanced_clustering_mod::{
     spectral_clustering,
     trimmed_kmeans,
 };
-pub use bart::{
-    BartConfig, BartResult, bart, bart_arrays, run_bart,
-};
+pub use bart::{BartConfig, BartResult, bart, bart_arrays, run_bart};
 pub use bart_causal::{
     BartCausalConfig, BartCausalResult, bart_causal, bart_causal_arrays, bart_causal_predict,
     bart_causal_predict_arrays, run_bart_causal,
+};
+pub use c50::{
+    C50Config, C50Node, C50Result, C50Rule, C50RuleCondition, C50Split, ComparisonOp, c50,
+    c50_predict, c50_predict_proba, run_c50, run_c50_default,
+};
+pub use cart::{
+    CartConfig, CartMethod, CartNode, CartResult, CartSplit, CpTableRow, cart, cart_predict,
+    cart_prune, run_cart, run_cart_default,
 };
 pub use causal_forest::{
     CausalForestConfig, CausalForestResult, average_treatment_effect, causal_forest,
@@ -251,53 +271,45 @@ pub use clustering::{
     CutreeResult, DBSCANResult, HierarchicalResult, KMeansResult, Linkage, cutree,
     cutree_multiple_k, dbscan, hierarchical, kmeans, run_cutree,
 };
+pub use ctree::{
+    CtreeConfig, CtreeNode, CtreeResult, CtreeSplit, ctree, ctree_predict, ctree_predict_proba,
+    run_ctree, run_ctree_default,
+};
+pub use cubist::{
+    CubistConfig, CubistResult, CubistRule, RuleCondition, cubist, cubist_predict, run_cubist,
+    run_cubist_default,
+};
 pub use dual_tree::{DualTreeMstResult, dual_tree_boruvka_mst, kdtree_prim_mst};
+pub use gbm::{GbmConfig, GbmFamily, GbmResult, gbm, gbm_predict, run_gbm, run_gbm_default};
 pub use kdtree::{KdNode, KdTree, UnionFind, build_connected_mst, euclidean_distance, kruskal_mst};
+pub use mboost::{
+    CoefficientPathEntry, MboostBaseLearner, MboostConfig, MboostFamily, MboostResult, mboost,
+    mboost_cv, mboost_predict, run_mboost, run_mboost_default,
+};
 pub use ppr::{PprConfig, PprResult, SmoothingMethod, ppr, run_ppr};
+pub use quantile_rf::{
+    QuantileRfConfig, QuantileRfResult, predict_quantiles, predict_quantiles_at,
+    predict_quantiles_with_y, predict_quantiles_with_y_at, prediction_intervals, quantile_rf,
+    quantile_rf_with_names, run_quantile_rf, run_quantile_rf_default,
+};
 pub use reduction::{
     CmdscaleResult, PCAResult, TsneResult, cmdscale, cmdscale_from_data, pca,
     pca_inverse_transform, pca_transform, run_cmdscale, tsne,
+};
+pub use shap::{
+    FeaturePerturbation, ShapConfig, ShapResult, ShapSummary, kernel_shap, run_kernel_shap,
+    run_shap_values_model, shap_kernel, shap_summary, shap_tree_ensemble, shap_values_model,
+    shap_values_random_forest,
 };
 pub use svm::{SvmResult, linear_svm, svm_predict};
 pub use trees::{
     DecisionTree, RandomForestModel, RandomForestResult, TreeNode, random_forest,
     random_forest_with_trees,
 };
-pub use shap::{
-    FeaturePerturbation, ShapConfig, ShapResult, ShapSummary, kernel_shap, shap_kernel,
-    shap_summary, shap_tree_ensemble, shap_values_model, shap_values_random_forest,
-};
-pub use gbm::{
-    GbmConfig, GbmFamily, GbmResult, gbm, gbm_predict, run_gbm, run_gbm_default,
-};
-pub use cart::{
-    CartConfig, CartMethod, CartNode, CartResult, CartSplit, CpTableRow,
-    cart, cart_predict, cart_prune, run_cart, run_cart_default,
-};
-pub use adaboost::{
-    AdaBoostConfig, AdaBoostLoss, AdaBoostResult, AdaBoostType,
-    adaboost, adaboost_predict, adaboost_predict_class, run_adaboost, run_adaboost_default,
-};
-pub use ctree::{
-    CtreeConfig, CtreeNode, CtreeResult, CtreeSplit,
-    ctree, ctree_predict, ctree_predict_proba, run_ctree, run_ctree_default,
-};
-pub use cubist::{
-    CubistConfig, CubistResult, CubistRule, RuleCondition,
-    cubist, cubist_predict, run_cubist, run_cubist_default,
-};
-pub use c50::{
-    C50Config, C50Node, C50Result, C50Rule, C50RuleCondition, C50Split, ComparisonOp,
-    c50, c50_predict, c50_predict_proba, run_c50, run_c50_default,
-};
-pub use mboost::{
-    CoefficientPathEntry, MboostBaseLearner, MboostConfig, MboostFamily, MboostResult,
-    mboost, mboost_cv, mboost_predict, run_mboost, run_mboost_default,
-};
 // ICE curves (Individual Conditional Expectation) - enhanced version with heterogeneity analysis
 pub use ice::{
-    IceConfig, IceResult, IceSpread,
-    compute_ice_curves, ice_curves_cart, ice_curves_gbm, ice_curves_rf,
+    IceConfig, IceResult, IceSpread, compute_ice_curves, ice_curves_cart, ice_curves_gbm,
+    ice_curves_rf,
 };
 // PDP (Partial Dependence Plot) - original version
 pub use pdp::{ice_curves, partial_dependence};

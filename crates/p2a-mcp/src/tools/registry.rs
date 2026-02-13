@@ -85,9 +85,27 @@ impl ToolCategory {
     pub fn all() -> &'static [ToolCategory] {
         use ToolCategory::*;
         &[
-            Data, Cleaning, Munging, Descriptive, Statistics, Regression, Panel,
-            IV, DiD, RD, Matching, Treatment, Mediation, Discrete, TimeSeries,
-            Spatial, Survival, MachineLearning, Visualization, Database, Utility,
+            Data,
+            Cleaning,
+            Munging,
+            Descriptive,
+            Statistics,
+            Regression,
+            Panel,
+            IV,
+            DiD,
+            RD,
+            Matching,
+            Treatment,
+            Mediation,
+            Discrete,
+            TimeSeries,
+            Spatial,
+            Survival,
+            MachineLearning,
+            Visualization,
+            Database,
+            Utility,
         ]
     }
 }
@@ -108,7 +126,10 @@ pub struct ToolInfo {
     pub r_equivalent: Option<&'static str>,
 }
 
-fn serialize_static_strs<S>(value: &&'static [&'static str], serializer: S) -> Result<S::Ok, S::Error>
+fn serialize_static_strs<S>(
+    value: &&'static [&'static str],
+    serializer: S,
+) -> Result<S::Ok, S::Error>
 where
     S: serde::Serializer,
 {
@@ -175,7 +196,6 @@ pub fn get_registry() -> Vec<ToolInfo> {
             related: &["describe_dataset"],
             r_equivalent: Some("all.equal()"),
         },
-
         // ══════════════════════════════════════════════════════════════════════════
         // Data Cleaning
         // ══════════════════════════════════════════════════════════════════════════
@@ -228,7 +248,6 @@ pub fn get_registry() -> Vec<ToolInfo> {
             related: &["cleaning_session_start"],
             r_equivalent: None,
         },
-
         // ══════════════════════════════════════════════════════════════════════════
         // Descriptive Statistics
         // ══════════════════════════════════════════════════════════════════════════
@@ -274,7 +293,6 @@ pub fn get_registry() -> Vec<ToolInfo> {
             related: &["stats_ecdf", "viz_histogram"],
             r_equivalent: Some("density()"),
         },
-
         // ══════════════════════════════════════════════════════════════════════════
         // Data Munging
         // ══════════════════════════════════════════════════════════════════════════
@@ -341,7 +359,6 @@ pub fn get_registry() -> Vec<ToolInfo> {
             related: &["munge_drop_na"],
             r_equivalent: Some("tidyr::fill()"),
         },
-
         // ══════════════════════════════════════════════════════════════════════════
         // Regression
         // ══════════════════════════════════════════════════════════════════════════
@@ -401,7 +418,6 @@ pub fn get_registry() -> Vec<ToolInfo> {
             related: &["regression_ols", "regression_bgtest"],
             r_equivalent: Some("car::vif(), lmtest::bptest()"),
         },
-
         // ══════════════════════════════════════════════════════════════════════════
         // Panel Data
         // ══════════════════════════════════════════════════════════════════════════
@@ -440,7 +456,6 @@ pub fn get_registry() -> Vec<ToolInfo> {
             related: &["panel_fixed_effects", "gmm_iv"],
             r_equivalent: Some("plm::pgmm()"),
         },
-
         // ══════════════════════════════════════════════════════════════════════════
         // Instrumental Variables
         // ══════════════════════════════════════════════════════════════════════════
@@ -479,7 +494,6 @@ pub fn get_registry() -> Vec<ToolInfo> {
             related: &["iv_2sls", "bp_bounds"],
             r_equivalent: Some("ivmte package"),
         },
-
         // ══════════════════════════════════════════════════════════════════════════
         // Difference-in-Differences
         // ══════════════════════════════════════════════════════════════════════════
@@ -525,7 +539,6 @@ pub fn get_registry() -> Vec<ToolInfo> {
             related: &["synthetic_control"],
             r_equivalent: Some("gsynth package"),
         },
-
         // ══════════════════════════════════════════════════════════════════════════
         // Regression Discontinuity
         // ══════════════════════════════════════════════════════════════════════════
@@ -557,7 +570,6 @@ pub fn get_registry() -> Vec<ToolInfo> {
             related: &["rd_estimate"],
             r_equivalent: Some("rdmulti package"),
         },
-
         // ══════════════════════════════════════════════════════════════════════════
         // Matching
         // ══════════════════════════════════════════════════════════════════════════
@@ -596,7 +608,6 @@ pub fn get_registry() -> Vec<ToolInfo> {
             related: &["treatment_cbps"],
             r_equivalent: Some("twang::ps()"),
         },
-
         // ══════════════════════════════════════════════════════════════════════════
         // Treatment Effects
         // ══════════════════════════════════════════════════════════════════════════
@@ -642,7 +653,6 @@ pub fn get_registry() -> Vec<ToolInfo> {
             related: &["treatment_doubly_robust"],
             r_equivalent: Some("DoubleML package"),
         },
-
         // ══════════════════════════════════════════════════════════════════════════
         // Mediation Analysis
         // ══════════════════════════════════════════════════════════════════════════
@@ -660,7 +670,6 @@ pub fn get_registry() -> Vec<ToolInfo> {
             related: &["mediation_analysis"],
             r_equivalent: Some("medflex::neModel()"),
         },
-
         // ══════════════════════════════════════════════════════════════════════════
         // Discrete Choice
         // ══════════════════════════════════════════════════════════════════════════
@@ -713,7 +722,6 @@ pub fn get_registry() -> Vec<ToolInfo> {
             related: &["logit", "panel_hdfe"],
             r_equivalent: Some("fixest::feglm()"),
         },
-
         // ══════════════════════════════════════════════════════════════════════════
         // Time Series
         // ══════════════════════════════════════════════════════════════════════════
@@ -766,7 +774,6 @@ pub fn get_registry() -> Vec<ToolInfo> {
             related: &["ts_mstl"],
             r_equivalent: Some("changepoint::cpt.*()"),
         },
-
         // ══════════════════════════════════════════════════════════════════════════
         // Spatial
         // ══════════════════════════════════════════════════════════════════════════
@@ -805,7 +812,6 @@ pub fn get_registry() -> Vec<ToolInfo> {
             related: &["sar_model", "panel_fixed_effects"],
             r_equivalent: Some("splm::spml()"),
         },
-
         // ══════════════════════════════════════════════════════════════════════════
         // Survival Analysis
         // ══════════════════════════════════════════════════════════════════════════
@@ -844,7 +850,6 @@ pub fn get_registry() -> Vec<ToolInfo> {
             related: &["survival_cox"],
             r_equivalent: Some("cmprsk::crr()"),
         },
-
         // ══════════════════════════════════════════════════════════════════════════
         // Machine Learning
         // ══════════════════════════════════════════════════════════════════════════
@@ -897,7 +902,6 @@ pub fn get_registry() -> Vec<ToolInfo> {
             related: &["ml_random_forest"],
             r_equivalent: Some("grf::causal_forest()"),
         },
-
         // ══════════════════════════════════════════════════════════════════════════
         // Visualization
         // ══════════════════════════════════════════════════════════════════════════
@@ -943,7 +947,6 @@ pub fn get_registry() -> Vec<ToolInfo> {
             related: &["regression_ols"],
             r_equivalent: Some("coefplot::coefplot()"),
         },
-
         // ══════════════════════════════════════════════════════════════════════════
         // Statistics
         // ══════════════════════════════════════════════════════════════════════════
@@ -982,7 +985,6 @@ pub fn get_registry() -> Vec<ToolInfo> {
             related: &["power_prop_test", "power_anova_test"],
             r_equivalent: Some("power.t.test()"),
         },
-
         // ══════════════════════════════════════════════════════════════════════════
         // Database
         // ══════════════════════════════════════════════════════════════════════════
@@ -1007,7 +1009,6 @@ pub fn get_registry() -> Vec<ToolInfo> {
             related: &["db_duckdb_query"],
             r_equivalent: None,
         },
-
         // ══════════════════════════════════════════════════════════════════════════
         // Utility
         // ══════════════════════════════════════════════════════════════════════════

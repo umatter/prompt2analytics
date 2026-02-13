@@ -15,9 +15,8 @@ use crate::tools::requests::viz::*;
 use p2a_core::{
     ChartConfig,
     visualization::{
-        histogram, scatter_plot, line_chart, box_plot,
-        correlation_heatmap, event_study_plot, coefficient_plot, irf_plot,
-        residual_diagnostics, dendrogram,
+        box_plot, coefficient_plot, correlation_heatmap, dendrogram, event_study_plot, histogram,
+        irf_plot, line_chart, residual_diagnostics, scatter_plot,
     },
 };
 

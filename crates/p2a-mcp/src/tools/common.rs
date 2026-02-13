@@ -12,7 +12,9 @@ pub type McpError = rmcp::ErrorData;
 
 /// Create a successful tool result with text content.
 pub fn success_text(msg: impl ToString) -> Result<CallToolResult, McpError> {
-    Ok(CallToolResult::success(vec![Content::text(msg.to_string())]))
+    Ok(CallToolResult::success(vec![Content::text(
+        msg.to_string(),
+    )]))
 }
 
 /// Create an error tool result with text content.
@@ -31,7 +33,9 @@ pub fn success_image(base64_data: impl ToString) -> Result<CallToolResult, McpEr
 /// Create a successful tool result with HTML content.
 pub fn success_html(html: impl ToString) -> Result<CallToolResult, McpError> {
     // Return HTML as text content for now (MCP doesn't have native HTML type)
-    Ok(CallToolResult::success(vec![Content::text(html.to_string())]))
+    Ok(CallToolResult::success(vec![Content::text(
+        html.to_string(),
+    )]))
 }
 
 /// Helper macro for getting a dataset from the datasets map.

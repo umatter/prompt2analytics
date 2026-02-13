@@ -3,7 +3,7 @@
 //! Run with: cargo run -p p2a-mcp --example generate_tool_docs
 
 use p2a_mcp::tools::{
-    category_counts, generate_markdown_docs, get_registry, search_tools, tool_count, ToolCategory,
+    ToolCategory, category_counts, generate_markdown_docs, get_registry, search_tools, tool_count,
 };
 use std::fs;
 
@@ -20,7 +20,12 @@ fn main() {
     let mut sorted: Vec<_> = counts.iter().collect();
     sorted.sort_by(|a, b| b.1.cmp(a.1));
     for (category, count) in sorted {
-        println!("  {:?}: {} tools - {}", category, count, category.description());
+        println!(
+            "  {:?}: {} tools - {}",
+            category,
+            count,
+            category.description()
+        );
     }
 
     println!("\n");

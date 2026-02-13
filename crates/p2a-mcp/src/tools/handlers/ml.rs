@@ -11,26 +11,56 @@ use rmcp::{
 
 use crate::server::AnalyticsServer;
 use crate::tools::common::extract_numeric_matrix;
-use crate::tools::requests::ml::*;
 use crate::tools::requests::causal::{BartCausalRequest, CausalForestRequest, HetTxRequest};
+use crate::tools::requests::ml::*;
 
 use p2a_core::{
-    cmdscale, cmdscale_from_data, cutree, dbscan, hierarchical, kmeans, linear_svm, pca, ppr,
-    random_forest, run_bart_causal, run_causal_forest, run_hettx_dataset, tsne, EffectEstimationMethod,
-    HetTestStat, HetTxConfig, Linkage, PprConfig, SmoothingMethod,
-    // GBM and CART
-    run_gbm, GbmConfig, GbmFamily,
-    run_cart, CartConfig, CartMethod,
-    // C5.0 Decision Trees
-    run_c50, C50Config,
-    // Cubist rule-based regression
-    run_cubist, CubistConfig,
-    // Conditional Inference Trees
-    run_ctree, CtreeConfig,
+    C50Config,
+    CartConfig,
+    CartMethod,
+    CtreeConfig,
+    CubistConfig,
+    EffectEstimationMethod,
+    GbmConfig,
+    GbmFamily,
+    HetTestStat,
+    HetTxConfig,
+    Linkage,
+    MboostBaseLearner,
+    MboostConfig,
+    MboostFamily,
+    PprConfig,
+    ShapConfig,
+    SmoothingMethod,
+    cmdscale,
+    cmdscale_from_data,
+    cutree,
+    dbscan,
+    hierarchical,
+    kmeans,
+    linear_svm,
+    pca,
+    ppr,
+    random_forest,
     // SHAP values
-    random_forest_with_trees, shap_values_model, shap_summary, ShapConfig,
+    random_forest_with_trees,
+    run_bart_causal,
+    // C5.0 Decision Trees
+    run_c50,
+    run_cart,
+    run_causal_forest,
+    // Conditional Inference Trees
+    run_ctree,
+    // Cubist rule-based regression
+    run_cubist,
+    // GBM and CART
+    run_gbm,
+    run_hettx_dataset,
     // Model-based Boosting (mboost)
-    run_mboost, MboostConfig, MboostFamily, MboostBaseLearner,
+    run_mboost,
+    shap_summary,
+    shap_values_model,
+    tsne,
 };
 
 #[tool_router(router = ml_router, vis = "pub")]
@@ -766,7 +796,9 @@ impl AnalyticsServer {
             .iter()
             .enumerate()
             .map(|(i, &imp)| {
-                let name = result.feature_names.as_ref()
+                let name = result
+                    .feature_names
+                    .as_ref()
                     .and_then(|names| names.get(i))
                     .map(|s| s.as_str())
                     .unwrap_or("?");
@@ -1038,7 +1070,11 @@ impl AnalyticsServer {
             compute_importance: true,
         };
 
-        let cov_refs: Vec<&str> = request.covariates.iter().map(|s: &String| s.as_str()).collect();
+        let cov_refs: Vec<&str> = request
+            .covariates
+            .iter()
+            .map(|s: &String| s.as_str())
+            .collect();
 
         let result = match run_hettx_dataset(
             dataset,
@@ -1148,53 +1184,70 @@ impl AnalyticsServer {
         };
 
         // Build rules summary for JSON output
-        let rules_summary: Vec<serde_json::Value> = result.rules.iter().take(10).map(|rule| {
-            let conditions: Vec<serde_json::Value> = rule.conditions.iter().map(|c| {
-                serde_json::json!({
-                    "feature": c.feature,
-                    "feature_name": c.feature_name,
-                    "operator": c.operator,
-                    "threshold": c.threshold
-                })
-            }).collect();
-
-            // coefficients is Vec<(usize, String, f64)> - (feature_idx, feature_name, coefficient)
-            let coefficients: Vec<serde_json::Value> = rule.coefficients.iter()
-                .filter(|(_, _, coef)| coef.abs() > 1e-10)
-                .map(|(idx, name, coef)| {
-                    serde_json::json!({
-                        "feature_index": idx,
-                        "feature": name,
-                        "coefficient": coef
+        let rules_summary: Vec<serde_json::Value> = result
+            .rules
+            .iter()
+            .take(10)
+            .map(|rule| {
+                let conditions: Vec<serde_json::Value> = rule
+                    .conditions
+                    .iter()
+                    .map(|c| {
+                        serde_json::json!({
+                            "feature": c.feature,
+                            "feature_name": c.feature_name,
+                            "operator": c.operator,
+                            "threshold": c.threshold
+                        })
                     })
-                })
-                .collect();
+                    .collect();
 
-            serde_json::json!({
-                "id": rule.id,
-                "coverage": rule.coverage,
-                "conditions": conditions,
-                "intercept": rule.intercept,
-                "coefficients": coefficients,
-                "mean_response": rule.mean_response
+                // coefficients is Vec<(usize, String, f64)> - (feature_idx, feature_name, coefficient)
+                let coefficients: Vec<serde_json::Value> = rule
+                    .coefficients
+                    .iter()
+                    .filter(|(_, _, coef)| coef.abs() > 1e-10)
+                    .map(|(idx, name, coef)| {
+                        serde_json::json!({
+                            "feature_index": idx,
+                            "feature": name,
+                            "coefficient": coef
+                        })
+                    })
+                    .collect();
+
+                serde_json::json!({
+                    "id": rule.id,
+                    "coverage": rule.coverage,
+                    "conditions": conditions,
+                    "intercept": rule.intercept,
+                    "coefficients": coefficients,
+                    "mean_response": rule.mean_response
+                })
             })
-        }).collect();
+            .collect();
 
         // Variable importance (top 10)
         let var_importance: Vec<(String, f64)> = if let Some(ref names) = result.feature_names {
-            names.iter()
+            names
+                .iter()
                 .zip(result.variable_importance.iter())
                 .map(|(name, &imp)| (name.clone(), imp))
                 .collect()
         } else {
-            result.variable_importance.iter()
+            result
+                .variable_importance
+                .iter()
                 .enumerate()
                 .map(|(i, &imp)| (format!("X{}", i), imp))
                 .collect()
         };
         let mut var_importance_sorted = var_importance;
-        var_importance_sorted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        let top_importance: Vec<serde_json::Value> = var_importance_sorted.iter().take(10)
+        var_importance_sorted
+            .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        let top_importance: Vec<serde_json::Value> = var_importance_sorted
+            .iter()
+            .take(10)
             .map(|(name, imp)| serde_json::json!({"feature": name, "importance": imp}))
             .collect();
 
@@ -1347,57 +1400,85 @@ impl AnalyticsServer {
 
         // Build SHAP values sample before json! macro
         let n_show = shap_result.n_obs.min(5);
-        let shap_values_sample: Vec<serde_json::Value> = (0..n_show).map(|i| {
-            let row = shap_result.shap_values.row(i);
-            let values: Vec<serde_json::Value> = shap_result.feature_names.as_ref().map(|names| {
-                names.iter()
-                    .zip(row.iter())
-                    .map(|(name, &val)| serde_json::json!({
-                        "feature": name,
-                        "shap_value": val
-                    }))
-                    .collect()
-            }).unwrap_or_else(|| {
-                row.iter().enumerate()
-                    .map(|(j, &val)| serde_json::json!({
-                        "feature": format!("Feature_{}", j),
-                        "shap_value": val
-                    }))
-                    .collect()
-            });
-            serde_json::json!(values)
-        }).collect();
+        let shap_values_sample: Vec<serde_json::Value> = (0..n_show)
+            .map(|i| {
+                let row = shap_result.shap_values.row(i);
+                let values: Vec<serde_json::Value> = shap_result
+                    .feature_names
+                    .as_ref()
+                    .map(|names| {
+                        names
+                            .iter()
+                            .zip(row.iter())
+                            .map(|(name, &val)| {
+                                serde_json::json!({
+                                    "feature": name,
+                                    "shap_value": val
+                                })
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_else(|| {
+                        row.iter()
+                            .enumerate()
+                            .map(|(j, &val)| {
+                                serde_json::json!({
+                                    "feature": format!("Feature_{}", j),
+                                    "shap_value": val
+                                })
+                            })
+                            .collect()
+                    });
+                serde_json::json!(values)
+            })
+            .collect();
 
         // Build feature importance list
-        let feature_importance_list: Vec<serde_json::Value> = shap_result.feature_names.as_ref().map(|names| {
-            names.iter()
-                .zip(shap_result.feature_importance.iter())
-                .map(|(name, &imp)| serde_json::json!({
-                    "feature": name,
-                    "mean_abs_shap": imp
-                }))
-                .collect()
-        }).unwrap_or_else(|| {
-            shap_result.feature_importance.iter().enumerate()
-                .map(|(i, &imp)| serde_json::json!({
-                    "feature": format!("Feature_{}", i),
-                    "mean_abs_shap": imp
-                }))
-                .collect()
-        });
+        let feature_importance_list: Vec<serde_json::Value> = shap_result
+            .feature_names
+            .as_ref()
+            .map(|names| {
+                names
+                    .iter()
+                    .zip(shap_result.feature_importance.iter())
+                    .map(|(name, &imp)| {
+                        serde_json::json!({
+                            "feature": name,
+                            "mean_abs_shap": imp
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_else(|| {
+                shap_result
+                    .feature_importance
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &imp)| {
+                        serde_json::json!({
+                            "feature": format!("Feature_{}", i),
+                            "mean_abs_shap": imp
+                        })
+                    })
+                    .collect()
+            });
 
         // Build summary if available
         let summary_json = summary.map(|s| {
-            let top_features: Vec<serde_json::Value> = s.feature_names.iter()
+            let top_features: Vec<serde_json::Value> = s
+                .feature_names
+                .iter()
                 .zip(s.mean_abs_shap.iter())
                 .zip(s.std_shap.iter())
                 .zip(s.importance_rank.iter())
-                .map(|(((name, &mean_abs), &std), &rank)| serde_json::json!({
-                    "feature": name,
-                    "mean_abs_shap": mean_abs,
-                    "std_shap": std,
-                    "rank": rank
-                }))
+                .map(|(((name, &mean_abs), &std), &rank)| {
+                    serde_json::json!({
+                        "feature": name,
+                        "mean_abs_shap": mean_abs,
+                        "std_shap": std,
+                        "rank": rank
+                    })
+                })
                 .collect();
             serde_json::json!({ "top_features": top_features })
         });
@@ -1464,8 +1545,14 @@ impl AnalyticsServer {
             minsplit: request.minsplit.unwrap_or(20),
             minbucket: request.minbucket.unwrap_or(7),
             maxdepth: request.maxdepth.unwrap_or(0),
-            teststat: request.teststat.clone().unwrap_or_else(|| "quadratic".to_string()),
-            testtype: request.testtype.clone().unwrap_or_else(|| "bonferroni".to_string()),
+            teststat: request
+                .teststat
+                .clone()
+                .unwrap_or_else(|| "quadratic".to_string()),
+            testtype: request
+                .testtype
+                .clone()
+                .unwrap_or_else(|| "bonferroni".to_string()),
             seed: request.seed,
         };
 
@@ -1482,7 +1569,10 @@ impl AnalyticsServer {
         };
 
         // Build tree structure for JSON output
-        fn node_to_json(node: &p2a_core::CtreeNode, feature_names: &Option<Vec<String>>) -> serde_json::Value {
+        fn node_to_json(
+            node: &p2a_core::CtreeNode,
+            feature_names: &Option<Vec<String>>,
+        ) -> serde_json::Value {
             let mut obj = serde_json::json!({
                 "id": node.id,
                 "n_samples": node.n,
@@ -1490,7 +1580,8 @@ impl AnalyticsServer {
             });
 
             if let Some(ref split) = node.split {
-                let var_name = feature_names.as_ref()
+                let var_name = feature_names
+                    .as_ref()
                     .and_then(|names| names.get(split.feature))
                     .cloned()
                     .unwrap_or_else(|| format!("X{}", split.feature));

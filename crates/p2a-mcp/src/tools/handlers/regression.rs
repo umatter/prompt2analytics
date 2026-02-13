@@ -34,11 +34,11 @@ use crate::tools::requests::regression::{
 };
 
 use p2a_core::regression::{
-    bg_test, gls, harvey_collier_test, quantreg_multi, reset_test, run_cv_glmnet, run_diagnostics,
-    run_glmnet, run_lasso, run_line, run_loess, run_ols, run_ols_clustered, run_quantreg,
-    run_ridge, run_step, run_vcov_bootstrap, run_vcov_driscoll_kraay, run_vcov_hac, smooth_spline,
-    smooth_spline_predict, supsmu, wald_test, BgTestType, CorrelationStructure, CovarianceType,
-    GlmnetConfig, GlmnetFamily, ResetType, SmoothSplineConfig,
+    BgTestType, CorrelationStructure, CovarianceType, GlmnetConfig, GlmnetFamily, ResetType,
+    SmoothSplineConfig, bg_test, gls, harvey_collier_test, quantreg_multi, reset_test,
+    run_cv_glmnet, run_diagnostics, run_glmnet, run_lasso, run_line, run_loess, run_ols,
+    run_ols_clustered, run_quantreg, run_ridge, run_step, run_vcov_bootstrap,
+    run_vcov_driscoll_kraay, run_vcov_hac, smooth_spline, smooth_spline_predict, supsmu, wald_test,
 };
 
 #[tool_router(router = regression_router, vis = "pub")]
@@ -537,9 +537,9 @@ impl AnalyticsServer {
         use ndarray::Array1;
         use p2a_core::linalg::design::DesignMatrix;
         use p2a_core::regression::{
-            model_asymptotic, model_exponential_decay, model_exponential_growth,
-            model_logistic_growth, model_michaelis_menten, model_power, nls, NlsAlgorithm,
-            NlsConfig,
+            NlsAlgorithm, NlsConfig, model_asymptotic, model_exponential_decay,
+            model_exponential_growth, model_logistic_growth, model_michaelis_menten, model_power,
+            nls,
         };
 
         let datasets = self.datasets.read().await;
