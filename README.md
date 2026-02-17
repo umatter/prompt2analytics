@@ -498,9 +498,22 @@ prompt2analytics/
 │       ├── api/           # HTTP client and SSE streaming
 │       ├── components/    # UI components
 │       └── state/         # State management (Dioxus signals)
-├── validation/            # Validation against R/Python references
+├── validation/            # Validation against R references
+│   ├── [category]/        # Per-method validation docs (R code + expected values)
+│   ├── datasets/          # Reference datasets (Grunfeld, Longley, Iris)
+│   ├── scripts/           # R validation scripts
+│   └── run_validation.sh  # Master validation runner
 ├── performance/           # Benchmark framework and results
+│   └── comparisons/
+│       ├── run_all.sh     # Full pipeline orchestration
+│       └── r_comparison/  # R benchmark scripts + merged results
+│           ├── benchmark_*.R     # 67 R benchmark scripts
+│           ├── merge_results.R   # Merge Rust JSON + R CSV
+│           └── results/          # comparison_speed.csv, comparison_memory.csv
 └── paper/                 # JSS article materials
+    ├── code/              # Figure/table generation scripts (R)
+    ├── figures/           # Generated benchmark figures (PDF + PNG)
+    └── tables/            # Generated LaTeX tables
 ```
 
 ## MCP Tools (257 total)
@@ -527,6 +540,192 @@ The MCP server exposes 257 analytics tools. Key categories include:
 | Utilities | `generate_random_data`, `set_seed`, `generate_report` |
 
 For a complete list, see the tool definitions in `crates/p2a-mcp/src/tools/handlers/`.
+
+## Validation
+
+All methods are validated against reference R implementations to ensure numerical correctness. Validation uses a two-layer approach:
+
+1. **Rust unit tests** (`test_validate_*` prefix) compare outputs to known R results at tight tolerances
+2. **Validation documents** (`validation/`) record the R code, expected values, and precision analysis for each method
+
+### Running Validation Tests
+
+```bash
+# All validation tests
+cargo test -p p2a-core -- test_validate
+
+# Specific method
+cargo test -p p2a-core -- test_validate_ols
+cargo test -p p2a-core -- test_validate_hdfe
+
+# Full validation (Rust + R scripts)
+./validation/run_validation.sh
+
+# Rust only (faster)
+./validation/run_validation.sh --rust-only
+
+# Filter by category
+./validation/run_validation.sh --category stats
+```
+
+### Tolerance Guidelines
+
+| Sample Size | Coefficient Tolerance | SE Tolerance |
+|-------------|----------------------|--------------|
+| n < 100     | 1e-6                 | 1e-5         |
+| n = 100-1000| 1e-8                 | 1e-6         |
+| n > 1000    | 1e-10                | 1e-8         |
+
+For iterative methods (HDFE, MLE), slightly larger differences are expected due to convergence criteria.
+
+### Validation Directory Structure
+
+```
+validation/
+├── README.md                    # Validation framework overview
+├── VALIDATION_STATUS.md         # Current coverage report
+├── run_validation.sh            # Master validation runner
+├── reference_implementations.md # Catalog of R/Python reference packages
+├── regression/                  # OLS, robust SEs, GLS, LOESS, sensemakr, E-value
+├── econometrics/                # Panel, IV, DiD, discrete choice, spatial, survival
+│   └── timeseries/              # VAR, VARMA, VECM, IRF
+├── forecasting/                 # ARIMA, MSTL, Holt-Winters, changepoint
+├── stats/                       # 50+ statistical tests (t-test, ANOVA, Fisher, etc.)
+├── diagnostics/                 # JB, BP, DW, VIF, Breusch-Godfrey, RESET
+├── ml/                          # K-means, DBSCAN, PCA, t-SNE, Random Forest
+├── multivariate/                # MANOVA, CCA, factor analysis
+├── linalg/                      # Matrix operation validation
+├── spatial/                     # Moran's I, SAR, SEM
+├── datasets/                    # Reference datasets (Grunfeld, Longley, Iris)
+├── scripts/                     # R validation scripts
+└── reports/                     # Generated validation reports
+```
+
+Each validation document records: method overview, reference R/Python code, test cases with expected values, numerical precision analysis, and known differences.
+
+## Performance Benchmarking
+
+Performance is measured with a custom benchmarking framework that captures distribution statistics (min, p25, median, p75, max, mean, std) and memory usage, matching the output format of R's `bench::mark()` package for direct comparison.
+
+### Pipeline Overview
+
+```
+Rust benchmarks (19 files)          R benchmarks (67 scripts)
+         │                                    │
+         ▼                                    ▼
+  rust_comprehensive_*.json             r_*_*.csv files
+         │                                    │
+         └──────────┬─────────────────────────┘
+                    ▼
+            merge_results.R
+                    │
+         ┌──────────┼──────────┐
+         ▼          ▼          ▼
+  comparison_   comparison_   validation_
+  speed.csv     memory.csv    coverage.csv
+         │          │
+         ▼          ▼
+  generate_paper_figures.R    generate_paper_tables.R
+         │                              │
+         ▼                              ▼
+  paper/figures/*.pdf           paper/tables/*.tex
+```
+
+### Running Benchmarks
+
+```bash
+# Full pipeline (Rust validation + benchmarks + R benchmarks + merge)
+./performance/comparisons/run_all.sh
+
+# Rust benchmarks only
+cargo bench -p p2a-core --bench comprehensive_benchmarks
+
+# R benchmarks only
+cd performance/comparisons/r_comparison && Rscript r_benchmark_runner.R
+
+# Merge existing results (no new benchmark runs)
+./performance/comparisons/run_all.sh --merge-only
+
+# Quick mode (validation + comprehensive R benchmarks only)
+./performance/comparisons/run_all.sh --quick
+```
+
+### Rust Benchmarks
+
+**Location**: `crates/p2a-core/benches/` (19 files)
+
+The primary benchmark file is `comprehensive_benchmarks.rs`, which covers all method categories. Specialized benchmark files exist for deeper per-module coverage (regression, econometrics, forecasting, hypothesis tests, ML, spatial, causal, etc.).
+
+Key design choices:
+- Custom `bench_utils.rs` runner (not Criterion) to produce distribution statistics compatible with R's `bench::mark()`
+- Reproducible data generation via seeded ChaCha8Rng (seed=42)
+- Memory tracking via `memory_stats` crate (physical memory before/after/peak)
+- JSON output for automated merging with R results
+
+### R Benchmarks
+
+**Location**: `performance/comparisons/r_comparison/` (67 `benchmark_*.R` scripts)
+
+Each R script benchmarks the equivalent R function(s) using `bench::mark()` with identical data-generating processes (same seeds, same sample sizes). Scripts cover: regression (`lm`, `sandwich`, `plm`, `lfe`), discrete choice (`glm`, `MASS`), time series (`forecast`, `stats::stl`), spatial (`spdep`), survival (`survival`), ML (`kmeans`, `dbscan`, `prcomp`), and 50+ statistical tests.
+
+### Merge and Comparison
+
+**Script**: `performance/comparisons/r_comparison/merge_results.R`
+
+This script:
+1. Loads all timestamped R CSV results and Rust JSON results
+2. Normalizes method names across languages (e.g., `lagsarlm` → `SAR`, `ols_lm` → `OLS`)
+3. Matches on method + sample size (exact match, then fuzzy within 2x)
+4. Computes speedup factors: `speedup = R_median_time / Rust_median_time`
+5. Assigns methods to modules (Regression, Panel, Stats, ML, etc.)
+6. Outputs: `comparison_speed.csv`, `comparison_memory.csv`, `validation_coverage.csv`
+
+### Paper Figures and Tables
+
+**Location**: `paper/code/` (18 R scripts)
+
+```bash
+# Generate all figures (reads comparison CSVs, writes to paper/figures/)
+cd paper/code && Rscript generate_paper_figures.R
+
+# Generate all tables (reads comparison CSVs, writes to paper/tables/)
+cd paper/code && Rscript generate_paper_tables.R
+```
+
+**Generated figures** (`paper/figures/`):
+- `benchmark_speedup_violin.pdf` — Violin plots of speedup distribution by module
+- `benchmark_boxplots.pdf` — Box plots of speedup by module
+- `benchmark_histogram.pdf` — Histogram of speedup factors with median line
+- `benchmark_memory.pdf` — Memory usage ratio comparison
+- `benchmark_speedup.pdf` — Log-scale speedup by method
+
+**Generated tables** (`paper/tables/`):
+- `tab_speedup_by_module.tex` — Per-module speedup summary (min, median, mean, max)
+- `tab_benchmark_summary.tex` — Representative method benchmarks with execution times
+
+### R Prerequisites for Benchmarks
+
+```bash
+# Core packages (required)
+install.packages(c("bench", "sandwich", "plm", "lfe"))
+
+# Extended packages (for full coverage)
+install.packages(c("forecast", "changepoint", "survival", "MatchIt",
+                   "WeightIt", "randomForest", "e1071", "dbscan",
+                   "Rtsne", "spdep", "rugarch", "dlm", "tseries"))
+```
+
+### Results Directory
+
+```
+performance/comparisons/r_comparison/results/
+├── comparison_speed.csv          # Merged Rust vs R speed comparison
+├── comparison_memory.csv         # Merged memory comparison
+├── validation_coverage.csv       # Method coverage matrix
+└── *.log                         # Execution logs from run_all.sh
+```
+
+Raw timestamped results (`r_*_2026*.csv`, `rust_comprehensive_2026*.json`) are gitignored. Only the merged comparison CSVs are tracked.
 
 ## Development
 
@@ -600,14 +799,52 @@ cd crates/p2a-dioxus && dx serve
 
 ## Paper
 
-The `paper/` directory contains materials for a Journal of Statistical Software (JSS) article:
+The `paper/` directory contains materials for a Journal of Statistical Software (JSS) article.
+
+### Building the Paper
 
 ```bash
-# Build the paper (requires pdfLaTeX and BibTeX)
+# Build PDF (requires pdfLaTeX and BibTeX)
 cd paper && make
+```
 
-# Generate benchmark figures (requires p2a CLI and jq)
-cd paper/code && ./analyze_benchmarks.sh
+### Reproducing Benchmark Exhibits
+
+All figures and tables in the paper are generated from benchmark data via R scripts. To reproduce from scratch:
+
+```bash
+# Step 1: Run Rust benchmarks
+cargo bench -p p2a-core --bench comprehensive_benchmarks
+
+# Step 2: Run R benchmarks (requires R + benchmark packages)
+cd performance/comparisons/r_comparison && Rscript r_benchmark_runner.R
+
+# Step 3: Merge results
+Rscript merge_results.R
+
+# Step 4: Generate figures and tables
+cd ../../paper/code
+Rscript generate_paper_figures.R    # → paper/figures/*.pdf
+Rscript generate_paper_tables.R     # → paper/tables/*.tex
+
+# Or run the full pipeline in one command:
+./performance/comparisons/run_all.sh
+```
+
+### Paper Directory Structure
+
+```
+paper/
+├── code/
+│   ├── generate_paper_figures.R   # Master figure generator
+│   ├── generate_paper_tables.R    # Master table generator
+│   ├── fig_*.R                    # Individual figure scripts
+│   ├── tab_*.R                    # Individual table scripts
+│   ├── helpers.R                  # Shared R utilities
+│   └── requirements.R            # R package dependency check
+├── figures/                       # Generated PDF/PNG figures
+├── tables/                        # Generated LaTeX tables
+└── build/                         # LaTeX build output (gitignored)
 ```
 
 ## License
@@ -616,7 +853,9 @@ MIT
 
 ## Documentation
 
-- `docs/guides/TESTING.md` - Test runtime expectations, validation framework
+- `validation/README.md` - Validation framework and method index
+- `validation/VALIDATION_STATUS.md` - Current validation coverage report
+- `docs/guides/TESTING.md` - Test runtime expectations
 - `docs/guides/DATA_SECURITY.md` - Data write locations, privacy
 - `docs/security/PROMPT_INJECTION.md` - MCP security considerations
 
@@ -625,4 +864,4 @@ MIT
 Contributions are welcome! See:
 - `CLAUDE.md` - Development guidance for Claude Code
 - `DEVELOPMENT_REPORT.md` - Architecture details and current status
-- `validation/` - How to add validation tests
+- `validation/README.md` - How to add validation tests

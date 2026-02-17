@@ -510,20 +510,142 @@ Tool calls tracked during streaming via SSE events (`ToolStart`, `ToolEnd`). Fro
 
 ### Validation Framework (`validation/`)
 
-All methods validated against R/Python reference implementations. Run validation tests:
+All methods are validated against reference R implementations. Validation has two layers:
+
+1. **Rust tests** with `test_validate_*` prefix compare outputs to known R values
+2. **Validation documents** in `validation/[category]/method.md` record R code, expected values, and precision
+
 ```bash
+# Run all validation tests
 cargo test -p p2a-core -- test_validate
+
+# Run specific method validation
+cargo test -p p2a-core -- test_validate_ols
+cargo test -p p2a-core -- test_validate_hdfe
+
+# Full validation (Rust + R scripts)
+./validation/run_validation.sh
+
+# Filter by category
+./validation/run_validation.sh --category stats
 ```
+
+Tolerance guidelines: coefficients to 1e-10 for n>1000, 1e-6 for n<100. Iterative methods (HDFE, MLE) may have slightly larger differences. See `validation/README.md` for details.
+
+Key directories:
+- `validation/regression/` - OLS, robust SEs, GLS, LOESS, sensemakr, E-value
+- `validation/econometrics/` - Panel, IV, DiD, discrete choice, spatial, survival
+- `validation/stats/` - 50+ statistical tests
+- `validation/forecasting/` - ARIMA, MSTL, Holt-Winters
+- `validation/ml/` - Clustering, PCA, t-SNE
+- `validation/datasets/` - Reference datasets (Grunfeld, Longley, Iris)
+- `validation/VALIDATION_STATUS.md` - Current coverage report
 
 ### Performance Benchmarks (`performance/`)
 
-Criterion benchmarks with R comparison scripts:
+The benchmarking system measures Rust vs R performance using matching data-generating processes and matching output statistics (distribution percentiles + memory).
+
+#### Benchmark pipeline
+
+```
+Rust benchmarks (19 files)          R benchmarks (67 scripts)
+  crates/p2a-core/benches/           performance/comparisons/r_comparison/
+         │                                    │
+         ▼                                    ▼
+  rust_comprehensive_*.json             r_*_*.csv files
+         │                                    │
+         └──────────┬─────────────────────────┘
+                    ▼
+            merge_results.R
+                    │
+         ┌──────────┼──────────┐
+         ▼          ▼          ▼
+  comparison_   comparison_   validation_
+  speed.csv     memory.csv    coverage.csv
+         │          │
+         ▼          ▼
+  paper/code/generate_paper_figures.R + generate_paper_tables.R
+         │                              │
+         ▼                              ▼
+  paper/figures/*.pdf           paper/tables/*.tex
+```
+
+#### Running benchmarks
+
 ```bash
-# Rust benchmarks
+# Full pipeline (validation + Rust bench + R bench + merge)
+./performance/comparisons/run_all.sh
+
+# Rust benchmarks only (outputs JSON)
 cargo bench -p p2a-core --bench comprehensive_benchmarks
 
-# R benchmarks
-cd performance/comparisons/r_comparison && Rscript benchmark_comprehensive.R
+# R benchmarks only (outputs CSV per script)
+cd performance/comparisons/r_comparison && Rscript r_benchmark_runner.R
+
+# Merge existing results only
+./performance/comparisons/run_all.sh --merge-only
+
+# Quick mode (validation + comprehensive R benchmark only)
+./performance/comparisons/run_all.sh --quick
+```
+
+#### Rust benchmark framework
+
+`crates/p2a-core/benches/bench_utils.rs` provides:
+- Distribution statistics: min, p25, median, p75, max, mean, std (matching R's `bench::mark()`)
+- Memory tracking: physical_mem before/after/peak via `memory_stats` crate
+- Iterations per second
+- JSON serialization for merging with R results
+- Reproducible data via seeded ChaCha8Rng (seed=42)
+
+The benchmark harness is custom (not Criterion): `harness = false` in `Cargo.toml`.
+
+Key benchmark files:
+- `comprehensive_benchmarks.rs` - Master benchmark covering all method categories
+- `regression_benchmarks.rs` - OLS variants, NLS, LOESS, GLS, smooth spline
+- `econometrics_benchmarks.rs` - Panel, IV, DiD, synthetic control, RD, spatial
+- `hypothesis_benchmarks.rs` - 20+ hypothesis tests
+- `forecasting_benchmarks.rs` - ARIMA, STL, MSTL, Holt-Winters, Kalman
+- `clustering_benchmarks.rs` - K-means, DBSCAN, hierarchical, PCA, t-SNE
+
+#### R benchmark framework
+
+`performance/comparisons/r_comparison/benchmark_*.R` (67 scripts) each benchmark the equivalent R function using `bench::mark()` with identical DGPs (same seeds, sample sizes). Orchestrated by `r_benchmark_runner.R`.
+
+#### Merge pipeline
+
+`performance/comparisons/r_comparison/merge_results.R`:
+1. Loads all timestamped R CSVs + latest Rust JSON
+2. Normalizes method names across languages (e.g., `lagsarlm` → `SAR`)
+3. Matches on method + sample size
+4. Computes `speedup = R_median / Rust_median`
+5. Assigns module categories
+6. Outputs: `comparison_speed.csv`, `comparison_memory.csv`, `validation_coverage.csv`
+
+#### Paper exhibit generation
+
+```bash
+cd paper/code
+Rscript generate_paper_figures.R    # → paper/figures/*.pdf and *.png
+Rscript generate_paper_tables.R     # → paper/tables/*.tex
+```
+
+Generated artifacts:
+- `paper/figures/benchmark_speedup_violin.pdf` - Violin plots by module
+- `paper/figures/benchmark_boxplots.pdf` - Box plots by module
+- `paper/figures/benchmark_histogram.pdf` - Speedup distribution histogram
+- `paper/figures/benchmark_memory.pdf` - Memory comparison
+- `paper/tables/tab_speedup_by_module.tex` - Module-level speedup summary
+- `paper/tables/tab_benchmark_summary.tex` - Representative method benchmarks
+
+#### Results directory
+
+```
+performance/comparisons/r_comparison/results/
+├── comparison_speed.csv          # Merged speed comparison (tracked in git)
+├── comparison_memory.csv         # Merged memory comparison (tracked in git)
+├── validation_coverage.csv       # Method coverage matrix (tracked in git)
+└── r_*_2026*.csv / rust_*.json   # Raw timestamped results (gitignored)
 ```
 
 ## Agentic Engineering Setup
@@ -613,10 +735,29 @@ let df = df! {
 - `crates/p2a-dioxus/src/state/` - State management (chat, session, settings)
 - `crates/p2a-dioxus/src/api/sse.rs` - SSE streaming for chat
 
+**Validation:**
+- `validation/README.md` - Validation framework overview and method index
+- `validation/VALIDATION_STATUS.md` - Current validation coverage by category
+- `validation/run_validation.sh` - Master validation runner (Rust + R)
+- `validation/[category]/method.md` - Per-method validation documents with R code and expected values
+
+**Benchmarking:**
+- `crates/p2a-core/benches/bench_utils.rs` - Custom benchmark runner (distribution stats + memory)
+- `crates/p2a-core/benches/comprehensive_benchmarks.rs` - Master Rust benchmark (all methods)
+- `performance/comparisons/run_all.sh` - Full pipeline orchestration script
+- `performance/comparisons/r_comparison/r_benchmark_runner.R` - R benchmark orchestrator
+- `performance/comparisons/r_comparison/merge_results.R` - Merge Rust JSON + R CSV → comparison CSVs
+- `performance/comparisons/r_comparison/results/comparison_speed.csv` - Merged speed comparison
+- `performance/comparisons/r_comparison/results/comparison_memory.csv` - Merged memory comparison
+
+**Paper Exhibits:**
+- `paper/code/generate_paper_figures.R` - Generate all paper figures from comparison CSVs
+- `paper/code/generate_paper_tables.R` - Generate all paper LaTeX tables from comparison CSVs
+- `paper/figures/` - Generated benchmark figures (PDF + PNG)
+- `paper/tables/` - Generated LaTeX tables
+
 **Documentation:**
 - `DEVELOPMENT_REPORT.md` - Detailed development history and current status
-- `validation/` - Validation against R/Python reference implementations
-- `performance/` - Benchmark results and methodology
 - `docs/guides/TESTING.md` - Test runtime expectations, validation framework
 - `docs/guides/DATA_SECURITY.md` - Data write locations, offline capability
 - `docs/security/PROMPT_INJECTION.md` - MCP security considerations
