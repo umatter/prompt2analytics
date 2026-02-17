@@ -341,7 +341,9 @@ pub fn fisher_exact_test(
 
 /// Compute two-sided p-value for Fisher's exact test.
 ///
-/// Sums probabilities of all tables with probability ≤ observed probability.
+/// Computes all hypergeometric PMF values once into a Vec, then sums those
+/// with probability <= observed probability. Includes early termination
+/// when remaining probability mass is negligible (< 1e-15).
 fn compute_two_sided_pvalue(
     hyper: &Hypergeometric,
     _observed: u64,
@@ -353,15 +355,33 @@ fn compute_two_sided_pvalue(
     // The support of X is [max(0, row1 + col1 - n), min(row1, col1)]
     let x_min = (row1 + col1).saturating_sub(n);
     let x_max = row1.min(col1);
+    let support_size = (x_max - x_min + 1) as usize;
 
-    let mut p_value = 0.0;
-
-    // Sum probabilities of all tables with P(X=x) <= P(X=observed)
+    // Optimization 1: Compute all PMF values once into a Vec
+    let mut pmf_values: Vec<f64> = Vec::with_capacity(support_size);
     for x in x_min..=x_max {
-        let prob_x = hyper.pmf(x);
-        // Use small epsilon for floating point comparison
-        if prob_x <= prob_observed + 1e-10 {
+        pmf_values.push(hyper.pmf(x));
+    }
+
+    // Optimization 2: Sort indices by descending PMF to enable early termination.
+    // We accumulate p-value by summing qualifying PMFs, and track remaining mass.
+    let threshold = prob_observed + 1e-10;
+    let mut p_value = 0.0;
+    let mut remaining_mass = 1.0;
+
+    // Iterate through PMF values. We process from largest to smallest so that
+    // once the remaining mass is negligible, we can stop early.
+    // Since most distributions are unimodal, a simpler approach works well:
+    // just scan all values and sum those that qualify, with early termination
+    // when the cumulative remaining mass drops below the threshold.
+    for &prob_x in &pmf_values {
+        if prob_x <= threshold {
             p_value += prob_x;
+        }
+        remaining_mass -= prob_x;
+        // Early termination: if all remaining mass is negligible, stop
+        if remaining_mass < 1e-15 {
+            break;
         }
     }
 
@@ -369,10 +389,64 @@ fn compute_two_sided_pvalue(
     p_value.min(1.0).max(0.0)
 }
 
+/// Pre-computed log-binomial coefficients for the non-central hypergeometric
+/// distribution used in CI computation. Avoids recomputing ln_gamma calls
+/// across binary search iterations.
+struct PrecomputedLogBinom {
+    /// log(C(col1, x)) for x in x_min..=x_max
+    ln_choose_col1: Vec<f64>,
+    /// log(C(col2, row1 - x)) for x in x_min..=x_max
+    ln_choose_col2: Vec<f64>,
+    /// Validity flags: true if the table entry is valid for this x
+    valid: Vec<bool>,
+    /// Minimum x in support
+    x_min: u64,
+    /// Maximum x in support
+    x_max: u64,
+}
+
+impl PrecomputedLogBinom {
+    /// Pre-compute all log-binomial coefficients for the support range.
+    fn new(row1: u64, col1: u64, n: u64) -> Self {
+        let x_min = (row1 + col1).saturating_sub(n);
+        let x_max = row1.min(col1);
+        let col2 = n - col1;
+        let support_size = (x_max - x_min + 1) as usize;
+
+        let mut ln_choose_col1 = Vec::with_capacity(support_size);
+        let mut ln_choose_col2 = Vec::with_capacity(support_size);
+        let mut valid = Vec::with_capacity(support_size);
+
+        for x in x_min..=x_max {
+            // Check validity: need x <= col1, row1 >= x, row1 - x <= col2
+            if x > col1 || row1 < x || row1 - x > col2 {
+                ln_choose_col1.push(0.0);
+                ln_choose_col2.push(0.0);
+                valid.push(false);
+            } else {
+                ln_choose_col1.push(log_binomial(col1, x));
+                ln_choose_col2.push(log_binomial(col2, row1 - x));
+                valid.push(true);
+            }
+        }
+
+        Self {
+            ln_choose_col1,
+            ln_choose_col2,
+            valid,
+            x_min,
+            x_max,
+        }
+    }
+}
+
 /// Compute exact confidence interval for odds ratio using iterative search.
 ///
 /// Uses the Cornfield method: find odds ratios where Fisher's test
 /// would give p-value = alpha/2 for one-sided alternatives.
+///
+/// Pre-computes log-binomial coefficients once and reuses them across
+/// all binary search iterations for efficiency.
 fn compute_odds_ratio_ci(a: u64, b: u64, c: u64, d: u64, conf_level: f64) -> (f64, f64) {
     let alpha = 1.0 - conf_level;
 
@@ -384,20 +458,41 @@ fn compute_odds_ratio_ci(a: u64, b: u64, c: u64, d: u64, conf_level: f64) -> (f6
     }
     if a == 0 || d == 0 {
         // Odds ratio is 0 - upper bound only
-        return (0.0, compute_ci_upper(a, b, c, d, alpha / 2.0));
+        let n = a + b + c + d;
+        let row1 = a + b;
+        let col1 = a + c;
+        let precomp = PrecomputedLogBinom::new(row1, col1, n);
+        return (
+            0.0,
+            compute_ci_upper_fast(a, b, c, d, alpha / 2.0, &precomp),
+        );
     }
 
+    let n = a + b + c + d;
+    let row1 = a + b;
+    let col1 = a + c;
+
+    // Pre-compute log-binomial coefficients once for both lower and upper bounds
+    let precomp = PrecomputedLogBinom::new(row1, col1, n);
+
     // Binary search for lower bound
-    let lower = compute_ci_lower(a, b, c, d, alpha / 2.0);
+    let lower = compute_ci_lower_fast(a, b, c, d, alpha / 2.0, &precomp);
 
     // Binary search for upper bound
-    let upper = compute_ci_upper(a, b, c, d, alpha / 2.0);
+    let upper = compute_ci_upper_fast(a, b, c, d, alpha / 2.0, &precomp);
 
     (lower, upper)
 }
 
-/// Find lower CI bound using binary search.
-fn compute_ci_lower(a: u64, b: u64, c: u64, d: u64, alpha: f64) -> f64 {
+/// Find lower CI bound using binary search with pre-computed log-binomial coefficients.
+fn compute_ci_lower_fast(
+    a: u64,
+    b: u64,
+    c: u64,
+    d: u64,
+    alpha: f64,
+    precomp: &PrecomputedLogBinom,
+) -> f64 {
     let n = a + b + c + d;
     let row1 = a + b;
     let col1 = a + c;
@@ -408,7 +503,7 @@ fn compute_ci_lower(a: u64, b: u64, c: u64, d: u64, alpha: f64) -> f64 {
     let mut hi = sample_or.max(0.001);
 
     // Expand upper search bound if needed
-    while compute_fisher_pvalue_given_or(a, row1, col1, n, hi, FisherAlternative::Less) < alpha {
+    while compute_fisher_pvalue_given_or_fast(a, row1, col1, n, hi, FisherAlternative::Less, precomp) < alpha {
         hi *= 2.0;
         if hi > 1e6 {
             return 0.0;
@@ -418,7 +513,7 @@ fn compute_ci_lower(a: u64, b: u64, c: u64, d: u64, alpha: f64) -> f64 {
     // Binary search
     for _ in 0..100 {
         let mid = (lo + hi) / 2.0;
-        let p = compute_fisher_pvalue_given_or(a, row1, col1, n, mid, FisherAlternative::Less);
+        let p = compute_fisher_pvalue_given_or_fast(a, row1, col1, n, mid, FisherAlternative::Less, precomp);
 
         if p < alpha {
             lo = mid;
@@ -434,8 +529,15 @@ fn compute_ci_lower(a: u64, b: u64, c: u64, d: u64, alpha: f64) -> f64 {
     lo
 }
 
-/// Find upper CI bound using binary search.
-fn compute_ci_upper(a: u64, b: u64, c: u64, d: u64, alpha: f64) -> f64 {
+/// Find upper CI bound using binary search with pre-computed log-binomial coefficients.
+fn compute_ci_upper_fast(
+    a: u64,
+    b: u64,
+    c: u64,
+    d: u64,
+    alpha: f64,
+    precomp: &PrecomputedLogBinom,
+) -> f64 {
     let n = a + b + c + d;
     let row1 = a + b;
     let col1 = a + c;
@@ -450,7 +552,7 @@ fn compute_ci_upper(a: u64, b: u64, c: u64, d: u64, alpha: f64) -> f64 {
     let mut hi = (sample_or * 10.0).max(10.0);
 
     // Expand upper search bound if needed
-    while compute_fisher_pvalue_given_or(a, row1, col1, n, hi, FisherAlternative::Greater) < alpha {
+    while compute_fisher_pvalue_given_or_fast(a, row1, col1, n, hi, FisherAlternative::Greater, precomp) < alpha {
         hi *= 2.0;
         if hi > 1e10 {
             return f64::INFINITY;
@@ -460,7 +562,7 @@ fn compute_ci_upper(a: u64, b: u64, c: u64, d: u64, alpha: f64) -> f64 {
     // Binary search
     for _ in 0..100 {
         let mid = (lo + hi) / 2.0;
-        let p = compute_fisher_pvalue_given_or(a, row1, col1, n, mid, FisherAlternative::Greater);
+        let p = compute_fisher_pvalue_given_or_fast(a, row1, col1, n, mid, FisherAlternative::Greater, precomp);
 
         if p < alpha {
             hi = mid;
@@ -476,74 +578,97 @@ fn compute_ci_upper(a: u64, b: u64, c: u64, d: u64, alpha: f64) -> f64 {
     hi
 }
 
-/// Compute Fisher's p-value under a specific null odds ratio.
+/// Compute Fisher's p-value under a specific null odds ratio, using pre-computed
+/// log-binomial coefficients for efficiency.
 ///
-/// This is used for confidence interval computation.
-/// Under non-central hypergeometric with odds ratio `or`, compute one-sided p-value.
-fn compute_fisher_pvalue_given_or(
+/// This is the hot path for CI computation. By accepting pre-computed log-binomial
+/// coefficients, we avoid redundant ln_gamma calls across binary search iterations.
+/// Only the `x * ln(or)` term changes between iterations.
+fn compute_fisher_pvalue_given_or_fast(
     observed: u64,
     row1: u64,
     col1: u64,
-    n: u64,
+    _n: u64,
     or: f64,
     alternative: FisherAlternative,
+    precomp: &PrecomputedLogBinom,
 ) -> f64 {
-    // Under null odds ratio `or`, we need non-central hypergeometric distribution
-    // For simplicity, we use a weighted sum approach
+    let x_min = precomp.x_min;
+    let x_max = precomp.x_max;
+    let support_size = (x_max - x_min + 1) as usize;
 
-    // Support of X
-    let x_min = (row1 + col1).saturating_sub(n);
-    let x_max = row1.min(col1);
+    // Compute log-probabilities using pre-computed binomial coefficients
+    // Only the OR^x term varies across binary search iterations
+    let ln_or = or.ln();
 
-    // Compute unnormalized probabilities for non-central hypergeometric
-    // P(X = x | OR) ∝ C(col1, x) * C(n - col1, row1 - x) * OR^x
-    let mut probs: Vec<f64> = Vec::with_capacity((x_max - x_min + 1) as usize);
-    let mut log_probs: Vec<f64> = Vec::with_capacity((x_max - x_min + 1) as usize);
+    // First pass: compute log-probs and find maximum for numerical stability
+    let mut log_probs: Vec<f64> = Vec::with_capacity(support_size);
+    let mut max_log = f64::NEG_INFINITY;
 
-    // Use log-probabilities for numerical stability
-    for x in x_min..=x_max {
-        let _row2 = n - row1;
-        let col2 = n - col1;
-
-        // Check validity: need x <= col1, row1-x <= col2
-        if x > col1 || row1 < x || row1 - x > col2 {
+    for (i, x) in (x_min..=x_max).enumerate() {
+        if !precomp.valid[i] {
             log_probs.push(f64::NEG_INFINITY);
             continue;
         }
-
         // log P(X=x|OR) = log(C(col1, x)) + log(C(col2, row1-x)) + x*log(OR)
-        let log_p = log_binomial(col1, x) + log_binomial(col2, row1 - x) + (x as f64) * or.ln();
+        let log_p =
+            precomp.ln_choose_col1[i] + precomp.ln_choose_col2[i] + (x as f64) * ln_or;
+        if log_p > max_log {
+            max_log = log_p;
+        }
         log_probs.push(log_p);
     }
 
-    // Convert to probabilities with normalization
-    let max_log = log_probs.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
     if max_log.is_infinite() && max_log < 0.0 {
         return 1.0; // All probabilities are 0
     }
 
-    for log_p in &log_probs {
-        probs.push((*log_p - max_log).exp());
+    // Second pass: convert to normalized probabilities in a single allocation
+    let mut probs: Vec<f64> = Vec::with_capacity(support_size);
+    let mut total = 0.0;
+    for &log_p in &log_probs {
+        let p = (log_p - max_log).exp();
+        total += p;
+        probs.push(p);
     }
 
-    let total: f64 = probs.iter().sum();
     if total == 0.0 {
         return 1.0;
     }
 
+    let inv_total = 1.0 / total;
     for p in &mut probs {
-        *p /= total;
+        *p *= inv_total;
     }
 
     // Compute p-value
     let obs_idx = (observed - x_min) as usize;
     match alternative {
-        FisherAlternative::Less => probs[..=obs_idx].iter().sum(),
-        FisherAlternative::Greater => probs[obs_idx..].iter().sum(),
+        FisherAlternative::Less => {
+            let mut sum = 0.0;
+            for i in 0..=obs_idx {
+                sum += probs[i];
+            }
+            sum
+        }
+        FisherAlternative::Greater => {
+            let mut sum = 0.0;
+            for i in obs_idx..probs.len() {
+                sum += probs[i];
+            }
+            sum
+        }
         FisherAlternative::TwoSided => {
             // Sum probs of all values as extreme
             let obs_prob = probs[obs_idx];
-            probs.iter().filter(|&&p| p <= obs_prob + 1e-10).sum()
+            let threshold = obs_prob + 1e-10;
+            let mut sum = 0.0;
+            for &p in &probs {
+                if p <= threshold {
+                    sum += p;
+                }
+            }
+            sum
         }
     }
 }

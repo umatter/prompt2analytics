@@ -107,6 +107,7 @@ pub use diagnostics::{
     run_harvey_collier,
     run_reset_test,
     run_wald_test,
+    jarque_bera_test,
     wald_test,
     wald_test_from_ols,
 };

@@ -526,50 +526,89 @@ pub fn run_diagnostics(
 /// JB = (n/6) * (S² + K²/4)
 /// where S = skewness, K = excess kurtosis
 /// JB ~ χ²(2) under the null
+///
+/// # Implementation notes
+///
+/// Uses Welford's online algorithm for numerically stable single-pass
+/// computation of mean, variance, skewness, and kurtosis simultaneously.
+/// The chi-squared(2) p-value is computed analytically as exp(-x/2)
+/// rather than through the general chi-squared distribution.
+///
+/// # References
+///
+/// - Jarque, C. M., & Bera, A. K. (1980). "Efficient tests for normality,
+///   homoscedasticity and serial independence of regression residuals".
+///   *Economics Letters*, 6(3), 255-259.
+/// - Welford, B. P. (1962). "Note on a method for calculating corrected sums
+///   of squares and products". *Technometrics*, 4(3), 419-420.
 fn compute_jarque_bera(residuals: &Array1<f64>) -> Option<TestResult> {
-    let n = residuals.len() as f64;
-    if n < 8.0 {
+    let n_usize = residuals.len();
+    if n_usize < 8 {
         return None; // Need sufficient observations
     }
+    let n = n_usize as f64;
 
-    let mean = residuals.mean()?;
+    // Single-pass computation using Welford's online algorithm for moments.
+    // We accumulate M1 (mean), M2 (sum of squared deviations), M3, and M4
+    // in a single pass with O(1) updates per element.
+    // Reference: Pebay, P. (2008). "Formulas for robust, one-pass parallel
+    // computation of covariances and arbitrary-order statistical moments".
+    // Sandia National Laboratories, SAND2008-6212.
+    let mut count: f64 = 0.0;
+    let mut m1: f64 = 0.0; // mean
+    let mut m2: f64 = 0.0; // sum of (x - mean)^2
+    let mut m3: f64 = 0.0; // sum of (x - mean)^3 (scaled)
+    let mut m4: f64 = 0.0; // sum of (x - mean)^4 (scaled)
 
-    // Compute centered moments
-    let mut m2 = 0.0;
-    let mut m3 = 0.0;
-    let mut m4 = 0.0;
-
-    for &e in residuals.iter() {
-        let dev = e - mean;
-        let dev2 = dev * dev;
-        m2 += dev2;
-        m3 += dev2 * dev;
-        m4 += dev2 * dev2;
+    for &x in residuals.iter() {
+        let n1 = count;
+        count += 1.0;
+        let delta = x - m1;
+        let delta_n = delta / count;
+        let delta_n2 = delta_n * delta_n;
+        let term1 = delta * delta_n * n1;
+        // Update M4 before M3 and M2 since it depends on their current values
+        // Pebay (2008), Eq. 1.6
+        m4 += term1 * delta_n2 * (count * count - 3.0 * count + 3.0)
+            + 6.0 * delta_n2 * m2
+            - 4.0 * delta_n * m3;
+        // Pebay (2008), Eq. 1.4
+        m3 += term1 * delta_n * (count - 2.0) - 3.0 * delta_n * m2;
+        // Welford (1962)
+        m2 += term1;
+        m1 += delta_n;
     }
 
-    m2 /= n;
-    m3 /= n;
-    m4 /= n;
-
+    // m2 is the sum of squared deviations; variance = m2 / n
     if m2 <= 0.0 {
         return None;
     }
 
-    let std = m2.sqrt();
+    // Compute skewness^2 and excess_kurtosis^2 directly to avoid sqrt.
+    // skewness = (m3 / n) / (m2 / n)^(3/2) = m3 * sqrt(n) / m2^(3/2)
+    // skewness^2 = m3^2 * n / m2^3
+    let m2_sq = m2 * m2;
+    let skewness_sq = (m3 * m3 * n) / (m2_sq * m2);
 
-    // Skewness: E[(X - μ)³] / σ³
-    let skewness = m3 / (std * std * std);
-
-    // Kurtosis: E[(X - μ)⁴] / σ⁴
-    // Excess kurtosis = kurtosis - 3 (normal has kurtosis = 3)
-    let kurtosis = m4 / (m2 * m2);
+    // kurtosis = (m4 / n) / (m2 / n)^2 = m4 * n / m2^2
+    // excess_kurtosis = kurtosis - 3
+    let kurtosis = (m4 * n) / m2_sq;
     let excess_kurtosis = kurtosis - 3.0;
 
-    // JB statistic
-    let jb = (n / 6.0) * (skewness * skewness + excess_kurtosis * excess_kurtosis / 4.0);
+    // JB = (n/6) * (S^2 + (K-3)^2 / 4)  -- Jarque & Bera (1980), Eq. 1
+    let jb = (n / 6.0) * (skewness_sq + excess_kurtosis * excess_kurtosis * 0.25);
 
-    // P-value from chi-squared(2) distribution
-    let p_value = chi_squared_p_value(jb, 2.0);
+    // P-value from chi-squared(2): the survival function of chi-squared with
+    // df=2 has the closed-form expression P(X > x) = exp(-x/2).
+    // This avoids constructing a distribution object and evaluating the
+    // general incomplete gamma function.
+    let p_value = if jb.is_nan() || jb < 0.0 {
+        f64::NAN
+    } else if jb.is_infinite() || jb > 1e10 {
+        0.0
+    } else {
+        (-0.5 * jb).exp()
+    };
 
     let significant = p_value < 0.05;
     let interpretation = if significant {
@@ -585,6 +624,18 @@ fn compute_jarque_bera(residuals: &Array1<f64>) -> Option<TestResult> {
         significant_at_05: significant,
         interpretation,
     })
+}
+
+/// Jarque-Bera test for normality of a data vector.
+///
+/// A standalone version of the Jarque-Bera test that accepts any `&[f64]`
+/// slice (e.g. residuals from OLS). Uses Welford's single-pass online
+/// algorithm for numerically stable moment computation.
+///
+/// Returns `None` if fewer than 8 observations are provided.
+pub fn jarque_bera_test(data: &[f64]) -> Option<TestResult> {
+    let arr = ndarray::Array1::from_vec(data.to_vec());
+    compute_jarque_bera(&arr)
 }
 
 /// Compute Breusch-Pagan test for heteroskedasticity.

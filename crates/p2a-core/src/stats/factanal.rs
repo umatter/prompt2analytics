@@ -13,6 +13,7 @@
 //!   *Psychometrika*, 23, 187-200.
 //! - R Documentation: https://stat.ethz.ch/R-manual/R-devel/library/stats/html/factanal.html
 
+use faer::prelude::*;
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -355,9 +356,165 @@ impl CorrCache {
     }
 }
 
+/// Extract top-k eigenpairs using iterative deflation with power iteration.
+///
+/// For k << p, this is much faster than a full eigendecomposition.
+/// Each eigenpair is found via power iteration, then deflated from the matrix.
+///
+/// # References
+/// - Golub, G. H., & Van Loan, C. F. (2013). *Matrix Computations* (4th ed.). Johns Hopkins. Ch. 8.
+fn top_k_eigenpairs(
+    mat: &Array2<f64>,
+    k: usize,
+    max_power_iter: usize,
+    tol: f64,
+) -> EconResult<(Vec<f64>, Array2<f64>, Vec<usize>)> {
+    let p = mat.nrows();
+
+    // For very small matrices or when k is close to p, full eigendecomposition is faster
+    if k * 3 >= p || p <= 8 {
+        let (eigenvalues, eigenvectors) = eig_symmetric(&mat.view())
+            .map_err(|e| EconError::Internal(format!("Eigendecomposition failed: {}", e)))?;
+
+        let mut idx_val: Vec<(usize, f64)> = eigenvalues.iter().cloned().enumerate().collect();
+        idx_val.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        let sorted_vals: Vec<f64> = idx_val.iter().take(k).map(|&(_, v)| v).collect();
+        let sorted_indices: Vec<usize> = idx_val.iter().take(k).map(|&(i, _)| i).collect();
+
+        return Ok((sorted_vals, eigenvectors, sorted_indices));
+    }
+
+    // Power iteration with deflation for top-k eigenpairs
+    let mut deflated = mat.clone();
+    let mut eigenvalues = Vec::with_capacity(k);
+    let mut eigenvectors_cols: Vec<Array1<f64>> = Vec::with_capacity(k);
+
+    for _factor in 0..k {
+        // Initialize with a random-ish vector (use alternating signs for diversity)
+        let mut v = Array1::from_elem(p, 1.0 / (p as f64).sqrt());
+        for i in 0..p {
+            if i % 2 == 1 {
+                v[i] = -v[i];
+            }
+            // Add a small perturbation based on position
+            v[i] += (i as f64 * 0.01).sin() * 0.1;
+        }
+        // Normalize
+        let norm: f64 = v.iter().map(|&x| x * x).sum::<f64>().sqrt();
+        v.mapv_inplace(|x| x / norm);
+
+        let mut eigenvalue = 0.0;
+
+        for _iter in 0..max_power_iter {
+            // w = A * v  (matrix-vector multiply)
+            let mut w = Array1::zeros(p);
+            for i in 0..p {
+                let mut sum = 0.0;
+                for j in 0..p {
+                    sum += deflated[[i, j]] * v[j];
+                }
+                w[i] = sum;
+            }
+
+            // Rayleigh quotient: eigenvalue = v' * w
+            let new_eigenvalue: f64 = v.iter().zip(w.iter()).map(|(&vi, &wi)| vi * wi).sum();
+
+            // Normalize w
+            let w_norm: f64 = w.iter().map(|&x| x * x).sum::<f64>().sqrt();
+            if w_norm < 1e-15 {
+                break;
+            }
+            w.mapv_inplace(|x| x / w_norm);
+
+            // Check convergence
+            if (new_eigenvalue - eigenvalue).abs() < tol * (1.0 + eigenvalue.abs()) {
+                v = w;
+                eigenvalue = new_eigenvalue;
+                break;
+            }
+
+            eigenvalue = new_eigenvalue;
+            v = w;
+        }
+
+        eigenvalues.push(eigenvalue);
+        eigenvectors_cols.push(v.clone());
+
+        // Deflate: A = A - eigenvalue * v * v'
+        for i in 0..p {
+            for j in 0..p {
+                deflated[[i, j]] -= eigenvalue * v[i] * v[j];
+            }
+        }
+    }
+
+    // Build eigenvector matrix (p x p) with only the k columns we found
+    // We store them in a p x p matrix for compatibility, with the k columns
+    // placed at indices 0..k
+    let mut eigvec_matrix = Array2::zeros((p, p));
+    for (j, col) in eigenvectors_cols.iter().enumerate() {
+        for i in 0..p {
+            eigvec_matrix[[i, j]] = col[i];
+        }
+    }
+
+    // Indices are simply 0..k since we stored them in order
+    let sorted_indices: Vec<usize> = (0..k).collect();
+
+    Ok((eigenvalues, eigvec_matrix, sorted_indices))
+}
+
+/// Compute log-determinant of a small k x k positive definite matrix using Cholesky.
+/// Falls back to eigendecomposition if Cholesky fails.
+fn log_det_small(m: &Array2<f64>) -> EconResult<f64> {
+    let k = m.nrows();
+
+    // Try Cholesky first (O(k^3/3) vs O(k^3) for eigendecomposition)
+    let mat_faer = ndarray_to_faer(&m.view());
+    if let Ok(chol) = mat_faer.llt(faer::Side::Lower) {
+        // log|M| = 2 * sum(log(diag(L)))
+        let l = chol.L();
+        let mut log_det = 0.0;
+        for i in 0..k {
+            let diag = l[(i, i)];
+            if diag > 0.0 {
+                log_det += diag.ln();
+            } else {
+                // Cholesky diagonal is non-positive; fall through to eigendecomposition
+                return log_det_small_via_eigen(m);
+            }
+        }
+        return Ok(2.0 * log_det);
+    }
+
+    log_det_small_via_eigen(m)
+}
+
+fn log_det_small_via_eigen(m: &Array2<f64>) -> EconResult<f64> {
+    let (eig, _) = eig_symmetric(&m.view())
+        .map_err(|e| EconError::Internal(format!("Eigendecomposition failed: {}", e)))?;
+    Ok(eig
+        .iter()
+        .map(|&x| if x > 1e-10 { x.ln() } else { -23.0 })
+        .sum())
+}
+
 /// Optimize uniquenesses using the EM algorithm.
 ///
 /// Returns (loadings, uniquenesses, converged, iterations, objective).
+///
+/// # Performance optimizations
+///
+/// 1. **Top-k eigendecomposition**: Uses power iteration with deflation to extract
+///    only the top `n_factors` eigenvalues instead of a full O(p^3) decomposition
+///    when k << p and p > 8.
+/// 2. **Reduced objective frequency**: Full objective function is only computed
+///    every 5 iterations; intermediate convergence is checked via psi change only.
+/// 3. **Pre-allocated scaled matrix**: The p x p scaled correlation matrix is
+///    allocated once and updated in-place each iteration.
+/// 4. **Cholesky log-determinant**: Uses Cholesky decomposition for the k x k
+///    matrix log-determinant instead of eigendecomposition.
 fn optimize_uniquenesses(
     corr: &ArrayView2<f64>,
     n_factors: usize,
@@ -373,12 +530,25 @@ fn optimize_uniquenesses(
     // Cache correlation matrix info that doesn't change
     let cache = CorrCache::new(corr)?;
 
+    // Optimization 3: Pre-allocate scaled correlation matrix (reused each iteration)
+    let mut scaled_corr = Array2::zeros((p, p));
+
+    // How often to compute the full objective (Optimization 2)
+    let obj_check_interval = 5;
+
     for iter in 0..config.max_iter {
         iteration = iter + 1;
 
-        // E-step: Compute reduced correlation matrix R* = R - Psi
+        // E-step: Compute reduced correlation matrix R* = Psi^{-1/2} R Psi^{-1/2}
         // Then extract loadings from eigendecomposition
-        let (new_loadings, obj) = compute_loadings_from_psi_cached(corr, psi, n_factors, &cache)?;
+        let (new_loadings, obj) = compute_loadings_optimized(
+            corr,
+            psi,
+            n_factors,
+            &cache,
+            &mut scaled_corr,
+            iter % obj_check_interval == 0, // Only compute objective periodically
+        )?;
 
         // M-step: Update uniquenesses
         // psi_i = 1 - sum(lambda_ij^2)
@@ -397,27 +567,110 @@ fn optimize_uniquenesses(
             .map(|(old, new)| (old - new).abs())
             .fold(0.0_f64, f64::max);
 
-        let obj_change = (prev_obj - obj).abs();
-
         *psi = new_psi;
         loadings = new_loadings;
-        prev_obj = obj;
 
-        if psi_change < config.tolerance && obj_change < config.tolerance {
-            converged = true;
-            break;
+        // Update objective only when we computed it
+        if let Some(obj_val) = obj {
+            let obj_change = (prev_obj - obj_val).abs();
+            prev_obj = obj_val;
+
+            if psi_change < config.tolerance && obj_change < config.tolerance {
+                converged = true;
+                break;
+            }
+        } else {
+            // On non-objective iterations, check psi convergence only as a fast check.
+            // If psi has converged, compute objective on next iteration to confirm.
+            if psi_change < config.tolerance {
+                // Compute final objective to confirm convergence
+                let final_obj = compute_objective_cached(
+                    corr, &loadings.view(), psi, &cache,
+                )?;
+                let obj_change = (prev_obj - final_obj).abs();
+                prev_obj = final_obj;
+                if obj_change < config.tolerance {
+                    converged = true;
+                    break;
+                }
+            }
         }
     }
 
     Ok((loadings, psi.clone(), converged, iteration, prev_obj))
 }
 
+/// Optimized loadings computation with in-place matrix update and top-k eigendecomposition.
+///
+/// Given uniquenesses Psi, compute loadings Lambda by:
+/// 1. Form R* = Psi^(-1/2) R Psi^(-1/2) (in-place into pre-allocated buffer)
+/// 2. Top-k eigendecompose R* (power iteration when k << p, full otherwise)
+/// 3. Lambda = Psi^(1/2) V_k (D_k - I)^(1/2) for top k eigenpairs
+///
+/// Returns (loadings, Some(objective)) or (loadings, None) if compute_obj is false.
+fn compute_loadings_optimized(
+    corr: &ArrayView2<f64>,
+    psi: &Array1<f64>,
+    n_factors: usize,
+    cache: &CorrCache,
+    scaled_corr: &mut Array2<f64>,
+    compute_obj: bool,
+) -> EconResult<(Array2<f64>, Option<f64>)> {
+    let p = corr.nrows();
+
+    // Compute Psi^(-1/2)
+    let psi_inv_sqrt: Array1<f64> = psi.iter().map(|&x| 1.0 / x.sqrt()).collect();
+
+    // Update scaled correlation matrix in-place (no allocation)
+    for i in 0..p {
+        let pis_i = psi_inv_sqrt[i];
+        for j in i..p {
+            let val = corr[[i, j]] * pis_i * psi_inv_sqrt[j];
+            scaled_corr[[i, j]] = val;
+            scaled_corr[[j, i]] = val;
+        }
+    }
+
+    // Top-k eigendecomposition (uses power iteration for large p, full for small p)
+    let (top_eigenvalues, eigenvectors, sorted_indices) =
+        top_k_eigenpairs(scaled_corr, n_factors, 200, 1e-12)?;
+
+    // Compute loadings: Lambda = Psi^(1/2) V_k (D_k - I)^(1/2)
+    // where D_k are the top k eigenvalues
+    let psi_sqrt: Array1<f64> = psi.iter().map(|&x| x.sqrt()).collect();
+    let mut loadings = Array2::zeros((p, n_factors));
+
+    for (j, &orig_idx) in sorted_indices.iter().take(n_factors).enumerate() {
+        let eigval = top_eigenvalues[j];
+        // eigenvalue must be > 1 for positive loading contribution
+        let sqrt_eigval = (eigval - 1.0).max(0.0).sqrt();
+        for i in 0..p {
+            loadings[[i, j]] = psi_sqrt[i] * eigenvectors[[i, orig_idx]] * sqrt_eigval;
+        }
+    }
+
+    // Optimization 3: Only compute objective when requested
+    let obj = if compute_obj {
+        Some(compute_objective_cached(
+            corr,
+            &loadings.view(),
+            psi,
+            cache,
+        )?)
+    } else {
+        None
+    };
+
+    Ok((loadings, obj))
+}
+
 /// Compute loadings from uniquenesses using eigendecomposition (with caching).
 ///
-/// Given uniquenesses Ψ, compute Λ by:
-/// 1. Form R* = Ψ^(-1/2) R Ψ^(-1/2) - I
+/// Given uniquenesses Psi, compute Lambda by:
+/// 1. Form R* = Psi^(-1/2) R Psi^(-1/2) - I
 /// 2. Eigendecompose R*
-/// 3. Λ = Ψ^(1/2) V D^(1/2) for top k eigenpairs
+/// 3. Lambda = Psi^(1/2) V D^(1/2) for top k eigenpairs
+#[allow(dead_code)]
 fn compute_loadings_from_psi_cached(
     corr: &ArrayView2<f64>,
     psi: &Array1<f64>,
@@ -426,35 +679,19 @@ fn compute_loadings_from_psi_cached(
 ) -> EconResult<(Array2<f64>, f64)> {
     let p = corr.nrows();
 
-    // Compute Ψ^(-1/2)
+    // Compute Psi^(-1/2)
     let psi_inv_sqrt: Array1<f64> = psi.iter().map(|&x| 1.0 / x.sqrt()).collect();
 
-    // Form scaled correlation matrix: Ψ^(-1/2) R Ψ^(-1/2)
-    // Use parallel iteration for large matrices
-    let scaled_corr = if p > 50 {
-        // Parallel computation for large matrices
-        // Compute each row in parallel
-        let rows: Vec<Vec<f64>> = (0..p)
-            .into_par_iter()
-            .map(|i| {
-                (0..p)
-                    .map(|j| corr[[i, j]] * psi_inv_sqrt[i] * psi_inv_sqrt[j])
-                    .collect()
-            })
-            .collect();
-        let flat: Vec<f64> = rows.into_iter().flatten().collect();
-        Array2::from_shape_vec((p, p), flat)
-            .map_err(|e| EconError::Internal(format!("Array reshape failed: {}", e)))?
-    } else {
-        // Sequential for small matrices (parallel overhead not worth it)
-        let mut scaled = Array2::zeros((p, p));
-        for i in 0..p {
-            for j in 0..p {
-                scaled[[i, j]] = corr[[i, j]] * psi_inv_sqrt[i] * psi_inv_sqrt[j];
-            }
+    // Form scaled correlation matrix: Psi^(-1/2) R Psi^(-1/2)
+    let mut scaled_corr = Array2::zeros((p, p));
+    for i in 0..p {
+        let pis_i = psi_inv_sqrt[i];
+        for j in i..p {
+            let val = corr[[i, j]] * pis_i * psi_inv_sqrt[j];
+            scaled_corr[[i, j]] = val;
+            scaled_corr[[j, i]] = val;
         }
-        scaled
-    };
+    }
 
     // Eigendecomposition
     let (eigenvalues, eigenvectors) = eig_symmetric(&scaled_corr.view())
@@ -464,7 +701,7 @@ fn compute_loadings_from_psi_cached(
     let mut idx_val: Vec<(usize, f64)> = eigenvalues.iter().cloned().enumerate().collect();
     idx_val.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
-    // Compute loadings: Λ = Ψ^(1/2) V_k (D_k - I)^(1/2)
+    // Compute loadings: Lambda = Psi^(1/2) V_k (D_k - I)^(1/2)
     // where D_k are the top k eigenvalues
     let psi_sqrt: Array1<f64> = psi.iter().map(|&x| x.sqrt()).collect();
     let mut loadings = Array2::zeros((p, n_factors));
@@ -485,6 +722,7 @@ fn compute_loadings_from_psi_cached(
 
 /// Compute loadings from uniquenesses using eigendecomposition.
 /// (Non-cached version for backward compatibility)
+#[allow(dead_code)]
 fn compute_loadings_from_psi(
     corr: &ArrayView2<f64>,
     psi: &Array1<f64>,
@@ -520,7 +758,13 @@ fn compute_objective_cached(
     }
 }
 
-/// Compute objective using Woodbury matrix identity (efficient for k << p).
+/// Optimized Woodbury objective computation.
+///
+/// Key optimizations vs the original:
+/// 1. Uses Cholesky for log|M| computation (O(k^3/3) vs O(k^3) eigendecomp)
+/// 2. Pre-computes Psi^{-1} Lambda to avoid redundant diagonal scaling
+/// 3. Computes tr(M^{-1} B) via D = M^{-1} C then dot with psi_inv_lambda,
+///    avoiding explicit formation of the full B matrix product
 fn compute_objective_woodbury(
     corr: &ArrayView2<f64>,
     loadings: &ArrayView2<f64>,
@@ -530,84 +774,90 @@ fn compute_objective_woodbury(
     let p = corr.nrows();
     let k = loadings.ncols();
 
-    // Compute Ψ^{-1}
+    // Compute Psi^{-1}
     let psi_inv: Array1<f64> = psi.iter().map(|&x| 1.0 / x.max(1e-10)).collect();
 
-    // Compute Λ'Ψ^{-1}Λ (k x k matrix)
-    let mut ltpil = Array2::zeros((k, k));
-    for i in 0..k {
+    // Pre-compute Psi^{-1} Lambda (p x k) -- reused multiple times
+    let mut psi_inv_lambda = Array2::zeros((p, k));
+    for i in 0..p {
+        let pi = psi_inv[i];
         for j in 0..k {
-            let mut sum = 0.0;
-            for m in 0..p {
-                sum += loadings[[m, i]] * psi_inv[m] * loadings[[m, j]];
-            }
-            ltpil[[i, j]] = sum;
+            psi_inv_lambda[[i, j]] = pi * loadings[[i, j]];
         }
     }
 
-    // M = I + Λ'Ψ^{-1}Λ
+    // Compute M = I + Lambda' Psi^{-1} Lambda (k x k matrix, symmetric)
+    let mut m_matrix = Array2::zeros((k, k));
     for i in 0..k {
-        ltpil[[i, i]] += 1.0;
+        for j in i..k {
+            let mut sum = 0.0;
+            for m in 0..p {
+                sum += psi_inv_lambda[[m, i]] * loadings[[m, j]];
+            }
+            m_matrix[[i, j]] = sum;
+            m_matrix[[j, i]] = sum;
+        }
+        m_matrix[[i, i]] += 1.0;
     }
 
-    // Compute M^{-1} using faer (more efficient for small k x k matrix)
-    let m_inv = matrix_inverse(&ltpil.view())
+    // Optimization: Use Cholesky for log|M| (k x k is small, typically 2-5)
+    let log_det_m = log_det_small(&m_matrix)?;
+
+    // Compute M^{-1}
+    let m_inv = matrix_inverse(&m_matrix.view())
         .map_err(|e| EconError::Internal(format!("Matrix inversion failed: {}", e)))?;
 
-    // log|Σ| = log|Ψ| + log|M|
+    // log|Sigma| = log|Psi| + log|M|
     let log_det_psi: f64 = psi.iter().map(|&x| x.max(1e-10).ln()).sum();
-    let (m_eig, _) = eig_symmetric(&ltpil.view())
-        .map_err(|e| EconError::Internal(format!("Eigendecomposition failed: {}", e)))?;
-    let log_det_m: f64 = m_eig
-        .iter()
-        .map(|&x| if x > 1e-10 { x.ln() } else { -23.0 })
-        .sum();
     let log_det_sigma = log_det_psi + log_det_m;
 
-    // Compute Σ^{-1}R trace using Woodbury:
-    // Σ^{-1} = Ψ^{-1} - Ψ^{-1}Λ M^{-1} Λ'Ψ^{-1}
-    //
-    // tr(Σ^{-1}R) = tr(Ψ^{-1}R) - tr(Ψ^{-1}Λ M^{-1} Λ'Ψ^{-1}R)
+    // Compute tr(Sigma^{-1} R) using Woodbury:
+    // Sigma^{-1} = Psi^{-1} - Psi^{-1} Lambda M^{-1} Lambda' Psi^{-1}
+    // tr(Sigma^{-1} R) = tr(Psi^{-1} R) - tr(M^{-1} Lambda' Psi^{-1} R Psi^{-1} Lambda)
 
-    // First term: tr(Ψ^{-1}R)
+    // First term: tr(Psi^{-1} R) = sum_i psi_inv[i] * R[i,i]
     let trace_psi_inv_r: f64 = (0..p).map(|i| psi_inv[i] * corr[[i, i]]).sum();
 
-    // Second term: tr(Ψ^{-1}Λ M^{-1} Λ'Ψ^{-1}R)
-    // = tr(M^{-1} Λ'Ψ^{-1}R Ψ^{-1}Λ)  [cyclic property of trace]
-
-    // Compute Λ'Ψ^{-1}R (k x p)
-    let mut lt_psi_inv_r = Array2::zeros((k, p));
+    // Fused computation of trace correction:
+    // B = Lambda' Psi^{-1} R Psi^{-1} Lambda  (k x k)
+    // tr(M^{-1} B) = sum_{i,j} M_inv[i,j] * B[j,i]
+    //
+    // Step 1: C = psi_inv_lambda' * R  (k x p)
+    let mut c_matrix = Array2::zeros((k, p));
     for i in 0..k {
         for j in 0..p {
             let mut sum = 0.0;
             for m in 0..p {
-                sum += loadings[[m, i]] * psi_inv[m] * corr[[m, j]];
+                sum += psi_inv_lambda[[m, i]] * corr[[m, j]];
             }
-            lt_psi_inv_r[[i, j]] = sum;
+            c_matrix[[i, j]] = sum;
         }
     }
 
-    // Compute (Λ'Ψ^{-1}R)(Ψ^{-1}Λ) = k x k matrix
-    let mut lt_psi_inv_r_psi_inv_l = Array2::zeros((k, k));
+    // Step 2: D = M_inv * C  (k x p)
+    let mut d_matrix = Array2::zeros((k, p));
     for i in 0..k {
-        for j in 0..k {
+        for j in 0..p {
             let mut sum = 0.0;
-            for m in 0..p {
-                sum += lt_psi_inv_r[[i, m]] * psi_inv[m] * loadings[[m, j]];
+            for l in 0..k {
+                sum += m_inv[[i, l]] * c_matrix[[l, j]];
             }
-            lt_psi_inv_r_psi_inv_l[[i, j]] = sum;
+            d_matrix[[i, j]] = sum;
         }
     }
 
-    // tr(M^{-1} * (Λ'Ψ^{-1}R Ψ^{-1}Λ))
-    let m_inv_times_b = matmul(&m_inv.view(), &lt_psi_inv_r_psi_inv_l.view())
-        .map_err(|e| EconError::Internal(format!("Matrix multiplication failed: {}", e)))?;
-    let trace_correction: f64 = (0..k).map(|i| m_inv_times_b[[i, i]]).sum();
+    // Step 3: trace_correction = sum_m sum_i psi_inv_lambda[m,i] * D[i,m]
+    // This equals tr(M^{-1} B) without forming B explicitly
+    let mut trace_correction = 0.0;
+    for m in 0..p {
+        for i in 0..k {
+            trace_correction += psi_inv_lambda[[m, i]] * d_matrix[[i, m]];
+        }
+    }
 
     let trace = trace_psi_inv_r - trace_correction;
 
-    // f = log|Σ| + tr(Σ^{-1} R) - log|R| - p
-    // Use cached log|R|
+    // f = log|Sigma| + tr(Sigma^{-1} R) - log|R| - p
     let obj = log_det_sigma + trace - cache.log_det_r - p as f64;
 
     Ok(obj.max(0.0))

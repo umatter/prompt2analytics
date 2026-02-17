@@ -152,8 +152,9 @@ pub fn isoreg(x: &[f64], y: &[f64]) -> Result<IsoregResult, String> {
 
 /// Pool Adjacent Violators Algorithm (PAVA) for isotonic regression.
 ///
-/// This implements the weighted PAVA that produces a monotonically
-/// non-decreasing sequence of fitted values.
+/// Uses an O(n) single-pass stack-based approach: process each element
+/// left to right, pushing onto a stack and merging with the previous
+/// block whenever the monotonicity constraint is violated.
 fn pava(y: &[f64]) -> Vec<f64> {
     let n = y.len();
     if n == 0 {
@@ -163,55 +164,46 @@ fn pava(y: &[f64]) -> Vec<f64> {
         return vec![y[0]];
     }
 
-    // Block representation: each block has (sum of values, count)
-    // Initially each observation is its own block
-    let mut block_sum: Vec<f64> = y.to_vec();
-    let mut block_count: Vec<usize> = vec![1; n];
-    let mut block_start: Vec<usize> = (0..n).collect();
-    let mut n_blocks = n;
+    // Stack of blocks: (sum, count, start_index)
+    // Pre-allocate for worst case (no pooling)
+    let mut stack_sum = Vec::with_capacity(n);
+    let mut stack_cnt = Vec::with_capacity(n);
+    let mut stack_start = Vec::with_capacity(n);
 
-    // Keep pooling adjacent violators until no violations exist
-    loop {
-        let mut pooled = false;
+    for i in 0..n {
+        // Push new singleton block
+        stack_sum.push(y[i]);
+        stack_cnt.push(1usize);
+        stack_start.push(i);
 
-        // Scan from left to right
-        let mut i = 0;
-        while i < n_blocks - 1 {
-            let mean_i = block_sum[i] / block_count[i] as f64;
-            let mean_j = block_sum[i + 1] / block_count[i + 1] as f64;
+        // Merge back while top-of-stack violates monotonicity with previous
+        while stack_sum.len() >= 2 {
+            let top = stack_sum.len() - 1;
+            let prev = top - 1;
+            let mean_prev = stack_sum[prev] / stack_cnt[prev] as f64;
+            let mean_top = stack_sum[top] / stack_cnt[top] as f64;
 
-            if mean_i > mean_j {
-                // Violation: pool blocks i and i+1
-                block_sum[i] += block_sum[i + 1];
-                block_count[i] += block_count[i + 1];
-
-                // Remove block i+1 by shifting
-                for k in (i + 1)..(n_blocks - 1) {
-                    block_sum[k] = block_sum[k + 1];
-                    block_count[k] = block_count[k + 1];
-                    block_start[k] = block_start[k + 1];
-                }
-                n_blocks -= 1;
-                pooled = true;
-                // Don't increment i, check this block again
+            if mean_prev > mean_top {
+                // Pool: merge top into prev
+                stack_sum[prev] += stack_sum[top];
+                stack_cnt[prev] += stack_cnt[top];
+                stack_sum.pop();
+                stack_cnt.pop();
+                stack_start.pop();
             } else {
-                i += 1;
+                break;
             }
-        }
-
-        if !pooled {
-            break;
         }
     }
 
-    // Reconstruct fitted values from blocks
+    // Reconstruct fitted values from stack
     let mut yf = vec![0.0; n];
-    let mut idx = 0;
-    for b in 0..n_blocks {
-        let mean = block_sum[b] / block_count[b] as f64;
-        for _ in 0..block_count[b] {
-            yf[idx] = mean;
-            idx += 1;
+    for b in 0..stack_sum.len() {
+        let mean = stack_sum[b] / stack_cnt[b] as f64;
+        let start = stack_start[b];
+        let end = start + stack_cnt[b];
+        for v in &mut yf[start..end] {
+            *v = mean;
         }
     }
 

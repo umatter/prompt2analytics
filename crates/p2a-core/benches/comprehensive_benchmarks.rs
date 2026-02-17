@@ -14,11 +14,15 @@ use bench_utils::{
     BenchConfig, BenchmarkResult, print_header, print_result, run_benchmark, save_results,
 };
 use p2a_core::regression::CovarianceType;
+use p2a_core::spatial::{Neighbors, SpatialWeights, WeightStyle};
+use p2a_core::stats::{RotationMethod, ScoresMethod, factanal, fisher_exact_test, isoreg};
+use p2a_core::regression::jarque_bera_test;
 use p2a_core::{
-    CostFunction, DRMethod, Dataset, DoublyRobustConfig, Estimand, Linkage, PredictorSpec,
-    SynthConfig, hierarchical, kmeans, pca, random_forest, run_arima, run_changepoint,
-    run_doubly_robust, run_fixed_effects, run_hdfe, run_loess, run_logit, run_mstl, run_ols,
-    run_probit, run_random_effects, run_synthetic_control,
+    CostFunction, DRMethod, Dataset, DoublyRobustConfig, Estimand, FisherAlternative, Linkage,
+    PredictorSpec, SarConfig, SemConfig, SynthConfig, dbscan, hierarchical, kmeans, pca,
+    random_forest, run_arima, run_changepoint, run_doubly_robust, run_fixed_effects, run_hdfe,
+    run_loess, run_logit, run_mstl, run_ols, run_probit, run_random_effects, run_sar_dataset,
+    run_sem_dataset, run_synthetic_control,
 };
 use polars::prelude::*;
 use rand::Rng;
@@ -437,10 +441,177 @@ fn main() {
     }
 
     // ============================================
+    // Round 3: Optimized Methods (SAR, SEM, DBSCAN, Factor Analysis, Fisher, Isotonic, JB)
+    // ============================================
+    println!("\n--- Round 3 Optimized Methods ---");
+    print_header();
+
+    // --- Spatial SAR/SEM (Ord 1975 optimization) ---
+    for n_side in [10, 20, 32] {
+        let n = n_side * n_side;
+        let mut rng = ChaCha8Rng::seed_from_u64(42);
+
+        let mut coords = Vec::with_capacity(n);
+        for y_coord in 0..n_side {
+            for x_coord in 0..n_side {
+                coords.push((x_coord as f64, y_coord as f64));
+            }
+        }
+
+        let nb = Neighbors::from_knn(&coords, 4);
+        let mut listw = SpatialWeights::from_neighbors(&nb, WeightStyle::RowStd);
+        let _ = listw.eigenvalues(); // Pre-compute
+
+        let x_vals: Vec<f64> = (0..n).map(|_| rng.gen_range(-1.0..1.0)).collect();
+        let y_vals: Vec<f64> = (0..n)
+            .map(|i| {
+                let (cx, cy) = coords[i];
+                2.0 + 0.7 * x_vals[i] + 0.3 * (cx + cy) / (n_side as f64) + rng.gen_range(-0.25..0.25)
+            })
+            .collect();
+
+        let df = df! { "y" => &y_vals, "x" => &x_vals }.expect("spatial data");
+        let dataset = Dataset::new(df);
+        let sar_config = SarConfig { compute_impacts: false, ..Default::default() };
+        let sem_config = SemConfig::default();
+
+        let listw_clone = listw.clone();
+        let result = run_benchmark("SAR", "lagsarlm", n, &config, || {
+            let mut lw = listw_clone.clone();
+            run_sar_dataset(&dataset, "y", &["x"], &mut lw, sar_config.clone())
+        });
+        print_result(&result);
+        results.push(result);
+
+        let listw_clone = listw.clone();
+        let result = run_benchmark("SEM", "errorsarlm", n, &config, || {
+            let mut lw = listw_clone.clone();
+            run_sem_dataset(&dataset, "y", &["x"], &mut lw, sem_config.clone())
+        });
+        print_result(&result);
+        results.push(result);
+    }
+
+    // --- DBSCAN (small-n condensed distance matrix optimization) ---
+    for n in [100, 1000, 5000] {
+        let data = generate_cluster_data(n, 5, 42);
+        let result = run_benchmark("DBSCAN", "eps=1.5", n, &config, || {
+            dbscan(data.view(), 1.5, 5)
+        });
+        print_result(&result);
+        results.push(result);
+    }
+
+    // --- Factor Analysis (top-k eigenpairs, Cholesky log-det) ---
+    for n in [100, 500, 1000] {
+        let mut rng = ChaCha8Rng::seed_from_u64(42);
+        let p = 10; // 10 variables, 3 factors
+        let k = 3;
+        let mut data = ndarray::Array2::zeros((n, p));
+        for i in 0..n {
+            let f1: f64 = rng.gen_range(-2.0..2.0);
+            let f2: f64 = rng.gen_range(-2.0..2.0);
+            let f3: f64 = rng.gen_range(-2.0..2.0);
+            // Variables 1-3 load on factor 1
+            data[[i, 0]] = 0.8 * f1 + rng.gen_range(-0.3..0.3);
+            data[[i, 1]] = 0.7 * f1 + rng.gen_range(-0.4..0.4);
+            data[[i, 2]] = 0.75 * f1 + rng.gen_range(-0.35..0.35);
+            // Variables 4-6 load on factor 2
+            data[[i, 3]] = 0.8 * f2 + rng.gen_range(-0.3..0.3);
+            data[[i, 4]] = 0.7 * f2 + rng.gen_range(-0.4..0.4);
+            data[[i, 5]] = 0.75 * f2 + rng.gen_range(-0.35..0.35);
+            // Variables 7-9 load on factor 3
+            data[[i, 6]] = 0.8 * f3 + rng.gen_range(-0.3..0.3);
+            data[[i, 7]] = 0.7 * f3 + rng.gen_range(-0.4..0.4);
+            data[[i, 8]] = 0.75 * f3 + rng.gen_range(-0.35..0.35);
+            // Variable 10: noise
+            data[[i, 9]] = rng.gen_range(-1.0..1.0);
+        }
+
+        let result = run_benchmark("factanal", "none", n, &config, || {
+            factanal(&data.view(), k, RotationMethod::None, ScoresMethod::None)
+        });
+        print_result(&result);
+        results.push(result);
+
+        let result = run_benchmark("factanal", "varimax", n, &config, || {
+            factanal(&data.view(), k, RotationMethod::Varimax, ScoresMethod::None)
+        });
+        print_result(&result);
+        results.push(result);
+    }
+
+    // --- Fisher Exact Test (pre-computed PMF, early termination) ---
+    for n in [20, 100, 500, 1000] {
+        // Create a 2x2 contingency table with total ~n
+        let a = (n as f64 * 0.3) as f64;
+        let b = (n as f64 * 0.2) as f64;
+        let c = (n as f64 * 0.15) as f64;
+        let d = n as f64 - a - b - c;
+        let table = [[a, b], [c, d]];
+
+        let result = run_benchmark("Fisher", "twosided", n, &config, || {
+            fisher_exact_test(&table, FisherAlternative::TwoSided, None)
+        });
+        print_result(&result);
+        results.push(result);
+    }
+
+    // --- Fisher Exact Test with CI ---
+    for n in [20, 100, 500, 1000] {
+        let a = (n as f64 * 0.3) as f64;
+        let b = (n as f64 * 0.2) as f64;
+        let c = (n as f64 * 0.15) as f64;
+        let d = n as f64 - a - b - c;
+        let table = [[a, b], [c, d]];
+
+        let result = run_benchmark("Fisher", "with_ci", n, &config, || {
+            fisher_exact_test(&table, FisherAlternative::TwoSided, Some(0.95))
+        });
+        print_result(&result);
+        results.push(result);
+    }
+
+    // --- Isotonic Regression (O(n) stack-based PAVA) ---
+    for n in [100, 1000, 10000] {
+        let mut rng = ChaCha8Rng::seed_from_u64(42);
+        let x: Vec<f64> = (0..n).map(|i| i as f64 / n as f64).collect();
+        let y: Vec<f64> = x.iter().map(|&xi| xi * 2.0 + rng.gen_range(-0.5..0.5)).collect();
+
+        let result = run_benchmark("Isotonic_Regression", "PAVA", n, &config, || {
+            isoreg(&x, &y)
+        });
+        print_result(&result);
+        results.push(result);
+    }
+
+    // --- Jarque-Bera (standalone, matching R's jarque.bera.test) ---
+    for n in [100, 1000, 10000] {
+        let dataset = generate_regression_data(n, 5, 42);
+        let x_cols = vec!["x1", "x2", "x3", "x4", "x5"];
+        // Pre-compute OLS residuals (not timed — R's jarque.bera.test also takes a vector)
+        let ols_result = run_ols(&dataset, "y", &x_cols, true, CovarianceType::Standard).unwrap();
+        use p2a_core::traits::LinearEstimator;
+        let residuals: Vec<f64> = ols_result.residuals().to_vec();
+
+        let result = run_benchmark("Jarque_Bera", "standalone", n, &config, || {
+            jarque_bera_test(&residuals)
+        });
+        print_result(&result);
+        results.push(result);
+    }
+
+    // ============================================
     // Save Results
     // ============================================
     let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S");
     let results_path = format!("performance/results/rust_comprehensive_{}.json", timestamp);
+
+    // Save to both performance/results/ and r_comparison/results/ for merge pipeline
+    let r_comparison_path = format!(
+        "performance/comparisons/r_comparison/results/rust_comprehensive_{}.json",
+        timestamp
+    );
 
     // Try to save, but don't fail if directory doesn't exist
     if let Err(e) = save_results(&results, &results_path) {
@@ -452,6 +623,13 @@ fn main() {
         }
     } else {
         println!("\nResults saved to: {}", results_path);
+    }
+
+    // Also save to r_comparison results directory for merge pipeline
+    if let Err(e) = save_results(&results, &r_comparison_path) {
+        eprintln!("Note: Could not save to r_comparison: {}", e);
+    } else {
+        println!("Results also saved to: {}", r_comparison_path);
     }
 
     // Print summary

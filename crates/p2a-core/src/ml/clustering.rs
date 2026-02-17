@@ -283,24 +283,188 @@ fn kmeans_single(
 /// Above this threshold, the curse of dimensionality makes KDTree inefficient.
 const KDTREE_MAX_DIMS: usize = 20;
 
+/// Threshold below which we use the small-n optimized path (condensed distance matrix,
+/// no KD-tree, no rayon) to avoid overhead that dominates for small datasets.
+const DBSCAN_SMALL_N_THRESHOLD: usize = 500;
+
 /// Run DBSCAN clustering.
 ///
-/// Uses KD-tree acceleration for O(n log n) average complexity when dimensionality ≤ 20.
-/// Falls back to O(n²) naive algorithm for higher dimensions.
+/// Uses three strategies depending on data size and dimensionality:
+/// - **n < 500**: O(n^2) with pre-computed condensed distance matrix (no KD-tree, no rayon).
+///   For small datasets the overhead of KD-tree construction and thread pool startup
+///   exceeds the cost of a brute-force pairwise distance scan.
+/// - **n >= 500, d <= 20**: KD-tree acceleration with parallel neighborhood queries via rayon.
+/// - **d > 20**: O(n^2) naive with parallel pairwise distance computation.
 ///
 /// # Arguments
 /// * `data` - Input data matrix (n_samples x n_features)
 /// * `eps` - Maximum distance between two samples for neighborhood
 /// * `min_samples` - Minimum samples in neighborhood for core point
 pub fn dbscan(data: ArrayView2<f64>, eps: f64, min_samples: usize) -> EconResult<DBSCANResult> {
+    let n_samples = data.nrows();
     let n_features = data.ncols();
 
-    // Use KD-tree for low-dimensional data, naive for high-dimensional
+    // Small datasets: use condensed distance matrix, no KD-tree, no rayon
+    if n_samples < DBSCAN_SMALL_N_THRESHOLD {
+        return dbscan_small(data, eps, min_samples);
+    }
+
+    // Large datasets: use KD-tree for low-dimensional data, naive for high-dimensional
     if n_features <= KDTREE_MAX_DIMS {
         dbscan_kdtree(data, eps, min_samples)
     } else {
         dbscan_naive(data, eps, min_samples)
     }
+}
+
+/// Run DBSCAN using a pre-computed condensed distance matrix.
+///
+/// Optimized for small datasets (n < 500) where KD-tree construction overhead
+/// and rayon thread pool startup dominate the actual computation. Pre-computes
+/// all pairwise distances into a flat condensed matrix (same layout as the
+/// hierarchical clustering code), then scans the array for each neighborhood query.
+///
+/// Uses the condensed index formula: `idx = i * (2*n - i - 1) / 2 + j - i - 1`
+/// for i < j, which is equivalent to the `condensed_index` helper used by
+/// hierarchical clustering.
+fn dbscan_small(data: ArrayView2<f64>, eps: f64, min_samples: usize) -> EconResult<DBSCANResult> {
+    let n = data.nrows();
+
+    if eps <= 0.0 {
+        return Err(EconError::InvalidSpecification {
+            message: "eps must be positive".to_string(),
+        });
+    }
+    if min_samples == 0 {
+        return Err(EconError::InvalidSpecification {
+            message: "min_samples must be at least 1".to_string(),
+        });
+    }
+
+    if n == 0 {
+        return Ok(DBSCANResult {
+            labels: Vec::new(),
+            n_clusters: 0,
+            n_noise: 0,
+            core_sample_indices: Vec::new(),
+        });
+    }
+
+    // Single point: it is a core point only if min_samples <= 1
+    if n == 1 {
+        let is_core = min_samples <= 1;
+        return Ok(DBSCANResult {
+            labels: vec![if is_core { 0 } else { -1 }],
+            n_clusters: if is_core { 1 } else { 0 },
+            n_noise: if is_core { 0 } else { 1 },
+            core_sample_indices: if is_core { vec![0] } else { Vec::new() },
+        });
+    }
+
+    let eps_sq = eps * eps;
+
+    // Pre-compute condensed distance matrix (squared Euclidean distances).
+    // Layout: for i < j, index = i * (2*n - i - 1) / 2 + j - i - 1
+    let condensed_len = n * (n - 1) / 2;
+    let mut dist_sq = vec![0.0f64; condensed_len];
+    for i in 0..n {
+        let row_i = data.row(i);
+        // Use the condensed_index formula inline for i < j
+        let base = i * (2 * n - i - 1) / 2;
+        for j in (i + 1)..n {
+            let idx = base + j - i - 1;
+            dist_sq[idx] = euclidean_distance_squared(&row_i, &data.row(j));
+        }
+    }
+
+    // Count neighbors for each point to identify core points.
+    // neighbor_count[i] = number of points within eps of point i (including itself).
+    let mut neighbor_count = vec![1usize; n]; // each point is its own neighbor
+    for i in 0..n {
+        let base = i * (2 * n - i - 1) / 2;
+        for j in (i + 1)..n {
+            let idx = base + j - i - 1;
+            if dist_sq[idx] <= eps_sq {
+                neighbor_count[i] += 1;
+                neighbor_count[j] += 1;
+            }
+        }
+    }
+
+    // Identify core points using a flat bool array (no HashSet overhead)
+    let mut is_core = vec![false; n];
+    let mut core_sample_indices = Vec::new();
+    for i in 0..n {
+        if neighbor_count[i] >= min_samples {
+            is_core[i] = true;
+            core_sample_indices.push(i);
+        }
+    }
+
+    // Initialize labels (-1 = unvisited/noise)
+    let mut labels = vec![-1i32; n];
+    let mut current_cluster = 0i32;
+
+    // DFS expansion from core points.
+    // We re-scan the condensed matrix for neighbors during expansion rather than
+    // storing full neighbor lists, trading a small amount of redundant scanning
+    // for lower memory usage.
+    let mut stack: Vec<usize> = Vec::with_capacity(n);
+
+    for &core_idx in &core_sample_indices {
+        if labels[core_idx] != -1 {
+            continue;
+        }
+
+        // Start new cluster
+        labels[core_idx] = current_cluster;
+        stack.clear();
+        stack.push(core_idx);
+
+        while let Some(idx) = stack.pop() {
+            // Find neighbors of idx by scanning the condensed matrix.
+            // For each j != idx, check if dist_sq(idx, j) <= eps_sq.
+            //
+            // We split into two ranges to use the condensed index formula:
+            //   - j < idx: condensed index = j * (2*n - j - 1) / 2 + idx - j - 1
+            //   - j > idx: condensed index = idx * (2*n - idx - 1) / 2 + j - idx - 1
+
+            // Range j < idx
+            for j in 0..idx {
+                let cidx = j * (2 * n - j - 1) / 2 + idx - j - 1;
+                if dist_sq[cidx] <= eps_sq && labels[j] == -1 {
+                    labels[j] = current_cluster;
+                    if is_core[j] {
+                        stack.push(j);
+                    }
+                }
+            }
+
+            // Range j > idx
+            let base = idx * (2 * n - idx - 1) / 2;
+            for j in (idx + 1)..n {
+                let cidx = base + j - idx - 1;
+                if dist_sq[cidx] <= eps_sq && labels[j] == -1 {
+                    labels[j] = current_cluster;
+                    if is_core[j] {
+                        stack.push(j);
+                    }
+                }
+            }
+        }
+
+        current_cluster += 1;
+    }
+
+    let n_clusters = current_cluster as usize;
+    let n_noise = labels.iter().filter(|&&l| l == -1).count();
+
+    Ok(DBSCANResult {
+        labels,
+        n_clusters,
+        n_noise,
+        core_sample_indices,
+    })
 }
 
 /// Run DBSCAN using KD-tree for efficient neighborhood queries.

@@ -1250,29 +1250,47 @@ fn optimize_rho_sar(
     // Constant term in log-likelihood
     let const_term = 0.5 * n_f64 * (1.0 + (2.0 * std::f64::consts::PI).ln());
 
+    // === Ord (1975) optimization ===
+    // Since y_tilde = y - rho*Wy, and beta = (X'X)^{-1} X'y_tilde,
+    // beta is linear in rho: beta(rho) = beta_y - rho * beta_wy
+    // where beta_y = (X'X)^{-1} X'y, beta_wy = (X'X)^{-1} X'Wy
+    //
+    // Residuals: e(rho) = y_tilde - X*beta = e_y - rho * e_wy
+    // where e_y = y - X*beta_y, e_wy = Wy - X*beta_wy
+    //
+    // RSS(rho) = ||e_y - rho * e_wy||^2 = ey_ey - 2*rho*ey_ewy + rho^2 * ewy_ewy
+    // This is a quadratic in rho, requiring only 3 pre-computed dot products!
+
+    let xty_y = xty(&x.view(), y);
+    let beta_y = xtx_inv.dot(&xty_y);
+    let fitted_y = x.dot(&beta_y);
+    let e_y: Array1<f64> = y - &fitted_y;
+
+    let xty_wy = xty(&x.view(), wy);
+    let beta_wy = xtx_inv.dot(&xty_wy);
+    let fitted_wy = x.dot(&beta_wy);
+    let e_wy: Array1<f64> = wy - &fitted_wy;
+
+    // Pre-compute the three dot products for the RSS quadratic
+    let ey_ey: f64 = e_y.iter().map(|&r| r * r).sum();
+    let ey_ewy: f64 = e_y.iter().zip(e_wy.iter()).map(|(&a, &b)| a * b).sum();
+    let ewy_ewy: f64 = e_wy.iter().map(|&r| r * r).sum();
+
     let mut a = rho_min;
     let mut b = rho_max;
 
     // Concentrated log-likelihood as function of rho
-    // All matrix operations except y_tilde are pre-computed
+    // Now only requires O(p) work for the log-determinant (no matrix ops)
     let neg_ll = |rho: f64| -> f64 {
-        // y_tilde = y - ρ*Wy (this is the only thing that changes with rho)
-        let y_tilde = y - rho * wy;
-
-        // β = (X'X)^{-1} X'y_tilde
-        let xty_vec = xty(&x.view(), &y_tilde);
-        let beta = xtx_inv.dot(&xty_vec);
-
-        // Compute RSS
-        let residuals = &y_tilde - &x.dot(&beta);
-        let rss: f64 = residuals.iter().map(|&r| r * r).sum();
+        // RSS(rho) = ey_ey - 2*rho*ey_ewy + rho^2 * ewy_ewy
+        let rss = ey_ey - 2.0 * rho * ey_ewy + rho * rho * ewy_ewy;
         let sigma2 = rss / n_f64;
 
         if sigma2 <= 0.0 {
             return f64::INFINITY;
         }
 
-        // Log determinant using pre-computed eigenvalues
+        // Log determinant using pre-computed eigenvalues: O(p) scalar ops
         let log_det: f64 = eigenvalues
             .iter()
             .map(|&lambda| (1.0 - rho * lambda).ln())
@@ -1282,7 +1300,7 @@ fn optimize_rho_sar(
         const_term + 0.5 * n_f64 * sigma2.ln() - log_det
     };
 
-    // Golden section search
+    // Golden section search (each iteration is now O(p) instead of O(n*k))
     let mut c = b - (b - a) / phi;
     let mut d = a + (b - a) / phi;
     let mut fc = neg_ll(c);
@@ -1379,34 +1397,63 @@ fn optimize_lambda_sem(
     // Constant term in log-likelihood
     let const_term = 0.5 * n_f64 * (1.0 + (2.0 * std::f64::consts::PI).ln());
 
+    // === Pre-compute quadratic coefficients for SEM ===
+    // X*(λ) = X - λ*WX, y*(λ) = y - λ*Wy
+    //
+    // X*'X* = X'X - λ*(X'WX + WX'X) + λ²*WX'WX  [k×k matrices]
+    // X*'y* = X'y - λ*(X'Wy + WX'y) + λ²*WX'Wy   [k×1 vectors]
+    //
+    // Pre-computing these eliminates all O(n*k) operations from the inner loop.
+    // Only k×k matrix operations remain (trivial for typical k=2-5).
+
+    let xx = xtx(&x.view());                          // X'X [k×k]
+    let xwx = x.t().dot(&wx);                         // X'WX [k×k]
+    let wxwx = wx.t().dot(&wx);                       // WX'WX [k×k]
+    let xwx_plus_wxwx_sym = &xwx + &xwx.t();         // X'WX + WX'X [k×k, symmetric term]
+
+    let xy = xty(&x.view(), y);                       // X'y [k×1]
+    let xwy = xty(&x.view(), &wy);                    // X'Wy [k×1]
+    let wxy = xty(&wx.view(), y);                      // WX'y [k×1]
+    let xwy_plus_wxy = &xwy + &wxy;                   // X'Wy + WX'y [k×1]
+    let wxwy = xty(&wx.view(), &wy);                   // WX'Wy [k×1]
+
+    // For RSS computation, pre-compute dot products:
+    // ||y*||² = y'y - 2λ*y'Wy + λ²*Wy'Wy
+    let yy: f64 = y.iter().map(|&v| v * v).sum();
+    let ywy: f64 = y.iter().zip(wy.iter()).map(|(&a, &b)| a * b).sum();
+    let wywy: f64 = wy.iter().map(|&v| v * v).sum();
+
     let mut a = lambda_min;
     let mut b = lambda_max;
 
     let neg_ll = |lambda: f64| -> f64 {
-        // y* = y - λ*Wy (using pre-computed Wy)
-        let y_star = y - lambda * &wy;
+        let l2 = lambda * lambda;
 
-        // X* = X - λ*WX (using pre-computed WX)
-        let x_star = x - lambda * &wx;
+        // X*'X* = XX - λ*(X'WX + WX'X) + λ²*WX'WX
+        let xtx_star = &xx - lambda * &xwx_plus_wxwx_sym + l2 * &wxwx;
 
-        // Now compute β = (X*'X*)^{-1} X*'y*
-        let xtx_mat = xtx(&x_star.view());
-        let xtx_inv = match matrix_inverse(&xtx_mat.view()) {
+        // X*'y* = X'y - λ*(X'Wy + WX'y) + λ²*WX'Wy
+        let xty_star = &xy - lambda * &xwy_plus_wxy + l2 * &wxwy;
+
+        // Solve k×k system for β (tiny for typical k=2-5)
+        let xtx_inv = match matrix_inverse(&xtx_star.view()) {
             Ok(inv) => inv,
             Err(_) => return f64::INFINITY,
         };
-        let xty_vec = xty(&x_star.view(), &y_star);
-        let beta = xtx_inv.dot(&xty_vec);
+        let beta = xtx_inv.dot(&xty_star);
 
-        let residuals = &y_star - &x_star.dot(&beta);
-        let rss: f64 = residuals.iter().map(|&r| r * r).sum();
+        // RSS = ||y*||² - 2*β'*(X*'y*) + β'*(X*'X*)*β
+        //     = ||y*||² - β'*(X*'y*)  [since β = (X*'X*)^{-1}(X*'y*)]
+        let y_star_sq = yy - 2.0 * lambda * ywy + l2 * wywy;
+        let beta_xty: f64 = beta.iter().zip(xty_star.iter()).map(|(&b, &x)| b * x).sum();
+        let rss = y_star_sq - beta_xty;
         let sigma2 = rss / n_f64;
 
         if sigma2 <= 0.0 {
             return f64::INFINITY;
         }
 
-        // Log determinant using pre-computed eigenvalues
+        // Log determinant using pre-computed eigenvalues: O(p) scalar ops
         let log_det: f64 = eigenvalues
             .iter()
             .map(|&lambda_eig| (1.0 - lambda * lambda_eig).ln())
@@ -1415,7 +1462,7 @@ fn optimize_lambda_sem(
         const_term + 0.5 * n_f64 * sigma2.ln() - log_det
     };
 
-    // Golden section search with cached function values
+    // Golden section search (each iteration is now O(k³ + p) instead of O(n*k))
     let mut c = b - (b - a) / phi;
     let mut d = a + (b - a) / phi;
     let mut fc = neg_ll(c);

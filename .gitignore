@@ -89,3 +89,18 @@ validation/reports/
 
 # Generated output reports
 reports/
+
+# One-off generated reports
+new_code_review_report.md
+
+# LaTeX build output
+paper/build/
+
+# R auto-generated plot device output
+performance/comparisons/r_comparison/Rplots.pdf
+
+# Timestamped raw benchmark results (keep only merged comparison CSVs)
+performance/comparisons/r_comparison/results/r_*_2026*.csv
+performance/comparisons/r_comparison/results/rust_comprehensive_2026*.json
+performance/comparisons/r_comparison/results/figures/
+performance/results/
