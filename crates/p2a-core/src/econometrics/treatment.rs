@@ -18,6 +18,7 @@
 use ndarray::{Array1, Array2};
 use rand::SeedableRng;
 use rand::prelude::*;
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -530,34 +531,41 @@ pub fn run_ipw_treatment(
         ));
     }
 
-    // Bootstrap for standard errors
+    // Bootstrap for standard errors using cached propensity scores (parallel via rayon)
+    // Pre-generate all bootstrap index sets sequentially for reproducibility,
+    // then compute bootstrap effects in parallel using cached propensity scores.
     let mut rng: StdRng = match config.seed {
         Some(s) => StdRng::seed_from_u64(s),
         None => StdRng::from_entropy(),
     };
 
-    let mut boot_effects: Vec<f64> = Vec::with_capacity(config.bootstrap);
+    let boot_indices: Vec<Vec<usize>> = (0..config.bootstrap)
+        .map(|_| (0..n_trim).map(|_| rng.gen_range(0..n_trim)).collect())
+        .collect();
 
-    for _ in 0..config.bootstrap {
-        // Resample with replacement
-        let indices: Vec<usize> = (0..n_trim).map(|_| rng.gen_range(0..n_trim)).collect();
+    // Parallel bootstrap: reuse cached propensity scores instead of re-fitting
+    let boot_effects: Vec<f64> = boot_indices
+        .into_par_iter()
+        .filter_map(|indices| {
+            let y_boot: Array1<f64> = indices.iter().map(|&i| y_trim[i]).collect();
+            let d_boot: Array1<f64> = indices.iter().map(|&i| d_trim[i]).collect();
+            let ps_boot: Array1<f64> = indices.iter().map(|&i| ps_trim[i]).collect();
 
-        let y_boot: Array1<f64> = indices.iter().map(|&i| y_trim[i]).collect();
-        let d_boot: Array1<f64> = indices.iter().map(|&i| d_trim[i]).collect();
-        let ps_boot: Array1<f64> = indices.iter().map(|&i| ps_trim[i]).collect();
+            let effect_boot = compute_ipw_effect(
+                &y_boot,
+                &d_boot,
+                &ps_boot,
+                config.estimand,
+                config.normalized,
+            );
 
-        let effect_boot = compute_ipw_effect(
-            &y_boot,
-            &d_boot,
-            &ps_boot,
-            config.estimand,
-            config.normalized,
-        );
-
-        if effect_boot.is_finite() {
-            boot_effects.push(effect_boot);
-        }
-    }
+            if effect_boot.is_finite() {
+                Some(effect_boot)
+            } else {
+                None
+            }
+        })
+        .collect();
 
     if boot_effects.len() < config.bootstrap / 2 {
         warnings.push(
@@ -579,18 +587,19 @@ pub fn run_ipw_treatment(
     };
 
     // Sort for percentile CI
-    boot_effects.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let mut boot_effects_sorted = boot_effects;
+    boot_effects_sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
-    let ci_lower = if boot_effects.len() >= 20 {
-        let idx = (boot_effects.len() as f64 * 0.025).floor() as usize;
-        boot_effects[idx]
+    let ci_lower = if boot_effects_sorted.len() >= 20 {
+        let idx = (boot_effects_sorted.len() as f64 * 0.025).floor() as usize;
+        boot_effects_sorted[idx]
     } else {
         effect - 1.96 * std_error
     };
 
-    let ci_upper = if boot_effects.len() >= 20 {
-        let idx = (boot_effects.len() as f64 * 0.975).floor() as usize;
-        boot_effects[idx.min(boot_effects.len() - 1)]
+    let ci_upper = if boot_effects_sorted.len() >= 20 {
+        let idx = (boot_effects_sorted.len() as f64 * 0.975).floor() as usize;
+        boot_effects_sorted[idx.min(boot_effects_sorted.len() - 1)]
     } else {
         effect + 1.96 * std_error
     };
@@ -885,102 +894,172 @@ pub fn run_doubly_robust(
     // Propensity score summary
     let ps_summary = compute_ps_summary(&ps_trim);
 
-    // Bootstrap for standard errors
-    let mut rng: StdRng = match config.seed {
-        Some(s) => StdRng::seed_from_u64(s),
-        None => StdRng::from_entropy(),
-    };
+    // Compute standard error, CI, and inference.
+    // For AIPW: use analytic influence function variance (no bootstrap needed).
+    // For IPW/Regression: use parallel bootstrap with cached propensity scores.
+    let (std_error, ci_lower, ci_upper) = match config.method {
+        DRMethod::AIPW => {
+            // Analytic influence function variance for AIPW
+            // (Robins, Rotnitzky & Zhao 1994; Lunceford & Davidian 2004, Eq. 6)
+            //
+            // For ATE, the influence function for unit i is:
+            //   IF(i) = [D_i*(Y_i - mu_1(X_i))/e(X_i)]
+            //         - [(1-D_i)*(Y_i - mu_0(X_i))/(1-e(X_i))]
+            //         + [mu_1(X_i) - mu_0(X_i)]
+            //         - ATE
+            // Then Var(ATE) = (1/n^2) * sum(IF_i^2)
+            //
+            // For ATT, the influence function is analogous but normalized by n_treated.
+            let n_f = n_trim as f64;
+            let if_var = match config.estimand {
+                Estimand::ATE => {
+                    let mut sum_if_sq = 0.0;
+                    for i in 0..n_trim {
+                        let di = d_trim[i];
+                        let yi = y_trim[i];
+                        let ps_i = ps_trim[i].max(1e-10).min(1.0 - 1e-10);
+                        let mu1_i = mu_1[i];
+                        let mu0_i = mu_0[i];
 
-    let mut boot_effects: Vec<f64> = Vec::with_capacity(config.bootstrap);
+                        // AIPW influence function (Lunceford & Davidian 2004, Eq. 6)
+                        let if_i = if di >= 0.5 {
+                            (yi - mu1_i) / ps_i
+                        } else {
+                            0.0
+                        } - if di < 0.5 {
+                            (yi - mu0_i) / (1.0 - ps_i)
+                        } else {
+                            0.0
+                        } + (mu1_i - mu0_i)
+                            - effect;
 
-    for _ in 0..config.bootstrap {
-        let indices: Vec<usize> = (0..n_trim).map(|_| rng.gen_range(0..n_trim)).collect();
+                        sum_if_sq += if_i * if_i;
+                    }
+                    sum_if_sq / (n_f * n_f)
+                }
+                Estimand::ATT => {
+                    let n_treated_f = n_treated as f64;
+                    let mut sum_if_sq = 0.0;
+                    for i in 0..n_trim {
+                        let di = d_trim[i];
+                        let yi = y_trim[i];
+                        let ps_i = ps_trim[i].max(1e-10).min(1.0 - 1e-10);
+                        let mu0_i = mu_0[i];
 
-        let y_boot: Array1<f64> = indices.iter().map(|&i| y_trim[i]).collect();
-        let d_boot: Array1<f64> = indices.iter().map(|&i| d_trim[i]).collect();
+                        let if_i = if di >= 0.5 {
+                            (yi - mu0_i) / n_treated_f - effect / n_treated_f
+                        } else {
+                            -(ps_i * (yi - mu0_i)) / ((1.0 - ps_i) * n_treated_f)
+                        };
 
-        // Check bootstrap sample has both treated and control
-        let n_t_boot = d_boot.iter().filter(|&&v| v >= 0.5).count();
-        if n_t_boot == 0 || n_t_boot == n_trim {
-            continue;
+                        sum_if_sq += if_i * if_i;
+                    }
+                    sum_if_sq
+                }
+            };
+
+            let se = if_var.sqrt();
+            let ci_lo = effect - 1.96 * se;
+            let ci_hi = effect + 1.96 * se;
+            (se, ci_lo, ci_hi)
         }
+        DRMethod::IPW | DRMethod::Regression => {
+            // Parallel bootstrap with cached propensity scores for IPW/Regression.
+            // Pre-generate index sets sequentially for reproducibility,
+            // then compute effects in parallel reusing cached ps/outcome models.
+            let mut rng: StdRng = match config.seed {
+                Some(s) => StdRng::seed_from_u64(s),
+                None => StdRng::from_entropy(),
+            };
 
-        let mut x_boot = Array2::zeros((n_trim, x_trim.ncols()));
-        for (new_i, &old_i) in indices.iter().enumerate() {
-            x_boot.row_mut(new_i).assign(&x_trim.row(old_i));
-        }
+            let boot_indices: Vec<Vec<usize>> = (0..config.bootstrap)
+                .map(|_| (0..n_trim).map(|_| rng.gen_range(0..n_trim)).collect())
+                .collect();
 
-        // Re-estimate propensity scores on bootstrap sample
-        let ps_boot = match estimate_propensity_scores(&x_boot, &d_boot) {
-            Ok(p) => p,
-            Err(_) => continue,
-        };
+            let method = config.method;
+            let estimand = config.estimand;
 
-        // Re-fit outcome models
-        let (mu_1_boot, _) = match fit_outcome_model(&x_boot, &y_boot, &d_boot, true) {
-            Ok(m) => m,
-            Err(_) => continue,
-        };
-        let (mu_0_boot, _) = match fit_outcome_model(&x_boot, &y_boot, &d_boot, false) {
-            Ok(m) => m,
-            Err(_) => continue,
-        };
+            let boot_effects: Vec<f64> = boot_indices
+                .into_par_iter()
+                .filter_map(|indices| {
+                    let y_boot: Array1<f64> = indices.iter().map(|&i| y_trim[i]).collect();
+                    let d_boot: Array1<f64> = indices.iter().map(|&i| d_trim[i]).collect();
 
-        let effect_boot = match config.method {
-            DRMethod::AIPW => compute_aipw_effect(
-                &y_boot,
-                &d_boot,
-                &ps_boot,
-                &mu_1_boot,
-                &mu_0_boot,
-                config.estimand,
-            ),
-            DRMethod::IPW => compute_ipw_effect(&y_boot, &d_boot, &ps_boot, config.estimand, true),
-            DRMethod::Regression => {
-                let mean_mu1: f64 = mu_1_boot.iter().sum::<f64>() / n_trim as f64;
-                let mean_mu0: f64 = mu_0_boot.iter().sum::<f64>() / n_trim as f64;
-                mean_mu1 - mean_mu0
+                    // Check bootstrap sample has both treated and control
+                    let n_t_boot = d_boot.iter().filter(|&&v| v >= 0.5).count();
+                    if n_t_boot == 0 || n_t_boot == n_trim {
+                        return None;
+                    }
+
+                    let effect_boot = match method {
+                        DRMethod::IPW => {
+                            // Reuse cached propensity scores (resample them)
+                            let ps_boot: Array1<f64> =
+                                indices.iter().map(|&i| ps_trim[i]).collect();
+                            compute_ipw_effect(&y_boot, &d_boot, &ps_boot, estimand, true)
+                        }
+                        DRMethod::Regression => {
+                            // Reuse cached outcome model predictions (resample them)
+                            let mu_1_boot: Array1<f64> =
+                                indices.iter().map(|&i| mu_1[i]).collect();
+                            let mu_0_boot: Array1<f64> =
+                                indices.iter().map(|&i| mu_0[i]).collect();
+                            let mean_mu1: f64 =
+                                mu_1_boot.iter().sum::<f64>() / n_trim as f64;
+                            let mean_mu0: f64 =
+                                mu_0_boot.iter().sum::<f64>() / n_trim as f64;
+                            mean_mu1 - mean_mu0
+                        }
+                        DRMethod::AIPW => unreachable!(),
+                    };
+
+                    if effect_boot.is_finite() {
+                        Some(effect_boot)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            if boot_effects.len() < config.bootstrap / 2 {
+                warnings.push(
+                    "Many bootstrap iterations failed; standard errors may be unreliable"
+                        .to_string(),
+                );
             }
-        };
 
-        if effect_boot.is_finite() {
-            boot_effects.push(effect_boot);
+            let se = if !boot_effects.is_empty() {
+                let mean_boot: f64 =
+                    boot_effects.iter().sum::<f64>() / boot_effects.len() as f64;
+                let var_boot: f64 = boot_effects
+                    .iter()
+                    .map(|&e| (e - mean_boot).powi(2))
+                    .sum::<f64>()
+                    / (boot_effects.len() - 1).max(1) as f64;
+                var_boot.sqrt()
+            } else {
+                f64::NAN
+            };
+
+            let mut boot_sorted = boot_effects;
+            boot_sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+            let ci_lo = if boot_sorted.len() >= 20 {
+                let idx = (boot_sorted.len() as f64 * 0.025).floor() as usize;
+                boot_sorted[idx]
+            } else {
+                effect - 1.96 * se
+            };
+
+            let ci_hi = if boot_sorted.len() >= 20 {
+                let idx = (boot_sorted.len() as f64 * 0.975).floor() as usize;
+                boot_sorted[idx.min(boot_sorted.len() - 1)]
+            } else {
+                effect + 1.96 * se
+            };
+
+            (se, ci_lo, ci_hi)
         }
-    }
-
-    if boot_effects.len() < config.bootstrap / 2 {
-        warnings.push(
-            "Many bootstrap iterations failed; standard errors may be unreliable".to_string(),
-        );
-    }
-
-    // Compute SE and CI
-    let std_error = if !boot_effects.is_empty() {
-        let mean_boot: f64 = boot_effects.iter().sum::<f64>() / boot_effects.len() as f64;
-        let var_boot: f64 = boot_effects
-            .iter()
-            .map(|&e| (e - mean_boot).powi(2))
-            .sum::<f64>()
-            / (boot_effects.len() - 1).max(1) as f64;
-        var_boot.sqrt()
-    } else {
-        f64::NAN
-    };
-
-    boot_effects.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-
-    let ci_lower = if boot_effects.len() >= 20 {
-        let idx = (boot_effects.len() as f64 * 0.025).floor() as usize;
-        boot_effects[idx]
-    } else {
-        effect - 1.96 * std_error
-    };
-
-    let ci_upper = if boot_effects.len() >= 20 {
-        let idx = (boot_effects.len() as f64 * 0.975).floor() as usize;
-        boot_effects[idx.min(boot_effects.len() - 1)]
-    } else {
-        effect + 1.96 * std_error
     };
 
     let t_stat = if std_error > 0.0 && std_error.is_finite() {

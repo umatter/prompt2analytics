@@ -1,8 +1,21 @@
 //! Decision trees and Random Forest.
 //!
 //! Pure Rust implementations for regression and classification.
+//!
+//! # Performance Optimizations
+//!
+//! The Random Forest implementation uses several optimizations for speed:
+//! - **Parallel tree building**: Trees are built concurrently via rayon
+//! - **Pre-sorted feature indices**: Sorted index arrays computed once, shared read-only
+//! - **Running statistics**: Split finding uses running sums instead of repeated partitioning
+//! - **Zero-copy bootstrap**: Trees reference original data via index arrays
+//!
+//! # References
+//!
+//! - Breiman, L. (2001). "Random Forests". Machine Learning, 45(1), 5-32.
 
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
+use rayon::prelude::*;
 
 /// A node in a decision tree.
 #[derive(Debug, Clone)]
@@ -285,10 +298,305 @@ fn compute_mse(y: &ArrayView1<f64>, indices: &[usize]) -> f64 {
     let sum: f64 = indices.iter().map(|&i| y[i]).sum();
     let mean = sum / indices.len() as f64;
 
-    indices.iter().map(|&i| (y[i] - mean).powi(2)).sum::<f64>() / indices.len() as f64
+    indices
+        .iter()
+        .map(|&i| (y[i] - mean).powi(2))
+        .sum::<f64>()
+        / indices.len() as f64
 }
 
 use super::lcg_random;
+
+// ---------------------------------------------------------------------------
+// Optimized internal tree builder for Random Forest
+// ---------------------------------------------------------------------------
+//
+// This builder operates on the original data arrays (no copying) using:
+// - Pre-sorted feature indices (computed once, shared across all trees)
+// - Boolean membership masks for node splits
+// - Running sum/count statistics for O(n) split evaluation per feature
+//
+// The public DecisionTree API is preserved unchanged. The optimized builder
+// produces TreeNode trees that are stored inside DecisionTree wrappers.
+
+/// Pre-sorted indices for each feature, shared across all trees.
+struct SortedFeatureIndices {
+    /// sorted_indices[feature][rank] = original row index
+    sorted_indices: Vec<Vec<usize>>,
+}
+
+impl SortedFeatureIndices {
+    /// Build pre-sorted index arrays for all features.
+    fn new(data: &ArrayView2<f64>) -> Self {
+        let n_features = data.ncols();
+        let n_samples = data.nrows();
+
+        let sorted_indices: Vec<Vec<usize>> = (0..n_features)
+            .into_par_iter()
+            .map(|f| {
+                let mut indices: Vec<usize> = (0..n_samples).collect();
+                indices.sort_by(|&a, &b| {
+                    data[[a, f]]
+                        .partial_cmp(&data[[b, f]])
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+                indices
+            })
+            .collect();
+
+        SortedFeatureIndices { sorted_indices }
+    }
+}
+
+/// Optimized split result: feature, threshold, and the partition of indices.
+struct SplitResult {
+    feature: usize,
+    threshold: f64,
+    left_indices: Vec<usize>,
+    right_indices: Vec<usize>,
+}
+
+/// Build a tree on the original data using bootstrap sample indices.
+///
+/// The tree is built recursively. At each node, `node_indices` are the
+/// bootstrap sample rows that reach this node. Pre-sorted feature indices
+/// are used with a membership mask for efficient split finding.
+fn build_tree_optimized(
+    data: &ArrayView2<f64>,
+    target: &ArrayView1<f64>,
+    node_indices: &[usize],
+    depth: usize,
+    max_depth: usize,
+    min_samples_split: usize,
+    max_features: usize,
+    n_features: usize,
+    sorted_feature_indices: &SortedFeatureIndices,
+    rng_state: &mut u64,
+) -> TreeNode {
+    let n_samples = node_indices.len();
+
+    // Stopping conditions
+    if depth >= max_depth || n_samples < min_samples_split || n_samples <= 1 {
+        return make_leaf(target, node_indices);
+    }
+
+    // Check if all targets are the same
+    let first_val = target[node_indices[0]];
+    if node_indices
+        .iter()
+        .all(|&i| (target[i] - first_val).abs() < 1e-10)
+    {
+        return make_leaf(target, node_indices);
+    }
+
+    // Select features to consider
+    let features_to_try = select_features_fast(n_features, max_features, rng_state);
+
+    // Build a membership set for the current node's samples.
+    // For large n, a boolean mask is faster than a HashSet.
+    let total_rows = data.nrows();
+    let mut in_node = vec![0u32; total_rows];
+    // Count occurrences (bootstrap can have duplicates)
+    for &idx in node_indices {
+        in_node[idx] += 1;
+    }
+
+    // Compute total sum and count for the node (accounting for duplicates)
+    let total_sum: f64 = node_indices.iter().map(|&i| target[i]).sum();
+    let total_count = n_samples;
+
+    // Find best split using pre-sorted indices and running statistics
+    if let Some(split) = find_best_split_optimized(
+        data,
+        target,
+        node_indices,
+        &in_node,
+        total_sum,
+        total_count,
+        &features_to_try,
+        sorted_feature_indices,
+    ) {
+        if split.left_indices.is_empty() || split.right_indices.is_empty() {
+            return make_leaf(target, node_indices);
+        }
+
+        let left = build_tree_optimized(
+            data,
+            target,
+            &split.left_indices,
+            depth + 1,
+            max_depth,
+            min_samples_split,
+            max_features,
+            n_features,
+            sorted_feature_indices,
+            rng_state,
+        );
+        let right = build_tree_optimized(
+            data,
+            target,
+            &split.right_indices,
+            depth + 1,
+            max_depth,
+            min_samples_split,
+            max_features,
+            n_features,
+            sorted_feature_indices,
+            rng_state,
+        );
+
+        TreeNode::Split {
+            feature_index: split.feature,
+            threshold: split.threshold,
+            left: Box::new(left),
+            right: Box::new(right),
+        }
+    } else {
+        make_leaf(target, node_indices)
+    }
+}
+
+fn make_leaf(target: &ArrayView1<f64>, indices: &[usize]) -> TreeNode {
+    let sum: f64 = indices.iter().map(|&i| target[i]).sum();
+    let value = sum / indices.len() as f64;
+    TreeNode::Leaf {
+        value,
+        n_samples: indices.len(),
+    }
+}
+
+/// Select a random subset of feature indices.
+fn select_features_fast(
+    n_features: usize,
+    max_features: usize,
+    rng_state: &mut u64,
+) -> Vec<usize> {
+    if max_features >= n_features {
+        return (0..n_features).collect();
+    }
+    let mut selected = Vec::with_capacity(max_features);
+    let mut remaining: Vec<usize> = (0..n_features).collect();
+    for _ in 0..max_features {
+        if remaining.is_empty() {
+            break;
+        }
+        let idx = lcg_random(rng_state) % remaining.len();
+        selected.push(remaining.swap_remove(idx));
+    }
+    selected
+}
+
+/// Find the best split using pre-sorted indices and running statistics.
+///
+/// For each candidate feature, we iterate through the pre-sorted index array.
+/// We skip rows not in the current node (using `in_node` mask). As we scan,
+/// we maintain running sum_left/count_left and derive sum_right/count_right
+/// from the totals. This gives O(N) split evaluation per feature (where N
+/// is the total dataset size, but with early-out opportunities).
+///
+/// The weighted MSE criterion is:
+///   MSE = (n_left * var_left + n_right * var_right) / n_total
+/// where var = E[y^2] - (E[y])^2 = (sum_sq / n) - (sum / n)^2
+///
+/// We can equivalently minimize:
+///   sum_sq_left - sum_left^2/n_left + sum_sq_right - sum_right^2/n_right
+/// which avoids computing mean/variance explicitly.
+fn find_best_split_optimized(
+    data: &ArrayView2<f64>,
+    target: &ArrayView1<f64>,
+    node_indices: &[usize],
+    in_node: &[u32],
+    total_sum: f64,
+    total_count: usize,
+    features: &[usize],
+    sorted_feature_indices: &SortedFeatureIndices,
+) -> Option<SplitResult> {
+    let mut best_reduction = f64::NEG_INFINITY;
+    let mut best_feature = 0;
+    let mut best_threshold = 0.0;
+
+    // Total sum of squares for the node
+    let total_sum_sq: f64 = node_indices.iter().map(|&i| target[i] * target[i]).sum();
+    // Baseline impurity (proportional to total_sum_sq - total_sum^2 / total_count)
+    let baseline = total_sum_sq - total_sum * total_sum / total_count as f64;
+
+    if baseline <= 0.0 {
+        // Pure node, no split can improve
+        return None;
+    }
+
+    for &feature in features {
+        let sorted = &sorted_feature_indices.sorted_indices[feature];
+
+        // Running statistics for the left side
+        let mut sum_left = 0.0;
+        let mut sum_sq_left = 0.0;
+        let mut count_left: usize = 0;
+        let mut prev_val = f64::NEG_INFINITY;
+
+        for &row_idx in sorted {
+            let cnt = in_node[row_idx];
+            if cnt == 0 {
+                continue;
+            }
+
+            let x_val = data[[row_idx, feature]];
+            let y_val = target[row_idx];
+
+            // Before adding this point, evaluate split if feature value changed
+            // (split between prev_val and x_val)
+            if count_left > 0 && x_val > prev_val + 1e-12 {
+                let count_right = total_count - count_left;
+                if count_right > 0 {
+                    // Reduction = sum_left^2/n_left + sum_right^2/n_right - total_sum^2/total_count
+                    let sum_right = total_sum - sum_left;
+                    let reduction = sum_left * sum_left / count_left as f64
+                        + sum_right * sum_right / count_right as f64;
+
+                    if reduction > best_reduction {
+                        best_reduction = reduction;
+                        best_feature = feature;
+                        best_threshold = (prev_val + x_val) / 2.0;
+                    }
+                }
+            }
+
+            // Add this point to the left side (handle bootstrap duplicates)
+            let cnt_f = cnt as f64;
+            sum_left += y_val * cnt_f;
+            sum_sq_left += y_val * y_val * cnt_f;
+            count_left += cnt as usize;
+            prev_val = x_val;
+        }
+    }
+
+    // Check that we found a valid split
+    if best_reduction <= f64::NEG_INFINITY {
+        return None;
+    }
+
+    // Partition node_indices by the best split
+    let mut left_indices = Vec::with_capacity(node_indices.len() / 2);
+    let mut right_indices = Vec::with_capacity(node_indices.len() / 2);
+    for &idx in node_indices {
+        if data[[idx, best_feature]] <= best_threshold {
+            left_indices.push(idx);
+        } else {
+            right_indices.push(idx);
+        }
+    }
+
+    if left_indices.is_empty() || right_indices.is_empty() {
+        return None;
+    }
+
+    Some(SplitResult {
+        feature: best_feature,
+        threshold: best_threshold,
+        left_indices,
+        right_indices,
+    })
+}
 
 /// Random Forest result.
 #[derive(Debug, Clone)]
@@ -299,7 +607,7 @@ pub struct RandomForestResult {
     pub feature_importances: Vec<f64>,
     /// Number of trees in the forest
     pub n_trees: usize,
-    /// Out-of-bag R² score (if computed)
+    /// Out-of-bag R-squared score (if computed)
     pub oob_score: Option<f64>,
     /// Feature names (if provided)
     pub feature_names: Option<Vec<String>>,
@@ -312,7 +620,7 @@ impl std::fmt::Display for RandomForestResult {
         writeln!(f, "Number of trees: {}", self.n_trees)?;
 
         if let Some(oob) = self.oob_score {
-            writeln!(f, "Out-of-bag R² score: {:.4}", oob)?;
+            writeln!(f, "Out-of-bag R\u{00b2} score: {:.4}", oob)?;
         }
 
         writeln!(f)?;
@@ -380,6 +688,12 @@ impl std::fmt::Display for RandomForestResult {
 /// * `max_features` - Max features per split ("sqrt", "log2", "all", or number)
 /// * `seed` - Random seed
 /// * `feature_names` - Optional feature names
+///
+/// # Performance
+///
+/// Trees are built in parallel using rayon. Pre-sorted feature indices are
+/// computed once and shared across all trees for O(n) split evaluation per
+/// feature per node.
 pub fn random_forest(
     data: ArrayView2<f64>,
     target: ArrayView1<f64>,
@@ -407,44 +721,86 @@ pub fn random_forest(
     // Parse max_features
     let max_feat = parse_max_features(max_features, n_features);
 
-    let mut rng_state = seed.unwrap_or(42);
+    let base_seed = seed.unwrap_or(42);
 
-    // Build forest
+    // Pre-sort feature indices once (shared read-only across all trees)
+    let sorted_features = SortedFeatureIndices::new(&data);
+
+    // Pre-generate per-tree seeds and bootstrap samples deterministically
+    // so results are reproducible regardless of thread scheduling.
+    let mut rng_state = base_seed;
+    let tree_configs: Vec<(u64, Vec<usize>, Vec<usize>)> = (0..num_trees)
+        .map(|_| {
+            let tree_seed = lcg_random(&mut rng_state) as u64;
+            let (bootstrap, oob) = bootstrap_sample(n_samples, &mut rng_state);
+            (tree_seed, bootstrap, oob)
+        })
+        .collect();
+
+    // Build trees in parallel
+    let tree_results: Vec<(DecisionTree, Vec<(usize, f64)>)> = tree_configs
+        .par_iter()
+        .map(|(tree_seed, bootstrap_indices, oob_indices)| {
+            let mut tree_rng = *tree_seed;
+
+            // Build tree on original data using bootstrap indices (no copy)
+            let root = build_tree_optimized(
+                &data,
+                &target,
+                bootstrap_indices,
+                0,
+                tree_max_depth,
+                tree_min_split,
+                max_feat,
+                n_features,
+                &sorted_features,
+                &mut tree_rng,
+            );
+
+            let tree = DecisionTree {
+                root: Some(root),
+                max_depth: tree_max_depth,
+                min_samples_split: tree_min_split,
+                max_features: Some(max_feat),
+                n_features,
+            };
+
+            // Compute OOB predictions for this tree
+            let oob_preds: Vec<(usize, f64)> = oob_indices
+                .iter()
+                .map(|&idx| (idx, tree.predict_one(&data.row(idx))))
+                .collect();
+
+            (tree, oob_preds)
+        })
+        .collect();
+
+    // Separate trees and OOB predictions
     let mut trees = Vec::with_capacity(num_trees);
-    let mut oob_predictions: Array2<f64> = Array2::from_elem((n_samples, num_trees), f64::NAN);
-    let mut oob_counts: Array1<usize> = Array1::zeros(n_samples);
+    // OOB: accumulate sum and count per sample
+    let mut oob_sum = vec![0.0f64; n_samples];
+    let mut oob_count = vec![0u32; n_samples];
 
-    for tree_idx in 0..num_trees {
-        // Bootstrap sample
-        let (bootstrap_indices, oob_indices) = bootstrap_sample(n_samples, &mut rng_state);
-
-        // Extract bootstrap data
-        let bootstrap_x = select_rows(&data, &bootstrap_indices);
-        let bootstrap_y = select_elements(&target, &bootstrap_indices);
-
-        // Build tree
-        let mut tree = DecisionTree::new(tree_max_depth, tree_min_split, Some(max_feat));
-        tree.fit(bootstrap_x.view(), bootstrap_y.view(), None, &mut rng_state);
-
-        // OOB predictions
-        for &oob_idx in &oob_indices {
-            let pred = tree.predict_one(&data.row(oob_idx));
-            oob_predictions[[oob_idx, tree_idx]] = pred;
-            oob_counts[oob_idx] += 1;
+    for (tree, oob_preds) in tree_results {
+        for (idx, pred) in oob_preds {
+            oob_sum[idx] += pred;
+            oob_count[idx] += 1;
         }
-
         trees.push(tree);
     }
 
-    // Aggregate predictions (mean across all trees)
-    let mut predictions = Vec::with_capacity(n_samples);
-    for i in 0..n_samples {
-        let sum: f64 = trees.iter().map(|t| t.predict_one(&data.row(i))).sum();
-        predictions.push(sum / num_trees as f64);
-    }
+    // Aggregate predictions in parallel (mean across all trees)
+    let predictions: Vec<f64> = (0..n_samples)
+        .into_par_iter()
+        .map(|i| {
+            let row = data.row(i);
+            let sum: f64 = trees.iter().map(|t| t.predict_one(&row)).sum();
+            sum / num_trees as f64
+        })
+        .collect();
 
     // Compute OOB score
-    let oob_score = compute_oob_score(&oob_predictions.view(), &oob_counts.view(), &target);
+    let oob_score = compute_oob_score_fast(&oob_sum, &oob_count, &target);
 
     // Aggregate feature importances
     let mut importances = Array1::zeros(n_features);
@@ -570,42 +926,85 @@ pub fn random_forest_with_trees(
 
     let max_feat = parse_max_features(max_features, n_features);
 
-    let mut rng_state = seed.unwrap_or(42);
+    let base_seed = seed.unwrap_or(42);
 
+    // Pre-sort feature indices once (shared read-only across all trees)
+    let sorted_features = SortedFeatureIndices::new(&data);
+
+    // Pre-generate per-tree seeds and bootstrap samples deterministically
+    let mut rng_state = base_seed;
+    let tree_configs: Vec<(u64, Vec<usize>, Vec<usize>)> = (0..num_trees)
+        .map(|_| {
+            let tree_seed = lcg_random(&mut rng_state) as u64;
+            let (bootstrap, oob) = bootstrap_sample(n_samples, &mut rng_state);
+            (tree_seed, bootstrap, oob)
+        })
+        .collect();
+
+    // Build trees in parallel
+    let tree_results: Vec<(DecisionTree, Vec<(usize, f64)>)> = tree_configs
+        .par_iter()
+        .map(|(tree_seed, bootstrap_indices, oob_indices)| {
+            let mut tree_rng = *tree_seed;
+
+            let root = build_tree_optimized(
+                &data,
+                &target,
+                bootstrap_indices,
+                0,
+                tree_max_depth,
+                tree_min_split,
+                max_feat,
+                n_features,
+                &sorted_features,
+                &mut tree_rng,
+            );
+
+            let tree = DecisionTree {
+                root: Some(root),
+                max_depth: tree_max_depth,
+                min_samples_split: tree_min_split,
+                max_features: Some(max_feat),
+                n_features,
+            };
+
+            let oob_preds: Vec<(usize, f64)> = oob_indices
+                .iter()
+                .map(|&idx| (idx, tree.predict_one(&data.row(idx))))
+                .collect();
+
+            (tree, oob_preds)
+        })
+        .collect();
+
+    // Separate trees and accumulate OOB
     let mut trees = Vec::with_capacity(num_trees);
-    let mut oob_predictions: Array2<f64> = Array2::from_elem((n_samples, num_trees), f64::NAN);
-    let mut oob_counts: Array1<usize> = Array1::zeros(n_samples);
+    let mut oob_sum = vec![0.0f64; n_samples];
+    let mut oob_count = vec![0u32; n_samples];
 
-    for tree_idx in 0..num_trees {
-        let (bootstrap_indices, oob_indices) = bootstrap_sample(n_samples, &mut rng_state);
-
-        let bootstrap_x = select_rows(&data, &bootstrap_indices);
-        let bootstrap_y = select_elements(&target, &bootstrap_indices);
-
-        let mut tree = DecisionTree::new(tree_max_depth, tree_min_split, Some(max_feat));
-        tree.fit(bootstrap_x.view(), bootstrap_y.view(), None, &mut rng_state);
-
-        for &oob_idx in &oob_indices {
-            let pred = tree.predict_one(&data.row(oob_idx));
-            oob_predictions[[oob_idx, tree_idx]] = pred;
-            oob_counts[oob_idx] += 1;
+    for (tree, oob_preds) in tree_results {
+        for (idx, pred) in oob_preds {
+            oob_sum[idx] += pred;
+            oob_count[idx] += 1;
         }
-
         trees.push(tree);
     }
 
-    // Aggregate predictions
-    let mut predictions = Vec::with_capacity(n_samples);
-    for i in 0..n_samples {
-        let sum: f64 = trees.iter().map(|t| t.predict_one(&data.row(i))).sum();
-        predictions.push(sum / num_trees as f64);
-    }
+    // Aggregate predictions in parallel
+    let predictions: Vec<f64> = (0..n_samples)
+        .into_par_iter()
+        .map(|i| {
+            let row = data.row(i);
+            let sum: f64 = trees.iter().map(|t| t.predict_one(&row)).sum();
+            sum / num_trees as f64
+        })
+        .collect();
 
     // Compute base value (mean prediction)
     let base_value = predictions.iter().sum::<f64>() / predictions.len() as f64;
 
     // Compute OOB score
-    let oob_score = compute_oob_score(&oob_predictions.view(), &oob_counts.view(), &target);
+    let oob_score = compute_oob_score_fast(&oob_sum, &oob_count, &target);
 
     // Aggregate feature importances
     let mut importances = Array1::zeros(n_features);
@@ -654,7 +1053,45 @@ fn bootstrap_sample(n_samples: usize, rng_state: &mut u64) -> (Vec<usize>, Vec<u
     (bootstrap, oob)
 }
 
+/// Compute OOB R-squared score from accumulated sum/count vectors.
+fn compute_oob_score_fast(
+    oob_sum: &[f64],
+    oob_count: &[u32],
+    target: &ArrayView1<f64>,
+) -> Option<f64> {
+    let n_samples = target.len();
+    let mut valid_pred = Vec::new();
+    let mut valid_true = Vec::new();
+
+    for i in 0..n_samples {
+        if oob_count[i] > 0 {
+            valid_pred.push(oob_sum[i] / oob_count[i] as f64);
+            valid_true.push(target[i]);
+        }
+    }
+
+    if valid_true.is_empty() {
+        return None;
+    }
+
+    let mean_y: f64 = valid_true.iter().sum::<f64>() / valid_true.len() as f64;
+    let ss_tot: f64 = valid_true.iter().map(|&y| (y - mean_y).powi(2)).sum();
+    let ss_res: f64 = valid_true
+        .iter()
+        .zip(valid_pred.iter())
+        .map(|(&y, &pred)| (y - pred).powi(2))
+        .sum();
+
+    if ss_tot > 0.0 {
+        Some(1.0 - ss_res / ss_tot)
+    } else {
+        None
+    }
+}
+
+// Keep the old helper functions for backward compatibility (used by DecisionTree::fit)
 /// Select rows from a 2D array.
+#[allow(dead_code)]
 fn select_rows(data: &ArrayView2<f64>, indices: &[usize]) -> Array2<f64> {
     let n_features = data.ncols();
     let mut result = Array2::zeros((indices.len(), n_features));
@@ -667,11 +1104,13 @@ fn select_rows(data: &ArrayView2<f64>, indices: &[usize]) -> Array2<f64> {
 }
 
 /// Select elements from a 1D array.
+#[allow(dead_code)]
 fn select_elements(data: &ArrayView1<f64>, indices: &[usize]) -> Array1<f64> {
     Array1::from_iter(indices.iter().map(|&i| data[i]))
 }
 
-/// Compute OOB R² score.
+/// Compute OOB R-squared score (legacy interface for backward compat).
+#[allow(dead_code)]
 fn compute_oob_score(
     oob_predictions: &ArrayView2<f64>,
     oob_counts: &ArrayView1<usize>,
@@ -707,7 +1146,7 @@ fn compute_oob_score(
         return None;
     }
 
-    // Compute R²
+    // Compute R-squared
     let y_true: Vec<f64> = valid_samples.iter().map(|&i| target[i]).collect();
     let mean_y: f64 = y_true.iter().sum::<f64>() / y_true.len() as f64;
 
@@ -839,5 +1278,88 @@ mod tests {
                     || bootstrap.iter().filter(|&&x| x == idx).count() == 0
             );
         }
+    }
+
+    #[test]
+    fn test_random_forest_with_trees_basic() {
+        let x = array![
+            [1.0, 0.1],
+            [2.0, 0.2],
+            [3.0, 0.3],
+            [4.0, 0.4],
+            [5.0, 0.5],
+            [6.0, 0.6],
+            [7.0, 0.7],
+            [8.0, 0.8],
+            [9.0, 0.9],
+            [10.0, 1.0],
+        ];
+        let y = array![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
+
+        let model = random_forest_with_trees(
+            x.view(),
+            y.view(),
+            Some(10),
+            Some(5),
+            Some(2),
+            Some("sqrt"),
+            Some(42),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(model.n_trees, 10);
+        assert_eq!(model.trees.len(), 10);
+        assert_eq!(model.predictions.len(), 10);
+        assert_eq!(model.feature_importances.len(), 2);
+
+        // Each tree should have a valid root
+        for tree in &model.trees {
+            assert!(tree.root().is_some());
+        }
+    }
+
+    #[test]
+    fn test_random_forest_predictions_reasonable() {
+        // Larger dataset to test prediction quality
+        let n = 50;
+        let mut x_data = Vec::with_capacity(n * 2);
+        let mut y_data = Vec::with_capacity(n);
+        for i in 0..n {
+            let v = (i as f64) + 1.0;
+            x_data.push(v);
+            x_data.push(v * 0.1);
+            y_data.push(v + 0.1 * ((i * 7 + 3) % 5) as f64); // y ~ x + small noise
+        }
+        let x = Array2::from_shape_vec((n, 2), x_data).unwrap();
+        let y = Array1::from_vec(y_data);
+
+        let result = random_forest(
+            x.view(),
+            y.view(),
+            Some(50),
+            Some(8),
+            Some(2),
+            Some("all"),
+            Some(123),
+            None,
+        )
+        .unwrap();
+
+        // Predictions should be correlated with target
+        let mean_y = y.mean().unwrap();
+        let ss_tot: f64 = y.iter().map(|&v| (v - mean_y).powi(2)).sum();
+        let ss_res: f64 = y
+            .iter()
+            .zip(result.predictions.iter())
+            .map(|(&actual, &pred)| (actual - pred).powi(2))
+            .sum();
+        let r2 = 1.0 - ss_res / ss_tot;
+        // R-squared should be positive (model is better than mean)
+        assert!(
+            r2 > 0.5,
+            "R-squared should be > 0.5 for near-linear data, got {}",
+            r2
+        );
     }
 }

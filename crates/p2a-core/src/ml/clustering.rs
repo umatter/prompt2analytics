@@ -558,23 +558,35 @@ impl std::fmt::Display for HierarchicalResult {
 
 /// Run hierarchical agglomerative clustering.
 ///
+/// Uses an optimized nearest-neighbor algorithm with condensed distance matrix
+/// and Lance-Williams recurrence for O(n^2) time and O(n^2) memory.
+///
 /// # Arguments
 /// * `data` - Input data matrix (n_samples x n_features)
 /// * `n_clusters` - Number of clusters to form (if None, returns full dendrogram)
 /// * `linkage` - Linkage method (single, complete, average, ward)
 /// * `distance_threshold` - If set, cut tree at this distance instead of n_clusters
+///
+/// # References
+///
+/// - Murtagh, F. (1983). "A Survey of Recent Advances in Hierarchical Clustering
+///   Algorithms". The Computer Journal, 26(4), 354-359.
+/// - Lance, G. N. & Williams, W. T. (1967). "A General Theory of Classificatory
+///   Sorting Strategies: 1. Hierarchical Systems". The Computer Journal, 9(4), 373-380.
+/// - Mullner, D. (2011). "Modern hierarchical, agglomerative clustering algorithms".
+///   arXiv:1109.2378.
 pub fn hierarchical(
     data: ArrayView2<f64>,
     n_clusters: Option<usize>,
     linkage: Linkage,
     distance_threshold: Option<f64>,
 ) -> Result<HierarchicalResult, String> {
-    let n_samples = data.nrows();
+    let n = data.nrows();
 
-    if n_samples == 0 {
+    if n == 0 {
         return Err("Cannot cluster empty data".to_string());
     }
-    if n_samples == 1 {
+    if n == 1 {
         return Ok(HierarchicalResult {
             labels: vec![0],
             n_clusters: 1,
@@ -585,347 +597,399 @@ pub fn hierarchical(
     }
 
     let target_clusters = match (n_clusters, distance_threshold) {
-        (Some(n), _) => {
-            if n == 0 || n > n_samples {
+        (Some(nc), _) => {
+            if nc == 0 || nc > n {
                 return Err(format!(
                     "n_clusters must be between 1 and {} (n_samples)",
-                    n_samples
+                    n
                 ));
             }
-            Some(n)
+            Some(nc)
         }
-        (None, None) => Some(1), // Default: cluster all into one
-        (None, Some(_)) => None, // Will use distance threshold
+        (None, None) => Some(1),
+        (None, Some(_)) => None,
     };
 
-    // Compute initial pairwise distance matrix
-    let mut distances = compute_distance_matrix(&data);
-
-    // Track cluster membership: cluster_id -> indices in that cluster
-    let mut clusters: HashMap<usize, Vec<usize>> = HashMap::new();
-    for i in 0..n_samples {
-        clusters.insert(i, vec![i]);
+    // --- Condensed distance matrix ---
+    // Store pairwise distances in a flat Vec using the condensed index formula.
+    // For Ward's method we store squared Euclidean distances; for others, Euclidean distances.
+    let use_squared = linkage == Linkage::Ward;
+    let condensed_len = n * (n - 1) / 2;
+    let mut dist = vec![0.0f64; condensed_len];
+    for i in 0..n {
+        let row_i = data.row(i);
+        for j in (i + 1)..n {
+            let d = euclidean_distance_squared(&row_i, &data.row(j));
+            let idx = condensed_index(n, i, j);
+            dist[idx] = if use_squared { d } else { d.sqrt() };
+        }
     }
 
-    // Active cluster IDs
-    let mut active: HashSet<usize> = (0..n_samples).collect();
+    // --- Cluster sizes ---
+    // size[i] = number of original observations in cluster i.
+    // Indices 0..n are original observations (size 1).
+    // We use a Vec indexed by cluster label; new clusters get appended.
+    let mut size = vec![1usize; n];
 
-    // Linkage matrix storage
-    let mut linkage_matrix: Vec<(usize, usize, f64, usize)> = Vec::with_capacity(n_samples - 1);
-    let mut merge_distances: Vec<f64> = Vec::with_capacity(n_samples - 1);
+    // --- Nearest neighbor tracking ---
+    // nn[i] = index of nearest active neighbor of cluster i (among active clusters).
+    // nn_dist[i] = distance to that neighbor.
+    // We also track which clusters are active.
+    let mut active = vec![true; n];
+    let mut nn = vec![0usize; n];
+    let mut nn_dist = vec![f64::INFINITY; n];
 
-    let mut next_cluster_id = n_samples;
+    // Initialize nearest neighbors for each cluster.
+    for i in 0..n {
+        for j in (i + 1)..n {
+            let d = ward_or_raw_dist(&dist, n, i, j, &size, linkage);
+            if d < nn_dist[i] {
+                nn_dist[i] = d;
+                nn[i] = j;
+            }
+            if d < nn_dist[j] {
+                nn_dist[j] = d;
+                nn[j] = i;
+            }
+        }
+    }
 
-    // Agglomerative clustering loop
-    while active.len() > 1 {
-        // Check if we've reached target number of clusters
+    // --- Linkage matrix storage ---
+    let mut linkage_matrix: Vec<(usize, usize, f64, usize)> = Vec::with_capacity(n - 1);
+    let mut merge_distances: Vec<f64> = Vec::with_capacity(n - 1);
+
+    // Mapping: original cluster labels (0..n, n, n+1, ...) -> internal labels.
+    // Internal labels grow as new clusters form; we keep track via `label_map`.
+    // label_map[internal] = external label used in the linkage_matrix output.
+    let mut label_map: Vec<usize> = (0..n).collect();
+    let mut next_external_id = n;
+
+    // --- Union-find for final label assignment ---
+    let mut uf_parent: Vec<usize> = (0..n).collect();
+    let mut uf_rank: Vec<usize> = vec![0; n];
+
+    let mut n_active = n;
+
+    // --- Main agglomerative loop ---
+    for _step in 0..(n - 1) {
         if let Some(target) = target_clusters {
-            if active.len() <= target {
+            if n_active <= target {
                 break;
             }
         }
 
-        // Find closest pair of clusters
-        let (c1, c2, min_dist) =
-            find_closest_clusters(&active, &distances, &clusters, &data, linkage)?;
+        // Find the global minimum distance pair using the nearest-neighbor cache.
+        // Scan all active clusters to find the one with smallest nn_dist.
+        let mut min_d = f64::INFINITY;
+        let mut c_i = 0;
+        for i in 0..active.len() {
+            if active[i] && nn_dist[i] < min_d {
+                min_d = nn_dist[i];
+                c_i = i;
+            }
+        }
+        let mut c_j = nn[c_i];
+
+        // Validate that nn[c_i] is still active; if not, rescan.
+        if !active[c_j] {
+            // Recompute nn for c_i
+            nn_dist[c_i] = f64::INFINITY;
+            for k in 0..active.len() {
+                if k != c_i && active[k] {
+                    let d = ward_or_raw_dist(&dist, n, c_i, k, &size, linkage);
+                    if d < nn_dist[c_i] {
+                        nn_dist[c_i] = d;
+                        nn[c_i] = k;
+                    }
+                }
+            }
+            // Restart search for global minimum -- this invalidated our choice.
+            // Re-scan for global minimum.
+            min_d = f64::INFINITY;
+            for i in 0..active.len() {
+                if active[i] && nn_dist[i] < min_d {
+                    min_d = nn_dist[i];
+                    c_i = i;
+                }
+            }
+            c_j = nn[c_i];
+            // If still invalid, do a full nn rebuild (rare edge case)
+            if !active[c_j] {
+                rebuild_nn_full(&dist, n, &active, &size, linkage, &mut nn, &mut nn_dist);
+                min_d = f64::INFINITY;
+                for i in 0..active.len() {
+                    if active[i] && nn_dist[i] < min_d {
+                        min_d = nn_dist[i];
+                        c_i = i;
+                    }
+                }
+                c_j = nn[c_i];
+            }
+        }
+
+        // Ensure c_i < c_j for canonical ordering in output.
+        if c_i > c_j {
+            std::mem::swap(&mut c_i, &mut c_j);
+        }
+
+        // Compute the reported merge distance (for display / cutree).
+        // For Ward, convert squared distance to the Ward distance metric:
+        //   ward_dist = sqrt(2 * n_i * n_j / (n_i + n_j) * d_sq_euclidean(centroid_i, centroid_j))
+        // The condensed matrix stores squared Euclidean centroid distances already embedded in
+        // the Lance-Williams updates; the stored value equals (n_i + n_j) / (n_i * n_j) * ward_dist^2 / 2.
+        // Actually for Ward we store the quantity that the Lance-Williams formula preserves, which is
+        // the squared Euclidean distance between centroids scaled appropriately.
+        // The conventional Ward merge height is sqrt(2*n_i*n_j/(n_i+n_j)) * ||c_i - c_j||.
+        let merge_dist = if use_squared {
+            let raw = get_condensed(&dist, n, c_i, c_j);
+            let ni = size[c_i] as f64;
+            let nj = size[c_j] as f64;
+            // raw = squared Euclidean distance between centroids
+            // Ward merge distance = sqrt(2 * ni * nj / (ni + nj)) * sqrt(raw)
+            ((2.0 * ni * nj / (ni + nj)) * raw).sqrt()
+        } else {
+            get_condensed(&dist, n, c_i, c_j)
+        };
 
         // Check distance threshold
         if let Some(thresh) = distance_threshold {
-            if min_dist > thresh {
+            if merge_dist > thresh {
                 break;
             }
         }
 
-        // Merge clusters
-        let merged_indices: Vec<usize> = {
-            let mut merged = clusters.remove(&c1).unwrap();
-            merged.extend(clusters.remove(&c2).unwrap());
-            merged
-        };
-        let merged_size = merged_indices.len();
+        let new_size = size[c_i] + size[c_j];
 
-        // Record merge
-        linkage_matrix.push((c1, c2, min_dist, merged_size));
-        merge_distances.push(min_dist);
+        // Record merge in linkage matrix using external labels
+        linkage_matrix.push((label_map[c_i], label_map[c_j], merge_dist, new_size));
+        merge_distances.push(merge_dist);
 
-        // Update distance matrix for new cluster
-        update_distances_for_merge(
-            &mut distances,
-            &active,
-            c1,
-            c2,
-            next_cluster_id,
-            &merged_indices,
-            &clusters,
-            &data,
-            linkage,
-        );
+        // --- Lance-Williams distance update ---
+        // Update dist[c_i, k] for all active k != c_i, c_j using the recurrence.
+        // After update, c_i becomes the merged cluster; c_j is deactivated.
+        let ni = size[c_i] as f64;
+        let nj = size[c_j] as f64;
+        let d_ij = get_condensed(&dist, n, c_i, c_j);
 
-        // Update cluster tracking
-        active.remove(&c1);
-        active.remove(&c2);
-        active.insert(next_cluster_id);
-        clusters.insert(next_cluster_id, merged_indices);
+        for k in 0..active.len() {
+            if !active[k] || k == c_i || k == c_j {
+                continue;
+            }
+            let nk = size[k] as f64;
+            let d_ki = get_condensed(&dist, n, k, c_i);
+            let d_kj = get_condensed(&dist, n, k, c_j);
 
-        next_cluster_id += 1;
-    }
+            // Lance-Williams recurrence (Lance & Williams, 1967)
+            let new_d = match linkage {
+                Linkage::Single => {
+                    // d(k, i+j) = min(d(k,i), d(k,j))
+                    d_ki.min(d_kj)
+                }
+                Linkage::Complete => {
+                    // d(k, i+j) = max(d(k,i), d(k,j))
+                    d_ki.max(d_kj)
+                }
+                Linkage::Average => {
+                    // d(k, i+j) = (n_i * d(k,i) + n_j * d(k,j)) / (n_i + n_j)
+                    (ni * d_ki + nj * d_kj) / (ni + nj)
+                }
+                Linkage::Ward => {
+                    // Lance-Williams for Ward (on squared Euclidean distances):
+                    // d(k, i+j) = ((n_i+n_k)*d(k,i) + (n_j+n_k)*d(k,j) - n_k*d(i,j)) / (n_i+n_j+n_k)
+                    ((ni + nk) * d_ki + (nj + nk) * d_kj - nk * d_ij) / (ni + nj + nk)
+                }
+            };
 
-    // Assign final labels
-    let mut labels = vec![0usize; n_samples];
-    for (cluster_label, &cluster_id) in active.iter().enumerate() {
-        if let Some(indices) = clusters.get(&cluster_id) {
-            for &idx in indices {
-                labels[idx] = cluster_label;
+            set_condensed(&mut dist, n, c_i, k, new_d);
+        }
+
+        // Update cluster size and label
+        size[c_i] = new_size;
+        label_map[c_i] = next_external_id;
+        next_external_id += 1;
+
+        // Deactivate c_j
+        active[c_j] = false;
+        nn_dist[c_j] = f64::INFINITY;
+        n_active -= 1;
+
+        // Union-find: merge original observations.
+        // We track which original observations belong to c_i and c_j via the union-find.
+        // For the union-find, we just need a representative from each.
+        // c_i and c_j are internal indices (0..n), so we use them directly.
+        uf_union(&mut uf_parent, &mut uf_rank, c_i, c_j);
+
+        // --- Update nearest neighbors ---
+        // For the merged cluster c_i, recompute its nearest neighbor from scratch.
+        nn_dist[c_i] = f64::INFINITY;
+        for k in 0..active.len() {
+            if k != c_i && active[k] {
+                let d = ward_or_raw_dist(&dist, n, c_i, k, &size, linkage);
+                if d < nn_dist[c_i] {
+                    nn_dist[c_i] = d;
+                    nn[c_i] = k;
+                }
+                // Also update k's nearest neighbor if it was pointing to c_i or c_j,
+                // or if the new distance to c_i is less than k's current nn_dist.
+                if nn[k] == c_i || nn[k] == c_j || d < nn_dist[k] {
+                    // Recompute nn for k from scratch
+                    nn_dist[k] = f64::INFINITY;
+                    for m in 0..active.len() {
+                        if m != k && active[m] {
+                            let dm = ward_or_raw_dist(&dist, n, k, m, &size, linkage);
+                            if dm < nn_dist[k] {
+                                nn_dist[k] = dm;
+                                nn[k] = m;
+                            }
+                        }
+                    }
+                }
             }
         }
+    }
+
+    // --- Assign final labels using union-find ---
+    let mut labels = vec![0usize; n];
+    // Find roots
+    for i in 0..n {
+        labels[i] = uf_find(&mut uf_parent, i);
+    }
+    // Map roots to consecutive 0-based labels
+    let mut root_to_label: HashMap<usize, usize> = HashMap::new();
+    let mut next_label = 0;
+    for i in 0..n {
+        let root = labels[i];
+        if !root_to_label.contains_key(&root) {
+            root_to_label.insert(root, next_label);
+            next_label += 1;
+        }
+        labels[i] = root_to_label[&root];
     }
 
     Ok(HierarchicalResult {
         labels,
-        n_clusters: active.len(),
+        n_clusters: root_to_label.len(),
         linkage_matrix,
         merge_distances,
         linkage: format!("{:?}", linkage).to_lowercase(),
     })
 }
 
-/// Compute initial pairwise distance matrix.
-fn compute_distance_matrix(data: &ArrayView2<f64>) -> HashMap<(usize, usize), f64> {
-    let n = data.nrows();
-    let mut distances = HashMap::new();
+// =============================================================================
+// Condensed distance matrix helpers
+// =============================================================================
 
-    for i in 0..n {
-        for j in (i + 1)..n {
-            let dist = euclidean_distance_squared(&data.row(i), &data.row(j)).sqrt();
-            distances.insert((i, j), dist);
-            distances.insert((j, i), dist);
-        }
-    }
-
-    distances
+/// Compute condensed index for pair (i, j) where i < j in an n-element matrix.
+/// Formula: idx = n*(n-1)/2 - (n-i)*(n-i-1)/2 + j - i - 1
+#[inline(always)]
+fn condensed_index(n: usize, i: usize, j: usize) -> usize {
+    debug_assert!(i < j && j < n);
+    let ni = n - i;
+    n * (n - 1) / 2 - ni * (ni - 1) / 2 + j - i - 1
 }
 
-/// Find the closest pair of clusters.
-fn find_closest_clusters(
-    active: &HashSet<usize>,
-    distances: &HashMap<(usize, usize), f64>,
-    clusters: &HashMap<usize, Vec<usize>>,
-    data: &ArrayView2<f64>,
-    linkage: Linkage,
-) -> Result<(usize, usize, f64), String> {
-    let mut min_dist = f64::INFINITY;
-    let mut best_pair = (0, 0);
-
-    let active_vec: Vec<usize> = active.iter().cloned().collect();
-
-    for i in 0..active_vec.len() {
-        for j in (i + 1)..active_vec.len() {
-            let c1 = active_vec[i];
-            let c2 = active_vec[j];
-
-            let dist = cluster_distance(c1, c2, distances, clusters, data, linkage);
-
-            if dist < min_dist {
-                min_dist = dist;
-                best_pair = (c1, c2);
-            }
-        }
+/// Get distance from condensed matrix, handling i == j and i > j.
+#[inline(always)]
+fn get_condensed(dist: &[f64], n: usize, i: usize, j: usize) -> f64 {
+    if i == j {
+        0.0
+    } else if i < j {
+        dist[condensed_index(n, i, j)]
+    } else {
+        dist[condensed_index(n, j, i)]
     }
-
-    if min_dist.is_infinite() {
-        return Err("Could not find valid cluster pair".to_string());
-    }
-
-    Ok((best_pair.0, best_pair.1, min_dist))
 }
 
-/// Calculate distance between two clusters based on linkage method.
-fn cluster_distance(
-    c1: usize,
-    c2: usize,
-    distances: &HashMap<(usize, usize), f64>,
-    clusters: &HashMap<usize, Vec<usize>>,
-    data: &ArrayView2<f64>,
+/// Set distance in condensed matrix, handling i > j.
+#[inline(always)]
+fn set_condensed(dist: &mut [f64], n: usize, i: usize, j: usize, val: f64) {
+    if i < j {
+        dist[condensed_index(n, i, j)] = val;
+    } else if j < i {
+        dist[condensed_index(n, j, i)] = val;
+    }
+}
+
+/// Get the "effective" distance for nearest-neighbor comparison.
+/// For Ward's method (squared distances), we convert to the Ward merge metric
+/// for comparison: sqrt(2*ni*nj/(ni+nj) * d_sq).
+/// For other linkages, the raw stored value is the distance.
+#[inline]
+fn ward_or_raw_dist(
+    dist: &[f64],
+    n: usize,
+    i: usize,
+    j: usize,
+    size: &[usize],
     linkage: Linkage,
 ) -> f64 {
-    let indices1 = clusters.get(&c1).unwrap();
-    let indices2 = clusters.get(&c2).unwrap();
-
-    match linkage {
-        Linkage::Single => {
-            // Minimum distance between any pair
-            let mut min_dist = f64::INFINITY;
-            for &i in indices1 {
-                for &j in indices2 {
-                    if let Some(&d) = distances.get(&(i, j)) {
-                        min_dist = min_dist.min(d);
-                    } else {
-                        // Compute if not in cache
-                        let d = euclidean_distance_squared(&data.row(i), &data.row(j)).sqrt();
-                        min_dist = min_dist.min(d);
-                    }
-                }
-            }
-            min_dist
-        }
-        Linkage::Complete => {
-            // Maximum distance between any pair
-            let mut max_dist = 0.0f64;
-            for &i in indices1 {
-                for &j in indices2 {
-                    if let Some(&d) = distances.get(&(i, j)) {
-                        max_dist = max_dist.max(d);
-                    } else {
-                        let d = euclidean_distance_squared(&data.row(i), &data.row(j)).sqrt();
-                        max_dist = max_dist.max(d);
-                    }
-                }
-            }
-            max_dist
-        }
-        Linkage::Average => {
-            // Average distance between all pairs
-            let mut total = 0.0;
-            let mut count = 0;
-            for &i in indices1 {
-                for &j in indices2 {
-                    if let Some(&d) = distances.get(&(i, j)) {
-                        total += d;
-                    } else {
-                        total += euclidean_distance_squared(&data.row(i), &data.row(j)).sqrt();
-                    }
-                    count += 1;
-                }
-            }
-            if count > 0 {
-                total / count as f64
-            } else {
-                f64::INFINITY
-            }
-        }
-        Linkage::Ward => {
-            // Ward's minimum variance: increase in total within-cluster variance
-            let n1 = indices1.len() as f64;
-            let n2 = indices2.len() as f64;
-
-            // Compute centroids
-            let centroid1 = compute_centroid(data, indices1);
-            let centroid2 = compute_centroid(data, indices2);
-
-            // Ward distance: sqrt(2 * n1 * n2 / (n1 + n2)) * ||c1 - c2||
-            let centroid_dist = centroid1
-                .iter()
-                .zip(centroid2.iter())
-                .map(|(a, b)| (a - b).powi(2))
-                .sum::<f64>()
-                .sqrt();
-
-            ((2.0 * n1 * n2) / (n1 + n2)).sqrt() * centroid_dist
-        }
+    let raw = get_condensed(dist, n, i, j);
+    if linkage == Linkage::Ward {
+        let ni = size[i] as f64;
+        let nj = size[j] as f64;
+        // Ward merge distance = sqrt(2 * ni * nj / (ni + nj) * raw)
+        // where raw = squared Euclidean distance between centroids
+        ((2.0 * ni * nj / (ni + nj)) * raw).sqrt()
+    } else {
+        raw
     }
 }
 
-/// Compute centroid of a cluster.
-fn compute_centroid(data: &ArrayView2<f64>, indices: &[usize]) -> Vec<f64> {
-    let n_features = data.ncols();
-    let mut centroid = vec![0.0; n_features];
-    let n = indices.len() as f64;
-
-    for &idx in indices {
-        for (j, val) in data.row(idx).iter().enumerate() {
-            centroid[j] += val;
-        }
-    }
-
-    for val in &mut centroid {
-        *val /= n;
-    }
-
-    centroid
-}
-
-/// Update distance matrix after merging two clusters.
-#[allow(clippy::too_many_arguments)]
-fn update_distances_for_merge(
-    distances: &mut HashMap<(usize, usize), f64>,
-    active: &HashSet<usize>,
-    c1: usize,
-    c2: usize,
-    new_id: usize,
-    merged_indices: &[usize],
-    clusters: &HashMap<usize, Vec<usize>>,
-    data: &ArrayView2<f64>,
+/// Full rebuild of nearest-neighbor arrays (fallback for edge cases).
+fn rebuild_nn_full(
+    dist: &[f64],
+    n: usize,
+    active: &[bool],
+    size: &[usize],
     linkage: Linkage,
+    nn: &mut [usize],
+    nn_dist: &mut [f64],
 ) {
-    // For each other active cluster, compute distance to new merged cluster
-    for &other in active {
-        if other == c1 || other == c2 {
+    for i in 0..active.len() {
+        if !active[i] {
+            nn_dist[i] = f64::INFINITY;
             continue;
         }
-
-        let other_indices = clusters.get(&other).unwrap();
-
-        let dist = match linkage {
-            Linkage::Single => {
-                let mut min_dist = f64::INFINITY;
-                for &i in merged_indices {
-                    for &j in other_indices {
-                        if let Some(&d) = distances.get(&(i, j)) {
-                            min_dist = min_dist.min(d);
-                        } else {
-                            let d = euclidean_distance_squared(&data.row(i), &data.row(j)).sqrt();
-                            min_dist = min_dist.min(d);
-                        }
-                    }
+        nn_dist[i] = f64::INFINITY;
+        for j in 0..active.len() {
+            if j != i && active[j] {
+                let d = ward_or_raw_dist(dist, n, i, j, size, linkage);
+                if d < nn_dist[i] {
+                    nn_dist[i] = d;
+                    nn[i] = j;
                 }
-                min_dist
             }
-            Linkage::Complete => {
-                let mut max_dist = 0.0f64;
-                for &i in merged_indices {
-                    for &j in other_indices {
-                        if let Some(&d) = distances.get(&(i, j)) {
-                            max_dist = max_dist.max(d);
-                        } else {
-                            let d = euclidean_distance_squared(&data.row(i), &data.row(j)).sqrt();
-                            max_dist = max_dist.max(d);
-                        }
-                    }
-                }
-                max_dist
-            }
-            Linkage::Average => {
-                let mut total = 0.0;
-                let mut count = 0;
-                for &i in merged_indices {
-                    for &j in other_indices {
-                        if let Some(&d) = distances.get(&(i, j)) {
-                            total += d;
-                        } else {
-                            total += euclidean_distance_squared(&data.row(i), &data.row(j)).sqrt();
-                        }
-                        count += 1;
-                    }
-                }
-                total / count as f64
-            }
-            Linkage::Ward => {
-                let n1 = merged_indices.len() as f64;
-                let n2 = other_indices.len() as f64;
-                let centroid1 = compute_centroid(data, merged_indices);
-                let centroid2 = compute_centroid(data, other_indices);
-                let centroid_dist = centroid1
-                    .iter()
-                    .zip(centroid2.iter())
-                    .map(|(a, b)| (a - b).powi(2))
-                    .sum::<f64>()
-                    .sqrt();
-                ((2.0 * n1 * n2) / (n1 + n2)).sqrt() * centroid_dist
-            }
-        };
+        }
+    }
+}
 
-        distances.insert((new_id, other), dist);
-        distances.insert((other, new_id), dist);
+// =============================================================================
+// Union-find helpers
+// =============================================================================
+
+/// Find with path compression.
+fn uf_find(parent: &mut [usize], mut x: usize) -> usize {
+    while parent[x] != x {
+        parent[x] = parent[parent[x]]; // path splitting
+        x = parent[x];
+    }
+    x
+}
+
+/// Union by rank.
+fn uf_union(parent: &mut [usize], rank: &mut [usize], x: usize, y: usize) {
+    let px = uf_find(parent, x);
+    let py = uf_find(parent, y);
+    if px == py {
+        return;
+    }
+    if rank[px] < rank[py] {
+        parent[px] = py;
+    } else if rank[px] > rank[py] {
+        parent[py] = px;
+    } else {
+        parent[py] = px;
+        rank[px] += 1;
     }
 }
 

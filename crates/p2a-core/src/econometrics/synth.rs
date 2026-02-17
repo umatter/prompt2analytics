@@ -884,7 +884,7 @@ fn get_outcome(
 
 /// Precomputed data for H matrix computation (thread-safe, read-only after creation).
 ///
-/// Precomputes structures that allow O(j²) H matrix construction instead of O(j²k).
+/// Precomputes structures that allow O(j^2) H matrix construction instead of O(j^2 k).
 /// Since X0 doesn't change during V optimization, we can precompute:
 /// - outer_products[m] = X0[m,:]' * X0[m,:] for each predictor m
 /// - x0_x1[m][i] = X0[m,i] * X1[m] for the c vector
@@ -964,8 +964,8 @@ impl QpWorkspace {
         self.h_buffer.fill(0.0);
         self.c_buffer.fill(0.0);
 
-        // H = Σ_m V[m] * outer_products[m]
-        // c = -Σ_m V[m] * x0_x1[m]
+        // H = Sigma_m V[m] * outer_products[m]
+        // c = -Sigma_m V[m] * x0_x1[m]
         for m in 0..precomputed.k {
             let vm = v[m];
             if vm.abs() < 1e-12 {
@@ -1004,9 +1004,15 @@ impl QpWorkspace {
 
 /// Optimize V (predictor weights) and W (unit weights).
 ///
-/// Uses nested optimization:
-/// - Outer: Optimize V to minimize pre-treatment MSPE
-/// - Inner: For given V, solve constrained QP for W
+/// Uses nested optimization following R's Synth package:
+/// - Outer: Nelder-Mead simplex on V to minimize pre-treatment MSPE
+/// - Inner: For given V, solve constrained QP for W using active-set NNLS
+///
+/// # References
+///
+/// - Nelder, J. A., & Mead, R. (1965). "A Simplex Method for Function Minimization."
+///   The Computer Journal, 7(4), 308-313.
+/// - R package `Synth` uses `optim(method="Nelder-Mead")` for V optimization.
 fn optimize_synth_weights(
     data: &SynthData,
     v_method: &VOptimization,
@@ -1048,84 +1054,246 @@ fn optimize_synth_weights(
     let precomputed = QpPrecomputed::new(&data.x0, &data.x1);
     let j = precomputed.j;
 
-    // Initial solve with starting V
-    let mut workspace = QpWorkspace::new(j);
-    let mut best_v = v.clone();
-    let mut best_w = workspace.solve(&precomputed, &v)?;
-    let mut best_loss = calculate_v_loss(data, &best_w);
+    // Objective function: given V weights (unnormalized, positive), compute MSPE
+    // Returns (loss, w_weights) so we can recover the best W at the end
+    let evaluate_v = |v_raw: &[f64]| -> (f64, Array1<f64>) {
+        // Ensure positive and normalize to sum to 1
+        let mut v_pos: Vec<f64> = v_raw.iter().map(|&x| x.max(1e-6)).collect();
+        let sum: f64 = v_pos.iter().sum();
+        for x in &mut v_pos {
+            *x /= sum;
+        }
+        let v_arr = Array1::from_vec(v_pos);
+
+        let mut ws = QpWorkspace::new(j);
+        match ws.solve(&precomputed, &v_arr) {
+            Ok(w) => {
+                let loss = calculate_v_loss(data, &w);
+                (loss, w)
+            }
+            Err(_) => (f64::INFINITY, Array1::from_elem(j, 1.0 / j as f64)),
+        }
+    };
+
+    // Use Nelder-Mead simplex optimization for V
+    // (Nelder & Mead, 1965; same approach as R's optim(method="Nelder-Mead"))
+    // The V-matrix dimension is typically small (2-10), ideal for Nelder-Mead.
+    let (best_v_raw, best_loss, iterations) =
+        nelder_mead_optimize(v.as_slice().unwrap(), &evaluate_v, tolerance, max_iter);
+
+    // Recover best V (normalized) and best W
+    let mut best_v_pos: Vec<f64> = best_v_raw.iter().map(|&x| x.max(1e-6)).collect();
+    let sum: f64 = best_v_pos.iter().sum();
+    for x in &mut best_v_pos {
+        *x /= sum;
+    }
+    let best_v = Array1::from_vec(best_v_pos);
+
+    // Re-solve for W with the final V to ensure consistency
+    let mut final_ws = QpWorkspace::new(j);
+    let best_w = final_ws.solve(&precomputed, &best_v)?;
+    let final_loss = calculate_v_loss(data, &best_w);
+
+    Ok((best_v, best_w, iterations, final_loss.min(best_loss)))
+}
+
+/// Nelder-Mead simplex optimizer for V-matrix weights.
+///
+/// Standard Nelder-Mead with reflection, expansion, contraction, and shrink steps.
+/// Parameters follow the standard settings from Nelder & Mead (1965):
+/// - alpha (reflection) = 1.0
+/// - gamma (expansion) = 2.0
+/// - rho (contraction) = 0.5
+/// - sigma (shrink) = 0.5
+///
+/// # Arguments
+/// * `x0` - Initial point (V weights, k-dimensional)
+/// * `objective` - Function mapping V weights to (loss, W weights)
+/// * `tol` - Convergence tolerance on function values
+/// * `max_iter` - Maximum number of iterations
+///
+/// # Returns
+/// (best_point, best_value, iterations)
+fn nelder_mead_optimize<F>(
+    x0: &[f64],
+    objective: &F,
+    tol: f64,
+    max_iter: usize,
+) -> (Vec<f64>, f64, usize)
+where
+    F: Fn(&[f64]) -> (f64, Array1<f64>),
+{
+    let n = x0.len();
+
+    // Nelder-Mead standard parameters (Nelder & Mead, 1965)
+    let alpha = 1.0; // Reflection coefficient
+    let gamma = 2.0; // Expansion coefficient
+    let rho = 0.5; // Contraction coefficient
+    let sigma = 0.5; // Shrink coefficient
+
+    // Initialize simplex with n+1 vertices
+    // Each vertex perturbs one coordinate of x0
+    let mut simplex: Vec<Vec<f64>> = Vec::with_capacity(n + 1);
+    let mut values: Vec<f64> = Vec::with_capacity(n + 1);
+
+    // First vertex is x0 itself
+    simplex.push(x0.to_vec());
+    let (val, _) = objective(x0);
+    values.push(val);
+
+    // Remaining vertices: perturb each coordinate
+    for i in 0..n {
+        let mut vertex = x0.to_vec();
+        let perturbation = if vertex[i].abs() > 1e-10 {
+            0.05 * vertex[i] // 5% perturbation
+        } else {
+            0.00025 // Small absolute perturbation for near-zero values
+        };
+        vertex[i] += perturbation;
+        let (val, _) = objective(&vertex);
+        simplex.push(vertex);
+        values.push(val);
+    }
 
     let mut iterations = 0;
-
-    // Track loss at start of each outer iteration for convergence check
-    let mut loss_at_iter_start = best_loss;
-    let convergence_threshold = tolerance * 10.0; // Relative improvement threshold
-
-    // Parallel coordinate descent for V optimization
-    // Generate all (dimension, delta) candidates to evaluate in parallel
-    let deltas: [f64; 6] = [0.1, -0.1, 0.05, -0.05, 0.01, -0.01];
 
     for iter in 0..max_iter {
         iterations = iter + 1;
 
-        // Evaluate all coordinate directions in parallel
-        // Each thread gets its own workspace but shares the precomputed data
-        let candidates: Vec<(usize, f64)> = (0..k)
-            .flat_map(|i| deltas.iter().map(move |&d| (i, d)))
-            .collect();
+        // Sort vertices by function value (ascending)
+        let mut order: Vec<usize> = (0..=n).collect();
+        order.sort_by(|&a, &b| values[a].partial_cmp(&values[b]).unwrap_or(std::cmp::Ordering::Equal));
 
-        // Parallel evaluation of all candidates
-        let results: Vec<(f64, Array1<f64>, Array1<f64>)> = candidates
-            .par_iter()
-            .filter_map(|&(dim, delta)| {
-                // Build candidate V vector
-                let mut v_new = best_v.clone();
-                v_new[dim] = (v_new[dim] + delta).max(0.001);
+        let sorted_simplex: Vec<Vec<f64>> = order.iter().map(|&i| simplex[i].clone()).collect();
+        let sorted_values: Vec<f64> = order.iter().map(|&i| values[i]).collect();
+        simplex = sorted_simplex;
+        values = sorted_values;
 
-                // Normalize
-                let sum: f64 = v_new.sum();
-                if sum <= 0.0 {
-                    return None;
-                }
-                v_new.mapv_inplace(|x| x / sum);
-
-                // Each thread creates its own workspace
-                let mut local_workspace = QpWorkspace::new(j);
-
-                // Solve QP for this candidate
-                let w_new = local_workspace.solve(&precomputed, &v_new).ok()?;
-                let loss_new = calculate_v_loss(data, &w_new);
-
-                Some((loss_new, v_new, w_new))
-            })
-            .collect();
-
-        // Find the best result among all candidates
-        let mut improved = false;
-        for (loss_new, v_new, w_new) in results {
-            if loss_new < best_loss - tolerance {
-                best_v = v_new;
-                best_w = w_new;
-                best_loss = loss_new;
-                improved = true;
-            }
-        }
-
-        // Check for convergence based on relative improvement this iteration
-        if iter > 5 {
-            let relative_improvement =
-                (loss_at_iter_start - best_loss) / loss_at_iter_start.max(1e-10);
-            if relative_improvement < convergence_threshold && relative_improvement >= 0.0 {
-                break; // Converged - improvements too small to continue
-            }
-        }
-        loss_at_iter_start = best_loss;
-
-        if !improved {
+        // Check convergence: spread of function values
+        let f_best = values[0];
+        let f_worst = values[n];
+        let f_spread = (f_worst - f_best).abs();
+        if f_spread < tol && iter > 0 {
             break;
+        }
+
+        // Also check convergence on simplex diameter
+        let mut max_dist = 0.0_f64;
+        for i in 1..=n {
+            let dist: f64 = simplex[i]
+                .iter()
+                .zip(simplex[0].iter())
+                .map(|(a, b)| (a - b) * (a - b))
+                .sum::<f64>()
+                .sqrt();
+            max_dist = max_dist.max(dist);
+        }
+        if max_dist < tol * 1e-4 && iter > 0 {
+            break;
+        }
+
+        // Compute centroid of all vertices except the worst
+        let mut centroid = vec![0.0; n];
+        for i in 0..n {
+            for j in 0..n {
+                centroid[j] += simplex[i][j];
+            }
+        }
+        for j in 0..n {
+            centroid[j] /= n as f64;
+        }
+
+        // Reflection: x_r = centroid + alpha * (centroid - worst)
+        let worst = &simplex[n];
+        let x_r: Vec<f64> = centroid
+            .iter()
+            .zip(worst.iter())
+            .map(|(&c, &w)| c + alpha * (c - w))
+            .collect();
+        let (f_r, _) = objective(&x_r);
+
+        if f_r < values[0] {
+            // Reflection is best so far: try expansion
+            // x_e = centroid + gamma * (x_r - centroid)
+            let x_e: Vec<f64> = centroid
+                .iter()
+                .zip(x_r.iter())
+                .map(|(&c, &r)| c + gamma * (r - c))
+                .collect();
+            let (f_e, _) = objective(&x_e);
+
+            if f_e < f_r {
+                // Accept expansion
+                simplex[n] = x_e;
+                values[n] = f_e;
+            } else {
+                // Accept reflection
+                simplex[n] = x_r;
+                values[n] = f_r;
+            }
+        } else if f_r < values[n - 1] {
+            // Reflection is better than second-worst: accept it
+            simplex[n] = x_r;
+            values[n] = f_r;
+        } else {
+            // Contraction
+            if f_r < values[n] {
+                // Outside contraction: x_c = centroid + rho * (x_r - centroid)
+                let x_c: Vec<f64> = centroid
+                    .iter()
+                    .zip(x_r.iter())
+                    .map(|(&c, &r)| c + rho * (r - c))
+                    .collect();
+                let (f_c, _) = objective(&x_c);
+
+                if f_c <= f_r {
+                    simplex[n] = x_c;
+                    values[n] = f_c;
+                } else {
+                    // Shrink: move all vertices toward the best
+                    for i in 1..=n {
+                        for j in 0..n {
+                            simplex[i][j] = simplex[0][j] + sigma * (simplex[i][j] - simplex[0][j]);
+                        }
+                        let (f_i, _) = objective(&simplex[i]);
+                        values[i] = f_i;
+                    }
+                }
+            } else {
+                // Inside contraction: x_cc = centroid - rho * (centroid - worst)
+                let x_cc: Vec<f64> = centroid
+                    .iter()
+                    .zip(worst.iter())
+                    .map(|(&c, &w)| c - rho * (c - w))
+                    .collect();
+                let (f_cc, _) = objective(&x_cc);
+
+                if f_cc < values[n] {
+                    simplex[n] = x_cc;
+                    values[n] = f_cc;
+                } else {
+                    // Shrink: move all vertices toward the best
+                    for i in 1..=n {
+                        for j in 0..n {
+                            simplex[i][j] = simplex[0][j] + sigma * (simplex[i][j] - simplex[0][j]);
+                        }
+                        let (f_i, _) = objective(&simplex[i]);
+                        values[i] = f_i;
+                    }
+                }
+            }
         }
     }
 
-    Ok((best_v, best_w, iterations, best_loss))
+    // Return the best vertex
+    let mut best_idx = 0;
+    for i in 1..=n {
+        if values[i] < values[best_idx] {
+            best_idx = i;
+        }
+    }
+
+    (simplex[best_idx].clone(), values[best_idx], iterations)
 }
 
 /// Calculate the V-loss (pre-treatment MSPE) for given W weights.
@@ -1209,95 +1377,259 @@ fn solve_weights_qp(
     solve_simplex_constrained_qp(&h, &c, j)
 }
 
-/// Solve constrained QP with simplex constraints (Σw = 1, w ≥ 0).
+/// Solve constrained QP with simplex constraints (sum w = 1, w >= 0).
 ///
-/// Uses active set method / projected gradient descent.
+/// Uses Lawson-Hanson active-set NNLS followed by simplex projection.
+/// The synthetic control weights problem is:
+///   min (1/2) w' H w + c' w  subject to w >= 0, sum(w) = 1
+///
+/// This is solved by first finding the unconstrained minimum of the
+/// augmented system that enforces sum(w) = 1 via a penalty term,
+/// then applying NNLS active-set iterations for non-negativity.
+///
+/// # References
+///
+/// - Lawson, C. L., & Hanson, R. J. (1974). Solving Least Squares Problems.
+///   Prentice-Hall. Chapter 23.
+/// - The approach follows R's Synth package which uses LowRankQP for the inner solve.
 fn solve_simplex_constrained_qp(
     h: &Array2<f64>,
     c: &Array1<f64>,
     n: usize,
 ) -> EconResult<Array1<f64>> {
-    // Initialize with uniform weights
-    let mut w = Array1::from_elem(n, 1.0 / n as f64);
+    if n == 0 {
+        return Ok(Array1::zeros(0));
+    }
+    if n == 1 {
+        return Ok(Array1::from_elem(1, 1.0));
+    }
 
-    let max_iter = 10000;
-    let tolerance = 1e-10;
+    // Strategy: solve the NNLS problem and project onto the simplex.
+    //
+    // The QP is: min 0.5 w'Hw + c'w  s.t. w >= 0, sum(w) = 1
+    //
+    // We handle sum(w) = 1 by augmenting the QP with a large penalty:
+    //   min 0.5 w'(H + mu*ee')w + (c - mu*e)'w + const
+    // where e = [1,...,1]', mu is a large penalty coefficient.
+    // This pushes the solution toward sum(w) = 1.
+    //
+    // Then we apply Lawson-Hanson NNLS active-set method for w >= 0.
 
-    // Projected gradient descent with line search
+    let mu = 1e6; // Penalty for sum constraint
+
+    // H_aug = H + mu * e * e'
+    // c_aug = c - mu * e  (since we want sum(w) = 1, penalty term is mu/2 (sum(w) - 1)^2)
+    let mut h_aug = h.clone();
+    let mut c_aug = c.clone();
+    for i in 0..n {
+        for j in 0..n {
+            h_aug[[i, j]] += mu;
+        }
+        c_aug[i] -= mu;
+    }
+
+    // Lawson-Hanson NNLS active-set algorithm
+    // (Lawson & Hanson, 1974, Algorithm NNLS)
+    let w = nnls_solve(&h_aug, &c_aug, n);
+
+    // Project onto simplex: normalize to sum to 1
+    let mut result = w;
+    result.mapv_inplace(|x| x.max(0.0));
+    let sum: f64 = result.sum();
+    if sum > 1e-15 {
+        result.mapv_inplace(|x| x / sum);
+    } else {
+        // Fallback: uniform weights
+        result = Array1::from_elem(n, 1.0 / n as f64);
+    }
+
+    Ok(result)
+}
+
+/// Lawson-Hanson NNLS active-set solver.
+///
+/// Solves: min 0.5 x'Hx + c'x  subject to x >= 0
+///
+/// This is equivalent to NNLS: min ||Ax - b||^2 where H = A'A and c = -A'b,
+/// but we work directly with the QP formulation for efficiency.
+///
+/// The algorithm maintains a passive set P (indices free to vary) and an
+/// active set Z (indices fixed at zero). It iteratively moves indices between
+/// sets based on the gradient (KKT conditions).
+///
+/// # References
+///
+/// - Lawson, C. L., & Hanson, R. J. (1974). Solving Least Squares Problems.
+///   Prentice-Hall. Chapter 23, Algorithm NNLS.
+fn nnls_solve(h: &Array2<f64>, c: &Array1<f64>, n: usize) -> Array1<f64> {
+    let mut x = Array1::zeros(n);
+    let mut passive: Vec<bool> = vec![false; n]; // P set: true = passive (free)
+    let max_iter = 3 * n; // Typical NNLS converges in O(n) iterations
+
     for _ in 0..max_iter {
-        // Gradient: H * w + c
-        let grad = h.dot(&w) + c;
+        // Compute gradient: w = Hx + c (the negative gradient of the objective is -w)
+        let grad = h.dot(&x) + c;
 
-        // Compute step direction (negative gradient projected onto simplex)
-        // For simplex, this means we need to project onto Σw = 1, w ≥ 0
-
-        // Frank-Wolfe style: find vertex minimizing gradient
-        let mut min_idx = 0;
-        let mut min_val = grad[0];
-        for i in 1..n {
-            if grad[i] < min_val {
-                min_val = grad[i];
-                min_idx = i;
+        // Check KKT: for active (zero) variables, gradient should be >= 0
+        // Find the most negative gradient among active variables
+        let mut min_grad = 0.0;
+        let mut min_idx: Option<usize> = None;
+        for i in 0..n {
+            if !passive[i] && grad[i] < min_grad {
+                min_grad = grad[i];
+                min_idx = Some(i);
             }
         }
 
-        // Direction: e_min - w (move toward best vertex)
-        let mut direction = Array1::zeros(n);
-        direction[min_idx] = 1.0;
-        let direction = &direction - &w;
-
-        // Line search: find optimal step size
-        // f(w + α*d) = 0.5*(w+αd)'H(w+αd) + c'(w+αd)
-        // df/dα = d'Hw + α*d'Hd + c'd = 0
-        // α* = -(d'Hw + c'd) / (d'Hd)
-
-        let hd = h.dot(&direction);
-        let d_h_d: f64 = direction
-            .iter()
-            .zip(hd.iter())
-            .map(|(&di, &hi)| di * hi)
-            .sum();
-        let d_h_w: f64 = direction
-            .iter()
-            .zip(h.dot(&w).iter())
-            .map(|(&di, &hi)| di * hi)
-            .sum();
-        let c_d: f64 = c
-            .iter()
-            .zip(direction.iter())
-            .map(|(&ci, &di)| ci * di)
-            .sum();
-
-        let alpha = if d_h_d.abs() > 1e-12 {
-            (-(d_h_w + c_d) / d_h_d).max(0.0).min(1.0)
-        } else {
-            0.0
-        };
-
-        // Update
-        let w_new = &w + &(&direction * alpha);
-
-        // Check convergence
-        let change: f64 = w_new
-            .iter()
-            .zip(w.iter())
-            .map(|(&a, &b)| (a - b).abs())
-            .sum();
-        w = w_new;
-
-        if change < tolerance {
+        // If no active variable has negative gradient, KKT satisfied
+        if min_idx.is_none() {
             break;
+        }
+
+        // Move the most violating variable to the passive set
+        let t = min_idx.unwrap();
+        passive[t] = true;
+
+        // Inner loop: solve unconstrained subproblem on passive set
+        loop {
+            let passive_indices: Vec<usize> = (0..n).filter(|&i| passive[i]).collect();
+            let p = passive_indices.len();
+
+            if p == 0 {
+                break;
+            }
+
+            // Extract submatrix H_PP and subvector c_P
+            let mut h_sub = Array2::zeros((p, p));
+            let mut c_sub = Array1::zeros(p);
+            for (ii, &i) in passive_indices.iter().enumerate() {
+                c_sub[ii] = c[i];
+                for (jj, &j) in passive_indices.iter().enumerate() {
+                    h_sub[[ii, jj]] = h[[i, j]];
+                }
+            }
+
+            // Solve H_PP * z_P = -c_P using Cholesky or direct solve
+            let z_p = solve_symmetric_positive(&h_sub, &(-&c_sub));
+
+            // Check if all z_P >= 0
+            let all_positive = z_p.iter().all(|&v| v >= -1e-14);
+
+            if all_positive {
+                // Accept solution: set x[passive] = z_p, x[active] = 0
+                x.fill(0.0);
+                for (ii, &i) in passive_indices.iter().enumerate() {
+                    x[i] = z_p[ii].max(0.0);
+                }
+                break;
+            } else {
+                // Find the interpolation parameter alpha to keep x >= 0
+                // alpha = min over {i in P : z_i < 0} of x_i / (x_i - z_i)
+                let mut alpha = 1.0;
+                for (ii, &i) in passive_indices.iter().enumerate() {
+                    if z_p[ii] < -1e-14 {
+                        let a = x[i] / (x[i] - z_p[ii]);
+                        if a < alpha {
+                            alpha = a;
+                        }
+                    }
+                }
+                alpha = alpha.max(0.0).min(1.0);
+
+                // Update x = x + alpha * (z - x) for passive indices
+                for (ii, &i) in passive_indices.iter().enumerate() {
+                    x[i] += alpha * (z_p[ii] - x[i]);
+                }
+
+                // Move variables that hit zero back to active set
+                for &i in &passive_indices {
+                    if x[i].abs() < 1e-14 {
+                        x[i] = 0.0;
+                        passive[i] = false;
+                    }
+                }
+            }
         }
     }
 
-    // Project to ensure constraints are satisfied
-    w.mapv_inplace(|x| x.max(0.0));
-    let sum: f64 = w.sum();
-    if sum > 0.0 {
-        w.mapv_inplace(|x| x / sum);
+    x
+}
+
+/// Solve a symmetric positive definite system Ax = b using Cholesky decomposition.
+///
+/// Falls back to regularized solve if the matrix is near-singular.
+fn solve_symmetric_positive(a: &Array2<f64>, b: &Array1<f64>) -> Array1<f64> {
+    let n = b.len();
+    if n == 0 {
+        return Array1::zeros(0);
+    }
+    if n == 1 {
+        return if a[[0, 0]].abs() > 1e-15 {
+            Array1::from_elem(1, b[0] / a[[0, 0]])
+        } else {
+            Array1::zeros(1)
+        };
     }
 
-    Ok(w)
+    // Try Cholesky decomposition (A = L L')
+    // If it fails, add regularization
+    let mut mat = a.clone();
+    for attempt in 0..5 {
+        if let Some(l) = cholesky_decompose(&mat) {
+            // Solve L y = b (forward substitution)
+            let mut y = b.clone();
+            for i in 0..n {
+                for j in 0..i {
+                    y[i] -= l[[i, j]] * y[j];
+                }
+                y[i] /= l[[i, i]];
+            }
+            // Solve L' x = y (backward substitution)
+            let mut x = y;
+            for i in (0..n).rev() {
+                for j in (i + 1)..n {
+                    x[i] -= l[[j, i]] * x[j];
+                }
+                x[i] /= l[[i, i]];
+            }
+            return x;
+        }
+        // Add increasing regularization
+        let reg = 1e-8 * 10.0_f64.powi(attempt as i32);
+        for i in 0..n {
+            mat[[i, i]] = a[[i, i]] + reg;
+        }
+    }
+
+    // Last resort: return zero vector
+    Array1::zeros(n)
+}
+
+/// Cholesky decomposition of a symmetric positive definite matrix.
+/// Returns L such that A = L L', or None if not positive definite.
+fn cholesky_decompose(a: &Array2<f64>) -> Option<Array2<f64>> {
+    let n = a.nrows();
+    let mut l = Array2::zeros((n, n));
+
+    for i in 0..n {
+        for j in 0..=i {
+            let mut sum = 0.0;
+            for k in 0..j {
+                sum += l[[i, k]] * l[[j, k]];
+            }
+            if i == j {
+                let diag = a[[i, i]] - sum;
+                if diag <= 0.0 {
+                    return None; // Not positive definite
+                }
+                l[[i, j]] = diag.sqrt();
+            } else {
+                l[[i, j]] = (a[[i, j]] - sum) / l[[j, j]];
+            }
+        }
+    }
+
+    Some(l)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

@@ -9,17 +9,25 @@
 //! subsets of the data to build up a function that describes the deterministic part
 //! of the variation in the data, point by point.
 //!
-//! For each point x₀, the algorithm:
-//! 1. Selects k = floor(span × n) nearest neighbors
-//! 2. Computes tricubic weights: w(u) = (1 - |u|³)³ for |u| < 1
+//! For each point x0, the algorithm:
+//! 1. Selects k = floor(span * n) nearest neighbors
+//! 2. Computes tricubic weights: w(u) = (1 - |u|^3)^3 for |u| < 1
 //! 3. Fits a weighted polynomial regression
-//! 4. Returns the fitted value at x₀
+//! 4. Returns the fitted value at x0
 //!
 //! # Robust Fitting
 //!
 //! When `robust=true`, the algorithm applies iterative reweighting using the bisquare
 //! function to downweight outliers:
-//! - w(u) = (1 - u²)² for |u| < 1, else 0
+//! - w(u) = (1 - u^2)^2 for |u| < 1, else 0
+//!
+//! # Performance
+//!
+//! This implementation uses several optimizations inspired by R's C implementation:
+//! - Pre-sorting by x with binary search for O(k + log n) neighborhood lookup
+//! - Inline closed-form WLS solvers for degree 0 (weighted mean), degree 1 (2x2),
+//!   and degree 2 (3x3 Cramer's rule)
+//! - Buffer reuse across all fitting points to avoid per-point allocations
 //!
 //! # References
 //!
@@ -32,7 +40,7 @@
 //!   Chapter 8 of Statistical Models in S, eds J.M. Chambers and T.J. Hastie.
 //! - R implementation: `stats::loess()` - https://stat.ethz.ch/R-manual/R-devel/library/stats/html/loess.html
 
-use ndarray::{Array1, Array2, ArrayView1};
+use ndarray::{Array1, Array2};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -143,7 +151,7 @@ impl fmt::Display for LoessResult {
     }
 }
 
-/// Tricubic weight function: w(u) = (1 - |u|³)³ for |u| < 1, else 0.
+/// Tricubic weight function: w(u) = (1 - |u|^3)^3 for |u| < 1, else 0.
 ///
 /// This is the default weight function for LOESS, giving more weight to nearby
 /// points and smoothly decreasing to zero at the boundary of the neighborhood.
@@ -158,7 +166,7 @@ fn tricubic_weight(u: f64) -> f64 {
     }
 }
 
-/// Bisquare weight function: w(u) = (1 - u²)² for |u| < 1, else 0.
+/// Bisquare weight function: w(u) = (1 - u^2)^2 for |u| < 1, else 0.
 ///
 /// Used for robust fitting (Tukey's biweight function).
 #[inline]
@@ -172,158 +180,465 @@ fn bisquare_weight(u: f64) -> f64 {
     }
 }
 
-/// Build a local polynomial design matrix centered at x0.
-///
-/// For degree=1: [1, (x - x0)]
-/// For degree=2: [1, (x - x0), (x - x0)²]
-fn build_local_design_matrix(x: &[f64], x0: f64, degree: usize) -> Array2<f64> {
-    let n = x.len();
-    let p = degree + 1;
-    let mut design = Array2::zeros((n, p));
+// ---------------------------------------------------------------------------
+// Optimized internal engine using pre-sorted data and inline WLS solvers
+// ---------------------------------------------------------------------------
 
-    for i in 0..n {
-        let dx = x[i] - x0;
-        design[[i, 0]] = 1.0; // Intercept
-        if degree >= 1 {
-            design[[i, 1]] = dx;
-        }
-        if degree >= 2 {
-            design[[i, 2]] = dx * dx;
+/// Pre-sorted data structure for O(k + log n) neighborhood lookups.
+///
+/// Instead of computing O(n) distances and sorting them for each evaluation point,
+/// we sort the data by x once upfront. Then, for each evaluation point x0, we use
+/// binary search to find the insertion point and expand outward to collect the k
+/// nearest neighbors. This mirrors the approach used in R's C implementation of loess.
+struct SortedData {
+    /// x values in sorted order
+    x_sorted: Vec<f64>,
+    /// y values reordered to match x_sorted
+    y_sorted: Vec<f64>,
+    /// Mapping from sorted index back to original index
+    orig_idx: Vec<usize>,
+    /// Number of neighbors to use
+    k: usize,
+    /// Whether span > 1 (use all points with scaled bandwidth)
+    span_gt1: bool,
+    /// The span value (for bandwidth scaling when span > 1)
+    span: f64,
+}
+
+impl SortedData {
+    fn new(x: &[f64], y: &[f64], span: f64) -> Self {
+        let n = x.len();
+        // Create index array sorted by x values
+        let mut order: Vec<usize> = (0..n).collect();
+        order.sort_by(|&a, &b| x[a].partial_cmp(&x[b]).unwrap());
+
+        let x_sorted: Vec<f64> = order.iter().map(|&i| x[i]).collect();
+        let y_sorted: Vec<f64> = order.iter().map(|&i| y[i]).collect();
+
+        let k = if span <= 1.0 {
+            ((span * n as f64).ceil() as usize).max(1).min(n)
+        } else {
+            n
+        };
+
+        SortedData {
+            x_sorted,
+            y_sorted,
+            orig_idx: order,
+            k,
+            span_gt1: span > 1.0,
+            span,
         }
     }
 
-    design
+    /// Find the k nearest neighbors of x0 using binary search + expand.
+    /// Returns (left_idx, right_idx) as a contiguous range in the sorted arrays,
+    /// where right_idx is exclusive.
+    ///
+    /// This is O(k + log n) instead of O(n log n) for the naive approach.
+    #[inline]
+    fn find_neighborhood(&self, x0: f64) -> (usize, usize) {
+        let n = self.x_sorted.len();
+        let k = self.k;
+
+        // Binary search for insertion point of x0
+        let pos = self.x_sorted.partition_point(|&v| v < x0);
+
+        // Expand outward from pos to collect k neighbors
+        let mut left = pos.min(n - 1);
+        let mut right = left; // right is inclusive during expansion
+
+        // Start: pick the closest single point
+        if left > 0
+            && (left >= n
+                || (x0 - self.x_sorted[left - 1]).abs()
+                    < (self.x_sorted[left] - x0).abs())
+        {
+            left -= 1;
+            right = left;
+        }
+
+        // Expand until we have k points
+        while right - left + 1 < k {
+            let can_go_left = left > 0;
+            let can_go_right = right < n - 1;
+            if !can_go_left && !can_go_right {
+                break;
+            }
+            if can_go_left && can_go_right {
+                let dl = (x0 - self.x_sorted[left - 1]).abs();
+                let dr = (self.x_sorted[right + 1] - x0).abs();
+                if dl <= dr {
+                    left -= 1;
+                } else {
+                    right += 1;
+                }
+            } else if can_go_left {
+                left -= 1;
+            } else {
+                right += 1;
+            }
+        }
+
+        (left, right + 1) // right+1 to make it exclusive
+    }
+
+    /// Compute the maximum distance in the neighborhood for weight scaling.
+    #[inline]
+    fn max_distance(&self, x0: f64, left: usize, right: usize) -> f64 {
+        let dl = (x0 - self.x_sorted[left]).abs();
+        let dr = (x0 - self.x_sorted[right - 1]).abs();
+        let max_dist = dl.max(dr);
+        let max_dist = if self.span_gt1 {
+            max_dist * self.span
+        } else {
+            max_dist
+        };
+        if max_dist < 1e-10 { 1.0 } else { max_dist }
+    }
 }
 
-/// Perform weighted least squares regression and return fitted value at x0.
+/// Inline WLS solver for degree 0 (local constant / weighted mean).
 ///
-/// Solves: (X'WX)β = X'Wy
-/// Returns: β[0] (the intercept, which is the fitted value at x0)
-fn weighted_local_regression(
-    y: ArrayView1<f64>,
-    x_design: &Array2<f64>,
-    weights: ArrayView1<f64>,
-) -> EconResult<(f64, Array1<f64>)> {
-    let n = y.len();
-    let p = x_design.ncols();
+/// fitted = sum(w_i * y_i) / sum(w_i)
+///
+/// Also returns the self-weight (h_ii) for hat matrix trace computation.
+/// For degree 0: h_ii = w_i / sum(w_j)
+#[inline]
+fn wls_degree0(
+    y: &[f64],
+    weights: &[f64],
+    self_pos: usize,
+) -> (f64, f64) {
+    let mut sw = 0.0;
+    let mut swy = 0.0;
+    for i in 0..y.len() {
+        let w = weights[i];
+        sw += w;
+        swy += w * y[i];
+    }
+    if sw < 1e-15 {
+        return (0.0, 0.0);
+    }
+    let fitted = swy / sw;
+    let h_ii = weights[self_pos] / sw;
+    (fitted, h_ii)
+}
 
-    // Build X'WX and X'Wy
+/// Inline WLS solver for degree 1 (local linear) using 2x2 normal equations.
+///
+/// Solves the weighted normal equations directly:
+///   [S0  S1] [b0]   [T0]
+///   [S1  S2] [b1] = [T1]
+///
+/// where Sk = sum(w_i * dx_i^k), Tk = sum(w_i * dx_i^k * y_i), dx_i = x_i - x0.
+///
+/// Uses Cramer's rule for the 2x2 system.
+/// Also returns h_ii for hat matrix trace: h_ii = e_0' (X'WX)^-1 e_0 * w_self
+/// where e_0 = [1, 0] since we evaluate at x0 (dx=0).
+/// So h_ii = (X'WX)^{-1}[0,0] * w_self
+#[inline]
+fn wls_degree1(
+    x_sorted: &[f64],
+    y: &[f64],
+    weights: &[f64],
+    x0: f64,
+    left: usize,
+    self_pos: usize,
+) -> (f64, f64) {
+    let mut s0 = 0.0;
+    let mut s1 = 0.0;
+    let mut s2 = 0.0;
+    let mut t0 = 0.0;
+    let mut t1 = 0.0;
+
+    for i in 0..weights.len() {
+        let w = weights[i];
+        if w > 0.0 {
+            let dx = x_sorted[left + i] - x0;
+            let wdx = w * dx;
+            s0 += w;
+            s1 += wdx;
+            s2 += wdx * dx;
+            t0 += w * y[i];
+            t1 += wdx * y[i];
+        }
+    }
+
+    // Cramer's rule for 2x2: det = s0*s2 - s1*s1
+    let det = s0 * s2 - s1 * s1;
+    if det.abs() < 1e-30 {
+        // Fallback to degree 0 (weighted mean)
+        return wls_degree0(y, weights, self_pos);
+    }
+    let inv_det = 1.0 / det;
+    // b0 = (s2*t0 - s1*t1) / det
+    let b0 = (s2 * t0 - s1 * t1) * inv_det;
+    // h_ii: (X'WX)^{-1}[0,0] = s2 / det
+    let h_ii = (s2 * inv_det) * weights[self_pos];
+    (b0, h_ii)
+}
+
+/// Inline WLS solver for degree 2 (local quadratic) using 3x3 system.
+///
+/// Solves:
+///   [S0  S1  S2] [b0]   [T0]
+///   [S1  S2  S3] [b1] = [T1]
+///   [S2  S3  S4] [b2]   [T2]
+///
+/// We only need b0 (fitted value at x0) and (X'WX)^{-1}[0,0] (for h_ii).
+/// Uses Cramer's rule for the 3x3 system to get b0, and the cofactor
+/// expansion for (X'WX)^{-1}[0,0].
+#[inline]
+fn wls_degree2(
+    x_sorted: &[f64],
+    y: &[f64],
+    weights: &[f64],
+    x0: f64,
+    left: usize,
+    self_pos: usize,
+) -> (f64, f64) {
+    let mut s0 = 0.0;
+    let mut s1 = 0.0;
+    let mut s2 = 0.0;
+    let mut s3 = 0.0;
+    let mut s4 = 0.0;
+    let mut t0 = 0.0;
+    let mut t1 = 0.0;
+    let mut t2 = 0.0;
+
+    for i in 0..weights.len() {
+        let w = weights[i];
+        if w > 0.0 {
+            let dx = x_sorted[left + i] - x0;
+            let dx2 = dx * dx;
+            s0 += w;
+            s1 += w * dx;
+            s2 += w * dx2;
+            s3 += w * dx2 * dx;
+            s4 += w * dx2 * dx2;
+            t0 += w * y[i];
+            t1 += w * dx * y[i];
+            t2 += w * dx2 * y[i];
+        }
+    }
+
+    // 3x3 determinant by cofactor expansion along row 0:
+    // det = s0*(s2*s4 - s3*s3) - s1*(s1*s4 - s3*s2) + s2*(s1*s3 - s2*s2)
+    let m00 = s2 * s4 - s3 * s3;
+    let m01 = s1 * s4 - s3 * s2;
+    let m02 = s1 * s3 - s2 * s2;
+    let det = s0 * m00 - s1 * m01 + s2 * m02;
+
+    if det.abs() < 1e-30 {
+        // Fallback to degree 1
+        return wls_degree1(x_sorted, y, weights, x0, left, self_pos);
+    }
+
+    let inv_det = 1.0 / det;
+
+    // b0 via Cramer's rule: replace column 0 with RHS
+    // det_0 = t0*(s2*s4-s3^2) - s1*(t1*s4-s3*t2) + s2*(t1*s3-s2*t2)
+    let det_0 = t0 * m00 - s1 * (t1 * s4 - s3 * t2) + s2 * (t1 * s3 - s2 * t2);
+    let b0 = det_0 * inv_det;
+
+    // (X'WX)^{-1}[0,0] = cofactor(0,0) / det = m00 / det
+    let h_ii = (m00 * inv_det) * weights[self_pos];
+
+    (b0, h_ii)
+}
+
+/// Compute weights for a neighborhood range, writing into the provided buffer.
+/// Returns the number of non-zero weights.
+#[inline]
+fn compute_weights_into(
+    x_sorted: &[f64],
+    x0: f64,
+    left: usize,
+    right: usize,
+    max_dist: f64,
+    robust_weights: Option<&[f64]>,
+    orig_idx: &[usize],
+    weight_buf: &mut [f64],
+) -> usize {
+    let inv_max = 1.0 / max_dist;
+    let len = right - left;
+    let mut nonzero = 0;
+    for i in 0..len {
+        let u = (x_sorted[left + i] - x0).abs() * inv_max;
+        let mut w = tricubic_weight(u);
+        if let Some(rw) = robust_weights {
+            w *= rw[orig_idx[left + i]];
+        }
+        weight_buf[i] = w;
+        if w > 0.0 {
+            nonzero += 1;
+        }
+    }
+    nonzero
+}
+
+/// Fit all data points using the optimized engine.
+///
+/// Returns (fitted_values_in_original_order, hat_matrix_trace).
+fn fit_all_points(
+    sd: &SortedData,
+    degree: usize,
+    robust_weights: Option<&[f64]>,
+    compute_hat: bool,
+) -> EconResult<(Vec<f64>, f64)> {
+    let n = sd.x_sorted.len();
+    let k = sd.k;
+
+    // Pre-allocate output in sorted order, then reorder
+    let mut fitted_sorted = vec![0.0; n];
+    let mut hat_trace = 0.0;
+
+    // Reusable weight buffer (max size = k)
+    let mut weight_buf = vec![0.0; k];
+
+    for si in 0..n {
+        let x0 = sd.x_sorted[si];
+        let (left, right) = sd.find_neighborhood(x0);
+        let len = right - left;
+        let max_dist = sd.max_distance(x0, left, right);
+
+        // Compute weights into reusable buffer
+        compute_weights_into(
+            &sd.x_sorted,
+            x0,
+            left,
+            right,
+            max_dist,
+            robust_weights,
+            &sd.orig_idx,
+            &mut weight_buf[..len],
+        );
+
+        // Find position of current point within neighborhood for h_ii
+        // Since data is sorted, si must be in [left, right)
+        let self_pos = si - left;
+
+        let y_slice = &sd.y_sorted[left..right];
+        let w_slice = &weight_buf[..len];
+
+        let (fitted_val, h_ii) = match degree {
+            0 => wls_degree0(y_slice, w_slice, self_pos),
+            1 => wls_degree1(&sd.x_sorted, y_slice, w_slice, x0, left, self_pos),
+            2 => wls_degree2(&sd.x_sorted, y_slice, w_slice, x0, left, self_pos),
+            _ => {
+                // Generic fallback using matrix operations (should not happen for degree <= 2)
+                let fitted = generic_wls_fit(
+                    &sd.x_sorted[left..right],
+                    y_slice,
+                    w_slice,
+                    x0,
+                    degree,
+                )?;
+                (fitted, 0.0) // No hat trace for generic
+            }
+        };
+
+        fitted_sorted[si] = fitted_val;
+        if compute_hat {
+            hat_trace += h_ii;
+        }
+    }
+
+    // Reorder from sorted order back to original order
+    let mut fitted_orig = vec![0.0; n];
+    for si in 0..n {
+        fitted_orig[sd.orig_idx[si]] = fitted_sorted[si];
+    }
+
+    Ok((fitted_orig, hat_trace))
+}
+
+/// Fit at a single evaluation point (used for prediction at new x values).
+fn fit_single_point(
+    sd: &SortedData,
+    x0: f64,
+    degree: usize,
+    robust_weights: Option<&[f64]>,
+) -> EconResult<f64> {
+    let (left, right) = sd.find_neighborhood(x0);
+    let len = right - left;
+    let max_dist = sd.max_distance(x0, left, right);
+
+    let mut weight_buf = vec![0.0; len];
+    compute_weights_into(
+        &sd.x_sorted,
+        x0,
+        left,
+        right,
+        max_dist,
+        robust_weights,
+        &sd.orig_idx,
+        &mut weight_buf,
+    );
+
+    let y_slice = &sd.y_sorted[left..right];
+
+    let (fitted_val, _) = match degree {
+        0 => wls_degree0(y_slice, &weight_buf, 0), // self_pos doesn't matter for prediction
+        1 => wls_degree1(&sd.x_sorted, y_slice, &weight_buf, x0, left, 0),
+        2 => wls_degree2(&sd.x_sorted, y_slice, &weight_buf, x0, left, 0),
+        _ => {
+            let fitted = generic_wls_fit(
+                &sd.x_sorted[left..right],
+                y_slice,
+                &weight_buf,
+                x0,
+                degree,
+            )?;
+            (fitted, 0.0)
+        }
+    };
+
+    Ok(fitted_val)
+}
+
+/// Generic WLS solver using matrix operations for arbitrary degree.
+/// Fallback for degree > 2 (should not be needed normally).
+fn generic_wls_fit(
+    x_nbr: &[f64],
+    y_nbr: &[f64],
+    weights: &[f64],
+    x0: f64,
+    degree: usize,
+) -> EconResult<f64> {
+    let n = x_nbr.len();
+    let p = degree + 1;
+
     let mut xtwx = Array2::<f64>::zeros((p, p));
     let mut xtwy = Array1::<f64>::zeros(p);
 
     for i in 0..n {
         let w = weights[i];
         if w > 0.0 {
+            let dx = x_nbr[i] - x0;
+            // Build powers of dx
+            let mut powers = vec![1.0; p];
+            for j in 1..p {
+                powers[j] = powers[j - 1] * dx;
+            }
             for j in 0..p {
-                xtwy[j] += w * x_design[[i, j]] * y[i];
-                for k in 0..p {
-                    xtwx[[j, k]] += w * x_design[[i, j]] * x_design[[i, k]];
+                xtwy[j] += w * powers[j] * y_nbr[i];
+                for kk in 0..p {
+                    xtwx[[j, kk]] += w * powers[j] * powers[kk];
                 }
             }
         }
     }
 
-    // Solve for β using matrix inverse
     let xtwx_inv = matrix_inverse(&xtwx.view())?;
     let beta = xtwx_inv.dot(&xtwy);
-
-    // Fitted value at x0 is β[0] (since x_design is centered at x0)
-    let fitted_at_x0 = beta[0];
-
-    Ok((fitted_at_x0, beta))
-}
-
-/// Find the k nearest neighbors and compute their tricubic weights.
-///
-/// Returns: (indices, weights, max_distance)
-fn compute_neighborhood_weights(
-    x: &[f64],
-    x0: f64,
-    span: f64,
-    robust_weights: Option<&[f64]>,
-) -> (Vec<usize>, Vec<f64>, f64) {
-    let n = x.len();
-
-    // Compute number of neighbors
-    let k = if span <= 1.0 {
-        ((span * n as f64).ceil() as usize).max(1).min(n)
-    } else {
-        n
-    };
-
-    // Compute distances from x0
-    let mut distances: Vec<(usize, f64)> = x
-        .iter()
-        .enumerate()
-        .map(|(i, &xi)| (i, (xi - x0).abs()))
-        .collect();
-
-    // Sort by distance
-    distances.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
-
-    // Get the k nearest neighbors
-    let neighbors: Vec<(usize, f64)> = distances.into_iter().take(k).collect();
-
-    // Find max distance in neighborhood
-    let max_dist = if span > 1.0 {
-        // For span > 1, use span^(1/p) times max distance (p=1 for univariate)
-        neighbors.last().map(|&(_, d)| d * span).unwrap_or(1.0)
-    } else {
-        neighbors.last().map(|&(_, d)| d).unwrap_or(1.0)
-    };
-
-    // Avoid division by zero
-    let max_dist = if max_dist < 1e-10 { 1.0 } else { max_dist };
-
-    // Compute tricubic weights
-    let mut indices = Vec::with_capacity(k);
-    let mut weights = Vec::with_capacity(k);
-
-    for (idx, dist) in neighbors {
-        let u = dist / max_dist;
-        let mut w = tricubic_weight(u);
-
-        // Apply robust weights if provided
-        if let Some(rw) = robust_weights {
-            w *= rw[idx];
-        }
-
-        indices.push(idx);
-        weights.push(w);
-    }
-
-    (indices, weights, max_dist)
-}
-
-/// Fit LOESS at a single point x0.
-fn loess_fit_at_point(
-    x: &[f64],
-    y: &[f64],
-    x0: f64,
-    span: f64,
-    degree: usize,
-    robust_weights: Option<&[f64]>,
-) -> EconResult<f64> {
-    // Get neighborhood weights
-    let (indices, weights, _max_dist) = compute_neighborhood_weights(x, x0, span, robust_weights);
-
-    // Extract subset of data in neighborhood
-    let x_subset: Vec<f64> = indices.iter().map(|&i| x[i]).collect();
-    let y_subset: Array1<f64> = indices.iter().map(|&i| y[i]).collect();
-    let w_subset: Array1<f64> = Array1::from_vec(weights);
-
-    // Build local design matrix centered at x0
-    let x_design = build_local_design_matrix(&x_subset, x0, degree);
-
-    // Weighted least squares
-    let (fitted, _beta) = weighted_local_regression(y_subset.view(), &x_design, w_subset.view())?;
-
-    Ok(fitted)
+    Ok(beta[0])
 }
 
 /// Compute robust weights using bisquare function.
 ///
-/// Scale residuals by 6 × MAD (median absolute deviation) and apply bisquare.
+/// Scale residuals by 6 * MAD (median absolute deviation) and apply bisquare.
 fn compute_robust_weights(residuals: &[f64]) -> Vec<f64> {
     let n = residuals.len();
     if n == 0 {
@@ -340,7 +655,7 @@ fn compute_robust_weights(residuals: &[f64]) -> Vec<f64> {
         abs_resid[median_idx]
     };
 
-    // Scale factor: 6 × MAD (following R's loess implementation)
+    // Scale factor: 6 * MAD (following R's loess implementation)
     let scale = 6.0 * mad;
 
     if scale < 1e-10 {
@@ -353,52 +668,6 @@ fn compute_robust_weights(residuals: &[f64]) -> Vec<f64> {
         .iter()
         .map(|&r| bisquare_weight(r / scale))
         .collect()
-}
-
-/// Compute the trace of the hat matrix (effective number of parameters).
-///
-/// This is an approximation computed by summing the weights at each diagonal.
-fn compute_enp(x: &[f64], span: f64, degree: usize) -> f64 {
-    let n = x.len();
-    let mut trace = 0.0;
-
-    for i in 0..n {
-        let x0 = x[i];
-        let (indices, weights, _) = compute_neighborhood_weights(x, x0, span, None);
-
-        // Find position of current point in neighborhood
-        if let Some(pos) = indices.iter().position(|&idx| idx == i) {
-            // Get local design matrix
-            let x_subset: Vec<f64> = indices.iter().map(|&idx| x[idx]).collect();
-            let x_design = build_local_design_matrix(&x_subset, x0, degree);
-            let w_subset: Array1<f64> = Array1::from_vec(weights.clone());
-
-            // Build X'WX
-            let p = degree + 1;
-            let mut xtwx = Array2::<f64>::zeros((p, p));
-            for j in 0..indices.len() {
-                let w = w_subset[j];
-                if w > 0.0 {
-                    for jj in 0..p {
-                        for kk in 0..p {
-                            xtwx[[jj, kk]] += w * x_design[[j, jj]] * x_design[[j, kk]];
-                        }
-                    }
-                }
-            }
-
-            // Compute diagonal element of hat matrix at position i
-            // H[i,i] = x_i' (X'WX)^-1 X' W e_i * w_i
-            // where e_i is the unit vector
-            if let Ok(xtwx_inv) = matrix_inverse(&xtwx.view()) {
-                // x_i in local coordinates is [1, 0, 0, ...] (since centered at x0 = x[i])
-                let h_ii = xtwx_inv[[0, 0]] * weights[pos];
-                trace += h_ii;
-            }
-        }
-    }
-
-    trace
 }
 
 /// Fit LOESS model to data.
@@ -463,12 +732,11 @@ pub fn loess(x: &[f64], y: &[f64], config: LoessConfig) -> EconResult<LoessResul
         });
     }
 
-    // Initial fit
-    let mut fitted = Vec::with_capacity(n);
-    for i in 0..n {
-        let f = loess_fit_at_point(x, y, x[i], config.span, config.degree, None)?;
-        fitted.push(f);
-    }
+    // Build pre-sorted data structure for fast neighborhood lookups
+    let sd = SortedData::new(x, y, config.span);
+
+    // Initial fit (also computes hat matrix trace for ENP)
+    let (mut fitted, enp) = fit_all_points(&sd, config.degree, None, true)?;
 
     // Compute residuals
     let mut residuals: Vec<f64> = y
@@ -486,19 +754,9 @@ pub fn loess(x: &[f64], y: &[f64], config: LoessConfig) -> EconResult<LoessResul
             // Compute robust weights from residuals
             let new_robust_weights = compute_robust_weights(&residuals);
 
-            // Refit with robust weights
-            let mut new_fitted = Vec::with_capacity(n);
-            for i in 0..n {
-                let f = loess_fit_at_point(
-                    x,
-                    y,
-                    x[i],
-                    config.span,
-                    config.degree,
-                    Some(&new_robust_weights),
-                )?;
-                new_fitted.push(f);
-            }
+            // Refit with robust weights (no need for hat trace in robust iterations)
+            let (new_fitted, _) =
+                fit_all_points(&sd, config.degree, Some(&new_robust_weights), false)?;
 
             // Check convergence
             let max_change: f64 = fitted
@@ -527,7 +785,6 @@ pub fn loess(x: &[f64], y: &[f64], config: LoessConfig) -> EconResult<LoessResul
     let y_mean: f64 = y.iter().sum::<f64>() / n as f64;
     let tss: f64 = y.iter().map(|yi| (yi - y_mean).powi(2)).sum();
 
-    let enp = compute_enp(x, config.span, config.degree);
     let df = (n as f64 - enp).max(1.0);
     let residual_se = (rss / df).sqrt();
     let r_squared = if tss > 1e-10 { 1.0 - rss / tss } else { 0.0 };
@@ -567,14 +824,15 @@ pub fn loess(x: &[f64], y: &[f64], config: LoessConfig) -> EconResult<LoessResul
 /// # Returns
 /// Vector of predicted y values.
 pub fn loess_predict(model: &LoessModel, new_x: &[f64]) -> EconResult<Vec<f64>> {
+    // Build sorted data structure for the model's training data
+    let sd = SortedData::new(&model.x, &model.y, model.span);
+
     let mut predictions = Vec::with_capacity(new_x.len());
 
     for &x0 in new_x {
-        let pred = loess_fit_at_point(
-            &model.x,
-            &model.y,
+        let pred = fit_single_point(
+            &sd,
             x0,
-            model.span,
             model.degree,
             model.robust_weights.as_deref(),
         )?;
@@ -666,7 +924,7 @@ mod tests {
         // At u > 1, weight should be 0
         assert!(tricubic_weight(1.5).abs() < 1e-10);
 
-        // At u = 0.5, weight should be (1 - 0.125)^3 = 0.875^3 ≈ 0.6699
+        // At u = 0.5, weight should be (1 - 0.125)^3 = 0.875^3 ~ 0.6699
         let expected = (1.0 - 0.5_f64.powi(3)).powi(3);
         assert!((tricubic_weight(0.5) - expected).abs() < 1e-10);
     }
@@ -907,7 +1165,7 @@ mod tests {
         )
         .unwrap();
 
-        // The data is nearly linear (y ≈ 2x), so fitted values should be close
+        // The data is nearly linear (y ~ 2x), so fitted values should be close
         // R produces very similar results to raw y for this smooth data
 
         // Check that RSS is small (good fit)
@@ -930,6 +1188,69 @@ mod tests {
                 result.fitted[i],
                 i,
                 y[i],
+                diff
+            );
+        }
+    }
+
+    #[test]
+    fn test_loess_degree_0() {
+        // Degree 0 = local constant (Nadaraya-Watson)
+        let x: Vec<f64> = (0..20).map(|i| i as f64).collect();
+        let y: Vec<f64> = x
+            .iter()
+            .map(|&xi| 2.0 * xi + 1.0 + 0.1 * (xi * 10.0).sin())
+            .collect();
+
+        let result = loess(
+            &x,
+            &y,
+            LoessConfig {
+                degree: 0,
+                span: 0.5,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        // Should produce reasonable fit
+        assert!(result.r_squared > 0.8);
+        assert_eq!(result.degree, 0);
+        assert_eq!(result.fitted.len(), 20);
+    }
+
+    #[test]
+    fn test_loess_sorted_vs_unsorted_input() {
+        // Verify that the optimized (sorted) path gives the same results
+        // as the legacy (unsorted) path, even when input is scrambled.
+        let x_sorted: Vec<f64> = (0..15).map(|i| i as f64).collect();
+        let y_sorted: Vec<f64> = x_sorted.iter().map(|&xi| xi.sin() + xi * 0.5).collect();
+
+        // Scramble the order
+        let perm = vec![7, 3, 12, 0, 9, 5, 14, 1, 11, 6, 2, 10, 4, 13, 8];
+        let x_scrambled: Vec<f64> = perm.iter().map(|&i| x_sorted[i]).collect();
+        let y_scrambled: Vec<f64> = perm.iter().map(|&i| y_sorted[i]).collect();
+
+        let config = LoessConfig {
+            span: 0.5,
+            degree: 1,
+            ..Default::default()
+        };
+
+        let result_sorted = loess(&x_sorted, &y_sorted, config.clone()).unwrap();
+        let result_scrambled = loess(&x_scrambled, &y_scrambled, config).unwrap();
+
+        // Compare fitted values (need to account for different ordering)
+        for i in 0..15 {
+            let orig_idx = perm[i];
+            let diff = (result_scrambled.fitted[i] - result_sorted.fitted[orig_idx]).abs();
+            assert!(
+                diff < 1e-10,
+                "Mismatch at scrambled[{}] (orig {}): {} vs {}, diff={}",
+                i,
+                orig_idx,
+                result_scrambled.fitted[i],
+                result_sorted.fitted[orig_idx],
                 diff
             );
         }

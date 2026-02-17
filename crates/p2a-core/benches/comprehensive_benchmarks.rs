@@ -15,8 +15,10 @@ use bench_utils::{
 };
 use p2a_core::regression::CovarianceType;
 use p2a_core::{
-    Dataset, kmeans, pca, run_arima, run_fixed_effects, run_hdfe, run_logit, run_mstl, run_ols,
-    run_probit, run_random_effects,
+    CostFunction, DRMethod, Dataset, DoublyRobustConfig, Estimand, Linkage, PredictorSpec,
+    SynthConfig, hierarchical, kmeans, pca, random_forest, run_arima, run_changepoint,
+    run_doubly_robust, run_fixed_effects, run_hdfe, run_loess, run_logit, run_mstl, run_ols,
+    run_probit, run_random_effects, run_synthetic_control,
 };
 use polars::prelude::*;
 use rand::Rng;
@@ -299,6 +301,136 @@ fn main() {
         // PCA
         let result = run_benchmark("PCA", "k=3", n, &config, || {
             pca(data.view(), Some(3), false)
+        });
+        print_result(&result);
+        results.push(result);
+    }
+
+    // ============================================
+    // Round 2 Optimized Methods (LOESS, Synth, StructTS, Changepoint)
+    // ============================================
+    println!("\n--- Round 2 Optimized Methods ---");
+    print_header();
+
+    // LOESS
+    for n in [100, 500, 1000] {
+        let dataset = generate_regression_data(n, 1, 42);
+        let result = run_benchmark("LOESS", "span=0.75", n, &config, || {
+            run_loess(&dataset, "y", "x1", 0.75, 1, false)
+        });
+        print_result(&result);
+        results.push(result);
+    }
+
+    // Hierarchical Clustering
+    for n in [100, 500, 1000] {
+        let data = generate_cluster_data(n, 5, 42);
+        let result = run_benchmark("Hierarchical", "Ward", n, &config, || {
+            hierarchical(data.view(), Some(3), Linkage::Ward, None)
+        });
+        print_result(&result);
+        results.push(result);
+    }
+
+    // Random Forest
+    for n in [100, 500, 1000] {
+        let data = generate_cluster_data(n, 5, 42);
+        let target: ndarray::Array1<f64> = data.column(0).to_owned();
+        let features = data.slice(ndarray::s![.., 1..]);
+        let result = run_benchmark("RandomForest", "100trees", n, &config, || {
+            random_forest(
+                features.view(),
+                target.view(),
+                Some(100),
+                Some(10),
+                Some(5),
+                None,
+                Some(42),
+                None,
+            )
+        });
+        print_result(&result);
+        results.push(result);
+    }
+
+    // Doubly Robust (AIPW)
+    for n in [200, 500, 1000] {
+        let dataset = generate_binary_data(n, 42);
+        let dr_config = DoublyRobustConfig {
+            method: DRMethod::AIPW,
+            estimand: Estimand::ATE,
+            bootstrap: 999,
+            seed: Some(42),
+            ..Default::default()
+        };
+        let result = run_benchmark("Doubly_Robust", "AIPW", n, &config, || {
+            run_doubly_robust(&dataset, "y", "x1", &["x2"], dr_config.clone())
+        });
+        print_result(&result);
+        results.push(result);
+    }
+
+    // Changepoint
+    for n in [100, 500, 1000] {
+        let dataset = generate_time_series(n, 42);
+        let result = run_benchmark("Changepoint", "PELT", n, &config, || {
+            run_changepoint(&dataset, "y", None, None, CostFunction::MeanChange)
+        });
+        print_result(&result);
+        results.push(result);
+    }
+
+    // Synthetic Control
+    for n_units in [10, 30] {
+        let n_periods = 10;
+        let n = n_units * n_periods;
+        let mut rng = ChaCha8Rng::seed_from_u64(42);
+
+        let mut unit_ids: Vec<String> = Vec::new();
+        let mut time_ids: Vec<i64> = Vec::new();
+        let mut outcome: Vec<f64> = Vec::new();
+        let mut pred1: Vec<f64> = Vec::new();
+        let mut pred2: Vec<f64> = Vec::new();
+
+        for u in 0..n_units {
+            for t in 0..n_periods {
+                unit_ids.push(format!("unit_{}", u));
+                time_ids.push(t as i64);
+                let base = (u as f64) * 0.5 + (t as f64) * 0.1;
+                let treatment_effect = if u == 0 && t >= 7 { 2.0 } else { 0.0 };
+                outcome.push(base + treatment_effect + rng.gen_range(-0.3..0.3));
+                pred1.push(rng.gen_range(0.0..1.0));
+                pred2.push(rng.gen_range(0.0..1.0));
+            }
+        }
+
+        let df = df! {
+            "unit" => &unit_ids,
+            "time" => &time_ids,
+            "outcome" => &outcome,
+            "pred1" => &pred1,
+            "pred2" => &pred2,
+        }
+        .expect("synth data");
+        let dataset = Dataset::new(df);
+
+        let predictors = vec![PredictorSpec::new("pred1"), PredictorSpec::new("pred2")];
+        let config_synth = SynthConfig {
+            treatment_time: 7,
+            treated_unit: "unit_0".to_string(),
+            run_placebos: false,
+            ..Default::default()
+        };
+
+        let result = run_benchmark("SynthControl", "Nelder-Mead", n, &config, || {
+            run_synthetic_control(
+                &dataset,
+                "outcome",
+                "unit",
+                "time",
+                &predictors,
+                config_synth.clone(),
+            )
         });
         print_result(&result);
         results.push(result);
