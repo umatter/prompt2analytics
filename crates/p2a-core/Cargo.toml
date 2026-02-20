@@ -14,6 +14,7 @@ readme = "README.md"
 [features]
 default = ["full"]
 full = ["visualization", "forecasting", "file-formats", "database", "spectral-analysis"]
+cuda = ["dep:cudarc"]
 visualization = ["dep:plotters", "dep:plotlars", "dep:image", "dep:base64"]
 forecasting = ["dep:arima", "dep:augurs-core", "dep:augurs-mstl", "dep:augurs-ets", "dep:stlrs"]
 file-formats = ["dep:calamine"]
@@ -63,6 +64,9 @@ plotters = { workspace = true, optional = true }
 plotlars = { workspace = true, optional = true }
 image = { workspace = true, optional = true }
 base64 = { workspace = true, optional = true }
+
+# GPU acceleration (optional - enable with "cuda" feature)
+cudarc = { workspace = true, optional = true }
 
 # Serialization
 serde.workspace = true
@@ -165,6 +169,11 @@ harness = false
 [[bench]]
 name = "data_loading_benchmarks"
 harness = false
+
+[[bench]]
+name = "gpu_benchmarks"
+harness = false
+required-features = ["cuda"]
 
 # Examples
 [[example]]

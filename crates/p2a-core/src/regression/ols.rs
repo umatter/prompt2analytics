@@ -817,11 +817,27 @@ fn compute_leverage(x: &ndarray::ArrayView2<f64>, xtx_inv: &Array2<f64>) -> Arra
 }
 
 /// Compute the meat of the sandwich estimator: X' diag(weights) X
+///
+/// When the `cuda` feature is enabled and a GPU is available, dispatches to
+/// GPU for large matrices (n >= xtx threshold).
 fn compute_sandwich_meat(x: &ndarray::ArrayView2<f64>, weights: &Array1<f64>) -> Array2<f64> {
     let n = x.nrows();
     let k = x.ncols();
 
-    // Parallel accumulation
+    // GPU dispatch: sandwich meat = (W^{1/2} X)' (W^{1/2} X) via cuBLAS DGEMM
+    #[cfg(feature = "cuda")]
+    if let Some(ctx) = crate::linalg::gpu::GpuContext::get() {
+        if k >= ctx.thresholds.xtx_min_k && n * k * k >= ctx.thresholds.xtx_min_nkk {
+            match crate::linalg::gpu::sandwich_meat_gpu(ctx, x, weights) {
+                Ok(result) => return result,
+                Err(e) => {
+                    tracing::warn!("GPU sandwich_meat failed, falling back to CPU: {:?}", e);
+                }
+            }
+        }
+    }
+
+    // CPU path: parallel accumulation
     let meat: Vec<Vec<f64>> = (0..k)
         .into_par_iter()
         .map(|j| {

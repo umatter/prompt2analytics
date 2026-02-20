@@ -203,6 +203,9 @@ fn kmeans_plusplus_init(data: &ArrayView2<f64>, k: usize, rng: &mut StdRng) -> A
 }
 
 /// Single run of k-means.
+///
+/// When the `cuda` feature is enabled and a GPU is available, uses DGEMM-based
+/// pairwise distance computation for the assignment step (n >= threshold).
 fn kmeans_single(
     data: &ArrayView2<f64>,
     mut centroids: Array2<f64>,
@@ -215,22 +218,48 @@ fn kmeans_single(
     let mut labels = vec![0usize; n_samples];
     let mut n_iterations = 0;
 
+    // Check if GPU is available for distance computation.
+    // GPU helps for d >= 20 (DGEMM-based distances) but hurts for small d.
+    #[cfg(feature = "cuda")]
+    let gpu_ctx = crate::linalg::gpu::GpuContext::get().filter(|ctx| {
+        let d = data.ncols();
+        n_samples >= ctx.thresholds.kmeans_min_n && d >= ctx.thresholds.kmeans_min_d
+    });
+    #[cfg(not(feature = "cuda"))]
+    let gpu_ctx: Option<&()> = None;
+
     for iter in 0..max_iter {
         n_iterations = iter + 1;
 
-        // Assign points to nearest centroid
-        for i in 0..n_samples {
-            let point = data.row(i);
-            let mut min_dist = f64::INFINITY;
-            let mut min_idx = 0;
-            for j in 0..k {
-                let dist = euclidean_distance_squared(&point, &centroids.row(j));
-                if dist < min_dist {
-                    min_dist = dist;
-                    min_idx = j;
+        if gpu_ctx.is_some() {
+            // GPU path: compute all pairwise distances via DGEMM
+            #[cfg(feature = "cuda")]
+            {
+                let ctx = gpu_ctx.unwrap();
+                match crate::linalg::gpu::pairwise_distances_gpu(ctx, data, &centroids.view()) {
+                    Ok(distances) => {
+                        // Assign each point to nearest centroid
+                        for i in 0..n_samples {
+                            let mut min_dist = f64::INFINITY;
+                            let mut min_idx = 0;
+                            for j in 0..k {
+                                if distances[[i, j]] < min_dist {
+                                    min_dist = distances[[i, j]];
+                                    min_idx = j;
+                                }
+                            }
+                            labels[i] = min_idx;
+                        }
+                    }
+                    Err(_) => {
+                        // Fall back to CPU assignment
+                        assign_labels_cpu(data, &centroids, &mut labels);
+                    }
                 }
             }
-            labels[i] = min_idx;
+        } else {
+            // CPU path: point-by-point distance
+            assign_labels_cpu(data, &centroids, &mut labels);
         }
 
         // Update centroids
@@ -276,6 +305,25 @@ fn kmeans_single(
         n_iterations,
         inertia,
         cluster_sizes,
+    }
+}
+
+/// CPU path for K-means label assignment.
+fn assign_labels_cpu(data: &ArrayView2<f64>, centroids: &Array2<f64>, labels: &mut [usize]) {
+    let n_samples = data.nrows();
+    let k = centroids.nrows();
+    for i in 0..n_samples {
+        let point = data.row(i);
+        let mut min_dist = f64::INFINITY;
+        let mut min_idx = 0;
+        for j in 0..k {
+            let dist = euclidean_distance_squared(&point, &centroids.row(j));
+            if dist < min_dist {
+                min_dist = dist;
+                min_idx = j;
+            }
+        }
+        labels[i] = min_idx;
     }
 }
 

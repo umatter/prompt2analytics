@@ -7,13 +7,15 @@
 //! - Toeplitz matrix construction
 
 pub mod design;
+#[cfg(feature = "cuda")]
+pub mod gpu;
 pub mod matrix_ops;
 pub mod toeplitz;
 
 pub use matrix_ops::{
     CONDITION_THRESHOLD, LinalgError, cholesky, cholesky_inverse, condition_number, eig_symmetric,
-    faer_col_to_ndarray, faer_to_ndarray, matmul, matrix_inverse, ndarray_to_faer, pseudoinverse,
-    safe_inverse, solve, xtx, xtx_inv, xty,
+    faer_col_to_ndarray, faer_ref_to_ndarray, faer_to_ndarray, matmul, matrix_inverse,
+    ndarray_to_faer, pseudoinverse, safe_inverse, solve, xtx, xtx_inv, xty,
 };
 
 pub use design::{

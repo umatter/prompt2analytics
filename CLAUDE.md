@@ -18,6 +18,10 @@ cargo build -p p2a-dioxus
 cargo build --release -p p2a-cli        # CLI binary at target/release/p2a
 cargo build --release -p p2a-mcp        # MCP server at target/release/p2a-mcp
 
+# GPU-accelerated build (optional, requires CUDA)
+cargo build -p p2a-core --features cuda
+cargo test -p p2a-core --features cuda --release  # Tests with GPU dispatch
+
 # Run tests
 cargo test                              # All tests
 cargo test -p p2a-core                  # Core library tests only
@@ -123,6 +127,35 @@ cargo build -p p2a-core --all-features
 
 # Specific features
 cargo build -p p2a-core --features spectral-analysis  # Spectral analysis (spectrum, periodogram)
+cargo build -p p2a-core --features cuda               # GPU acceleration (requires CUDA toolkit)
+```
+
+### GPU Acceleration (Optional)
+
+The `cuda` feature enables transparent GPU dispatch for core linear algebra operations via cuBLAS and cuSOLVER. GPU paths are selected automatically when problem sizes exceed calibrated thresholds.
+
+**GPU-accelerated operations** (via `linalg/gpu/` module):
+- **xtx (X'X)**: 2-7x speedup for k>=30 via cuBLAS DGEMM
+- **PCA**: 4-13x speedup via GPU covariance eigendecomposition
+- **K-means distances**: 2-3x speedup for d>=20 via DGEMM reformulation
+- **matmul**: 1.4-2.4x speedup for near-square matrices
+- **Sandwich estimators**: 2-3x speedup for k>=50 (HC0-HC3, HAC)
+- **cholesky_inverse**: Marginal; mainly avoids host-device round-trips
+
+**Not GPU-accelerated** (CPU always faster):
+- xty (X'y): DGEMV is bandwidth-bound; CPU OpenBLAS is faster
+- Small matrices (k<30, n<5K): Transfer overhead exceeds compute savings
+- Tall-skinny matmul: CPU BLAS optimized for these shapes
+
+Dispatch thresholds are configurable via environment variables (`P2A_GPU_XTX_MIN_NKK`, etc.) and calibrated on DGX Spark. See `performance/reports/gpu_performance.md` for full benchmark results and threshold rationale.
+
+```bash
+# GPU benchmarks (95 configurations)
+cargo bench -p p2a-core --bench gpu_benchmarks --features cuda
+
+# CPU-only baseline for comparison
+P2A_GPU_XTX_MIN_NKK=999999999999 P2A_GPU_XTX_MIN_K=999999 \
+  cargo bench -p p2a-core --bench gpu_benchmarks --features cuda
 ```
 
 ### Module Organization (p2a-core)
@@ -133,7 +166,15 @@ src/
 ├── cache.rs               # Thread-safe LRU cache with memory limits and TTL
 ├── memory.rs              # Memory monitoring, pressure detection, cleanup
 ├── linalg/
-│   ├── matrix_ops.rs      # xtx, xty, safe_inverse, cholesky (via faer)
+│   ├── matrix_ops.rs      # xtx, xty, safe_inverse, cholesky (via faer), GPU dispatch
+│   └── gpu/               # Optional CUDA acceleration (#[cfg(feature = "cuda")])
+│       ├── mod.rs          # GpuContext singleton (OnceLock)
+│       ├── context.rs      # CUDA device init, capability detection
+│       ├── memory.rs       # ndarray <-> CudaSlice (row-major handling)
+│       ├── dispatch.rs     # Size thresholds (env-configurable)
+│       ├── blas.rs         # cuBLAS: xtx (DSYRK→DGEMM), xty (DGEMV), matmul (DGEMM)
+│       ├── solver.rs       # cuSOLVER: cholesky_inverse, sandwich_meat
+│       └── kernels.rs      # Custom: pairwise_distances (K-means)
 │   └── design.rs          # DesignMatrix, demeaning functions
 ├── traits/
 │   └── estimator.rs       # LinearEstimator trait, SignificanceLevel, p-value helpers
@@ -740,6 +781,12 @@ let df = df! {
 - `validation/VALIDATION_STATUS.md` - Current validation coverage by category
 - `validation/run_validation.sh` - Master validation runner (Rust + R)
 - `validation/[category]/method.md` - Per-method validation documents with R code and expected values
+
+**GPU Acceleration:**
+- `crates/p2a-core/src/linalg/gpu/` - GPU module (cuBLAS + cuSOLVER wrappers)
+- `crates/p2a-core/src/linalg/gpu/dispatch.rs` - Calibrated dispatch thresholds
+- `crates/p2a-core/benches/gpu_benchmarks.rs` - GPU vs CPU benchmarks (95 configurations)
+- `performance/reports/gpu_performance.md` - GPU benchmark results and threshold rationale
 
 **Benchmarking:**
 - `crates/p2a-core/benches/bench_utils.rs` - Custom benchmark runner (distribution stats + memory)

@@ -32,6 +32,9 @@ r_mathlib = "0.2"
 # Linear algebra (pure Rust, no external BLAS dependency)
 faer = "0.22"
 
+# GPU acceleration (optional, requires CUDA toolkit)
+cudarc = { version = "0.19", features = ["cublas", "cusolver", "driver", "std", "fallback-dynamic-loading", "cuda-version-from-build-system"], default-features = false }
+
 # Parallel computation
 rayon = "1.10"
 

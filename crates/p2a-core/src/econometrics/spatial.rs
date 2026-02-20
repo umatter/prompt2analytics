@@ -1406,16 +1406,16 @@ fn optimize_lambda_sem(
     // Pre-computing these eliminates all O(n*k) operations from the inner loop.
     // Only k×k matrix operations remain (trivial for typical k=2-5).
 
-    let xx = xtx(&x.view());                          // X'X [k×k]
-    let xwx = x.t().dot(&wx);                         // X'WX [k×k]
-    let wxwx = wx.t().dot(&wx);                       // WX'WX [k×k]
-    let xwx_plus_wxwx_sym = &xwx + &xwx.t();         // X'WX + WX'X [k×k, symmetric term]
+    let xx = xtx(&x.view()); // X'X [k×k]
+    let xwx = x.t().dot(&wx); // X'WX [k×k]
+    let wxwx = wx.t().dot(&wx); // WX'WX [k×k]
+    let xwx_plus_wxwx_sym = &xwx + &xwx.t(); // X'WX + WX'X [k×k, symmetric term]
 
-    let xy = xty(&x.view(), y);                       // X'y [k×1]
-    let xwy = xty(&x.view(), &wy);                    // X'Wy [k×1]
-    let wxy = xty(&wx.view(), y);                      // WX'y [k×1]
-    let xwy_plus_wxy = &xwy + &wxy;                   // X'Wy + WX'y [k×1]
-    let wxwy = xty(&wx.view(), &wy);                   // WX'Wy [k×1]
+    let xy = xty(&x.view(), y); // X'y [k×1]
+    let xwy = xty(&x.view(), &wy); // X'Wy [k×1]
+    let wxy = xty(&wx.view(), y); // WX'y [k×1]
+    let xwy_plus_wxy = &xwy + &wxy; // X'Wy + WX'y [k×1]
+    let wxwy = xty(&wx.view(), &wy); // WX'Wy [k×1]
 
     // For RSS computation, pre-compute dot products:
     // ||y*||² = y'y - 2λ*y'Wy + λ²*Wy'Wy

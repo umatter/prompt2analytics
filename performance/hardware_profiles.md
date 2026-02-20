@@ -81,32 +81,42 @@ Get-ComputerInfo | Select-Object CsProcessors, CsPhyicallyInstalledMemory, Windo
 
 ## Reference Profiles
 
+### NVIDIA DGX Spark (GPU Benchmarks)
+
+Profile used for GPU vs CPU benchmarks (2026-02-20).
+
+#### CPU
+- Model: ARM Cortex-X925 (10 cores, up to 4.0 GHz) + Cortex-A725 (10 cores)
+- Total CPUs: 20 (no SMT)
+- Architecture: aarch64
+
+#### GPU
+- Model: NVIDIA GB10 (Grace Blackwell)
+- VRAM: 12 GB
+- Compute Capability: 12.1
+- Memory: Unified (CPU+GPU shared address space)
+
+#### Memory
+- Total: 120 GB unified
+
+#### Operating System
+- OS: Linux (NVIDIA DGX Spark)
+- Kernel: 6.14.0-1015-nvidia
+
+#### Software Versions
+- Rust: 1.93.0
+- CUDA: via cudarc 0.12 (cuBLAS + cuSOLVER)
+
+#### Notes
+- Unified memory eliminates explicit host-device transfers
+- ARM OpenBLAS is highly optimized for Cortex-X925 NEON/SVE
+- GPU crossover thresholds are calibrated for this specific hardware
+
+---
+
 ### Development Machine (Primary)
 
-*To be filled in when benchmarks are run*
-
-```markdown
-## Profile: Development-Primary (YYYY-MM-DD)
-
-### CPU
-- Model:
-- Cores:
-- Base Clock:
-- L3 Cache:
-
-### Memory
-- Total:
-- Type:
-
-### Operating System
-- OS:
-- Kernel:
-
-### Software Versions
-- Rust:
-- R:
-- Python:
-```
+*To be filled in when benchmarks are run on non-GPU hardware.*
 
 ---
 

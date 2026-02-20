@@ -112,7 +112,26 @@ pub fn pca(
 
     // Use SVD for numerical stability and speed
     // For tall matrices (n >> p), SVD on X is faster than eigendecomp on X'X
-    let (eigenvalues, eigenvectors) = pca_via_svd(&centered.view(), n_comp)?;
+    //
+    // When GPU is available, use covariance eigendecomposition for tall matrices:
+    // 1. Compute X'X on GPU via cuBLAS (O(np²), GPU-accelerated)
+    // 2. Eigendecompose the p x p covariance matrix on CPU (O(p³), fast for small p)
+    // This is faster than SVD for n >> p when GPU xtx is available.
+    #[cfg(feature = "cuda")]
+    let use_gpu_cov = crate::linalg::gpu::GpuContext::get()
+        .is_some_and(|ctx| {
+            n_features >= ctx.thresholds.xtx_min_k
+                && n_samples * n_features * n_features >= ctx.thresholds.xtx_min_nkk
+                && n_samples > 4 * n_features
+        });
+    #[cfg(not(feature = "cuda"))]
+    let use_gpu_cov = false;
+
+    let (eigenvalues, eigenvectors) = if use_gpu_cov {
+        pca_via_cov_eigen(&centered.view(), n_comp)?
+    } else {
+        pca_via_svd(&centered.view(), n_comp)?
+    };
 
     // Compute explained variance
     let total_variance: f64 = eigenvalues.iter().take(n_features).sum();
@@ -195,6 +214,48 @@ fn pca_via_svd(
     }
 
     Ok((eigenvalues, eigenvectors))
+}
+
+/// PCA via covariance matrix eigendecomposition.
+///
+/// For GPU-accelerated PCA on tall matrices (n >> p):
+/// 1. Compute covariance = X'X / (n-1) using GPU-dispatched xtx
+/// 2. Eigendecompose the p x p covariance matrix on CPU
+///
+/// This leverages GPU DGEMM for the O(np²) bottleneck while keeping
+/// the O(p³) eigendecomposition on CPU.
+fn pca_via_cov_eigen(
+    centered: &ArrayView2<f64>,
+    n_components: usize,
+) -> Result<(Array1<f64>, Array2<f64>), String> {
+    let n = centered.nrows();
+    let p = centered.ncols();
+    let n_minus_1 = (n - 1) as f64;
+
+    // Compute covariance matrix via GPU-dispatched xtx (O(np²) on GPU)
+    let xtx = crate::linalg::xtx(centered);
+    let cov = &xtx / n_minus_1;
+
+    // Eigendecompose p x p covariance matrix on CPU (fast for small p)
+    let (eigenvalues, eigenvectors) =
+        crate::linalg::eig_symmetric(&cov.view()).map_err(|e| format!("Eigen failed: {}", e))?;
+
+    // Sort by descending eigenvalue
+    let mut indices: Vec<usize> = (0..p).collect();
+    indices.sort_by(|&a, &b| eigenvalues[b].partial_cmp(&eigenvalues[a]).unwrap());
+
+    let n_comp = n_components.min(p);
+    let mut sorted_eigenvalues = Array1::zeros(n_comp);
+    let mut sorted_eigenvectors = Array2::zeros((p, n_comp));
+
+    for (out_j, &orig_j) in indices.iter().take(n_comp).enumerate() {
+        sorted_eigenvalues[out_j] = eigenvalues[orig_j].max(0.0);
+        for i in 0..p {
+            sorted_eigenvectors[[i, out_j]] = eigenvectors[[i, orig_j]];
+        }
+    }
+
+    Ok((sorted_eigenvalues, sorted_eigenvectors))
 }
 
 /// Symmetric eigendecomposition using power iteration with deflation.

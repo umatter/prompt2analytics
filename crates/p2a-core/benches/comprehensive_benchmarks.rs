@@ -14,9 +14,9 @@ use bench_utils::{
     BenchConfig, BenchmarkResult, print_header, print_result, run_benchmark, save_results,
 };
 use p2a_core::regression::CovarianceType;
+use p2a_core::regression::jarque_bera_test;
 use p2a_core::spatial::{Neighbors, SpatialWeights, WeightStyle};
 use p2a_core::stats::{RotationMethod, ScoresMethod, factanal, fisher_exact_test, isoreg};
-use p2a_core::regression::jarque_bera_test;
 use p2a_core::{
     CostFunction, DRMethod, Dataset, DoublyRobustConfig, Estimand, FisherAlternative, Linkage,
     PredictorSpec, SarConfig, SemConfig, SynthConfig, dbscan, hierarchical, kmeans, pca,
@@ -466,13 +466,18 @@ fn main() {
         let y_vals: Vec<f64> = (0..n)
             .map(|i| {
                 let (cx, cy) = coords[i];
-                2.0 + 0.7 * x_vals[i] + 0.3 * (cx + cy) / (n_side as f64) + rng.gen_range(-0.25..0.25)
+                2.0 + 0.7 * x_vals[i]
+                    + 0.3 * (cx + cy) / (n_side as f64)
+                    + rng.gen_range(-0.25..0.25)
             })
             .collect();
 
         let df = df! { "y" => &y_vals, "x" => &x_vals }.expect("spatial data");
         let dataset = Dataset::new(df);
-        let sar_config = SarConfig { compute_impacts: false, ..Default::default() };
+        let sar_config = SarConfig {
+            compute_impacts: false,
+            ..Default::default()
+        };
         let sem_config = SemConfig::default();
 
         let listw_clone = listw.clone();
@@ -576,11 +581,12 @@ fn main() {
     for n in [100, 1000, 10000] {
         let mut rng = ChaCha8Rng::seed_from_u64(42);
         let x: Vec<f64> = (0..n).map(|i| i as f64 / n as f64).collect();
-        let y: Vec<f64> = x.iter().map(|&xi| xi * 2.0 + rng.gen_range(-0.5..0.5)).collect();
+        let y: Vec<f64> = x
+            .iter()
+            .map(|&xi| xi * 2.0 + rng.gen_range(-0.5..0.5))
+            .collect();
 
-        let result = run_benchmark("Isotonic_Regression", "PAVA", n, &config, || {
-            isoreg(&x, &y)
-        });
+        let result = run_benchmark("Isotonic_Regression", "PAVA", n, &config, || isoreg(&x, &y));
         print_result(&result);
         results.push(result);
     }

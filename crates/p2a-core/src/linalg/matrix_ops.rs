@@ -266,15 +266,39 @@ pub fn eig_symmetric(m: &ArrayView2<f64>) -> Result<(Array1<f64>, Array2<f64>), 
 }
 
 /// Matrix multiplication: A * B
+///
+/// When the `cuda` feature is enabled and a GPU is available, dispatches to
+/// cuBLAS DGEMM for large matrices (m*n*k >= threshold).
 pub fn matmul(a: &ArrayView2<f64>, b: &ArrayView2<f64>) -> Result<Array2<f64>, LinalgError> {
-    let (_a_rows, a_cols) = a.dim();
-    let (b_rows, _b_cols) = b.dim();
+    let (a_rows, a_cols) = a.dim();
+    let (b_rows, b_cols) = b.dim();
 
     if a_cols != b_rows {
         return Err(LinalgError::DimensionMismatch {
             expected: format!("{} columns in A", a_cols),
             actual: format!("{} rows in B", b_rows),
         });
+    }
+
+    // GPU dispatch for large matrices. Also check shape ratio to avoid
+    // tall-skinny cases where GPU is much slower (e.g., 100Kx50x50 → 6x slower).
+    #[cfg(feature = "cuda")]
+    if let Some(ctx) = super::gpu::GpuContext::get() {
+        let mnk = a_rows * b_cols * a_cols;
+        let dims = [a_rows, a_cols, b_cols];
+        let min_d = *dims.iter().min().unwrap() as f64;
+        let max_d = *dims.iter().max().unwrap() as f64;
+        let shape_ratio = if max_d > 0.0 { min_d / max_d } else { 0.0 };
+        if mnk >= ctx.thresholds.matmul_min_mnk
+            && shape_ratio >= ctx.thresholds.matmul_min_shape_ratio
+        {
+            match super::gpu::matmul_gpu(ctx, a, b) {
+                Ok(result) => return Ok(result),
+                Err(e) => {
+                    tracing::warn!("GPU matmul failed, falling back to CPU: {:?}", e);
+                }
+            }
+        }
     }
 
     let mat_a = ndarray_to_faer(a);
@@ -286,9 +310,28 @@ pub fn matmul(a: &ArrayView2<f64>, b: &ArrayView2<f64>) -> Result<Array2<f64>, L
 
 /// Compute X'X (X transpose times X)
 /// Uses ndarray's native dot product for better performance on larger matrices.
+///
+/// When the `cuda` feature is enabled and a GPU is available, dispatches to
+/// cuBLAS DGEMM for large matrices (n >= threshold).
 pub fn xtx(x: &ArrayView2<f64>) -> Array2<f64> {
-    // Use pure ndarray for small matrices to avoid conversion overhead
-    let k = x.ncols();
+    let (n, k) = x.dim();
+
+    // GPU dispatch: xtx compute is O(n*k²), so use n*k*k as dispatch metric.
+    // GPU wins when k is large (k >= ~30); for small k the CPU path is faster
+    // even at very large n (benchmarked up to 1M x 10 → CPU still wins).
+    #[cfg(feature = "cuda")]
+    if let Some(ctx) = super::gpu::GpuContext::get() {
+        if k >= ctx.thresholds.xtx_min_k && n * k * k >= ctx.thresholds.xtx_min_nkk {
+            match super::gpu::xtx_gpu(ctx, x) {
+                Ok(result) => return result,
+                Err(e) => {
+                    tracing::warn!("GPU xtx failed, falling back to CPU: {:?}", e);
+                }
+            }
+        }
+    }
+
+    // CPU path (unchanged)
     if k <= 20 {
         x.t().dot(x)
     } else {
@@ -302,10 +345,26 @@ pub fn xtx(x: &ArrayView2<f64>) -> Array2<f64> {
 /// Fast inverse using Cholesky decomposition.
 /// Use this for positive definite matrices (like X'X) where we don't need
 /// condition number checks. Much faster than safe_inverse for small matrices.
+///
+/// When the `cuda` feature is enabled and a GPU is available, dispatches to
+/// GPU for large matrices (k >= threshold).
 pub fn cholesky_inverse(m: &ArrayView2<f64>) -> Result<Array2<f64>, LinalgError> {
     let (rows, cols) = m.dim();
     if rows != cols {
         return Err(LinalgError::NotSquare { rows, cols });
+    }
+
+    // GPU dispatch for large matrices
+    #[cfg(feature = "cuda")]
+    if let Some(ctx) = super::gpu::GpuContext::get() {
+        if rows >= ctx.thresholds.inverse_min_k {
+            match super::gpu::cholesky_inverse_gpu(ctx, m) {
+                Ok(result) => return Ok(result),
+                Err(e) => {
+                    tracing::warn!("GPU cholesky_inverse failed, falling back to CPU: {:?}", e);
+                }
+            }
+        }
     }
 
     let mat = ndarray_to_faer(m);
@@ -329,7 +388,27 @@ pub fn cholesky_inverse(m: &ArrayView2<f64>) -> Result<Array2<f64>, LinalgError>
 
 /// Compute X'y (X transpose times y)
 /// Uses ndarray's native dot product for better performance.
+///
+/// When the `cuda` feature is enabled and a GPU is available, dispatches to
+/// cuBLAS DGEMV for large matrices (n*k >= threshold).
 pub fn xty(x: &ArrayView2<f64>, y: &Array1<f64>) -> Array1<f64> {
+    let (n, k) = x.dim();
+
+    // GPU dispatch: xty is bandwidth-bound O(n*k) DGEMV; GPU only helps at
+    // large n. For large k the CPU is already well-parallelized via BLAS.
+    #[cfg(feature = "cuda")]
+    if let Some(ctx) = super::gpu::GpuContext::get() {
+        if n >= ctx.thresholds.xty_min_n {
+            match super::gpu::xty_gpu(ctx, x, y) {
+                Ok(result) => return result,
+                Err(e) => {
+                    tracing::warn!("GPU xty failed, falling back to CPU: {:?}", e);
+                }
+            }
+        }
+    }
+
+    let _ = (n, k); // suppress unused warnings when cuda feature is off
     x.t().dot(y)
 }
 

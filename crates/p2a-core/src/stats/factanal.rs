@@ -584,9 +584,7 @@ fn optimize_uniquenesses(
             // If psi has converged, compute objective on next iteration to confirm.
             if psi_change < config.tolerance {
                 // Compute final objective to confirm convergence
-                let final_obj = compute_objective_cached(
-                    corr, &loadings.view(), psi, &cache,
-                )?;
+                let final_obj = compute_objective_cached(corr, &loadings.view(), psi, &cache)?;
                 let obj_change = (prev_obj - final_obj).abs();
                 prev_obj = final_obj;
                 if obj_change < config.tolerance {

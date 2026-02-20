@@ -569,8 +569,7 @@ fn compute_jarque_bera(residuals: &Array1<f64>) -> Option<TestResult> {
         let term1 = delta * delta_n * n1;
         // Update M4 before M3 and M2 since it depends on their current values
         // Pebay (2008), Eq. 1.6
-        m4 += term1 * delta_n2 * (count * count - 3.0 * count + 3.0)
-            + 6.0 * delta_n2 * m2
+        m4 += term1 * delta_n2 * (count * count - 3.0 * count + 3.0) + 6.0 * delta_n2 * m2
             - 4.0 * delta_n * m3;
         // Pebay (2008), Eq. 1.4
         m3 += term1 * delta_n * (count - 2.0) - 3.0 * delta_n * m2;

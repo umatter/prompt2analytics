@@ -251,8 +251,7 @@ impl SortedData {
         // Start: pick the closest single point
         if left > 0
             && (left >= n
-                || (x0 - self.x_sorted[left - 1]).abs()
-                    < (self.x_sorted[left] - x0).abs())
+                || (x0 - self.x_sorted[left - 1]).abs() < (self.x_sorted[left] - x0).abs())
         {
             left -= 1;
             right = left;
@@ -305,11 +304,7 @@ impl SortedData {
 /// Also returns the self-weight (h_ii) for hat matrix trace computation.
 /// For degree 0: h_ii = w_i / sum(w_j)
 #[inline]
-fn wls_degree0(
-    y: &[f64],
-    weights: &[f64],
-    self_pos: usize,
-) -> (f64, f64) {
+fn wls_degree0(y: &[f64], weights: &[f64], self_pos: usize) -> (f64, f64) {
     let mut sw = 0.0;
     let mut swy = 0.0;
     for i in 0..y.len() {
@@ -528,13 +523,8 @@ fn fit_all_points(
             2 => wls_degree2(&sd.x_sorted, y_slice, w_slice, x0, left, self_pos),
             _ => {
                 // Generic fallback using matrix operations (should not happen for degree <= 2)
-                let fitted = generic_wls_fit(
-                    &sd.x_sorted[left..right],
-                    y_slice,
-                    w_slice,
-                    x0,
-                    degree,
-                )?;
+                let fitted =
+                    generic_wls_fit(&sd.x_sorted[left..right], y_slice, w_slice, x0, degree)?;
                 (fitted, 0.0) // No hat trace for generic
             }
         };
@@ -584,13 +574,8 @@ fn fit_single_point(
         1 => wls_degree1(&sd.x_sorted, y_slice, &weight_buf, x0, left, 0),
         2 => wls_degree2(&sd.x_sorted, y_slice, &weight_buf, x0, left, 0),
         _ => {
-            let fitted = generic_wls_fit(
-                &sd.x_sorted[left..right],
-                y_slice,
-                &weight_buf,
-                x0,
-                degree,
-            )?;
+            let fitted =
+                generic_wls_fit(&sd.x_sorted[left..right], y_slice, &weight_buf, x0, degree)?;
             (fitted, 0.0)
         }
     };
@@ -830,12 +815,7 @@ pub fn loess_predict(model: &LoessModel, new_x: &[f64]) -> EconResult<Vec<f64>> 
     let mut predictions = Vec::with_capacity(new_x.len());
 
     for &x0 in new_x {
-        let pred = fit_single_point(
-            &sd,
-            x0,
-            model.degree,
-            model.robust_weights.as_deref(),
-        )?;
+        let pred = fit_single_point(&sd, x0, model.degree, model.robust_weights.as_deref())?;
         predictions.push(pred);
     }
 

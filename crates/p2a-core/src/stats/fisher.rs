@@ -503,7 +503,16 @@ fn compute_ci_lower_fast(
     let mut hi = sample_or.max(0.001);
 
     // Expand upper search bound if needed
-    while compute_fisher_pvalue_given_or_fast(a, row1, col1, n, hi, FisherAlternative::Less, precomp) < alpha {
+    while compute_fisher_pvalue_given_or_fast(
+        a,
+        row1,
+        col1,
+        n,
+        hi,
+        FisherAlternative::Less,
+        precomp,
+    ) < alpha
+    {
         hi *= 2.0;
         if hi > 1e6 {
             return 0.0;
@@ -513,7 +522,15 @@ fn compute_ci_lower_fast(
     // Binary search
     for _ in 0..100 {
         let mid = (lo + hi) / 2.0;
-        let p = compute_fisher_pvalue_given_or_fast(a, row1, col1, n, mid, FisherAlternative::Less, precomp);
+        let p = compute_fisher_pvalue_given_or_fast(
+            a,
+            row1,
+            col1,
+            n,
+            mid,
+            FisherAlternative::Less,
+            precomp,
+        );
 
         if p < alpha {
             lo = mid;
@@ -552,7 +569,16 @@ fn compute_ci_upper_fast(
     let mut hi = (sample_or * 10.0).max(10.0);
 
     // Expand upper search bound if needed
-    while compute_fisher_pvalue_given_or_fast(a, row1, col1, n, hi, FisherAlternative::Greater, precomp) < alpha {
+    while compute_fisher_pvalue_given_or_fast(
+        a,
+        row1,
+        col1,
+        n,
+        hi,
+        FisherAlternative::Greater,
+        precomp,
+    ) < alpha
+    {
         hi *= 2.0;
         if hi > 1e10 {
             return f64::INFINITY;
@@ -562,7 +588,15 @@ fn compute_ci_upper_fast(
     // Binary search
     for _ in 0..100 {
         let mid = (lo + hi) / 2.0;
-        let p = compute_fisher_pvalue_given_or_fast(a, row1, col1, n, mid, FisherAlternative::Greater, precomp);
+        let p = compute_fisher_pvalue_given_or_fast(
+            a,
+            row1,
+            col1,
+            n,
+            mid,
+            FisherAlternative::Greater,
+            precomp,
+        );
 
         if p < alpha {
             hi = mid;
@@ -611,8 +645,7 @@ fn compute_fisher_pvalue_given_or_fast(
             continue;
         }
         // log P(X=x|OR) = log(C(col1, x)) + log(C(col2, row1-x)) + x*log(OR)
-        let log_p =
-            precomp.ln_choose_col1[i] + precomp.ln_choose_col2[i] + (x as f64) * ln_or;
+        let log_p = precomp.ln_choose_col1[i] + precomp.ln_choose_col2[i] + (x as f64) * ln_or;
         if log_p > max_log {
             max_log = log_p;
         }

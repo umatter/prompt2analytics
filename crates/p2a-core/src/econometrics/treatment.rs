@@ -922,15 +922,13 @@ pub fn run_doubly_robust(
                         let mu0_i = mu_0[i];
 
                         // AIPW influence function (Lunceford & Davidian 2004, Eq. 6)
-                        let if_i = if di >= 0.5 {
-                            (yi - mu1_i) / ps_i
-                        } else {
-                            0.0
-                        } - if di < 0.5 {
-                            (yi - mu0_i) / (1.0 - ps_i)
-                        } else {
-                            0.0
-                        } + (mu1_i - mu0_i)
+                        let if_i = if di >= 0.5 { (yi - mu1_i) / ps_i } else { 0.0 }
+                            - if di < 0.5 {
+                                (yi - mu0_i) / (1.0 - ps_i)
+                            } else {
+                                0.0
+                            }
+                            + (mu1_i - mu0_i)
                             - effect;
 
                         sum_if_sq += if_i * if_i;
@@ -1000,14 +998,10 @@ pub fn run_doubly_robust(
                         }
                         DRMethod::Regression => {
                             // Reuse cached outcome model predictions (resample them)
-                            let mu_1_boot: Array1<f64> =
-                                indices.iter().map(|&i| mu_1[i]).collect();
-                            let mu_0_boot: Array1<f64> =
-                                indices.iter().map(|&i| mu_0[i]).collect();
-                            let mean_mu1: f64 =
-                                mu_1_boot.iter().sum::<f64>() / n_trim as f64;
-                            let mean_mu0: f64 =
-                                mu_0_boot.iter().sum::<f64>() / n_trim as f64;
+                            let mu_1_boot: Array1<f64> = indices.iter().map(|&i| mu_1[i]).collect();
+                            let mu_0_boot: Array1<f64> = indices.iter().map(|&i| mu_0[i]).collect();
+                            let mean_mu1: f64 = mu_1_boot.iter().sum::<f64>() / n_trim as f64;
+                            let mean_mu0: f64 = mu_0_boot.iter().sum::<f64>() / n_trim as f64;
                             mean_mu1 - mean_mu0
                         }
                         DRMethod::AIPW => unreachable!(),
@@ -1029,8 +1023,7 @@ pub fn run_doubly_robust(
             }
 
             let se = if !boot_effects.is_empty() {
-                let mean_boot: f64 =
-                    boot_effects.iter().sum::<f64>() / boot_effects.len() as f64;
+                let mean_boot: f64 = boot_effects.iter().sum::<f64>() / boot_effects.len() as f64;
                 let var_boot: f64 = boot_effects
                     .iter()
                     .map(|&e| (e - mean_boot).powi(2))

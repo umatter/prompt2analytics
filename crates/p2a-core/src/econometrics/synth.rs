@@ -1162,7 +1162,11 @@ where
 
         // Sort vertices by function value (ascending)
         let mut order: Vec<usize> = (0..=n).collect();
-        order.sort_by(|&a, &b| values[a].partial_cmp(&values[b]).unwrap_or(std::cmp::Ordering::Equal));
+        order.sort_by(|&a, &b| {
+            values[a]
+                .partial_cmp(&values[b])
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         let sorted_simplex: Vec<Vec<f64>> = order.iter().map(|&i| simplex[i].clone()).collect();
         let sorted_values: Vec<f64> = order.iter().map(|&i| values[i]).collect();

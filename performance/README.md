@@ -38,6 +38,7 @@ performance/
 │
 └── reports/                  # Summary reports
     ├── summary.md
+    ├── gpu_performance.md
     ├── regression_performance.md
     ├── econometrics_performance.md
     ├── ml_performance.md
@@ -64,6 +65,19 @@ cargo bench -p p2a-core -- ols_standard
 # (automatically generated in target/criterion/)
 open target/criterion/report/index.html
 ```
+
+### GPU vs CPU
+
+```bash
+# GPU-enabled (requires --features cuda and NVIDIA GPU)
+cargo bench -p p2a-core --bench gpu_benchmarks --features cuda
+
+# CPU-only baseline (force all thresholds to infinity)
+P2A_GPU_XTX_MIN_NKK=999999999999 P2A_GPU_XTX_MIN_K=999999 \
+  cargo bench -p p2a-core --bench gpu_benchmarks --features cuda
+```
+
+Results and analysis: `reports/gpu_performance.md`
 
 ### R Comparisons
 

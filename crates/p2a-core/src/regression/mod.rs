@@ -99,6 +99,7 @@ pub use diagnostics::{
     bg_test,
     bg_test_from_ols,
     harvey_collier_test,
+    jarque_bera_test,
     recursive_residuals,
     reset_test,
     reset_test_from_ols,
@@ -107,7 +108,6 @@ pub use diagnostics::{
     run_harvey_collier,
     run_reset_test,
     run_wald_test,
-    jarque_bera_test,
     wald_test,
     wald_test_from_ols,
 };

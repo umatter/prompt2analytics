@@ -298,11 +298,7 @@ fn compute_mse(y: &ArrayView1<f64>, indices: &[usize]) -> f64 {
     let sum: f64 = indices.iter().map(|&i| y[i]).sum();
     let mean = sum / indices.len() as f64;
 
-    indices
-        .iter()
-        .map(|&i| (y[i] - mean).powi(2))
-        .sum::<f64>()
-        / indices.len() as f64
+    indices.iter().map(|&i| (y[i] - mean).powi(2)).sum::<f64>() / indices.len() as f64
 }
 
 use super::lcg_random;
@@ -466,11 +462,7 @@ fn make_leaf(target: &ArrayView1<f64>, indices: &[usize]) -> TreeNode {
 }
 
 /// Select a random subset of feature indices.
-fn select_features_fast(
-    n_features: usize,
-    max_features: usize,
-    rng_state: &mut u64,
-) -> Vec<usize> {
+fn select_features_fast(n_features: usize, max_features: usize, rng_state: &mut u64) -> Vec<usize> {
     if max_features >= n_features {
         return (0..n_features).collect();
     }
