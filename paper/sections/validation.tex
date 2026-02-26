@@ -111,7 +111,7 @@ methods have corresponding validation tests in the test suite.
 
 \subsubsection{Ordinary Least Squares}
 
-OLS estimation is validated against the Longley dataset \citep{Longley:1967},
+OLS estimation is validated against the Longley dataset~\citep{Longley:1967},
 a classic benchmark for numerical accuracy in regression software due to its
 high multicollinearity.
 
@@ -140,7 +140,7 @@ Adj.\ $R^2$ & $0.9925$ & $0.9925$ & $< 10^{-4}$ \\
 \subsubsection{Robust standard errors}
 
 Heteroskedasticity-consistent standard errors (HC0--HC3) are validated against
-the \pkg{sandwich} package \citep{Zeileis:2004}. Table~\ref{tab:validation-hc}
+the \pkg{sandwich} package~\citep{Zeileis:2004}. Table~\ref{tab:validation-hc}
 shows achieved precision levels.
 
 \begin{table}[htbp]
@@ -166,7 +166,7 @@ variance formula.
 \subsubsection{Panel data estimation}
 
 Fixed and random effects estimators are validated against the \pkg{plm}
-package \citep{Croissant+Millo:2008} using the Grunfeld investment dataset
+package~\citep{Croissant+Millo:2008} using the Grunfeld investment dataset
 ($n = 200$, 10 firms $\times$ 20 years).
 
 \begin{table}[htbp]
@@ -214,14 +214,10 @@ F-statistic & $217.44$ & $217.44$ & $< 0.01$ \\
 
 \subsubsection{Regression diagnostics}
 
-Diagnostic tests are validated against \pkg{lmtest}:
-
-\begin{itemize}
-  \item \textbf{Jarque-Bera}: Normality test statistic matches to $< 10^{-4}$
-  \item \textbf{Breusch-Pagan}: Heteroskedasticity test matches to $< 10^{-4}$
-  \item \textbf{Durbin-Watson}: Autocorrelation statistic matches to $< 10^{-6}$
-  \item \textbf{VIF}: Variance inflation factors match to $< 10^{-6}$
-\end{itemize}
+Diagnostic tests (Jarque-Bera, Breusch-Pagan, Durbin-Watson, VIF) are
+validated against \pkg{lmtest}, with all statistics matching to at least
+$10^{-4}$. Per-test tolerances are documented in
+Appendix~\ref{app:implementation}.
 
 
 %% -----------------------------------------------------------------------------
@@ -265,25 +261,8 @@ cargo test -p p2a-core -- test_validate
 \subsection{Known differences} \label{sec:validation-differences}
 
 A small number of intentional differences exist between \pkg{prompt2analytics}
-and reference implementations:
-
-\begin{enumerate}
-  \item \textbf{Default robust SE type}: \pkg{prompt2analytics} defaults to
-    HC1 (consistent with Stata's \code{robust} option), while \proglang{R}'s
-    \pkg{sandwich} defaults to HC3.
-
-  \item \textbf{Coefficient naming}: \proglang{R} uses variable names in output;
-    \pkg{prompt2analytics} uses numeric indices internally but displays names
-    in formatted output.
-
-  \item \textbf{$R^2$ variants}: For panel models, we report ``within $R^2$''
-    by default, matching \pkg{plm}'s convention for fixed effects models.
-
-  \item \textbf{Convergence tolerance}: Iterative methods (HDFE, MLE) use
-    a default tolerance of $10^{-8}$, which may differ slightly from
-    \proglang{R} package defaults.
-\end{enumerate}
-
-These differences are documented in the method documentation and do not
-affect the validity of statistical inference.
+and reference implementations, including default robust SE type (HC1 vs.\
+HC3), coefficient naming conventions, $R^2$ variant selection, and
+convergence tolerances. These do not affect the validity of statistical
+inference; details are in Appendix~\ref{app:known-differences}.
 

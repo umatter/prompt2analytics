@@ -7,6 +7,9 @@
 
 %% additional packages
 \usepackage{booktabs}
+\usepackage{threeparttable}
+%% Ensure table notes use footnotesize and no paragraph indent
+\renewcommand{\TPTnoteSettings}{\footnotesize\setlength{\parindent}{0pt}}
 \usepackage{multirow}
 \usepackage{amsmath,amssymb}
 \usepackage{bm}
@@ -26,9 +29,8 @@
 
 %% -- Article metainformation (author, title, ...) -----------------------------
 
-%% TODO: Update with actual author information
-\author{First Author\\University of Somewhere}
-\Plainauthor{First Author}
+\author{Ulrich Matter\\Bern University of Applied Sciences\\University of St.~Gallen}
+\Plainauthor{Ulrich Matter}
 
 %% Title
 \title{Chat-First Data Analytics}
@@ -37,22 +39,26 @@
 
 %% Abstract
 \Abstract{
-  This paper presents \pkg{prompt2analytics}, a software toolkit that applies
-  established tool-augmented language model techniques to econometric analysis.
-  Natural language conversation serves as the interface to statistical methods,
-  while pre-implemented algorithms perform computation---the language model
-  selects tools; verified implementations produce results. This approach
-  addresses concerns about correctness, data privacy, and reproducibility
-  that arise when language models generate statistical code directly.
-  The software contribution includes: (1)~an econometrics library in pure
-  \proglang{Rust} covering regression, panel data, instrumental variables,
-  difference-in-differences, discrete choice, and time series methods;
-  (2)~exposure through the Model Context Protocol (MCP) for LLM integration;
-  and (3)~validation against established \proglang{R} packages. Extended
-  evaluation reveals practical accuracy limitations: multi-turn accuracy
-  ranges from 47--60\% and parameter extraction F1 from 41--59\%, indicating
-  that users should expect to correct requests in realistic workflows.
-  Local deployment via Ollama enables complete data isolation.
+  Using natural language to drive data analysis is an old idea, but large
+  language models have made it suddenly ubiquitous. A widely observed
+  and rather concerning workflow has users upload a dataset to ChatGPT
+  and ask for an analysis; the model generates and executes code on a
+  remote virtual machine, producing results that are difficult to
+  verify, impossible to reproduce, and incompatible with data privacy
+  requirements. This paper develops \emph{chat-first data analytics}, an
+  alternative architecture built on three principles: separate interpretation
+  from computation, pre-validate methods rather than generating code, and
+  transmit only metadata, not data. The language model interprets intent and selects tools;
+  pre-implemented, validated algorithms produce results.
+  \pkg{prompt2analytics} implements this approach as an econometrics and
+  data analytics library in pure \proglang{Rust}, exposed through the
+  Model Context Protocol~(MCP) for integration with language models. The
+  library covers regression, panel data, instrumental variables,
+  difference-in-differences, discrete choice, time series, and over 200
+  additional methods---all validated against established \proglang{R}
+  packages. Evaluation shows that tool selection
+  works well (90--100\% on curated prompts). Local deployment via Ollama enables
+  complete data isolation on consumer hardware.
 }
 
 %% Keywords (at least one required)
@@ -61,15 +67,12 @@
 \Plainkeywords{econometrics, Rust, regression, panel data, causal inference,
   time series, MCP, R}
 
-%% Author address (TODO: Update)
 \Address{
-  First Author\\
-  Department of Economics\\
-  University of Somewhere\\
-  Address Line\\
-  City, Country\\
-  E-mail: \email{author@example.org}\\
-  URL: \url{https://example.org/}
+  Ulrich Matter\\
+  Bern University of Applied Sciences, Bern, Switzerland\\
+  University of St.~Gallen, St.~Gallen, Switzerland\\
+  E-mail: \email{ulrich.matter@unisg.ch}\\
+  URL: \url{https://umatter.github.io/}
 }
 
 \begin{document}

@@ -8,7 +8,7 @@ A statistical software package must demonstrate both correctness and competitive
 performance. This section compares \pkg{prompt2analytics} against established
 \proglang{R} packages on both dimensions, showing that the \proglang{Rust}
 implementation achieves speedups ranging from 2$\times$ to over
-100$\times$ depending on the method, while matching reference implementations
+100$\times$, depending on the method, while matching reference implementations
 to high numerical precision.
 
 \subsection{Methodology}
@@ -163,8 +163,8 @@ Panel data methods are validated using the Grunfeld dataset (10 firms, 20 years,
 $n = 200$). Fixed effects coefficients match \pkg{plm} to $< 10^{-6}$, and the
 within $R^2$ matches to four decimal places. The Hausman test statistic for
 choosing between fixed and random effects matches to $< 10^{-4}$. Two-way
-high-dimensional fixed effects, implemented using the MAP algorithm
-\citep{Gaure:2013}, matches \pkg{lfe}'s \fct{felm} to $< 10^{-5}$.
+high-dimensional fixed effects, implemented using the MAP
+algorithm~\citep{Gaure:2013}, matches \pkg{lfe}'s \fct{felm} to $< 10^{-5}$.
 
 Beyond these flagship methods, the validation suite covers over 200 methods
 with more than 1,500 individual test cases (334 specifically targeting validation
@@ -267,9 +267,11 @@ errors. The distinguishing features are the natural language interface and
 fully local execution without \proglang{R} dependencies. Users requiring
 maximum performance for high-dimensional fixed effects should note that
 \pkg{fixest} likely outperforms \pkg{prompt2analytics} due to its highly
-optimized C++ implementation specifically tuned for this problem class. Performance advantages become practically relevant for simulation
+optimized C++ implementation specifically tuned for this problem class.
+
+Performance advantages become practically relevant for simulation
 studies, bootstrap procedures, and deployment contexts where \proglang{R}
-installation is impractical; for typical one-off analyses, speed differences
+installation is impractical. For typical one-off analyses, speed differences
 are imperceptible.
 
 \subsection{Limitations}
@@ -285,7 +287,7 @@ value not captured in raw timing comparisons or feature checklists.
 
 \subsubsection{Comparison with fixest}
 
-\pkg{fixest} \citep{Berge:2018} was excluded from the performance benchmarks
+\pkg{fixest}~\citep{Berge:2018} was excluded from the performance benchmarks
 in Table~\ref{tab:performance-summary} because its highly optimized C++
 implementation makes direct speed comparison uninformative for most users.
 \pkg{fixest} is specifically engineered for high-dimensional fixed effects
@@ -304,4 +306,9 @@ unified framework.
 For users already proficient in \proglang{R} who work primarily with
 high-dimensional fixed effects, \pkg{fixest} remains the recommended choice.
 \pkg{prompt2analytics} complements rather than replaces specialized tools.
+
+The performance advantages documented here become practically relevant
+for interactive use, where sub-second response times matter for
+conversational workflows. Section~\ref{sec:performance} presents
+detailed benchmarks across approximately 75 method configurations.
 

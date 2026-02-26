@@ -5,91 +5,44 @@
 
 ## SETUP ----
 library(tidyverse)
-library(jsonlite)
 library(viridis)
 
-INPUT <- "llm_eval/results/"
 OUTPUT <- "../figures/"
 
-# Complete evaluation files (87 tests)
-EVAL_FILES <- c(
-  "claude-3-5-haiku-20241022_all_20260123_165810.jsonl",
-  "qwen_qwen-2.5-72b-instruct_all_20260123_173345.jsonl",
-  "meta-llama_llama-3.3-70b-instruct_all_20260123_171743.jsonl",
-  "gpt-4o-mini_all_20260123_152151.jsonl",
-  "gpt-4.1-nano-2025-04-14_all_20260123_155259.jsonl",
-  "gpt-5-nano-2025-08-07_all_20260123_161312.jsonl",
-  "mistralai_ministral-3b_all_20260123_205903.jsonl"
-)
+## DATA (from tab_category_accuracy.tex) ----
+categories <- c("Regression", "Panel", "Causal", "Discrete",
+                 "Time Series", "Hypothesis", "ML", "Visualization")
 
-## DATA IMPORT AND PREPARATION ----
-# Read all JSONL files and aggregate by category
-read_jsonl <- function(file) {
-  lines <- readLines(paste0(INPUT, file), warn = FALSE)
-  map_dfr(lines, ~ fromJSON(.x))
-}
+models <- c("Claude 3.5 Haiku", "Qwen 2.5 72B", "Llama 3.3 70B",
+            "GPT-5 Nano", "GPT-4o Mini", "GPT-4.1 Nano", "Ministral 3B")
 
-all_results <- map_dfr(EVAL_FILES, read_jsonl)
+# Rows: models (in order above), Cols: categories (in order above)
+acc_matrix <- matrix(c(
+  100, 100, 100, 100, 100, 100, 100, 100,  # Haiku
+  100, 100, 100, 100, 100, 100, 100, 100,  # Qwen 2.5 72B
+  100,  90, 100, 100, 100, 100, 100, 100,  # Llama 3.3 70B
+  100, 100, 100, 100, 100,  92,  92, 100,  # GPT-5 Nano
+  100, 100, 100,  90, 100,  92, 100, 100,  # GPT-4o Mini
+   90, 100, 100,  80, 100, 100, 100, 100,  # GPT-4.1 Nano
+   90, 100,  91, 100,  67,  83, 100, 100   # Ministral 3B
+), nrow = 7, ncol = 8, byrow = TRUE)
 
-# Calculate accuracy by model and category
-# Note: Only "exact" and "acceptable" matches count toward accuracy
-# "category" matches (correct category, wrong specific tool) do not count
-category_accuracy <- all_results %>%
-  group_by(model, category) %>%
-  summarise(
-    correct = sum(match_type %in% c("exact", "acceptable")),
-    total = n(),
-    accuracy = correct / total * 100,
-    .groups = "drop"
-  ) %>%
+category_accuracy <- expand.grid(
+  model = models,
+  category = categories,
+  stringsAsFactors = FALSE
+) %>%
   mutate(
-    # Clean model names
-    model_display = case_when(
-      grepl("claude", model) ~ "Claude 3.5 Haiku",
-      grepl("qwen-2.5-72b", model) ~ "Qwen 2.5 72B",
-      grepl("llama-3.3-70b", model) ~ "Llama 3.3 70B",
-      model == "gpt-4o-mini" ~ "GPT-4o Mini",
-      grepl("gpt-5-nano", model) ~ "GPT-5 Nano",
-      grepl("gpt-4.1-nano", model) ~ "GPT-4.1 Nano",
-      grepl("ministral-3b", model) ~ "Ministral 3B",
-      TRUE ~ model
-    ),
-    # Clean category names
-    category_display = case_when(
-      category == "regression" ~ "Regression",
-      category == "panel" ~ "Panel",
-      category == "causal" ~ "Causal",
-      category == "discrete" ~ "Discrete",
-      category == "timeseries" ~ "Time Series",
-      category == "hypothesis" ~ "Hypothesis",
-      category == "ml" ~ "ML",
-      category == "viz" ~ "Visualization",
-      TRUE ~ category
-    )
-  )
-
-# Calculate overall accuracy for ordering
-model_order <- category_accuracy %>%
-  group_by(model_display) %>%
-  summarise(overall = mean(accuracy), .groups = "drop") %>%
-  arrange(desc(overall)) %>%
-  pull(model_display)
-
-# Set factor levels
-category_order <- c("Regression", "Panel", "Causal", "Discrete",
-                    "Time Series", "Hypothesis", "ML", "Visualization")
-
-category_accuracy <- category_accuracy %>%
-  mutate(
-    model_display = factor(model_display, levels = rev(model_order)),
-    category_display = factor(category_display, levels = category_order)
+    accuracy = as.vector(acc_matrix),
+    model = factor(model, levels = rev(models)),
+    category = factor(category, levels = categories)
   )
 
 ## PLOT ----
-p <- ggplot(category_accuracy, aes(x = category_display, y = model_display, fill = accuracy)) +
+p <- ggplot(category_accuracy, aes(x = category, y = model, fill = accuracy)) +
   geom_tile(color = "white", linewidth = 0.5) +
   geom_text(aes(label = sprintf("%.0f", accuracy)),
-            size = 3.5, color = ifelse(category_accuracy$accuracy < 70, "white", "black")) +
+            size = 5.5, color = ifelse(category_accuracy$accuracy < 70, "white", "black")) +
   scale_fill_viridis(
     option = "D",
     limits = c(0, 100),
@@ -102,11 +55,14 @@ p <- ggplot(category_accuracy, aes(x = category_display, y = model_display, fill
     y = NULL,
     title = NULL
   ) +
-  theme_minimal(base_size = 12) +
+  theme_minimal(base_size = 16) +
   theme(
-    axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1),
+    axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1, size = 14),
+    axis.text.y = element_text(size = 14),
     panel.grid = element_blank(),
     legend.position = "right",
+    legend.text = element_text(size = 13),
+    legend.title = element_text(size = 14),
     plot.margin = margin(10, 10, 10, 10)
   )
 

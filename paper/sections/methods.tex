@@ -1,8 +1,8 @@
 %% =============================================================================
-%% DESIGN PHILOSOPHY
+%% BACKGROUND AND DESIGN PRINCIPLES
 %% =============================================================================
 
-\section{Design philosophy} \label{sec:design}
+\section{Background and design principles} \label{sec:design}
 
 Traditional statistical software requires users to learn domain-specific syntax:
 \proglang{R} formulas, \proglang{Stata} commands, or \proglang{Python} APIs.
@@ -12,7 +12,7 @@ language, and the system determines the appropriate statistical method.
 
 \subsection{Chat-first analytics}
 
-The design approach is \emph{chat-first analytics}:
+The design approach is \emph{chat-first data analytics}:
 the primary interface is conversational rather than programmatic. A user
 might request ``estimate the effect of education on wages, controlling for
 experience and industry, with robust standard errors'' without specifying
@@ -21,13 +21,13 @@ system interprets the request, selects appropriate methods, executes the
 analysis, and returns results with natural language explanation.
 
 This approach builds on a long history of natural language interfaces for
-data. Early systems like LUNAR \citep{Woods:1973} demonstrated that users
+data. Early systems like LUNAR~\citep{Woods:1973} demonstrated that users
 could query databases in English, though these systems were limited to
-specific domains and required careful phrasing
-\citep{Androutsopoulos+etal:1995}. The text-to-SQL paradigm, exemplified
-by benchmarks like Spider \citep{Yu+etal:2018}, has driven substantial
-progress in translating natural language to structured queries
-\citep{Li+etal:2024}. Similarly, systems like NL4DV \citep{Narechania+etal:2021}
+specific domains and required careful
+phrasing~\citep{Androutsopoulos+etal:1995}. The text-to-SQL paradigm, exemplified
+by benchmarks like Spider~\citep{Yu+etal:2018}, has driven substantial
+progress in translating natural language to structured
+queries~\citep{Li+etal:2024}. Similarly, systems like NL4DV~\citep{Narechania+etal:2021}
 enable natural language specification of data visualizations.
 
 Our approach differs from these predecessors in two key respects. First,
@@ -44,15 +44,15 @@ dialogue: users can refine their analysis iteratively based on results
 and suggestions from the system. However, these benefits remain hypothesized;
 user studies comparing chat-first workflows against traditional interfaces
 are needed to validate accessibility and productivity claims. Our extended
-evaluation (Section~\ref{sec:local}) shows that realistic use requires
+evaluation (Section~\ref{sec:evaluation}) shows that realistic use requires
 significant user intervention.
 
 \subsection{Positioning this work}
 
 \pkg{prompt2analytics} builds on a long tradition of interface innovation in
-statistical software, from the Wilkinson-Rogers formula notation
-\citep{Wilkinson+Rogers:1973} to text-to-SQL systems \citep{Yu+etal:2018} and
-AutoML pipelines \citep{Feurer+etal:2015}. Rather than inventing new notation,
+statistical software, from the Wilkinson-Rogers formula
+notation~\citep{Wilkinson+Rogers:1973} to text-to-SQL systems~\citep{Yu+etal:2018} and
+AutoML pipelines~\citep{Feurer+etal:2015}. Rather than inventing new notation,
 it accepts natural language descriptions of analytical intent, trading the
 precision of formal DSLs for accessibility.
 
@@ -82,67 +82,18 @@ Users bear responsibility for ensuring that causal interpretations are
 warranted by their identification strategy, not merely by the statistical
 method employed.
 
-\subsubsection{Identification warnings}
-
-The system implements a diagnostics module that generates data-driven
-warnings when estimation results suggest potential violations of
-identifying assumptions. These warnings are non-blocking---results are
-always returned to the user---but they highlight conditions that warrant
-careful interpretation.
-
-For \emph{instrumental variables}, the system checks first-stage
-$F$-statistics against the Stock-Yogo threshold of 10
-\citep{Stock+Yogo:2005}. Values below 10 trigger weak instrument warnings
-with severity scaled by the degree of weakness ($F < 5$ generates critical
-warnings). When models are overidentified, the Sargan test is automatically
-computed and rejection ($p < 0.05$) triggers exclusion restriction warnings.
-
-For \emph{difference-in-differences}, staggered designs include a pre-trend
-test (joint test that pre-treatment ATT estimates are zero). Rejection
-generates parallel trends warnings. The system also checks for significant
-individual pre-treatment effects that may indicate anticipation.
-
-For \emph{matching and IPW}, balance diagnostics check whether post-matching
-standardized mean differences exceed 0.1, the conventional threshold for
-acceptable balance \citep{Austin:2011}. Propensity score distributions are
-examined for positivity violations---scores near 0 or 1 imply extreme
-weights. Match rates are reported to flag limited common support.
-
-For \emph{regression discontinuity}, effective sample sizes within the
-bandwidth are checked against minimum thresholds ($n < 50$ per side triggers
-warnings). Bandwidth sensitivity is flagged to encourage robustness checks
-at alternative bandwidths.
-
-Each warning includes: (1) a severity level (info, caution, warning, critical),
-(2) a diagnostic message explaining the concern, (3) the specific assumption
-at risk, and (4) suggested remediation steps. For example, weak instrument
-warnings recommend weak-instrument-robust inference methods (Anderson-Rubin,
-LIML) and reduced-form reporting.
-
-Fundamental untestable assumptions---SUTVA, unconfoundedness, no
-manipulation---are documented but cannot generate data-driven warnings.
-The system recommends sensitivity analyses (e.g., \pkg{sensemakr}, E-values)
-for selection-on-observables designs.
-
-Future versions could extend this framework with LLM-generated warnings that
-flag context-specific concerns (e.g., detecting specification search patterns)
-and heuristic checks for common errors (e.g., sample size warnings for
-subgroup analyses). These extensions require additional research and testing
-to ensure warnings are accurate and actionable rather than overwhelming users
-with false positives.
 
 \subsection{Practical accuracy expectations} \label{sec:accuracy-expectations}
 
 Before presenting polished examples (Section~\ref{sec:examples}), readers
 should understand the practical accuracy limitations documented in our
-extended evaluation (Section~\ref{sec:local}). Table~\ref{tab:accuracy-summary-early}
+extended evaluation (Section~\ref{sec:evaluation}). Table~\ref{tab:accuracy-summary-early}
 summarizes key findings that set appropriate expectations for realistic use.
 
 \begin{table}[htbp]
 \centering
-\caption{Summary of LLM accuracy limitations. Single-turn accuracy on curated
-benchmarks substantially overstates practical capability in realistic workflows.
-Values show range across 10 evaluated models.}
+\begin{threeparttable}
+\caption{Summary of LLM accuracy limitations}
 \label{tab:accuracy-summary-early}
 \small
 \begin{tabular}{lcc}
@@ -156,23 +107,25 @@ Parameter extraction F1 & 41--59\% & Variable names, options correctly extracted
 Out-of-scope detection & 40--60\% & Correctly declines unsupported requests \\
 \bottomrule
 \end{tabular}
+\begin{tablenotes}\small
+\item \emph{Note:} Single-turn accuracy on curated benchmarks substantially
+overstates practical capability in realistic workflows. Values show range
+across 10 evaluated models.
+\end{tablenotes}
+\end{threeparttable}
 \end{table}
 
-For users, this means:
-\begin{itemize}
-  \item \emph{Keep tool calls in history}: Multi-turn accuracy jumps from
-    ${\sim}50\%$ to ${\sim}97\%$ when conversation history includes previous
-    tool invocations and their results. This is the single biggest factor.
-  \item \emph{Check parameters}: The model often picks the right tool but
-    extracts wrong variable names or options (F1 of 41--59\%). Glance at
-    what it extracted before trusting results.
-  \item \emph{Be specific}: ``Within-transformation fixed effects with firm-clustered
-    standard errors'' works better than ``regression with firm effects.''
-  \item \emph{Stay in the loop}: Tool selection is reliable now; parameter
-    extraction and interpretation still need a human eye.
-\end{itemize}
+For users, the most important factor is keeping tool calls in conversation
+history: multi-turn accuracy jumps from ${\sim}50\%$ to ${\sim}97\%$ when
+history includes previous tool invocations and their results. Users should
+also check extracted parameters, since models often select the right tool
+but extract wrong variable names or options (F1 of 41--59\%). Specific
+prompts help---``within-transformation fixed effects with firm-clustered
+standard errors'' works better than ``regression with firm effects.'' In
+general, tool selection is reliable; parameter extraction and result
+interpretation still require human oversight.
 
-\noindent Section~\ref{sec:local} provides full evaluation methodology and results.
+\noindent Section~\ref{sec:evaluation} provides full evaluation methodology and results.
 Table~\ref{tab:extended-eval-summary-main} presents per-model breakdowns across
 all evaluation dimensions.
 
@@ -181,12 +134,12 @@ all evaluation dimensions.
 Large language models are the interpretive layer between user intent
 and statistical execution. The LLM parses natural language requests, selects
 appropriate methods from the toolkit, generates structured tool calls, and
-interprets results. This builds on tool-augmented LLMs
-\citep{Yao+etal:2023, Schick+etal:2023}.
+interprets results. This builds on tool-augmented
+LLMs~\citep{Yao+etal:2023, Schick+etal:2023}.
 
 Unlike code-generation approaches, our system does not ask the LLM to write
-statistical code. Studies show LLMs generate incorrect code frequently
-\citep{Nejjar+etal:2024}. Instead, we provide pre-implemented, verified methods
+statistical code. Studies show LLMs generate incorrect code
+frequently~\citep{Nejjar+etal:2024}. Instead, we provide pre-implemented, verified methods
 as callable tools. The LLM's constrained role (method selection and parameter
 specification) enables smaller models to perform adequately (Section~\ref{sec:local}).
 
@@ -208,7 +161,7 @@ Correctness & Validated vs R & Code review & None & None \\
 \end{table}
 
 Table~\ref{tab:system-comparison} contrasts \pkg{prompt2analytics} with related
-systems \citep{Chen+Shen+Ma:2025, Hong+etal:2024, Sun+etal:2025:LAMBDA}---all of
+systems~\citep{Chen+Shen+Ma:2025, Hong+etal:2024, Sun+etal:2025:LAMBDA}---all of
 which generate and execute code, whereas our system routes requests to
 pre-validated implementations.
 
@@ -225,11 +178,11 @@ shared libraries for language integration.
 \subsection{MCP as the bridge}
 
 The Model Context Protocol (MCP) provides the communication layer between
-LLMs and the analytics engine \citep{MCP:2024}.%
+LLMs and the analytics engine~\citep{MCP:2024}.%
 \footnote{MCP focuses on model-to-tool integration. Complementary protocols
 address agent-to-agent communication: Google's Agent2Agent (A2A) protocol
 \citep{A2A:2025} enables discovery and task delegation between AI agents,
-while IBM's Agent Communication Protocol (ACP) \citep{ACP:2025} provides
+while IBM's Agent Communication Protocol (ACP)~\citep{ACP:2025} provides
 lightweight HTTP-native messaging. A2A and ACP merged under Linux Foundation
 governance in 2025. For single-agent tool invocation, the pattern used in
 \pkg{prompt2analytics}, MCP remains the dominant standard, with adoption
@@ -305,22 +258,17 @@ MCP implementations face security challenges common to tool-augmented
 LLM systems. \emph{Prompt injection} attacks embed malicious instructions
 in data that the LLM then processes, potentially causing unintended
 tool invocations. \emph{Tool poisoning} attacks modify tool descriptions
-to influence LLM behavior \citep{OWASP:MCP:2025}.
+to influence LLM behavior~\citep{OWASP:MCP:2025}.
 
 \pkg{prompt2analytics} mitigates these risks through several design
-choices:
-\begin{itemize}
-  \item Tools have fixed, auditable descriptions embedded in the server
-    binary---external modification is not possible without rebuilding.
-  \item The server executes only pre-defined statistical methods.
-    No arbitrary code execution capability exists; the LLM cannot
-    instruct the server to run shell commands or access files outside
-    loaded datasets.
-  \item Tool calls are logged and can be inspected before execution
-    (in interactive mode) or reviewed in audit logs.
-  \item Dataset access requires explicit loading; the server does not
-    have ambient filesystem access.
-\end{itemize}
+choices. Tools have fixed, auditable descriptions embedded in the server
+binary---external modification is not possible without rebuilding. The
+server executes only pre-defined statistical methods; no arbitrary code
+execution capability exists, so the LLM cannot instruct the server to run
+shell commands or access files outside loaded datasets. Tool calls are
+logged and can be inspected before execution (in interactive mode) or
+reviewed in audit logs. Dataset access requires explicit loading; the
+server does not have ambient filesystem access.
 
 Nevertheless, users deploying MCP servers should follow security best
 practices: avoid loading untrusted data files that could contain
@@ -329,189 +277,15 @@ and prefer local LLM deployment for high-security environments.
 
 The same interface and analytics engine function identically with
 local or cloud-hosted models, allowing users to select the deployment
-appropriate to their security requirements.
+model appropriate to their security requirements.
 
-\subsection{Implemented methods}
 
-The analytics engine implements over 200 econometric and statistical methods
-organized into the following categories:
 
-\begin{itemize}
-  \item \emph{Regression}: OLS with HC0--HC3 robust standard errors, clustered
-    standard errors, HAC (Newey-West), bootstrap inference, GLS, nonlinear
-    least squares, LOESS, smoothing splines, stepwise selection, and
-    quantile regression \citep{Koenker+Bassett:1978}.
-  \item \emph{Panel data}: Fixed effects, random effects, Hausman test,
-    high-dimensional fixed effects (HDFE), panel GLS, Arellano-Bond GMM
-    for dynamic panels \citep{Arellano+Bond:1991}, and panel unit root tests
-    (LLC, IPS, Fisher).
-  \item \emph{Instrumental variables}: 2SLS with first-stage diagnostics,
-    Sargan overidentification test, and general GMM \citep{Hansen:1982}.
-  \item \emph{Causal inference---design-based}: Canonical difference-in-differences,
-    staggered DiD via Callaway-Sant'Anna \citep{Callaway+SantAnna:2021},
-    Goodman-Bacon decomposition \citep{Goodman-Bacon:2021}, extended TWFE
-    \citep{Wooldridge:2021}, sharp and fuzzy regression discontinuity with
-    CCT bandwidth selection \citep{Calonico+etal:2014}, multi-cutoff RD,
-    synthetic control \citep{Abadie+etal:2010}, generalized synthetic control
-    \citep{Xu:2017}, and synthetic control with prediction intervals \citep{Cattaneo+etal:2021}.
-  \item \emph{Causal inference---treatment effects}: Inverse probability weighting,
-    doubly robust/AIPW estimation, propensity score matching (nearest neighbor,
-    CEM, full matching, subclassification) following the \pkg{MatchIt} interface
-    \citep{Ho+etal:2011}, covariate balancing propensity scores \citep{Imai+Ratkovic:2014},
-    entropy balancing, GBM-based weighting, TMLE \citep{vanderLaan+Rose:2011},
-    collaborative TMLE, longitudinal TMLE, and double/debiased machine learning
-    \citep{Chernozhukov+etal:2018}.
-  \item \emph{Discrete choice}: Binary logit and probit, multinomial logit,
-    conditional/McFadden logit, mixed logit with random parameters, ordered
-    logit/probit, negative binomial, zero-inflated Poisson/negative binomial,
-    and hurdle models.
-  \item \emph{Time series}: ARIMA, VAR, VARMA, VECM, impulse response functions,
-    Granger causality, seasonal decomposition (STL, MSTL), Holt-Winters,
-    structural time series, Kalman filtering, GARCH, and changepoint detection.
-  \item \emph{Spatial econometrics}: Spatial autoregressive (SAR), spatial error
-    (SEM), and combined (SAC) models \citep{Anselin:1988}; spatial probit;
-    spatial panel models; and spatial GMM with heteroskedasticity-robust
-    inference.
-  \item \emph{Survival analysis}: Kaplan-Meier estimation, log-rank tests,
-    Cox proportional hazards, accelerated failure time models, and competing
-    risks analysis.
-  \item \emph{Mediation and sensitivity}: Causal mediation analysis, natural
-    effect models, sensitivity analysis for unmeasured confounding
-    \citep{Cinelli+Hazlett:2020}, E-values, and Balke-Pearl bounds.
-  \item \emph{Statistical tests}: Over 50 hypothesis tests including $t$-tests,
-    ANOVA, MANOVA, chi-squared, Fisher exact, Wilcoxon, Kruskal-Wallis,
-    Friedman, normality tests (Shapiro-Wilk, Kolmogorov-Smirnov), and
-    post-hoc procedures (Tukey HSD).
-\end{itemize}
-
-Full documentation of all methods, including mathematical specifications and
-implementation details, is available in the package documentation and
-Appendix~\ref{app:implementation}.
-
-\subsection{Implementation caveats}
-
-While method coverage is broad (200+ methods), several important categories
-remain unimplemented. Table~\ref{tab:method-coverage} summarizes coverage
-gaps and recommends alternative tools for each category.
-
-\begin{table}[htbp]
-\centering
-\caption{Method coverage limitations and recommended alternatives}
-\label{tab:method-coverage}
-\small
-\begin{tabular}{p{3.5cm}p{5cm}p{4cm}}
-\toprule
-Method Category & Status & Recommended Alternative \\
-\midrule
-Bayesian inference & Not implemented & \proglang{R}: \pkg{rstanarm}, \pkg{brms}; \proglang{Python}: PyMC \\
-Heckman selection & Not implemented & \proglang{R}: \pkg{sampleSelection}; \proglang{Stata}: \code{heckman} \\
-Conley spatial SEs & Not implemented & \proglang{R}: \pkg{fixest}, \pkg{lfe} \\
-Full SARIMA (arbitrary seasonal) & Partial support & \proglang{R}: \pkg{forecast} \\
-Quantile IV & Not implemented & \proglang{R}: \pkg{quantreg} \\
-Structural equation modeling & Not implemented & \proglang{R}: \pkg{lavaan} \\
-\addlinespace
-Weak instrument inference & $F$-stat only; no Stock-Yogo CVs & \proglang{R}: \pkg{ivmodel}, \pkg{AER} \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-Additional method-specific limitations:
-\begin{itemize}
-  \item 2SLS reports first-stage $F$-statistics but lacks Stock-Yogo critical
-    values for formal weak instrument inference. Users with potentially weak
-    instruments should verify results using weak-identification-robust methods
-    in \proglang{R}.
-  \item ARIMA supports non-seasonal and simple seasonal models; full
-    seasonal ARIMA (SARIMA) with arbitrary seasonal periods and automatic
-    order selection is not yet implemented.
-  \item Mixed-effects models support random intercepts and slopes but do not
-    match the full flexibility of \pkg{lme4} for complex random effect structures.
-\end{itemize}
-
-\noindent Appendix~\ref{app:implementation} provides detailed documentation of
-method-specific limitations and recommended alternatives for edge cases. Users
-whose primary needs fall within unimplemented categories should use the
-recommended specialized tools rather than \pkg{prompt2analytics}.
-
-\subsection{Best practices for effective use}
-
-Realizing the benefits of chat-first analytics requires understanding when
-the system excels and when traditional software remains preferable. This
-section provides practical guidance based on our extended evaluation
-(Section~\ref{sec:local}) and user testing.
-
-\subsubsection{Pre-analysis checklist}
-
-Before running an analysis through \pkg{prompt2analytics}, users should verify:
-\begin{enumerate}
-  \item \emph{Method availability}: Confirm the required method is implemented.
-    Table~\ref{tab:feature-comparison} in Section~\ref{sec:comparison} provides
-    feature coverage; Appendix~\ref{app:implementation} gives comprehensive
-    method documentation.
-  \item \emph{Data requirements}: Verify the dataset meets method assumptions.
-    Panel methods require entity and time identifiers; IV requires instruments;
-    DiD requires treatment and time indicators.
-  \item \emph{Variable naming}: Use clear, unambiguous column names. The LLM
-    extracts variable names from natural language; names like \code{x1} or
-    \code{var\_1} are more error-prone than \code{wage} or \code{education}.
-  \item \emph{Specification clarity}: Plan to specify methods explicitly when
-    precision matters. ``Estimate a within-transformation fixed effects model
-    with clustered standard errors at the firm level'' yields more reliable
-    results than ``run a regression with firm effects.''
-\end{enumerate}
-
-\subsubsection{During analysis}
-
-Multi-turn accuracy varies from 47--97\% depending on context management
-(Section~\ref{sec:local}). With proper conversation history, accuracy exceeds
-90\%, but users should still:
-\begin{itemize}
-  \item \emph{Verify tool selection}: Check which method was invoked before
-    interpreting results. The system reports tool calls explicitly.
-  \item \emph{Inspect extracted parameters}: Confirm that variable names,
-    options (robust SEs, clustering), and specifications match intent.
-  \item \emph{Expect corrections}: Budget for 2--3 clarification turns per
-    analytical workflow. Rephrase ambiguous requests with explicit method names.
-  \item \emph{Cross-check novel results}: For high-stakes analyses, verify
-    key findings against \proglang{R} or \proglang{Stata} implementations.
-\end{itemize}
-
-\subsubsection{When to use traditional software}
-
-\pkg{prompt2analytics} complements rather than replaces established tools.
-Users should prefer \proglang{R}, \proglang{Stata}, or \proglang{Python} when:
-\begin{itemize}
-  \item \emph{Methods are unavailable}: Bayesian inference, Heckman selection,
-    SARIMA with arbitrary seasonal periods, and Conley spatial SEs require
-    specialized packages.
-  \item \emph{Maximum performance is critical}: \pkg{fixest} outperforms
-    \pkg{prompt2analytics} for high-dimensional fixed effects at scale.
-    Simulation studies with thousands of replications may benefit from
-    direct code.
-  \item \emph{Reproducibility requires code}: Published research should
-    include reproducible scripts. While \pkg{prompt2analytics} logs tool
-    calls, traditional scripts provide clearer audit trails.
-  \item \emph{Complex data pipelines}: Multi-step transformations with
-    intermediate validations are more reliably implemented in scripted
-    workflows.
-  \item \emph{Visualization customization}: While \pkg{prompt2analytics}
-    generates standard plots, publication-quality figures often require
-    fine-grained control available in \pkg{ggplot2} or \pkg{matplotlib}.
-\end{itemize}
-
-\subsubsection{Recommended workflows}
-
-The system is most effective for:
-\begin{itemize}
-  \item \emph{Exploratory analysis}: Quickly testing specifications before
-    committing to a formal analysis pipeline.
-  \item \emph{Teaching and learning}: Students can explore econometric methods
-    conversationally while seeing which tools and parameters are invoked.
-  \item \emph{Rapid prototyping}: Researchers can iterate on model specifications
-    in natural language before writing production code.
-  \item \emph{Verification}: Cross-checking results from other software by
-    running the same analysis through an independent implementation.
-  \item \emph{Accessibility}: Users with limited programming experience can
-    access validated statistical methods without learning specialized syntax.
-\end{itemize}
+Having established the design principles, we now describe how they are
+realized in software. Section~\ref{sec:architecture} presents the software
+architecture, Section~\ref{sec:examples} demonstrates the system through
+worked examples, and subsequent sections evaluate accuracy and performance.
+Appendix~\ref{app:best-practices} provides practical guidance on effective
+use, including a pre-analysis checklist and recommendations for when
+traditional software remains preferable.
 

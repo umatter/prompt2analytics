@@ -1,14 +1,7 @@
 \begin{table}[htbp]
 \centering
-\caption{Extended evaluation results across robustness dimensions. Single-Turn
-shows baseline tool selection accuracy (87 tests). Multi-Turn shows turn-level
-accuracy (72 turns); Conv.\ Compl.\ shows percentage of conversations with all
-turns correct (20 conversations). Naturalistic shows accuracy on informal
-prompts (99 tests). Param F1 shows parameter extraction F1 score (49 tests).
-Interpret.\ shows interpretation accuracy (26 tests). OOS Det.\ shows
-out-of-scope detection rate (20 tests). Multi-turn results reflect V3 evaluation
-with enhanced conversation context (tool calls and results included in history).
-Dashes indicate incomplete evaluation data due to API errors.}
+\begin{threeparttable}
+\caption{Extended evaluation: per-model results across robustness dimensions}
 \label{tab:extended-eval}
 \small
 \begin{tabular}{@{}lrrrrrrr@{}}
@@ -35,4 +28,14 @@ Ministral 3B          &  90.8 & 47.2 & 20.0 & 63.6 & 51.6 & 79.5 & 40.0 \\
 Nemotron Nano 9B      &  97.7 & 48.6 & 15.0 & 58.6 & 51.9 & 80.3 & 60.0 \\
 \bottomrule
 \end{tabular}
+\begin{tablenotes}[flushleft]
+\item \emph{Note:} Single-Turn = tool selection accuracy (87 tests);
+Multi-Turn = per-turn accuracy (72 turns); Conv.\ Compl.\ = all turns
+correct (20 conversations); Naturalistic = informal prompts (99 tests);
+Param F1 = parameter extraction (49 tests); Interpret.\ = interpretation
+(26 tests); OOS Det.\ = out-of-scope detection (20 tests). Multi-turn
+uses enhanced context (tool calls in history). Dashes = incomplete data
+due to API errors.
+\end{tablenotes}
+\end{threeparttable}
 \end{table}

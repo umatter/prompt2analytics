@@ -10,7 +10,7 @@ approximately 75 method configurations spanning regression, econometrics,
 machine learning, and forecasting. Benchmark methodology follows
 Section~\ref{sec:comparison}; see Appendix~\ref{app:benchmark-methodology}
 for complete details.%
-\footnote{A notable omission is \pkg{fixest} \citep{Berge:2018}, which is
+\footnote{A notable omission is \pkg{fixest}~\citep{Berge:2018}, which is
 substantially faster than both \pkg{plm} and \pkg{lfe} for panel methods.
 Informal benchmarks suggest \pkg{fixest} also outperforms \pkg{prompt2analytics}
 for HDFE problems at large scale due to its highly optimized C++ implementation
@@ -163,3 +163,9 @@ Performance differences reflect \proglang{Rust}'s ownership model (reduced heap
 allocation), SIMD vectorization via \pkg{faer}, compiled vs. interpreted
 overhead, and column-based API (no formula parsing). Speedup factors decrease
 with sample size as matrix operations dominate.
+
+These performance characteristics, combined with the evaluation results from
+Section~\ref{sec:evaluation}, make fully local deployment practical. The next
+section describes configurations where all components---including the language
+model---run on the user's machine, eliminating external data transmission
+entirely.

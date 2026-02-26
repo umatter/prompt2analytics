@@ -35,6 +35,27 @@ LLM-mediated access through chat interfaces.
 All user-facing crates depend on \pkg{p2a-core}, ensuring that statistical
 computations are identical regardless of the interface used.
 
+\subsubsection*{Quick start}
+
+The simplest way to use \pkg{prompt2analytics} is through the CLI:
+
+\begin{Sinput}
+# Load data and run OLS with robust standard errors
+p2a data load wages.csv --name wages
+p2a reg ols wages -y salary -x education experience --robust hc1
+\end{Sinput}
+
+\noindent For LLM-mediated access, configure the MCP server and type in
+natural language:
+
+\begin{Sinput}
+User: Load wages.csv and regress salary on education and experience
+      with robust standard errors.
+\end{Sinput}
+
+\noindent Both pathways invoke the same \proglang{Rust} implementation and
+produce identical numerical results.
+
 \begin{figure}[htbp]
 \centering
 \includegraphics[width=\textwidth]{figures/architecture_v3}
@@ -56,13 +77,43 @@ and forecasting (\code{forecasting}), clustering and dimensionality reduction
 (\code{ml}), and visualization (\code{visualization}).
 
 A \code{LinearEstimator} trait provides a consistent interface across OLS,
-panel models, and IV estimators. Implementors provide core results (coefficients,
+panel models, and IV estimators:
+
+\begin{Code}
+pub trait LinearEstimator {
+    fn coefficients(&self) -> &Array1<f64>;
+    fn std_errors(&self) -> &Array1<f64>;
+    fn t_values(&self) -> Array1<f64>;    // default impl
+    fn p_values(&self) -> Array1<f64>;    // default impl
+    fn residuals(&self) -> Array1<f64>;
+    fn n_obs(&self) -> usize;
+    fn df(&self) -> usize;
+}
+\end{Code}
+
+\noindent Implementors provide core results (coefficients,
 standard errors, residuals); derived statistics ($t$-values, $p$-values,
 confidence intervals) are computed via default implementations. This ensures
 comparable output across estimators while enforcing the interface at compile
-time. Unlike \proglang{R}'s formula interface, \pkg{p2a-core} uses an explicit
-column-based API (\code{run\_ols(dataset, "y", \&["x1", "x2"], ...)}), since
-the LLM already translates intent to specification.
+time. For example, calling OLS from \proglang{Rust} code:
+
+\begin{Code}
+use p2a_core::regression::ols::run_ols;
+use p2a_core::regression::ols::CovarianceType;
+
+let result = run_ols(
+    &dataset, "inv", &["value", "capital"],
+    true,                    // intercept
+    CovarianceType::HC1,     // robust SEs
+)?;
+println!("R-squared: {:.4}", result.r_squared);
+for (name, coef, se) in result.summary() {
+    println!("{}: {:.4} ({:.4})", name, coef, se);
+}
+\end{Code}
+
+\noindent Unlike \proglang{R}'s formula interface, \pkg{p2a-core} uses an explicit
+column-based API, since the LLM already translates intent to specification.
 
 The \code{EconError} type provides specific, actionable error messages
 (singular matrix, perfect multicollinearity, convergence failure, insufficient
@@ -95,9 +146,9 @@ the core library structure:
 
 \begin{center}
 \begin{tabular}{llr}
-\hline
+\toprule
 Category & Examples & Tools \\
-\hline
+\midrule
 Data management & \code{load\_dataset}, \code{describe\_dataset} & 7 \\
 Data transformation & \code{munge\_filter}, \code{munge\_join}, \code{munge\_pivot} & 19 \\
 Regression & \code{regression\_ols}, \code{regression\_diagnostics} & 10 \\
@@ -107,7 +158,7 @@ Discrete choice & \code{logit}, \code{probit} & 2 \\
 Time series & \code{ts\_arima\_fit}, \code{ts\_var} & 6 \\
 Statistics & various hypothesis tests & 30+ \\
 Visualization & \code{viz\_scatter}, \code{viz\_histogram\_interactive} & 7 \\
-\hline
+\bottomrule
 \end{tabular}
 \end{center}
 
@@ -118,8 +169,36 @@ sensible defaults are provided (e.g., HC1 robust standard errors), and
 parameter names use consistent conventions (dataset identifier is always
 \code{dataset}, dependent variable is \code{y\_var}). Tool descriptions
 are written to be interpretable by LLMs, specifying when each tool is
-appropriate and what alternatives exist. The complete tool schema is
-available in the supplementary materials (\code{paper/code/mcp\_tool\_schema.json}).
+appropriate and what alternatives exist. For example, the OLS tool schema is:
+
+\begin{verbatim}
+{
+  "name": "regression_ols",
+  "description": "Run OLS regression with optional robust SEs",
+  "inputSchema": {
+    "required": ["dataset", "y_var", "x_vars"],
+    "properties": {
+      "dataset": {"type": "string"},
+      "y_var": {"type": "string"},
+      "x_vars": {"type": "array", "items": {"type": "string"}},
+      "robust": {"type": "string", "enum": ["hc0","hc1","hc2","hc3"]},
+      "cluster_var": {"type": "string"}
+    }
+  }
+}
+\end{verbatim}
+
+\noindent The complete tool schema is available in the supplementary
+materials (\code{mcp\_tool\_schema.json}).
+
+Note the distinction between \emph{MCP tools} and \emph{core methods}: the
+101 MCP tools serve as entry points that may invoke one or more of the 200+
+statistical methods in \pkg{p2a-core}. For instance, the
+\code{regression\_ols} tool provides access to OLS estimation with multiple
+covariance estimators (HC0--HC3, clustered, HAC), each a distinct method
+in the core library. This many-to-one mapping keeps the LLM's tool selection
+task manageable while preserving access to the full method library.
+
 The server supports multiple transport mechanisms: stdio for direct CLI
 integration, HTTP for the web application, and WebSocket for streaming results.
 
@@ -203,4 +282,69 @@ is not available. The system does not explicitly enumerate unimplemented
 methods; rather, the LLM infers scope from the tool schema. Users seeking
 methods not in the tool list should verify availability before assuming
 support.
+
+\subsection{Implemented methods}
+
+The \pkg{p2a-core} library implements over 200 econometric and statistical
+methods. Table~\ref{tab:method-categories} summarizes coverage by category;
+full documentation including mathematical specifications is available in the
+package documentation and Appendix~\ref{app:implementation}.
+Table~\ref{tab:method-coverage} in Appendix~\ref{app:best-practices}
+documents coverage gaps and recommended alternatives for unimplemented
+categories.
+
+\begin{table}[htbp]
+\centering
+\begin{threeparttable}
+\caption{Implemented method categories in \pkg{p2a-core}}
+\label{tab:method-categories}
+\small
+\begin{tabular}{lp{9.5cm}}
+\toprule
+Category & Methods \\
+\midrule
+Regression & OLS with HC0--HC3, clustered SEs, HAC, bootstrap, GLS, NLS, LOESS, splines, stepwise, quantile regression~\citep{Koenker+Bassett:1978} \\
+Panel data & FE, RE, Hausman, HDFE, panel GLS, Arellano-Bond GMM~\citep{Arellano+Bond:1991}, panel unit root tests (LLC, IPS, Fisher) \\
+IV & 2SLS, first-stage diagnostics, Sargan test, GMM~\citep{Hansen:1982} \\
+Causal (design) & DiD, staggered DiD~\citep{Callaway+SantAnna:2021}, Bacon decomposition~\citep{Goodman-Bacon:2021}, ETWFE~\citep{Wooldridge:2021}, sharp/fuzzy RD with CCT~\citep{Calonico+etal:2014}, multi-cutoff RD, synthetic control~\citep{Abadie+etal:2010}, gsynth~\citep{Xu:2017}, SCPI~\citep{Cattaneo+etal:2021} \\
+Causal (treatment) & IPW, AIPW, matching~\citep{Ho+etal:2011}, CBPS~\citep{Imai+Ratkovic:2014}, entropy balancing, GBM weighting, TMLE~\citep{vanderLaan+Rose:2011}, CTMLE, LTMLE, DML~\citep{Chernozhukov+etal:2018} \\
+Discrete choice & Logit, probit, multinomial, conditional, mixed, ordered, negative binomial, ZIP/ZINB, hurdle \\
+Time series & ARIMA, VAR, VARMA, VECM, IRF, Granger causality, STL/MSTL, Holt-Winters, structural TS, Kalman filter, GARCH, changepoint \\
+Spatial & SAR, SEM, SAC~\citep{Anselin:1988}, spatial probit, spatial panel, spatial GMM \\
+Survival & Kaplan-Meier, log-rank, Cox PH, AFT, competing risks \\
+Mediation & Causal mediation, natural effects, sensitivity~\citep{Cinelli+Hazlett:2020}, E-values, Balke-Pearl bounds \\
+Statistical tests & 50+ tests: $t$-tests, ANOVA, MANOVA, $\chi^2$, Fisher, Wilcoxon, Kruskal-Wallis, Friedman, Shapiro-Wilk, KS, Tukey HSD \\
+\bottomrule
+\end{tabular}
+\end{threeparttable}
+\end{table}
+
+\subsection{Identification diagnostics}
+
+Beyond executing statistical methods, the system generates data-driven
+warnings when estimation results suggest potential violations of identifying
+assumptions. These warnings are non-blocking---results are always returned
+to the user---but highlight conditions that warrant careful interpretation.
+
+For \emph{instrumental variables}, the system checks first-stage
+$F$-statistics against the Stock-Yogo threshold of
+10~\citep{Stock+Yogo:2005}. Values below 10 trigger weak instrument warnings
+with severity scaled by the degree of weakness ($F < 5$ generates critical
+warnings). When models are overidentified, the Sargan test is automatically
+computed and rejection ($p < 0.05$) triggers exclusion restriction warnings.
+
+For \emph{difference-in-differences}, staggered designs include a pre-trend
+test (joint test that pre-treatment ATT estimates are zero). For
+\emph{matching and IPW}, balance diagnostics check whether post-matching
+standardized mean differences exceed 0.1, the conventional threshold for
+acceptable balance~\citep{Austin:2011}. For \emph{regression discontinuity},
+effective sample sizes within the bandwidth are checked against minimum
+thresholds ($n < 50$ per side triggers warnings).
+
+Each warning includes: (1) a severity level (info, caution, warning, critical),
+(2) a diagnostic message explaining the concern, (3) the specific assumption
+at risk, and (4) suggested remediation steps. The \code{EconError} type
+provides structured error information for estimation failures---singular
+matrices, convergence problems, insufficient clusters---that enables the LLM
+to provide actionable recovery guidance rather than generic failure messages.
 

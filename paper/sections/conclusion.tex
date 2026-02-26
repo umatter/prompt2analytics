@@ -9,7 +9,7 @@ tool-augmented language model techniques to statistical computation. The approac
 combines natural language interfaces with pre-implemented, verified statistical
 methods. Language models are good at interpreting user intent and selecting
 appropriate methods, but they should not be trusted with numerical
-computation \citep{Schick+etal:2023}. Separating interpretation from execution
+computation~\citep{Schick+etal:2023}. Separating interpretation from execution
 allows chat-first systems to provide accessible conversational interfaces
 while maintaining the reliability that scientific work requires.
 
@@ -45,13 +45,13 @@ for integration with language models. The software makes several contributions:
 \subsection{Limitations}
 
 \textbf{LLM interpretation failures.} The 9.2\% error rate with the smallest
-model concentrates in ambiguous cases; safeguards (result inspection,
+model is concentrated in ambiguous cases; safeguards (result inspection,
 reformulation, clarifying questions) require statistical knowledge to be effective.
 
 \textbf{Evaluation scope.} Multi-turn accuracy is 83--97\% when tool calls are
 included in conversation history, but drops to 47--60\% without them. Parameter
 extraction is weaker: F1 of 41--59\%. Out-of-scope detection hovers around
-40--60\% (Section~\ref{sec:local} and Appendix~\ref{app:extended-eval}).
+40--60\% (Section~\ref{sec:evaluation} and Appendix~\ref{app:extended-eval}).
 
 \textbf{User study validation.} The practical benefits of chat-first interfaces
 (accessibility, exploratory analysis, reduced cognitive load) remain hypothesized
@@ -63,7 +63,7 @@ work but represent an important direction for future research.
 \textbf{Method coverage.} While coverage is broad (200+ methods), important
 categories remain unimplemented: Bayesian inference, Heckman selection, Conley
 spatial standard errors, and others. See Table~\ref{tab:method-coverage} in
-Section~\ref{sec:design} for coverage gaps and recommended alternatives.
+Appendix~\ref{app:best-practices} for coverage gaps and recommended alternatives.
 
 \textbf{Scalability.} Data are loaded entirely into memory; datasets exceeding
 available RAM require external preprocessing.
@@ -106,7 +106,7 @@ of compiled code with existing analytical workflows.
 
 \subsection{Broader implications}
 
-Chat-first data analytics is one instance of a broader pattern: using
+Chat-first data analytics exemplifies a broader pattern: using
 language models as interpreters between human intent and specialized software.
 This pattern applies beyond econometrics to any domain where users express goals
 in natural language and systems execute well-defined operations.
@@ -157,25 +157,100 @@ The authors thank the reviewers for constructive feedback that improved the pape
 \noindent\textbf{Contents}
 \vspace{0.5em}
 
-\noindent\hyperref[app:llm-eval]{A\hspace{1em}LLM evaluation details}\\
-\noindent\hyperref[app:extended-eval]{B\hspace{1em}Extended robustness evaluation}\\
-\noindent\hyperref[app:latency]{C\hspace{1em}API response latency}\\
-\noindent\hyperref[app:deployment]{D\hspace{1em}Deployment guide}\\
-\noindent\hyperref[app:privacy]{E\hspace{1em}Privacy and security}\\
-\noindent\hyperref[app:reproducibility]{F\hspace{1em}Reproducibility}\\
-\noindent\hyperref[app:benchmark-methodology]{G\hspace{1em}Benchmark methodology}\\
-\noindent\hyperref[app:related-work]{H\hspace{1em}Related work: Statistical interfaces}\\
-\noindent\hyperref[app:implementation]{I\hspace{1em}Implementation notes}\\
-\noindent\hyperref[app:extended-examples]{J\hspace{1em}Extended examples}
+\noindent\hyperref[app:best-practices]{A\hspace{1em}Best practices and coverage gaps}\\
+\noindent\hyperref[app:llm-eval]{B\hspace{1em}LLM evaluation details}\\
+\noindent\hyperref[app:extended-eval]{C\hspace{1em}Extended robustness evaluation}\\
+\noindent\hyperref[app:latency]{D\hspace{1em}API response latency}\\
+\noindent\hyperref[app:deployment]{E\hspace{1em}Deployment guide}\\
+\noindent\hyperref[app:privacy]{F\hspace{1em}Privacy and security}\\
+\noindent\hyperref[app:reproducibility]{G\hspace{1em}Reproducibility}\\
+\noindent\hyperref[app:benchmark-methodology]{H\hspace{1em}Benchmark methodology}\\
+\noindent\hyperref[app:related-work]{I\hspace{1em}Related work: Statistical interfaces}\\
+\noindent\hyperref[app:implementation]{J\hspace{1em}Implementation notes}\\
+\noindent\hyperref[app:extended-examples]{K\hspace{1em}Extended examples}
 
 \vspace{2em}
+
+\section{Best practices and coverage gaps} \label{app:best-practices}
+\setcounter{table}{0}
+\setcounter{figure}{0}
+
+This appendix provides practical guidance for effective use of
+\pkg{prompt2analytics} and documents method coverage gaps.
+
+\subsection{Pre-analysis checklist}
+
+Before running an analysis through \pkg{prompt2analytics}, users should verify:
+\begin{enumerate}
+  \item \emph{Method availability}: Confirm the required method is implemented.
+    Table~\ref{tab:feature-comparison} in Section~\ref{sec:comparison} provides
+    feature coverage; Appendix~\ref{app:implementation} gives comprehensive
+    method documentation.
+  \item \emph{Data requirements}: Verify the dataset meets method assumptions.
+    Panel methods require entity and time identifiers; IV requires instruments;
+    DiD requires treatment and time indicators.
+  \item \emph{Variable naming}: Use clear, unambiguous column names. The LLM
+    extracts variable names from natural language; names like \code{x1} or
+    \code{var\_1} are more error-prone than \code{wage} or \code{education}.
+  \item \emph{Specification clarity}: Specify methods explicitly when
+    precision matters. ``Estimate a within-transformation fixed effects model
+    with clustered standard errors at the firm level'' yields more reliable
+    results than ``run a regression with firm effects.''
+\end{enumerate}
+
+\subsection{Recommended workflows}
+
+The system is most effective for:
+\begin{itemize}
+  \item \emph{Exploratory analysis}: Quickly testing specifications before
+    committing to a formal analysis pipeline.
+  \item \emph{Teaching and learning}: Students can explore econometric methods
+    conversationally while seeing which tools and parameters are invoked.
+  \item \emph{Rapid prototyping}: Researchers can iterate on model specifications
+    in natural language before writing production code.
+  \item \emph{Verification}: Cross-checking results from other software by
+    running the same analysis through an independent implementation.
+\end{itemize}
+
+\noindent Users should prefer \proglang{R}, \proglang{Stata}, or \proglang{Python}
+when methods are unavailable (Bayesian inference, Heckman selection), maximum
+performance is critical (\pkg{fixest} outperforms for HDFE at scale),
+reproducibility requires code scripts, or publication-quality visualizations
+are needed.
+
+\subsection{Method coverage gaps}
+
+While method coverage is broad (200+ methods), several important categories
+remain unimplemented. Table~\ref{tab:method-coverage} summarizes coverage
+gaps and recommends alternative tools.
+
+\begin{table}[htbp]
+\centering
+\caption{Method coverage limitations and recommended alternatives}
+\label{tab:method-coverage}
+\small
+\begin{tabular}{p{3.5cm}p{5cm}p{4cm}}
+\toprule
+Method Category & Status & Recommended Alternative \\
+\midrule
+Bayesian inference & Not implemented & \proglang{R}: \pkg{rstanarm}, \pkg{brms}; \proglang{Python}: PyMC \\
+Heckman selection & Not implemented & \proglang{R}: \pkg{sampleSelection}; \proglang{Stata}: \code{heckman} \\
+Conley spatial SEs & Not implemented & \proglang{R}: \pkg{fixest}, \pkg{lfe} \\
+Full SARIMA (arbitrary seasonal) & Partial support & \proglang{R}: \pkg{forecast} \\
+Quantile IV & Not implemented & \proglang{R}: \pkg{quantreg} \\
+Structural equation modeling & Not implemented & \proglang{R}: \pkg{lavaan} \\
+\addlinespace
+Weak instrument inference & $F$-stat only; no Stock-Yogo CVs & \proglang{R}: \pkg{ivmodel}, \pkg{AER} \\
+\bottomrule
+\end{tabular}
+\end{table}
 
 \section{LLM evaluation details} \label{app:llm-eval}
 \setcounter{table}{0}
 \setcounter{figure}{0}
 
 This appendix provides detailed results from the tool selection evaluation
-described in Section~\ref{sec:local}. Table~\ref{tab:model-summary} presents
+described in Section~\ref{sec:evaluation}. Table~\ref{tab:model-summary} presents
 accuracy, cost, and failure rates across all evaluated models.
 Table~\ref{tab:category-accuracy} breaks down accuracy by test category.
 
@@ -188,7 +263,7 @@ Table~\ref{tab:category-accuracy} breaks down accuracy by test category.
 \setcounter{figure}{0}
 
 This appendix provides detailed results from the extended evaluation described
-in Section~\ref{sec:local}. The evaluation assesses model performance across
+in Section~\ref{sec:evaluation}. The evaluation assesses model performance across
 five dimensions beyond single-turn tool selection: multi-turn conversations,
 naturalistic prompts, parameter extraction, interpretation accuracy, and
 out-of-scope detection.
@@ -459,8 +534,8 @@ ENTRYPOINT ["p2a-mcp"]
 \toprule
 Use Case & Recommended Model & Notes \\
 \midrule
-Maximum privacy & Llama 3.1 8B (local) & No data leaves machine \\
-Best accuracy & Claude 3.5 Sonnet & Requires API key \\
+Maximum privacy & Nemotron Nano 9B (local) & No data leaves machine \\
+Best accuracy & Claude 3.5 Haiku & Requires API key; 100\% tool selection \\
 Cost-sensitive & GPT-4.1 Nano & Cheapest high-accuracy option \\
 Resource-constrained & Ministral 3B & Runs on 8GB RAM \\
 \bottomrule
@@ -639,10 +714,8 @@ unbounded quantities (e.g., coefficient estimates).
 
 \begin{table}[htbp]
 \centering
-\caption{Validation tolerances by method category and sample size.
-Absolute tolerances ($\varepsilon_{\mathrm{abs}}$) apply to test statistics,
-$p$-values, and bounded quantities. Relative tolerances
-($\varepsilon_{\mathrm{rel}}$) apply to coefficient estimates and standard errors.}
+\begin{threeparttable}
+\caption{Validation tolerances by method category and sample size}
 \label{tab:validation-tolerances}
 \small
 \begin{tabular}{llccc}
@@ -667,6 +740,12 @@ Test statistics & Absolute & $10^{-4}$ & $10^{-6}$ & $10^{-6}$ \\
 Critical values & Absolute & $10^{-4}$ & $10^{-4}$ & $10^{-4}$ \\
 \bottomrule
 \end{tabular}
+\begin{tablenotes}\small
+\item \emph{Note:} Absolute tolerances ($\varepsilon_{\mathrm{abs}}$) apply to
+test statistics, $p$-values, and bounded quantities. Relative tolerances
+($\varepsilon_{\mathrm{rel}}$) apply to coefficient estimates and standard errors.
+\end{tablenotes}
+\end{threeparttable}
 \end{table}
 
 \textbf{Rationale for tolerances.} Looser tolerances for small samples reflect
@@ -702,16 +781,16 @@ computing interfaces.
 \subsection{Formula notation and domain-specific languages}
 
 The most influential interface innovation in statistical computing was the
-Wilkinson-Rogers formula notation \citep{Wilkinson+Rogers:1973}, which
+Wilkinson-Rogers formula notation~\citep{Wilkinson+Rogers:1973}, which
 introduced the symbolic representation of linear models that remains central
 to \proglang{R}, \proglang{Stata}, and other systems (e.g., \code{y \~{} x1 + x2}).
 \cite{Chambers+Hastie:1992} extended this notation in \proglang{S} and later
 \proglang{R}, establishing design principles for statistical software that
-prioritize expressiveness and composability \citep{Chambers:1998, Chambers:2008}.
+prioritize expressiveness and composability~\citep{Chambers:1998, Chambers:2008}.
 The formula interface represents a domain-specific language (DSL) for model
 specification---a pattern that \proglang{Stata} adopts with its command syntax
 and that appears in specialized systems like Stan's probabilistic programming
-language \citep{Carpenter+etal:2017}.
+language~\citep{Carpenter+etal:2017}.
 
 \pkg{prompt2analytics} takes a fundamentally different approach: rather than
 inventing new notation, it accepts natural language descriptions of analytical
@@ -722,25 +801,25 @@ execution.
 \subsection{Natural language interfaces to data systems}
 
 Natural language interfaces (NLIs) for data systems have a long history.
-LUNAR \citep{Woods:1973} demonstrated feasibility for database querying;
-subsequent decades produced various NLI systems with limited adoption
-\citep{Androutsopoulos+etal:1995}. Commercial systems attempted similar
+LUNAR~\citep{Woods:1973} demonstrated feasibility for database querying;
+subsequent decades produced various NLI systems with limited
+adoption~\citep{Androutsopoulos+etal:1995}. Commercial systems attempted similar
 approaches: SPSS's syntax assistance, SAS Enterprise Guide's point-and-click
 interface with natural language elements, and JMP's scripting language with
 English-like constructs.
 
 The text-to-SQL paradigm, revitalized by deep learning, represents recent
-progress on natural language data interfaces. Benchmarks like WikiSQL
-\citep{Zhong+etal:2017} and Spider \citep{Yu+etal:2018} have driven substantial
-improvements in translating natural language to structured queries
-\citep{Li+etal:2024}. NL4DV \citep{Narechania+etal:2021} enables
+progress on natural language data interfaces. Benchmarks like
+WikiSQL~\citep{Zhong+etal:2017} and Spider~\citep{Yu+etal:2018} have driven substantial
+improvements in translating natural language to structured
+queries~\citep{Li+etal:2024}. NL4DV~\citep{Narechania+etal:2021} enables
 natural language specification of visualizations.
 
 \subsection{Automated machine learning}
 
 AutoML systems automate model selection through algorithmic search.
-Auto-WEKA \citep{Thornton+etal:2013}, Auto-sklearn \citep{Feurer+etal:2015},
-and H2O AutoML \citep{LeDell+Poirier:2020} optimize predictive performance
+Auto-WEKA~\citep{Thornton+etal:2013}, Auto-sklearn~\citep{Feurer+etal:2015},
+and H2O AutoML~\citep{LeDell+Poirier:2020} optimize predictive performance
 over predefined pipeline spaces. Recent work integrates LLMs into AutoML:
 \cite{Hollmann+etal:2024} use language models to guide feature engineering
 and hyperparameter search.
@@ -790,9 +869,9 @@ units as controls. \cite{deChaisemartin+DHaultfoeuille:2020} and
 \cite{Sun+Abraham:2021} propose alternative estimators robust to treatment
 effect heterogeneity.
 
-\pkg{prompt2analytics} implements staggered DiD via Callaway-Sant'Anna
-\citep{Callaway+SantAnna:2021}, Goodman-Bacon decomposition, and extended
-TWFE \citep{Wooldridge:2021}. Users with complex staggered designs may also
+\pkg{prompt2analytics} implements staggered DiD via
+Callaway-Sant'Anna~\citep{Callaway+SantAnna:2021}, Goodman-Bacon decomposition, and extended
+TWFE~\citep{Wooldridge:2021}. Users with complex staggered designs may also
 consult \pkg{fixest}'s \fct{sunab} function or the \pkg{did} package in
 \proglang{R} for additional diagnostics.
 
@@ -813,7 +892,7 @@ at each observation's covariate values, then averaged across the sample.
 This differs from \emph{Marginal Effects at Means} (MEM), which evaluates
 derivatives at the sample mean of all covariates. AME is generally preferred
 because it does not depend on potentially unrepresentative ``average''
-covariate values \citep{Cameron+Trivedi:2005}.
+covariate values~\citep{Cameron+Trivedi:2005}.
 
 \subsection{Time series models}
 
@@ -824,6 +903,29 @@ seasonal order selection is not available.
 
 VAR and VECM implementations support lag selection via AIC/BIC and Johansen
 cointegration testing, but do not implement structural VAR identification.
+
+\subsection{Regression diagnostics validation}
+
+Diagnostic tests are validated against \pkg{lmtest}~\citep{lmtest}:
+Jarque-Bera normality test statistics match to $< 10^{-4}$,
+Breusch-Pagan heteroskedasticity tests to $< 10^{-4}$,
+Durbin-Watson autocorrelation statistics to $< 10^{-6}$, and
+variance inflation factors (VIF) to $< 10^{-6}$.
+
+\subsection{Known differences from reference implementations}
+\label{app:known-differences}
+
+A small number of intentional differences exist between \pkg{prompt2analytics}
+and reference implementations. First, \pkg{prompt2analytics} defaults to
+HC1 robust standard errors (consistent with Stata's \code{robust} option),
+while \proglang{R}'s \pkg{sandwich} defaults to HC3. Second, \proglang{R}
+uses variable names in output; \pkg{prompt2analytics} uses numeric indices
+internally but displays names in formatted output. Third, for panel models
+we report ``within $R^2$'' by default, matching \pkg{plm}'s convention for
+fixed effects models. Fourth, iterative methods (HDFE, MLE) use a default
+convergence tolerance of $10^{-8}$, which may differ slightly from
+\proglang{R} package defaults. These differences are documented in the
+method documentation and do not affect the validity of statistical inference.
 
 \subsection{Methods not implemented}
 

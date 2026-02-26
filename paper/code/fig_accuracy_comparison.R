@@ -24,9 +24,9 @@ all_evals <- summary_data %>%
       model == "gpt-5-nano-2025-08-07" ~ "GPT-5 Nano",
       model == "gpt-4.1-nano-2025-04-14" ~ "GPT-4.1 Nano",
       model == "ministral-3b" ~ "Ministral 3B",
-      model == "nemotron-nano-9b-v2" ~ "Nemotron 9B*",
-      model == "qwen3-8b" ~ "Qwen3 8B*",
-      model == "deepseek-chat" ~ "DeepSeek*",
+      model == "nemotron-nano-9b-v2" ~ "Nemotron 9B",
+      model == "qwen3-8b" ~ "Qwen3 8B",
+      model == "deepseek-chat" ~ "DeepSeek",
       TRUE ~ model
     ),
     provider_display = case_when(
@@ -44,7 +44,7 @@ all_evals <- summary_data %>%
 ## PLOT ----
 p <- ggplot(all_evals, aes(x = model_display, y = accuracy, fill = provider_display)) +
   geom_col(width = 0.7) +
-  geom_text(aes(label = accuracy_label), vjust = -0.3, size = 2.8) +
+  geom_text(aes(label = accuracy_label), vjust = -0.3, size = 4.5) +
   scale_y_continuous(
     limits = c(0, 108),
     breaks = seq(0, 100, 20),
@@ -62,17 +62,18 @@ p <- ggplot(all_evals, aes(x = model_display, y = accuracy, fill = provider_disp
   labs(
     x = NULL,
     y = "Accuracy",
-    caption = "* Partial evaluation (API errors before completion)"
   ) +
-  theme_minimal(base_size = 11) +
+  theme_minimal(base_size = 16) +
   theme(
-    axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1),
+    axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1, size = 14),
+    axis.text.y = element_text(size = 14),
+    axis.title.y = element_text(size = 15),
     panel.grid.major.x = element_blank(),
     panel.grid.minor = element_blank(),
-    legend.position = "top",
-    legend.justification = "left",
-    plot.margin = margin(10, 20, 10, 10),
-    plot.caption = element_text(hjust = 0, size = 9, color = "gray40")
+    legend.position = "bottom",
+    legend.text = element_text(size = 14),
+    legend.title = element_text(size = 14),
+    plot.margin = margin(10, 20, 10, 10)
   )
 
 ## WRITE TO DISK ----

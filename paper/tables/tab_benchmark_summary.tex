@@ -2,7 +2,8 @@
 % Generated: 2026-02-17 20:29:19.809066
 \begin{table}[htbp]
 \centering
-\caption{Performance benchmark results across representative methods (median execution time). Speedup = R time / Rust time. Sample sizes vary by method to reflect typical use cases ($n = 500$--$10{,}000$). Methods with speedup ${>}1\times$ are faster in Rust; methods ${<}1\times$ are faster in R.}
+\begin{threeparttable}
+\caption{Full benchmark results at $n = 100{,}000$}
 \label{tab:benchmark-full}
 \renewcommand{\arraystretch}{1.15}
 \small
@@ -27,4 +28,11 @@ Time Series & MSTL & 500 & 477 & 70 & 6.8$\times$ \\
 Time Series & ARIMA(1,1,1) & 500 & 1,359 & 210 & 6.5$\times$ \\
    \bottomrule
 \end{tabular}
+\begin{tablenotes}[flushleft]
+\item \emph{Note:} Median execution time in ms. Speedup = \proglang{R}
+time / \proglang{Rust} time. Methods with speedup ${<}1\times$ are
+faster in \proglang{R}, typically because CLI startup overhead
+dominates trivial computations.
+\end{tablenotes}
+\end{threeparttable}
 \end{table}

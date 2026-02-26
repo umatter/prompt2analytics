@@ -120,10 +120,14 @@ p <- ggplot(plot_long, aes(x = method_label, y = time_ms, fill = implementation)
     values = c("R" = "#0097A7", "Rust" = "#E65100"),
     name = "Implementation"
   ) +
-  theme_minimal(base_size = 11) +
+  theme_minimal(base_size = 16) +
   theme(
     legend.position = "bottom",
-    axis.text.x = element_text(angle = 45, hjust = 1, size = 9),
+    legend.text = element_text(size = 14),
+    legend.title = element_text(size = 14),
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 13),
+    axis.text.y = element_text(size = 13),
+    axis.title.y = element_text(size = 14),
     panel.grid.minor = element_blank(),
     plot.margin = margin(10, 20, 10, 10)
   )

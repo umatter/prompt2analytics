@@ -9,14 +9,16 @@ two interfaces: the natural language chat interface powered by large language
 models, and the command-line interface for scripted workflows. Both interfaces
 access the same underlying \proglang{Rust} analytics engine.
 
-We use two datasets throughout this section:
+We use three datasets throughout this section:
 \begin{itemize}
-  \item The Grunfeld investment data \citep{Baltagi:2013}, a classic panel
+  \item The Grunfeld investment data~\citep{Baltagi:2013}, a classic panel
     dataset with 200 observations (10 firms over 20 years) containing firm
-    investment, market value, and capital stock. This dataset is included
-    in the \pkg{plm} package and can be loaded via \code{data("Grunfeld",
-    package = "plm")} in \proglang{R}; we provide it as \code{grunfeld.csv}
-    in the supplementary materials.
+    investment, market value, and capital stock. Included in the
+    \pkg{plm} package; we provide it as \code{grunfeld.csv} in the
+    supplementary materials.
+  \item Quarterly U.S.\ macroeconomic data (1954--2023) with GDP growth,
+    unemployment, inflation, and the federal funds rate, used for
+    time series examples.
   \item A simulated cross-sectional dataset demonstrating basic regression
     analysis with heteroskedasticity.
 \end{itemize}
@@ -31,7 +33,7 @@ translates these requests into structured tool calls executed by the MCP server.
 This interface is useful for exploratory data analysis and for
 users less familiar with programming syntax. The examples in this section
 were generated using Claude 3.5 Sonnet via the MCP integration; other models
-(GPT-4o, Llama 3.1 8B, etc.) produce similar results with minor variations
+(GPT-4o-mini, Llama 3.3 70B, etc.) produce similar results with minor variations
 in explanation style.
 
 \subsubsection{Loading and exploring data}
@@ -156,7 +158,7 @@ RE coefficient estimates for this dataset.
 
 **Note**: Extreme p-values like 0.9999 warrant interpretation with caution.
 Such values can arise from small test statistics (as here), but also from
-numerical issues or model misspecification. The Hausman test \citep{Hausman:1978}
+numerical issues or model misspecification. The Hausman test~\citep{Hausman:1978}
 assumes both estimators are consistent under the null, which requires correct
 functional form, homoskedastic errors, and no omitted variables correlated
 with the regressors. The test statistic may be unreliable with small samples,
@@ -246,7 +248,39 @@ works in Bash, Zsh, and most POSIX-compatible shells. Windows Command Prompt
 users should write commands on a single line or use PowerShell's backtick
 (\texttt{`}) for continuation.
 
-All commands support JSON output (\code{-F json}) for programmatic integration.
+\subsubsection{JSON output for programmatic use}
+
+All commands support JSON output (\code{-F json}) for integration with
+other tools and scripts:
+
+\begin{Sinput}
+p2a -F json reg ols grunfeld -y inv -x value capital --robust hc1
+\end{Sinput}
+
+\begin{Soutput}
+{
+  "coefficients": {
+    "(Intercept)": -42.714, "value": 0.116, "capital": 0.231
+  },
+  "std_errors": {
+    "(Intercept)": 11.575, "value": 0.007, "capital": 0.049
+  },
+  "t_values": {
+    "(Intercept)": -3.690, "value": 16.967, "capital": 4.721
+  },
+  "p_values": {
+    "(Intercept)": 0.000, "value": 0.000, "capital": 0.000
+  },
+  "r_squared": 0.812, "adj_r_squared": 0.810,
+  "n_obs": 200, "cov_type": "HC1"
+}
+\end{Soutput}
+
+\noindent This enables integration with analysis pipelines, for example
+piping results to \code{jq} for extraction or to \proglang{Python}/\proglang{R}
+scripts for further processing. The session mechanism records all commands
+and can export them as an executable shell script for exact reproduction.
+
 Appendix~\ref{app:extended-examples} provides additional CLI examples including
 panel estimation, hypothesis tests, and two-way fixed effects.
 
@@ -278,9 +312,78 @@ summary(fe_twoway)
 \end{Sinput}
 
 The \pkg{prompt2analytics} implementation produces numerically equivalent
-results (see Section~\ref{sec:comparison}), while offering the conversational
+results (see Section~\ref{sec:evaluation}), while offering the conversational
 interface that enables users unfamiliar with \proglang{R} syntax to perform
 the same analyses through natural language.
+
+
+%% -----------------------------------------------------------------------------
+\subsection{Time series analysis: An applied example} \label{sec:examples-timeseries}
+
+To illustrate capabilities beyond panel data, this section demonstrates a
+time series workflow using quarterly U.S.\ GDP growth data.
+
+\begin{Sinput}
+User: Load gdp_quarterly.csv and check for stationarity.
+\end{Sinput}
+
+\begin{Soutput}
+**Dataset loaded: gdp**
+- Rows: 280 (quarterly, 1954 Q1 to 2023 Q4)
+- Columns: date, gdp_growth, unemployment, inflation, fed_rate
+
+**Augmented Dickey-Fuller Test** (gdp_growth)
+Statistic: -4.82
+P-value: 0.000
+
+GDP growth is stationary (rejects unit root). No differencing needed.
+\end{Soutput}
+
+\begin{Sinput}
+User: Fit an ARIMA model to GDP growth. Let the system pick the order.
+\end{Sinput}
+
+\begin{Soutput}
+**ARIMA Model Selection** (AIC-based)
+Best model: ARIMA(2,0,1)
+
+| Parameter |  Estimate | Std Err |
+|-----------|----------:|--------:|
+| AR(1)     |     0.312 |   0.067 |
+| AR(2)     |     0.154 |   0.063 |
+| MA(1)     |    -0.089 |   0.072 |
+| Intercept |     0.782 |   0.117 |
+
+AIC: 1042.3
+Ljung-Box (lag 10): p = 0.482 (no residual autocorrelation)
+\end{Soutput}
+
+\begin{Sinput}
+User: Now estimate a VAR with GDP growth, unemployment, and inflation.
+      I want to see how shocks propagate between these variables.
+\end{Sinput}
+
+\begin{Soutput}
+**VAR(2) Estimation** (lag selected by AIC)
+Variables: gdp_growth, unemployment, inflation
+Observations: 278 (after lag adjustment)
+
+Granger Causality Tests:
+- gdp_growth -> unemployment: F = 8.42, p = 0.000
+- unemployment -> gdp_growth: F = 3.17, p = 0.044
+- inflation -> gdp_growth: F = 1.89, p = 0.153
+
+GDP growth Granger-causes unemployment (and vice versa).
+No significant evidence that inflation Granger-causes GDP growth.
+
+Impulse response functions saved to irf_plot.html
+(interactive plot with 95% bootstrap confidence bands).
+\end{Soutput}
+
+This example demonstrates method progression---stationarity testing, univariate
+modeling, then multivariate analysis---within a single conversation. The LLM
+maintains context: the third request builds on the loaded dataset and prior
+results without restating variable names.
 
 
 %% -----------------------------------------------------------------------------
@@ -299,15 +402,17 @@ proactive issue identification.
 
 
 %% -----------------------------------------------------------------------------
-\subsection{Realistic interaction patterns} \label{sec:examples-realistic}
+\subsection{Realistic use} \label{sec:examples-realistic}
 
-The preceding examples show things working. Real use involves more back-and-forth.
-With tool calls in conversation history, multi-turn accuracy is 83--97\%
-(Section~\ref{sec:local}). Parameter extraction is less reliable (F1 of
-41--59\%), so check what the model extracted. This section shows what failures
-look like and how to recover.
+The preceding examples show successful interactions. Real use involves
+more iteration. This section shows what failures look like, how to
+recover, and what accuracy to expect
+(Section~\ref{sec:evaluation} provides detailed numbers).
 
-\subsubsection{Ambiguous specification requiring clarification}
+\subsubsection{Ambiguous specification}
+
+Vague requests prompt the system to ask for clarification rather
+than guess:
 
 \begin{Sinput}
 User: Run a regression with firm effects.
@@ -324,120 +429,11 @@ I can estimate this model, but need clarification:
 Please specify, e.g., "Regress inv on value and capital with firm fixed effects"
 \end{Soutput}
 
-\begin{Sinput}
-User: Regress inv on value with firm fixed effects.
-\end{Sinput}
+\subsubsection{A multi-turn workflow with corrections}
 
-\begin{Soutput}
-**Fixed Effects (Within) Estimation**
-Dependent variable: inv
-Entity fixed effects: firm (10 levels)
-
-| Variable |    Coef |  Std Err |      t | P>|t| |
-|----------|--------:|---------:|-------:|------:|
-| value    |   0.095 |    0.010 |  9.747 | 0.000 |
-
-R-squared (within): 0.334
-\end{Soutput}
-
-\subsubsection{Incorrect method selection}
-
-When users describe analyses ambiguously, the LLM may select inappropriate methods:
-
-\begin{Sinput}
-User: Estimate the causal effect of capital on investment.
-\end{Sinput}
-
-\begin{Soutput}
-**OLS Regression Results**
-Dependent variable: inv
-
-| Variable    |    Coef |  Std Err |      t | P>|t| |
-|-------------|--------:|---------:|-------:|------:|
-| (Intercept) | -17.892 |   11.312 | -1.582 | 0.115 |
-| capital     |   0.234 |    0.012 | 19.524 | 0.000 |
-
-A one-unit increase in capital is associated with a 0.234 increase in
-investment.
-\end{Soutput}
-
-\begin{Sinput}
-User: That's just correlation. I need the causal effect - capital is
-      endogenous due to simultaneity with investment decisions.
-\end{Sinput}
-
-\begin{Soutput}
-You're right - capital and investment are jointly determined, making OLS
-estimates biased. For causal identification, you would need:
-
-1. **Instrumental Variables**: A valid instrument affecting capital but
-   not investment directly
-2. **Panel methods**: Firm fixed effects can address time-invariant
-   confounding, though not simultaneity
-3. **Lagged variables**: Using lagged capital may reduce (but not eliminate)
-   simultaneity bias
-
-The system implements IV/2SLS if you have instruments. Without instruments,
-I can only provide associational estimates with appropriate caveats.
-
-**Important**: This system executes statistical methods but does not validate
-identification strategies. Causal claims require justification beyond the
-statistical procedure.
-\end{Soutput}
-
-\subsubsection{Parameter extraction failure}
-
-The LLM sometimes extracts parameters incorrectly from natural language:
-
-\begin{Sinput}
-User: Use HC2 standard errors and cluster by firm.
-\end{Sinput}
-
-\begin{Soutput}
-**OLS Regression Results** (HC2 robust standard errors)
-...
-\end{Soutput}
-
-\begin{Sinput}
-User: I asked for clustering by firm, not just robust SEs.
-\end{Sinput}
-
-\begin{Soutput}
-I apologize for the error. Let me re-run with clustered standard errors:
-
-**OLS Regression Results** (Clustered by firm, 10 clusters)
-
-| Variable    |    Coef | Cluster SE |      t | P>|t| |
-|-------------|--------:|-----------:|-------:|------:|
-| (Intercept) | -42.714 |     23.624 | -1.808 | 0.104 |
-| value       |   0.116 |      0.013 |  8.844 | 0.000 |
-| capital     |   0.231 |      0.068 |  3.409 | 0.008 |
-
-**Note**: With only 10 clusters, clustered standard errors may be
-downward biased. Consider wild cluster bootstrap for more reliable inference.
-\end{Soutput}
-
-\subsubsection{What to expect}
-
-From our evaluation:
-\begin{itemize}
-  \item Multi-turn workflows complete 60--90\% of the time when tool calls
-        are in history (Section~\ref{sec:local})
-  \item Naming variables directly (``regress inv on value'') beats pronouns
-        (``use the same variables'')
-  \item Check extracted parameters before trusting output
-\end{itemize}
-
-The fix for most failures: keep tool calls in conversation history, and glance
-at what the model extracted.
-
-
-%% -----------------------------------------------------------------------------
-\subsection{A realistic multi-turn workflow} \label{sec:examples-failure}
-
-The preceding examples show individual exchanges. Here is a full multi-turn
-workflow showing what can go wrong: wrong method selected, parameters
-extracted incorrectly, user corrections, eventual success.
+The following workflow illustrates common failure modes: wrong method
+selected, parameters extracted incorrectly, user corrections,
+eventual success.
 
 \begin{Sinput}
 User: Analyze whether the training program affected employee performance.
@@ -521,11 +517,24 @@ No evidence of differential pre-trends; parallel trends assumption
 is supported (though not proven) by this test.
 \end{Soutput}
 
-This workflow required three correction turns: (1)~correcting method selection
-from t-test to DiD; (2)~adding clustered standard errors; and (3)~requesting
-pre-trend diagnostics. The final result is correct. With tool calls in
-conversation history, these corrections become less common: completion rates
-are 60--90\% versus 0--35\% without (Section~\ref{sec:local}).
+This workflow required three correction turns: (1)~correcting method
+selection from a t-test to DiD; (2)~adding clustered standard errors;
+and (3)~requesting pre-trend diagnostics. The final result is correct.
+
+\subsubsection{What to expect}
+
+From our evaluation (Section~\ref{sec:evaluation}):
+\begin{itemize}
+  \item Multi-turn workflows complete 15--90\% of the time when tool calls
+        are in conversation history
+  \item Naming variables directly (``regress inv on value'') beats pronouns
+        (``use the same variables'')
+  \item Check extracted parameters before trusting output---parameter
+        extraction F1 is only 41--59\%
+\end{itemize}
+
+\noindent The remedy for most failures is to keep tool calls in conversation
+history, and verify what the model extracted.
 
 
 %% -----------------------------------------------------------------------------
@@ -578,3 +587,8 @@ When requests exceed capabilities, it clearly states limitations and points
 to external tools. Appendix~\ref{app:extended-examples} provides additional
 error handling examples including small cluster warnings and out-of-scope
 request handling.
+
+These examples illustrate what the system can do; the next section
+measures how reliably it does so. We evaluate tool selection accuracy
+across 12 models, parameter extraction quality, and numerical
+correctness of the underlying \proglang{Rust} implementations.
