@@ -2,18 +2,18 @@
   "method": "ols",
   "dataset": "synthetic_ols_n1000.csv",
   "n": 1000,
-  "iterations": 100,
-  "warmup": 5,
-  "timestamp": "2026-01-26T15:59:40",
+  "iterations": 3,
+  "warmup": 3,
+  "timestamp": "2026-02-26T22:09:41",
   "r_version": "4.3.3",
   "timing": {
-    "min_us": 578.7619156763,
-    "median_us": 633.1379991025,
-    "mean_us": [],
-    "max_us": [],
-    "itr_per_sec": 1543.2008515682,
+    "min_us": 2090.4670236632,
+    "median_us": 2170.0980141759,
+    "mean_us": 0,
+    "max_us": 0,
+    "itr_per_sec": 452.7915015255,
     "mem_alloc": 314312,
-    "n_gc": 5,
-    "n_itr": 95
+    "n_gc": 0,
+    "n_itr": 3
   }
 }

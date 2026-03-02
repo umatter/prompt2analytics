@@ -19,6 +19,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 
+use polars::prelude::Float64Chunked;
+
 use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
 use crate::linalg::matrix_ops::safe_inverse;
@@ -1056,6 +1058,22 @@ pub fn run_cox_ph(
     let mut obs_data: Vec<(f64, bool, usize)> = Vec::new(); // (time, event, row_index)
     let mut valid_rows = 0;
 
+    // Extract covariate columns ONCE upfront (avoids repeated column lookups in inner loop)
+    let covariate_cols: Vec<&Float64Chunked> = x_cols
+        .iter()
+        .map(|col| {
+            df.column(col)
+                .map_err(|_| EconError::ColumnNotFound {
+                    column: col.to_string(),
+                    available: available_cols.clone(),
+                })?
+                .f64()
+                .map_err(|_| EconError::NonNumericColumn {
+                    column: col.to_string(),
+                })
+        })
+        .collect::<EconResult<Vec<_>>>()?;
+
     for i in 0..df.height() {
         let t = match times.get(i) {
             Some(v) if !v.is_nan() && v >= 0.0 => v,
@@ -1066,21 +1084,11 @@ pub fn run_cox_ph(
             _ => continue,
         };
 
-        // Extract covariates
+        // Extract covariates from pre-fetched columns
         let mut row_valid = true;
         let mut row_x: Vec<f64> = Vec::with_capacity(p);
-        for col in x_cols {
-            let col_data = df
-                .column(col)
-                .map_err(|_| EconError::ColumnNotFound {
-                    column: col.to_string(),
-                    available: available_cols.clone(),
-                })?
-                .f64()
-                .map_err(|_| EconError::NonNumericColumn {
-                    column: col.to_string(),
-                })?;
-            match col_data.get(i) {
+        for ca in &covariate_cols {
+            match ca.get(i) {
                 Some(v) if !v.is_nan() => row_x.push(v),
                 _ => {
                     row_valid = false;
@@ -1362,10 +1370,10 @@ fn cox_gradient_hessian(
                 let xi = x.row(row_idx);
                 let exp_eta_i = exp_eta[row_idx];
 
-                // Update risk set sums
+                // Update risk set sums (in-place, zero allocations)
                 s0 += exp_eta_i;
-                s1 = &s1 + &(&xi.to_owned() * exp_eta_i);
                 for j in 0..p {
+                    s1[j] += xi[j] * exp_eta_i;
                     for k in 0..p {
                         s2[[j, k]] += xi[j] * xi[k] * exp_eta_i;
                     }
@@ -1374,14 +1382,19 @@ fn cox_gradient_hessian(
                 if event {
                     log_lik += eta[row_idx] - s0.ln();
 
-                    // Gradient contribution: x_i - E[X|R_i]
-                    let x_bar = &s1 / s0;
-                    grad = &grad + &(&xi.to_owned() - &x_bar);
+                    // Gradient contribution: x_i - E[X|R_i] (in-place)
+                    let inv_s0 = 1.0 / s0;
+                    for j in 0..p {
+                        let x_bar_j = s1[j] * inv_s0;
+                        grad[j] += xi[j] - x_bar_j;
+                    }
 
                     // Hessian contribution: -Var[X|R_i]
                     for j in 0..p {
+                        let x_bar_j = s1[j] * inv_s0;
                         for k in 0..p {
-                            hess[[j, k]] += s2[[j, k]] / s0 - x_bar[j] * x_bar[k];
+                            let x_bar_k = s1[k] * inv_s0;
+                            hess[[j, k]] += s2[[j, k]] * inv_s0 - x_bar_j * x_bar_k;
                         }
                     }
                 }
@@ -1407,15 +1420,15 @@ fn cox_gradient_hessian(
                     }
                 }
 
-                // Update risk set sums with all tied observations
+                // Update risk set sums with all tied observations (in-place)
                 for &tidx in &tie_indices {
                     let row_idx = obs[tidx].2;
                     let xi = x.row(row_idx);
                     let exp_eta_i = exp_eta[row_idx];
 
                     s0 += exp_eta_i;
-                    s1 = &s1 + &(&xi.to_owned() * exp_eta_i);
                     for jj in 0..p {
+                        s1[jj] += xi[jj] * exp_eta_i;
                         for kk in 0..p {
                             s2[[jj, kk]] += xi[jj] * xi[kk] * exp_eta_i;
                         }
@@ -1431,9 +1444,9 @@ fn cox_gradient_hessian(
                 let d = event_indices.len();
 
                 if d > 0 {
-                    // Compute sums over events
+                    // Compute sums over events (in-place)
                     let mut sum_exp_events: f64 = 0.0;
-                    let mut sum_x_exp_events: Array1<f64> = Array1::zeros(p);
+                    let mut sum_x_exp_events: Vec<f64> = vec![0.0; p];
                     let mut sum_xx_exp_events: Array2<f64> = Array2::zeros((p, p));
 
                     for &eidx in &event_indices {
@@ -1442,8 +1455,8 @@ fn cox_gradient_hessian(
                         let exp_eta_i = exp_eta[row_idx];
 
                         sum_exp_events += exp_eta_i;
-                        sum_x_exp_events = &sum_x_exp_events + &(&xi.to_owned() * exp_eta_i);
                         for jj in 0..p {
+                            sum_x_exp_events[jj] += xi[jj] * exp_eta_i;
                             for kk in 0..p {
                                 sum_xx_exp_events[[jj, kk]] += xi[jj] * xi[kk] * exp_eta_i;
                             }
@@ -1457,19 +1470,23 @@ fn cox_gradient_hessian(
                         let fraction = k as f64 / d as f64;
 
                         let s0_adj = s0 - fraction * sum_exp_events;
-                        let s1_adj = &s1 - &(&sum_x_exp_events * fraction);
-                        let s2_adj: Array2<f64> = &s2 - &(&sum_xx_exp_events * fraction);
 
                         if s0_adj > 0.0 {
                             log_lik += eta[row_idx] - s0_adj.ln();
 
-                            let x_bar = &s1_adj / s0_adj;
-                            grad = &grad + &(&xi.to_owned() - &x_bar);
+                            let inv_s0_adj = 1.0 / s0_adj;
+                            for jj in 0..p {
+                                let x_bar_jj = (s1[jj] - fraction * sum_x_exp_events[jj]) * inv_s0_adj;
+                                grad[jj] += xi[jj] - x_bar_jj;
+                            }
 
                             for jj in 0..p {
+                                let x_bar_jj = (s1[jj] - fraction * sum_x_exp_events[jj]) * inv_s0_adj;
                                 for kk in 0..p {
+                                    let x_bar_kk = (s1[kk] - fraction * sum_x_exp_events[kk]) * inv_s0_adj;
                                     hess[[jj, kk]] +=
-                                        s2_adj[[jj, kk]] / s0_adj - x_bar[jj] * x_bar[kk];
+                                        (s2[[jj, kk]] - fraction * sum_xx_exp_events[[jj, kk]]) * inv_s0_adj
+                                        - x_bar_jj * x_bar_kk;
                                 }
                             }
                         }
@@ -1484,43 +1501,124 @@ fn cox_gradient_hessian(
     (grad, hess, log_lik)
 }
 
+/// Fenwick tree (Binary Indexed Tree) for cumulative frequency queries.
+/// Supports point updates and prefix sum queries in O(log n).
+struct FenwickTree {
+    tree: Vec<f64>,
+    n: usize,
+}
+
+impl FenwickTree {
+    fn new(n: usize) -> Self {
+        Self {
+            tree: vec![0.0; n + 1],
+            n,
+        }
+    }
+
+    /// Add `val` to position `i` (1-indexed).
+    fn update(&mut self, mut i: usize, val: f64) {
+        while i <= self.n {
+            self.tree[i] += val;
+            i += i & i.wrapping_neg();
+        }
+    }
+
+    /// Sum of elements from position 1 to `i` (inclusive, 1-indexed).
+    fn prefix_sum(&self, mut i: usize) -> f64 {
+        let mut s = 0.0;
+        while i > 0 {
+            s += self.tree[i];
+            i -= i & i.wrapping_neg();
+        }
+        s
+    }
+
+    /// Sum of elements in range [lo, hi] (1-indexed, inclusive).
+    fn range_sum(&self, lo: usize, hi: usize) -> f64 {
+        if lo > hi {
+            return 0.0;
+        }
+        self.prefix_sum(hi) - if lo > 1 { self.prefix_sum(lo - 1) } else { 0.0 }
+    }
+}
+
 /// Compute concordance statistic (C-index) for Cox model.
+///
+/// Uses an O(n log n) algorithm with a Fenwick tree. Sorts observations by time
+/// descending and processes events, using the Fenwick tree to count how many
+/// already-inserted (i.e., larger-time) risk scores are less than, equal to,
+/// or greater than the current event's risk score.
 fn compute_concordance(
     obs: &[(f64, bool, usize)],
     x: &Array2<f64>,
     beta: &Array1<f64>,
 ) -> (f64, f64) {
     let n = obs.len();
+    if n < 2 {
+        return (0.5, 0.0);
+    }
     let eta: Vec<f64> = (0..n).map(|i| x.row(i).dot(beta)).collect();
 
-    let mut concordant = 0.0;
-    let mut discordant = 0.0;
-    let mut tied_risk = 0.0;
+    // Create (time, event, risk_score) sorted by time ascending
+    let mut sorted: Vec<(f64, bool, f64)> = obs
+        .iter()
+        .map(|&(t, e, ri)| (t, e, eta[ri]))
+        .collect();
+    sorted.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
 
-    for i in 0..n {
-        let (ti, ei, ri) = obs[i];
-        if !ei {
-            continue; // Only consider pairs where shorter time had event
+    // Coordinate-compress risk scores for Fenwick tree indexing
+    let mut scores: Vec<f64> = sorted.iter().map(|s| s.2).collect();
+    scores.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    scores.dedup();
+    let m = scores.len(); // number of distinct risk scores
+
+    // Map risk score -> 1-indexed rank
+    let score_rank = |s: f64| -> usize {
+        scores.partition_point(|&v| v < s) + 1
+    };
+
+    let mut concordant = 0.0_f64;
+    let mut discordant = 0.0_f64;
+    let mut tied_risk = 0.0_f64;
+
+    // Fenwick tree tracks risk scores of observations with strictly larger times
+    let mut bit = FenwickTree::new(m);
+    let mut total_inserted: f64 = 0.0;
+
+    // Process groups of observations with the same time, from largest to smallest time.
+    // For each event, observations already in the BIT have strictly larger times.
+    let mut i = n;
+    while i > 0 {
+        // Find the start of this time group
+        let group_end = i;
+        let t_current = sorted[i - 1].0;
+        let mut group_start = i - 1;
+        while group_start > 0 && (sorted[group_start - 1].0 - t_current).abs() < 1e-10 {
+            group_start -= 1;
         }
 
-        for j in 0..n {
-            let (tj, _, rj) = obs[j];
-            if ti >= tj {
-                continue; // i should have shorter time
-            }
-
-            // Compare risk scores
-            let eta_i = eta[ri];
-            let eta_j = eta[rj];
-
-            if eta_i > eta_j {
-                concordant += 1.0;
-            } else if eta_i < eta_j {
-                discordant += 1.0;
-            } else {
-                tied_risk += 1.0;
+        // Process events in this time group (count pairs with BIT entries = larger times)
+        for idx in group_start..group_end {
+            if sorted[idx].1 {
+                let rank = score_rank(sorted[idx].2);
+                let n_less = bit.prefix_sum(rank - 1); // scores < this -> concordant (event has higher risk)
+                let n_equal = bit.range_sum(rank, rank); // scores == this -> tied risk
+                let n_greater = total_inserted - bit.prefix_sum(rank); // scores > this -> discordant
+                concordant += n_less;
+                discordant += n_greater;
+                tied_risk += n_equal;
             }
         }
+
+        // Insert all observations in this time group into BIT
+        for idx in group_start..group_end {
+            let rank = score_rank(sorted[idx].2);
+            bit.update(rank, 1.0);
+            total_inserted += 1.0;
+        }
+
+        i = group_start;
     }
 
     let total: f64 = concordant + discordant + tied_risk;

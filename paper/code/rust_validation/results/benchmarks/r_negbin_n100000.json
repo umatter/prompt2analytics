@@ -1,0 +1,19 @@
+{
+  "method": "negbin",
+  "dataset": "synthetic_count_n100000.csv",
+  "n": 100000,
+  "iterations": 10,
+  "warmup": 3,
+  "timestamp": "2026-02-27T11:15:28",
+  "r_version": "4.3.3",
+  "timing": {
+    "min_us": 1780233.8410401717,
+    "median_us": 1932622.7235724218,
+    "mean_us": 0,
+    "max_us": 0,
+    "itr_per_sec": 0.49912641045,
+    "mem_alloc": 691687384,
+    "n_gc": 211,
+    "n_itr": 10
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "method": "kruskal_wallis",
+  "dataset": "synthetic_factor_n100000.csv",
+  "n": 100000,
+  "iterations": 10,
+  "warmup": 3,
+  "timestamp": "2026-02-27T11:21:18",
+  "r_version": "4.3.3",
+  "timing": {
+    "min_us": 426225.6609508768,
+    "median_us": 506647.0134770498,
+    "mean_us": 0,
+    "max_us": 0,
+    "itr_per_sec": 2.015543551,
+    "mem_alloc": 76190632,
+    "n_gc": 28,
+    "n_itr": 10
+  }
+}

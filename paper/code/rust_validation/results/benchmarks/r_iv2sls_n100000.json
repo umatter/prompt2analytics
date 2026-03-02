@@ -1,0 +1,19 @@
+{
+  "method": "iv_2sls",
+  "dataset": "synthetic_iv_n100000.csv",
+  "n": 100000,
+  "iterations": 10,
+  "warmup": 3,
+  "timestamp": "2026-02-27T11:15:54",
+  "r_version": "4.3.3",
+  "timing": {
+    "min_us": 201453.513931483,
+    "median_us": 264631.5935417078,
+    "mean_us": 0,
+    "max_us": 0,
+    "itr_per_sec": 3.7028110779,
+    "mem_alloc": 148259000,
+    "n_gc": 43,
+    "n_itr": 10
+  }
+}

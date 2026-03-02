@@ -26,7 +26,7 @@ all_evals <- summary_data %>%
       model == "ministral-3b" ~ "Ministral 3B",
       model == "nemotron-nano-9b-v2" ~ "Nemotron 9B",
       model == "qwen3-8b" ~ "Qwen3 8B",
-      model == "deepseek-chat" ~ "DeepSeek",
+      model == "deepseek-chat" ~ "DeepSeek V3",
       TRUE ~ model
     ),
     provider_display = case_when(

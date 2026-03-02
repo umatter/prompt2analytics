@@ -1,0 +1,19 @@
+{
+  "method": "ttest_one_sample",
+  "dataset": "synthetic_ols_n100000.csv",
+  "n": 100000,
+  "iterations": 10,
+  "warmup": 3,
+  "timestamp": "2026-02-27T11:20:53",
+  "r_version": "4.3.3",
+  "timing": {
+    "min_us": 2404.7109764069,
+    "median_us": 3518.0969862267,
+    "mean_us": 0,
+    "max_us": 0,
+    "itr_per_sec": 288.0212317859,
+    "mem_alloc": 2400248,
+    "n_gc": 1,
+    "n_itr": 9
+  }
+}

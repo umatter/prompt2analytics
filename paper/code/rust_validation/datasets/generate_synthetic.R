@@ -134,6 +134,63 @@ for (n in sample_sizes) {
   X_pca <- mvrnorm(n, mu = c(0, 0, 0, 0), Sigma = Sigma)
   pca_data <- data.frame(x1 = X_pca[, 1], x2 = X_pca[, 2], x3 = X_pca[, 3], x4 = X_pca[, 4])
   save_dataset(pca_data, "pca", n)
+
+  # 9. Survival data (time-to-event with censoring)
+  x1_surv <- rnorm(n, mean = 0, sd = 1)
+  x2_surv <- rnorm(n, mean = 0, sd = 1)
+  # Exponential baseline hazard with covariates
+  rate <- exp(-2 + 0.5 * x1_surv - 0.3 * x2_surv)
+  time_surv <- rexp(n, rate = rate)
+  # Right censoring at random times
+  censor_time <- rexp(n, rate = 0.1)
+  observed_time <- pmin(time_surv, censor_time)
+  event <- as.integer(time_surv <= censor_time)
+
+  surv_data <- data.frame(
+    time = observed_time, event = event,
+    x1 = x1_surv, x2 = x2_surv
+  )
+  save_dataset(surv_data, "survival", n)
+
+  # 10. Count data (Poisson/NegBin)
+  x1_count <- rnorm(n, mean = 0, sd = 1)
+  x2_count <- rnorm(n, mean = 0, sd = 1)
+  lambda <- exp(1 + 0.5 * x1_count - 0.3 * x2_count)
+  # Negative binomial with overdispersion
+  y_count <- rnbinom(n, size = 2, mu = lambda)
+
+  count_data <- data.frame(y = y_count, x1 = x1_count, x2 = x2_count)
+  save_dataset(count_data, "count", n)
+
+  # 11. Factor/ANOVA data (groups for hypothesis tests)
+  n_groups <- 4
+  group_size <- n / n_groups
+  group <- rep(paste0("G", 1:n_groups), each = group_size)
+  group_means <- c(5, 7, 6, 8)
+  y_factor <- unlist(lapply(1:n_groups, function(i) {
+    rnorm(group_size, mean = group_means[i], sd = 2)
+  }))
+  # Second factor for two-way ANOVA
+  factor2 <- rep(c("A", "B"), times = n / 2)
+
+  factor_data <- data.frame(
+    y = y_factor, group = group, factor2 = factor2,
+    x1 = rnorm(n)
+  )
+  save_dataset(factor_data, "factor", n)
+
+  # 12. Multivariate time series (for VAR/Granger)
+  y1 <- numeric(n)
+  y2 <- numeric(n)
+  y1[1] <- rnorm(1)
+  y2[1] <- rnorm(1)
+  for (i in 2:n) {
+    y1[i] <- 0.7 * y1[i-1] + 0.2 * y2[i-1] + rnorm(1, sd = 0.5)
+    y2[i] <- 0.3 * y1[i-1] + 0.6 * y2[i-1] + rnorm(1, sd = 0.5)
+  }
+
+  mvar_data <- data.frame(y1 = y1, y2 = y2, t = 1:n)
+  save_dataset(mvar_data, "multivar_ts", n)
 }
 
 cat("\nDone!\n")

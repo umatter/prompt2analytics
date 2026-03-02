@@ -158,6 +158,10 @@ pub fn run_negbin(
             .collect(),
     })?;
     let y: Vec<f64> = y_series
+        .cast(&polars::prelude::DataType::Float64)
+        .map_err(|_| EconError::NonNumericColumn {
+            column: y_col.to_string(),
+        })?
         .f64()
         .map_err(|_| EconError::NonNumericColumn {
             column: y_col.to_string(),
@@ -540,6 +544,10 @@ fn run_zeroinfl(
             .collect(),
     })?;
     let y: Vec<f64> = y_series
+        .cast(&polars::prelude::DataType::Float64)
+        .map_err(|_| EconError::NonNumericColumn {
+            column: y_col.to_string(),
+        })?
         .f64()
         .map_err(|_| EconError::NonNumericColumn {
             column: y_col.to_string(),
@@ -966,6 +974,10 @@ pub fn run_hurdle(
             .collect(),
     })?;
     let y: Vec<f64> = y_series
+        .cast(&polars::prelude::DataType::Float64)
+        .map_err(|_| EconError::NonNumericColumn {
+            column: y_col.to_string(),
+        })?
         .f64()
         .map_err(|_| EconError::NonNumericColumn {
             column: y_col.to_string(),

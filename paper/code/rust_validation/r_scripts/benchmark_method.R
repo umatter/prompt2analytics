@@ -24,6 +24,11 @@ option_list <- list(
   make_option(c("-n", "--n_components"), type = "integer", default = NULL, help = "Number of components (for PCA)"),
   make_option(c("-p", "--arima_order"), type = "character", default = "1,1,1", help = "ARIMA order p,d,q"),
   make_option(c("-r", "--robust"), type = "character", default = NULL, help = "Robust SE type (hc0, hc1, etc.)"),
+  make_option(c("--event_var"), type = "character", default = NULL, help = "Event variable (for survival analysis)"),
+  make_option(c("--factor_var"), type = "character", default = NULL, help = "Factor variable (for ANOVA)"),
+  make_option(c("--factor2_var"), type = "character", default = NULL, help = "Second factor variable (for two-way ANOVA)"),
+  make_option(c("--sort_col"), type = "character", default = NULL, help = "Sort column (for sort)"),
+  make_option(c("--endog_vars"), type = "character", default = NULL, help = "Endogenous variables (comma-separated, for IV)"),
   make_option(c("--iterations"), type = "integer", default = 100, help = "Number of benchmark iterations"),
   make_option(c("--warmup"), type = "integer", default = 5, help = "Number of warmup iterations"),
   make_option(c("-s", "--seed"), type = "integer", default = 42, help = "Random seed")
@@ -73,9 +78,9 @@ if (!file.exists(method_script)) {
 }
 source(method_script)
 
-# Create benchmarking function
-benchmark_fn <- function() {
-  run_method(
+# Build argument list dynamically (only pass non-NULL extra args)
+build_args <- function() {
+  args <- list(
     data = data,
     dep_var = opt$dep_var,
     indep_vars = indep_vars,
@@ -89,6 +94,19 @@ benchmark_fn <- function() {
     robust = opt$robust,
     seed = opt$seed
   )
+  if (!is.null(opt$event_var)) args$event_var <- opt$event_var
+  if (!is.null(opt$factor_var)) args$factor_var <- opt$factor_var
+  if (!is.null(opt$factor2_var)) args$factor2_var <- opt$factor2_var
+  if (!is.null(opt$sort_col)) args$sort_col <- opt$sort_col
+  if (!is.null(opt$endog_vars)) args$endog_vars <- parse_vars(opt$endog_vars)
+  args
+}
+
+method_args <- build_args()
+
+# Create benchmarking function
+benchmark_fn <- function() {
+  do.call(run_method, method_args)
 }
 
 # Warmup
@@ -106,16 +124,24 @@ bench_result <- bench::mark(
   memory = TRUE
 )
 
-# Extract timing information
+# Extract timing information (safely handle missing columns)
+safe_extract <- function(col_name, multiplier = 1e6) {
+  if (col_name %in% names(bench_result)) {
+    val <- bench_result[[col_name]]
+    if (length(val) > 0 && !is.null(val[[1]])) return(as.numeric(val) * multiplier)
+  }
+  0
+}
+
 timing <- list(
-  min_us = as.numeric(bench_result$min) * 1e6,
-  median_us = as.numeric(bench_result$median) * 1e6,
-  mean_us = as.numeric(bench_result$mean) * 1e6,
-  max_us = as.numeric(bench_result$max) * 1e6,
-  itr_per_sec = bench_result$`itr/sec`,
-  mem_alloc = as.numeric(bench_result$mem_alloc),
-  n_gc = bench_result$n_gc,
-  n_itr = bench_result$n_itr
+  min_us = safe_extract("min"),
+  median_us = safe_extract("median"),
+  mean_us = safe_extract("mean"),
+  max_us = safe_extract("max"),
+  itr_per_sec = if ("itr/sec" %in% names(bench_result)) bench_result$`itr/sec` else 0,
+  mem_alloc = safe_extract("mem_alloc", 1),
+  n_gc = if ("n_gc" %in% names(bench_result)) bench_result$n_gc else 0,
+  n_itr = if ("n_itr" %in% names(bench_result)) bench_result$n_itr else opt$iterations
 )
 
 # Build output structure

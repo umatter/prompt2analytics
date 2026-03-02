@@ -28,9 +28,9 @@ all: jss arxiv
 jss: article-jss.pdf
 
 # Section files
-SECTIONS = sections/introduction.tex sections/methods.tex sections/architecture.tex \
-           sections/examples.tex sections/performance.tex sections/validation.tex \
-           sections/comparison.tex sections/local.tex sections/conclusion.tex
+SECTIONS = sections/introduction_new.tex sections/defining.tex sections/tools.tex \
+           sections/examples.tex sections/evaluation_new.tex sections/deployment.tex \
+           sections/discussion.tex sections/appendices.tex
 
 # Generated output files (from CLI commands)
 GENERATED = generated/cli_data_describe.tex generated/cli_data_head.tex \

@@ -1,0 +1,19 @@
+{
+  "method": "anova_twoway",
+  "dataset": "synthetic_factor_n100000.csv",
+  "n": 100000,
+  "iterations": 10,
+  "warmup": 3,
+  "timestamp": "2026-02-27T11:20:50",
+  "r_version": "4.3.3",
+  "timing": {
+    "min_us": 66979.7520386055,
+    "median_us": 81413.0840008147,
+    "mean_us": 0,
+    "max_us": 0,
+    "itr_per_sec": 10.6670298885,
+    "mem_alloc": 43149928,
+    "n_gc": 18,
+    "n_itr": 10
+  }
+}

@@ -91,6 +91,8 @@ pub struct FactorInfo {
     pub n_levels: usize,
     /// Mapping from observation index to level ID (0 to n_levels-1)
     pub ids: Vec<usize>,
+    /// Pre-computed group counts (number of observations per level)
+    pub counts: Vec<usize>,
 }
 
 /// Extract factor information from a dataset column.
@@ -171,10 +173,17 @@ fn extract_factor_info(dataset: &Dataset, col: &str) -> EconResult<FactorInfo> {
         });
     }
 
+    // Pre-compute group counts
+    let mut counts = vec![0usize; n_levels];
+    for &id in &ids {
+        counts[id] += 1;
+    }
+
     Ok(FactorInfo {
         name: col.to_string(),
         n_levels,
         ids,
+        counts,
     })
 }
 
@@ -182,48 +191,38 @@ fn extract_factor_info(dataset: &Dataset, col: &str) -> EconResult<FactorInfo> {
 // Method of Alternating Projections
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Demean a vector by a single factor.
+/// Demean a slice in-place by a single factor using pre-computed counts.
 ///
-/// Subtracts the group mean from each observation within its group.
-fn demean_by_factor(data: &Array1<f64>, factor: &FactorInfo) -> Array1<f64> {
-    let n = data.len();
-    let mut group_sums = vec![0.0; factor.n_levels];
-    let mut group_counts = vec![0usize; factor.n_levels];
+/// Uses a scratch buffer for group sums to avoid allocation.
+fn demean_by_factor_inplace(data: &mut [f64], factor: &FactorInfo, sums_buf: &mut [f64]) {
+    // Zero the scratch buffer
+    for s in sums_buf.iter_mut() {
+        *s = 0.0;
+    }
 
-    // Accumulate sums and counts
+    // Accumulate sums
     for (i, &val) in data.iter().enumerate() {
-        let g = factor.ids[i];
-        group_sums[g] += val;
-        group_counts[g] += 1;
+        sums_buf[factor.ids[i]] += val;
     }
 
-    // Compute group means
-    let group_means: Vec<f64> = group_sums
-        .iter()
-        .zip(group_counts.iter())
-        .map(
-            |(&sum, &count)| {
-                if count > 0 { sum / count as f64 } else { 0.0 }
-            },
-        )
-        .collect();
-
-    // Subtract group means
-    let mut result = Array1::zeros(n);
-    for i in 0..n {
-        result[i] = data[i] - group_means[factor.ids[i]];
+    // Convert sums to means using pre-computed counts
+    for (s, &c) in sums_buf.iter_mut().zip(factor.counts.iter()) {
+        if c > 0 {
+            *s /= c as f64;
+        }
     }
 
-    result
+    // Subtract group means in-place
+    for (i, val) in data.iter_mut().enumerate() {
+        *val -= sums_buf[factor.ids[i]];
+    }
 }
 
-/// Perform one round of alternating projections (demean by each factor once).
-fn map_step(data: &Array1<f64>, factors: &[FactorInfo]) -> Array1<f64> {
-    let mut current = data.clone();
-    for factor in factors {
-        current = demean_by_factor(&current, factor);
+/// Perform one round of alternating projections in-place.
+fn map_step_inplace(data: &mut [f64], factors: &[FactorInfo], sums_bufs: &mut [Vec<f64>]) {
+    for (factor, sums_buf) in factors.iter().zip(sums_bufs.iter_mut()) {
+        demean_by_factor_inplace(data, factor, sums_buf);
     }
-    current
 }
 
 /// Demean a vector using the Method of Alternating Projections.
@@ -250,68 +249,80 @@ fn demean_map(
         return (data.clone(), 0, 0.0, true);
     }
 
+    let n = data.len();
+
+    // Pre-allocate scratch buffers for group sums (one per factor)
+    let mut sums_bufs: Vec<Vec<f64>> = factors.iter().map(|f| vec![0.0; f.n_levels]).collect();
+
     // Single factor: one pass is sufficient
     if factors.len() == 1 {
-        let demeaned = demean_by_factor(data, &factors[0]);
-        return (demeaned, 1, 0.0, true);
+        let mut result = data.to_vec();
+        demean_by_factor_inplace(&mut result, &factors[0], &mut sums_bufs[0]);
+        return (Array1::from_vec(result), 1, 0.0, true);
     }
 
-    let mut current = data.clone();
-    let mut prev = data.clone();
-    let mut prev_prev = data.clone();
+    // Working buffers — avoid repeated allocations
+    let mut current = data.to_vec();
+    let mut prev = vec![0.0; n];
+    let mut prev_prev = vec![0.0; n];
     let mut converged = false;
     let mut final_change = f64::MAX;
 
     for iter in 1..=max_iter {
-        // Store previous states for acceleration
+        // Rotate buffers: prev_prev <- prev, prev <- current (memcpy, no allocation)
         if iter > 1 {
-            prev_prev = prev.clone();
+            prev_prev.copy_from_slice(&prev);
         }
-        prev = current.clone();
+        prev.copy_from_slice(&current);
 
-        // One round of alternating projections
-        current = map_step(&current, factors);
+        // One round of alternating projections (in-place)
+        map_step_inplace(&mut current, factors, &mut sums_bufs);
 
-        // Compute change (L2 norm)
-        let delta: f64 = current
-            .iter()
-            .zip(prev.iter())
-            .map(|(&c, &p)| (c - p).powi(2))
-            .sum();
-        final_change = delta.sqrt();
+        // Compute change (L2 norm) inline
+        let mut delta_sq: f64 = 0.0;
+        for i in 0..n {
+            let d = current[i] - prev[i];
+            delta_sq += d * d;
+        }
+        final_change = delta_sq.sqrt();
 
         // Check convergence
         if final_change < tolerance {
             converged = true;
-            return (current, iter, final_change, converged);
+            return (Array1::from_vec(current), iter, final_change, converged);
         }
 
         // Gearhart-Koshy acceleration (after at least 2 iterations)
         if accelerate && iter > 2 {
-            let delta_vec: Array1<f64> = &current - &prev;
-            let delta_prev: Array1<f64> = &prev - &prev_prev;
-
-            let numerator: f64 = delta_vec
-                .iter()
-                .zip(delta_prev.iter())
-                .map(|(&d, &dp)| d * dp)
-                .sum();
-            let denominator: f64 = delta_prev.iter().map(|&dp| dp * dp).sum();
+            // Compute dot products inline without temporary arrays
+            let mut numerator: f64 = 0.0;
+            let mut denominator: f64 = 0.0;
+            for i in 0..n {
+                let d = current[i] - prev[i];
+                let dp = prev[i] - prev_prev[i];
+                numerator += d * dp;
+                denominator += dp * dp;
+            }
 
             if denominator > 1e-16 {
                 let alpha = (numerator / denominator).clamp(0.0, 1.0);
                 if alpha > 0.0 && alpha < 1.0 {
-                    // Apply acceleration: move further in the direction of change
-                    current = &prev + &delta_vec * (1.0 + alpha);
+                    // Apply acceleration in-place
+                    for i in 0..n {
+                        let d = current[i] - prev[i];
+                        current[i] = prev[i] + d * (1.0 + alpha);
+                    }
                 }
             }
         }
     }
 
-    (current, max_iter, final_change, converged)
+    (Array1::from_vec(current), max_iter, final_change, converged)
 }
 
 /// Demean a matrix column-wise using the Method of Alternating Projections.
+///
+/// Processes all columns sharing the same scratch buffers for group sums.
 fn demean_matrix_map(
     x: &Array2<f64>,
     factors: &[FactorInfo],
@@ -913,23 +924,25 @@ mod tests {
 
     #[test]
     fn test_demean_by_factor() {
-        let data = Array1::from(vec![1.0, 2.0, 3.0, 10.0, 11.0, 12.0]);
+        let mut data = vec![1.0, 2.0, 3.0, 10.0, 11.0, 12.0];
         let factor = FactorInfo {
             name: "test".to_string(),
             n_levels: 2,
             ids: vec![0, 0, 0, 1, 1, 1],
+            counts: vec![3, 3],
         };
+        let mut sums = vec![0.0; 2];
 
-        let demeaned = demean_by_factor(&data, &factor);
+        demean_by_factor_inplace(&mut data, &factor, &mut sums);
 
         // Group 0 mean: (1+2+3)/3 = 2
         // Group 1 mean: (10+11+12)/3 = 11
-        assert!((demeaned[0] - (-1.0)).abs() < 1e-10); // 1 - 2 = -1
-        assert!((demeaned[1] - 0.0).abs() < 1e-10); // 2 - 2 = 0
-        assert!((demeaned[2] - 1.0).abs() < 1e-10); // 3 - 2 = 1
-        assert!((demeaned[3] - (-1.0)).abs() < 1e-10); // 10 - 11 = -1
-        assert!((demeaned[4] - 0.0).abs() < 1e-10); // 11 - 11 = 0
-        assert!((demeaned[5] - 1.0).abs() < 1e-10); // 12 - 11 = 1
+        assert!((data[0] - (-1.0)).abs() < 1e-10); // 1 - 2 = -1
+        assert!((data[1] - 0.0).abs() < 1e-10); // 2 - 2 = 0
+        assert!((data[2] - 1.0).abs() < 1e-10); // 3 - 2 = 1
+        assert!((data[3] - (-1.0)).abs() < 1e-10); // 10 - 11 = -1
+        assert!((data[4] - 0.0).abs() < 1e-10); // 11 - 11 = 0
+        assert!((data[5] - 1.0).abs() < 1e-10); // 12 - 11 = 1
     }
 
     #[test]
@@ -939,6 +952,7 @@ mod tests {
             name: "test".to_string(),
             n_levels: 2,
             ids: vec![0, 0, 0, 1, 1, 1],
+            counts: vec![3, 3],
         };
 
         let (demeaned, iters, _change, converged) = demean_map(&data, &[factor], 1e-8, 1000, false);
@@ -955,11 +969,13 @@ mod tests {
             name: "entity".to_string(),
             n_levels: 2,
             ids: vec![0, 0, 0, 1, 1, 1],
+            counts: vec![3, 3],
         };
         let factor2 = FactorInfo {
             name: "time".to_string(),
             n_levels: 3,
             ids: vec![0, 1, 2, 0, 1, 2],
+            counts: vec![2, 2, 2],
         };
 
         let (_demeaned, iters, change, converged) =

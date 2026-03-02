@@ -1,0 +1,19 @@
+{
+  "method": "chisq_gof",
+  "dataset": "synthetic_factor_n100000.csv",
+  "n": 100000,
+  "iterations": 10,
+  "warmup": 3,
+  "timestamp": "2026-02-27T11:21:20",
+  "r_version": "4.3.3",
+  "timing": {
+    "min_us": 7156.4809186384,
+    "median_us": 7265.0949005038,
+    "mean_us": 0,
+    "max_us": 0,
+    "itr_per_sec": 118.3088593345,
+    "mem_alloc": 5849160,
+    "n_gc": 1,
+    "n_itr": 9
+  }
+}

@@ -2,18 +2,18 @@
   "method": "logit",
   "dataset": "synthetic_binary_n100000.csv",
   "n": 100000,
-  "iterations": 100,
-  "warmup": 5,
-  "timestamp": "2026-01-26T16:01:03",
+  "iterations": 10,
+  "warmup": 3,
+  "timestamp": "2026-02-27T11:14:44",
   "r_version": "4.3.3",
   "timing": {
-    "min_us": 170187.0639808476,
-    "median_us": 230133.9245750569,
-    "mean_us": [],
-    "max_us": [],
-    "itr_per_sec": 4.0003628965,
+    "min_us": 335824.7019350529,
+    "median_us": 406865.2149871923,
+    "mean_us": 0,
+    "max_us": 0,
+    "itr_per_sec": 2.4498085696,
     "mem_alloc": 313876920,
-    "n_gc": 1190,
-    "n_itr": 100
+    "n_gc": 119,
+    "n_itr": 10
   }
 }

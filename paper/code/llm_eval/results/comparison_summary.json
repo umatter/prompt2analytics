@@ -130,7 +130,7 @@
     "acceptable": 1,
     "category": 0,
     "failed": 2,
-    "accuracy": 88.5,
+    "accuracy": 92.3,
     "avg_latency_ms": 8000,
     "est_cost_usd": 0.13,
     "local_viable": true,

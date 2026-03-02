@@ -1,0 +1,84 @@
+%% =============================================================================
+%% INTRODUCTION
+%% =============================================================================
+
+\section{Introduction} \label{sec:intro}
+
+The idea of talking to a computer to analyze data is not new. Natural
+language interfaces to databases date to the
+1970s~\citep{Woods:1973, Codd:1974}, and every generation of statistical software
+has tried to lower the barrier between analytical intent and software
+commands. What \emph{is} new is that the idea suddenly works well
+enough to be everywhere. Since late 2022, millions of users have been
+uploading datasets to ChatGPT and typing requests like ``compare last
+quarter's sales by region''~\citep{Hu:2023}. The conversational
+interface to data analysis has gone from research curiosity to
+mass-market product in under two years.
+
+The results are concerning. The model generates a \proglang{Python}
+script and executes it on a remote virtual machine---the user's data
+now resides on a third-party server they do not control. Even when
+users copy generated code back to their own machine, the problems
+persist: generated code may compute the wrong quantity without raising
+an error~\citep{Ludwig+Mullainathan+Rambachan:2025}, and the same
+prompt yields different code as models update---making results
+irreproducible. Section~\ref{sec:defining} examines these failure
+modes in detail.
+
+The core idea---natural language as interface---is sound. The
+architecture is not. These problems are not inherent to
+conversational data analysis; they arise from a specific design
+choice: delegating computation to generated code. This paper describes
+an alternative approach we call \emph{chat-first data analytics}, built
+on three principles:
+
+\begin{enumerate}
+  \item \textbf{Interpretation and computation are separated.}
+    The language model selects methods and extracts parameters from natural
+    language; pre-implemented, validated algorithms perform the actual
+    computation.
+  \item \textbf{Methods are pre-validated, not generated.}
+    Correctness is established once, through systematic validation against
+    reference implementations, rather than hoped for anew with each request.
+  \item \textbf{Data stays local; only structure travels.}
+    The language model receives column names, data types, and summary
+    statistics---not the data itself. For complete isolation, the language
+    model can run locally too.
+\end{enumerate}
+
+These principles address each concern directly. Correctness follows
+from using validated implementations rather than generated code.
+Privacy is protected by keeping data on the user's machine.
+Reproducibility is achieved because the same tool invocation produces
+identical results---the stochastic element of the language model
+affects only interpretation, not computation.
+
+This paper presents \pkg{prompt2analytics} (\pkg{p2a}), an implementation of
+chat-first data analytics. The software includes an econometrics and
+data analytics library in pure \proglang{Rust}, exposed through the
+Model Context Protocol (MCP) for integration with language models. The
+implementation covers ordinary least squares (OLS) with robust standard errors,
+panel data models with fixed effects (FE) and random effects (RE),
+instrumental variables (IV), difference-in-differences (DiD),
+discrete choice, time series, and over 200 additional methods---all
+validated against established \proglang{R} packages.
+
+\pkg{prompt2analytics} is available as open-source software under the MIT
+license at \url{https://github.com/umatter/prompt2analytics}.
+Supplementary materials---including the 87 evaluation test cases,
+benchmark scripts for both \proglang{R} and \proglang{Rust}, and validation
+test suites---are located in the repository's \code{paper/} directory.
+Appendix~\ref{app:reproducibility} provides reproduction instructions.
+
+The remainder of the paper is organized as follows.
+Section~\ref{sec:defining} motivates chat-first analytics by
+examining the failure modes of current approaches and situating the
+three principles within existing work.
+Section~\ref{sec:tools} describes the software implementation.
+Section~\ref{sec:examples} demonstrates the system through worked
+examples including realistic failure cases.
+Section~\ref{sec:evaluation} evaluates tool selection accuracy and
+numerical correctness.
+Section~\ref{sec:deployment} presents performance benchmarks and local
+deployment configurations. Section~\ref{sec:discussion} discusses
+limitations and future directions.

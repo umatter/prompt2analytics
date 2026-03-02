@@ -1,0 +1,19 @@
+{
+  "method": "gls_regression",
+  "dataset": "synthetic_ols_n1000.csv",
+  "n": 1000,
+  "iterations": 3,
+  "warmup": 3,
+  "timestamp": "2026-02-26T21:56:10",
+  "r_version": "4.3.3",
+  "timing": {
+    "min_us": 710570.3600682318,
+    "median_us": 776394.0651202574,
+    "mean_us": 0,
+    "max_us": 0,
+    "itr_per_sec": 1.288459949,
+    "mem_alloc": 854627880,
+    "n_gc": 95,
+    "n_itr": 3
+  }
+}

@@ -2,18 +2,18 @@
   "method": "group_by",
   "dataset": "synthetic_clustered_n100000.csv",
   "n": 100000,
-  "iterations": 100,
-  "warmup": 5,
-  "timestamp": "2026-01-26T16:03:47",
+  "iterations": 10,
+  "warmup": 3,
+  "timestamp": "2026-02-27T11:35:05",
   "r_version": "4.3.3",
   "timing": {
-    "min_us": 24864.5630199462,
-    "median_us": 30323.7410262227,
-    "mean_us": [],
-    "max_us": [],
-    "itr_per_sec": 30.0912882594,
+    "min_us": 61252.2751325741,
+    "median_us": 71230.6069908664,
+    "mean_us": 0,
+    "max_us": 0,
+    "itr_per_sec": 14.2980437646,
     "mem_alloc": 19458944,
-    "n_gc": 61,
-    "n_itr": 41
+    "n_gc": 5,
+    "n_itr": 5
   }
 }

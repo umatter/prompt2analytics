@@ -1,0 +1,19 @@
+{
+  "method": "acf_pacf",
+  "dataset": "synthetic_timeseries_n100000.csv",
+  "n": 100000,
+  "iterations": 10,
+  "warmup": 3,
+  "timestamp": "2026-02-27T11:21:22",
+  "r_version": "4.3.3",
+  "timing": {
+    "min_us": 25702.2139849141,
+    "median_us": 29904.0785175748,
+    "mean_us": 0,
+    "max_us": 0,
+    "itr_per_sec": 34.194445479,
+    "mem_alloc": 12410128,
+    "n_gc": 2,
+    "n_itr": 8
+  }
+}

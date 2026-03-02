@@ -3,25 +3,49 @@
 
 use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
-use ndarray::Array2;
+use ndarray::{Array1, Array2};
 use p2a_core::{
     run_ols, run_fixed_effects, run_logit, run_probit, run_random_effects,
     run_diagnostics, run_ols_clustered, run_hausman_test, run_hdfe, run_feglm,
     run_iv2sls, run_did, run_ipw_treatment, run_doubly_robust, run_mediation_analysis,
     run_arima, run_mstl, run_stl, run_holt_winters, run_ar,
     run_one_way_anova, run_two_way_anova, one_sample_t_test, two_sample_t_test,
-    run_shapiro_wilk, run_chisq_gof, run_kaplan_meier, run_cox_ph,
+    run_chisq_gof, run_kaplan_meier, run_cox_ph,
+    run_quantreg, run_gls, run_nls, run_loess,
+    run_fisher_test, wilcoxon_rank_sum, run_kruskal_test, run_negbin,
+    run_var, granger_test, run_changepoint, run_acf,
+    model_exponential_growth, ModelFn,
     DataLoader, Dataset, LinearEstimator,
     regression::CovarianceType,
     econometrics::{GlmFamily, IpwConfig, DoublyRobustConfig, Estimand, DRMethod, MediationConfig},
-    forecasting::SeasonalType,
-    stats::Alternative,
+    forecasting::{SeasonalType, CostFunction},
+    stats::{Alternative, FisherAlternative, WilcoxonConfig, AcfType},
     ml::{kmeans, pca, dbscan, hierarchical, Linkage},
     data::munging::{sort, filter, group_by, AggSpec, AggFn, select, standardize, lag, lead, diff},
 };
+use p2a_core::polars;
+use polars::prelude::*;
 use serde_json::json;
 use std::collections::HashMap;
 use std::path::PathBuf;
+
+/// Cast integer columns to Float64 in the dataset (needed for methods that call .f64())
+fn ensure_float_columns(dataset: &Dataset, cols: &[&str]) -> Result<Dataset> {
+    let mut df = dataset.df().clone();
+    for col_name in cols {
+        if let Ok(col) = df.column(*col_name) {
+            let dtype = col.dtype().clone();
+            if dtype.is_integer() {
+                let series = col.as_materialized_series();
+                let casted = series.cast(&DataType::Float64)
+                    .with_context(|| format!("Failed to cast column '{}' to Float64", col_name))?;
+                df.replace(*col_name, casted)
+                    .with_context(|| format!("Failed to replace column '{}'", col_name))?;
+            }
+        }
+    }
+    Ok(Dataset::new(df))
+}
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum Method {
@@ -69,6 +93,22 @@ enum Method {
     Pca,
     Dbscan,
     Hierarchical,
+    // Additional regression
+    QuantileReg,
+    Gls,
+    Nls,
+    Loess,
+    // Additional stats tests
+    FisherExact,
+    Wilcoxon,
+    KruskalWallis,
+    AcfPacf,
+    // Additional discrete choice
+    NegBin,
+    // Additional time series / econometrics
+    Var,
+    GrangerCausality,
+    Changepoint,
     // Data munging
     Sort,
     Filter,
@@ -212,9 +252,100 @@ struct Args {
     #[arg(long, default_value = "1")]
     lags: usize,
 
+    /// Quantile (tau) for quantile regression
+    #[arg(long, default_value = "0.5")]
+    tau: f64,
+
     /// Dry run - only print what would be executed
     #[arg(long)]
     dry_run: bool,
+
+    /// Benchmark mode: load data once, time only computation
+    #[arg(long)]
+    benchmark: bool,
+
+    /// Number of benchmark iterations (only used with --benchmark)
+    #[arg(long, default_value = "10")]
+    iterations: usize,
+
+    /// Number of warmup iterations (only used with --benchmark)
+    #[arg(long, default_value = "3")]
+    warmup: usize,
+}
+
+/// Dispatch and run a single method on the dataset.
+fn run_method(dataset: &Dataset, args: &Args) -> Result<serde_json::Value> {
+    match args.method {
+        // Regression
+        Method::Ols => run_ols_method(dataset, args, CovarianceType::Standard),
+        Method::OlsHc0 => run_ols_method(dataset, args, CovarianceType::HC0),
+        Method::OlsHc1 => run_ols_method(dataset, args, CovarianceType::HC1),
+        Method::OlsHc2 => run_ols_method(dataset, args, CovarianceType::HC2),
+        Method::OlsHc3 => run_ols_method(dataset, args, CovarianceType::HC3),
+        Method::OlsClustered => run_ols_clustered_method(dataset, args),
+        Method::Diagnostics => run_diagnostics_method(dataset, args),
+        // Panel
+        Method::PanelFe => run_panel_fe_method(dataset, args),
+        Method::PanelRe => run_panel_re_method(dataset, args),
+        Method::Hausman => run_hausman_method(dataset, args),
+        Method::Hdfe => run_hdfe_method(dataset, args),
+        Method::Feglm => run_feglm_method(dataset, args),
+        // Discrete choice
+        Method::Logit => run_logit_method(dataset, args),
+        Method::Probit => run_probit_method(dataset, args),
+        // Causal inference
+        Method::Iv2sls => run_iv2sls_method(dataset, args),
+        Method::Did => run_did_method(dataset, args),
+        Method::Ipw => run_ipw_method(dataset, args),
+        Method::DoublyRobust => run_doubly_robust_method(dataset, args),
+        Method::Mediation => run_mediation_method(dataset, args),
+        // Survival
+        Method::KaplanMeier => run_kaplan_meier_method(dataset, args),
+        Method::CoxPh => run_cox_ph_method(dataset, args),
+        // Time series / Forecasting
+        Method::Arima => run_arima_method(dataset, args),
+        Method::Mstl => run_mstl_method(dataset, args),
+        Method::Stl => run_stl_method(dataset, args),
+        Method::HoltWinters => run_holt_winters_method(dataset, args),
+        Method::Ar => run_ar_method(dataset, args),
+        // Stats tests
+        Method::AnovaOneway => run_anova_oneway_method(dataset, args),
+        Method::AnovaTwoway => run_anova_twoway_method(dataset, args),
+        Method::TTestOneSample => run_ttest_one_sample_method(dataset, args),
+        Method::TTestTwoSample => run_ttest_two_sample_method(dataset, args),
+        Method::ShapiroWilk => run_shapiro_wilk_method(dataset, args),
+        Method::ChisqGof => run_chisq_gof_method(dataset, args),
+        // ML
+        Method::Kmeans => run_kmeans_method(dataset, args),
+        Method::Pca => run_pca_method(dataset, args),
+        Method::Dbscan => run_dbscan_method(dataset, args),
+        Method::Hierarchical => run_hierarchical_method(dataset, args),
+        // Additional regression
+        Method::QuantileReg => run_quantreg_method(dataset, args),
+        Method::Gls => run_gls_method(dataset, args),
+        Method::Nls => run_nls_method(dataset, args),
+        Method::Loess => run_loess_method(dataset, args),
+        // Additional stats tests
+        Method::FisherExact => run_fisher_exact_method(dataset, args),
+        Method::Wilcoxon => run_wilcoxon_method(dataset, args),
+        Method::KruskalWallis => run_kruskal_wallis_method(dataset, args),
+        Method::AcfPacf => run_acf_pacf_method(dataset, args),
+        // Additional discrete choice
+        Method::NegBin => run_negbin_method(dataset, args),
+        // Additional time series / econometrics
+        Method::Var => run_var_method(dataset, args),
+        Method::GrangerCausality => run_granger_method(dataset, args),
+        Method::Changepoint => run_changepoint_method(dataset, args),
+        // Munging methods
+        Method::Sort => run_sort_method(dataset, args),
+        Method::Filter => run_filter_method(dataset, args),
+        Method::GroupBy => run_group_by_method(dataset, args),
+        Method::Select => run_select_method(dataset, args),
+        Method::Standardize => run_standardize_method(dataset, args),
+        Method::Lag => run_lag_method(dataset, args),
+        Method::Lead => run_lead_method(dataset, args),
+        Method::Diff => run_diff_method(dataset, args),
+    }
 }
 
 fn main() -> Result<()> {
@@ -233,77 +364,63 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    // Load data
+    // Load data once
     let dataset = DataLoader::load(&args.data)
         .context("Failed to load data file")?;
     let n = dataset.df().height();
 
-    // Run method
-    let result = match args.method {
-        // Regression
-        Method::Ols => run_ols_method(&dataset, &args, CovarianceType::Standard)?,
-        Method::OlsHc0 => run_ols_method(&dataset, &args, CovarianceType::HC0)?,
-        Method::OlsHc1 => run_ols_method(&dataset, &args, CovarianceType::HC1)?,
-        Method::OlsHc2 => run_ols_method(&dataset, &args, CovarianceType::HC2)?,
-        Method::OlsHc3 => run_ols_method(&dataset, &args, CovarianceType::HC3)?,
-        Method::OlsClustered => run_ols_clustered_method(&dataset, &args)?,
-        Method::Diagnostics => run_diagnostics_method(&dataset, &args)?,
-        // Panel
-        Method::PanelFe => run_panel_fe_method(&dataset, &args)?,
-        Method::PanelRe => run_panel_re_method(&dataset, &args)?,
-        Method::Hausman => run_hausman_method(&dataset, &args)?,
-        Method::Hdfe => run_hdfe_method(&dataset, &args)?,
-        Method::Feglm => run_feglm_method(&dataset, &args)?,
-        // Discrete choice
-        Method::Logit => run_logit_method(&dataset, &args)?,
-        Method::Probit => run_probit_method(&dataset, &args)?,
-        // Causal inference
-        Method::Iv2sls => run_iv2sls_method(&dataset, &args)?,
-        Method::Did => run_did_method(&dataset, &args)?,
-        Method::Ipw => run_ipw_method(&dataset, &args)?,
-        Method::DoublyRobust => run_doubly_robust_method(&dataset, &args)?,
-        Method::Mediation => run_mediation_method(&dataset, &args)?,
-        // Survival
-        Method::KaplanMeier => run_kaplan_meier_method(&dataset, &args)?,
-        Method::CoxPh => run_cox_ph_method(&dataset, &args)?,
-        // Time series / Forecasting
-        Method::Arima => run_arima_method(&dataset, &args)?,
-        Method::Mstl => run_mstl_method(&dataset, &args)?,
-        Method::Stl => run_stl_method(&dataset, &args)?,
-        Method::HoltWinters => run_holt_winters_method(&dataset, &args)?,
-        Method::Ar => run_ar_method(&dataset, &args)?,
-        // Stats tests
-        Method::AnovaOneway => run_anova_oneway_method(&dataset, &args)?,
-        Method::AnovaTwoway => run_anova_twoway_method(&dataset, &args)?,
-        Method::TTestOneSample => run_ttest_one_sample_method(&dataset, &args)?,
-        Method::TTestTwoSample => run_ttest_two_sample_method(&dataset, &args)?,
-        Method::ShapiroWilk => run_shapiro_wilk_method(&dataset, &args)?,
-        Method::ChisqGof => run_chisq_gof_method(&dataset, &args)?,
-        // ML
-        Method::Kmeans => run_kmeans_method(&dataset, &args)?,
-        Method::Pca => run_pca_method(&dataset, &args)?,
-        Method::Dbscan => run_dbscan_method(&dataset, &args)?,
-        Method::Hierarchical => run_hierarchical_method(&dataset, &args)?,
-        // Munging methods
-        Method::Sort => run_sort_method(&dataset, &args)?,
-        Method::Filter => run_filter_method(&dataset, &args)?,
-        Method::GroupBy => run_group_by_method(&dataset, &args)?,
-        Method::Select => run_select_method(&dataset, &args)?,
-        Method::Standardize => run_standardize_method(&dataset, &args)?,
-        Method::Lag => run_lag_method(&dataset, &args)?,
-        Method::Lead => run_lead_method(&dataset, &args)?,
-        Method::Diff => run_diff_method(&dataset, &args)?,
-    };
+    if args.benchmark {
+        // Benchmark mode: time only the computation, not CSV loading
+        use std::time::Instant;
 
-    // Output JSON
-    let output = json!({
-        "method": format!("{:?}", args.method).to_lowercase(),
-        "dataset": args.data.file_name().and_then(|s| s.to_str()).unwrap_or("unknown"),
-        "n": n,
-        "results": result
-    });
+        // Warmup
+        for _ in 0..args.warmup {
+            let _ = run_method(&dataset, &args)?;
+        }
 
-    println!("{}", serde_json::to_string_pretty(&output)?);
+        // Timed iterations
+        let mut times_us: Vec<u64> = Vec::with_capacity(args.iterations);
+        for _ in 0..args.iterations {
+            let start = Instant::now();
+            let _ = run_method(&dataset, &args)?;
+            let elapsed = start.elapsed();
+            times_us.push(elapsed.as_micros() as u64);
+        }
+
+        times_us.sort();
+        let median_us = times_us[times_us.len() / 2];
+        let min_us = times_us[0];
+        let max_us = times_us[times_us.len() - 1];
+
+        let output = json!({
+            "method": format!("{:?}", args.method).to_lowercase(),
+            "n": n,
+            "benchmark": true,
+            "iterations": args.iterations,
+            "warmup": args.warmup,
+            "timing": {
+                "median_us": median_us,
+                "min_us": min_us,
+                "max_us": max_us,
+                "all_us": times_us,
+            }
+        });
+
+        println!("{}", serde_json::to_string_pretty(&output)?);
+    } else {
+        // Normal mode: run once and output results
+        let result = run_method(&dataset, &args)?;
+
+        let output = json!({
+            "method": format!("{:?}", args.method).to_lowercase(),
+            "dataset": args.data.file_name().and_then(|s| s.to_str()).unwrap_or("unknown"),
+            "n": n,
+            "results": result
+        });
+
+        println!("{}", serde_json::to_string_pretty(&output)?);
+    }
+
     Ok(())
 }
 
@@ -319,10 +436,21 @@ fn extract_array(dataset: &Dataset, cols: &[String]) -> Result<Array2<f64>> {
         for col_name in cols {
             let col = df.column(col_name)
                 .map_err(|e| anyhow::anyhow!("Column {} not found: {}", col_name, e))?;
-            let val = col.f64()
-                .map_err(|e| anyhow::anyhow!("Column {} not f64: {}", col_name, e))?
-                .get(row_idx)
-                .ok_or_else(|| anyhow::anyhow!("Null value at row {}", row_idx))?;
+            let series = col.as_materialized_series();
+            let val = if let Ok(ca) = series.f64() {
+                ca.get(row_idx).ok_or_else(|| anyhow::anyhow!("Null at row {}", row_idx))?
+            } else if let Ok(ca) = series.i64() {
+                ca.get(row_idx).ok_or_else(|| anyhow::anyhow!("Null at row {}", row_idx))? as f64
+            } else if let Ok(ca) = series.i32() {
+                ca.get(row_idx).ok_or_else(|| anyhow::anyhow!("Null at row {}", row_idx))? as f64
+            } else {
+                let casted = series.cast(&polars::prelude::DataType::Float64)
+                    .map_err(|e| anyhow::anyhow!("Column '{}' cast failed: {}", col_name, e))?;
+                casted.f64()
+                    .map_err(|e| anyhow::anyhow!("Cast failed: {}", e))?
+                    .get(row_idx)
+                    .ok_or_else(|| anyhow::anyhow!("Null at row {}", row_idx))?
+            };
             data_vec.push(val);
         }
     }
@@ -335,8 +463,22 @@ fn extract_column(dataset: &Dataset, col: &str) -> Result<Vec<f64>> {
     let df = dataset.df();
     let column = df.column(col)
         .map_err(|e| anyhow::anyhow!("Column {} not found: {}", col, e))?;
-    Ok(column.f64()
-        .map_err(|e| anyhow::anyhow!("Column {} not f64: {}", col, e))?
+    let series = column.as_materialized_series();
+    // Try f64 first, then cast from integer types
+    if let Ok(ca) = series.f64() {
+        return Ok(ca.into_no_null_iter().collect());
+    }
+    if let Ok(ca) = series.i64() {
+        return Ok(ca.into_no_null_iter().map(|v| v as f64).collect());
+    }
+    if let Ok(ca) = series.i32() {
+        return Ok(ca.into_no_null_iter().map(|v| v as f64).collect());
+    }
+    // Fall back to cast
+    let casted = series.cast(&polars::prelude::DataType::Float64)
+        .map_err(|e| anyhow::anyhow!("Column '{}' cannot be cast to f64: {}", col, e))?;
+    Ok(casted.f64()
+        .map_err(|e| anyhow::anyhow!("Column '{}' cast failed: {}", col, e))?
         .into_no_null_iter()
         .collect())
 }
@@ -853,7 +995,10 @@ fn run_kaplan_meier_method(dataset: &Dataset, args: &Args) -> Result<serde_json:
     let event_var = args.event_var.as_ref().context("event_var required for KM")?;
     let group_var = args.group_var.as_ref().map(|s| s.as_str());
 
-    let results = run_kaplan_meier(dataset, time_var, event_var, group_var, 0.95)
+    // Ensure survival columns are Float64 (CSV may read as Int64)
+    let ds = ensure_float_columns(dataset, &[time_var, event_var])?;
+
+    let results = run_kaplan_meier(&ds, time_var, event_var, group_var, 0.95)
         .context("Kaplan-Meier failed")?;
 
     // Use the first result (overall if no grouping)
@@ -878,7 +1023,10 @@ fn run_cox_ph_method(dataset: &Dataset, args: &Args) -> Result<serde_json::Value
         .map(|s| s.as_str())
         .collect();
 
-    let result = run_cox_ph(dataset, time_var, event_var, &indep_vars, None)
+    // Ensure survival columns are Float64 (CSV may read as Int64)
+    let ds = ensure_float_columns(dataset, &[time_var, event_var])?;
+
+    let result = run_cox_ph(&ds, time_var, event_var, &indep_vars, None)
         .context("Cox PH failed")?;
 
     let coeffs: HashMap<String, f64> = result.variables
@@ -1078,11 +1226,19 @@ fn run_ttest_two_sample_method(dataset: &Dataset, args: &Args) -> Result<serde_j
 }
 
 fn run_shapiro_wilk_method(dataset: &Dataset, args: &Args) -> Result<serde_json::Value> {
+    use p2a_core::shapiro_wilk_test;
+
     let col = args.dep_var.as_ref()
         .or_else(|| args.indep_vars.as_ref().and_then(|v| v.first()))
         .context("dep_var or indep_vars[0] required for Shapiro-Wilk")?;
 
-    let result = run_shapiro_wilk(dataset, col)
+    // Extract column directly and truncate to 5000 (avoids cloning entire DataFrame)
+    let mut data = extract_column(dataset, col)?;
+    if data.len() > 5000 {
+        data.truncate(5000);
+    }
+
+    let result = shapiro_wilk_test(&data)
         .context("Shapiro-Wilk failed")?;
 
     Ok(json!({
@@ -1208,12 +1364,7 @@ fn run_filter_method(dataset: &Dataset, args: &Args) -> Result<serde_json::Value
         .context("indep_vars required for filter")?;
 
     // Get median value for the filter
-    let col = dataset.df().column(filter_col)
-        .map_err(|e| anyhow::anyhow!("Column {} not found: {}", filter_col, e))?;
-    let values: Vec<f64> = col.f64()
-        .map_err(|e| anyhow::anyhow!("Column {} not f64: {}", filter_col, e))?
-        .into_no_null_iter()
-        .collect();
+    let values: Vec<f64> = extract_column(dataset, filter_col)?;
 
     let mut sorted = values.clone();
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
@@ -1319,5 +1470,411 @@ fn run_diff_method(dataset: &Dataset, args: &Args) -> Result<serde_json::Value> 
     Ok(json!({
         "n_rows": result.nrows(),
         "n_cols": result.ncols()
+    }))
+}
+
+// ========== Additional Regression Methods ==========
+
+fn run_quantreg_method(dataset: &Dataset, args: &Args) -> Result<serde_json::Value> {
+    let dep_var = args.dep_var.as_ref().context("dep_var required")?;
+    let indep_vars: Vec<&str> = args
+        .indep_vars
+        .as_ref()
+        .context("indep_vars required")?
+        .iter()
+        .map(|s| s.as_str())
+        .collect();
+
+    let result = run_quantreg(dataset, dep_var, &indep_vars, args.tau)
+        .map_err(|e| anyhow::anyhow!("Quantile regression failed: {}", e))?;
+
+    let coeffs: HashMap<String, f64> = result.coefficients
+        .iter()
+        .map(|c| (c.name.clone(), c.estimate))
+        .collect();
+    let std_errs: HashMap<String, f64> = result.coefficients
+        .iter()
+        .map(|c| (c.name.clone(), c.std_error))
+        .collect();
+    let t_vals: HashMap<String, f64> = result.coefficients
+        .iter()
+        .map(|c| (c.name.clone(), c.t_value))
+        .collect();
+    let p_vals: HashMap<String, f64> = result.coefficients
+        .iter()
+        .map(|c| (c.name.clone(), c.p_value))
+        .collect();
+
+    Ok(json!({
+        "tau": result.tau,
+        "coefficients": coeffs,
+        "std_errors": std_errs,
+        "t_values": t_vals,
+        "p_values": p_vals,
+        "objective": result.objective,
+        "n_obs": result.n_obs,
+        "n_params": result.n_params,
+        "iterations": result.iterations
+    }))
+}
+
+fn run_gls_method(dataset: &Dataset, args: &Args) -> Result<serde_json::Value> {
+    let dep_var = args.dep_var.as_ref().context("dep_var required")?;
+    let indep_vars = args
+        .indep_vars
+        .as_ref()
+        .context("indep_vars required")?;
+
+    let y = extract_column(dataset, dep_var)?;
+
+    // Collect all column data upfront to avoid repeated extraction
+    let col_data: Vec<Vec<f64>> = indep_vars
+        .iter()
+        .map(|col_name| extract_column(dataset, col_name))
+        .collect::<Result<Vec<_>>>()?;
+
+    // Build X matrix as flat row-major vector (with intercept column prepended)
+    let n = y.len();
+    let n_cols = indep_vars.len() + 1; // +1 for intercept
+    let mut x_flat = Vec::with_capacity(n * n_cols);
+    for row_idx in 0..n {
+        x_flat.push(1.0); // intercept
+        for col_vec in &col_data {
+            x_flat.push(col_vec[row_idx]);
+        }
+    }
+
+    let result = run_gls(&y, &x_flat, n_cols, "ar1", Some(0.5))
+        .map_err(|e| anyhow::anyhow!("GLS failed: {}", e))?;
+
+    // Build variable name map: intercept + indep_vars
+    let mut var_names = vec!["(Intercept)".to_string()];
+    var_names.extend(indep_vars.iter().cloned());
+
+    let coeffs: HashMap<String, f64> = var_names
+        .iter()
+        .zip(result.coefficients.iter())
+        .map(|(k, v)| (k.clone(), *v))
+        .collect();
+    let std_errs: HashMap<String, f64> = var_names
+        .iter()
+        .zip(result.std_errors.iter())
+        .map(|(k, v)| (k.clone(), *v))
+        .collect();
+    let t_vals: HashMap<String, f64> = var_names
+        .iter()
+        .zip(result.t_values.iter())
+        .map(|(k, v)| (k.clone(), *v))
+        .collect();
+    let p_vals: HashMap<String, f64> = var_names
+        .iter()
+        .zip(result.p_values.iter())
+        .map(|(k, v)| (k.clone(), *v))
+        .collect();
+
+    Ok(json!({
+        "coefficients": coeffs,
+        "std_errors": std_errs,
+        "t_values": t_vals,
+        "p_values": p_vals,
+        "r_squared": result.r_squared,
+        "adj_r_squared": result.adj_r_squared,
+        "sigma": result.sigma,
+        "log_likelihood": result.log_likelihood,
+        "aic": result.aic,
+        "bic": result.bic,
+        "n_obs": result.n_obs,
+        "correlation": result.correlation
+    }))
+}
+
+fn run_nls_method(dataset: &Dataset, args: &Args) -> Result<serde_json::Value> {
+    let dep_var = args.dep_var.as_ref().context("dep_var required")?;
+    let x_col = args.indep_vars.as_ref()
+        .and_then(|v| v.first())
+        .context("indep_vars[0] required as x_col for NLS")?;
+
+    // Use exponential growth model: a * exp(b * x) + c
+    let model: ModelFn = model_exponential_growth;
+    let start = Array1::from_vec(vec![1.0, 0.1, 0.0]);
+    let param_names = &["a", "b", "c"];
+
+    let result = run_nls(dataset, dep_var, x_col, model, &start, param_names)
+        .map_err(|e| anyhow::anyhow!("NLS failed: {}", e))?;
+
+    let coeffs: HashMap<String, f64> = result.param_names
+        .iter()
+        .zip(result.coefficients.iter())
+        .map(|(k, v)| (k.clone(), *v))
+        .collect();
+    let std_errs: HashMap<String, f64> = result.param_names
+        .iter()
+        .zip(result.std_errors.iter())
+        .map(|(k, v)| (k.clone(), *v))
+        .collect();
+    let p_vals: HashMap<String, f64> = result.param_names
+        .iter()
+        .zip(result.p_values.iter())
+        .map(|(k, v)| (k.clone(), *v))
+        .collect();
+
+    Ok(json!({
+        "algorithm": result.algorithm,
+        "coefficients": coeffs,
+        "std_errors": std_errs,
+        "p_values": p_vals,
+        "rss": result.rss,
+        "sigma": result.sigma,
+        "n_obs": result.n_obs,
+        "n_params": result.n_params,
+        "iterations": result.iterations,
+        "converged": result.converged
+    }))
+}
+
+fn run_loess_method(dataset: &Dataset, args: &Args) -> Result<serde_json::Value> {
+    let dep_var = args.dep_var.as_ref().context("dep_var required")?;
+    let x_col = args.indep_vars.as_ref()
+        .and_then(|v| v.first())
+        .context("indep_vars[0] required as x_col for LOESS")?;
+
+    // Default span=0.75, degree=1, non-robust
+    let result = run_loess(dataset, dep_var, x_col, 0.75, 1, false)
+        .map_err(|e| anyhow::anyhow!("LOESS failed: {}", e))?;
+
+    // Compute residual statistics for validation
+    let rss: f64 = result.residuals.iter().map(|r| r * r).sum();
+    let n = result.n_obs;
+    let mean_fitted: f64 = if n > 0 {
+        result.fitted.iter().sum::<f64>() / n as f64
+    } else {
+        0.0
+    };
+
+    Ok(json!({
+        "span": result.span,
+        "degree": result.degree,
+        "robust": result.robust,
+        "n_obs": result.n_obs,
+        "rss": rss,
+        "mean_fitted": mean_fitted,
+        "n_fitted": result.fitted.len(),
+        "n_residuals": result.residuals.len()
+    }))
+}
+
+// ========== Additional Stats Tests ==========
+
+fn run_fisher_exact_method(dataset: &Dataset, args: &Args) -> Result<serde_json::Value> {
+    let indep_vars = args.indep_vars.as_ref().context("indep_vars required (two columns for Fisher)")?;
+    if indep_vars.len() < 2 {
+        return Err(anyhow::anyhow!("Two columns required for Fisher exact test"));
+    }
+    let row_col = &indep_vars[0];
+    let col_col = &indep_vars[1];
+
+    let result = run_fisher_test(dataset, row_col, col_col, FisherAlternative::TwoSided, Some(0.95))
+        .map_err(|e| anyhow::anyhow!("Fisher exact test failed: {}", e))?;
+
+    Ok(json!({
+        "p_value": result.p_value,
+        "odds_ratio": result.odds_ratio,
+        "odds_ratio_ci": result.odds_ratio_ci.map(|(lo, hi)| vec![lo, hi]),
+        "table": result.table,
+        "n": result.n,
+        "test_name": result.test_name
+    }))
+}
+
+fn run_wilcoxon_method(dataset: &Dataset, args: &Args) -> Result<serde_json::Value> {
+    let indep_vars = args.indep_vars.as_ref().context("indep_vars required (two columns for Wilcoxon)")?;
+    if indep_vars.len() < 2 {
+        return Err(anyhow::anyhow!("Two columns required for Wilcoxon rank-sum test"));
+    }
+
+    let x = extract_column(dataset, &indep_vars[0])?;
+    let y = extract_column(dataset, &indep_vars[1])?;
+    let config = WilcoxonConfig::default();
+
+    let result = wilcoxon_rank_sum(&x, &y, 0.0, Alternative::TwoSided, &config)
+        .map_err(|e| anyhow::anyhow!("Wilcoxon rank-sum test failed: {}", e))?;
+
+    Ok(json!({
+        "statistic": result.statistic,
+        "p_value": result.p_value,
+        "test_name": result.test_name,
+        "n_x": x.len(),
+        "n_y": y.len()
+    }))
+}
+
+fn run_kruskal_wallis_method(dataset: &Dataset, args: &Args) -> Result<serde_json::Value> {
+    let value_col = args.dep_var.as_ref().context("dep_var required for Kruskal-Wallis")?;
+    let group_col = args.factor_var.as_ref()
+        .or_else(|| args.group_var.as_ref())
+        .context("factor_var or group_var required for Kruskal-Wallis")?;
+
+    let result = run_kruskal_test(dataset, value_col, group_col)
+        .map_err(|e| anyhow::anyhow!("Kruskal-Wallis test failed: {}", e))?;
+
+    Ok(json!({
+        "statistic": result.statistic,
+        "p_value": result.p_value,
+        "df": result.df,
+        "n_groups": result.n_groups,
+        "n_total": result.n_total,
+        "group_sizes": result.group_sizes
+    }))
+}
+
+fn run_acf_pacf_method(dataset: &Dataset, args: &Args) -> Result<serde_json::Value> {
+    let col = args.dep_var.as_ref()
+        .or_else(|| args.indep_vars.as_ref().and_then(|v| v.first()))
+        .context("dep_var or indep_vars[0] required for ACF")?;
+
+    let max_lag = if args.lags > 1 { Some(args.lags) } else { None };
+
+    let acf_result = run_acf(dataset, col, max_lag, AcfType::Correlation)
+        .map_err(|e| anyhow::anyhow!("ACF failed: {}", e))?;
+
+    // Also compute PACF
+    let pacf_result = run_acf(dataset, col, max_lag, AcfType::Partial)
+        .map_err(|e| anyhow::anyhow!("PACF failed: {}", e))?;
+
+    Ok(json!({
+        "acf_values": acf_result.values,
+        "pacf_values": pacf_result.values,
+        "lags": acf_result.lags,
+        "n_obs": acf_result.n_obs,
+        "confidence_bound": acf_result.confidence_bound,
+        "n_lags": acf_result.values.len()
+    }))
+}
+
+// ========== Additional Discrete Choice ==========
+
+fn run_negbin_method(dataset: &Dataset, args: &Args) -> Result<serde_json::Value> {
+    let dep_var = args.dep_var.as_ref().context("dep_var required")?;
+    let indep_vars: Vec<&str> = args
+        .indep_vars
+        .as_ref()
+        .context("indep_vars required")?
+        .iter()
+        .map(|s| s.as_str())
+        .collect();
+
+    let result = run_negbin(dataset, dep_var, &indep_vars, None)
+        .map_err(|e| anyhow::anyhow!("Negative binomial failed: {}", e))?;
+
+    let coeffs: HashMap<String, f64> = result.variables
+        .iter()
+        .zip(result.coefficients.iter())
+        .map(|(k, v)| (k.clone(), *v))
+        .collect();
+    let std_errs: HashMap<String, f64> = result.variables
+        .iter()
+        .zip(result.std_errors.iter())
+        .map(|(k, v)| (k.clone(), *v))
+        .collect();
+    let z_vals: HashMap<String, f64> = result.variables
+        .iter()
+        .zip(result.z_stats.iter())
+        .map(|(k, v)| (k.clone(), *v))
+        .collect();
+    let p_vals: HashMap<String, f64> = result.variables
+        .iter()
+        .zip(result.p_values.iter())
+        .map(|(k, v)| (k.clone(), *v))
+        .collect();
+
+    Ok(json!({
+        "coefficients": coeffs,
+        "std_errors": std_errs,
+        "z_values": z_vals,
+        "p_values": p_vals,
+        "theta": result.theta,
+        "theta_std_error": result.theta_std_error,
+        "log_likelihood": result.log_likelihood,
+        "pseudo_r_squared": result.pseudo_r_squared,
+        "aic": result.aic,
+        "bic": result.bic,
+        "n_obs": result.n_obs,
+        "converged": result.converged
+    }))
+}
+
+// ========== Additional Time Series / Econometrics ==========
+
+fn run_var_method(dataset: &Dataset, args: &Args) -> Result<serde_json::Value> {
+    let col_names: Vec<&str> = args
+        .indep_vars
+        .as_ref()
+        .context("indep_vars required for VAR (list of endogenous variables)")?
+        .iter()
+        .map(|s| s.as_str())
+        .collect();
+
+    let lag_order = args.lags;
+
+    let result = run_var(dataset, &col_names, lag_order)
+        .map_err(|e| anyhow::anyhow!("VAR failed: {}", e))?;
+
+    Ok(json!({
+        "lags": result.lags,
+        "n_vars": result.n_vars,
+        "n_obs": result.n_obs,
+        "var_names": result.var_names,
+        "aic": result.aic,
+        "bic": result.bic,
+        "log_likelihood": result.log_likelihood,
+        "coefficients": result.coefficients,
+        "sigma_u": result.sigma_u
+    }))
+}
+
+fn run_granger_method(dataset: &Dataset, args: &Args) -> Result<serde_json::Value> {
+    let dep_var = args.dep_var.as_ref().context("dep_var required for Granger causality")?;
+    let cause_var = args.indep_vars.as_ref()
+        .and_then(|v| v.first())
+        .context("indep_vars[0] required as cause variable for Granger")?;
+
+    let lag_order = args.lags;
+
+    let result = granger_test(dataset, dep_var, cause_var, lag_order)
+        .map_err(|e| anyhow::anyhow!("Granger causality test failed: {}", e))?;
+
+    Ok(json!({
+        "f_statistic": result.f_statistic,
+        "p_value": result.p_value,
+        "df1": result.df1,
+        "df2": result.df2,
+        "lags": result.lags,
+        "n_obs": result.n_obs,
+        "dependent": result.dependent,
+        "cause": result.cause
+    }))
+}
+
+fn run_changepoint_method(dataset: &Dataset, args: &Args) -> Result<serde_json::Value> {
+    let col = args.dep_var.as_ref()
+        .or_else(|| args.indep_vars.as_ref().and_then(|v| v.first()))
+        .context("dep_var or indep_vars[0] required for changepoint")?;
+
+    let result = run_changepoint(dataset, col, None, None, CostFunction::MeanChange)
+        .context("Changepoint detection failed")?;
+
+    let segment_means: Vec<f64> = result.segments.iter().map(|s| s.mean).collect();
+    let segment_variances: Vec<f64> = result.segments.iter().map(|s| s.variance).collect();
+    let segment_sizes: Vec<usize> = result.segments.iter().map(|s| s.n_points).collect();
+
+    Ok(json!({
+        "changepoints": result.changepoints,
+        "n_changepoints": result.n_changepoints,
+        "total_cost": result.total_cost,
+        "penalty": result.penalty,
+        "method": result.method,
+        "segment_means": segment_means,
+        "segment_variances": segment_variances,
+        "segment_sizes": segment_sizes
     }))
 }

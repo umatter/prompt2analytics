@@ -6,28 +6,6 @@
 % REGRESSION & ROBUST STANDARD ERRORS
 % -----------------------------------------------------------------------------
 
-@Article{White:1980,
-  author = {Halbert White},
-  title = {A Heteroskedasticity-Consistent Covariance Matrix Estimator and a Direct Test for Heteroskedasticity},
-  journal = {Econometrica},
-  year = {1980},
-  volume = {48},
-  number = {4},
-  pages = {817--838},
-  doi = {10.2307/1912934},
-}
-
-@Article{MacKinnon+White:1985,
-  author = {James G. MacKinnon and Halbert White},
-  title = {Some Heteroskedasticity-Consistent Covariance Matrix Estimators with Improved Finite Sample Properties},
-  journal = {Journal of Econometrics},
-  year = {1985},
-  volume = {29},
-  number = {3},
-  pages = {305--325},
-  doi = {10.1016/0304-4076(85)90158-7},
-}
-
 @Article{Zeileis:2004,
   author = {Achim Zeileis},
   title = {Econometric Computing with {HC} and {HAC} Covariance Matrix Estimators},
@@ -51,80 +29,6 @@
 }
 
 % -----------------------------------------------------------------------------
-% CLUSTERED STANDARD ERRORS
-% -----------------------------------------------------------------------------
-
-@Article{Cameron+Gelbach+Miller:2011,
-  author = {A. Colin Cameron and Jonah B. Gelbach and Douglas L. Miller},
-  title = {Robust Inference with Multiway Clustering},
-  journal = {Journal of Business \& Economic Statistics},
-  year = {2011},
-  volume = {29},
-  number = {2},
-  pages = {238--249},
-  doi = {10.1198/jbes.2010.07136},
-}
-
-@Article{Cameron+Miller:2015,
-  author = {A. Colin Cameron and Douglas L. Miller},
-  title = {A Practitioner's Guide to Cluster-Robust Inference},
-  journal = {Journal of Human Resources},
-  year = {2015},
-  volume = {50},
-  number = {2},
-  pages = {317--372},
-  doi = {10.3368/jhr.50.2.317},
-}
-
-@Article{Petersen:2009,
-  author = {Mitchell A. Petersen},
-  title = {Estimating Standard Errors in Finance Panel Data Sets: Comparing Approaches},
-  journal = {Review of Financial Studies},
-  year = {2009},
-  volume = {22},
-  number = {1},
-  pages = {435--480},
-  doi = {10.1093/rfs/hhn053},
-}
-
-% -----------------------------------------------------------------------------
-% REGRESSION DIAGNOSTICS
-% -----------------------------------------------------------------------------
-
-@Article{Jarque+Bera:1980,
-  author = {Carlos M. Jarque and Anil K. Bera},
-  title = {Efficient Tests for Normality, Homoscedasticity and Serial Independence of Regression Residuals},
-  journal = {Economics Letters},
-  year = {1980},
-  volume = {6},
-  number = {3},
-  pages = {255--259},
-  doi = {10.1016/0165-1765(80)90024-5},
-}
-
-@Article{Breusch+Pagan:1979,
-  author = {Trevor S. Breusch and Adrian R. Pagan},
-  title = {A Simple Test for Heteroscedasticity and Random Coefficient Variation},
-  journal = {Econometrica},
-  year = {1979},
-  volume = {47},
-  number = {5},
-  pages = {1287--1294},
-  doi = {10.2307/1911963},
-}
-
-@Article{Durbin+Watson:1950,
-  author = {James Durbin and Geoffrey S. Watson},
-  title = {Testing for Serial Correlation in Least Squares Regression {I}},
-  journal = {Biometrika},
-  year = {1950},
-  volume = {37},
-  number = {3/4},
-  pages = {409--428},
-  doi = {10.2307/2332391},
-}
-
-% -----------------------------------------------------------------------------
 % PANEL DATA MODELS
 % -----------------------------------------------------------------------------
 
@@ -137,17 +41,6 @@
   number = {6},
   pages = {1251--1271},
   doi = {10.2307/1913827},
-}
-
-@Article{Swamy+Arora:1972,
-  author = {P. A. V. B. Swamy and S. S. Arora},
-  title = {The Exact Finite Sample Properties of the Estimators of Coefficients in the Error Components Regression Models},
-  journal = {Econometrica},
-  year = {1972},
-  volume = {40},
-  number = {2},
-  pages = {261--275},
-  doi = {10.2307/1909405},
 }
 
 @Book{Baltagi:2013,
@@ -179,14 +72,6 @@
   doi = {10.18637/jss.v027.i02},
 }
 
-@Manual{plm,
-  title = {\pkg{plm}: Linear Models for Panel Data},
-  author = {Yves Croissant and Giovanni Millo and Kevin Tappe},
-  year = {2024},
-  note = {\proglang{R} package version 2.6-4},
-  url = {https://CRAN.R-project.org/package=plm},
-}
-
 % -----------------------------------------------------------------------------
 % HIGH-DIMENSIONAL FIXED EFFECTS
 % -----------------------------------------------------------------------------
@@ -202,32 +87,15 @@
   url = {https://journal.r-project.org/archive/2013/RJ-2013-031/},
 }
 
-@Article{Guimaraes+Portugal:2010,
-  author = {Paulo Guimar{\~a}es and Pedro Portugal},
-  title = {A Simple Feasible Procedure to Fit Models with High-Dimensional Fixed Effects},
-  journal = {Stata Journal},
-  year = {2010},
-  volume = {10},
-  number = {4},
-  pages = {628--649},
-  doi = {10.1177/1536867X1101000406},
-}
-
-@Unpublished{Correia:2017,
-  author = {Sergio Correia},
-  title = {Linear Models with High-Dimensional Fixed Effects: An Efficient and Feasible Estimator},
-  year = {2017},
-  note = {Working Paper},
-  url = {http://scorreia.com/research/hdfe.pdf},
-}
-
 @Article{Berge:2018,
   author = {Laurent Berg{\'e}},
   title = {Efficient Estimation of Maximum Likelihood Models with Multiple Fixed-Effects: The \proglang{R} Package \pkg{fixest}},
-  journal = {CREA Discussion Papers},
+  journal = {Journal of Statistical Software},
   year = {2018},
-  volume = {13},
-  url = {https://CRAN.R-project.org/package=fixest},
+  volume = {106},
+  number = {3},
+  pages = {1--35},
+  doi = {10.18637/jss.v106.i03},
 }
 
 % -----------------------------------------------------------------------------
@@ -260,17 +128,6 @@
 % -----------------------------------------------------------------------------
 % DIFFERENCE-IN-DIFFERENCES
 % -----------------------------------------------------------------------------
-
-@Article{Card+Krueger:1994,
-  author = {David Card and Alan B. Krueger},
-  title = {Minimum Wages and Employment: A Case Study of the Fast-Food Industry in {N}ew {J}ersey and {P}ennsylvania},
-  journal = {American Economic Review},
-  year = {1994},
-  volume = {84},
-  number = {4},
-  pages = {772--793},
-  url = {https://www.jstor.org/stable/2118030},
-}
 
 @Article{Goodman-Bacon:2021,
   author = {Andrew Goodman-Bacon},
@@ -317,196 +174,42 @@
 }
 
 % -----------------------------------------------------------------------------
-% DISCRETE CHOICE MODELS
+% NUMERICAL ACCURACY IN STATISTICAL SOFTWARE
 % -----------------------------------------------------------------------------
 
-@InCollection{McFadden:1974,
-  author = {Daniel McFadden},
-  title = {Conditional Logit Analysis of Qualitative Choice Behavior},
-  booktitle = {Frontiers in Econometrics},
-  editor = {Paul Zarembka},
-  publisher = {Academic Press},
-  year = {1974},
-  pages = {105--142},
-  address = {New York},
-}
-
-@Book{Train:2009,
-  author = {Kenneth E. Train},
-  title = {Discrete Choice Methods with Simulation},
-  year = {2009},
-  edition = {2nd},
-  publisher = {Cambridge University Press},
-  address = {Cambridge},
-  doi = {10.1017/CBO9780511805271},
-}
-
-% -----------------------------------------------------------------------------
-% TREATMENT EFFECTS & CAUSAL INFERENCE
-% -----------------------------------------------------------------------------
-
-@Article{Horvitz+Thompson:1952,
-  author = {Daniel G. Horvitz and Donovan J. Thompson},
-  title = {A Generalization of Sampling Without Replacement from a Finite Universe},
-  journal = {Journal of the American Statistical Association},
-  year = {1952},
-  volume = {47},
-  number = {260},
-  pages = {663--685},
-  doi = {10.1080/01621459.1952.10483446},
-}
-
-@Article{Robins+Rotnitzky+Zhao:1994,
-  author = {James M. Robins and Andrea Rotnitzky and Lue Ping Zhao},
-  title = {Estimation of Regression Coefficients When Some Regressors Are Not Always Observed},
-  journal = {Journal of the American Statistical Association},
-  year = {1994},
-  volume = {89},
-  number = {427},
-  pages = {846--866},
-  doi = {10.1080/01621459.1994.10476818},
-}
-
-@Article{Bang+Robins:2005,
-  author = {Heejung Bang and James M. Robins},
-  title = {Doubly Robust Estimation in Missing Data and Causal Inference Models},
-  journal = {Biometrics},
-  year = {2005},
-  volume = {61},
+@Article{McCullough:1997,
+  author = {B. D. McCullough},
+  title = {Assessing the Reliability of Statistical Software: Part I},
+  journal = {The American Statistician},
+  year = {1997},
+  volume = {52},
   number = {4},
-  pages = {962--973},
-  doi = {10.1111/j.1541-0420.2005.00377.x},
+  pages = {358--366},
+  doi = {10.2307/2685442},
 }
 
-@Article{Lunceford+Davidian:2004,
-  author = {Jared K. Lunceford and Marie Davidian},
-  title = {Stratification and Weighting Via the Propensity Score in Estimation of Causal Treatment Effects: A Comparative Study},
-  journal = {Statistics in Medicine},
+@Article{McCullough+Vinod:1999,
+  author = {B. D. McCullough and H. D. Vinod},
+  title = {The Numerical Reliability of Econometric Software},
+  journal = {Journal of Economic Literature},
+  year = {1999},
+  volume = {37},
+  number = {2},
+  pages = {633--665},
+  doi = {10.1257/jel.37.2.633},
+}
+
+@Book{Davidson+MacKinnon:2004,
+  author = {Russell Davidson and James G. MacKinnon},
+  title = {Econometric Theory and Methods},
   year = {2004},
-  volume = {23},
-  number = {19},
-  pages = {2937--2960},
-  doi = {10.1002/sim.1903},
-}
-
-@Article{Huber:2014,
-  author = {Martin Huber},
-  title = {Identifying Causal Mechanisms (Primarily) Based on Inverse Probability Weighting},
-  journal = {Journal of Applied Econometrics},
-  year = {2014},
-  volume = {29},
-  number = {6},
-  pages = {920--943},
-  doi = {10.1002/jae.2341},
-}
-
-@Article{Imai+Keele+Tingley:2010,
-  author = {Kosuke Imai and Luke Keele and Dustin Tingley},
-  title = {A General Approach to Causal Mediation Analysis},
-  journal = {Psychological Methods},
-  year = {2010},
-  volume = {15},
-  number = {4},
-  pages = {309--334},
-  doi = {10.1037/a0020761},
-}
-
-@InProceedings{Pearl:2001,
-  author = {Judea Pearl},
-  title = {Direct and Indirect Effects},
-  booktitle = {Proceedings of the 17th Conference on Uncertainty in Artificial Intelligence},
-  year = {2001},
-  pages = {411--420},
-  publisher = {Morgan Kaufmann},
-  address = {San Francisco},
-}
-
-@Book{VanderWeele:2015,
-  author = {Tyler J. VanderWeele},
-  title = {Explanation in Causal Inference: Methods for Mediation and Interaction},
-  year = {2015},
   publisher = {Oxford University Press},
-  address = {Oxford},
-}
-
-% -----------------------------------------------------------------------------
-% TIME SERIES
-% -----------------------------------------------------------------------------
-
-@Article{Hyndman+Khandakar:2008,
-  author = {Rob J. Hyndman and Yeasmin Khandakar},
-  title = {Automatic Time Series Forecasting: The \pkg{forecast} Package for \proglang{R}},
-  journal = {Journal of Statistical Software},
-  year = {2008},
-  volume = {27},
-  number = {3},
-  pages = {1--22},
-  doi = {10.18637/jss.v027.i03},
-}
-
-@Article{Cleveland+Cleveland+McRae+Terpenning:1990,
-  author = {Robert B. Cleveland and William S. Cleveland and Jean E. McRae and Irma Terpenning},
-  title = {{STL}: A Seasonal-Trend Decomposition Procedure Based on Loess},
-  journal = {Journal of Official Statistics},
-  year = {1990},
-  volume = {6},
-  number = {1},
-  pages = {3--73},
-}
-
-@Article{Sims:1980,
-  author = {Christopher A. Sims},
-  title = {Macroeconomics and Reality},
-  journal = {Econometrica},
-  year = {1980},
-  volume = {48},
-  number = {1},
-  pages = {1--48},
-  doi = {10.2307/1912017},
-}
-
-@Article{Johansen:1991,
-  author = {S{\o}ren Johansen},
-  title = {Estimation and Hypothesis Testing of Cointegration Vectors in {G}aussian Vector Autoregressive Models},
-  journal = {Econometrica},
-  year = {1991},
-  volume = {59},
-  number = {6},
-  pages = {1551--1580},
-  doi = {10.2307/2938278},
-}
-
-@Article{Dickey+Fuller:1979,
-  author = {David A. Dickey and Wayne A. Fuller},
-  title = {Distribution of the Estimators for Autoregressive Time Series with a Unit Root},
-  journal = {Journal of the American Statistical Association},
-  year = {1979},
-  volume = {74},
-  number = {366a},
-  pages = {427--431},
-  doi = {10.1080/01621459.1979.10482531},
-}
-
-@Book{Box+Jenkins+Reinsel+Ljung:2015,
-  author = {George E. P. Box and Gwilym M. Jenkins and Gregory C. Reinsel and Greta M. Ljung},
-  title = {Time Series Analysis: Forecasting and Control},
-  year = {2015},
-  edition = {5th},
-  publisher = {Wiley},
-  address = {Hoboken, NJ},
+  address = {New York},
 }
 
 % -----------------------------------------------------------------------------
 % TEXTBOOKS & GENERAL ECONOMETRICS
 % -----------------------------------------------------------------------------
-
-@Book{Angrist+Pischke:2009,
-  author = {Joshua D. Angrist and J{\"o}rn-Steffen Pischke},
-  title = {Mostly Harmless Econometrics: An Empiricist's Companion},
-  year = {2009},
-  publisher = {Princeton University Press},
-  address = {Princeton, NJ},
-}
 
 @Book{Greene:2018,
   author = {William H. Greene},
@@ -534,77 +237,20 @@
   address = {Princeton, NJ},
 }
 
+@Article{Hyndman+Khandakar:2008,
+  author = {Rob J. Hyndman and Yeasmin Khandakar},
+  title = {Automatic Time Series Forecasting: The \pkg{forecast} Package for \proglang{R}},
+  journal = {Journal of Statistical Software},
+  year = {2008},
+  volume = {27},
+  number = {3},
+  pages = {1--22},
+  doi = {10.18637/jss.v027.i03},
+}
+
 % -----------------------------------------------------------------------------
 % R PACKAGES
 % -----------------------------------------------------------------------------
-
-@Manual{R,
-  title = {\proglang{R}: A Language and Environment for Statistical Computing},
-  author = {{\proglang{R} Core Team}},
-  organization = {\proglang{R} Foundation for Statistical Computing},
-  address = {Vienna, Austria},
-  year = {2024},
-  url = {https://www.R-project.org/},
-}
-
-@Manual{data.table,
-  title = {\pkg{data.table}: Extension of \code{data.frame}},
-  author = {Matt Dowle and Arun Srinivasan},
-  year = {2024},
-  note = {\proglang{R} package version 1.16.2},
-  url = {https://CRAN.R-project.org/package=data.table},
-}
-
-@Article{dplyr,
-  author = {Hadley Wickham and Romain Fran{\c c}ois and Lionel Henry and Kirill M{\"u}ller and Davis Vaughan},
-  title = {\pkg{dplyr}: A Grammar of Data Manipulation},
-  year = {2023},
-  note = {\proglang{R} package version 1.1.4},
-  url = {https://CRAN.R-project.org/package=dplyr},
-}
-
-@Manual{tidyr,
-  title = {\pkg{tidyr}: Tidy Messy Data},
-  author = {Hadley Wickham and Davis Vaughan and Maximilian Girlich},
-  year = {2024},
-  note = {\proglang{R} package version 1.3.1},
-  url = {https://CRAN.R-project.org/package=tidyr},
-}
-
-@Manual{sandwich,
-  title = {\pkg{sandwich}: Robust Covariance Matrix Estimators},
-  author = {Achim Zeileis and Thomas Lumley},
-  year = {2024},
-  note = {\proglang{R} package version 3.1-1},
-  url = {https://CRAN.R-project.org/package=sandwich},
-}
-
-@Article{Zeileis:2006,
-  author = {Achim Zeileis},
-  title = {Object-Oriented Computation of Sandwich Estimators},
-  journal = {Journal of Statistical Software},
-  year = {2006},
-  volume = {16},
-  number = {9},
-  pages = {1--16},
-  doi = {10.18637/jss.v016.i09},
-}
-
-@Manual{causalweight,
-  title = {\pkg{causalweight}: Causal Inference Based on Inverse Probability Weighting, Doubly Robust Estimation, and Double Machine Learning},
-  author = {Hugo Bodory and Martin Huber},
-  year = {2024},
-  note = {\proglang{R} package version 1.1.1},
-  url = {https://CRAN.R-project.org/package=causalweight},
-}
-
-@Manual{AER,
-  title = {\pkg{AER}: Applied Econometrics with \proglang{R}},
-  author = {Christian Kleiber and Achim Zeileis},
-  year = {2024},
-  note = {\proglang{R} package version 1.2-14},
-  url = {https://CRAN.R-project.org/package=AER},
-}
 
 @Manual{lmtest,
   title = {\pkg{lmtest}: Testing Linear Regression Models},
@@ -614,57 +260,9 @@
   url = {https://CRAN.R-project.org/package=lmtest},
 }
 
-@Manual{vars,
-  title = {\pkg{vars}: VAR Modelling},
-  author = {Bernhard Pfaff},
-  year = {2024},
-  note = {\proglang{R} package version 1.6-1},
-  url = {https://CRAN.R-project.org/package=vars},
-}
-
-@Manual{changepoint,
-  title = {\pkg{changepoint}: Methods for Changepoint Detection},
-  author = {Rebecca Killick and Kaylea Haynes and Idris A. Eckley},
-  year = {2024},
-  note = {\proglang{R} package version 2.3},
-  url = {https://CRAN.R-project.org/package=changepoint},
-}
-
-@Manual{urca,
-  title = {\pkg{urca}: Unit Root and Cointegration Tests for Time Series Data},
-  author = {Bernhard Pfaff},
-  year = {2024},
-  note = {\proglang{R} package version 1.3-4},
-  url = {https://CRAN.R-project.org/package=urca},
-}
-
-@Manual{bench,
-  title = {\pkg{bench}: High Precision Timing of \proglang{R} Expressions},
-  author = {Jim Hester and Davis Vaughan},
-  year = {2024},
-  note = {\proglang{R} package version 1.1.3},
-  url = {https://CRAN.R-project.org/package=bench},
-}
-
-@Manual{microbenchmark,
-  title = {\pkg{microbenchmark}: Accurate Timing Functions},
-  author = {Olaf Mersmann},
-  year = {2024},
-  note = {\proglang{R} package version 1.5.0},
-  url = {https://CRAN.R-project.org/package=microbenchmark},
-}
-
 % -----------------------------------------------------------------------------
 % RUST CRATES & DEPENDENCIES
 % -----------------------------------------------------------------------------
-
-@Manual{criterion,
-  title = {\pkg{Criterion.rs}: Statistics-Driven Micro-Benchmarking in \proglang{Rust}},
-  author = {Brook Heisler and Jorge Aparicio},
-  year = {2024},
-  note = {\proglang{Rust} crate version 0.5},
-  url = {https://github.com/bheisler/criterion.rs},
-}
 
 @Manual{polars,
   title = {\pkg{polars}: Blazingly Fast DataFrames in \proglang{Rust} and \proglang{Python}},
@@ -672,63 +270,6 @@
   year = {2024},
   note = {Version 0.46},
   url = {https://pola.rs/},
-}
-
-@Manual{ndarray,
-  title = {\pkg{ndarray}: An N-Dimensional Array for General Elements and for Numerics},
-  author = {{ndarray Contributors}},
-  year = {2024},
-  note = {\proglang{Rust} crate version 0.16},
-  url = {https://crates.io/crates/ndarray},
-}
-
-@Manual{faer,
-  title = {\pkg{faer}: A Collection of Low-Level Linear Algebra Routines Written in Pure \proglang{Rust}},
-  author = {Sarah {\relax el} and {faer Contributors}},
-  year = {2024},
-  note = {\proglang{Rust} crate version 0.22},
-  url = {https://crates.io/crates/faer},
-}
-
-@Manual{statrs,
-  title = {\pkg{statrs}: Statistical Computation Library for \proglang{Rust}},
-  author = {{statrs Contributors}},
-  year = {2024},
-  note = {\proglang{Rust} crate version 0.18},
-  url = {https://crates.io/crates/statrs},
-}
-
-@Manual{duckdb,
-  title = {\pkg{DuckDB}: An In-Process SQL OLAP Database Management System},
-  author = {Mark Raasveldt and Hannes M{\"u}hleisen},
-  year = {2024},
-  note = {Version 1.2},
-  url = {https://duckdb.org/},
-}
-
-@InProceedings{Raasveldt+Muhleisen:2019,
-  author = {Mark Raasveldt and Hannes M{\"u}hleisen},
-  title = {{DuckDB}: An Embeddable Analytical Database},
-  booktitle = {Proceedings of the 2019 International Conference on Management of Data (SIGMOD)},
-  year = {2019},
-  pages = {1981--1984},
-  doi = {10.1145/3299869.3320212},
-}
-
-@Manual{tokio,
-  title = {\pkg{tokio}: An Event-Driven, Non-Blocking I/O Platform for Writing Asynchronous \proglang{Rust} Applications},
-  author = {{Tokio Contributors}},
-  year = {2024},
-  note = {\proglang{Rust} crate version 1.0},
-  url = {https://tokio.rs/},
-}
-
-@Manual{serde,
-  title = {\pkg{serde}: A Generic Serialization/Deserialization Framework},
-  author = {David Tolnay and Erick Tryzelaar},
-  year = {2024},
-  note = {\proglang{Rust} crate version 1.0},
-  url = {https://serde.rs/},
 }
 
 % -----------------------------------------------------------------------------
@@ -759,176 +300,6 @@
   note = {Launched March 2025; merged with A2A under Linux Foundation},
 }
 
-@Misc{OWASP:MCP:2025,
-  author = {{OWASP Foundation}},
-  title = {{OWASP MCP} Top 10},
-  year = {2025},
-  url = {https://owasp.org/www-project-mcp-top-10/},
-  note = {Security risks for Model Context Protocol implementations},
-}
-
-% -----------------------------------------------------------------------------
-% PROGRAMMING LANGUAGES
-% -----------------------------------------------------------------------------
-
-@Misc{Rust,
-  author = {{Rust Foundation}},
-  title = {The \proglang{Rust} Programming Language},
-  year = {2024},
-  url = {https://www.rust-lang.org/},
-}
-
-
-% -----------------------------------------------------------------------------
-% MACHINE LEARNING
-% -----------------------------------------------------------------------------
-
-@InProceedings{Arthur+Vassilvitskii:2007,
-  author = {David Arthur and Sergei Vassilvitskii},
-  title = {k-means++: The Advantages of Careful Seeding},
-  booktitle = {Proceedings of the Eighteenth Annual ACM-SIAM Symposium on Discrete Algorithms},
-  series = {SODA '07},
-  year = {2007},
-  pages = {1027--1035},
-  publisher = {Society for Industrial and Applied Mathematics},
-  address = {Philadelphia, PA, USA},
-}
-
-% -----------------------------------------------------------------------------
-% ECONOMETRIC SOFTWARE ECOSYSTEM
-% -----------------------------------------------------------------------------
-
-@Article{Zeileis+Koenker:2008,
-  author = {Achim Zeileis and Roger Koenker},
-  title = {Econometrics in \proglang{R}: Past, Present, and Future},
-  journal = {Journal of Statistical Software},
-  year = {2008},
-  volume = {27},
-  number = {1},
-  pages = {1--5},
-  doi = {10.18637/jss.v027.i01},
-}
-
-@Book{Kleiber+Zeileis:2008,
-  author = {Christian Kleiber and Achim Zeileis},
-  title = {Applied Econometrics with \proglang{R}},
-  year = {2008},
-  publisher = {Springer-Verlag},
-  address = {New York},
-  doi = {10.1007/978-0-387-77318-6},
-}
-
-@Article{Michelaki+Tsagris:2025,
-  author = {Despina Michelaki and Michail Tsagris},
-  title = {An Overview of Economics and Econometrics Related \proglang{R} Packages},
-  journal = {Stats},
-  year = {2025},
-  volume = {8},
-  number = {4},
-  pages = {85},
-  doi = {10.3390/stats8040085},
-}
-
-@Article{Santiago-Calderon:2020,
-  author = {Jos{\'e} Bayoa{\'n} Santiago Calder{\'o}n},
-  title = {\pkg{Econometrics.jl}},
-  journal = {Proceedings of the JuliaCon Conferences},
-  year = {2020},
-  volume = {1},
-  number = {1},
-  pages = {38},
-  doi = {10.21105/jcon.00038},
-}
-
-@Article{McCullough:1997,
-  author = {B. D. McCullough},
-  title = {A Review of \pkg{RATS} v4.2: Benchmarking Numerical Accuracy},
-  journal = {Journal of Applied Econometrics},
-  year = {1997},
-  volume = {12},
-  number = {2},
-  pages = {181--190},
-  doi = {10.1002/(SICI)1099-1255(199703/04)12:2<181::AID-JAE428>3.0.CO;2-V},
-}
-
-@Article{McCullough+Vinod:1999,
-  author = {B. D. McCullough and H. D. Vinod},
-  title = {The Numerical Reliability of Econometric Software},
-  journal = {Journal of Economic Literature},
-  year = {1999},
-  volume = {37},
-  number = {2},
-  pages = {633--665},
-  doi = {10.1257/jel.37.2.633},
-}
-
-@Article{McCullough:1999b,
-  author = {B. D. McCullough},
-  title = {Econometric Software Reliability: {EViews}, {LIMDEP}, {SHAZAM} and {TSP}},
-  journal = {Journal of Applied Econometrics},
-  year = {1999},
-  volume = {14},
-  number = {2},
-  pages = {191--202},
-  doi = {10.1002/(SICI)1099-1255(199903/04)14:2<191::AID-JAE524>3.0.CO;2-K},
-}
-
-@Article{Alvarez+Barbero+Zofio:2017,
-  author = {Inmaculada C. {\'A}lvarez and Javier Barbero and Jos{\'e} L. Zof{\'i}o},
-  title = {A Panel Data Toolbox for \proglang{MATLAB}},
-  journal = {Journal of Statistical Software},
-  year = {2017},
-  volume = {76},
-  number = {6},
-  pages = {1--27},
-  doi = {10.18637/jss.v076.i06},
-}
-
-% -----------------------------------------------------------------------------
-% PROGRAMMING LANGUAGE COMPARISONS
-% -----------------------------------------------------------------------------
-
-@Article{Aruoba+Fernandez-Villaverde:2015,
-  author = {S. Bora{\u{g}}an Aruoba and Jes{\'u}s Fern{\'a}ndez-Villaverde},
-  title = {A Comparison of Programming Languages in Macroeconomics},
-  journal = {Journal of Economic Dynamics and Control},
-  year = {2015},
-  volume = {58},
-  pages = {265--273},
-  doi = {10.1016/j.jedc.2015.05.009},
-}
-
-@Article{Duarte+Duarte+Fonseca+Montecinos:2020,
-  author = {Victor Duarte and Diogo Duarte and Julia Fonseca and Alexis Montecinos},
-  title = {Benchmarking Machine-Learning Software and Hardware for Quantitative Economics},
-  journal = {Journal of Economic Dynamics and Control},
-  year = {2020},
-  volume = {111},
-  pages = {103796},
-  doi = {10.1016/j.jedc.2019.103796},
-}
-
-% -----------------------------------------------------------------------------
-% RUST DATA SCIENCE ECOSYSTEM
-% -----------------------------------------------------------------------------
-
-@InProceedings{Lamb+etal:2024,
-  author = {Andrew Lamb and Yijie Shen and Dani{\"e}l Heres and Jayjeet Chakraborty and Mehmet Ozan Kabak and Liang-Chi Hsieh and Chao Sun},
-  title = {Apache Arrow {DataFusion}: A Fast, Embeddable, Modular Analytic Query Engine},
-  booktitle = {Companion of the 2024 International Conference on Management of Data (SIGMOD)},
-  year = {2024},
-  pages = {5--17},
-  doi = {10.1145/3626246.3653368},
-}
-
-@Manual{linfa,
-  title = {\pkg{linfa}: A \proglang{Rust} Machine Learning Framework},
-  author = {{rust-ml Contributors}},
-  year = {2024},
-  note = {\proglang{Rust} crate},
-  url = {https://github.com/rust-ml/linfa},
-}
-
 % -----------------------------------------------------------------------------
 % LOCAL LLM DEPLOYMENT
 % -----------------------------------------------------------------------------
@@ -938,23 +309,6 @@
   author = {{Ollama Inc.}},
   year = {2024},
   url = {https://ollama.ai},
-}
-
-@InProceedings{BFCL:2024,
-  author = {Shishir G. Patil and Tianjun Zhang and Xin Wang and Joseph E. Gonzalez},
-  title = {Gorilla: Large Language Model Connected with Massive {APIs}},
-  booktitle = {Proceedings of the 41st International Conference on Machine Learning (ICML)},
-  year = {2024},
-  url = {https://gorilla.cs.berkeley.edu},
-  note = {Berkeley Function Calling Leaderboard},
-}
-
-@Article{Patil+Zhang+Song+Gonzalez:2023,
-  author = {Shishir G. Patil and Tianjun Zhang and Xin Wang and Joseph E. Gonzalez},
-  title = {Gorilla: Large Language Model Connected with Massive {APIs}},
-  journal = {arXiv preprint arXiv:2305.15334},
-  year = {2023},
-  url = {https://arxiv.org/abs/2305.15334},
 }
 
 % -----------------------------------------------------------------------------
@@ -977,17 +331,6 @@
   year = {1973},
   pages = {441--450},
   doi = {10.1145/1499586.1499695},
-}
-
-@Article{Androutsopoulos+etal:1995,
-  author = {Ion Androutsopoulos and Graeme D. Ritchie and Peter Thanisch},
-  title = {Natural Language Interfaces to Databases -- An Introduction},
-  journal = {Natural Language Engineering},
-  year = {1995},
-  volume = {1},
-  number = {1},
-  pages = {29--81},
-  doi = {10.1017/S135132490000005X},
 }
 
 % -----------------------------------------------------------------------------
@@ -1014,15 +357,13 @@
   doi = {10.14778/3681954.3682024},
 }
 
-@Article{Narechania+etal:2021,
-  author = {Arpit Narechania and Arjun Srinivasan and John Stasko},
-  title = {{NL4DV}: A Toolkit for Generating Analytic Specifications for Data Visualization from Natural Language Queries},
-  journal = {IEEE Transactions on Visualization and Computer Graphics},
-  year = {2021},
-  volume = {27},
-  number = {2},
-  pages = {369--379},
-  doi = {10.1109/TVCG.2020.3030378},
+@Article{Renggli+Ilyas+Rekatsinas:2025,
+  author = {Cedric Renggli and Ihab F. Ilyas and Theodoros Rekatsinas},
+  title = {Fundamental Challenges in Evaluating {Text2SQL} Solutions and Detecting Their Limitations},
+  journal = {arXiv preprint},
+  year = {2025},
+  note = {arXiv:2501.18197},
+  url = {https://arxiv.org/abs/2501.18197},
 }
 
 % -----------------------------------------------------------------------------
@@ -1047,26 +388,6 @@
   note = {Online first},
 }
 
-@Article{Sun+etal:2025:Survey,
-  author = {Maojun Sun and Ruijian Han and Binyan Jiang and Houduo Qi and Defeng Sun and Yancheng Yuan and Jian Huang},
-  title = {A Survey on Large Language Model-Based Agents for Statistics and Data Science},
-  journal = {The American Statistician},
-  year = {2025},
-  doi = {10.1080/00031305.2025.2561140},
-  note = {Online first},
-}
-
-@Article{Nejjar+etal:2024,
-  author = {Amine Nejjar and Lorenz Zacharias and Fabian Stiehle and Ingo Weber},
-  title = {{LLMs} for Science: Usage for Code Generation and Data Analysis},
-  journal = {Journal of Software: Evolution and Process},
-  year = {2024},
-  volume = {36},
-  number = {9},
-  pages = {e2723},
-  doi = {10.1002/smr.2723},
-}
-
 % -----------------------------------------------------------------------------
 % LLM TOOL USE & AGENTS
 % -----------------------------------------------------------------------------
@@ -1079,20 +400,12 @@
   url = {https://arxiv.org/abs/2210.03629},
 }
 
-@Article{Schick+etal:2023,
+@InProceedings{Schick+etal:2023,
   author = {Timo Schick and Jane Dwivedi-Yu and Roberto Dess{\`i} and Roberta Raileanu and Maria Lomeli and Luke Zettlemoyer and Nicola Cancedda and Thomas Scialom},
   title = {Toolformer: Language Models Can Teach Themselves to Use Tools},
-  journal = {arXiv preprint arXiv:2302.04761},
+  booktitle = {Advances in Neural Information Processing Systems (NeurIPS)},
   year = {2023},
   url = {https://arxiv.org/abs/2302.04761},
-}
-
-@Article{Qin+etal:2024,
-  author = {Yujia Qin and Shihao Liang and Yining Ye and Kunlun Zhu and Lan Yan and Yaxi Lu and Yankai Lin and Xin Cong and Xiangru Tang and Bill Qian and Sihan Zhao and Lauren Hong and Runchu Tian and Ruobing Xie and Jie Zhou and Mark Gerstein and Dahai Li and Zhiyuan Liu and Maosong Sun},
-  title = {{ToolLLM}: Facilitating Large Language Models to Master 16000+ Real-world {APIs}},
-  journal = {arXiv preprint arXiv:2307.16789},
-  year = {2024},
-  url = {https://arxiv.org/abs/2307.16789},
 }
 
 @InProceedings{Liu+etal:2025:ToolACE,
@@ -1111,11 +424,11 @@
   doi = {10.1007/s44336-025-00024-x},
 }
 
-@Article{Ludwig+Mullainathan+Rambachan:2024,
+@Article{Ludwig+Mullainathan+Rambachan:2025,
   author = {Jens Ludwig and Sendhil Mullainathan and Ashesh Rambachan},
   title = {Large Language Models: An Applied Econometric Framework},
   journal = {NBER Working Paper},
-  year = {2024},
+  year = {2025},
   number = {33344},
   doi = {10.3386/w33344},
   url = {https://www.nber.org/papers/w33344},
@@ -1127,15 +440,6 @@
   journal = {arXiv preprint arXiv:2506.00856},
   year = {2025},
   url = {https://arxiv.org/abs/2506.00856},
-}
-
-@Article{Korinek:2025,
-  author = {Anton Korinek},
-  title = {{AI} Agents for Economic Research},
-  journal = {Journal of Economic Literature},
-  year = {2025},
-  note = {Forthcoming},
-  url = {https://www.aeaweb.org/content/file?id=23290},
 }
 
 % -----------------------------------------------------------------------------
@@ -1156,6 +460,20 @@
   booktitle = {Proceedings of the 7th ICML Workshop on Automated Machine Learning},
   year = {2020},
   url = {https://www.automl.org/wp-content/uploads/2020/07/AutoML_2020_paper_61.pdf},
+}
+
+% -----------------------------------------------------------------------------
+% CHATGPT ADOPTION
+% -----------------------------------------------------------------------------
+
+@Misc{Hu:2023,
+  author = {Krystal Hu},
+  title = {{ChatGPT} Sets Record for Fastest-Growing User Base},
+  year = {2023},
+  month = feb,
+  howpublished = {Reuters},
+  url = {https://www.reuters.com/technology/chatgpt-sets-record-fastest-growing-user-base-analyst-note-2023-02-01/},
+  note = {Accessed January 2026},
 }
 
 % -----------------------------------------------------------------------------
@@ -1190,15 +508,6 @@
   doi = {10.1007/978-1-4684-6310-8},
 }
 
-@Book{Chambers:2008,
-  author = {John M. Chambers},
-  title = {Software for Data Analysis: Programming with \proglang{R}},
-  year = {2008},
-  publisher = {Springer-Verlag},
-  address = {New York},
-  doi = {10.1007/978-0-387-75936-4},
-}
-
 @Article{Carpenter+etal:2017,
   author = {Bob Carpenter and Andrew Gelman and Matthew D. Hoffman and Daniel Lee and Ben Goodrich and Michael Betancourt and Marcus Brubaker and Jiqiang Guo and Peter Li and Allen Riddell},
   title = {Stan: A Probabilistic Programming Language},
@@ -1210,37 +519,12 @@
   doi = {10.18637/jss.v076.i01},
 }
 
-@InProceedings{Zhong+etal:2017,
-  author = {Victor Zhong and Caiming Xiong and Richard Socher},
-  title = {Seq2{SQL}: Generating Structured Queries from Natural Language Using Reinforcement Learning},
-  booktitle = {arXiv preprint arXiv:1709.00103},
-  year = {2017},
-  url = {https://arxiv.org/abs/1709.00103},
-}
-
-@InProceedings{Thornton+etal:2013,
-  author = {Chris Thornton and Frank Hutter and Holger H. Hoos and Kevin Leyton-Brown},
-  title = {Auto-{WEKA}: Combined Selection and Hyperparameter Optimization of Classification Algorithms},
-  booktitle = {Proceedings of the 19th ACM SIGKDD International Conference on Knowledge Discovery and Data Mining},
-  year = {2013},
-  pages = {847--855},
-  doi = {10.1145/2487575.2487629},
-}
-
 @InProceedings{Hollmann+etal:2024,
   author = {Noah Hollmann and Samuel M{\"u}ller and Frank Hutter},
   title = {Large Language Models for Automated Machine Learning},
   booktitle = {Proceedings of the 2024 Conference on Neural Information Processing Systems (NeurIPS)},
   year = {2024},
   url = {https://arxiv.org/abs/2408.14033},
-}
-
-@Book{Davidson+MacKinnon:2004,
-  author = {Russell Davidson and James G. MacKinnon},
-  title = {Econometric Theory and Methods},
-  year = {2004},
-  publisher = {Oxford University Press},
-  address = {New York},
 }
 
 % -----------------------------------------------------------------------------
@@ -1295,7 +579,8 @@
   author = {Jeffrey M. Wooldridge},
   title = {Two-Way Fixed Effects, the Two-Way Mundlak Regression, and Difference-in-Differences Estimators},
   year = {2021},
-  journal = {SSRN Working Paper},
+  journal = {Econometrica},
+  note = {Forthcoming; originally circulated as SSRN Working Paper 3906345},
   doi = {10.2139/ssrn.3906345},
 }
 

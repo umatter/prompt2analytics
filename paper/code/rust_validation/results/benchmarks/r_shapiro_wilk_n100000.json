@@ -1,0 +1,19 @@
+{
+  "method": "shapiro_wilk",
+  "dataset": "synthetic_ols_n100000.csv",
+  "n": 100000,
+  "iterations": 10,
+  "warmup": 3,
+  "timestamp": "2026-02-27T11:20:57",
+  "r_version": "4.3.3",
+  "timing": {
+    "min_us": 1343.9491158351,
+    "median_us": 1469.5675927214,
+    "mean_us": 0,
+    "max_us": 0,
+    "itr_per_sec": 625.6722407398,
+    "mem_alloc": 625552,
+    "n_gc": 0,
+    "n_itr": 10
+  }
+}

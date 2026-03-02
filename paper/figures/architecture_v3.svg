@@ -67,24 +67,33 @@
     <rect x="0" y="0" width="380" height="95" rx="6" fill="#E0F7FA" stroke="#0097A7" stroke-width="2"/>
     <text x="190" y="20" text-anchor="middle" class="section-title" fill="#0097A7">LLM LAYER</text>
 
-    <!-- Cloud icons spread across wider box -->
+    <!-- Robot head icons for LLM providers -->
     <g transform="translate(50, 32)">
-      <path d="M15,45 Q0,45 0,35 Q0,25 12,25 Q12,15 25,15 Q38,15 40,25 Q50,25 50,35 Q50,45 35,45 Z"
-            fill="none" stroke="#0097A7" stroke-width="1.5" transform="scale(0.55)"/>
+      <rect x="3" y="6" width="22" height="17" rx="3" fill="none" stroke="#0097A7" stroke-width="1.5"/>
+      <circle cx="10" cy="14" r="2.5" fill="#0097A7"/>
+      <circle cx="18" cy="14" r="2.5" fill="#0097A7"/>
+      <line x1="14" y1="0" x2="14" y2="6" stroke="#0097A7" stroke-width="1.5"/>
+      <circle cx="14" cy="0" r="2" fill="none" stroke="#0097A7" stroke-width="1.5"/>
     </g>
     <text x="95" y="52" class="label">Ollama</text>
     <text x="95" y="65" class="sublabel">Local</text>
 
     <g transform="translate(160, 32)">
-      <path d="M15,45 Q0,45 0,35 Q0,25 12,25 Q12,15 25,15 Q38,15 40,25 Q50,25 50,35 Q50,45 35,45 Z"
-            fill="none" stroke="#0097A7" stroke-width="1.5" transform="scale(0.55)"/>
+      <rect x="3" y="6" width="22" height="17" rx="3" fill="none" stroke="#0097A7" stroke-width="1.5"/>
+      <circle cx="10" cy="14" r="2.5" fill="#0097A7"/>
+      <circle cx="18" cy="14" r="2.5" fill="#0097A7"/>
+      <line x1="14" y1="0" x2="14" y2="6" stroke="#0097A7" stroke-width="1.5"/>
+      <circle cx="14" cy="0" r="2" fill="none" stroke="#0097A7" stroke-width="1.5"/>
     </g>
     <text x="205" y="52" class="label">Claude</text>
     <text x="205" y="65" class="sublabel">Cloud</text>
 
     <g transform="translate(270, 32)">
-      <path d="M15,45 Q0,45 0,35 Q0,25 12,25 Q12,15 25,15 Q38,15 40,25 Q50,25 50,35 Q50,45 35,45 Z"
-            fill="none" stroke="#0097A7" stroke-width="1.5" transform="scale(0.55)"/>
+      <rect x="3" y="6" width="22" height="17" rx="3" fill="none" stroke="#0097A7" stroke-width="1.5"/>
+      <circle cx="10" cy="14" r="2.5" fill="#0097A7"/>
+      <circle cx="18" cy="14" r="2.5" fill="#0097A7"/>
+      <line x1="14" y1="0" x2="14" y2="6" stroke="#0097A7" stroke-width="1.5"/>
+      <circle cx="14" cy="0" r="2" fill="none" stroke="#0097A7" stroke-width="1.5"/>
     </g>
     <text x="315" y="52" class="label">GPT</text>
     <text x="315" y="65" class="sublabel">Cloud</text>

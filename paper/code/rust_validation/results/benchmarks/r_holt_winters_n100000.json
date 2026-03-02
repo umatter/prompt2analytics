@@ -1,0 +1,19 @@
+{
+  "method": "holt_winters",
+  "dataset": "synthetic_timeseries_n100000.csv",
+  "n": 100000,
+  "iterations": 10,
+  "warmup": 3,
+  "timestamp": "2026-02-27T11:17:20",
+  "r_version": "4.3.3",
+  "timing": {
+    "min_us": 2667739.4108846784,
+    "median_us": 2939783.8174481876,
+    "mean_us": 0,
+    "max_us": 0,
+    "itr_per_sec": 0.34123293541,
+    "mem_alloc": 5081018776,
+    "n_gc": 1544,
+    "n_itr": 10
+  }
+}

@@ -764,10 +764,17 @@ fn extract_factor_info(dataset: &Dataset, col: &str) -> EconResult<FactorInfo> {
         });
     }
 
+    // Pre-compute group counts
+    let mut counts = vec![0usize; n_levels];
+    for &id in &ids {
+        counts[id] += 1;
+    }
+
     Ok(FactorInfo {
         name: col.to_string(),
         n_levels,
         ids,
+        counts,
     })
 }
 
@@ -1372,6 +1379,7 @@ mod tests {
             name: "test".to_string(),
             n_levels: 2,
             ids: vec![0, 0, 0, 1, 1, 1],
+            counts: vec![3, 3],
         };
 
         let demeaned = weighted_demean_by_factor(&data, &weights, &factor);
@@ -1393,6 +1401,7 @@ mod tests {
             name: "test".to_string(),
             n_levels: 2,
             ids: vec![0, 0, 1, 1],
+            counts: vec![2, 2],
         };
 
         let demeaned = weighted_demean_by_factor(&data, &weights, &factor);

@@ -2,18 +2,18 @@
   "method": "probit",
   "dataset": "synthetic_binary_n100000.csv",
   "n": 100000,
-  "iterations": 5,
-  "warmup": 1,
-  "timestamp": "2026-01-26T09:13:08",
+  "iterations": 10,
+  "warmup": 3,
+  "timestamp": "2026-02-27T11:14:55",
   "r_version": "4.3.3",
   "timing": {
-    "min_us": 171479.000011459,
-    "median_us": 180801.881942898,
-    "mean_us": [],
-    "max_us": [],
-    "itr_per_sec": 5.3773794857,
-    "mem_alloc": 334312712,
-    "n_gc": 68,
-    "n_itr": 5
+    "min_us": 413059.9410273135,
+    "median_us": 499628.2295323908,
+    "mean_us": 0,
+    "max_us": 0,
+    "itr_per_sec": 1.9994297508,
+    "mem_alloc": 334279016,
+    "n_gc": 128,
+    "n_itr": 10
   }
 }

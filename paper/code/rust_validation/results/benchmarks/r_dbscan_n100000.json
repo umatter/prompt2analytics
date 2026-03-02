@@ -1,9 +1,19 @@
 {
   "method": "dbscan",
+  "dataset": "synthetic_cluster_n100000.csv",
   "n": 100000,
-  "iterations": 30,
+  "iterations": 10,
+  "warmup": 3,
+  "timestamp": "2026-02-27T11:33:55",
+  "r_version": "4.3.3",
   "timing": {
-    "median_us": 8762254.63,
-    "min_us": 7572327.49
+    "min_us": 51680240.5170165,
+    "median_us": 52331858.549034223,
+    "mean_us": 0,
+    "max_us": 0,
+    "itr_per_sec": 0.019132545135,
+    "mem_alloc": 13703576,
+    "n_gc": 3,
+    "n_itr": 7
   }
 }

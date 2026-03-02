@@ -1,0 +1,19 @@
+{
+  "method": "ar",
+  "dataset": "synthetic_timeseries_n100000.csv",
+  "n": 100000,
+  "iterations": 10,
+  "warmup": 3,
+  "timestamp": "2026-02-27T11:17:41",
+  "r_version": "4.3.3",
+  "timing": {
+    "min_us": 25116.715929471,
+    "median_us": 26226.1829338968,
+    "mean_us": 0,
+    "max_us": 0,
+    "itr_per_sec": 37.5040364605,
+    "mem_alloc": 27672152,
+    "n_gc": 5,
+    "n_itr": 5
+  }
+}

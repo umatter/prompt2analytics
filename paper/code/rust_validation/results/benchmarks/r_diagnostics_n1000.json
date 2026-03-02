@@ -1,0 +1,19 @@
+{
+  "method": "diagnostics",
+  "dataset": "synthetic_ols_n1000.csv",
+  "n": 1000,
+  "iterations": 3,
+  "warmup": 3,
+  "timestamp": "2026-02-26T21:58:13",
+  "r_version": "4.3.3",
+  "timing": {
+    "min_us": 4200.1630645245,
+    "median_us": 4269.4030562416,
+    "mean_us": 0,
+    "max_us": 0,
+    "itr_per_sec": 224.66756707,
+    "mem_alloc": 1335208,
+    "n_gc": 0,
+    "n_itr": 3
+  }
+}

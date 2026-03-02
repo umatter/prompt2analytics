@@ -12,11 +12,14 @@ library(stringr)
 #' @return Character vector of category labels
 categorize_method <- function(method) {
   case_when(
-    grepl("^ols", method, ignore.case = TRUE) ~ "Regression",
-    grepl("^panel", method, ignore.case = TRUE) ~ "Panel",
-    grepl("logit|probit", method, ignore.case = TRUE) ~ "Discrete",
+    grepl("^ols|^quantreg|^gls$|^nls$|^loess$|^diagnostics$", method, ignore.case = TRUE) ~ "Regression",
+    grepl("^panel|^hausman$|^hdfe$|^feglm$", method, ignore.case = TRUE) ~ "Panel",
+    grepl("logit|probit|negbin", method, ignore.case = TRUE) ~ "Discrete",
     grepl("kmeans|pca|dbscan|hierarchical", method, ignore.case = TRUE) ~ "ML",
-    grepl("arima|mstl|stl|holt|ar$", method, ignore.case = TRUE) ~ "Time Series",
+    grepl("arima|mstl|stl|holt|^ar$|var_model|granger|changepoint|acf", method, ignore.case = TRUE) ~ "Time Series",
+    grepl("anova|ttest|shapiro|chisq|fisher|wilcoxon|kruskal", method, ignore.case = TRUE) ~ "Statistics",
+    grepl("iv2sls|did$|ipw|doubly", method, ignore.case = TRUE) ~ "Causal",
+    grepl("kaplan|cox_ph", method, ignore.case = TRUE) ~ "Survival",
     grepl("sort|filter|group|select|standardize|lag|lead|diff", method, ignore.case = TRUE) ~ "Munging",
     TRUE ~ "Other"
   )
@@ -35,7 +38,21 @@ clean_method_label <- function(method) {
     str_replace("panel fe", "Panel FE") %>%
     str_replace("panel re", "Panel RE") %>%
     str_replace("panel hdfe", "Panel HDFE") %>%
-    str_to_title()
+    str_to_title() %>%
+    # Fix abbreviations that str_to_title mangles
+    str_replace("Iv2sls", "IV/2SLS") %>%
+    str_replace("Pca", "PCA") %>%
+    str_replace("Dbscan", "DBSCAN") %>%
+    str_replace("Arima", "ARIMA") %>%
+    str_replace("Acf", "ACF") %>%
+    str_replace("Mstl", "MSTL") %>%
+    str_replace("Stl", "STL") %>%
+    str_replace("Nls", "NLS") %>%
+    str_replace("Gls", "GLS") %>%
+    str_replace("Var ", "VAR ") %>%
+    str_replace("Negbin", "NegBin") %>%
+    str_replace("Hdfe", "HDFE") %>%
+    str_replace("Chisq", "Chi-sq")
 }
 
 #' Load and flatten benchmark summary JSON

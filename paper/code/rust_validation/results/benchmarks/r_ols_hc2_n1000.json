@@ -1,0 +1,19 @@
+{
+  "method": "ols_hc2",
+  "dataset": "synthetic_ols_n1000.csv",
+  "n": 1000,
+  "iterations": 3,
+  "warmup": 3,
+  "timestamp": "2026-02-26T21:59:04",
+  "r_version": "4.3.3",
+  "timing": {
+    "min_us": 6587.6570297405,
+    "median_us": 7573.7291481346,
+    "mean_us": 0,
+    "max_us": 0,
+    "itr_per_sec": 133.4694115845,
+    "mem_alloc": 834216,
+    "n_gc": 0,
+    "n_itr": 3
+  }
+}

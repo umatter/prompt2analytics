@@ -1,0 +1,19 @@
+{
+  "method": "panel_hdfe",
+  "dataset": "synthetic_panel_n1000.csv",
+  "n": 1000,
+  "iterations": 3,
+  "warmup": 3,
+  "timestamp": "2026-02-26T21:56:33",
+  "r_version": "4.3.3",
+  "timing": {
+    "min_us": 19109.4600595534,
+    "median_us": 19723.4725346789,
+    "mean_us": 0,
+    "max_us": 0,
+    "itr_per_sec": 50.7010111045,
+    "mem_alloc": 236752,
+    "n_gc": 1,
+    "n_itr": 2
+  }
+}

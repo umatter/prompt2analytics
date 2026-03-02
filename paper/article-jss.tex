@@ -40,32 +40,35 @@
 %% Abstract
 \Abstract{
   Using natural language to drive data analysis is an old idea, but large
-  language models have made it suddenly ubiquitous. A widely observed
+  language models (LLMs) have made it suddenly ubiquitous. A widely observed
   and rather concerning workflow has users upload a dataset to ChatGPT
   and ask for an analysis; the model generates and executes code on a
   remote virtual machine, producing results that are difficult to
-  verify, impossible to reproduce, and incompatible with data privacy
-  requirements. This paper develops \emph{chat-first data analytics}, an
-  alternative architecture built on three principles: separate interpretation
-  from computation, pre-validate methods rather than generating code, and
-  transmit only metadata, not data. The language model interprets intent and selects tools;
-  pre-implemented, validated algorithms produce results.
+  verify, difficult to reproduce, and incompatible with data-privacy
+  requirements. This paper describes an alternative approach called
+  \emph{chat-first data analytics}, built on three principles: separate
+  interpretation from computation, pre-validate methods rather than
+  generate code, and transmit only metadata---not data. The language model
+  interprets intent and selects tools; pre-implemented, validated
+  algorithms produce results.
   \pkg{prompt2analytics} implements this approach as an econometrics and
   data analytics library in pure \proglang{Rust}, exposed through the
   Model Context Protocol~(MCP) for integration with language models. The
   library covers regression, panel data, instrumental variables,
   difference-in-differences, discrete choice, time series, and over 200
   additional methods---all validated against established \proglang{R}
-  packages. Evaluation shows that tool selection
-  works well (90--100\% on curated prompts). Local deployment via Ollama enables
+  packages. Benchmarks show a median speedup of 4$\times$ over
+  corresponding \proglang{R} implementations at $n = 100{,}000$.
+  Evaluation shows that tool selection achieves
+  90--100\% accuracy on curated prompts. Local deployment via Ollama enables
   complete data isolation on consumer hardware.
 }
 
 %% Keywords (at least one required)
 \Keywords{chat-first analytics, natural language interface, econometrics,
   \proglang{Rust}, MCP, local LLM, data privacy}
-\Plainkeywords{econometrics, Rust, regression, panel data, causal inference,
-  time series, MCP, R}
+\Plainkeywords{chat-first analytics, natural language interface, econometrics,
+  Rust, Model Context Protocol, local LLM, data privacy}
 
 \Address{
   Ulrich Matter\\

@@ -1,11 +1,11 @@
 {
   "method": "ols",
   "n": 1000,
-  "iterations": 100,
+  "iterations": 30,
   "timing": {
-    "min_us": 6046,
-    "median_us": 9544,
-    "mean_us": 9787,
-    "max_us": 13361
+    "min_us": 11490,
+    "median_us": 14197,
+    "mean_us": 16242,
+    "max_us": 40951
   }
 }

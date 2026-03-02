@@ -1,0 +1,44 @@
+# Dockerfile for reproducing paper tables and figures
+# Usage:
+#   docker build -f paper/Dockerfile.reproduce -t p2a-paper .
+#   docker run -v $(pwd)/paper:/output p2a-paper make all
+#
+# This builds a multi-stage image with both R and Rust toolchains.
+# For day-to-day development, prefer the native toolchain (see Appendix F).
+
+# ---------- Stage 1: Rust build ----------
+FROM rust:1.85-bookworm AS rust-builder
+
+WORKDIR /src
+COPY Cargo.toml Cargo.lock ./
+COPY crates/ crates/
+
+RUN apt-get update && apt-get install -y libopenblas-dev && rm -rf /var/lib/apt/lists/*
+RUN cargo build --release -p p2a-cli
+
+# ---------- Stage 2: Paper build ----------
+FROM rocker/r-ver:4.5.0
+
+# System dependencies for R packages and LaTeX
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libopenblas-dev \
+    texlive-full \
+    make \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# R packages used by figure/table scripts
+RUN R -e "install.packages(c( \
+    'plm', 'lfe', 'sandwich', 'forecast', 'bench', \
+    'ggplot2', 'dplyr', 'tidyr', 'jsonlite', 'knitr', \
+    'fixest', 'vars', 'survival' \
+  ), repos='https://cloud.r-project.org/')"
+
+# Copy Rust binary from builder
+COPY --from=rust-builder /src/target/release/p2a /usr/local/bin/p2a
+
+# Copy paper source
+WORKDIR /paper
+COPY paper/ .
+
+CMD ["make", "jss"]

@@ -1,0 +1,680 @@
+%% =============================================================================
+%% APPENDICES - content for all appendix sections
+%% =============================================================================
+%% Note: The \appendix command and TOC are in discussion.tex.
+%% This file contains the actual appendix sections.
+
+\section{Best practices and coverage gaps} \label{app:best-practices}
+\setcounter{table}{0}
+\setcounter{figure}{0}
+
+This appendix provides practical guidance for effective use of
+\pkg{prompt2analytics} and documents method coverage gaps.
+
+\subsection{Pre-analysis checklist}
+
+Before running an analysis through \pkg{prompt2analytics}, users should verify:
+\begin{enumerate}
+  \item \emph{Method availability}: Confirm the required method is implemented.
+    Table~\ref{tab:method-coverage} documents coverage gaps;
+    Appendix~\ref{app:implementation} provides method-specific caveats.
+  \item \emph{Data requirements}: Verify the dataset meets method assumptions.
+    Panel methods require entity and time identifiers; instrumental
+    variables (IV) require instruments; difference-in-differences (DiD)
+    requires treatment and time indicators.
+  \item \emph{Variable naming}: Use clear, unambiguous column names. The LLM
+    extracts variable names from natural language; names like \code{x1} or
+    \code{var\_1} are more error-prone than \code{wage} or \code{education}.
+  \item \emph{Specification clarity}: Specify methods explicitly when
+    precision matters. ``Estimate a within-transformation fixed effects model
+    with clustered standard errors at the firm level'' yields more reliable
+    results than ``run a regression with firm effects.''
+\end{enumerate}
+
+\subsection{Recommended workflows}
+
+The system is most effective for:
+\begin{itemize}
+  \item \emph{Exploratory analysis}: Quickly testing specifications before
+    committing to a formal analysis pipeline.
+  \item \emph{Teaching and learning}: Students can explore econometric methods
+    conversationally while seeing which tools and parameters are invoked.
+  \item \emph{Rapid prototyping}: Researchers can iterate on model specifications
+    in natural language before writing production code.
+  \item \emph{Verification}: Cross-checking results from other software by
+    running the same analysis through an independent implementation.
+\end{itemize}
+
+\noindent Users should prefer \proglang{R}, \proglang{Stata}, or \proglang{Python}
+when methods are unavailable (Bayesian inference, Heckman selection), maximum
+performance is critical (\pkg{fixest} outperforms for high-dimensional fixed effects (HDFE) at scale),
+reproducibility requires code scripts, or publication-quality visualizations
+are needed.
+
+\subsection{Method coverage gaps}
+
+While method coverage is broad (over 200 methods), several important categories
+remain unimplemented. Table~\ref{tab:method-coverage} summarizes coverage
+gaps and recommends alternative tools.
+
+\begin{table}[htbp]
+\centering
+\begin{threeparttable}
+\caption{Method coverage gaps}
+\label{tab:method-coverage}
+\small
+\begin{tabular}{p{3.5cm}p{5cm}p{4cm}}
+\toprule
+Method Category & Status & Recommended Alternative \\
+\midrule
+Bayesian inference & Not implemented & \proglang{R}: \pkg{rstanarm}, \pkg{brms}; \proglang{Python}: \pkg{PyMC} \\
+Heckman selection & Not implemented & \proglang{R}: \pkg{sampleSelection}; \proglang{Stata}: \code{heckman} \\
+Conley spatial SEs & Not implemented & \proglang{R}: \pkg{fixest}, \pkg{lfe} \\
+Full SARIMA (arbitrary seasonal) & Partial support & \proglang{R}: \pkg{forecast} \\
+Quantile IV & Not implemented & \proglang{R}: \pkg{quantreg} \\
+Structural equation modeling & Not implemented & \proglang{R}: \pkg{lavaan} \\
+\addlinespace
+Weak instrument inference & $F$-stat only; no Stock-Yogo CVs & \proglang{R}: \pkg{ivmodel}, \pkg{AER} \\
+\bottomrule
+\end{tabular}
+\begin{tablenotes}[flushleft]
+\item \emph{Note:} Lists unimplemented or partially implemented method
+categories with recommended alternatives in \proglang{R}, \proglang{Stata},
+or \proglang{Python}.
+\end{tablenotes}
+\end{threeparttable}
+\end{table}
+
+\noindent Users encountering these gaps should consult the listed
+alternatives; future releases aim to address Bayesian inference and
+Heckman selection as priorities.
+
+\section{LLM evaluation details} \label{app:llm-eval}
+\setcounter{table}{0}
+\setcounter{figure}{0}
+
+This appendix provides detailed single-turn tool selection results from
+the evaluation described in Section~\ref{sec:evaluation}.
+
+\subsection{Single-turn tool selection}
+
+Table~\ref{tab:model-summary} presents accuracy, cost, and failure rates
+across all evaluated models. Table~\ref{tab:category-accuracy} breaks down
+accuracy by test category.
+
+\input{tables/tab_model_summary}
+
+\input{tables/tab_category_accuracy}
+
+\noindent The key pattern across both tables is that all models exceed 90\%
+accuracy, with Ministral 3B the lowest at 90.8\%.
+Accuracy drops concentrate in hypothesis testing and time series
+categories, where distinguishing between closely related methods
+(e.g., VAR vs.\ VECM) proves challenging. Cost per query varies
+by two orders of magnitude across providers.
+
+%% Extended robustness evaluation — removed for initial submission.
+%% Content preserved in version control; subsection commented out because
+%% the methodology for multi-turn, naturalistic, parameter-extraction,
+%% interpretation, and out-of-scope evaluations is not yet mature enough
+%% to present.
+
+\section{API response latency} \label{app:latency}
+\setcounter{table}{0}
+\setcounter{figure}{0}
+
+Figure~\ref{fig:latency-comparison} presents response latency distributions
+for the models evaluated via their respective cloud APIs. These measurements
+include network round-trip time and reflect API-hosted inference, not local
+deployment performance.
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.85\textwidth]{figures/fig_latency_comparison}
+\caption{API response latency by model (log scale). Latencies reflect
+cloud-hosted inference including network round-trip time; local
+deployment would differ substantially.}
+\label{fig:latency-comparison}
+\end{figure}
+
+For cloud-hosted inference, GPT-4.1 Nano shows the fastest median response
+(1,245ms) among high-accuracy models, while Ministral 3B achieves 650ms
+median latency via OpenRouter. These figures are useful for comparing
+relative API performance but do not predict local inference speed.
+
+Local deployment latency depends on several factors: model size and
+quantization level, available RAM and GPU VRAM, CPU or GPU compute
+capability, and context length (which affects KV cache size). As a rough
+guide, GPU-accelerated inference on consumer hardware (RTX 3070/4070 with
+8~GB VRAM) typically achieves 1--3~seconds for 7--8B parameter models.
+CPU-only inference on modern laptops ranges from 5--15~seconds depending
+on model size and system specifications. For interactive use,
+GPU-accelerated inference with a 7--8B model provides sub-second
+tool selection, comparable to cloud API latency.
+
+\section{Deployment guide} \label{app:deployment}
+\setcounter{table}{0}
+\setcounter{figure}{0}
+
+Full platform-specific installation instructions (Linux, macOS, Windows/WSL2,
+Docker) are maintained in the repository's \code{README.md} at
+\url{https://github.com/umatter/prompt2analytics}. Pre-compiled binaries
+for all major platforms are available on the GitHub releases page.
+This appendix documents only the MCP client configuration and hardware
+requirements referenced from Section~\ref{sec:deployment}.
+
+\subsection{MCP client configuration}
+
+For Claude Desktop, add to \code{claude\_desktop\_config.json}:
+
+\begin{verbatim}
+{
+  "mcpServers": {
+    "prompt2analytics": {
+      "command": "/path/to/p2a-mcp",
+      "args": ["--transport", "stdio"]
+    }
+  }
+}
+\end{verbatim}
+
+\noindent Other MCP-compatible clients (Cursor, Windsurf, custom agents)
+use the same \code{--transport stdio} interface. For HTTP-based
+integration, start the server with \code{--transport http --port 8080}.
+
+\subsection{Hardware requirements for data processing}
+\label{app:hardware-requirements}
+
+Beyond LLM memory, users must budget RAM for dataset operations.
+\proglang{Rust} processes data in compact columnar format via
+\pkg{polars}. The primary memory consumers are design matrices
+($8nk$ bytes for $n$ observations and $k$ predictors), covariance
+matrices ($8k^2$ bytes), bootstrap samples ($8kB$ bytes for $B$
+replications), and panel transformations (approximately equal in size
+to the original dataset).
+
+\begin{table}[htbp]
+\centering
+\begin{threeparttable}
+\caption{RAM requirements for data processing}
+\label{tab:hardware-data}
+\small
+\begin{tabular}{lrrrl}
+\toprule
+Rows & File size & Base RAM & Matrix ops & Notes \\
+\midrule
+1,000 & $<$1 MB & 50 MB & +20 MB & Standard laptop \\
+10,000 & 1--10 MB & 100 MB & +100 MB & Standard laptop \\
+100,000 & 10--100 MB & 500 MB & +500 MB & Consumer hardware \\
+1,000,000 & 100 MB--1 GB & 2 GB & +2 GB & Workstation \\
+10,000,000 & 1--10 GB & 10 GB & +8 GB & High-memory system \\
+\bottomrule
+\end{tabular}
+\begin{tablenotes}[flushleft]
+\item \emph{Note:} Peak memory during analysis. Assumes typical
+econometric datasets with 10--50 columns.
+\end{tablenotes}
+\end{threeparttable}
+\end{table}
+
+For combined LLM and data processing, sum the requirements from
+Tables~\ref{tab:models} and \ref{tab:hardware-data}. A typical
+configuration analyzing 100,000 observations with a 7B model requires
+approximately 8--10~GB total RAM. Table~\ref{tab:hardware-summary}
+provides system recommendations for common deployment scenarios.
+
+\begin{table}[htbp]
+\centering
+\begin{threeparttable}
+\caption{System configurations by deployment scenario}
+\label{tab:hardware-summary}
+\small
+\begin{tabular}{llrrr}
+\toprule
+Scenario & Model & RAM & GPU VRAM & Storage \\
+\midrule
+Minimal (laptop) & Ministral 3B & 16 GB & 6 GB & 5 GB \\
+Consumer (desktop) & Qwen 2.5 7B & 16 GB & 8 GB & 10 GB \\
+Professional & Llama 3.3 70B & 64 GB & 48 GB & 50 GB \\
+Server (large data) & Qwen 2.5 72B & 128 GB & $2 \times 2$4 GB & 60 GB \\
+\bottomrule
+\end{tabular}
+\begin{tablenotes}[flushleft]
+\item \emph{Note:} RAM includes both LLM and data processing headroom.
+GPU requirements assume CUDA-capable NVIDIA cards; AMD and Intel GPUs
+are supported via Ollama's ROCm and OneAPI backends.
+\end{tablenotes}
+\end{threeparttable}
+\end{table}
+
+\noindent For the simplest setup, the Docker deployment
+(the Docker deployment subsection of Appendix~\ref{app:deployment}) bundles all dependencies including
+a pre-downloaded model and requires no local toolchain installation.
+
+\section{Privacy and security} \label{app:privacy}
+\setcounter{table}{0}
+\setcounter{figure}{0}
+
+This appendix documents data transmission behavior and security considerations.
+
+\subsection{Data transmission summary}
+
+Table~\ref{tab:data-transmission} lists operations that may transmit data
+beyond the local machine when using cloud LLM providers.
+
+\begin{table}[htbp]
+\centering
+\begin{threeparttable}
+\caption{Data transmission by operation type}
+\label{tab:data-transmission}
+\small
+\begin{tabular}{lp{6cm}l}
+\toprule
+Operation & Data Transmitted & Risk Level \\
+\midrule
+Dataset load & Column names, types, row count, null percentages & Low \\
+Data preview (head/tail/sample) & Actual row values & High \\
+Data profiling & Frequent values, min/max, examples & Medium \\
+Statistical estimation & Coefficients, SEs, test statistics only & Low \\
+Outlier detection & Specific observation values & Medium \\
+Error messages & May include problematic values & Low \\
+\bottomrule
+\end{tabular}
+\begin{tablenotes}[flushleft]
+\item \emph{Note:} Applies only when using cloud LLM providers. Local
+deployment via Ollama eliminates all external data transmission.
+\end{tablenotes}
+\end{threeparttable}
+\end{table}
+
+\subsection{Audit logging}
+
+To enable audit logging of all MCP tool calls:
+
+\begin{verbatim}
+p2a-mcp --transport stdio --log-level debug --log-file audit.log
+\end{verbatim}
+
+\noindent The log records: timestamp, tool name, parameters (excluding bulk
+data), and result summary. Review logs to verify no unexpected data transmission.
+
+\subsection{Network verification}
+
+To verify local-only operation with Ollama:
+
+\begin{enumerate}
+  \item Start Ollama: \code{ollama serve}
+  \item Block outbound connections: \code{sudo ufw default deny outgoing}
+  \item Run analysis---it should complete successfully
+  \item Restore network: \code{sudo ufw default allow outgoing}
+\end{enumerate}
+
+\subsection{Security best practices}
+
+\begin{itemize}
+  \item Avoid loading untrusted data files (potential injection payloads)
+  \item Review tool calls when processing sensitive data
+  \item Use local LLM deployment for high-security environments
+  \item Keep software updated; security patches are released as needed
+  \item The MCP server has no filesystem access beyond loaded datasets
+\end{itemize}
+
+\noindent The primary mitigation for data privacy concerns is local
+LLM deployment via Ollama, which eliminates all external data
+transmission while maintaining full analytical capability.
+
+\section{Reproducibility} \label{app:reproducibility}
+\setcounter{table}{0}
+\setcounter{figure}{0}
+
+This appendix provides detailed instructions for reproducing the results in this paper.
+
+\subsection{Version information}
+
+Results in this paper were generated with the following software versions:
+\begin{itemize}
+  \item \proglang{Rust}: 1.92.0 (stable)
+  \item \proglang{R}: 4.5.2 with OpenBLAS
+  \item Key \proglang{R} packages: \pkg{plm} 2.6-4, \pkg{lfe} 3.1-0,
+    \pkg{sandwich} 3.1-1, \pkg{fixest} 0.12.1, \pkg{forecast} 8.23.0
+  \item Operating system: Ubuntu 24.04 LTS (Linux 6.8)
+\end{itemize}
+
+\subsection{Reproducing benchmarks}
+
+Performance benchmarks can be reproduced using the following protocol:
+\begin{enumerate}
+  \item Install \proglang{R} 4.5+ with required packages: \pkg{plm}, \pkg{lfe},
+    \pkg{sandwich}, \pkg{forecast}, \pkg{bench}
+  \item Build \pkg{prompt2analytics} in release mode: \code{cargo build --release -p p2a-cli}
+  \item Execute benchmarks: \code{make -C paper/code benchmarks}
+\end{enumerate}
+
+\noindent Both languages use seed~$= 42$ for random number generation. The
+benchmark protocol includes 10 warmup iterations before 100 measured iterations
+for fast methods (50 for moderate, 20 for slow). Detailed
+instructions: \code{paper/\allowbreak code/\allowbreak README\_REPRODUCIBILITY.md}.
+
+\subsection{Containerized reproduction}
+
+The repository's \code{docker-compose.yml} provides a containerized
+deployment of the MCP server. For reproducing the paper's tables and
+figures, the native toolchain described above is recommended; a
+containerized paper build requires a multi-stage image with both
+\proglang{R}~4.5.2 (plus packages listed above) and
+\proglang{Rust}~1.92.0. A sample \code{Dockerfile} for this purpose
+is provided in \code{paper/\allowbreak Dockerfile.reproduce}; after
+building, run:
+
+\begin{verbatim}
+docker build -f paper/Dockerfile.reproduce -t p2a-paper .
+docker run -v $(pwd)/paper:/output p2a-paper make all
+\end{verbatim}
+
+\noindent Results should match within the tolerances specified in
+Appendix~\ref{app:benchmark-methodology}.
+
+\section{Benchmark methodology} \label{app:benchmark-methodology}
+\setcounter{table}{0}
+\setcounter{figure}{0}
+
+This appendix provides complete details on the benchmark methodology used in
+Section~\ref{sec:deployment}.
+
+\subsection{Data generating processes}
+
+Benchmark datasets are generated synthetically using identical data-generating
+processes in both languages with fixed random seeds (seed $= 42$) for exact
+reproducibility.
+
+For regression benchmarks, data follow
+$y_i = \beta_0 + \beta_1 x_{1i} + \beta_2 x_{2i} + \varepsilon_i$ with
+true parameters $\beta_0 = 1.0$, $\beta_1 = 2.0$, $\beta_2 = -1.5$, and
+$\varepsilon_i \sim \mathcal{N}(0, \sigma^2)$ where $\sigma = 1.0$; covariates
+are drawn as $x_{1i} \sim \mathcal{N}(0, 1)$ and $x_{2i} \sim \mathcal{N}(0, 1)$
+with correlation $\rho = 0.3$. For panel data, entity effects
+$\alpha_i \sim \mathcal{N}(0, 0.5^2)$ are added, with 100 entities observed
+over 10 periods. For discrete choice, the latent index
+$y^*_i = \beta' x_i + \varepsilon_i$ is transformed via the logit or probit
+link. For time series, data follow ARIMA$(1,1,1)$ with $\phi = 0.7$,
+$\theta = 0.3$, and innovation variance $\sigma^2_\eta = 1.0$.
+
+Complete DGP specifications are provided in
+\code{paper/code/README\_REPRODUCIBILITY\allowbreak.md}.
+
+\subsection{Benchmark execution protocol}
+
+Each benchmark configuration executes multiple iterations after a warmup phase:
+\begin{itemize}
+  \item 100 iterations for fast methods (OLS, robust SEs, PCA)
+  \item 50 iterations for moderate methods (panel FE, clustering)
+  \item 20 iterations for slow methods (ARIMA, MSTL (multiple seasonal-trend
+    decomposition using LOESS))
+\end{itemize}
+
+\proglang{R} benchmarks use the \pkg{bench} package, which accounts for garbage
+collection timing. \proglang{Rust} benchmarks use Criterion with automatic
+warmup and outlier detection. We report full timing distributions (minimum,
+quartiles, maximum, mean, standard deviation) rather than point estimates alone.
+
+\subsection{Hardware and software environment}
+
+All benchmarks run on identical hardware: an Intel Core i7-1260P processor
+with 64~GB RAM running Linux, with \proglang{R} 4.5.2 linked against
+OpenBLAS and \proglang{Rust} 1.92.0 compiled in release mode with
+link-time optimization. The \pkg{faer} library (version~0.22) used by
+\pkg{p2a-core} does \emph{not} call an external BLAS; it implements its
+own GEMM microkernels in pure \proglang{Rust} with explicit SIMD via
+the \pkg{pulp} crate, dispatching at runtime to AVX2+FMA on x86-64
+(or NEON on ARM). Both \proglang{R} and \proglang{Rust} therefore
+use optimized linear algebra routines, but from different
+implementations (OpenBLAS vs.\ \pkg{faer}). This makes the
+comparison a realistic measure of what each ecosystem delivers out of
+the box, not a controlled BLAS-versus-BLAS experiment.
+
+\subsection{Validation tolerances} \label{app:validation-tolerances}
+
+Numerical validation against \proglang{R} reference implementations uses
+sample-size-dependent tolerances. We use absolute tolerances for quantities
+with known scale (e.g., test statistics) and relative tolerances for
+unbounded quantities (e.g., coefficient estimates).
+
+\begin{table}[htbp]
+\centering
+\begin{threeparttable}
+\caption{Validation tolerances by method and sample size}
+\label{tab:validation-tolerances}
+\small
+\begin{tabular}{llccc}
+\toprule
+Category & Quantity & Small ($n < 100$) & Medium & Large ($n > 10{,}000$) \\
+\midrule
+\multicolumn{5}{l}{\textit{Coefficients and standard errors}} \\
+OLS coefficients & Relative & $10^{-6}$ & $10^{-8}$ & $10^{-10}$ \\
+Robust SEs (HC0/HC1)$^a$ & Relative & $10^{-6}$ & $10^{-8}$ & $10^{-8}$ \\
+Robust SEs (HC2/HC3)$^a$ & Relative & $10^{-5}$ & $10^{-7}$ & $10^{-7}$ \\
+Panel FE/RE & Relative & $10^{-5}$ & $10^{-6}$ & $10^{-6}$ \\
+MLE$^b$ (logit/probit) & Relative & $10^{-4}$ & $10^{-6}$ & $10^{-6}$ \\
+\addlinespace
+\multicolumn{5}{l}{\textit{Test statistics and fit measures}} \\
+$t$-statistics, $F$-statistics & Absolute & $10^{-4}$ & $10^{-6}$ & $10^{-6}$ \\
+$R^2$, within $R^2$ & Absolute & $10^{-4}$ & $10^{-6}$ & $10^{-6}$ \\
+$p$-values & Absolute & $10^{-4}$ & $10^{-6}$ & $10^{-6}$ \\
+Log-likelihood & Absolute & $10^{-2}$ & $10^{-4}$ & $10^{-4}$ \\
+\addlinespace
+\multicolumn{5}{l}{\textit{Hypothesis tests}} \\
+Test statistics & Absolute & $10^{-4}$ & $10^{-6}$ & $10^{-6}$ \\
+Critical values & Absolute & $10^{-4}$ & $10^{-4}$ & $10^{-4}$ \\
+\bottomrule
+\end{tabular}
+\begin{tablenotes}[flushleft]
+\item \emph{Note:} Absolute tolerances ($\varepsilon_{\mathrm{abs}}$) apply to
+test statistics, $p$-values, and bounded quantities. Relative tolerances
+($\varepsilon_{\mathrm{rel}}$) apply to coefficient estimates and standard errors.
+$^a$~HC0--HC3: heteroskedasticity-consistent standard error estimators
+(types 0--3). $^b$~MLE: maximum likelihood estimation.
+\end{tablenotes}
+\end{threeparttable}
+\end{table}
+
+Looser tolerances for small samples reflect
+increased sensitivity to algorithmic differences when matrices are
+ill-conditioned. HC2/HC3 standard errors use looser tolerances because
+leverage calculation involves $h_{ii} = x_i'(X'X)^{-1}x_i$, which accumulates
+rounding errors differently depending on whether leverage is extracted from
+QR decomposition (as in \pkg{sandwich}) or computed via direct matrix
+multiplication (as in \pkg{prompt2analytics}). Both approaches are numerically
+valid; the tolerance reflects implementation variation rather than error.
+
+MLE methods use looser small-sample tolerances because convergence criteria
+differ between implementations: \proglang{R}'s \fct{glm} uses relative
+change in deviance, while \pkg{prompt2analytics} uses absolute change in
+log-likelihood. Final parameter estimates can differ at the tolerance boundary
+while both satisfying their respective convergence criteria.
+
+Tolerances were determined empirically by
+running validation tests across sample sizes from $n = 10$ to $n = 100{,}000$
+and identifying the tightest tolerance that passes consistently. Edge cases
+(singular matrices, near-separation in logit/probit, small cluster counts)
+are tested separately with method-specific tolerances documented in the
+test code. All 334 validation tests pass at the specified tolerances.
+
+
+%% Appendix I (Related work) folded into Section 2.3
+
+\section{Implementation notes} \label{app:implementation}
+\setcounter{table}{0}
+\setcounter{figure}{0}
+
+This appendix documents implementation caveats and limitations for specific
+methods.
+
+\subsection{Instrumental variables}
+
+The two-stage least squares (2SLS) implementation reports first-stage
+$F$-statistics for instrument relevance. The traditional rule of thumb ($F > 10$) from \citet{Staiger+Stock:1997}
+has been superseded by more nuanced guidance. \citet{Stock+Yogo:2005} provide
+critical values depending on the number of instruments and acceptable bias
+levels; \citet{Lee+etal:2022} offer further refinements for inference under
+weak identification. The current implementation does not provide Stock-Yogo
+critical values or weak-identification-robust inference methods (Anderson-Rubin,
+conditional likelihood ratio). Users with potentially weak instruments should
+verify results using \proglang{R}'s \pkg{ivmodel} or \pkg{AER} packages.
+
+\subsection{Difference-in-differences}
+
+The difference-in-differences (DiD) implementation assumes the canonical
+two-group, two-period design.
+Recent econometric literature has documented severe biases when this estimator
+is applied to staggered treatment timing. \citet{Goodman-Bacon:2021} demonstrates
+that two-way fixed effects DiD produces a weighted average of all possible $2 \times 2$
+comparisons, including problematic ``forbidden'' comparisons using already-treated
+units as controls. \citet{deChaisemartin+DHaultfoeuille:2020} and
+\citet{Sun+Abraham:2021} propose alternative estimators robust to treatment
+effect heterogeneity.
+
+\pkg{prompt2analytics} implements staggered DiD via
+Callaway-Sant'Anna~\citep{Callaway+SantAnna:2021}, Goodman-Bacon decomposition, and extended
+two-way fixed effects (TWFE)~\citep{Wooldridge:2021}. Users with complex staggered designs may also
+consult \pkg{fixest}'s \fct{sunab} function or the \pkg{did} package in
+\proglang{R} for additional diagnostics.
+
+\subsection{Random effects}
+
+The random effects estimator uses the Swamy-Arora variance component estimator,
+which can produce negative variance estimates for $\sigma^2_\alpha$ (the
+between-entity variance) in certain data configurations. When this occurs,
+the implementation truncates the estimate to zero and proceeds with pooled
+OLS, issuing a warning.
+
+\subsection{Discrete choice models}
+
+Logit and probit models report coefficients on the latent index scale. For
+interpretation, marginal effects are computed as \emph{Average Marginal Effects}
+(AME): the partial derivative $\partial \Pr(y=1)/\partial x_j$ is evaluated
+at each observation's covariate values, then averaged across the sample.
+This differs from \emph{Marginal Effects at Means} (MEM), which evaluates
+derivatives at the sample mean of all covariates. AME is generally preferred
+because it does not depend on potentially unrepresentative ``average''
+covariate values~\citep{Cameron+Trivedi:2005}.
+
+\subsection{Time series models}
+
+Autoregressive integrated moving average (ARIMA) estimation supports
+non-seasonal models: ARIMA$(p,d,q)$ with automatic or user-specified orders. Seasonal ARIMA (SARIMA) is partially implemented:
+seasonal differencing and seasonal AR/MA terms can be specified, but automatic
+seasonal order selection is not available.
+
+Vector autoregression (VAR) and vector error correction model (VECM)
+implementations support lag selection via AIC/BIC and Johansen
+cointegration testing, but do not implement structural VAR identification.
+
+\subsection{Regression diagnostics validation}
+
+Diagnostic tests are validated against \pkg{lmtest}~\citep{lmtest}:
+Jarque-Bera normality test statistics match to $< 10^{-4}$,
+Breusch-Pagan heteroskedasticity tests to $< 10^{-4}$,
+Durbin-Watson autocorrelation statistics to $< 10^{-6}$, and
+variance inflation factors (VIF) to $< 10^{-6}$.
+
+\subsection{Known differences from reference implementations}
+\label{app:known-differences}
+
+A small number of intentional differences exist between \pkg{prompt2analytics}
+and reference implementations. First, \pkg{prompt2analytics} defaults to
+HC1 robust standard errors (consistent with \proglang{Stata}'s \code{robust} option),
+while \proglang{R}'s \pkg{sandwich} defaults to HC3. Second, \proglang{R}
+uses variable names in output; \pkg{prompt2analytics} uses numeric indices
+internally but displays names in formatted output. Third, for panel models
+we report ``within $R^2$'' by default, matching \pkg{plm}'s convention for
+fixed effects models. Fourth, iterative methods (HDFE, maximum likelihood estimation) use a default
+convergence tolerance of $10^{-8}$, which may differ slightly from
+\proglang{R} package defaults. These differences are documented in the
+method documentation and do not affect the validity of statistical inference.
+
+\noindent Coverage gaps and unimplemented methods are documented in
+Appendix~\ref{app:best-practices} (Table~\ref{tab:method-coverage}).
+
+\section{Extended examples} \label{app:extended-examples}
+\setcounter{table}{0}
+\setcounter{figure}{0}
+
+This appendix collects additional examples that complement the core
+demonstrations in Section~\ref{sec:examples}.
+
+\subsection[Comparison with R]{Comparison with \proglang{R}}
+
+For reference, the equivalent \proglang{R} code for the fixed effects
+estimation shown in Section~\ref{sec:examples-chat} is:
+
+\begin{Sinput}
+library(plm)
+data("Grunfeld", package = "plm")
+fe_model <- plm(inv ~ value + capital, data = Grunfeld,
+                index = c("firm", "year"), model = "within")
+summary(fe_model)
+\end{Sinput}
+
+The \pkg{prompt2analytics} implementation produces numerically equivalent
+results (Section~\ref{sec:evaluation}), while offering a conversational
+interface for users unfamiliar with \proglang{R} syntax.
+
+\subsection{Time series analysis}
+
+A time series workflow using quarterly U.S.\ GDP growth data
+(1954--2023) illustrates method progression within a single
+conversation: stationarity testing, univariate modeling, then
+multivariate analysis.
+
+\begin{Sinput}
+User: Load gdp_quarterly.csv and check for stationarity.
+\end{Sinput}
+
+\begin{Soutput}
+**Augmented Dickey-Fuller Test** (gdp_growth)
+Statistic: -4.82, P-value: 0.000
+GDP growth is stationary. No differencing needed.
+\end{Soutput}
+
+\begin{Sinput}
+User: Fit an ARIMA model to GDP growth. Let the system pick the order.
+\end{Sinput}
+
+\begin{Soutput}
+**ARIMA(2,0,1)** (AIC-based selection)
+AR(1): 0.312 (0.067), AR(2): 0.154 (0.063), MA(1): -0.089 (0.072)
+Ljung-Box (lag 10): p = 0.482 (no residual autocorrelation)
+\end{Soutput}
+
+\noindent Order selection is delegated to the LLM, which chooses
+$p$, $d$, $q$ based on the ADF result and its training knowledge.
+This is not equivalent to \proglang{R}'s \code{auto.arima()}, which
+performs systematic grid
+search~\citep{Hyndman+Khandakar:2008}.
+
+\subsection{Handling messy data}
+
+Real-world datasets often require cleaning before analysis. The
+system detects non-standard missing indicators and guides type
+conversion:
+
+\begin{Sinput}
+User: Load survey_responses.csv and describe the data.
+\end{Sinput}
+
+\begin{Soutput}
+Dataset: survey_responses (2,847 rows x 6 columns)
+Note: 'income' and 'satisfaction' are typed as String, likely due to
+non-standard missing value indicators (".", "N/A").
+\end{Soutput}
+
+\begin{Sinput}
+User: Replace "." and "N/A" with proper missing values, then convert
+      income and satisfaction to numeric.
+\end{Sinput}
+
+\begin{Soutput}
+Cleaned: 89 values replaced across 2 columns.
+  income:        now Float64, 52 missing (1.8%)
+  satisfaction:  now Float64, 37 missing (1.3%)
+\end{Soutput}

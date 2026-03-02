@@ -26,12 +26,11 @@ benchmark_df <- map_dfr(names(methods_list), function(method) {
   })
 })
 
-# Filter to n=100,000 (or max n for each method)
+# Filter to n=100,000, exclude startup-dominated and known-slow methods
 plot_data <- benchmark_df %>%
-  group_by(method) %>%
-  filter(n == max(n)) %>%
-  ungroup() %>%
+  filter(n == 100000) %>%
   filter(speedup > 0) %>%
+  filter(!method %in% c("hierarchical", "pca", "select", "lag")) %>%
   mutate(
     rust_faster = speedup > 1,
     speedup_label = case_when(
@@ -47,8 +46,8 @@ p <- ggplot(plot_data, aes(x = speedup, fill = rust_faster)) +
   geom_vline(xintercept = 1, linetype = "dashed", color = "gray40", linewidth = 0.8) +
   scale_x_log10(
     name = "Speedup Factor (Rust / R)",
-    breaks = c(0.1, 0.25, 0.5, 1, 2, 4, 6),
-    labels = c("0.1×", "0.25×", "0.5×", "1×", "2×", "4×", "6×")
+    breaks = c(0.1, 0.5, 1, 2, 5, 10, 50, 200, 700),
+    labels = c("0.1×", "0.5×", "1×", "2×", "5×", "10×", "50×", "200×", "700×")
   ) +
   scale_y_continuous(name = "Number of Methods") +
   scale_fill_manual(
@@ -57,14 +56,14 @@ p <- ggplot(plot_data, aes(x = speedup, fill = rust_faster)) +
     name = NULL
   ) +
   annotate(
-    "text", x = 0.15, y = Inf, label = "R faster",
-    vjust = 2, hjust = 0.5, color = "#0097A7", fontface = "bold", size = 3.5
+    "text", x = 0.2, y = Inf, label = "R faster",
+    vjust = 2, hjust = 0.5, color = "#0097A7", fontface = "bold", size = 5
   ) +
   annotate(
-    "text", x = 4, y = Inf, label = "Rust faster",
-    vjust = 2, hjust = 0.5, color = "#E65100", fontface = "bold", size = 3.5
+    "text", x = 10, y = Inf, label = "Rust faster",
+    vjust = 2, hjust = 0.5, color = "#E65100", fontface = "bold", size = 5
   ) +
-  theme_minimal(base_size = 11) +
+  theme_minimal(base_size = 16) +
   theme(
     legend.position = "none",
     panel.grid.minor = element_blank(),

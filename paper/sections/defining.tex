@@ -1,0 +1,294 @@
+%% =============================================================================
+%% DEFINING CHAT-FIRST ANALYTICS
+%% =============================================================================
+
+\section{Defining chat-first analytics} \label{sec:defining}
+
+The introduction identified three concerns with using language models for
+data analysis: correctness, privacy, and reproducibility. This section
+examines these failure modes more carefully, then states the three
+principles that define chat-first analytics.
+
+\subsection{How LLM-assisted analysis goes wrong}
+
+The appeal of typing ``regress wages on education with robust standard
+errors'' into ChatGPT is obvious. The problems are less visible. They
+fall into four categories.
+
+First, LLM-generated code often runs without error but computes the wrong
+quantity. Requesting ``clustered standard errors'' might yield
+heteroskedasticity-robust errors instead. A panel model might omit
+entity fixed effects. A difference-in-differences specification might
+use the wrong interaction term. \citet{Ludwig+Mullainathan+Rambachan:2025}
+document these risks systematically: the code executes, returns
+plausible-looking output, and the user has no way to detect the
+error without the expertise that would have let them write the code
+themselves.
+
+Second, code-generation systems require the data. When a user asks ChatGPT
+to analyze a dataset, the data is uploaded to a third-party server
+with unclear retention policies. For survey responses, health records,
+personnel data, or any dataset subject to privacy regulations, this
+may be unacceptable. Even when providers promise not to retain data,
+the transmission itself may violate institutional or regulatory
+requirements.
+
+Third, the same prompt sent to the same model on different days may produce
+different code. Models are updated, fine-tuned, and retrained. The
+generated \proglang{Python} script that worked in January may not be
+what the model produces in March. Conversational sessions are
+ephemeral---unless the user manually saves the generated code, the
+analysis cannot be reproduced. This contradicts a basic requirement
+of scientific work.
+
+Fourth, when a system generates 30 lines of \proglang{Python} to answer a
+statistical question, understanding what was computed requires reading
+and auditing those 30 lines of code. The user who could not write the code
+cannot audit it either. This problem extends beyond research:
+enterprise text-to-SQL deployments struggle with the same issue---ambiguous
+questions admit multiple valid interpretations, and users cannot verify
+which was executed~\citep{Renggli+Ilyas+Rekatsinas:2025}.
+
+These four problems are distinct but related. Silent errors arise
+because the language model controls both \emph{what} to compute and
+\emph{how} to compute it. Privacy violations arise because
+computation and data must be co-located on the provider's servers.
+Reproducibility failures arise because the generated code is a
+function of the model's current state. Auditability failures arise
+because the computational logic is opaque---buried in generated code
+rather than invoked from a known, inspectable implementation.
+Systematic error rates for LLM-generated statistical code are not
+yet well established---\citet{Ludwig+Mullainathan+Rambachan:2025}
+document the \emph{types} of errors that arise, but base rates
+depend on the model, the prompt, and the statistical method. The
+motivation for the architecture described below rests on the
+existence and nature of these failure modes, not on their precise
+frequency.
+
+\subsection{Three principles} \label{sec:principles}
+
+Chat-first data analytics addresses these problems through three
+principles. ``Chat-first'' means that natural language conversation
+is the designed-for entry point: tool schemas are annotated for LLM
+consumption, error messages are phrased for conversational context,
+and default parameters are chosen so that typical requests need
+minimal specification. It does not mean chat-only---\pkg{prompt2analytics}
+also provides a CLI that invokes the same methods directly
+(Section~\ref{sec:tools}), and every tool call maps to a public
+\proglang{Rust} function usable without any LLM---but the
+conversational interface is the primary design target. The first
+two principles are definitional; the third is a design choice that we
+consider essential.
+
+\subsubsection{Principle 1: Separate interpretation from computation}
+
+The language model decides \emph{what} to compute; validated software
+decides \emph{how}. When a user asks to ``estimate the effect of
+education on wages, controlling for experience, with robust standard
+errors,'' the language model's job is to determine that this requires
+OLS with HC1 standard errors, identify the column names, and generate
+a structured tool call. The actual matrix algebra---forming
+$(\bm{X}'\bm{X})^{-1}\bm{X}'\bm{y}$, computing the
+HC1 sandwich estimator---is performed by pre-implemented code that
+the language model cannot modify.
+
+This division of labor plays to each component's strengths. Language
+models are good at understanding intent, resolving ambiguity, and
+mapping natural language to structured specifications. They are
+unreliable at generating correct numerical code. Separation removes
+the failure mode where the model produces code that runs but computes
+the wrong quantity, because the model never produces code at all.
+Wrong parameter extraction remains possible (Section~\ref{sec:evaluation}),
+but the error surface is smaller: the model selects from a fixed schema
+rather than generating arbitrary code.
+
+The idea has precedent in text-to-SQL systems~\citep{Yu+etal:2018,
+Li+etal:2024}, where a language model translates natural language into
+structured database queries executed by a SQL engine. We extend this
+pattern from data retrieval to statistical computation: from
+text-to-SQL to text-to-statistics.
+
+\subsubsection{Principle 2: Pre-validate methods, not generated code}
+
+Correctness is established once, through systematic validation against
+reference implementations, rather than hoped for anew with each
+request. When \pkg{prompt2analytics} runs OLS, it uses the same
+\proglang{Rust} function every time---a function validated against
+\proglang{R}'s \fct{lm} on the Longley dataset to $10^{-8}$
+precision (Section~\ref{sec:evaluation}). The user need not audit
+the implementation on each invocation, any more than they audit
+\proglang{R}'s source code when calling \fct{lm}.
+
+This principle also solves the reproducibility problem. The same
+method invocation with the same data produces identical results,
+regardless of when it is run or which language model is used. The
+stochastic element of the language model affects only interpretation
+(which tool to call, how to explain the output), never computation.
+Two users who phrase the same analysis differently may get different
+tool calls---but once the tool is selected and parameters specified,
+the result is deterministic.
+
+\subsubsection{Principle 3: Keep data local; transmit only structure}
+
+The language model receives column names, data types, and summary
+statistics---not the data itself. A dataset of 100,000 salary records
+is represented to the model as metadata: ``columns: employee\_id (int),
+salary (float, range 28000--185000), department (string, 12 unique
+values), years\_experience (float, range 0.5--35.2).'' Statistical
+computations execute on the user's machine; only aggregated results
+(coefficients, standard errors, test statistics) pass through the
+language model.
+
+This is not definitionally required for chat-first analytics---a
+cloud-based system satisfying Principles~1 and~2 would still qualify.
+But we consider data locality essential for the use cases that
+motivate this work. Researchers analyzing survey data, firms analyzing
+personnel records, and analysts working under privacy regulations need
+architectures where data isolation is guaranteed by design, not
+promised by policy.
+
+For complete isolation, the language model itself can run locally.
+Open-source models deployed via Ollama~\citep{Ollama} eliminate all
+external network communication. Our evaluation
+(Section~\ref{sec:evaluation}) shows that even 3-billion-parameter
+models achieve over 90\% tool selection accuracy, making fully local
+deployment practical on consumer hardware.
+
+Together, the three principles address the four failure modes
+identified above. Separation and pre-validation eliminate silent
+computational errors: the model never generates code, and the code
+it invokes is validated once against reference implementations.
+Pre-validation also ensures reproducibility, because the same method
+invocation with the same data always produces the same result. Data
+locality protects privacy by keeping raw data on the user's machine.
+Auditability improves on all three fronts---the user inspects a
+structured tool call rather than 30 lines of generated code.
+
+\subsection{Relationship to existing ideas}
+
+Chat-first analytics applies established techniques to a new domain.
+Tool-augmented language models~\citep{Schick+etal:2023, Yao+etal:2023}
+can reliably select and invoke external tools when provided with
+appropriate schemas~\citep{Qu+etal:2025, Liu+etal:2025:ToolACE}. The
+Model Context Protocol (MCP)~\citep{MCP:2024} standardizes how
+language models discover and invoke tools, providing the communication
+layer between interpretation and computation.%
+\footnote{MCP focuses on model-to-tool integration. Complementary
+protocols address agent-to-agent communication: Google's Agent2Agent
+(A2A) protocol~\citep{A2A:2025} and IBM's Agent Communication
+Protocol (ACP)~\citep{ACP:2025}, which merged under Linux Foundation
+governance in 2025. For single-agent tool invocation---the pattern
+used here---MCP is the dominant standard, with adoption by OpenAI,
+Microsoft, and Google alongside Anthropic.}
+
+The interface innovation has precedents in four strands of work.
+First, \emph{formula notation and domain-specific languages}:
+the Wilkinson-Rogers formula notation~\citep{Wilkinson+Rogers:1973}
+simplified model specification in the 1970s;
+\citet{Chambers+Hastie:1992} extended it in \proglang{S} and
+\proglang{R}~\citep{Chambers:1998}; and probabilistic programming
+languages like Stan~\citep{Carpenter+etal:2017} apply the DSL
+pattern to Bayesian inference. Chat-first analytics replaces
+formal notation with natural language, trading precision for
+accessibility.
+Second, \emph{natural language interfaces to data systems}:
+LUNAR~\citep{Woods:1973} demonstrated feasibility for database
+querying in the 1970s, and the text-to-SQL paradigm---driven by
+benchmarks like Spider~\citep{Yu+etal:2018}---has produced
+substantial improvements in translating natural language to
+structured queries~\citep{Li+etal:2024}. We extend this pattern
+from data retrieval to statistical computation.
+Third, \emph{automated machine learning}: Auto-sklearn~\citep{Feurer+etal:2015}
+and H2O AutoML~\citep{LeDell+Poirier:2020} automate model selection
+through algorithmic search, and recent work integrates LLMs into
+the pipeline~\citep{Hollmann+etal:2024}. AutoML optimizes for
+prediction; chat-first analytics interprets user intent across
+prediction, causal inference, hypothesis testing, and description.
+Fourth, \emph{computational econometrics} has established
+standards for numerical accuracy~\citep{McCullough:1997,
+McCullough+Vinod:1999, Davidson+MacKinnon:2004}, which motivate
+the validation approach described in Section~\ref{sec:evaluation}.
+
+Several systems have explored LLM-assisted data analysis, but with
+a code-generation architecture. \citet{Hong+etal:2024} present a
+``Data Interpreter'' that generates and executes \proglang{Python}
+code. \citet{Chen+Shen+Ma:2025} develop an ``Econometrics AI Agent''
+that augments code generation with domain knowledge.
+\citet{Sun+etal:2025:LAMBDA} describe an agent that orchestrates
+generated code across analysis stages. All three generate code;
+none pre-validate implementations or enforce data locality.
+Table~\ref{tab:system-comparison} summarizes these differences.
+
+Hybrid designs are possible. A system could generate code for bespoke
+analyses while routing standard requests to pre-validated tools, or
+could verify generated code through static analysis before execution.
+\pkg{prompt2analytics} deliberately occupies one end of this spectrum:
+all computation is pre-validated, with no code generation at all. This
+sacrifices flexibility (analyses outside the method library are
+unavailable) but eliminates an entire class of failure modes. Whether
+hybrid designs can achieve a better trade-off is an open question.
+
+\begin{table}[htbp]
+\centering
+\begin{threeparttable}
+\caption{Comparison with code-generation approaches}
+\label{tab:system-comparison}
+\small
+\begin{tabular}{@{}lp{2.5cm}p{2.4cm}p{2.4cm}p{2.4cm}@{}}
+\toprule
+ & \pkg{p2a} & Econ.\ AI & Data Interpr. & LAMBDA \\
+\midrule
+LLM role & Tool selection & Enhanced code gen & Code gen + exec & Agent orchestration \\
+Computation & Pre-validated & LLM-generated & LLM-generated & LLM-generated \\
+Local execution & Yes (Ollama) & No & No & No \\
+Validated & Yes (vs.\ R) & No & No & No \\
+Method flexibility & Fixed library (${\sim}200$ methods) & Any \proglang{R} method & Any \proglang{Python} method & Any \proglang{Python} method \\
+Extensibility & Requires Rust impl. & Extends with model & Extends with model & Extends with model \\
+\bottomrule
+\end{tabular}
+\begin{tablenotes}[flushleft]
+\item \emph{Note:} Econ.\ AI = Econometrics AI
+Agent~\citep{Chen+Shen+Ma:2025}; Data Interpr.\ = Data
+Interpreter~\citep{Hong+etal:2024}; LAMBDA~\citep{Sun+etal:2025:LAMBDA}.
+The trade-off: code-generation systems offer unlimited method
+flexibility at the cost of unvalidated computation; \pkg{p2a}
+constrains coverage to ensure correctness.
+\end{tablenotes}
+\end{threeparttable}
+\end{table}
+
+Two limitations of the approach are fundamental, not fixable by
+better engineering. First, statistical expertise is still required:
+chat-first analytics assists with method selection and execution, not
+with research design or causal identification. A user who requests
+``estimate the effect of X on Y'' receives a regression, but the
+system does not validate whether a causal interpretation is warranted.
+LLM explanations may echo causal language from the user's prompt even
+when the analysis provides only associational evidence. Users remain
+responsible for ensuring that their identification strategy supports
+their claims.
+
+Second, method selection is imperfect. Tool selection works well on
+curated prompts (Section~\ref{sec:evaluation}), but users should
+verify that the system understood their request correctly---particularly
+for ambiguous specifications where multiple methods could apply. Users
+should consult the accuracy results before interpreting the curated
+examples in Section~\ref{sec:examples}.
+
+Third, pre-validation trades coverage for correctness. When a user
+requests a method outside the implemented set---Bayesian inference,
+structural equation modeling, or a custom estimator---the LLM may
+silently map the request to the closest available alternative rather
+than reporting unavailability. This is the symmetric failure mode to
+code generation's silent errors: instead of running wrong code, the
+system runs the wrong method. The risk is mitigated by the structured
+tool schema (which makes the selected method visible to the user) and
+by the LLM's ability to explain substitutions, but users must still
+verify that the method matches their intent.
+
+These limitations mean that chat-first analytics is a useful tool,
+not an autonomous analyst. Users should verify tool selection, check
+extracted parameters, and apply domain knowledge to interpret
+results---the same discipline required when using any statistical
+software, with the added need to verify that the system understood the
+request correctly.

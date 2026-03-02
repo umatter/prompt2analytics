@@ -105,6 +105,24 @@ performance/comparisons/r_comparison/results/rust_comprehensive_2026*.json
 performance/comparisons/r_comparison/results/figures/
 performance/results/
 
+# Nested Rust build artifacts
+paper/code/rust_validation/rust_runner/target/
+
+# Generated synthetic data directory
+paper/code/rust_validation/datasets/synthetic/
+
+# Generated review/copyedit reports
+copyedit_reports/
+paper/copyedit_reports/
+paper/narrative_review/
+paper/jss_*.md
+
+# Archived paper drafts
+paper/archive/
+
+# External resources
+_resources/tidy-data.pdf
+
 # Python
 __pycache__/
 *.pyc

@@ -1,19 +1,19 @@
 {
-  "method": "ols_robust",
+  "method": "ols_hc0",
   "dataset": "synthetic_ols_n100000.csv",
   "n": 100000,
-  "iterations": 20,
+  "iterations": 10,
   "warmup": 3,
-  "timestamp": "2026-01-26T11:48:06",
+  "timestamp": "2026-02-27T11:07:15",
   "r_version": "4.3.3",
   "timing": {
-    "min_us": 126388.6039378121,
-    "median_us": 137225.4050220363,
-    "mean_us": [],
-    "max_us": [],
-    "itr_per_sec": 6.7864722682,
+    "min_us": 270576.6749568284,
+    "median_us": 289782.3855164461,
+    "mean_us": 0,
+    "max_us": 0,
+    "itr_per_sec": 3.2494049468,
     "mem_alloc": 82254552,
-    "n_gc": 98,
-    "n_itr": 20
+    "n_gc": 48,
+    "n_itr": 10
   }
 }

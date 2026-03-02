@@ -37,7 +37,7 @@ domain experts to describe analytical goals directly.
 The pitfalls, however, are substantial. LLM-generated code may run without error
 but compute the wrong quantity---requesting ``clustered standard errors'' might
 yield robust errors instead, or a panel model might omit fixed effects.
-\cite{Ludwig+Mullainathan+Rambachan:2024} emphasize the risks of ``training
+\cite{Ludwig+Mullainathan+Rambachan:2025} emphasize the risks of ``training
 leakage'' and the difficulty of validating generated code. Users who lack the
 expertise to write code often lack the expertise to audit it.
 
@@ -73,11 +73,8 @@ workflows discourage. A researcher might begin with
 ``control for Z,'' inspect the regression output, and continue ``are there
 outliers driving this?'' Each step builds on the previous, with the language
 model maintaining context across the conversation. This mirrors how experienced
-analysts actually think about data. Our evaluation (Section~\ref{sec:evaluation})
-found that multi-turn accuracy reaches 83--97\% when conversation history
-includes tool calls and their results---a simple fix that makes a large
-difference. Whether this translates to better user experience remains to be
-tested in user studies.
+analysts actually think about data. Whether this translates to better user
+experience remains to be tested in user studies.
 
 A further opportunity comes from reconsidering the computational architecture.
 When ChatGPT or Claude perform data analysis, they generate \proglang{Python}
@@ -176,8 +173,8 @@ describes the software architecture of \pkg{prompt2analytics}, including the
 core library, implemented methods, user interfaces, and communication flow.
 Section~\ref{sec:examples} demonstrates the chat-first workflow through worked
 examples, including realistic failure cases. Section~\ref{sec:evaluation}
-evaluates LLM performance across tool selection, multi-turn conversations,
-parameter extraction, and interpretation accuracy.
+evaluates LLM tool selection accuracy and numerical validation against
+\proglang{R}.
 Section~\ref{sec:comparison} presents validation results comparing
 \pkg{prompt2analytics} to established \proglang{R} packages, and
 Section~\ref{sec:performance} provides detailed performance benchmarks.

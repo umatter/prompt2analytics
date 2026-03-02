@@ -7,6 +7,7 @@
 ## SETUP ----
 library(tidyverse)
 library(jsonlite)
+source("helpers.R")
 
 INPUT <- "rust_validation/results/summaries/"
 OUTPUT <- "../figures/"
@@ -43,22 +44,16 @@ benchmark_df <- map_dfr(names(methods_list), function(method) {
   })
 })
 
-# Filter to largest n per method and prepare for plotting
+# Filter to n=100,000 only (fair comparison at scale)
+# Exclude methods where process startup overhead dominates (R < 1ms)
+# and methods with known implementation issues (hierarchical O(n^3))
 plot_data <- benchmark_df %>%
-  group_by(method) %>%
-  filter(n == max(n)) %>%
-  ungroup() %>%
+  filter(n == 100000) %>%
   filter(r_median_us > 0, rust_median_us > 0) %>%
+  filter(r_median_us > 5000) %>%  # Exclude sub-5ms methods (startup-dominated)
+  filter(!method %in% c("hierarchical", "pca", "granger")) %>%  # Exclude known slow and extreme outlier methods
   mutate(
-    # Add category labels
-    category = case_when(
-      grepl("^ols", method, ignore.case = TRUE) ~ "Regression",
-      grepl("^panel", method, ignore.case = TRUE) ~ "Panel",
-      grepl("logit|probit", method, ignore.case = TRUE) ~ "Discrete",
-      grepl("kmeans|pca|dbscan|hierarchical", method, ignore.case = TRUE) ~ "ML",
-      grepl("sort|filter|group|select|standardize|lag|lead|diff", method, ignore.case = TRUE) ~ "Munging",
-      TRUE ~ "Other"
-    ),
+    category = categorize_method(method),
     # Clean method labels
     method_label = method %>%
       str_replace_all("_", " ") %>%
@@ -71,7 +66,7 @@ plot_data <- benchmark_df %>%
     # Convert to milliseconds
     r_ms = r_median_us / 1000,
     r_min_ms = r_min_us / 1000,
-    r_max_ms = if_else(is.na(r_max_us), r_ms * 1.2, r_max_us / 1000),  # fallback if missing
+    r_max_ms = if_else(is.na(r_max_us) | r_max_us == 0, r_ms * 1.2, r_max_us / 1000),  # fallback if missing/zero
     rust_ms = rust_median_us / 1000,
     rust_min_ms = rust_min_us / 1000,
     rust_max_ms = rust_max_us / 1000
@@ -137,7 +132,7 @@ ggsave(
   paste0(OUTPUT, "benchmark_boxplots.pdf"),
   plot = p,
   width = 12,
-  height = 6
+  height = 8
 )
 
 message("Created: ", OUTPUT, "benchmark_boxplots.pdf")

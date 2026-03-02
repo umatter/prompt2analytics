@@ -9,20 +9,19 @@ two interfaces: the natural language chat interface powered by large language
 models, and the command-line interface for scripted workflows. Both interfaces
 access the same underlying \proglang{Rust} analytics engine.
 
-We use three datasets throughout this section:
-\begin{itemize}
-  \item The Grunfeld investment data~\citep{Baltagi:2013}, a classic panel
-    dataset with 200 observations (10 firms over 20 years) containing firm
-    investment, market value, and capital stock. Included in the
-    \pkg{plm} package; we provide it as \code{grunfeld.csv} in the
-    supplementary materials.
-  \item Quarterly U.S.\ macroeconomic data (1954--2023) with GDP growth,
-    unemployment, inflation, and the federal funds rate, used for
-    time series examples.
-  \item A simulated cross-sectional dataset demonstrating basic regression
-    analysis with heteroskedasticity.
-\end{itemize}
+We use the Grunfeld investment data~\citep{Baltagi:2013}, a classic
+panel dataset with 200 observations (10 firms over 20 years) containing
+firm investment, market value, and capital stock. The dataset is included
+in the \pkg{plm} package; we provide it as \code{grunfeld.csv} in the
+supplementary materials.
 
+\noindent The early examples show the system working as intended; later
+examples (Section~\ref{sec:examples-realistic}) demonstrate failure
+modes---incorrect tool selection, missing parameters, and ambiguous
+prompts---to set realistic expectations before the formal evaluation in
+Section~\ref{sec:evaluation}.  Appendix~\ref{app:extended-examples}
+provides additional examples including time series analysis, data
+cleaning workflows, and a comparison with equivalent \proglang{R} code.
 
 %% -----------------------------------------------------------------------------
 \subsection{Chat interface} \label{sec:examples-chat}
@@ -35,8 +34,6 @@ users less familiar with programming syntax. The examples in this section
 were generated using Claude 3.5 Sonnet via the MCP integration; other models
 (GPT-4o-mini, Llama 3.3 70B, etc.) produce similar results with minor variations
 in explanation style.
-
-\subsubsection{Loading and exploring data}
 
 A typical session begins by loading data and examining its structure:
 
@@ -64,9 +61,7 @@ This is a balanced panel dataset with 10 firms observed over 20 years,
 commonly used to demonstrate panel data methods.
 \end{Soutput}
 
-\subsubsection{OLS regression with robust standard errors}
-
-Cross-sectional regression with heteroskedasticity-consistent standard errors.%
+The next example shows cross-sectional regression with heteroskedasticity-consistent standard errors.%
 \footnote{HC1 is the default robust standard error estimator when robust SEs are
 requested. HC1 applies a degrees-of-freedom correction $(n/(n-k))$ to HC0,
 improving small-sample performance.}
@@ -97,8 +92,6 @@ Both market value and capital stock are highly significant predictors of
 investment. A $1 million increase in market value is associated with
 approximately $116,000 more investment, holding capital constant.
 \end{Soutput}
-
-\subsubsection{Panel data: Fixed effects estimation}
 
 For panel data, users can request fixed effects estimation in natural language:
 
@@ -131,8 +124,6 @@ underestimated the association between capital stock and investment.
 bias, not necessarily identification of a causal effect.)
 \end{Soutput}
 
-\subsubsection{Model comparison: Hausman test}
-
 Users can request specification tests without knowing the technical details:
 
 \begin{Sinput}
@@ -158,15 +149,21 @@ RE coefficient estimates for this dataset.
 
 **Note**: Extreme p-values like 0.9999 warrant interpretation with caution.
 Such values can arise from small test statistics (as here), but also from
-numerical issues or model misspecification. The Hausman test~\citep{Hausman:1978}
-assumes both estimators are consistent under the null, which requires correct
-functional form, homoskedastic errors, and no omitted variables correlated
-with the regressors. The test statistic may be unreliable with small samples,
+numerical issues or model misspecification. The Hausman test assumes both
+estimators are consistent under the null, which requires correct functional
+form, homoskedastic errors, and no omitted variables correlated with the
+regressors. The test statistic may be unreliable with small samples,
 heteroskedasticity, or serial correlation. Users should treat very high
 p-values as suggestive rather than definitive.
 \end{Soutput}
 
-\subsubsection{High-dimensional fixed effects}
+\noindent In this example, the test statistics (chi-squared, $p$-value,
+degrees of freedom) and the recommendation come from the \proglang{Rust}
+backend; the interpretive caveat about extreme $p$-values is generated
+by the LLM. This division is typical: the computation layer returns
+structured results and simple diagnostics, and the language model adds
+contextual interpretation---including caveats about assumptions and
+limitations that depend on the specific results observed.
 
 For datasets with multiple categorical dimensions, users can request
 multi-way fixed effects:
@@ -192,9 +189,7 @@ Observations: 200
 F-statistic: 217.44 (p-value: 0.000)
 \end{Soutput}
 
-\subsubsection{Regression diagnostics}
-
-Users can request diagnostic tests using natural language:
+Users can also request diagnostic tests in natural language:
 
 \begin{Sinput}
 User: Check the regression assumptions for the OLS model.
@@ -248,8 +243,6 @@ works in Bash, Zsh, and most POSIX-compatible shells. Windows Command Prompt
 users should write commands on a single line or use PowerShell's backtick
 (\texttt{`}) for continuation.
 
-\subsubsection{JSON output for programmatic use}
-
 All commands support JSON output (\code{-F json}) for integration with
 other tools and scripts:
 
@@ -276,140 +269,18 @@ p2a -F json reg ols grunfeld -y inv -x value capital --robust hc1
 }
 \end{Soutput}
 
-\noindent This enables integration with analysis pipelines, for example
+\noindent This enables integration with analysis pipelines, for example,
 piping results to \code{jq} for extraction or to \proglang{Python}/\proglang{R}
 scripts for further processing. The session mechanism records all commands
 and can export them as an executable shell script for exact reproduction.
 
-Appendix~\ref{app:extended-examples} provides additional CLI examples including
-panel estimation, hypothesis tests, and two-way fixed effects.
-
-
 %% -----------------------------------------------------------------------------
-\subsection{Comparison with R} \label{sec:examples-comparison}
-
-For reference, the equivalent \proglang{R} code for the fixed effects
-estimation is:
-
-\begin{Sinput}
-library(plm)
-data("Grunfeld", package = "plm")
-
-# Fixed effects model
-fe_model <- plm(inv ~ value + capital,
-                data = Grunfeld,
-                index = c("firm", "year"),
-                model = "within")
-summary(fe_model)
-
-# Two-way fixed effects
-fe_twoway <- plm(inv ~ value + capital,
-                 data = Grunfeld,
-                 index = c("firm", "year"),
-                 model = "within",
-                 effect = "twoways")
-summary(fe_twoway)
-\end{Sinput}
-
-The \pkg{prompt2analytics} implementation produces numerically equivalent
-results (see Section~\ref{sec:evaluation}), while offering the conversational
-interface that enables users unfamiliar with \proglang{R} syntax to perform
-the same analyses through natural language.
-
-
-%% -----------------------------------------------------------------------------
-\subsection{Time series analysis: An applied example} \label{sec:examples-timeseries}
-
-To illustrate capabilities beyond panel data, this section demonstrates a
-time series workflow using quarterly U.S.\ GDP growth data.
-
-\begin{Sinput}
-User: Load gdp_quarterly.csv and check for stationarity.
-\end{Sinput}
-
-\begin{Soutput}
-**Dataset loaded: gdp**
-- Rows: 280 (quarterly, 1954 Q1 to 2023 Q4)
-- Columns: date, gdp_growth, unemployment, inflation, fed_rate
-
-**Augmented Dickey-Fuller Test** (gdp_growth)
-Statistic: -4.82
-P-value: 0.000
-
-GDP growth is stationary (rejects unit root). No differencing needed.
-\end{Soutput}
-
-\begin{Sinput}
-User: Fit an ARIMA model to GDP growth. Let the system pick the order.
-\end{Sinput}
-
-\begin{Soutput}
-**ARIMA Model Selection** (AIC-based)
-Best model: ARIMA(2,0,1)
-
-| Parameter |  Estimate | Std Err |
-|-----------|----------:|--------:|
-| AR(1)     |     0.312 |   0.067 |
-| AR(2)     |     0.154 |   0.063 |
-| MA(1)     |    -0.089 |   0.072 |
-| Intercept |     0.782 |   0.117 |
-
-AIC: 1042.3
-Ljung-Box (lag 10): p = 0.482 (no residual autocorrelation)
-\end{Soutput}
-
-\begin{Sinput}
-User: Now estimate a VAR with GDP growth, unemployment, and inflation.
-      I want to see how shocks propagate between these variables.
-\end{Sinput}
-
-\begin{Soutput}
-**VAR(2) Estimation** (lag selected by AIC)
-Variables: gdp_growth, unemployment, inflation
-Observations: 278 (after lag adjustment)
-
-Granger Causality Tests:
-- gdp_growth -> unemployment: F = 8.42, p = 0.000
-- unemployment -> gdp_growth: F = 3.17, p = 0.044
-- inflation -> gdp_growth: F = 1.89, p = 0.153
-
-GDP growth Granger-causes unemployment (and vice versa).
-No significant evidence that inflation Granger-causes GDP growth.
-
-Impulse response functions saved to irf_plot.html
-(interactive plot with 95% bootstrap confidence bands).
-\end{Soutput}
-
-This example demonstrates method progression---stationarity testing, univariate
-modeling, then multivariate analysis---within a single conversation. The LLM
-maintains context: the third request builds on the loaded dataset and prior
-results without restating variable names.
-
-
-%% -----------------------------------------------------------------------------
-\subsection{Multi-step workflows} \label{sec:examples-multistep}
-
-Real-world analysis involves multiple steps: data inspection, handling issues,
-and specification refinement. The chat interface maintains context across turns,
-enabling progressive model refinement guided by user questions. The LLM provides
-interpretive commentary while all computations execute through validated
-\proglang{Rust} implementations.
-
-Appendix~\ref{app:extended-examples} provides a detailed multi-step workflow
-example demonstrating data loading, missingness analysis, initial specification,
-and refinement with fixed effects---illustrating context preservation and
-proactive issue identification.
-
-
-%% -----------------------------------------------------------------------------
-\subsection{Realistic use} \label{sec:examples-realistic}
+\subsection{Realistic use and error handling} \label{sec:examples-realistic}
 
 The preceding examples show successful interactions. Real use involves
 more iteration. This section shows what failures look like, how to
 recover, and what accuracy to expect
 (Section~\ref{sec:evaluation} provides detailed numbers).
-
-\subsubsection{Ambiguous specification}
 
 Vague requests prompt the system to ask for clarification rather
 than guess:
@@ -429,11 +300,9 @@ I can estimate this model, but need clarification:
 Please specify, e.g., "Regress inv on value and capital with firm fixed effects"
 \end{Soutput}
 
-\subsubsection{A multi-turn workflow with corrections}
-
 The following workflow illustrates common failure modes: wrong method
 selected, parameters extracted incorrectly, user corrections,
-eventual success.
+and eventual success.
 
 \begin{Sinput}
 User: Analyze whether the training program affected employee performance.
@@ -521,29 +390,16 @@ This workflow required three correction turns: (1)~correcting method
 selection from a t-test to DiD; (2)~adding clustered standard errors;
 and (3)~requesting pre-trend diagnostics. The final result is correct.
 
-\subsubsection{What to expect}
-
-From our evaluation (Section~\ref{sec:evaluation}):
-\begin{itemize}
-  \item Multi-turn workflows complete 15--90\% of the time when tool calls
-        are in conversation history
-  \item Naming variables directly (``regress inv on value'') beats pronouns
-        (``use the same variables'')
-  \item Check extracted parameters before trusting output---parameter
-        extraction F1 is only 41--59\%
-\end{itemize}
-
-\noindent The remedy for most failures is to keep tool calls in conversation
-history, and verify what the model extracted.
+Practical tips from using the system: naming variables directly
+(``regress inv on value'') is more reliable than using pronouns
+(``use the same variables''), and users should always verify which
+parameters the model extracted before trusting the output.
 
 
-%% -----------------------------------------------------------------------------
-\subsection{Error handling and recovery} \label{sec:examples-errors}
+The system also handles common failure modes with explanatory guidance.
 
-The system handles common failure modes with explanatory guidance. Two
-examples illustrate the approach.
-
-\subsubsection{Multicollinearity detection}
+The system detects multicollinearity and reports it with
+suggested actions:
 
 \begin{Sinput}
 User: Add years_since_hire to the model alongside tenure.
@@ -561,7 +417,7 @@ combination of existing columns (correlation with tenure: 1.000).
    your construct of interest
 \end{Soutput}
 
-\subsubsection{Convergence failure}
+Similarly, convergence failures are caught and explained:
 
 \begin{Sinput}
 User: Fit a logit model with department fixed effects.
@@ -584,11 +440,9 @@ Running linear probability model with department FE instead...
 The system detects problems before estimation fails, explains statistical
 issues rather than computational symptoms, and provides actionable suggestions.
 When requests exceed capabilities, it clearly states limitations and points
-to external tools. Appendix~\ref{app:extended-examples} provides additional
-error handling examples including small cluster warnings and out-of-scope
-request handling.
+to external tools.
 
 These examples illustrate what the system can do; the next section
 measures how reliably it does so. We evaluate tool selection accuracy
-across 12 models, parameter extraction quality, and numerical
-correctness of the underlying \proglang{Rust} implementations.
+across 12 models and numerical correctness of the underlying
+\proglang{Rust} implementations.

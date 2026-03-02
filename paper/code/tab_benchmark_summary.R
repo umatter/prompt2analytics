@@ -12,12 +12,13 @@ source("helpers.R")
 ## DATA IMPORT AND PREPARATION ----
 benchmark_df <- load_benchmark_summary(paste0(INPUT_BENCHMARK, "benchmark_summary.json"))
 
-# Filter to n=100,000 and format for table
+# Filter to n=100,000 and methods where both R and Rust succeeded
 table_data <- benchmark_df %>%
   filter(n == 100000 | n == max(n)) %>%
   group_by(method) %>%
   filter(n == max(n)) %>%
   ungroup() %>%
+  filter(r_median_us > 1000, rust_median_us > 0) %>%  # Exclude sub-1ms R methods (startup-dominated)
   mutate(
     Category = categorize_method(method),
     Method = clean_method_label(method),
@@ -25,7 +26,9 @@ table_data <- benchmark_df %>%
     `$n$` = format(n, big.mark = ","),
     `R (ms)` = sprintf("%.1f", r_median_us / 1000),
     `Rust (ms)` = sprintf("%.1f", rust_median_us / 1000),
-    Speedup = sprintf("%.1f$\\times$", speedup)
+    Speedup = ifelse(speedup < 0.1,
+                      sprintf("%.2f$\\times$", speedup),
+                      sprintf("%.1f$\\times$", speedup))
   ) %>%
   arrange(Category, desc(speedup)) %>%
   select(Category, Method, `$n$`, `R (ms)`, `Rust (ms)`, Speedup)

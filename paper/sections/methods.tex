@@ -101,9 +101,6 @@ summarizes key findings that set appropriate expectations for realistic use.
 Metric & Range & Interpretation \\
 \midrule
 Single-turn tool selection & 90.8--100\% & Curated prompts, best case \\
-Multi-turn accuracy & 47--97\% & With enhanced context: up to 97\% \\
-Conversation completion & 15--90\% & With enhanced context: up to 90\% \\
-Parameter extraction F1 & 41--59\% & Variable names, options correctly extracted \\
 Out-of-scope detection & 40--60\% & Correctly declines unsupported requests \\
 \bottomrule
 \end{tabular}
@@ -115,19 +112,15 @@ across 10 evaluated models.
 \end{threeparttable}
 \end{table}
 
-For users, the most important factor is keeping tool calls in conversation
-history: multi-turn accuracy jumps from ${\sim}50\%$ to ${\sim}97\%$ when
-history includes previous tool invocations and their results. Users should
-also check extracted parameters, since models often select the right tool
-but extract wrong variable names or options (F1 of 41--59\%). Specific
-prompts help---``within-transformation fixed effects with firm-clustered
-standard errors'' works better than ``regression with firm effects.'' In
-general, tool selection is reliable; parameter extraction and result
-interpretation still require human oversight.
+Users should verify extracted parameters. Models reliably extract core
+parameters (dependent and independent variables) but sometimes omit secondary
+options such as robust SE type or clustering specification.
+Specific prompts help---``within-transformation fixed effects with
+firm-clustered standard errors'' works better than ``regression with firm
+effects.'' In general, tool selection is reliable; parameter specification
+and result interpretation still benefit from human oversight.
 
 \noindent Section~\ref{sec:evaluation} provides full evaluation methodology and results.
-Table~\ref{tab:extended-eval-summary-main} presents per-model breakdowns across
-all evaluation dimensions.
 
 \subsection{LLM as method selector}
 

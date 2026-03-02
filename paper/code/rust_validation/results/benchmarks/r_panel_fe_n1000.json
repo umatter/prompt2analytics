@@ -2,18 +2,18 @@
   "method": "panel_fe",
   "dataset": "synthetic_panel_n1000.csv",
   "n": 1000,
-  "iterations": 100,
-  "warmup": 5,
-  "timestamp": "2026-01-26T15:59:55",
+  "iterations": 3,
+  "warmup": 3,
+  "timestamp": "2026-02-26T21:56:25",
   "r_version": "4.3.3",
   "timing": {
-    "min_us": 6102.3769667372,
-    "median_us": 6528.0359704047,
-    "mean_us": [],
-    "max_us": [],
-    "itr_per_sec": 153.1050065677,
+    "min_us": 16639.6800195798,
+    "median_us": 18009.9725257605,
+    "mean_us": 0,
+    "max_us": 0,
+    "itr_per_sec": 55.5247931983,
     "mem_alloc": 1835520,
-    "n_gc": 9,
-    "n_itr": 91
+    "n_gc": 1,
+    "n_itr": 2
   }
 }

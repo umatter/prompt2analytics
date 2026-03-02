@@ -7,30 +7,37 @@
 library(tidyverse)
 library(jsonlite)
 
-INPUT <- "llm_eval/results/"
+INPUT <- "llm_eval/results/naturalistic/"
 OUTPUT <- "../figures/"
 
-# Complete evaluation files (87 tests)
-EVAL_FILES <- c(
-  "claude-3-5-haiku-20241022_all_20260123_165810.jsonl",
-  "qwen_qwen-2.5-72b-instruct_all_20260123_173345.jsonl",
-  "meta-llama_llama-3.3-70b-instruct_all_20260123_171743.jsonl",
-  "gpt-4o-mini_all_20260123_152151.jsonl",
-  "gpt-4.1-nano-2025-04-14_all_20260123_155259.jsonl",
-  "gpt-5-nano-2025-08-07_all_20260123_161312.jsonl",
-  "mistralai_ministral-3b_all_20260123_205903.jsonl"
-)
-
 ## DATA IMPORT AND PREPARATION ----
-read_jsonl <- function(file) {
-  lines <- readLines(paste0(INPUT, file), warn = FALSE)
-  map_dfr(lines, ~ fromJSON(.x))
+
+# Read concatenated pretty-printed JSON objects from a file
+read_json_concat <- function(file) {
+  text <- readLines(file, warn = FALSE)
+  # Split on lines that are just "}" followed by "{"
+  json_str <- paste(text, collapse = "\n")
+  # Wrap in array: insert commas between top-level objects
+  json_str <- gsub("\\}\n\\{", "},{", json_str)
+  json_str <- paste0("[", json_str, "]")
+  fromJSON(json_str, flatten = TRUE)
 }
 
-all_results <- map_dfr(EVAL_FILES, read_jsonl)
+# Read all files matching the 7 models used in the paper
+eval_files <- list.files(INPUT, pattern = "_all_.*\\.jsonl$", full.names = TRUE)
+
+# Filter to the 7 models in the paper
+keep_models <- c("claude-3-5-haiku", "qwen-2.5-72b", "llama-3.3-70b",
+                 "gpt-4o-mini", "gpt-5-nano", "gpt-4.1-nano", "ministral-3b")
+eval_files <- eval_files[sapply(eval_files, function(f) {
+  any(sapply(keep_models, function(m) grepl(m, f)))
+})]
+
+all_results <- map_dfr(eval_files, read_json_concat)
 
 # Clean model names and add provider info
 latency_data <- all_results %>%
+  filter(!is.na(latency_ms)) %>%
   mutate(
     model_display = case_when(
       grepl("claude", model) ~ "Claude 3.5\nHaiku",
@@ -64,7 +71,8 @@ p <- ggplot(latency_data, aes(x = model_display, y = latency_ms, fill = provider
   geom_boxplot(outlier.size = 1, outlier.alpha = 0.5) +
   scale_y_log10(
     breaks = c(500, 1000, 2000, 5000, 10000, 20000),
-    labels = scales::comma
+    labels = scales::comma,
+    limits = c(300, 30000)
   ) +
   scale_fill_manual(
     values = c(
@@ -79,12 +87,12 @@ p <- ggplot(latency_data, aes(x = model_display, y = latency_ms, fill = provider
     y = "Latency (ms, log scale)",
     title = NULL
   ) +
-  theme_minimal(base_size = 12) +
+  theme_minimal(base_size = 16) +
   theme(
     panel.grid.major.x = element_blank(),
     panel.grid.minor = element_blank(),
-    legend.position = "top",
-    legend.justification = "left",
+    legend.position = "bottom",
+    legend.justification = "center",
     plot.margin = margin(10, 20, 10, 10)
   ) +
   annotation_logticks(sides = "l", size = 0.3)

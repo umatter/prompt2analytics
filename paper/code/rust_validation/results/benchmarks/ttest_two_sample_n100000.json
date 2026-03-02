@@ -1,0 +1,10 @@
+{
+  "n": 100000,
+  "r_median_us": 6268,
+  "r_min_us": 5902,
+  "r_max_us": 0,
+  "rust_median_us": 2065,
+  "rust_min_us": 2029,
+  "rust_max_us": 2192,
+  "speedup": 3.04
+}

@@ -1,0 +1,19 @@
+{
+  "method": "ols_clustered",
+  "dataset": "synthetic_clustered_n1000.csv",
+  "n": 1000,
+  "iterations": 3,
+  "warmup": 3,
+  "timestamp": "2026-02-26T21:58:15",
+  "r_version": "4.3.3",
+  "timing": {
+    "min_us": 3682.4680864811,
+    "median_us": 3748.2221378013,
+    "mean_us": 0,
+    "max_us": 0,
+    "itr_per_sec": 236.0875318092,
+    "mem_alloc": 569064,
+    "n_gc": 0,
+    "n_itr": 3
+  }
+}

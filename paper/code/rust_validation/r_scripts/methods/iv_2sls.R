@@ -6,25 +6,28 @@ suppressPackageStartupMessages({
 
 run_method <- function(data, dep_var, indep_vars, entity_var = NULL, time_var = NULL,
                        cluster_var = NULL, instrument_vars = NULL, k = NULL,
-                       n_components = NULL, arima_order = NULL, robust = NULL, seed = 42) {
+                       n_components = NULL, arima_order = NULL, robust = NULL, seed = 42,
+                       endog_vars = NULL) {
 
   if (is.null(instrument_vars)) {
     stop("instrument_vars is required for 2SLS")
   }
 
-  # Identify endogenous variables (those that have instruments)
-  # For simplicity, assume first variable in indep_vars is endogenous
-  endogenous_var <- indep_vars[1]
-  exogenous_vars <- indep_vars[-1]
-
-  # Build IV formula: y ~ x1 + exog | instruments + exog
-  if (length(exogenous_vars) > 0) {
-    formula_str <- paste(dep_var, "~", paste(indep_vars, collapse = " + "), "|",
-                         paste(c(instrument_vars, exogenous_vars), collapse = " + "))
+  # Identify endogenous vs exogenous variables
+  if (!is.null(endog_vars)) {
+    all_regressors <- unique(c(endog_vars, indep_vars))
+    exogenous_vars <- setdiff(all_regressors, endog_vars)
   } else {
-    formula_str <- paste(dep_var, "~", endogenous_var, "|",
-                         paste(instrument_vars, collapse = " + "))
+    # Fallback: assume first variable in indep_vars is endogenous
+    endog_vars <- indep_vars[1]
+    all_regressors <- indep_vars
+    exogenous_vars <- indep_vars[-1]
   }
+
+  # Build IV formula: y ~ endog + exog | instruments + exog
+  formula_str <- paste(dep_var, "~",
+                       paste(all_regressors, collapse = " + "), "|",
+                       paste(c(instrument_vars, exogenous_vars), collapse = " + "))
   formula <- as.formula(formula_str)
 
   # Fit 2SLS model

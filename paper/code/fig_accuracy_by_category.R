@@ -5,7 +5,7 @@
 
 ## SETUP ----
 library(tidyverse)
-library(viridis)
+library(scales)
 
 OUTPUT <- "../figures/"
 
@@ -42,9 +42,10 @@ category_accuracy <- expand.grid(
 p <- ggplot(category_accuracy, aes(x = category, y = model, fill = accuracy)) +
   geom_tile(color = "white", linewidth = 0.5) +
   geom_text(aes(label = sprintf("%.0f", accuracy)),
-            size = 5.5, color = ifelse(category_accuracy$accuracy < 70, "white", "black")) +
-  scale_fill_viridis(
-    option = "D",
+            size = 5.5, color = ifelse(category_accuracy$accuracy < 50, "white", "black")) +
+  scale_fill_gradientn(
+    colours = c("#D32F2F", "#E57373", "#BDBDBD", "#81C784", "#388E3C"),
+    values = scales::rescale(c(0, 25, 50, 75, 100)),
     limits = c(0, 100),
     breaks = c(0, 25, 50, 75, 100),
     labels = function(x) paste0(x, "%"),

@@ -171,6 +171,10 @@ pub fn run_discrete_model(
     })?;
 
     let y: Vec<f64> = y_series
+        .cast(&polars::prelude::DataType::Float64)
+        .map_err(|_| EconError::NonNumericColumn {
+            column: y_col.to_string(),
+        })?
         .f64()
         .map_err(|_| EconError::NonNumericColumn {
             column: y_col.to_string(),
