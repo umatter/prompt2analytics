@@ -81,6 +81,18 @@ benchmark_spatial <- function(n_sides, n_iter = 10) {
       times = n_iter
     )
 
+    # Benchmark Local Moran's I (localmoran)
+    localmoran_time <- microbenchmark(
+      localmoran(data$y, listw),
+      times = n_iter
+    )
+
+    # Benchmark SAC model (sacsarlm)
+    sac_time <- microbenchmark(
+      sacsarlm(y ~ x, data = data, listw = listw, type = "sac"),
+      times = min(n_iter, 5)  # SAC is slow, fewer iterations
+    )
+
     # Store results
     results[[as.character(n)]] <- list(
       n = n,
@@ -88,7 +100,9 @@ benchmark_spatial <- function(n_sides, n_iter = 10) {
       moran_ms = median(moran_time$time) / 1e6,
       lm_tests_ms = median(lm_tests_time$time) / 1e6,
       sar_ms = median(sar_time$time) / 1e6,
-      sem_ms = median(sem_time$time) / 1e6
+      sem_ms = median(sem_time$time) / 1e6,
+      localmoran_ms = median(localmoran_time$time) / 1e6,
+      sac_ms = median(sac_time$time) / 1e6
     )
 
     cat(sprintf("  neighbors:  %.2f ms\n", results[[as.character(n)]]$neighbors_ms))
@@ -96,14 +110,18 @@ benchmark_spatial <- function(n_sides, n_iter = 10) {
     cat(sprintf("  lm.LMtests: %.2f ms\n", results[[as.character(n)]]$lm_tests_ms))
     cat(sprintf("  lagsarlm:   %.2f ms\n", results[[as.character(n)]]$sar_ms))
     cat(sprintf("  errorsarlm: %.2f ms\n", results[[as.character(n)]]$sem_ms))
+    cat(sprintf("  localmoran: %.2f ms\n", results[[as.character(n)]]$localmoran_ms))
+    cat(sprintf("  sacsarlm:   %.2f ms\n", results[[as.character(n)]]$sac_ms))
   }
 
   # Create summary data frame
   df <- do.call(rbind, lapply(results, function(r) {
     data.frame(
-      method = c("neighbors", "moran_test", "lm_tests", "lagsarlm", "errorsarlm"),
+      method = c("neighbors", "moran_test", "lm_tests", "lagsarlm", "errorsarlm",
+                 "localmoran", "sacsarlm"),
       n = r$n,
-      time_ms = c(r$neighbors_ms, r$moran_ms, r$lm_tests_ms, r$sar_ms, r$sem_ms)
+      time_ms = c(r$neighbors_ms, r$moran_ms, r$lm_tests_ms, r$sar_ms, r$sem_ms,
+                  r$localmoran_ms, r$sac_ms)
     )
   }))
 

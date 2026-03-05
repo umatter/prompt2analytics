@@ -4,6 +4,8 @@
 
 use memory_stats::memory_stats;
 use serde::{Deserialize, Serialize};
+use std::alloc::{GlobalAlloc, Layout, System};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Instant;
 
 /// Result from a single benchmark run
@@ -199,6 +201,153 @@ pub fn print_header() {
         "method", "variant", "n", "median", "IQR", "itr/s", "mem_alloc"
     );
     println!("{}", "-".repeat(100));
+}
+
+// ============================================
+// Tracking Allocator for per-benchmark heap measurement
+// ============================================
+
+/// A wrapper around the system allocator that tracks allocation totals.
+/// Use `#[global_allocator] static ALLOC: TrackingAllocator = TrackingAllocator;`
+/// in benchmark binaries that want precise heap tracking.
+pub struct TrackingAllocator;
+
+static HEAP_ALLOCATED: AtomicUsize = AtomicUsize::new(0);
+static HEAP_FREED: AtomicUsize = AtomicUsize::new(0);
+static HEAP_PEAK: AtomicUsize = AtomicUsize::new(0);
+static HEAP_TRACKING_ENABLED: AtomicBool = AtomicBool::new(false);
+
+unsafe impl GlobalAlloc for TrackingAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        let ptr = unsafe { System.alloc(layout) };
+        if !ptr.is_null() && HEAP_TRACKING_ENABLED.load(Ordering::Relaxed) {
+            let current =
+                HEAP_ALLOCATED.fetch_add(layout.size(), Ordering::Relaxed) + layout.size();
+            let freed = HEAP_FREED.load(Ordering::Relaxed);
+            let live = current.saturating_sub(freed);
+            let mut peak = HEAP_PEAK.load(Ordering::Relaxed);
+            while live > peak {
+                match HEAP_PEAK.compare_exchange_weak(
+                    peak,
+                    live,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                ) {
+                    Ok(_) => break,
+                    Err(p) => peak = p,
+                }
+            }
+        }
+        ptr
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        if HEAP_TRACKING_ENABLED.load(Ordering::Relaxed) {
+            HEAP_FREED.fetch_add(layout.size(), Ordering::Relaxed);
+        }
+        unsafe { System.dealloc(ptr, layout) };
+    }
+}
+
+/// Reset heap tracking counters and enable tracking.
+pub fn heap_tracking_reset() {
+    HEAP_ALLOCATED.store(0, Ordering::Relaxed);
+    HEAP_FREED.store(0, Ordering::Relaxed);
+    HEAP_PEAK.store(0, Ordering::Relaxed);
+    HEAP_TRACKING_ENABLED.store(true, Ordering::Relaxed);
+}
+
+/// Disable heap tracking and return (total_allocated, peak_live) in bytes.
+pub fn heap_tracking_stop() -> (usize, usize) {
+    HEAP_TRACKING_ENABLED.store(false, Ordering::Relaxed);
+    let total = HEAP_ALLOCATED.load(Ordering::Relaxed);
+    let peak = HEAP_PEAK.load(Ordering::Relaxed);
+    (total, peak)
+}
+
+/// Run a benchmark with heap tracking (requires TrackingAllocator as #[global_allocator]).
+/// Returns BenchmarkResult with accurate mem_alloc_bytes from the tracking allocator.
+pub fn run_benchmark_tracked<F, T>(
+    method: &str,
+    variant: &str,
+    n: usize,
+    config: &BenchConfig,
+    mut f: F,
+) -> BenchmarkResult
+where
+    F: FnMut() -> T,
+{
+    // Warmup phase (untracked)
+    for _ in 0..config.warmup_iterations {
+        std::hint::black_box(f());
+    }
+
+    let mem_before = memory_stats().map(|m| m.physical_mem).unwrap_or(0);
+
+    // Measurement phase with heap tracking
+    let mut times_us: Vec<f64> = Vec::with_capacity(config.measurement_iterations);
+    let mut total_heap_alloc: usize = 0;
+    let mut max_peak: usize = 0;
+
+    for _ in 0..config.measurement_iterations {
+        heap_tracking_reset();
+        let start = Instant::now();
+        std::hint::black_box(f());
+        let elapsed = start.elapsed();
+        let (alloc, peak) = heap_tracking_stop();
+
+        times_us.push(elapsed.as_secs_f64() * 1_000_000.0);
+        total_heap_alloc += alloc;
+        if peak > max_peak {
+            max_peak = peak;
+        }
+    }
+
+    let mem_after = memory_stats().map(|m| m.physical_mem).unwrap_or(0);
+
+    // Sort for percentile calculations
+    times_us.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+    let n_times = times_us.len();
+    let time_min = times_us[0];
+    let time_max = times_us[n_times - 1];
+    let time_median = percentile(&times_us, 50.0);
+    let time_p25 = percentile(&times_us, 25.0);
+    let time_p75 = percentile(&times_us, 75.0);
+    let time_mean = times_us.iter().sum::<f64>() / n_times as f64;
+    let time_std = (times_us
+        .iter()
+        .map(|t| (t - time_mean).powi(2))
+        .sum::<f64>()
+        / (n_times - 1) as f64)
+        .sqrt();
+
+    let itr_per_sec = 1_000_000.0 / time_median;
+    let avg_alloc = total_heap_alloc / config.measurement_iterations;
+
+    BenchmarkResult {
+        method: method.to_string(),
+        variant: variant.to_string(),
+        n,
+        iterations: config.measurement_iterations,
+        time_min_us: time_min,
+        time_p25_us: time_p25,
+        time_median_us: time_median,
+        time_p75_us: time_p75,
+        time_max_us: time_max,
+        time_mean_us: time_mean,
+        time_std_us: time_std,
+        itr_per_sec,
+        mem_before_bytes: mem_before,
+        mem_after_bytes: mem_after,
+        mem_peak_bytes: max_peak,
+        mem_alloc_bytes: avg_alloc as i64,
+        raw_times_us: if config.capture_raw_times {
+            times_us
+        } else {
+            vec![]
+        },
+    }
 }
 
 #[cfg(test)]

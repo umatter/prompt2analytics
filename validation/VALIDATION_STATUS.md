@@ -7,10 +7,18 @@
 
 | Metric | Count | Status |
 |--------|-------|--------|
-| **Rust Validation Tests** (`test_validate_*`) | 416 | All Pass |
+| **Rust Validation Tests** (`test_validate_*`) | 437 | All Pass |
 | **R Validation Scripts** | 41 | All Pass |
 | **R Expected Value CSVs** | 73 | All Pass |
-| **Total Test Functions** | 1,847 | 1,843 pass, 4 pre-existing LightGBM failures |
+| **Total Test Functions** | 1,848 | All pass (0 failures) |
+
+### Recent Changes
+- Added 15 ML validation tests: C5.0 (3), Cubist (3), CTree (3), MBoost (4), SHAP (2)
+- Fixed LightGBM index-out-of-bounds bug and consolidated validation tests
+- Added 15 causal/econometrics Rust benchmarks to comprehensive_benchmarks.rs
+- Consolidated spatial R benchmarks from 5 to 2 files
+- Integrated tracking allocator for per-method heap measurement
+- Added validation docs for staggered DiD, ETWFE, Bacon, DoubleML, CTMLE
 
 ## How to Run Validation
 
@@ -149,7 +157,7 @@ cargo test -p p2a-core -- test_validate
 - Structural time series: local level tracking, trend slope, BSM components sum, log-likelihood
 - CausalImpact: pre-period fit, post-period detection, cumulative effect, no-effect null
 
-### Machine Learning (54 validation tests)
+### Machine Learning (69 validation tests)
 
 **Fully Validated (R cross-validated):**
 - K-means (centroids, assignment, inertia, reproducibility, vs R)
@@ -161,9 +169,28 @@ cargo test -p p2a-core -- test_validate
 **DGP-validated (known-parameter recovery):**
 - Random Forest: classification accuracy on separable data, feature importance ordering, regression MSE, OOB error
 - SVM: linear separability, margin properties, support vector count, prediction accuracy
+- C5.0: classification accuracy, boosted trials, prediction consistency
+- Cubist: regression R², committee improvement, out-of-sample prediction
+- CTree: regression R², classification accuracy, prediction on test data
+- MBoost: linear and tree base learners, out-of-sample R², Poisson family
+- SHAP: tree ensemble attribution, additivity property, feature importance ordering
+- XGBoost: regression R², feature importance, classification accuracy
+- LightGBM: regression R² (index-out-of-bounds bug fixed)
+- BART: regression R², posterior intervals
 
-**Not yet validated against R:**
-- Advanced trees (XGBoost, LightGBM, BART, etc.)
+## Benchmark Coverage
+
+The comprehensive benchmark file (`crates/p2a-core/benches/comprehensive_benchmarks.rs`) now includes:
+- Regression: OLS, OLS+HC1
+- Panel: FE, RE, HDFE
+- Discrete: Logit, Probit
+- Time Series: ARIMA, MSTL
+- ML: K-Means, PCA, DBSCAN, Hierarchical, Random Forest
+- Spatial: SAR, SEM
+- Causal: DiD, Staggered DiD, ETWFE, Bacon, IV/2SLS, RD, TMLE, CTMLE, IPW, CBPS, Matching, WeightIt, DoubleML, Mediation, LTMLE
+- Other: LOESS, Doubly Robust, Changepoint, Synthetic Control, Factor Analysis, Fisher Exact, Isotonic Regression, Jarque-Bera
+
+Spatial R benchmarks consolidated from 5 to 2 files. Redundant `ml_benchmarks.rs` removed.
 
 ## File Locations
 
@@ -172,6 +199,8 @@ cargo test -p p2a-core -- test_validate
 - **Expected Values:** `validation/expected/` (73 CSVs)
 - **Validation Docs:** `validation/[category]/`
 - **Reports:** `validation/reports/`
+- **Pipeline Overview:** `performance/README.md`
+- **Coverage Check:** `performance/comparisons/check_coverage.R`
 
 ## Adding New Validations
 

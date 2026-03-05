@@ -824,7 +824,8 @@ fn fit_tree(
     leaf_queue.push(root_leaf);
 
     // Track nodes by ID for tree construction
-    let mut nodes: Vec<Option<LgbNode>> = vec![None; 2 * config.num_leaves];
+    // Use 4x num_leaves to accommodate worst-case leaf-wise growth
+    let mut nodes: Vec<Option<LgbNode>> = vec![None; 4 * config.num_leaves + 2];
     let mut leaf_count = 0;
     let mut next_id = 0;
 
@@ -833,7 +834,16 @@ fn fit_tree(
         std::collections::HashMap::new();
     histogram_cache.insert(0, histograms);
 
+    // Track child IDs for each split node
+    let mut child_ids: std::collections::HashMap<usize, (usize, usize)> =
+        std::collections::HashMap::new();
+
     while let Some(leaf) = leaf_queue.pop() {
+        // Ensure nodes vector is large enough for this leaf ID
+        if leaf.id >= nodes.len() {
+            nodes.resize(leaf.id + 2, None);
+        }
+
         // Check if we've reached max leaves
         if leaf_count >= config.num_leaves - 1 {
             // Convert remaining to leaf node
@@ -996,6 +1006,11 @@ fn fit_tree(
         next_id += 1;
         let right_id = next_id;
 
+        // Ensure nodes vector is large enough for child IDs
+        if right_id >= nodes.len() {
+            nodes.resize(right_id + 2, None);
+        }
+
         let left_leaf = LeafInfo {
             id: left_id,
             gain: left_split.map(|(_, _, g)| g).unwrap_or(0.0),
@@ -1026,7 +1041,8 @@ fn fit_tree(
         leaf_queue.push(left_leaf);
         leaf_queue.push(right_leaf);
 
-        // Create split node (children will be filled later)
+        // Record child IDs and create split node (children will be wired up later)
+        child_ids.insert(leaf.id, (left_id, right_id));
         nodes[leaf.id] = Some(LgbNode::Split {
             feature: split_feature,
             bin_threshold: split_bin,
@@ -1053,18 +1069,57 @@ fn fit_tree(
     }
 
     // Build tree structure from nodes
-    tree.root = build_tree_from_nodes(&nodes, 0);
+    tree.root = build_tree_from_nodes(&nodes, &child_ids, 0);
 
     tree
 }
 
-/// Recursively build tree from node array.
-fn build_tree_from_nodes(nodes: &[Option<LgbNode>], id: usize) -> Option<LgbNode> {
+/// Recursively build tree from node array, wiring up child nodes.
+fn build_tree_from_nodes(
+    nodes: &[Option<LgbNode>],
+    child_ids: &std::collections::HashMap<usize, (usize, usize)>,
+    id: usize,
+) -> Option<LgbNode> {
     if id >= nodes.len() {
         return None;
     }
 
-    nodes[id].clone()
+    match &nodes[id] {
+        Some(LgbNode::Leaf { value, n_samples }) => Some(LgbNode::Leaf {
+            value: *value,
+            n_samples: *n_samples,
+        }),
+        Some(LgbNode::Split {
+            feature,
+            bin_threshold,
+            gain,
+            ..
+        }) => {
+            if let Some(&(left_id, right_id)) = child_ids.get(&id) {
+                let left = build_tree_from_nodes(nodes, child_ids, left_id)
+                    .unwrap_or(LgbNode::Leaf {
+                        value: 0.0,
+                        n_samples: 0,
+                    });
+                let right = build_tree_from_nodes(nodes, child_ids, right_id)
+                    .unwrap_or(LgbNode::Leaf {
+                        value: 0.0,
+                        n_samples: 0,
+                    });
+                Some(LgbNode::Split {
+                    feature: *feature,
+                    bin_threshold: *bin_threshold,
+                    left: Box::new(left),
+                    right: Box::new(right),
+                    gain: *gain,
+                })
+            } else {
+                // No children recorded, return as-is
+                nodes[id].clone()
+            }
+        }
+        None => None,
+    }
 }
 
 // ============================================================================

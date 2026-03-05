@@ -13,8 +13,8 @@ use p2a_core::{
     MboostBaseLearner,
     MboostConfig,
     SvmKernel,
-    XgbConfig,
-    XgbObjective,
+    XGBoostConfig,
+    XGBoostObjective,
     fast_mboost,
     fast_roc_auc,
     fast_roc_auc_parallel,
@@ -26,7 +26,7 @@ use p2a_core::{
     mboost,
     roc_auc,
     // Boosting implementations (original and fast)
-    xgb,
+    xgboost,
 };
 use std::time::Instant;
 
@@ -281,7 +281,7 @@ fn benchmark_xgboost_implementations() {
             + Array1::from_shape_fn(n, |i| ((i * 12345) % 1000) as f64 / 10000.0);
 
         // Original XGBoost
-        let config_orig = XgbConfig {
+        let config_orig = XGBoostConfig {
             n_estimators: 50,
             max_depth: 4,
             learning_rate: 0.3,
@@ -289,7 +289,7 @@ fn benchmark_xgboost_implementations() {
         };
 
         let start = Instant::now();
-        let result_orig = xgb(x_full.view(), y.view(), &config_orig);
+        let result_orig = xgboost(x_full.view(), y.view(), &config_orig);
         let t_original = start.elapsed().as_secs_f64() * 1000.0;
 
         // Fast XGBoost (histogram-based)
@@ -369,11 +369,11 @@ fn benchmark_mboost_implementations() {
             + x.column(1).mapv(|v| 0.5 * v)
             + Array1::from_shape_fn(n, |i| ((i * 12345) % 1000) as f64 / 3000.0);
 
-        // Original MBoost (componentwise linear)
+        // Original MBoost (linear base learner)
         let config_orig = MboostConfig {
-            m_stop: 100,
+            mstop: 100,
             nu: 0.1,
-            base_learner: MboostBaseLearner::ComponentwiseLinear,
+            base_learner: MboostBaseLearner::Linear,
             ..Default::default()
         };
 

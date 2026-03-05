@@ -44,6 +44,19 @@ cat(sprintf("Memory data: %d entries\n", nrow(mem_df)))
 matched <- speed_df %>% filter(!is.na(speedup_median) & is.finite(speedup_median))
 cat(sprintf("Matched methods: %d\n\n", n_distinct(matched$method_norm)))
 
+if (nrow(matched) < 50) {
+  message(sprintf("WARNING: Only %d matched rows found (expected >= 50). Figures may be incomplete.", nrow(matched)))
+}
+
+# Check for modules with 0 matches
+all_modules <- c("Regression", "Panel", "Discrete", "Time Series", "ML",
+                 "Causal", "Spatial", "Stats", "Survival")
+missing_modules <- setdiff(all_modules, unique(matched$module))
+if (length(missing_modules) > 0) {
+  message(sprintf("WARNING: No matched benchmarks for module(s): %s",
+                  paste(missing_modules, collapse = ", ")))
+}
+
 # Use largest-n per method for summary figures
 largest_n <- matched %>%
   group_by(method_norm) %>%

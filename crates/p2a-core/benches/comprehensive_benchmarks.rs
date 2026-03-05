@@ -11,19 +11,28 @@
 mod bench_utils;
 
 use bench_utils::{
-    BenchConfig, BenchmarkResult, print_header, print_result, run_benchmark, save_results,
+    BenchConfig, BenchmarkResult, TrackingAllocator, print_header, print_result, run_benchmark,
+    run_benchmark_tracked, save_results,
 };
+
+#[global_allocator]
+static ALLOC: TrackingAllocator = TrackingAllocator;
 use p2a_core::regression::CovarianceType;
 use p2a_core::regression::jarque_bera_test;
 use p2a_core::spatial::{Neighbors, SpatialWeights, WeightStyle};
 use p2a_core::stats::{RotationMethod, ScoresMethod, factanal, fisher_exact_test, isoreg};
+use p2a_core::econometrics::{DoubleMLConfig, LtmleConfig, LtmleData, run_double_ml, run_ltmle};
 use p2a_core::{
-    CostFunction, DRMethod, Dataset, DoublyRobustConfig, Estimand, FisherAlternative, Linkage,
-    PredictorSpec, SarConfig, SemConfig, SynthConfig, dbscan, hierarchical, kmeans, pca,
-    random_forest, run_arima, run_changepoint, run_doubly_robust, run_fixed_effects, run_hdfe,
-    run_loess, run_logit, run_mstl, run_ols, run_probit, run_random_effects, run_sar_dataset,
-    run_sem_dataset, run_synthetic_control,
+    CTmleConfig, CostFunction, DRMethod, Dataset, DoublyRobustConfig, Estimand, EtwfeConfig,
+    FisherAlternative, IpwConfig, Linkage, MatchMethod, MediationConfig, PredictorSpec, RdConfig,
+    SarConfig, SemConfig, StaggeredDidConfig, SynthConfig, TmleConfig, WeightItConfig,
+    bacon_decomp, ctmle, dbscan, hierarchical, kmeans, match_it, pca, random_forest, run_arima,
+    run_cbps, run_changepoint, run_did, run_doubly_robust, run_etwfe, run_fixed_effects, run_hdfe,
+    run_ipw_treatment, run_iv2sls, run_loess, run_logit, run_mediation_analysis, run_mstl,
+    run_ols, run_probit, run_random_effects, run_rd, run_sar_dataset, run_sem_dataset,
+    run_staggered_did, run_synthetic_control, tmle, weightit,
 };
+use ndarray::{Array1, Array2};
 use polars::prelude::*;
 use rand::Rng;
 use rand::SeedableRng;
@@ -159,6 +168,202 @@ fn generate_cluster_data(n: usize, k: usize, seed: u64) -> ndarray::Array2<f64> 
     data
 }
 
+/// Generate DiD data (2x2 canonical design)
+fn generate_did_data(n: usize, seed: u64) -> Dataset {
+    let mut rng = ChaCha8Rng::seed_from_u64(seed);
+    let half = n / 2;
+
+    let mut treatment = Vec::with_capacity(n);
+    let mut post = Vec::with_capacity(n);
+    let mut y = Vec::with_capacity(n);
+    let mut x1 = Vec::with_capacity(n);
+
+    for i in 0..n {
+        let t = if i < half { 0.0 } else { 1.0 };
+        let p = if i % 2 == 0 { 0.0 } else { 1.0 };
+        treatment.push(t);
+        post.push(p);
+        let x = rng.gen_range(-1.0..1.0);
+        x1.push(x);
+        y.push(1.0 + 0.5 * t + 0.3 * p + 2.0 * t * p + 0.4 * x + rng.gen_range(-0.5..0.5));
+    }
+
+    let df = df! {
+        "y" => y,
+        "treatment" => treatment,
+        "post" => post,
+        "x1" => x1,
+    }
+    .expect("did data");
+    Dataset::new(df)
+}
+
+/// Generate staggered panel data with treatment timing
+fn generate_staggered_panel(n_units: usize, n_periods: usize, seed: u64) -> Dataset {
+    let mut rng = ChaCha8Rng::seed_from_u64(seed);
+    let n = n_units * n_periods;
+
+    let mut unit: Vec<i64> = Vec::with_capacity(n);
+    let mut time: Vec<i64> = Vec::with_capacity(n);
+    let mut y: Vec<f64> = Vec::with_capacity(n);
+    let mut treat_time: Vec<i64> = Vec::with_capacity(n);
+    let mut treated: Vec<f64> = Vec::with_capacity(n);
+
+    for u in 0..n_units {
+        // Stagger treatment: first third never treated, rest treated at different times
+        let tt = if u < n_units / 3 {
+            0i64 // never treated (coded as 0)
+        } else {
+            (n_periods as i64 / 3) + (u as i64 % (n_periods as i64 / 2)) + 1
+        };
+
+        let unit_effect = (u as f64) * 0.1;
+        for t in 0..n_periods {
+            unit.push(u as i64);
+            time.push(t as i64);
+            treat_time.push(tt);
+            let is_treated = tt > 0 && (t as i64) >= tt;
+            treated.push(if is_treated { 1.0 } else { 0.0 });
+            let te = if is_treated { 2.0 } else { 0.0 };
+            y.push(unit_effect + 0.05 * (t as f64) + te + rng.gen_range(-0.5..0.5));
+        }
+    }
+
+    let df = df! {
+        "unit" => unit,
+        "time" => time,
+        "y" => y,
+        "treat_time" => treat_time,
+        "treated" => treated,
+    }
+    .expect("staggered panel data");
+    Dataset::new(df)
+}
+
+/// Generate IV data with endogenous variable + instrument
+fn generate_iv_data(n: usize, seed: u64) -> Dataset {
+    let mut rng = ChaCha8Rng::seed_from_u64(seed);
+
+    let z: Vec<f64> = (0..n).map(|_| rng.gen_range(-2.0..2.0)).collect();
+    let x_exog: Vec<f64> = (0..n).map(|_| rng.gen_range(-1.0..1.0)).collect();
+    let u: Vec<f64> = (0..n).map(|_| rng.gen_range(-1.0..1.0)).collect();
+    let x_endog: Vec<f64> = (0..n)
+        .map(|i| 0.5 * z[i] + 0.3 * u[i] + rng.gen_range(-0.3..0.3))
+        .collect();
+    let y: Vec<f64> = (0..n)
+        .map(|i| 1.0 + 0.8 * x_endog[i] + 0.5 * x_exog[i] + u[i] + rng.gen_range(-0.3..0.3))
+        .collect();
+
+    let df = df! {
+        "y" => y,
+        "x_exog" => x_exog,
+        "x_endog" => x_endog,
+        "instrument" => z,
+    }
+    .expect("iv data");
+    Dataset::new(df)
+}
+
+/// Generate RD data with running variable and cutoff at 0
+fn generate_rd_data(n: usize, seed: u64) -> Dataset {
+    let mut rng = ChaCha8Rng::seed_from_u64(seed);
+
+    let running: Vec<f64> = (0..n).map(|_| rng.gen_range(-1.0..1.0)).collect();
+    let y: Vec<f64> = (0..n)
+        .map(|i| {
+            let te = if running[i] >= 0.0 { 1.5 } else { 0.0 };
+            0.5 + 0.3 * running[i] + te + rng.gen_range(-0.5..0.5)
+        })
+        .collect();
+
+    let df = df! {
+        "y" => y,
+        "running" => running,
+    }
+    .expect("rd data");
+    Dataset::new(df)
+}
+
+/// Generate treatment data with binary treatment, covariates, and outcome
+fn generate_treatment_data(n: usize, seed: u64) -> Dataset {
+    let mut rng = ChaCha8Rng::seed_from_u64(seed);
+
+    let x1: Vec<f64> = (0..n).map(|_| rng.gen_range(-2.0..2.0)).collect();
+    let x2: Vec<f64> = (0..n).map(|_| rng.gen_range(-2.0..2.0)).collect();
+    let treatment: Vec<f64> = (0..n)
+        .map(|i| {
+            let prob = 1.0 / (1.0 + (-0.3 * x1[i] - 0.2 * x2[i]).exp());
+            if rng.gen_range(0.0..1.0) < prob { 1.0 } else { 0.0 }
+        })
+        .collect();
+    let y: Vec<f64> = (0..n)
+        .map(|i| 1.0 + 0.5 * treatment[i] + 0.3 * x1[i] + 0.2 * x2[i] + rng.gen_range(-0.5..0.5))
+        .collect();
+
+    let df = df! {
+        "y" => y,
+        "treatment" => treatment,
+        "x1" => x1,
+        "x2" => x2,
+    }
+    .expect("treatment data");
+    Dataset::new(df)
+}
+
+/// Generate DoubleML data (returns arrays)
+fn generate_doubleml_data(n: usize, seed: u64) -> (Array1<f64>, Array1<f64>, Array2<f64>) {
+    let mut rng = ChaCha8Rng::seed_from_u64(seed);
+    let k = 5;
+    let mut x = Array2::zeros((n, k));
+    for i in 0..n {
+        for j in 0..k {
+            x[[i, j]] = rng.gen_range(-2.0..2.0);
+        }
+    }
+    let d: Array1<f64> = (0..n)
+        .map(|i| {
+            let lin: f64 = (0..k).map(|j| 0.2 * x[[i, j]]).sum();
+            let prob = 1.0 / (1.0 + (-lin).exp());
+            if rng.gen_range(0.0..1.0) < prob { 1.0 } else { 0.0 }
+        })
+        .collect();
+    let y: Array1<f64> = (0..n)
+        .map(|i| {
+            let lin: f64 = (0..k).map(|j| 0.3 * x[[i, j]]).sum();
+            1.0 + 0.5 * d[i] + lin + rng.gen_range(-0.5..0.5)
+        })
+        .collect();
+    (y, d, x)
+}
+
+/// Generate mediation data with treatment, mediator, outcome, covariates
+fn generate_mediation_data(n: usize, seed: u64) -> Dataset {
+    let mut rng = ChaCha8Rng::seed_from_u64(seed);
+
+    let x1: Vec<f64> = (0..n).map(|_| rng.gen_range(-1.0..1.0)).collect();
+    let treatment: Vec<f64> = (0..n)
+        .map(|_| if rng.gen_range(0.0..1.0) < 0.5 { 1.0 } else { 0.0 })
+        .collect();
+    let mediator: Vec<f64> = (0..n)
+        .map(|i| 0.5 * treatment[i] + 0.3 * x1[i] + rng.gen_range(-0.5..0.5))
+        .collect();
+    let y: Vec<f64> = (0..n)
+        .map(|i| {
+            1.0 + 0.3 * treatment[i] + 0.5 * mediator[i] + 0.2 * x1[i]
+                + rng.gen_range(-0.5..0.5)
+        })
+        .collect();
+
+    let df = df! {
+        "y" => y,
+        "treatment" => treatment,
+        "mediator" => mediator,
+        "x1" => x1,
+    }
+    .expect("mediation data");
+    Dataset::new(df)
+}
+
 fn main() {
     let config = BenchConfig {
         warmup_iterations: 10,
@@ -184,15 +389,15 @@ fn main() {
         let dataset = generate_regression_data(n, 5, 42);
         let x_cols = vec!["x1", "x2", "x3", "x4", "x5"];
 
-        // OLS Standard
-        let result = run_benchmark("OLS", "standard", n, &config, || {
+        // OLS Standard (with heap tracking)
+        let result = run_benchmark_tracked("OLS", "standard", n, &config, || {
             run_ols(&dataset, "y", &x_cols, true, CovarianceType::Standard)
         });
         print_result(&result);
         results.push(result);
 
-        // OLS HC1
-        let result = run_benchmark("OLS", "HC1", n, &config, || {
+        // OLS HC1 (with heap tracking)
+        let result = run_benchmark_tracked("OLS", "HC1", n, &config, || {
             run_ols(&dataset, "y", &x_cols, true, CovarianceType::HC1)
         });
         print_result(&result);
@@ -209,22 +414,22 @@ fn main() {
         let n = n_ent * n_per;
         let dataset = generate_panel_data(n_ent, n_per, 42);
 
-        // Fixed Effects
-        let result = run_benchmark("FixedEffects", "within", n, &config, || {
+        // Fixed Effects (with heap tracking)
+        let result = run_benchmark_tracked("FixedEffects", "within", n, &config, || {
             run_fixed_effects(&dataset, "y", &["x1", "x2"], "entity")
         });
         print_result(&result);
         results.push(result);
 
-        // Random Effects
-        let result = run_benchmark("RandomEffects", "GLS", n, &config, || {
+        // Random Effects (with heap tracking)
+        let result = run_benchmark_tracked("RandomEffects", "GLS", n, &config, || {
             run_random_effects(&dataset, "y", &["x1", "x2"], "entity")
         });
         print_result(&result);
         results.push(result);
 
-        // HDFE
-        let result = run_benchmark("HDFE", "2-way", n, &config, || {
+        // HDFE (with heap tracking)
+        let result = run_benchmark_tracked("HDFE", "2-way", n, &config, || {
             run_hdfe(
                 &dataset,
                 "y",
@@ -295,15 +500,15 @@ fn main() {
     for n in [100, 1000, 5000] {
         let data = generate_cluster_data(n, 5, 42);
 
-        // K-Means
-        let result = run_benchmark("K-Means", "k=3", n, &config, || {
+        // K-Means (with heap tracking)
+        let result = run_benchmark_tracked("K-Means", "k=3", n, &config, || {
             kmeans(data.view(), 3, Some(100), Some(1e-4), Some(5), Some(42))
         });
         print_result(&result);
         results.push(result);
 
-        // PCA
-        let result = run_benchmark("PCA", "k=3", n, &config, || {
+        // PCA (with heap tracking)
+        let result = run_benchmark_tracked("PCA", "k=3", n, &config, || {
             pca(data.view(), Some(3), false)
         });
         print_result(&result);
@@ -602,6 +807,255 @@ fn main() {
 
         let result = run_benchmark("Jarque_Bera", "standalone", n, &config, || {
             jarque_bera_test(&residuals)
+        });
+        print_result(&result);
+        results.push(result);
+    }
+
+    // ============================================
+    // Round 4: Causal Inference & Econometrics
+    // ============================================
+    println!("\n--- Causal Inference & Econometrics ---");
+    print_header();
+
+    let slow_config = BenchConfig {
+        warmup_iterations: 3,
+        measurement_iterations: 20,
+        capture_raw_times: true,
+    };
+
+    // DiD (canonical 2x2)
+    for n in [200, 500, 1000] {
+        let dataset = generate_did_data(n, 42);
+        let result = run_benchmark("DiD", "canonical", n, &slow_config, || {
+            run_did(&dataset, "y", "treatment", "post", Some(&["x1"]))
+        });
+        print_result(&result);
+        results.push(result);
+    }
+
+    // IV/2SLS
+    for n in [200, 500, 1000] {
+        let dataset = generate_iv_data(n, 42);
+        let result = run_benchmark("IV_2SLS", "2sls", n, &slow_config, || {
+            run_iv2sls(&dataset, "y", &["x_exog"], &["x_endog"], &["instrument"], false)
+        });
+        print_result(&result);
+        results.push(result);
+    }
+
+    // RD (sharp)
+    for n in [200, 500, 1000] {
+        let dataset = generate_rd_data(n, 42);
+        let result = run_benchmark("RD", "sharp", n, &slow_config, || {
+            run_rd(&dataset, "y", "running", 0.0, RdConfig::default())
+        });
+        print_result(&result);
+        results.push(result);
+    }
+
+    // Staggered DiD (Callaway-Sant'Anna)
+    for (n_units, n_periods) in [(20, 10), (50, 10)] {
+        let n = n_units * n_periods;
+        let dataset = generate_staggered_panel(n_units, n_periods, 42);
+        let sdid_config = StaggeredDidConfig::default();
+        let result = run_benchmark("Staggered_DiD", "CS", n, &slow_config, || {
+            run_staggered_did(
+                &dataset,
+                "y",
+                "treat_time",
+                "time",
+                "unit",
+                None,
+                sdid_config.clone(),
+            )
+        });
+        print_result(&result);
+        results.push(result);
+    }
+
+    // ETWFE (Wooldridge)
+    for (n_units, n_periods) in [(20, 10), (50, 10)] {
+        let n = n_units * n_periods;
+        let dataset = generate_staggered_panel(n_units, n_periods, 42);
+        let result = run_benchmark("ETWFE", "Wooldridge", n, &slow_config, || {
+            run_etwfe(
+                &dataset,
+                "y",
+                "unit",
+                "time",
+                "treated",
+                "treat_time",
+                None,
+                Some(EtwfeConfig::default()),
+            )
+        });
+        print_result(&result);
+        results.push(result);
+    }
+
+    // Bacon decomposition
+    for (n_units, n_periods) in [(20, 10), (50, 10)] {
+        let n = n_units * n_periods;
+        let dataset = generate_staggered_panel(n_units, n_periods, 42);
+        let result = run_benchmark("Bacon", "decomp", n, &slow_config, || {
+            bacon_decomp(&dataset, "y", "unit", "time", "treated")
+        });
+        print_result(&result);
+        results.push(result);
+    }
+
+    // TMLE
+    for n in [200, 500, 1000] {
+        let dataset = generate_treatment_data(n, 42);
+        let result = run_benchmark("TMLE", "ATE", n, &slow_config, || {
+            tmle(
+                &dataset,
+                "y",
+                "treatment",
+                &["x1", "x2"],
+                TmleConfig::default(),
+            )
+        });
+        print_result(&result);
+        results.push(result);
+    }
+
+    // CTMLE
+    for n in [200, 500, 1000] {
+        let dataset = generate_treatment_data(n, 42);
+        let result = run_benchmark("CTMLE", "adaptive", n, &slow_config, || {
+            ctmle(
+                &dataset,
+                "y",
+                "treatment",
+                &["x1", "x2"],
+                CTmleConfig::default(),
+            )
+        });
+        print_result(&result);
+        results.push(result);
+    }
+
+    // IPW
+    for n in [200, 500, 1000] {
+        let dataset = generate_treatment_data(n, 42);
+        let result = run_benchmark("IPW", "ATE", n, &slow_config, || {
+            run_ipw_treatment(
+                &dataset,
+                "y",
+                "treatment",
+                &["x1", "x2"],
+                IpwConfig::default(),
+            )
+        });
+        print_result(&result);
+        results.push(result);
+    }
+
+    // CBPS
+    for n in [200, 500, 1000] {
+        let dataset = generate_treatment_data(n, 42);
+        let result = run_benchmark("CBPS", "exact", n, &slow_config, || {
+            run_cbps(&dataset, "treatment", &["x1", "x2"], None)
+        });
+        print_result(&result);
+        results.push(result);
+    }
+
+    // Matching (nearest neighbor)
+    for n in [200, 500, 1000] {
+        let dataset = generate_treatment_data(n, 42);
+        let result = run_benchmark("Matching", "nearest", n, &slow_config, || {
+            match_it(
+                &dataset,
+                "treatment",
+                &["x1", "x2"],
+                MatchMethod::NearestNeighbor { ratio: 1, caliper: None, replace: false },
+                None,
+            )
+        });
+        print_result(&result);
+        results.push(result);
+    }
+
+    // WeightIt
+    for n in [200, 500, 1000] {
+        let dataset = generate_treatment_data(n, 42);
+        let result = run_benchmark("WeightIt", "logistic", n, &slow_config, || {
+            weightit(
+                &dataset,
+                "treatment",
+                &["x1", "x2"],
+                WeightItConfig::default(),
+            )
+        });
+        print_result(&result);
+        results.push(result);
+    }
+
+    // DoubleML (PLR)
+    for n in [200, 500, 1000] {
+        let (y, d, x) = generate_doubleml_data(n, 42);
+        let result = run_benchmark("DoubleML", "PLR", n, &slow_config, || {
+            run_double_ml(&y.view(), &d.view(), &x.view(), DoubleMLConfig::default())
+        });
+        print_result(&result);
+        results.push(result);
+    }
+
+    // Mediation
+    for n in [200, 500, 1000] {
+        let dataset = generate_mediation_data(n, 42);
+        let med_config = MediationConfig {
+            bootstrap: 199,
+            seed: Some(42),
+            ..Default::default()
+        };
+        let result = run_benchmark("Mediation", "IPW", n, &slow_config, || {
+            run_mediation_analysis(
+                &dataset,
+                "y",
+                "treatment",
+                "mediator",
+                &["x1"],
+                med_config.clone(),
+            )
+        });
+        print_result(&result);
+        results.push(result);
+    }
+
+    // LTMLE (2 time points)
+    for n in [200, 500, 1000] {
+        let mut rng = ChaCha8Rng::seed_from_u64(42);
+        let x1: Array2<f64> = Array2::from_shape_fn((n, 2), |_| rng.gen_range(-1.0..1.0));
+        let x2: Array2<f64> = Array2::from_shape_fn((n, 2), |_| rng.gen_range(-1.0..1.0));
+        let a1: Array1<f64> = (0..n)
+            .map(|i| {
+                let p = 1.0 / (1.0 + (-0.3 * x1[[i, 0]]).exp());
+                if rng.gen_range(0.0..1.0) < p { 1.0 } else { 0.0 }
+            })
+            .collect();
+        let a2: Array1<f64> = (0..n)
+            .map(|i| {
+                let p = 1.0 / (1.0 + (-0.3 * x2[[i, 0]] - 0.2 * a1[i]).exp());
+                if rng.gen_range(0.0..1.0) < p { 1.0 } else { 0.0 }
+            })
+            .collect();
+        let y1: Array1<f64> = Array1::zeros(n);
+        let y2: Array1<f64> = (0..n)
+            .map(|i| 1.0 + 0.5 * a1[i] + 0.3 * a2[i] + 0.2 * x1[[i, 0]] + rng.gen_range(-0.5..0.5))
+            .collect();
+
+        let ltmle_data = LtmleData::new(
+            vec![y1, y2],
+            vec![a1, a2],
+            vec![x1, x2],
+        )
+        .expect("ltmle data");
+        let result = run_benchmark("LTMLE", "2-period", n, &slow_config, || {
+            run_ltmle(&ltmle_data, LtmleConfig::default())
         });
         print_result(&result);
         results.push(result);
