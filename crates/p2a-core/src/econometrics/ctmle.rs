@@ -2148,4 +2148,236 @@ mod tests {
         assert!(result.ate.is_finite());
         assert!(result.se > 0.0);
     }
+
+    // =========================================================================
+    // Validation tests (test_validate_* prefix)
+    // =========================================================================
+
+    /// Create a larger confounded dataset for validation with known positive ATE.
+    ///
+    /// DGP (continuous outcome for stability):
+    ///   W1 ~ Uniform(0, 1), W2 ~ Uniform(0, 1)
+    ///   A | W ~ Bernoulli(expit(0.5*W1 + 0.3*W2 - 0.4))
+    ///   Y = ATE*A + 0.8*W1 + 0.4*W2 + noise
+    ///
+    /// True ATE = 2.0
+    fn create_validate_ctmle_dataset() -> (Dataset, f64) {
+        let true_ate = 2.0;
+        let n = 200;
+
+        // Deterministic pseudo-random using modular arithmetic
+        let w1: Vec<f64> = (0..n)
+            .map(|i| ((i * 7 + 3) % 100) as f64 / 100.0 + 0.005)
+            .collect();
+        let w2: Vec<f64> = (0..n)
+            .map(|i| ((i * 13 + 7) % 100) as f64 / 100.0 + 0.005)
+            .collect();
+
+        let treatment: Vec<f64> = (0..n)
+            .map(|i| {
+                let ps = 1.0 / (1.0 + (-0.5 * w1[i] - 0.3 * w2[i] + 0.4).exp());
+                let threshold = ((i * 37 + 11) % 100) as f64 / 100.0;
+                if threshold < ps { 1.0 } else { 0.0 }
+            })
+            .collect();
+
+        let y: Vec<f64> = (0..n)
+            .map(|i| {
+                let noise = ((i * 31 + 5) % 100) as f64 / 500.0 - 0.1;
+                true_ate * treatment[i] + 0.8 * w1[i] + 0.4 * w2[i] + noise
+            })
+            .collect();
+
+        let df = df! {
+            "y" => y,
+            "treatment" => treatment,
+            "w1" => w1,
+            "w2" => w2,
+        }
+        .unwrap();
+
+        (Dataset::new(df), true_ate)
+    }
+
+    /// Validate C-TMLE ATE estimate is in a reasonable range for the DGP.
+    #[test]
+    fn test_validate_ctmle_ate_recovery() {
+        let (dataset, true_ate) = create_validate_ctmle_dataset();
+
+        let config = CTmleConfig {
+            n_folds: 3,
+            max_covariates: Some(2),
+            stopping_rule: StoppingRule::MaxCovariates(2),
+            q_model: CTmleQModel::Linear,
+            ..Default::default()
+        };
+
+        let result = ctmle(&dataset, "y", "treatment", &["w1", "w2"], config).unwrap();
+
+        // ATE should be positive and in the general range of the true ATE
+        assert!(
+            result.ate > 0.5,
+            "ATE = {:.4} should be positive (true = {})",
+            result.ate,
+            true_ate
+        );
+        assert!(
+            result.ate < 4.0,
+            "ATE = {:.4} should not be too large (true = {})",
+            result.ate,
+            true_ate
+        );
+
+        // SE should be positive and finite
+        assert!(
+            result.se > 0.0 && result.se.is_finite(),
+            "SE should be positive and finite, got {:.4}",
+            result.se
+        );
+
+        // CI should bracket the estimate
+        assert!(
+            result.ci_lower < result.ate && result.ate < result.ci_upper,
+            "CI [{:.4}, {:.4}] should bracket ATE = {:.4}",
+            result.ci_lower,
+            result.ci_upper,
+            result.ate
+        );
+    }
+
+    /// Validate that the collaborative selection path is computed.
+    #[test]
+    fn test_validate_ctmle_selection_path_properties() {
+        let (dataset, _) = create_validate_ctmle_dataset();
+
+        let config = CTmleConfig {
+            n_folds: 3,
+            max_covariates: Some(2),
+            stopping_rule: StoppingRule::MaxCovariates(2),
+            q_model: CTmleQModel::Linear,
+            ..Default::default()
+        };
+
+        let result = ctmle(&dataset, "y", "treatment", &["w1", "w2"], config).unwrap();
+
+        // Selection path should start with intercept-only model
+        assert!(
+            !result.selection_path.is_empty(),
+            "Selection path must not be empty"
+        );
+        assert!(
+            result.selection_path[0].covariate_index.is_none(),
+            "First step should be intercept-only"
+        );
+        assert_eq!(result.selection_path[0].n_covariates, 0);
+
+        // Each subsequent step should add one covariate
+        for i in 1..result.selection_path.len() {
+            assert_eq!(result.selection_path[i].n_covariates, i);
+            assert!(
+                result.selection_path[i].covariate_index.is_some(),
+                "Step {} should have a covariate index",
+                i
+            );
+        }
+
+        // CV criterion values should all be non-negative
+        for (i, step) in result.selection_path.iter().enumerate() {
+            assert!(
+                step.cv_criterion >= 0.0,
+                "CV criterion at step {} = {:.6} should be non-negative",
+                i,
+                step.cv_criterion
+            );
+        }
+
+        // CV risk vector should match selection path length
+        assert_eq!(result.cv_risk.len(), result.selection_path.len());
+    }
+
+    /// Validate influence curve and standard error computation.
+    #[test]
+    fn test_validate_ctmle_influence_curve() {
+        let (dataset, _) = create_validate_ctmle_dataset();
+
+        let config = CTmleConfig {
+            n_folds: 3,
+            max_covariates: Some(2),
+            stopping_rule: StoppingRule::MaxCovariates(2),
+            q_model: CTmleQModel::Linear,
+            ..Default::default()
+        };
+
+        let result = ctmle(&dataset, "y", "treatment", &["w1", "w2"], config).unwrap();
+
+        // IC should have one value per observation
+        assert_eq!(result.influence_curve.len(), result.n_obs);
+
+        // All IC values should be finite
+        assert!(
+            result.influence_curve.iter().all(|ic| ic.is_finite()),
+            "All influence curve values must be finite"
+        );
+
+        // IC variance should be positive
+        let n = result.n_obs as f64;
+        let ic_mean: f64 = result.influence_curve.iter().sum::<f64>() / n;
+        let ic_var: f64 = result
+            .influence_curve
+            .iter()
+            .map(|ic| (ic - ic_mean).powi(2))
+            .sum::<f64>()
+            / (n - 1.0);
+        assert!(
+            ic_var > 0.0,
+            "IC variance should be positive, got {:.6}",
+            ic_var
+        );
+
+        // SE should be derived from IC variance:
+        // SE = sqrt(Var(IC) / n) approximately
+        let se_from_ic = (ic_var / n).sqrt();
+        // Allow some tolerance because the exact computation may differ
+        assert!(
+            (result.se - se_from_ic).abs() / result.se < 0.5,
+            "SE = {:.4} should be roughly sqrt(Var(IC)/n) = {:.4}",
+            result.se,
+            se_from_ic
+        );
+    }
+
+    /// Validate propensity scores are within truncation bounds.
+    #[test]
+    fn test_validate_ctmle_propensity_bounds() {
+        let (dataset, _) = create_validate_ctmle_dataset();
+
+        let gbound = (0.05, 0.95);
+        let config = CTmleConfig {
+            n_folds: 3,
+            max_covariates: Some(2),
+            stopping_rule: StoppingRule::MaxCovariates(2),
+            q_model: CTmleQModel::Linear,
+            gbound,
+            ..Default::default()
+        };
+
+        let result = ctmle(&dataset, "y", "treatment", &["w1", "w2"], config).unwrap();
+
+        // All propensity scores should be within bounds
+        for (i, &ps) in result.propensity_scores.iter().enumerate() {
+            assert!(
+                ps >= gbound.0 - 1e-10 && ps <= gbound.1 + 1e-10,
+                "Propensity score {} = {:.4} should be within [{}, {}]",
+                i,
+                ps,
+                gbound.0,
+                gbound.1
+            );
+        }
+
+        // Should have correct count of treated and control
+        assert!(result.n_treated > 0, "Should have some treated observations");
+        assert!(result.n_control > 0, "Should have some control observations");
+        assert_eq!(result.n_treated + result.n_control, result.n_obs);
+    }
 }

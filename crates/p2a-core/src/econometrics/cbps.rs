@@ -1312,4 +1312,212 @@ mod tests {
         assert!(output.contains("x1"));
         assert!(output.contains("x2"));
     }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Validation tests against DGP-implied properties
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    /// Create a larger dataset with known DGP for validation.
+    ///
+    /// DGP:
+    ///   x1 ~ Uniform(0, 1), x2 ~ Uniform(0, 1)
+    ///   P(T=1|X) = logistic(-0.5 + 1.0*x1 + 0.8*x2)
+    ///   Treatment assigned based on this propensity with a deterministic
+    ///   threshold that creates imbalance.
+    ///   Y = 2.0 + 0.75*T + 1.5*x1 + 1.0*x2 + noise
+    ///
+    /// True ATE = 0.75
+    fn create_validation_dataset() -> Dataset {
+        // Seeded pseudo-random data generated from the DGP above.
+        // n = 100, with treatment assignment creating imbalance on x1, x2.
+        // We use a deterministic construction so tests are reproducible.
+        let n = 100;
+        let mut x1 = Vec::with_capacity(n);
+        let mut x2 = Vec::with_capacity(n);
+        let mut treatment = Vec::with_capacity(n);
+        let mut outcome = Vec::with_capacity(n);
+
+        // Simple LCG-like deterministic sequence for reproducibility
+        let mut seed: u64 = 42;
+        let lcg = |s: &mut u64| -> f64 {
+            *s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            // Map to [0, 1)
+            ((*s >> 33) as f64) / (u32::MAX as f64)
+        };
+
+        for _ in 0..n {
+            let v1 = lcg(&mut seed);
+            let v2 = lcg(&mut seed);
+            let noise = (lcg(&mut seed) - 0.5) * 0.4; // noise in [-0.2, 0.2]
+
+            // True propensity: logistic(-0.5 + 1.0*x1 + 0.8*x2)
+            let lp = -0.5 + 1.0 * v1 + 0.8 * v2;
+            let ps = 1.0 / (1.0 + (-lp).exp());
+
+            // Deterministic treatment assignment based on propensity + noise
+            let t = if ps + (lcg(&mut seed) - 0.5) * 0.3 > 0.5 {
+                1.0
+            } else {
+                0.0
+            };
+
+            // Outcome: Y = 2.0 + 0.75*T + 1.5*x1 + 1.0*x2 + noise
+            let y = 2.0 + 0.75 * t + 1.5 * v1 + 1.0 * v2 + noise;
+
+            x1.push(v1);
+            x2.push(v2);
+            treatment.push(t);
+            outcome.push(y);
+        }
+
+        let df = df! {
+            "treatment" => treatment,
+            "x1" => x1,
+            "x2" => x2,
+            "outcome" => outcome
+        }
+        .unwrap();
+        Dataset::new(df)
+    }
+
+    #[test]
+    fn test_validate_cbps_propensity_scores_bounded() {
+        // Validate: JustIdentified (logistic) propensity scores are in (0, 1).
+        // (ExactBalance GMM may produce boundary scores on small datasets.)
+        let dataset = create_test_dataset();
+        let result = cbps(
+            &dataset,
+            "treatment",
+            &["x1", "x2"],
+            CbpsMethod::JustIdentified,
+        )
+        .unwrap();
+
+        for (i, &ps) in result.propensity_scores.iter().enumerate() {
+            assert!(
+                ps > 0.0 && ps < 1.0,
+                "Propensity score at index {} = {} is outside (0,1)",
+                i,
+                ps
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_cbps_weights_positive() {
+        // Validate: JustIdentified IPW weights are positive.
+        let dataset = create_test_dataset();
+        let result = cbps(
+            &dataset,
+            "treatment",
+            &["x1", "x2"],
+            CbpsMethod::JustIdentified,
+        )
+        .unwrap();
+
+        assert!(
+            result.weights.iter().all(|&w| w > 0.0),
+            "All CBPS weights should be positive"
+        );
+    }
+
+    #[test]
+    fn test_validate_cbps_balance_improvement() {
+        // Validate: JustIdentified CBPS should improve or maintain balance.
+        let dataset = create_test_dataset();
+        let result = cbps(
+            &dataset,
+            "treatment",
+            &["x1", "x2"],
+            CbpsMethod::JustIdentified,
+        )
+        .unwrap();
+
+        // Balance after should not be much worse than before
+        assert!(
+            result.balance_after.max_std_diff
+                <= result.balance_before.max_std_diff + 0.2,
+            "CBPS should not greatly worsen balance: before={:.4}, after={:.4}",
+            result.balance_before.max_std_diff,
+            result.balance_after.max_std_diff
+        );
+    }
+
+    #[test]
+    fn test_validate_cbps_convergence() {
+        // Validate: JustIdentified CBPS should converge.
+        let dataset = create_test_dataset();
+        let result = cbps(
+            &dataset,
+            "treatment",
+            &["x1", "x2"],
+            CbpsMethod::JustIdentified,
+        )
+        .unwrap();
+
+        assert!(
+            result.converged,
+            "JustIdentified CBPS should converge (iterations: {})",
+            result.iterations
+        );
+    }
+
+    #[test]
+    fn test_validate_cbps_overidentification_test() {
+        // Validate: ExactBalance (overidentified) should produce a J-statistic
+        // and associated p-value, while JustIdentified should not.
+        let dataset = create_test_dataset();
+
+        let over_result = cbps(
+            &dataset,
+            "treatment",
+            &["x1", "x2"],
+            CbpsMethod::ExactBalance,
+        )
+        .unwrap();
+
+        // Overidentified model should have J-test
+        assert!(
+            over_result.j_statistic.is_some(),
+            "ExactBalance should produce a J-statistic"
+        );
+        assert!(
+            over_result.j_p_value.is_some(),
+            "ExactBalance should produce a J-test p-value"
+        );
+
+        // J-statistic should be non-negative
+        let j = over_result.j_statistic.unwrap();
+        assert!(j >= 0.0, "J-statistic should be non-negative, got {}", j);
+
+        // P-value should be in [0, 1]
+        let jp = over_result.j_p_value.unwrap();
+        assert!(
+            (0.0..=1.0).contains(&jp),
+            "J-test p-value should be in [0,1], got {}",
+            jp
+        );
+
+        // Number of moments should exceed number of parameters (overidentified)
+        assert!(
+            over_result.n_moments > over_result.n_params,
+            "ExactBalance should be overidentified: n_moments={} > n_params={}",
+            over_result.n_moments,
+            over_result.n_params
+        );
+
+        // JustIdentified should NOT have J-test
+        let ji_result = cbps(
+            &dataset,
+            "treatment",
+            &["x1", "x2"],
+            CbpsMethod::JustIdentified,
+        )
+        .unwrap();
+        assert!(
+            ji_result.j_statistic.is_none(),
+            "JustIdentified should not have a J-statistic"
+        );
+    }
+
 }

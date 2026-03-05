@@ -1730,4 +1730,470 @@ mod tests {
             p
         );
     }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Validation Tests
+    //
+    // These tests validate the Callaway-Sant'Anna estimator against known
+    // DGP properties. The data-generating process uses deterministic
+    // pseudo-noise so results are reproducible without external RNG.
+    //
+    // References:
+    // - Callaway, B. & Sant'Anna, P.H.C. (2021). "Difference-in-Differences
+    //   with Multiple Time Periods". Journal of Econometrics, 225(2), 200-230.
+    // - R package `did` (https://bcallaway11.github.io/did/)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Create a larger staggered dataset with heterogeneous treatment effects
+    /// and known group-time ATTs.
+    ///
+    /// DGP:
+    /// - 50 units over 9 periods (2000-2008)
+    /// - Cohort 2002 (units 1-10): ATT = 2.0 for all post-treatment periods
+    /// - Cohort 2004 (units 11-20): ATT = 4.0 for all post-treatment periods
+    /// - Cohort 2006 (units 21-30): ATT = 6.0 for all post-treatment periods
+    /// - Never-treated (units 31-50): no treatment effect
+    /// - Common time trend: 0.3 per period
+    /// - Unit FE: unit_id * 0.5
+    /// - Deterministic pseudo-noise: ((unit * year) % 17) * 0.05 - 0.425
+    fn create_validation_dataset_heterogeneous() -> Dataset {
+        let mut year_vec = Vec::new();
+        let mut unit_vec = Vec::new();
+        let mut g_vec = Vec::new();
+        let mut y_vec = Vec::new();
+
+        for year in 2000..=2008 {
+            for unit in 1..=50 {
+                year_vec.push(year as f64);
+                unit_vec.push(unit as f64);
+
+                let g = if unit <= 10 {
+                    2002
+                } else if unit <= 20 {
+                    2004
+                } else if unit <= 30 {
+                    2006
+                } else {
+                    0
+                };
+                g_vec.push(g as f64);
+
+                // True cohort-specific ATT
+                let att = match g {
+                    2002 => 2.0,
+                    2004 => 4.0,
+                    2006 => 6.0,
+                    _ => 0.0,
+                };
+
+                let base = unit as f64 * 0.5;
+                let trend = (year - 2000) as f64 * 0.3;
+                let treated = if g > 0 && year >= g { att } else { 0.0 };
+                let noise = ((unit * year) % 17) as f64 * 0.05 - 0.425;
+
+                y_vec.push(base + trend + treated + noise);
+            }
+        }
+
+        let df = df! {
+            "year" => year_vec,
+            "unit" => unit_vec,
+            "first_treat" => g_vec,
+            "outcome" => y_vec
+        }
+        .unwrap();
+
+        Dataset::new(df)
+    }
+
+    #[test]
+    fn test_validate_staggered_did_group_time_atts_recover_true_effects() {
+        // Validate that group-time ATT estimates recover the true ATTs
+        // from the DGP within tolerance.
+        //
+        // True ATTs: cohort 2002 -> 2.0, cohort 2004 -> 4.0, cohort 2006 -> 6.0
+        let dataset = create_validation_dataset_heterogeneous();
+        let config = StaggeredDidConfig {
+            comparison_group: ComparisonGroup::NeverTreated,
+            estimation_method: AttEstimationMethod::OutcomeRegression,
+            bootstrap: 50,
+            seed: Some(42),
+            min_obs_per_cell: 3,
+            ..Default::default()
+        };
+
+        let result = run_staggered_did(
+            &dataset,
+            "outcome",
+            "first_treat",
+            "year",
+            "unit",
+            None,
+            config,
+        )
+        .unwrap();
+
+        // Check that we have the expected cohorts
+        assert_eq!(result.cohorts.len(), 3);
+        assert!(result.cohorts.contains(&2002));
+        assert!(result.cohorts.contains(&2004));
+        assert!(result.cohorts.contains(&2006));
+
+        // Check post-treatment group-time ATTs
+        let true_atts: std::collections::HashMap<i64, f64> =
+            [(2002, 2.0), (2004, 4.0), (2006, 6.0)].into_iter().collect();
+
+        for att in &result.group_time_atts {
+            if att.post_treatment {
+                let true_att = true_atts[&att.group];
+                assert!(
+                    (att.att - true_att).abs() < 1.0,
+                    "ATT(g={}, t={}) = {:.4}, expected ~{:.1} (tol=1.0)",
+                    att.group,
+                    att.time,
+                    att.att,
+                    true_att
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_validate_staggered_did_event_study_pre_treatment_near_zero() {
+        // Validate that pre-treatment event study coefficients are near zero,
+        // confirming parallel trends hold in the DGP.
+        let dataset = create_validation_dataset_heterogeneous();
+        let config = StaggeredDidConfig {
+            comparison_group: ComparisonGroup::NeverTreated,
+            estimation_method: AttEstimationMethod::OutcomeRegression,
+            bootstrap: 50,
+            seed: Some(42),
+            min_obs_per_cell: 3,
+            ..Default::default()
+        };
+
+        let result = run_staggered_did(
+            &dataset,
+            "outcome",
+            "first_treat",
+            "year",
+            "unit",
+            None,
+            config,
+        )
+        .unwrap();
+
+        // All pre-treatment event study effects (relative time < 0) should be near 0
+        let pre_effects: Vec<&AggregatedEffect> =
+            result.event_study.iter().filter(|e| e.key < 0).collect();
+
+        assert!(
+            !pre_effects.is_empty(),
+            "Should have at least one pre-treatment event study coefficient"
+        );
+
+        for e in &pre_effects {
+            assert!(
+                e.att.abs() < 1.5,
+                "Pre-treatment event study at e={} should be near 0, got {:.4}",
+                e.key,
+                e.att
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_staggered_did_event_study_post_treatment_positive() {
+        // Validate that post-treatment event study coefficients are positive
+        // and reflect the (weighted) true ATTs.
+        let dataset = create_validation_dataset_heterogeneous();
+        let config = StaggeredDidConfig {
+            comparison_group: ComparisonGroup::NeverTreated,
+            estimation_method: AttEstimationMethod::OutcomeRegression,
+            bootstrap: 50,
+            seed: Some(42),
+            min_obs_per_cell: 3,
+            ..Default::default()
+        };
+
+        let result = run_staggered_did(
+            &dataset,
+            "outcome",
+            "first_treat",
+            "year",
+            "unit",
+            None,
+            config,
+        )
+        .unwrap();
+
+        let post_effects: Vec<&AggregatedEffect> =
+            result.event_study.iter().filter(|e| e.key >= 0).collect();
+
+        assert!(
+            !post_effects.is_empty(),
+            "Should have post-treatment event study coefficients"
+        );
+
+        // Post-treatment effects should be positive (true ATTs range from 2 to 6)
+        for e in &post_effects {
+            assert!(
+                e.att > 0.0,
+                "Post-treatment event study at e={} should be positive, got {:.4}",
+                e.key,
+                e.att
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_staggered_did_overall_att_weighted_average() {
+        // Validate that the overall ATT is a reasonable weighted average
+        // of the group-specific effects.
+        //
+        // With equal group sizes (10 units each) and true ATTs of 2, 4, 6,
+        // the simple average of group ATTs would be ~4.0 (but weighted by
+        // number of post-treatment observations, so may differ).
+        let dataset = create_validation_dataset_heterogeneous();
+        let config = StaggeredDidConfig {
+            comparison_group: ComparisonGroup::NeverTreated,
+            estimation_method: AttEstimationMethod::OutcomeRegression,
+            bootstrap: 50,
+            seed: Some(42),
+            min_obs_per_cell: 3,
+            ..Default::default()
+        };
+
+        let result = run_staggered_did(
+            &dataset,
+            "outcome",
+            "first_treat",
+            "year",
+            "unit",
+            None,
+            config,
+        )
+        .unwrap();
+
+        // Overall ATT should be between 2 and 6 (the range of true ATTs)
+        assert!(
+            result.overall_att.att > 1.0 && result.overall_att.att < 7.0,
+            "Overall ATT should be between 1 and 7, got {:.4}",
+            result.overall_att.att
+        );
+
+        // Overall ATT should be statistically significant (large true effects)
+        assert!(
+            result.overall_att.p_value < 0.10,
+            "Overall ATT should be significant at 10%, p = {:.4}",
+            result.overall_att.p_value
+        );
+    }
+
+    #[test]
+    fn test_validate_staggered_did_group_effects_heterogeneity() {
+        // Validate that group-level aggregated effects preserve the
+        // treatment effect heterogeneity across cohorts.
+        //
+        // The ordering should be: ATT(cohort 2006) > ATT(cohort 2004) > ATT(cohort 2002)
+        let dataset = create_validation_dataset_heterogeneous();
+        let config = StaggeredDidConfig {
+            comparison_group: ComparisonGroup::NeverTreated,
+            estimation_method: AttEstimationMethod::OutcomeRegression,
+            bootstrap: 50,
+            seed: Some(42),
+            min_obs_per_cell: 3,
+            ..Default::default()
+        };
+
+        let result = run_staggered_did(
+            &dataset,
+            "outcome",
+            "first_treat",
+            "year",
+            "unit",
+            None,
+            config,
+        )
+        .unwrap();
+
+        // Find group-level effects
+        let group_2002 = result.group_effects.iter().find(|e| e.key == 2002);
+        let group_2004 = result.group_effects.iter().find(|e| e.key == 2004);
+        let group_2006 = result.group_effects.iter().find(|e| e.key == 2006);
+
+        assert!(group_2002.is_some(), "Should have cohort 2002 effect");
+        assert!(group_2004.is_some(), "Should have cohort 2004 effect");
+        assert!(group_2006.is_some(), "Should have cohort 2006 effect");
+
+        let att_2002 = group_2002.unwrap().att;
+        let att_2004 = group_2004.unwrap().att;
+        let att_2006 = group_2006.unwrap().att;
+
+        // Each group ATT should be close to the true value
+        assert!(
+            (att_2002 - 2.0).abs() < 1.0,
+            "Cohort 2002 ATT should be ~2.0, got {:.4}",
+            att_2002
+        );
+        assert!(
+            (att_2004 - 4.0).abs() < 1.0,
+            "Cohort 2004 ATT should be ~4.0, got {:.4}",
+            att_2004
+        );
+        assert!(
+            (att_2006 - 6.0).abs() < 1.5,
+            "Cohort 2006 ATT should be ~6.0, got {:.4}",
+            att_2006
+        );
+
+        // Ordering should preserve heterogeneity
+        assert!(
+            att_2006 > att_2004,
+            "Cohort 2006 ({:.4}) should exceed cohort 2004 ({:.4})",
+            att_2006,
+            att_2004
+        );
+        assert!(
+            att_2004 > att_2002,
+            "Cohort 2004 ({:.4}) should exceed cohort 2002 ({:.4})",
+            att_2004,
+            att_2002
+        );
+    }
+
+    #[test]
+    fn test_validate_staggered_did_never_treated_comparison() {
+        // Validate with never-treated comparison group explicitly, checking
+        // structural properties of the result.
+        let dataset = create_validation_dataset_heterogeneous();
+        let config = StaggeredDidConfig {
+            comparison_group: ComparisonGroup::NeverTreated,
+            estimation_method: AttEstimationMethod::OutcomeRegression,
+            bootstrap: 50,
+            seed: Some(42),
+            min_obs_per_cell: 3,
+            ..Default::default()
+        };
+
+        let result = run_staggered_did(
+            &dataset,
+            "outcome",
+            "first_treat",
+            "year",
+            "unit",
+            None,
+            config,
+        )
+        .unwrap();
+
+        // Dataset has 50 units x 9 periods = 450 observations
+        assert_eq!(result.n_obs, 450);
+
+        // 30 treated units, 20 never-treated
+        assert_eq!(result.n_treated, 30);
+        assert_eq!(result.n_never_treated, 20);
+
+        // All group-time ATTs should have non-zero comparison observations
+        for att in &result.group_time_atts {
+            assert!(
+                att.n_comparison > 0,
+                "ATT(g={}, t={}) should have comparison observations",
+                att.group,
+                att.time
+            );
+        }
+
+        // Pre-trend test should not reject (DGP has parallel trends)
+        if let Some(ref pretrend) = result.pretrend_test {
+            assert!(
+                pretrend.p_value > 0.01,
+                "Pre-trend test should not reject at 1% level, p = {:.4}",
+                pretrend.p_value
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_staggered_did_homogeneous_effect() {
+        // Validate with homogeneous treatment effect (all cohorts get ATT = 3.0).
+        // The overall ATT should be very close to 3.0.
+        let mut year_vec = Vec::new();
+        let mut unit_vec = Vec::new();
+        let mut g_vec = Vec::new();
+        let mut y_vec = Vec::new();
+
+        let true_att = 3.0;
+
+        for year in 2000..=2008 {
+            for unit in 1..=40 {
+                year_vec.push(year as f64);
+                unit_vec.push(unit as f64);
+
+                let g = if unit <= 10 {
+                    2002
+                } else if unit <= 20 {
+                    2004
+                } else {
+                    0
+                };
+                g_vec.push(g as f64);
+
+                let base = unit as f64 * 0.5;
+                let trend = (year - 2000) as f64 * 0.3;
+                let treated = if g > 0 && year >= g { true_att } else { 0.0 };
+                let noise = ((unit * year) % 13) as f64 * 0.04 - 0.26;
+
+                y_vec.push(base + trend + treated + noise);
+            }
+        }
+
+        let df = df! {
+            "year" => year_vec,
+            "unit" => unit_vec,
+            "first_treat" => g_vec,
+            "outcome" => y_vec
+        }
+        .unwrap();
+        let dataset = Dataset::new(df);
+
+        let config = StaggeredDidConfig {
+            comparison_group: ComparisonGroup::NeverTreated,
+            estimation_method: AttEstimationMethod::OutcomeRegression,
+            bootstrap: 50,
+            seed: Some(42),
+            min_obs_per_cell: 3,
+            ..Default::default()
+        };
+
+        let result = run_staggered_did(
+            &dataset,
+            "outcome",
+            "first_treat",
+            "year",
+            "unit",
+            None,
+            config,
+        )
+        .unwrap();
+
+        // With homogeneous effects, overall ATT should be close to true_att
+        assert!(
+            (result.overall_att.att - true_att).abs() < 1.0,
+            "Overall ATT should be ~{}, got {:.4}",
+            true_att,
+            result.overall_att.att
+        );
+
+        // Group effects should also be close to the common ATT
+        for ge in &result.group_effects {
+            assert!(
+                (ge.att - true_att).abs() < 1.0,
+                "Group {} ATT should be ~{}, got {:.4}",
+                ge.key,
+                true_att,
+                ge.att
+            );
+        }
+    }
 }

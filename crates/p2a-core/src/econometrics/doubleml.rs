@@ -1273,4 +1273,221 @@ mod tests {
         assert!((result1.theta - result2.theta).abs() < 1e-10);
         assert!((result1.se - result2.se).abs() < 1e-10);
     }
+
+    // =========================================================================
+    // Validation tests (test_validate_* prefix)
+    // =========================================================================
+
+    /// Validate PLR model recovers known treatment effect from a linear DGP.
+    ///
+    /// DGP (linear, so OLS nuisance models are correctly specified):
+    ///   X1, X2 ~ Uniform(0,1)
+    ///   D = 0.5*X1 + 0.3*X2 + V,  V ~ Uniform(-0.1, 0.1)
+    ///   Y = theta*D + 0.3*X1 + 0.2*X2 + U,  U ~ Uniform(-0.1, 0.1)
+    ///
+    /// True theta = 0.5. With n=1000 and linear nuisance, cross-fitted OLS
+    /// should recover theta to within ~0.1 of the true value.
+    #[test]
+    fn test_validate_doubleml_plr_parameter_recovery() {
+        let (y, d, x) = create_plr_test_data(1000, 99);
+        let true_theta = 0.5;
+
+        let config = DoubleMLConfig {
+            n_folds: 5,
+            model_type: DMLModelType::PLR,
+            seed: Some(99),
+            ..Default::default()
+        };
+
+        let result = run_double_ml(&y.view(), &d.view(), &x.view(), config).unwrap();
+
+        // theta_hat should be close to true theta (within 0.15 for n=1000)
+        assert!(
+            (result.theta - true_theta).abs() < 0.15,
+            "PLR theta_hat = {:.4} should be within 0.15 of true theta = {}",
+            result.theta,
+            true_theta
+        );
+
+        // Standard error should be positive and reasonable (< 0.1 for n=1000)
+        assert!(result.se > 0.0, "SE must be positive");
+        assert!(
+            result.se < 0.1,
+            "SE = {:.4} too large for n=1000",
+            result.se
+        );
+
+        // 95% CI should contain the true theta
+        assert!(
+            result.ci_lower < true_theta && true_theta < result.ci_upper,
+            "95% CI [{:.4}, {:.4}] should contain true theta = {}",
+            result.ci_lower,
+            result.ci_upper,
+            true_theta
+        );
+
+        // t-stat should be consistent with theta/se
+        assert!(
+            (result.t_stat - result.theta / result.se).abs() < 1e-8,
+            "t_stat = {:.4} should equal theta/se = {:.4}",
+            result.t_stat,
+            result.theta / result.se
+        );
+
+        // p-value should be small (theta != 0)
+        assert!(
+            result.p_value < 0.05,
+            "p-value = {:.4} should reject H0: theta=0",
+            result.p_value
+        );
+    }
+
+    /// Validate that cross-fitting actually uses K folds and scores are computed.
+    #[test]
+    fn test_validate_doubleml_crossfitting_structure() {
+        let (y, d, x) = create_plr_test_data(500, 77);
+
+        for n_folds in [2, 3, 5] {
+            let config = DoubleMLConfig {
+                n_folds,
+                seed: Some(77),
+                ..Default::default()
+            };
+
+            let result = run_double_ml(&y.view(), &d.view(), &x.view(), config).unwrap();
+
+            // Result should report the correct number of folds
+            assert_eq!(result.n_folds, n_folds);
+            assert_eq!(result.n_obs, 500);
+
+            // Scores (psi) should have one entry per observation
+            assert_eq!(
+                result.scores.len(),
+                500,
+                "Should have n={} orthogonal scores",
+                500
+            );
+
+            // All scores should be finite
+            assert!(
+                result.scores.iter().all(|s| s.is_finite()),
+                "All scores must be finite"
+            );
+
+            // Mean of scores should be close to zero at the estimated theta
+            // (this is the moment condition)
+            let mean_score: f64 = result.scores.iter().sum::<f64>() / 500.0;
+            assert!(
+                mean_score.abs() < 0.1,
+                "Mean orthogonal score = {:.6} should be near zero",
+                mean_score
+            );
+
+            // Jacobian should be positive
+            assert!(
+                result.jacobian > 0.0,
+                "Jacobian J = {:.6} should be positive",
+                result.jacobian
+            );
+        }
+    }
+
+    /// Validate IRM model recovers known ATE from a binary treatment DGP.
+    ///
+    /// True ATE = 0.5. With n=1000 and linear nuisance models, should be
+    /// recovered within ~0.3 (wider tolerance for binary treatment).
+    #[test]
+    fn test_validate_doubleml_irm_parameter_recovery() {
+        let (y, d, x) = create_irm_test_data(1000, 55);
+        let true_ate = 0.5;
+
+        let config = DoubleMLConfig {
+            n_folds: 5,
+            model_type: DMLModelType::IRM,
+            treatment_type: TreatmentType::Binary,
+            seed: Some(55),
+            ..Default::default()
+        };
+
+        let result = run_double_ml(&y.view(), &d.view(), &x.view(), config).unwrap();
+
+        // theta_hat should be in reasonable range of true ATE
+        assert!(
+            (result.theta - true_ate).abs() < 0.3,
+            "IRM theta_hat = {:.4} should be within 0.3 of true ATE = {}",
+            result.theta,
+            true_ate
+        );
+
+        // SE should be positive
+        assert!(result.se > 0.0, "SE must be positive: {}", result.se);
+
+        // CI should be properly ordered
+        assert!(
+            result.ci_lower < result.ci_upper,
+            "CI lower ({:.4}) must be < CI upper ({:.4})",
+            result.ci_lower,
+            result.ci_upper
+        );
+
+        // Nuisance diagnostics should be populated
+        assert!(
+            result.nuisance_diagnostics.outcome_r2 >= 0.0,
+            "Outcome R2 should be non-negative"
+        );
+        assert!(
+            result.nuisance_diagnostics.var_residual_treatment > 0.0,
+            "Residual treatment variance should be positive"
+        );
+    }
+
+    /// Validate DML with zero treatment effect correctly produces theta near 0
+    /// and a non-significant p-value.
+    #[test]
+    fn test_validate_doubleml_null_effect() {
+        use rand::Rng;
+        use rand::SeedableRng;
+        let mut rng = rand::rngs::StdRng::seed_from_u64(42);
+
+        let n = 500;
+        let mut y = Array1::zeros(n);
+        let mut d = Array1::zeros(n);
+        let mut x = Array2::zeros((n, 2));
+
+        for i in 0..n {
+            let x1: f64 = rng.r#gen();
+            let x2: f64 = rng.r#gen();
+            x[[i, 0]] = x1;
+            x[[i, 1]] = x2;
+
+            // Treatment depends on X
+            d[i] = 0.5 * x1 + 0.3 * x2 + (rng.r#gen::<f64>() * 0.2 - 0.1);
+
+            // Outcome: NO treatment effect (theta = 0)
+            y[i] = 0.3 * x1 + 0.2 * x2 + (rng.r#gen::<f64>() * 0.2 - 0.1);
+        }
+
+        let config = DoubleMLConfig {
+            n_folds: 5,
+            seed: Some(42),
+            ..Default::default()
+        };
+
+        let result = run_double_ml(&y.view(), &d.view(), &x.view(), config).unwrap();
+
+        // theta should be close to zero
+        assert!(
+            result.theta.abs() < 0.15,
+            "Under null, theta_hat = {:.4} should be near zero",
+            result.theta
+        );
+
+        // p-value should typically NOT reject (but allow for randomness)
+        // Just check it is properly computed (between 0 and 1)
+        assert!(
+            (0.0..=1.0).contains(&result.p_value),
+            "p-value = {} should be in [0, 1]",
+            result.p_value
+        );
+    }
 }

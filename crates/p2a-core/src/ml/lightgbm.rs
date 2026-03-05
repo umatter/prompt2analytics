@@ -1148,8 +1148,8 @@ pub fn lightgbm(
 
     let mut trees = Vec::with_capacity(config.num_iterations);
     let mut train_loss = Vec::with_capacity(config.num_iterations + 1);
-    let mut total_importance_gain = Array1::zeros(n_features);
-    let mut total_importance_split = Array1::zeros(n_features);
+    let mut total_importance_gain: Array1<f64> = Array1::zeros(n_features);
+    let mut total_importance_split: Array1<f64> = Array1::zeros(n_features);
 
     // Initial loss
     train_loss.push(compute_loss(&y, &predictions, config.objective, config.huber_delta));

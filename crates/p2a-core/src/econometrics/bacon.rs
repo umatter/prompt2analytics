@@ -1275,4 +1275,413 @@ mod tests {
         assert!(display.contains("Never"));
         assert!(display.contains("1.5"));
     }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Validation Tests
+    //
+    // These tests validate the Goodman-Bacon decomposition against known
+    // structural properties:
+    // 1. Weights must sum to 1
+    // 2. Weighted sum of 2x2 DD estimates must equal overall TWFE coefficient
+    // 3. Each component has a valid estimate and non-negative weight
+    //
+    // References:
+    // - Goodman-Bacon, A. (2021). "Difference-in-Differences with Variation
+    //   in Treatment Timing". Journal of Econometrics, 225(2), 254-277.
+    // - R package `bacondecomp` (Flack & Edward)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Create a larger dataset for Bacon decomposition validation.
+    ///
+    /// DGP:
+    /// - 6 units per timing group, 3 timing groups + 6 never-treated = 24 units
+    /// - 8 periods (2000-2007)
+    /// - Cohort 2002: ATT = 2.0
+    /// - Cohort 2004: ATT = 2.0
+    /// - Cohort 2006: ATT = 2.0
+    /// - Homogeneous effect ensures all 2x2 estimates converge to ~2.0
+    fn create_validation_bacon_dataset() -> Dataset {
+        let mut unit_vec = Vec::new();
+        let mut time_vec = Vec::new();
+        let mut treat_vec = Vec::new();
+        let mut y_vec = Vec::new();
+
+        let treatment_effect = 2.0;
+
+        for year in 2000..=2007 {
+            for unit in 1..=24 {
+                unit_vec.push(unit as f64);
+                time_vec.push(year as f64);
+
+                let (g, is_treated) = if unit <= 6 {
+                    (2002, year >= 2002)
+                } else if unit <= 12 {
+                    (2004, year >= 2004)
+                } else if unit <= 18 {
+                    (2006, year >= 2006)
+                } else {
+                    (0, false)
+                };
+
+                treat_vec.push(if is_treated { 1.0 } else { 0.0 });
+
+                let base = unit as f64 * 1.5;
+                let trend = (year - 2000) as f64 * 0.4;
+                let effect = if is_treated { treatment_effect } else { 0.0 };
+                let noise = ((unit * year) % 13) as f64 * 0.03 - 0.195;
+
+                y_vec.push(base + trend + effect + noise);
+            }
+        }
+
+        let df = df! {
+            "unit" => unit_vec,
+            "year" => time_vec,
+            "treated" => treat_vec,
+            "outcome" => y_vec
+        }
+        .unwrap();
+
+        Dataset::new(df)
+    }
+
+    #[test]
+    fn test_validate_bacon_weights_sum_to_one() {
+        // The fundamental property of the Bacon decomposition: all weights
+        // must sum to exactly 1 (within numerical tolerance).
+        // This follows from Theorem 1 in Goodman-Bacon (2021).
+        let dataset = create_validation_bacon_dataset();
+        let result = bacon_decomp(&dataset, "outcome", "unit", "year", "treated").unwrap();
+
+        let weight_sum: f64 = result.components.iter().map(|c| c.weight).sum();
+        assert!(
+            (weight_sum - 1.0).abs() < 1e-6,
+            "Decomposition weights must sum to 1.0, got {:.10}",
+            weight_sum
+        );
+
+        // Also verify via the stored weights_sum field
+        assert!(
+            (result.weights_sum - 1.0).abs() < 1e-6,
+            "weights_sum field should be ~1.0, got {:.10}",
+            result.weights_sum
+        );
+    }
+
+    #[test]
+    fn test_validate_bacon_weighted_sum_equals_overall() {
+        // The weighted sum of all 2x2 DD estimates must equal the overall
+        // TWFE coefficient. This is the key decomposition identity:
+        //   beta_TWFE = sum_k sum_l w_kl * beta_kl
+        //
+        // Goodman-Bacon (2021), Theorem 1.
+        let dataset = create_validation_bacon_dataset();
+        let result = bacon_decomp(&dataset, "outcome", "unit", "year", "treated").unwrap();
+
+        let weighted_sum: f64 = result
+            .components
+            .iter()
+            .map(|c| c.weight * c.estimate)
+            .sum();
+
+        assert!(
+            (weighted_sum - result.overall_estimate).abs() < 1e-8,
+            "Weighted sum of 2x2 DDs ({:.10}) must equal overall estimate ({:.10})",
+            weighted_sum,
+            result.overall_estimate
+        );
+    }
+
+    #[test]
+    fn test_validate_bacon_all_weights_nonnegative() {
+        // All decomposition weights must be non-negative.
+        // Weights are proportional to (group share)^2 * variance(D), which
+        // are inherently non-negative quantities.
+        let dataset = create_validation_bacon_dataset();
+        let result = bacon_decomp(&dataset, "outcome", "unit", "year", "treated").unwrap();
+
+        for (i, comp) in result.components.iter().enumerate() {
+            assert!(
+                comp.weight >= 0.0,
+                "Component {} weight should be non-negative, got {:.10}",
+                i,
+                comp.weight
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_bacon_type_weights_sum_to_total() {
+        // The sum of weights by comparison type must equal the total weight sum.
+        // This is a partition identity: every component belongs to exactly one type.
+        let dataset = create_validation_bacon_dataset();
+        let result = bacon_decomp(&dataset, "outcome", "unit", "year", "treated").unwrap();
+
+        let type_sum =
+            result.treated_vs_never + result.treated_vs_not_yet + result.later_vs_earlier;
+
+        assert!(
+            (type_sum - result.weights_sum).abs() < 1e-10,
+            "Sum of type weights ({:.10}) must equal total ({:.10})",
+            type_sum,
+            result.weights_sum
+        );
+    }
+
+    #[test]
+    fn test_validate_bacon_homogeneous_effect_estimates() {
+        // Under a homogeneous treatment effect (ATT = 2.0 for all cohorts),
+        // all 2x2 DD estimates should be close to the true effect.
+        // The "treated vs never-treated" comparisons should be especially
+        // close since they are clean comparisons.
+        let dataset = create_validation_bacon_dataset();
+        let result = bacon_decomp(&dataset, "outcome", "unit", "year", "treated").unwrap();
+
+        let true_att = 2.0;
+
+        // Overall TWFE estimate should be close to the true effect
+        assert!(
+            (result.overall_estimate - true_att).abs() < 1.0,
+            "Overall TWFE estimate should be ~{:.1}, got {:.4}",
+            true_att,
+            result.overall_estimate
+        );
+
+        // Treated vs never-treated estimates should be close to true effect
+        let tvn_components: Vec<&BaconComponent> = result
+            .components
+            .iter()
+            .filter(|c| c.comparison_type == ComparisonType::TreatedVsNeverTreated)
+            .collect();
+
+        for comp in &tvn_components {
+            assert!(
+                (comp.estimate - true_att).abs() < 1.5,
+                "TvN estimate (g={}) should be ~{:.1}, got {:.4}",
+                comp.treated_group,
+                true_att,
+                comp.estimate
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_bacon_expected_comparison_count() {
+        // With K timing groups and a never-treated group, we expect:
+        // - K "treated vs never-treated" comparisons
+        // - K*(K-1)/2 "treated vs not-yet-treated" comparisons
+        // - K*(K-1)/2 "later vs earlier treated" comparisons
+        //
+        // For K=3: 3 + 3 + 3 = 9 total components (at most).
+        // Some may be missing if time windows are too narrow.
+        let dataset = create_validation_bacon_dataset();
+        let result = bacon_decomp(&dataset, "outcome", "unit", "year", "treated").unwrap();
+
+        let k = result.n_timing_groups;
+        assert_eq!(k, 3, "Should have 3 timing groups");
+
+        // Count by type
+        let n_tvn = result
+            .components
+            .iter()
+            .filter(|c| c.comparison_type == ComparisonType::TreatedVsNeverTreated)
+            .count();
+        let n_tvnyt = result
+            .components
+            .iter()
+            .filter(|c| c.comparison_type == ComparisonType::TreatedVsNotYetTreated)
+            .count();
+        let n_lve = result
+            .components
+            .iter()
+            .filter(|c| c.comparison_type == ComparisonType::LaterVsEarlierTreated)
+            .count();
+
+        // Should have K treated-vs-never comparisons
+        assert_eq!(
+            n_tvn, k,
+            "Should have {} treated-vs-never comparisons, got {}",
+            k, n_tvn
+        );
+
+        // Between-group comparisons: at most K*(K-1)/2 each
+        let max_between = k * (k - 1) / 2;
+        assert!(
+            n_tvnyt <= max_between,
+            "Should have at most {} treated-vs-not-yet comparisons, got {}",
+            max_between,
+            n_tvnyt
+        );
+        assert!(
+            n_lve <= max_between,
+            "Should have at most {} later-vs-earlier comparisons, got {}",
+            max_between,
+            n_lve
+        );
+    }
+
+    #[test]
+    fn test_validate_bacon_each_component_has_valid_estimate() {
+        // Each decomposition component should have a finite estimate
+        // and positive observation counts.
+        let dataset = create_validation_bacon_dataset();
+        let result = bacon_decomp(&dataset, "outcome", "unit", "year", "treated").unwrap();
+
+        for (i, comp) in result.components.iter().enumerate() {
+            assert!(
+                comp.estimate.is_finite(),
+                "Component {} estimate should be finite, got {}",
+                i,
+                comp.estimate
+            );
+            assert!(
+                comp.n_treated > 0,
+                "Component {} should have treated observations",
+                i
+            );
+            assert!(
+                comp.n_control > 0,
+                "Component {} should have control observations",
+                i
+            );
+            assert!(
+                comp.time_range.0 <= comp.time_range.1,
+                "Component {} time range should be valid: ({}, {})",
+                i,
+                comp.time_range.0,
+                comp.time_range.1
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_bacon_heterogeneous_effects_forbidden_comparisons() {
+        // Under heterogeneous treatment effects, the "later vs earlier"
+        // (forbidden) comparisons may produce biased estimates. This is
+        // the key insight of Goodman-Bacon (2021).
+        //
+        // DGP: Cohort 2002 ATT = 1.0, Cohort 2004 ATT = 5.0
+        let mut unit_vec = Vec::new();
+        let mut time_vec = Vec::new();
+        let mut treat_vec = Vec::new();
+        let mut y_vec = Vec::new();
+
+        for year in 2000..=2006 {
+            for unit in 1..=12 {
+                unit_vec.push(unit as f64);
+                time_vec.push(year as f64);
+
+                let (g, is_treated) = if unit <= 4 {
+                    (2002, year >= 2002)
+                } else if unit <= 8 {
+                    (2004, year >= 2004)
+                } else {
+                    (0, false)
+                };
+
+                let att = match g {
+                    2002 if is_treated => 1.0,
+                    2004 if is_treated => 5.0,
+                    _ => 0.0,
+                };
+
+                treat_vec.push(if is_treated { 1.0 } else { 0.0 });
+
+                let base = unit as f64 * 1.0;
+                let trend = (year - 2000) as f64 * 0.3;
+                let noise = ((unit * year) % 7) as f64 * 0.02 - 0.07;
+
+                y_vec.push(base + trend + att + noise);
+            }
+        }
+
+        let df = df! {
+            "unit" => unit_vec,
+            "year" => time_vec,
+            "treated" => treat_vec,
+            "outcome" => y_vec
+        }
+        .unwrap();
+        let dataset = Dataset::new(df);
+
+        let result = bacon_decomp(&dataset, "outcome", "unit", "year", "treated").unwrap();
+
+        // Weights should still sum to 1
+        let weight_sum: f64 = result.components.iter().map(|c| c.weight).sum();
+        assert!(
+            (weight_sum - 1.0).abs() < 1e-6,
+            "Weights must sum to 1 even with heterogeneous effects, got {:.10}",
+            weight_sum
+        );
+
+        // Weighted sum must still equal overall estimate
+        let weighted_sum: f64 = result
+            .components
+            .iter()
+            .map(|c| c.weight * c.estimate)
+            .sum();
+        assert!(
+            (weighted_sum - result.overall_estimate).abs() < 1e-8,
+            "Decomposition identity must hold with heterogeneous effects"
+        );
+
+        // The forbidden comparison (later vs earlier) may have different
+        // estimates than the clean comparisons. Check that these are present.
+        let has_forbidden = result
+            .components
+            .iter()
+            .any(|c| c.comparison_type == ComparisonType::LaterVsEarlierTreated);
+        // Note: forbidden comparisons may not always be present depending
+        // on the time window structure, so just check if they exist and
+        // their estimates are finite.
+        if has_forbidden {
+            let forbidden: Vec<&BaconComponent> = result
+                .components
+                .iter()
+                .filter(|c| c.comparison_type == ComparisonType::LaterVsEarlierTreated)
+                .collect();
+            for comp in &forbidden {
+                assert!(
+                    comp.estimate.is_finite(),
+                    "Forbidden comparison estimate should be finite"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_validate_bacon_estimates_by_type_aggregation() {
+        // Validate that the estimates_by_type field correctly aggregates
+        // within-type weighted averages.
+        let dataset = create_validation_bacon_dataset();
+        let result = bacon_decomp(&dataset, "outcome", "unit", "year", "treated").unwrap();
+
+        // If treated_vs_never weight > 0, the estimate should be defined
+        if result.treated_vs_never > 0.0 {
+            assert!(
+                result.estimate_by_type.treated_vs_never.is_some(),
+                "Should have TvN estimate when TvN weight > 0"
+            );
+            let tvn_est = result.estimate_by_type.treated_vs_never.unwrap();
+            assert!(
+                tvn_est.is_finite(),
+                "TvN estimate should be finite, got {}",
+                tvn_est
+            );
+        }
+
+        if result.treated_vs_not_yet > 0.0 {
+            assert!(
+                result.estimate_by_type.treated_vs_not_yet.is_some(),
+                "Should have TvNYT estimate when weight > 0"
+            );
+        }
+
+        if result.later_vs_earlier > 0.0 {
+            assert!(
+                result.estimate_by_type.later_vs_earlier.is_some(),
+                "Should have LvE estimate when weight > 0"
+            );
+        }
+    }
 }

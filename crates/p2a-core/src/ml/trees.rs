@@ -1354,4 +1354,208 @@ mod tests {
             r2
         );
     }
+
+    #[test]
+    fn test_validate_rf_classification_iris_like() {
+        // Create 3-class classification data similar to Iris.
+        // Class 0: x1 ~ [0,2], x2 ~ [0,2]
+        // Class 1: x1 ~ [3,5], x2 ~ [3,5]
+        // Class 2: x1 ~ [6,8], x2 ~ [6,8]
+        // Use class label as target (regression RF used as classifier by rounding).
+        let n_per_class = 30;
+        let n = n_per_class * 3;
+        let mut x_data = Vec::with_capacity(n * 4);
+        let mut y_data = Vec::with_capacity(n);
+
+        for class in 0..3 {
+            let base = class as f64 * 3.0;
+            for i in 0..n_per_class {
+                let noise1 = ((i * 7 + class * 3 + 1) % 10) as f64 / 10.0;
+                let noise2 = ((i * 11 + class * 5 + 2) % 10) as f64 / 10.0;
+                let noise3 = ((i * 13 + class * 7 + 3) % 10) as f64 / 10.0;
+                let noise4 = ((i * 17 + class * 2 + 4) % 10) as f64 / 10.0;
+                x_data.push(base + noise1 * 2.0);
+                x_data.push(base + noise2 * 2.0);
+                x_data.push(noise3 * 2.0); // noise feature
+                x_data.push(noise4 * 2.0); // noise feature
+                y_data.push(class as f64);
+            }
+        }
+
+        let x = Array2::from_shape_vec((n, 4), x_data).unwrap();
+        let y = Array1::from_vec(y_data.clone());
+
+        let result = random_forest(
+            x.view(),
+            y.view(),
+            Some(100),
+            Some(8),
+            Some(2),
+            Some("sqrt"),
+            Some(42),
+            None,
+        )
+        .unwrap();
+
+        // Classify by rounding predictions to nearest integer
+        let correct: usize = result
+            .predictions
+            .iter()
+            .zip(y_data.iter())
+            .filter(|(pred, actual)| {
+                let rounded = pred.round();
+                (rounded - *actual).abs() < 0.5
+            })
+            .count();
+
+        let accuracy = correct as f64 / n as f64;
+        assert!(
+            accuracy > 0.80,
+            "Classification accuracy should be > 80%, got {:.1}%",
+            accuracy * 100.0
+        );
+    }
+
+    #[test]
+    fn test_validate_rf_regression_correlation() {
+        // y = x1 + x2 + noise
+        // Predictions should correlate well with true values.
+        let n = 100;
+        let mut x_data = Vec::with_capacity(n * 3);
+        let mut y_data = Vec::with_capacity(n);
+
+        for i in 0..n {
+            let x1 = (i as f64) / 10.0;
+            let x2 = ((i * 3 + 7) % 20) as f64 / 5.0;
+            let noise_feat = ((i * 17 + 11) % 30) as f64 / 10.0;
+            let noise = ((i * 13 + 5) % 11) as f64 / 11.0 - 0.5;
+            x_data.push(x1);
+            x_data.push(x2);
+            x_data.push(noise_feat);
+            y_data.push(x1 + x2 + noise);
+        }
+
+        let x = Array2::from_shape_vec((n, 3), x_data).unwrap();
+        let y = Array1::from_vec(y_data);
+
+        let result = random_forest(
+            x.view(),
+            y.view(),
+            Some(100),
+            Some(10),
+            Some(2),
+            Some("sqrt"),
+            Some(42),
+            None,
+        )
+        .unwrap();
+
+        // Compute R-squared
+        let mean_y = y.mean().unwrap();
+        let ss_tot: f64 = y.iter().map(|&v| (v - mean_y).powi(2)).sum();
+        let ss_res: f64 = y
+            .iter()
+            .zip(result.predictions.iter())
+            .map(|(&actual, &pred)| (actual - pred).powi(2))
+            .sum();
+        let r2 = 1.0 - ss_res / ss_tot;
+
+        assert!(
+            r2 > 0.7,
+            "R-squared should be > 0.7 for y = x1 + x2 + noise, got {:.4}",
+            r2
+        );
+    }
+
+    #[test]
+    fn test_validate_rf_feature_importances_sum() {
+        // Feature importances should sum to approximately 1 and be non-negative.
+        let n = 80;
+        let mut x_data = Vec::with_capacity(n * 3);
+        let mut y_data = Vec::with_capacity(n);
+
+        for i in 0..n {
+            let x1 = i as f64;
+            let x2 = ((i * 7 + 3) % 20) as f64;
+            let x3 = ((i * 11 + 5) % 15) as f64;
+            x_data.push(x1);
+            x_data.push(x2);
+            x_data.push(x3);
+            y_data.push(x1 + 0.5 * x2 + 0.1 * ((i * 3) % 7) as f64);
+        }
+
+        let x = Array2::from_shape_vec((n, 3), x_data).unwrap();
+        let y = Array1::from_vec(y_data);
+
+        let result = random_forest(
+            x.view(),
+            y.view(),
+            Some(50),
+            Some(8),
+            Some(2),
+            Some("all"),
+            Some(42),
+            None,
+        )
+        .unwrap();
+
+        // All importances should be non-negative
+        for (i, &imp) in result.feature_importances.iter().enumerate() {
+            assert!(
+                imp >= 0.0,
+                "Feature importance {} should be non-negative, got {:.4}",
+                i,
+                imp
+            );
+        }
+
+        // Sum should be approximately 1.0
+        let sum: f64 = result.feature_importances.iter().sum();
+        assert!(
+            (sum - 1.0).abs() < 0.01,
+            "Feature importances should sum to ~1.0, got {:.6}",
+            sum
+        );
+    }
+
+    #[test]
+    fn test_validate_rf_oob_score_computed() {
+        // OOB score should be computed and reasonable.
+        let n = 80;
+        let mut x_data = Vec::with_capacity(n * 2);
+        let mut y_data = Vec::with_capacity(n);
+
+        for i in 0..n {
+            let x1 = i as f64;
+            let x2 = ((i * 3 + 1) % 10) as f64;
+            x_data.push(x1);
+            x_data.push(x2);
+            y_data.push(x1 * 2.0 + 0.5 * ((i * 7) % 5) as f64);
+        }
+
+        let x = Array2::from_shape_vec((n, 2), x_data).unwrap();
+        let y = Array1::from_vec(y_data);
+
+        let result = random_forest(
+            x.view(),
+            y.view(),
+            Some(50),
+            Some(8),
+            Some(2),
+            Some("all"),
+            Some(42),
+            None,
+        )
+        .unwrap();
+
+        assert!(result.oob_score.is_some(), "OOB score should be computed");
+        let oob = result.oob_score.unwrap();
+        assert!(oob.is_finite(), "OOB score should be finite");
+        // For reasonably predictable data, OOB R-squared should be positive
+        assert!(
+            oob > 0.0,
+            "OOB R-squared should be positive for predictable data, got {:.4}",
+            oob
+        );
+    }
 }

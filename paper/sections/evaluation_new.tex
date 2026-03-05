@@ -149,51 +149,9 @@ unimplemented methods map to superficially similar available tools.
 Users can mitigate misselection by specifying methods explicitly
 rather than describing goals abstractly.
 
-Table~\ref{tab:confusion-patterns} summarizes the most frequent
-misselection patterns from the naturalistic prompt evaluation (891
-test instances across 9~models).  Four categories emerge.
-\emph{Related test substitution} (e.g., ADF $\to$ Phillips-Perron)
-selects a valid alternative from the same test family---often
-harmless, but not what was requested.  \emph{Specific $\to$ omnibus}
-maps a named diagnostic (Breusch-Pagan, VIF) to the general
-diagnostics bundle, losing precision.  \emph{Method-level confusion}
-produces a fundamentally different estimator (NLS~$\to$~OLS,
-hierarchical clustering~$\to$~DBSCAN); the ``clustered~SEs $\to$
-K-means'' case illustrates how lexical overlap in the word
-``cluster'' misleads smaller models.  \emph{Scope confusion} selects
-a simpler variant that omits a requested feature (event study $\to$
-basic DiD, two-way FE $\to$ one-way FE).
-
-\begin{table}[htbp]
-\centering
-\begin{threeparttable}
-\caption{Most frequent tool misselection patterns (naturalistic prompts)}
-\label{tab:confusion-patterns}
-\small
-\begin{tabular}{llrl}
-\toprule
-Expected & Selected & $n$ & Category \\
-\midrule
-ADF test & Phillips-Perron & 17 & Related test \\
-Breusch-Pagan & Diagnostics bundle & 16 & Specific $\to$ omnibus \\
-Auto-ARIMA & AR & 15 & Method confusion \\
-Durbin-Watson & Box-Ljung & 10 & Related test \\
-Two-way FE & One-way FE & 9 & Scope confusion \\
-Hierarchical & DBSCAN & 9 & Method confusion \\
-NLS & OLS & 8 & Method confusion \\
-Welch $t$ & Standard $t$ & 8 & Related test \\
-VIF & Diagnostics bundle & 8 & Specific $\to$ omnibus \\
-Histogram & Describe dataset & 8 & Scope confusion \\
-\bottomrule
-\end{tabular}
-\begin{tablenotes}[flushleft]
-\item \emph{Note:} Counts aggregated across 9~models on 99
-naturalistic prompts (891 model--prompt pairs). Naming aliases
-(e.g., \code{panel\_fe} vs.\ \code{panel\_fixed\_effects})
-excluded. Full scored results are in the supplementary materials.
-\end{tablenotes}
-\end{threeparttable}
-\end{table}
+%% Naturalistic prompt confusion table removed for initial submission.
+%% Table~\ref{tab:confusion-patterns} and supporting paragraph preserved
+%% in version control for future revision.
 
 Second, even when the correct method is selected, the LLM may extract
 incorrect parameters. Manual inspection of recorded tool calls across
@@ -214,13 +172,10 @@ parameter names is confounded by name aliasing across tool schemas
 (e.g., \code{cluster\_col} vs.\ \code{cluster\_var}), making the
 metric unreliable as a measure of actual analysis correctness.
 
-These observations suggest that for curated prompts, the dominant
-failure mode is tool misselection (5--10\% of requests), not
-parameter error. For naturalistic prompts, where tool accuracy drops
-to 58--70\%, both misselection and ambiguous parameter specification
-contribute. In all cases, users can inspect the tool call before
-execution, correct misselected methods or missing parameters, and
-iterate.
+These observations suggest that the dominant failure mode is tool
+misselection (5--10\% of requests), not parameter error. In all
+cases, users can inspect the tool call before execution, correct
+misselected methods or missing parameters, and iterate.
 
 Third, categorical (string) variables are automatically converted to dummy variables
 using treatment coding (one level omitted as reference). The system detects
@@ -296,19 +251,21 @@ algorithm~\citep{Gaure:2013} matches \pkg{lfe}'s \fct{felm} to
 $< 10^{-5}$.
 
 Beyond the methods shown above, the validation suite covers over 200
-methods with more than 1,500 individual test cases (334 specifically
-targeting validation against \proglang{R} reference implementations).
+methods with more than 1,800 individual test cases (416 specifically
+targeting validation against \proglang{R} reference implementations or
+known data-generating processes).
 Statistical tests ($t$-tests, ANOVA, chi-squared, Fisher's exact,
 Wilcoxon, Shapiro-Wilk, Kolmogorov-Smirnov) are validated against
 \proglang{R}'s \pkg{stats} package. Discrete choice models (logit,
 probit) match \fct{glm} coefficients and standard errors. Time series
-methods (VAR, ARIMA) match \pkg{vars} and \pkg{forecast}. The \pkg{p2a-core} test suite comprises 1{,}962 test functions.
+methods (VAR, ARIMA) match \pkg{vars} and \pkg{forecast}. The \pkg{p2a-core} test suite comprises 1{,}847 test functions.
 Continuous integration (GitHub Actions) runs the full test suite,
 \code{clippy} linting, and format checks on every push to
 \code{main} and on all pull requests. Line-level code coverage is not
 currently tracked as a summary metric; instead, we prioritize
-validation breadth---each implemented method has at least one
-cross-validated test against an \proglang{R} reference.  The CI pipeline does \emph{not} execute the
+validation breadth---most implemented methods have at least one
+cross-validated test against an \proglang{R} reference, with
+exceptions noted below.  The CI pipeline does \emph{not} execute the
 \proglang{R} reference scripts; cross-language validation is run
 manually before releases and the reference outputs are checked into
 the repository.  All Rust-side validation tests can be run via
@@ -335,23 +292,24 @@ validation tests that verify the targeting step, clever covariate
 formula, influence curve properties, propensity score truncation, and
 counterfactual predictions on simulated data; these check mathematical
 identities and DGP-implied ranges rather than exact \proglang{R}
-output values. In total, 55 R reference scripts (one per validated
-method) and the Rust benchmarking runner are provided in the
-supplementary materials.
+output values. In total, 41 \proglang{R} validation scripts and
+73 expected-value CSVs are provided in the supplementary materials.
 
 Several complex methods---staggered
 DiD~\citep{Callaway+SantAnna:2021}, extended TWFE, Goodman-Bacon
 decomposition, Double/Debiased ML, synthetic control, SCPI, CTMLE,
-LTMLE, CBPS, and entropy balancing---have internal consistency tests
-(correct output dimensions, convergence on simulated DGPs, coefficient
-sign verification, weight-sum constraints) but lack direct numerical
-cross-validation against \proglang{R} reference packages.  The
-corresponding \proglang{R} implementations (e.g., \pkg{did},
-\pkg{DoubleML}, \pkg{Synth}, \pkg{CBPS}) use different default tuning
+LTMLE, CBPS, and entropy balancing---are validated using
+DGP-based tests with known true parameters rather than exact numerical
+cross-validation against \proglang{R} packages.  These tests generate
+data from a known process (e.g., true ATT~$=5$, true coefficient~$=1$)
+and verify that the estimator recovers the parameter within tolerance,
+that pre-trends are null when they should be, that weights sum correctly,
+and that confidence intervals have appropriate coverage.
+The corresponding \proglang{R} implementations (e.g.,
+\pkg{did}, \pkg{DoubleML}, \pkg{Synth}) use different default tuning
 parameters, cross-validation splits, and optimization algorithms that
-complicate exact numerical comparison; matching output requires careful
-configuration alignment that is not yet in place.  Extending
-cross-validation coverage to these methods is a priority for future
+complicate exact numerical comparison.  Extending
+exact cross-validation coverage to these methods is a priority for future
 releases.
 
 Appendix~\ref{app:benchmark-methodology} documents tolerance

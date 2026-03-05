@@ -107,5 +107,114 @@ pub fn run_mstl(dataset: &Dataset, column: &str, periods: &[usize]) -> Result<Ms
 
 #[cfg(test)]
 mod tests {
-    // MSTL tests would require generating synthetic seasonal data
+    use super::*;
+    use polars::prelude::*;
+
+    #[test]
+    fn test_validate_mstl_two_seasonal_components() {
+        // Create data with two seasonal periods: period=7 and period=28
+        // y_t = trend_t + S1_t(period=7) + S2_t(period=28) + noise
+        let n = 7 * 28; // = 196, enough for both periods
+        let mut y = Vec::with_capacity(n);
+        for t in 0..n {
+            let trend = 100.0 + 0.01 * t as f64;
+            let season1 = 5.0 * (2.0 * std::f64::consts::PI * t as f64 / 7.0).sin();
+            let season2 = 3.0 * (2.0 * std::f64::consts::PI * t as f64 / 28.0).sin();
+            let noise = 0.1 * ((t * 17 + 3) % 11) as f64 / 11.0 - 0.05;
+            y.push(trend + season1 + season2 + noise);
+        }
+
+        let df = df! {
+            "y" => &y,
+        }
+        .unwrap();
+        let dataset = crate::data::Dataset::new(df);
+
+        let result = run_mstl(&dataset, "y", &[7, 28]).unwrap();
+
+        // Should extract two seasonal components
+        assert_eq!(result.seasonal.len(), 2, "Should have 2 seasonal components");
+        assert_eq!(result.seasonal[0].len(), n);
+        assert_eq!(result.seasonal[1].len(), n);
+        assert_eq!(result.trend.len(), n);
+        assert_eq!(result.residuals.len(), n);
+        assert_eq!(result.n_obs, n);
+    }
+
+    #[test]
+    fn test_validate_mstl_reconstruction() {
+        // Verify that trend + sum(seasonal) + residuals == original series
+        let n = 100;
+        let period = 10;
+        let mut y = Vec::with_capacity(n);
+        for t in 0..n {
+            let trend = 50.0 + 0.2 * t as f64;
+            let season = 8.0 * (2.0 * std::f64::consts::PI * t as f64 / period as f64).sin();
+            let noise = 0.3 * ((t * 7 + 5) % 9) as f64 / 9.0 - 0.15;
+            y.push(trend + season + noise);
+        }
+
+        let df = df! {
+            "y" => &y,
+        }
+        .unwrap();
+        let dataset = crate::data::Dataset::new(df);
+
+        let result = run_mstl(&dataset, "y", &[period]).unwrap();
+
+        // Reconstruct: trend + seasonal[0] + residuals should approximate original
+        let max_reconstruction_error: f64 = (0..n)
+            .map(|t| {
+                let reconstructed = result.trend[t]
+                    + result.seasonal.iter().map(|s| s[t]).sum::<f64>()
+                    + result.residuals[t];
+                (reconstructed - y[t]).abs()
+            })
+            .fold(0.0f64, f64::max);
+
+        assert!(
+            max_reconstruction_error < 1e-4,
+            "Reconstruction error should be near zero, got {:.6}",
+            max_reconstruction_error
+        );
+    }
+
+    #[test]
+    fn test_validate_mstl_seasonal_has_correct_period() {
+        // For data with strong period-12 seasonality, the extracted seasonal
+        // component should exhibit period-12 repetition.
+        let n = 120; // 10 cycles of period 12
+        let period = 12;
+        let mut y = Vec::with_capacity(n);
+        for t in 0..n {
+            let trend = 100.0;
+            let season = 10.0 * (2.0 * std::f64::consts::PI * t as f64 / period as f64).sin();
+            y.push(trend + season);
+        }
+
+        let df = df! {
+            "y" => &y,
+        }
+        .unwrap();
+        let dataset = crate::data::Dataset::new(df);
+
+        let result = run_mstl(&dataset, "y", &[period]).unwrap();
+
+        // The seasonal component at time t and t+period should be similar
+        // (after a few initial cycles to stabilize)
+        let seasonal = &result.seasonal[0];
+        let start = period * 2; // skip first 2 cycles
+        let mut max_diff = 0.0f64;
+        for t in start..(n - period) {
+            let diff = (seasonal[t] - seasonal[t + period]).abs();
+            max_diff = max_diff.max(diff);
+        }
+
+        assert!(
+            max_diff < 2.0,
+            "Seasonal component should repeat with period {}, max period-to-period diff = {:.4}",
+            period,
+            max_diff
+        );
+    }
 }

@@ -635,4 +635,137 @@ mod tests {
         let final_slope = result.filtered_states[result.n_obs - 1][1];
         assert!(final_slope > 0.0);
     }
+
+    #[test]
+    fn test_validate_kalman_local_level_tracks_signal() {
+        // Generate data from a local level model with known variances.
+        // Signal: mu_t = mu_{t-1} + eta_t, eta_t ~ N(0, sigma2_eta)
+        // Obs:    y_t  = mu_t + eps_t,     eps_t ~ N(0, sigma2_eps)
+        //
+        // The filter should track the true signal.
+        use rand::{Rng, SeedableRng};
+        use rand_chacha::ChaCha8Rng;
+
+        let sigma2_eta: f64 = 0.5; // state noise variance
+        let sigma2_eps: f64 = 1.0; // observation noise variance
+        let n = 200;
+        let mut rng = ChaCha8Rng::seed_from_u64(42);
+
+        let mut true_signal = Vec::with_capacity(n);
+        let mut y = Vec::with_capacity(n);
+        let mut mu = 10.0;
+
+        for _ in 0..n {
+            mu += (rng.r#gen::<f64>() - 0.5) * 2.0 * sigma2_eta.sqrt();
+            true_signal.push(mu);
+            y.push(mu + (rng.r#gen::<f64>() - 0.5) * 2.0 * sigma2_eps.sqrt());
+        }
+
+        let transition = array![[1.0]];
+        let observation = array![1.0];
+        let selection = array![[1.0]];
+        let state_cov = array![[sigma2_eta]];
+        let obs_var = sigma2_eps;
+
+        let model =
+            StateSpaceModel::new(transition, observation, selection, state_cov, obs_var).unwrap();
+
+        let init_state = array![y[0]];
+        let init_cov = array![[10.0]]; // diffuse
+
+        let result = kalman_filter(&y, &model, init_state.view(), init_cov.view()).unwrap();
+
+        // Filtered states should be closer to the true signal than the raw observations.
+        let mut filter_mse = 0.0;
+        let mut obs_mse = 0.0;
+        for t in 10..n {
+            // skip first 10 for burn-in
+            let filter_err = result.filtered_states[t][0] - true_signal[t];
+            let obs_err = y[t] - true_signal[t];
+            filter_mse += filter_err * filter_err;
+            obs_mse += obs_err * obs_err;
+        }
+
+        assert!(
+            filter_mse < obs_mse,
+            "Filtered MSE ({:.4}) should be less than observation MSE ({:.4})",
+            filter_mse,
+            obs_mse
+        );
+    }
+
+    #[test]
+    fn test_validate_kalman_loglikelihood_finite_negative() {
+        // Log-likelihood should be finite and negative for any valid model.
+        let transition = array![[1.0]];
+        let observation = array![1.0];
+        let selection = array![[1.0]];
+        let state_cov = array![[0.5]];
+        let obs_var = 1.0;
+
+        let model =
+            StateSpaceModel::new(transition, observation, selection, state_cov, obs_var).unwrap();
+
+        let y: Vec<f64> = (0..50).map(|t| (t as f64) * 0.3 + 0.5 * (t as f64 * 0.2).sin()).collect();
+        let init_state = array![y[0]];
+        let init_cov = array![[10.0]];
+
+        let ll = kalman_loglik(&y, &model, init_state.view(), init_cov.view()).unwrap();
+
+        assert!(ll.is_finite(), "Log-likelihood should be finite, got {}", ll);
+        assert!(ll < 0.0, "Log-likelihood should be negative, got {}", ll);
+    }
+
+    #[test]
+    fn test_validate_kalman_smoother_tighter_than_filter() {
+        // Smoother uses all data (backward pass), so smoothed state covariance
+        // should be <= filtered covariance at each time point.
+        use rand::{Rng, SeedableRng};
+        use rand_chacha::ChaCha8Rng;
+
+        let n = 100;
+        let mut rng = ChaCha8Rng::seed_from_u64(88);
+
+        let transition = array![[1.0]];
+        let observation = array![1.0];
+        let selection = array![[1.0]];
+        let state_cov = array![[0.3]];
+        let obs_var = 0.5;
+
+        let model =
+            StateSpaceModel::new(transition, observation, selection, state_cov, obs_var).unwrap();
+
+        let mut mu = 5.0;
+        let y: Vec<f64> = (0..n)
+            .map(|_| {
+                mu += (rng.r#gen::<f64>() - 0.5) * 1.0;
+                mu + (rng.r#gen::<f64>() - 0.5) * 1.5
+            })
+            .collect();
+
+        let init_state = array![y[0]];
+        let init_cov = array![[5.0]];
+
+        let filter_result = kalman_filter(&y, &model, init_state.view(), init_cov.view()).unwrap();
+        let smooth_result = kalman_smoother(&filter_result, &model).unwrap();
+
+        // Check that smoothed covariance <= filtered covariance for interior points.
+        // The last point is identical by construction, so skip it.
+        let mut count_tighter = 0;
+        for t in 0..(n - 1) {
+            let filter_var = filter_result.filtered_covs[t][0][0];
+            let smooth_var = smooth_result.smoothed_covs[t][0][0];
+            if smooth_var <= filter_var + 1e-10 {
+                count_tighter += 1;
+            }
+        }
+
+        // Allow for small numerical issues: at least 90% of points should satisfy the property
+        let ratio = count_tighter as f64 / (n - 1) as f64;
+        assert!(
+            ratio > 0.9,
+            "Smoothed covariance should be <= filtered covariance in at least 90% of points, got {:.1}%",
+            ratio * 100.0
+        );
+    }
 }

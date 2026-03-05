@@ -1370,4 +1370,321 @@ mod tests {
         assert!(logit(0.99).is_finite());
         assert!(logit(0.731) > 0.9 && logit(0.731) < 1.1);
     }
+
+    // =========================================================================
+    // Validation tests (test_validate_* prefix)
+    // =========================================================================
+
+    /// Create a larger longitudinal dataset with known DGP for validation.
+    ///
+    /// DGP with 2 time points, n=200:
+    ///   L_1 ~ Uniform(0,1)
+    ///   A_1 | L_1 ~ Bernoulli(based on L_1 threshold)
+    ///   L_2 = L_1 + 0.3*A_1 + noise
+    ///   A_2 | L_2 ~ Bernoulli(based on L_2 threshold)
+    ///   Y = 0.2*L_1 + 0.3*L_2 + 0.4*A_1 + 0.5*A_2 + noise
+    ///
+    /// The treatment effects for always-treat vs never-treat:
+    ///   E[Y^{1,1}] - E[Y^{0,0}] = 0.4 + 0.5 + indirect effects through L_2
+    ///   Expected ATE ~ 0.9 + indirect effect of A_1 on L_2 (0.3*0.3 = 0.09)
+    ///   So roughly ATE ~ 1.0
+    fn create_validate_ltmle_data() -> LtmleData {
+        let n = 200;
+
+        // L_1: covariate at time 1
+        let l_1_vec: Vec<f64> = (0..n)
+            .map(|i| ((i * 7 + 3) % 100) as f64 / 100.0 + 0.005)
+            .collect();
+        let l_1 = Array2::from_shape_vec((n, 1), l_1_vec).unwrap();
+
+        // A_1: treatment at time 1 (depends on L_1)
+        let a_1: Array1<f64> = l_1
+            .column(0)
+            .iter()
+            .enumerate()
+            .map(|(i, &l)| {
+                let ps = 1.0 / (1.0 + (-0.5 * l + 0.25).exp());
+                let threshold = ((i * 37 + 11) % 100) as f64 / 100.0;
+                if threshold < ps { 1.0 } else { 0.0 }
+            })
+            .collect();
+
+        // L_2: covariate at time 2 (depends on L_1 and A_1)
+        let l_2_vec: Vec<f64> = (0..n)
+            .map(|i| {
+                let noise = ((i * 31 + 5) % 100) as f64 / 500.0 - 0.1;
+                l_1[[i, 0]] + 0.3 * a_1[i] + noise
+            })
+            .collect();
+        let l_2 = Array2::from_shape_vec((n, 1), l_2_vec).unwrap();
+
+        // A_2: treatment at time 2 (depends on L_2)
+        let a_2: Array1<f64> = l_2
+            .column(0)
+            .iter()
+            .enumerate()
+            .map(|(i, &l)| {
+                let ps = 1.0 / (1.0 + (-0.5 * l + 0.25).exp());
+                let threshold = ((i * 41 + 17) % 100) as f64 / 100.0;
+                if threshold < ps { 1.0 } else { 0.0 }
+            })
+            .collect();
+
+        // Y: final outcome
+        let y_2: Array1<f64> = (0..n)
+            .map(|i| {
+                let noise = ((i * 23 + 9) % 100) as f64 / 500.0 - 0.1;
+                0.2 * l_1[[i, 0]] + 0.3 * l_2[[i, 0]] + 0.4 * a_1[i] + 0.5 * a_2[i] + noise
+            })
+            .collect();
+
+        let y_1 = Array1::zeros(n);
+
+        LtmleData {
+            outcomes: vec![y_1, y_2],
+            treatments: vec![a_1, a_2],
+            covariates: vec![l_1, l_2],
+        }
+    }
+
+    /// Validate LTMLE estimates a positive ATE consistent with the DGP.
+    #[test]
+    fn test_validate_ltmle_ate_direction() {
+        let data = create_validate_ltmle_data();
+        let config = LtmleConfig {
+            q_model: LtmleQModel::Linear,
+            ..Default::default()
+        };
+
+        let result = run_ltmle(&data, config).unwrap();
+
+        // ATE should be positive (treatment has positive effects in DGP)
+        assert!(
+            result.ate > 0.0,
+            "ATE = {:.4} should be positive",
+            result.ate
+        );
+
+        // ATE should be in a reasonable range (true ATE ~ 1.0)
+        assert!(
+            result.ate < 3.0,
+            "ATE = {:.4} should not be too large (true ~ 1.0)",
+            result.ate
+        );
+
+        // Counterfactual means should be ordered: treated > control
+        assert!(
+            result.psi_treated > result.psi_control,
+            "E[Y^{{always treat}}] = {:.4} should be > E[Y^{{never treat}}] = {:.4}",
+            result.psi_treated,
+            result.psi_control
+        );
+
+        // ATE should equal the difference of counterfactual means
+        let ate_from_psi = result.psi_treated - result.psi_control;
+        assert!(
+            (result.ate - ate_from_psi).abs() < 1e-8,
+            "ATE = {:.4} should equal psi_treated - psi_control = {:.4}",
+            result.ate,
+            ate_from_psi
+        );
+    }
+
+    /// Validate LTMLE standard errors and confidence intervals.
+    #[test]
+    fn test_validate_ltmle_inference() {
+        let data = create_validate_ltmle_data();
+        let config = LtmleConfig {
+            q_model: LtmleQModel::Linear,
+            ..Default::default()
+        };
+
+        let result = run_ltmle(&data, config).unwrap();
+
+        // SE should be positive and finite
+        assert!(
+            result.se > 0.0 && result.se.is_finite(),
+            "SE = {:.4} should be positive and finite",
+            result.se
+        );
+
+        // CI should be properly ordered
+        assert!(
+            result.ci_lower < result.ci_upper,
+            "CI lower ({:.4}) should be < CI upper ({:.4})",
+            result.ci_lower,
+            result.ci_upper
+        );
+
+        // CI should bracket ATE
+        assert!(
+            result.ci_lower < result.ate && result.ate < result.ci_upper,
+            "CI [{:.4}, {:.4}] should bracket ATE = {:.4}",
+            result.ci_lower,
+            result.ci_upper,
+            result.ate
+        );
+
+        // z-stat should be consistent with ATE/SE
+        assert!(
+            (result.z_stat - result.ate / result.se).abs() < 1e-8,
+            "z_stat = {:.4} should equal ATE/SE = {:.4}",
+            result.z_stat,
+            result.ate / result.se
+        );
+
+        // p-value should be in [0, 1]
+        assert!(
+            (0.0..=1.0).contains(&result.p_value),
+            "p-value = {} should be in [0, 1]",
+            result.p_value
+        );
+
+        // Counterfactual mean SEs should be positive
+        assert!(
+            result.psi_treated_se > 0.0,
+            "psi_treated_se should be positive"
+        );
+        assert!(
+            result.psi_control_se > 0.0,
+            "psi_control_se should be positive"
+        );
+    }
+
+    /// Validate LTMLE targeting step produces finite fluctuation coefficients
+    /// and properly structured output.
+    #[test]
+    fn test_validate_ltmle_targeting_convergence() {
+        let data = create_validate_ltmle_data();
+        let config = LtmleConfig {
+            q_model: LtmleQModel::Linear,
+            ..Default::default()
+        };
+
+        let result = run_ltmle(&data, config).unwrap();
+
+        // Should have one fluctuation coefficient per time point
+        assert_eq!(
+            result.fluctuation_coefs.len(),
+            2,
+            "Should have 2 fluctuation coefficients for 2 time points"
+        );
+
+        // All fluctuation coefficients should be finite
+        for (t, &eps) in result.fluctuation_coefs.iter().enumerate() {
+            assert!(
+                eps.is_finite(),
+                "Fluctuation coef at time {} = {:.6} should be finite",
+                t + 1,
+                eps
+            );
+        }
+
+        // Clever covariates should exist for each time point
+        assert_eq!(result.clever_covariates.len(), 2);
+        for (t, hc) in result.clever_covariates.iter().enumerate() {
+            assert_eq!(
+                hc.len(),
+                200,
+                "Clever covariates at time {} should have n=200 entries",
+                t + 1
+            );
+            // All should be finite
+            assert!(
+                hc.iter().all(|h| h.is_finite()),
+                "All clever covariates at time {} should be finite",
+                t + 1
+            );
+        }
+
+        // Targeted predictions should exist for each time point
+        assert_eq!(result.targeted_predictions.len(), 2);
+
+        // Model should have converged
+        assert!(
+            result.converged,
+            "LTMLE should report convergence"
+        );
+    }
+
+    /// Validate LTMLE propensity score truncation.
+    #[test]
+    fn test_validate_ltmle_propensity_truncation() {
+        let data = create_validate_ltmle_data();
+
+        let gbounds = (0.05, 0.95);
+        let config = LtmleConfig {
+            q_model: LtmleQModel::Linear,
+            gbounds,
+            ..Default::default()
+        };
+
+        let result = run_ltmle(&data, config).unwrap();
+
+        // All propensity scores should be within the specified bounds
+        for (t, ps_vec) in result.propensity_scores.iter().enumerate() {
+            for (i, &ps) in ps_vec.iter().enumerate() {
+                assert!(
+                    ps >= gbounds.0 - 1e-10 && ps <= gbounds.1 + 1e-10,
+                    "PS at time {}, obs {} = {:.4} should be in [{}, {}]",
+                    t + 1,
+                    i,
+                    ps,
+                    gbounds.0,
+                    gbounds.1
+                );
+            }
+        }
+
+        // Should report truncation counts per time point
+        assert_eq!(result.n_truncated_by_time.len(), 2);
+
+        // Should report treatment counts per time point
+        assert_eq!(result.n_treated_by_time.len(), 2);
+        for &nt in &result.n_treated_by_time {
+            assert!(nt > 0, "Should have some treated observations at each time point");
+        }
+    }
+
+    /// Validate influence curve has mean approximately zero.
+    #[test]
+    fn test_validate_ltmle_influence_curve_properties() {
+        let data = create_validate_ltmle_data();
+        let config = LtmleConfig {
+            q_model: LtmleQModel::Linear,
+            ..Default::default()
+        };
+
+        let result = run_ltmle(&data, config).unwrap();
+
+        // IC should have n entries
+        assert_eq!(result.influence_curve.len(), 200);
+
+        // All IC values should be finite
+        assert!(
+            result.influence_curve.iter().all(|ic| ic.is_finite()),
+            "All IC values must be finite"
+        );
+
+        // Mean of IC should be close to zero (targeting condition)
+        let ic_mean: f64 = result.influence_curve.iter().sum::<f64>() / 200.0;
+        assert!(
+            ic_mean.abs() < 0.5,
+            "IC mean = {:.6} should be close to zero",
+            ic_mean
+        );
+
+        // IC variance should be positive (used for SE)
+        let ic_var: f64 = result
+            .influence_curve
+            .iter()
+            .map(|ic| (ic - ic_mean).powi(2))
+            .sum::<f64>()
+            / 199.0;
+        assert!(
+            ic_var > 0.0,
+            "IC variance should be positive, got {:.6}",
+            ic_var
+        );
+    }
 }

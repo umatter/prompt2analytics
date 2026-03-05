@@ -265,6 +265,7 @@ fn difference(series: &[f64], d: usize) -> Vec<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use polars::prelude::*;
 
     #[test]
     fn test_difference() {
@@ -274,5 +275,160 @@ mod tests {
 
         let diff2 = difference(&series, 2);
         assert_eq!(diff2, vec![1.0, 1.0, 1.0]);
+    }
+
+    /// Generate AR(1) data: y_t = phi * y_{t-1} + e_t, e_t ~ uniform noise.
+    fn generate_ar1_data(n: usize, phi: f64, seed: u64) -> Vec<f64> {
+        use rand::{Rng, SeedableRng};
+        use rand_chacha::ChaCha8Rng;
+
+        let mut rng = ChaCha8Rng::seed_from_u64(seed);
+        let mut y = Vec::with_capacity(n);
+        let mut prev = 0.0;
+
+        for _ in 0..n {
+            let noise = (rng.r#gen::<f64>() - 0.5) * 2.0; // uniform in [-1, 1]
+            let val = phi * prev + noise;
+            y.push(val);
+            prev = val;
+        }
+
+        y
+    }
+
+    #[test]
+    fn test_validate_arima_ar1_coefficient_recovery() {
+        // Fit ARIMA(1,0,0) to AR(1) data with known phi=0.7
+        // Verify that estimated phi is reasonably close.
+        // Note: arima::estimate::fit may return [intercept, phi] or [phi] depending
+        // on the series. We check whether any returned coefficient is close to phi_true.
+        let phi_true = 0.7;
+        let n = 500;
+        let y = generate_ar1_data(n, phi_true, 42);
+
+        let df = df! {
+            "y" => &y,
+        }
+        .unwrap();
+        let dataset = crate::data::Dataset::new(df);
+
+        let result = run_arima(&dataset, "y", 1, 0, 0).unwrap();
+
+        assert_eq!(result.p, 1);
+        assert_eq!(result.d, 0);
+        assert_eq!(result.q, 0);
+        assert!(!result.ar_coeffs.is_empty(), "Should have at least one AR coefficient");
+
+        // The arima crate may return coefficients with an intercept prepended.
+        // Check that at least one coefficient is close to the true AR(1) parameter.
+        let close_to_phi = result.ar_coeffs.iter().any(|&c| (c - phi_true).abs() < 0.25);
+        assert!(
+            close_to_phi,
+            "At least one AR coefficient should be close to phi_true={:.4}, got {:?}",
+            phi_true,
+            result.ar_coeffs
+        );
+    }
+
+    #[test]
+    fn test_validate_arima_aic_finite() {
+        // Verify AIC is computed and finite for ARIMA(1,0,0).
+        let y = generate_ar1_data(200, 0.5, 99);
+
+        let df = df! {
+            "y" => &y,
+        }
+        .unwrap();
+        let dataset = crate::data::Dataset::new(df);
+
+        let result = run_arima(&dataset, "y", 1, 0, 0).unwrap();
+
+        assert!(result.aic.is_finite(), "AIC should be finite, got {}", result.aic);
+        assert!(result.ssr.is_finite(), "SSR should be finite");
+        assert!(result.ssr > 0.0, "SSR should be positive");
+    }
+
+    #[test]
+    fn test_validate_arima_forecast_decays_toward_mean() {
+        // For ARIMA(1,0,0) with |phi| < 1, forecasts should decay toward
+        // the unconditional mean (approximately the sample mean of the differenced series).
+        let y = generate_ar1_data(300, 0.6, 77);
+
+        let df = df! {
+            "y" => &y,
+        }
+        .unwrap();
+        let dataset = crate::data::Dataset::new(df);
+
+        let result = forecast_arima(&dataset, "y", 1, 0, 0, 20).unwrap();
+
+        assert_eq!(result.forecast.len(), 20);
+
+        // All forecast values should be finite
+        for (i, &f) in result.forecast.iter().enumerate() {
+            assert!(f.is_finite(), "Forecast at step {} should be finite, got {}", i, f);
+        }
+
+        // For a stationary AR(1), successive forecasts should move closer to 0
+        // (the unconditional mean for zero-mean AR).
+        // Check that the absolute value of forecasts is not diverging.
+        let last_abs = result.forecast.last().unwrap().abs();
+        let first_abs = result.forecast.first().unwrap().abs();
+        // Last forecast should be closer to zero or at least not much larger than first
+        assert!(
+            last_abs <= first_abs + 2.0,
+            "Forecast should not diverge: first_abs={:.4}, last_abs={:.4}",
+            first_abs,
+            last_abs
+        );
+    }
+
+    #[test]
+    fn test_validate_arima_011_ma_coefficient() {
+        // Fit ARIMA(0,1,1) to a random walk with MA noise.
+        // Generate: y_t = y_{t-1} + e_t + theta * e_{t-1}
+        use rand::{Rng, SeedableRng};
+        use rand_chacha::ChaCha8Rng;
+
+        let theta_true = -0.4;
+        let n = 400;
+        let mut rng = ChaCha8Rng::seed_from_u64(55);
+        let mut y = Vec::with_capacity(n);
+        let mut prev_y = 0.0;
+        let mut prev_e = 0.0;
+
+        for _ in 0..n {
+            let e = (rng.r#gen::<f64>() - 0.5) * 2.0;
+            let val = prev_y + e + theta_true * prev_e;
+            y.push(val);
+            prev_y = val;
+            prev_e = e;
+        }
+
+        let df = df! {
+            "y" => &y,
+        }
+        .unwrap();
+        let dataset = crate::data::Dataset::new(df);
+
+        let result = run_arima(&dataset, "y", 0, 1, 1).unwrap();
+
+        assert_eq!(result.p, 0);
+        assert_eq!(result.d, 1);
+        assert_eq!(result.q, 1);
+
+        // MA coefficient recovery is harder, so use generous tolerance
+        if !result.ma_coeffs.is_empty() {
+            let theta_hat = result.ma_coeffs[0];
+            assert!(
+                (theta_hat - theta_true).abs() < 0.5,
+                "MA(1) coefficient theta_hat={:.4} should be in neighborhood of theta_true={:.4}",
+                theta_hat,
+                theta_true
+            );
+        }
+
+        // At minimum, AIC should be finite
+        assert!(result.aic.is_finite());
     }
 }

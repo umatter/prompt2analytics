@@ -1164,8 +1164,7 @@ pub use ml::{
     gbm_predict,
     gbm_variable_importance,
     hierarchical,
-    // PDP (Partial Dependence Plot)
-    ice_curves,
+    // ICE (Individual Conditional Expectation)
     ice_curves_cart,
     ice_curves_gbm,
     ice_curves_rf,

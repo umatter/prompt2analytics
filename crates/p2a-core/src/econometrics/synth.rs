@@ -2164,6 +2164,217 @@ mod tests {
         assert!(output.contains("Treated Unit: A"));
         assert!(output.contains("PREDICTOR BALANCE"));
     }
+
+    // =========================================================================
+    // Validation tests (test_validate_* prefix)
+    // =========================================================================
+
+    /// Create a larger synthetic control dataset with a known treatment effect.
+    ///
+    /// DGP:
+    /// - 1 treated unit (T), 4 donors (D1-D4)
+    /// - 10 pre-treatment periods, 5 post-treatment periods
+    /// - T = 0.4*D1 + 0.6*D2 in pre-treatment (known weights)
+    /// - Treatment effect = 10 in post-treatment
+    fn create_validate_synth_dataset() -> Dataset {
+        let mut units = Vec::new();
+        let mut times = Vec::new();
+        let mut outcomes = Vec::new();
+        let mut x1_vals = Vec::new();
+
+        let n_pre = 10;
+        let n_post = 5;
+        let treatment_time = (n_pre + 1) as i64;
+        let true_effect = 10.0;
+
+        // Donor D1: linear trend
+        for t in 1..=(n_pre + n_post) {
+            units.push("D1");
+            times.push(t as i64);
+            outcomes.push(20.0 + 1.5 * t as f64 + 0.1 * ((t as f64) * 0.5).sin());
+            x1_vals.push(3.0);
+        }
+
+        // Donor D2: different slope
+        for t in 1..=(n_pre + n_post) {
+            units.push("D2");
+            times.push(t as i64);
+            outcomes.push(25.0 + 1.0 * t as f64 + 0.1 * ((t as f64) * 0.3).sin());
+            x1_vals.push(7.0);
+        }
+
+        // Donor D3: unrelated
+        for t in 1..=(n_pre + n_post) {
+            units.push("D3");
+            times.push(t as i64);
+            outcomes.push(30.0 + 0.5 * t as f64);
+            x1_vals.push(1.0);
+        }
+
+        // Donor D4: unrelated
+        for t in 1..=(n_pre + n_post) {
+            units.push("D4");
+            times.push(t as i64);
+            outcomes.push(15.0 + 2.0 * t as f64);
+            x1_vals.push(9.0);
+        }
+
+        // Treated unit T: in pre-treatment = 0.4*D1 + 0.6*D2
+        // In post-treatment, add true_effect
+        for t in 1..=(n_pre + n_post) {
+            units.push("T");
+            times.push(t as i64);
+            let d1_val = 20.0 + 1.5 * t as f64 + 0.1 * ((t as f64) * 0.5).sin();
+            let d2_val = 25.0 + 1.0 * t as f64 + 0.1 * ((t as f64) * 0.3).sin();
+            let synth_val = 0.4 * d1_val + 0.6 * d2_val;
+            let effect = if t > n_pre { true_effect } else { 0.0 };
+            outcomes.push(synth_val + effect);
+            x1_vals.push(0.4 * 3.0 + 0.6 * 7.0); // 5.4
+        }
+
+        let df = df! {
+            "unit" => units,
+            "time" => times,
+            "outcome" => outcomes,
+            "x1" => x1_vals,
+        }
+        .unwrap();
+
+        Dataset::new(df)
+    }
+
+    /// Validate synthetic control recovers known weights and treatment effect.
+    #[test]
+    fn test_validate_synth_weight_recovery() {
+        let dataset = create_validate_synth_dataset();
+        let predictors = vec![PredictorSpec::new("x1")];
+
+        let config = SynthConfig {
+            treatment_time: 11,
+            treated_unit: "T".to_string(),
+            v_method: VOptimization::Equal,
+            run_placebos: false,
+            ..Default::default()
+        };
+
+        let result =
+            run_synthetic_control(&dataset, "outcome", "unit", "time", &predictors, config)
+                .unwrap();
+
+        // Weights should be non-negative
+        for (unit, weight) in &result.all_unit_weights {
+            assert!(
+                *weight >= -1e-6,
+                "Weight for {} = {:.4} should be non-negative",
+                unit,
+                weight
+            );
+        }
+
+        // Weights should sum to ~1
+        let weight_sum: f64 = result.all_unit_weights.iter().map(|(_, w)| w).sum();
+        assert!(
+            (weight_sum - 1.0).abs() < 0.02,
+            "Weights should sum to 1, got {:.6}",
+            weight_sum
+        );
+
+        // Pre-treatment RMSPE should be small (good fit)
+        assert!(
+            result.pre_treatment_rmspe < 2.0,
+            "Pre-treatment RMSPE = {:.4} should be small",
+            result.pre_treatment_rmspe
+        );
+    }
+
+    /// Validate synthetic control detects treatment effect direction and magnitude.
+    #[test]
+    fn test_validate_synth_treatment_effect() {
+        let dataset = create_validate_synth_dataset();
+        let predictors = vec![PredictorSpec::new("x1")];
+        let true_effect = 10.0;
+
+        let config = SynthConfig {
+            treatment_time: 11,
+            treated_unit: "T".to_string(),
+            v_method: VOptimization::Equal,
+            run_placebos: false,
+            ..Default::default()
+        };
+
+        let result =
+            run_synthetic_control(&dataset, "outcome", "unit", "time", &predictors, config)
+                .unwrap();
+
+        // Average effect should be close to true effect (within 3 for this DGP)
+        assert!(
+            (result.average_effect - true_effect).abs() < 3.0,
+            "Average effect = {:.4} should be close to true effect = {}",
+            result.average_effect,
+            true_effect
+        );
+
+        // All post-treatment effects should be positive
+        for te in &result.treatment_effects {
+            assert!(
+                te.effect > 0.0,
+                "Treatment effect at time {} = {:.4} should be positive",
+                te.time,
+                te.effect
+            );
+        }
+
+        // Cumulative effect should be positive and substantial
+        assert!(
+            result.cumulative_effect > 0.0,
+            "Cumulative effect should be positive"
+        );
+
+        // Structural checks
+        assert_eq!(result.n_pre_periods, 10);
+        assert_eq!(result.n_post_periods, 5);
+        assert_eq!(result.n_donors, 4);
+    }
+
+    /// Validate synthetic control time series outputs are correctly aligned.
+    #[test]
+    fn test_validate_synth_time_series_alignment() {
+        let dataset = create_validate_synth_dataset();
+        let predictors = vec![PredictorSpec::new("x1")];
+
+        let config = SynthConfig {
+            treatment_time: 11,
+            treated_unit: "T".to_string(),
+            v_method: VOptimization::Equal,
+            run_placebos: false,
+            ..Default::default()
+        };
+
+        let result =
+            run_synthetic_control(&dataset, "outcome", "unit", "time", &predictors, config)
+                .unwrap();
+
+        // Actual and synthetic outcomes should have the same length
+        assert_eq!(result.actual_outcome.len(), result.synthetic_outcome.len());
+
+        // In pre-treatment period, actual and synthetic should be close
+        for i in 0..result.n_pre_periods {
+            if i < result.actual_outcome.len() && i < result.synthetic_outcome.len() {
+                let (_, actual) = result.actual_outcome[i];
+                let (_, synth) = result.synthetic_outcome[i];
+                let diff = (actual - synth).abs();
+                // Pre-treatment fit should be reasonable (within 5 units)
+                assert!(
+                    diff < 5.0,
+                    "Pre-treatment period {}: actual={:.2}, synth={:.2}, diff={:.2}",
+                    i,
+                    actual,
+                    synth,
+                    diff
+                );
+            }
+        }
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

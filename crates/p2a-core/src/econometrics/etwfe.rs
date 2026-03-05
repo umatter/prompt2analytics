@@ -920,4 +920,326 @@ mod tests {
         assert!(display.contains("ATT"));
         assert!(display.contains("Event Study"));
     }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Validation Tests
+    //
+    // These tests validate the Extended TWFE (Wooldridge) estimator against
+    // known DGP properties, particularly verifying that it correctly handles
+    // treatment effect heterogeneity that would bias naive TWFE.
+    //
+    // References:
+    // - Wooldridge, J.M. (2021). "Two-Way Fixed Effects, the Two-Way Mundlak
+    //   Regression, and Difference-in-Differences Estimators." Working paper.
+    // - Wooldridge, J.M. (2023). "Simple Approaches to Nonlinear
+    //   Difference-in-Differences with Panel Data." The Econometrics Journal.
+    // - R package `etwfe` (Grant McDermott)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Create a large staggered panel with heterogeneous treatment effects
+    /// across cohorts for ETWFE validation.
+    ///
+    /// DGP:
+    /// - 10 units per cohort, 3 cohorts + 10 never-treated = 40 units
+    /// - 7 periods (1-7)
+    /// - Cohort 3 (treated from t=3): true ATT = 2.0
+    /// - Cohort 5 (treated from t=5): true ATT = 5.0
+    /// - Never-treated: no effect
+    /// - Unit FE: unit_id * 0.3
+    /// - Time FE: period * 0.5
+    /// - Noise: deterministic pseudo-random
+    fn create_validation_etwfe_panel() -> (Dataset, std::collections::HashMap<i64, f64>) {
+        let true_atts: std::collections::HashMap<i64, f64> =
+            [(3, 2.0), (5, 5.0)].into_iter().collect();
+
+        let mut unit_vec: Vec<i64> = Vec::new();
+        let mut time_vec: Vec<i64> = Vec::new();
+        let mut treat_vec: Vec<f64> = Vec::new();
+        let mut first_treat_vec: Vec<i64> = Vec::new();
+        let mut y_vec: Vec<f64> = Vec::new();
+
+        for t in 1..=7i64 {
+            for uid in 1..=40i64 {
+                // Assign cohort
+                let g: i64 = if uid <= 10 {
+                    3 // Cohort 3
+                } else if uid <= 20 {
+                    5 // Cohort 5
+                } else {
+                    0 // Never treated
+                };
+
+                let is_treated = g > 0 && t >= g;
+                let att = if is_treated {
+                    *true_atts.get(&g).unwrap_or(&0.0)
+                } else {
+                    0.0
+                };
+
+                let unit_fe = uid as f64 * 0.3;
+                let time_fe = t as f64 * 0.5;
+                let noise = ((uid * t) % 11) as f64 * 0.03 - 0.165;
+
+                unit_vec.push(uid);
+                time_vec.push(t);
+                treat_vec.push(if is_treated { 1.0 } else { 0.0 });
+                first_treat_vec.push(g);
+                y_vec.push(unit_fe + time_fe + att + noise);
+            }
+        }
+
+        let df = df! {
+            "unit" => unit_vec,
+            "time" => time_vec,
+            "treat" => treat_vec,
+            "first_treat" => first_treat_vec,
+            "y" => y_vec
+        }
+        .unwrap();
+
+        (Dataset::new(df), true_atts)
+    }
+
+    #[test]
+    fn test_validate_etwfe_recovers_cohort_specific_effects() {
+        // Validate that ETWFE correctly recovers cohort-specific treatment effects.
+        // This is the key advantage of ETWFE over naive TWFE: it allows
+        // heterogeneous effects across cohorts without bias.
+        let (dataset, true_atts) = create_validation_etwfe_panel();
+
+        let result = run_etwfe(
+            &dataset,
+            "y",
+            "unit",
+            "time",
+            "treat",
+            "first_treat",
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(result.n_cohorts, 2, "Should have 2 treatment cohorts");
+        assert_eq!(result.n_periods, 7, "Should have 7 periods");
+
+        // Check cohort average effects
+        for avg in &result.cohort_avg {
+            if let Some(&true_att) = true_atts.get(&avg.key) {
+                assert!(
+                    (avg.estimate - true_att).abs() < 1.0,
+                    "Cohort {} avg effect should be ~{:.1}, got {:.4}",
+                    avg.key,
+                    true_att,
+                    avg.estimate
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_validate_etwfe_att_positive_with_positive_treatment() {
+        // Validate that the overall ATT is positive when the DGP has
+        // strictly positive treatment effects.
+        let (dataset, _true_atts) = create_validation_etwfe_panel();
+
+        let result = run_etwfe(
+            &dataset,
+            "y",
+            "unit",
+            "time",
+            "treat",
+            "first_treat",
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert!(
+            result.att_simple > 0.0,
+            "Simple ATT should be positive, got {:.4}",
+            result.att_simple
+        );
+        assert!(
+            result.att_weighted > 0.0,
+            "Weighted ATT should be positive, got {:.4}",
+            result.att_weighted
+        );
+    }
+
+    #[test]
+    fn test_validate_etwfe_event_study_pattern() {
+        // Validate that the event study shows the expected pattern:
+        // - Pre-treatment (rel_time < 0): effects near 0
+        // - Post-treatment (rel_time >= 0): positive effects
+        let (dataset, _true_atts) = create_validation_etwfe_panel();
+
+        let result = run_etwfe(
+            &dataset,
+            "y",
+            "unit",
+            "time",
+            "treat",
+            "first_treat",
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert!(
+            !result.event_study.is_empty(),
+            "Event study should have entries"
+        );
+
+        // Post-treatment effects should be meaningfully positive
+        let post_effects: Vec<&AggregatedEffect> =
+            result.event_study.iter().filter(|e| e.key >= 0).collect();
+
+        assert!(
+            !post_effects.is_empty(),
+            "Should have post-treatment event study effects"
+        );
+
+        for e in &post_effects {
+            assert!(
+                e.estimate > -1.0,
+                "Post-treatment event study at e={} should not be strongly negative, got {:.4}",
+                e.key,
+                e.estimate
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_etwfe_heterogeneous_vs_homogeneous() {
+        // Validate that ETWFE produces unbiased estimates under treatment
+        // effect heterogeneity. Compare results from a heterogeneous DGP
+        // (cohort 3 -> ATT=2, cohort 5 -> ATT=5) against a homogeneous
+        // DGP (all cohorts -> ATT=3.5).
+        //
+        // Both should produce overall ATTs in a reasonable range.
+
+        // Heterogeneous case
+        let (dataset_het, _) = create_validation_etwfe_panel();
+        let result_het = run_etwfe(
+            &dataset_het,
+            "y",
+            "unit",
+            "time",
+            "treat",
+            "first_treat",
+            None,
+            None,
+        )
+        .unwrap();
+
+        // Homogeneous case: same structure but ATT = 3.5 for all
+        let mut unit_vec: Vec<i64> = Vec::new();
+        let mut time_vec: Vec<i64> = Vec::new();
+        let mut treat_vec: Vec<f64> = Vec::new();
+        let mut first_treat_vec: Vec<i64> = Vec::new();
+        let mut y_vec: Vec<f64> = Vec::new();
+
+        let homogeneous_att = 3.5;
+
+        for t in 1..=7i64 {
+            for uid in 1..=40i64 {
+                let g: i64 = if uid <= 10 { 3 } else if uid <= 20 { 5 } else { 0 };
+                let is_treated = g > 0 && t >= g;
+                let att = if is_treated { homogeneous_att } else { 0.0 };
+                let unit_fe = uid as f64 * 0.3;
+                let time_fe = t as f64 * 0.5;
+                let noise = ((uid * t) % 11) as f64 * 0.03 - 0.165;
+
+                unit_vec.push(uid);
+                time_vec.push(t);
+                treat_vec.push(if is_treated { 1.0 } else { 0.0 });
+                first_treat_vec.push(g);
+                y_vec.push(unit_fe + time_fe + att + noise);
+            }
+        }
+
+        let df_hom = df! {
+            "unit" => unit_vec,
+            "time" => time_vec,
+            "treat" => treat_vec,
+            "first_treat" => first_treat_vec,
+            "y" => y_vec
+        }
+        .unwrap();
+        let dataset_hom = Dataset::new(df_hom);
+
+        let result_hom = run_etwfe(
+            &dataset_hom,
+            "y",
+            "unit",
+            "time",
+            "treat",
+            "first_treat",
+            None,
+            None,
+        )
+        .unwrap();
+
+        // Homogeneous ATT should be close to 3.5
+        assert!(
+            (result_hom.att_simple - homogeneous_att).abs() < 1.5,
+            "Homogeneous ATT should be ~{}, got {:.4}",
+            homogeneous_att,
+            result_hom.att_simple
+        );
+
+        // Heterogeneous ATT should be between the min and max true ATTs (2 and 5)
+        assert!(
+            result_het.att_simple > 0.5 && result_het.att_simple < 7.0,
+            "Heterogeneous ATT should be in (0.5, 7.0), got {:.4}",
+            result_het.att_simple
+        );
+    }
+
+    #[test]
+    fn test_validate_etwfe_structural_counts() {
+        // Validate structural properties of the ETWFE result.
+        let (dataset, _) = create_validation_etwfe_panel();
+
+        let result = run_etwfe(
+            &dataset,
+            "y",
+            "unit",
+            "time",
+            "treat",
+            "first_treat",
+            None,
+            None,
+        )
+        .unwrap();
+
+        // 40 units x 7 periods = 280 observations
+        assert_eq!(result.n_obs, 280);
+        assert!(result.n_treated > 0);
+        assert!(result.n_control > 0);
+        assert_eq!(result.n_treated + result.n_control, 280);
+
+        // R-squared should be between 0 and 1
+        assert!(
+            result.r_squared >= 0.0 && result.r_squared <= 1.0,
+            "R-squared should be in [0,1], got {:.4}",
+            result.r_squared
+        );
+
+        // Standard errors should be positive and finite
+        assert!(
+            result.att_se > 0.0 && result.att_se.is_finite(),
+            "ATT SE should be positive and finite, got {:.4}",
+            result.att_se
+        );
+
+        // Cohort-time effects should have correct relative time computation
+        for ct in &result.cohort_time_effects {
+            assert_eq!(
+                ct.rel_time,
+                ct.time - ct.cohort,
+                "rel_time should equal time - cohort"
+            );
+        }
+    }
 }

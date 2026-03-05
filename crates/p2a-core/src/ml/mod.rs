@@ -182,8 +182,6 @@ mod cubist;
 pub mod dual_tree;
 mod evaluation;
 mod evaluation_fast;
-mod evaluation;
-mod evaluation_fast;
 mod gbm;
 mod ice;
 pub mod kdtree;
@@ -293,7 +291,7 @@ pub use advanced_clustering_mod::{
     spectral_clustering,
     trimmed_kmeans,
 };
-pub use bart::{BartConfig, BartResult, bart, bart_arrays, run_bart};
+pub use bart::{BartConfig, BartResult, bart, bart_arrays, bart_predict, run_bart};
 pub use bart_causal::{
     BartCausalConfig, BartCausalResult, bart_causal, bart_causal_arrays, bart_causal_predict,
     bart_causal_predict_arrays, run_bart_causal,

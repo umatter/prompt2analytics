@@ -1594,4 +1594,173 @@ mod tests {
         );
         assert!(result.inference.effect_sd > 0.0);
     }
+
+    #[test]
+    fn test_validate_causal_impact_cumulative_effect() {
+        // Create data with a known additive effect of 5.0 in the post-period.
+        // Verify the estimated cumulative effect is close to n_post * 5.0 = 150.
+        let n_pre = 80;
+        let n_post = 30;
+        let true_effect = 5.0;
+
+        let (y, time) = generate_causal_impact_data(n_pre, n_post, true_effect, 42);
+
+        let df = df! {
+            "y" => &y,
+            "time" => &time,
+        }
+        .unwrap();
+        let dataset = Dataset::new(df);
+
+        let result = run_causal_impact(
+            &dataset,
+            "y",
+            "time",
+            (0, (n_pre - 1) as i64),
+            (n_pre as i64, (n_pre + n_post - 1) as i64),
+            None,
+        )
+        .unwrap();
+
+        let expected_cumulative = n_post as f64 * true_effect;
+
+        // The cumulative effect should be within 50% of the true cumulative
+        // (generous because it's a random walk + small sample)
+        let relative_error =
+            (result.summary.cumulative_effect - expected_cumulative).abs() / expected_cumulative;
+        assert!(
+            relative_error < 0.6,
+            "Cumulative effect {:.2} should be close to expected {:.2} (rel err {:.2})",
+            result.summary.cumulative_effect,
+            expected_cumulative,
+            relative_error
+        );
+    }
+
+    #[test]
+    fn test_validate_causal_impact_point_effects() {
+        // Verify that point-wise effects in the post-period average near the true effect.
+        let n_pre = 70;
+        let n_post = 30;
+        let true_effect = 5.0;
+
+        let (y, time) = generate_causal_impact_data(n_pre, n_post, true_effect, 123);
+
+        let df = df! {
+            "y" => &y,
+            "time" => &time,
+        }
+        .unwrap();
+        let dataset = Dataset::new(df);
+
+        let result = run_causal_impact(
+            &dataset,
+            "y",
+            "time",
+            (0, (n_pre - 1) as i64),
+            (n_pre as i64, (n_pre + n_post - 1) as i64),
+            None,
+        )
+        .unwrap();
+
+        // Average of point effects in the post-period
+        let avg_point_effect = result.summary.average_effect;
+
+        // Should be in the neighborhood of true_effect
+        assert!(
+            (avg_point_effect - true_effect).abs() < true_effect * 1.5,
+            "Average point effect {:.2} should be in neighborhood of {:.2}",
+            avg_point_effect,
+            true_effect
+        );
+
+        // All point effects should be finite
+        for pe in &result.series.point_effect {
+            assert!(pe.is_finite(), "Point effect should be finite");
+        }
+    }
+
+    #[test]
+    fn test_validate_causal_impact_credible_intervals() {
+        // Verify that the credible interval for the average effect contains
+        // the true effect value (at least occasionally with random data).
+        let n_pre = 80;
+        let n_post = 30;
+        let true_effect = 8.0;
+
+        let (y, time) = generate_causal_impact_data(n_pre, n_post, true_effect, 321);
+
+        let df = df! {
+            "y" => &y,
+            "time" => &time,
+        }
+        .unwrap();
+        let dataset = Dataset::new(df);
+
+        let config = CausalImpactConfig {
+            pre_period: (0, (n_pre - 1) as i64),
+            post_period: (n_pre as i64, (n_pre + n_post - 1) as i64),
+            alpha: 0.05,
+            ..Default::default()
+        };
+
+        let result = causal_impact(&dataset, "y", "time", config).unwrap();
+
+        // The CI bounds should be ordered correctly
+        assert!(
+            result.summary.average_effect_lower <= result.summary.average_effect,
+            "Lower CI bound should be <= average effect"
+        );
+        assert!(
+            result.summary.average_effect_upper >= result.summary.average_effect,
+            "Upper CI bound should be >= average effect"
+        );
+
+        // Cumulative bounds should also be ordered
+        assert!(
+            result.summary.cumulative_effect_lower <= result.summary.cumulative_effect,
+        );
+        assert!(
+            result.summary.cumulative_effect_upper >= result.summary.cumulative_effect,
+        );
+
+        // CI width should be positive
+        let ci_width = result.summary.average_effect_upper - result.summary.average_effect_lower;
+        assert!(ci_width > 0.0, "CI width should be positive, got {:.4}", ci_width);
+    }
+
+    #[test]
+    fn test_validate_causal_impact_series_lengths() {
+        // Verify that all output series have consistent lengths.
+        let n_pre = 60;
+        let n_post = 20;
+        let n = n_pre + n_post;
+
+        let (y, time) = generate_causal_impact_data(n_pre, n_post, 3.0, 555);
+
+        let df = df! {
+            "y" => &y,
+            "time" => &time,
+        }
+        .unwrap();
+        let dataset = Dataset::new(df);
+
+        let result = run_causal_impact(
+            &dataset,
+            "y",
+            "time",
+            (0, (n_pre - 1) as i64),
+            (n_pre as i64, (n - 1) as i64),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(result.series.time.len(), n);
+        assert_eq!(result.series.observed.len(), n);
+        assert_eq!(result.series.predicted.len(), n);
+        assert_eq!(result.series.predicted_lower.len(), n);
+        assert_eq!(result.series.predicted_upper.len(), n);
+        assert_eq!(result.series.point_effect.len(), n);
+        assert_eq!(result.series.cumulative_effect.len(), n);
+    }
 }

@@ -1298,4 +1298,222 @@ mod tests {
             t_100_95
         );
     }
+
+    // =========================================================================
+    // Validation tests (test_validate_* prefix)
+    // =========================================================================
+
+    /// Create a dataset with a known treatment effect for validation.
+    ///
+    /// Treated unit follows donors closely in pre-treatment,
+    /// then diverges by +5 in post-treatment.
+    fn generate_validate_data() -> (Array1<f64>, Array2<f64>) {
+        let n_pre = 10;
+        let n_post = 4;
+        let true_effect = 5.0;
+
+        // Donors: smooth trends with slight differences
+        let donors = Array2::from_shape_fn((n_pre + n_post, 6), |(t, j)| {
+            10.0 + 1.2 * t as f64 + 0.5 * j as f64 + 0.05 * ((t * (j + 1)) as f64).sin()
+        });
+
+        // Treated unit: weighted combination of donors 0 and 1 in pre-treatment
+        // with added treatment effect in post-treatment
+        let treated = Array1::from_shape_fn(n_pre + n_post, |t| {
+            let synth_val =
+                0.5 * donors[[t, 0]] + 0.3 * donors[[t, 1]] + 0.2 * donors[[t, 2]];
+            if t >= n_pre {
+                synth_val + true_effect
+            } else {
+                synth_val
+            }
+        });
+
+        (treated, donors)
+    }
+
+    /// Validate SCPI point estimates capture the known treatment effect.
+    #[test]
+    fn test_validate_scpi_point_estimates() {
+        let (treated, donors) = generate_validate_data();
+        let n_pre = 10;
+        let true_effect = 5.0;
+
+        let config = SCPIConfig {
+            constraint: SCPIConstraint::Simplex,
+            ..Default::default()
+        };
+
+        let result = run_scpi(&treated.view(), &donors.view(), n_pre, config).unwrap();
+
+        // Point estimates (effects) should be close to the true effect
+        for (i, &eff) in result.effect.iter().enumerate() {
+            assert!(
+                (eff - true_effect).abs() < 3.0,
+                "Effect at post-period {} = {:.4} should be close to true effect {}",
+                i,
+                eff,
+                true_effect
+            );
+        }
+
+        // Pre-treatment fit should be good
+        assert!(
+            result.pre_treatment_rmspe < 1.0,
+            "Pre-treatment RMSPE = {:.4} should be small for well-specified DGP",
+            result.pre_treatment_rmspe
+        );
+
+        // R-squared in pre-treatment should be high
+        assert!(
+            result.pre_treatment_r2 > 0.9,
+            "Pre-treatment R2 = {:.4} should be high",
+            result.pre_treatment_r2
+        );
+    }
+
+    /// Validate prediction intervals have positive width and bracket the effect.
+    #[test]
+    fn test_validate_scpi_prediction_intervals() {
+        let (treated, donors) = generate_validate_data();
+        let n_pre = 10;
+
+        let config = SCPIConfig {
+            constraint: SCPIConstraint::Simplex,
+            alpha: 0.05,
+            ..Default::default()
+        };
+
+        let result = run_scpi(&treated.view(), &donors.view(), n_pre, config).unwrap();
+
+        // Should have one PI per post-treatment period
+        assert_eq!(result.prediction_intervals.len(), 4);
+
+        for (i, pi) in result.prediction_intervals.iter().enumerate() {
+            // Interval width must be positive
+            let width = pi.upper - pi.lower;
+            assert!(
+                width > 0.0,
+                "PI width at period {} = {:.4} should be positive",
+                i,
+                width
+            );
+
+            // Standard error should be positive
+            assert!(
+                pi.std_error > 0.0,
+                "PI std_error at period {} = {:.4} should be positive",
+                i,
+                pi.std_error
+            );
+
+            // Lower bound should be below upper bound
+            assert!(
+                pi.lower < pi.upper,
+                "PI bounds at period {}: lower={:.4} should be < upper={:.4}",
+                i,
+                pi.lower,
+                pi.upper
+            );
+        }
+
+        // Variance components should be positive
+        assert!(
+            result.in_sample_var > 0.0,
+            "In-sample variance should be positive"
+        );
+        assert!(
+            result.out_sample_var > 0.0,
+            "Out-sample variance should be positive"
+        );
+        assert!(
+            result.total_var > 0.0,
+            "Total variance should be positive"
+        );
+
+        // Total variance = in + out
+        assert!(
+            (result.total_var - (result.in_sample_var + result.out_sample_var)).abs() < 1e-10,
+            "Total variance should equal in_sample + out_sample"
+        );
+    }
+
+    /// Validate simplex weights are proper (non-negative, sum to 1).
+    #[test]
+    fn test_validate_scpi_simplex_weights() {
+        let (treated, donors) = generate_validate_data();
+        let n_pre = 10;
+
+        let config = SCPIConfig {
+            constraint: SCPIConstraint::Simplex,
+            ..Default::default()
+        };
+
+        let result = run_scpi(&treated.view(), &donors.view(), n_pre, config).unwrap();
+
+        // All weights non-negative
+        for (j, &w) in result.weights.iter().enumerate() {
+            assert!(
+                w >= -1e-8,
+                "Simplex weight {} = {:.6} should be non-negative",
+                j,
+                w
+            );
+        }
+
+        // Weights sum to 1
+        let wsum: f64 = result.weights.sum();
+        assert!(
+            (wsum - 1.0).abs() < 1e-5,
+            "Simplex weights should sum to 1, got {:.6}",
+            wsum
+        );
+
+        // Number of effective donors <= total donors
+        assert!(result.n_effective_donors <= result.n_donors);
+    }
+
+    /// Validate SCPI critical value is consistent with alpha.
+    #[test]
+    fn test_validate_scpi_critical_value() {
+        let (treated, donors) = generate_validate_data();
+        let n_pre = 10;
+
+        // 95% PI
+        let config_95 = SCPIConfig {
+            alpha: 0.05,
+            ..Default::default()
+        };
+        let result_95 = run_scpi(&treated.view(), &donors.view(), n_pre, config_95).unwrap();
+
+        // 90% PI
+        let config_90 = SCPIConfig {
+            alpha: 0.10,
+            ..Default::default()
+        };
+        let result_90 = run_scpi(&treated.view(), &donors.view(), n_pre, config_90).unwrap();
+
+        // 95% intervals should be wider than 90% intervals
+        for i in 0..result_95.prediction_intervals.len() {
+            let width_95 =
+                result_95.prediction_intervals[i].upper - result_95.prediction_intervals[i].lower;
+            let width_90 =
+                result_90.prediction_intervals[i].upper - result_90.prediction_intervals[i].lower;
+            assert!(
+                width_95 >= width_90 - 1e-6,
+                "95% PI width ({:.4}) should be >= 90% PI width ({:.4}) at period {}",
+                width_95,
+                width_90,
+                i
+            );
+        }
+
+        // Critical value for 95% should be larger than for 90%
+        assert!(
+            result_95.critical_value >= result_90.critical_value - 1e-6,
+            "95% critical value ({:.4}) should be >= 90% ({:.4})",
+            result_95.critical_value,
+            result_90.critical_value
+        );
+    }
 }

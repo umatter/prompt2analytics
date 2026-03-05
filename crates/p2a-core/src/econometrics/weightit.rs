@@ -1671,4 +1671,438 @@ mod tests {
         assert!(output.contains("ESS"));
         assert!(output.contains("Balance"));
     }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Validation tests against DGP-implied properties
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    /// Create a larger dataset with known DGP for validation.
+    ///
+    /// DGP:
+    ///   x1 ~ Uniform(0, 1), x2 ~ Uniform(0, 1)
+    ///   P(T=1|X) = logistic(-0.5 + 1.0*x1 + 0.8*x2)
+    ///   Treatment assigned based on propensity with deterministic threshold.
+    ///   Y = 2.0 + 0.75*T + 1.5*x1 + 1.0*x2 + noise
+    ///
+    /// True ATE = 0.75
+    fn create_validation_dataset() -> Dataset {
+        let n = 100;
+        let mut x1 = Vec::with_capacity(n);
+        let mut x2 = Vec::with_capacity(n);
+        let mut treatment = Vec::with_capacity(n);
+        let mut outcome = Vec::with_capacity(n);
+
+        // Simple LCG-like deterministic sequence for reproducibility
+        let mut seed: u64 = 42;
+        let lcg = |s: &mut u64| -> f64 {
+            *s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            ((*s >> 33) as f64) / (u32::MAX as f64)
+        };
+
+        for _ in 0..n {
+            let v1 = lcg(&mut seed);
+            let v2 = lcg(&mut seed);
+            let noise = (lcg(&mut seed) - 0.5) * 0.4;
+
+            let lp = -0.5 + 1.0 * v1 + 0.8 * v2;
+            let ps = 1.0 / (1.0 + (-lp).exp());
+
+            let t = if ps + (lcg(&mut seed) - 0.5) * 0.3 > 0.5 {
+                1.0
+            } else {
+                0.0
+            };
+
+            let y = 2.0 + 0.75 * t + 1.5 * v1 + 1.0 * v2 + noise;
+
+            x1.push(v1);
+            x2.push(v2);
+            treatment.push(t);
+            outcome.push(y);
+        }
+
+        let df = df! {
+            "treatment" => treatment,
+            "x1" => x1,
+            "x2" => x2,
+            "outcome" => outcome
+        }
+        .unwrap();
+        Dataset::new(df)
+    }
+
+    #[test]
+    fn test_validate_entropy_exact_mean_balance() {
+        // Validate the defining property of entropy balancing (Hainmueller 2012):
+        // After reweighting, the weighted mean of each covariate among control
+        // units should equal the (unweighted) mean among treated units.
+        //
+        // This is the exact moment balance constraint that entropy balancing
+        // solves for, so violation indicates a bug.
+        let dataset = create_validation_dataset();
+        let config = WeightItConfig {
+            method: WeightMethod::Entropy,
+            estimand: WeightEstimand::ATT,
+            max_iter: 500,
+            tolerance: 1e-6,
+            ..Default::default()
+        };
+
+        let result = weightit(&dataset, "treatment", &["x1", "x2"], config).unwrap();
+
+        // If converged, check exact mean balance
+        if result.converged {
+            for cov in &result.balance_after.covariates {
+                let diff = (cov.mean_treated - cov.mean_control).abs();
+                assert!(
+                    diff < 0.05,
+                    "Entropy balancing should achieve near-exact mean balance \
+                     for '{}': treated mean={:.6}, weighted control mean={:.6}, diff={:.6}",
+                    cov.variable,
+                    cov.mean_treated,
+                    cov.mean_control,
+                    diff
+                );
+            }
+
+            // Max standardized difference should be very small
+            assert!(
+                result.balance_after.max_std_diff < 0.1,
+                "Entropy balancing max_std_diff should be < 0.1 when converged, got {:.4}",
+                result.balance_after.max_std_diff
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_entropy_balance_direct_exact_balance() {
+        // Validate entropy_balance() directly: the dedicated function should
+        // achieve exact mean balance when it converges.
+        let dataset = create_validation_dataset();
+
+        let result = entropy_balance(&dataset, "treatment", &["x1", "x2"], None).unwrap();
+
+        if result.converged {
+            // All covariates should have std_diff near zero
+            for cov in &result.balance.covariates {
+                assert!(
+                    cov.std_diff.abs() < 0.1,
+                    "Entropy balancing (direct) should achieve balance for '{}': \
+                     std_diff={:.6}",
+                    cov.variable,
+                    cov.std_diff
+                );
+            }
+        }
+
+        // Weights should be positive and finite
+        assert!(
+            result.weights.iter().all(|&w| w > 0.0 && w.is_finite()),
+            "Entropy balance weights should be positive and finite"
+        );
+
+        // ESS should be positive
+        assert!(
+            result.effective_sample_size > 0.0,
+            "ESS should be positive, got {}",
+            result.effective_sample_size
+        );
+    }
+
+    #[test]
+    fn test_validate_entropy_weights_positive_finite() {
+        // Validate: entropy balancing weights should all be positive and finite.
+        let dataset = create_validation_dataset();
+
+        let result = entropy_balance(&dataset, "treatment", &["x1", "x2"], None).unwrap();
+
+        assert!(
+            result.weights.iter().all(|&w| w > 0.0 && w.is_finite()),
+            "Entropy balance weights should be positive and finite"
+        );
+
+        // Weight sum should be positive
+        let weight_sum: f64 = result.weights.iter().sum();
+        assert!(
+            weight_sum > 0.0,
+            "Entropy balance weights should have positive sum, got {:.6}",
+            weight_sum
+        );
+    }
+
+    #[test]
+    fn test_validate_logistic_ipw_propensity_scores() {
+        // Validate: logistic IPW propensity scores should be in (0, 1)
+        // and the mean propensity score should approximate the treatment
+        // prevalence (a well-known calibration property).
+        let dataset = create_validation_dataset();
+        let config = WeightItConfig {
+            method: WeightMethod::Logistic,
+            estimand: WeightEstimand::ATE,
+            ..Default::default()
+        };
+
+        let result = weightit(&dataset, "treatment", &["x1", "x2"], config).unwrap();
+
+        // Propensity scores should exist for logistic method
+        let ps = result
+            .propensity_scores
+            .as_ref()
+            .expect("Logistic method should produce propensity scores");
+
+        // All in (0, 1)
+        for (i, &p) in ps.iter().enumerate() {
+            assert!(
+                p > 0.0 && p < 1.0,
+                "Propensity score at index {} = {} is outside (0,1)",
+                i,
+                p
+            );
+        }
+
+        // Mean propensity score should approximate treatment prevalence
+        let mean_ps: f64 = ps.iter().sum::<f64>() / ps.len() as f64;
+        let prevalence = result.n_treated as f64 / result.n_obs as f64;
+        assert!(
+            (mean_ps - prevalence).abs() < 0.15,
+            "Mean propensity score ({:.4}) should approximate treatment prevalence ({:.4})",
+            mean_ps,
+            prevalence
+        );
+    }
+
+    #[test]
+    fn test_validate_logistic_ipw_balance_improvement() {
+        // Validate: logistic IPW should improve balance relative to raw data.
+        let dataset = create_validation_dataset();
+        let config = WeightItConfig {
+            method: WeightMethod::Logistic,
+            estimand: WeightEstimand::ATE,
+            ..Default::default()
+        };
+
+        let result = weightit(&dataset, "treatment", &["x1", "x2"], config).unwrap();
+
+        assert!(
+            result.balance_after.max_std_diff < result.balance_before.max_std_diff,
+            "Logistic IPW should improve balance: before={:.4}, after={:.4}",
+            result.balance_before.max_std_diff,
+            result.balance_after.max_std_diff
+        );
+    }
+
+    #[test]
+    fn test_validate_att_treated_weights_unity() {
+        // Validate: for ATT estimation, treated units should have weight = 1.0
+        // (they serve as the reference distribution). This holds for all methods.
+        let dataset = create_validation_dataset();
+
+        let df = dataset.df();
+        let t_col = df
+            .column("treatment")
+            .unwrap()
+            .as_materialized_series()
+            .f64()
+            .unwrap();
+
+        for method in [WeightMethod::Logistic, WeightMethod::Entropy] {
+            let config = WeightItConfig {
+                method,
+                estimand: WeightEstimand::ATT,
+                max_iter: 500,
+                tolerance: 1e-4,
+                ..Default::default()
+            };
+
+            let result = weightit(&dataset, "treatment", &["x1", "x2"], config).unwrap();
+
+            for i in 0..result.n_obs {
+                let t = t_col.get(i).unwrap_or(0.0);
+                if t >= 0.5 {
+                    assert!(
+                        (result.weights[i] - 1.0).abs() < 1e-8,
+                        "ATT treated weight at index {} should be 1.0, got {} (method: {:?})",
+                        i,
+                        result.weights[i],
+                        method
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_validate_weightit_weighted_ate_recovery() {
+        // Validate: using IPW weights to compute weighted difference in means
+        // should recover an ATE estimate close to the true value (0.75).
+        let dataset = create_validation_dataset();
+        let config = WeightItConfig {
+            method: WeightMethod::Logistic,
+            estimand: WeightEstimand::ATE,
+            ..Default::default()
+        };
+
+        let result = weightit(&dataset, "treatment", &["x1", "x2"], config).unwrap();
+
+        let df = dataset.df();
+        let t_col = df
+            .column("treatment")
+            .unwrap()
+            .as_materialized_series()
+            .f64()
+            .unwrap();
+        let y_col = df
+            .column("outcome")
+            .unwrap()
+            .as_materialized_series()
+            .f64()
+            .unwrap();
+
+        let mut sum_wy_t = 0.0;
+        let mut sum_w_t = 0.0;
+        let mut sum_wy_c = 0.0;
+        let mut sum_w_c = 0.0;
+
+        for i in 0..result.n_obs {
+            let t = t_col.get(i).unwrap();
+            let y = y_col.get(i).unwrap();
+            let w = result.weights[i];
+
+            if t >= 0.5 {
+                sum_wy_t += w * y;
+                sum_w_t += w;
+            } else {
+                sum_wy_c += w * y;
+                sum_w_c += w;
+            }
+        }
+
+        let ate_hat = sum_wy_t / sum_w_t - sum_wy_c / sum_w_c;
+
+        // True ATE = 0.75. With n=100, allow tolerance of 0.5.
+        assert!(
+            (ate_hat - 0.75).abs() < 0.5,
+            "Weighted ATE ({:.4}) should be within 0.5 of true ATE (0.75)",
+            ate_hat
+        );
+    }
+
+    #[test]
+    fn test_validate_ess_properties() {
+        // Validate: ESS properties across methods.
+        // ESS = (sum w)^2 / (sum w^2), always in (0, n].
+        // More variable weights => lower ESS.
+        let dataset = create_validation_dataset();
+
+        for method in [
+            WeightMethod::Logistic,
+            WeightMethod::Entropy,
+            WeightMethod::Energy,
+            WeightMethod::Stable,
+        ] {
+            let config = WeightItConfig {
+                method,
+                estimand: WeightEstimand::ATE,
+                max_iter: 300,
+                tolerance: 1e-4,
+                ..Default::default()
+            };
+
+            let result = weightit(&dataset, "treatment", &["x1", "x2"], config).unwrap();
+
+            // ESS should be positive
+            assert!(
+                result.effective_sample_size > 0.0,
+                "ESS should be positive for {:?}, got {}",
+                method,
+                result.effective_sample_size
+            );
+
+            // ESS should not exceed n
+            assert!(
+                result.effective_sample_size <= result.n_obs as f64 + 1e-6,
+                "ESS ({}) should not exceed n ({}) for {:?}",
+                result.effective_sample_size,
+                result.n_obs,
+                method
+            );
+
+            // All weights should be positive and finite
+            assert!(
+                result.weights.iter().all(|&w| w > 0.0 && w.is_finite()),
+                "All weights should be positive and finite for {:?}",
+                method
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_entropy_better_balance_than_logistic() {
+        // Validate: entropy balancing should achieve better (or equal) balance
+        // than standard logistic IPW, since it directly optimizes for exact
+        // moment balance (Hainmueller 2012).
+        let dataset = create_validation_dataset();
+
+        let logistic_config = WeightItConfig {
+            method: WeightMethod::Logistic,
+            estimand: WeightEstimand::ATT,
+            ..Default::default()
+        };
+        let logistic_result =
+            weightit(&dataset, "treatment", &["x1", "x2"], logistic_config).unwrap();
+
+        let entropy_config = WeightItConfig {
+            method: WeightMethod::Entropy,
+            estimand: WeightEstimand::ATT,
+            max_iter: 500,
+            tolerance: 1e-6,
+            ..Default::default()
+        };
+        let entropy_result =
+            weightit(&dataset, "treatment", &["x1", "x2"], entropy_config).unwrap();
+
+        if entropy_result.converged {
+            assert!(
+                entropy_result.balance_after.max_std_diff
+                    <= logistic_result.balance_after.max_std_diff + 0.01,
+                "Entropy balancing (max_std_diff={:.4}) should achieve at least as \
+                 good balance as logistic IPW ({:.4})",
+                entropy_result.balance_after.max_std_diff,
+                logistic_result.balance_after.max_std_diff
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_atc_control_weights_unity() {
+        // Validate: for ATC estimation, control units should have weight = 1.0.
+        let dataset = create_validation_dataset();
+        let config = WeightItConfig {
+            method: WeightMethod::Logistic,
+            estimand: WeightEstimand::ATC,
+            ..Default::default()
+        };
+
+        let result = weightit(&dataset, "treatment", &["x1", "x2"], config).unwrap();
+
+        let df = dataset.df();
+        let t_col = df
+            .column("treatment")
+            .unwrap()
+            .as_materialized_series()
+            .f64()
+            .unwrap();
+
+        for i in 0..result.n_obs {
+            let t = t_col.get(i).unwrap_or(1.0);
+            if t < 0.5 {
+                assert!(
+                    (result.weights[i] - 1.0).abs() < 1e-8,
+                    "ATC control weight at index {} should be 1.0, got {}",
+                    i,
+                    result.weights[i]
+                );
+            }
+        }
+    }
 }

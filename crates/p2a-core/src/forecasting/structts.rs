@@ -716,4 +716,127 @@ mod tests {
         // For n=50, ln(50) ≈ 3.9 > 2, so BIC > AIC
         assert!(result.bic > result.aic);
     }
+
+    #[test]
+    fn test_validate_structts_local_level_tracks_data() {
+        // The estimated level should track the data within a reasonable range.
+        let y = generate_local_level_data(150, 1.0, 0.5, 101);
+
+        let result = struct_ts(
+            &y,
+            StructTsConfig {
+                model_type: StructTsType::Level,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(result.n_obs, 150);
+
+        // Level should be close to the data (within a few standard deviations)
+        let mut max_dev = 0.0f64;
+        for t in 10..result.n_obs {
+            let dev = (result.level[t] - y[t]).abs();
+            max_dev = max_dev.max(dev);
+        }
+
+        // The level is the smoothed signal; deviations should be moderate
+        assert!(
+            max_dev < 10.0,
+            "Level should track data, max deviation = {:.4}",
+            max_dev
+        );
+    }
+
+    #[test]
+    fn test_validate_structts_bsm_components_sum_to_data() {
+        // For BSM: fitted = level + seasonal should approximate data.
+        // residuals = data - fitted
+        let period = 12;
+        let n = 60; // 5 years of monthly data
+        let y: Vec<f64> = (0..n)
+            .map(|t| {
+                let trend = 50.0 + 0.3 * t as f64;
+                let seasonal = 8.0 * (2.0 * std::f64::consts::PI * t as f64 / period as f64).sin();
+                let noise = 0.2 * ((t * 13 + 7) % 11) as f64 / 11.0 - 0.1;
+                trend + seasonal + noise
+            })
+            .collect();
+
+        let result = struct_ts(
+            &y,
+            StructTsConfig {
+                model_type: StructTsType::BSM,
+                period: Some(period),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert!(result.seasonal.is_some());
+        assert!(result.slope.is_some());
+
+        // fitted + residual should equal original data
+        for t in 0..n {
+            let reconstructed = result.fitted[t] + result.residuals[t];
+            let diff = (reconstructed - y[t]).abs();
+            assert!(
+                diff < 1e-10,
+                "fitted + residual should equal y at t={}, diff={:.12}",
+                t,
+                diff
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_structts_loglikelihood_computed() {
+        // Log-likelihood should be finite for all model types.
+        let y = generate_local_level_data(80, 0.5, 1.0, 77);
+
+        for model_type in &[StructTsType::Level, StructTsType::Trend] {
+            let config = StructTsConfig {
+                model_type: *model_type,
+                ..Default::default()
+            };
+            let result = struct_ts(&y, config).unwrap();
+
+            assert!(
+                result.log_likelihood.is_finite(),
+                "Log-likelihood should be finite for {:?}, got {}",
+                model_type,
+                result.log_likelihood
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_structts_trend_model_positive_slope() {
+        // For clearly trending data, the estimated slope should be positive.
+        let n = 100;
+        let y: Vec<f64> = (0..n)
+            .map(|t| {
+                let trend = 10.0 + 2.0 * t as f64;
+                let noise = 0.5 * ((t * 11 + 3) % 7) as f64 / 7.0 - 0.25;
+                trend + noise
+            })
+            .collect();
+
+        let result = struct_ts(
+            &y,
+            StructTsConfig {
+                model_type: StructTsType::Trend,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let slopes = result.slope.unwrap();
+        let avg_slope = slopes.iter().sum::<f64>() / slopes.len() as f64;
+        assert!(
+            avg_slope > 0.5,
+            "Average slope should be clearly positive for linearly trending data, got {:.4}",
+            avg_slope
+        );
+    }
 }

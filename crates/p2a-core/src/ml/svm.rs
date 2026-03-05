@@ -976,4 +976,172 @@ mod tests {
         // First weight should be larger in magnitude
         assert!(result.weights[0].abs() > result.weights[1].abs());
     }
+
+    #[test]
+    fn test_validate_svm_linearly_separable_perfect() {
+        // Well-separated data should achieve 100% accuracy.
+        let x = array![
+            // Class 0: bottom-left cluster
+            [0.0, 0.0],
+            [0.5, 0.5],
+            [1.0, 0.0],
+            [0.0, 1.0],
+            [0.5, 0.0],
+            [0.0, 0.5],
+            // Class 1: top-right cluster (well separated)
+            [5.0, 5.0],
+            [5.5, 5.5],
+            [6.0, 5.0],
+            [5.0, 6.0],
+            [5.5, 5.0],
+            [5.0, 5.5],
+        ];
+        let y = array![0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0];
+
+        let result = linear_svm(
+            x.view(),
+            y.view(),
+            Some(10.0),
+            Some(500),
+            Some(1e-4),
+            None,
+        )
+        .unwrap();
+
+        // Should achieve perfect classification on well-separated data
+        let correct: usize = result
+            .predictions
+            .iter()
+            .enumerate()
+            .filter(|&(i, p)| {
+                let expected = if i < 6 { 0 } else { 1 };
+                *p == expected
+            })
+            .count();
+
+        assert_eq!(
+            correct, 12,
+            "Should achieve 100% accuracy on well-separated data, got {}/12",
+            correct
+        );
+    }
+
+    #[test]
+    fn test_validate_svm_support_vectors_identified() {
+        // There should be at least some support vectors.
+        let x = array![
+            [0.0, 0.0],
+            [1.0, 1.0],
+            [2.0, 0.0],
+            [5.0, 5.0],
+            [6.0, 6.0],
+            [7.0, 5.0],
+        ];
+        let y = array![0.0, 0.0, 0.0, 1.0, 1.0, 1.0];
+
+        let result = linear_svm(
+            x.view(),
+            y.view(),
+            Some(1.0),
+            Some(300),
+            Some(1e-4),
+            None,
+        )
+        .unwrap();
+
+        assert!(
+            result.n_support_vectors > 0,
+            "Should identify at least 1 support vector, got 0"
+        );
+        assert!(
+            result.n_support_vectors <= 6,
+            "Number of support vectors should be at most n_samples"
+        );
+        assert_eq!(
+            result.support_vector_indices.len(),
+            result.n_support_vectors,
+            "support_vector_indices len should match n_support_vectors"
+        );
+
+        // All support vector indices should be valid
+        for &idx in &result.support_vector_indices {
+            assert!(idx < 6, "Support vector index {} should be < 6", idx);
+        }
+    }
+
+    #[test]
+    fn test_validate_svm_decision_boundary_sign() {
+        // For data where class 1 is at higher x1 values, w[0] should be positive.
+        let x = array![
+            [0.0, 1.0],
+            [1.0, 2.0],
+            [0.5, 0.5],
+            [10.0, 1.0],
+            [11.0, 2.0],
+            [10.5, 0.5],
+        ];
+        let y = array![0.0, 0.0, 0.0, 1.0, 1.0, 1.0];
+
+        let result = linear_svm(
+            x.view(),
+            y.view(),
+            Some(1.0),
+            Some(300),
+            Some(1e-4),
+            None,
+        )
+        .unwrap();
+
+        // Weight for feature 0 (the separating feature) should be positive
+        // because class 1 has higher x1 values.
+        assert!(
+            result.weights[0] > 0.0,
+            "w[0] should be positive since class 1 has higher x1, got {:.6}",
+            result.weights[0]
+        );
+    }
+
+    #[test]
+    fn test_validate_svm_kernel_rbf_nonlinear() {
+        // RBF kernel should handle nonlinear separation (XOR-like pattern).
+        // Class 0: (low, low) and (high, high)
+        // Class 1: (low, high) and (high, low)
+        let x = array![
+            // Class 0
+            [0.0, 0.0],
+            [0.5, 0.5],
+            [5.0, 5.0],
+            [5.5, 5.5],
+            // Class 1
+            [0.0, 5.0],
+            [0.5, 5.5],
+            [5.0, 0.0],
+            [5.5, 0.5],
+        ];
+        let y = array![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0];
+
+        let config = KernelSvmConfig {
+            kernel: SvmKernel::Rbf,
+            c: 10.0,
+            gamma: Some(0.1),
+            max_iter: 1000,
+            tolerance: 1e-3,
+            ..Default::default()
+        };
+
+        let result = kernel_svm(x.view(), y.view(), &config, None).unwrap();
+
+        // Should converge
+        assert!(result.converged, "RBF SVM should converge");
+
+        // Should have support vectors
+        assert!(result.n_support_vectors > 0, "Should have support vectors");
+
+        // Training accuracy should be reasonable (XOR is hard with few points)
+        assert!(
+            result.train_accuracy >= 0.5,
+            "Train accuracy should be at least 50%, got {:.1}%",
+            result.train_accuracy * 100.0
+        );
+    }
 }

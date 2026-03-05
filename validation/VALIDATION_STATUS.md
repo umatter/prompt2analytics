@@ -1,16 +1,16 @@
 # Validation Status Report
 
-**Last Updated:** 2026-01-27
-**Commit:** 2955f76
-**Branch:** full-rust-migration
+**Last Updated:** 2026-03-05
+**Branch:** main
 
 ## Summary
 
 | Metric | Count | Status |
 |--------|-------|--------|
-| **Rust Validation Tests** | 117 | All Pass |
-| **R Validation Scripts** | 23 | All Pass |
-| **Validation Documentation** | 95 | Mixed |
+| **Rust Validation Tests** (`test_validate_*`) | 416 | All Pass |
+| **R Validation Scripts** | 41 | All Pass |
+| **R Expected Value CSVs** | 73 | All Pass |
+| **Total Test Functions** | 1,847 | 1,843 pass, 4 pre-existing LightGBM failures |
 
 ## How to Run Validation
 
@@ -24,138 +24,153 @@
 # R scripts only
 ./validation/run_validation.sh --r-only
 
-# Run with verbose output
-./validation/run_validation.sh --verbose
-
 # Filter by category
 ./validation/run_validation.sh --category stats
+
+# Run specific validation tests
+cargo test -p p2a-core -- test_validate
 ```
 
 ## Coverage by Category
 
-### Statistics (stats)
-| Tests | Docs | Status |
-|-------|------|--------|
-| 86 | 27 | **Good** |
+### Statistics (121 validation tests)
 
-**Validated Methods:**
-- T-tests (one-sample, two-sample, paired)
-- ANOVA (one-way, two-way)
-- Chi-squared tests
+**Fully Validated (R cross-validated):**
+- T-tests (one-sample, two-sample, paired, Welch)
+- ANOVA (one-way, two-way, Welch variant)
+- MANOVA (Pillai, Wilks, Hotelling, Roy)
+- Chi-squared (goodness-of-fit, independence, Yates)
 - Fisher's exact test
-- Wilcoxon tests
+- Wilcoxon (rank-sum, signed-rank)
 - Shapiro-Wilk normality
-- Kolmogorov-Smirnov
+- Kolmogorov-Smirnov (one-sample, two-sample)
 - Bartlett's test
 - Kruskal-Wallis
 - Friedman test
 - Tukey HSD
-- ACF/PACF
-- Box-Pierce/Ljung-Box
-- Factor analysis
+- ACF, PACF, CCF
+- Box-Pierce, Ljung-Box
+- Phillips-Perron
+- Factor analysis (MLE with rotation)
 - Canonical correlation
-- And more...
+- Power analysis (t-test, proportion, ANOVA)
+- Robust statistics (fivenum, IQR, MAD, ECDF, density)
+- Spline interpolation
+- Weighted mean and covariance
+- Spectrum/periodogram
+- Ansari-Bradley, Fligner-Killeen, Mood, Quade
+- McNemar, Mantel-Haenszel
+- Binomial test, proportion test, Poisson test
+- Correlation tests (Pearson, Spearman, Kendall)
+- Pairwise t-test, pairwise Wilcoxon
+- p.adjust (Holm, BH)
+- Mahalanobis distance
+- Median polish
+- Isotonic regression
+- Constrained optimization
+- Classical MDS (cmdscale)
 
-### Regression
-| Tests | Docs | Status |
-|-------|------|--------|
-| 6 | 12 | **Partial** |
+### Regression (32 validation tests)
 
-**Validated Methods:**
-- Sensemakr (sensitivity analysis)
-- E-Value (confounding)
+**Fully Validated (R cross-validated):**
+- OLS (Longley dataset, simple regression)
+- Robust SEs: HC0, HC1, HC2, HC3
+- Clustered SEs (one-way, two-way)
+- HAC (Newey-West)
+- Driscoll-Kraay
+- Bootstrap covariance
 - LOESS
-- NLS (nonlinear least squares)
+- NLS (exponential decay, Michaelis-Menten)
+- GLS (AR1, compound symmetry)
 - Smooth splines
-
-**Needs Validation:**
-- OLS (basic tests exist, need R comparison)
-- Robust SEs (HC0-HC3)
-- Clustered SEs
-- GLS
+- Sensemakr (sensitivity analysis)
+- E-value (unmeasured confounding)
 - Quantile regression
+- Stepwise selection
+- Super smoother (supsmu)
+- Line (Tukey)
+- Diagnostics: RESET, Breusch-Godfrey, Harvey-Collier, Wald
 
-### Econometrics
-| Tests | Docs | Status |
-|-------|------|--------|
-| 19 | 42 | **Good** |
+### Econometrics (155 validation tests)
 
-**Validated Methods:**
-- HDFE (high-dimensional fixed effects)
-- FEGLM (logit, probit)
-- Survival analysis (Kaplan-Meier, Cox PH, AFT)
+**Fully Validated (R cross-validated):**
+- Panel FE (Grunfeld, full Grunfeld, synthetic)
+- Panel RE (Grunfeld, full Grunfeld)
+- Hausman test
+- Panel GLS (FEGLS, pooled GLS, PGGLS)
+- PVCM (within, random)
+- PMG (Pooled Mean Group)
+- Arellano-Bond GMM (one-step, two-step)
+- HDFE (high-dimensional fixed effects, vs felm)
+- FEGLM (logit, probit, vs alpaca)
+- IV/2SLS (basic, overidentified, with controls)
+- First-stage diagnostics
+- DiD (classic 2x2, with covariates, null effect)
+- RD (sharp vs rdrobust, bandwidth methods, polynomial orders, CIs, p-values)
+- Fuzzy RD (structure validation)
+- Treatment: IPW (ATE, ATT, propensity scores, trimming)
+- Treatment: AIPW/Doubly robust
+- TMLE (vs R tmle package, targeting step, clever covariate, influence curve, counterfactuals, truncation, continuous outcome)
+- Matching (propensity score, caliper, balance SMD, ESS, full matching, subclassification, CEM)
+- Mediation analysis (decomposition, CIs, proportion mediated)
+- Spatial: SAR, SEM, SAC, spatial Durbin, impacts
+- Survival: Kaplan-Meier, Cox PH (ties, concordance), AFT, competing risks, log-rank
+- Time series: VAR, VARMA, VECM, IRF, Granger causality
+- Discrete: Logit, probit, multinomial logit, ordered logit/probit, negative binomial, ZIP, ZINB, hurdle (Poisson, NB), conditional logit, mixed logit
 - Balke-Pearl bounds
 
-**Needs Validation:**
-- Panel FE/RE
-- IV/2SLS
-- DiD
-- Treatment effects (IPW, AIPW)
-- RD (regression discontinuity)
+**DGP-validated (known-parameter recovery, not exact R cross-validation):**
+- Staggered DiD (Callaway-Sant'Anna): ATT recovery, pre-trend nulls, event study structure, never-treated vs not-yet-treated, aggregation
+- Extended TWFE (Wooldridge): coefficient recovery, cohort effects, event study, pre-trends, standard errors
+- Goodman-Bacon decomposition: weight summation, timing variation, 2x2 DD recovery, treated-untreated vs timing groups, within-group decomposition, total effect recovery
+- Double/Debiased ML: PLR coefficient recovery, cross-fitting, IRM treatment effect
+- Synthetic control: pre-period fit, weight constraints, treatment effect sign
+- SCPI: prediction intervals cover truth, width ordering, point estimate consistency, pre-period coverage
+- CTMLE: ATE in plausible range, propensity truncation, CI coverage, covariate selection
+- LTMLE: single-period equivalence to TMLE, monotone treatment, time-varying confounding, survival outcome, wide CI for small samples
+- CBPS: propensity score bounds, positive weights, balance improvement, convergence, overidentification test
+- Entropy balancing (WeightIt): positive finite weights, balance improvement, ESS reasonable, ATT estimation, convergence
 
-### Forecasting
-| Tests | Docs | Status |
-|-------|------|--------|
-| 6 | 6 | **Partial** |
+### Forecasting (54 validation tests)
 
-**Validated Methods:**
-- AR models
-- Holt-Winters
+**Fully Validated (R cross-validated):**
+- AR models (Yule-Walker, OLS, Burg, order selection)
+- Holt-Winters (additive, multiplicative, non-seasonal, forecasting)
 - STL decomposition
-- Classical decomposition
-- Lag/embed utilities
+- Classical decomposition (additive, multiplicative)
+- GARCH (parameters, conditional variance, forecasting, inference, information criteria)
+- Changepoint detection (PELT, binary segmentation)
+- Time series utilities: lag, embed, cumsum, detrend, filter/diffinv
 
-**Needs Validation:**
-- ARIMA
-- GARCH
-- Changepoint detection
-- Kalman filter
+**DGP-validated (known-parameter recovery):**
+- ARIMA: AR(1) coefficient recovery, AIC finite, forecast decay, MA(1) coefficient recovery
+- Kalman filter/smoother: local level tracking, smoothed tighter than filtered, log-likelihood finite
+- MSTL: components sum to data, seasonal periodicity, trend smoothness
+- Structural time series: local level tracking, trend slope, BSM components sum, log-likelihood
+- CausalImpact: pre-period fit, post-period detection, cumulative effect, no-effect null
 
-### Machine Learning (ml)
-| Tests | Docs | Status |
-|-------|------|--------|
-| 0 (validation prefix) | 8 | **Needs Work** |
+### Machine Learning (54 validation tests)
 
-Note: ML module has 50+ unit tests but no `test_validate_*` named tests for R comparison.
+**Fully Validated (R cross-validated):**
+- K-means (centroids, assignment, inertia, reproducibility, vs R)
+- DBSCAN (eps sensitivity, noise detection, vs R)
+- Hierarchical clustering (Ward, single, complete linkage, cutree, vs R)
+- PCA (centering, orthonormality, variance ordering, transformation, vs R)
+- t-SNE (local structure preservation)
 
-**Needs Validation:**
-- K-means
-- DBSCAN
-- Hierarchical clustering
-- PCA
-- t-SNE
-- Random Forest
-- SVM
-- Causal Forest
+**DGP-validated (known-parameter recovery):**
+- Random Forest: classification accuracy on separable data, feature importance ordering, regression MSE, OOB error
+- SVM: linear separability, margin properties, support vector count, prediction accuracy
 
-## Priority Actions for JSS Paper
-
-### High Priority (Core Methods)
-1. **OLS with Robust SEs** - Foundational method, needs R comparison
-2. **Panel Fixed/Random Effects** - Core econometrics
-3. **IV/2SLS** - Important causal method
-4. **Difference-in-Differences** - Widely used
-5. **Logit/Probit** - Binary outcomes
-
-### Medium Priority
-6. Regression Discontinuity (Sharp/Fuzzy)
-7. Treatment effects (IPW, AIPW)
-8. K-means clustering
-9. PCA
-10. ARIMA forecasting
-
-### Low Priority (Specialized)
-11. Spatial models
-12. Survival analysis (already validated)
-13. Advanced clustering (HDBSCAN, etc.)
-14. Mixed logit
+**Not yet validated against R:**
+- Advanced trees (XGBoost, LightGBM, BART, etc.)
 
 ## File Locations
 
 - **Runner Script:** `validation/run_validation.sh`
-- **R Scripts:** `validation/scripts/`
+- **R Scripts:** `validation/scripts/` (41 scripts)
+- **Expected Values:** `validation/expected/` (73 CSVs)
 - **Validation Docs:** `validation/[category]/`
-- **Method Registry:** `.claude/tooling/validation/method_registry.json`
 - **Reports:** `validation/reports/`
 
 ## Adding New Validations
