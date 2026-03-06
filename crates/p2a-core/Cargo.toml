@@ -167,6 +167,10 @@ name = "data_loading_benchmarks"
 harness = false
 
 [[bench]]
+name = "unified_benchmarks"
+harness = false
+
+[[bench]]
 name = "gpu_benchmarks"
 harness = false
 required-features = ["cuda"]

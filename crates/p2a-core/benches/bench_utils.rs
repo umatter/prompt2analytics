@@ -5,6 +5,7 @@
 use memory_stats::memory_stats;
 use serde::{Deserialize, Serialize};
 use std::alloc::{GlobalAlloc, Layout, System};
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Instant;
 
@@ -37,6 +38,13 @@ pub struct BenchmarkResult {
     // All individual timings for distribution analysis
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub raw_times_us: Vec<f64>,
+
+    // Unified pipeline fields: seed, DGP description, and captured outputs
+    pub seed: u64,
+    pub dgp: String,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(default)]
+    pub outputs: BTreeMap<String, serde_json::Value>,
 }
 
 /// Configuration for benchmark runs
@@ -138,6 +146,9 @@ where
         } else {
             vec![]
         },
+        seed: 0,
+        dgp: String::new(),
+        outputs: BTreeMap::new(),
     }
 }
 
@@ -347,6 +358,9 @@ where
         } else {
             vec![]
         },
+        seed: 0,
+        dgp: String::new(),
+        outputs: BTreeMap::new(),
     }
 }
 

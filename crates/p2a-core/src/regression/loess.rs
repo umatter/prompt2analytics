@@ -231,55 +231,57 @@ impl SortedData {
         }
     }
 
-    /// Find the k nearest neighbors of x0 using binary search + expand.
+    /// Find the k nearest neighbors of x0 using binary search + sliding window.
     /// Returns (left_idx, right_idx) as a contiguous range in the sorted arrays,
     /// where right_idx is exclusive.
     ///
-    /// This is O(k + log n) instead of O(n log n) for the naive approach.
+    /// This is O(log n) instead of O(k) for the expand approach.
     #[inline]
     fn find_neighborhood(&self, x0: f64) -> (usize, usize) {
         let n = self.x_sorted.len();
         let k = self.k;
 
+        if k >= n {
+            return (0, n);
+        }
+
         // Binary search for insertion point of x0
         let pos = self.x_sorted.partition_point(|&v| v < x0);
 
-        // Expand outward from pos to collect k neighbors
-        let mut left = pos.min(n - 1);
-        let mut right = left; // right is inclusive during expansion
+        // The optimal window of size k that contains x0's nearest neighbors
+        // must start somewhere in [max(0, pos-k) .. min(pos, n-k)].
+        // We find the best start by sliding:
+        // For a window [left, left+k), we want to minimize the max distance.
+        // The optimal window has the property that the distances from x0 to
+        // both endpoints are as balanced as possible.
 
-        // Start: pick the closest single point
-        if left > 0
-            && (left >= n
-                || (x0 - self.x_sorted[left - 1]).abs() < (self.x_sorted[left] - x0).abs())
-        {
-            left -= 1;
-            right = left;
+        // Initial candidate: center the window around pos
+        let mut left = if pos >= k / 2 { pos - k / 2 } else { 0 };
+        if left + k > n {
+            left = n - k;
         }
 
-        // Expand until we have k points
-        while right - left + 1 < k {
-            let can_go_left = left > 0;
-            let can_go_right = right < n - 1;
-            if !can_go_left && !can_go_right {
+        // Slide the window to find optimal position:
+        // Compare distance to left boundary vs right boundary.
+        // If right boundary is closer, shift window right; if left is closer, shift left.
+        // This converges in at most k/2 steps but typically very few.
+        loop {
+            if left + k >= n {
                 break;
             }
-            if can_go_left && can_go_right {
-                let dl = (x0 - self.x_sorted[left - 1]).abs();
-                let dr = (self.x_sorted[right + 1] - x0).abs();
-                if dl <= dr {
-                    left -= 1;
-                } else {
-                    right += 1;
-                }
-            } else if can_go_left {
-                left -= 1;
+            // Compare: would shifting right improve things?
+            // Currently window is [left, left+k). Shifting right gives [left+1, left+k+1).
+            // We lose x_sorted[left] and gain x_sorted[left+k].
+            let d_left = (x0 - self.x_sorted[left]).abs();
+            let d_right = (self.x_sorted[left + k] - x0).abs();
+            if d_right < d_left {
+                left += 1;
             } else {
-                right += 1;
+                break;
             }
         }
 
-        (left, right + 1) // right+1 to make it exclusive
+        (left, left + k)
     }
 
     /// Compute the maximum distance in the neighborhood for weight scaling.

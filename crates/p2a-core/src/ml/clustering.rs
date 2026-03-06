@@ -1041,10 +1041,12 @@ pub fn hierarchical(
                     nn_dist[c_i] = d;
                     nn[c_i] = k;
                 }
-                // Also update k's nearest neighbor if it was pointing to c_i or c_j,
-                // or if the new distance to c_i is less than k's current nn_dist.
-                if nn[k] == c_i || nn[k] == c_j || d < nn_dist[k] {
-                    // Recompute nn for k from scratch
+                // Update k's nearest neighbor:
+                // - If k's NN was c_j (now deactivated) or c_i (distances changed),
+                //   we must do a full rescan for k.
+                // - Otherwise, just check if the merged cluster c_i is now closer.
+                if nn[k] == c_j || nn[k] == c_i {
+                    // NN invalidated — full rescan required
                     nn_dist[k] = f64::INFINITY;
                     for m in 0..active.len() {
                         if m != k && active[m] {
@@ -1055,6 +1057,10 @@ pub fn hierarchical(
                             }
                         }
                     }
+                } else if d < nn_dist[k] {
+                    // Merged cluster is closer than current NN — just update
+                    nn_dist[k] = d;
+                    nn[k] = c_i;
                 }
             }
         }

@@ -56,7 +56,7 @@ pub enum CostFunction {
 ///
 /// # Arguments
 /// * `data` - Time series data
-/// * `penalty` - Penalty for adding a changepoint (use None for automatic BIC penalty)
+/// * `penalty` - Penalty for adding a changepoint (use None for automatic MBIC penalty matching R's changepoint package)
 /// * `min_segment_length` - Minimum length of a segment (default: 2)
 /// * `cost_function` - Type of change to detect
 ///
@@ -83,13 +83,16 @@ pub fn detect_changepoints(
         ));
     }
 
-    // Default penalty: BIC-style penalty
+    // Default penalty: MBIC (Modified BIC) to match R's changepoint::cpt.mean() default.
+    // R uses penalty="MBIC" by default, which applies 3*log(n) for mean change
+    // and 3*log(n) for variance change (one parameter estimated per segment).
+    // For mean-and-variance change (two parameters), the penalty is higher.
     let pen = penalty.unwrap_or_else(|| {
         let log_n = (n as f64).ln();
         match cost_function {
-            CostFunction::MeanChange => log_n,
-            CostFunction::VarianceChange => log_n,
-            CostFunction::MeanAndVariance => 2.0 * log_n,
+            CostFunction::MeanChange => 3.0 * log_n,
+            CostFunction::VarianceChange => 3.0 * log_n,
+            CostFunction::MeanAndVariance => 4.0 * log_n,
         }
     });
 

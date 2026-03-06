@@ -135,20 +135,33 @@ pub fn run_arima(
     let coeffs =
         estimate::fit(&values, p, d, q).map_err(|e| anyhow!("ARIMA fitting failed: {:?}", e))?;
 
-    // Split coefficients into AR and MA parts
-    // The coefficients are returned as [phi_1, ..., phi_p, theta_1, ..., theta_q]
-    let (ar_coeffs, ma_coeffs) = if coeffs.len() == p + q {
-        (coeffs[..p].to_vec(), coeffs[p..].to_vec())
+    // The arima crate's fit() returns coefficients as:
+    //   [intercept, phi_1, ..., phi_p, theta_1, ..., theta_q]
+    // where the first element is always the intercept/mean term.
+    let (intercept, ar_coeffs, ma_coeffs) = if coeffs.len() == 1 + p + q {
+        (
+            coeffs[0],
+            coeffs[1..1 + p].to_vec(),
+            coeffs[1 + p..].to_vec(),
+        )
+    } else if coeffs.len() == p + q {
+        // Fallback: no intercept returned
+        let diff_series = difference(&values, d);
+        let mean = diff_series.iter().sum::<f64>() / diff_series.len() as f64;
+        (mean, coeffs[..p].to_vec(), coeffs[p..].to_vec())
     } else {
-        // Fallback: all coefficients are AR if split doesn't match expected
-        (coeffs.clone(), vec![])
+        // Unexpected length - treat first as intercept, rest as AR
+        let intercept = if !coeffs.is_empty() { coeffs[0] } else { 0.0 };
+        let rest = if coeffs.len() > 1 {
+            coeffs[1..].to_vec()
+        } else {
+            vec![]
+        };
+        (intercept, rest, vec![])
     };
 
     // Apply differencing for residual calculation
     let diff_series = difference(&values, d);
-
-    // Calculate intercept (mean of differenced series)
-    let intercept = diff_series.iter().sum::<f64>() / diff_series.len() as f64;
 
     // Calculate residuals
     let phi_opt = if ar_coeffs.is_empty() {
@@ -167,10 +180,15 @@ pub fn run_arima(
     // Calculate sum of squared residuals
     let ssr: f64 = residuals.iter().map(|r| r * r).sum();
 
-    // Calculate AIC: n*log(SSR/n) + 2*(p+q+1)
+    // Calculate AIC using the full normal log-likelihood, matching R's arima():
+    //   loglik = -n/2 * log(2*pi) - n/2 * log(sigma2) - n/2
+    //   AIC = -2*loglik + 2*k
+    //       = n*log(2*pi) + n*log(sigma2) + n + 2*k
+    // where sigma2 = SSR/n and k = p + q + 1 (intercept counted)
     let n = residuals.len() as f64;
     let k = (p + q + 1) as f64;
-    let aic = n * (ssr / n).ln() + 2.0 * k;
+    let sigma2 = ssr / n;
+    let aic = n * (2.0 * std::f64::consts::PI).ln() + n * sigma2.ln() + n + 2.0 * k;
 
     Ok(ArimaResult {
         column: column.to_string(),

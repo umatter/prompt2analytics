@@ -83,7 +83,9 @@ pub struct IpwConfig {
     /// Trimming threshold for propensity scores (default: 0.05)
     /// Observations with p(X) < trim or p(X) > 1-trim are excluded
     pub trim: f64,
-    /// Number of bootstrap replications for standard errors (default: 999)
+    /// Number of bootstrap replications for standard errors (default: 0 = analytic).
+    /// When 0, uses the influence-function variance estimator (Lunceford & Davidian 2004).
+    /// Set to e.g. 999 to use bootstrap instead.
     pub bootstrap: usize,
     /// Use normalized (Hajek) weights (default: true)
     /// If false, uses Horvitz-Thompson weights
@@ -97,7 +99,7 @@ impl Default for IpwConfig {
         Self {
             estimand: Estimand::ATE,
             trim: 0.05,
-            bootstrap: 999,
+            bootstrap: 0,
             normalized: true,
             seed: None,
         }
@@ -531,77 +533,161 @@ pub fn run_ipw_treatment(
         ));
     }
 
-    // Bootstrap for standard errors using cached propensity scores (parallel via rayon)
-    // Pre-generate all bootstrap index sets sequentially for reproducibility,
-    // then compute bootstrap effects in parallel using cached propensity scores.
-    let mut rng: StdRng = match config.seed {
-        Some(s) => StdRng::seed_from_u64(s),
-        None => StdRng::from_entropy(),
-    };
+    // Standard errors: analytic influence function (default) or bootstrap
+    let (std_error, ci_lower, ci_upper) = if config.bootstrap == 0 {
+        // Analytic influence function variance (Lunceford & Davidian 2004)
+        // For ATE with Hajek weights:
+        //   IF_i = D_i*Y_i/e(X_i) / E[D/e(X)] - (1-D_i)*Y_i/(1-e(X_i)) / E[(1-D)/(1-e(X))] - ATE
+        // For HT weights:
+        //   IF_i = D_i*Y_i/e(X_i) / n - (1-D_i)*Y_i/(1-e(X_i)) / n - ATE
+        let n_f = n_trim as f64;
 
-    let boot_indices: Vec<Vec<usize>> = (0..config.bootstrap)
-        .map(|_| (0..n_trim).map(|_| rng.gen_range(0..n_trim)).collect())
-        .collect();
+        let se = match config.estimand {
+            Estimand::ATE => {
+                // Precompute weight sums for Hajek normalization
+                let (sum_w1, sum_w0) = if config.normalized {
+                    let mut sw1 = 0.0_f64;
+                    let mut sw0 = 0.0_f64;
+                    for i in 0..n_trim {
+                        let ps_i = ps_trim[i].max(1e-10).min(1.0 - 1e-10);
+                        if d_trim[i] >= 0.5 {
+                            sw1 += 1.0 / ps_i;
+                        } else {
+                            sw0 += 1.0 / (1.0 - ps_i);
+                        }
+                    }
+                    (sw1, sw0)
+                } else {
+                    (n_f, n_f)
+                };
 
-    // Parallel bootstrap: reuse cached propensity scores instead of re-fitting
-    let boot_effects: Vec<f64> = boot_indices
-        .into_par_iter()
-        .filter_map(|indices| {
-            let y_boot: Array1<f64> = indices.iter().map(|&i| y_trim[i]).collect();
-            let d_boot: Array1<f64> = indices.iter().map(|&i| d_trim[i]).collect();
-            let ps_boot: Array1<f64> = indices.iter().map(|&i| ps_trim[i]).collect();
+                let mut sum_if_sq = 0.0;
+                for i in 0..n_trim {
+                    let di = d_trim[i];
+                    let yi = y_trim[i];
+                    let ps_i = ps_trim[i].max(1e-10).min(1.0 - 1e-10);
 
-            let effect_boot = compute_ipw_effect(
-                &y_boot,
-                &d_boot,
-                &ps_boot,
-                config.estimand,
-                config.normalized,
-            );
+                    let if_i = if di >= 0.5 {
+                        yi / ps_i / sum_w1 * n_f
+                    } else {
+                        0.0
+                    } - if di < 0.5 {
+                        yi / (1.0 - ps_i) / sum_w0 * n_f
+                    } else {
+                        0.0
+                    } - effect;
 
-            if effect_boot.is_finite() {
-                Some(effect_boot)
-            } else {
-                None
+                    sum_if_sq += if_i * if_i;
+                }
+                (sum_if_sq / (n_f * n_f)).sqrt()
             }
-        })
-        .collect();
+            Estimand::ATT => {
+                let n_treated_f = n_treated as f64;
+                // Precompute weight sum for control
+                let sum_w0 = if config.normalized {
+                    let mut sw = 0.0_f64;
+                    for i in 0..n_trim {
+                        if d_trim[i] < 0.5 {
+                            let ps_i = ps_trim[i].max(1e-10).min(1.0 - 1e-10);
+                            sw += ps_i / (1.0 - ps_i);
+                        }
+                    }
+                    sw
+                } else {
+                    n_treated_f
+                };
 
-    if boot_effects.len() < config.bootstrap / 2 {
-        warnings.push(
-            "Many bootstrap iterations failed; standard errors may be unreliable".to_string(),
-        );
-    }
+                let mut sum_if_sq = 0.0;
+                for i in 0..n_trim {
+                    let di = d_trim[i];
+                    let yi = y_trim[i];
+                    let ps_i = ps_trim[i].max(1e-10).min(1.0 - 1e-10);
 
-    // Compute standard error and confidence intervals
-    let std_error = if !boot_effects.is_empty() {
-        let mean_boot: f64 = boot_effects.iter().sum::<f64>() / boot_effects.len() as f64;
-        let var_boot: f64 = boot_effects
-            .iter()
-            .map(|&e| (e - mean_boot).powi(2))
-            .sum::<f64>()
-            / (boot_effects.len() - 1).max(1) as f64;
-        var_boot.sqrt()
+                    let if_i = if di >= 0.5 {
+                        (yi - effect) / n_treated_f
+                    } else {
+                        -(ps_i / (1.0 - ps_i)) * yi / sum_w0 * (n_treated_f / n_f)
+                    };
+
+                    sum_if_sq += if_i * if_i;
+                }
+                (sum_if_sq / (n_f * n_f)).sqrt()
+            }
+        };
+
+        let ci_lo = effect - 1.96 * se;
+        let ci_hi = effect + 1.96 * se;
+        (se, ci_lo, ci_hi)
     } else {
-        f64::NAN
-    };
+        // Bootstrap for standard errors using cached propensity scores (parallel via rayon)
+        let mut rng: StdRng = match config.seed {
+            Some(s) => StdRng::seed_from_u64(s),
+            None => StdRng::from_entropy(),
+        };
 
-    // Sort for percentile CI
-    let mut boot_effects_sorted = boot_effects;
-    boot_effects_sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let boot_indices: Vec<Vec<usize>> = (0..config.bootstrap)
+            .map(|_| (0..n_trim).map(|_| rng.gen_range(0..n_trim)).collect())
+            .collect();
 
-    let ci_lower = if boot_effects_sorted.len() >= 20 {
-        let idx = (boot_effects_sorted.len() as f64 * 0.025).floor() as usize;
-        boot_effects_sorted[idx]
-    } else {
-        effect - 1.96 * std_error
-    };
+        let boot_effects: Vec<f64> = boot_indices
+            .into_par_iter()
+            .filter_map(|indices| {
+                let y_boot: Array1<f64> = indices.iter().map(|&i| y_trim[i]).collect();
+                let d_boot: Array1<f64> = indices.iter().map(|&i| d_trim[i]).collect();
+                let ps_boot: Array1<f64> = indices.iter().map(|&i| ps_trim[i]).collect();
 
-    let ci_upper = if boot_effects_sorted.len() >= 20 {
-        let idx = (boot_effects_sorted.len() as f64 * 0.975).floor() as usize;
-        boot_effects_sorted[idx.min(boot_effects_sorted.len() - 1)]
-    } else {
-        effect + 1.96 * std_error
+                let effect_boot = compute_ipw_effect(
+                    &y_boot,
+                    &d_boot,
+                    &ps_boot,
+                    config.estimand,
+                    config.normalized,
+                );
+
+                if effect_boot.is_finite() {
+                    Some(effect_boot)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        if boot_effects.len() < config.bootstrap / 2 {
+            warnings.push(
+                "Many bootstrap iterations failed; standard errors may be unreliable".to_string(),
+            );
+        }
+
+        let se = if !boot_effects.is_empty() {
+            let mean_boot: f64 = boot_effects.iter().sum::<f64>() / boot_effects.len() as f64;
+            let var_boot: f64 = boot_effects
+                .iter()
+                .map(|&e| (e - mean_boot).powi(2))
+                .sum::<f64>()
+                / (boot_effects.len() - 1).max(1) as f64;
+            var_boot.sqrt()
+        } else {
+            f64::NAN
+        };
+
+        let mut boot_effects_sorted = boot_effects;
+        boot_effects_sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+        let ci_lo = if boot_effects_sorted.len() >= 20 {
+            let idx = (boot_effects_sorted.len() as f64 * 0.025).floor() as usize;
+            boot_effects_sorted[idx]
+        } else {
+            effect - 1.96 * se
+        };
+
+        let ci_hi = if boot_effects_sorted.len() >= 20 {
+            let idx = (boot_effects_sorted.len() as f64 * 0.975).floor() as usize;
+            boot_effects_sorted[idx.min(boot_effects_sorted.len() - 1)]
+        } else {
+            effect + 1.96 * se
+        };
+
+        (se, ci_lo, ci_hi)
     };
 
     let t_stat = if std_error > 0.0 && std_error.is_finite() {

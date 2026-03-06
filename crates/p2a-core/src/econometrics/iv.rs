@@ -57,7 +57,7 @@ use std::fmt;
 use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
 use crate::linalg::design::{DesignMatrix, get_column_names};
-use crate::linalg::matrix_ops::{matmul, safe_inverse, xtx, xty};
+use crate::linalg::matrix_ops::{safe_inverse, xtx, xty};
 use crate::traits::estimator::{
     SignificanceLevel, chi_squared_p_value, f_test_p_value, t_test_p_value,
 };
@@ -163,9 +163,19 @@ impl fmt::Display for IVResult {
 /// * `robust` - Whether to use heteroskedasticity-robust standard errors
 ///
 /// # Algorithm
-/// 1. First stage: Regress each endogenous variable on all exogenous + instruments
-/// 2. Second stage: Regress y on exogenous + fitted endogenous
-/// 3. Compute correct standard errors using original (not fitted) X
+///
+/// Uses the efficient projection formula to avoid forming large n×k matrices
+/// in the second stage. Instead of building X̂ = P_Z X explicitly, we compute:
+///
+///   β_IV = (X'P_Z X)^{-1} X'P_Z y
+///
+/// where P_Z = Z(Z'Z)^{-1}Z'. By noting that X'P_Z = X'Z (Z'Z)^{-1} Z',
+/// we can compute everything via small k×k matrix operations:
+///
+///   X'P_Z X = (Z'X)' (Z'Z)^{-1} (Z'X)
+///   X'P_Z y = (Z'X)' (Z'Z)^{-1} (Z'y)
+///
+/// This reduces memory from O(n·k) to O(k²) for the second stage.
 pub fn run_iv2sls(
     dataset: &Dataset,
     y_col: &str,
@@ -185,7 +195,7 @@ pub fn run_iv2sls(
     }
 
     // Extract y
-    let y = DesignMatrix::extract_column(dataset.df(), y_col).map_err(|e| {
+    let y = DesignMatrix::extract_column(dataset.df(), y_col).map_err(|_e| {
         EconError::ColumnNotFound {
             column: y_col.to_string(),
             available: get_column_names(dataset.df()),
@@ -208,7 +218,6 @@ pub fn run_iv2sls(
     // Z: instruments only
     let design_instruments = DesignMatrix::from_dataframe(dataset.df(), instruments, false)?;
     let z_mat = design_instruments.data;
-    let _instr_names = design_instruments.column_names;
 
     // Full instrument matrix: [X_exog, Z] (all exogenous + excluded instruments)
     let k_exog = x_exog_mat.ncols();
@@ -223,8 +232,7 @@ pub fn run_iv2sls(
     z_full.slice_mut(ndarray::s![.., k_exog..]).assign(&z_mat);
 
     // ═══════════════════════════════════════════════════════════════════
-    // First Stage: Regress each endogenous variable on Z_full
-    // X_endog_hat = Z(Z'Z)^{-1}Z' X_endog = P_Z * X_endog
+    // Compute Z'Z inverse (small k_z × k_z matrix)
     // ═══════════════════════════════════════════════════════════════════
     let ztz = xtx(&z_full.view());
     let (ztz_inv, cond_warning) =
@@ -237,27 +245,32 @@ pub fn run_iv2sls(
         warnings.push(format!("High condition number in Z'Z: {:.2e}", cond));
     }
 
-    // Projection matrix P_Z = Z(Z'Z)^{-1}Z'
-    let _z_ztz_inv = matmul(&z_full.view(), &ztz_inv.view())?;
-    let mut x_endog_hat = Array2::zeros((n, k_endog));
-
+    // ═══════════════════════════════════════════════════════════════════
+    // First Stage: Compute F-statistics for instrument strength
+    // X_endog_hat_j = Z * (Z'Z)^{-1} * Z' * x_j
+    // ═══════════════════════════════════════════════════════════════════
     let mut first_stage_f_stats = Vec::with_capacity(k_endog);
 
+    // Store first-stage betas only if needed for robust SEs
+    let mut first_stage_betas: Vec<Array1<f64>> = if robust {
+        Vec::with_capacity(k_endog)
+    } else {
+        Vec::new()
+    };
+
     for j in 0..k_endog {
-        let x_j = x_endog_mat.column(j).to_owned();
+        let x_j = x_endog_mat.column(j);
 
-        // First stage regression
-        let ztx_j = xty(&z_full.view(), &x_j);
+        // First stage: beta_j = (Z'Z)^{-1} Z'x_j
+        let ztx_j = z_full.t().dot(&x_j);
         let beta_first = ztz_inv.dot(&ztx_j);
-        let x_j_hat = z_full.dot(&beta_first);
 
-        x_endog_hat.column_mut(j).assign(&x_j_hat);
-
-        // First-stage F-statistic (simplified: overall F for the regression)
-        let residuals_first = &x_j - &x_j_hat;
-        let ssr = residuals_first.iter().map(|r| r * r).sum::<f64>();
+        // First-stage F-statistic via projection:
+        // SSR = x_j'(I - P_Z)x_j = x_j'x_j - ztx_j' * (Z'Z)^{-1} * ztx_j
+        let x_j_sq = x_j.dot(&x_j);
+        let ssr = x_j_sq - ztx_j.dot(&beta_first);
         let x_j_mean = x_j.mean().unwrap_or(0.0);
-        let sst = x_j.iter().map(|x| (x - x_j_mean).powi(2)).sum::<f64>();
+        let sst = x_j_sq - n as f64 * x_j_mean * x_j_mean;
 
         let df_reg = k_full_z.saturating_sub(1);
         let df_res = n.saturating_sub(k_full_z);
@@ -269,6 +282,9 @@ pub fn run_iv2sls(
         };
 
         first_stage_f_stats.push(f_stat);
+        if robust {
+            first_stage_betas.push(beta_first);
+        }
 
         if f_stat < 10.0 {
             warnings.push(format!(
@@ -281,39 +297,57 @@ pub fn run_iv2sls(
     let strong_instruments = first_stage_f_stats.iter().all(|&f| f >= 10.0);
 
     // ═══════════════════════════════════════════════════════════════════
-    // Second Stage: Regress y on [X_exog, X_endog_hat]
+    // Second Stage via projection formula (no n×k matrices needed):
+    //
+    //   X_full = [X_exog, X_endog]  (the original regressors)
+    //   Z'X_full is k_z × k_total
+    //   X'P_Z X = (Z'X)' (Z'Z)^{-1} (Z'X)  -- k_total × k_total
+    //   X'P_Z y = (Z'X)' (Z'Z)^{-1} (Z'y)  -- k_total × 1
+    //   β = (X'P_Z X)^{-1} X'P_Z y
     // ═══════════════════════════════════════════════════════════════════
     let k_total = k_exog + k_endog;
-    let mut x_second = Array2::zeros((n, k_total));
-    x_second
-        .slice_mut(ndarray::s![.., ..k_exog])
-        .assign(&x_exog_mat);
-    x_second
-        .slice_mut(ndarray::s![.., k_exog..])
-        .assign(&x_endog_hat);
 
-    let xtx_second = xtx(&x_second.view());
-    let (xtx_second_inv, _) =
-        safe_inverse(&xtx_second.view()).map_err(|e| EconError::SingularMatrix {
-            context: "X'X in 2SLS second stage".to_string(),
+    // Compute Z'X_full (k_z × k_total) via ndarray BLAS
+    // Z'X_exog (k_z × k_exog) and Z'X_endog (k_z × k_endog)
+    let ztx_exog = z_full.t().dot(&x_exog_mat);
+    let ztx_endog = z_full.t().dot(&x_endog_mat);
+    let mut ztx_full = Array2::zeros((k_full_z, k_total));
+    ztx_full
+        .slice_mut(ndarray::s![.., ..k_exog])
+        .assign(&ztx_exog);
+    ztx_full
+        .slice_mut(ndarray::s![.., k_exog..])
+        .assign(&ztx_endog);
+
+    // Z'y (k_z × 1)
+    let zty = z_full.t().dot(&y);
+
+    // (Z'Z)^{-1} Z'X  (k_z × k_total)
+    let ztz_inv_ztx = ztz_inv.dot(&ztx_full);
+
+    // X'P_Z X = (Z'X)' (Z'Z)^{-1} (Z'X) = ztx_full' * ztz_inv_ztx  (k_total × k_total)
+    let xpzx = ztx_full.t().dot(&ztz_inv_ztx);
+
+    // X'P_Z y = (Z'X)' (Z'Z)^{-1} (Z'y) = ztx_full' * (Z'Z)^{-1} * Z'y  (k_total × 1)
+    let ztz_inv_zty = ztz_inv.dot(&zty);
+    let xpzy = ztx_full.t().dot(&ztz_inv_zty);
+
+    // β = (X'P_Z X)^{-1} X'P_Z y
+    let (xpzx_inv, _) =
+        safe_inverse(&xpzx.view()).map_err(|e| EconError::SingularMatrix {
+            context: "X'P_Z X in 2SLS second stage".to_string(),
             suggestion: format!("Check for collinearity: {:?}", e),
         })?;
 
-    let xty_second = xty(&x_second.view(), &y);
-    let beta: Array1<f64> = xtx_second_inv.dot(&xty_second);
+    let beta: Array1<f64> = xpzx_inv.dot(&xpzy);
 
     // ═══════════════════════════════════════════════════════════════════
-    // Standard Errors: Use original X_endog (not fitted) for residuals
+    // Residuals using original X (not fitted values)
+    // y_hat = X_exog * beta_exog + X_endog * beta_endog
     // ═══════════════════════════════════════════════════════════════════
-    let mut x_original = Array2::zeros((n, k_total));
-    x_original
-        .slice_mut(ndarray::s![.., ..k_exog])
-        .assign(&x_exog_mat);
-    x_original
-        .slice_mut(ndarray::s![.., k_exog..])
-        .assign(&x_endog_mat);
-
-    let y_hat = x_original.dot(&beta);
+    let beta_exog = beta.slice(ndarray::s![..k_exog]);
+    let beta_endog = beta.slice(ndarray::s![k_exog..]);
+    let y_hat = x_exog_mat.dot(&beta_exog) + x_endog_mat.dot(&beta_endog);
     let residuals = &y - &y_hat;
 
     let df = n.saturating_sub(k_total);
@@ -324,28 +358,53 @@ pub fn run_iv2sls(
         ssr / n as f64
     };
 
+    // ═══════════════════════════════════════════════════════════════════
     // Variance-covariance matrix
+    // For 2SLS: V = σ² (X̂'X̂)^{-1} = σ² (X'P_Z X)^{-1}
+    // ═══════════════════════════════════════════════════════════════════
     let vcov = if robust {
         // HC1 robust standard errors
-        // V = (X̃'X̃)^{-1} (X̃'ΩX̃) (X̃'X̃)^{-1} where X̃ uses fitted values
+        // V = (X̂'X̂)^{-1} (X̂'ΩX̂) (X̂'X̂)^{-1}
+        // Need X̂ = P_Z X for the meat. Build it efficiently using first-stage betas.
         let scale = (n as f64) / (df as f64);
-        let mut meat = Array2::zeros((k_total, k_total));
 
+        // Build fitted X matrix for robust SEs
+        // X̂_exog = X_exog (exogenous vars are their own instruments)
+        // X̂_endog_j = Z * first_stage_beta_j
+        let mut meat = Array2::zeros((k_total, k_total));
+        // Pre-compute x_hat rows on the fly to avoid allocating full n×k matrix
+        let mut xi_hat = vec![0.0; k_total];
         for i in 0..n {
-            let xi = x_second.row(i);
+            // Exogenous part: same as original
+            for j in 0..k_exog {
+                xi_hat[j] = x_exog_mat[[i, j]];
+            }
+            // Endogenous part: fitted values from first stage
+            for j in 0..k_endog {
+                let mut val = 0.0;
+                for l in 0..k_full_z {
+                    val += z_full[[i, l]] * first_stage_betas[j][l];
+                }
+                xi_hat[k_exog + j] = val;
+            }
+
             let e2 = residuals[i] * residuals[i];
             for j in 0..k_total {
-                for l in 0..k_total {
-                    meat[[j, l]] += e2 * xi[j] * xi[l];
+                for l in j..k_total {
+                    let contrib = e2 * xi_hat[j] * xi_hat[l];
+                    meat[[j, l]] += contrib;
+                    if l != j {
+                        meat[[l, j]] += contrib;
+                    }
                 }
             }
         }
 
         let meat = &meat * scale;
-        let bread_meat = matmul(&xtx_second_inv.view(), &meat.view())?;
-        matmul(&bread_meat.view(), &xtx_second_inv.view())?
+        let bread_meat = xpzx_inv.dot(&meat);
+        bread_meat.dot(&xpzx_inv)
     } else {
-        &xtx_second_inv * sigma2
+        &xpzx_inv * sigma2
     };
 
     let std_errors: Vec<f64> = vcov.diag().mapv(|v| v.max(0.0).sqrt()).to_vec();

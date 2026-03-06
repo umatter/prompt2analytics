@@ -225,19 +225,18 @@ pub fn run_random_effects(
         });
     }
 
-    // Step 1: Pooled OLS to get initial residuals
-    let xtx_mat = xtx(&x.view());
-    let (xtx_inv, _) = safe_inverse(&xtx_mat.view()).map_err(|e| EconError::SingularMatrix {
-        context: "X'X in Random Effects".to_string(),
-        suggestion: format!("Check for perfect multicollinearity: {:?}", e),
-    })?;
-    let xty_vec = xty(&x.view(), &y);
-    let beta_pooled: Array1<f64> = xtx_inv.dot(&xty_vec);
-    let residuals_pooled = &y - &x.dot(&beta_pooled);
+    // Swamy-Arora variance component estimation (matches R's plm default)
+    //
+    // Step 1: Within (FE) estimation to get σ²_e
+    // Use only non-intercept columns for the within estimator
+    let x_no_intercept = {
+        let design_no_int = DesignMatrix::from_dataframe(dataset.df(), x_cols, false)?;
+        design_no_int.data
+    };
+    let k_no_int = x_no_intercept.ncols(); // number of slope coefficients
 
-    // Step 2: Estimate variance components using Fixed Effects residuals
     let y_demeaned = demean_by_entity(&y, &entity_ids, n_groups);
-    let x_demeaned = demean_matrix_by_entity(&x, &entity_ids, n_groups);
+    let x_demeaned = demean_matrix_by_entity(&x_no_intercept, &entity_ids, n_groups);
 
     let xtx_demeaned = xtx(&x_demeaned.view());
     let (xtx_demeaned_inv, _) =
@@ -249,10 +248,20 @@ pub fn run_random_effects(
     let beta_fe: Array1<f64> = xtx_demeaned_inv.dot(&xty_demeaned);
     let residuals_fe = &y_demeaned - &x_demeaned.dot(&beta_fe);
 
-    let df_fe = n.saturating_sub(n_groups).saturating_sub(k);
+    // σ²_e = SSR_within / (n - n_groups - k_no_int)
+    let df_fe = n.saturating_sub(n_groups).saturating_sub(k_no_int);
     let sigma2_e = if df_fe > 0 {
         residuals_fe.iter().map(|r| r * r).sum::<f64>() / df_fe as f64
     } else {
+        // Fallback: use pooled OLS residual variance
+        let xtx_mat = xtx(&x.view());
+        let (xtx_inv, _) = safe_inverse(&xtx_mat.view()).map_err(|e| EconError::SingularMatrix {
+            context: "X'X in Random Effects".to_string(),
+            suggestion: format!("Check for perfect multicollinearity: {:?}", e),
+        })?;
+        let xty_vec = xty(&x.view(), &y);
+        let beta_pooled: Array1<f64> = xtx_inv.dot(&xty_vec);
+        let residuals_pooled = &y - &x.dot(&beta_pooled);
         residuals_pooled.iter().map(|r| r * r).sum::<f64>() / n as f64
     };
 
@@ -261,42 +270,98 @@ pub fn run_random_effects(
     for &g in &entity_ids {
         group_counts[g] += 1;
     }
-    let t_bar: f64 = group_counts.iter().map(|&c| c as f64).sum::<f64>() / n_groups as f64;
 
-    // Compute between-groups variance
+    // Step 2: Between regression to get σ²_between
+    // Compute group means of y and X (with intercept)
     let y_means = compute_entity_means(&y, &entity_ids, n_groups);
 
-    // Extract unique group means
+    // Extract unique group means for y and x (no intercept)
     let y_between: Array1<f64> = (0..n_groups)
-        .filter_map(|g| {
-            let first_idx = entity_ids.iter().position(|&id| id == g)?;
-            Some(y_means[first_idx])
+        .map(|g| {
+            let first_idx = entity_ids.iter().position(|&id| id == g).unwrap();
+            y_means[first_idx]
         })
         .collect();
 
-    let y_overall_mean = y.mean().unwrap_or(0.0);
-    let sigma2_between = if n_groups > 1 {
-        y_between
-            .iter()
-            .map(|&ym| (ym - y_overall_mean).powi(2))
-            .sum::<f64>()
-            / (n_groups - 1) as f64
+    // Build between-regression X matrix: group means of x_cols + intercept
+    let x_between = {
+        let mut xb = ndarray::Array2::zeros((n_groups, k_no_int + 1));
+        // Intercept column
+        for i in 0..n_groups {
+            xb[[i, 0]] = 1.0;
+        }
+        // Group means of each x column
+        for j in 0..k_no_int {
+            let col = x_no_intercept.column(j).to_owned();
+            let col_means = compute_entity_means(&col, &entity_ids, n_groups);
+            for g in 0..n_groups {
+                let first_idx = entity_ids.iter().position(|&id| id == g).unwrap();
+                xb[[g, j + 1]] = col_means[first_idx];
+            }
+        }
+        xb
+    };
+
+    // Between OLS: regress group-mean y on group-mean X
+    let xtx_between = xtx(&x_between.view());
+    let (xtx_between_inv, _) =
+        safe_inverse(&xtx_between.view()).map_err(|e| EconError::SingularMatrix {
+            context: "X'X (between) in Random Effects".to_string(),
+            suggestion: format!("Check for multicollinearity: {:?}", e),
+        })?;
+    let xty_between = xty(&x_between.view(), &y_between);
+    let beta_between: Array1<f64> = xtx_between_inv.dot(&xty_between);
+    let residuals_between = &y_between - &x_between.dot(&beta_between);
+
+    // σ²_between = SSR_between / (N - K - 1) where K = number of slope coefficients
+    let df_between = n_groups.saturating_sub(k_no_int + 1);
+    let sigma2_between = if df_between > 0 {
+        residuals_between.iter().map(|r| r * r).sum::<f64>() / df_between as f64
     } else {
         0.0
     };
 
-    // σ²_u = (σ²_between - σ²_e / T̄)
-    let sigma2_u = (sigma2_between - sigma2_e / t_bar).max(0.0);
+    // Step 3: Swamy-Arora σ²_u estimation
+    // Use harmonic mean of T_i for unbalanced panels (matches plm)
+    let t_harmonic: f64 = {
+        let sum_inv = group_counts.iter().map(|&c| 1.0 / c as f64).sum::<f64>();
+        n_groups as f64 / sum_inv
+    };
 
-    // Step 3: Compute theta for quasi-demeaning
+    // σ²_u = σ²_between - σ²_e / T_harmonic
+    let sigma2_u = (sigma2_between - sigma2_e / t_harmonic).max(0.0);
+
+    // Step 4: Compute theta for quasi-demeaning (per-group for unbalanced panels)
+    // For balanced panels all thetas are identical; for unbalanced, each group has its own
+    // θ_i = 1 - sqrt(σ²_e / (T_i * σ²_u + σ²_e))
+    let theta_per_group: Vec<f64> = group_counts
+        .iter()
+        .map(|&ti| {
+            if sigma2_u > 0.0 {
+                1.0 - (sigma2_e / (ti as f64 * sigma2_u + sigma2_e)).sqrt()
+            } else {
+                0.0
+            }
+        })
+        .collect();
+
+    // Report a representative theta (harmonic-mean based, matches plm summary output)
     let theta = if sigma2_u > 0.0 {
-        1.0 - (sigma2_e / (t_bar * sigma2_u + sigma2_e)).sqrt()
+        1.0 - (sigma2_e / (t_harmonic * sigma2_u + sigma2_e)).sqrt()
     } else {
         0.0
     };
 
-    // Step 4: Quasi-demean the data
-    let y_quasi = &y - &(&y_means * theta);
+    // Step 5: Quasi-demean the data using per-group theta
+    // y*_it = y_it - θ_i * ȳ_i
+    let y_quasi = {
+        let mut yq = y.clone();
+        for i in 0..n {
+            let g = entity_ids[i];
+            yq[i] -= theta_per_group[g] * y_means[i];
+        }
+        yq
+    };
     let x_means = {
         let mut means = ndarray::Array2::zeros((n, k));
         for j in 0..k {
@@ -309,15 +374,15 @@ pub fn run_random_effects(
     let x_quasi = {
         let mut xq = ndarray::Array2::zeros((n, k));
         for j in 0..k {
-            let col = x.column(j).to_owned();
-            let col_means = x_means.column(j).to_owned();
-            let col_quasi = &col - &(&col_means * theta);
-            xq.column_mut(j).assign(&col_quasi);
+            for i in 0..n {
+                let g = entity_ids[i];
+                xq[[i, j]] = x[[i, j]] - theta_per_group[g] * x_means[[i, j]];
+            }
         }
         xq
     };
 
-    // Step 5: OLS on quasi-demeaned data
+    // Step 6: GLS on quasi-demeaned data
     let xtx_quasi = xtx(&x_quasi.view());
     let (xtx_quasi_inv, _) =
         safe_inverse(&xtx_quasi.view()).map_err(|e| EconError::SingularMatrix {
@@ -327,27 +392,41 @@ pub fn run_random_effects(
     let xty_quasi = xty(&x_quasi.view(), &y_quasi);
     let beta: Array1<f64> = xtx_quasi_inv.dot(&xty_quasi);
 
-    // Residuals (from original data)
+    // Residuals (from original data, for R² and diagnostics)
     let y_hat: Array1<f64> = x.dot(&beta);
     let residuals = &y - &y_hat;
 
-    // Degrees of freedom
+    // Degrees of freedom: n - k (k includes intercept)
     let df = n.saturating_sub(k);
 
-    // Variance estimation
-    let ssr: f64 = residuals.iter().map(|r| r * r).sum();
-    let sigma2 = ssr / df as f64;
-    let vcov = &xtx_quasi_inv * sigma2;
+    // GLS standard errors: Var(β) = σ²_e * (X*'X*)^{-1}
+    // where X* is the quasi-demeaned X. The quasi-demeaning already accounts
+    // for the error structure, so we use σ²_e directly (not re-estimated sigma²).
+    let vcov = &xtx_quasi_inv * sigma2_e;
     let std_errors: Vec<f64> = vcov.diag().mapv(|v| v.sqrt()).to_vec();
 
-    // R-squared (overall)
+    // R-squared: plm uses squared correlation between y_hat and y
+    // This is equivalent to 1 - var(residuals)/var(y) when computed properly
+    let y_overall_mean = y.mean().unwrap_or(0.0);
+    let y_hat_mean = y_hat.mean().unwrap_or(0.0);
     let sst: f64 = y.iter().map(|yi| (yi - y_overall_mean).powi(2)).sum();
-    let r_squared = if sst > 0.0 { 1.0 - ssr / sst } else { 0.0 };
+    let cov_y_yhat: f64 = y
+        .iter()
+        .zip(y_hat.iter())
+        .map(|(&yi, &yhi)| (yi - y_overall_mean) * (yhi - y_hat_mean))
+        .sum::<f64>();
+    let ss_yhat: f64 = y_hat.iter().map(|yhi| (yhi - y_hat_mean).powi(2)).sum();
+    let r_squared = if sst > 0.0 && ss_yhat > 0.0 {
+        (cov_y_yhat * cov_y_yhat) / (sst * ss_yhat)
+    } else {
+        0.0
+    };
 
     // Adjusted R-squared
     let adj_r_squared = 1.0 - (1.0 - r_squared) * ((n - 1) as f64) / (df as f64);
 
-    // F-statistic
+    // F-statistic (Wald test: all slope coefficients = 0)
+    let ssr: f64 = residuals.iter().map(|r| r * r).sum();
     let f_stat = if k > 1 && ssr > 0.0 {
         (sst - ssr) / ((k - 1) as f64) / (ssr / df as f64)
     } else {

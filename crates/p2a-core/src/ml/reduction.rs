@@ -110,24 +110,15 @@ pub fn pca(
         row -= &mean;
     }
 
-    // Use SVD for numerical stability and speed
-    // For tall matrices (n >> p), SVD on X is faster than eigendecomp on X'X
+    // For tall-skinny data (n >> p), covariance eigendecomposition is much faster:
+    // 1. Compute p×p covariance matrix C = X'X / (n-1)  — O(np²)
+    // 2. Eigendecompose C (p×p)                          — O(p³)
+    // For n=5000, p=5 this operates on a 5×5 matrix instead of SVD on 5000×5.
     //
-    // When GPU is available, use covariance eigendecomposition for tall matrices:
-    // 1. Compute X'X on GPU via cuBLAS (O(np²), GPU-accelerated)
-    // 2. Eigendecompose the p x p covariance matrix on CPU (O(p³), fast for small p)
-    // This is faster than SVD for n >> p when GPU xtx is available.
-    #[cfg(feature = "cuda")]
-    let use_gpu_cov = crate::linalg::gpu::GpuContext::get()
-        .is_some_and(|ctx| {
-            n_features >= ctx.thresholds.xtx_min_k
-                && n_samples * n_features * n_features >= ctx.thresholds.xtx_min_nkk
-                && n_samples > 4 * n_features
-        });
-    #[cfg(not(feature = "cuda"))]
-    let use_gpu_cov = false;
+    // For wide or square data, use SVD which is more numerically stable.
+    let use_cov_eigen = n_samples > 4 * n_features;
 
-    let (eigenvalues, eigenvectors) = if use_gpu_cov {
+    let (eigenvalues, eigenvectors) = if use_cov_eigen {
         pca_via_cov_eigen(&centered.view(), n_comp)?
     } else {
         pca_via_svd(&centered.view(), n_comp)?
@@ -240,18 +231,20 @@ fn pca_via_cov_eigen(
     let (eigenvalues, eigenvectors) =
         crate::linalg::eig_symmetric(&cov.view()).map_err(|e| format!("Eigen failed: {}", e))?;
 
-    // Sort by descending eigenvalue
+    // Sort by descending eigenvalue — return all p eigenvalues for total_variance
     let mut indices: Vec<usize> = (0..p).collect();
     indices.sort_by(|&a, &b| eigenvalues[b].partial_cmp(&eigenvalues[a]).unwrap());
 
     let n_comp = n_components.min(p);
-    let mut sorted_eigenvalues = Array1::zeros(n_comp);
+    let mut sorted_eigenvalues = Array1::zeros(p);
     let mut sorted_eigenvectors = Array2::zeros((p, n_comp));
 
-    for (out_j, &orig_j) in indices.iter().take(n_comp).enumerate() {
+    for (out_j, &orig_j) in indices.iter().enumerate() {
         sorted_eigenvalues[out_j] = eigenvalues[orig_j].max(0.0);
-        for i in 0..p {
-            sorted_eigenvectors[[i, out_j]] = eigenvectors[[i, orig_j]];
+        if out_j < n_comp {
+            for i in 0..p {
+                sorted_eigenvectors[[i, out_j]] = eigenvectors[[i, orig_j]];
+            }
         }
     }
 
