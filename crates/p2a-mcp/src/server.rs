@@ -651,875 +651,79 @@ impl AnalyticsServer {
     }
 
     /// List available tools for HTTP API discovery.
+    /// Dynamically generates the tool list from all registered tool routers.
     #[cfg(feature = "http")]
     pub fn list_tools(&self) -> Vec<crate::transport::http::ToolDefinition> {
         use crate::transport::http::ToolDefinition;
 
-        // Tool definitions with their descriptions and input schemas
-        // This is a static list matching the #[tool] definitions
-        vec![
-            // Data management tools
-            ToolDefinition {
-                name: "list_datasets".to_string(),
-                description: "List all currently loaded datasets with their basic information (name, dimensions, column types).".to_string(),
-                input_schema: serde_json::json!({"type": "object", "properties": {}}),
-            },
-            ToolDefinition {
-                name: "load_dataset".to_string(),
-                description: "Load a dataset from a file. Supports CSV, Parquet, Excel, Stata, and SAS formats.".to_string(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "path": {"type": "string", "description": "Path to the data file"},
-                        "name": {"type": "string", "description": "Optional name for the dataset"}
-                    },
-                    "required": ["path"]
-                }),
-            },
-            ToolDefinition {
-                name: "upload_dataset".to_string(),
-                description: "Upload and load a dataset from base64-encoded file content. Use this when the file is selected via browser file picker.".to_string(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "content": {"type": "string", "description": "Base64-encoded file content"},
-                        "filename": {"type": "string", "description": "Original filename with extension (e.g., 'data.csv')"},
-                        "name": {"type": "string", "description": "Optional name for the dataset"}
-                    },
-                    "required": ["content", "filename"]
-                }),
-            },
-            ToolDefinition {
-                name: "create_dataset".to_string(),
-                description: "Create a dataset from inline CSV content. Use this to create datasets on-the-fly from generated or inline data without needing a file.".to_string(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "name": {"type": "string", "description": "Name for the dataset (e.g., 'my_data')"},
-                        "csv_content": {"type": "string", "description": "CSV content as plain text with headers in first row (e.g., 'x,y\\n1,2\\n3,4')"}
-                    },
-                    "required": ["name", "csv_content"]
-                }),
-            },
-            ToolDefinition {
-                name: "describe_dataset".to_string(),
-                description: "Compute descriptive statistics for all columns in a dataset.".to_string(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "dataset": {"type": "string", "description": "Name of the dataset"}
-                    },
-                    "required": ["dataset"]
-                }),
-            },
-            ToolDefinition {
-                name: "head_dataset".to_string(),
-                description: "Show the first N rows of a dataset.".to_string(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "dataset": {"type": "string", "description": "Name of the dataset"},
-                        "n": {"type": "integer", "description": "Number of rows (default: 5)"}
-                    },
-                    "required": ["dataset"]
-                }),
-            },
-            ToolDefinition {
-                name: "data_quality_profile".to_string(),
-                description: "Generate a comprehensive data quality profile for LLM-assisted data cleaning. Returns column-level statistics (nulls, uniques, types), numeric outlier detection, string pattern analysis, and automated issue detection.".to_string(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "dataset": {"type": "string", "description": "Name of the dataset to profile"}
-                    },
-                    "required": ["dataset"]
-                }),
-            },
-            ToolDefinition {
-                name: "compute_correlation".to_string(),
-                description: "Compute correlation matrix for numeric columns.".to_string(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "dataset": {"type": "string", "description": "Name of the dataset"}
-                    },
-                    "required": ["dataset"]
-                }),
-            },
-            // Regression tools
-            ToolDefinition {
-                name: "regression_ols".to_string(),
-                description: "Run OLS regression with robust standard errors (HC0-HC3).".to_string(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "dataset": {"type": "string"},
-                        "y": {"type": "string", "description": "Dependent variable"},
-                        "x": {"type": "array", "items": {"type": "string"}, "description": "Independent variables"}
-                    },
-                    "required": ["dataset", "y", "x"]
-                }),
-            },
-            ToolDefinition {
-                name: "regression_diagnostics".to_string(),
-                description: "Run regression diagnostics (Jarque-Bera, Breusch-Pagan, Durbin-Watson, VIF).".to_string(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "dataset": {"type": "string"},
-                        "y": {"type": "string"},
-                        "x": {"type": "array", "items": {"type": "string"}}
-                    },
-                    "required": ["dataset", "y", "x"]
-                }),
-            },
-            ToolDefinition {
-                name: "regression_clustered".to_string(),
-                description: "Run OLS with clustered standard errors.".to_string(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "dataset": {"type": "string"},
-                        "y": {"type": "string"},
-                        "x": {"type": "array", "items": {"type": "string"}},
-                        "cluster1": {"type": "string"},
-                        "cluster2": {"type": "string"}
-                    },
-                    "required": ["dataset", "y", "x", "cluster1"]
-                }),
-            },
-            // Panel econometrics
-            ToolDefinition {
-                name: "panel_fixed_effects".to_string(),
-                description: "Run fixed effects panel regression.".to_string(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "dataset": {"type": "string"},
-                        "y": {"type": "string"},
-                        "x": {"type": "array", "items": {"type": "string"}},
-                        "entity_col": {"type": "string"},
-                        "time_col": {"type": "string"}
-                    },
-                    "required": ["dataset", "y", "x", "entity_col"]
-                }),
-            },
-            ToolDefinition {
-                name: "panel_random_effects".to_string(),
-                description: "Run random effects panel regression.".to_string(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "dataset": {"type": "string"},
-                        "y": {"type": "string"},
-                        "x": {"type": "array", "items": {"type": "string"}},
-                        "entity_col": {"type": "string"}
-                    },
-                    "required": ["dataset", "y", "x", "entity_col"]
-                }),
-            },
-            ToolDefinition {
-                name: "panel_hdfe".to_string(),
-                description: "Run high-dimensional fixed effects regression.".to_string(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "dataset": {"type": "string"},
-                        "y": {"type": "string"},
-                        "x": {"type": "array", "items": {"type": "string"}},
-                        "fe": {"type": "array", "items": {"type": "string"}}
-                    },
-                    "required": ["dataset", "y", "x", "fe"]
-                }),
-            },
-            ToolDefinition {
-                name: "hausman_test".to_string(),
-                description: "Perform Hausman test for FE vs RE specification.".to_string(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "dataset": {"type": "string"},
-                        "y": {"type": "string"},
-                        "x": {"type": "array", "items": {"type": "string"}},
-                        "entity_col": {"type": "string"}
-                    },
-                    "required": ["dataset", "y", "x", "entity_col"]
-                }),
-            },
-            ToolDefinition {
-                name: "panel_gmm".to_string(),
-                description: "Run Arellano-Bond or System GMM for dynamic panel data models.".to_string(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "dataset": {"type": "string"},
-                        "y": {"type": "string"},
-                        "x": {"type": "array", "items": {"type": "string"}},
-                        "entity_var": {"type": "string"},
-                        "time_var": {"type": "string"},
-                        "lags": {"type": "integer", "default": 1},
-                        "transform": {"type": "string", "enum": ["difference", "system"], "default": "difference"},
-                        "step": {"type": "string", "enum": ["onestep", "twostep"], "default": "twostep"},
-                        "max_lag": {"type": "integer"},
-                        "min_lag": {"type": "integer", "default": 2},
-                        "collapse": {"type": "boolean", "default": false},
-                        "robust": {"type": "boolean", "default": true}
-                    },
-                    "required": ["dataset", "y", "x", "entity_var", "time_var"]
-                }),
-            },
-            // Causal inference
-            ToolDefinition {
-                name: "iv_2sls".to_string(),
-                description: "Run two-stage least squares regression.".to_string(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "dataset": {"type": "string"},
-                        "y": {"type": "string"},
-                        "endogenous": {"type": "array", "items": {"type": "string"}},
-                        "instruments": {"type": "array", "items": {"type": "string"}},
-                        "exogenous": {"type": "array", "items": {"type": "string"}}
-                    },
-                    "required": ["dataset", "y", "endogenous", "instruments"]
-                }),
-            },
-            ToolDefinition {
-                name: "iv_first_stage".to_string(),
-                description: "Run first-stage diagnostics for IV regression.".to_string(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "dataset": {"type": "string"},
-                        "endogenous": {"type": "string"},
-                        "instruments": {"type": "array", "items": {"type": "string"}},
-                        "exogenous": {"type": "array", "items": {"type": "string"}}
-                    },
-                    "required": ["dataset", "endogenous", "instruments"]
-                }),
-            },
-            ToolDefinition {
-                name: "iv_sargan_test".to_string(),
-                description: "Run Sargan test of overidentifying restrictions for IV/2SLS. Tests whether instruments are valid (uncorrelated with the error term). Requires more instruments than endogenous variables.".to_string(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "dataset": {"type": "string", "description": "Name of the dataset"},
-                        "y": {"type": "string", "description": "Dependent variable name"},
-                        "x_exog": {"type": "array", "items": {"type": "string"}, "description": "Exogenous variables (may be empty)"},
-                        "x_endog": {"type": "array", "items": {"type": "string"}, "description": "Endogenous variables to be instrumented"},
-                        "instruments": {"type": "array", "items": {"type": "string"}, "description": "Instrumental variables (must exceed x_endog count)"}
-                    },
-                    "required": ["dataset", "y", "x_endog", "instruments"]
-                }),
-            },
-            ToolDefinition {
-                name: "diff_in_diff".to_string(),
-                description: "Run difference-in-differences analysis.".to_string(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "dataset": {"type": "string"},
-                        "y": {"type": "string"},
-                        "treatment_col": {"type": "string"},
-                        "time_col": {"type": "string"},
-                        "treatment_time": {"type": "number"}
-                    },
-                    "required": ["dataset", "y", "treatment_col", "time_col", "treatment_time"]
-                }),
-            },
-            // Discrete choice
-            ToolDefinition {
-                name: "logit".to_string(),
-                description: "Run logistic regression.".to_string(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "dataset": {"type": "string"},
-                        "y": {"type": "string"},
-                        "x": {"type": "array", "items": {"type": "string"}}
-                    },
-                    "required": ["dataset", "y", "x"]
-                }),
-            },
-            ToolDefinition {
-                name: "probit".to_string(),
-                description: "Run probit regression.".to_string(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "dataset": {"type": "string"},
-                        "y": {"type": "string"},
-                        "x": {"type": "array", "items": {"type": "string"}}
-                    },
-                    "required": ["dataset", "y", "x"]
-                }),
-            },
-            // Time series
-            ToolDefinition {
-                name: "ts_var".to_string(),
-                description: "Estimate Vector Autoregression model.".to_string(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "dataset": {"type": "string"},
-                        "columns": {"type": "array", "items": {"type": "string"}},
-                        "lags": {"type": "integer"}
-                    },
-                    "required": ["dataset", "columns", "lags"]
-                }),
-            },
-            ToolDefinition {
-                name: "ts_arima_fit".to_string(),
-                description: "Fit ARIMA model to time series.".to_string(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "dataset": {"type": "string"},
-                        "column": {"type": "string"},
-                        "p": {"type": "integer"},
-                        "d": {"type": "integer"},
-                        "q": {"type": "integer"}
-                    },
-                    "required": ["dataset", "column", "p", "d", "q"]
-                }),
-            },
-            // Machine learning
-            ToolDefinition {
-                name: "ml_kmeans".to_string(),
-                description: "Run K-means clustering.".to_string(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "dataset": {"type": "string"},
-                        "columns": {"type": "array", "items": {"type": "string"}},
-                        "k": {"type": "integer"}
-                    },
-                    "required": ["dataset", "columns", "k"]
-                }),
-            },
-            ToolDefinition {
-                name: "ml_pca".to_string(),
-                description: "Run Principal Component Analysis.".to_string(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "dataset": {"type": "string"},
-                        "columns": {"type": "array", "items": {"type": "string"}},
-                        "n_components": {"type": "integer"}
-                    },
-                    "required": ["dataset", "columns"]
-                }),
-            },
-            ToolDefinition {
-                name: "ml_cmdscale".to_string(),
-                description: "Classical Multidimensional Scaling for embedding distances into Euclidean space.".to_string(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "dataset": {"type": "string"},
-                        "columns": {"type": "array", "items": {"type": "string"}},
-                        "k": {"type": "integer"},
-                        "is_distance_matrix": {"type": "boolean"}
-                    },
-                    "required": ["dataset", "columns"]
-                }),
-            },
-            ToolDefinition {
-                name: "ml_cutree".to_string(),
-                description: "Cut hierarchical clustering dendrogram into groups.".to_string(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "dataset": {"type": "string"},
-                        "columns": {"type": "array", "items": {"type": "string"}},
-                        "k": {"type": "integer"},
-                        "cut_height": {"type": "number"},
-                        "linkage": {"type": "string"}
-                    },
-                    "required": ["dataset", "columns"]
-                }),
-            },
-            // Visualization
-            ToolDefinition {
-                name: "viz_histogram".to_string(),
-                description: "Create a histogram plot.".to_string(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "dataset": {"type": "string"},
-                        "column": {"type": "string"},
-                        "bins": {"type": "integer"}
-                    },
-                    "required": ["dataset", "column"]
-                }),
-            },
-            ToolDefinition {
-                name: "viz_scatter".to_string(),
-                description: "Create a scatter plot.".to_string(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "dataset": {"type": "string"},
-                        "x": {"type": "string"},
-                        "y": {"type": "string"}
-                    },
-                    "required": ["dataset", "x", "y"]
-                }),
-            },
-            ToolDefinition {
-                name: "viz_line".to_string(),
-                description: "Create a line chart.".to_string(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "dataset": {"type": "string"},
-                        "x": {"type": "string"},
-                        "y": {"type": "string"}
-                    },
-                    "required": ["dataset", "x", "y"]
-                }),
-            },
-            ToolDefinition {
-                name: "viz_heatmap".to_string(),
-                description: "Create a correlation heatmap.".to_string(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "dataset": {"type": "string"}
-                    },
-                    "required": ["dataset"]
-                }),
-            },
-            // Interactive Visualization tools (HTML/Plotly output)
-            ToolDefinition {
-                name: "viz_scatter_interactive".to_string(),
-                description: "Create an interactive scatter plot (HTML with Plotly.js).".to_string(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "dataset": {"type": "string"},
-                        "x_column": {"type": "string"},
-                        "y_column": {"type": "string"},
-                        "group_column": {"type": "string"},
-                        "title": {"type": "string"}
-                    },
-                    "required": ["dataset", "x_column", "y_column"]
-                }),
-            },
-            ToolDefinition {
-                name: "viz_histogram_interactive".to_string(),
-                description: "Create an interactive histogram (HTML with Plotly.js).".to_string(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "dataset": {"type": "string"},
-                        "column": {"type": "string"},
-                        "group_column": {"type": "string"},
-                        "title": {"type": "string"}
-                    },
-                    "required": ["dataset", "column"]
-                }),
-            },
-            ToolDefinition {
-                name: "viz_line_interactive".to_string(),
-                description: "Create an interactive line chart (HTML with Plotly.js).".to_string(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "dataset": {"type": "string"},
-                        "x_column": {"type": "string"},
-                        "y_column": {"type": "string"},
-                        "title": {"type": "string"}
-                    },
-                    "required": ["dataset", "x_column", "y_column"]
-                }),
-            },
-            // Database tools
-            ToolDefinition {
-                name: "db_sqlite_query".to_string(),
-                description: "Execute SQL query on SQLite database.".to_string(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "database": {"type": "string"},
-                        "query": {"type": "string"},
-                        "name": {"type": "string"}
-                    },
-                    "required": ["database", "query"]
-                }),
-            },
-            ToolDefinition {
-                name: "db_duckdb_query".to_string(),
-                description: "Execute SQL query on DuckDB database.".to_string(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "database": {"type": "string"},
-                        "query": {"type": "string"},
-                        "name": {"type": "string"}
-                    },
-                    "required": ["database", "query"]
-                }),
-            },
-            ToolDefinition {
-                name: "db_query_file".to_string(),
-                description: "Execute SQL query directly on a Parquet or CSV file using DuckDB. Use {file} as placeholder for the file path.".to_string(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "file_path": {"type": "string", "description": "Path to the Parquet or CSV file"},
-                        "query": {"type": "string", "description": "SQL query with {file} placeholder for the file path"},
-                        "name": {"type": "string", "description": "Optional name for the resulting dataset"}
-                    },
-                    "required": ["file_path", "query"]
-                }),
-            },
-            // Data munging tools
-            ToolDefinition {
-                name: "munge_filter".to_string(),
-                description: "Filter rows in a dataset based on a condition. Supports operators: eq, ne, gt, ge, lt, le, contains, startswith, endswith.".to_string(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "dataset": {"type": "string", "description": "Name of the dataset to filter"},
-                        "column": {"type": "string", "description": "Column to filter on"},
-                        "operator": {"type": "string", "description": "Comparison operator (eq, ne, gt, ge, lt, le, contains, startswith, endswith)"},
-                        "value": {"type": "string", "description": "Value to compare against"},
-                        "output_name": {"type": "string", "description": "Optional name for the resulting dataset"}
-                    },
-                    "required": ["dataset", "column", "operator", "value"]
-                }),
-            },
-            ToolDefinition {
-                name: "munge_select".to_string(),
-                description: "Select specific columns from a dataset.".to_string(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "dataset": {"type": "string", "description": "Name of the dataset"},
-                        "columns": {"type": "array", "items": {"type": "string"}, "description": "Columns to select"},
-                        "output_name": {"type": "string", "description": "Optional name for the resulting dataset"}
-                    },
-                    "required": ["dataset", "columns"]
-                }),
-            },
-            ToolDefinition {
-                name: "munge_drop_columns".to_string(),
-                description: "Drop columns from a dataset.".to_string(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "dataset": {"type": "string", "description": "Name of the dataset"},
-                        "columns": {"type": "array", "items": {"type": "string"}, "description": "Columns to drop"},
-                        "output_name": {"type": "string", "description": "Optional name for the resulting dataset"}
-                    },
-                    "required": ["dataset", "columns"]
-                }),
-            },
-            ToolDefinition {
-                name: "munge_rename".to_string(),
-                description: "Rename columns in a dataset.".to_string(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "dataset": {"type": "string", "description": "Name of the dataset"},
-                        "renames": {"type": "object", "additionalProperties": {"type": "string"}, "description": "Map of old names to new names"},
-                        "output_name": {"type": "string", "description": "Optional name for the resulting dataset"}
-                    },
-                    "required": ["dataset", "renames"]
-                }),
-            },
-            ToolDefinition {
-                name: "munge_sort".to_string(),
-                description: "Sort a dataset by one or more columns.".to_string(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "dataset": {"type": "string", "description": "Name of the dataset"},
-                        "columns": {"type": "array", "items": {"type": "string"}, "description": "Columns to sort by"},
-                        "descending": {"type": "boolean", "description": "Sort in descending order (default: false)"},
-                        "output_name": {"type": "string", "description": "Optional name for the resulting dataset"}
-                    },
-                    "required": ["dataset", "columns"]
-                }),
-            },
-            ToolDefinition {
-                name: "munge_mutate".to_string(),
-                description: "Create a new column or modify an existing one using an expression. Supports arithmetic operations on columns.".to_string(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "dataset": {"type": "string", "description": "Name of the dataset"},
-                        "new_column": {"type": "string", "description": "Name of the new column"},
-                        "expression": {"type": "string", "description": "Expression type: 'copy', 'constant', 'add', 'subtract', 'multiply', 'divide'"},
-                        "left": {"type": "string", "description": "Left operand (column name or constant value)"},
-                        "right": {"type": "string", "description": "Right operand (column name, for arithmetic operations)"},
-                        "output_name": {"type": "string", "description": "Optional name for the resulting dataset"}
-                    },
-                    "required": ["dataset", "new_column", "expression", "left"]
-                }),
-            },
-            ToolDefinition {
-                name: "munge_sample".to_string(),
-                description: "Take a random sample of rows from a dataset.".to_string(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "dataset": {"type": "string", "description": "Name of the dataset"},
-                        "n": {"type": "integer", "description": "Number of rows to sample"},
-                        "with_replacement": {"type": "boolean", "description": "Sample with replacement (default: false)"},
-                        "seed": {"type": "integer", "description": "Optional random seed for reproducibility"},
-                        "output_name": {"type": "string", "description": "Optional name for the resulting dataset"}
-                    },
-                    "required": ["dataset", "n"]
-                }),
-            },
-            ToolDefinition {
-                name: "munge_join".to_string(),
-                description: "Join two datasets on key columns. Supports left, right, inner, and full outer joins.".to_string(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "left_dataset": {"type": "string", "description": "Name of the left dataset"},
-                        "right_dataset": {"type": "string", "description": "Name of the right dataset"},
-                        "on": {"type": "array", "items": {"type": "string"}, "description": "Columns to join on"},
-                        "right_on": {"type": "array", "items": {"type": "string"}, "description": "Right key columns if different from left"},
-                        "join_type": {"type": "string", "description": "Join type: left, right, inner, full (default: left)"},
-                        "suffix": {"type": "string", "description": "Suffix for duplicate column names (default: _right)"},
-                        "output_name": {"type": "string", "description": "Optional name for the resulting dataset"}
-                    },
-                    "required": ["left_dataset", "right_dataset", "on"]
-                }),
-            },
-            ToolDefinition {
-                name: "munge_concat".to_string(),
-                description: "Concatenate multiple datasets vertically (row-bind).".to_string(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "datasets": {"type": "array", "items": {"type": "string"}, "description": "Names of datasets to concatenate"},
-                        "output_name": {"type": "string", "description": "Optional name for the resulting dataset"}
-                    },
-                    "required": ["datasets"]
-                }),
-            },
-            ToolDefinition {
-                name: "munge_group_by".to_string(),
-                description: "Group dataset by columns and compute aggregations (sum, mean, count, min, max, std, var, first, last, median).".to_string(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "dataset": {"type": "string", "description": "Name of the dataset"},
-                        "by": {"type": "array", "items": {"type": "string"}, "description": "Columns to group by"},
-                        "aggs": {"type": "array", "items": {"type": "object"}, "description": "Aggregation specs: [{column, function}]"},
-                        "output_name": {"type": "string", "description": "Optional name for the resulting dataset"}
-                    },
-                    "required": ["dataset", "by", "aggs"]
-                }),
-            },
-            ToolDefinition {
-                name: "munge_value_counts".to_string(),
-                description: "Count occurrences of unique values in a column.".to_string(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "dataset": {"type": "string", "description": "Name of the dataset"},
-                        "column": {"type": "string", "description": "Column to count values in"},
-                        "output_name": {"type": "string", "description": "Optional name for the resulting dataset"}
-                    },
-                    "required": ["dataset", "column"]
-                }),
-            },
-            ToolDefinition {
-                name: "munge_pivot".to_string(),
-                description: "Pivot a dataset from long to wide format.".to_string(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "dataset": {"type": "string", "description": "Name of the dataset"},
-                        "index": {"type": "array", "items": {"type": "string"}, "description": "Columns to use as index (row identifiers)"},
-                        "on": {"type": "string", "description": "Column whose values become new column names"},
-                        "values": {"type": "string", "description": "Column containing values to fill the new columns"},
-                        "output_name": {"type": "string", "description": "Optional name for the resulting dataset"}
-                    },
-                    "required": ["dataset", "index", "on", "values"]
-                }),
-            },
-            ToolDefinition {
-                name: "munge_melt".to_string(),
-                description: "Melt a dataset from wide to long format (unpivot).".to_string(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "dataset": {"type": "string", "description": "Name of the dataset"},
-                        "id_vars": {"type": "array", "items": {"type": "string"}, "description": "Columns to keep as identifiers"},
-                        "value_vars": {"type": "array", "items": {"type": "string"}, "description": "Columns to unpivot into rows"},
-                        "variable_name": {"type": "string", "description": "Name for the variable column (default: variable)"},
-                        "value_name": {"type": "string", "description": "Name for the value column (default: value)"},
-                        "output_name": {"type": "string", "description": "Optional name for the resulting dataset"}
-                    },
-                    "required": ["dataset", "id_vars", "value_vars"]
-                }),
-            },
-            ToolDefinition {
-                name: "munge_drop_na".to_string(),
-                description: "Drop rows with missing values.".to_string(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "dataset": {"type": "string", "description": "Name of the dataset"},
-                        "columns": {"type": "array", "items": {"type": "string"}, "description": "Columns to check for NA (all if not specified)"},
-                        "how": {"type": "string", "description": "How to drop: 'any' or 'all' (default: any)"},
-                        "output_name": {"type": "string", "description": "Optional name for the resulting dataset"}
-                    },
-                    "required": ["dataset"]
-                }),
-            },
-            ToolDefinition {
-                name: "munge_fill_na".to_string(),
-                description: "Fill missing values using a strategy (mean, median, constant, forward, backward, zero).".to_string(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "dataset": {"type": "string", "description": "Name of the dataset"},
-                        "columns": {"type": "array", "items": {"type": "string"}, "description": "Columns to fill (all if not specified)"},
-                        "strategy": {"type": "string", "description": "Fill strategy: mean, median, constant, forward, backward, zero"},
-                        "constant_value": {"type": "number", "description": "Value to use for constant strategy"},
-                        "output_name": {"type": "string", "description": "Optional name for the resulting dataset"}
-                    },
-                    "required": ["dataset", "strategy"]
-                }),
-            },
-            ToolDefinition {
-                name: "munge_deduplicate".to_string(),
-                description: "Remove duplicate rows from a dataset.".to_string(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "dataset": {"type": "string", "description": "Name of the dataset"},
-                        "subset": {"type": "array", "items": {"type": "string"}, "description": "Columns to consider for duplicates (all if not specified)"},
-                        "keep": {"type": "string", "description": "Which duplicate to keep: 'first', 'last', or 'none' (default: first)"},
-                        "output_name": {"type": "string", "description": "Optional name for the resulting dataset"}
-                    },
-                    "required": ["dataset"]
-                }),
-            },
-            ToolDefinition {
-                name: "munge_lag_lead".to_string(),
-                description: "Create lag or lead of a column (shift values forward or backward).".to_string(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "dataset": {"type": "string", "description": "Name of the dataset"},
-                        "column": {"type": "string", "description": "Column to lag or lead"},
-                        "periods": {"type": "integer", "description": "Number of periods to shift"},
-                        "operation": {"type": "string", "description": "Operation: 'lag' or 'lead'"},
-                        "group_by": {"type": "array", "items": {"type": "string"}, "description": "Optional group by columns for panel data"},
-                        "output_name": {"type": "string", "description": "Optional name for the resulting dataset"}
-                    },
-                    "required": ["dataset", "column", "periods", "operation"]
-                }),
-            },
-            ToolDefinition {
-                name: "munge_diff".to_string(),
-                description: "Compute difference or percentage change of a column.".to_string(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "dataset": {"type": "string", "description": "Name of the dataset"},
-                        "column": {"type": "string", "description": "Column to difference"},
-                        "periods": {"type": "integer", "description": "Number of periods for differencing (default: 1)"},
-                        "pct_change": {"type": "boolean", "description": "Compute percentage change instead of difference (default: false)"},
-                        "output_name": {"type": "string", "description": "Optional name for the resulting dataset"}
-                    },
-                    "required": ["dataset", "column"]
-                }),
-            },
-            ToolDefinition {
-                name: "munge_standardize".to_string(),
-                description: "Standardize (z-score) or normalize (0-1) columns.".to_string(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "dataset": {"type": "string", "description": "Name of the dataset"},
-                        "columns": {"type": "array", "items": {"type": "string"}, "description": "Columns to standardize"},
-                        "method": {"type": "string", "description": "Method: 'standardize' (z-score) or 'normalize' (0-1)"},
-                        "output_name": {"type": "string", "description": "Optional name for the resulting dataset"}
-                    },
-                    "required": ["dataset", "columns"]
-                }),
-            },
-            ToolDefinition {
-                name: "munge_bin".to_string(),
-                description: "Bin a continuous column into discrete categories.".to_string(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "dataset": {"type": "string", "description": "Name of the dataset"},
-                        "column": {"type": "string", "description": "Column to bin"},
-                        "strategy": {"type": "string", "description": "Binning strategy: 'equal_width', 'quantile', or 'custom'"},
-                        "n_bins": {"type": "integer", "description": "Number of bins for equal_width or quantile strategies"},
-                        "breaks": {"type": "array", "items": {"type": "number"}, "description": "Custom bin edges for custom strategy"},
-                        "output_name": {"type": "string", "description": "Optional name for the resulting dataset"}
-                    },
-                    "required": ["dataset", "column", "strategy"]
-                }),
-            },
-            ToolDefinition {
-                name: "munge_one_hot_encode".to_string(),
-                description: "One-hot encode a categorical column into dummy variables.".to_string(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "dataset": {"type": "string", "description": "Name of the dataset"},
-                        "column": {"type": "string", "description": "Column to one-hot encode"},
-                        "drop_first": {"type": "boolean", "description": "Drop first category to avoid multicollinearity (default: false)"},
-                        "output_name": {"type": "string", "description": "Optional name for the resulting dataset"}
-                    },
-                    "required": ["dataset", "column"]
-                }),
-            },
-            // Tool discovery (meta-tools for scaling beyond 128 tools)
-            ToolDefinition {
-                name: "search_tools".to_string(),
-                description: "Search for analytics tools by natural language description. Use this when you need to find the right tool for an analysis task. Returns matching tools with descriptions and relevance scores.".to_string(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "query": {"type": "string", "description": "Natural language description of the analysis task"},
-                        "category": {"type": "string", "description": "Optional category filter (data, regression, panel, causal, timeseries, etc.)"},
-                        "limit": {"type": "integer", "description": "Maximum tools to return (default: 10, max: 25)"}
-                    },
-                    "required": ["query"]
-                }),
-            },
-            ToolDefinition {
-                name: "list_tool_categories".to_string(),
-                description: "List all available tool categories with descriptions and tool counts. Use this to understand what types of analyses are available.".to_string(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "include_counts": {"type": "boolean", "description": "Include tool counts per category (default: true)"}
+        self.tool_router
+            .list_all()
+            .into_iter()
+            .map(|tool| ToolDefinition {
+                name: tool.name.to_string(),
+                description: tool.description.unwrap_or_default().to_string(),
+                input_schema: serde_json::to_value(&tool.input_schema).unwrap_or_default(),
+            })
+            .collect()
+    }
+
+
+    /// List tools filtered for LLM function calling (Tier 1 only).
+    /// Auto-generates definitions from the router's JsonSchema derives.
+    #[cfg(feature = "http")]
+    pub fn list_tools_for_llm(&self) -> Vec<crate::llm::ToolDefinition> {
+        /// Convert `prefixItems` (JSON Schema draft 2020-12, used by schemars for tuples)
+        /// to `items` (draft 7, required by OpenAI). Recurses through the entire schema.
+        fn fix_prefix_items(value: &mut serde_json::Value) {
+            if let Some(obj) = value.as_object_mut() {
+                // If this object has prefixItems but no items, convert it
+                if obj.contains_key("prefixItems") && !obj.contains_key("items") {
+                    if let Some(prefix) = obj.remove("prefixItems") {
+                        // For tuples like (i64, i64), all items share a type — use first
+                        if let Some(first) = prefix.as_array().and_then(|a| a.first()) {
+                            obj.insert("items".to_string(), first.clone());
+                        }
+                        // Set type to array if not already
+                        obj.entry("type").or_insert(serde_json::json!("array"));
                     }
-                }),
-            },
-            ToolDefinition {
-                name: "tool_info".to_string(),
-                description: "Get detailed information about a specific tool including its full description, parameters, related tools, and R equivalent.".to_string(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "tool_name": {"type": "string", "description": "Name of the tool to get information about"}
-                    },
-                    "required": ["tool_name"]
-                }),
-            },
-        ]
+                }
+                // Recurse into all values
+                for v in obj.values_mut() {
+                    fix_prefix_items(v);
+                }
+            } else if let Some(arr) = value.as_array_mut() {
+                for v in arr.iter_mut() {
+                    fix_prefix_items(v);
+                }
+            }
+        }
+
+        use crate::llm::{ToolDefinition, TIER1_TOOLS, INTERNAL_TOOLS};
+
+        self.tool_router
+            .list_all()
+            .into_iter()
+            .filter(|t| {
+                let name = t.name.as_ref();
+                !INTERNAL_TOOLS.contains(&name) && TIER1_TOOLS.contains(&name)
+            })
+            .map(|t| {
+                let mut params = serde_json::to_value(&t.input_schema).unwrap_or_default();
+                // Fix JSON Schema compatibility: convert prefixItems (draft 2020-12)
+                // to items (draft 7) for OpenAI API compatibility.
+                fix_prefix_items(&mut params);
+                ToolDefinition {
+                    name: t.name.to_string(),
+                    description: t.description.unwrap_or_default().to_string(),
+                    parameters: params,
+                }
+            })
+            .collect()
     }
 
     /// Call a tool by name with session context (for HTTP transport).
-    /// This creates a session-scoped server and dispatches the tool call.
+    /// Dispatches to all registered tool handler methods directly, bypassing the
+    /// ToolRouter (which requires a Peer that cannot be constructed outside rmcp).
     #[cfg(feature = "http")]
     pub async fn call_tool_with_session(
         &self,
@@ -1539,8 +743,6 @@ impl AnalyticsServer {
                 .content
                 .into_iter()
                 .filter_map(|c| {
-                    // Content in rmcp is an Annotated<RawContent>
-                    // We need to access the inner raw content
                     match &c.raw {
                         RawContent::Text(text_content) => Some(ContentItem::Text {
                             text: text_content.text.clone(),
@@ -1573,378 +775,335 @@ impl AnalyticsServer {
             }
         }
 
-        // Parse arguments and dispatch to the appropriate tool method
-        // For now, we support a subset of the most commonly used tools
-        let result = match tool_name {
-            "list_datasets" => session_server.list_datasets().await,
-            "load_dataset" => {
-                let req: LoadDatasetRequest = serde_json::from_value(arguments)
-                    .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server.load_dataset(Parameters(req)).await
-            }
-            "upload_dataset" => {
-                let req: UploadDatasetRequest = serde_json::from_value(arguments)
-                    .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server.upload_dataset(Parameters(req)).await
-            }
-            "create_dataset" => {
-                let req: CreateDatasetRequest = serde_json::from_value(arguments)
-                    .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server.create_dataset(Parameters(req)).await
-            }
-            "describe_dataset" => {
-                let req: DescribeDatasetRequest = serde_json::from_value(arguments)
-                    .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server.describe_dataset(Parameters(req)).await
-            }
-            "head_dataset" => {
-                let req: HeadDatasetRequest = serde_json::from_value(arguments)
-                    .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server.head_dataset(Parameters(req)).await
-            }
-            "data_quality_profile" => {
-                let req: DataQualityProfileRequest = serde_json::from_value(arguments)
-                    .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server.data_quality_profile(Parameters(req)).await
-            }
-            "preview_cleaning" => {
-                let req: PreviewCleaningRequest = serde_json::from_value(arguments)
-                    .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server.preview_cleaning(Parameters(req)).await
-            }
-            "verify_cleaning" => {
-                let req: VerifyCleaningRequest = serde_json::from_value(arguments)
-                    .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server.verify_cleaning(Parameters(req)).await
-            }
-            "compute_correlation" => {
-                let req: CorrelationRequest = serde_json::from_value(arguments)
-                    .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server.compute_correlation(Parameters(req)).await
-            }
-            "regression_ols" => {
-                let req: OlsRequest = serde_json::from_value(arguments)
-                    .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server.regression_ols(Parameters(req)).await
-            }
-            "regression_diagnostics" => {
-                let req: DiagnosticsRequest = serde_json::from_value(arguments)
-                    .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server.regression_diagnostics(Parameters(req)).await
-            }
-            "panel_fixed_effects" => {
-                let req: PanelFERequest = serde_json::from_value(arguments)
-                    .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server.panel_fixed_effects(Parameters(req)).await
-            }
-            "panel_random_effects" => {
-                let req: PanelRERequest = serde_json::from_value(arguments)
-                    .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server.panel_random_effects(Parameters(req)).await
-            }
-            "panel_gmm" => {
-                let req: GmmRequest = serde_json::from_value(arguments)
-                    .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server.panel_gmm(Parameters(req)).await
-            }
-            "iv_2sls" => {
-                let req: IV2SLSRequest = serde_json::from_value(arguments)
-                    .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server.iv_2sls(Parameters(req)).await
-            }
-            "diff_in_diff" => {
-                let req: DiDRequest = serde_json::from_value(arguments)
-                    .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server.diff_in_diff(Parameters(req)).await
-            }
-            "treatment_ipw" => {
-                let req: IpwRequest = serde_json::from_value(arguments)
-                    .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server.treatment_ipw(Parameters(req)).await
-            }
-            "treatment_doubly_robust" => {
-                let req: DoublyRobustRequest = serde_json::from_value(arguments)
-                    .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server
-                    .treatment_doubly_robust(Parameters(req))
-                    .await
-            }
-            "treatment_tmle" => {
-                let req: TmleRequest = serde_json::from_value(arguments)
-                    .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server.treatment_tmle(Parameters(req)).await
-            }
-            "collaborative_tmle" => {
-                let req: CTmleRequest = serde_json::from_value(arguments)
-                    .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server.collaborative_tmle(Parameters(req)).await
-            }
-            "ltmle" => {
-                let req: LtmleRequest = serde_json::from_value(arguments)
-                    .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server.ltmle(Parameters(req)).await
-            }
-            "regression_standardization" => {
-                let req: StdRegRequest = serde_json::from_value(arguments)
-                    .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server
-                    .regression_standardization(Parameters(req))
-                    .await
-            }
-            "gformula" => {
-                let req: GFormulaRequest = serde_json::from_value(arguments)
-                    .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server.gformula(Parameters(req)).await
-            }
-            "mediation_analysis" => {
-                let req: MediationRequest = serde_json::from_value(arguments)
-                    .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server.mediation_analysis(Parameters(req)).await
-            }
-            "natural_effects_mediation" => {
-                let req: NaturalEffectsRequest = serde_json::from_value(arguments)
-                    .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server
-                    .natural_effects_mediation(Parameters(req))
-                    .await
-            }
-            "logit" => {
-                let req: LogitRequest = serde_json::from_value(arguments)
-                    .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server.logit(Parameters(req)).await
-            }
-            "probit" => {
-                let req: ProbitRequest = serde_json::from_value(arguments)
-                    .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server.probit(Parameters(req)).await
-            }
-            "multinom" => {
-                let req: MultinomRequest = serde_json::from_value(arguments)
-                    .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server.multinom(Parameters(req)).await
-            }
-            "ordered_model" => {
-                let req: OrderedRequest = serde_json::from_value(arguments)
-                    .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server.ordered_model(Parameters(req)).await
-            }
-            "negbin" => {
-                let req: NegBinRequest = serde_json::from_value(arguments)
-                    .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server.negbin(Parameters(req)).await
-            }
-            "zeroinfl" => {
-                let req: ZeroInflRequest = serde_json::from_value(arguments)
-                    .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server.zeroinfl(Parameters(req)).await
-            }
-            "ml_kmeans" => {
-                let req: KMeansRequest = serde_json::from_value(arguments)
-                    .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server.ml_kmeans(Parameters(req)).await
-            }
-            "ml_pca" => {
-                let req: PCARequest = serde_json::from_value(arguments)
-                    .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server.ml_pca(Parameters(req)).await
-            }
-            "ml_cmdscale" => {
-                let req: CmdscaleRequest = serde_json::from_value(arguments)
-                    .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server.ml_cmdscale(Parameters(req)).await
-            }
-            "ml_cutree" => {
-                let req: CutreeRequest = serde_json::from_value(arguments)
-                    .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server.ml_cutree(Parameters(req)).await
-            }
-            "viz_histogram" => {
-                let req: HistogramRequest = serde_json::from_value(arguments)
-                    .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server.viz_histogram(Parameters(req)).await
-            }
-            "viz_scatter" => {
-                let req: ScatterPlotRequest = serde_json::from_value(arguments)
-                    .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server.viz_scatter(Parameters(req)).await
-            }
-            "viz_line" => {
-                let req: LineChartRequest = serde_json::from_value(arguments)
-                    .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server.viz_line(Parameters(req)).await
-            }
-            "viz_heatmap" => {
-                let req: HeatmapRequest = serde_json::from_value(arguments)
-                    .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server.viz_heatmap(Parameters(req)).await
-            }
-            "viz_scatter_interactive" => {
-                let req: ScatterInteractiveRequest = serde_json::from_value(arguments)
-                    .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server
-                    .viz_scatter_interactive(Parameters(req))
-                    .await
-            }
-            "viz_histogram_interactive" => {
-                let req: HistogramInteractiveRequest = serde_json::from_value(arguments)
-                    .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server
-                    .viz_histogram_interactive(Parameters(req))
-                    .await
-            }
-            "viz_line_interactive" => {
-                let req: LineInteractiveRequest = serde_json::from_value(arguments)
-                    .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server.viz_line_interactive(Parameters(req)).await
-            }
-            "db_sqlite_query" => {
-                let req: SqliteQueryRequest = serde_json::from_value(arguments)
-                    .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server.db_sqlite_query(Parameters(req)).await
-            }
-            "db_duckdb_query" => {
-                let req: DuckDBQueryRequest = serde_json::from_value(arguments)
-                    .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server.db_duckdb_query(Parameters(req)).await
-            }
-            "db_query_file" => {
-                let req: DuckDBFileQueryRequest = serde_json::from_value(arguments)
-                    .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server.db_query_file(Parameters(req)).await
-            }
-            // Data munging tools
-            "munge_filter" => {
-                let req: FilterDatasetRequest = serde_json::from_value(arguments)
-                    .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server.munge_filter(Parameters(req)).await
-            }
-            "munge_select" => {
-                let req: SelectColumnsRequest = serde_json::from_value(arguments)
-                    .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server.munge_select(Parameters(req)).await
-            }
-            "munge_drop_columns" => {
-                let req: DropColumnsRequest = serde_json::from_value(arguments)
-                    .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server.munge_drop_columns(Parameters(req)).await
-            }
-            "munge_rename" => {
-                let req: RenameColumnsRequest = serde_json::from_value(arguments)
-                    .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server.munge_rename(Parameters(req)).await
-            }
-            "munge_sort" => {
-                let req: SortDatasetRequest = serde_json::from_value(arguments)
-                    .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server.munge_sort(Parameters(req)).await
-            }
-            "munge_mutate" => {
-                let req: MutateColumnRequest = serde_json::from_value(arguments)
-                    .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server.munge_mutate(Parameters(req)).await
-            }
-            "munge_sample" => {
-                let req: SampleDatasetRequest = serde_json::from_value(arguments)
-                    .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server.munge_sample(Parameters(req)).await
-            }
-            "munge_join" => {
-                let req: JoinDatasetsRequest = serde_json::from_value(arguments)
-                    .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server.munge_join(Parameters(req)).await
-            }
-            "munge_concat" => {
-                let req: ConcatDatasetsRequest = serde_json::from_value(arguments)
-                    .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server.munge_concat(Parameters(req)).await
-            }
-            "munge_group_by" => {
-                let req: GroupByRequest = serde_json::from_value(arguments)
-                    .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server.munge_group_by(Parameters(req)).await
-            }
-            "munge_value_counts" => {
-                let req: ValueCountsRequest = serde_json::from_value(arguments)
-                    .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server.munge_value_counts(Parameters(req)).await
-            }
-            "munge_pivot" => {
-                let req: PivotDatasetRequest = serde_json::from_value(arguments)
-                    .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server.munge_pivot(Parameters(req)).await
-            }
-            "munge_melt" => {
-                let req: MeltDatasetRequest = serde_json::from_value(arguments)
-                    .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server.munge_melt(Parameters(req)).await
-            }
-            "munge_drop_na" => {
-                let req: DropNaRequest = serde_json::from_value(arguments)
-                    .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server.munge_drop_na(Parameters(req)).await
-            }
-            "munge_fill_na" => {
-                let req: FillNaRequest = serde_json::from_value(arguments)
-                    .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server.munge_fill_na(Parameters(req)).await
-            }
-            "munge_deduplicate" => {
-                let req: DeduplicateRequest = serde_json::from_value(arguments)
-                    .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server.munge_deduplicate(Parameters(req)).await
-            }
-            "munge_lag_lead" => {
-                let req: LagLeadRequest = serde_json::from_value(arguments)
-                    .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server.munge_lag_lead(Parameters(req)).await
-            }
-            "munge_diff" => {
-                let req: DiffRequest = serde_json::from_value(arguments)
-                    .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server.munge_diff(Parameters(req)).await
-            }
-            "munge_standardize" => {
-                let req: StandardizeRequest = serde_json::from_value(arguments)
-                    .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server.munge_standardize(Parameters(req)).await
-            }
-            "munge_bin" => {
-                let req: BinColumnRequest = serde_json::from_value(arguments)
-                    .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server.munge_bin(Parameters(req)).await
-            }
-            "munge_one_hot_encode" => {
-                let req: OneHotEncodeRequest = serde_json::from_value(arguments)
-                    .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server.munge_one_hot_encode(Parameters(req)).await
-            }
-            // Tool discovery (meta-tools for scaling beyond 128 tools)
-            "search_tools" => {
-                let req: SearchToolsRequest = serde_json::from_value(arguments)
-                    .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server.search_tools(Parameters(req)).await
-            }
-            "list_tool_categories" => {
-                let req: ListToolCategoriesRequest = serde_json::from_value(arguments)
-                    .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server.list_tool_categories(Parameters(req)).await
-            }
-            "tool_info" => {
-                let req: crate::tools::handlers::search::ToolInfoRequest =
-                    serde_json::from_value(arguments)
-                        .map_err(|e| format!("Invalid arguments: {}", e))?;
-                session_server.tool_info(Parameters(req)).await
-            }
-            _ => {
-                return Err(format!("Unknown tool: {}", tool_name));
-            }
-        };
-
-        match result {
-            Ok(call_result) => Ok(convert_result(call_result)),
-            Err(e) => Err(format!("Tool execution failed: {:?}", e)),
+        // Macro to reduce boilerplate for dispatching to tool handler methods.
+        // Each arm deserializes the JSON arguments into the correct request type
+        // and calls the corresponding async method on the session server.
+        macro_rules! dispatch {
+            ($name:literal => no_params => $method:ident) => {
+                if tool_name == $name {
+                    let result = session_server.$method().await
+                        .map_err(|e| format!("Tool execution failed: {:?}", e))?;
+                    return Ok(convert_result(result));
+                }
+            };
+            ($name:literal => $req:ty => $method:ident) => {
+                if tool_name == $name {
+                    let request: $req = serde_json::from_value(arguments.clone())
+                        .map_err(|e| format!("Failed to parse arguments for '{}': {}", tool_name, e))?;
+                    let result = session_server.$method(Parameters(request)).await
+                        .map_err(|e| format!("Tool execution failed: {:?}", e))?;
+                    return Ok(convert_result(result));
+                }
+            };
         }
+
+        // ===== Data management =====
+        dispatch!("list_datasets" => no_params => list_datasets);
+        dispatch!("load_dataset" => LoadDatasetRequest => load_dataset);
+        dispatch!("export_dataset" => ExportDatasetRequest => export_dataset);
+        dispatch!("upload_dataset" => UploadDatasetRequest => upload_dataset);
+        dispatch!("create_dataset" => CreateDatasetRequest => create_dataset);
+        dispatch!("describe_dataset" => DescribeDatasetRequest => describe_dataset);
+        dispatch!("head_dataset" => HeadDatasetRequest => head_dataset);
+
+        // ===== Utils =====
+        dispatch!("set_seed" => SetSeedRequest => set_seed);
+        dispatch!("get_seed" => GetSeedRequest => get_seed);
+        dispatch!("server_stats" => ServerStatsRequest => server_stats);
+        dispatch!("generate_random_data" => GenerateRandomDataRequest => generate_random_data);
+        dispatch!("generate_report" => GenerateReportRequest => generate_report);
+        dispatch!("export_session" => ExportSessionRequest => export_session);
+        dispatch!("import_session" => ImportSessionRequest => import_session);
+
+        // ===== Database =====
+        dispatch!("db_sqlite_query" => SqliteQueryRequest => db_sqlite_query);
+        dispatch!("db_sqlite_tables" => SqliteListTablesRequest => db_sqlite_tables);
+        dispatch!("db_sqlite_schema" => SqliteSchemaRequest => db_sqlite_schema);
+        dispatch!("db_duckdb_query" => DuckDBQueryRequest => db_duckdb_query);
+        dispatch!("db_duckdb_tables" => DuckDBListTablesRequest => db_duckdb_tables);
+        dispatch!("db_duckdb_schema" => DuckDBSchemaRequest => db_duckdb_schema);
+        dispatch!("db_query_file" => DuckDBFileQueryRequest => db_query_file);
+
+        // ===== Visualization =====
+        dispatch!("viz_histogram" => HistogramRequest => viz_histogram);
+        dispatch!("viz_scatter" => ScatterPlotRequest => viz_scatter);
+        dispatch!("viz_line" => LineChartRequest => viz_line);
+        dispatch!("viz_boxplot" => BoxPlotRequest => viz_boxplot);
+        dispatch!("viz_heatmap" => HeatmapRequest => viz_heatmap);
+        dispatch!("viz_scatter_interactive" => ScatterInteractiveRequest => viz_scatter_interactive);
+        dispatch!("viz_histogram_interactive" => HistogramInteractiveRequest => viz_histogram_interactive);
+        dispatch!("viz_line_interactive" => LineInteractiveRequest => viz_line_interactive);
+        dispatch!("viz_event_study" => EventStudyRequest => viz_event_study);
+        dispatch!("viz_coefficient" => CoefficientPlotRequest => viz_coefficient);
+        dispatch!("viz_irf" => IrfPlotRequest => viz_irf);
+        dispatch!("viz_residual_diagnostics" => ResidualDiagnosticsRequest => viz_residual_diagnostics);
+        dispatch!("viz_dendrogram" => DendrogramRequest => viz_dendrogram);
+
+        // ===== Cleaning =====
+        dispatch!("data_quality_profile" => DataQualityProfileRequest => data_quality_profile);
+        dispatch!("preview_cleaning" => PreviewCleaningRequest => preview_cleaning);
+        dispatch!("verify_cleaning" => VerifyCleaningRequest => verify_cleaning);
+        dispatch!("cleaning_session_start" => CleaningSessionStartRequest => cleaning_session_start);
+        dispatch!("cleaning_session_status" => CleaningSessionStatusRequest => cleaning_session_status);
+        dispatch!("list_cleaning_sessions" => ListCleaningSessionsRequest => list_cleaning_sessions);
+        dispatch!("cleaning_session_apply" => CleaningSessionApplyRequest => cleaning_session_apply);
+        dispatch!("cleaning_rollback" => CleaningRollbackRequest => cleaning_rollback);
+        dispatch!("cleaning_session_checkpoints" => CleaningSessionCheckpointsRequest => cleaning_session_checkpoints);
+        dispatch!("suggest_cleaning" => SuggestCleaningRequest => suggest_cleaning);
+
+        // ===== Machine Learning =====
+        dispatch!("ml_kmeans" => KMeansRequest => ml_kmeans);
+        dispatch!("ml_dbscan" => DBSCANRequest => ml_dbscan);
+        dispatch!("ml_hierarchical" => HierarchicalRequest => ml_hierarchical);
+        dispatch!("ml_cutree" => CutreeRequest => ml_cutree);
+        dispatch!("ml_pca" => PCARequest => ml_pca);
+        dispatch!("ml_tsne" => TsneRequest => ml_tsne);
+        dispatch!("ml_cmdscale" => CmdscaleRequest => ml_cmdscale);
+        dispatch!("ml_random_forest" => RandomForestRequest => ml_random_forest);
+        dispatch!("ml_svm" => SvmRequest => ml_svm);
+        dispatch!("ml_ppr" => PprRequest => ml_ppr);
+        dispatch!("ml_c50" => C50Request => ml_c50);
+        dispatch!("ml_causal_forest" => CausalForestRequest => ml_causal_forest);
+        dispatch!("ml_bart_causal" => BartCausalRequest => ml_bart_causal);
+        dispatch!("heterogeneity_test" => HetTxRequest => heterogeneity_test);
+        dispatch!("ml_cubist" => CubistRequest => ml_cubist);
+        dispatch!("ml_shap_values" => ShapValuesRequest => ml_shap_values);
+        dispatch!("ml_ctree" => CtreeRequest => ml_ctree);
+        dispatch!("ml_mboost" => MboostRequest => ml_mboost);
+
+        // ===== Statistics =====
+        dispatch!("stats_loglin" => LoglinRequest => stats_loglin);
+        dispatch!("stats_model_tables" => ModelTablesRequest => stats_model_tables);
+        dispatch!("stats_se_contrast" => SeContrastRequest => stats_se_contrast);
+        dispatch!("stats_weighted_mean" => WeightedMeanRequest => stats_weighted_mean);
+        dispatch!("stats_cov_wt" => CovWtRequest => stats_cov_wt);
+        dispatch!("stats_mauchly_test" => MauchlyTestRequest => stats_mauchly_test);
+        dispatch!("stats_fivenum" => FivenumRequest => stats_fivenum);
+        dispatch!("stats_iqr" => IqrRequest => stats_iqr);
+        dispatch!("stats_mad" => MadRequest => stats_mad);
+        dispatch!("stats_ecdf" => EcdfRequest => stats_ecdf);
+        dispatch!("stats_density" => DensityRequest => stats_density);
+        dispatch!("stats_spline" => SplineRequest => stats_spline);
+        dispatch!("stats_approx" => ApproxRequest => stats_approx);
+        dispatch!("anova_manova" => ManovaRequest => anova_manova);
+        dispatch!("anova_one_way" => OneWayAnovaRequest => anova_one_way);
+        dispatch!("anova_tukey_hsd" => TukeyHsdRequest => anova_tukey_hsd);
+        dispatch!("anova_two_way" => TwoWayAnovaRequest => anova_two_way);
+        dispatch!("compute_correlation" => CorrelationRequest => compute_correlation);
+        dispatch!("descriptive_isoreg" => IsoregRequest => descriptive_isoreg);
+        dispatch!("descriptive_medpolish" => MedpolishRequest => descriptive_medpolish);
+        dispatch!("multivariate_cancor" => CancorRequest => multivariate_cancor);
+        dispatch!("multivariate_factanal" => FactorAnalysisRequest => multivariate_factanal);
+        dispatch!("multivariate_mahalanobis" => MahalanobisRequest => multivariate_mahalanobis);
+        dispatch!("power_anova_test" => PowerAnovaTestRequest => power_anova_test);
+        dispatch!("power_prop_test" => PowerPropTestRequest => power_prop_test);
+        dispatch!("power_t_test" => PowerTTestRequest => power_t_test);
+
+        // ===== Hypothesis tests =====
+        dispatch!("hypothesis_bartlett_test" => BartlettTestRequest => hypothesis_bartlett_test);
+        dispatch!("hypothesis_chisq_gof" => ChiSquaredGofRequest => hypothesis_chisq_gof);
+        dispatch!("hypothesis_chisq_independence" => ChiSquaredIndependenceRequest => hypothesis_chisq_independence);
+        dispatch!("hypothesis_cor_test" => CorTestRequest => hypothesis_cor_test);
+        dispatch!("hypothesis_fisher_exact" => FisherExactRequest => hypothesis_fisher_exact);
+        dispatch!("hypothesis_friedman" => FriedmanTestRequest => hypothesis_friedman);
+        dispatch!("hypothesis_kruskal_wallis" => KruskalWallisRequest => hypothesis_kruskal_wallis);
+        dispatch!("hypothesis_ks_test" => KsTestRequest => hypothesis_ks_test);
+        dispatch!("hypothesis_mantelhaen" => MantelhaenTestRequest => hypothesis_mantelhaen);
+        dispatch!("hypothesis_mcnemar" => McnemarTestRequest => hypothesis_mcnemar);
+        dispatch!("hypothesis_mood_test" => MoodTestRequest => hypothesis_mood_test);
+        dispatch!("hypothesis_oneway" => OnewayTestRequest => hypothesis_oneway);
+        dispatch!("hypothesis_pairwise_t_test" => PairwiseTTestRequest => hypothesis_pairwise_t_test);
+        dispatch!("hypothesis_pairwise_wilcox" => PairwiseWilcoxRequest => hypothesis_pairwise_wilcox);
+        dispatch!("hypothesis_poisson" => PoissonTestRequest => hypothesis_poisson);
+        dispatch!("hypothesis_prop_trend_test" => PropTrendTestRequest => hypothesis_prop_trend_test);
+        dispatch!("hypothesis_quade" => QuadeTestRequest => hypothesis_quade);
+        dispatch!("hypothesis_shapiro_wilk" => ShapiroWilkRequest => hypothesis_shapiro_wilk);
+        dispatch!("hypothesis_t_test" => TTestRequest => hypothesis_t_test);
+        dispatch!("hypothesis_wilcoxon" => WilcoxonTestRequest => hypothesis_wilcoxon);
+
+        // ===== Regression =====
+        dispatch!("regression_ols" => OlsRequest => regression_ols);
+        dispatch!("regression_diagnostics" => DiagnosticsRequest => regression_diagnostics);
+        dispatch!("regression_bgtest" => BgTestRequest => regression_bgtest);
+        dispatch!("regression_resettest" => ResetTestRequest => regression_resettest);
+        dispatch!("regression_waldtest" => WaldTestRequest => regression_waldtest);
+        dispatch!("regression_harvtest" => HarveyCollierRequest => regression_harvtest);
+        dispatch!("regression_hac" => HacRequest => regression_hac);
+        dispatch!("regression_bootstrap_cov" => BootstrapCovRequest => regression_bootstrap_cov);
+        dispatch!("regression_driscoll_kraay" => DriscollKraayRequest => regression_driscoll_kraay);
+        dispatch!("regression_quantreg" => QuantRegRequest => regression_quantreg);
+        dispatch!("regression_clustered" => OlsClusteredRequest => regression_clustered);
+        dispatch!("regression_nls" => NlsRequest => regression_nls);
+        dispatch!("regression_loess" => LoessRequest => regression_loess);
+        dispatch!("regression_supsmu" => SupsmuRequest => regression_supsmu);
+        dispatch!("regression_line" => LineRequest => regression_line);
+        dispatch!("regression_step" => StepRequest => regression_step);
+        dispatch!("regression_gls" => GlsRequest => regression_gls);
+        dispatch!("regression_smooth_spline" => SmoothSplineRequest => regression_smooth_spline);
+        dispatch!("regression_glmnet" => GlmnetRequest => regression_glmnet);
+        dispatch!("regression_cv_glmnet" => CvGlmnetRequest => regression_cv_glmnet);
+        dispatch!("regression_ridge" => RidgeRequest => regression_ridge);
+        dispatch!("regression_lasso" => LassoRequest => regression_lasso);
+
+        // ===== Panel data =====
+        dispatch!("panel_fixed_effects" => PanelFERequest => panel_fixed_effects);
+        dispatch!("panel_random_effects" => PanelRERequest => panel_random_effects);
+        dispatch!("hausman_test" => HausmanRequest => hausman_test);
+        dispatch!("panel_pvcm" => PvcmRequest => panel_pvcm);
+        dispatch!("panel_pmg" => PvcmRequest => panel_pmg);
+        dispatch!("panel_gmm" => GmmRequest => panel_gmm);
+        dispatch!("panel_gls" => PanelGlsRequest => panel_gls);
+        dispatch!("panel_unit_root" => PanelUnitRootRequest => panel_unit_root);
+        dispatch!("panel_hdfe" => PanelHdfeRequest => panel_hdfe);
+
+        // ===== Discrete choice =====
+        dispatch!("logit" => LogitRequest => logit);
+        dispatch!("probit" => ProbitRequest => probit);
+        dispatch!("multinom" => MultinomRequest => multinom);
+        dispatch!("mlogit" => MlogitRequest => mlogit);
+        dispatch!("mixed_logit" => MixedLogitRequest => mixed_logit);
+        dispatch!("ordered_model" => OrderedRequest => ordered_model);
+        dispatch!("negbin" => NegBinRequest => negbin);
+        dispatch!("zeroinfl" => ZeroInflRequest => zeroinfl);
+        dispatch!("hurdle_model" => HurdleModelRequest => hurdle_model);
+        dispatch!("feglm" => FeglmRequest => feglm);
+
+        // ===== Causal inference =====
+        dispatch!("iv_2sls" => IV2SLSRequest => iv_2sls);
+        dispatch!("iv_first_stage" => FirstStageRequest => iv_first_stage);
+        dispatch!("iv_sargan_test" => SarganTestRequest => iv_sargan_test);
+        dispatch!("bp_bounds" => BPBoundsRequest => bp_bounds);
+        dispatch!("iv_mte" => IVMTERequest => iv_mte);
+        dispatch!("staggered_did" => StaggeredDiDRequest => staggered_did);
+        dispatch!("bacon_decomp" => BaconDecompRequest => bacon_decomp);
+        dispatch!("etwfe" => EtwfeRequest => etwfe);
+        dispatch!("treatment_ipw" => IpwRequest => treatment_ipw);
+        dispatch!("treatment_doubly_robust" => DoublyRobustRequest => treatment_doubly_robust);
+        dispatch!("treatment_double_ml" => DoubleMLRequest => treatment_double_ml);
+        dispatch!("treatment_cbps" => CbpsRequest => treatment_cbps);
+        dispatch!("treatment_weightit" => WeightItRequest => treatment_weightit);
+        dispatch!("treatment_entropy_balance" => EntropyBalanceRequest => treatment_entropy_balance);
+        dispatch!("treatment_sbw" => SBWRequest => treatment_sbw);
+        dispatch!("treatment_twang" => TwangRequest => treatment_twang);
+        dispatch!("propensity_matching" => MatchItRequest => propensity_matching);
+        dispatch!("treatment_tmle" => TmleRequest => treatment_tmle);
+        dispatch!("collaborative_tmle" => CTmleRequest => collaborative_tmle);
+        dispatch!("gformula" => GFormulaRequest => gformula);
+        dispatch!("mediation_analysis" => MediationRequest => mediation_analysis);
+        dispatch!("natural_effects_mediation" => NaturalEffectsRequest => natural_effects_mediation);
+        dispatch!("synthetic_control" => SyntheticControlRequest => synthetic_control);
+        dispatch!("gsynth" => GsynthRequest => gsynth);
+        dispatch!("scpi" => ScpiRequest => scpi);
+        dispatch!("rd_estimate" => RdEstimateRequest => rd_estimate);
+        dispatch!("rd_bw" => RdBandwidthRequest => rd_bw);
+        dispatch!("rd_fuzzy" => FuzzyRdRequest => rd_fuzzy);
+        dispatch!("rd_multi" => RdMultiRequest => rd_multi);
+        dispatch!("diff_in_diff" => DiDRequest => diff_in_diff);
+        dispatch!("evalue" => EValueRequest => evalue);
+        dispatch!("gmm_iv" => GeneralGmmIvRequest => gmm_iv);
+        dispatch!("ltmle" => LtmleRequest => ltmle);
+        dispatch!("marginal_effects" => MarginalEffectsRequest => marginal_effects);
+        dispatch!("regression_standardization" => StdRegRequest => regression_standardization);
+        dispatch!("sensemakr" => SensemakrRequest => sensemakr);
+
+        // ===== Time series =====
+        dispatch!("timeseries_acf" => AcfRequest => timeseries_acf);
+        dispatch!("timeseries_ccf" => CcfRequest => timeseries_ccf);
+        dispatch!("timeseries_spectrum" => SpectrumRequest => timeseries_spectrum);
+        dispatch!("timeseries_box_test" => BoxTestRequest => timeseries_box_test);
+        dispatch!("timeseries_pp_test" => PPTestRequest => timeseries_pp_test);
+        dispatch!("ts_var" => VarRequest => ts_var);
+        dispatch!("ts_granger" => GrangerRequest => ts_granger);
+        dispatch!("ts_varma" => VarmaRequest => ts_varma);
+        dispatch!("ts_vecm" => VecmRequest => ts_vecm);
+        dispatch!("ts_var_irf" => VarIrfRequest => ts_var_irf);
+        dispatch!("ts_arima_fit" => ArimaRequest => ts_arima_fit);
+        dispatch!("ts_arima_forecast" => ArimaForecastRequest => ts_arima_forecast);
+        dispatch!("ts_garch_fit" => GarchRequest => ts_garch_fit);
+        dispatch!("ts_mstl" => MstlRequest => ts_mstl);
+        dispatch!("ts_changepoint" => ChangepointRequest => ts_changepoint);
+        dispatch!("ts_holt_winters" => HoltWintersRequest => ts_holt_winters);
+        dispatch!("timeseries_ar" => ArModelRequest => timeseries_ar);
+        dispatch!("timeseries_decompose" => DecomposeRequest => timeseries_decompose);
+        dispatch!("timeseries_structts" => StructTsRequest => timeseries_structts);
+        dispatch!("causal_impact_analysis" => CausalImpactRequest => causal_impact_analysis);
+        dispatch!("timeseries_cpgram" => CpgramRequest => timeseries_cpgram);
+        dispatch!("linalg_toeplitz" => ToeplitzRequest => linalg_toeplitz);
+        dispatch!("timeseries_lag" => LagRequest => timeseries_lag);
+        dispatch!("timeseries_embed" => EmbedRequest => timeseries_embed);
+        dispatch!("timeseries_diffinv" => DiffinvRequest => timeseries_diffinv);
+        dispatch!("timeseries_filter" => FilterRequest => timeseries_filter);
+        dispatch!("timeseries_window" => WindowRequest => timeseries_window);
+        dispatch!("timeseries_arma_acf" => ArmaAcfRequest => timeseries_arma_acf);
+        dispatch!("timeseries_arma_to_ma" => ArmaToMaRequest => timeseries_arma_to_ma);
+        dispatch!("timeseries_acf_to_ar" => Acf2ArRequest => timeseries_acf_to_ar);
+        dispatch!("timeseries_arima_sim" => ArimaSimRequest => timeseries_arima_sim);
+        dispatch!("timeseries_runmed" => RunmedRequest => timeseries_runmed);
+
+        // ===== Spatial =====
+        dispatch!("spatial_neighbors" => SpatialNeighborsRequest => spatial_neighbors);
+        dispatch!("moran_test" => MoranTestRequest => moran_test);
+        dispatch!("spatial_lm_tests_tool" => SpatialLmTestRequest => spatial_lm_tests_tool);
+        dispatch!("sar_model" => SarModelRequest => sar_model);
+        dispatch!("sem_model" => SemModelRequest => sem_model);
+        dispatch!("sphet_model" => SphetRequest => sphet_model);
+        dispatch!("sar_probit_model" => SarProbitRequest => sar_probit_model);
+        dispatch!("sem_probit_model" => SemProbitRequest => sem_probit_model);
+        dispatch!("spatial_panel_ml" => SpmlRequest => spatial_panel_ml);
+        dispatch!("spatial_panel_gmm" => SpgmRequest => spatial_panel_gmm);
+
+        // ===== Data munging =====
+        dispatch!("batch_process" => BatchProcessRequest => batch_process);
+        dispatch!("compare_datasets" => CompareDatasetRequest => compare_datasets);
+        dispatch!("munge_filter" => FilterDatasetRequest => munge_filter);
+        dispatch!("munge_select" => SelectColumnsRequest => munge_select);
+        dispatch!("munge_drop_columns" => DropColumnsRequest => munge_drop_columns);
+        dispatch!("munge_rename" => RenameColumnsRequest => munge_rename);
+        dispatch!("munge_sort" => SortDatasetRequest => munge_sort);
+        dispatch!("munge_join" => JoinDatasetsRequest => munge_join);
+        dispatch!("munge_concat" => ConcatDatasetsRequest => munge_concat);
+        dispatch!("munge_group_by" => GroupByRequest => munge_group_by);
+        dispatch!("munge_value_counts" => ValueCountsRequest => munge_value_counts);
+        dispatch!("munge_pivot" => PivotDatasetRequest => munge_pivot);
+        dispatch!("munge_melt" => MeltDatasetRequest => munge_melt);
+        dispatch!("munge_drop_na" => DropNaRequest => munge_drop_na);
+        dispatch!("munge_fill_na" => FillNaRequest => munge_fill_na);
+        dispatch!("munge_deduplicate" => DeduplicateRequest => munge_deduplicate);
+        dispatch!("str_trim" => TrimRequest => str_trim);
+        dispatch!("str_to_lowercase" => ToLowercaseRequest => str_to_lowercase);
+        dispatch!("str_to_uppercase" => ToUppercaseRequest => str_to_uppercase);
+        dispatch!("str_replace_value" => ReplaceValueRequest => str_replace_value);
+        dispatch!("str_regex_replace" => RegexReplaceRequest => str_regex_replace);
+        dispatch!("str_regex_extract" => RegexExtractRequest => str_regex_extract);
+        dispatch!("str_regex_count" => RegexCountRequest => str_regex_count);
+        dispatch!("str_split" => StrSplitRequest => str_split);
+        dispatch!("str_concat" => StrConcatRequest => str_concat);
+        dispatch!("str_length" => StrLengthRequest => str_length);
+        dispatch!("str_substring" => StrSubstringRequest => str_substring);
+        dispatch!("munge_lag_lead" => LagLeadRequest => munge_lag_lead);
+        dispatch!("munge_standardize" => StandardizeRequest => munge_standardize);
+        dispatch!("munge_bin" => BinColumnRequest => munge_bin);
+        dispatch!("munge_one_hot_encode" => OneHotEncodeRequest => munge_one_hot_encode);
+        dispatch!("munge_diff" => DiffRequest => munge_diff);
+        dispatch!("munge_sample" => SampleDatasetRequest => munge_sample);
+        dispatch!("munge_mutate" => MutateColumnRequest => munge_mutate);
+
+        // ===== Survival =====
+        dispatch!("kaplan_meier" => KaplanMeierRequest => kaplan_meier);
+        dispatch!("log_rank" => LogRankRequest => log_rank);
+        dispatch!("cox_ph" => CoxPhRequest => cox_ph);
+        dispatch!("aft" => AftRequest => aft);
+        dispatch!("competing_risks" => CompetingRisksRequest => competing_risks);
+
+        // ===== Search/discovery =====
+        dispatch!("search_tools" => SearchToolsRequest => search_tools);
+        dispatch!("list_tool_categories" => ListToolCategoriesRequest => list_tool_categories);
+        dispatch!("tool_info" => crate::tools::handlers::search::ToolInfoRequest => tool_info);
+
+        // If no tool matched, return an error
+        Err(format!("Unknown tool: {}", tool_name))
     }
+
 
     // ========================================================================
     // Cleaning Session Management Tools
@@ -2062,6 +1221,7 @@ impl AnalyticsServer {
     // GLS and Smooth Spline Tools
     // ========================================================================
 }
+
 
 /// Helper function to extract a single column as Vec<f64>.
 fn extract_column_f64(dataset: &Dataset, column: &str) -> Result<Vec<f64>, String> {

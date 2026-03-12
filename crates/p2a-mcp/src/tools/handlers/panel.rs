@@ -33,7 +33,7 @@ use p2a_core::regression::CovarianceType;
 impl AnalyticsServer {
     /// Run Fixed Effects panel regression.
     #[tool(
-        description = "Run Fixed Effects (within) panel regression. Controls for time-invariant unobserved heterogeneity. Requires panel data with entity identifiers."
+        description = "Run Fixed Effects (within) panel regression. Controls for time-invariant unobserved heterogeneity. Requires panel data with entity identifiers. Controls ONE fixed effect dimension. For multiple simultaneous FEs (e.g., firm + year), use panel_hdfe instead."
     )]
     pub async fn panel_fixed_effects(
         &self,

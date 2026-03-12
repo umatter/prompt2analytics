@@ -3,6 +3,9 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
+/// Default maximum number of tool execution iterations per request.
+pub const DEFAULT_MAX_TOOL_ITERATIONS: usize = 25;
+
 /// Configuration for an LLM provider.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderConfig {
@@ -12,6 +15,9 @@ pub struct ProviderConfig {
     pub model: String,
     pub temperature: Option<f32>,
     pub max_tokens: Option<u32>,
+    /// Maximum number of tool execution iterations (default: 25)
+    #[serde(default)]
+    pub max_tool_iterations: Option<usize>,
 }
 
 impl Default for ProviderConfig {
@@ -23,6 +29,7 @@ impl Default for ProviderConfig {
             model: "llama3.2".to_string(),
             temperature: Some(0.7),
             max_tokens: Some(4096),
+            max_tool_iterations: None,
         }
     }
 }

@@ -12,44 +12,49 @@ model---run on the user's machine.
 
 \subsection[Performance comparison with R]{Performance comparison with \proglang{R}}
 
-Table~\ref{tab:benchmark-full} presents benchmark results across 41
-method configurations at $n = 100{,}000$ observations with multiple
-iterations per method---100 for fast methods, 50 for moderate, 20 for
-slow---after 10 warmup iterations (median timing reported;
-see Appendix~\ref{app:benchmark-methodology} for details). Both \proglang{R} and \proglang{Rust} timings measure
-computation only, excluding data loading and process startup, ensuring
-a fair comparison of algorithmic performance. Across 42 method
-configurations, the median speedup is 4.1$\times$, with wide
-variation by method category reflecting the relative weight of
-interpreter overhead versus numerical computation.
+Table~\ref{tab:benchmark-full} presents benchmark results from a unified
+validation and benchmarking pipeline that simultaneously measures
+correctness, execution time, and memory usage. The pipeline covers 384
+benchmark configurations across 140+ unique methods, with sample sizes
+ranging from $n = 50$ to $n = 10{,}000$ (see
+Appendix~\ref{app:benchmark-methodology} for details). Both
+\proglang{R} and \proglang{Rust} operate on identical datasets
+generated with shared random seeds; timings measure computation only,
+excluding data loading and process startup.
+\proglang{R} benchmarks use canonical reference packages:
+\fct{lm}/\pkg{sandwich}~\citep{Zeileis:2004} for regression,
+\pkg{plm}~\citep{Croissant+Millo:2008}/\pkg{lfe}~\citep{Gaure:2013}
+for panel data, \pkg{AER} for IV,
+\pkg{forecast}~\citep{Hyndman+Khandakar:2008}/\pkg{vars} for time
+series, and \proglang{R}'s \pkg{stats} for hypothesis tests.
+Across all 384 configurations (multiple sample sizes per method),
+the median speedup is 25.1$\times$, with \proglang{Rust} faster in
+361 cases (94\%). At the largest sample size per unique method
+(119 methods), the median is 11.0$\times$
+(Figure~\ref{fig:benchmark-histogram}).
 
-The majority of methods show speedups of 2--10$\times$: OLS
-(6.9$\times$), IV/2SLS (5.2$\times$), Hausman (4.7$\times$), MSTL
-decomposition (4.4$\times$), Kaplan-Meier (4.1$\times$), and t-tests
-(3--7$\times$). Compute-intensive iterative methods see larger gains:
-quantile regression (44$\times$), Wilcoxon rank-sum (23$\times$),
-OLS with robust standard errors (15--22$\times$ for HC0--HC3), panel
-fixed effects (21$\times$), and DBSCAN (14.5$\times$). One extreme
-outlier---Granger causality at 660$\times$---likely reflects
-implementation differences in \proglang{R}'s
-\code{lmtest::grangertest} (which fits full VAR models per lag) rather
-than a genuine language advantage, and should be interpreted with
-caution.
+Speedups vary widely by method category, reflecting the relative weight
+of interpreter overhead versus numerical computation.
+\emph{Causal inference} methods show the largest gains: IV/2SLS
+(146$\times$) and difference-in-differences (81$\times$).
+\emph{Treatment effect} estimators are similarly fast: TMLE
+(283$\times$), CBPS (198$\times$), and IPW (171$\times$).
+\emph{Panel data} methods benefit from avoiding formula parsing and
+factor handling: fixed effects (207$\times$), HDFE (176$\times$), and
+random effects (136$\times$). \emph{Time series} methods show moderate
+to large gains: VECM (56$\times$), ARIMA (37$\times$), and Granger
+causality (4$\times$). \emph{Statistical tests} cluster around
+20--40$\times$: $t$-tests (40$\times$), ANOVA (31$\times$), and
+Shapiro-Wilk (30$\times$). \emph{Regression} methods range from
+13$\times$ (OLS) to 27$\times$ (quantile regression), with robust
+standard errors at 18$\times$ (HC1). \emph{Discrete choice} models
+range from 8$\times$ (logit) to 15$\times$ (Poisson).
+\emph{Survival} methods achieve 14--19$\times$ (Cox PH 14$\times$,
+Kaplan-Meier 19$\times$). \emph{Machine learning} methods show more
+modest gains of 2--3$\times$ (K-means 3$\times$, PCA 3$\times$,
+DBSCAN 2$\times$), reflecting the competitiveness of \proglang{R}'s
+underlying C implementations for these algorithms.
 
-Methods near parity include two-way ANOVA, AR, and negative binomial
-regression (all ${\sim}1\times$). \proglang{R} outperforms
-\proglang{Rust} for PCA (0.03$\times$), NLS (0.1$\times$),
-diagnostics (0.2$\times$), and ACF (0.4$\times$)---operations where
-\proglang{R}'s highly optimized LAPACK bindings or vectorized C
-implementations dominate. For high-dimensional fixed effects,
-\pkg{fixest}~\citep{Berge:2018} provides a highly optimized C++
-implementation that likely outperforms both \pkg{plm} and
-\pkg{prompt2analytics} at large scale; our HDFE benchmark against
-\pkg{plm} shows only 1.3$\times$ speedup. At smaller sample sizes
-($n < 1{,}000$), speedups can be much larger---for example, panel
-fixed effects at $n = 100$ is $184\times$ faster---but these figures
-primarily reflect \proglang{R}'s interpreter overhead (formula
-parsing, factor handling) rather than computational advantages.
 Complete benchmark results are in
 Appendix~\ref{app:benchmark-methodology}; reproduction instructions
 are in Appendix~\ref{app:reproducibility}.
@@ -57,16 +62,23 @@ are in Appendix~\ref{app:reproducibility}.
 % Table generated by: Rscript paper/code/tab_benchmark_summary.R
 \input{tables/tab_benchmark_summary}
 
-%% Commented out for now
-% \begin{figure}[htbp]
-% \centering
-% \includegraphics[width=\textwidth]{figures/benchmark_boxplots}
-% \caption{Execution time comparison between \proglang{R} and \proglang{Rust}
-% implementations at $n = 100{,}000$ observations (log scale). Error bars
-% show min/max execution times across iterations. Both timings measure
-% computation only, excluding data loading and process startup.}
-% \label{fig:benchmark-boxplots}
-% \end{figure}
+\begin{figure}[htbp]
+\centering
+\IfFileExists{figures/benchmark_histogram.pdf}{%
+  \includegraphics[width=\textwidth]{figures/benchmark_histogram}%
+}{%
+  \fbox{\parbox{\textwidth}{\centering\vspace{3cm}%
+    [Figure: benchmark\_histogram.pdf]\\%
+    Generate with: \texttt{Rscript paper/code/generate\_paper\_figures.R}%
+    \vspace{3cm}}}%
+}
+\caption{Distribution of Rust/R speedup factors across 119 unique methods
+at their largest sample size (log scale). The vertical line at
+1$\times$ indicates parity; values to the right indicate \proglang{Rust}
+faster. The median speedup is 11.0$\times$, with \proglang{Rust} faster
+in 89\% of methods.}
+\label{fig:benchmark-histogram}
+\end{figure}
 
 The performance advantages stem from \proglang{Rust}'s ownership system
 (stack allocation and in-place mutation without garbage collection),
@@ -74,35 +86,43 @@ the \pkg{faer} library's SIMD-optimized linear algebra, the
 column-based API that eliminates formula parsing, and the
 single-language design that avoids data serialization between
 components. \pkg{prompt2analytics} performs best on computationally intensive
-iterative methods (panel fixed effects, robust standard errors,
-quantile regression, DBSCAN) where compile-time optimizations and
-memory efficiency compound across iterations. For single-pass
-operations dominated by optimized linear algebra (PCA, ACF, NLS),
-\proglang{R}'s BLAS bindings provide comparable or superior
+iterative methods (panel fixed effects, treatment effect estimators,
+causal inference, robust standard errors) where compile-time
+optimizations and memory efficiency compound across iterations. For
+machine learning methods dominated by optimized C code (PCA, K-means,
+DBSCAN), \proglang{R}'s compiled implementations provide competitive
 performance.
 
-%% Commented out --- information already in Table~\ref{tab:benchmark-full}
-% \begin{figure}[htbp]
-% \centering
-% % Figure generated by: Rscript paper/code/fig_benchmark_speedup.R
-% \IfFileExists{figures/benchmark_speedup.pdf}{%
-%   \includegraphics[width=\textwidth]{figures/benchmark_speedup}%
-% }{%
-%   \fbox{\parbox{\textwidth}{\centering\vspace{3cm}%
-%     [Figure: benchmark\_speedup.pdf]\\%
-%     Generate with: \texttt{Rscript paper/code/fig\_benchmark\_speedup.R}%
-%     \vspace{3cm}}}%
-% }
-% \caption{Rust/R speedup factors by method at $n = 100{,}000$ observations
-% (Granger causality omitted at 660$\times$ for readability).
-% The vertical line at 1$\times$ indicates parity. Bars extending right
-% indicate \proglang{Rust} faster. Compute-intensive iterative methods
-% (quantile regression, Wilcoxon, Panel FE, robust SEs) show
-% 10--44$\times$ speedups.
-% Methods near or below 1$\times$ reflect \proglang{R}'s highly
-% optimized vectorized C/LAPACK implementations.}
-% \label{fig:benchmark-speedup}
-% \end{figure}
+\paragraph{Memory efficiency.}
+Beyond execution time, \proglang{Rust}'s deterministic memory
+management reduces heap allocation. Across
+the 384 benchmark configurations, \proglang{Rust} typically allocates
+2--50$\times$ less memory than the equivalent \proglang{R} call. The
+largest savings appear in panel data and treatment effect methods,
+where \proglang{R}'s formula interface and factor expansion create
+intermediate copies that \proglang{Rust}'s ownership model avoids.
+Figure~\ref{fig:benchmark-memory} and Table~\ref{tab:memory-summary}
+show the memory comparison by module.
+
+\begin{figure}[htbp]
+\centering
+\IfFileExists{figures/benchmark_memory.pdf}{%
+  \includegraphics[width=\textwidth]{figures/benchmark_memory}%
+}{%
+  \fbox{\parbox{\textwidth}{\centering\vspace{3cm}%
+    [Figure: benchmark\_memory.pdf]\\%
+    Generate with: \texttt{Rscript paper/code/generate\_paper\_figures.R}%
+    \vspace{3cm}}}%
+}
+\caption{Memory allocation comparison between \proglang{R} and
+\proglang{Rust} implementations by method category. \proglang{Rust}
+consistently allocates less memory, with the largest savings in panel
+data and treatment effect methods.}
+\label{fig:benchmark-memory}
+\end{figure}
+
+% Table generated by: Rscript paper/code/generate_paper_tables.R
+\input{tables/tab_memory_summary}
 
 For users with CUDA-capable hardware, \pkg{p2a-core} provides optional
 GPU acceleration via cuBLAS and cuSOLVER. The \code{cuda} feature flag
@@ -126,10 +146,10 @@ multiplications, where the CPU path is substantially faster.
 Table~\ref{tab:gpu-ops} summarizes the operations with GPU code paths
 and observed speedups on an NVIDIA DGX~Spark (Grace Blackwell, 12~GB
 VRAM, unified memory). The largest gains appear in $\bm{X}'\bm{X}$
-computation (up to $7\times$ for $k \geq 100$) and PCA via the
-covariance path (up to $13\times$ for tall matrices). K-means distance
+computation (up to 7$\times$ for $k \geq 100$) and PCA via the
+covariance path (up to 13$\times$ for tall matrices). K-means distance
 computation and sandwich estimators for heteroskedasticity-robust
-standard errors see more modest improvements of $2$--$3\times$.
+standard errors see more modest improvements of 2--3$\times$.
 
 \begin{table}[htbp]
 \centering
@@ -178,13 +198,17 @@ all external network communication. Appendix~\ref{app:deployment}
 provides platform-specific installation instructions.
 
 The evaluation results (Section~\ref{sec:evaluation}) inform practical
-model recommendations. Open-source models can match proprietary
-alternatives: Qwen 2.5 72B achieves 100\% accuracy on our benchmark,
-identical to Claude 3.5 Haiku. Users requiring complete data isolation
-need not sacrifice tool selection quality.
+model recommendations. Open-source models deployable via Ollama---such
+as Ministral~3B (80.2\% adequate) and Llama~4~Scout (50.0\%)---enable
+fully local analysis without cloud connectivity, and Ministral~3B's
+80\% adequate rate shows that data isolation need not come at the cost
+of tool selection quality for standard workflows.
 
 Table~\ref{tab:models} summarizes model options with hardware
-requirements and recommended use cases.
+requirements and recommended use cases.  Cloud-hosted models
+(GPT-4.1~Mini, Sonnet~4.6, Haiku~4.5, Gemini~2.5~Flash) provide
+higher accuracy but require API access; the table focuses on locally
+deployable options.
 
 \begin{table}[htbp]
 \centering
@@ -193,38 +217,35 @@ requirements and recommended use cases.
 \label{tab:models}
 \begin{tabular}{lrrrrl}
 \toprule
-Model & Params & Storage & RAM & Acc.\ (\%) & Recommended for \\
+Model & Params & Storage & RAM & Adeq.\ (\%) & Recommended for \\
 \midrule
-\multicolumn{6}{l}{\textit{High accuracy, workstation hardware}} \\
-Qwen 2.5 72B & 72B & 42 GB & 48 GB & 100.0 & Parameter-sensitive tasks \\
-Llama 3.3 70B & 70B & 40 GB & 48 GB & 98.9 & Multi-turn workflows \\
+\multicolumn{6}{l}{\textit{Evaluated models (locally deployable via Ollama)}} \\
+Llama 4 Scout   & 17B$^a$ & 12 GB & 16 GB & 50.0 & Simple single-turn analyses \\
+Ministral 3B    & 3B      & 2.0 GB & 6 GB  & 80.2 & General local use \\
 \midrule
-\multicolumn{6}{l}{\textit{Balanced accuracy, consumer hardware}} \\
-Llama 3.1 8B & 8B & 4.7 GB & 8 GB & ---$^a$ & General use \\
-Qwen 2.5 7B & 7B & 4.4 GB & 8 GB & ---$^a$ & General use \\
-\midrule
-\multicolumn{6}{l}{\textit{Viable accuracy, minimal hardware}} \\
-Ministral 3B & 3B & 2.0 GB & 6 GB & 90.8 & Single-turn analyses \\
+\multicolumn{6}{l}{\textit{Additional local options (not in our evaluation)}} \\
+Llama 3.3 70B   & 70B  & 40 GB & 48 GB & ---$^b$ & Multi-turn workflows \\
+Qwen 2.5 7B     & 7B   & 4.4 GB & 8 GB  & ---$^b$ & Balanced accuracy \\
 \bottomrule
 \end{tabular}
 \begin{tablenotes}[flushleft]
-\item \emph{Note:} Accuracy figures are from the 87-test single-turn
-benchmark (Section~\ref{sec:evaluation}). Storage refers to Q4\_K\_M
+\item \emph{Note:} Adequate rate from the 96-prompt end-to-end
+evaluation (Section~\ref{sec:evaluation}). Storage refers to Q4\_K\_M
 quantization (4-bit). RAM is memory during inference, typically
 1.5--2$\times$ storage due to KV cache and computational buffers.
-$^a$~Not included in our benchmark; recommended based on external
-tool-calling evaluations (Berkeley Function-Calling Leaderboard).
-Multi-turn workflows benefit from 70B+ models that maintain context
-across iterative specification refinement.
+$^a$~17B active parameters, 109B total (mixture of experts).
+$^b$~Not included in our evaluation; recommended based on external
+tool-calling evaluations.
 \end{tablenotes}
 \end{threeparttable}
 \end{table}
 
-Ministral 3B demonstrates that even very small models achieve viable
-accuracy. With only 3 billion parameters, it runs on virtually any
+Ministral~3B demonstrates that even very small models achieve viable
+accuracy.  With only 3~billion parameters, it runs on virtually any
 modern laptop---approximately 6~GB VRAM for GPU inference, or CPU-only
-with 8~GB RAM. The 9.2\% error rate concentrates in genuinely ambiguous
-cases. The 7--8B parameter class offers a practical middle ground,
+with 8~GB RAM.  Its adequate rate (80.2\%) is within 4~percentage
+points of Claude Haiku~4.5 (81.2\%), a cloud-hosted model.
+The 7--8B parameter class offers a practical middle ground,
 fitting on consumer GPUs with 8+ GB VRAM (e.g., NVIDIA RTX 3070/4070)
 or Apple M-series devices with 16~GB unified memory.
 
@@ -248,4 +269,4 @@ is suitable for analysis of sensitive data where regulatory requirements
 policy prohibit cloud processing. Users should verify that their Ollama
 installation does not enable telemetry or automatic model updates.
 Appendix~\ref{app:privacy} provides detailed data transmission
-documentation and security best practices. The next section discusses limitations and future directions.
+documentation and security best practices.

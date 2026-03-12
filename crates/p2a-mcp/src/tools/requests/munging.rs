@@ -779,6 +779,36 @@ pub struct SampleDatasetRequest {
     pub result_name: Option<String>,
 }
 
+/// Request to cast column(s) to a different data type.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CastColumnRequest {
+    /// Name/ID of the dataset
+    #[schemars(description = "Name or ID of the dataset.")]
+    pub dataset: String,
+
+    /// Single column to cast
+    #[schemars(description = "Name of the column to cast. Use this for single-column casting.")]
+    pub column: Option<String>,
+
+    /// Target data type for single column
+    #[schemars(
+        description = "Target data type: 'int' (i64), 'float' (f64), 'string' (Utf8), 'bool' (Boolean)."
+    )]
+    pub dtype: Option<String>,
+
+    /// Batch cast: list of [column, dtype] pairs
+    #[schemars(
+        description = "Batch mode: list of [column, dtype] pairs, e.g. [[\"col1\", \"float\"], [\"col2\", \"int\"]]. Use this to cast multiple columns at once."
+    )]
+    pub casts: Option<Vec<Vec<String>>>,
+
+    /// Optional name for the resulting dataset
+    #[schemars(
+        description = "Optional name for the result. If not provided, overwrites the source dataset."
+    )]
+    pub result_name: Option<String>,
+}
+
 /// Request to create a new column by computation.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct MutateColumnRequest {

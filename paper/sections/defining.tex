@@ -2,7 +2,7 @@
 %% DEFINING CHAT-FIRST ANALYTICS
 %% =============================================================================
 
-\section{Defining chat-first analytics} \label{sec:defining}
+\section{Background and design principles} \label{sec:defining}
 
 The introduction identified three concerns with using language models for
 data analysis: correctness, privacy, and reproducibility. This section
@@ -26,7 +26,7 @@ error without the expertise that would have let them write the code
 themselves.
 
 Second, code-generation systems require the data. When a user asks ChatGPT
-to analyze a dataset, the data is uploaded to a third-party server
+to analyze a dataset, the data are uploaded to a third-party server
 with unclear retention policies. For survey responses, health records,
 personnel data, or any dataset subject to privacy regulations, this
 may be unacceptable. Even when providers promise not to retain data,
@@ -58,7 +58,7 @@ function of the model's current state. Auditability failures arise
 because the computational logic is opaque---buried in generated code
 rather than invoked from a known, inspectable implementation.
 Systematic error rates for LLM-generated statistical code are not
-yet well established---\citet{Ludwig+Mullainathan+Rambachan:2025}
+yet well established: \citet{Ludwig+Mullainathan+Rambachan:2025}
 document the \emph{types} of errors that arise, but base rates
 depend on the model, the prompt, and the statistical method. The
 motivation for the architecture described below rests on the
@@ -150,8 +150,8 @@ promised by policy.
 For complete isolation, the language model itself can run locally.
 Open-source models deployed via Ollama~\citep{Ollama} eliminate all
 external network communication. Our evaluation
-(Section~\ref{sec:evaluation}) shows that even 3-billion-parameter
-models achieve over 90\% tool selection accuracy, making fully local
+(Section~\ref{sec:evaluation}) shows that even a 3-billion-parameter
+model achieves over 80\% adequate rate, making fully local
 deployment practical on consumer hardware.
 
 Together, the three principles address the four failure modes
@@ -219,14 +219,26 @@ generated code across analysis stages. All three generate code;
 none pre-validate implementations or enforce data locality.
 Table~\ref{tab:system-comparison} summarizes these differences.
 
-Hybrid designs are possible. A system could generate code for bespoke
-analyses while routing standard requests to pre-validated tools, or
-could verify generated code through static analysis before execution.
-\pkg{prompt2analytics} deliberately occupies one end of this spectrum:
-all computation is pre-validated, with no code generation at all. This
-sacrifices flexibility (analyses outside the method library are
-unavailable) but eliminates an entire class of failure modes. Whether
-hybrid designs can achieve a better trade-off is an open question.
+Hybrid designs are possible. A system
+could generate code for bespoke analyses while routing standard
+requests to pre-validated tools. It could verify generated code
+through static analysis or property checking before execution---for
+instance, confirming that a difference-in-differences specification
+includes the correct interaction term, or that a panel regression
+includes entity fixed effects when requested. It could also combine
+code generation with human review, leveraging the fact that many users
+can \emph{audit} code even if they cannot \emph{write} it from
+scratch. \pkg{prompt2analytics} deliberately occupies one end of
+this spectrum: all computation is pre-validated, with no code
+generation at all. This sacrifices flexibility---analyses outside the
+method library are unavailable, custom data transformations beyond the
+built-in munging tools require the CLI or direct \proglang{Rust}
+code, and ad-hoc visualizations not covered by the visualization
+tools cannot be produced---but it eliminates an entire class of
+failure modes. Whether hybrid designs can achieve a better trade-off
+is an open question; the answer likely depends on the reliability of
+code verification techniques and the target user's ability to review
+generated code.
 
 \begin{table}[htbp]
 \centering
@@ -257,7 +269,7 @@ constrains coverage to ensure correctness.
 \end{threeparttable}
 \end{table}
 
-Two limitations of the approach are fundamental, not fixable by
+Three limitations of the approach are fundamental, not fixable by
 better engineering. First, statistical expertise is still required:
 chat-first analytics assists with method selection and execution, not
 with research design or causal identification. A user who requests
@@ -279,7 +291,7 @@ Third, pre-validation trades coverage for correctness. When a user
 requests a method outside the implemented set---Bayesian inference,
 structural equation modeling, or a custom estimator---the LLM may
 silently map the request to the closest available alternative rather
-than reporting unavailability. This is the symmetric failure mode to
+than reporting unavailability---the symmetric failure mode to
 code generation's silent errors: instead of running wrong code, the
 system runs the wrong method. The risk is mitigated by the structured
 tool schema (which makes the selected method visible to the user) and

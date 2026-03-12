@@ -1556,7 +1556,7 @@ impl AnalyticsServer {
 
     /// Run t-test for comparing means.
     #[tool(
-        description = "Run Student's t-test for comparing means. Supports: (1) One-sample t-test: compare sample mean to hypothesized value, (2) Two-sample t-test: compare means between two groups (Welch's by default), (3) Paired t-test: compare matched pairs. Returns t-statistic, p-value, confidence interval, and effect estimate."
+        description = "Run Student's t-test for comparing means. Supports: (1) One-sample t-test: compare sample mean to hypothesized value, (2) Two-sample t-test: pass x and y as two numeric columns to compare (Welch's by default), (3) Paired t-test: compare matched pairs. Returns t-statistic, p-value, confidence interval, and effect estimate. Note: x and y must both be numeric columns. To compare a numeric variable across groups (e.g., salary by gender), first filter into two datasets or use two numeric columns."
     )]
     pub async fn hypothesis_t_test(
         &self,

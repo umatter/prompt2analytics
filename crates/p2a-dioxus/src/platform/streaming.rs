@@ -78,6 +78,7 @@ pub mod web {
             history: Some(history),
             interpret,
             conversation_id,
+            retrieve_history: true,
         };
 
         let body_json =
@@ -274,6 +275,7 @@ pub mod native {
             history: Some(history),
             interpret,
             conversation_id,
+            retrieve_history: true,
         };
 
         let body_json =

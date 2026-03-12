@@ -43,7 +43,8 @@ TODO.md
 # Machine-specific MCP config (absolute paths)
 mcp-config.json
 
-# LaTeX intermediate files
+# LaTeX intermediate and output files
+paper/paper.pdf
 paper/*.aux
 paper/*.bbl
 paper/*.blg
@@ -70,9 +71,13 @@ paper/CODE_REVIEW.md
 # Benchmark result files
 crates/p2a-core/rust_*.json
 
-# LLM evaluation results
-paper/code/llm_eval/results/*.jsonl
-paper/code/llm_eval/results/*.md
+# End-to-end evaluation results (regenerable via run_evaluation.py)
+paper/code/e2e_eval/results/*.json
+paper/code/e2e_eval/results/screenshots/
+paper/code/e2e_eval/__pycache__/
+paper/code/e2e_eval/*.csv
+paper/code/e2e_eval/*.parquet
+paper/code/e2e_eval/texput.log
 
 # Simulated review reports
 paper/_resources/review_reports/
@@ -125,7 +130,8 @@ paper/copyedit_reports/
 paper/narrative_review/
 paper/jss_*.md
 
-# Archived paper drafts
+# Archive directories (superseded/stale files)
+archive/
 paper/archive/
 
 # External resources

@@ -85,12 +85,14 @@ pub struct FisherExactRequest {
     #[schemars(
         description = "Name of the column for rows of the 2×2 table. Must have exactly 2 unique values."
     )]
+    #[serde(alias = "x", alias = "row")]
     pub row_var: String,
 
     /// Column variable column name
     #[schemars(
         description = "Name of the column for columns of the 2×2 table. Must have exactly 2 unique values."
     )]
+    #[serde(alias = "y", alias = "col")]
     pub col_var: String,
 
     /// Alternative hypothesis
@@ -243,6 +245,7 @@ pub struct ChiSquaredGofRequest {
     #[schemars(
         description = "Name of the categorical column. Counts of each unique value will be tested."
     )]
+    #[serde(alias = "x", alias = "variable", alias = "value")]
     pub column: String,
 
     /// Expected probabilities (optional)
@@ -261,10 +264,12 @@ pub struct ChiSquaredIndependenceRequest {
 
     /// Row variable column name
     #[schemars(description = "Name of the column for rows of the contingency table.")]
+    #[serde(alias = "x", alias = "row")]
     pub row_var: String,
 
     /// Column variable column name
     #[schemars(description = "Name of the column for columns of the contingency table.")]
+    #[serde(alias = "y", alias = "col")]
     pub col_var: String,
 
     /// Apply Yates' continuity correction
@@ -337,10 +342,12 @@ pub struct BartlettTestRequest {
 
     /// Response variable column name
     #[schemars(description = "Name of the response (numeric) variable column.")]
+    #[serde(alias = "value", alias = "y", alias = "column")]
     pub response: String,
 
     /// Factor (grouping) variable column name
     #[schemars(description = "Name of the factor (grouping) variable column.")]
+    #[serde(alias = "group", alias = "group_col")]
     pub factor: String,
 }
 
@@ -391,10 +398,12 @@ pub struct KruskalWallisRequest {
     #[schemars(
         description = "Name of the numeric column containing the values to compare across groups."
     )]
+    #[serde(alias = "response", alias = "y", alias = "column")]
     pub value: String,
 
     /// Group column name
     #[schemars(description = "Name of the column containing group labels/factors.")]
+    #[serde(alias = "factor", alias = "group_col")]
     pub group: String,
 }
 
@@ -407,10 +416,12 @@ pub struct PairwiseTTestRequest {
 
     /// Response variable column name
     #[schemars(description = "Name of the numeric response variable column.")]
+    #[serde(alias = "value", alias = "y", alias = "column")]
     pub response: String,
 
     /// Grouping factor column name
     #[schemars(description = "Name of the grouping factor column (can be string or numeric).")]
+    #[serde(alias = "group", alias = "group_col")]
     pub factor: String,
 
     /// P-value adjustment method
@@ -443,10 +454,12 @@ pub struct OnewayTestRequest {
     #[schemars(
         description = "Name of the numeric column containing the values to compare across groups."
     )]
+    #[serde(alias = "response", alias = "y", alias = "column")]
     pub value: String,
 
     /// Group column name
     #[schemars(description = "Name of the column containing group labels/factors.")]
+    #[serde(alias = "factor", alias = "group_col")]
     pub group: String,
 
     /// Assume equal variances
@@ -465,10 +478,12 @@ pub struct PairwiseWilcoxRequest {
 
     /// Response variable column name
     #[schemars(description = "Name of the numeric response variable column.")]
+    #[serde(alias = "value", alias = "y", alias = "column")]
     pub response: String,
 
     /// Grouping factor column name
     #[schemars(description = "Name of the grouping factor column (can be string or numeric).")]
+    #[serde(alias = "group", alias = "group_col")]
     pub factor: String,
 
     /// P-value adjustment method
@@ -553,6 +568,7 @@ pub struct QuadeTestRequest {
 
     /// Value column name
     #[schemars(description = "Name of the numeric column containing the measured values.")]
+    #[serde(alias = "response", alias = "y", alias = "column")]
     pub value: String,
 
     /// Treatment/group column name
@@ -573,6 +589,7 @@ pub struct FriedmanTestRequest {
 
     /// Value column name
     #[schemars(description = "Name of the numeric column containing the measured values.")]
+    #[serde(alias = "response", alias = "y", alias = "column")]
     pub value: String,
 
     /// Treatment/group column name
@@ -593,5 +610,6 @@ pub struct ShapiroWilkRequest {
 
     /// Column to test for normality
     #[schemars(description = "Name of the numeric column to test for normality.")]
+    #[serde(alias = "x", alias = "variable", alias = "value")]
     pub column: String,
 }

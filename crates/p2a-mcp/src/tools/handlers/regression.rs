@@ -45,7 +45,7 @@ use p2a_core::regression::{
 impl AnalyticsServer {
     /// Run OLS regression.
     #[tool(
-        description = "Run Ordinary Least Squares (OLS) regression. Returns coefficients, standard errors, t-values, p-values, R-squared, and F-statistic."
+        description = "Run Ordinary Least Squares (OLS) regression. Returns coefficients, standard errors, t-values, p-values, R-squared, and F-statistic. For comparing group means with a single categorical predictor, consider anova_one_way instead."
     )]
     pub async fn regression_ols(
         &self,

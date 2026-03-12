@@ -179,10 +179,12 @@ pub struct BPBoundsRequest {
     #[schemars(
         description = "Name of the binary treatment received column (D). Example: actual treatment uptake."
     )]
+    #[serde(alias = "treatment_var", alias = "treat")]
     pub treatment: String,
 
     /// Outcome column (binary 0/1)
     #[schemars(description = "Name of the binary outcome column (Y). Example: recovery status.")]
+    #[serde(alias = "dep_var", alias = "y", alias = "response")]
     pub outcome: String,
 
     /// Assume monotonicity (no defiers)
@@ -267,14 +269,17 @@ pub struct DiDRequest {
 
     /// Dependent variable column name
     #[schemars(description = "Name of the outcome/dependent variable column.")]
+    #[serde(alias = "outcome", alias = "y", alias = "response")]
     pub dep_var: String,
 
     /// Treatment group indicator column (0/1)
     #[schemars(description = "Column indicating treatment group (1 = treated, 0 = control).")]
+    #[serde(alias = "treatment", alias = "treat")]
     pub treatment_var: String,
 
     /// Post-treatment period indicator column (0/1)
     #[schemars(description = "Column indicating post-treatment period (1 = post, 0 = pre).")]
+    #[serde(alias = "post", alias = "post_treatment")]
     pub post_var: String,
 }
 
@@ -287,6 +292,7 @@ pub struct StaggeredDiDRequest {
 
     /// Outcome variable column name
     #[schemars(description = "Name of the outcome variable column.")]
+    #[serde(alias = "dep_var", alias = "y", alias = "response")]
     pub outcome: String,
 
     /// Treatment timing column
@@ -299,12 +305,14 @@ pub struct StaggeredDiDRequest {
     #[schemars(
         description = "Column containing the time period identifier (e.g., year, quarter)."
     )]
+    #[serde(alias = "time_var", alias = "time", alias = "period")]
     pub time_col: String,
 
     /// Unit identifier column
     #[schemars(
         description = "Column containing the unit/individual identifier (e.g., state_id, firm_id)."
     )]
+    #[serde(alias = "entity_var", alias = "entity_col", alias = "entity")]
     pub unit_col: String,
 
     /// Covariate columns (optional)
@@ -347,18 +355,21 @@ pub struct BaconDecompRequest {
 
     /// Outcome variable column name
     #[schemars(description = "Name of the outcome variable column.")]
+    #[serde(alias = "dep_var", alias = "y", alias = "response")]
     pub outcome: String,
 
     /// Unit identifier column
     #[schemars(
         description = "Column containing the unit/individual identifier (e.g., state_id, firm_id)."
     )]
+    #[serde(alias = "entity_var", alias = "entity_col", alias = "entity")]
     pub unit_col: String,
 
     /// Time period column
     #[schemars(
         description = "Column containing the time period identifier (e.g., year, quarter)."
     )]
+    #[serde(alias = "time_var", alias = "time", alias = "period")]
     pub time_col: String,
 
     /// Treatment indicator column
@@ -377,24 +388,28 @@ pub struct EtwfeRequest {
 
     /// Outcome variable column name
     #[schemars(description = "Name of the outcome variable column.")]
+    #[serde(alias = "dep_var", alias = "y", alias = "response")]
     pub outcome: String,
 
     /// Unit identifier column
     #[schemars(
         description = "Column containing the unit/individual identifier (e.g., state_id, firm_id)."
     )]
+    #[serde(alias = "entity_var", alias = "entity_col", alias = "entity")]
     pub unit_col: String,
 
     /// Time period column
     #[schemars(
         description = "Column containing the time period identifier (e.g., year, quarter)."
     )]
+    #[serde(alias = "time_var", alias = "time", alias = "period")]
     pub time_col: String,
 
     /// Treatment indicator column
     #[schemars(
         description = "Column indicating treatment status (1 = currently treated, 0 = not treated). Binary indicator."
     )]
+    #[serde(alias = "treatment_var", alias = "treat")]
     pub treatment: String,
 
     /// First treatment period column
@@ -423,12 +438,14 @@ pub struct IpwRequest {
 
     /// Outcome variable column name
     #[schemars(description = "Name of the outcome variable column.")]
+    #[serde(alias = "dep_var", alias = "y", alias = "response")]
     pub outcome: String,
 
     /// Treatment indicator column (0/1)
     #[schemars(
         description = "Column indicating treatment status (1 = treated, 0 = control). Must be binary."
     )]
+    #[serde(alias = "treatment_var", alias = "treat")]
     pub treatment: String,
 
     /// Covariate columns for propensity score model
@@ -463,12 +480,14 @@ pub struct DoublyRobustRequest {
 
     /// Outcome variable column name
     #[schemars(description = "Name of the outcome variable column.")]
+    #[serde(alias = "dep_var", alias = "y", alias = "response")]
     pub outcome: String,
 
     /// Treatment indicator column (0/1)
     #[schemars(
         description = "Column indicating treatment status (1 = treated, 0 = control). Must be binary."
     )]
+    #[serde(alias = "treatment_var", alias = "treat")]
     pub treatment: String,
 
     /// Covariate columns for propensity score and outcome models
@@ -511,12 +530,14 @@ pub struct DoubleMLRequest {
 
     /// Outcome variable column name
     #[schemars(description = "Name of the outcome variable column (Y).")]
+    #[serde(alias = "dep_var", alias = "y", alias = "response")]
     pub outcome: String,
 
     /// Treatment variable column name
     #[schemars(
         description = "Name of the treatment variable column (D). Can be continuous or binary."
     )]
+    #[serde(alias = "treatment_var", alias = "treat")]
     pub treatment: String,
 
     /// Covariate columns for nuisance model estimation
@@ -559,6 +580,7 @@ pub struct CbpsRequest {
     #[schemars(
         description = "Column indicating treatment status (1 = treated, 0 = control). Must be binary."
     )]
+    #[serde(alias = "treatment_var", alias = "treat")]
     pub treatment: String,
 
     /// Covariate columns for propensity score model
@@ -589,6 +611,7 @@ pub struct WeightItRequest {
     #[schemars(
         description = "Column indicating treatment status (1 = treated, 0 = control). Must be binary."
     )]
+    #[serde(alias = "treatment_var", alias = "treat")]
     pub treatment: String,
 
     /// Covariate columns for balance
@@ -631,6 +654,7 @@ pub struct EntropyBalanceRequest {
     #[schemars(
         description = "Column indicating treatment status (1 = treated, 0 = control). Must be binary."
     )]
+    #[serde(alias = "treatment_var", alias = "treat")]
     pub treatment: String,
 
     /// Covariate columns for balance
@@ -655,6 +679,7 @@ pub struct SBWRequest {
     #[schemars(
         description = "Column indicating treatment status (1 = treated, 0 = control). Must be binary."
     )]
+    #[serde(alias = "treatment_var", alias = "treat")]
     pub treatment: String,
 
     /// Covariate columns for balance
@@ -695,6 +720,7 @@ pub struct TwangRequest {
     #[schemars(
         description = "Column indicating treatment status (1 = treated, 0 = control). Must be binary."
     )]
+    #[serde(alias = "treatment_var", alias = "treat")]
     pub treatment: String,
 
     /// Covariate columns for propensity model
@@ -741,6 +767,7 @@ pub struct MatchItRequest {
     #[schemars(
         description = "Column indicating treatment status (1 = treated, 0 = control). Must be binary."
     )]
+    #[serde(alias = "treatment_var", alias = "treat")]
     pub treatment: String,
 
     /// Covariate columns for matching
@@ -793,12 +820,14 @@ pub struct TmleRequest {
 
     /// Outcome variable column name
     #[schemars(description = "Name of the outcome variable column. Can be binary or continuous.")]
+    #[serde(alias = "dep_var", alias = "y", alias = "response")]
     pub outcome: String,
 
     /// Treatment indicator column (0/1)
     #[schemars(
         description = "Column indicating treatment status (1 = treated, 0 = control). Must be binary."
     )]
+    #[serde(alias = "treatment_var", alias = "treat")]
     pub treatment: String,
 
     /// Covariate columns for propensity score and outcome models
@@ -831,12 +860,14 @@ pub struct CTmleRequest {
 
     /// Outcome variable column name
     #[schemars(description = "Name of the outcome variable column. Can be binary or continuous.")]
+    #[serde(alias = "dep_var", alias = "y", alias = "response")]
     pub outcome: String,
 
     /// Treatment indicator column (0/1)
     #[schemars(
         description = "Column indicating treatment status (1 = treated, 0 = control). Must be binary."
     )]
+    #[serde(alias = "treatment_var", alias = "treat")]
     pub treatment: String,
 
     /// Covariate columns (candidates for propensity score selection)
@@ -927,12 +958,14 @@ pub struct StdRegRequest {
 
     /// Outcome variable column name
     #[schemars(description = "Name of the outcome variable column. Can be continuous or binary.")]
+    #[serde(alias = "dep_var", alias = "y", alias = "response")]
     pub outcome: String,
 
     /// Treatment indicator column (0/1)
     #[schemars(
         description = "Column indicating treatment status (1 = treated, 0 = control). Must be binary."
     )]
+    #[serde(alias = "treatment_var", alias = "treat")]
     pub treatment: String,
 
     /// Covariate columns for the outcome model
@@ -983,6 +1016,7 @@ pub struct GFormulaRequest {
 
     /// Outcome variable column name (observed at final time point)
     #[schemars(description = "Name of the outcome variable column.")]
+    #[serde(alias = "dep_var", alias = "y", alias = "response")]
     pub outcome: String,
 
     /// Baseline (time-invariant) covariate column names
@@ -1065,12 +1099,14 @@ pub struct MediationRequest {
 
     /// Outcome variable column name
     #[schemars(description = "Name of the outcome variable column.")]
+    #[serde(alias = "dep_var", alias = "y", alias = "response")]
     pub outcome: String,
 
     /// Treatment indicator column (0/1)
     #[schemars(
         description = "Column indicating treatment status (1 = treated, 0 = control). Must be binary."
     )]
+    #[serde(alias = "treatment_var", alias = "treat")]
     pub treatment: String,
 
     /// Mediator variable column name
@@ -1107,12 +1143,14 @@ pub struct NaturalEffectsRequest {
 
     /// Outcome variable column name
     #[schemars(description = "Name of the outcome variable column (continuous).")]
+    #[serde(alias = "dep_var", alias = "y", alias = "response")]
     pub outcome: String,
 
     /// Treatment indicator column (0/1)
     #[schemars(
         description = "Column indicating treatment status (1 = treated, 0 = control). Typically binary."
     )]
+    #[serde(alias = "treatment_var", alias = "treat")]
     pub treatment: String,
 
     /// Mediator variable column name
@@ -1161,16 +1199,19 @@ pub struct SyntheticControlRequest {
 
     /// Outcome variable column name
     #[schemars(description = "Name of the outcome variable column.")]
+    #[serde(alias = "dep_var", alias = "y", alias = "response")]
     pub outcome: String,
 
     /// Unit identifier column name
     #[schemars(description = "Name of the column identifying units (e.g., 'state', 'country').")]
+    #[serde(alias = "entity_var", alias = "entity_col", alias = "entity")]
     pub unit_col: String,
 
     /// Time period column name
     #[schemars(
         description = "Name of the column identifying time periods (must be integer, e.g., 'year')."
     )]
+    #[serde(alias = "time_var", alias = "time", alias = "period")]
     pub time_col: String,
 
     /// Name/ID of the treated unit
@@ -1237,20 +1278,24 @@ pub struct GsynthRequest {
 
     /// Outcome variable column name
     #[schemars(description = "Name of the outcome variable column (Y).")]
+    #[serde(alias = "dep_var", alias = "y", alias = "response")]
     pub outcome: String,
 
     /// Treatment indicator column name
     #[schemars(
         description = "Name of the treatment indicator column (D, binary 0/1). Treatment can start at different times for different units."
     )]
+    #[serde(alias = "treatment_var", alias = "treat")]
     pub treatment: String,
 
     /// Unit identifier column name
     #[schemars(description = "Name of the column identifying units (e.g., 'state', 'country').")]
+    #[serde(alias = "entity_var", alias = "entity_col", alias = "entity")]
     pub unit_col: String,
 
     /// Time period column name
     #[schemars(description = "Name of the column identifying time periods (must be numeric).")]
+    #[serde(alias = "time_var", alias = "time", alias = "period")]
     pub time_col: String,
 
     /// Covariate columns
@@ -1305,14 +1350,17 @@ pub struct ScpiRequest {
 
     /// Outcome variable column name
     #[schemars(description = "Name of the outcome variable column (Y).")]
+    #[serde(alias = "dep_var", alias = "y", alias = "response")]
     pub outcome: String,
 
     /// Unit identifier column name
     #[schemars(description = "Name of the column identifying units (e.g., 'state', 'country').")]
+    #[serde(alias = "entity_var", alias = "entity_col", alias = "entity")]
     pub unit_col: String,
 
     /// Time period column name
     #[schemars(description = "Name of the column identifying time periods (must be numeric).")]
+    #[serde(alias = "time_var", alias = "time", alias = "period")]
     pub time_col: String,
 
     /// Treated unit identifier
@@ -1369,10 +1417,12 @@ pub struct RdEstimateRequest {
 
     /// Outcome variable column name
     #[schemars(description = "Name of the outcome variable (Y) column.")]
+    #[serde(alias = "dep_var", alias = "y", alias = "response")]
     pub outcome: String,
 
     /// Running variable column name
     #[schemars(description = "Name of the running (forcing) variable (X) column.")]
+    #[serde(alias = "x", alias = "score")]
     pub running_var: String,
 
     /// Cutoff value
@@ -1421,10 +1471,12 @@ pub struct RdBandwidthRequest {
 
     /// Outcome variable column name
     #[schemars(description = "Name of the outcome variable (Y) column.")]
+    #[serde(alias = "dep_var", alias = "y", alias = "response")]
     pub outcome: String,
 
     /// Running variable column name
     #[schemars(description = "Name of the running (forcing) variable (X) column.")]
+    #[serde(alias = "x", alias = "score")]
     pub running_var: String,
 
     /// Cutoff value
@@ -1457,16 +1509,19 @@ pub struct FuzzyRdRequest {
 
     /// Outcome variable column name
     #[schemars(description = "Name of the outcome variable (Y) column.")]
+    #[serde(alias = "dep_var", alias = "y", alias = "response")]
     pub outcome: String,
 
     /// Running variable column name
     #[schemars(description = "Name of the running (forcing) variable (X) column.")]
+    #[serde(alias = "x", alias = "score")]
     pub running_var: String,
 
     /// Treatment indicator column name
     #[schemars(
         description = "Name of the treatment indicator column (actual treatment received, 0/1)."
     )]
+    #[serde(alias = "treatment_var", alias = "treat")]
     pub treatment: String,
 
     /// Cutoff value
@@ -1507,10 +1562,12 @@ pub struct RdMultiRequest {
 
     /// Outcome variable column name
     #[schemars(description = "Name of the outcome variable (Y) column.")]
+    #[serde(alias = "dep_var", alias = "y", alias = "response")]
     pub outcome: String,
 
     /// Running variable column name
     #[schemars(description = "Name of the running (forcing) variable (X) column.")]
+    #[serde(alias = "x", alias = "score")]
     pub running_var: String,
 
     /// Cutoff values
@@ -1579,10 +1636,12 @@ pub struct CausalForestRequest {
 
     /// Outcome column name
     #[schemars(description = "Name of the outcome variable (Y).")]
+    #[serde(alias = "dep_var", alias = "y", alias = "response")]
     pub outcome: String,
 
     /// Treatment column name
     #[schemars(description = "Name of the binary treatment variable (W). Must be 0/1.")]
+    #[serde(alias = "treatment_var", alias = "treat")]
     pub treatment: String,
 
     /// Covariate column names
@@ -1621,10 +1680,12 @@ pub struct BartCausalRequest {
 
     /// Outcome column name
     #[schemars(description = "Name of the outcome variable (Y).")]
+    #[serde(alias = "dep_var", alias = "y", alias = "response")]
     pub outcome: String,
 
     /// Treatment column name
     #[schemars(description = "Name of the binary treatment variable (W). Must be 0/1.")]
+    #[serde(alias = "treatment_var", alias = "treat")]
     pub treatment: String,
 
     /// Covariate column names
@@ -1667,10 +1728,12 @@ pub struct HetTxRequest {
 
     /// Outcome column name
     #[schemars(description = "Name of the outcome variable (Y).")]
+    #[serde(alias = "dep_var", alias = "y", alias = "response")]
     pub outcome: String,
 
     /// Treatment column name
     #[schemars(description = "Name of the binary treatment indicator (0/1).")]
+    #[serde(alias = "treatment_var", alias = "treat")]
     pub treatment: String,
 
     /// Covariate column names
@@ -1723,6 +1786,7 @@ pub struct SensemakrRequest {
     #[schemars(
         description = "Name of the treatment variable whose coefficient will be analyzed for sensitivity."
     )]
+    #[serde(alias = "treatment_var", alias = "treat")]
     pub treatment: String,
 
     /// Control covariate column names

@@ -11,6 +11,7 @@ use futures::StreamExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::hash::{Hash, Hasher};
 
 /// Anthropic provider for LLM inference.
 pub struct AnthropicProvider {
@@ -141,21 +142,83 @@ impl AnthropicProvider {
         interpret: bool,
     ) -> Result<Message, LlmError> {
         let mut iterations = 0;
+        let mut tool_call_history: Vec<u64> = Vec::new();
+        let mut tool_name_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        let mut last_text_content = String::new();
 
         loop {
             iterations += 1;
             if iterations > max_iterations {
-                return Err(LlmError::ApiError(
-                    "Maximum tool execution iterations exceeded".to_string(),
-                ));
+                tracing::warn!("Maximum tool execution iterations ({}) exceeded, returning partial results", max_iterations);
+                let fallback = if last_text_content.is_empty() {
+                    "Analysis reached the maximum number of tool calls. Here are the results gathered so far.".to_string()
+                } else {
+                    last_text_content
+                };
+                return Ok(Message {
+                    role: MessageRole::Assistant,
+                    content: fallback,
+                    tool_calls: None,
+                    tool_results: None,
+                });
             }
 
             // Make the API call
             let response = self.call_api(messages, tools).await?;
 
+            // Track last text content for graceful degradation
+            if !response.content.is_empty() {
+                last_text_content = response.content.clone();
+            }
+
             // Check if there are tool calls to execute
             if let Some(ref tool_calls) = response.tool_calls {
                 if !tool_calls.is_empty() {
+                    // Loop detection: hash (tool_name, arguments) for each call
+                    let mut iteration_hash = std::hash::DefaultHasher::new();
+                    for tc in tool_calls {
+                        tc.name.hash(&mut iteration_hash);
+                        tc.arguments.to_string().hash(&mut iteration_hash);
+                    }
+                    let hash = Hasher::finish(&iteration_hash);
+
+                    // Check for exact repeat of previous iteration
+                    if tool_call_history.last() == Some(&hash) {
+                        tracing::warn!("Loop detected: exact repeat of previous tool calls, breaking");
+                        let fallback = if last_text_content.is_empty() {
+                            "Analysis detected a repeated tool call pattern and stopped. Please try rephrasing your request.".to_string()
+                        } else {
+                            last_text_content
+                        };
+                        return Ok(Message {
+                            role: MessageRole::Assistant,
+                            content: fallback,
+                            tool_calls: None,
+                            tool_results: None,
+                        });
+                    }
+                    tool_call_history.push(hash);
+
+                    // Check for same tool called too many times
+                    for tc in tool_calls {
+                        let count = tool_name_counts.entry(tc.name.clone()).or_insert(0);
+                        *count += 1;
+                        if *count > 3 {
+                            tracing::warn!("Loop detected: tool '{}' called {} times, breaking", tc.name, count);
+                            let fallback = if last_text_content.is_empty() {
+                                format!("Analysis stopped: tool '{}' was called repeatedly. Here are the results gathered so far.", tc.name)
+                            } else {
+                                last_text_content
+                            };
+                            return Ok(Message {
+                                role: MessageRole::Assistant,
+                                content: fallback,
+                                tool_calls: None,
+                                tool_results: None,
+                            });
+                        }
+                    }
+
                     // Add the assistant message with tool calls
                     messages.push(response.clone());
 
@@ -233,15 +296,20 @@ impl AnthropicProvider {
             "Sending request to Anthropic API"
         );
 
-        let response = self
-            .client
-            .post(&url)
-            .header("x-api-key", api_key)
-            .header("anthropic-version", "2023-06-01")
-            .header("Content-Type", "application/json")
-            .json(&request_body)
-            .send()
-            .await?;
+        let retry_config = super::retry::RetryConfig::default();
+        let client = &self.client;
+        let response = super::retry::send_with_retry(
+            || {
+                client
+                    .post(&url)
+                    .header("x-api-key", api_key)
+                    .header("anthropic-version", "2023-06-01")
+                    .header("Content-Type", "application/json")
+                    .json(&request_body)
+            },
+            &retry_config,
+        )
+        .await?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -311,15 +379,20 @@ impl AnthropicProvider {
             stream: Some(true),
         };
 
-        let response = self
-            .client
-            .post(&url)
-            .header("x-api-key", api_key)
-            .header("anthropic-version", "2023-06-01")
-            .header("Content-Type", "application/json")
-            .json(&request_body)
-            .send()
-            .await?;
+        let retry_config = super::retry::RetryConfig::default();
+        let client = &self.client;
+        let response = super::retry::send_with_retry(
+            || {
+                client
+                    .post(&url)
+                    .header("x-api-key", api_key)
+                    .header("anthropic-version", "2023-06-01")
+                    .header("Content-Type", "application/json")
+                    .json(&request_body)
+            },
+            &retry_config,
+        )
+        .await?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -423,21 +496,83 @@ impl AnthropicProvider {
         callback: &(dyn Fn(StreamChunk) + Send + Sync),
     ) -> Result<Message, LlmError> {
         let mut iterations = 0;
+        let mut tool_call_history: Vec<u64> = Vec::new();
+        let mut tool_name_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        let mut last_text_content = String::new();
 
         loop {
             iterations += 1;
             if iterations > max_iterations {
-                return Err(LlmError::ApiError(
-                    "Maximum tool execution iterations exceeded".to_string(),
-                ));
+                tracing::warn!("Maximum tool execution iterations ({}) exceeded, returning partial results", max_iterations);
+                let fallback = if last_text_content.is_empty() {
+                    "Analysis reached the maximum number of tool calls. Here are the results gathered so far.".to_string()
+                } else {
+                    last_text_content
+                };
+                return Ok(Message {
+                    role: MessageRole::Assistant,
+                    content: fallback,
+                    tool_calls: None,
+                    tool_results: None,
+                });
             }
 
             // Make the streaming API call
             let response = self.call_api_stream(messages, tools, callback).await?;
 
+            // Track last text content for graceful degradation
+            if !response.content.is_empty() {
+                last_text_content = response.content.clone();
+            }
+
             // Check if there are tool calls to execute
             if let Some(ref tool_calls) = response.tool_calls {
                 if !tool_calls.is_empty() {
+                    // Loop detection: hash (tool_name, arguments) for each call
+                    let mut iteration_hash = std::hash::DefaultHasher::new();
+                    for tc in tool_calls {
+                        tc.name.hash(&mut iteration_hash);
+                        tc.arguments.to_string().hash(&mut iteration_hash);
+                    }
+                    let hash = Hasher::finish(&iteration_hash);
+
+                    // Check for exact repeat of previous iteration
+                    if tool_call_history.last() == Some(&hash) {
+                        tracing::warn!("Loop detected: exact repeat of previous tool calls, breaking");
+                        let fallback = if last_text_content.is_empty() {
+                            "Analysis detected a repeated tool call pattern and stopped. Please try rephrasing your request.".to_string()
+                        } else {
+                            last_text_content
+                        };
+                        return Ok(Message {
+                            role: MessageRole::Assistant,
+                            content: fallback,
+                            tool_calls: None,
+                            tool_results: None,
+                        });
+                    }
+                    tool_call_history.push(hash);
+
+                    // Check for same tool called too many times
+                    for tc in tool_calls {
+                        let count = tool_name_counts.entry(tc.name.clone()).or_insert(0);
+                        *count += 1;
+                        if *count > 3 {
+                            tracing::warn!("Loop detected: tool '{}' called {} times, breaking", tc.name, count);
+                            let fallback = if last_text_content.is_empty() {
+                                format!("Analysis stopped: tool '{}' was called repeatedly. Here are the results gathered so far.", tc.name)
+                            } else {
+                                last_text_content
+                            };
+                            return Ok(Message {
+                                role: MessageRole::Assistant,
+                                content: fallback,
+                                tool_calls: None,
+                                tool_results: None,
+                            });
+                        }
+                    }
+
                     // Add the assistant message with tool calls
                     messages.push(response.clone());
 
@@ -529,7 +664,8 @@ impl LlmProvider for AnthropicProvider {
         interpret: bool,
     ) -> Result<Message, LlmError> {
         let mut conversation = messages.to_vec();
-        self.execute_tool_loop(&mut conversation, tools, tool_executor, 10, interpret)
+        let max_iterations = self.config.max_tool_iterations.unwrap_or(super::provider::DEFAULT_MAX_TOOL_ITERATIONS);
+        self.execute_tool_loop(&mut conversation, tools, tool_executor, max_iterations, interpret)
             .await
     }
 
@@ -542,11 +678,12 @@ impl LlmProvider for AnthropicProvider {
         callback: Box<dyn Fn(StreamChunk) + Send + Sync>,
     ) -> Result<Message, LlmError> {
         let mut conversation = messages.to_vec();
+        let max_iterations = self.config.max_tool_iterations.unwrap_or(super::provider::DEFAULT_MAX_TOOL_ITERATIONS);
         self.execute_tool_loop_stream(
             &mut conversation,
             tools,
             tool_executor,
-            10,
+            max_iterations,
             interpret,
             callback.as_ref(),
         )

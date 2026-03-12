@@ -54,6 +54,7 @@ pub struct ModelTablesRequest {
 
     /// Response column
     #[schemars(description = "Name of the response column (Y variable).")]
+    #[serde(alias = "y", alias = "value")]
     pub response: String,
 
     /// Factor column(s) for ANOVA
@@ -82,10 +83,12 @@ pub struct SeContrastRequest {
 
     /// Response column
     #[schemars(description = "Name of the response column (Y variable).")]
+    #[serde(alias = "y", alias = "value")]
     pub response: String,
 
     /// Factor column for ANOVA
     #[schemars(description = "Name of the factor column for one-way ANOVA.")]
+    #[serde(alias = "group", alias = "group_col")]
     pub factor: String,
 
     /// Contrast coefficients
@@ -496,12 +499,14 @@ pub struct TukeyHsdRequest {
 
     /// Response variable column name
     #[schemars(description = "Name of the response (dependent) variable column. Must be numeric.")]
+    #[serde(alias = "y", alias = "value")]
     pub response: String,
 
     /// Factor (grouping) variable column name
     #[schemars(
         description = "Name of the factor (grouping) variable column. Defines groups to compare."
     )]
+    #[serde(alias = "group", alias = "group_col")]
     pub factor: String,
 
     /// Confidence level (default: 0.95)
@@ -578,12 +583,14 @@ pub struct OneWayAnovaRequest {
 
     /// Response variable column name
     #[schemars(description = "Name of the response (dependent) variable column. Must be numeric.")]
+    #[serde(alias = "y", alias = "value")]
     pub response: String,
 
     /// Factor (grouping) variable column name
     #[schemars(
         description = "Name of the factor (grouping) variable column. Groups observations for comparison."
     )]
+    #[serde(alias = "group", alias = "group_col")]
     pub factor: String,
 }
 
@@ -596,6 +603,7 @@ pub struct TwoWayAnovaRequest {
 
     /// Response variable column name
     #[schemars(description = "Name of the response (dependent) variable column. Must be numeric.")]
+    #[serde(alias = "y", alias = "value")]
     pub response: String,
 
     /// First factor variable column name

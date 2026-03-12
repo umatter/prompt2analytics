@@ -130,13 +130,25 @@ pub trait LinearEstimator {
 
 \noindent Implementors provide core results; derived statistics
 ($t$-values, $p$-values, confidence intervals) are computed by default
-implementations, enforced at compile time. Other method families use
-their own result types: discrete choice models return $z$-statistics
-and log-likelihood rather than $t$-statistics and residuals; panel
-models include within-$R^2$ and group structure; time series models
-include information criteria and forecast output. Unlike \proglang{R}'s
-formula interface, the API uses explicit column names, because the LLM
-has already translated intent into specification.
+implementations, enforced at compile time. The \code{LinearEstimator}
+trait applies only to linear models (OLS, GLS, panel FE/RE). Non-linear
+models use their own result types: discrete choice models
+(\code{DiscreteResult}) return $z$-statistics, log-likelihood, and
+pseudo-$R^2$ rather than $t$-statistics and residuals; panel models
+(\code{PanelResult}) include within-$R^2$ and group structure; time
+series models return information criteria and forecast output;
+clustering methods (\code{ClusterResult}) return cluster assignments,
+centroids, and fit measures (silhouette, inertia); and survival models
+(\code{SurvivalResult}) return hazard ratios, survival curves, and
+log-rank statistics. Each result type implements a common serialization
+interface so the MCP layer can return structured output regardless of
+the method family. Unlike \proglang{R}'s
+formula interface, the API uses explicit column names---the natural
+output of LLM parameter extraction, which identifies individual
+columns rather than constructing formula syntax. This design also
+simplifies the implementation: formula parsing, factor expansion, and
+interaction term handling are unnecessary when the caller specifies
+columns directly.
 
 The \code{EconError} type provides structured error information
 (singular matrix, convergence failure, insufficient clusters) that
@@ -155,7 +167,7 @@ known differences.
 
 \subsection{Implemented methods}
 
-The \pkg{p2a-core} library implements 271 methods, exposed as
+The \pkg{p2a-core} library implements over 250 methods, exposed as
 individual MCP tools.
 Table~\ref{tab:method-categories} summarizes coverage, using standard
 abbreviations: heteroskedasticity and autocorrelation consistent (HAC),
@@ -259,12 +271,34 @@ method in \pkg{p2a-core}. This many-to-one mapping keeps the LLM's
 selection task manageable while preserving access to the full library.
 
 The full set of tool schemas consumes approximately 32{,}000 tokens,
-a substantial share of current context windows.  For the built-in
-chat interface, the MCP server therefore exposes a curated subset of
+a substantial share of current context windows.  The built-in
+chat interface therefore exposes a curated subset of
 roughly 70 tools covering the most common analytical workflows;
-specialized tools are available on request or through the CLI.
-External LLM clients that connect via MCP receive the complete
-schema and can apply their own filtering.
+specialized tools remain available through the CLI.
+External MCP clients receive the complete schema and can apply
+their own filtering.
+
+\paragraph{Multi-turn context management.}
+In multi-turn conversations, the system includes prior tool calls and
+their results in the conversation history sent to the LLM. Each
+assistant message that triggered a tool call is preserved with its
+structured \code{tool\_calls} field, followed by a \code{tool} role
+message containing the result (truncated to 2{,}000 characters to
+prevent context overflow). This enables the LLM to resolve references
+like ``those results'' or ``now try with clustered standard errors''
+by inspecting what was previously computed.  A token budget tracker
+estimates context usage across the system prompt, conversation history,
+tool schemas, and the current query; when the budget approaches the
+model's context window, older turns are summarized (retaining tool
+names and key results) while recent turns are kept verbatim.
+
+For the
+curated 70-tool schema (${\approx}\,12{,}000$ tokens), a 128K-context
+model supports roughly 30--40 substantive turns before summarization
+begins; the full 250+ tool schema (${\approx}\,32{,}000$ tokens) reduces
+this to approximately 20 turns. External MCP clients (e.g., Claude
+Desktop, Cursor) manage their own context windows and may apply
+different truncation or tool-filtering strategies.
 
 Beyond executing methods, the system generates data-driven warnings
 when results suggest potential violations of identifying assumptions.
@@ -307,7 +341,7 @@ The ecosystem provides the necessary components: \pkg{polars} for
 data manipulation~\citep{polars}, \pkg{ndarray} for array operations,
 and \pkg{faer} for linear algebra. All computations use 64-bit
 floating-point arithmetic throughout, matching \proglang{R}'s precision. To
-date, no econometrics or data analytics library has been available for \proglang{Rust};
+our knowledge, no econometrics or data analytics library has previously been available for \proglang{Rust};
 \pkg{p2a-core} addresses this gap.
 
 Several additional design choices merit brief explanation. For

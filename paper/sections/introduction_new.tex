@@ -53,6 +53,18 @@ Reproducibility is achieved because the same tool invocation produces
 identical results---the stochastic element of the language model
 affects only interpretation, not computation.
 
+The target users are researchers and analysts who know what analysis
+they want but prefer not to write the code themselves: graduate
+students running standard econometric models for the first time,
+applied researchers iterating on specifications during exploratory
+work, and data analysts in organizations where privacy regulations
+prohibit cloud processing. For expert users fluent in \proglang{R}
+or \proglang{Stata}, the system offers faster iteration on routine
+tasks and a local privacy guarantee; for less experienced users, it
+lowers the barrier to correctly specified analyses---though
+statistical literacy remains necessary to interpret results
+(Section~\ref{sec:defining}).
+
 This paper presents \pkg{prompt2analytics} (\pkg{p2a}), an implementation of
 chat-first data analytics. The software includes an econometrics and
 data analytics library in pure \proglang{Rust}, exposed through the
@@ -65,7 +77,7 @@ validated against established \proglang{R} packages.
 
 \pkg{prompt2analytics} is available as open-source software under the MIT
 license at \url{https://github.com/umatter/prompt2analytics}.
-Supplementary materials---including the 87 evaluation test cases,
+Supplementary materials---including all 96 evaluation prompts,
 benchmark scripts for both \proglang{R} and \proglang{Rust}, and validation
 test suites---are located in the repository's \code{paper/} directory.
 Appendix~\ref{app:reproducibility} provides reproduction instructions.
@@ -80,5 +92,5 @@ examples including realistic failure cases.
 Section~\ref{sec:evaluation} evaluates tool selection accuracy and
 numerical correctness.
 Section~\ref{sec:deployment} presents performance benchmarks and local
-deployment configurations. Section~\ref{sec:discussion} discusses
+deployment configurations, and Section~\ref{sec:discussion} discusses
 limitations and future directions.

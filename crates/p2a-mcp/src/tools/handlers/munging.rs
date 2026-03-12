@@ -1369,7 +1369,7 @@ impl AnalyticsServer {
 
     /// Replace exact values in a column.
     #[tool(
-        description = "Replace exact values in a column with a new value. For pattern-based replacement, use str_regex_replace."
+        description = "Replace exact values in a column with a new value. Use to clean sentinel values like -99, 'N/A', or 'missing' by replacing them (use null as new_value to convert to missing). For pattern-based replacement, use str_regex_replace. Call this directly — do NOT call head_dataset or describe_dataset first."
     )]
     pub async fn str_replace_value(
         &self,
@@ -2185,6 +2185,97 @@ impl AnalyticsServer {
         Ok(CallToolResult::success(vec![Content::text(format!(
             "Created column '{}', saved as '{}'",
             request.new_column, result_name
+        ))]))
+    }
+
+    /// Cast column(s) to a different data type.
+    #[tool(
+        description = "Cast column(s) to a different data type (int, float, string, bool). Use after cleaning sentinel values to convert string columns to numeric for analysis."
+    )]
+    pub async fn munge_cast(
+        &self,
+        Parameters(request): Parameters<CastColumnRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        use p2a_core::data::munging::{cast, cast_columns};
+
+        let datasets = self.datasets.read().await;
+
+        let dataset = match datasets.get(&request.dataset) {
+            Some(ds) => ds,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Dataset '{}' not found.",
+                    request.dataset
+                ))]));
+            }
+        };
+
+        // Build list of (column, dtype) pairs from either single or batch mode
+        let cast_pairs: Vec<(String, String)> = if let Some(ref casts) = request.casts {
+            // Batch mode
+            let mut pairs = Vec::new();
+            for pair in casts {
+                if pair.len() != 2 {
+                    return Ok(CallToolResult::error(vec![Content::text(
+                        "Each entry in 'casts' must be a [column, dtype] pair.".to_string(),
+                    )]));
+                }
+                pairs.push((pair[0].clone(), pair[1].clone()));
+            }
+            pairs
+        } else if let (Some(col), Some(dt)) = (&request.column, &request.dtype) {
+            // Single column mode
+            vec![(col.clone(), dt.clone())]
+        } else {
+            return Ok(CallToolResult::error(vec![Content::text(
+                "Provide either 'column' + 'dtype' for single-column casting, or 'casts' for batch casting.".to_string(),
+            )]));
+        };
+
+        let cast_refs: Vec<(&str, &str)> = cast_pairs
+            .iter()
+            .map(|(c, d)| (c.as_str(), d.as_str()))
+            .collect();
+
+        let result = if cast_refs.len() == 1 {
+            match cast(dataset, cast_refs[0].0, cast_refs[0].1) {
+                Ok(ds) => ds,
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Cast failed: {}",
+                        e
+                    ))]));
+                }
+            }
+        } else {
+            match cast_columns(dataset, &cast_refs) {
+                Ok(ds) => ds,
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Cast failed: {}",
+                        e
+                    ))]));
+                }
+            }
+        };
+
+        let result_name = request
+            .result_name
+            .unwrap_or_else(|| request.dataset.clone());
+
+        let cast_desc: Vec<String> = cast_pairs
+            .iter()
+            .map(|(c, d)| format!("{} -> {}", c, d))
+            .collect();
+
+        drop(datasets);
+        let mut datasets = self.datasets.write().await;
+        datasets.insert(result_name.clone(), result);
+
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Cast columns [{}], saved as '{}'",
+            cast_desc.join(", "),
+            result_name
         ))]))
     }
 }

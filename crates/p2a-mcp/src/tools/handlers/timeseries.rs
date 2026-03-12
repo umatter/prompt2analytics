@@ -70,7 +70,7 @@ use p2a_core::{
 impl AnalyticsServer {
     /// - R `stats::acf`: https://stat.ethz.ch/R-manual/R-devel/library/stats/html/acf.html
     #[tool(
-        description = "Compute autocorrelation function (ACF), autocovariance, or partial autocorrelation function (PACF) for a time series. ACF measures correlation between observations at different lags. PACF measures correlation after removing effects of intermediate lags - useful for identifying AR order. Returns values for lags 0 to lag_max with 95% confidence bounds."
+        description = "Compute autocorrelation function (ACF), autocovariance, or partial autocorrelation function (PACF) for a time series. ACF measures correlation between observations at different lags. PACF measures correlation after removing effects of intermediate lags. Returns values for lags 0 to lag_max with 95% confidence bounds. For model fitting, use ts_arima_fit directly instead of computing ACF first."
     )]
     pub async fn timeseries_acf(
         &self,
@@ -682,7 +682,7 @@ impl AnalyticsServer {
 
     /// Fit an ARIMA model.
     #[tool(
-        description = "Fit an ARIMA(p,d,q) model to a univariate time series. Returns AR/MA coefficients, residuals, AIC, and model diagnostics."
+        description = "Fit an ARIMA(p,d,q) model to a univariate time series. Returns AR/MA coefficients, residuals, AIC, and model diagnostics. If the user does not specify p, d, q, use reasonable defaults like ARIMA(1,0,1) or ARIMA(1,1,1). Do NOT call timeseries_acf first — call this tool directly."
     )]
     pub async fn ts_arima_fit(
         &self,

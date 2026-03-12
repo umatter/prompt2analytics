@@ -618,7 +618,7 @@ mod llm_handlers {
     use super::*;
     use crate::llm::{
         AnthropicProvider, LlmProvider, Message, OllamaProvider, OpenAIProvider, ProviderConfig,
-        ProviderType, ToolExecutor, build_enhanced_dataset_context, get_mcp_tool_definitions,
+        ProviderType, ToolExecutor, build_enhanced_dataset_context,
         get_system_prompt_with_context,
     };
     use crate::session::Session;
@@ -642,6 +642,9 @@ mod llm_handlers {
         /// is provided and history is empty (default: true)
         #[serde(default = "default_retrieve_history")]
         pub retrieve_history: bool,
+        /// Maximum number of tool execution iterations (default: 25)
+        #[serde(default)]
+        pub max_tool_iterations: Option<usize>,
     }
 
     fn default_retrieve_history() -> bool {
@@ -716,8 +719,12 @@ mod llm_handlers {
     /// If no API key is provided, checks for environment variables:
     /// - OPENAI_API_KEY for OpenAI
     /// - ANTHROPIC_API_KEY for Anthropic
-    fn create_provider(config: Option<ProviderConfig>) -> Box<dyn LlmProvider> {
+    fn create_provider_with_iterations(config: Option<ProviderConfig>, max_tool_iterations: Option<usize>) -> Box<dyn LlmProvider> {
         let mut config = config.unwrap_or_default();
+        // Override max_tool_iterations if provided at request level
+        if max_tool_iterations.is_some() {
+            config.max_tool_iterations = max_tool_iterations;
+        }
 
         // Fill in API key from environment variable if not provided
         if config.api_key.is_none()
@@ -746,6 +753,11 @@ mod llm_handlers {
             ProviderType::OpenAI => Box::new(OpenAIProvider::new(config)),
             ProviderType::Anthropic => Box::new(AnthropicProvider::new(config)),
         }
+    }
+
+    /// Create a provider from config without extra iteration override.
+    fn create_provider(config: Option<ProviderConfig>) -> Box<dyn LlmProvider> {
+        create_provider_with_iterations(config, None)
     }
 
     /// LLM chat endpoint.
@@ -777,9 +789,9 @@ mod llm_handlers {
         };
 
         // Create provider and tool executor
-        let provider = create_provider(request.provider);
+        let provider = create_provider_with_iterations(request.provider, request.max_tool_iterations);
         let tool_executor = SessionToolExecutor::new(state.server.clone(), session.clone());
-        let tools = get_mcp_tool_definitions();
+        let tools = state.server.list_tools_for_llm();
 
         // Build enhanced dataset context from currently loaded datasets
         // This includes data types, sample values, and basic statistics
@@ -791,7 +803,7 @@ mod llm_handlers {
         tracing::info!(provider = %provider.provider_type(), num_tools = %tools.len(), has_datasets = dataset_context.is_some(), "Starting LLM chat");
 
         // Build message history with dataset context
-        let system_prompt = get_system_prompt_with_context(dataset_context.as_deref());
+        let system_prompt = get_system_prompt_with_context(dataset_context.as_deref(), &tools);
         let mut messages = vec![Message::system(system_prompt)];
         messages.extend(request.history);
         messages.push(Message::user(request.message));
@@ -1703,7 +1715,7 @@ mod llm_handlers {
             };
 
             // Create provider and streaming tool executor
-            let provider = create_provider(request.provider);
+            let provider = create_provider_with_iterations(request.provider, request.max_tool_iterations);
             let mut tool_executor =
                 StreamingToolExecutor::new(state_clone.server.clone(), session, tx_clone.clone());
 
@@ -1735,7 +1747,7 @@ mod llm_handlers {
                 }
             }
 
-            let tools = get_mcp_tool_definitions();
+            let tools = state.server.list_tools_for_llm();
 
             let _ = tx_clone
                 .send(ProgressEvent::Status {
@@ -1880,7 +1892,7 @@ mod llm_handlers {
             };
 
             // Build message history with dataset context
-            let system_prompt = get_system_prompt_with_context(dataset_context.as_deref());
+            let system_prompt = get_system_prompt_with_context(dataset_context.as_deref(), &tools);
             let mut messages = vec![Message::system(system_prompt)];
             messages.extend(history_to_use);
             messages.push(Message::user(request.message.clone()));

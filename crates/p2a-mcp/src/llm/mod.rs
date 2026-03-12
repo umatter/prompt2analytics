@@ -8,6 +8,7 @@ mod context;
 mod ollama;
 mod openai;
 mod provider;
+mod retry;
 mod tokens;
 mod tools;
 
@@ -26,4 +27,5 @@ pub use tokens::{
     ContextBudget, estimate_message_tokens, estimate_tokens, estimate_tool_definition_tokens,
     get_model_context_size,
 };
-pub use tools::{get_mcp_tool_definitions, get_system_prompt_with_context};
+pub use retry::{RetryConfig, send_with_retry};
+pub use tools::{get_system_prompt_with_context, TIER1_TOOLS, INTERNAL_TOOLS};

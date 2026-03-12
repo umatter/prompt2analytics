@@ -33,6 +33,7 @@ pub struct PanelFERequest {
     #[schemars(
         description = "Column name for entity/individual identifier (e.g., 'firm_id', 'person_id')."
     )]
+    #[serde(alias = "unit_col", alias = "entity_col", alias = "entity")]
     pub entity_var: String,
 }
 
@@ -55,6 +56,7 @@ pub struct PanelRERequest {
     #[schemars(
         description = "Column name for entity/individual identifier (e.g., 'firm_id', 'person_id')."
     )]
+    #[serde(alias = "unit_col", alias = "entity_col", alias = "entity")]
     pub entity_var: String,
 }
 
@@ -77,6 +79,7 @@ pub struct HausmanRequest {
     #[schemars(
         description = "Column name for entity/individual identifier (e.g., 'firm_id', 'person_id')."
     )]
+    #[serde(alias = "unit_col", alias = "entity_col", alias = "entity")]
     pub entity_var: String,
 }
 
@@ -99,6 +102,7 @@ pub struct PvcmRequest {
     #[schemars(
         description = "Column name for entity/individual identifier (e.g., 'firm_id', 'person_id')."
     )]
+    #[serde(alias = "unit_col", alias = "entity_col", alias = "entity")]
     pub entity_var: String,
 
     /// Model type: 'within' or 'random'
@@ -129,10 +133,12 @@ pub struct GmmRequest {
     #[schemars(
         description = "Column name for entity/individual identifier (e.g., 'firm_id', 'person_id')."
     )]
+    #[serde(alias = "unit_col", alias = "entity_col", alias = "entity")]
     pub entity_var: String,
 
     /// Time period identifier column
     #[schemars(description = "Column name for time period identifier (e.g., 'year', 'quarter').")]
+    #[serde(alias = "time_col", alias = "time", alias = "period")]
     pub time_var: String,
 
     /// Number of lags of the dependent variable to include
@@ -193,10 +199,12 @@ pub struct PanelGlsRequest {
     #[schemars(
         description = "Column name for entity/individual identifier (e.g., 'firm_id', 'person_id')."
     )]
+    #[serde(alias = "unit_col", alias = "entity_col", alias = "entity")]
     pub entity_var: String,
 
     /// Time period identifier column
     #[schemars(description = "Column name for time period identifier (e.g., 'year', 'quarter').")]
+    #[serde(alias = "time_col", alias = "time", alias = "period")]
     pub time_var: String,
 
     /// Model type: 'fe' (fixed effects), 'pooling', or 'fd' (first difference)
@@ -221,10 +229,12 @@ pub struct PanelUnitRootRequest {
     #[schemars(
         description = "Column name for panel unit identifier (e.g., 'country', 'firm_id')."
     )]
+    #[serde(alias = "entity_var", alias = "entity_col", alias = "entity")]
     pub unit_col: String,
 
     /// Time period column
     #[schemars(description = "Column name for time period identifier (e.g., 'year', 'quarter').")]
+    #[serde(alias = "time_var", alias = "time", alias = "period")]
     pub time_col: String,
 
     /// Test type

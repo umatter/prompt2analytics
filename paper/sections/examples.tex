@@ -20,8 +20,8 @@ examples (Section~\ref{sec:examples-realistic}) demonstrate failure
 modes---incorrect tool selection, missing parameters, and ambiguous
 prompts---to set realistic expectations before the formal evaluation in
 Section~\ref{sec:evaluation}.  Appendix~\ref{app:extended-examples}
-provides additional examples including time series analysis, data
-cleaning workflows, and a comparison with equivalent \proglang{R} code.
+provides additional examples including data
+cleaning workflows and a comparison with equivalent \proglang{R} code.
 
 %% -----------------------------------------------------------------------------
 \subsection{Chat interface} \label{sec:examples-chat}
@@ -31,9 +31,9 @@ engine. Users describe their analysis goals in plain language, and the LLM
 translates these requests into structured tool calls executed by the MCP server.
 This interface is useful for exploratory data analysis and for
 users less familiar with programming syntax. The examples in this section
-were generated using Claude 3.5 Sonnet via the MCP integration; other models
-(GPT-4o-mini, Llama 3.3 70B, etc.) produce similar results with minor variations
-in explanation style.
+were generated using Claude Sonnet~4.6 via the MCP integration; other models
+(GPT-4.1~Mini, Ministral~3B, etc.) produce similar results with minor
+variations in explanation style.
 
 A typical session begins by loading data and examining its structure:
 
@@ -386,17 +386,15 @@ No evidence of differential pre-trends; parallel trends assumption
 is supported (though not proven) by this test.
 \end{Soutput}
 
-This workflow required three correction turns: (1)~correcting method
-selection from a t-test to DiD; (2)~adding clustered standard errors;
-and (3)~requesting pre-trend diagnostics. The final result is correct.
+This workflow required three corrections: (1)~method
+selection from a t-test to DiD; (2)~clustered standard errors;
+and (3)~pre-trend diagnostics. The final result is correct.
 
-Practical tips from using the system: naming variables directly
+Two practical tips: naming variables directly
 (``regress inv on value'') is more reliable than using pronouns
-(``use the same variables''), and users should always verify which
-parameters the model extracted before trusting the output.
+(``use the same variables''); and users should verify which
+parameters the model extracted before interpreting the output.
 
-
-The system also handles common failure modes with explanatory guidance.
 
 The system detects multicollinearity and reports it with
 suggested actions:
@@ -437,12 +435,49 @@ User: Fit a logit model with department fixed effects.
 Running linear probability model with department FE instead...
 \end{Soutput}
 
-The system detects problems before estimation fails, explains statistical
-issues rather than computational symptoms, and provides actionable suggestions.
-When requests exceed capabilities, it clearly states limitations and points
-to external tools.
+The system detects problems before estimation fails and explains statistical
+issues rather than computational symptoms.
+When requests exceed the implemented method set, it reports unavailability and
+suggests external tools.
+
+%% -----------------------------------------------------------------------------
+\subsection{Beyond regression: time series} \label{sec:examples-ts}
+
+The system covers domains beyond regression. A time series workflow
+using quarterly U.S.\ GDP growth data (1954--2023) illustrates method
+progression within a single conversation: stationarity testing,
+univariate modeling, then residual diagnostics.
+
+\begin{Sinput}
+User: Load gdp_quarterly.csv and check whether GDP growth is stationary.
+\end{Sinput}
+
+\begin{Soutput}
+**Augmented Dickey-Fuller Test** (gdp_growth)
+Statistic: -4.82, P-value: 0.000
+GDP growth is stationary. No differencing needed.
+\end{Soutput}
+
+\begin{Sinput}
+User: Fit an ARIMA model to GDP growth. Let the system pick the order.
+\end{Sinput}
+
+\begin{Soutput}
+**ARIMA(2,0,1)** (AIC-based selection)
+AR(1): 0.312 (0.067), AR(2): 0.154 (0.063), MA(1): -0.089 (0.072)
+Ljung-Box (lag 10): p = 0.482 (no residual autocorrelation)
+\end{Soutput}
+
+\noindent Order selection is delegated to the LLM, which chooses
+$p$, $d$, $q$ based on the ADF result and its training knowledge.
+This is not equivalent to \proglang{R}'s \code{auto.arima()}, which
+performs systematic grid
+search~\citep{Hyndman+Khandakar:2008}.
+Appendix~\ref{app:extended-examples} provides additional examples
+including data cleaning workflows and a side-by-side comparison with
+equivalent \proglang{R} code.
 
 These examples illustrate what the system can do; the next section
 measures how reliably it does so. We evaluate tool selection accuracy
-across 12 models and numerical correctness of the underlying
+across six models and numerical correctness of the underlying
 \proglang{Rust} implementations.

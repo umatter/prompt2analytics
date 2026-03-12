@@ -758,6 +758,48 @@ performance/comparisons/r_comparison/results/
 └── r_*_2026*.csv / rust_*.json   # Raw timestamped results (gitignored)
 ```
 
+### End-to-End LLM Evaluation (`paper/code/e2e_eval/`)
+
+The paper includes two evaluations of LLM tool-calling accuracy:
+
+1. **96-prompt single-turn evaluation**: Tests tool selection, parameter extraction, numerical correctness, and interpretation quality across 6 models. Each prompt is scored on 4 dimensions (tool acceptable, parameters correct, numerical match, interpretation adequate) and an overall "adequate" rating.
+
+2. **Chrome-based multi-turn evaluation**: Uses Claude-in-Chrome browser automation to test 8 multi-step analytical conversations (30 total turns) with Claude Sonnet 4.6.
+
+#### Running the evaluation
+
+```bash
+# Single-turn evaluation (requires API keys)
+cd paper/code/e2e_eval
+python3 run_evaluation.py --models gpt-4.1-mini claude-sonnet-4.6
+
+# Re-score existing results without API calls
+python3 rescore.py
+
+# Generate evaluation figures and tables for the paper
+cd paper/code
+Rscript generate_e2e_figures.R
+```
+
+#### Key files
+
+- `test_cases.json` - 96 prompts organized by category (regression, panel, causal, etc.)
+- `run_evaluation.py` - Sends prompts to LLM APIs, executes returned tool calls, scores results
+- `rescore.py` - Re-scores saved result JSONs (useful after updating scoring logic)
+- `results/` - Per-model JSON results and Chrome multi-turn results (gitignored)
+
+#### Current results (paper numbers)
+
+| Model | Adequate Rate |
+|-------|--------------|
+| GPT-4.1 Mini | 90.6% |
+| Sonnet 4.6 | 84.4% |
+| Haiku 4.5 | 81.2% |
+| Ministral 3B | 80.2% |
+| Gemini 2.5 Flash | 75.0% |
+| Llama 4 Scout | 50.0% |
+| Chrome multi-turn (Sonnet 4.6) | 96.7% |
+
 ## Agentic Engineering Setup
 
 ### Slash Commands (`.claude/commands/`)
@@ -870,8 +912,24 @@ let df = df! {
 **Paper Exhibits:**
 - `paper/code/generate_paper_figures.R` - Generate all paper figures from comparison CSVs
 - `paper/code/generate_paper_tables.R` - Generate all paper LaTeX tables from comparison CSVs
-- `paper/figures/` - Generated benchmark figures (PDF + PNG)
+- `paper/code/generate_e2e_figures.R` - Generate evaluation figures from e2e results
+- `paper/figures/` - Generated benchmark and evaluation figures (PDF + PNG)
 - `paper/tables/` - Generated LaTeX tables
+
+**End-to-End Evaluation:**
+- `paper/code/e2e_eval/test_cases.json` - 96 evaluation prompts with expected tools and parameters
+- `paper/code/e2e_eval/run_evaluation.py` - Evaluation runner (calls LLM APIs, scores responses)
+- `paper/code/e2e_eval/rescore.py` - Re-score existing result JSONs without re-running API calls
+- `paper/code/e2e_eval/generate_datasets.R` - Generate evaluation datasets (eval_clean, eval_messy)
+- `paper/code/e2e_eval/PROTOCOL.md` - Full evaluation protocol documentation
+- `paper/code/e2e_eval/results/` - Per-model result JSONs and Chrome multi-turn results (gitignored)
+
+**Paper Sections (LaTeX):**
+- `paper/article-jss.tex` - Main JSS document wrapper
+- `paper/paper.tex` - Section includes
+- `paper/sections/evaluation_new.tex` - Evaluation section (96-prompt e2e + Chrome multi-turn)
+- `paper/sections/appendices.tex` - Appendices A–G
+- `paper/sections/e2e_eval_appendix.tex` - Appendix H (e2e evaluation protocol details)
 
 **Documentation:**
 - `DEVELOPMENT_REPORT.md` - Detailed development history and current status

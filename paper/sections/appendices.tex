@@ -89,69 +89,6 @@ or \proglang{Python}.
 alternatives; future releases aim to address Bayesian inference and
 Heckman selection as priorities.
 
-\section{LLM evaluation details} \label{app:llm-eval}
-\setcounter{table}{0}
-\setcounter{figure}{0}
-
-This appendix provides detailed single-turn tool selection results from
-the evaluation described in Section~\ref{sec:evaluation}.
-
-\subsection{Single-turn tool selection}
-
-Table~\ref{tab:model-summary} presents accuracy, cost, and failure rates
-across all evaluated models. Table~\ref{tab:category-accuracy} breaks down
-accuracy by test category.
-
-\input{tables/tab_model_summary}
-
-\input{tables/tab_category_accuracy}
-
-\noindent The key pattern across both tables is that all models exceed 90\%
-accuracy, with Ministral 3B the lowest at 90.8\%.
-Accuracy drops concentrate in hypothesis testing and time series
-categories, where distinguishing between closely related methods
-(e.g., VAR vs.\ VECM) proves challenging. Cost per query varies
-by two orders of magnitude across providers.
-
-%% Extended robustness evaluation — removed for initial submission.
-%% Content preserved in version control; subsection commented out because
-%% the methodology for multi-turn, naturalistic, parameter-extraction,
-%% interpretation, and out-of-scope evaluations is not yet mature enough
-%% to present.
-
-\section{API response latency} \label{app:latency}
-\setcounter{table}{0}
-\setcounter{figure}{0}
-
-Figure~\ref{fig:latency-comparison} presents response latency distributions
-for the models evaluated via their respective cloud APIs. These measurements
-include network round-trip time and reflect API-hosted inference, not local
-deployment performance.
-
-\begin{figure}[htbp]
-\centering
-\includegraphics[width=0.85\textwidth]{figures/fig_latency_comparison}
-\caption{API response latency by model (log scale). Latencies reflect
-cloud-hosted inference including network round-trip time; local
-deployment would differ substantially.}
-\label{fig:latency-comparison}
-\end{figure}
-
-For cloud-hosted inference, GPT-4.1 Nano shows the fastest median response
-(1,245ms) among high-accuracy models, while Ministral 3B achieves 650ms
-median latency via OpenRouter. These figures are useful for comparing
-relative API performance but do not predict local inference speed.
-
-Local deployment latency depends on several factors: model size and
-quantization level, available RAM and GPU VRAM, CPU or GPU compute
-capability, and context length (which affects KV cache size). As a rough
-guide, GPU-accelerated inference on consumer hardware (RTX 3070/4070 with
-8~GB VRAM) typically achieves 1--3~seconds for 7--8B parameter models.
-CPU-only inference on modern laptops ranges from 5--15~seconds depending
-on model size and system specifications. For interactive use,
-GPU-accelerated inference with a 7--8B model provides sub-second
-tool selection, comparable to cloud API latency.
-
 \section{Deployment guide} \label{app:deployment}
 \setcounter{table}{0}
 \setcounter{figure}{0}
@@ -234,9 +171,9 @@ provides system recommendations for common deployment scenarios.
 Scenario & Model & RAM & GPU VRAM & Storage \\
 \midrule
 Minimal (laptop) & Ministral 3B & 16 GB & 6 GB & 5 GB \\
-Consumer (desktop) & Qwen 2.5 7B & 16 GB & 8 GB & 10 GB \\
+Consumer (desktop) & Llama 4 Scout & 16 GB & 12 GB & 15 GB \\
 Professional & Llama 3.3 70B & 64 GB & 48 GB & 50 GB \\
-Server (large data) & Qwen 2.5 72B & 128 GB & $2 \times 2$4 GB & 60 GB \\
+Server (large data) & Cloud API & 32 GB & --- & 2 GB \\
 \bottomrule
 \end{tabular}
 \begin{tablenotes}[flushleft]
@@ -247,8 +184,8 @@ are supported via Ollama's ROCm and OneAPI backends.
 \end{threeparttable}
 \end{table}
 
-\noindent For the simplest setup, the Docker deployment
-(the Docker deployment subsection of Appendix~\ref{app:deployment}) bundles all dependencies including
+\noindent For the simplest setup, the Docker configuration
+(Appendix~\ref{app:deployment}) bundles all dependencies including
 a pre-downloaded model and requires no local toolchain installation.
 
 \section{Privacy and security} \label{app:privacy}
@@ -347,7 +284,7 @@ Performance benchmarks can be reproduced using the following protocol:
   \item Install \proglang{R} 4.5+ with required packages: \pkg{plm}, \pkg{lfe},
     \pkg{sandwich}, \pkg{forecast}, \pkg{bench}
   \item Build \pkg{prompt2analytics} in release mode: \code{cargo build --release -p p2a-cli}
-  \item Execute benchmarks: \code{make -C paper/code benchmarks}
+  \item Execute benchmarks: \code{make -C paper benchmark-full}
 \end{enumerate}
 
 \noindent Both languages use seed~$= 42$ for random number generation. The
@@ -413,8 +350,9 @@ Each benchmark configuration executes multiple iterations after a warmup phase:
 \end{itemize}
 
 \proglang{R} benchmarks use the \pkg{bench} package, which accounts for garbage
-collection timing. \proglang{Rust} benchmarks use Criterion with automatic
-warmup and outlier detection. We report full timing distributions (minimum,
+collection timing. \proglang{Rust} benchmarks use a custom harness
+(\code{harness = false} in \code{Cargo.toml}) with automatic warmup
+and outlier detection. We report full timing distributions (minimum,
 quartiles, maximum, mean, standard deviation) rather than point estimates alone.
 
 \subsection{Hardware and software environment}
@@ -621,36 +559,11 @@ interface for users unfamiliar with \proglang{R} syntax.
 
 \subsection{Time series analysis}
 
-A time series workflow using quarterly U.S.\ GDP growth data
-(1954--2023) illustrates method progression within a single
-conversation: stationarity testing, univariate modeling, then
-multivariate analysis.
-
-\begin{Sinput}
-User: Load gdp_quarterly.csv and check for stationarity.
-\end{Sinput}
-
-\begin{Soutput}
-**Augmented Dickey-Fuller Test** (gdp_growth)
-Statistic: -4.82, P-value: 0.000
-GDP growth is stationary. No differencing needed.
-\end{Soutput}
-
-\begin{Sinput}
-User: Fit an ARIMA model to GDP growth. Let the system pick the order.
-\end{Sinput}
-
-\begin{Soutput}
-**ARIMA(2,0,1)** (AIC-based selection)
-AR(1): 0.312 (0.067), AR(2): 0.154 (0.063), MA(1): -0.089 (0.072)
-Ljung-Box (lag 10): p = 0.482 (no residual autocorrelation)
-\end{Soutput}
-
-\noindent Order selection is delegated to the LLM, which chooses
-$p$, $d$, $q$ based on the ADF result and its training knowledge.
-This is not equivalent to \proglang{R}'s \code{auto.arima()}, which
-performs systematic grid
-search~\citep{Hyndman+Khandakar:2008}.
+The basic time series workflow (stationarity testing and ARIMA fitting)
+is demonstrated in Section~\ref{sec:examples-ts}. Here we note a
+limitation: order selection is delegated to the LLM rather than
+algorithmic search, so it is not equivalent to \proglang{R}'s
+\code{auto.arima()}~\citep{Hyndman+Khandakar:2008}.
 
 \subsection{Handling messy data}
 
@@ -678,3 +591,48 @@ Cleaned: 89 values replaced across 2 columns.
   income:        now Float64, 52 missing (1.8%)
   satisfaction:  now Float64, 37 missing (1.3%)
 \end{Soutput}
+
+\noindent The next example demonstrates a common challenge: ambiguous
+column names that do not match natural language descriptions. The
+dataset uses coded variable names rather than descriptive labels.
+
+\begin{Sinput}
+User: Load hr_extract_q3.csv and describe the data.
+\end{Sinput}
+
+\begin{Soutput}
+Dataset: hr_extract_q3 (1,204 rows x 8 columns)
+  emp_id:    Int64 (1204 unique)
+  dept_cd:   String (12 unique: "ENG", "MKT", "FIN", ...)
+  var_03:    Float64 (range: 28000-185000)
+  var_04:    Float64 (range: 0.5-35.2)
+  var_05:    Int64 (0 or 1)
+  q3_rating: Float64 (range: 1.0-5.0, 23 missing)
+  loc_cd:    String (8 unique: "NYC", "SFO", "CHI", ...)
+  dte_hire:  String (formats vary: "2015-03-12", "03/12/2015")
+\end{Soutput}
+
+\begin{Sinput}
+User: var_03 is salary and var_04 is years of experience.
+      Regress salary on experience and department with robust SEs.
+\end{Sinput}
+
+\begin{Soutput}
+Renamed: var_03 -> salary, var_04 -> experience
+Note: dept_cd is categorical (12 levels); using treatment coding
+with reference category "ENG".
+
+OLS Regression (HC1 robust standard errors)
+  Dependent variable: salary
+  Observations: 1,204
+  ...
+\end{Soutput}
+
+\noindent This example illustrates both a strength and a limitation.
+The system correctly maps user-provided variable descriptions to coded
+column names and handles the categorical department variable
+automatically. However, the user must know what the coded variables
+represent---the system cannot infer that \code{var\_03} is salary
+from its range alone.  Inconsistent date formats in \code{dte\_hire}
+(ISO~8601 and US~format in the same column) would require explicit
+cleaning before use as a time variable.

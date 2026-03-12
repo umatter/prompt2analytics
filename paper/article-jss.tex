@@ -41,7 +41,7 @@
 \Abstract{
   Using natural language to drive data analysis is an old idea, but large
   language models (LLMs) have made it suddenly ubiquitous. A widely observed
-  and rather concerning workflow has users upload a dataset to ChatGPT
+  and concerning workflow has users upload a dataset to ChatGPT
   and ask for an analysis; the model generates and executes code on a
   remote virtual machine, producing results that are difficult to
   verify, difficult to reproduce, and incompatible with data-privacy
@@ -57,11 +57,15 @@
   library covers regression, panel data, instrumental variables,
   difference-in-differences, discrete choice, time series, and over 200
   additional methods---all validated against established \proglang{R}
-  packages. Benchmarks show a median speedup of 4$\times$ over
-  corresponding \proglang{R} implementations at $n = 100{,}000$.
-  Evaluation shows that tool selection achieves
-  90--100\% accuracy on curated prompts. Local deployment via Ollama enables
-  complete data isolation on consumer hardware.
+  packages. Benchmarks across 384 configurations show a median
+  speedup of 11$\times$ over corresponding \proglang{R}
+  implementations, with \proglang{Rust} faster in 89\% of methods.
+  End-to-end evaluation across six models shows that frontier models
+  achieve 81--91\% adequate rates on 96~prompts spanning tool selection,
+  parameter extraction, and numerical correctness; a 3B-parameter model
+  scores 80\%, making fully local deployment practical.
+  Local deployment via Ollama enables complete data isolation on consumer
+  hardware.
 }
 
 %% Keywords (at least one required)

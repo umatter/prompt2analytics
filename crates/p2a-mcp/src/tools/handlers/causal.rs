@@ -87,7 +87,7 @@ fn format_diagnostic_warnings(report: &p2a_core::diagnostics::IdentificationRepo
 impl AnalyticsServer {
     /// Run IV/2SLS regression.
     #[tool(
-        description = "Run Instrumental Variables (2SLS) regression. Use when an explanatory variable is endogenous (correlated with the error term). Requires valid instruments."
+        description = "Run Instrumental Variables (2SLS) regression. Use when an explanatory variable is endogenous (correlated with the error term). Requires valid instruments. Includes first-stage diagnostics (F-statistic, instrument strength). Prefer this over iv_first_stage for a complete IV analysis."
     )]
     pub async fn iv_2sls(
         &self,
@@ -138,7 +138,7 @@ impl AnalyticsServer {
 
     /// Run first-stage diagnostics for IV/2SLS.
     #[tool(
-        description = "Run first-stage diagnostics to test instrument strength. Reports F-statistic (F > 10 suggests strong instruments), R-squared, and coefficient estimates. Essential before running 2SLS."
+        description = "Run ONLY first-stage diagnostics to test instrument strength. Reports F-statistic (F > 10 suggests strong instruments), R-squared, and coefficient estimates. Note: iv_2sls already includes first-stage results — use this only when you need first-stage diagnostics without the full 2SLS estimation."
     )]
     pub async fn iv_first_stage(
         &self,
@@ -579,7 +579,7 @@ impl AnalyticsServer {
 
     /// Run IPW treatment effect estimation.
     #[tool(
-        description = "Estimate Average Treatment Effect (ATE) or Average Treatment Effect on Treated (ATT) using Inverse Probability Weighting. Uses propensity scores to create pseudo-populations that balance covariates between treatment groups. Returns effect estimate with bootstrap standard errors and confidence intervals."
+        description = "Estimate Average Treatment Effect (ATE) or Average Treatment Effect on Treated (ATT) using Inverse Probability Weighting. Uses propensity scores to create pseudo-populations that balance covariates between treatment groups. Returns effect estimate with bootstrap standard errors and confidence intervals. Returns a point estimate (ATE/ATT). For matched samples with balance diagnostics, use propensity_matching instead."
     )]
     pub async fn treatment_ipw(
         &self,
@@ -1129,7 +1129,7 @@ impl AnalyticsServer {
 
     /// Run propensity score matching (MatchIt) for causal inference.
     #[tool(
-        description = "Perform propensity score matching to create balanced comparison groups for causal inference. Methods: 'nearest' (nearest neighbor matching on propensity score), 'cem' (coarsened exact matching on covariate bins), 'full' (optimal full matching), 'subclass' (propensity score subclassification). Returns matched sample with weights, balance diagnostics (standardized mean differences, variance ratios, KS statistics) before and after matching. Low SMD (<0.1) indicates good balance."
+        description = "Perform propensity score matching to create balanced comparison groups for causal inference. Methods: 'nearest' (nearest neighbor matching on propensity score), 'cem' (coarsened exact matching on covariate bins), 'full' (optimal full matching), 'subclass' (propensity score subclassification). Returns matched sample with weights, balance diagnostics (standardized mean differences, variance ratios, KS statistics) before and after matching. Low SMD (<0.1) indicates good balance. Returns a matched dataset. For direct effect estimation via reweighting, use treatment_ipw instead."
     )]
     pub async fn propensity_matching(
         &self,
@@ -2349,7 +2349,7 @@ impl AnalyticsServer {
 
     /// Run Difference-in-Differences estimation.
     #[tool(
-        description = "Run Difference-in-Differences (DiD) estimation. Estimates causal treatment effects by comparing treated vs control groups before and after treatment."
+        description = "Run Difference-in-Differences (DiD) estimation. Estimates causal treatment effects by comparing treated vs control groups before and after treatment. For staggered treatment adoption across multiple periods, use staggered_did instead."
     )]
     pub async fn diff_in_diff(
         &self,

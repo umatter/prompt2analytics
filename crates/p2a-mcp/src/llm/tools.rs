@@ -1,9 +1,172 @@
-//! MCP tool definitions for LLM function calling.
+//! LLM tool definitions auto-generated from the MCP router.
 //!
-//! Provides the system prompt and tool definitions for the analytics assistant.
+//! Tool definitions for LLM function calling are derived from the router's
+//! `JsonSchema` derives on request structs, ensuring a single source of truth.
+//! Tools are organized into tiers for priority-based filtering.
 
 use super::ToolDefinition;
-use serde_json::json;
+
+/// Tier 1: Core analytical tools always exposed to LLM (~119 tools).
+/// Stays under OpenAI's 128-tool limit while covering all common workflows.
+pub const TIER1_TOOLS: &[&str] = &[
+    // Data management (6)
+    "load_dataset",
+    "create_dataset",
+    "list_datasets",
+    "describe_dataset",
+    "head_dataset",
+    "export_dataset",
+    // Regression (10)
+    "regression_ols",
+    "regression_clustered",
+    "regression_diagnostics",
+    "regression_hac",
+    "regression_quantreg",
+    "regression_bootstrap_cov",
+    "regression_driscoll_kraay",
+    "regression_bgtest",
+    "regression_loess",
+    "regression_step",
+    // Panel (10)
+    "panel_fixed_effects",
+    "panel_random_effects",
+    "panel_hdfe",
+    "panel_gmm",
+    "panel_gls",
+    "panel_pvcm",
+    "panel_pmg",
+    "panel_unit_root",
+    "hausman_test",
+    "feglm",
+    // Causal inference (18)
+    "iv_2sls",
+    "iv_first_stage",
+    "iv_sargan_test",
+    "diff_in_diff",
+    "staggered_did",
+    "etwfe",
+    "bacon_decomp",
+    "rd_estimate",
+    "rd_bw",
+    "rd_fuzzy",
+    "synthetic_control",
+    "scpi",
+    "gsynth",
+    "treatment_ipw",
+    "treatment_doubly_robust",
+    "propensity_matching",
+    "treatment_cbps",
+    "treatment_weightit",
+    // Hypothesis testing (15)
+    "hypothesis_t_test",
+    "hypothesis_wilcoxon",
+    "hypothesis_kruskal_wallis",
+    "hypothesis_chisq_independence",
+    "hypothesis_chisq_gof",
+    "hypothesis_fisher_exact",
+    "hypothesis_shapiro_wilk",
+    "hypothesis_ks_test",
+    "hypothesis_bartlett_test",
+    "hypothesis_cor_test",
+    "hypothesis_friedman",
+    "anova_one_way",
+    "anova_two_way",
+    "anova_tukey_hsd",
+    "anova_manova",
+    // Discrete choice (5)
+    "logit",
+    "probit",
+    "ordered_model",
+    "negbin",
+    "mlogit",
+    // Time series (12)
+    "ts_arima_fit",
+    "ts_arima_forecast",
+    "ts_var",
+    "ts_vecm",
+    "ts_var_irf",
+    "ts_mstl",
+    "ts_holt_winters",
+    "ts_garch_fit",
+    "ts_changepoint",
+    "timeseries_pp_test",
+    "timeseries_decompose",
+    "timeseries_acf",
+    // ML (7)
+    "ml_kmeans",
+    "ml_pca",
+    "ml_random_forest",
+    "ml_dbscan",
+    "ml_hierarchical",
+    "ml_tsne",
+    "ml_svm",
+    // Data munging (16)
+    "munge_filter",
+    "munge_rename",
+    "munge_mutate",
+    "munge_cast",
+    "munge_sort",
+    "munge_group_by",
+    "munge_join",
+    "munge_pivot",
+    "munge_melt",
+    "munge_select",
+    "munge_drop_columns",
+    "munge_drop_na",
+    "munge_fill_na",
+    "munge_deduplicate",
+    "munge_concat",
+    "str_replace_value",
+    // Visualization (10)
+    "viz_histogram",
+    "viz_scatter",
+    "viz_line",
+    "viz_boxplot",
+    "viz_heatmap",
+    "viz_coefficient",
+    "viz_residual_diagnostics",
+    "viz_event_study",
+    "viz_irf",
+    "viz_dendrogram",
+    // Statistics & other (4)
+    "compute_correlation",
+    "marginal_effects",
+    "stats_model_tables",
+    "generate_random_data",
+    // Database (6)
+    "db_sqlite_query",
+    "db_sqlite_tables",
+    "db_sqlite_schema",
+    "db_duckdb_query",
+    "db_duckdb_tables",
+    "db_duckdb_schema",
+];
+
+/// Internal tools never exposed to LLM.
+pub const INTERNAL_TOOLS: &[&str] = &[
+    "server_stats",
+    "set_seed",
+    "get_seed",
+    "import_session",
+    "export_session",
+    "batch_process",
+    "search_tools",
+    "list_tool_categories",
+    "tool_info",
+    "suggest_cleaning",
+    "preview_cleaning",
+    "verify_cleaning",
+    "cleaning_session_start",
+    "cleaning_session_status",
+    "cleaning_session_apply",
+    "cleaning_session_checkpoints",
+    "cleaning_rollback",
+    "list_cleaning_sessions",
+    "data_quality_profile",
+    "compare_datasets",
+    "upload_dataset",
+    "generate_report",
+];
 
 /// Returns the base system prompt for the data analytics assistant.
 fn get_base_system_prompt() -> &'static str {
@@ -28,109 +191,29 @@ fn get_base_system_prompt() -> &'static str {
    - "There might be serial correlation" → Call `regression_bgtest`
    The user wants RESULTS, not explanations of methodology.
 
-4. **ALWAYS USE EXISTING DATASETS.** Before creating a new dataset:
+5. **ALWAYS USE EXISTING DATASETS.** Before creating a new dataset:
    - Check the "Currently Loaded Datasets" section below (if present) to see what data is already available
    - If a dataset with the data you need already exists, USE IT - do NOT call `create_dataset` again
    - Only call `create_dataset` if the user explicitly asks to create NEW data or no suitable dataset exists
    - When referencing a dataset in a tool call, use the EXACT name shown in the loaded datasets list
 
-5. **Be aware of conversation context.** The user may be continuing a previous analysis:
+6. **SKIP EXPLORATION — CALL THE ANALYTICAL TOOL DIRECTLY.**
+   - Do NOT call `head_dataset` or `describe_dataset` before cleaning, munging, or analysis — the dataset context below already provides column names, types, and sample values
+   - Do NOT call `timeseries_acf` before `ts_arima_fit` — if the user doesn't specify ARIMA order, use reasonable defaults like ARIMA(1,0,1)
+   - Do NOT call `iv_first_stage` before `iv_2sls` — 2SLS already includes first-stage diagnostics
+   - Do NOT call `munge_filter` to split groups before a statistical test — pass column names directly to the test tool
+   - When the user says "clean", "replace", or "fix values", call `str_replace_value` or `munge_filter` immediately — do NOT explore first
+
+7. **TOOL CALL BUDGET.** Aim for at most 10 tool calls per request. Plan efficiently:
+   - Single-step analyses: 1 tool call
+   - Multi-step tasks (e.g., "clean then analyze"): 2–3 tool calls
+   - Do NOT call the same tool with the same arguments twice
+   - If a tool errors, try a different approach rather than retrying
+
+8. **Be aware of conversation context.** The user may be continuing a previous analysis:
    - Refer back to datasets, analyses, or results from earlier in the conversation
    - Don't repeat tool calls unnecessarily if the result is already available
    - Build on previous work rather than starting over
-
-## AVAILABLE TOOLS BY CATEGORY
-
-### Data Management
-- `load_dataset` - Load CSV, Parquet, Excel (.xlsx/.xls), Stata (.dta), SAS (.sas7bdat)
-- `create_dataset` - Create dataset from inline CSV (ONLY for NEW test/generated data - check existing datasets first!)
-- `list_datasets` - List all loaded datasets
-- `describe_dataset` - Descriptive statistics for all columns
-- `head_dataset` - Preview first N rows
-
-### Regression Analysis
-- `regression_ols` - OLS with robust standard errors (HC0-HC3)
-- `regression_clustered` - OLS with clustered standard errors
-- `regression_diagnostics` - Jarque-Bera, Breusch-Pagan, Durbin-Watson, VIF
-
-### Panel Data Econometrics
-- `panel_fixed_effects` - Fixed Effects estimation
-- `panel_random_effects` - Random Effects estimation
-- `panel_hdfe` - High-Dimensional Fixed Effects (multiple FE)
-- `panel_gmm` - Arellano-Bond/Blundell-Bond GMM
-- `panel_gls` - Panel GLS (Feasible GLS)
-- `hausman_test` - Choose between FE and RE
-- `regression_bgtest` - Breusch-Godfrey serial correlation test
-- `regression_driscoll_kraay` - Driscoll-Kraay standard errors
-
-### Causal Inference
-- `iv_2sls` - Instrumental Variables (2SLS) with first-stage diagnostics
-- `iv_first_stage` - First stage of IV to test instrument strength
-- `iv_sargan_test` - Sargan test for overidentification
-- `diff_in_diff` - Difference-in-Differences
-- `staggered_did` - Callaway-Sant'Anna staggered DiD
-- `etwfe` - Extended TWFE (Wooldridge 2021)
-- `rd_estimate` - Regression discontinuity design
-- `rd_bw` - RD optimal bandwidth selection
-- `rd_fuzzy` - Fuzzy RD design
-- `synthetic_control` - Synthetic control method
-- `scpi` - Synthetic control with prediction intervals
-- `gsynth` - Generalized synthetic control
-- `treatment_ipw` - Inverse probability weighting
-- `treatment_doubly_robust` - Doubly robust (AIPW)
-- `propensity_matching` - Propensity score matching
-- `treatment_cbps` - Covariate balancing propensity scores
-- `treatment_weightit` - Flexible weighting methods
-- `treatment_entropy_balance` - Entropy balancing
-
-### Discrete Choice Models
-- `logit` - Logistic regression for binary outcomes
-- `probit` - Probit regression for binary outcomes
-
-### Time Series
-- `ts_arima_fit` - Fit ARIMA(p,d,q) model
-- `ts_arima_forecast` - Forecast with ARIMA
-- `ts_var` - Vector Autoregression
-- `ts_varma` - VARMA model
-- `ts_vecm` - Vector Error Correction Model
-- `ts_var_irf` - Impulse Response Functions
-- `ts_mstl` - MSTL decomposition
-- `ts_changepoint` - Changepoint detection
-- `timeseries_pp_test` - Phillips-Perron unit root test
-- `timeseries_decompose` - Classical seasonal decomposition
-- `acf` - Autocorrelation/partial autocorrelation function
-
-### Machine Learning
-- `ml_kmeans` - K-means clustering
-- `ml_dbscan` - DBSCAN clustering
-- `ml_hierarchical` - Hierarchical clustering
-- `ml_pca` - Principal Component Analysis
-- `ml_tsne` - t-SNE dimensionality reduction
-- `ml_random_forest` - Random Forest classification/regression
-- `ml_svm` - Support Vector Machine
-
-### Database Queries
-- `db_sqlite_query` - Query SQLite database
-- `db_sqlite_tables` - List SQLite tables
-- `db_sqlite_schema` - Get SQLite table schema
-- `db_duckdb_query` - Query DuckDB (can query Parquet/CSV directly)
-- `db_duckdb_tables` - List DuckDB tables
-- `db_duckdb_schema` - Get DuckDB table schema
-
-### Visualization
-- `viz_histogram` - Histogram
-- `viz_scatter` - Scatter plot
-- `viz_line` - Line chart
-- `viz_boxplot` - Box plot
-- `viz_heatmap` - Correlation heatmap
-- `viz_coefficient` - Coefficient plot with confidence intervals
-- `viz_residual_diagnostics` - Residual diagnostic plots
-- `viz_event_study` - Event study plot
-- `viz_irf` - Impulse response function plot
-- `viz_dendrogram` - Hierarchical clustering dendrogram
-
-### Statistics
-- `compute_correlation` - Correlation matrix
 
 ## WORKFLOW
 
@@ -186,7 +269,7 @@ User: "Evaluate California's policy using other states as controls"
 When users mention these terms, map to the correct tool:
 - "Johansen procedure/test" → `ts_vecm` (cointegration)
 - "Cointegration" → `ts_vecm`
-- "Unit root test" → `timeseries_pp_test` or `acf`
+- "Unit root test" → `timeseries_pp_test` or `timeseries_acf`
 - "Granger causality" → `ts_var`
 - "Robust standard errors" / "HC0-HC3" → `regression_ols` (NOT `regression_clustered`)
 - "Clustered standard errors" → `regression_clustered`
@@ -196,6 +279,14 @@ When users mention these terms, map to the correct tool:
 - "Event study" → `staggered_did` or `etwfe`
 - "Parallel trends" → `staggered_did` or `viz_event_study`
 - "SCPI" / "prediction intervals for synth" → `scpi`
+
+## Vocabulary → Tool Mapping
+- "Compare group means" / "ANOVA" → anova_one_way
+- "Matching" / "matched sample" → propensity_matching
+- "IPW" / "inverse probability weighting" → treatment_ipw
+- "Multiple fixed effects" / "two-way FE" → panel_hdfe
+- "Staggered treatment" / "event study" → staggered_did
+- "Cast" / "convert type" / "change column type" → munge_cast
 
 ## FEW-SHOT EXAMPLES OF CORRECT TOOL CALLS
 
@@ -223,9 +314,9 @@ These examples show the exact format for common multi-turn scenarios:
 **Turn 3 - User**: "Check for heteroskedasticity in that model"
 **Turn 3 - Tool Call**:
 ```json
-{"name": "regression_diagnostics", "arguments": {"dataset": "housing", "formula": "price ~ sqft + bedrooms"}}
+{"name": "regression_diagnostics", "arguments": {"dataset": "housing", "y": "price", "x": ["sqft", "bedrooms"]}}
 ```
-Note: Use the SAME dataset and formula from the previous regression.
+Note: Use the SAME dataset and variables from the previous regression.
 
 ### Example 3: Referencing "those results" or "that data"
 
@@ -242,7 +333,7 @@ Note: "that data" refers to "survey_data" from the previous tool call.
 **User**: "I want to analyze my panel data. First describe it, then run fixed effects."
 **Tool Calls** (in sequence):
 1. `{"name": "describe_dataset", "arguments": {"dataset": "panel_data"}}`
-2. After seeing the columns, call: `{"name": "panel_fixed_effects", "arguments": {"dataset": "panel_data", "formula": "y ~ x1 + x2", "entity_var": "firm_id"}}`
+2. After seeing the columns, call: `{"name": "panel_fixed_effects", "arguments": {"dataset": "panel_data", "y": "y", "x": ["x1", "x2"], "entity_var": "firm_id"}}`
 
 ## CRITICAL REMINDERS
 
@@ -254,961 +345,119 @@ Note: "that data" refers to "survey_data" from the previous tool call.
 Remember: Your value is in orchestrating these powerful Rust tools, not in doing mental math. The tools are fast, accurate, and provide publication-quality output. USE THEM. Always check what datasets are already loaded before creating new ones."#
 }
 
+/// Categorize a tool by its name prefix and return the category label.
+fn tool_category(name: &str) -> &'static str {
+    if name.starts_with("load_") || name.starts_with("create_") || name.starts_with("list_datasets")
+        || name.starts_with("describe_") || name.starts_with("head_") || name.starts_with("export_")
+        || name.starts_with("upload_")
+    {
+        "Data Management"
+    } else if name.starts_with("regression_") {
+        "Regression"
+    } else if name.starts_with("panel_") || name == "hausman_test" || name == "feglm" {
+        "Panel Data"
+    } else if name.starts_with("iv_") || name.starts_with("diff_") || name.starts_with("staggered_")
+        || name == "etwfe" || name.starts_with("bacon_") || name.starts_with("rd_")
+        || name.starts_with("synthetic_") || name == "scpi" || name == "gsynth"
+        || name.starts_with("treatment_") || name.starts_with("propensity_")
+        || name == "marginal_effects"
+    {
+        "Causal Inference"
+    } else if name.starts_with("hypothesis_") || name.starts_with("anova_") {
+        "Hypothesis Testing"
+    } else if name == "logit" || name == "probit" || name.starts_with("ordered_")
+        || name == "negbin" || name == "mlogit" || name == "poisson"
+        || name.starts_with("zeroinfl") || name.starts_with("hurdle")
+    {
+        "Discrete Choice"
+    } else if name.starts_with("ts_") || name.starts_with("timeseries_") {
+        "Time Series"
+    } else if name.starts_with("ml_") {
+        "Machine Learning"
+    } else if name.starts_with("munge_") || name.starts_with("str_") {
+        "Data Munging"
+    } else if name.starts_with("viz_") {
+        "Visualization"
+    } else if name.starts_with("db_") {
+        "Database"
+    } else if name.starts_with("survival_") || name.starts_with("km_") || name.starts_with("cox_") {
+        "Survival Analysis"
+    } else if name.starts_with("spatial_") || name.starts_with("moran") {
+        "Spatial Econometrics"
+    } else {
+        "Other"
+    }
+}
+
+/// Generate a categorized tool listing for the system prompt from actual tool definitions.
+fn generate_tool_listing(tools: &[ToolDefinition]) -> String {
+    use std::collections::BTreeMap;
+
+    let mut categories: BTreeMap<&str, Vec<(&str, &str)>> = BTreeMap::new();
+
+    for tool in tools {
+        let cat = tool_category(&tool.name);
+        // Take the first sentence of the description
+        let desc = tool.description.split(". ").next().unwrap_or(&tool.description);
+        categories.entry(cat).or_default().push((&tool.name, desc));
+    }
+
+    // Define display order
+    let order = [
+        "Data Management", "Regression", "Panel Data", "Causal Inference",
+        "Hypothesis Testing", "Discrete Choice", "Time Series", "Machine Learning",
+        "Data Munging", "Visualization", "Database", "Survival Analysis",
+        "Spatial Econometrics", "Other",
+    ];
+
+    let mut out = String::from("## AVAILABLE TOOLS BY CATEGORY\n\n");
+
+    for &cat_name in &order {
+        if let Some(tools_in_cat) = categories.get(cat_name) {
+            out.push_str(&format!("### {}\n", cat_name));
+            for (name, desc) in tools_in_cat {
+                out.push_str(&format!("- `{}` - {}\n", name, desc));
+            }
+            out.push('\n');
+        }
+    }
+
+    // Any remaining categories not in the order
+    for (cat_name, tools_in_cat) in &categories {
+        if !order.contains(cat_name) {
+            out.push_str(&format!("### {}\n", cat_name));
+            for (name, desc) in tools_in_cat {
+                out.push_str(&format!("- `{}` - {}\n", name, desc));
+            }
+            out.push('\n');
+        }
+    }
+
+    out
+}
+
 /// Returns the system prompt for the data analytics assistant.
 pub fn get_system_prompt() -> String {
     get_base_system_prompt().to_string()
 }
 
-/// Returns the system prompt with dataset context included.
-pub fn get_system_prompt_with_context(dataset_context: Option<&str>) -> String {
+/// Returns the system prompt with dataset context and dynamically generated tool listing.
+pub fn get_system_prompt_with_context(
+    dataset_context: Option<&str>,
+    tools: &[ToolDefinition],
+) -> String {
     let base = get_base_system_prompt();
+    let tool_listing = generate_tool_listing(tools);
 
-    match dataset_context {
-        Some(context) if !context.is_empty() => {
-            format!("{}\n\n## Currently Loaded Datasets\n\n{}", base, context)
+    let mut prompt = format!("{}\n\n{}", base, tool_listing);
+
+    if let Some(context) = dataset_context {
+        if !context.is_empty() {
+            prompt.push_str(&format!("\n## Currently Loaded Datasets\n\n{}", context));
         }
-        _ => base.to_string(),
     }
-}
 
-/// Returns the complete set of MCP tool definitions for LLM function calling.
-pub fn get_mcp_tool_definitions() -> Vec<ToolDefinition> {
-    vec![
-        // Data Loading & Management
-        ToolDefinition {
-            name: "load_dataset".to_string(),
-            description: "Load a dataset from a file. Supports CSV, Parquet, Excel, Stata, and SAS formats.".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "path": { "type": "string", "description": "Path to the data file." },
-                    "name": { "type": "string", "description": "Optional name for the dataset." }
-                },
-                "required": ["path"]
-            }),
-        },
-        ToolDefinition {
-            name: "create_dataset".to_string(),
-            description: "Create a dataset from inline CSV content. Use this to create datasets on-the-fly from generated or inline data without needing a file.".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "name": { "type": "string", "description": "Name for the dataset (e.g., 'my_data')" },
-                    "csv_content": { "type": "string", "description": "CSV content with headers in first row (e.g., 'x,y\\n1,2\\n3,4')" }
-                },
-                "required": ["name", "csv_content"]
-            }),
-        },
-        ToolDefinition {
-            name: "list_datasets".to_string(),
-            description: "List all currently loaded datasets.".to_string(),
-            parameters: json!({ "type": "object", "properties": {} }),
-        },
-        ToolDefinition {
-            name: "describe_dataset".to_string(),
-            description: "Compute descriptive statistics for all columns in a dataset.".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": { "dataset": { "type": "string" } },
-                "required": ["dataset"]
-            }),
-        },
-        ToolDefinition {
-            name: "head_dataset".to_string(),
-            description: "Show the first N rows of a dataset.".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "dataset": { "type": "string" },
-                    "n": { "type": "integer" }
-                },
-                "required": ["dataset"]
-            }),
-        },
-        ToolDefinition {
-            name: "compute_correlation".to_string(),
-            description: "Compute the correlation matrix for numeric columns.".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": { "dataset": { "type": "string" } },
-                "required": ["dataset"]
-            }),
-        },
-        // Regression Analysis
-        ToolDefinition {
-            name: "regression_ols".to_string(),
-            description: "Run OLS regression. Returns coefficients, standard errors, t-values, p-values, R-squared.".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "dataset": { "type": "string" },
-                    "y": { "type": "string", "description": "Dependent variable column" },
-                    "x": { "type": "array", "items": { "type": "string" }, "description": "Independent variable columns" }
-                },
-                "required": ["dataset", "y", "x"]
-            }),
-        },
-        ToolDefinition {
-            name: "regression_clustered".to_string(),
-            description: "Run OLS with clustered standard errors.".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "dataset": { "type": "string" },
-                    "formula": { "type": "string" },
-                    "cluster1": { "type": "string" },
-                    "cluster2": { "type": "string" }
-                },
-                "required": ["dataset", "formula", "cluster1"]
-            }),
-        },
-        ToolDefinition {
-            name: "regression_diagnostics".to_string(),
-            description: "Run regression diagnostics (Jarque-Bera, Breusch-Pagan, Durbin-Watson, VIF).".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "dataset": { "type": "string" },
-                    "formula": { "type": "string" }
-                },
-                "required": ["dataset", "formula"]
-            }),
-        },
-        // Panel Data
-        ToolDefinition {
-            name: "panel_fixed_effects".to_string(),
-            description: "Run Fixed Effects panel regression.".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "dataset": { "type": "string" },
-                    "formula": { "type": "string" },
-                    "entity_var": { "type": "string" }
-                },
-                "required": ["dataset", "formula", "entity_var"]
-            }),
-        },
-        ToolDefinition {
-            name: "panel_random_effects".to_string(),
-            description: "Run Random Effects panel regression.".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "dataset": { "type": "string" },
-                    "formula": { "type": "string" },
-                    "entity_var": { "type": "string" }
-                },
-                "required": ["dataset", "formula", "entity_var"]
-            }),
-        },
-        ToolDefinition {
-            name: "hausman_test".to_string(),
-            description: "Run Hausman test to choose between Fixed and Random Effects.".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "dataset": { "type": "string" },
-                    "formula": { "type": "string" },
-                    "entity_var": { "type": "string" }
-                },
-                "required": ["dataset", "formula", "entity_var"]
-            }),
-        },
-        ToolDefinition {
-            name: "panel_hdfe".to_string(),
-            description: "Run High-Dimensional Fixed Effects panel regression with multiple FE.".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "dataset": { "type": "string" },
-                    "formula": { "type": "string" },
-                    "fe_vars": { "type": "array", "items": { "type": "string" } },
-                    "cluster_var": { "type": "string" }
-                },
-                "required": ["dataset", "formula", "fe_vars"]
-            }),
-        },
-        ToolDefinition {
-            name: "panel_gmm".to_string(),
-            description: "Run Arellano-Bond or Blundell-Bond GMM panel estimation.".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "dataset": { "type": "string" },
-                    "formula": { "type": "string" },
-                    "entity_var": { "type": "string" },
-                    "time_var": { "type": "string" },
-                    "method": { "type": "string", "description": "difference or system" }
-                },
-                "required": ["dataset", "formula", "entity_var", "time_var"]
-            }),
-        },
-        ToolDefinition {
-            name: "panel_gls".to_string(),
-            description: "Run Panel GLS (Feasible GLS) estimation.".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "dataset": { "type": "string" },
-                    "formula": { "type": "string" },
-                    "entity_var": { "type": "string" }
-                },
-                "required": ["dataset", "formula", "entity_var"]
-            }),
-        },
-        ToolDefinition {
-            name: "regression_bgtest".to_string(),
-            description: "Run Breusch-Godfrey test for serial correlation.".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "dataset": { "type": "string" },
-                    "formula": { "type": "string" },
-                    "order": { "type": "integer" }
-                },
-                "required": ["dataset", "formula"]
-            }),
-        },
-        ToolDefinition {
-            name: "regression_driscoll_kraay".to_string(),
-            description: "Run regression with Driscoll-Kraay standard errors for panel data.".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "dataset": { "type": "string" },
-                    "formula": { "type": "string" },
-                    "time_var": { "type": "string" },
-                    "lag": { "type": "integer" }
-                },
-                "required": ["dataset", "formula", "time_var"]
-            }),
-        },
-        // Causal Inference
-        ToolDefinition {
-            name: "iv_2sls".to_string(),
-            description: "Run Instrumental Variables (2SLS) regression.".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "dataset": { "type": "string" },
-                    "endog_formula": { "type": "string" },
-                    "instrument_formula": { "type": "string" },
-                    "robust": { "type": "boolean" }
-                },
-                "required": ["dataset", "endog_formula", "instrument_formula"]
-            }),
-        },
-        ToolDefinition {
-            name: "diff_in_diff".to_string(),
-            description: "Run Difference-in-Differences estimation.".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "dataset": { "type": "string" },
-                    "dep_var": { "type": "string" },
-                    "treatment_var": { "type": "string" },
-                    "post_var": { "type": "string" }
-                },
-                "required": ["dataset", "dep_var", "treatment_var", "post_var"]
-            }),
-        },
-        ToolDefinition {
-            name: "staggered_did".to_string(),
-            description: "Run Callaway-Sant'Anna staggered DiD for heterogeneous treatment timing.".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "dataset": { "type": "string" },
-                    "dep_var": { "type": "string" },
-                    "treatment_time_var": { "type": "string" },
-                    "entity_var": { "type": "string" },
-                    "time_var": { "type": "string" }
-                },
-                "required": ["dataset", "dep_var", "treatment_time_var", "entity_var", "time_var"]
-            }),
-        },
-        ToolDefinition {
-            name: "etwfe".to_string(),
-            description: "Run Extended Two-Way Fixed Effects (Wooldridge 2021) for staggered DiD.".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "dataset": { "type": "string" },
-                    "dep_var": { "type": "string" },
-                    "treatment_time_var": { "type": "string" },
-                    "entity_var": { "type": "string" },
-                    "time_var": { "type": "string" }
-                },
-                "required": ["dataset", "dep_var", "treatment_time_var", "entity_var", "time_var"]
-            }),
-        },
-        ToolDefinition {
-            name: "iv_first_stage".to_string(),
-            description: "Run first stage of IV regression to test instrument strength.".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "dataset": { "type": "string" },
-                    "endog_var": { "type": "string" },
-                    "instruments": { "type": "array", "items": { "type": "string" } },
-                    "controls": { "type": "array", "items": { "type": "string" } }
-                },
-                "required": ["dataset", "endog_var", "instruments"]
-            }),
-        },
-        ToolDefinition {
-            name: "iv_sargan_test".to_string(),
-            description: "Run Sargan test for overidentification in IV regression.".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "dataset": { "type": "string" },
-                    "endog_formula": { "type": "string" },
-                    "instrument_formula": { "type": "string" }
-                },
-                "required": ["dataset", "endog_formula", "instrument_formula"]
-            }),
-        },
-        ToolDefinition {
-            name: "rd_estimate".to_string(),
-            description: "Run regression discontinuity design estimation.".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "dataset": { "type": "string" },
-                    "outcome": { "type": "string" },
-                    "running_var": { "type": "string" },
-                    "cutoff": { "type": "number" },
-                    "kernel": { "type": "string" }
-                },
-                "required": ["dataset", "outcome", "running_var"]
-            }),
-        },
-        ToolDefinition {
-            name: "rd_bw".to_string(),
-            description: "Compute optimal bandwidth for RD estimation.".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "dataset": { "type": "string" },
-                    "outcome": { "type": "string" },
-                    "running_var": { "type": "string" },
-                    "cutoff": { "type": "number" }
-                },
-                "required": ["dataset", "outcome", "running_var"]
-            }),
-        },
-        ToolDefinition {
-            name: "rd_fuzzy".to_string(),
-            description: "Run fuzzy regression discontinuity design.".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "dataset": { "type": "string" },
-                    "outcome": { "type": "string" },
-                    "treatment": { "type": "string" },
-                    "running_var": { "type": "string" },
-                    "cutoff": { "type": "number" }
-                },
-                "required": ["dataset", "outcome", "treatment", "running_var"]
-            }),
-        },
-        ToolDefinition {
-            name: "synthetic_control".to_string(),
-            description: "Run synthetic control method for causal inference with single treated unit.".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "dataset": { "type": "string" },
-                    "outcome": { "type": "string" },
-                    "treated_unit": { "type": "string" },
-                    "treatment_time": { "type": "integer" },
-                    "unit_var": { "type": "string" },
-                    "time_var": { "type": "string" }
-                },
-                "required": ["dataset", "outcome", "treated_unit", "treatment_time", "unit_var", "time_var"]
-            }),
-        },
-        ToolDefinition {
-            name: "scpi".to_string(),
-            description: "Run synthetic control with prediction intervals (SCPI).".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "dataset": { "type": "string" },
-                    "outcome": { "type": "string" },
-                    "treated_unit": { "type": "string" },
-                    "treatment_time": { "type": "integer" },
-                    "unit_var": { "type": "string" },
-                    "time_var": { "type": "string" }
-                },
-                "required": ["dataset", "outcome", "treated_unit", "treatment_time", "unit_var", "time_var"]
-            }),
-        },
-        ToolDefinition {
-            name: "gsynth".to_string(),
-            description: "Run generalized synthetic control method using interactive fixed effects.".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "dataset": { "type": "string" },
-                    "outcome": { "type": "string" },
-                    "treatment": { "type": "string" },
-                    "unit_var": { "type": "string" },
-                    "time_var": { "type": "string" }
-                },
-                "required": ["dataset", "outcome", "treatment", "unit_var", "time_var"]
-            }),
-        },
-        ToolDefinition {
-            name: "treatment_ipw".to_string(),
-            description: "Estimate treatment effects using inverse probability weighting.".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "dataset": { "type": "string" },
-                    "outcome": { "type": "string" },
-                    "treatment": { "type": "string" },
-                    "covariates": { "type": "array", "items": { "type": "string" } }
-                },
-                "required": ["dataset", "outcome", "treatment", "covariates"]
-            }),
-        },
-        ToolDefinition {
-            name: "treatment_doubly_robust".to_string(),
-            description: "Estimate treatment effects using doubly robust estimation (AIPW).".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "dataset": { "type": "string" },
-                    "outcome": { "type": "string" },
-                    "treatment": { "type": "string" },
-                    "covariates": { "type": "array", "items": { "type": "string" } }
-                },
-                "required": ["dataset", "outcome", "treatment", "covariates"]
-            }),
-        },
-        ToolDefinition {
-            name: "propensity_matching".to_string(),
-            description: "Estimate treatment effects using propensity score matching.".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "dataset": { "type": "string" },
-                    "outcome": { "type": "string" },
-                    "treatment": { "type": "string" },
-                    "covariates": { "type": "array", "items": { "type": "string" } }
-                },
-                "required": ["dataset", "outcome", "treatment", "covariates"]
-            }),
-        },
-        ToolDefinition {
-            name: "treatment_cbps".to_string(),
-            description: "Estimate treatment effects using covariate balancing propensity scores.".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "dataset": { "type": "string" },
-                    "outcome": { "type": "string" },
-                    "treatment": { "type": "string" },
-                    "covariates": { "type": "array", "items": { "type": "string" } }
-                },
-                "required": ["dataset", "outcome", "treatment", "covariates"]
-            }),
-        },
-        ToolDefinition {
-            name: "treatment_weightit".to_string(),
-            description: "Estimate treatment effects using flexible weighting methods.".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "dataset": { "type": "string" },
-                    "outcome": { "type": "string" },
-                    "treatment": { "type": "string" },
-                    "covariates": { "type": "array", "items": { "type": "string" } }
-                },
-                "required": ["dataset", "outcome", "treatment", "covariates"]
-            }),
-        },
-        ToolDefinition {
-            name: "treatment_entropy_balance".to_string(),
-            description: "Estimate treatment effects using entropy balancing.".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "dataset": { "type": "string" },
-                    "outcome": { "type": "string" },
-                    "treatment": { "type": "string" },
-                    "covariates": { "type": "array", "items": { "type": "string" } }
-                },
-                "required": ["dataset", "outcome", "treatment", "covariates"]
-            }),
-        },
-        // Discrete Choice
-        ToolDefinition {
-            name: "logit".to_string(),
-            description: "Run Logit regression for binary outcomes.".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "dataset": { "type": "string" },
-                    "formula": { "type": "string" }
-                },
-                "required": ["dataset", "formula"]
-            }),
-        },
-        ToolDefinition {
-            name: "probit".to_string(),
-            description: "Run Probit regression for binary outcomes.".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "dataset": { "type": "string" },
-                    "formula": { "type": "string" }
-                },
-                "required": ["dataset", "formula"]
-            }),
-        },
-        // Time Series
-        ToolDefinition {
-            name: "ts_arima_fit".to_string(),
-            description: "Fit an ARIMA(p,d,q) model.".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "dataset": { "type": "string" },
-                    "column": { "type": "string" },
-                    "p": { "type": "integer" },
-                    "d": { "type": "integer" },
-                    "q": { "type": "integer" }
-                },
-                "required": ["dataset", "column", "p", "d", "q"]
-            }),
-        },
-        ToolDefinition {
-            name: "ts_arima_forecast".to_string(),
-            description: "Forecast with ARIMA model.".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "dataset": { "type": "string" },
-                    "column": { "type": "string" },
-                    "p": { "type": "integer" },
-                    "d": { "type": "integer" },
-                    "q": { "type": "integer" },
-                    "horizon": { "type": "integer" }
-                },
-                "required": ["dataset", "column", "p", "d", "q", "horizon"]
-            }),
-        },
-        ToolDefinition {
-            name: "ts_var".to_string(),
-            description: "Run Vector Autoregression (VAR) model.".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "dataset": { "type": "string" },
-                    "columns": { "type": "array", "items": { "type": "string" } },
-                    "lags": { "type": "integer" }
-                },
-                "required": ["dataset", "columns", "lags"]
-            }),
-        },
-        // Machine Learning
-        ToolDefinition {
-            name: "ml_kmeans".to_string(),
-            description: "Run K-means clustering.".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "dataset": { "type": "string" },
-                    "columns": { "type": "array", "items": { "type": "string" } },
-                    "k": { "type": "integer" }
-                },
-                "required": ["dataset", "columns", "k"]
-            }),
-        },
-        ToolDefinition {
-            name: "ml_dbscan".to_string(),
-            description: "Run DBSCAN clustering.".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "dataset": { "type": "string" },
-                    "columns": { "type": "array", "items": { "type": "string" } },
-                    "eps": { "type": "number" },
-                    "min_samples": { "type": "integer" }
-                },
-                "required": ["dataset", "columns", "eps", "min_samples"]
-            }),
-        },
-        ToolDefinition {
-            name: "ml_pca".to_string(),
-            description: "Run Principal Component Analysis.".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "dataset": { "type": "string" },
-                    "columns": { "type": "array", "items": { "type": "string" } },
-                    "n_components": { "type": "integer" }
-                },
-                "required": ["dataset", "columns"]
-            }),
-        },
-        // Statistical Tests
-        ToolDefinition {
-            name: "t_test".to_string(),
-            description: "Run Student's t-test. Supports one-sample, two-sample (Welch's), and paired t-tests.".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "dataset": { "type": "string" },
-                    "x": { "type": "string", "description": "First column" },
-                    "y": { "type": "string", "description": "Second column (for two-sample/paired)" },
-                    "mu": { "type": "number", "description": "Hypothesized mean (for one-sample)" },
-                    "paired": { "type": "boolean", "description": "Whether paired test" },
-                    "alternative": { "type": "string", "description": "two.sided, less, or greater" }
-                },
-                "required": ["dataset", "x"]
-            }),
-        },
-        ToolDefinition {
-            name: "anova".to_string(),
-            description: "Run one-way ANOVA to test whether means differ across groups.".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "dataset": { "type": "string" },
-                    "response": { "type": "string", "description": "Response variable" },
-                    "group": { "type": "string", "description": "Grouping variable" }
-                },
-                "required": ["dataset", "response", "group"]
-            }),
-        },
-        ToolDefinition {
-            name: "shapiro_wilk".to_string(),
-            description: "Run Shapiro-Wilk test for normality.".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "dataset": { "type": "string" },
-                    "column": { "type": "string" }
-                },
-                "required": ["dataset", "column"]
-            }),
-        },
-        ToolDefinition {
-            name: "chi_squared_test".to_string(),
-            description: "Run chi-squared test of independence for two categorical variables.".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "dataset": { "type": "string" },
-                    "x": { "type": "string" },
-                    "y": { "type": "string" }
-                },
-                "required": ["dataset", "x", "y"]
-            }),
-        },
-        ToolDefinition {
-            name: "wilcoxon_test".to_string(),
-            description: "Run Wilcoxon non-parametric test (Mann-Whitney U for two-sample).".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "dataset": { "type": "string" },
-                    "x": { "type": "string" },
-                    "y": { "type": "string" },
-                    "paired": { "type": "boolean" }
-                },
-                "required": ["dataset", "x"]
-            }),
-        },
-        ToolDefinition {
-            name: "cor_test".to_string(),
-            description: "Test for correlation between two variables (Pearson, Spearman, or Kendall).".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "dataset": { "type": "string" },
-                    "x": { "type": "string" },
-                    "y": { "type": "string" },
-                    "method": { "type": "string", "description": "pearson, spearman, or kendall" }
-                },
-                "required": ["dataset", "x", "y"]
-            }),
-        },
-        // Database Tools
-        ToolDefinition {
-            name: "db_sqlite_query".to_string(),
-            description: "Execute SQL query on a SQLite database and load result as dataset.".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "path": { "type": "string", "description": "Path to SQLite database file" },
-                    "query": { "type": "string", "description": "SQL query to execute" },
-                    "name": { "type": "string", "description": "Name for result dataset" }
-                },
-                "required": ["path", "query", "name"]
-            }),
-        },
-        ToolDefinition {
-            name: "db_duckdb_query".to_string(),
-            description: "Execute SQL query using DuckDB (can query Parquet/CSV files directly).".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "path": { "type": "string", "description": "Path to database or data file" },
-                    "query": { "type": "string", "description": "SQL query" },
-                    "name": { "type": "string", "description": "Name for result dataset" }
-                },
-                "required": ["path", "query", "name"]
-            }),
-        },
-        // Additional Time Series
-        ToolDefinition {
-            name: "ts_mstl".to_string(),
-            description: "Run MSTL decomposition (Multiple Seasonal-Trend decomposition using LOESS).".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "dataset": { "type": "string" },
-                    "column": { "type": "string" },
-                    "periods": { "type": "array", "items": { "type": "integer" } }
-                },
-                "required": ["dataset", "column", "periods"]
-            }),
-        },
-        ToolDefinition {
-            name: "ts_var_irf".to_string(),
-            description: "Compute Impulse Response Functions for VAR model.".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "dataset": { "type": "string" },
-                    "columns": { "type": "array", "items": { "type": "string" } },
-                    "lags": { "type": "integer" },
-                    "horizon": { "type": "integer" }
-                },
-                "required": ["dataset", "columns", "lags", "horizon"]
-            }),
-        },
-        ToolDefinition {
-            name: "acf".to_string(),
-            description: "Compute autocorrelation or partial autocorrelation function.".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "dataset": { "type": "string" },
-                    "column": { "type": "string" },
-                    "lag_max": { "type": "integer" },
-                    "type": { "type": "string", "description": "correlation, covariance, or partial" }
-                },
-                "required": ["dataset", "column"]
-            }),
-        },
-        ToolDefinition {
-            name: "ts_vecm".to_string(),
-            description: "Run Vector Error Correction Model for cointegrated time series.".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "dataset": { "type": "string" },
-                    "columns": { "type": "array", "items": { "type": "string" } },
-                    "lags": { "type": "integer" },
-                    "r": { "type": "integer", "description": "Cointegration rank" }
-                },
-                "required": ["dataset", "columns", "lags"]
-            }),
-        },
-        ToolDefinition {
-            name: "timeseries_pp_test".to_string(),
-            description: "Run Phillips-Perron unit root test for stationarity.".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "dataset": { "type": "string" },
-                    "column": { "type": "string" },
-                    "trend": { "type": "string", "description": "none, constant, or trend" }
-                },
-                "required": ["dataset", "column"]
-            }),
-        },
-        ToolDefinition {
-            name: "timeseries_decompose".to_string(),
-            description: "Classical seasonal decomposition (additive or multiplicative).".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "dataset": { "type": "string" },
-                    "column": { "type": "string" },
-                    "period": { "type": "integer" },
-                    "type": { "type": "string", "description": "additive or multiplicative" }
-                },
-                "required": ["dataset", "column", "period"]
-            }),
-        },
-        // Additional ML
-        ToolDefinition {
-            name: "ml_hierarchical".to_string(),
-            description: "Run hierarchical clustering (Ward, single, complete, average linkage).".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "dataset": { "type": "string" },
-                    "columns": { "type": "array", "items": { "type": "string" } },
-                    "method": { "type": "string", "description": "ward, single, complete, or average" },
-                    "k": { "type": "integer", "description": "Number of clusters to cut" }
-                },
-                "required": ["dataset", "columns"]
-            }),
-        },
-        ToolDefinition {
-            name: "ml_tsne".to_string(),
-            description: "Run t-SNE for dimensionality reduction and visualization.".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "dataset": { "type": "string" },
-                    "columns": { "type": "array", "items": { "type": "string" } },
-                    "n_components": { "type": "integer" },
-                    "perplexity": { "type": "number" }
-                },
-                "required": ["dataset", "columns"]
-            }),
-        },
-        ToolDefinition {
-            name: "ml_random_forest".to_string(),
-            description: "Train Random Forest for classification or regression.".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "dataset": { "type": "string" },
-                    "target": { "type": "string" },
-                    "features": { "type": "array", "items": { "type": "string" } },
-                    "n_trees": { "type": "integer" },
-                    "max_depth": { "type": "integer" }
-                },
-                "required": ["dataset", "target", "features"]
-            }),
-        },
-        // Visualizations
-        ToolDefinition {
-            name: "viz_histogram".to_string(),
-            description: "Generate a histogram.".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "dataset": { "type": "string" },
-                    "column": { "type": "string" },
-                    "bins": { "type": "integer" }
-                },
-                "required": ["dataset", "column"]
-            }),
-        },
-        ToolDefinition {
-            name: "viz_scatter".to_string(),
-            description: "Generate a scatter plot.".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "dataset": { "type": "string" },
-                    "x_column": { "type": "string" },
-                    "y_column": { "type": "string" }
-                },
-                "required": ["dataset", "x_column", "y_column"]
-            }),
-        },
-        ToolDefinition {
-            name: "viz_line".to_string(),
-            description: "Generate a line chart.".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "dataset": { "type": "string" },
-                    "x_column": { "type": "string" },
-                    "y_columns": { "type": "array", "items": { "type": "string" } }
-                },
-                "required": ["dataset", "x_column", "y_columns"]
-            }),
-        },
-        ToolDefinition {
-            name: "viz_boxplot".to_string(),
-            description: "Generate a box plot.".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "dataset": { "type": "string" },
-                    "columns": { "type": "array", "items": { "type": "string" } }
-                },
-                "required": ["dataset", "columns"]
-            }),
-        },
-        ToolDefinition {
-            name: "viz_heatmap".to_string(),
-            description: "Generate a correlation heatmap.".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "dataset": { "type": "string" },
-                    "columns": { "type": "array", "items": { "type": "string" } }
-                },
-                "required": ["dataset"]
-            }),
-        },
-        ToolDefinition {
-            name: "viz_coefficient".to_string(),
-            description: "Generate a coefficient plot with confidence intervals from regression results.".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "dataset": { "type": "string" },
-                    "formula": { "type": "string" }
-                },
-                "required": ["dataset", "formula"]
-            }),
-        },
-        ToolDefinition {
-            name: "viz_residual_diagnostics".to_string(),
-            description: "Generate residual diagnostic plots (Q-Q, residuals vs fitted, etc.).".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "dataset": { "type": "string" },
-                    "formula": { "type": "string" }
-                },
-                "required": ["dataset", "formula"]
-            }),
-        },
-        ToolDefinition {
-            name: "viz_event_study".to_string(),
-            description: "Generate event study plot with coefficients and confidence intervals.".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "dataset": { "type": "string" },
-                    "coefficients": { "type": "array", "items": { "type": "number" } },
-                    "standard_errors": { "type": "array", "items": { "type": "number" } },
-                    "time_labels": { "type": "array", "items": { "type": "string" } }
-                },
-                "required": ["dataset"]
-            }),
-        },
-        ToolDefinition {
-            name: "viz_irf".to_string(),
-            description: "Generate impulse response function plot.".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "dataset": { "type": "string" },
-                    "irf_data": { "type": "object" },
-                    "shock_var": { "type": "string" },
-                    "response_var": { "type": "string" }
-                },
-                "required": ["dataset"]
-            }),
-        },
-    ]
+    prompt
 }
 
 #[cfg(test)]
@@ -1223,17 +472,59 @@ mod tests {
     }
 
     #[test]
-    fn test_tool_definitions_complete() {
-        let tools = get_mcp_tool_definitions();
-        assert!(
-            tools.len() >= 20,
-            "Expected at least 20 tools, got {}",
-            tools.len()
-        );
+    fn test_tool_listing_generation() {
+        let tools = vec![
+            ToolDefinition {
+                name: "regression_ols".to_string(),
+                description: "Run OLS regression. Returns coefficients.".to_string(),
+                parameters: serde_json::json!({"type": "object"}),
+            },
+            ToolDefinition {
+                name: "munge_filter".to_string(),
+                description: "Filter rows in a dataset.".to_string(),
+                parameters: serde_json::json!({"type": "object"}),
+            },
+        ];
+        let listing = generate_tool_listing(&tools);
+        assert!(listing.contains("### Regression"));
+        assert!(listing.contains("`regression_ols`"));
+        assert!(listing.contains("### Data Munging"));
+        assert!(listing.contains("`munge_filter`"));
+    }
 
-        let tool_names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
-        assert!(tool_names.contains(&"load_dataset"));
-        assert!(tool_names.contains(&"regression_ols"));
-        assert!(tool_names.contains(&"viz_histogram"));
+    #[test]
+    fn test_system_prompt_with_context_includes_tools() {
+        let tools = vec![
+            ToolDefinition {
+                name: "regression_ols".to_string(),
+                description: "Run OLS regression.".to_string(),
+                parameters: serde_json::json!({"type": "object"}),
+            },
+        ];
+        let prompt = get_system_prompt_with_context(Some("dataset: test"), &tools);
+        assert!(prompt.contains("AVAILABLE TOOLS BY CATEGORY"));
+        assert!(prompt.contains("`regression_ols`"));
+        assert!(prompt.contains("Currently Loaded Datasets"));
+        assert!(prompt.contains("dataset: test"));
+    }
+
+    #[test]
+    fn test_tier1_tools_under_128() {
+        assert!(
+            TIER1_TOOLS.len() <= 128,
+            "Tier 1 has {} tools, exceeds OpenAI limit of 128",
+            TIER1_TOOLS.len()
+        );
+    }
+
+    #[test]
+    fn test_no_overlap_between_tiers() {
+        for tool in INTERNAL_TOOLS {
+            assert!(
+                !TIER1_TOOLS.contains(tool),
+                "Tool {} is in both TIER1 and INTERNAL",
+                tool
+            );
+        }
     }
 }

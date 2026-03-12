@@ -272,6 +272,7 @@ pub struct DriscollKraayRequest {
     #[schemars(
         description = "Column containing time period identifiers (e.g., 'year', 'quarter'). Used to aggregate scores within periods."
     )]
+    #[serde(alias = "time_var", alias = "time")]
     pub time_col: String,
 
     /// Bandwidth for HAC kernel (optional)

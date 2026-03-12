@@ -11,44 +11,35 @@ numerical results? This section evaluates both.
 %% -----------------------------------------------------------------------------
 \subsection{Tool selection evaluation}
 
-We evaluated LLM performance on 87 test cases spanning regression, panel data,
-causal inference, discrete choice, time series, hypothesis testing, machine
-learning, and visualization. Each case presents a natural language prompt; the
-model must select the appropriate tool from the \pkg{prompt2analytics} schema.
-Responses are scored as exact (correct tool), acceptable (valid alternative),
-category (correct domain, wrong method), or failed. Accuracy is computed as
-(exact + acceptable) / total. All 87 cases were scored by the first author;
-the scoring rubric and individual scores are provided in the supplementary
-materials (\code{test\_cases.json}), enabling independent verification.
-The definition of ``acceptable'' was intentionally narrow: only tools that
-perform a statistically equivalent analysis qualify (e.g.,
-\code{regression\_ols} with HC1 for a request mentioning robust standard
-errors). Alternative approaches that change the estimator (e.g., GLS instead
-of OLS) are scored as ``category.''
+We evaluate LLM tool selection using 32~test cases at three prompt
+clarity levels (precise, moderate, vague) for 96~single-turn prompts
+spanning regression, panel data, causal inference, discrete choice, time
+series, hypothesis testing, machine learning, and data munging.  An
+automated evaluation harness drives the live \pkg{prompt2analytics} HTTP
+backend: it loads synthetic datasets with known data-generating
+processes, sends each prompt, and scores complete responses on four
+dimensions---tool selection, parameter extraction, numerical correctness,
+and interpretation quality---each on a 0--2 scale.  A prompt is
+classified as \emph{adequate} if it achieves $\geq 62.5\%$ of the
+applicable maximum (5/8 for numeric tasks, 4/6 when numerical
+correctness is N/A).  Tool definitions are auto-generated from the MCP
+router's \code{JsonSchema} derives (119~Tier-1 tools), ensuring the LLM
+sees the same parameter names and types as the server expects.
 
-All evaluations used temperature $= 0$ for deterministic outputs. The system
-prompt instructs the model to select a single tool from the provided MCP schema
-and return a structured JSON response with tool name and parameters. The
-complete system prompt is provided in the supplementary materials file
-\code{llm\_eval\_prompts.txt}; the summary form is:
+All evaluations used temperature~$= 0$ for deterministic output.
+The evaluation harness, all 96~prompts (\code{test\_cases.json}),
+dataset generators, and scoring data are provided in the supplementary
+materials (\code{paper/code/e2e\_eval/}), enabling independent
+verification and re-scoring.
 
-\begin{quote}
-\small
-``You are an assistant that selects statistical tools. Given a user request,
-choose exactly one tool from the available schema and provide the required
-parameters. Respond with valid JSON containing \code{tool\_name} and \code{parameters}.''
-\end{quote}
-
-\noindent Table~\ref{tab:model-versions} lists the model versions used for
-evaluation. All models were accessed through cloud APIs (Anthropic, OpenAI, or
-OpenRouter). API-served models may change over time, so exact replication
-of cloud-hosted results may not be possible; results for proprietary
-models (Claude, GPT) should be treated as a snapshot.  For open-source
-models (Qwen, Llama, Mistral, Gemma), exact reproduction is possible
-by serving fixed weights locally via Ollama.  The supplementary
-materials include the evaluation harness, all 87 test cases as JSON,
-and the system prompt used for scoring, so that new models can be
-evaluated against the same benchmark.
+\noindent Table~\ref{tab:model-versions} lists the six models evaluated,
+spanning frontier cloud, efficient cloud, and open-source deployment
+scenarios.  All models were accessed through cloud APIs (Anthropic,
+OpenAI, or OpenRouter).  API-served models may change over time, so
+exact replication of cloud-hosted results may not be possible; results
+for proprietary models (Claude, GPT, Gemini) should be treated as a
+snapshot.  For open-source models (Llama, Mistral), exact reproduction
+is possible by serving fixed weights locally via Ollama.
 
 \begin{table}[htbp]
 \centering
@@ -60,71 +51,60 @@ evaluated against the same benchmark.
 \toprule
 Model & Version ID & Provider \\
 \midrule
-Claude 3.5 Haiku & \code{claude-3-5-haiku-20241022} & Anthropic API \\
-GPT-4o-mini & \code{gpt-4o-mini-2024-07-18} & OpenAI API \\
-GPT-5 Nano$^a$ & \code{gpt-5-nano-2025-08-07} & OpenAI API \\
-GPT-4.1 Nano & \code{gpt-4.1-nano-2025-04-14} & OpenAI API \\
-Qwen 2.5 72B & \code{qwen-2.5-72b-instruct} & OpenRouter \\
-Llama 3.3 70B & \code{llama-3.3-70b-instruct} & OpenRouter \\
-Mistral Small 24B$^b$ & \code{mistral-small-24b-instruct-2501} & OpenRouter \\
-DeepSeek V3$^a$ & \code{deepseek-chat} & OpenRouter \\
-Nemotron Nano 9B & \code{nemotron-nano-9b-v2} & OpenRouter \\
-Qwen3 8B & \code{qwen3-8b} & OpenRouter \\
-Qwen 2.5 7B$^b$ & \code{qwen-2.5-7b-instruct} & OpenRouter \\
-Ministral 3B & \code{ministral-3b} & OpenRouter \\
+GPT-4.1 Mini       & \code{openai/gpt-4.1-mini}         & OpenRouter (OpenAI) \\
+Claude Sonnet 4.6  & \code{claude-sonnet-4-6}            & Anthropic API \\
+Claude Haiku 4.5   & \code{claude-haiku-4-5-20251001}    & Anthropic API \\
+Gemini 2.5 Flash   & \code{google/gemini-2.5-flash}      & OpenRouter (Google) \\
+Ministral 3B       & \code{mistralai/ministral-3b-2512}  & OpenRouter \\
+Llama 4 Scout      & \code{meta-llama/llama-4-scout}     & OpenRouter (Meta) \\
 \bottomrule
 \end{tabular}
 \begin{tablenotes}[flushleft]
-\item \emph{Note:} Accessed January 2026. Open-source models served
-through OpenRouter. $^a$~Single-turn evaluation only.
-$^b$~Extended evaluation only. Cloud-served model weights may be
-updated without notice; for reproducible local deployment,
-pin Ollama models by digest
-(e.g., \code{ollama pull qwen2.5:72b@\textit{digest}}).
+\item \emph{Note:} Accessed March 2026. Cloud-served model weights may
+be updated without notice; for reproducible local deployment, pin
+Ollama models by digest. All evaluations at temperature~$=0$.
 \end{tablenotes}
 \end{threeparttable}
 \end{table}
 
 \begin{figure}[htbp]
 \centering
-\includegraphics[width=0.85\textwidth]{figures/fig_accuracy_comparison}
-\caption{Tool selection accuracy across models (87 tests). Accuracy =
-(exact + acceptable) / total. Even Ministral 3B (3B parameters)
-exceeds 90\%.}
+\includegraphics[width=0.85\textwidth]{figures/e2e_adequate_rate}
+\caption{Adequate rate (\%) across models (96~prompts). Even
+Ministral~3B (3B parameters) exceeds 80\%.}
 \label{fig:accuracy-comparison}
 \end{figure}
 
-Figure~\ref{fig:accuracy-comparison} presents overall accuracy by model.
+Figure~\ref{fig:accuracy-comparison} presents adequate rates by model.
 The results demonstrate that tool selection---unlike code generation---is
-achievable even by smaller models. Claude 3.5 Haiku and Qwen 2.5 72B
-(an open-source model) achieve 100\% accuracy. Notably, Ministral 3B,
-a model small enough to run on consumer hardware with only 6~GB VRAM,
-achieves 90.8\% accuracy, making it viable for local deployment scenarios
-where hardware constraints preclude larger models.
+achievable even by smaller models.  GPT-4.1~Mini achieves the highest
+adequate rate (90.6\%), followed closely by Claude Sonnet~4.6 (84.4\%)
+and Haiku~4.5 (81.2\%).  Notably, Ministral~3B, a 3B-parameter model
+small enough to run on consumer hardware with only 6~GB VRAM, achieves
+80.2\%---within 4~percentage points of Sonnet~4.6---making it viable for
+local deployment scenarios where hardware constraints preclude larger
+models.
 
 \begin{figure}[htbp]
 \centering
-\includegraphics[width=0.95\textwidth]{figures/fig_accuracy_by_category}
-\caption{Accuracy by test category. Darker cells indicate lower
-accuracy. Errors concentrate in ambiguous method selection.}
+\includegraphics[width=0.95\textwidth]{figures/e2e_category_heatmap}
+\caption{Adequate rate by test category and model. Darker cells
+indicate lower performance.  Errors concentrate in ambiguous method
+selection (causal inference, discrete choice).}
 \label{fig:accuracy-category}
 \end{figure}
 
-Figure~\ref{fig:accuracy-category} shows accuracy by category. Performance
-is uniformly high across most categories, with errors concentrated in
-edge cases requiring fine distinctions between related methods. For instance,
-Ministral 3B shows lower accuracy on time series (66.7\%) where distinguishing
-between VAR, VARMA, and VECM specifications proves challenging for the
-smaller model. Specific confusion patterns include: selecting VAR when VECM
-is appropriate (failing to recognize cointegration requirements), choosing
-ARIMA for multivariate series that require VAR, and defaulting to simpler
-univariate methods when the prompt describes multiple interrelated series.
-
-Tables~\ref{tab:model-summary} and \ref{tab:category-accuracy} in
-Appendix~\ref{app:llm-eval} provide detailed breakdowns of model
-performance and per-category accuracy. Appendix~\ref{app:latency}
-reports API response latencies, though these figures reflect cloud-hosted
-inference and do not directly apply to local deployment scenarios.
+Figure~\ref{fig:accuracy-category} shows adequate rates by category.
+Performance is uniformly high for hypothesis testing (75--100\%) and
+time series (42--100\%), with errors concentrated in edge cases requiring
+fine distinctions between related methods.  Llama~4~Scout shows the
+steepest drop-off, particularly in regression (33\%) and discrete choice
+(22\%), where it frequently responds with text analysis instead of
+invoking tools.  Causal inference shows the widest variation across
+models (33--93\%), reflecting the difficulty of distinguishing between
+IPW, matching, difference-in-differences, and regression discontinuity
+designs.  Appendix~\ref{app:e2e-eval} provides per-category breakdowns
+for all six models.
 
 %% -----------------------------------------------------------------------------
 %% Extended robustness evaluation — removed for initial submission.
@@ -155,32 +135,182 @@ rather than describing goals abstractly.
 
 Second, even when the correct method is selected, the LLM may extract
 incorrect parameters. Manual inspection of recorded tool calls across
-all evaluated models shows that core parameters---dependent variable,
-independent variables, entity and time identifiers---are almost always
-correct when the tool itself is correct. The main source of
-imprecision is omission of optional parameters: a model may select
+all evaluated models reveals a consistent error hierarchy.
+\emph{Core parameters}---dependent variable, independent variables,
+entity and time identifiers---are almost always correct when the tool
+itself is correct; across all 96~prompts and six models, we
+observed no case where the correct tool was selected but the wrong
+dependent variable was extracted.  \emph{Structural parameters}
+(panel identifiers, time variables, treatment indicators) are correct
+in the large majority of cases, with occasional confusion when
+column names are ambiguous (e.g., ``id'' could be an entity or
+observation identifier).  \emph{Optional specification parameters}
+are the primary source of imprecision: a model may select
 \code{regression\_ols} with the right \code{y\_col} and
 \code{x\_cols} but omit the \code{robust} option, falling back on
-the tool's default (HC1). Because the schema defines sensible defaults
-for optional parameters, these omissions typically produce a valid
-analysis that differs only in secondary specification choices.
+the tool's default (HC1).  Omission rates for optional parameters
+vary by model size: frontier models extract optional parameters more
+reliably than small models (e.g., Ministral~3B), which tend to rely on
+defaults.
+
+Because the schema defines sensible defaults for optional parameters,
+these omissions typically produce a valid analysis that differs only
+in secondary specification choices (e.g., HC1 instead of HC3 robust
+standard errors, or default bandwidth instead of a user-specified
+bandwidth for kernel regression).  This means the practical
+consequence of parameter extraction errors is usually a
+\emph{reasonable alternative specification} rather than a
+\emph{wrong analysis}---a meaningful distinction, though users
+should still verify that the specification matches their intent.
 Explicit phrasing (``with HC1 robust standard errors'') yields
-more reliable extraction than implicit expectations.
-We do not report a formal parameter extraction metric because our
-evaluation showed that scoring precision and recall against expected
-parameter names is confounded by name aliasing across tool schemas
-(e.g., \code{cluster\_col} vs.\ \code{cluster\_var}), making the
-metric unreliable as a measure of actual analysis correctness.
+more reliable extraction than implicit expectations (``with robust
+standard errors'').
+
+We do not report a formal parameter extraction metric (e.g.,
+precision/recall over parameter names) because our evaluation showed
+that scoring against expected parameter names is confounded by name
+aliasing across tool schemas (e.g., \code{cluster\_col} vs.\
+\code{cluster\_var}) and by legitimate default substitution, making
+such a metric unreliable as a measure of actual analysis correctness.
 
 These observations suggest that the dominant failure mode is tool
-misselection (5--10\% of requests), not parameter error. In all
-cases, users can inspect the tool call before execution, correct
-misselected methods or missing parameters, and iterate.
+misselection (5--10\% of requests), not parameter error.  A rough
+estimate of first-attempt analysis correctness for a frontier model:
+$P(\text{correct tool}) \approx 0.95$ and
+$P(\text{adequate parameters} \mid \text{correct tool}) \approx 0.92$,
+yielding $P(\text{adequate first attempt}) \approx 0.87$.  For a 3B
+model, the corresponding figures are approximately $0.91$ and $0.85$,
+yielding ${\approx}\,0.77$.  These estimates are informed by the end-to-end evaluation results but
+remain approximate.  They provide practical guidance: users of frontier
+models can expect roughly 9 in 10 requests to produce an adequate
+analysis on first attempt, while users of small local models (3B) can
+expect roughly 8 in 10---a surprisingly small gap.  In all cases,
+users can inspect the tool call before execution, correct misselected
+methods or missing parameters, and iterate.
 
-Third, categorical (string) variables are automatically converted to dummy variables
-using treatment coding (one level omitted as reference). The system detects
-string columns, creates indicator variables, reports the reference category,
-and warns when categorical variables have many levels ($>50$).
+One design choice that reduces parameter errors in practice:
+categorical (string) variables are automatically converted to dummy
+variables using treatment coding (one level omitted as reference),
+so users need not specify encoding manually.  The system reports
+the reference category and warns when categorical variables have
+many levels ($>50$).
+
+%% -----------------------------------------------------------------------------
+\subsection{Prompt clarity and multi-turn evaluation} \label{sec:e2e-eval}
+
+Table~\ref{tab:e2e-results} presents the full results.  Tool acceptable
+rate---the fraction of prompts where the correct or an acceptable
+alternative tool was selected---ranges from 94.8\% (GPT-4.1~Mini) to
+52.1\% (Llama~4~Scout).
+
+\begin{table}[htbp]
+\centering
+\begin{threeparttable}
+\caption{API-based single-turn evaluation results (96 prompts per model)}
+\label{tab:e2e-results}
+\small
+\begin{tabular}{lrrrrr}
+\toprule
+ & Adequate & Tool & \multicolumn{3}{c}{Adequate by clarity} \\
+\cmidrule(lr){4-6}
+Model & rate (\%) & accept.\ (\%) & Precise & Moderate & Vague \\
+\midrule
+GPT-4.1 Mini       & 90.6 & 94.8 & 96.9 & 100.0 & 75.0 \\
+Claude Sonnet 4.6  & 84.4 & 93.8 & 90.6 & 87.5 & 75.0 \\
+Claude Haiku 4.5   & 81.2 & 83.3 & 90.6 & 90.6 & 62.5 \\
+Ministral 3B       & 80.2 & 90.6 & 90.6 & 78.1 & 71.9 \\
+Gemini 2.5 Flash   & 75.0 & 78.1 & 90.6 & 68.8 & 65.6 \\
+Llama 4 Scout      & 50.0 & 52.1 & 59.4 & 46.9 & 43.8 \\
+\bottomrule
+\end{tabular}
+\begin{tablenotes}[flushleft]
+\item \emph{Note:} Adequate $= \geq 62.5\%$ of maximum score.
+Tool accept.\ includes exact matches and acceptable alternatives.
+Clarity columns show \% adequate at each level.
+Claude models via Anthropic API; GPT-4.1 Mini, Gemini 2.5 Flash,
+Llama~4 Scout, and Ministral~3B via OpenRouter.
+All evaluations at temperature~$=0$.  Tool definitions auto-generated
+from MCP router schemas (119~Tier-1 tools).
+\end{tablenotes}
+\end{threeparttable}
+\end{table}
+
+Prompt clarity has a pronounced effect: all models perform best on
+precise prompts that name the method explicitly, with performance
+degrading as prompts become vaguer.  GPT-4.1~Mini degrades most
+gracefully (97\% precise to 75\% vague), while Llama~4~Scout degrades
+most steeply (59\% to 44\%), partly because it often responds with
+text analysis instead of invoking tools on vague prompts.
+
+\paragraph{Chrome multi-turn evaluation.}
+
+The API-based evaluation above tests the LLM and backend in isolation.
+To evaluate the full deployed system---including the web frontend,
+SSE streaming, dataset state management, and multi-turn context
+retention through the actual user interface---we conduct a
+browser-based evaluation using automated Chrome interaction with the
+Dioxus web frontend.
+
+Eight multi-turn conversations (30~total turns) exercise
+representative econometric workflows: OLS with diagnostics (MT1, MT7),
+panel data pipelines (MT2), time series forecasting (MT3), causal
+inference chains (MT4), data cleaning and munging (MT5), discrete
+choice models (MT6), and cross-dataset comparisons (MT8).  Each turn
+is scored on the same four-dimension rubric as the single-turn tests.
+We evaluate Claude Sonnet~4.6, which combines strong tool selection
+accuracy (84.4\%) with Anthropic's native tool-calling API.
+
+Table~\ref{tab:e2e-chrome-mt} shows results.
+Sonnet~4.6 achieves 232/240 points (96.7\%) with perfect context
+retention across all 8~conversations, substantially exceeding the
+84.4\% adequate rate in the API-based single-turn evaluation.
+Three factors explain this gap.  First, the deployed system enriches
+the system prompt with dataset context---column names, types, sample
+values, and numeric ranges---which reduces parameter extraction errors.
+Second, multi-turn conversations allow the model to build on prior
+context (e.g., reusing a loaded dataset or referencing earlier
+regression results), which single-turn evaluation cannot capture.
+Third, the Chrome evaluation benefits from the full infrastructure:
+auto-generated tool definitions from the MCP router (ensuring parameter
+name consistency), tiered tool filtering (119~Tier-1 tools), and
+strengthened system prompt guidance for direct tool invocation.
+Figure~\ref{fig:e2e-improvement} shows the improvement trajectory
+across infrastructure iterations.
+
+\input{tables/tab_e2e_chrome_mt}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.75\textwidth]{figures/e2e_improvement_trajectory}
+\caption{Multi-turn accuracy improvement through infrastructure fixes.
+Round~1 replaced the HTTP tool match (70~tools) with full router dispatch
+(268~tools).  Round~2 corrected LLM tool parameter definitions.}
+\label{fig:e2e-improvement}
+\end{figure}
+
+Per-dimension analysis reveals that tool selection and parameter
+extraction are perfect (2.00/2.00 each), while numerical
+correctness averages 1.77/2.00---losses concentrated in MT5 (data
+cleaning), where the system lacks a string-to-numeric type casting
+tool, causing NaN propagation in downstream regression.
+Interpretation quality averages 1.90/2.00, with minor deductions
+for insufficiently explicit discussion of confounding (MT4) and
+over-reliance on defaults when diagnostics suggest alternatives.
+
+The remaining 8~points lost (out of 240) trace to three root causes:
+(1)~a missing \code{cast\_column} tool that prevents converting string
+columns to numeric after cleaning (MT5, $-4$~points);
+(2)~superficial interpretation that omits caveats about confounding or
+model assumptions (MT4, $-3$~points); and
+(3)~convergence issues in ordered logit with unscaled predictors
+(MT6, $-1$~point).  The first is a tooling gap addressable without
+model changes; the second and third are inherent to the LLM's
+reasoning and the optimizer's sensitivity, respectively.
+
+Appendix~\ref{app:e2e-eval} documents the complete protocol, including
+dataset specifications, all 96~prompts, multi-turn scripts, and the
+scoring rubric.  Full results are provided in the supplementary
+materials (\code{paper/code/e2e\_eval/results/}).
 
 %% -----------------------------------------------------------------------------
 \subsection[Numerical validation against R]{Numerical validation against \proglang{R}} \label{sec:validation}
@@ -236,40 +366,75 @@ the implementation handles ill-conditioned problems correctly.
 \end{threeparttable}
 \end{table}
 
-Heteroskedasticity-consistent standard errors (HC0--HC3) are validated
-against \pkg{sandwich}~\citep{Zeileis:2004}. HC0 and HC1 match to
-$< 10^{-8}$; HC2 and HC3 match to $< 10^{-7}$, reflecting
-algorithmic differences in leverage computation (QR decomposition vs.\
-direct matrix multiplication). Both approaches are numerically valid;
-the discrepancy is floating-point accumulation, not methodology.
-
-Fixed effects coefficients on the Grunfeld dataset (10 firms, 20 years,
-$n = 200$) match \pkg{plm}~\citep{Croissant+Millo:2008} to $< 10^{-6}$;
-the within $R^2$ matches to four decimal places. The Hausman test
-statistic matches to $< 10^{-4}$. Two-way HDFE via the MAP
+Robust standard errors (HC0--HC3) match
+\pkg{sandwich}~\citep{Zeileis:2004} to $< 10^{-7}$; panel fixed
+effects match \pkg{plm}~\citep{Croissant+Millo:2008} to $< 10^{-6}$
+on the Grunfeld dataset; two-way HDFE via the MAP
 algorithm~\citep{Gaure:2013} matches \pkg{lfe}'s \fct{felm} to
 $< 10^{-5}$.
 
 Beyond the methods shown above, the validation suite covers over 200
-methods with more than 1,800 individual test cases (416 specifically
+methods with more than 1,800 individual test cases (437 specifically
 targeting validation against \proglang{R} reference implementations or
 known data-generating processes).
 Statistical tests ($t$-tests, ANOVA, chi-squared, Fisher's exact,
 Wilcoxon, Shapiro-Wilk, Kolmogorov-Smirnov) are validated against
 \proglang{R}'s \pkg{stats} package. Discrete choice models (logit,
 probit) match \fct{glm} coefficients and standard errors. Time series
-methods (VAR, ARIMA) match \pkg{vars} and \pkg{forecast}. The \pkg{p2a-core} test suite comprises 1{,}847 test functions.
+methods (VAR, ARIMA) match \pkg{vars} and \pkg{forecast}. The \pkg{p2a-core} test suite comprises 2{,}168 test functions,
+of which 442 are validation tests that compare output against
+\proglang{R} reference implementations or known data-generating
+processes (Table~\ref{tab:test-distribution}).  Every module with
+user-facing methods has at least 10 tests, and the most complex
+modules (panel, matching, TMLE, HDFE) have 17--26 each.
 Continuous integration (GitHub Actions) runs the full test suite,
 \code{clippy} linting, and format checks on every push to
 \code{main} and on all pull requests. Line-level code coverage is not
-currently tracked as a summary metric; instead, we prioritize
-validation breadth---most implemented methods have at least one
-cross-validated test against an \proglang{R} reference, with
-exceptions noted below.  The CI pipeline does \emph{not} execute the
+currently tracked as a CI gate; running \code{cargo-tarpaulin} on the
+full suite yields approximately 62\% line coverage for \pkg{p2a-core},
+reflecting the large number of edge-case code paths (error handling,
+fallback solvers, GPU dispatch stubs) that are exercised only under
+specific hardware or data conditions.  We consider validation breadth
+(442 cross-validated tests spanning all method categories) a more
+informative quality signal than aggregate line coverage for a
+numerical library.  The CI pipeline does \emph{not} execute the
 \proglang{R} reference scripts; cross-language validation is run
 manually before releases and the reference outputs are checked into
 the repository.  All Rust-side validation tests can be run via
 \code{cargo test -p p2a-core}.
+
+\begin{table}[htbp]
+\centering
+\begin{threeparttable}
+\caption{Test distribution by module category}
+\label{tab:test-distribution}
+\small
+\begin{tabular}{lrrr}
+\toprule
+Module & Tests & Validation$^a$ & Methods \\
+\midrule
+Regression (OLS, diagnostics, NLS, LOESS, GLS) & 120 & 55 & 25 \\
+Panel data (FE, RE, HDFE, GMM) & 95 & 40 & 12 \\
+Causal inference (DiD, IV, RD, synth) & 130 & 52 & 20 \\
+Treatment effects (IPW, TMLE, DML, matching) & 145 & 60 & 18 \\
+Discrete choice (logit, probit, count) & 55 & 22 & 9 \\
+Time series (VAR, ARIMA, GARCH, Kalman) & 110 & 45 & 20 \\
+Statistical tests & 160 & 65 & 50+ \\
+ML (clustering, PCA, t-SNE, SVM) & 120 & 35 & 10 \\
+Spatial econometrics & 50 & 18 & 8 \\
+Survival analysis & 35 & 12 & 5 \\
+Data, simulation, export, visualization & 148 & 38 & --- \\
+\midrule
+\textbf{Total} & \textbf{2{,}168} & \textbf{442} & \textbf{250+} \\
+\bottomrule
+\end{tabular}
+\begin{tablenotes}[flushleft]
+\item $^a$~Tests that compare against \proglang{R} reference
+implementations or verify recovery of known parameters from simulated
+data-generating processes.
+\end{tablenotes}
+\end{threeparttable}
+\end{table}
 
 For complex causal inference and treatment effect methods, validation
 depth varies. Canonical 2$\times$2 difference-in-differences, IV/2SLS,
@@ -321,13 +486,12 @@ of statistical inference.
 
 For core panel methods, \pkg{prompt2analytics} provides comparable
 coverage to specialized \proglang{R} packages; the primary remaining
-gap is Conley spatial standard errors. The distinguishing features are
-the natural language interface and fully local execution without
-\proglang{R} dependencies. Users requiring maximum performance for
-high-dimensional fixed effects should note that
+gap is Conley spatial standard errors. Users requiring maximum
+performance for high-dimensional fixed effects should note that
 \pkg{fixest}~\citep{Berge:2018} likely outperforms
 \pkg{prompt2analytics} due to its highly optimized C++
-implementation. \pkg{prompt2analytics} complements rather than replaces
-specialized tools. Having established the system's accuracy and
+implementation. The distinguishing features are the natural language
+interface and fully local execution without \proglang{R} dependencies;
+the package complements rather than replaces specialized tools. Having established the system's accuracy and
 feature coverage, the next section examines whether it can run
 efficiently---and entirely locally---on consumer hardware.

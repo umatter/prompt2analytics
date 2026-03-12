@@ -10,8 +10,9 @@ generating code, and keeping data local---and implemented the approach
 in \pkg{prompt2analytics}, a \proglang{Rust} library of over 200
 validated methods exposed through MCP. The evaluation
 (Section~\ref{sec:evaluation}) shows that tool selection works well:
-90--100\% accuracy on curated prompts, with errors concentrated in
+81--91\% adequate rate for frontier models, with errors concentrated in
 edge cases requiring fine distinctions between related methods.
+
 Several limitations qualify these results. The practical benefits of
 chat-first interfaces---accessibility, reduced cognitive load,
 exploratory dialogue---remain hypothesized, as no user studies were
@@ -48,7 +49,9 @@ correct tool selection and fully specified analysis execution.
 Property-based testing could strengthen correctness guarantees beyond
 comparison to reference implementations; QuickCheck-style testing for
 statistical properties (e.g., residuals orthogonal to regressors) would
-complement numerical validation. Foreign function interfaces to
+complement numerical validation.
+
+Foreign function interfaces to
 \proglang{R} and \proglang{Python} would let users call the
 \proglang{Rust} implementations from familiar environments, combining
 compiled performance with existing analytical workflows. An
@@ -59,7 +62,9 @@ primary interface is the MCP server---a long-running process that any
 LLM client can connect to---which does not fit naturally into
 \proglang{R}'s package model. FFI wrappers remain a priority for
 giving \proglang{R} and \proglang{Python} users direct access to the
-compiled implementations. If extraction
+compiled implementations.
+
+If extraction
 quality improves sufficiently, the bottleneck shifts from ``did the
 model understand the request?'' to ``does the method library cover this
 analysis?''---at which point extending coverage becomes more valuable
@@ -80,8 +85,7 @@ interfaces are available, from \proglang{R} and \proglang{Python}.
 
 Maintaining a library of over 200 validated methods is a legitimate
 concern. The same AI-assisted development tools that motivate the
-project also address this: coding agents (e.g., Claude
-Code) can implement new methods, write validation
+project also address this: coding agents can implement new methods, write validation
 tests, update dependencies, and respond to bug reports filed as
 GitHub issues---with human review of each pull request ensuring
 correctness. This workflow already produced the majority of the
@@ -102,34 +106,34 @@ information systems, circuit simulation---could adopt the same
 architecture, particularly as structured protocols like
 MCP~\citep{MCP:2024} standardize the interface between models and tools.
 
-The LLM landscape evolves rapidly.  Models that achieve 100\% on the
-current 87-test benchmark (Claude~3.5 Haiku, Qwen~2.5 72B) suggest the
-benchmark may already exhibit ceiling effects; expanding it with
-harder multi-turn cases is a priority.  The
-evaluation harness and test cases are open-source, so new models can
-be benchmarked as they appear.  Importantly, improving LLM capability
-does not undermine the architecture---it strengthens it.  Better
-models reduce parameter omissions and may eventually make
-code-generation approaches more reliable, but the
-benefits of pre-validation and data locality are orthogonal to model
-quality.  Even if future models generate flawless code, users who
-require auditable, reproducible analyses on local data would still
-benefit from fixed, validated tool implementations.
+The LLM landscape evolves rapidly.  The 96-prompt end-to-end evaluation
+(Section~\ref{sec:e2e-eval}), which scores the full pipeline including
+tool selection, parameter extraction, numerical correctness, and
+interpretation, shows adequate rates of 50--91\% across six models in
+single-turn mode.
+However, the Chrome multi-turn evaluation demonstrates that the
+deployed system---with dataset context, conversation history, and
+iterative refinement---achieves 96.7\% accuracy (232/240 points) with
+Claude Sonnet~4.6, suggesting that the gap between isolated and
+deployed performance is substantial and that infrastructure quality
+matters as much as model capability.  The evaluation harness and test
+cases are open-source, so new models can be benchmarked as they appear.
+Importantly, improving LLM capability does not undermine the
+architecture---it strengthens it.  Better models reduce parameter
+omissions and may eventually make code-generation approaches more
+reliable, but the benefits of pre-validation and data locality are
+orthogonal to model quality.  Even if future models generate flawless
+code, users who require auditable, reproducible analyses on local data
+would still benefit from fixed, validated tool implementations.
 
-The success of this approach depends on a clear division of labor:
-language models interpret and explain; specialized software computes.
-Attempts to have language models do both---generating code that performs
-numerical computation---conflate interpretation with execution and
-sacrifice the reliability that scientific work
-requires~\citep{Schick+etal:2023}. The viability of local LLM deployment shown in
+The viability of local LLM deployment shown in
 Section~\ref{sec:deployment} has implications beyond data privacy.
 If small models can reliably select among pre-implemented methods,
 conversational interfaces to scientific software become possible
-without cloud connectivity or high-end hardware. The design of
-\pkg{prompt2analytics} suggests a template: implement algorithms in
-high-performance, memory-safe languages; expose them through structured
-protocols; and let language models handle the translation between human
-intent and computational execution.
+without cloud connectivity or high-end hardware---extending the
+separation principle (Section~\ref{sec:defining}) to settings where
+code-generation approaches would require both model capability and
+network access that may not be available.
 
 
 %% =============================================================================
@@ -138,7 +142,7 @@ intent and computational execution.
 
 \section*{Acknowledgments}
 
-The authors thank the reviewers for constructive feedback that improved
+The author thanks the reviewers for constructive feedback that improved
 the paper.
 
 
@@ -161,13 +165,12 @@ the paper.
 \vspace{0.5em}
 
 \noindent\hyperref[app:best-practices]{A\hspace{1em}Best practices and coverage gaps}\\
-\noindent\hyperref[app:llm-eval]{B\hspace{1em}LLM evaluation details}\\
-\noindent\hyperref[app:latency]{C\hspace{1em}API response latency}\\
-\noindent\hyperref[app:deployment]{D\hspace{1em}Deployment guide}\\
-\noindent\hyperref[app:privacy]{E\hspace{1em}Privacy and security}\\
-\noindent\hyperref[app:reproducibility]{F\hspace{1em}Reproducibility}\\
-\noindent\hyperref[app:benchmark-methodology]{G\hspace{1em}Benchmark methodology}\\
-\noindent\hyperref[app:implementation]{H\hspace{1em}Implementation notes}\\
-\noindent\hyperref[app:extended-examples]{I\hspace{1em}Extended examples}
+\noindent\hyperref[app:deployment]{B\hspace{1em}Deployment guide}\\
+\noindent\hyperref[app:privacy]{C\hspace{1em}Privacy and security}\\
+\noindent\hyperref[app:reproducibility]{D\hspace{1em}Reproducibility}\\
+\noindent\hyperref[app:benchmark-methodology]{E\hspace{1em}Benchmark methodology}\\
+\noindent\hyperref[app:implementation]{F\hspace{1em}Implementation notes}\\
+\noindent\hyperref[app:extended-examples]{G\hspace{1em}Extended examples}\\
+\noindent\hyperref[app:e2e-eval]{H\hspace{1em}End-to-end evaluation protocol}
 
 \vspace{2em}
