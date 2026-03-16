@@ -39,7 +39,7 @@ cat("=== StructTS R Benchmarks ===\n\n")
 
 # Local Level Model
 cat("1. Local Level Model (type = 'level')\n")
-for (n in c(50, 100, 200, 500)) {
+for (n in c(100, 1000, 10000)) {
   y <- generate_local_level(n)
   y_ts <- ts(y)
 
@@ -61,7 +61,7 @@ cat("\n")
 
 # Local Linear Trend Model
 cat("2. Local Linear Trend Model (type = 'trend')\n")
-for (n in c(50, 100, 200, 500)) {
+for (n in c(100, 1000, 10000)) {
   y <- generate_local_level(n)
   y_ts <- ts(y)
 
@@ -83,7 +83,7 @@ cat("\n")
 
 # Basic Structural Model (BSM)
 cat("3. Basic Structural Model (type = 'BSM')\n")
-for (n in c(48, 96, 144, 240)) {
+for (n in c(100, 1000, 10000)) {
   y <- generate_bsm(n, 12)
   y_ts <- ts(y, frequency = 12)
 
@@ -106,7 +106,7 @@ cat("\n")
 # KalmanFilter/KalmanRun using makeARIMA + KalmanRun
 cat("4. Kalman Filter (using makeARIMA + KalmanRun)\n")
 cat("   Note: R's KalmanRun is accessed via arima internals\n")
-for (n in c(100, 500, 1000, 5000)) {
+for (n in c(100, 1000, 10000)) {
   y <- generate_local_level(n)
   y_ts <- ts(y)
 

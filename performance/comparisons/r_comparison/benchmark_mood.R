@@ -9,7 +9,7 @@
 set.seed(42)
 
 # Benchmark at different dataset sizes
-sizes <- c(100, 1000, 10000, 100000)
+sizes <- c(100, 1000, 10000)
 
 cat("=== Mood Two-Sample Test of Scale R Benchmarks ===\n\n")
 

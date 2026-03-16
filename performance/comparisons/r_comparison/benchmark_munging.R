@@ -76,7 +76,7 @@ generate_data_with_na <- function(n, na_fraction = 0.1) {
 benchmark_filter <- function() {
   results <- list()
 
-  for (n in c(10000, 100000, 1000000)) {
+  for (n in c(100, 1000, 10000)) {
     cat(sprintf("Benchmarking filter with n=%d\n", n))
     dt <- generate_munging_data(n)
     df <- as.data.frame(dt)
@@ -112,7 +112,7 @@ benchmark_filter <- function() {
 benchmark_select <- function() {
   results <- list()
 
-  for (n in c(10000, 100000, 1000000)) {
+  for (n in c(100, 1000, 10000)) {
     cat(sprintf("Benchmarking select with n=%d\n", n))
     dt <- generate_munging_data(n)
     df <- as.data.frame(dt)
@@ -137,7 +137,7 @@ benchmark_select <- function() {
 benchmark_sort <- function() {
   results <- list()
 
-  for (n in c(10000, 100000, 1000000)) {
+  for (n in c(100, 1000, 10000)) {
     cat(sprintf("Benchmarking sort with n=%d\n", n))
     dt <- generate_munging_data(n)
     df <- as.data.frame(dt)
@@ -179,7 +179,7 @@ benchmark_sort <- function() {
 benchmark_join <- function() {
   results <- list()
 
-  for (n in c(10000, 100000, 1000000)) {
+  for (n in c(100, 1000, 10000)) {
     cat(sprintf("Benchmarking left join with n=%d\n", n))
     data <- generate_join_data(n)
     dt_left <- data$left
@@ -207,7 +207,7 @@ benchmark_join <- function() {
 benchmark_group_by <- function() {
   results <- list()
 
-  for (n in c(10000, 100000, 1000000)) {
+  for (n in c(100, 1000, 10000)) {
     cat(sprintf("Benchmarking group_by with n=%d\n", n))
     dt <- generate_munging_data(n)
     df <- as.data.frame(dt)
@@ -254,7 +254,7 @@ benchmark_reshape <- function() {
   results <- list()
 
   # Pivot (long to wide)
-  for (n_ids in c(1000, 10000, 100000)) {
+  for (n_ids in c(100, 1000, 10000)) {
     cat(sprintf("Benchmarking pivot with n_ids=%d\n", n_ids))
     dt <- generate_pivot_data(n_ids, 5)
     df <- as.data.frame(dt)
@@ -270,7 +270,7 @@ benchmark_reshape <- function() {
   }
 
   # Melt (wide to long)
-  for (n in c(10000, 100000, 1000000)) {
+  for (n in c(100, 1000, 10000)) {
     cat(sprintf("Benchmarking melt with n=%d\n", n))
     dt <- generate_munging_data(n)
     df <- as.data.frame(dt)
@@ -296,7 +296,7 @@ benchmark_lag <- function() {
   results <- list()
 
   # Simple lag (no grouping)
-  for (n in c(10000, 100000, 1000000)) {
+  for (n in c(100, 1000, 10000)) {
     cat(sprintf("Benchmarking simple lag with n=%d\n", n))
     dt <- generate_munging_data(n)
     df <- as.data.frame(dt)
@@ -312,7 +312,7 @@ benchmark_lag <- function() {
   }
 
   # Grouped lag (panel data)
-  for (config in list(c(100, 100), c(500, 200), c(1000, 1000))) {
+  for (config in list(c(10, 10), c(100, 10), c(100, 100))) {
     n_entities <- config[1]
     n_periods <- config[2]
     label <- paste0(n_entities, "x", n_periods)
@@ -341,7 +341,7 @@ benchmark_lag <- function() {
 benchmark_fill_na <- function() {
   results <- list()
 
-  for (n in c(10000, 100000, 1000000)) {
+  for (n in c(100, 1000, 10000)) {
     cat(sprintf("Benchmarking fill_na with n=%d\n", n))
     dt <- generate_data_with_na(n, 0.1)
     df <- as.data.frame(dt)

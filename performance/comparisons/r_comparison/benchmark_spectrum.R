@@ -27,7 +27,7 @@ generate_spectrum_data <- function(n) {
 
 cat("=== Spectral Density Estimation R Benchmarks ===\n\n")
 
-sizes <- c(100, 1000, 10000, 100000)
+sizes <- c(100, 1000, 10000)
 
 if (has_microbenchmark) {
   library(microbenchmark)

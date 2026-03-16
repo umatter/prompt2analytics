@@ -22,10 +22,9 @@ generate_data <- function(k_groups, n_per_group) {
 
 # Test configurations: (k_groups, n_per_group)
 configs <- list(
-  c(3, 10),     # Small: 3 groups, 10 per group, 3 comparisons
-  c(5, 50),     # Medium: 5 groups, 50 per group, 10 comparisons
-  c(10, 100),   # Large: 10 groups, 100 per group, 45 comparisons
-  c(20, 200)    # Very large: 20 groups, 200 per group, 190 comparisons
+  c(5, 20),     # Small: 5 groups, 20 per group (n=100)
+  c(10, 100),   # Medium: 10 groups, 100 per group (n=1000)
+  c(10, 1000)   # Large: 10 groups, 1000 per group (n=10000)
 )
 
 cat("Benchmarking pairwise.wilcox.test with p.adjust.method='holm'\n")

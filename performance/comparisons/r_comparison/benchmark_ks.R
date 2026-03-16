@@ -10,7 +10,7 @@ set.seed(42)
 cat("=== Kolmogorov-Smirnov Test R Benchmarks ===\n\n")
 
 # Benchmark at different dataset sizes
-sizes <- c(100, 1000, 10000, 100000)
+sizes <- c(100, 1000, 10000)
 
 cat("Two-Sample KS Test Benchmarks:\n")
 cat("-------------------------------\n")

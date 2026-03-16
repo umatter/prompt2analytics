@@ -7,7 +7,7 @@ set.seed(42)
 
 cat("=== smooth.spline R Benchmarks ===\n")
 
-sizes <- c(50, 100, 200, 500)
+sizes <- c(100, 1000, 10000)
 
 for (n in sizes) {
   x <- seq(0, 4*pi, length.out = n)

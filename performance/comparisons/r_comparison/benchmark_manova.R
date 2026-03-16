@@ -38,7 +38,7 @@ generate_manova_data <- function(n_per_group, n_groups, n_vars) {
 
 # Benchmark configurations
 configs <- list(
-  list(n_per_group = 33, n_groups = 3, n_vars = 2, label = "n=100, p=2, g=3"),
+  list(n_per_group = 50, n_groups = 2, n_vars = 2, label = "n=100, p=2, g=2"),
   list(n_per_group = 250, n_groups = 4, n_vars = 3, label = "n=1000, p=3, g=4"),
   list(n_per_group = 2000, n_groups = 5, n_vars = 5, label = "n=10000, p=5, g=5")
 )

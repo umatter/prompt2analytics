@@ -45,7 +45,7 @@ results <- list()
 cat("\n=== Wilcoxon Rank Sum (Mann-Whitney U) ===\n")
 cat("Two independent samples, normal approximation\n\n")
 
-for (n in c(10, 50, 100, 500, 1000)) {
+for (n in c(100, 1000, 10000)) {
   cat(sprintf("  n=%d (each group): ", n))
   data <- generate_two_sample_data(n, n)
 
@@ -71,7 +71,7 @@ for (n in c(10, 50, 100, 500, 1000)) {
 cat("\n=== Wilcoxon Signed Rank (Paired) ===\n")
 cat("Paired samples, normal approximation\n\n")
 
-for (n in c(10, 50, 100, 500, 1000)) {
+for (n in c(100, 1000, 10000)) {
   cat(sprintf("  n=%d pairs: ", n))
   data <- generate_paired_data(n)
 
@@ -97,7 +97,7 @@ for (n in c(10, 50, 100, 500, 1000)) {
 cat("\n=== Wilcoxon Signed Rank (One-Sample) ===\n")
 cat("One sample vs hypothesized median\n\n")
 
-for (n in c(10, 50, 100, 500, 1000)) {
+for (n in c(100, 1000, 10000)) {
   cat(sprintf("  n=%d: ", n))
   data <- generate_one_sample_data(n)
 
@@ -150,7 +150,7 @@ cat("SUMMARY TABLE (median times in microseconds)\n")
 cat("======================================================\n\n")
 
 cat("Rank Sum (two independent samples):\n")
-for (n in c(10, 50, 100, 500, 1000)) {
+for (n in c(100, 1000, 10000)) {
   key <- paste0("rank_sum_n", n)
   if (!is.null(results[[key]])) {
     med <- results[[key]]$median
@@ -159,7 +159,7 @@ for (n in c(10, 50, 100, 500, 1000)) {
 }
 
 cat("\nSigned Rank (paired samples):\n")
-for (n in c(10, 50, 100, 500, 1000)) {
+for (n in c(100, 1000, 10000)) {
   key <- paste0("signed_rank_n", n)
   if (!is.null(results[[key]])) {
     med <- results[[key]]$median
@@ -168,7 +168,7 @@ for (n in c(10, 50, 100, 500, 1000)) {
 }
 
 cat("\nOne-Sample Signed Rank:\n")
-for (n in c(10, 50, 100, 500, 1000)) {
+for (n in c(100, 1000, 10000)) {
   key <- paste0("one_sample_n", n)
   if (!is.null(results[[key]])) {
     med <- results[[key]]$median

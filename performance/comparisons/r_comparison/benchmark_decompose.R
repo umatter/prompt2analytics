@@ -19,7 +19,7 @@ generate_seasonal <- function(n, period = 12) {
 }
 
 # Test configurations
-configs <- c(48, 120, 240, 480, 1200)
+configs <- c(100, 1000, 10000)
 
 cat("Additive Decomposition Benchmarks\n")
 cat("---------------------------------\n\n")

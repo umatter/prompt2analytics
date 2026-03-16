@@ -152,7 +152,7 @@ for (n in c(100, 1000, 10000)) {
 # --- Panel Data ---
 cat("\n--- Panel Data ---\n")
 
-for (params in list(c(10, 10), c(50, 20), c(100, 50))) {
+for (params in list(c(10, 10), c(50, 20), c(100, 100))) {
   n_ent <- params[1]
   n_per <- params[2]
   n <- n_ent * n_per
@@ -188,7 +188,7 @@ for (params in list(c(10, 10), c(50, 20), c(100, 50))) {
 # --- Discrete Choice ---
 cat("\n--- Discrete Choice ---\n")
 
-for (n in c(100, 500, 1000)) {
+for (n in c(100, 1000, 10000)) {
   data <- generate_binary_data(n)
 
   # Logit
@@ -214,7 +214,7 @@ for (n in c(100, 500, 1000)) {
 cat("\n--- Time Series ---\n")
 
 if (require(forecast, quietly = TRUE)) {
-  for (n in c(100, 200, 500)) {
+  for (n in c(100, 1000, 10000)) {
     ts_data <- generate_time_series(n)
 
     # ARIMA
@@ -238,7 +238,7 @@ if (require(forecast, quietly = TRUE)) {
 # --- ML ---
 cat("\n--- Machine Learning ---\n")
 
-for (n in c(100, 1000, 5000)) {
+for (n in c(100, 1000, 10000)) {
   # Generate cluster data
   set.seed(42)
   k <- 5

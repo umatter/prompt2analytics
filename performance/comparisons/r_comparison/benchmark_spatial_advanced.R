@@ -121,7 +121,8 @@ cat("=" %>% rep(70) %>% paste(collapse = ""), "\n\n")
 cat("1. SPHET (Spatial GMM with Heteroscedasticity)\n")
 cat("-" %>% rep(50) %>% paste(collapse = ""), "\n")
 
-for (n in c(100, 400, 900)) {
+for (n in c(100, 1024)) {
+  # Cap at 1024: spatial GMM requires O(n^3) matrix operations, n=10000 is impractical
   cat(sprintf("\nn = %d observations:\n", n))
 
   spatial_data <- generate_spatial_data(n, rho = 0.4)
@@ -157,7 +158,8 @@ for (n in c(100, 400, 900)) {
 cat("\n\n2. SPLM (Spatial Panel Models)\n")
 cat("-" %>% rep(50) %>% paste(collapse = ""), "\n")
 
-for (config in list(c(25, 10), c(49, 10), c(100, 10))) {
+for (config in list(c(10, 10), c(50, 20))) {
+  # Cap at 50x20=1000: spatial panel models at 100x100 are impractical
   n_units <- config[1]
   n_time <- config[2]
   n_total <- n_units * n_time
@@ -198,7 +200,8 @@ for (config in list(c(25, 10), c(49, 10), c(100, 10))) {
 cat("\n\n3. SPATIALPROBIT (Spatial Probit Models)\n")
 cat("-" %>% rep(50) %>% paste(collapse = ""), "\n")
 
-for (n in c(100, 225, 400)) {
+for (n in c(100, 1024)) {
+  # Cap at 1024: spatial probit MCMC with O(n^2) per draw is impractical at n=10000
   cat(sprintf("\nn = %d observations:\n", n))
 
   binary_data <- generate_binary_spatial_data(n, rho = 0.3)

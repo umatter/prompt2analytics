@@ -57,12 +57,9 @@ benchmark_mlogit <- function(n_choosers, n_alts, n_reps = 10) {
 cat("=== McFadden Conditional Logit (mlogit) R Benchmarks ===\n\n")
 
 configs <- list(
-  list(n = 50, alts = 3),
   list(n = 100, alts = 3),
-  list(n = 200, alts = 4),
-  list(n = 500, alts = 3),
   list(n = 1000, alts = 3),
-  list(n = 2000, alts = 5)
+  list(n = 10000, alts = 3)
 )
 
 cat(sprintf("%-25s %15s %15s %15s\n", "Config", "Median (ms)", "Mean (ms)", "SD (ms)"))

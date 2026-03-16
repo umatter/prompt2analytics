@@ -20,7 +20,7 @@ generate_test_data <- function(n) {
 }
 
 # Benchmark at different dataset sizes
-sizes <- c(100, 1000, 10000, 100000)
+sizes <- c(100, 1000, 10000)
 
 cat("=== Phillips-Perron Test R Benchmarks ===\n")
 cat("Testing with lshort=TRUE (default)\n\n")
@@ -68,7 +68,7 @@ cat("\n=== Validation Results ===\n")
 
 # Verify truncation lag calculation
 cat("Truncation lag verification:\n")
-for (n in c(50, 100, 1000)) {
+for (n in c(100, 1000, 10000)) {
   x <- generate_test_data(n)
   result_short <- PP.test(x, lshort = TRUE)
   result_long <- PP.test(x, lshort = FALSE)

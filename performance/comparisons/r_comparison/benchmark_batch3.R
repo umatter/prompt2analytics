@@ -42,7 +42,7 @@ generate_univariate_mixture <- function(n) {
 cat("BATCH 3 PERFORMANCE BENCHMARKS (R)\n")
 cat("===================================\n\n")
 
-sizes <- c(100, 500, 1000)
+sizes <- c(100, 1000, 10000)
 results <- data.frame()
 
 # skmeans benchmarks

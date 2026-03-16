@@ -32,9 +32,9 @@ cat("=== fixest Benchmark Results ===\n\n")
 
 # Test configurations
 configs <- list(
-  list(entities = 100, periods = 10, n = 1000),
-  list(entities = 100, periods = 50, n = 5000),
-  list(entities = 500, periods = 20, n = 10000)
+  list(entities = 10, periods = 10, n = 100),
+  list(entities = 50, periods = 20, n = 1000),
+  list(entities = 100, periods = 100, n = 10000)
 )
 
 results <- data.frame()

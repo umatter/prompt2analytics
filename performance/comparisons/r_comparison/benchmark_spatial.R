@@ -133,8 +133,9 @@ cat("R Spatial Econometrics Benchmarks\n")
 cat("==================================\n")
 cat("Packages: spdep", packageVersion("spdep"), ", spatialreg", packageVersion("spatialreg"), "\n")
 
-# Test with different grid sizes: 10x10=100, 20x20=400, 32x32=1024, 50x50=2500
-results <- benchmark_spatial(c(10, 20, 32, 50), n_iter = 10)
+# Test with different grid sizes: 10x10=100, 32x32=1024
+# Cap at 32x32: SAR/SEM require O(n^3) matrix operations, 100x100=10000 is impractical
+results <- benchmark_spatial(c(10, 32), n_iter = 10)
 
 # Save results
 write.csv(results, "r_spatial_benchmark_results.csv", row.names = FALSE)

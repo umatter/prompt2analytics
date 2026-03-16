@@ -22,7 +22,7 @@ generate_data <- function(n, p) {
 cat("Sample Size Scaling (p=5)\n")
 cat("--------------------------\n\n")
 
-for (n in c(100, 1000, 10000, 100000)) {
+for (n in c(100, 1000, 10000)) {
   x <- generate_data(n, 5)
   center <- colMeans(x)
   cov_mat <- cov(x)

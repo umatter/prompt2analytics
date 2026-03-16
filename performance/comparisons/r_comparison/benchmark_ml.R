@@ -27,7 +27,7 @@ generate_cluster_data <- function(n, k = 5, n_clusters = 3) {
 benchmark_kmeans <- function() {
   results <- list()
 
-  for (n in c(100, 1000, 5000)) {
+  for (n in c(100, 1000, 10000)) {
     cat(sprintf("Benchmarking K-Means with n=%d\n", n))
     data <- generate_cluster_data(n, k = 5, n_clusters = 3)
 
@@ -53,7 +53,7 @@ benchmark_dbscan <- function() {
 
   results <- list()
 
-  for (n in c(100, 500, 1000)) {
+  for (n in c(100, 1000, 10000)) {
     cat(sprintf("Benchmarking DBSCAN with n=%d\n", n))
     data <- generate_cluster_data(n, k = 5, n_clusters = 3)
 
@@ -73,7 +73,7 @@ benchmark_dbscan <- function() {
 benchmark_hierarchical <- function() {
   results <- list()
 
-  for (n in c(50, 100, 200)) {
+  for (n in c(100, 1000, 10000)) {
     cat(sprintf("Benchmarking Hierarchical with n=%d\n", n))
     data <- generate_cluster_data(n, k = 5, n_clusters = 3)
 
@@ -96,7 +96,7 @@ benchmark_hierarchical <- function() {
 benchmark_pca <- function() {
   results <- list()
 
-  for (n in c(100, 1000, 5000)) {
+  for (n in c(100, 1000, 10000)) {
     cat(sprintf("Benchmarking PCA with n=%d\n", n))
     data <- generate_cluster_data(n, k = 10, n_clusters = 3)
 

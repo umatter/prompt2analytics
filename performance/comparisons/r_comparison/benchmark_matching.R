@@ -36,7 +36,7 @@ if (requireNamespace("MatchIt", quietly = TRUE)) {
   library(MatchIt)
   cat("--- MatchIt ---\n")
 
-  for (n in c(200, 500, 1000, 2000)) {
+  for (n in c(100, 1000, 10000)) {
     df <- generate_treatment_data(n)
     local_df <- df
 
@@ -70,7 +70,7 @@ if (requireNamespace("WeightIt", quietly = TRUE)) {
   library(WeightIt)
   cat("\n--- WeightIt ---\n")
 
-  for (n in c(200, 500, 1000, 2000)) {
+  for (n in c(100, 1000, 10000)) {
     df <- generate_treatment_data(n)
     local_df <- df
 

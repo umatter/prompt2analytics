@@ -7,7 +7,7 @@ set.seed(42)
 
 cat("=== Robust Statistics R Benchmarks ===\n")
 
-sizes <- c(100, 1000, 10000, 100000)
+sizes <- c(100, 1000, 10000)
 
 for (n in sizes) {
   x <- rnorm(n)

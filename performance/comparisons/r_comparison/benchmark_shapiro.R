@@ -41,7 +41,7 @@ results <- list()
 
 cat("=== Shapiro-Wilk Test (Normal Data) ===\n\n")
 
-for (n in c(10, 50, 100, 500, 1000, 2000, 5000)) {
+for (n in c(100, 1000, 5000)) {
   cat(sprintf("  n=%d: ", n))
   data <- generate_normal_data(n)
 
@@ -67,7 +67,7 @@ for (n in c(10, 50, 100, 500, 1000, 2000, 5000)) {
 
 cat("\n=== Shapiro-Wilk Test (Mixed Data) ===\n\n")
 
-for (n in c(10, 50, 100, 500, 1000)) {
+for (n in c(100, 1000, 5000)) {
   cat(sprintf("  n=%d: ", n))
   data <- generate_mixed_data(n)
 
@@ -101,7 +101,7 @@ cat("======================================================\n\n")
 
 if (use_microbenchmark) {
   cat("Normal data:\n")
-  for (n in c(10, 50, 100, 500, 1000, 2000, 5000)) {
+  for (n in c(100, 1000, 5000)) {
     key <- paste0("normal_n", n)
     if (!is.null(results[[key]])) {
       med <- results[[key]]$median
@@ -110,7 +110,7 @@ if (use_microbenchmark) {
   }
 
   cat("\nMixed data:\n")
-  for (n in c(10, 50, 100, 500, 1000)) {
+  for (n in c(100, 1000, 5000)) {
     key <- paste0("mixed_n", n)
     if (!is.null(results[[key]])) {
       med <- results[[key]]$median

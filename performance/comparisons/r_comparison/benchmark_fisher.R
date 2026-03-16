@@ -32,7 +32,7 @@ cat("======================================================\n")
 cat("\n=== Fisher's Exact Test (Two-Sided) ===\n")
 results <- list()
 
-for (total in c(20, 100, 500, 1000)) {
+for (total in c(100, 1000, 10000)) {
   cat(sprintf("  n=%d: ", total))
   table <- generate_2x2_table(total)
 
@@ -48,7 +48,7 @@ for (total in c(20, 100, 500, 1000)) {
 }
 
 cat("\n=== Fisher's Exact Test with CI ===\n")
-for (total in c(20, 100, 500)) {
+for (total in c(100, 1000, 10000)) {
   cat(sprintf("  n=%d: ", total))
   table <- generate_2x2_table(total)
 
@@ -101,7 +101,7 @@ cat("SUMMARY TABLE (median times in microseconds)\n")
 cat("======================================================\n\n")
 
 cat("Fisher's Exact Test (Two-Sided):\n")
-for (total in c(20, 100, 500, 1000)) {
+for (total in c(100, 1000, 10000)) {
   key <- paste0("fisher_n", total)
   if (!is.null(results[[key]])) {
     med <- results[[key]]$median
@@ -110,7 +110,7 @@ for (total in c(20, 100, 500, 1000)) {
 }
 
 cat("\nFisher's Exact Test with 95% CI:\n")
-for (total in c(20, 100, 500)) {
+for (total in c(100, 1000, 10000)) {
   key <- paste0("fisher_ci_n", total)
   if (!is.null(results[[key]])) {
     med <- results[[key]]$median

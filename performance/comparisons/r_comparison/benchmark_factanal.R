@@ -32,9 +32,8 @@ cat("=== Factor Analysis R Benchmarks ===\n\n")
 # Different dataset sizes
 configs <- list(
   list(n = 100, p = 6, k = 2),
-  list(n = 500, p = 10, k = 3),
-  list(n = 1000, p = 15, k = 4),
-  list(n = 5000, p = 20, k = 5)
+  list(n = 1000, p = 10, k = 3),
+  list(n = 10000, p = 15, k = 4)
 )
 
 for (cfg in configs) {

@@ -20,7 +20,7 @@ generate_ar2 <- function(n) {
 }
 
 # Test configurations
-configs <- c(50, 100, 500, 1000, 5000)
+configs <- c(100, 1000, 10000)
 
 cat("Yule-Walker Method Benchmarks\n")
 cat("------------------------------\n\n")

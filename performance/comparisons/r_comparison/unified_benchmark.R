@@ -451,54 +451,55 @@ message("\n=== Pre-generating data CSVs ===")
 # Regression
 for (n in c(100, 1000, 10000)) save_dgp(generate_regression_data(n), sprintf("regression_n%d", n))
 
-# Panel
-for (params in list(c(10, 10), c(50, 20), c(100, 50))) {
+# Panel: (n_entities, n_periods) tuples -> totals 100, 1000, 10000
+for (params in list(c(10, 10), c(50, 20), c(100, 100))) {
   save_dgp(generate_panel_data(params[1], params[2]), sprintf("panel_n%d", params[1] * params[2]))
 }
 
-# Binary (all sizes Rust needs)
-for (n in c(100, 200, 500, 1000)) save_dgp(generate_binary_data(n), sprintf("binary_n%d", n))
+# Binary
+for (n in c(100, 1000, 10000)) save_dgp(generate_binary_data(n), sprintf("binary_n%d", n))
 
-# Time series (all sizes Rust needs)
-for (n in c(100, 200, 500, 1000)) save_dgp(generate_time_series(n), sprintf("timeseries_n%d", n))
+# Time series
+for (n in c(100, 1000, 10000)) save_dgp(generate_time_series(n), sprintf("timeseries_n%d", n))
 
-# Cluster (all sizes Rust needs)
-for (n in c(100, 500, 1000, 5000)) save_dgp(generate_cluster_data(n), sprintf("cluster_n%d", n))
+# Cluster
+for (n in c(100, 1000, 10000)) save_dgp(generate_cluster_data(n), sprintf("cluster_n%d", n))
 
 # LOESS
-for (n in c(100, 500, 1000)) save_dgp(generate_regression_data(n, 1), sprintf("loess_n%d", n))
+for (n in c(100, 1000, 10000)) save_dgp(generate_regression_data(n, 1), sprintf("loess_n%d", n))
 
 # Factor analysis
-for (n in c(100, 500, 1000)) save_dgp(generate_factor_data(n), sprintf("factor_n%d", n))
+for (n in c(100, 1000, 10000)) save_dgp(generate_factor_data(n), sprintf("factor_n%d", n))
 
 # DiD
-for (n in c(200, 500, 1000)) save_dgp(generate_did_data(n), sprintf("did_n%d", n))
+for (n in c(100, 1000, 10000)) save_dgp(generate_did_data(n), sprintf("did_n%d", n))
 
 # IV
-for (n in c(200, 500, 1000)) save_dgp(generate_iv_data(n), sprintf("iv_n%d", n))
+for (n in c(100, 1000, 10000)) save_dgp(generate_iv_data(n), sprintf("iv_n%d", n))
 
 # RD
-for (n in c(200, 500, 1000)) save_dgp(generate_rd_data(n), sprintf("rd_n%d", n))
+for (n in c(100, 1000, 10000)) save_dgp(generate_rd_data(n), sprintf("rd_n%d", n))
 
 # Treatment (for IPW, TMLE, CTMLE, CBPS, Matching, WeightIt)
-for (n in c(200, 500, 1000)) save_dgp(generate_treatment_data(n), sprintf("treatment_n%d", n))
+for (n in c(100, 1000, 10000)) save_dgp(generate_treatment_data(n), sprintf("treatment_n%d", n))
 
-# Staggered panel (for Staggered DiD, ETWFE, Bacon)
-for (params in list(c(20, 10), c(50, 10))) {
+# Staggered panel (for Staggered DiD, Bacon, GSynth) — totals 100, 1000
+# ETWFE capped at (50, 50) = 2500 due to saturated interactions
+for (params in list(c(10, 10), c(50, 20), c(100, 100))) {
   save_dgp(generate_staggered_panel(params[1], params[2]), sprintf("staggered_n%d", params[1] * params[2]))
 }
 
 # Mediation
-for (n in c(200, 500, 1000)) save_dgp(generate_mediation_data(n), sprintf("mediation_n%d", n))
+for (n in c(100, 1000, 10000)) save_dgp(generate_mediation_data(n), sprintf("mediation_n%d", n))
 
-# Spatial
-for (n_side in c(10, 20, 32)) save_dgp(generate_spatial_data(n_side), sprintf("spatial_n%d", n_side * n_side))
+# Spatial: n_side grid -> n_side^2 total; cap at n_side=32 (~1024) — O(n^3)
+for (n_side in c(10, 32)) save_dgp(generate_spatial_data(n_side), sprintf("spatial_n%d", n_side * n_side))
 
 # Survival
-for (n in c(100, 500, 1000)) save_dgp(generate_survival_data(n), sprintf("survival_n%d", n))
+for (n in c(100, 1000, 10000)) save_dgp(generate_survival_data(n), sprintf("survival_n%d", n))
 
 # DoubleML
-for (n in c(200, 500, 1000)) {
+for (n in c(100, 1000, 10000)) {
   set.seed(42)
   k <- 5
   X <- matrix(runif(n * k, -2, 2), nrow = n, ncol = k)
@@ -512,22 +513,22 @@ for (n in c(200, 500, 1000)) {
 }
 
 # GARCH
-for (n in c(200, 500, 1000)) save_dgp(generate_garch_data(n), sprintf("garch_n%d", n))
+for (n in c(100, 1000, 10000)) save_dgp(generate_garch_data(n), sprintf("garch_n%d", n))
 
 # Bivariate (for VAR, VECM, Granger)
-for (n in c(100, 200, 500)) save_dgp(generate_bivariate_data(n), sprintf("bivariate_n%d", n))
+for (n in c(100, 1000, 10000)) save_dgp(generate_bivariate_data(n), sprintf("bivariate_n%d", n))
 
 # Count data (for Poisson, NegBin)
-for (n in c(200, 500, 1000)) save_dgp(generate_count_data(n), sprintf("count_n%d", n))
+for (n in c(100, 1000, 10000)) save_dgp(generate_count_data(n), sprintf("count_n%d", n))
 
 # Zero-inflated data (for ZIP, ZINB, Hurdle)
-for (n in c(200, 500, 1000)) save_dgp(generate_zeroinfl_data(n), sprintf("zeroinfl_n%d", n))
+for (n in c(100, 1000, 10000)) save_dgp(generate_zeroinfl_data(n), sprintf("zeroinfl_n%d", n))
 
 # Ordered data (for Ordered Logit)
-for (n in c(200, 500, 1000)) save_dgp(generate_ordered_data(n), sprintf("ordered_n%d", n))
+for (n in c(100, 1000, 10000)) save_dgp(generate_ordered_data(n), sprintf("ordered_n%d", n))
 
 # Multinomial data (for Multinomial Logit)
-for (n in c(200, 500, 1000)) save_dgp(generate_multinomial_data(n), sprintf("multinomial_n%d", n))
+for (n in c(100, 1000, 10000)) save_dgp(generate_multinomial_data(n), sprintf("multinomial_n%d", n))
 
 message("Data pre-generation complete.\n")
 
@@ -562,7 +563,7 @@ suppressPackageStartupMessages({
   library(lfe)
 })
 
-for (params in list(c(10, 10), c(50, 20), c(100, 50))) {
+for (params in list(c(10, 10), c(50, 20), c(100, 100))) {
   n_ent <- params[1]
   n_per <- params[2]
   n <- n_ent * n_per
@@ -595,7 +596,7 @@ for (params in list(c(10, 10), c(50, 20), c(100, 50))) {
 message("\n=== Additional Panel Methods ===")
 
 # Hausman test
-for (params in list(c(10, 10), c(50, 20), c(100, 50))) {
+for (params in list(c(10, 10), c(50, 20), c(100, 100))) {
   n_ent <- params[1]
   n_per <- params[2]
   n <- n_ent * n_per
@@ -619,7 +620,7 @@ for (params in list(c(10, 10), c(50, 20), c(100, 50))) {
 }
 
 # Panel GLS (pggls)
-for (params in list(c(10, 10), c(50, 20), c(100, 50))) {
+for (params in list(c(10, 10), c(50, 20), c(100, 100))) {
   n_ent <- params[1]
   n_per <- params[2]
   n <- n_ent * n_per
@@ -641,6 +642,7 @@ for (params in list(c(10, 10), c(50, 20), c(100, 50))) {
 }
 
 # Arellano-Bond GMM (pgmm)
+# Cap at (50,20)=1000: pgmm creates O(T^2*N) instrument matrices, impractical at n=10000
 for (params in list(c(10, 10), c(50, 20))) {
   n_ent <- params[1]
   n_per <- params[2]
@@ -664,7 +666,7 @@ for (params in list(c(10, 10), c(50, 20))) {
 }
 
 # PVCM (random coefficients - Swamy)
-for (params in list(c(10, 10), c(50, 20))) {
+for (params in list(c(10, 10), c(50, 20), c(100, 100))) {
   n_ent <- params[1]
   n_per <- params[2]
   n <- n_ent * n_per
@@ -684,7 +686,7 @@ for (params in list(c(10, 10), c(50, 20))) {
 }
 
 # PMG (Mean Group estimator)
-for (params in list(c(10, 10), c(50, 20))) {
+for (params in list(c(10, 10), c(50, 20), c(100, 100))) {
   n_ent <- params[1]
   n_per <- params[2]
   n <- n_ent * n_per
@@ -708,7 +710,7 @@ for (params in list(c(10, 10), c(50, 20))) {
 # ============================================
 message("\n=== Panel Unit Root ===")
 
-for (params in list(c(20, 10), c(50, 10), c(100, 10))) {
+for (params in list(c(10, 10), c(50, 20), c(100, 100))) {
   n_ent <- params[1]
   n_per <- params[2]
   n <- n_ent * n_per
@@ -736,7 +738,7 @@ message("\n=== FEGLM Gaussian ===")
 if (requireNamespace("fixest", quietly = TRUE)) {
   suppressPackageStartupMessages(library(fixest))
 
-  for (params in list(c(10, 10), c(50, 10), c(100, 10))) {
+  for (params in list(c(10, 10), c(50, 20), c(100, 100))) {
     n_ent <- params[1]
     n_per <- params[2]
     n <- n_ent * n_per
@@ -763,7 +765,7 @@ if (requireNamespace("fixest", quietly = TRUE)) {
 # ============================================
 message("\n=== Discrete Choice ===")
 
-for (n in c(100, 500, 1000)) {
+for (n in c(100, 1000, 10000)) {
   d <- generate_binary_data(n)
   save_dgp(d, sprintf("binary_n%d", n))
 
@@ -786,7 +788,7 @@ message("\n=== Time Series ===")
 if (requireNamespace("forecast", quietly = TRUE)) {
   suppressPackageStartupMessages(library(forecast))
 
-  for (n in c(100, 200, 500)) {
+  for (n in c(100, 1000, 10000)) {
     d <- generate_time_series(n)
     save_dgp(d, sprintf("timeseries_n%d", n))
     ts_data <- ts(d$y, frequency = 12)
@@ -814,7 +816,7 @@ if (requireNamespace("forecast", quietly = TRUE)) {
 # ============================================
 message("\n=== Machine Learning ===")
 
-for (n in c(100, 1000, 5000)) {
+for (n in c(100, 1000, 10000)) {
   d <- generate_cluster_data(n)
   save_dgp(d, sprintf("cluster_n%d", n))
   mat <- as.matrix(d)
@@ -835,7 +837,7 @@ for (n in c(100, 1000, 5000)) {
 # ============================================
 message("\n=== LOESS ===")
 
-for (n in c(100, 500, 1000)) {
+for (n in c(100, 1000, 10000)) {
   d <- generate_regression_data(n, 1)
   save_dgp(d, sprintf("loess_n%d", n))
 
@@ -857,7 +859,8 @@ for (n in c(100, 500, 1000)) {
 # ============================================
 message("\n=== Hierarchical Clustering ===")
 
-for (n in c(100, 500, 1000)) {
+# hclust/dist is O(n^2) space + O(n^2 log n) time — cap at 1000
+for (n in c(100, 1000)) {
   d <- generate_cluster_data(n)
   mat <- as.matrix(d)
 
@@ -881,7 +884,7 @@ message("\n=== Random Forest ===")
 if (requireNamespace("randomForest", quietly = TRUE)) {
   suppressPackageStartupMessages(library(randomForest))
 
-  for (n in c(100, 500, 1000)) {
+  for (n in c(100, 1000, 10000)) {
     d <- generate_cluster_data(n)
     mat <- as.matrix(d)
     target <- mat[, 1]
@@ -906,7 +909,7 @@ message("\n=== DBSCAN ===")
 if (requireNamespace("dbscan", quietly = TRUE)) {
   suppressPackageStartupMessages(library(dbscan))
 
-  for (n in c(100, 1000, 5000)) {
+  for (n in c(100, 1000, 10000)) {
     d <- generate_cluster_data(n)
     mat <- as.matrix(d)
 
@@ -943,7 +946,7 @@ sign_normalize_loadings <- function(L) {
   L
 }
 
-for (n in c(100, 500, 1000)) {
+for (n in c(100, 1000, 10000)) {
   d <- generate_factor_data(n)
   save_dgp(d, sprintf("factor_n%d", n))
   mat <- as.matrix(d)
@@ -980,7 +983,7 @@ for (n in c(100, 500, 1000)) {
 # ============================================
 message("\n=== Fisher Exact Test ===")
 
-for (n in c(20, 100, 500, 1000)) {
+for (n in c(100, 1000, 10000)) {
   a <- round(n * 0.3)
   b <- round(n * 0.2)
   cc <- round(n * 0.15)
@@ -1053,7 +1056,7 @@ message("\n=== Changepoint ===")
 if (requireNamespace("changepoint", quietly = TRUE)) {
   suppressPackageStartupMessages(library(changepoint))
 
-  for (n in c(100, 500, 1000)) {
+  for (n in c(100, 1000, 10000)) {
     d <- generate_time_series(n)
 
     r <- run_unified("Changepoint", "PELT", n, 42, "timeseries", function() {
@@ -1075,7 +1078,7 @@ if (requireNamespace("changepoint", quietly = TRUE)) {
 # ============================================
 message("\n=== DiD (canonical 2x2) ===")
 
-for (n in c(200, 500, 1000)) {
+for (n in c(100, 1000, 10000)) {
   d <- generate_did_data(n)
   save_dgp(d, sprintf("did_n%d", n))
 
@@ -1103,7 +1106,7 @@ message("\n=== IV/2SLS ===")
 if (requireNamespace("AER", quietly = TRUE)) {
   suppressPackageStartupMessages(library(AER))
 
-  for (n in c(200, 500, 1000)) {
+  for (n in c(100, 1000, 10000)) {
     d <- generate_iv_data(n)
     save_dgp(d, sprintf("iv_n%d", n))
 
@@ -1128,7 +1131,7 @@ if (requireNamespace("AER", quietly = TRUE)) {
 message("\n=== RD (sharp) ===")
 
 if (requireNamespace("rdrobust", quietly = TRUE)) {
-  for (n in c(200, 500, 1000)) {
+  for (n in c(100, 1000, 10000)) {
     d <- generate_rd_data(n)
     save_dgp(d, sprintf("rd_n%d", n))
 
@@ -1155,7 +1158,7 @@ message("\n=== Staggered DiD ===")
 if (requireNamespace("did", quietly = TRUE)) {
   suppressPackageStartupMessages(library(did))
 
-  for (params in list(c(20, 10), c(50, 10))) {
+  for (params in list(c(10, 10), c(50, 20), c(100, 100))) {
     n_units <- params[1]
     n_periods <- params[2]
     n <- n_units * n_periods
@@ -1191,7 +1194,8 @@ message("\n=== ETWFE ===")
 if (requireNamespace("fixest", quietly = TRUE)) {
   suppressPackageStartupMessages(library(fixest))
 
-  for (params in list(c(20, 10), c(50, 10))) {
+  # ETWFE capped at (50, 50) = 2500 total — creates saturated cohort x period interactions
+  for (params in list(c(10, 10), c(50, 20), c(50, 50))) {
     n_units <- params[1]
     n_periods <- params[2]
     n <- n_units * n_periods
@@ -1223,7 +1227,7 @@ if (requireNamespace("fixest", quietly = TRUE)) {
 message("\n=== Bacon Decomposition ===")
 
 if (requireNamespace("bacondecomp", quietly = TRUE)) {
-  for (params in list(c(20, 10), c(50, 10))) {
+  for (params in list(c(10, 10), c(50, 20), c(100, 100))) {
     n_units <- params[1]
     n_periods <- params[2]
     n <- n_units * n_periods
@@ -1253,7 +1257,7 @@ message("\n=== GSynth ===")
 if (requireNamespace("gsynth", quietly = TRUE)) {
   suppressPackageStartupMessages(library(gsynth))
 
-  for (params in list(c(20, 10), c(50, 10))) {
+  for (params in list(c(10, 10), c(50, 20), c(100, 100))) {
     n_units <- params[1]
     n_periods <- params[2]
     n <- n_units * n_periods
@@ -1283,7 +1287,7 @@ if (requireNamespace("gsynth", quietly = TRUE)) {
 message("\n=== TMLE ===")
 
 if (requireNamespace("tmle", quietly = TRUE)) {
-  for (n in c(200, 500, 1000)) {
+  for (n in c(100, 1000, 10000)) {
     d <- generate_treatment_data(n)
     save_dgp(d, sprintf("treatment_n%d", n))
     W <- as.matrix(d[, c("x1", "x2")])
@@ -1312,7 +1316,7 @@ if (requireNamespace("tmle", quietly = TRUE)) {
 message("\n=== CTMLE ===")
 
 if (requireNamespace("ctmle", quietly = TRUE)) {
-  for (n in c(200, 500, 1000)) {
+  for (n in c(100, 1000, 10000)) {
     d <- generate_treatment_data(n)
     W <- as.matrix(d[, c("x1", "x2")])
     local_d <- d
@@ -1331,7 +1335,7 @@ if (requireNamespace("ctmle", quietly = TRUE)) {
   }
 } else if (requireNamespace("tmle", quietly = TRUE)) {
   message("  ctmle not installed, using TMLE as proxy for CTMLE")
-  for (n in c(200, 500, 1000)) {
+  for (n in c(100, 1000, 10000)) {
     d <- generate_treatment_data(n)
     W <- as.matrix(d[, c("x1", "x2")])
     local_d <- d
@@ -1356,7 +1360,7 @@ if (requireNamespace("ctmle", quietly = TRUE)) {
 # ============================================
 message("\n=== IPW ===")
 
-for (n in c(200, 500, 1000)) {
+for (n in c(100, 1000, 10000)) {
   d <- generate_treatment_data(n)
   local_d <- d
 
@@ -1391,7 +1395,7 @@ for (n in c(200, 500, 1000)) {
 message("\n=== CBPS ===")
 
 if (requireNamespace("CBPS", quietly = TRUE)) {
-  for (n in c(200, 500, 1000)) {
+  for (n in c(100, 1000, 10000)) {
     d <- generate_treatment_data(n)
     local_d <- d
 
@@ -1424,7 +1428,7 @@ message("\n=== Matching ===")
 if (requireNamespace("MatchIt", quietly = TRUE)) {
   suppressPackageStartupMessages(library(MatchIt))
 
-  for (n in c(200, 500, 1000)) {
+  for (n in c(100, 1000, 10000)) {
     d <- generate_treatment_data(n)
     local_d <- d
 
@@ -1450,7 +1454,7 @@ message("\n=== WeightIt ===")
 if (requireNamespace("WeightIt", quietly = TRUE)) {
   suppressPackageStartupMessages(library(WeightIt))
 
-  for (n in c(200, 500, 1000)) {
+  for (n in c(100, 1000, 10000)) {
     d <- generate_treatment_data(n)
     local_d <- d
 
@@ -1473,7 +1477,7 @@ if (requireNamespace("WeightIt", quietly = TRUE)) {
 # ============================================
 message("\n=== Doubly Robust ===")
 
-for (n in c(200, 500, 1000)) {
+for (n in c(100, 1000, 10000)) {
   d <- generate_binary_data(n)
   local_d <- d
 
@@ -1513,7 +1517,7 @@ if (requireNamespace("DoubleML", quietly = TRUE) &&
     library(mlr3learners)
   })
 
-  for (n in c(200, 500, 1000)) {
+  for (n in c(100, 1000, 10000)) {
     set.seed(42)
     k <- 5
     X <- matrix(runif(n * k, -2, 2), nrow = n, ncol = k)
@@ -1553,7 +1557,7 @@ if (requireNamespace("DoubleML", quietly = TRUE) &&
 message("\n=== Mediation ===")
 
 if (requireNamespace("mediation", quietly = TRUE)) {
-  for (n in c(200, 500, 1000)) {
+  for (n in c(100, 1000, 10000)) {
     d <- generate_mediation_data(n)
     save_dgp(d, sprintf("mediation_n%d", n))
     local_d <- d
@@ -1582,7 +1586,7 @@ if (requireNamespace("mediation", quietly = TRUE)) {
 message("\n=== LTMLE ===")
 
 if (requireNamespace("ltmle", quietly = TRUE)) {
-  for (n in c(200, 500, 1000)) {
+  for (n in c(100, 1000, 10000)) {
     set.seed(42)
     L1_1 <- runif(n, -1, 1); L1_2 <- runif(n, -1, 1)
     A1 <- as.numeric(runif(n) < 1 / (1 + exp(-0.3 * L1_1)))
@@ -1621,7 +1625,9 @@ if (requireNamespace("spdep", quietly = TRUE) && requireNamespace("spatialreg", 
     library(spatialreg)
   })
 
-  for (n_side in c(10, 20, 32)) {
+  # Spatial models are O(n^3) — use n_side grid: 10 (100), 32 (1024 ~ 1000)
+  # Do NOT use n_side=100 — SAR/SEM is impractical at n=10000
+  for (n_side in c(10, 32)) {
     n <- n_side * n_side
     d <- generate_spatial_data(n_side)
     save_dgp(d, sprintf("spatial_n%d", n))
@@ -1680,8 +1686,8 @@ if (requireNamespace("spdep", quietly = TRUE) && requireNamespace("spatialreg", 
     })
     if (!is.null(r)) results[[length(results) + 1]] <- r
 
-    # Local Moran (LISA) - skip n_side=32 (too slow for permutations)
-    if (n_side <= 20) {
+    # Local Moran (LISA)
+    if (n_side <= 32) {
       r <- run_unified("Local_Moran", "localmoran", n, 42, "spatial", function() {
         localmoran(local_d$y, local_listw)
       }, function(fit) {
@@ -1701,7 +1707,7 @@ if (requireNamespace("spdep", quietly = TRUE) && requireNamespace("spatialreg", 
 message("\n=== Synthetic Control ===")
 
 if (requireNamespace("Synth", quietly = TRUE)) {
-  for (n_units in c(10, 30)) {
+  for (n_units in c(10, 100)) {
     n_periods <- 10
     n <- n_units * n_periods
     set.seed(42)
@@ -1770,7 +1776,7 @@ message("\n=== Survival Analysis ===")
 if (requireNamespace("survival", quietly = TRUE)) {
   suppressPackageStartupMessages(library(survival))
 
-  for (n in c(100, 500, 1000)) {
+  for (n in c(100, 1000, 10000)) {
     d <- generate_survival_data(n)
     save_dgp(d, sprintf("survival_n%d", n))
     local_d <- d
@@ -1808,7 +1814,7 @@ if (requireNamespace("survival", quietly = TRUE)) {
 message("\n=== Sensemakr ===")
 
 if (requireNamespace("sensemakr", quietly = TRUE)) {
-  for (n in c(200, 500, 1000)) {
+  for (n in c(100, 1000, 10000)) {
     d <- generate_treatment_data(n)
     local_d <- d
 
@@ -1833,7 +1839,7 @@ if (requireNamespace("sensemakr", quietly = TRUE)) {
 message("\n=== E-Value ===")
 
 if (requireNamespace("EValue", quietly = TRUE)) {
-  for (n in c(100, 500, 1000)) {
+  for (n in c(100, 1000, 10000)) {
     d <- generate_regression_data(n)
     local_d <- d
 
@@ -1865,7 +1871,7 @@ if (requireNamespace("EValue", quietly = TRUE)) {
 message("\n=== Marginal Effects ===")
 
 if (requireNamespace("margins", quietly = TRUE)) {
-  for (n in c(100, 500, 1000)) {
+  for (n in c(100, 1000, 10000)) {
     d <- generate_binary_data(n)
     local_d <- d
 
@@ -2000,7 +2006,7 @@ for (n in c(100, 1000, 10000)) {
 
 # OLS_Bootstrap (slower, smaller sample sizes)
 if (requireNamespace("boot", quietly = TRUE)) {
-  for (n in c(200, 500, 1000)) {
+  for (n in c(100, 1000, 10000)) {
     d <- generate_regression_data(n)
 
     r <- run_unified("OLS_Bootstrap", "pairs", n, 42, "regression", function() {
@@ -2022,7 +2028,8 @@ if (requireNamespace("boot", quietly = TRUE)) {
 
 # GLS (AR1)
 if (requireNamespace("nlme", quietly = TRUE)) {
-  for (n in c(100, 500, 1000)) {
+  # GLS with corAR1 creates n x n correlation matrix — O(n^3), cap at 1000
+  for (n in c(100, 1000)) {
     d <- generate_regression_data(n, k = 1)
 
     r <- run_unified("GLS", "AR1", n, 42, "regression", function() {
@@ -2042,7 +2049,7 @@ if (requireNamespace("nlme", quietly = TRUE)) {
 
 # Quantile Regression
 if (requireNamespace("quantreg", quietly = TRUE)) {
-  for (n in c(200, 500, 1000)) {
+  for (n in c(100, 1000, 10000)) {
     d <- generate_regression_data(n, k = 3)
 
     r <- run_unified("Quantile_Regression", "median", n, 42, "regression", function() {
@@ -2057,7 +2064,7 @@ if (requireNamespace("quantreg", quietly = TRUE)) {
 }
 
 # Smooth Spline
-for (n in c(100, 500, 1000)) {
+for (n in c(100, 1000, 10000)) {
   d <- generate_regression_data(n, k = 1)
 
   r <- run_unified("Smooth_Spline", "GCV", n, 42, "regression", function() {
@@ -2072,7 +2079,7 @@ for (n in c(100, 500, 1000)) {
 }
 
 # Stepwise Selection
-for (n in c(200, 500, 1000)) {
+for (n in c(100, 1000, 10000)) {
   d <- generate_regression_data(n)
 
   r <- run_unified("Stepwise", "both_AIC", n, 42, "regression", function() {
@@ -2092,7 +2099,7 @@ for (n in c(200, 500, 1000)) {
 message("\n=== Discrete Choice: Count Models ===")
 
 # Poisson GLM
-for (n in c(200, 500, 1000)) {
+for (n in c(100, 1000, 10000)) {
   d <- generate_count_data(n)
   save_dgp(d, sprintf("count_n%d", n))
 
@@ -2106,7 +2113,7 @@ for (n in c(200, 500, 1000)) {
 if (requireNamespace("MASS", quietly = TRUE)) {
   suppressPackageStartupMessages(library(MASS))
 
-  for (n in c(200, 500, 1000)) {
+  for (n in c(100, 1000, 10000)) {
     d <- generate_count_data(n)
     local_d <- d
 
@@ -2131,7 +2138,7 @@ if (requireNamespace("MASS", quietly = TRUE)) {
 if (requireNamespace("pscl", quietly = TRUE)) {
   suppressPackageStartupMessages(library(pscl))
 
-  for (n in c(200, 500, 1000)) {
+  for (n in c(100, 1000, 10000)) {
     d <- generate_zeroinfl_data(n)
     save_dgp(d, sprintf("zeroinfl_n%d", n))
     local_d <- d
@@ -2186,7 +2193,7 @@ message("\n=== Discrete Choice: Ordered & Multinomial ===")
 
 # Ordered Logit
 if (requireNamespace("MASS", quietly = TRUE)) {
-  for (n in c(200, 500, 1000)) {
+  for (n in c(100, 1000, 10000)) {
     d <- generate_ordered_data(n)
     save_dgp(d, sprintf("ordered_n%d", n))
     local_d <- d
@@ -2212,7 +2219,7 @@ if (requireNamespace("MASS", quietly = TRUE)) {
 if (requireNamespace("nnet", quietly = TRUE)) {
   suppressPackageStartupMessages(library(nnet))
 
-  for (n in c(200, 500, 1000)) {
+  for (n in c(100, 1000, 10000)) {
     d <- generate_multinomial_data(n)
     save_dgp(d, sprintf("multinomial_n%d", n))
     local_d <- d
@@ -2240,7 +2247,7 @@ if (requireNamespace("nnet", quietly = TRUE)) {
 
 # --- AR ---
 message("\n=== AR ===")
-for (n in c(100, 200, 500)) {
+for (n in c(100, 1000, 10000)) {
   d <- generate_time_series(n)
   y_vec <- d$y
 
@@ -2257,7 +2264,7 @@ for (n in c(100, 200, 500)) {
 
 # --- STL ---
 message("\n=== STL ===")
-for (n in c(100, 200, 500)) {
+for (n in c(100, 1000, 10000)) {
   d <- generate_time_series(n)
   ts_data <- ts(d$y, frequency = 12)
 
@@ -2271,7 +2278,7 @@ for (n in c(100, 200, 500)) {
 
 # --- Decompose ---
 message("\n=== Decompose ===")
-for (n in c(100, 200, 500)) {
+for (n in c(100, 1000, 10000)) {
   d <- generate_time_series(n)
   ts_data <- ts(d$y, frequency = 12)
 
@@ -2285,7 +2292,7 @@ for (n in c(100, 200, 500)) {
 
 # --- Holt-Winters ---
 message("\n=== Holt-Winters ===")
-for (n in c(100, 200, 500)) {
+for (n in c(100, 1000, 10000)) {
   d <- generate_time_series(n)
   ts_data <- ts(d$y + 5.0, frequency = 12)
 
@@ -2304,7 +2311,7 @@ for (n in c(100, 200, 500)) {
 # --- GARCH ---
 message("\n=== GARCH ===")
 if (requireNamespace("fGarch", quietly = TRUE)) {
-  for (n in c(200, 500, 1000)) {
+  for (n in c(100, 1000, 10000)) {
     d <- generate_garch_data(n)
 
     r <- run_unified("GARCH", "(1,1)", n, 42, "garch", function() {
@@ -2321,7 +2328,7 @@ if (requireNamespace("fGarch", quietly = TRUE)) {
 
 # --- Kalman (StructTS level) ---
 message("\n=== Kalman ===")
-for (n in c(100, 200, 500)) {
+for (n in c(100, 1000, 10000)) {
   d <- generate_time_series(n)
   ts_data <- ts(d$y, frequency = 1)
 
@@ -2335,7 +2342,7 @@ for (n in c(100, 200, 500)) {
 
 # --- StructTS (trend) ---
 message("\n=== StructTS ===")
-for (n in c(100, 200, 500)) {
+for (n in c(100, 1000, 10000)) {
   d <- generate_time_series(n)
   ts_data <- ts(d$y, frequency = 1)
 
@@ -2350,7 +2357,7 @@ for (n in c(100, 200, 500)) {
 # --- VAR ---
 message("\n=== VAR ===")
 if (requireNamespace("vars", quietly = TRUE)) {
-  for (n in c(100, 200, 500)) {
+  for (n in c(100, 1000, 10000)) {
     d <- generate_bivariate_data(n)
 
     r <- run_unified("VAR", "p=1", n, 42, "bivariate", function() {
@@ -2368,7 +2375,7 @@ if (requireNamespace("vars", quietly = TRUE)) {
 # --- VECM ---
 message("\n=== VECM ===")
 if (requireNamespace("urca", quietly = TRUE)) {
-  for (n in c(200, 500)) {
+  for (n in c(100, 1000, 10000)) {
     d <- generate_bivariate_data(n)
 
     r <- run_unified("VECM", "rank=1", n, 42, "bivariate", function() {
@@ -2384,7 +2391,7 @@ if (requireNamespace("urca", quietly = TRUE)) {
 
 # --- Granger ---
 message("\n=== Granger ===")
-for (n in c(100, 200, 500)) {
+for (n in c(100, 1000, 10000)) {
   d <- generate_bivariate_data(n)
 
   r <- run_unified("Granger", "lags=4", n, 42, "bivariate", function() {
@@ -2401,7 +2408,7 @@ for (n in c(100, 200, 500)) {
 # --- Phillips-Perron ---
 message("\n=== Phillips-Perron ===")
 if (requireNamespace("tseries", quietly = TRUE)) {
-  for (n in c(100, 200, 500)) {
+  for (n in c(100, 1000, 10000)) {
     d <- generate_time_series(n)
 
     r <- run_unified("Phillips_Perron", "short_lag", n, 42, "timeseries", function() {
@@ -2420,7 +2427,7 @@ if (requireNamespace("tseries", quietly = TRUE)) {
 
 # --- Box-Ljung ---
 message("\n=== Box-Ljung ===")
-for (n in c(100, 200, 500)) {
+for (n in c(100, 1000, 10000)) {
   d <- generate_time_series(n)
 
   r <- run_unified("Box_Ljung", "lag=10", n, 42, "timeseries", function() {
@@ -2444,7 +2451,7 @@ message("\n=== K-Medoids ===")
 if (requireNamespace("cluster", quietly = TRUE)) {
   suppressPackageStartupMessages(library(cluster))
 
-  for (n in c(100, 500, 1000)) {
+  for (n in c(100, 1000, 10000)) {
     d <- generate_cluster_data(n)
     mat <- as.matrix(d)
     save_dgp(d, sprintf("cluster_n%d", n))
@@ -2473,7 +2480,7 @@ message("\n=== SVM ===")
 if (requireNamespace("e1071", quietly = TRUE)) {
   suppressPackageStartupMessages(library(e1071))
 
-  for (n in c(200, 500, 1000)) {
+  for (n in c(100, 1000, 10000)) {
     d <- generate_cluster_data(n)
     mat <- as.matrix(d)
     labels <- factor(ifelse(((1:n) - 1) %% 3 == 0, 1, -1))
@@ -2503,7 +2510,7 @@ message("\n=== t-SNE ===")
 if (requireNamespace("Rtsne", quietly = TRUE)) {
   suppressPackageStartupMessages(library(Rtsne))
 
-  for (n in c(100, 500)) {
+  for (n in c(100, 1000)) {
     d <- generate_cluster_data(n)
     mat <- as.matrix(d)
 
@@ -2530,7 +2537,8 @@ if (requireNamespace("Rtsne", quietly = TRUE)) {
 message("\n=== Silhouette ===")
 
 if (requireNamespace("cluster", quietly = TRUE)) {
-  for (n in c(100, 500, 1000)) {
+  # Silhouette computes dist() which is O(n^2) — cap at 1000
+  for (n in c(100, 1000)) {
     d <- generate_cluster_data(n)
     mat <- as.matrix(d)
 
@@ -2556,7 +2564,8 @@ if (requireNamespace("cluster", quietly = TRUE)) {
 # ============================================
 message("\n=== MDS ===")
 
-for (n in c(100, 500)) {
+# cmdscale is O(n^3) — cap at 1000
+for (n in c(100, 1000)) {
   d <- generate_cluster_data(n)
   mat <- as.matrix(d)
 
@@ -2581,7 +2590,7 @@ for (n in c(100, 500)) {
 # ============================================
 message("\n=== ACF ===")
 
-for (n in c(100, 500, 1000)) {
+for (n in c(100, 1000, 10000)) {
   d <- generate_time_series(n)
   save_dgp(d, sprintf("timeseries_n%d", n))
 
@@ -2602,7 +2611,7 @@ for (n in c(100, 500, 1000)) {
 # ============================================
 message("\n=== PACF ===")
 
-for (n in c(100, 500, 1000)) {
+for (n in c(100, 1000, 10000)) {
   d <- generate_time_series(n)
 
   local_y <- d$y
@@ -2622,7 +2631,7 @@ for (n in c(100, 500, 1000)) {
 # ============================================
 message("\n=== CCF ===")
 
-for (n in c(100, 200, 500)) {
+for (n in c(100, 1000, 10000)) {
   set.seed(42)
   t_idx <- 0:(n - 1)
   y1 <- 0.01 * t_idx + sin(t_idx * pi / 6) * 2.0 + runif(n, 0, 0.5)
@@ -2649,7 +2658,7 @@ for (n in c(100, 200, 500)) {
 # ============================================
 message("\n=== Canonical Correlation ===")
 
-for (n in c(100, 500, 1000)) {
+for (n in c(100, 1000, 10000)) {
   d <- generate_regression_data(n)
 
   local_d <- d
@@ -2666,7 +2675,7 @@ for (n in c(100, 500, 1000)) {
 # ============================================
 message("\n=== Spline ===")
 
-for (n in c(100, 500, 1000)) {
+for (n in c(100, 1000, 10000)) {
   set.seed(42)
   x_sp <- (0:(n - 1)) / n
   y_sp <- sin(x_sp * pi * 2) + runif(n, -0.1, 0.1)
@@ -2692,7 +2701,7 @@ for (n in c(100, 500, 1000)) {
 # ============================================
 message("\n=== t-test ===")
 
-for (n in c(50, 200, 1000)) {
+for (n in c(100, 1000, 10000)) {
   set.seed(42)
   x_tt <- 5.0 + runif(n, -1, 1)
   tt_df <- data.frame(x = x_tt)
@@ -2716,7 +2725,7 @@ for (n in c(50, 200, 1000)) {
 # ============================================
 message("\n=== Wilcoxon ===")
 
-for (n in c(50, 200, 1000)) {
+for (n in c(100, 1000, 10000)) {
   set.seed(42)
   x_wt <- 5.0 + runif(n, -1, 1)
 
@@ -2737,7 +2746,7 @@ for (n in c(50, 200, 1000)) {
 # ============================================
 message("\n=== KS test ===")
 
-for (n in c(50, 200, 1000)) {
+for (n in c(100, 1000, 10000)) {
   set.seed(42)
   x_ks <- 5.0 + runif(n, -1, 1)
 
@@ -2758,7 +2767,8 @@ for (n in c(50, 200, 1000)) {
 # ============================================
 message("\n=== Shapiro-Wilk ===")
 
-for (n in c(50, 200, 1000)) {
+# Shapiro-Wilk: R's shapiro.test() caps at n=5000, use c(100, 1000)
+for (n in c(100, 1000)) {
   set.seed(42)
   x_sw <- 5.0 + runif(n, -1, 1)
 
@@ -2779,7 +2789,7 @@ for (n in c(50, 200, 1000)) {
 # ============================================
 message("\n=== ANOVA ===")
 
-for (n in c(50, 200, 1000)) {
+for (n in c(100, 1000, 10000)) {
   set.seed(42)
   n_per_group <- n %/% 3
   groups <- c(rep("g0", n_per_group), rep("g1", n_per_group), rep("g2", n - 2 * n_per_group))
@@ -2808,7 +2818,7 @@ for (n in c(50, 200, 1000)) {
 # ============================================
 message("\n=== ANOVA Two-Way ===")
 
-for (n in c(100, 500, 1000)) {
+for (n in c(100, 1000, 10000)) {
   set.seed(42)
   factor1 <- factor(rep(c("A", "B"), length.out = n))
   factor2 <- factor(rep(c("X", "Y", "Z"), length.out = n))
@@ -2837,7 +2847,7 @@ for (n in c(100, 500, 1000)) {
 # ============================================
 message("\n=== Kruskal-Wallis ===")
 
-for (n in c(50, 200, 1000)) {
+for (n in c(100, 1000, 10000)) {
   set.seed(42)
   n_per_group <- n %/% 3
   groups <- c(rep("g0", n_per_group), rep("g1", n_per_group), rep("g2", n - 2 * n_per_group))
@@ -2865,7 +2875,7 @@ for (n in c(50, 200, 1000)) {
 # ============================================
 message("\n=== Friedman ===")
 
-for (n in c(30, 100, 500)) {
+for (n in c(100, 1000, 10000)) {
   set.seed(42)
   # n blocks x 3 treatments
   mat_friedman <- matrix(c(
@@ -2894,7 +2904,7 @@ for (n in c(30, 100, 500)) {
 # ============================================
 message("\n=== Chi-squared ===")
 
-for (n in c(50, 200, 1000)) {
+for (n in c(100, 1000, 10000)) {
   set.seed(42)
   observed <- (n / 5) + runif(5, -5, 5)
   observed <- abs(observed)  # ensure positive
@@ -2916,7 +2926,7 @@ for (n in c(50, 200, 1000)) {
 # ============================================
 message("\n=== Cor Test ===")
 
-for (n in c(50, 200, 1000)) {
+for (n in c(100, 1000, 10000)) {
   set.seed(42)
   x_cor <- runif(n, -2, 2)
   y_cor <- 0.5 * x_cor + runif(n, -0.5, 0.5)
@@ -2943,7 +2953,7 @@ for (n in c(50, 200, 1000)) {
 
 # --- Bartlett ---
 message("\n=== Bartlett ===")
-for (n in c(100, 500, 1000)) {
+for (n in c(100, 1000, 10000)) {
   set.seed(42)
   g1 <- rnorm(n/2, 0, 1); g2 <- rnorm(n/2, 0, 1.5)
   r <- run_unified("Bartlett", "two_group", n, 42, "variance", function() {
@@ -2954,7 +2964,7 @@ for (n in c(100, 500, 1000)) {
 
 # --- Fligner ---
 message("\n=== Fligner ===")
-for (n in c(100, 500, 1000)) {
+for (n in c(100, 1000, 10000)) {
   set.seed(42)
   g1 <- rnorm(n/2, 0, 1); g2 <- rnorm(n/2, 0, 1.5)
   r <- run_unified("Fligner", "two_group", n, 42, "variance", function() {
@@ -2965,7 +2975,7 @@ for (n in c(100, 500, 1000)) {
 
 # --- Mood ---
 message("\n=== Mood ===")
-for (n in c(100, 500, 1000)) {
+for (n in c(100, 1000, 10000)) {
   set.seed(42)
   x <- rnorm(n/2, 0, 1); y_val <- rnorm(n/2, 0, 1.5)
   r <- run_unified("Mood", "two_sample", n, 42, "variance", function() {
@@ -2976,7 +2986,7 @@ for (n in c(100, 500, 1000)) {
 
 # --- Ansari ---
 message("\n=== Ansari ===")
-for (n in c(100, 500, 1000)) {
+for (n in c(100, 1000, 10000)) {
   set.seed(42)
   x <- rnorm(n/2, 0, 1); y_val <- rnorm(n/2, 0, 1.5)
   r <- run_unified("Ansari", "two_sample", n, 42, "variance", function() {
@@ -2987,7 +2997,7 @@ for (n in c(100, 500, 1000)) {
 
 # --- McNemar ---
 message("\n=== McNemar ===")
-for (n in c(100, 500, 1000)) {
+for (n in c(100, 1000, 10000)) {
   set.seed(42)
   a <- sample(0:1, n, replace = TRUE)
   b <- ifelse(runif(n) < 0.7, a, 1 - a)
@@ -3000,7 +3010,7 @@ for (n in c(100, 500, 1000)) {
 
 # --- Mantel_Haenszel ---
 message("\n=== Mantel_Haenszel ===")
-for (n in c(100, 500, 1000)) {
+for (n in c(100, 1000, 10000)) {
   set.seed(42)
   tables <- array(0, dim = c(2, 2, 3))
   for (s in 1:3) {
@@ -3017,7 +3027,7 @@ for (n in c(100, 500, 1000)) {
 
 # --- MANOVA ---
 message("\n=== MANOVA ===")
-for (n in c(100, 500, 1000)) {
+for (n in c(100, 1000, 10000)) {
   set.seed(42)
   group <- factor(rep(c("A","B","C"), length.out = n))
   y1 <- rnorm(n) + ifelse(group == "B", 0.5, ifelse(group == "C", 1.0, 0))
@@ -3037,7 +3047,7 @@ for (n in c(100, 500, 1000)) {
 
 # --- Median_Polish ---
 message("\n=== Median_Polish ===")
-for (n in c(25, 100, 400)) {
+for (n in c(100, 1000, 10000)) {
   set.seed(42)
   side <- as.integer(sqrt(n))
   mat <- matrix(rnorm(side * side), nrow = side)
@@ -3051,7 +3061,7 @@ for (n in c(25, 100, 400)) {
 
 # --- Oneway (Welch) ---
 message("\n=== Oneway ===")
-for (n in c(100, 500, 1000)) {
+for (n in c(100, 1000, 10000)) {
   set.seed(42)
   group <- factor(rep(c("A","B","C"), length.out = n))
   values <- rnorm(n) + ifelse(group == "B", 0.5, ifelse(group == "C", 1.0, 0))
@@ -3063,7 +3073,7 @@ for (n in c(100, 500, 1000)) {
 
 # --- Var_Test ---
 message("\n=== Var_Test ===")
-for (n in c(100, 500, 1000)) {
+for (n in c(100, 1000, 10000)) {
   set.seed(42)
   x <- rnorm(n/2, 0, 1); y_val <- rnorm(n/2, 0, 1.5)
   r <- run_unified("Var_Test", "f_test", n, 42, "variance", function() {
@@ -3074,7 +3084,7 @@ for (n in c(100, 500, 1000)) {
 
 # --- Prop_Test ---
 message("\n=== Prop_Test ===")
-for (n in c(100, 500, 1000)) {
+for (n in c(100, 1000, 10000)) {
   set.seed(42)
   x <- sum(rbinom(n, 1, 0.6))
   r <- run_unified("Prop_Test", "one_sample", n, 42, "binomial", function() {
@@ -3085,7 +3095,7 @@ for (n in c(100, 500, 1000)) {
 
 # --- Prop_Trend ---
 message("\n=== Prop_Trend ===")
-for (n in c(100, 500, 1000)) {
+for (n in c(100, 1000, 10000)) {
   set.seed(42)
   k <- 5
   trials <- rep(n %/% k, k)
@@ -3099,7 +3109,7 @@ for (n in c(100, 500, 1000)) {
 
 # --- Binom_Test ---
 message("\n=== Binom_Test ===")
-for (n in c(100, 500, 1000)) {
+for (n in c(100, 1000, 10000)) {
   set.seed(42)
   x <- sum(rbinom(n, 1, 0.6))
   r <- run_unified("Binom_Test", "default", n, 42, "binomial", function() {
@@ -3112,7 +3122,7 @@ for (n in c(100, 500, 1000)) {
 
 # --- Poisson_Test ---
 message("\n=== Poisson_Test ===")
-for (n in c(100, 500, 1000)) {
+for (n in c(100, 1000, 10000)) {
   set.seed(42)
   x <- sum(rpois(n, 5))
   r <- run_unified("Poisson_Test", "default", n, 42, "poisson", function() {
@@ -3125,7 +3135,7 @@ for (n in c(100, 500, 1000)) {
 
 # --- Power_Analysis ---
 message("\n=== Power_Analysis ===")
-for (n in c(50, 100, 200)) {
+for (n in c(100, 1000, 10000)) {
   r <- run_unified("Power_Analysis", "t_test", n, 42, "computed", function() {
     power.t.test(n = n, delta = 0.5, sd = 1, sig.level = 0.05)
   }, function(fit) {
@@ -3136,7 +3146,7 @@ for (n in c(50, 100, 200)) {
 
 # --- Pairwise_t ---
 message("\n=== Pairwise_t ===")
-for (n in c(100, 500, 1000)) {
+for (n in c(100, 1000, 10000)) {
   set.seed(42)
   group <- factor(rep(c("A","B","C"), length.out = n))
   values <- rnorm(n) + ifelse(group == "B", 0.5, ifelse(group == "C", 1.0, 0))
@@ -3150,7 +3160,7 @@ for (n in c(100, 500, 1000)) {
 
 # --- Pairwise_Wilcox ---
 message("\n=== Pairwise_Wilcox ===")
-for (n in c(100, 500, 1000)) {
+for (n in c(100, 1000, 10000)) {
   set.seed(42)
   group <- factor(rep(c("A","B","C"), length.out = n))
   values <- rnorm(n) + ifelse(group == "B", 0.5, ifelse(group == "C", 1.0, 0))
@@ -3164,7 +3174,7 @@ for (n in c(100, 500, 1000)) {
 
 # --- Quade ---
 message("\n=== Quade ===")
-for (n in c(30, 100, 200)) {
+for (n in c(100, 1000, 10000)) {
   set.seed(42)
   k <- 3
   mat <- matrix(rnorm(n * k), nrow = n, ncol = k)
@@ -3178,7 +3188,7 @@ for (n in c(30, 100, 200)) {
 
 # --- Tukey ---
 message("\n=== Tukey ===")
-for (n in c(100, 500, 1000)) {
+for (n in c(100, 1000, 10000)) {
   set.seed(42)
   group <- factor(rep(c("A","B","C"), length.out = n))
   values <- rnorm(n) + ifelse(group == "B", 0.5, ifelse(group == "C", 1.0, 0))
@@ -3193,7 +3203,7 @@ for (n in c(100, 500, 1000)) {
 
 # --- Mahalanobis ---
 message("\n=== Mahalanobis ===")
-for (n in c(100, 500, 1000)) {
+for (n in c(100, 1000, 10000)) {
   d <- generate_cluster_data(n, k = 3)
   mat <- as.matrix(d)
   center <- colMeans(mat)
@@ -3208,7 +3218,7 @@ for (n in c(100, 500, 1000)) {
 
 # --- Robust_Stats ---
 message("\n=== Robust_Stats ===")
-for (n in c(100, 500, 1000)) {
+for (n in c(100, 1000, 10000)) {
   set.seed(42)
   x <- rnorm(n, 5, 1)
   r <- run_unified("Robust_Stats", "default", n, 42, "normal", function() {
@@ -3221,7 +3231,7 @@ for (n in c(100, 500, 1000)) {
 
 # --- Weighted ---
 message("\n=== Weighted ===")
-for (n in c(100, 500, 1000)) {
+for (n in c(100, 1000, 10000)) {
   set.seed(42)
   x <- rnorm(n, 5, 1)
   w <- runif(n, 0.1, 2)
@@ -3235,7 +3245,7 @@ for (n in c(100, 500, 1000)) {
 
 # --- Loglin ---
 message("\n=== Loglin ===")
-for (n in c(100, 500, 1000)) {
+for (n in c(100, 1000, 10000)) {
   set.seed(42)
   tab <- array(rpois(8, n/8) + 1, dim = c(2, 2, 2))
   r <- run_unified("Loglin", "default", n, 42, "contingency", function() {
@@ -3248,7 +3258,7 @@ for (n in c(100, 500, 1000)) {
 
 # --- P_Adjust ---
 message("\n=== P_Adjust ===")
-for (n in c(10, 50, 100)) {
+for (n in c(100, 1000, 10000)) {
   set.seed(42)
   pvals <- runif(n, 0, 1)
   r <- run_unified("P_Adjust", "bonferroni", n, 42, "pvalues", function() {
@@ -3262,7 +3272,7 @@ for (n in c(10, 50, 100)) {
 # --- RD_Multi ---
 message("\n=== RD_Multi ===")
 if (requireNamespace("rdrobust", quietly = TRUE)) {
-  for (n in c(500, 1000)) {
+  for (n in c(100, 1000, 10000)) {
     set.seed(42)
     cutoffs <- c(-0.5, 0.0, 0.5)
     running <- runif(n, -1.5, 1.5)
@@ -3285,7 +3295,7 @@ if (requireNamespace("rdrobust", quietly = TRUE)) {
 # --- AFT ---
 message("\n=== AFT ===")
 if (requireNamespace("survival", quietly = TRUE)) {
-  for (n in c(200, 500, 1000)) {
+  for (n in c(100, 1000, 10000)) {
     d <- generate_survival_data(n)
     save_dgp(d, sprintf("survival_n%d", n))
     r <- run_unified("AFT", "weibull", n, 42, "survival", function() {
@@ -3305,7 +3315,7 @@ if (requireNamespace("survival", quietly = TRUE)) {
 # --- Competing_Risks ---
 message("\n=== Competing_Risks ===")
 if (requireNamespace("cmprsk", quietly = TRUE)) {
-  for (n in c(200, 500, 1000)) {
+  for (n in c(100, 1000, 10000)) {
     set.seed(42)
     time <- rexp(n, 0.1)
     event_type <- sample(0:2, n, replace = TRUE, prob = c(0.3, 0.4, 0.3))
@@ -3329,7 +3339,7 @@ if (requireNamespace("cmprsk", quietly = TRUE)) {
 
 # --- OLS_Clustered ---
 message("\n=== OLS_Clustered ===")
-for (n in c(100, 500, 1000)) {
+for (n in c(100, 1000, 10000)) {
   d <- generate_panel_data(n %/% 10, 10)
   save_dgp(d, sprintf("panel_%d_10", n %/% 10))
   r <- run_unified("OLS_Clustered", "entity", nrow(d), 42, "panel", function() {
@@ -3341,7 +3351,7 @@ for (n in c(100, 500, 1000)) {
 
 # --- OLS_Driscoll_Kraay ---
 message("\n=== OLS_Driscoll_Kraay ===")
-for (n in c(100, 500, 1000)) {
+for (n in c(100, 1000, 10000)) {
   d <- generate_panel_data(n %/% 10, 10)
   save_dgp(d, sprintf("panel_%d_10", n %/% 10))
   r <- run_unified("OLS_Driscoll_Kraay", "entity", nrow(d), 42, "panel", function() {
@@ -3353,7 +3363,7 @@ for (n in c(100, 500, 1000)) {
 
 # --- NLS ---
 message("\n=== NLS ===")
-for (n in c(100, 500, 1000)) {
+for (n in c(100, 1000, 10000)) {
   set.seed(42)
   x <- seq(0.1, 10, length.out = n)
   y <- 2 * exp(-0.3 * x) + rnorm(n, 0, 0.1)
@@ -3376,7 +3386,7 @@ for (n in c(100, 500, 1000)) {
 # ============================================
 message("\n=== Variance/Scale Tests ===")
 
-for (n in c(50, 200, 1000)) {
+for (n in c(100, 1000, 10000)) {
   set.seed(42)
   g1 <- runif(n, -1, 1)
   g2 <- runif(n, -0.5, 1.5)
@@ -3429,7 +3439,7 @@ for (n in c(50, 200, 1000)) {
 # ============================================
 message("\n=== Categorical Tests ===")
 
-for (n in c(50, 200, 1000)) {
+for (n in c(100, 1000, 10000)) {
   set.seed(42)
   a <- as.integer(n * 0.4)
   b <- as.integer(n * 0.15) + sample(1:4, 1)
@@ -3444,7 +3454,7 @@ for (n in c(50, 200, 1000)) {
 }
 
 # Mantel-Haenszel
-for (n in c(50, 200)) {
+for (n in c(100, 1000)) {
   set.seed(42)
   n_strata <- n %/% 25
   arr <- array(0, dim=c(2, 2, n_strata))
@@ -3466,7 +3476,7 @@ for (n in c(50, 200)) {
 # ============================================
 message("\n=== Multivariate Tests ===")
 
-for (n in c(50, 200, 1000)) {
+for (n in c(100, 1000, 10000)) {
   set.seed(42)
   n_groups <- 3
   n_per <- n %/% n_groups
@@ -3504,7 +3514,7 @@ for (n in c(50, 200, 1000)) {
 }
 
 # Median_Polish
-for (n in c(50, 200)) {
+for (n in c(100, 1000)) {
   set.seed(42)
   rows <- as.integer(sqrt(n))
   cols <- rows
@@ -3529,7 +3539,7 @@ for (n in c(50, 200)) {
 # ============================================
 message("\n=== Proportion/Count Tests ===")
 
-for (n in c(50, 200, 1000)) {
+for (n in c(100, 1000, 10000)) {
   x <- as.integer(n * 0.55)
 
   r <- run_unified("Prop_Test", "one-sample", n, 42, "proportion", function() {
@@ -3539,7 +3549,7 @@ for (n in c(50, 200, 1000)) {
 }
 
 # Prop_Trend
-for (n in c(50, 200)) {
+for (n in c(100, 1000)) {
   k <- 5
   x_vals <- sapply(0:(k-1), function(i) (n %/% k) %/% 2 + i * 3)
   n_vals <- rep(n %/% k, k)
@@ -3551,7 +3561,7 @@ for (n in c(50, 200)) {
 }
 
 # Binom_Test
-for (n in c(50, 200, 1000)) {
+for (n in c(100, 1000, 10000)) {
   x <- as.integer(n * 0.55)
 
   r <- run_unified("Binom_Test", "exact", n, 42, "binomial", function() {
@@ -3563,7 +3573,7 @@ for (n in c(50, 200, 1000)) {
 }
 
 # Poisson_Test
-for (n in c(50, 200, 1000)) {
+for (n in c(100, 1000, 10000)) {
   r <- run_unified("Poisson_Test", "exact", n, 42, "poisson", function() {
     poisson.test(n, T = 1, r = n)
   }, function(fit) {
@@ -3573,7 +3583,7 @@ for (n in c(50, 200, 1000)) {
 }
 
 # Power_Analysis
-for (n in c(50, 200, 1000)) {
+for (n in c(100, 1000, 10000)) {
   r <- run_unified("Power_Analysis", "t-test", n, 42, "power", function() {
     power.t.test(n = n, delta = 0.5, sd = 1, sig.level = 0.05, type = "two.sample")
   }, function(fit) {
@@ -3587,7 +3597,7 @@ for (n in c(50, 200, 1000)) {
 # ============================================
 message("\n=== Multiple Comparisons ===")
 
-for (n in c(100, 500)) {
+for (n in c(100, 1000)) {
   set.seed(42)
   n_per <- n %/% 3
   values <- numeric(n)
@@ -3636,7 +3646,7 @@ for (n in c(100, 500)) {
 }
 
 # Quade test
-for (n in c(30, 100)) {
+for (n in c(100, 1000)) {
   set.seed(42)
   n_blocks <- n
   n_treatments <- 3
@@ -3659,7 +3669,7 @@ for (n in c(30, 100)) {
 }
 
 # P_Adjust
-for (n in c(50, 200, 1000)) {
+for (n in c(100, 1000, 10000)) {
   set.seed(42)
   pvals <- runif(n, 0, 1)
 
@@ -3714,7 +3724,7 @@ for (n in c(100, 1000)) {
 }
 
 # Loglin (3-way table)
-for (n in c(50, 200)) {
+for (n in c(100, 1000)) {
   set.seed(42)
   tab <- array(runif(8, 5, 50), dim=c(2, 2, 2))
   local_tab <- tab
@@ -3735,7 +3745,7 @@ message("\n=== Survival: AFT ===")
 if (requireNamespace("survival", quietly = TRUE)) {
   suppressPackageStartupMessages(library(survival))
 
-  for (n in c(100, 500, 1000)) {
+  for (n in c(100, 1000, 10000)) {
     d <- generate_survival_data(n)
     local_d <- d
 
@@ -3759,7 +3769,7 @@ if (requireNamespace("survival", quietly = TRUE)) {
 message("\n=== Survival: Competing Risks ===")
 
 if (requireNamespace("cmprsk", quietly = TRUE)) {
-  for (n in c(100, 500, 1000)) {
+  for (n in c(100, 1000, 10000)) {
     set.seed(42)
     time_vals <- runif(n, 0.1, 20)
     u <- runif(n)
@@ -3788,7 +3798,7 @@ if (requireNamespace("cmprsk", quietly = TRUE)) {
 message("\n=== RD Multi-cutoff ===")
 
 if (requireNamespace("rdrobust", quietly = TRUE)) {
-  for (n in c(500, 1000)) {
+  for (n in c(100, 1000, 10000)) {
     set.seed(42)
     cutoffs <- c(0.0, 2.0)
     half <- n %/% 2

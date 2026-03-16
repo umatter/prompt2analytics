@@ -14,7 +14,7 @@ for (pkg in packages) {
 set.seed(42)
 
 # Generate test data for causal inference
-n <- 1000
+n <- 10000
 x1 <- rnorm(n)
 x2 <- rnorm(n)
 x3 <- rnorm(n)
@@ -116,8 +116,8 @@ if (requireNamespace("bacondecomp", quietly = TRUE)) {
   cat("\n=== bacondecomp (Goodman-Bacon Decomposition) ===\n")
 
   # Create panel data with staggered treatment
-  n_units <- 50
-  n_periods <- 10
+  n_units <- 100
+  n_periods <- 100
   panel <- expand.grid(unit = 1:n_units, time = 1:n_periods)
   panel$treat_time <- ifelse(panel$unit <= 15, 4,
                               ifelse(panel$unit <= 30, 6,

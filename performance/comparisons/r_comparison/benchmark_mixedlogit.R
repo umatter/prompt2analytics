@@ -83,13 +83,9 @@ cat("=== Mixed Logit (gmnl) R Benchmarks ===\n\n")
 cat("Testing with different data sizes and draw counts:\n\n")
 
 configs <- list(
-  list(n = 50, alts = 3, draws = 50),
-  list(n = 50, alts = 3, draws = 100),
-  list(n = 100, alts = 3, draws = 50),
   list(n = 100, alts = 3, draws = 100),
-  list(n = 200, alts = 3, draws = 100),
-  list(n = 200, alts = 4, draws = 100),
-  list(n = 500, alts = 3, draws = 100)
+  list(n = 1000, alts = 3, draws = 100),
+  list(n = 10000, alts = 3, draws = 100)
 )
 
 cat(sprintf("%-35s %15s %15s %15s\n", "Config", "Median (ms)", "Mean (ms)", "SD (ms)"))

@@ -8,7 +8,7 @@ set.seed(42)
 cat("=== prop.trend.test R Benchmarks ===\n")
 
 # Different number of groups
-group_sizes <- c(3, 5, 10, 20)
+group_sizes <- c(100, 1000, 10000)
 
 for (k in group_sizes) {
   # Generate data with trend

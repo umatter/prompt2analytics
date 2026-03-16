@@ -104,12 +104,20 @@ paper/build/
 # R auto-generated plot device output
 performance/comparisons/r_comparison/Rplots.pdf
 
-# Timestamped raw benchmark results (keep only merged comparison CSVs)
-performance/comparisons/r_comparison/results/r_*_2026*.csv
-performance/comparisons/r_comparison/results/rust_comprehensive_2026*.json
-performance/comparisons/r_comparison/results/rust_unified_*.json
-performance/comparisons/r_comparison/results/unified_r_*.json
-performance/comparisons/r_comparison/results/figures/
+# Benchmark results: ignore everything except final merged outputs
+# (comparison_speed.csv, comparison_memory.csv, comparison_unified.csv, validation_coverage.csv)
+# All intermediate/raw CSVs are regenerable via the benchmark pipeline
+performance/comparisons/r_comparison/results/*
+!performance/comparisons/r_comparison/results/comparison_speed.csv
+!performance/comparisons/r_comparison/results/comparison_memory.csv
+!performance/comparisons/r_comparison/results/comparison_unified.csv
+!performance/comparisons/r_comparison/results/validation_coverage.csv
+
+# Legacy benchmark CSVs in parent directory (regenerable)
+performance/comparisons/r_comparison/r_*_benchmark_results.csv
+performance/comparisons/r_comparison/rust_*_benchmark_results*.csv
+performance/comparisons/r_comparison/test_data/
+performance/comparisons/r_comparison/validation_data/
 performance/results/
 
 # Generated benchmark data (R-generated CSVs, regenerable via run_unified.sh)

@@ -115,7 +115,7 @@ idx <- 1
 # --- Kaplan-Meier ---
 cat("\n--- Kaplan-Meier ---\n")
 
-for (n in c(100, 500, 1000, 5000)) {
+for (n in c(100, 1000, 10000)) {
   data <- generate_survival_data(n)
 
   # Unstratified
@@ -140,7 +140,7 @@ for (n in c(100, 500, 1000, 5000)) {
 # --- Log-Rank Test ---
 cat("\n--- Log-Rank Test ---\n")
 
-for (n in c(100, 500, 1000, 5000)) {
+for (n in c(100, 1000, 10000)) {
   data <- generate_survival_data(n)
 
   r <- run_bench(sprintf("LogRank_%d", n),
@@ -155,7 +155,7 @@ for (n in c(100, 500, 1000, 5000)) {
 # --- Cox Proportional Hazards ---
 cat("\n--- Cox PH ---\n")
 
-for (n in c(100, 500, 1000, 2000)) {
+for (n in c(100, 1000, 10000)) {
   data <- generate_survival_data(n)
 
   # Efron method (default in R)
@@ -180,7 +180,7 @@ for (n in c(100, 500, 1000, 2000)) {
 # --- AFT Models ---
 cat("\n--- AFT Models ---\n")
 
-for (n in c(100, 500, 1000, 2000)) {
+for (n in c(100, 1000, 10000)) {
   data <- generate_survival_data(n)
 
   # Weibull AFT
@@ -207,7 +207,7 @@ for (n in c(100, 500, 1000, 2000)) {
 # --- Competing Risks (Aalen-Johansen) ---
 cat("\n--- Competing Risks ---\n")
 
-for (n in c(100, 500, 1000, 5000)) {
+for (n in c(100, 1000, 10000)) {
   data <- generate_competing_risks_data(n)
 
   # Use survfit with multi-state for Aalen-Johansen

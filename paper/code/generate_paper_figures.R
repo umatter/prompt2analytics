@@ -324,16 +324,18 @@ if (nrow(mem_df) > 0) {
                  values_to = "mem_kb") %>%
     mutate(language = ifelse(language == "r_mem_kb", "R", "Rust"))
 
-  p_mem <- ggplot(mem_long, aes(x = method_label, y = mem_kb, fill = language)) +
+  # Use bytes directly so log scale baseline is 1 byte (all bars go right)
+  mem_long <- mem_long %>%
+    mutate(mem_bytes = mem_kb * 1024)
+
+  p_mem <- ggplot(mem_long, aes(x = method_label, y = mem_bytes, fill = language)) +
     geom_col(position = "dodge", width = 0.7) +
     scale_fill_manual(values = c("R" = "#0097A7", "Rust" = "#E65100"), name = NULL) +
     scale_y_log10(
       name = "Memory Allocation per Call (log scale)",
-      labels = function(x) {
-        ifelse(x < 1, sprintf("%.0f B", x * 1024),
-        ifelse(x < 1024, sprintf("%.0f KB", x),
-               sprintf("%.1f MB", x / 1024)))
-      }
+      breaks = c(1, 1e3, 1e6, 1e9),
+      labels = c("1 B", "1 KB", "1 MB", "1 GB"),
+      limits = c(1, NA)
     ) +
     coord_flip() +
     labs(x = NULL) +

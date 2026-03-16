@@ -37,14 +37,13 @@ r_file <- r_files[1]
 cat(sprintf("Loading R results: %s\n", r_file))
 r_data <- fromJSON(r_file, simplifyVector = FALSE)
 
-# Find most recent Rust unified JSON
-rust_files <- sort(
-  list.files(results_dir, pattern = "^rust_unified_.*\\.json$", full.names = TRUE),
-  decreasing = TRUE
-)
+# Find most recent Rust JSON (unified or comprehensive format)
+# Sort by modification time (most recent first) to prefer newer results
+rust_files <- list.files(results_dir, pattern = "^rust_(unified|comprehensive)_.*\\.json$", full.names = TRUE)
 if (length(rust_files) == 0) {
-  stop("No unified Rust results found (rust_unified_*.json). Run Rust unified benchmarks first.")
+  stop("No Rust results found (rust_unified_*.json or rust_comprehensive_*.json). Run Rust benchmarks first.")
 }
+rust_files <- rust_files[order(file.mtime(rust_files), decreasing = TRUE)]
 rust_file <- rust_files[1]
 cat(sprintf("Loading Rust results: %s\n", rust_file))
 rust_data <- fromJSON(rust_file, simplifyVector = FALSE)

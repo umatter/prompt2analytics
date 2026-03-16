@@ -45,7 +45,7 @@ for (n in sizes) {
 }
 
 cat("\nRobust (symmetric) family:\n")
-for (n in c(100, 1000, 5000)) {
+for (n in c(100, 1000, 10000)) {
     data <- generate_loess_data(n)
 
     if (use_microbenchmark) {

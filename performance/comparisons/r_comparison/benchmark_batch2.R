@@ -26,7 +26,7 @@ cat("===========================================================================
 # ============================================================================
 cat("=== toeplitz R Benchmarks ===\n")
 
-for (size in c(10, 50, 100, 500)) {
+for (size in c(100, 1000, 10000)) {
   x <- 1 / (1:size)
 
   cat(sprintf("\nn=%d:\n", size))
@@ -39,7 +39,7 @@ for (size in c(10, 50, 100, 500)) {
 # ============================================================================
 cat("\n=== line R Benchmarks ===\n")
 
-for (n in c(20, 100, 500, 1000)) {
+for (n in c(100, 1000, 10000)) {
   x <- 1:n
   y <- 2 * x + 5 + rnorm(n, sd = 5)
 
@@ -54,7 +54,7 @@ for (n in c(20, 100, 500, 1000)) {
 cat("\n=== cpgram R Benchmarks ===\n")
 cat("(Note: cpgram is primarily a plotting function in R, timing the computation)\n")
 
-for (n in c(64, 256, 1024, 4096)) {
+for (n in c(100, 1000, 10000)) {
   x <- rnorm(n)
 
   cat(sprintf("\nn=%d:\n", n))
@@ -71,7 +71,7 @@ for (n in c(64, 256, 1024, 4096)) {
 # ============================================================================
 cat("\n=== supsmu R Benchmarks ===\n")
 
-for (n in c(50, 200, 1000)) {
+for (n in c(100, 1000, 10000)) {
   x <- (1:n) / n
   y <- sin(x * 2 * pi) + rnorm(n, sd = 0.25)
 
@@ -117,7 +117,7 @@ cat(sprintf("  constrOptim 10D: %.2f us (median)\n", med))
 # ============================================================================
 cat("\n=== ppr R Benchmarks ===\n")
 
-for (config in list(c(100, 5), c(500, 10), c(1000, 5))) {
+for (config in list(c(100, 5), c(1000, 10), c(10000, 5))) {
   n <- config[1]
   p <- config[2]
 
@@ -141,7 +141,7 @@ for (config in list(c(100, 5), c(500, 10), c(1000, 5))) {
 # ============================================================================
 cat("\n=== se.contrast R Benchmarks ===\n")
 
-for (n_per_group in c(10, 50, 100)) {
+for (n_per_group in c(25, 250, 2500)) {
   k <- 4  # 4 groups
   n <- n_per_group * k
 
@@ -175,7 +175,7 @@ for (n_per_group in c(10, 50, 100)) {
 # ============================================================================
 cat("\n=== model.tables R Benchmarks ===\n")
 
-for (n_per_group in c(10, 50, 100)) {
+for (n_per_group in c(20, 200, 2000)) {
   k <- 5  # 5 groups
   n <- n_per_group * k
 
@@ -200,7 +200,7 @@ for (n_per_group in c(10, 50, 100)) {
 
 # Two-way model.tables
 cat("\nTwo-way ANOVA model.tables:\n")
-for (size in c(3, 5, 10)) {
+for (size in c(4, 14, 44)) {
   n_per_cell <- 5
   n <- size * size * n_per_cell
 

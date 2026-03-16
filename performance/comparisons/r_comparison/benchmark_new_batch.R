@@ -18,7 +18,7 @@ benchmark_fn <- function(expr, times = 100) {
 # ============================================================================
 cat("=== medpolish R Benchmarks ===\n")
 
-for (size in c(10, 20, 50)) {
+for (size in c(10, 32, 100)) {
   nrow <- size
   ncol <- size
   data <- matrix(rnorm(nrow * ncol, mean = 50, sd = 10), nrow = nrow, ncol = ncol)
@@ -70,8 +70,9 @@ cat(sprintf("  loglin: %.2f us (median)\n", med))
 # ============================================================================
 cat("\n=== cmdscale R Benchmarks ===\n")
 
-for (n in c(20, 50, 100)) {
+for (n in c(100, 1000)) {
   # Generate random points and compute distance matrix
+  # Cap at n=1000: cmdscale is O(n^3) eigendecomposition, n=10000 is impractical
   points <- matrix(rnorm(n * 2), ncol = 2)
   d <- dist(points)
 
@@ -85,7 +86,8 @@ for (n in c(20, 50, 100)) {
 # ============================================================================
 cat("\n=== cutree R Benchmarks ===\n")
 
-for (n in c(50, 100, 200)) {
+for (n in c(100, 1000)) {
+  # Cap at n=1000: hclust requires O(n^2) distance matrix, impractical at n=10000
   # Generate random points and perform hierarchical clustering
   points <- matrix(rnorm(n * 2), ncol = 2)
   hc <- hclust(dist(points), method = "complete")

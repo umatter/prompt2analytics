@@ -27,7 +27,7 @@ generate_ar1 <- function(n, phi = 0.7, seed = 42) {
 cat("=== ACF/PACF/CCF R Benchmarks ===\n\n")
 
 # Benchmark at different dataset sizes
-sizes <- c(100, 1000, 10000, 100000)
+sizes <- c(100, 1000, 10000)
 
 benchmark_function <- function(name, fn, sizes, n_reps = 100) {
   cat(sprintf("--- %s ---\n", name))

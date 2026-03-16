@@ -274,19 +274,8 @@ Third, the Chrome evaluation benefits from the full infrastructure:
 auto-generated tool definitions from the MCP router (ensuring parameter
 name consistency), tiered tool filtering (119~Tier-1 tools), and
 strengthened system prompt guidance for direct tool invocation.
-Figure~\ref{fig:e2e-improvement} shows the improvement trajectory
-across infrastructure iterations.
 
 \input{tables/tab_e2e_chrome_mt}
-
-\begin{figure}[htbp]
-\centering
-\includegraphics[width=0.75\textwidth]{figures/e2e_improvement_trajectory}
-\caption{Multi-turn accuracy improvement through infrastructure fixes.
-Round~1 replaced the HTTP tool match (70~tools) with full router dispatch
-(268~tools).  Round~2 corrected LLM tool parameter definitions.}
-\label{fig:e2e-improvement}
-\end{figure}
 
 Per-dimension analysis reveals that tool selection and parameter
 extraction are perfect (2.00/2.00 each), while numerical

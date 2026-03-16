@@ -11,8 +11,8 @@ if (has_microbenchmark) {
     set.seed(42)
 
     # Benchmark at different dataset sizes
-    sizes <- c(15, 100, 1000, 10000)
-    k_groups <- c(3, 5, 10, 20)  # Number of groups for each size
+    sizes <- c(100, 1000, 10000)
+    k_groups <- c(5, 10, 20)  # Number of groups for each size
 
     cat("=== Bartlett's Test R Benchmarks (microbenchmark) ===\n\n")
 
@@ -53,8 +53,8 @@ if (has_microbenchmark) {
 
     set.seed(42)
 
-    sizes <- c(15, 100, 1000, 10000)
-    k_groups <- c(3, 5, 10, 20)
+    sizes <- c(100, 1000, 10000)
+    k_groups <- c(5, 10, 20)
 
     for (i in seq_along(sizes)) {
         n <- sizes[i]

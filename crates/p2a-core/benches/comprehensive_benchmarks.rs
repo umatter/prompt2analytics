@@ -410,7 +410,7 @@ fn main() {
     println!("\n--- Panel Data ---");
     print_header();
 
-    for (n_ent, n_per) in [(10, 10), (50, 20), (100, 50)] {
+    for (n_ent, n_per) in [(10, 10), (50, 20), (100, 100)] {
         let n = n_ent * n_per;
         let dataset = generate_panel_data(n_ent, n_per, 42);
 
@@ -449,7 +449,7 @@ fn main() {
     println!("\n--- Discrete Choice ---");
     print_header();
 
-    for n in [100, 500, 1000] {
+    for n in [100, 1000, 10000] {
         let dataset = generate_binary_data(n, 42);
 
         // Logit
@@ -473,7 +473,7 @@ fn main() {
     println!("\n--- Time Series ---");
     print_header();
 
-    for n in [100, 200, 500] {
+    for n in [100, 1000, 10000] {
         let dataset = generate_time_series(n, 42);
 
         // ARIMA
@@ -497,7 +497,7 @@ fn main() {
     println!("\n--- Machine Learning ---");
     print_header();
 
-    for n in [100, 1000, 5000] {
+    for n in [100, 1000, 10000] {
         let data = generate_cluster_data(n, 5, 42);
 
         // K-Means (with heap tracking)
@@ -522,7 +522,7 @@ fn main() {
     print_header();
 
     // LOESS
-    for n in [100, 500, 1000] {
+    for n in [100, 1000, 10000] {
         let dataset = generate_regression_data(n, 1, 42);
         let result = run_benchmark("LOESS", "span=0.75", n, &config, || {
             run_loess(&dataset, "y", "x1", 0.75, 1, false)
@@ -532,7 +532,7 @@ fn main() {
     }
 
     // Hierarchical Clustering
-    for n in [100, 500, 1000] {
+    for n in [100, 1000, 10000] {
         let data = generate_cluster_data(n, 5, 42);
         let result = run_benchmark("Hierarchical", "Ward", n, &config, || {
             hierarchical(data.view(), Some(3), Linkage::Ward, None)
@@ -542,7 +542,7 @@ fn main() {
     }
 
     // Random Forest
-    for n in [100, 500, 1000] {
+    for n in [100, 1000, 10000] {
         let data = generate_cluster_data(n, 5, 42);
         let target: ndarray::Array1<f64> = data.column(0).to_owned();
         let features = data.slice(ndarray::s![.., 1..]);
@@ -563,7 +563,7 @@ fn main() {
     }
 
     // Doubly Robust (AIPW)
-    for n in [200, 500, 1000] {
+    for n in [100, 1000, 10000] {
         let dataset = generate_binary_data(n, 42);
         let dr_config = DoublyRobustConfig {
             method: DRMethod::AIPW,
@@ -580,7 +580,7 @@ fn main() {
     }
 
     // Changepoint
-    for n in [100, 500, 1000] {
+    for n in [100, 1000, 10000] {
         let dataset = generate_time_series(n, 42);
         let result = run_benchmark("Changepoint", "PELT", n, &config, || {
             run_changepoint(&dataset, "y", None, None, CostFunction::MeanChange)
@@ -590,8 +590,7 @@ fn main() {
     }
 
     // Synthetic Control
-    for n_units in [10, 30] {
-        let n_periods = 10;
+    for (n_units, n_periods) in [(10, 10), (50, 20), (100, 100)] {
         let n = n_units * n_periods;
         let mut rng = ChaCha8Rng::seed_from_u64(42);
 
@@ -606,7 +605,7 @@ fn main() {
                 unit_ids.push(format!("unit_{}", u));
                 time_ids.push(t as i64);
                 let base = (u as f64) * 0.5 + (t as f64) * 0.1;
-                let treatment_effect = if u == 0 && t >= 7 { 2.0 } else { 0.0 };
+                let treatment_effect = if u == 0 && t >= (n_periods * 7 / 10) { 2.0 } else { 0.0 };
                 outcome.push(base + treatment_effect + rng.gen_range(-0.3..0.3));
                 pred1.push(rng.gen_range(0.0..1.0));
                 pred2.push(rng.gen_range(0.0..1.0));
@@ -625,7 +624,7 @@ fn main() {
 
         let predictors = vec![PredictorSpec::new("pred1"), PredictorSpec::new("pred2")];
         let config_synth = SynthConfig {
-            treatment_time: 7,
+            treatment_time: (n_periods * 7 / 10) as i64,
             treated_unit: "unit_0".to_string(),
             run_placebos: false,
             ..Default::default()
@@ -652,7 +651,8 @@ fn main() {
     print_header();
 
     // --- Spatial SAR/SEM (Ord 1975 optimization) ---
-    for n_side in [10, 20, 32] {
+    // Cap at 32x32=1024: SAR/SEM require O(n^3) spatial weight matrix operations
+    for n_side in [10, 32] {
         let n = n_side * n_side;
         let mut rng = ChaCha8Rng::seed_from_u64(42);
 
@@ -703,7 +703,7 @@ fn main() {
     }
 
     // --- DBSCAN (small-n condensed distance matrix optimization) ---
-    for n in [100, 1000, 5000] {
+    for n in [100, 1000, 10000] {
         let data = generate_cluster_data(n, 5, 42);
         let result = run_benchmark("DBSCAN", "eps=1.5", n, &config, || {
             dbscan(data.view(), 1.5, 5)
@@ -713,7 +713,7 @@ fn main() {
     }
 
     // --- Factor Analysis (top-k eigenpairs, Cholesky log-det) ---
-    for n in [100, 500, 1000] {
+    for n in [100, 1000, 10000] {
         let mut rng = ChaCha8Rng::seed_from_u64(42);
         let p = 10; // 10 variables, 3 factors
         let k = 3;
@@ -752,7 +752,7 @@ fn main() {
     }
 
     // --- Fisher Exact Test (pre-computed PMF, early termination) ---
-    for n in [20, 100, 500, 1000] {
+    for n in [100, 1000, 10000] {
         // Create a 2x2 contingency table with total ~n
         let a = (n as f64 * 0.3) as f64;
         let b = (n as f64 * 0.2) as f64;
@@ -768,7 +768,7 @@ fn main() {
     }
 
     // --- Fisher Exact Test with CI ---
-    for n in [20, 100, 500, 1000] {
+    for n in [100, 1000, 10000] {
         let a = (n as f64 * 0.3) as f64;
         let b = (n as f64 * 0.2) as f64;
         let c = (n as f64 * 0.15) as f64;
@@ -825,7 +825,7 @@ fn main() {
     };
 
     // DiD (canonical 2x2)
-    for n in [200, 500, 1000] {
+    for n in [100, 1000, 10000] {
         let dataset = generate_did_data(n, 42);
         let result = run_benchmark("DiD", "canonical", n, &slow_config, || {
             run_did(&dataset, "y", "treatment", "post", Some(&["x1"]))
@@ -835,7 +835,7 @@ fn main() {
     }
 
     // IV/2SLS
-    for n in [200, 500, 1000] {
+    for n in [100, 1000, 10000] {
         let dataset = generate_iv_data(n, 42);
         let result = run_benchmark("IV_2SLS", "2sls", n, &slow_config, || {
             run_iv2sls(&dataset, "y", &["x_exog"], &["x_endog"], &["instrument"], false)
@@ -845,7 +845,7 @@ fn main() {
     }
 
     // RD (sharp)
-    for n in [200, 500, 1000] {
+    for n in [100, 1000, 10000] {
         let dataset = generate_rd_data(n, 42);
         let result = run_benchmark("RD", "sharp", n, &slow_config, || {
             run_rd(&dataset, "y", "running", 0.0, RdConfig::default())
@@ -855,7 +855,7 @@ fn main() {
     }
 
     // Staggered DiD (Callaway-Sant'Anna)
-    for (n_units, n_periods) in [(20, 10), (50, 10)] {
+    for (n_units, n_periods) in [(10, 10), (50, 20), (100, 100)] {
         let n = n_units * n_periods;
         let dataset = generate_staggered_panel(n_units, n_periods, 42);
         let sdid_config = StaggeredDidConfig::default();
@@ -875,7 +875,7 @@ fn main() {
     }
 
     // ETWFE (Wooldridge)
-    for (n_units, n_periods) in [(20, 10), (50, 10)] {
+    for (n_units, n_periods) in [(10, 10), (50, 20), (100, 100)] {
         let n = n_units * n_periods;
         let dataset = generate_staggered_panel(n_units, n_periods, 42);
         let result = run_benchmark("ETWFE", "Wooldridge", n, &slow_config, || {
@@ -895,7 +895,7 @@ fn main() {
     }
 
     // Bacon decomposition
-    for (n_units, n_periods) in [(20, 10), (50, 10)] {
+    for (n_units, n_periods) in [(10, 10), (50, 20), (100, 100)] {
         let n = n_units * n_periods;
         let dataset = generate_staggered_panel(n_units, n_periods, 42);
         let result = run_benchmark("Bacon", "decomp", n, &slow_config, || {
@@ -906,7 +906,7 @@ fn main() {
     }
 
     // TMLE
-    for n in [200, 500, 1000] {
+    for n in [100, 1000, 10000] {
         let dataset = generate_treatment_data(n, 42);
         let result = run_benchmark("TMLE", "ATE", n, &slow_config, || {
             tmle(
@@ -922,7 +922,7 @@ fn main() {
     }
 
     // CTMLE
-    for n in [200, 500, 1000] {
+    for n in [100, 1000, 10000] {
         let dataset = generate_treatment_data(n, 42);
         let result = run_benchmark("CTMLE", "adaptive", n, &slow_config, || {
             ctmle(
@@ -938,7 +938,7 @@ fn main() {
     }
 
     // IPW
-    for n in [200, 500, 1000] {
+    for n in [100, 1000, 10000] {
         let dataset = generate_treatment_data(n, 42);
         let result = run_benchmark("IPW", "ATE", n, &slow_config, || {
             run_ipw_treatment(
@@ -954,7 +954,7 @@ fn main() {
     }
 
     // CBPS
-    for n in [200, 500, 1000] {
+    for n in [100, 1000, 10000] {
         let dataset = generate_treatment_data(n, 42);
         let result = run_benchmark("CBPS", "exact", n, &slow_config, || {
             run_cbps(&dataset, "treatment", &["x1", "x2"], None)
@@ -964,7 +964,7 @@ fn main() {
     }
 
     // Matching (nearest neighbor)
-    for n in [200, 500, 1000] {
+    for n in [100, 1000, 10000] {
         let dataset = generate_treatment_data(n, 42);
         let result = run_benchmark("Matching", "nearest", n, &slow_config, || {
             match_it(
@@ -980,7 +980,7 @@ fn main() {
     }
 
     // WeightIt
-    for n in [200, 500, 1000] {
+    for n in [100, 1000, 10000] {
         let dataset = generate_treatment_data(n, 42);
         let result = run_benchmark("WeightIt", "logistic", n, &slow_config, || {
             weightit(
@@ -995,7 +995,7 @@ fn main() {
     }
 
     // DoubleML (PLR)
-    for n in [200, 500, 1000] {
+    for n in [100, 1000, 10000] {
         let (y, d, x) = generate_doubleml_data(n, 42);
         let result = run_benchmark("DoubleML", "PLR", n, &slow_config, || {
             run_double_ml(&y.view(), &d.view(), &x.view(), DoubleMLConfig::default())
@@ -1005,7 +1005,7 @@ fn main() {
     }
 
     // Mediation
-    for n in [200, 500, 1000] {
+    for n in [100, 1000, 10000] {
         let dataset = generate_mediation_data(n, 42);
         let med_config = MediationConfig {
             bootstrap: 199,
@@ -1027,7 +1027,7 @@ fn main() {
     }
 
     // LTMLE (2 time points)
-    for n in [200, 500, 1000] {
+    for n in [100, 1000, 10000] {
         let mut rng = ChaCha8Rng::seed_from_u64(42);
         let x1: Array2<f64> = Array2::from_shape_fn((n, 2), |_| rng.gen_range(-1.0..1.0));
         let x2: Array2<f64> = Array2::from_shape_fn((n, 2), |_| rng.gen_range(-1.0..1.0));

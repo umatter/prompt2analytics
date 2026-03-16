@@ -27,7 +27,7 @@ generate_seasonal_data <- function(n, period) {
 cat("=== Holt-Winters R Benchmarks ===\n\n")
 
 # Test different dataset sizes with period=12
-sizes <- c(48, 120, 240, 480, 1000)
+sizes <- c(100, 1000, 10000)
 period <- 12
 
 cat("1. Multiplicative seasonality (parameter optimization)\n")

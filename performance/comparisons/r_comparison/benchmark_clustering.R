@@ -36,7 +36,7 @@ generate_cluster_data <- function(n, k = 5, n_clusters = 3, separation = 5.0) {
 }
 
 # Test sizes
-sizes <- c(100, 500, 1000)
+sizes <- c(100, 1000, 10000)
 
 cat("=" %+% strrep("=", 60) %+% "\n")
 cat("CLUSTERING BENCHMARKS - R vs Rust Comparison\n")

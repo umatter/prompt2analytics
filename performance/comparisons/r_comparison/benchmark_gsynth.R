@@ -79,10 +79,9 @@ cat("=== Generalized Synthetic Control (gsynth) R Benchmarks ===\n\n")
 
 # Test configurations
 configs <- list(
-  list(n = 20, T = 10),   # Small
-  list(n = 50, T = 20),   # Medium
-  list(n = 100, T = 50),  # Large
-  list(n = 200, T = 100)  # Very large
+  list(n = 10, T = 10),    # Small (n=100)
+  list(n = 50, T = 20),    # Medium (n=1000)
+  list(n = 100, T = 100)   # Large (n=10000)
 )
 
 cat(sprintf("%-20s %15s %15s %15s\n", "Config", "Median (ms)", "Mean (ms)", "SD (ms)"))

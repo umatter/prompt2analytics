@@ -11,7 +11,7 @@ set.seed(42)
 # Benchmark at different numbers of blocks (rows)
 # Each block has 3 treatments
 n_treatments <- 3
-sizes <- c(30, 100, 300, 1000)
+sizes <- c(100, 1000, 10000)
 
 cat("=== Friedman Rank Sum Test R Benchmarks ===\n\n")
 

@@ -11,7 +11,6 @@ cat("=== Exact Poisson Test R Benchmarks ===\n\n")
 
 # Test configurations for one-sample tests
 one_sample_configs <- list(
-  list(x = 10, t = 1),
   list(x = 100, t = 10),
   list(x = 1000, t = 100),
   list(x = 10000, t = 1000)
@@ -46,7 +45,6 @@ for (config in one_sample_configs) {
 
 # Test configurations for two-sample tests
 two_sample_configs <- list(
-  list(x1 = 5, x2 = 10, t1 = 1, t2 = 2),
   list(x1 = 50, x2 = 100, t1 = 10, t2 = 20),
   list(x1 = 500, x2 = 1000, t1 = 100, t2 = 200),
   list(x1 = 5000, x2 = 10000, t1 = 1000, t2 = 2000)

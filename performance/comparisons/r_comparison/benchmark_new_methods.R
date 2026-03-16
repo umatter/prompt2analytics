@@ -13,7 +13,7 @@ cat("R Performance Benchmark: New Statistical Methods\n")
 cat("================================================================\n\n")
 
 # Sample sizes to test
-sample_sizes <- c(100, 500, 1000, 5000)
+sample_sizes <- c(100, 1000, 10000)
 
 # Number of benchmark iterations
 n_iter <- 10
@@ -278,17 +278,16 @@ cat("\n")
 cat("================================================================\n")
 cat("SUMMARY: R Performance (milliseconds)\n")
 cat("================================================================\n")
-cat(sprintf("%-15s %8s %8s %8s %8s\n", "Method", "n=100", "n=500", "n=1000", "n=5000"))
-cat(sprintf("%-15s %8s %8s %8s %8s\n", "------", "-----", "-----", "------", "------"))
+cat(sprintf("%-15s %8s %8s %8s\n", "Method", "n=100", "n=1000", "n=10000"))
+cat(sprintf("%-15s %8s %8s %8s\n", "------", "-----", "------", "-------"))
 
 for (method in unique(results$method)) {
   row <- results[results$method == method, ]
-  cat(sprintf("%-15s %8.2f %8.2f %8.2f %8.2f\n",
+  cat(sprintf("%-15s %8.2f %8.2f %8.2f\n",
               method,
               row$time_ms[row$n == 100],
-              row$time_ms[row$n == 500],
               row$time_ms[row$n == 1000],
-              row$time_ms[row$n == 5000]))
+              row$time_ms[row$n == 10000]))
 }
 cat("================================================================\n")
 

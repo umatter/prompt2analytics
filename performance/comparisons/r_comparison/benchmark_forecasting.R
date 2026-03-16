@@ -44,7 +44,7 @@ generate_changepoint_series <- function(n, n_changes = 3) {
 benchmark_arima <- function() {
   results <- list()
 
-  for (n in c(100, 200, 500)) {
+  for (n in c(100, 1000, 10000)) {
     cat(sprintf("Benchmarking ARIMA with n=%d\n", n))
     data <- generate_time_series(n)
 
@@ -65,7 +65,7 @@ benchmark_arima <- function() {
 benchmark_mstl <- function() {
   results <- list()
 
-  for (n in c(100, 200, 500)) {
+  for (n in c(100, 1000, 10000)) {
     cat(sprintf("Benchmarking MSTL with n=%d\n", n))
     data <- generate_time_series(n)
 
@@ -91,7 +91,7 @@ benchmark_changepoint <- function() {
 
   results <- list()
 
-  for (n in c(100, 500, 1000)) {
+  for (n in c(100, 1000, 10000)) {
     cat(sprintf("Benchmarking Changepoint with n=%d\n", n))
     data <- generate_changepoint_series(n, n_changes = 3)
 

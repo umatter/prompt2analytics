@@ -15,7 +15,7 @@ suppressPackageStartupMessages({
 set.seed(42)
 
 # Benchmark at different dataset sizes
-sizes <- c(100, 1000, 10000, 100000)
+sizes <- c(100, 1000, 10000)
 
 cat("=== Box.test R Benchmarks ===\n")
 cat("Testing Ljung-Box and Box-Pierce with lag=10\n\n")

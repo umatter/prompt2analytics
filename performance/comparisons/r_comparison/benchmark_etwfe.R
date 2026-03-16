@@ -78,12 +78,9 @@ benchmark_etwfe <- function(n_units, n_periods, n_reps = 5) {
 cat("=== Extended Two-Way Fixed Effects (ETWFE) R Benchmarks ===\n\n")
 
 configs <- list(
-  list(units = 50, periods = 10),
-  list(units = 100, periods = 10),
-  list(units = 100, periods = 20),
-  list(units = 200, periods = 15),
-  list(units = 500, periods = 10),
-  list(units = 500, periods = 20)
+  list(units = 10, periods = 10),
+  list(units = 50, periods = 20),
+  list(units = 50, periods = 50)  # Cap at ~2500: etwfe creates saturated cohort×period interactions, O(n^2+) at n=10000
 )
 
 cat(sprintf("%-30s %15s %15s %15s\n", "Config", "Median (ms)", "Mean (ms)", "SD (ms)"))

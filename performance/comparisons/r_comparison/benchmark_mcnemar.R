@@ -27,7 +27,7 @@ cat(sprintf("  b = %d, c = %d\n", b, c))
 cat(sprintf("  Using microbenchmark: %s\n\n", use_microbenchmark))
 
 # Benchmark different numbers of test invocations
-n_tests <- c(1, 100, 1000, 10000)
+n_tests <- c(100, 1000, 10000)
 
 cat("Performance Results:\n")
 cat("-------------------\n")

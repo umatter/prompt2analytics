@@ -8,7 +8,7 @@
 set.seed(42)
 
 # Benchmark at different dataset sizes (total observations, split into 3 groups)
-sizes <- c(100, 1000, 10000, 100000)
+sizes <- c(100, 1000, 10000)
 
 cat("=== Welch's One-Way ANOVA R Benchmarks ===\n\n")
 

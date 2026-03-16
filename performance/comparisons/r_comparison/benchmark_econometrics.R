@@ -46,7 +46,7 @@ benchmark_fixed_effects <- function() {
   configs <- list(
     c(10, 10),
     c(50, 20),
-    c(100, 50)
+    c(100, 100)
   )
 
   for (cfg in configs) {
@@ -89,7 +89,7 @@ benchmark_hdfe <- function() {
   configs <- list(
     c(10, 10),
     c(50, 20),
-    c(100, 50)
+    c(100, 100)
   )
 
   for (cfg in configs) {
@@ -117,7 +117,7 @@ benchmark_hdfe <- function() {
 benchmark_logit <- function() {
   results <- list()
 
-  for (n in c(100, 500, 1000)) {
+  for (n in c(100, 1000, 10000)) {
     cat(sprintf("Benchmarking Logit with n=%d\n", n))
     data <- generate_binary_data(n)
 
@@ -137,7 +137,7 @@ benchmark_logit <- function() {
 benchmark_probit <- function() {
   results <- list()
 
-  for (n in c(100, 500, 1000)) {
+  for (n in c(100, 1000, 10000)) {
     cat(sprintf("Benchmarking Probit with n=%d\n", n))
     data <- generate_binary_data(n)
 

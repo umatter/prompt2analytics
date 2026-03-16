@@ -56,7 +56,7 @@ benchmark_one_sample_ttest <- function() {
   cat("\n=== One-Sample T-Test Benchmarks ===\n")
   results <- list()
 
-  for (n in c(100, 1000, 10000, 100000)) {
+  for (n in c(100, 1000, 10000)) {
     cat(sprintf("  n=%d: ", n))
     data <- generate_ttest_data(n)
 
@@ -78,7 +78,7 @@ benchmark_two_sample_ttest <- function() {
   cat("\n=== Two-Sample T-Test (Welch) Benchmarks ===\n")
   results <- list()
 
-  for (n in c(100, 1000, 10000, 100000)) {
+  for (n in c(100, 1000, 10000)) {
     cat(sprintf("  n=%d per group: ", n))
     data <- generate_ttest_data(n)
 
@@ -100,7 +100,7 @@ benchmark_paired_ttest <- function() {
   cat("\n=== Paired T-Test Benchmarks ===\n")
   results <- list()
 
-  for (n in c(100, 1000, 10000, 100000)) {
+  for (n in c(100, 1000, 10000)) {
     cat(sprintf("  n=%d pairs: ", n))
     data <- generate_ttest_data(n)
 
@@ -127,9 +127,9 @@ benchmark_one_way_anova <- function() {
   results <- list()
 
   configs <- list(
-    c(20, 3),    # 60 total
-    c(100, 5),   # 500 total
-    c(500, 10)   # 5000 total
+    c(50, 2),     # 100 total
+    c(200, 5),    # 1000 total
+    c(1000, 10)   # 10000 total
   )
 
   for (cfg in configs) {
@@ -159,7 +159,7 @@ benchmark_two_way_anova <- function() {
   results <- list()
 
   # 2x2 factorial with varying cell sizes
-  for (n_per_cell in c(10, 50, 100)) {
+  for (n_per_cell in c(25, 250, 2500)) {
     total_n <- n_per_cell * 4
     cat(sprintf("  n=%d (2x2, per_cell=%d): ", total_n, n_per_cell))
     data <- generate_two_way_anova_data(n_per_cell, 2, 2)
@@ -174,18 +174,6 @@ benchmark_two_way_anova <- function() {
     cat(sprintf("%.2f us (median)\n", med))
     results[[paste0("anova_two_way_n", total_n, "_2x2")]] <- summary(bm)
   }
-
-  # 3x4 factorial
-  data <- generate_two_way_anova_data(20, 3, 4)
-  cat("  n=240 (3x4, per_cell=20): ")
-  bm <- microbenchmark(
-    aov(y ~ factor_a * factor_b, data = data),
-    times = 100,
-    unit = "microseconds"
-  )
-  med <- median(bm$time) / 1000
-  cat(sprintf("%.2f us (median)\n", med))
-  results[["anova_two_way_n240_3x4"]] <- summary(bm)
 
   results
 }
@@ -307,7 +295,7 @@ cat("SUMMARY TABLE (median times in microseconds)\n")
 cat("======================================================\n")
 
 cat("\nT-Test (One-Sample):\n")
-for (n in c(100, 1000, 10000, 100000)) {
+for (n in c(100, 1000, 10000)) {
   key <- paste0("ttest_one_sample_", n)
   if (!is.null(ttest_one_results[[key]])) {
     med <- ttest_one_results[[key]]$median
@@ -316,7 +304,7 @@ for (n in c(100, 1000, 10000, 100000)) {
 }
 
 cat("\nT-Test (Two-Sample Welch):\n")
-for (n in c(100, 1000, 10000, 100000)) {
+for (n in c(100, 1000, 10000)) {
   key <- paste0("ttest_two_sample_", n)
   if (!is.null(ttest_two_results[[key]])) {
     med <- ttest_two_results[[key]]$median
@@ -325,7 +313,7 @@ for (n in c(100, 1000, 10000, 100000)) {
 }
 
 cat("\nOne-Way ANOVA:\n")
-for (cfg in list(c(60,3), c(500,5), c(5000,10))) {
+for (cfg in list(c(100,2), c(1000,5), c(10000,10))) {
   key <- paste0("anova_one_way_n", cfg[1], "_g", cfg[2])
   if (!is.null(anova_one_results[[key]])) {
     med <- anova_one_results[[key]]$median
@@ -334,7 +322,7 @@ for (cfg in list(c(60,3), c(500,5), c(5000,10))) {
 }
 
 cat("\nTwo-Way ANOVA:\n")
-for (n in c(40, 200, 400, 240)) {
+for (n in c(100, 1000, 10000)) {
   pattern <- paste0("anova_two_way_n", n)
   for (key in names(anova_two_results)) {
     if (grepl(pattern, key)) {

@@ -8,7 +8,8 @@ set.seed(42)
 
 cat("=== GLS R Benchmarks ===\n")
 
-sizes <- c(100, 500, 1000, 2000)
+# Cap at 1000: nlme::gls with corAR1 creates n×n correlation matrix, O(n³) at n=10000
+sizes <- c(100, 1000)
 
 for (n in sizes) {
   # Generate AR(1) correlated errors

@@ -9,7 +9,7 @@ cat("=== spline/approx R Benchmarks ===\n")
 
 # spline tests
 cat("\n--- spline ---\n")
-sizes <- c(10, 50, 100, 500)
+sizes <- c(100, 1000, 10000)
 
 for (n in sizes) {
   x <- sort(runif(n, 0, 10))

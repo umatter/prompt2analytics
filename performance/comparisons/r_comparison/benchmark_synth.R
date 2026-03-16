@@ -354,10 +354,10 @@ benchmark_synth <- function() {
 
   results <- list()
 
-  # Small panel
-  cat("\nSmall panel (5 donors, 10 periods):\n")
+  # Small panel (10 donors, 10 periods = 100 obs)
+  cat("\nSmall panel (10 donors, 10 periods):\n")
   set.seed(42)
-  small_panel <- generate_test_panel(5, 10, 6)
+  small_panel <- generate_test_panel(10, 10, 6)
 
   bm_small <- microbenchmark(
     {
@@ -376,9 +376,9 @@ benchmark_synth <- function() {
   print(summary(bm_small))
   results[["small"]] <- summary(bm_small)
 
-  # Medium panel
-  cat("\nMedium panel (15 donors, 20 periods):\n")
-  medium_panel <- generate_test_panel(15, 20, 12)
+  # Medium panel (50 donors, 20 periods = 1000 obs)
+  cat("\nMedium panel (50 donors, 20 periods):\n")
+  medium_panel <- generate_test_panel(50, 20, 12)
 
   bm_medium <- microbenchmark(
     {
@@ -397,19 +397,19 @@ benchmark_synth <- function() {
   print(summary(bm_medium))
   results[["medium"]] <- summary(bm_medium)
 
-  # Large panel (with placebos)
-  cat("\nMedium panel with placebos (10 donors, 15 periods):\n")
-  large_panel <- generate_test_panel(10, 15, 8)
+  # Large panel (100 donors, 100 periods = 10000 obs)
+  cat("\nLarge panel (100 donors, 100 periods):\n")
+  large_panel <- generate_test_panel(100, 100, 50)
 
   bm_large <- microbenchmark(
     {
       large_panel %>%
         synthetic_control(
           outcome = outcome, unit = unit, time = time,
-          i_unit = "Treated", i_time = 8, generate_placebos = TRUE
+          i_unit = "Treated", i_time = 50, generate_placebos = TRUE
         ) %>%
-        generate_predictor(time_window = 1:7, outcome = mean(outcome)) %>%
-        generate_weights(optimization_window = 1:7) %>%
+        generate_predictor(time_window = 1:49, outcome = mean(outcome)) %>%
+        generate_weights(optimization_window = 1:49) %>%
         generate_control()
     },
     times = 5,

@@ -69,7 +69,7 @@ benchmark_ipw <- function() {
   cat("=== IPW Treatment Effects Benchmarks ===\n")
   results <- list()
 
-  for (n in c(200, 500, 1000, 2000)) {
+  for (n in c(100, 1000, 10000)) {
     cat(sprintf("Benchmarking IPW with n=%d...\n", n))
 
     data <- generate_treatment_data(n)
@@ -107,7 +107,7 @@ benchmark_mediation <- function() {
   cat("\n=== Mediation Analysis Benchmarks ===\n")
   results <- list()
 
-  for (n in c(200, 500, 1000)) {
+  for (n in c(100, 1000, 10000)) {
     cat(sprintf("Benchmarking mediation with n=%d...\n", n))
 
     data <- generate_mediation_data(n)

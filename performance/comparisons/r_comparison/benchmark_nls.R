@@ -50,7 +50,7 @@ results <- list()
 
 cat("\n=== Exponential Decay (y = a * exp(-b * x) + c) ===\n")
 
-for (n in c(10, 50, 100, 500, 1000)) {
+for (n in c(100, 1000, 10000)) {
   cat(sprintf("  n=%d: ", n))
   data <- generate_exponential_decay_data(n)
 
@@ -76,7 +76,7 @@ for (n in c(10, 50, 100, 500, 1000)) {
 
 cat("\n=== Michaelis-Menten (V = Vmax * S / (Km + S)) ===\n")
 
-for (n in c(8, 20, 50, 100, 500)) {
+for (n in c(100, 1000, 10000)) {
   cat(sprintf("  n=%d: ", n))
   data <- generate_michaelis_menten_data(n)
 
@@ -135,7 +135,7 @@ cat("SUMMARY TABLE (median times in microseconds)\n")
 cat("======================================================\n\n")
 
 cat("Exponential Decay:\n")
-for (n in c(10, 50, 100, 500, 1000)) {
+for (n in c(100, 1000, 10000)) {
   key <- paste0("exp_decay_n", n)
   if (!is.null(results[[key]])) {
     med <- results[[key]]$median
@@ -144,7 +144,7 @@ for (n in c(10, 50, 100, 500, 1000)) {
 }
 
 cat("\nMichaelis-Menten:\n")
-for (n in c(8, 20, 50, 100, 500)) {
+for (n in c(100, 1000, 10000)) {
   key <- paste0("mm_n", n)
   if (!is.null(results[[key]])) {
     med <- results[[key]]$median

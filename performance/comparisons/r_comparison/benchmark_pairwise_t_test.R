@@ -22,10 +22,9 @@ generate_data <- function(k_groups, n_per_group) {
 
 # Test configurations: (k_groups, n_per_group)
 configs <- list(
-  c(3, 10),     # Small: 3 groups, 10 per group, 3 comparisons
-  c(5, 50),     # Medium: 5 groups, 50 per group, 10 comparisons
-  c(10, 100),   # Large: 10 groups, 100 per group, 45 comparisons
-  c(20, 500)    # Very large: 20 groups, 500 per group, 190 comparisons
+  c(5, 20),     # Small: 5 groups, 20 per group (n=100)
+  c(10, 100),   # Medium: 10 groups, 100 per group (n=1000)
+  c(10, 1000)   # Large: 10 groups, 1000 per group (n=10000)
 )
 
 cat("Benchmarking pairwise.t.test with pool.sd=TRUE, p.adjust.method='holm'\n")
@@ -68,7 +67,7 @@ for (cfg in configs) {
 cat("\n=== Benchmarking p.adjust methods ===\n\n")
 
 # Benchmark p.adjust with different numbers of p-values
-p_sizes <- c(10, 100, 1000, 10000)
+p_sizes <- c(100, 1000, 10000)
 
 for (n_p in p_sizes) {
   p_values <- runif(n_p, 0, 0.1)  # Random p-values between 0 and 0.1

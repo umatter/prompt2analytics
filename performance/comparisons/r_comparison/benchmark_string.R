@@ -99,7 +99,7 @@ generate_string_data <- function(n) {
 benchmark_trim <- function() {
   results <- list()
 
-  for (n in c(10000, 100000)) {
+  for (n in c(100, 1000, 10000)) {
     cat(sprintf("Benchmarking trim with n=%d\n", n))
     dt <- generate_string_data(n)
 
@@ -124,7 +124,7 @@ benchmark_trim <- function() {
 benchmark_case_conversion <- function() {
   results <- list()
 
-  for (n in c(10000, 100000)) {
+  for (n in c(100, 1000, 10000)) {
     cat(sprintf("Benchmarking case conversion with n=%d\n", n))
     dt <- generate_string_data(n)
 
@@ -161,7 +161,7 @@ benchmark_case_conversion <- function() {
 benchmark_replace <- function() {
   results <- list()
 
-  for (n in c(10000, 100000)) {
+  for (n in c(100, 1000, 10000)) {
     cat(sprintf("Benchmarking replace with n=%d\n", n))
     dt <- generate_string_data(n)
 
@@ -198,7 +198,7 @@ benchmark_replace <- function() {
 benchmark_regex_extract <- function() {
   results <- list()
 
-  for (n in c(10000, 100000)) {
+  for (n in c(100, 1000, 10000)) {
     cat(sprintf("Benchmarking regex extract with n=%d\n", n))
     dt <- generate_string_data(n)
 
@@ -227,7 +227,7 @@ benchmark_regex_extract <- function() {
 benchmark_regex_count <- function() {
   results <- list()
 
-  for (n in c(10000, 100000)) {
+  for (n in c(100, 1000, 10000)) {
     cat(sprintf("Benchmarking regex count with n=%d\n", n))
     dt <- generate_string_data(n)
 
@@ -253,7 +253,7 @@ benchmark_regex_count <- function() {
 benchmark_split <- function() {
   results <- list()
 
-  for (n in c(10000, 100000)) {
+  for (n in c(100, 1000, 10000)) {
     cat(sprintf("Benchmarking split with n=%d\n", n))
     dt <- generate_string_data(n)
 
@@ -278,7 +278,7 @@ benchmark_split <- function() {
 benchmark_concat <- function() {
   results <- list()
 
-  for (n in c(10000, 100000)) {
+  for (n in c(100, 1000, 10000)) {
     cat(sprintf("Benchmarking concat with n=%d\n", n))
     dt <- generate_string_data(n)
 
@@ -303,7 +303,7 @@ benchmark_concat <- function() {
 benchmark_length <- function() {
   results <- list()
 
-  for (n in c(10000, 100000)) {
+  for (n in c(100, 1000, 10000)) {
     cat(sprintf("Benchmarking length with n=%d\n", n))
     dt <- generate_string_data(n)
 
@@ -328,7 +328,7 @@ benchmark_length <- function() {
 benchmark_substring <- function() {
   results <- list()
 
-  for (n in c(10000, 100000)) {
+  for (n in c(100, 1000, 10000)) {
     cat(sprintf("Benchmarking substring with n=%d\n", n))
     dt <- generate_string_data(n)
 

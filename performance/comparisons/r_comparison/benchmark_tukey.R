@@ -25,9 +25,9 @@ generate_tukey_data <- function(n_per_group, n_groups) {
 
 # Benchmark configurations
 configs <- list(
-  list(n_per_group = 9, n_groups = 3, label = "n=27, k=3"),
-  list(n_per_group = 20, n_groups = 5, label = "n=100, k=5"),
-  list(n_per_group = 100, n_groups = 10, label = "n=1000, k=10")
+  list(n_per_group = 50, n_groups = 2, label = "n=100, k=2"),
+  list(n_per_group = 200, n_groups = 5, label = "n=1000, k=5"),
+  list(n_per_group = 1000, n_groups = 10, label = "n=10000, k=10")
 )
 
 cat("Tukey HSD Performance Benchmarks:\n")

@@ -31,10 +31,9 @@ generate_blocked_data <- function(n_blocks, n_treatments) {
 
 # Test configurations: (n_blocks, n_treatments)
 configs <- list(
-  c(10, 3),    # Small: 10 blocks, 3 treatments
-  c(50, 4),    # Medium: 50 blocks, 4 treatments
-  c(100, 5),   # Large: 100 blocks, 5 treatments
-  c(500, 3)    # Very large: 500 blocks, 3 treatments
+  c(20, 5),    # Small: 20 blocks, 5 treatments (n=100)
+  c(200, 5),   # Medium: 200 blocks, 5 treatments (n=1000)
+  c(2000, 5)   # Large: 2000 blocks, 5 treatments (n=10000)
 )
 
 cat("Benchmarking quade.test with varying block and treatment sizes\n")

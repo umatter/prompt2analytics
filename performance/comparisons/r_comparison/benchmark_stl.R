@@ -7,7 +7,7 @@ set.seed(42)
 
 cat("=== STL R Benchmarks ===\n")
 
-sizes <- c(120, 240, 480, 960)
+sizes <- c(100, 1000, 10000)
 
 for (n in sizes) {
   # Generate seasonal time series
