@@ -27,10 +27,10 @@ excluding data loading and process startup.
 for panel data, \pkg{AER} for IV,
 \pkg{forecast}~\citep{Hyndman+Khandakar:2008}/\pkg{vars} for time
 series, and \proglang{R}'s \pkg{stats} for hypothesis tests.
-Across all 384 configurations (multiple sample sizes per method),
-the median speedup is 25.1$\times$, with \proglang{Rust} faster in
-361 cases (94\%). At the largest sample size per unique method
-(119 methods), the median is 11.0$\times$
+Across all 200 configurations (multiple sample sizes per method),
+the median speedup is 16.4$\times$, with \proglang{Rust} faster in
+182 cases (91\%). At the largest sample size per unique method
+(117 methods), the median is 12.4$\times$
 (Figure~\ref{fig:benchmark-histogram}).
 
 Speedups vary widely by method category, reflecting the relative weight
@@ -72,10 +72,10 @@ are in Appendix~\ref{app:reproducibility}.
     Generate with: \texttt{Rscript paper/code/generate\_paper\_figures.R}%
     \vspace{3cm}}}%
 }
-\caption{Distribution of Rust/R speedup factors across 119 unique methods
+\caption{Distribution of Rust/R speedup factors across 117 unique methods
 at their largest sample size (log scale). The vertical line at
 1$\times$ indicates parity; values to the right indicate \proglang{Rust}
-faster. The median speedup is 11.0$\times$, with \proglang{Rust} faster
+faster. The median speedup is 12.4$\times$, with \proglang{Rust} faster
 in 89\% of methods.}
 \label{fig:benchmark-histogram}
 \end{figure}

@@ -665,7 +665,7 @@ fn main() {
     println!("\n--- Panel Data ---");
     print_header();
 
-    for (n_ent, n_per) in [(10, 10), (50, 20), (100, 50)] {
+    for (n_ent, n_per) in [(10, 10), (50, 20), (100, 100)] {
         let n = n_ent * n_per;
         let dataset = load_csv_dataset(&data_dir, "panel", n)
             .unwrap_or_else(|| generate_panel_data(n_ent, n_per, 42));
@@ -722,7 +722,7 @@ fn main() {
     // Additional Panel Methods: Hausman, Panel_GLS, Arellano_Bond, PVCM, PMG
 
     // Hausman test
-    for (n_ent, n_per) in [(10, 10), (50, 20), (100, 50)] {
+    for (n_ent, n_per) in [(10, 10), (50, 20), (100, 100)] {
         let n = n_ent * n_per;
         let dataset = load_csv_dataset(&data_dir, "panel", n)
             .unwrap_or_else(|| generate_panel_data(n_ent, n_per, 42));
@@ -743,7 +743,7 @@ fn main() {
     }
 
     // Panel GLS
-    for (n_ent, n_per) in [(10, 10), (50, 20), (100, 50)] {
+    for (n_ent, n_per) in [(10, 10), (50, 20), (100, 100)] {
         let n = n_ent * n_per;
         let dataset = load_csv_dataset(&data_dir, "panel", n)
             .unwrap_or_else(|| generate_panel_data(n_ent, n_per, 42));
@@ -764,7 +764,7 @@ fn main() {
     }
 
     // Arellano-Bond GMM
-    for (n_ent, n_per) in [(10, 10), (50, 20)] {
+    for (n_ent, n_per) in [(10, 10), (50, 20), (100, 100)] {
         let n = n_ent * n_per;
         let dataset = load_csv_dataset(&data_dir, "panel", n)
             .unwrap_or_else(|| generate_panel_data(n_ent, n_per, 42));
@@ -785,7 +785,7 @@ fn main() {
     }
 
     // PVCM (requires string entity column)
-    for (n_ent, n_per) in [(10, 10), (50, 20)] {
+    for (n_ent, n_per) in [(10, 10), (50, 20), (100, 100)] {
         let n = n_ent * n_per;
         let base_dataset = load_csv_dataset(&data_dir, "panel", n)
             .unwrap_or_else(|| generate_panel_data(n_ent, n_per, 42));
@@ -809,7 +809,7 @@ fn main() {
     }
 
     // PMG (requires string entity column)
-    for (n_ent, n_per) in [(10, 10), (50, 20)] {
+    for (n_ent, n_per) in [(10, 10), (50, 20), (100, 100)] {
         let n = n_ent * n_per;
         let base_dataset = load_csv_dataset(&data_dir, "panel", n)
             .unwrap_or_else(|| generate_panel_data(n_ent, n_per, 42));
@@ -838,7 +838,7 @@ fn main() {
     println!("\n--- Discrete Choice ---");
     print_header();
 
-    for n in [100, 500, 1000] {
+    for n in [100, 1000, 10000] {
         let dataset = load_csv_dataset(&data_dir, "binary", n)
             .unwrap_or_else(|| generate_binary_data(n, 42));
 
@@ -881,7 +881,7 @@ fn main() {
     println!("\n--- Time Series ---");
     print_header();
 
-    for n in [100, 200, 500] {
+    for n in [100, 1000, 10000] {
         let dataset = load_csv_dataset(&data_dir, "timeseries", n)
             .unwrap_or_else(|| generate_time_series(n, 42));
 
@@ -924,7 +924,7 @@ fn main() {
     println!("\n--- Machine Learning ---");
     print_header();
 
-    for n in [100, 1000, 5000] {
+    for n in [100, 1000, 10000] {
         let data = load_csv_array2(&data_dir, "cluster", n)
             .unwrap_or_else(|| generate_cluster_data(n, 5, 42));
 
@@ -969,7 +969,7 @@ fn main() {
     println!("\n--- LOESS ---");
     print_header();
 
-    for n in [100, 500, 1000] {
+    for n in [100, 1000, 10000] {
         let dataset = load_csv_dataset(&data_dir, "loess", n)
             .unwrap_or_else(|| generate_regression_data(n, 1, 42));
         let mut result = run_benchmark_tracked("LOESS", "span=0.75", n, &config, || {
@@ -992,7 +992,7 @@ fn main() {
     // ============================================
     // Hierarchical Clustering
     // ============================================
-    for n in [100, 500, 1000] {
+    for n in [100, 1000, 10000] {
         let data = load_csv_array2(&data_dir, "cluster", n)
             .unwrap_or_else(|| generate_cluster_data(n, 5, 42));
         let mut result = run_benchmark_tracked("Hierarchical", "Ward", n, &config, || {
@@ -1012,7 +1012,7 @@ fn main() {
     // ============================================
     // Random Forest
     // ============================================
-    for n in [100, 500, 1000] {
+    for n in [100, 1000, 10000] {
         let data = load_csv_array2(&data_dir, "cluster", n)
             .unwrap_or_else(|| generate_cluster_data(n, 5, 42));
         let target: Array1<f64> = data.column(0).to_owned();
@@ -1032,7 +1032,7 @@ fn main() {
     // ============================================
     // DBSCAN
     // ============================================
-    for n in [100, 1000, 5000] {
+    for n in [100, 1000, 10000] {
         let data = load_csv_array2(&data_dir, "cluster", n)
             .unwrap_or_else(|| generate_cluster_data(n, 5, 42));
         let mut result = run_benchmark_tracked("DBSCAN", "eps=1.5", n, &config, || {
@@ -1053,7 +1053,7 @@ fn main() {
     // ============================================
     // Factor Analysis
     // ============================================
-    for n in [100, 500, 1000] {
+    for n in [100, 1000, 10000] {
         let mut rng = ChaCha8Rng::seed_from_u64(42);
         let p = 10;
         let k = 3;
@@ -1117,7 +1117,7 @@ fn main() {
     // ============================================
     // Doubly Robust (AIPW)
     // ============================================
-    for n in [200, 500, 1000] {
+    for n in [100, 1000, 10000] {
         let dataset = load_csv_dataset(&data_dir, "binary", n)
             .unwrap_or_else(|| generate_binary_data(n, 42));
         let dr_config = DoublyRobustConfig {
@@ -1147,7 +1147,7 @@ fn main() {
     // ============================================
     // Changepoint
     // ============================================
-    for n in [100, 500, 1000] {
+    for n in [100, 1000, 10000] {
         let dataset = load_csv_dataset(&data_dir, "timeseries", n)
             .unwrap_or_else(|| generate_time_series(n, 42));
         let mut result = run_benchmark_tracked("Changepoint", "PELT", n, &config, || {
@@ -1169,8 +1169,7 @@ fn main() {
     // ============================================
     // Synthetic Control
     // ============================================
-    for n_units in [10, 30] {
-        let n_periods = 10;
+    for (n_units, n_periods) in [(10, 10), (50, 20), (100, 100)] {
         let n = n_units * n_periods;
         let mut rng = ChaCha8Rng::seed_from_u64(42);
         let mut unit_ids: Vec<String> = Vec::new();
@@ -1349,7 +1348,7 @@ fn main() {
     print_header();
 
     // DiD (canonical 2x2)
-    for n in [200, 500, 1000] {
+    for n in [100, 1000, 10000] {
         let dataset = load_csv_dataset(&data_dir, "did", n)
             .unwrap_or_else(|| generate_did_data(n, 42));
         let mut result = run_benchmark_tracked("DiD", "canonical", n, &slow_config, || {
@@ -1368,7 +1367,7 @@ fn main() {
     }
 
     // IV/2SLS
-    for n in [200, 500, 1000] {
+    for n in [100, 1000, 10000] {
         let dataset = load_csv_dataset(&data_dir, "iv", n)
             .unwrap_or_else(|| generate_iv_data(n, 42));
         let mut result = run_benchmark_tracked("IV_2SLS", "2sls", n, &slow_config, || {
@@ -1387,7 +1386,7 @@ fn main() {
     }
 
     // RD (sharp)
-    for n in [200, 500, 1000] {
+    for n in [100, 1000, 10000] {
         let dataset = load_csv_dataset(&data_dir, "rd", n)
             .unwrap_or_else(|| generate_rd_data(n, 42));
         let mut result = run_benchmark_tracked("RD", "sharp", n, &slow_config, || {
@@ -1409,7 +1408,7 @@ fn main() {
     }
 
     // Staggered DiD (Callaway-Sant'Anna)
-    for (n_units, n_periods) in [(20, 10), (50, 10)] {
+    for (n_units, n_periods) in [(10, 10), (50, 20), (100, 100)] {
         let n = n_units * n_periods;
         let dataset = load_csv_dataset(&data_dir, "staggered", n)
             .unwrap_or_else(|| generate_staggered_panel(n_units, n_periods, 42));
@@ -1430,7 +1429,7 @@ fn main() {
     }
 
     // ETWFE (Wooldridge)
-    for (n_units, n_periods) in [(20, 10), (50, 10)] {
+    for (n_units, n_periods) in [(10, 10), (50, 20), (100, 100)] {
         let n = n_units * n_periods;
         let dataset = load_csv_dataset(&data_dir, "staggered", n)
             .unwrap_or_else(|| generate_staggered_panel(n_units, n_periods, 42));
@@ -1450,7 +1449,7 @@ fn main() {
     }
 
     // Bacon decomposition
-    for (n_units, n_periods) in [(20, 10), (50, 10)] {
+    for (n_units, n_periods) in [(10, 10), (50, 20), (100, 100)] {
         let n = n_units * n_periods;
         let dataset = load_csv_dataset(&data_dir, "staggered", n)
             .unwrap_or_else(|| generate_staggered_panel(n_units, n_periods, 42));
@@ -1470,7 +1469,7 @@ fn main() {
     }
 
     // GSynth (Generalized Synthetic Control)
-    for (n_units, n_periods) in [(20, 10), (50, 10)] {
+    for (n_units, n_periods) in [(10, 10), (50, 20), (100, 100)] {
         let n = n_units * n_periods;
         let dataset = load_csv_dataset(&data_dir, "staggered", n)
             .unwrap_or_else(|| generate_staggered_panel(n_units, n_periods, 42));
@@ -1497,7 +1496,7 @@ fn main() {
     }
 
     // TMLE
-    for n in [200, 500, 1000] {
+    for n in [100, 1000, 10000] {
         let dataset = load_csv_dataset(&data_dir, "treatment", n)
             .unwrap_or_else(|| generate_treatment_data(n, 42));
         let mut result = run_benchmark_tracked("TMLE", "ATE", n, &slow_config, || {
@@ -1516,7 +1515,7 @@ fn main() {
     }
 
     // CTMLE
-    for n in [200, 500, 1000] {
+    for n in [100, 1000, 10000] {
         let dataset = load_csv_dataset(&data_dir, "treatment", n)
             .unwrap_or_else(|| generate_treatment_data(n, 42));
         let mut result = run_benchmark_tracked("CTMLE", "adaptive", n, &slow_config, || {
@@ -1535,7 +1534,7 @@ fn main() {
     }
 
     // IPW
-    for n in [200, 500, 1000] {
+    for n in [100, 1000, 10000] {
         let dataset = load_csv_dataset(&data_dir, "treatment", n)
             .unwrap_or_else(|| generate_treatment_data(n, 42));
         let mut result = run_benchmark_tracked("IPW", "ATE", n, &slow_config, || {
@@ -1554,7 +1553,7 @@ fn main() {
     }
 
     // CBPS
-    for n in [200, 500, 1000] {
+    for n in [100, 1000, 10000] {
         let dataset = load_csv_dataset(&data_dir, "treatment", n)
             .unwrap_or_else(|| generate_treatment_data(n, 42));
         let mut result = run_benchmark_tracked("CBPS", "exact", n, &slow_config, || {
@@ -1604,7 +1603,7 @@ fn main() {
     }
 
     // Matching (nearest neighbor)
-    for n in [200, 500, 1000] {
+    for n in [100, 1000, 10000] {
         let dataset = load_csv_dataset(&data_dir, "treatment", n)
             .unwrap_or_else(|| generate_treatment_data(n, 42));
         let mut result = run_benchmark_tracked("Matching", "nearest", n, &slow_config, || {
@@ -1631,7 +1630,7 @@ fn main() {
     }
 
     // WeightIt
-    for n in [200, 500, 1000] {
+    for n in [100, 1000, 10000] {
         let dataset = load_csv_dataset(&data_dir, "treatment", n)
             .unwrap_or_else(|| generate_treatment_data(n, 42));
         let mut result = run_benchmark_tracked("WeightIt", "logistic", n, &slow_config, || {
@@ -1649,7 +1648,7 @@ fn main() {
     }
 
     // DoubleML (PLR)
-    for n in [200, 500, 1000] {
+    for n in [100, 1000, 10000] {
         let (y, d, x) = generate_doubleml_data(n, 42);
         let mut result = run_benchmark_tracked("DoubleML", "PLR", n, &slow_config, || {
             run_double_ml(&y.view(), &d.view(), &x.view(), DoubleMLConfig::default())
@@ -1667,7 +1666,7 @@ fn main() {
     }
 
     // Mediation
-    for n in [200, 500, 1000] {
+    for n in [100, 1000, 10000] {
         let dataset = load_csv_dataset(&data_dir, "mediation", n)
             .unwrap_or_else(|| generate_mediation_data(n, 42));
         let med_config = MediationConfig {
@@ -1693,7 +1692,7 @@ fn main() {
     }
 
     // LTMLE (2 time points)
-    for n in [200, 500, 1000] {
+    for n in [100, 1000, 10000] {
         let mut rng = ChaCha8Rng::seed_from_u64(42);
         let x1: Array2<f64> = Array2::from_shape_fn((n, 2), |_| rng.gen_range(-1.0..1.0));
         let x2: Array2<f64> = Array2::from_shape_fn((n, 2), |_| rng.gen_range(-1.0..1.0));
@@ -1735,7 +1734,7 @@ fn main() {
     println!("\n--- Fisher Exact Test ---");
     print_header();
 
-    for n in [20, 100, 500, 1000] {
+    for n in [100, 1000, 10000] {
         let a = (n as f64 * 0.3) as f64;
         let b = (n as f64 * 0.2) as f64;
         let c = (n as f64 * 0.15) as f64;
@@ -1823,7 +1822,7 @@ fn main() {
     println!("\n--- Survival Analysis ---");
     print_header();
 
-    for n in [100, 500, 1000] {
+    for n in [100, 1000, 10000] {
         let ds = load_csv_dataset(&data_dir, "survival", n);
 
         if let Some(ref dataset) = ds {
@@ -1949,7 +1948,7 @@ fn main() {
     println!("\n--- Sensemakr ---");
     print_header();
 
-    for n in [200, 500, 1000] {
+    for n in [100, 1000, 10000] {
         let ds = load_csv_dataset(&data_dir, "treatment", n);
 
         let dataset = ds.unwrap_or_else(|| {
@@ -2200,7 +2199,7 @@ fn main() {
     }
 
     // OLS_Bootstrap (slower - use slow_config with smaller sample sizes)
-    for n in [200, 500, 1000] {
+    for n in [100, 1000, 10000] {
         let dataset = load_csv_dataset(&data_dir, "regression", n)
             .unwrap_or_else(|| generate_regression_data(n, 5, 42));
         let x_cols: Vec<&str> = vec!["x1", "x2", "x3", "x4", "x5"];
@@ -2227,7 +2226,7 @@ fn main() {
     }
 
     // GLS (slower - use slow_config)
-    for n in [100, 500, 1000] {
+    for n in [100, 1000, 10000] {
         let dataset = load_csv_dataset(&data_dir, "regression", n)
             .unwrap_or_else(|| generate_regression_data(n, 1, 42));
 
@@ -2253,7 +2252,7 @@ fn main() {
     }
 
     // Quantile Regression (slower - use slow_config)
-    for n in [200, 500, 1000] {
+    for n in [100, 1000, 10000] {
         let dataset = load_csv_dataset(&data_dir, "regression", n)
             .unwrap_or_else(|| generate_regression_data(n, 3, 42));
         let x_cols: Vec<&str> = vec!["x1", "x2", "x3"];
@@ -2278,7 +2277,7 @@ fn main() {
     }
 
     // Smooth Spline
-    for n in [100, 500, 1000] {
+    for n in [100, 1000, 10000] {
         let dataset = load_csv_dataset(&data_dir, "regression", n)
             .unwrap_or_else(|| generate_regression_data(n, 1, 42));
         let x1_col = dataset.df().column("x1").unwrap().as_materialized_series().f64().unwrap();
@@ -2302,7 +2301,7 @@ fn main() {
     }
 
     // Stepwise Selection (slower - use slow_config)
-    for n in [200, 500, 1000] {
+    for n in [100, 1000, 10000] {
         let dataset = load_csv_dataset(&data_dir, "regression", n)
             .unwrap_or_else(|| generate_regression_data(n, 5, 42));
         let x_cols: Vec<&str> = vec!["x1", "x2", "x3", "x4", "x5"];
@@ -2333,7 +2332,7 @@ fn main() {
     print_header();
 
     // AR
-    for n in [100, 200, 500] {
+    for n in [100, 1000, 10000] {
         let dataset = load_csv_dataset(&data_dir, "timeseries", n)
             .unwrap_or_else(|| generate_time_series(n, 42));
         let y_vec = extract_col_vec(&dataset, "y");
@@ -2361,7 +2360,7 @@ fn main() {
     }
 
     // STL
-    for n in [100, 200, 500] {
+    for n in [100, 1000, 10000] {
         let dataset = load_csv_dataset(&data_dir, "timeseries", n)
             .unwrap_or_else(|| generate_time_series(n, 42));
         let y_vec = extract_col_vec(&dataset, "y");
@@ -2382,7 +2381,7 @@ fn main() {
     }
 
     // Decompose
-    for n in [100, 200, 500] {
+    for n in [100, 1000, 10000] {
         let dataset = load_csv_dataset(&data_dir, "timeseries", n)
             .unwrap_or_else(|| generate_time_series(n, 42));
         let y_vec = extract_col_vec(&dataset, "y");
@@ -2406,7 +2405,7 @@ fn main() {
     }
 
     // Holt-Winters
-    for n in [100, 200, 500] {
+    for n in [100, 1000, 10000] {
         let dataset = load_csv_dataset(&data_dir, "timeseries", n)
             .unwrap_or_else(|| generate_time_series(n, 42));
         let y_vec = extract_col_vec(&dataset, "y");
@@ -2438,7 +2437,7 @@ fn main() {
     }
 
     // GARCH
-    for n in [200, 500, 1000] {
+    for n in [100, 1000, 10000] {
         let garch_y = load_csv_array1(&data_dir, "garch", n, "y")
             .map(|a| a.to_vec())
             .unwrap_or_else(|| generate_garch_data(n, 42));
@@ -2466,7 +2465,7 @@ fn main() {
     }
 
     // Kalman (local level state-space model)
-    for n in [100, 200, 500] {
+    for n in [100, 1000, 10000] {
         let dataset = load_csv_dataset(&data_dir, "timeseries", n)
             .unwrap_or_else(|| generate_time_series(n, 42));
         let y_vec = extract_col_vec(&dataset, "y");
@@ -2498,7 +2497,7 @@ fn main() {
     }
 
     // StructTS (local linear trend)
-    for n in [100, 200, 500] {
+    for n in [100, 1000, 10000] {
         let dataset = load_csv_dataset(&data_dir, "timeseries", n)
             .unwrap_or_else(|| generate_time_series(n, 42));
         let y_vec = extract_col_vec(&dataset, "y");
@@ -2527,7 +2526,7 @@ fn main() {
     }
 
     // VAR
-    for n in [100, 200, 500] {
+    for n in [100, 1000, 10000] {
         let dataset = load_csv_dataset(&data_dir, "bivariate", n)
             .unwrap_or_else(|| generate_bivariate_data(n, 42));
 
@@ -2547,7 +2546,7 @@ fn main() {
     }
 
     // VECM
-    for n in [200, 500] {
+    for n in [100, 1000, 10000] {
         let dataset = load_csv_dataset(&data_dir, "bivariate", n)
             .unwrap_or_else(|| generate_bivariate_data(n, 42));
 
@@ -2567,7 +2566,7 @@ fn main() {
     }
 
     // Granger
-    for n in [100, 200, 500] {
+    for n in [100, 1000, 10000] {
         let dataset = load_csv_dataset(&data_dir, "bivariate", n)
             .unwrap_or_else(|| generate_bivariate_data(n, 42));
 
@@ -2587,7 +2586,7 @@ fn main() {
     }
 
     // Phillips-Perron
-    for n in [100, 200, 500] {
+    for n in [100, 1000, 10000] {
         let dataset = load_csv_dataset(&data_dir, "timeseries", n)
             .unwrap_or_else(|| generate_time_series(n, 42));
         let y_vec = extract_col_vec(&dataset, "y");
@@ -2608,7 +2607,7 @@ fn main() {
     }
 
     // Box-Ljung
-    for n in [100, 200, 500] {
+    for n in [100, 1000, 10000] {
         let dataset = load_csv_dataset(&data_dir, "timeseries", n)
             .unwrap_or_else(|| generate_time_series(n, 42));
         let y_vec = extract_col_vec(&dataset, "y");
@@ -2634,7 +2633,7 @@ fn main() {
     println!("\n--- Discrete Choice: Count Models ---");
     print_header();
 
-    for n in [200, 500, 1000] {
+    for n in [100, 1000, 10000] {
         let count_dataset = load_csv_dataset(&data_dir, "count", n)
             .unwrap_or_else(|| generate_count_data(n, 42));
         let zeroinfl_dataset = load_csv_dataset(&data_dir, "zeroinfl", n)
@@ -2731,7 +2730,7 @@ fn main() {
     println!("\n--- Discrete Choice: Ordered & Multinomial ---");
     print_header();
 
-    for n in [200, 500, 1000] {
+    for n in [100, 1000, 10000] {
         let ordered_dataset = load_csv_dataset(&data_dir, "ordered", n)
             .unwrap_or_else(|| generate_ordered_data(n, 42));
         let multinom_dataset = load_csv_dataset(&data_dir, "multinomial", n)
@@ -2779,7 +2778,7 @@ fn main() {
     println!("\n--- K-Medoids ---");
     print_header();
 
-    for n in [100, 500, 1000] {
+    for n in [100, 1000, 10000] {
         let data = load_csv_array2(&data_dir, "cluster", n)
             .unwrap_or_else(|| generate_cluster_data(n, 5, 42));
 
@@ -2808,7 +2807,7 @@ fn main() {
     println!("\n--- Linear SVM ---");
     print_header();
 
-    for n in [200, 500, 1000] {
+    for n in [100, 1000, 10000] {
         let data = load_csv_array2(&data_dir, "cluster", n)
             .unwrap_or_else(|| generate_cluster_data(n, 5, 42));
         // Create binary labels: cluster 0 vs others
@@ -2838,7 +2837,7 @@ fn main() {
     println!("\n--- t-SNE ---");
     print_header();
 
-    for n in [100, 500] {
+    for n in [100, 1000, 10000] {
         let data = load_csv_array2(&data_dir, "cluster", n)
             .unwrap_or_else(|| generate_cluster_data(n, 5, 42));
 
@@ -2865,7 +2864,7 @@ fn main() {
     println!("\n--- Silhouette ---");
     print_header();
 
-    for n in [100, 500, 1000] {
+    for n in [100, 1000, 10000] {
         let data = load_csv_array2(&data_dir, "cluster", n)
             .unwrap_or_else(|| generate_cluster_data(n, 5, 42));
         // Run kmeans first to get labels
@@ -2894,7 +2893,7 @@ fn main() {
     println!("\n--- MDS ---");
     print_header();
 
-    for n in [100, 500] {
+    for n in [100, 1000, 10000] {
         let data = load_csv_array2(&data_dir, "cluster", n)
             .unwrap_or_else(|| generate_cluster_data(n, 5, 42));
 
@@ -2920,7 +2919,7 @@ fn main() {
     println!("\n--- ACF ---");
     print_header();
 
-    for n in [100, 500, 1000] {
+    for n in [100, 1000, 10000] {
         let ts_data = generate_time_series(n, 42);
         let y_vec: Vec<f64> = ts_data.df().column("y").unwrap().f64().unwrap().into_no_null_iter().collect();
 
@@ -2947,7 +2946,7 @@ fn main() {
     println!("\n--- PACF ---");
     print_header();
 
-    for n in [100, 500, 1000] {
+    for n in [100, 1000, 10000] {
         let ts_data = generate_time_series(n, 42);
         let y_vec: Vec<f64> = ts_data.df().column("y").unwrap().f64().unwrap().into_no_null_iter().collect();
 
@@ -2974,7 +2973,7 @@ fn main() {
     println!("\n--- CCF ---");
     print_header();
 
-    for n in [100, 200, 500] {
+    for n in [100, 1000, 10000] {
         let mut rng = ChaCha8Rng::seed_from_u64(42);
         let y1: Vec<f64> = (0..n).map(|t| {
             let trend = 0.01 * t as f64;
@@ -3010,7 +3009,7 @@ fn main() {
     println!("\n--- Canonical Correlation ---");
     print_header();
 
-    for n in [100, 500, 1000] {
+    for n in [100, 1000, 10000] {
         let ds = generate_regression_data(n, 5, 42);
         let df = ds.df();
         let mut x_mat = Array2::<f64>::zeros((n, 2));
@@ -3048,7 +3047,7 @@ fn main() {
     println!("\n--- Spline ---");
     print_header();
 
-    for n in [100, 500, 1000] {
+    for n in [100, 1000, 10000] {
         let x: Vec<f64> = (0..n).map(|i| i as f64 / n as f64).collect();
         let mut rng = ChaCha8Rng::seed_from_u64(42);
         let y_sp: Vec<f64> = x.iter().map(|&xi| (xi * std::f64::consts::PI * 2.0).sin() + rng.gen_range(-0.1..0.1)).collect();
@@ -3076,7 +3075,7 @@ fn main() {
     println!("\n--- t-test ---");
     print_header();
 
-    for n in [50, 200, 1000] {
+    for n in [100, 1000, 10000] {
         let mut rng = ChaCha8Rng::seed_from_u64(42);
         let data_vec: Vec<f64> = (0..n).map(|_| 5.0 + rng.gen_range(-1.0..1.0)).collect();
 
@@ -3102,7 +3101,7 @@ fn main() {
     println!("\n--- Wilcoxon ---");
     print_header();
 
-    for n in [50, 200, 1000] {
+    for n in [100, 1000, 10000] {
         let mut rng = ChaCha8Rng::seed_from_u64(42);
         let data_vec: Vec<f64> = (0..n).map(|_| 5.0 + rng.gen_range(-1.0..1.0)).collect();
 
@@ -3127,7 +3126,7 @@ fn main() {
     println!("\n--- KS Test ---");
     print_header();
 
-    for n in [50, 200, 1000] {
+    for n in [100, 1000, 10000] {
         let mut rng = ChaCha8Rng::seed_from_u64(42);
         let data_vec: Vec<f64> = (0..n).map(|_| 5.0 + rng.gen_range(-1.0..1.0)).collect();
 
@@ -3152,7 +3151,7 @@ fn main() {
     println!("\n--- Shapiro-Wilk ---");
     print_header();
 
-    for n in [50, 200, 1000] {
+    for n in [100, 1000, 10000] {
         let mut rng = ChaCha8Rng::seed_from_u64(42);
         let data_vec: Vec<f64> = (0..n).map(|_| 5.0 + rng.gen_range(-1.0..1.0)).collect();
 
@@ -3177,7 +3176,7 @@ fn main() {
     println!("\n--- ANOVA ---");
     print_header();
 
-    for n in [50, 200, 1000] {
+    for n in [100, 1000, 10000] {
         let mut rng = ChaCha8Rng::seed_from_u64(42);
         let n_per_group = n / 3;
         let mut y_vals: Vec<f64> = Vec::with_capacity(n);
@@ -3217,7 +3216,7 @@ fn main() {
     println!("\n--- Kruskal-Wallis ---");
     print_header();
 
-    for n in [50, 200, 1000] {
+    for n in [100, 1000, 10000] {
         let mut rng = ChaCha8Rng::seed_from_u64(42);
         let n_per_group = n / 3;
         let mut groups: Vec<(String, Vec<f64>)> = Vec::new();
@@ -3250,7 +3249,7 @@ fn main() {
     println!("\n--- Friedman ---");
     print_header();
 
-    for n in [30, 100, 500] {
+    for n in [100, 1000, 10000] {
         let mut rng = ChaCha8Rng::seed_from_u64(42);
         let treatments: Vec<Vec<f64>> = (0..3).map(|g| {
             let mean = 5.0 + g as f64;
@@ -3281,7 +3280,7 @@ fn main() {
     println!("\n--- Chi-squared ---");
     print_header();
 
-    for n in [50, 200, 1000] {
+    for n in [100, 1000, 10000] {
         let mut rng = ChaCha8Rng::seed_from_u64(42);
         let observed: Vec<f64> = (0..5).map(|_| (n as f64 / 5.0) + rng.gen_range(-5.0..5.0)).collect();
 
@@ -3306,7 +3305,7 @@ fn main() {
     println!("\n--- Cor Test ---");
     print_header();
 
-    for n in [50, 200, 1000] {
+    for n in [100, 1000, 10000] {
         let mut rng = ChaCha8Rng::seed_from_u64(42);
         let x_ct: Vec<f64> = (0..n).map(|_| rng.gen_range(-2.0..2.0)).collect();
         let y_ct: Vec<f64> = x_ct.iter().map(|&xi| 0.5 * xi + rng.gen_range(-0.5..0.5)).collect();
@@ -3334,7 +3333,7 @@ fn main() {
     println!("\n--- Variance/Scale Tests ---");
     print_header();
 
-    for n in [50, 100, 200, 500, 1000] {
+    for n in [100, 1000, 10000] {
         let mut rng = ChaCha8Rng::seed_from_u64(42);
         let g1: Vec<f64> = (0..n).map(|_| rng.gen_range(-1.0..1.0)).collect();
         let g2: Vec<f64> = (0..n).map(|_| rng.gen_range(-0.5..1.5)).collect();
@@ -3464,7 +3463,7 @@ fn main() {
     println!("\n--- Categorical Tests ---");
     print_header();
 
-    for n in [50, 100, 200, 500, 1000] {
+    for n in [100, 1000, 10000] {
         // McNemar - 2x2 paired table
         {
             let mut rng = ChaCha8Rng::seed_from_u64(42);
@@ -3490,7 +3489,7 @@ fn main() {
     }
 
     // Mantel-Haenszel
-    for n in [50, 100, 200, 500, 1000] {
+    for n in [100, 1000, 10000] {
         let mut rng = ChaCha8Rng::seed_from_u64(42);
         let tables: Vec<Table2x2> = (0..n/25).map(|_| {
             Table2x2::new(
@@ -3522,7 +3521,7 @@ fn main() {
     println!("\n--- Multivariate Tests ---");
     print_header();
 
-    for n in [50, 100, 200, 500, 1000] {
+    for n in [100, 1000, 10000] {
         // MANOVA
         {
             let mut rng = ChaCha8Rng::seed_from_u64(42);
@@ -3562,7 +3561,7 @@ fn main() {
     }
 
     // Median_Polish
-    for n in [25, 50, 100, 200, 400] {
+    for n in [100, 1000, 10000] {
         let rows = (n as f64).sqrt() as usize;
         let cols = rows;
         let mut rng = ChaCha8Rng::seed_from_u64(42);
@@ -3590,7 +3589,7 @@ fn main() {
     println!("\n--- Proportion/Count Tests ---");
     print_header();
 
-    for n in [50, 100, 200, 500, 1000] {
+    for n in [100, 1000, 10000] {
         let x = (n as f64 * 0.55) as u64;
         let nn = n as u64;
         let mut result = run_benchmark_tracked("Prop_Test", "one-sample", n, &config, || {
@@ -3609,7 +3608,7 @@ fn main() {
     }
 
     // Prop_Trend
-    for n in [50, 100, 200, 500, 1000] {
+    for n in [100, 1000, 10000] {
         let k = 5;
         let x_vals: Vec<usize> = (0..k).map(|i| (n / k) / 2 + i * 3).collect();
         let n_vals: Vec<usize> = vec![n / k; k];
@@ -3631,7 +3630,7 @@ fn main() {
     }
 
     // Binom_Test
-    for n in [50, 100, 200, 500, 1000] {
+    for n in [100, 1000, 10000] {
         let x = (n as f64 * 0.55) as u64;
         let nn = n as u64;
         let mut result = run_benchmark_tracked("Binom_Test", "exact", n, &config, || {
@@ -3650,7 +3649,7 @@ fn main() {
     }
 
     // Poisson_Test
-    for n in [50, 100, 200, 500, 1000] {
+    for n in [100, 1000, 10000] {
         let x_vals = vec![n as u64];
         let t_vals = vec![1.0];
         let local_x = x_vals.clone();
@@ -3671,7 +3670,7 @@ fn main() {
     }
 
     // Power_Analysis
-    for n in [50, 100, 200, 1000] {
+    for n in [100, 1000, 10000] {
         let mut result = run_benchmark_tracked("Power_Analysis", "t-test", n, &config, || {
             power_t_test(Some(n as f64), Some(0.5), Some(1.0), Some(0.05), None, TTestType::TwoSample, PowerAlternative::TwoSided)
         });
@@ -3692,7 +3691,7 @@ fn main() {
     println!("\n--- Multiple Comparisons ---");
     print_header();
 
-    for n in [100, 500, 1000] {
+    for n in [100, 1000, 10000] {
         let mut rng = ChaCha8Rng::seed_from_u64(42);
         let n_per = n / 3;
         let mut values: Vec<f64> = Vec::with_capacity(n);
@@ -3774,7 +3773,7 @@ fn main() {
     }
 
     // Quade test
-    for n in [30, 100, 200] {
+    for n in [100, 1000, 10000] {
         let mut rng = ChaCha8Rng::seed_from_u64(42);
         let n_blocks = n;
         let n_treatments = 3;
@@ -3800,7 +3799,7 @@ fn main() {
     }
 
     // P_Adjust
-    for n in [10, 50, 100, 200, 1000] {
+    for n in [100, 1000, 10000] {
         let mut rng = ChaCha8Rng::seed_from_u64(42);
         let pvals: Vec<f64> = (0..n).map(|_| rng.gen_range(0.0..1.0)).collect();
         let local_pv = pvals.clone();
@@ -3824,7 +3823,7 @@ fn main() {
     println!("\n--- Utility Stats ---");
     print_header();
 
-    for n in [100, 500, 1000] {
+    for n in [100, 1000, 10000] {
         let mut rng = ChaCha8Rng::seed_from_u64(42);
         let data: Vec<f64> = (0..n).map(|_| rng.gen_range(-5.0..5.0)).collect();
         let weights: Vec<f64> = (0..n).map(|_| rng.gen_range(0.1..2.0)).collect();
@@ -3896,7 +3895,7 @@ fn main() {
     }
 
     // Loglin (3-way table)
-    for n in [50, 100, 200, 500, 1000] {
+    for n in [100, 1000, 10000] {
         let dims = vec![2, 2, 2];
         let mut rng = ChaCha8Rng::seed_from_u64(42);
         let table: Vec<f64> = (0..8).map(|_| rng.gen_range(5.0..50.0)).collect();
@@ -3924,7 +3923,7 @@ fn main() {
     println!("\n--- Survival: AFT ---");
     print_header();
 
-    for n in [100, 200, 500, 1000] {
+    for n in [100, 1000, 10000] {
         let ds = load_csv_dataset(&data_dir, "survival", n);
 
         let dataset = ds.unwrap_or_else(|| {
@@ -3970,7 +3969,7 @@ fn main() {
     println!("\n--- Survival: Competing Risks ---");
     print_header();
 
-    for n in [100, 500, 1000] {
+    for n in [100, 1000, 10000] {
         let mut rng = ChaCha8Rng::seed_from_u64(42);
         let time_vals: Vec<f64> = (0..n).map(|_| rng.gen_range(0.1..20.0)).collect();
         let event_type_vals: Vec<f64> = (0..n).map(|_| {
@@ -4004,7 +4003,7 @@ fn main() {
     println!("\n--- RD Multi-cutoff ---");
     print_header();
 
-    for n in [500, 1000] {
+    for n in [100, 1000, 10000] {
         let mut rng = ChaCha8Rng::seed_from_u64(42);
         let cutoffs = vec![0.0, 2.0];
         let mut x_vals = Vec::with_capacity(n);
