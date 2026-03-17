@@ -152,3 +152,5 @@ __pycache__/
 
 # other notes
 validation_benchmarking_report.md
+paper/code/mc_validation/target/
+paper/code/mc_validation/results/

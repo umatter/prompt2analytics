@@ -5,7 +5,9 @@ members = [
     "crates/p2a-mcp",
     "crates/p2a-cli",
     "crates/p2a-dioxus",
+    "paper/code/mc_validation",
 ]
+exclude = []
 
 [workspace.package]
 version = "0.1.0"
