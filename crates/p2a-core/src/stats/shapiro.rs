@@ -499,7 +499,11 @@ fn compute_pvalue_large(w: f64, n: f64) -> f64 {
     let z = (y - mu) / sigma;
 
     // P-value from standard normal
-    // Note: smaller W (more negative y) means more evidence against normality
+    // Note: The Royston (1995) normalization is calibrated so that under H0,
+    // z is approximately standard normal. The lower tail gives the p-value
+    // because ln(1-W) is more negative (further left) when W is closer to 1.
+    // TODO: The large-sample p-value approximation needs review against R's
+    // implementation — MC validation shows incorrect rejection rates.
     let normal = Normal::new(0.0, 1.0).unwrap();
     normal.cdf(z)
 }

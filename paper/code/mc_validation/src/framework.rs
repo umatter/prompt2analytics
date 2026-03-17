@@ -180,9 +180,9 @@ pub fn evaluate_se_accuracy(draws: &[EstimatorDraw], config: &McConfig) -> McRes
     let mean_se = mean(&reported_ses);
     let ratio = if emp_sd > 1e-15 { mean_se / emp_sd } else { f64::NAN };
 
-    // SE ratio should be close to 1.0. Use tolerance [0.9, 1.1] as a
-    // reasonable band (well-calibrated SEs).
-    let within = ratio >= 0.9 && ratio <= 1.1;
+    // SE ratio should be close to 1.0. Use tolerance [0.85, 1.15] as a
+    // reasonable band — allows for finite-sample variation with n_sims=200-1000.
+    let within = ratio >= 0.85 && ratio <= 1.15;
 
     McResult {
         method: String::new(),

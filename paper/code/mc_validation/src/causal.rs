@@ -142,9 +142,13 @@ fn validate_tmle(config: &McConfig, n: usize) -> Vec<McResult> {
         let seed = config.seed + sim as u64;
         let (dataset, dgp) = dgp_treatment(n, seed);
 
+        let tmle_config = p2a_core::TmleConfig {
+            q_model: p2a_core::econometrics::QModel::Linear,
+            ..Default::default()
+        };
         if let Ok(result) = p2a_core::tmle(
             &dataset, "y", "treatment", &["x1", "x2"],
-            p2a_core::TmleConfig::default(),
+            tmle_config,
         ) {
             let est = result.ate;
             let se = result.ate_se;

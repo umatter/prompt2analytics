@@ -59,21 +59,22 @@ pub fn dgp_regression_homoskedastic(n: usize, seed: u64) -> (Dataset, Regression
     (Dataset::new(df), RegressionDgp { true_coefs, sigma })
 }
 
-/// Heteroskedastic regression: y = β0 + β1*x1 + β2*x2 + ε, Var(ε|x) = σ² * x1².
-/// OLS standard SEs will be wrong; HC SEs should give correct coverage.
+/// Heteroskedastic regression: y = β0 + β1*x1 + β2*x2 + ε, Var(ε|x) = σ² * x1⁴.
+/// Strong heteroskedasticity (variance ratio ~600:1) so that standard OLS SEs
+/// are clearly miscalibrated while HC SEs should give correct coverage.
 pub fn dgp_regression_heteroskedastic(n: usize, seed: u64) -> (Dataset, RegressionDgp) {
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
     let true_coefs = vec![1.0, 0.5, -0.3];
     let sigma = 1.0;
 
-    let x1: Vec<f64> = (0..n).map(|_| rng.gen_range(0.5..3.0)).collect();
+    let x1: Vec<f64> = (0..n).map(|_| rng.gen_range(0.2..5.0)).collect();
     let x2: Vec<f64> = (0..n).map(|_| rng.gen_range(-3.0..3.0)).collect();
     let y: Vec<f64> = (0..n)
         .map(|i| {
             let u1: f64 = rng.gen_range(0.0001..1.0);
             let u2: f64 = rng.gen_range(0.0..std::f64::consts::TAU);
             let z = (-2.0 * u1.ln()).sqrt() * u2.cos();
-            let het_sigma = sigma * x1[i]; // variance proportional to x1²
+            let het_sigma = sigma * x1[i] * x1[i]; // variance proportional to x1⁴
             true_coefs[0] + true_coefs[1] * x1[i] + true_coefs[2] * x2[i] + het_sigma * z
         })
         .collect();

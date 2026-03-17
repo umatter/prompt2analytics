@@ -145,9 +145,10 @@ fn validate_ols_het_failure(config: &McConfig, n: usize) -> Vec<McResult> {
     r.property = "ci_coverage_negative_control".to_string();
     r.dgp = "heteroskedastic".to_string();
     r.n = n;
-    // For this negative control, we EXPECT coverage to be below nominal
-    // So "within_tolerance" = true means it correctly detects the problem
-    r.within_tolerance = r.observed < 1.0 - config.alpha - 0.02; // coverage should be notably below 95%
+    // For this negative control, we EXPECT coverage to be below nominal.
+    // "within_tolerance" = true means the test correctly detects the problem.
+    // With strong het (x1⁴ variance), standard SEs should badly undercover.
+    r.within_tolerance = r.observed < 0.90; // coverage should be well below 95%
 
     vec![r]
 }
