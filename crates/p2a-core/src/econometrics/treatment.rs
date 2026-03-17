@@ -561,21 +561,47 @@ pub fn run_ipw_treatment(
                     (n_f, n_f)
                 };
 
+                // Compute counterfactual means for proper Hajek IF centering
+                // mu1 = E_w[Y|D=1], mu0 = E_w[Y|D=0] (weighted means)
+                let mut sum_wy1 = 0.0_f64;
+                let mut sum_w1_for_mean = 0.0_f64;
+                let mut sum_wy0 = 0.0_f64;
+                let mut sum_w0_for_mean = 0.0_f64;
+                for i in 0..n_trim {
+                    let ps_i = ps_trim[i].max(1e-10).min(1.0 - 1e-10);
+                    if d_trim[i] >= 0.5 {
+                        let w = 1.0 / ps_i;
+                        sum_wy1 += w * y_trim[i];
+                        sum_w1_for_mean += w;
+                    } else {
+                        let w = 1.0 / (1.0 - ps_i);
+                        sum_wy0 += w * y_trim[i];
+                        sum_w0_for_mean += w;
+                    }
+                }
+                let mu1 = if sum_w1_for_mean > 0.0 { sum_wy1 / sum_w1_for_mean } else { 0.0 };
+                let mu0 = if sum_w0_for_mean > 0.0 { sum_wy0 / sum_w0_for_mean } else { 0.0 };
+
                 let mut sum_if_sq = 0.0;
                 for i in 0..n_trim {
                     let di = d_trim[i];
                     let yi = y_trim[i];
                     let ps_i = ps_trim[i].max(1e-10).min(1.0 - 1e-10);
 
-                    let if_i = if di >= 0.5 {
-                        yi / ps_i / sum_w1 * n_f
+                    // Lunceford & Davidian (2004) Hajek IF with proper centering:
+                    // IF_i = D_i*(Y_i - mu1)/e(X_i) / E_n[D/e(X)]
+                    //       - (1-D_i)*(Y_i - mu0)/(1-e(X_i)) / E_n[(1-D)/(1-e(X))]
+                    let treated_part = if di >= 0.5 {
+                        (yi - mu1) / ps_i / sum_w1 * n_f
                     } else {
                         0.0
-                    } - if di < 0.5 {
-                        yi / (1.0 - ps_i) / sum_w0 * n_f
+                    };
+                    let control_part = if di < 0.5 {
+                        (yi - mu0) / (1.0 - ps_i) / sum_w0 * n_f
                     } else {
                         0.0
-                    } - effect;
+                    };
+                    let if_i = treated_part - control_part;
 
                     sum_if_sq += if_i * if_i;
                 }
