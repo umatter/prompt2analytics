@@ -281,6 +281,11 @@ pub struct DiDRequest {
     #[schemars(description = "Column indicating post-treatment period (1 = post, 0 = pre).")]
     #[serde(alias = "post", alias = "post_treatment")]
     pub post_var: String,
+
+    /// Optional: cluster variable for clustered standard errors (e.g., unit or entity ID)
+    #[schemars(description = "Column to cluster standard errors on (e.g., entity/unit ID). If omitted, HC1 robust SEs are used.")]
+    #[serde(default, alias = "cluster", alias = "cluster_id")]
+    pub cluster_var: Option<String>,
 }
 
 /// Request for Callaway-Sant'Anna staggered DiD estimation.

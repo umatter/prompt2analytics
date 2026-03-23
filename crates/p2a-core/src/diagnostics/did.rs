@@ -23,7 +23,7 @@ use super::{
 /// use p2a_core::econometrics::did::run_did;
 /// use p2a_core::diagnostics::did_diagnostics;
 ///
-/// let did_result = run_did(&dataset, "outcome", "treated", "post", None)?;
+/// let did_result = run_did(&dataset, "outcome", "treated", "post", None, None)?;
 /// let report = did_diagnostics(&did_result);
 /// ```
 pub fn did_diagnostics(result: &DiDResult) -> IdentificationReport {
@@ -485,6 +485,8 @@ mod tests {
                 "treated:post".to_string(),
             ],
             controls: vec![],
+            cluster_var: None,
+            n_clusters: None,
         };
 
         let report = did_diagnostics(&result);

@@ -1,27 +1,20 @@
 # Section 4.3 — Realistic use and error handling
 # Uses employee_training.csv (panel: 200 employees, 6 periods, treatment/control)
-# and grunfeld.csv (already loaded from section 4.1 session)
 
-# Prompt 1: Vague request — should prompt clarification
-Load validation/datasets/employee_training.csv as training and describe it.
+# Prompt 1: Load and describe
+Load /home/umatter/tools/prompt2analytics/validation/datasets/employee_training.csv as training and describe it.
 
-# Prompt 2: Vague request that needs clarification
+# Prompt 2: Vague request
 Run a regression with firm effects.
 
-# Prompt 3: Ambiguous analysis request — model may choose wrong method
-Analyze whether the training program affected employee performance.
-The data has employees observed before and after training, with a
-control group that didn't receive training.
+# Prompt 3: Analysis request — model should choose DiD
+Analyze whether the training program affected employee performance. The data has employees observed before and after training, with a control group that didn't receive training.
 
-# Prompt 4: Correction if needed, or request clustered SEs
-Now run the difference-in-differences with standard errors clustered at
-the employee level.
+# Prompt 4: Request clustered SEs
+Run the difference-in-differences again but with standard errors clustered at the employee level.
 
-# Prompt 5: Pre-trends check
-Check for pre-trends to validate the parallel trends assumption.
-
-# Prompt 6: Multicollinearity — add perfectly correlated variable
+# Prompt 5: Multicollinearity — add perfectly correlated variable
 Add years_since_hire to the model alongside tenure.
 
-# Prompt 7: Convergence failure — logit with perfect prediction
+# Prompt 6: Logit with potential separation
 Fit a logit model for bonus with department fixed effects.

@@ -961,7 +961,7 @@ fn execute_did(
                 Some(control_refs.as_slice())
             };
 
-            match run_did(ds, outcome, treat, post, controls_opt) {
+            match run_did(ds, outcome, treat, post, controls_opt, None) {
                 Ok(result) => match format {
                     OutputFormat::Json => {
                         let json = serde_json::json!({

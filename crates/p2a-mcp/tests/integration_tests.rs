@@ -133,7 +133,7 @@ fn test_core_did() {
 
     let dataset = Dataset::new(df);
 
-    let result = run_did(&dataset, "y", "treatment", "post", None);
+    let result = run_did(&dataset, "y", "treatment", "post", None, None);
     assert!(result.is_ok(), "DiD should succeed: {:?}", result.err());
 }
 

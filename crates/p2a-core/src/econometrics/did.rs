@@ -54,6 +54,8 @@ use ndarray::{Array1, Array2};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+use std::collections::HashMap;
+
 use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
 use crate::linalg::design::{DesignMatrix, get_column_names};
@@ -103,6 +105,12 @@ pub struct DiDResult {
     pub variables: Vec<String>,
     /// Control variables (if any)
     pub controls: Vec<String>,
+    /// Cluster variable (if clustered SEs were used)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cluster_var: Option<String>,
+    /// Number of clusters (if clustered SEs were used)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub n_clusters: Option<usize>,
 }
 
 impl fmt::Display for DiDResult {
@@ -116,6 +124,9 @@ impl fmt::Display for DiDResult {
             self.treatment_var, self.post_var
         )?;
         writeln!(f, "No. Observations: {}", self.n_obs)?;
+        if let (Some(cvar), Some(nc)) = (&self.cluster_var, self.n_clusters) {
+            writeln!(f, "Clustered SEs: {} ({} clusters)", cvar, nc)?;
+        }
         writeln!(f, "R-squared: {:.4}", self.r_squared)?;
         writeln!(f, "Adj. R-squared: {:.4}", self.adj_r_squared)?;
         writeln!(f)?;
@@ -191,6 +202,8 @@ impl fmt::Display for DiDResult {
 /// * `treatment_var` - Binary variable indicating treatment group (1 = treated, 0 = control)
 /// * `post_var` - Binary variable indicating post-treatment period (1 = post, 0 = pre)
 /// * `controls` - Optional control variables to include in the regression
+/// * `cluster_var` - Optional variable to cluster standard errors on (e.g., unit/entity ID).
+///   When provided, uses CR1 clustered SEs instead of HC1 robust SEs.
 ///
 /// # Model
 /// The model estimated is:
@@ -203,6 +216,7 @@ pub fn run_did(
     treatment_var: &str,
     post_var: &str,
     controls: Option<&[&str]>,
+    cluster_var: Option<&str>,
 ) -> EconResult<DiDResult> {
     // Extract y
     let y = DesignMatrix::extract_column(dataset.df(), dep_var).map_err(|e| {
@@ -304,31 +318,71 @@ pub fn run_did(
         ssr / n as f64
     };
 
-    // Robust standard errors (HC1)
-    let scale = (n as f64) / (df as f64);
-    let mut meat: Array2<f64> = Array2::zeros((k, k));
-    for i in 0..n {
-        let xi = x.row(i);
-        let e2: f64 = residuals[i] * residuals[i];
-        for j in 0..k {
-            for l in 0..k {
-                meat[[j, l]] += e2 * xi[j] * xi[l];
+    // Variance-covariance estimation: clustered or HC1
+    let (vcov, n_clust) = if let Some(cvar) = cluster_var {
+        // Clustered standard errors (CR1)
+        let cluster_col = DesignMatrix::extract_column(dataset.df(), cvar).map_err(|_| {
+            EconError::ColumnNotFound {
+                column: cvar.to_string(),
+                available: get_column_names(dataset.df()),
             }
-        }
-    }
-    let meat: Array2<f64> = &meat * scale;
+        })?;
 
-    // Sandwich estimator
-    let mut vcov: Array2<f64> = Array2::zeros((k, k));
-    for i in 0..k {
-        for j in 0..k {
-            for m in 0..k {
+        // Build cluster map: cluster_id -> [row indices]
+        let mut clusters: HashMap<String, Vec<usize>> = HashMap::new();
+        for i in 0..n {
+            let key = format!("{:.0}", cluster_col[i]);
+            clusters.entry(key).or_default().push(i);
+        }
+        let g = clusters.len();
+
+        // Small-sample correction: (G/(G-1)) * ((N-1)/(N-K))
+        let correction = if g > 1 {
+            (g as f64 / (g - 1) as f64) * ((n - 1) as f64 / (n - k) as f64)
+        } else {
+            1.0
+        };
+
+        // Compute meat: sum over clusters of (X_g' e_g)(X_g' e_g)'
+        let mut meat = Array2::<f64>::zeros((k, k));
+        for indices in clusters.values() {
+            let mut xe = vec![0.0; k];
+            for &i in indices {
+                let e = residuals[i];
+                for j in 0..k {
+                    xe[j] += x[[i, j]] * e;
+                }
+            }
+            for j in 0..k {
                 for l in 0..k {
-                    vcov[[i, j]] += xtx_inv[[i, m]] * meat[[m, l]] * xtx_inv[[l, j]];
+                    meat[[j, l]] += xe[j] * xe[l];
                 }
             }
         }
-    }
+
+        // Sandwich: (X'X)^{-1} * meat * (X'X)^{-1} * correction
+        let temp = xtx_inv.dot(&meat);
+        let vcov = temp.dot(&xtx_inv) * correction;
+        (vcov, Some(g))
+    } else {
+        // HC1 robust standard errors
+        let scale = (n as f64) / (df as f64);
+        let mut meat = Array2::<f64>::zeros((k, k));
+        for i in 0..n {
+            let xi = x.row(i);
+            let e2 = residuals[i] * residuals[i];
+            for j in 0..k {
+                for l in 0..k {
+                    meat[[j, l]] += e2 * xi[j] * xi[l];
+                }
+            }
+        }
+        let meat = &meat * scale;
+
+        let temp = xtx_inv.dot(&meat);
+        let vcov = temp.dot(&xtx_inv);
+        (vcov, None)
+    };
 
     let std_errors: Vec<f64> = vcov.diag().mapv(|v: f64| v.max(0.0).sqrt()).to_vec();
     let coefficients = beta.to_vec();
@@ -367,6 +421,8 @@ pub fn run_did(
         std_errors,
         variables: var_names,
         controls: control_names,
+        cluster_var: cluster_var.map(|s| s.to_string()),
+        n_clusters: n_clust,
     })
 }
 
@@ -470,7 +526,7 @@ mod tests {
     #[test]
     fn test_did_basic() {
         let dataset = create_did_dataset();
-        let result = run_did(&dataset, "y", "treatment", "post", None).unwrap();
+        let result = run_did(&dataset, "y", "treatment", "post", None, None).unwrap();
 
         // Check structure
         assert_eq!(result.n_obs, 8);
@@ -500,7 +556,7 @@ mod tests {
         .unwrap();
         let dataset = Dataset::new(df);
 
-        let result = run_did(&dataset, "y", "treatment", "post", None).unwrap();
+        let result = run_did(&dataset, "y", "treatment", "post", None, None).unwrap();
 
         // ATT should still be close to 3.0
         assert!(
@@ -513,7 +569,7 @@ mod tests {
     #[test]
     fn test_did_missing_column() {
         let dataset = create_did_dataset();
-        let result = run_did(&dataset, "nonexistent", "treatment", "post", None);
+        let result = run_did(&dataset, "nonexistent", "treatment", "post", None, None);
         assert!(result.is_err());
     }
 
@@ -592,7 +648,7 @@ mod tests {
     #[test]
     fn test_validate_did_classic_2x2() {
         let dataset = create_validation_did_dataset();
-        let result = run_did(&dataset, "y", "treat", "post", None).unwrap();
+        let result = run_did(&dataset, "y", "treat", "post", None, None).unwrap();
 
         // Structure checks
         assert_eq!(result.n_obs, 200); // 4 groups × 50 obs
@@ -702,7 +758,7 @@ mod tests {
         .unwrap();
         let dataset = Dataset::new(df);
 
-        let result = run_did(&dataset, "y", "treat", "post", Some(&["x"])).unwrap();
+        let result = run_did(&dataset, "y", "treat", "post", Some(&["x"]), None).unwrap();
 
         // ATT should still be close to 5.0 (controlling for x)
         assert!(
@@ -765,7 +821,7 @@ mod tests {
         .unwrap();
         let dataset = Dataset::new(df);
 
-        let result = run_did(&dataset, "y", "treat", "post", None).unwrap();
+        let result = run_did(&dataset, "y", "treat", "post", None, None).unwrap();
 
         // ATT should be close to 0
         assert!(

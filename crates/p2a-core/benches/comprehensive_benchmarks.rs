@@ -828,7 +828,7 @@ fn main() {
     for n in [100, 1000, 10000] {
         let dataset = generate_did_data(n, 42);
         let result = run_benchmark("DiD", "canonical", n, &slow_config, || {
-            run_did(&dataset, "y", "treatment", "post", Some(&["x1"]))
+            run_did(&dataset, "y", "treatment", "post", Some(&["x1"]), None)
         });
         print_result(&result);
         results.push(result);

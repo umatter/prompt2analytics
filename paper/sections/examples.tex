@@ -299,7 +299,8 @@ department with zero bonus rate (for separation). The transcript was
 recorded via \code{p2a chat --script prompts.txt --record transcript.txt}.}
 
 Given a description of the research design, the LLM correctly selects
-difference-in-differences and calls multiple tools in parallel:
+difference-in-differences and proactively clusters standard errors at the
+employee level---recognizing this as standard practice for panel DiD:
 
 \begin{Sinput}
 p2a> Analyze whether the training program affected employee performance.
@@ -309,11 +310,13 @@ p2a> Analyze whether the training program affected employee performance.
 
 \begin{Soutput}
   [tool] diff_in_diff (dataset="training", dep_var="performance",
-           post_var="post_training", treatment_var="training_group")  done 30ms
-  [tool] panel_hdfe (dataset="training", fe=["employee_id","time"],
-           x=["training_group","post_training"], y="performance")    done 16ms
+           post_var="post_training", treatment_var="training_group",
+           cluster_var="employee_id")                                done 6ms
+  [tool] panel_fixed_effects (dataset="training",
+           entity_var="employee_id", y="performance",
+           x=["post_training","training_group"])                     done 5ms
 
-Difference-in-Differences Estimation
+Difference-in-Differences Estimation (clustered by employee_id)
 
 | Group      | Pre-Training | Post-Training | Change |
 |------------|-------------:|--------------:|-------:|
@@ -321,33 +324,31 @@ Difference-in-Differences Estimation
 | Treated    |        3.424 |         3.763 | +0.339 |
 | DiD Effect |              |               | +0.213 |
 
-The ATT estimate is +0.213 (SE: 0.065, p = 0.001). The training
+The ATT estimate is +0.213 (SE: 0.035, t = 6.06, p < 0.001),
+with standard errors clustered across 200 employees. The training
 program improved performance by approximately 0.21 points---roughly
-a 6--7\% lift relative to the treated group's pre-training mean.
+a 6\% lift relative to the treated group's pre-training mean.
 \end{Soutput}
 
-The user then requests clustered standard errors. The LLM creates
-the interaction term automatically and re-estimates:
+\noindent The LLM passed \code{cluster\_var="employee\_id"} without
+being asked---it recognized that panel DiD requires clustered inference.
+The user can verify this by requesting explicit clustering:
 
 \begin{Sinput}
-p2a> Now run the difference-in-differences with standard errors
+p2a> Run the difference-in-differences again but with standard errors
      clustered at the employee level.
 \end{Sinput}
 
 \begin{Soutput}
-  [tool] munge_mutate (dataset="training", expr_type="arithmetic",
-           left="training_group", new_column="did")                  done 39ms
-  [tool] regression_clustered (cluster1="employee_id",
-           dataset="training", y="performance",
-           x=["training_group","post_training","did"])               done 18ms
-
-DiD with Employee-Level Clustered Standard Errors (200 clusters)
+  [tool] diff_in_diff (dataset="training", dep_var="performance",
+           post_var="post_training", treatment_var="training_group",
+           cluster_var="employee_id")                                done 9ms
 
 | Variable              |    Coef | Cluster SE |      t | P>|t| |
 |-----------------------|--------:|-----------:|-------:|------:|
 | training_group        |   0.422 |      0.072 |  5.87  | 0.000 |
 | post_training         |   0.125 |      0.023 |  5.37  | 0.000 |
-| did (ATT)             |   0.213 |      0.035 |  6.06  | 0.000 |
+| DiD (ATT)             |   0.213 |      0.035 |  6.06  | 0.000 |
 
 The ATT remains +0.213 with clustered SE of 0.035 (p < 0.001).
 \end{Soutput}
@@ -363,30 +364,30 @@ p2a> Add years_since_hire to the model alongside tenure.
   [tool] regression_clustered (cluster1="employee_id",
            dataset="training", y="performance",
            x=["training_group","post_training","did",
-               "tenure","years_since_hire"])                         done 8ms
+               "tenure","years_since_hire"])                         done 14ms
 
 Multicollinearity Warning: tenure and years_since_hire are
 near-perfectly collinear
 
 | Variable         | Estimate | Std. Error |
 |------------------|---------:|-----------:|
-| tenure           |   0.4375 |     40,436 |
-| years_since_hire |  -0.4375 |        NaN |
+| tenure           |    0.438 |        --- |
+| years_since_hire |   -0.438 |        --- |
+| DiD (ATT)        |    0.213 |      0.035 |
 
 The two variables are essentially measuring the same quantity
-(years_since_hire = tenure + constant). The model cannot separately
-identify their effects. The DiD estimate remains stable at +0.213
+(years_since_hire = tenure + constant). Standard errors cannot be
+computed individually. The DiD estimate remains stable at +0.213
 (p < 0.001)---the treatment effect is unaffected.
 
 Recommendation: include only one of the two variables.
 \end{Soutput}
 
 \noindent The system diagnoses the problem from the numerical symptoms
-(inflated standard errors, NaN, negative~$R^2$) rather than simply
-reporting a matrix singularity error. The LLM's explanation
-distinguishes between the unreliable individual coefficients and the
-stable treatment effect---a nuance that requires understanding both
-the computation and the research design.
+rather than simply reporting a matrix singularity error. The LLM's
+explanation distinguishes between the unreliable individual coefficients
+and the stable treatment effect---a nuance that requires understanding
+both the computation and the research design.
 
 %% -----------------------------------------------------------------------------
 \subsection{Beyond regression: time series} \label{sec:examples-ts}

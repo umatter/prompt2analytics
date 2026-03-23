@@ -1393,9 +1393,9 @@ fn main() {
         let dataset = load_csv_dataset(&data_dir, "did", n)
             .unwrap_or_else(|| generate_did_data(n, 42));
         let mut result = run_benchmark_tracked("DiD", "canonical", n, &slow_config, || {
-            run_did(&dataset, "y", "treatment", "post", Some(&["x1"]))
+            run_did(&dataset, "y", "treatment", "post", Some(&["x1"]), None)
         });
-        if let Ok(ref did) = run_did(&dataset, "y", "treatment", "post", Some(&["x1"])) {
+        if let Ok(ref did) = run_did(&dataset, "y", "treatment", "post", Some(&["x1"]), None) {
             let mut outputs = BTreeMap::new();
             capture(&mut outputs, "att", did.att);
             capture(&mut outputs, "se", did.std_error);

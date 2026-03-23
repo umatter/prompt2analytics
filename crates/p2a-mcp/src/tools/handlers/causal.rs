@@ -2373,6 +2373,7 @@ impl AnalyticsServer {
             &request.treatment_var,
             &request.post_var,
             None,
+            request.cluster_var.as_deref(),
         ) {
             Ok(r) => r,
             Err(e) => {
