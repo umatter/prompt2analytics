@@ -1,0 +1,15 @@
+# Section 4.1 — Chat interface examples (Grunfeld dataset)
+# Run with: p2a chat --script section4_1_chat.txt --record section4_1_transcript.txt \
+#           --provider anthropic --model claude-sonnet-4-6
+
+Load the Grunfeld investment dataset from validation/datasets/grunfeld.csv and show me what's in it.
+
+Run a regression of investment on market value and capital stock. Use robust standard errors.
+
+The data has a panel structure. Run a fixed effects regression controlling for firm-specific effects.
+
+Should I use fixed effects or random effects for this analysis?
+
+Control for both firm and year fixed effects in the regression.
+
+Check the regression assumptions for the OLS model.

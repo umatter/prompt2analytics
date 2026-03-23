@@ -45,9 +45,10 @@ unified_df <- read.csv(file.path(results_dir, "comparison_unified.csv"),
 matched <- unified_df %>%
   filter(!is.na(speedup) & is.finite(speedup))
 
+# Standardize to n=1000 for clean apples-to-apples comparison
 largest_n <- matched %>%
+  filter(n == 1000) %>%
   group_by(method) %>%
-  filter(n == max(n)) %>%
   slice(1) %>%
   ungroup()
 
@@ -78,9 +79,9 @@ rust_mem <- load_latest_json("^rust_unified_.*\\.json$") %>%
 if (nrow(r_mem) > 0 && nrow(rust_mem) > 0) {
   join_cols <- intersect(c("method", "variant", "n"), intersect(names(r_mem), names(rust_mem)))
   mem_df <- inner_join(r_mem, rust_mem, by = join_cols) %>%
-    filter(rust_mem_bytes > 0) %>%
+    filter(rust_mem_bytes > 0, n == 1000) %>%
     mutate(mem_ratio = r_mem_bytes / rust_mem_bytes)
-  cat(sprintf("Memory data: %d matched entries\n\n", nrow(mem_df)))
+  cat(sprintf("Memory data: %d matched entries (n=1000)\n\n", nrow(mem_df)))
 } else {
   mem_df <- data.frame()
   cat("WARNING: No memory data available\n\n")

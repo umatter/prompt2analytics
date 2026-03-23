@@ -14,46 +14,45 @@ model---run on the user's machine.
 
 Table~\ref{tab:benchmark-full} presents benchmark results from a unified
 validation and benchmarking pipeline that simultaneously measures
-correctness, execution time, and memory usage. The pipeline covers 384
-benchmark configurations across 140+ unique methods, with sample sizes
-ranging from $n = 50$ to $n = 10{,}000$ (see
-Appendix~\ref{app:benchmark-methodology} for details). Both
-\proglang{R} and \proglang{Rust} operate on identical datasets
-generated with shared random seeds; timings measure computation only,
-excluding data loading and process startup.
+correctness, execution time, and memory usage. Both \proglang{R} and
+\proglang{Rust} benchmarks operate on identical datasets generated with
+shared random seeds (seed~=~42) and matching data-generating processes;
+timings measure computation only, excluding data loading and process
+startup. To ensure clean apples-to-apples comparisons, all speedup
+figures reported here use $n = 1{,}000$ observations (see
+Appendix~\ref{app:benchmark-methodology} for the full pipeline covering
+multiple sample sizes).
 \proglang{R} benchmarks use canonical reference packages:
 \fct{lm}/\pkg{sandwich}~\citep{Zeileis:2004} for regression,
 \pkg{plm}~\citep{Croissant+Millo:2008}/\pkg{lfe}~\citep{Gaure:2013}
 for panel data, \pkg{AER} for IV,
 \pkg{forecast}~\citep{Hyndman+Khandakar:2008}/\pkg{vars} for time
 series, and \proglang{R}'s \pkg{stats} for hypothesis tests.
-Across all 200 configurations (multiple sample sizes per method),
-the median speedup is 16.4$\times$, with \proglang{Rust} faster in
-182 cases (91\%). At the largest sample size per unique method
-(117 methods), the median is 12.4$\times$
+Across 100 matched methods at $n = 1{,}000$, the median speedup is
+12$\times$, with \proglang{Rust} faster in 89\% of cases
 (Figure~\ref{fig:benchmark-histogram}).
 
 Speedups vary widely by method category, reflecting the relative weight
 of interpreter overhead versus numerical computation.
-\emph{Causal inference} methods show the largest gains: IV/2SLS
-(146$\times$) and difference-in-differences (81$\times$).
-\emph{Treatment effect} estimators are similarly fast: TMLE
-(283$\times$), CBPS (198$\times$), and IPW (171$\times$).
-\emph{Panel data} methods benefit from avoiding formula parsing and
-factor handling: fixed effects (207$\times$), HDFE (176$\times$), and
-random effects (136$\times$). \emph{Time series} methods show moderate
-to large gains: VECM (56$\times$), ARIMA (37$\times$), and Granger
-causality (4$\times$). \emph{Statistical tests} cluster around
-20--40$\times$: $t$-tests (40$\times$), ANOVA (31$\times$), and
-Shapiro-Wilk (30$\times$). \emph{Regression} methods range from
-13$\times$ (OLS) to 27$\times$ (quantile regression), with robust
-standard errors at 18$\times$ (HC1). \emph{Discrete choice} models
-range from 8$\times$ (logit) to 15$\times$ (Poisson).
-\emph{Survival} methods achieve 14--19$\times$ (Cox PH 14$\times$,
-Kaplan-Meier 19$\times$). \emph{Machine learning} methods show more
-modest gains of 2--3$\times$ (K-means 3$\times$, PCA 3$\times$,
-DBSCAN 2$\times$), reflecting the competitiveness of \proglang{R}'s
-underlying C implementations for these algorithms.
+\emph{Panel data} methods show large gains from avoiding formula parsing
+and factor handling: random effects (65$\times$), Hausman test
+(53$\times$), fixed effects (22$\times$), and HDFE (20$\times$).
+\emph{Time series} methods range widely: VAR (33$\times$), ARIMA
+(8$\times$), MSTL (7$\times$), and STL (3$\times$).
+\emph{Statistical tests} cluster around 5--15$\times$: $t$-tests
+(15$\times$), Kolmogorov-Smirnov (9$\times$), and Shapiro-Wilk
+(5$\times$). \emph{Regression} methods range from 3$\times$ (LOESS)
+to 9$\times$ (OLS). \emph{Discrete choice} models achieve 3--10$\times$:
+negative binomial (40$\times$), Poisson (4$\times$), logit (4$\times$),
+and probit (3$\times$). \emph{Causal inference} gains include IV/2SLS
+(8$\times$) and difference-in-differences (6$\times$).
+\emph{Survival analysis} shows mixed results: log-rank (7$\times$) and
+Kaplan-Meier (4$\times$), though Cox PH and AFT are comparable to
+\proglang{R}'s optimized \pkg{survival} package.
+\emph{Machine learning} methods show the most modest gains
+(K-means 6$\times$, PCA 4$\times$, DBSCAN 2$\times$), reflecting the
+competitiveness of \proglang{R}'s underlying \proglang{C} implementations
+for these algorithms.
 
 Complete benchmark results are in
 Appendix~\ref{app:benchmark-methodology}; reproduction instructions
@@ -72,10 +71,10 @@ are in Appendix~\ref{app:reproducibility}.
     Generate with: \texttt{Rscript paper/code/generate\_paper\_figures.R}%
     \vspace{3cm}}}%
 }
-\caption{Distribution of Rust/R speedup factors across 117 unique methods
-at their largest sample size (log scale). The vertical line at
+\caption{Distribution of Rust/R speedup factors across 100 matched methods
+at $n = 1{,}000$ (log scale). The vertical line at
 1$\times$ indicates parity; values to the right indicate \proglang{Rust}
-faster. The median speedup is 12.4$\times$, with \proglang{Rust} faster
+faster. The median speedup is 12$\times$, with \proglang{Rust} faster
 in 89\% of methods.}
 \label{fig:benchmark-histogram}
 \end{figure}
@@ -95,9 +94,10 @@ performance.
 
 \paragraph{Memory efficiency.}
 Beyond execution time, \proglang{Rust}'s deterministic memory
-management reduces heap allocation. Across
-the 384 benchmark configurations, \proglang{Rust} typically allocates
-2--50$\times$ less memory than the equivalent \proglang{R} call. The
+management reduces heap allocation. Across the 100 matched methods
+at $n = 1{,}000$, \proglang{Rust} typically allocates 2--50$\times$
+less memory than the equivalent \proglang{R} call (median
+3$\times$). The
 largest savings appear in panel data and treatment effect methods,
 where \proglang{R}'s formula interface and factor expansion create
 intermediate copies that \proglang{Rust}'s ownership model avoids.

@@ -26,55 +26,66 @@ cleaning workflows and a comparison with equivalent \proglang{R} code.
 %% -----------------------------------------------------------------------------
 \subsection{Chat interface} \label{sec:examples-chat}
 
-The chat interface enables natural language interaction with the analytics
-engine. Users describe their analysis goals in plain language, and the LLM
-translates these requests into structured tool calls executed by the MCP server.
-This interface is useful for exploratory data analysis and for
-users less familiar with programming syntax. The examples in this section
-were generated using Claude Sonnet~4.6 via the MCP integration; other models
-(GPT-4.1~Mini, Ministral~3B, etc.) produce similar results with minor
-variations in explanation style.
+The \code{p2a chat} command provides a terminal REPL for conversational
+analytics.  It connects to a running \pkg{p2a-mcp} HTTP server and streams
+responses via server-sent events, so all LLM calls, tool execution, and
+session management happen server-side.  Users describe their analysis goals
+in plain language, and the LLM translates these into structured tool calls
+executed by the MCP server.  Tool invocations are shown inline as they
+execute (tool name, arguments, elapsed time), followed by the LLM's
+narrative response.
+
+The transcript below was recorded from an actual terminal session using
+Claude Sonnet~4.6.\footnote{The session was generated non-interactively
+via \code{p2a chat --script prompts.txt --record transcript.txt --provider
+anthropic --model claude-sonnet-4-6}.  The \code{--script} flag reads
+prompts from a file; \code{--record} saves a plain-text transcript.  The
+full transcript and prompt file are included in the supplementary materials.
+Other models (GPT-4.1~Mini, Ministral~3B, etc.)\ produce similar results
+with minor variations in explanation style.}
+The outputs shown here are lightly condensed for space---the full,
+unedited transcript is available in \code{paper/transcripts/}.
 
 A typical session begins by loading data and examining its structure:
 
 \begin{Sinput}
-User: Load the Grunfeld investment dataset from grunfeld.csv and show me
-      what's in it.
+p2a> Load the Grunfeld investment dataset from grunfeld.csv and show me
+     what's in it.
 \end{Sinput}
 
 \begin{Soutput}
-I'll load the dataset and describe its contents.
+  [tool] load_dataset (name="grunfeld", path="grunfeld.csv")  done 6ms
+  [tool] head_dataset (dataset="grunfeld", n=10)              done 1ms
+  [tool] describe_dataset (dataset="grunfeld")                done 0ms
 
-**Dataset loaded: grunfeld**
-- Rows: 200
-- Columns: 5
+Dataset Overview: 200 rows, 5 columns, no missing values.
 
-| Column  | Type    | Description                        |
-|---------|---------|-----------------------------------|
-| firm    | Integer | Firm identifier (1-10)            |
-| year    | Integer | Year (1935-1954)                  |
-| inv     | Float64 | Gross investment                  |
-| value   | Float64 | Market value of firm              |
-| capital | Float64 | Stock of plant and equipment      |
+| Column  | Type    | Description                                  |
+|---------|---------|----------------------------------------------|
+| firm    | Integer | Firm identifier (1-10, 10 firms)             |
+| year    | Integer | Year (1935-1954)                             |
+| inv     | Float   | Gross investment (dependent variable, M$)    |
+| value   | Float   | Market value of the firm (M$)                |
+| capital | Float   | Capital stock (net plant & equipment, M$)    |
 
-This is a balanced panel dataset with 10 firms observed over 20 years,
-commonly used to demonstrate panel data methods.
+Classic panel dataset: 10 firms x 20 years = 200 balanced observations.
 \end{Soutput}
 
 The next example shows cross-sectional regression with heteroskedasticity-consistent standard errors.%
 \footnote{HC1 is the default robust standard error estimator when robust SEs are
-requested. HC1 applies a degrees-of-freedom correction $(n/(n-k))$ to HC0,
+requested. HC1 applies a degrees-of-freedom correction $n/(n-k)$ to HC0,
 improving small-sample performance.}
 
 \begin{Sinput}
-User: Run a regression of investment on market value and capital stock.
-      Use robust standard errors.
+p2a> Run a regression of investment on market value and capital stock.
+     Use robust standard errors.
 \end{Sinput}
 
 \begin{Soutput}
-Running OLS regression with HC1 robust standard errors...
+  [tool] regression_ols (dataset="grunfeld", y="inv",
+           x=["value","capital"])                              done 5ms
 
-**OLS Regression Results**
+OLS Regression Results (HC1 robust standard errors)
 Dependent variable: inv
 
 | Variable    |    Coef |  Std Err |      t | P>|t| |
@@ -83,99 +94,95 @@ Dependent variable: inv
 | value       |   0.116 |    0.007 | 16.967 | 0.000 |
 | capital     |   0.231 |    0.049 |  4.721 | 0.000 |
 
-R-squared: 0.812
-Adj. R-squared: 0.810
-Observations: 200
-Standard errors: HC1 (heteroskedasticity-robust)
+R-squared: 0.812,  Adj. R-squared: 0.810
+F-statistic: 426.58 (p < 0.001),  Observations: 200
 
 Both market value and capital stock are highly significant predictors of
-investment. A $1 million increase in market value is associated with
-approximately $116,000 more investment, holding capital constant.
+investment.  A $1M increase in market value is associated with $0.116M
+more in gross investment, holding capital constant.
+This is pooled OLS---it ignores the panel structure (firm fixed effects).
 \end{Soutput}
 
 For panel data, users can request fixed effects estimation in natural language:
 
 \begin{Sinput}
-User: The data has a panel structure. Run a fixed effects regression
-      controlling for firm-specific effects.
+p2a> The data has a panel structure. Run a fixed effects regression
+     controlling for firm-specific effects.
 \end{Sinput}
 
 \begin{Soutput}
-Running within-transformation fixed effects estimation...
+  [tool] panel_fixed_effects (dataset="grunfeld", y="inv",
+           x=["value","capital"], entity_var="firm")           done 2ms
 
-**Fixed Effects (Within) Estimation**
-Dependent variable: inv
-Entity fixed effects: firm (10 levels)
+Fixed Effects (Within) Estimation
+Dependent variable: inv,  Entity fixed effects: firm (10 levels)
 
 | Variable |    Coef |  Std Err |      t | P>|t| |
 |----------|--------:|---------:|-------:|------:|
 | value    |   0.110 |    0.012 |  9.288 | 0.000 |
 | capital  |   0.310 |    0.017 | 17.867 | 0.000 |
 
-R-squared (within): 0.767
-Observations: 200
-Groups: 10
-F-statistic: 309.01 (p-value: 0.000)
+R-squared (within): 0.767,  Observations: 200,  Groups: 10
+F-statistic: 309.01 (p < 0.001)
 
-After controlling for time-invariant firm characteristics, the coefficient
-on capital increases from 0.23 to 0.31, suggesting that pooled OLS
-underestimated the association between capital stock and investment.
-(Note: This change in coefficient reflects removal of omitted variable
-bias, not necessarily identification of a causal effect.)
+The capital stock coefficient increases from 0.231 to 0.310 after
+controlling for firm fixed effects---pooled OLS was underestimating the
+within-firm effect.  Market value is slightly lower (0.116 -> 0.110),
+suggesting some of the pooled effect was driven by cross-firm differences.
 \end{Soutput}
 
 Users can request specification tests without knowing the technical details:
 
 \begin{Sinput}
-User: Should I use fixed effects or random effects for this analysis?
+p2a> Should I use fixed effects or random effects for this analysis?
 \end{Sinput}
 
 \begin{Soutput}
-I'll run a Hausman test to help determine the appropriate specification.
+  [tool] hausman_test (dataset="grunfeld", y="inv",
+           x=["value","capital"], entity_var="firm")           done 60ms
 
-**Hausman Test Results**
-H0: Random Effects is consistent and efficient
-H1: Fixed Effects is consistent; Random Effects is inconsistent
+Hausman Test Results
+H0: Random effects is consistent and efficient
+H1: Fixed effects is consistent; random effects is inconsistent
 
-Chi-squared statistic: 0.0003
+Chi-squared statistic: 0.618
 Degrees of freedom: 2
-P-value: 0.9999
+P-value: 0.734
 
-**Recommendation**: Random Effects
+Coefficient comparison:
+| Variable | Fixed Effects | Random Effects | Difference |
+|----------|-------------:|---------------:|-----------:|
+| value    |        0.110 |          0.110 |      0.000 |
+| capital  |        0.310 |          0.308 |      0.002 |
 
-The test fails to reject the null hypothesis. The near-zero chi-squared
-statistic indicates virtually no systematic difference between the FE and
-RE coefficient estimates for this dataset.
-
-**Note**: Extreme p-values like 0.9999 warrant interpretation with caution.
-Such values can arise from small test statistics (as here), but also from
-numerical issues or model misspecification. The Hausman test assumes both
-estimators are consistent under the null, which requires correct functional
-form, homoskedastic errors, and no omitted variables correlated with the
-regressors. The test statistic may be unreliable with small samples,
-heteroskedasticity, or serial correlation. Users should treat very high
-p-values as suggestive rather than definitive.
+With p = 0.734, we fail to reject H0---random effects appears
+consistent. However, the Hausman test has limited power with only
+10 entities. Economically, unobserved firm characteristics likely
+correlate with market value and capital, arguing for fixed effects.
+Since FE and RE estimates are nearly identical here, the practical
+choice matters less for this dataset.
 \end{Soutput}
 
-\noindent In this example, the test statistics (chi-squared, $p$-value,
-degrees of freedom) and the recommendation come from the \proglang{Rust}
-backend; the interpretive caveat about extreme $p$-values is generated
-by the LLM. This division is typical: the computation layer returns
-structured results and simple diagnostics, and the language model adds
-contextual interpretation---including caveats about assumptions and
-limitations that depend on the specific results observed.
+\noindent In this example, the test statistics ($\chi^2$, $p$-value,
+degrees of freedom) come from the \proglang{Rust} backend; the interpretive
+caveat about limited power with few entities is generated by the LLM.
+This division is typical: the computation layer returns structured results
+and simple diagnostics, and the language model adds contextual
+interpretation---including caveats about assumptions and limitations that
+depend on the specific results observed.
 
 For datasets with multiple categorical dimensions, users can request
 multi-way fixed effects:
 
 \begin{Sinput}
-User: Control for both firm and year fixed effects in the regression.
+p2a> Control for both firm and year fixed effects in the regression.
 \end{Sinput}
 
 \begin{Soutput}
-Running two-way fixed effects using alternating projections...
+  [tool] panel_hdfe (dataset="grunfeld", y="inv",
+           x=["value","capital"], fe=["firm","year"])          done 5ms
 
-**High-Dimensional Fixed Effects Estimation**
+High-Dimensional Fixed Effects Estimation
 Dependent variable: inv
 Fixed effects: firm (10 levels), year (20 levels)
 
@@ -184,38 +191,42 @@ Fixed effects: firm (10 levels), year (20 levels)
 | value    |   0.118 |    0.019 |  6.137 | 0.000 |
 | capital  |   0.358 |    0.054 |  6.579 | 0.000 |
 
-R-squared (within): 0.720
-Observations: 200
-F-statistic: 217.44 (p-value: 0.000)
+R-squared (within): 0.720,  Observations: 200
+F-statistic: 217.44 (p < 0.001),  Convergence: 2 iterations
+
+Adding year fixed effects absorbs common macro shocks (recessions, WWII,
+post-war boom), revealing a stronger capital-investment relationship
+(0.358, up from 0.310 in the firm-FE-only model).
 \end{Soutput}
 
 Users can also request diagnostic tests in natural language:
 
 \begin{Sinput}
-User: Check the regression assumptions for the OLS model.
+p2a> Check the regression assumptions for the OLS model.
 \end{Sinput}
 
 \begin{Soutput}
-Running regression diagnostics...
+  [tool] regression_diagnostics (dataset="grunfeld", y="inv",
+           x=["value","capital"])                              done 22ms
 
-**Jarque-Bera Test (Normality of residuals)**
-Statistic: 89.57
-P-value: 0.000
+Jarque-Bera Test (Normality of residuals)
+Statistic: 89.57,  P-value: 0.000
 Conclusion: Residuals deviate significantly from normality.
 
-**Breusch-Pagan Test (Heteroskedasticity)**
-Statistic: 55.25
-P-value: 0.000
+Breusch-Pagan Test (Heteroskedasticity)
+LM statistic: 55.25,  P-value: 0.000
 Conclusion: Evidence of heteroskedasticity; robust SEs recommended.
 
-**Durbin-Watson Statistic (Autocorrelation)**
+Durbin-Watson Statistic (Autocorrelation)
 Statistic: 0.358
-Interpretation: Positive autocorrelation detected (expected in panel data).
+Interpretation: Strong positive serial autocorrelation (expected in
+panel data where investment decisions persist over time).
 
-**Variance Inflation Factors**
-value: 1.31
-capital: 1.31
+Variance Inflation Factors
+value: 1.31,  capital: 1.31
 No multicollinearity detected (VIF < 5).
+The high condition number (2,458) is driven by variable scale, not
+true collinearity.
 \end{Soutput}
 
 
@@ -278,201 +289,170 @@ and can export them as an executable shell script for exact reproduction.
 \subsection{Realistic use and error handling} \label{sec:examples-realistic}
 
 The preceding examples show successful interactions. Real use involves
-more iteration. This section shows what failures look like, how to
-recover, and what accuracy to expect
-(Section~\ref{sec:evaluation} provides detailed numbers).
+more iteration. This section demonstrates a multi-step
+difference-in-differences workflow---including method selection,
+clustered standard errors, and diagnostic issues---using a synthetic
+employee training dataset.\footnote{The dataset contains 1,200
+observations (200 employees $\times$ 6 periods) with treatment/control
+groups, perfectly correlated covariates (for multicollinearity), and a
+department with zero bonus rate (for separation). The transcript was
+recorded via \code{p2a chat --script prompts.txt --record transcript.txt}.}
 
-Vague requests prompt the system to ask for clarification rather
-than guess:
+Given a description of the research design, the LLM correctly selects
+difference-in-differences and calls multiple tools in parallel:
 
 \begin{Sinput}
-User: Run a regression with firm effects.
+p2a> Analyze whether the training program affected employee performance.
+     The data has employees observed before and after training, with a
+     control group that didn't receive training.
 \end{Sinput}
 
 \begin{Soutput}
-I can estimate this model, but need clarification:
+  [tool] diff_in_diff (dataset="training", dep_var="performance",
+           post_var="post_training", treatment_var="training_group")  done 30ms
+  [tool] panel_hdfe (dataset="training", fe=["employee_id","time"],
+           x=["training_group","post_training"], y="performance")    done 16ms
 
-1. **Dependent variable**: Which column should be the outcome?
-2. **Independent variables**: Which predictors should be included?
-3. **Fixed vs Random effects**: Should firm effects be treated as fixed
-   (within estimator) or random (GLS)?
+Difference-in-Differences Estimation
 
-Please specify, e.g., "Regress inv on value and capital with firm fixed effects"
+| Group      | Pre-Training | Post-Training | Change |
+|------------|-------------:|--------------:|-------:|
+| Control    |        3.002 |         3.127 | +0.125 |
+| Treated    |        3.424 |         3.763 | +0.339 |
+| DiD Effect |              |               | +0.213 |
+
+The ATT estimate is +0.213 (SE: 0.065, p = 0.001). The training
+program improved performance by approximately 0.21 points---roughly
+a 6--7\% lift relative to the treated group's pre-training mean.
 \end{Soutput}
 
-The following workflow illustrates common failure modes: wrong method
-selected, parameters extracted incorrectly, user corrections,
-and eventual success.
+The user then requests clustered standard errors. The LLM creates
+the interaction term automatically and re-estimates:
 
 \begin{Sinput}
-User: Analyze whether the training program affected employee performance.
-      The data has employees observed before and after training, with a
-      control group that didn't receive training.
+p2a> Now run the difference-in-differences with standard errors
+     clustered at the employee level.
 \end{Sinput}
 
 \begin{Soutput}
-I'll run a t-test comparing performance between training and control groups.
+  [tool] munge_mutate (dataset="training", expr_type="arithmetic",
+           left="training_group", new_column="did")                  done 39ms
+  [tool] regression_clustered (cluster1="employee_id",
+           dataset="training", y="performance",
+           x=["training_group","post_training","did"])               done 18ms
 
-**Two-sample t-test**
-Training group mean: 3.82
-Control group mean: 3.45
-Difference: 0.37 (95% CI: [0.21, 0.53])
-p-value: 0.000
-
-The training group shows significantly higher performance.
-\end{Soutput}
-
-\begin{Sinput}
-User: That's not right - I need a difference-in-differences analysis,
-      not just a comparison of means. I have before/after data.
-\end{Sinput}
-
-\begin{Soutput}
-You're right, I apologize. Let me run a difference-in-differences estimation
-to properly account for the before/after structure.
-
-**Difference-in-Differences Estimation**
-Treatment indicator: training_group
-Time indicator: post_training
-
-| Variable              |    Coef |  Std Err |      t | P>|t| |
-|-----------------------|--------:|---------:|-------:|------:|
-| post_training         |   0.12  |    0.08  |  1.50  | 0.134 |
-| training_group        |   0.31  |    0.11  |  2.82  | 0.005 |
-| post × training (ATT) |   0.24  |    0.09  |  2.67  | 0.008 |
-
-The ATT estimate is 0.24 performance points.
-\end{Soutput}
-
-\begin{Sinput}
-User: Good, but I asked for clustered standard errors at the employee
-      level to account for repeated observations.
-\end{Sinput}
-
-\begin{Soutput}
-Let me re-run with clustered standard errors:
-
-**Difference-in-Differences** (Clustered by employee, 847 clusters)
+DiD with Employee-Level Clustered Standard Errors (200 clusters)
 
 | Variable              |    Coef | Cluster SE |      t | P>|t| |
 |-----------------------|--------:|-----------:|-------:|------:|
-| post_training         |   0.12  |      0.11  |  1.09  | 0.276 |
-| training_group        |   0.31  |      0.14  |  2.21  | 0.027 |
-| post × training (ATT) |   0.24  |      0.12  |  2.00  | 0.046 |
+| training_group        |   0.422 |      0.072 |  5.87  | 0.000 |
+| post_training         |   0.125 |      0.023 |  5.37  | 0.000 |
+| did (ATT)             |   0.213 |      0.035 |  6.06  | 0.000 |
 
-With clustered SEs, the ATT remains significant at the 5% level, though
-standard errors are larger than the unclustered estimates.
+The ATT remains +0.213 with clustered SE of 0.035 (p < 0.001).
 \end{Soutput}
 
+When perfectly correlated covariates are added, the system detects
+multicollinearity and explains both the symptoms and the fix:
+
 \begin{Sinput}
-User: Now check for pre-trends to validate the parallel trends assumption.
+p2a> Add years_since_hire to the model alongside tenure.
 \end{Sinput}
 
 \begin{Soutput}
-**Pre-trend Test**
-Testing whether treatment and control groups had parallel trends
-in the pre-treatment period...
+  [tool] regression_clustered (cluster1="employee_id",
+           dataset="training", y="performance",
+           x=["training_group","post_training","did",
+               "tenure","years_since_hire"])                         done 8ms
 
-| Pre-period |  Diff |  Std Err |      t | P>|t| |
-|------------|------:|---------:|-------:|------:|
-| t-3        | -0.02 |    0.09  | -0.22  | 0.826 |
-| t-2        |  0.05 |    0.08  |  0.63  | 0.531 |
-| t-1        |  0.01 |    0.08  |  0.13  | 0.900 |
+Multicollinearity Warning: tenure and years_since_hire are
+near-perfectly collinear
 
-Joint test (H0: all pre-period diffs = 0):
-F-statistic: 0.18, p-value: 0.912
+| Variable         | Estimate | Std. Error |
+|------------------|---------:|-----------:|
+| tenure           |   0.4375 |     40,436 |
+| years_since_hire |  -0.4375 |        NaN |
 
-No evidence of differential pre-trends; parallel trends assumption
-is supported (though not proven) by this test.
+The two variables are essentially measuring the same quantity
+(years_since_hire = tenure + constant). The model cannot separately
+identify their effects. The DiD estimate remains stable at +0.213
+(p < 0.001)---the treatment effect is unaffected.
+
+Recommendation: include only one of the two variables.
 \end{Soutput}
 
-This workflow required three corrections: (1)~method
-selection from a t-test to DiD; (2)~clustered standard errors;
-and (3)~pre-trend diagnostics. The final result is correct.
-
-Two practical tips: naming variables directly
-(``regress inv on value'') is more reliable than using pronouns
-(``use the same variables''); and users should verify which
-parameters the model extracted before interpreting the output.
-
-
-The system detects multicollinearity and reports it with
-suggested actions:
-
-\begin{Sinput}
-User: Add years_since_hire to the model alongside tenure.
-\end{Sinput}
-
-\begin{Soutput}
-**Error: Perfect multicollinearity detected**
-
-The design matrix is rank-deficient. Column `years_since_hire` is a linear
-combination of existing columns (correlation with tenure: 1.000).
-
-**Suggested actions:**
-1. Remove one of the collinear variables
-2. If both are theoretically important, consider which better captures
-   your construct of interest
-\end{Soutput}
-
-Similarly, convergence failures are caught and explained:
-
-\begin{Sinput}
-User: Fit a logit model with department fixed effects.
-\end{Sinput}
-
-\begin{Soutput}
-**Warning: Convergence issues detected**
-
-**Issue:** Perfect prediction in some groups
-- Department "Legal" has 0% bonus rate (23 observations)
-
-**Options:**
-1. Drop singleton departments
-2. Use a linear probability model (robust to separation)
-3. Use penalized likelihood (Firth correction)
-
-Running linear probability model with department FE instead...
-\end{Soutput}
-
-The system detects problems before estimation fails and explains statistical
-issues rather than computational symptoms.
-When requests exceed the implemented method set, it reports unavailability and
-suggests external tools.
+\noindent The system diagnoses the problem from the numerical symptoms
+(inflated standard errors, NaN, negative~$R^2$) rather than simply
+reporting a matrix singularity error. The LLM's explanation
+distinguishes between the unreliable individual coefficients and the
+stable treatment effect---a nuance that requires understanding both
+the computation and the research design.
 
 %% -----------------------------------------------------------------------------
 \subsection{Beyond regression: time series} \label{sec:examples-ts}
 
 The system covers domains beyond regression. A time series workflow
-using quarterly U.S.\ GDP growth data (1954--2023) illustrates method
-progression within a single conversation: stationarity testing,
-univariate modeling, then residual diagnostics.
+using quarterly GDP growth data (1954--2023, 280 observations)
+illustrates method progression within a single conversation:
+stationarity testing, univariate modeling, then residual diagnostics.
 
 \begin{Sinput}
-User: Load gdp_quarterly.csv and check whether GDP growth is stationary.
+p2a> Load gdp_quarterly.csv as gdp and check whether GDP growth
+     is stationary.
 \end{Sinput}
 
 \begin{Soutput}
-**Augmented Dickey-Fuller Test** (gdp_growth)
-Statistic: -4.82, P-value: 0.000
+  [tool] load_dataset (name="gdp",
+           path="validation/datasets/gdp_quarterly.csv")            done 49ms
+  [tool] timeseries_pp_test (column="gdp_growth", dataset="gdp")    done 24ms
+
+Phillips-Perron Test (gdp_growth)
+Z(tau) statistic: -211.82,  P-value: < 0.0001
 GDP growth is stationary. No differencing needed.
 \end{Soutput}
 
 \begin{Sinput}
-User: Fit an ARIMA model to GDP growth. Let the system pick the order.
+p2a> Fit an ARIMA model to GDP growth. Let the system pick the order.
 \end{Sinput}
 
 \begin{Soutput}
-**ARIMA(2,0,1)** (AIC-based selection)
-AR(1): 0.312 (0.067), AR(2): 0.154 (0.063), MA(1): -0.089 (0.072)
-Ljung-Box (lag 10): p = 0.482 (no residual autocorrelation)
+  [tool] ts_arima_fit (column="gdp_growth", d=0, dataset="gdp",
+           p=1, q=1)                                                done 54ms
+
+ARIMA(1,0,1): gdp_growth_t = 0.233 + 0.549 * gdp_growth_{t-1}
+              + e_t - 0.249 * e_{t-1}
+AIC: 657.92,  Observations: 280
+\end{Soutput}
+
+\begin{Sinput}
+p2a> Check for residual autocorrelation in the ARIMA model.
+\end{Sinput}
+
+\begin{Soutput}
+  [tool] regression_bgtest (dataset="gdp", order=4,
+           x=["year","quarter"], y="gdp_growth")                    done 7ms
+  [tool] ts_arima_fit (column="gdp_growth", d=0, dataset="gdp",
+           p=2, q=2)                                                done 11ms
+
+Breusch-Godfrey Test (up to lag 4)
+LM statistic: 32.12,  p-value: < 0.0001
+Residual autocorrelation detected.
+
+Remediation: ARIMA(2,0,2) was fitted but does not improve AIC
+(660.6 vs 657.9). The remaining autocorrelation is statistically
+significant but economically modest (auxiliary R-squared = 0.115).
+Recommendation: retain ARIMA(1,0,1) and apply HAC standard errors
+for downstream inference.
 \end{Soutput}
 
 \noindent Order selection is delegated to the LLM, which chooses
-$p$, $d$, $q$ based on the ADF result and its training knowledge.
-This is not equivalent to \proglang{R}'s \code{auto.arima()}, which
-performs systematic grid
-search~\citep{Hyndman+Khandakar:2008}.
+$p$, $d$, $q$ based on the stationarity test result and its training
+knowledge. This is not equivalent to \proglang{R}'s \code{auto.arima()},
+which performs systematic grid
+search~\citep{Hyndman+Khandakar:2008}. The LLM autonomously checks a
+higher-order specification and reports that the parsimony--fit tradeoff
+favors the simpler model.
+
 Appendix~\ref{app:extended-examples} provides additional examples
 including data cleaning workflows and a side-by-side comparison with
 equivalent \proglang{R} code.

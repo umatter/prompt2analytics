@@ -607,8 +607,31 @@ fn main() {
 
     let mut results: Vec<BenchmarkResult> = Vec::new();
 
+    // Set up incremental save paths so results are written after each section
+    let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S");
+    let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .map(|p| p.to_path_buf())
+        .unwrap_or_default();
+    let perf_results = workspace_root.join("performance/results");
+    let r_results = workspace_root.join("performance/comparisons/r_comparison/results");
+    let _ = std::fs::create_dir_all(&perf_results);
+    let _ = std::fs::create_dir_all(&r_results);
+    let incremental_path = perf_results.join(format!("rust_unified_{}.json", timestamp));
+    let incremental_r_path = r_results.join(format!("rust_unified_{}.json", timestamp));
+
+    // Macro to save results incrementally after each section
+    macro_rules! save_incremental {
+        ($results:expr) => {
+            let _ = save_results($results, &incremental_path.to_string_lossy());
+            let _ = save_results($results, &incremental_r_path.to_string_lossy());
+        };
+    }
+
     println!("\n=== p2a Unified Benchmarks ===\n");
     println!("Data directory: {}", data_dir);
+    println!("Incremental results: {}", incremental_path.display());
     println!(
         "Configuration: {} warmup, {} measurement iterations\n",
         config.warmup_iterations, config.measurement_iterations
@@ -662,6 +685,7 @@ fn main() {
     // ============================================
     // Panel Data Benchmarks
     // ============================================
+    save_incremental!(&results);
     println!("\n--- Panel Data ---");
     print_header();
 
@@ -743,7 +767,8 @@ fn main() {
     }
 
     // Panel GLS
-    for (n_ent, n_per) in [(10, 10), (50, 20), (100, 100)] {
+    // Cap: no R benchmark at n=10000
+    for (n_ent, n_per) in [(10, 10), (50, 20)] {
         let n = n_ent * n_per;
         let dataset = load_csv_dataset(&data_dir, "panel", n)
             .unwrap_or_else(|| generate_panel_data(n_ent, n_per, 42));
@@ -764,7 +789,8 @@ fn main() {
     }
 
     // Arellano-Bond GMM
-    for (n_ent, n_per) in [(10, 10), (50, 20), (100, 100)] {
+    // Cap: no R benchmark at n=10000
+    for (n_ent, n_per) in [(10, 10), (50, 20)] {
         let n = n_ent * n_per;
         let dataset = load_csv_dataset(&data_dir, "panel", n)
             .unwrap_or_else(|| generate_panel_data(n_ent, n_per, 42));
@@ -785,7 +811,8 @@ fn main() {
     }
 
     // PVCM (requires string entity column)
-    for (n_ent, n_per) in [(10, 10), (50, 20), (100, 100)] {
+    // Cap: no R benchmark at n=10000
+    for (n_ent, n_per) in [(10, 10), (50, 20)] {
         let n = n_ent * n_per;
         let base_dataset = load_csv_dataset(&data_dir, "panel", n)
             .unwrap_or_else(|| generate_panel_data(n_ent, n_per, 42));
@@ -809,7 +836,8 @@ fn main() {
     }
 
     // PMG (requires string entity column)
-    for (n_ent, n_per) in [(10, 10), (50, 20), (100, 100)] {
+    // Cap: no R benchmark at n=10000
+    for (n_ent, n_per) in [(10, 10), (50, 20)] {
         let n = n_ent * n_per;
         let base_dataset = load_csv_dataset(&data_dir, "panel", n)
             .unwrap_or_else(|| generate_panel_data(n_ent, n_per, 42));
@@ -835,6 +863,7 @@ fn main() {
     // ============================================
     // Discrete Choice Benchmarks
     // ============================================
+    save_incremental!(&results);
     println!("\n--- Discrete Choice ---");
     print_header();
 
@@ -878,6 +907,7 @@ fn main() {
     // ============================================
     // Time Series Benchmarks
     // ============================================
+    save_incremental!(&results);
     println!("\n--- Time Series ---");
     print_header();
 
@@ -921,6 +951,7 @@ fn main() {
     // ============================================
     // ML Benchmarks
     // ============================================
+    save_incremental!(&results);
     println!("\n--- Machine Learning ---");
     print_header();
 
@@ -966,6 +997,7 @@ fn main() {
     // ============================================
     // LOESS
     // ============================================
+    save_incremental!(&results);
     println!("\n--- LOESS ---");
     print_header();
 
@@ -992,7 +1024,8 @@ fn main() {
     // ============================================
     // Hierarchical Clustering
     // ============================================
-    for n in [100, 1000, 10000] {
+    // Cap: no R benchmark at n=10000
+    for n in [100, 1000] {
         let data = load_csv_array2(&data_dir, "cluster", n)
             .unwrap_or_else(|| generate_cluster_data(n, 5, 42));
         let mut result = run_benchmark_tracked("Hierarchical", "Ward", n, &config, || {
@@ -1012,7 +1045,8 @@ fn main() {
     // ============================================
     // Random Forest
     // ============================================
-    for n in [100, 1000, 10000] {
+    // Cap: no R benchmark at n=10000
+    for n in [100, 1000] {
         let data = load_csv_array2(&data_dir, "cluster", n)
             .unwrap_or_else(|| generate_cluster_data(n, 5, 42));
         let target: Array1<f64> = data.column(0).to_owned();
@@ -1032,7 +1066,8 @@ fn main() {
     // ============================================
     // DBSCAN
     // ============================================
-    for n in [100, 1000, 10000] {
+    // Cap: no R benchmark at n=10000
+    for n in [100, 1000] {
         let data = load_csv_array2(&data_dir, "cluster", n)
             .unwrap_or_else(|| generate_cluster_data(n, 5, 42));
         let mut result = run_benchmark_tracked("DBSCAN", "eps=1.5", n, &config, || {
@@ -1053,7 +1088,8 @@ fn main() {
     // ============================================
     // Factor Analysis
     // ============================================
-    for n in [100, 1000, 10000] {
+    // Cap: no R benchmark at n=10000
+    for n in [100, 1000] {
         let mut rng = ChaCha8Rng::seed_from_u64(42);
         let p = 10;
         let k = 3;
@@ -1117,7 +1153,8 @@ fn main() {
     // ============================================
     // Doubly Robust (AIPW)
     // ============================================
-    for n in [100, 1000, 10000] {
+    // Cap: no R benchmark at n=10000
+    for n in [100, 1000] {
         let dataset = load_csv_dataset(&data_dir, "binary", n)
             .unwrap_or_else(|| generate_binary_data(n, 42));
         let dr_config = DoublyRobustConfig {
@@ -1169,7 +1206,8 @@ fn main() {
     // ============================================
     // Synthetic Control
     // ============================================
-    for (n_units, n_periods) in [(10, 10), (50, 20), (100, 100)] {
+    // Cap: no R benchmark at n=10000
+    for (n_units, n_periods) in [(10, 10), (50, 20)] {
         let n = n_units * n_periods;
         let mut rng = ChaCha8Rng::seed_from_u64(42);
         let mut unit_ids: Vec<String> = Vec::new();
@@ -1216,6 +1254,7 @@ fn main() {
     // ============================================
     // Spatial SAR/SEM
     // ============================================
+    save_incremental!(&results);
     println!("\n--- Spatial ---");
     print_header();
 
@@ -1344,11 +1383,13 @@ fn main() {
     // ============================================
     // Causal Inference & Econometrics
     // ============================================
+    save_incremental!(&results);
     println!("\n--- Causal Inference & Econometrics ---");
     print_header();
 
     // DiD (canonical 2x2)
-    for n in [100, 1000, 10000] {
+    // Cap: no R benchmark at n=10000
+    for n in [100, 1000] {
         let dataset = load_csv_dataset(&data_dir, "did", n)
             .unwrap_or_else(|| generate_did_data(n, 42));
         let mut result = run_benchmark_tracked("DiD", "canonical", n, &slow_config, || {
@@ -1367,7 +1408,8 @@ fn main() {
     }
 
     // IV/2SLS
-    for n in [100, 1000, 10000] {
+    // Cap: no R benchmark at n=10000
+    for n in [100, 1000] {
         let dataset = load_csv_dataset(&data_dir, "iv", n)
             .unwrap_or_else(|| generate_iv_data(n, 42));
         let mut result = run_benchmark_tracked("IV_2SLS", "2sls", n, &slow_config, || {
@@ -1386,7 +1428,8 @@ fn main() {
     }
 
     // RD (sharp)
-    for n in [100, 1000, 10000] {
+    // Cap: no R benchmark at n=10000
+    for n in [100, 1000] {
         let dataset = load_csv_dataset(&data_dir, "rd", n)
             .unwrap_or_else(|| generate_rd_data(n, 42));
         let mut result = run_benchmark_tracked("RD", "sharp", n, &slow_config, || {
@@ -1408,7 +1451,8 @@ fn main() {
     }
 
     // Staggered DiD (Callaway-Sant'Anna)
-    for (n_units, n_periods) in [(10, 10), (50, 20), (100, 100)] {
+    // Cap: no R benchmark at n=10000
+    for (n_units, n_periods) in [(10, 10), (50, 20)] {
         let n = n_units * n_periods;
         let dataset = load_csv_dataset(&data_dir, "staggered", n)
             .unwrap_or_else(|| generate_staggered_panel(n_units, n_periods, 42));
@@ -1429,7 +1473,8 @@ fn main() {
     }
 
     // ETWFE (Wooldridge)
-    for (n_units, n_periods) in [(10, 10), (50, 20), (100, 100)] {
+    // Cap: no R benchmark at n=10000
+    for (n_units, n_periods) in [(10, 10), (50, 20)] {
         let n = n_units * n_periods;
         let dataset = load_csv_dataset(&data_dir, "staggered", n)
             .unwrap_or_else(|| generate_staggered_panel(n_units, n_periods, 42));
@@ -1449,7 +1494,8 @@ fn main() {
     }
 
     // Bacon decomposition
-    for (n_units, n_periods) in [(10, 10), (50, 20), (100, 100)] {
+    // Cap: no R benchmark at n=10000
+    for (n_units, n_periods) in [(10, 10), (50, 20)] {
         let n = n_units * n_periods;
         let dataset = load_csv_dataset(&data_dir, "staggered", n)
             .unwrap_or_else(|| generate_staggered_panel(n_units, n_periods, 42));
@@ -1469,7 +1515,8 @@ fn main() {
     }
 
     // GSynth (Generalized Synthetic Control)
-    for (n_units, n_periods) in [(10, 10), (50, 20), (100, 100)] {
+    // Cap: no R benchmark at n=10000
+    for (n_units, n_periods) in [(10, 10), (50, 20)] {
         let n = n_units * n_periods;
         let dataset = load_csv_dataset(&data_dir, "staggered", n)
             .unwrap_or_else(|| generate_staggered_panel(n_units, n_periods, 42));
@@ -1496,7 +1543,8 @@ fn main() {
     }
 
     // TMLE
-    for n in [100, 1000, 10000] {
+    // Cap: no R benchmark at n=10000
+    for n in [100, 1000] {
         let dataset = load_csv_dataset(&data_dir, "treatment", n)
             .unwrap_or_else(|| generate_treatment_data(n, 42));
         let mut result = run_benchmark_tracked("TMLE", "ATE", n, &slow_config, || {
@@ -1515,7 +1563,8 @@ fn main() {
     }
 
     // CTMLE
-    for n in [100, 1000, 10000] {
+    // Cap: no R benchmark at n=10000
+    for n in [100, 1000] {
         let dataset = load_csv_dataset(&data_dir, "treatment", n)
             .unwrap_or_else(|| generate_treatment_data(n, 42));
         let mut result = run_benchmark_tracked("CTMLE", "adaptive", n, &slow_config, || {
@@ -1534,7 +1583,8 @@ fn main() {
     }
 
     // IPW
-    for n in [100, 1000, 10000] {
+    // Cap: no R benchmark at n=10000
+    for n in [100, 1000] {
         let dataset = load_csv_dataset(&data_dir, "treatment", n)
             .unwrap_or_else(|| generate_treatment_data(n, 42));
         let mut result = run_benchmark_tracked("IPW", "ATE", n, &slow_config, || {
@@ -1553,7 +1603,8 @@ fn main() {
     }
 
     // CBPS
-    for n in [100, 1000, 10000] {
+    // Cap: no R benchmark at n=10000
+    for n in [100, 1000] {
         let dataset = load_csv_dataset(&data_dir, "treatment", n)
             .unwrap_or_else(|| generate_treatment_data(n, 42));
         let mut result = run_benchmark_tracked("CBPS", "exact", n, &slow_config, || {
@@ -1603,7 +1654,8 @@ fn main() {
     }
 
     // Matching (nearest neighbor)
-    for n in [100, 1000, 10000] {
+    // Cap: no R benchmark at n=10000
+    for n in [100, 1000] {
         let dataset = load_csv_dataset(&data_dir, "treatment", n)
             .unwrap_or_else(|| generate_treatment_data(n, 42));
         let mut result = run_benchmark_tracked("Matching", "nearest", n, &slow_config, || {
@@ -1630,7 +1682,8 @@ fn main() {
     }
 
     // WeightIt
-    for n in [100, 1000, 10000] {
+    // Cap: no R benchmark at n=10000
+    for n in [100, 1000] {
         let dataset = load_csv_dataset(&data_dir, "treatment", n)
             .unwrap_or_else(|| generate_treatment_data(n, 42));
         let mut result = run_benchmark_tracked("WeightIt", "logistic", n, &slow_config, || {
@@ -1648,7 +1701,8 @@ fn main() {
     }
 
     // DoubleML (PLR)
-    for n in [100, 1000, 10000] {
+    // Cap: no R benchmark at n=10000
+    for n in [100, 1000] {
         let (y, d, x) = generate_doubleml_data(n, 42);
         let mut result = run_benchmark_tracked("DoubleML", "PLR", n, &slow_config, || {
             run_double_ml(&y.view(), &d.view(), &x.view(), DoubleMLConfig::default())
@@ -1666,7 +1720,8 @@ fn main() {
     }
 
     // Mediation
-    for n in [100, 1000, 10000] {
+    // Cap: no R benchmark at n=10000
+    for n in [100, 1000] {
         let dataset = load_csv_dataset(&data_dir, "mediation", n)
             .unwrap_or_else(|| generate_mediation_data(n, 42));
         let med_config = MediationConfig {
@@ -1692,7 +1747,8 @@ fn main() {
     }
 
     // LTMLE (2 time points)
-    for n in [100, 1000, 10000] {
+    // Cap: no R benchmark at n=10000
+    for n in [100, 1000] {
         let mut rng = ChaCha8Rng::seed_from_u64(42);
         let x1: Array2<f64> = Array2::from_shape_fn((n, 2), |_| rng.gen_range(-1.0..1.0));
         let x2: Array2<f64> = Array2::from_shape_fn((n, 2), |_| rng.gen_range(-1.0..1.0));
@@ -1731,6 +1787,7 @@ fn main() {
     // ============================================
     // Fisher Exact Test
     // ============================================
+    save_incremental!(&results);
     println!("\n--- Fisher Exact Test ---");
     print_header();
 
@@ -1759,6 +1816,7 @@ fn main() {
     // ============================================
     // Isotonic Regression
     // ============================================
+    save_incremental!(&results);
     println!("\n--- Isotonic Regression ---");
     print_header();
 
@@ -1792,6 +1850,7 @@ fn main() {
     // ============================================
     // Jarque-Bera
     // ============================================
+    save_incremental!(&results);
     println!("\n--- Jarque-Bera ---");
     print_header();
 
@@ -1819,6 +1878,7 @@ fn main() {
     // ============================================
     // Survival: KM, Cox PH, Log-Rank
     // ============================================
+    save_incremental!(&results);
     println!("\n--- Survival Analysis ---");
     print_header();
 
@@ -1945,6 +2005,7 @@ fn main() {
     // ============================================
     // Sensemakr
     // ============================================
+    save_incremental!(&results);
     println!("\n--- Sensemakr ---");
     print_header();
 
@@ -2011,6 +2072,7 @@ fn main() {
     // ============================================
     // Regression Diagnostics & Variants
     // ============================================
+    save_incremental!(&results);
     println!("\n--- Regression Diagnostics & Variants ---");
     print_header();
 
@@ -2199,7 +2261,8 @@ fn main() {
     }
 
     // OLS_Bootstrap (slower - use slow_config with smaller sample sizes)
-    for n in [100, 1000, 10000] {
+    // Cap: no R benchmark at n=10000
+    for n in [100, 1000] {
         let dataset = load_csv_dataset(&data_dir, "regression", n)
             .unwrap_or_else(|| generate_regression_data(n, 5, 42));
         let x_cols: Vec<&str> = vec!["x1", "x2", "x3", "x4", "x5"];
@@ -2226,7 +2289,8 @@ fn main() {
     }
 
     // GLS (slower - use slow_config)
-    for n in [100, 1000, 10000] {
+    // Cap at n=1000: GLS with AR1 creates n×n correlation matrix, O(n³) — matches R benchmark
+    for n in [100, 1000] {
         let dataset = load_csv_dataset(&data_dir, "regression", n)
             .unwrap_or_else(|| generate_regression_data(n, 1, 42));
 
@@ -2252,7 +2316,8 @@ fn main() {
     }
 
     // Quantile Regression (slower - use slow_config)
-    for n in [100, 1000, 10000] {
+    // Cap: no R benchmark at n=10000
+    for n in [100, 1000] {
         let dataset = load_csv_dataset(&data_dir, "regression", n)
             .unwrap_or_else(|| generate_regression_data(n, 3, 42));
         let x_cols: Vec<&str> = vec!["x1", "x2", "x3"];
@@ -2277,7 +2342,8 @@ fn main() {
     }
 
     // Smooth Spline
-    for n in [100, 1000, 10000] {
+    // Cap: no R benchmark at n=10000
+    for n in [100, 1000] {
         let dataset = load_csv_dataset(&data_dir, "regression", n)
             .unwrap_or_else(|| generate_regression_data(n, 1, 42));
         let x1_col = dataset.df().column("x1").unwrap().as_materialized_series().f64().unwrap();
@@ -2301,7 +2367,8 @@ fn main() {
     }
 
     // Stepwise Selection (slower - use slow_config)
-    for n in [100, 1000, 10000] {
+    // Cap: no R benchmark at n=10000
+    for n in [100, 1000] {
         let dataset = load_csv_dataset(&data_dir, "regression", n)
             .unwrap_or_else(|| generate_regression_data(n, 5, 42));
         let x_cols: Vec<&str> = vec!["x1", "x2", "x3", "x4", "x5"];
@@ -2328,6 +2395,7 @@ fn main() {
     // ============================================
     // Time Series + Forecasting Extended Benchmarks
     // ============================================
+    save_incremental!(&results);
     println!("\n--- Time Series / Forecasting (Extended) ---");
     print_header();
 
@@ -2437,7 +2505,8 @@ fn main() {
     }
 
     // GARCH
-    for n in [100, 1000, 10000] {
+    // Cap: no R benchmark at n=10000
+    for n in [100, 1000] {
         let garch_y = load_csv_array1(&data_dir, "garch", n, "y")
             .map(|a| a.to_vec())
             .unwrap_or_else(|| generate_garch_data(n, 42));
@@ -2465,7 +2534,8 @@ fn main() {
     }
 
     // Kalman (local level state-space model)
-    for n in [100, 1000, 10000] {
+    // Cap: no R benchmark at n=10000
+    for n in [100, 1000] {
         let dataset = load_csv_dataset(&data_dir, "timeseries", n)
             .unwrap_or_else(|| generate_time_series(n, 42));
         let y_vec = extract_col_vec(&dataset, "y");
@@ -2497,7 +2567,8 @@ fn main() {
     }
 
     // StructTS (local linear trend)
-    for n in [100, 1000, 10000] {
+    // Cap: no R benchmark at n=10000
+    for n in [100, 1000] {
         let dataset = load_csv_dataset(&data_dir, "timeseries", n)
             .unwrap_or_else(|| generate_time_series(n, 42));
         let y_vec = extract_col_vec(&dataset, "y");
@@ -2526,7 +2597,8 @@ fn main() {
     }
 
     // VAR
-    for n in [100, 1000, 10000] {
+    // Cap: no R benchmark at n=10000
+    for n in [100, 1000] {
         let dataset = load_csv_dataset(&data_dir, "bivariate", n)
             .unwrap_or_else(|| generate_bivariate_data(n, 42));
 
@@ -2546,7 +2618,8 @@ fn main() {
     }
 
     // VECM
-    for n in [100, 1000, 10000] {
+    // Cap: no R benchmark at n=10000
+    for n in [100, 1000] {
         let dataset = load_csv_dataset(&data_dir, "bivariate", n)
             .unwrap_or_else(|| generate_bivariate_data(n, 42));
 
@@ -2566,7 +2639,8 @@ fn main() {
     }
 
     // Granger
-    for n in [100, 1000, 10000] {
+    // Cap: no R benchmark at n=10000
+    for n in [100, 1000] {
         let dataset = load_csv_dataset(&data_dir, "bivariate", n)
             .unwrap_or_else(|| generate_bivariate_data(n, 42));
 
@@ -2630,6 +2704,7 @@ fn main() {
     // ============================================
     // Discrete Choice: Count & Zero-Inflated Models
     // ============================================
+    save_incremental!(&results);
     println!("\n--- Discrete Choice: Count Models ---");
     print_header();
 
@@ -2727,6 +2802,7 @@ fn main() {
     // ============================================
     // Discrete Choice: Ordered & Multinomial
     // ============================================
+    save_incremental!(&results);
     println!("\n--- Discrete Choice: Ordered & Multinomial ---");
     print_header();
 
@@ -2775,10 +2851,12 @@ fn main() {
     // ============================================
     // ML: K-Medoids (PAM)
     // ============================================
+    save_incremental!(&results);
     println!("\n--- K-Medoids ---");
     print_header();
 
-    for n in [100, 1000, 10000] {
+    // Cap: PAM is O(n^2); n=10000 takes ~40 min with 100 iterations
+    for n in [100, 1000] {
         let data = load_csv_array2(&data_dir, "cluster", n)
             .unwrap_or_else(|| generate_cluster_data(n, 5, 42));
 
@@ -2804,6 +2882,7 @@ fn main() {
     // ============================================
     // ML: SVM (Linear)
     // ============================================
+    save_incremental!(&results);
     println!("\n--- Linear SVM ---");
     print_header();
 
@@ -2834,10 +2913,12 @@ fn main() {
     // ============================================
     // ML: t-SNE
     // ============================================
+    save_incremental!(&results);
     println!("\n--- t-SNE ---");
     print_header();
 
-    for n in [100, 1000, 10000] {
+    // Cap: t-SNE is O(n^2) with 500 internal iterations; n=10000 takes hours
+    for n in [100, 1000] {
         let data = load_csv_array2(&data_dir, "cluster", n)
             .unwrap_or_else(|| generate_cluster_data(n, 5, 42));
 
@@ -2861,10 +2942,12 @@ fn main() {
     // ============================================
     // ML: Silhouette
     // ============================================
+    save_incremental!(&results);
     println!("\n--- Silhouette ---");
     print_header();
 
-    for n in [100, 1000, 10000] {
+    // Cap: Silhouette computes pairwise distances O(n^2); no R benchmark
+    for n in [100, 1000] {
         let data = load_csv_array2(&data_dir, "cluster", n)
             .unwrap_or_else(|| generate_cluster_data(n, 5, 42));
         // Run kmeans first to get labels
@@ -2890,10 +2973,12 @@ fn main() {
     // ============================================
     // ML: MDS (cmdscale)
     // ============================================
+    save_incremental!(&results);
     println!("\n--- MDS ---");
     print_header();
 
-    for n in [100, 1000, 10000] {
+    // Cap: MDS is O(n^3) eigendecomposition; n=10000 takes hours, no R benchmark
+    for n in [100, 1000] {
         let data = load_csv_array2(&data_dir, "cluster", n)
             .unwrap_or_else(|| generate_cluster_data(n, 5, 42));
 
@@ -2916,6 +3001,7 @@ fn main() {
     // ============================================
     // Stats: ACF
     // ============================================
+    save_incremental!(&results);
     println!("\n--- ACF ---");
     print_header();
 
@@ -2943,6 +3029,7 @@ fn main() {
     // ============================================
     // Stats: PACF
     // ============================================
+    save_incremental!(&results);
     println!("\n--- PACF ---");
     print_header();
 
@@ -2970,6 +3057,7 @@ fn main() {
     // ============================================
     // Stats: CCF
     // ============================================
+    save_incremental!(&results);
     println!("\n--- CCF ---");
     print_header();
 
@@ -3006,6 +3094,7 @@ fn main() {
     // ============================================
     // Stats: Canonical Correlation (cancor)
     // ============================================
+    save_incremental!(&results);
     println!("\n--- Canonical Correlation ---");
     print_header();
 
@@ -3044,6 +3133,7 @@ fn main() {
     // ============================================
     // Stats: Spline
     // ============================================
+    save_incremental!(&results);
     println!("\n--- Spline ---");
     print_header();
 
@@ -3072,6 +3162,7 @@ fn main() {
     // ============================================
     // Stats: t-test (one sample)
     // ============================================
+    save_incremental!(&results);
     println!("\n--- t-test ---");
     print_header();
 
@@ -3098,6 +3189,7 @@ fn main() {
     // ============================================
     // Stats: Wilcoxon signed-rank
     // ============================================
+    save_incremental!(&results);
     println!("\n--- Wilcoxon ---");
     print_header();
 
@@ -3123,6 +3215,7 @@ fn main() {
     // ============================================
     // Stats: KS test (one sample)
     // ============================================
+    save_incremental!(&results);
     println!("\n--- KS Test ---");
     print_header();
 
@@ -3148,6 +3241,7 @@ fn main() {
     // ============================================
     // Stats: Shapiro-Wilk
     // ============================================
+    save_incremental!(&results);
     println!("\n--- Shapiro-Wilk ---");
     print_header();
 
@@ -3173,6 +3267,7 @@ fn main() {
     // ============================================
     // Stats: ANOVA (one-way)
     // ============================================
+    save_incremental!(&results);
     println!("\n--- ANOVA ---");
     print_header();
 
@@ -3213,6 +3308,7 @@ fn main() {
     // ============================================
     // Stats: Kruskal-Wallis
     // ============================================
+    save_incremental!(&results);
     println!("\n--- Kruskal-Wallis ---");
     print_header();
 
@@ -3246,23 +3342,25 @@ fn main() {
     // ============================================
     // Stats: Friedman
     // ============================================
+    save_incremental!(&results);
     println!("\n--- Friedman ---");
     print_header();
 
     for n in [100, 1000, 10000] {
+        let k = 3; // number of treatments
         let mut rng = ChaCha8Rng::seed_from_u64(42);
-        let treatments: Vec<Vec<f64>> = (0..3).map(|g| {
-            let mean = 5.0 + g as f64;
-            (0..n).map(|_| mean + rng.gen_range(-1.0..1.0)).collect()
+        // Friedman expects n blocks × k treatments (outer=blocks, inner=treatments)
+        let blocks: Vec<Vec<f64>> = (0..n).map(|_| {
+            (0..k).map(|g| 5.0 + g as f64 + rng.gen_range(-1.0..1.0)).collect()
         }).collect();
-        let tnames: Vec<String> = (0..3).map(|g| format!("t{}", g)).collect();
+        let tnames: Vec<String> = (0..k).map(|g| format!("t{}", g)).collect();
 
-        let treat_ref = treatments.clone();
+        let blocks_ref = blocks.clone();
         let tnames_ref = tnames.clone();
         let mut result = run_benchmark_tracked("Friedman", "test", n, &config, || {
-            friedman_test(&treat_ref, &tnames_ref)
+            friedman_test(&blocks_ref, &tnames_ref)
         });
-        if let Ok(ref res) = friedman_test(&treatments, &tnames) {
+        if let Ok(ref res) = friedman_test(&blocks, &tnames) {
             let mut outputs = BTreeMap::new();
             capture(&mut outputs, "statistic", res.statistic);
             capture(&mut outputs, "p_value", res.p_value);
@@ -3277,6 +3375,7 @@ fn main() {
     // ============================================
     // Stats: Chi-squared (goodness of fit)
     // ============================================
+    save_incremental!(&results);
     println!("\n--- Chi-squared ---");
     print_header();
 
@@ -3302,6 +3401,7 @@ fn main() {
     // ============================================
     // Stats: Correlation Test
     // ============================================
+    save_incremental!(&results);
     println!("\n--- Cor Test ---");
     print_header();
 
@@ -3330,6 +3430,7 @@ fn main() {
     // ============================================
     // STATS B: Variance/Scale Tests
     // ============================================
+    save_incremental!(&results);
     println!("\n--- Variance/Scale Tests ---");
     print_header();
 
@@ -3460,6 +3561,7 @@ fn main() {
     // ============================================
     // STATS B: Categorical Tests
     // ============================================
+    save_incremental!(&results);
     println!("\n--- Categorical Tests ---");
     print_header();
 
@@ -3518,6 +3620,7 @@ fn main() {
     // ============================================
     // STATS B: Multivariate
     // ============================================
+    save_incremental!(&results);
     println!("\n--- Multivariate Tests ---");
     print_header();
 
@@ -3586,6 +3689,7 @@ fn main() {
     // ============================================
     // STATS B: Proportion/Binomial/Poisson Tests
     // ============================================
+    save_incremental!(&results);
     println!("\n--- Proportion/Count Tests ---");
     print_header();
 
@@ -3688,6 +3792,7 @@ fn main() {
     // ============================================
     // STATS B: Multiple Comparisons
     // ============================================
+    save_incremental!(&results);
     println!("\n--- Multiple Comparisons ---");
     print_header();
 
@@ -3820,6 +3925,7 @@ fn main() {
     // ============================================
     // STATS B: Utility / Robust / Weighted
     // ============================================
+    save_incremental!(&results);
     println!("\n--- Utility Stats ---");
     print_header();
 
@@ -3920,6 +4026,7 @@ fn main() {
     // ============================================
     // SURVIVAL: AFT Model
     // ============================================
+    save_incremental!(&results);
     println!("\n--- Survival: AFT ---");
     print_header();
 
@@ -3966,6 +4073,7 @@ fn main() {
     // ============================================
     // SURVIVAL: Competing Risks
     // ============================================
+    save_incremental!(&results);
     println!("\n--- Survival: Competing Risks ---");
     print_header();
 
@@ -4000,10 +4108,12 @@ fn main() {
     // ============================================
     // CAUSAL: RD Multi-cutoff
     // ============================================
+    save_incremental!(&results);
     println!("\n--- RD Multi-cutoff ---");
     print_header();
 
-    for n in [100, 1000, 10000] {
+    // Cap: no R benchmark at n=10000
+    for n in [100, 1000] {
         let mut rng = ChaCha8Rng::seed_from_u64(42);
         let cutoffs = vec![0.0, 2.0];
         let mut x_vals = Vec::with_capacity(n);
@@ -4314,45 +4424,11 @@ fn main() {
     }
 
     // ============================================
-    // Save Results
+    // Final Save (incremental saves already wrote partial results throughout)
     // ============================================
-    let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S");
-
-    // cargo bench runs with cwd at the crate root (crates/p2a-core/).
-    // Navigate to workspace root for consistent output paths.
-    // Navigate to workspace root for consistent output paths.
-    let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(|p| p.parent())
-        .map(|p| p.to_path_buf())
-        .unwrap_or_default();
-
-    let perf_results = workspace_root.join("performance/results");
-    let r_results = workspace_root.join("performance/comparisons/r_comparison/results");
-    let _ = std::fs::create_dir_all(&perf_results);
-    let _ = std::fs::create_dir_all(&r_results);
-
-    let results_path = perf_results.join(format!("rust_unified_{}.json", timestamp));
-    let r_comparison_path = r_results.join(format!("rust_unified_{}.json", timestamp));
-
-    let results_str = results_path.to_string_lossy().to_string();
-    let r_comparison_str = r_comparison_path.to_string_lossy().to_string();
-
-    if let Err(e) = save_results(&results, &results_str) {
-        eprintln!("\nNote: Could not save results to {}: {}", results_str, e);
-        let fallback_path = format!("rust_unified_{}.json", timestamp);
-        if let Ok(()) = save_results(&results, &fallback_path) {
-            println!("\nResults saved to: {}", fallback_path);
-        }
-    } else {
-        println!("\nResults saved to: {}", results_str);
-    }
-
-    if let Err(e) = save_results(&results, &r_comparison_str) {
-        eprintln!("Note: Could not save to r_comparison: {}", e);
-    } else {
-        println!("Results also saved to: {}", r_comparison_str);
-    }
+    save_incremental!(&results);
+    println!("\nFinal results saved to: {}", incremental_path.display());
+    println!("Also saved to: {}", incremental_r_path.display());
 
     // Print summary
     println!("\n=== Summary ===");

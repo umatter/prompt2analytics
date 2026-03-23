@@ -81,9 +81,9 @@ rust_mem <- load_latest_json("^rust_unified_.*\\.json$") %>%
 if (nrow(r_mem) > 0 && nrow(rust_mem) > 0) {
   join_cols <- intersect(c("method", "variant", "n"), intersect(names(r_mem), names(rust_mem)))
   mem_df <- inner_join(r_mem, rust_mem, by = join_cols) %>%
-    filter(rust_mem_bytes > 0) %>%
+    filter(rust_mem_bytes > 0, n == 1000) %>%
     mutate(mem_ratio = r_mem_bytes / rust_mem_bytes)
-  cat(sprintf("Memory data: %d matched entries\n", nrow(mem_df)))
+  cat(sprintf("Memory data: %d matched entries (n=1000)\n", nrow(mem_df)))
 } else {
   mem_df <- data.frame()
   cat("WARNING: No memory data available\n")
@@ -98,10 +98,10 @@ if (length(missing_modules) > 0) {
                   paste(missing_modules, collapse = ", ")))
 }
 
-# Use largest-n per method for summary figures
+# Standardize to n=1000 for clean apples-to-apples comparison
 largest_n <- matched %>%
+  filter(n == 1000) %>%
   group_by(method) %>%
-  filter(n == max(n)) %>%
   slice(1) %>%
   ungroup()
 
@@ -428,11 +428,10 @@ cat("  Saved benchmark_validation.pdf/png\n")
 # ============================================================================
 # Print Summary Stats
 # ============================================================================
-cat("\n=== Summary Statistics ===\n")
+cat("\n=== Summary Statistics (n=1000) ===\n")
 cat(sprintf("Total unified entries: %d\n", nrow(unified_df)))
-cat(sprintf("Matched speed benchmarks: %d\n", nrow(matched)))
-cat(sprintf("Unique matched methods: %d\n", n_distinct(matched$method)))
-cat(sprintf("Overall median speedup: %.1fx\n", median(matched$speedup)))
+cat(sprintf("Matched at n=1000: %d methods\n", nrow(largest_n)))
+cat(sprintf("Overall median speedup: %.1fx\n", median(largest_n$speedup)))
 cat(sprintf("Methods where Rust faster: %d (%.0f%%)\n",
             sum(largest_n$speedup >= 1),
             100 * mean(largest_n$speedup >= 1)))
@@ -441,14 +440,9 @@ cat(sprintf("Methods where R faster: %d (%.0f%%)\n",
             100 * mean(largest_n$speedup < 1)))
 
 if (nrow(mem_df) > 0) {
-  mem_largest_all <- mem_df %>%
-    group_by(method) %>%
-    filter(n == max(n)) %>%
-    slice(1) %>%
-    ungroup()
-  cat(sprintf("\nMemory: %d matched methods\n", nrow(mem_largest_all)))
+  cat(sprintf("\nMemory: %d matched methods at n=1000\n", n_distinct(mem_df$method)))
   cat(sprintf("Median memory ratio (R/Rust): %.0fx\n",
-              median(mem_largest_all$mem_ratio, na.rm = TRUE)))
+              median(mem_df$mem_ratio, na.rm = TRUE)))
 }
 
 # Validation summary
