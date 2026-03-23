@@ -4,6 +4,7 @@ members = [
     "crates/p2a-core",
     "crates/p2a-mcp",
     "crates/p2a-cli",
+    "crates/p2a-chat",
     "crates/p2a-dioxus",
 ]
 

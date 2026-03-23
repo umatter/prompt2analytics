@@ -52,6 +52,10 @@ env_logger = "0.11"
 # Progress indicators
 indicatif = "0.17"
 
+# Chat REPL (lightweight, no p2a-core dependency)
+p2a-chat = { path = "../p2a-chat" }
+tokio = { version = "1", features = ["rt", "macros"] }
+
 [dev-dependencies]
 assert_cmd = "2.0"
 predicates = "3.1"

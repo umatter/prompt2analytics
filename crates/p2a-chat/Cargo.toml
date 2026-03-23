@@ -1,0 +1,33 @@
+[package]
+name = "p2a-chat"
+description = "Terminal chat client for prompt2analytics"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "p2a_chat"
+path = "src/lib.rs"
+
+[[bin]]
+name = "p2a-chat"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4.5", features = ["derive", "env"] }
+tokio = { version = "1", features = ["rt", "macros", "signal"] }
+reqwest = { version = "0.12", features = ["json", "stream"] }
+futures = "0.3"
+rustyline = "15"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+colored = "2.1"
+base64 = "0.22"
+log = "0.4"
+env_logger = "0.11"
+anyhow = "1"
+
+[lints]
+workspace = true

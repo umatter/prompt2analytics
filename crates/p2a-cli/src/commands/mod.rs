@@ -1,6 +1,7 @@
 //! Command implementations for the p2a CLI
 
 pub mod causal;
+pub mod chat;
 pub mod data;
 pub mod discrete;
 pub mod ml;

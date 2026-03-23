@@ -13,7 +13,7 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 use commands::{
-    causal, data, discrete, ml, munge, panel, regression, script, spatial, stats, survival,
+    causal, chat, data, discrete, ml, munge, panel, regression, script, spatial, stats, survival,
     timeseries, viz,
 };
 use output::OutputFormat;
@@ -121,6 +121,9 @@ pub enum Commands {
     #[command(subcommand)]
     Script(script::ScriptCommands),
 
+    /// Interactive chat with a p2a-mcp server (natural language analytics)
+    Chat(chat::ChatArgs),
+
     /// Run a smoke test to verify the CLI works correctly
     SmokeTest,
 }
@@ -187,6 +190,10 @@ fn main() -> anyhow::Result<()> {
             viz::execute(cmd, &cli.format, cli.quiet, session_manager.as_mut())
         }
         Commands::Script(cmd) => script::execute(cmd, &cli.format),
+        Commands::Chat(args) => {
+            let rt = tokio::runtime::Runtime::new()?;
+            return rt.block_on(chat::run(args));
+        }
         Commands::SmokeTest => run_smoke_test(&cli.format),
     };
 
