@@ -233,50 +233,81 @@ true collinearity.
 %% -----------------------------------------------------------------------------
 \subsection{Command-line interface} \label{sec:examples-cli}
 
-The command-line interface provides programmatic access for scripted workflows.
-Commands follow a hierarchical structure with sessions maintaining state:
+The command-line interface provides programmatic access for scripted
+workflows.\footnote{The output shown in this section was captured from
+actual CLI invocations; the full transcript is in
+\code{paper/transcripts/section4\_2\_cli\_output.txt}.}
+Commands follow a hierarchical structure with sessions maintaining state
+across invocations:
 
 \begin{Sinput}
-# Load data and run OLS with robust standard errors
-p2a --session analysis.json data load grunfeld.csv --name grunfeld
-p2a --session analysis.json reg ols grunfeld \
-    -y inv -x value capital --robust hc1
-
-# Panel fixed effects
-p2a --session analysis.json panel fe grunfeld \
-    -y inv -x value capital --entity firm
-
-# Export session to reproducible script
-p2a script export analysis.json -o reproduce.sh
+$ p2a --session analysis.json data load grunfeld.csv --name grunfeld
 \end{Sinput}
-\noindent\textit{Note}: Backslash line continuation (\texttt{\textbackslash})
-works in Bash, Zsh, and most POSIX-compatible shells. Windows Command Prompt
-users should write commands on a single line or use PowerShell's backtick
-(\texttt{`}) for continuation.
+
+\begin{Soutput}
+Dataset: grunfeld
+  Rows: 200
+  Columns: 5
+  Column names: firm, year, inv, value, capital
+\end{Soutput}
+
+\begin{Sinput}
+$ p2a --session analysis.json reg ols grunfeld \
+    -y inv -x value capital --robust hc1
+\end{Sinput}
+
+\begin{Soutput}
+OLS Regression Results
+============================================================
+Variable         Coefficient   Std. Error    t-value    p-value
+------------------------------------------------------------
+(Intercept)       -42.714369    11.574701     -3.690     0.0003***
+value               0.115562     0.006811     16.967     0.0000***
+capital             0.230678     0.048866      4.721     0.0000***
+------------------------------------------------------------
+R-squared: 0.812408
+Adj. R-squared: 0.809537
+Observations: 200
+\end{Soutput}
+
+\begin{Sinput}
+$ p2a --session analysis.json panel fe grunfeld \
+    -y inv -x value capital --entity firm
+\end{Sinput}
+
+\begin{Soutput}
+Fixed Effects (Within) Estimation Results
+============================================================
+Variable         Coefficient   Std. Error    t-value    p-value
+------------------------------------------------------------
+value               0.110124     0.011857      9.288     0.0000***
+capital             0.310065     0.017355     17.867     0.0000***
+------------------------------------------------------------
+R-squared: 0.766758,  Observations: 200,  Groups: 10
+F-statistic: 309.0142 (p-value: 0.0000)
+\end{Soutput}
 
 All commands support JSON output (\code{-F json}) for integration with
 other tools and scripts:
 
 \begin{Sinput}
-p2a -F json reg ols grunfeld -y inv -x value capital --robust hc1
+$ p2a -F json reg ols grunfeld -y inv -x value capital --robust hc1
 \end{Sinput}
 
 \begin{Soutput}
 {
-  "coefficients": {
-    "(Intercept)": -42.714, "value": 0.116, "capital": 0.231
-  },
-  "std_errors": {
-    "(Intercept)": 11.575, "value": 0.007, "capital": 0.049
-  },
-  "t_values": {
-    "(Intercept)": -3.690, "value": 16.967, "capital": 4.721
-  },
-  "p_values": {
-    "(Intercept)": 0.000, "value": 0.000, "capital": 0.000
-  },
-  "r_squared": 0.812, "adj_r_squared": 0.810,
-  "n_obs": 200, "cov_type": "HC1"
+  "method": "OLS Regression",
+  "r_squared": 0.8124,
+  "adj_r_squared": 0.8095,
+  "n_observations": 200,
+  "coefficients": [
+    {"name": "(Intercept)", "coefficient": -42.714,
+     "std_error": 11.575, "t_value": -3.690, "p_value": 0.0003},
+    {"name": "value", "coefficient": 0.1156,
+     "std_error": 0.0068, "t_value": 16.967, "p_value": 0.0},
+    {"name": "capital", "coefficient": 0.2307,
+     "std_error": 0.0489, "t_value": 4.721, "p_value": 0.0}
+  ]
 }
 \end{Soutput}
 

@@ -1,0 +1,90 @@
+=== Session commands ===
+$ p2a --session /tmp/analysis.json data load validation/datasets/grunfeld.csv --name grunfeld
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.46s
+     Running `target/debug/p2a --session /tmp/analysis.json data load validation/datasets/grunfeld.csv --name grunfeld`
+Dataset: grunfeld
+  Rows: 200
+  Columns: 5
+  Column names: firm, year, inv, value, capital
+
+
+$ p2a --session /tmp/analysis.json reg ols grunfeld -y inv -x value capital --robust hc1
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.38s
+     Running `target/debug/p2a --session /tmp/analysis.json reg ols grunfeld -y inv -x value capital --robust hc1`
+
+OLS Regression Results
+============================================================
+
+Variable         Coefficient   Std. Error    t-value    p-value
+------------------------------------------------------------
+(Intercept)       -42.714369    11.574701     -3.690     0.0003***
+value               0.115562     0.006811     16.967     0.0000***
+capital             0.230678     0.048866      4.721     0.0000***
+------------------------------------------------------------
+R-squared: 0.812408
+Adj. R-squared: 0.809537
+Observations: 200
+
+Signif. codes: 0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1
+
+
+$ p2a --session /tmp/analysis.json panel fe grunfeld -y inv -x value capital --entity firm
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.40s
+     Running `target/debug/p2a --session /tmp/analysis.json panel fe grunfeld -y inv -x value capital --entity firm`
+
+Fixed Effects (Within) Estimation Results
+============================================================
+
+Variable         Coefficient   Std. Error    t-value    p-value
+------------------------------------------------------------
+value               0.110124     0.011857      9.288     0.0000***
+capital             0.310065     0.017355     17.867     0.0000***
+------------------------------------------------------------
+R-squared: 0.766758
+Adj. R-squared: 0.765517
+Observations: 200
+
+Signif. codes: 0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1
+
+
+Number of groups: 10
+F-statistic: 309.0142 (p-value: 0.0000)
+
+$ p2a script export /tmp/analysis.json -o /tmp/reproduce.sh
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.33s
+     Running `target/debug/p2a script export /tmp/analysis.json -o /tmp/reproduce.sh`
+Exported 0 commands to: /tmp/reproduce.sh
+
+=== JSON output ===
+$ p2a -F json reg ols grunfeld -y inv -x value capital --robust hc1
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.29s
+     Running `target/debug/p2a --session /tmp/analysis.json -F json reg ols grunfeld -y inv -x value capital --robust hc1`
+{
+  "adj_r_squared": 0.8095367066142903,
+  "coefficients": [
+    {
+      "coefficient": -42.71436943655954,
+      "name": "(Intercept)",
+      "p_value": 0.0002898009336218532,
+      "std_error": 11.574701117099613,
+      "t_value": -3.690321590546858
+    },
+    {
+      "coefficient": 0.11556215636055236,
+      "name": "value",
+      "p_value": 0.0,
+      "std_error": 0.006810954456871991,
+      "t_value": 16.96710161436399
+    },
+    {
+      "coefficient": 0.23067848873196917,
+      "name": "capital",
+      "p_value": 4.453595026321366e-6,
+      "std_error": 0.048865539534342216,
+      "t_value": 4.720678231125446
+    }
+  ],
+  "method": "OLS Regression",
+  "n_observations": 200,
+  "r_squared": 0.8124080125447282
+}
