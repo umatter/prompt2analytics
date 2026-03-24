@@ -389,6 +389,41 @@ explanation distinguishes between the unreliable individual coefficients
 and the stable treatment effect---a nuance that requires understanding
 both the computation and the research design.
 
+The session continues with a logit model for bonus receipt with
+department fixed effects---a discrete choice model with high-dimensional
+FE estimated via IRLS:
+
+\begin{Sinput}
+p2a> Fit a logit model for bonus with department fixed effects.
+\end{Sinput}
+
+\begin{Soutput}
+  [tool] feglm (dataset="training", family="logit",
+           fe=["department"],
+           x=["performance","tenure","training_group",
+               "post_training"])                                     done 102ms
+
+Logit Model for Bonus (Department FE, 5 levels absorbed)
+Observations: 1,200 (436 bonuses),  Pseudo R-squared: 0.082
+
+| Variable       |    Coef | Std Err |      z | P>|z| |
+|----------------|--------:|--------:|-------:|------:|
+| performance    |   0.305 |   0.105 |  2.90  | 0.004 |
+| tenure         |   0.000 |   0.011 |  0.03  | 0.977 |
+| training_group |  -0.004 |   0.138 | -0.03  | 0.978 |
+| post_training  |   0.118 |   0.128 |  0.92  | 0.359 |
+
+Performance is the only significant predictor of bonus receipt.
+The training program does not independently affect bonuses beyond
+its indirect effect through improved performance.
+\end{Soutput}
+
+\noindent This example spans three method categories in a single
+conversation: DiD (causal inference), OLS with diagnostics (regression),
+and FEGLM (discrete choice)---demonstrating how the conversational
+interface enables fluid transitions between methods as the analysis
+evolves.
+
 %% -----------------------------------------------------------------------------
 \subsection{Beyond regression: time series} \label{sec:examples-ts}
 
