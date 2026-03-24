@@ -16,12 +16,14 @@ in the \pkg{plm} package; we provide it as \code{grunfeld.csv} in the
 supplementary materials.
 
 \noindent The early examples show the system working as intended; later
-examples (Section~\ref{sec:examples-realistic}) demonstrate failure
-modes---incorrect tool selection, missing parameters, and ambiguous
-prompts---to set realistic expectations before the formal evaluation in
-Section~\ref{sec:evaluation}.  Appendix~\ref{app:extended-examples}
-provides additional examples including data
-cleaning workflows and a comparison with equivalent \proglang{R} code.
+examples (Section~\ref{sec:examples-realistic}) demonstrate a realistic
+multi-step workflow---including proactive method selection, clustered
+inference, and multicollinearity detection---to illustrate how the
+conversational interface handles iterative analysis before the formal
+evaluation in Section~\ref{sec:evaluation}.
+Appendix~\ref{app:extended-examples} provides additional examples
+including data cleaning workflows and a comparison with equivalent
+\proglang{R} code.
 
 %% -----------------------------------------------------------------------------
 \subsection{Chat interface} \label{sec:examples-chat}
@@ -325,9 +327,9 @@ difference-in-differences workflow---including method selection,
 clustered standard errors, and diagnostic issues---using a synthetic
 employee training dataset.\footnote{The dataset contains 1,200
 observations (200 employees $\times$ 6 periods) with treatment/control
-groups, perfectly correlated covariates (for multicollinearity), and a
-department with zero bonus rate (for separation). The transcript was
-recorded via \code{p2a chat --script prompts.txt --record transcript.txt}.}
+groups, and perfectly correlated covariates (for multicollinearity).
+The transcript was recorded via
+\code{p2a chat --script prompts.txt --record transcript.txt}.}
 
 Given a description of the research design, the LLM correctly selects
 difference-in-differences and proactively clusters standard errors at the
@@ -449,9 +451,9 @@ The training program does not independently affect bonuses beyond
 its indirect effect through improved performance.
 \end{Soutput}
 
-\noindent This example spans three method categories in a single
-conversation: DiD (causal inference), OLS with diagnostics (regression),
-and FEGLM (discrete choice)---demonstrating how the conversational
+\noindent This session spans three method categories---DiD (causal
+inference), clustered regression with diagnostics, and FEGLM (discrete
+choice with high-dimensional FE)---demonstrating how the conversational
 interface enables fluid transitions between methods as the analysis
 evolves.
 
