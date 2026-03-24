@@ -18,12 +18,12 @@ The core analytics library, \pkg{p2a-core}, implements all
 statistical methods in pure \proglang{Rust} with no external
 econometrics dependencies; all estimators are implemented from first
 principles using \pkg{ndarray} for matrix operations and \pkg{faer}
-for numerically stable linear algebra. Implementations follow standard
-textbook algorithms: OLS and robust standard errors follow
-\citet{Wooldridge:2010} and \citet{Cameron+Trivedi:2005}; panel data
-methods follow \citet{Baltagi:2013}; time series methods follow
-\citet{Hamilton:1994}; maximum likelihood for discrete choice uses
-Newton-Raphson as described in \citet{Greene:2018}. An optional
+for numerically stable linear algebra. The methods implemented are standard econometric procedures as
+described in \citet{Wooldridge:2010} and
+\citet{Cameron+Trivedi:2005} for regression and robust standard
+errors, \citet{Baltagi:2013} for panel data,
+\citet{Hamilton:1994} for time series, and \citet{Greene:2018} for
+maximum likelihood estimation of discrete choice models. An optional
 \code{cuda} feature flag enables GPU acceleration for
 compute-intensive operations on NVIDIA hardware
 (Section~\ref{sec:deployment}). Three user-facing crates provide
@@ -31,8 +31,10 @@ different access paths: \pkg{p2a-cli} produces a standalone
 \code{p2a} binary with hierarchical subcommands organized by
 analytical domain; \pkg{p2a-mcp} runs a Model Context Protocol server
 exposing tools for LLM integration via stdio, HTTP, or WebSocket
-transports; and \pkg{p2a-dioxus} provides a web application using
-Dioxus that compiles to WebAssembly for browser deployment. All three
+transports; and \pkg{p2a-dioxus} provides a cross-platform graphical interface
+using Dioxus~\citep{Dioxus}, a \proglang{Rust} framework that
+compiles to WebAssembly for browser deployment, native desktop
+applications, and mobile targets from a single codebase. All three
 depend on \pkg{p2a-core}, ensuring identical numerical results
 regardless of the interface used.
 
@@ -46,20 +48,24 @@ locally in \pkg{p2a-core}.}
 \label{fig:architecture}
 \end{figure}
 
-The simplest way to use \pkg{prompt2analytics} is through the CLI:
-
-\begin{Sinput}
-# Load data and run OLS with robust standard errors
-p2a data load wages.csv --name wages
-p2a reg ols wages -y salary -x education experience --robust hc1
-\end{Sinput}
-
-\noindent For LLM-mediated access, configure the MCP server and type
-in natural language:
+The primary interface is conversational. Through the Dioxus web or
+desktop application---or any MCP-compatible client such as Claude
+Desktop---a user types:
 
 \begin{Sinput}
 User: Load wages.csv and regress salary on education and experience
       with robust standard errors.
+\end{Sinput}
+
+\noindent The language model interprets this request, selects the
+appropriate tool (\code{regression\_ols} with \code{robust="hc1"}),
+and returns both the numerical results and a natural language summary.
+For scripting and automation, the same methods are accessible through
+the CLI:
+
+\begin{Sinput}
+p2a data load wages.csv --name wages
+p2a reg ols wages -y salary -x education experience --robust hc1
 \end{Sinput}
 
 \noindent Both pathways invoke the same \proglang{Rust} implementation
@@ -167,8 +173,8 @@ known differences.
 
 \subsection{Implemented methods}
 
-The \pkg{p2a-core} library implements over 250 methods, exposed as
-individual MCP tools.
+The \pkg{p2a-core} library implements over 200 statistical and
+econometric methods, exposed as MCP tools.
 Table~\ref{tab:method-categories} summarizes coverage, using standard
 abbreviations: heteroskedasticity and autocorrelation consistent (HAC),
 generalized least squares (GLS), high-dimensional fixed effects (HDFE),
@@ -270,13 +276,17 @@ covariance estimators (HC0--HC3, clustered, HAC), each a distinct
 method in \pkg{p2a-core}. This many-to-one mapping keeps the LLM's
 selection task manageable while preserving access to the full library.
 
-The full set of tool schemas consumes approximately 32{,}000 tokens,
-a substantial share of current context windows.  The built-in
+The full MCP server exposes all methods as individual tools;
+after consolidation (e.g., one \code{regression\_ols} tool covering
+HC0--HC3, HAC, and bootstrap), this yields approximately 250 MCP tools
+whose JSON schemas consume ${\approx}\,32{,}000$ tokens---a
+substantial share of current context windows.  The built-in
 chat interface therefore exposes a curated subset of
 roughly 70 tools covering the most common analytical workflows;
-specialized tools remain available through the CLI.
-External MCP clients receive the complete schema and can apply
-their own filtering.
+the evaluation in Section~\ref{sec:evaluation} uses a broader
+set of 119~Tier-1 tools.  All tools remain accessible through the
+CLI and external MCP clients, which receive the complete schema and
+can apply their own filtering.
 
 \paragraph{Multi-turn context management.}
 In multi-turn conversations, the system includes prior tool calls and
@@ -295,7 +305,7 @@ names and key results) while recent turns are kept verbatim.
 For the
 curated 70-tool schema (${\approx}\,12{,}000$ tokens), a 128K-context
 model supports roughly 30--40 substantive turns before summarization
-begins; the full 250+ tool schema (${\approx}\,32{,}000$ tokens) reduces
+begins; the full ${\approx}\,250$-tool schema (${\approx}\,32{,}000$ tokens) reduces
 this to approximately 20 turns. External MCP clients (e.g., Claude
 Desktop, Cursor) manage their own context windows and may apply
 different truncation or tool-filtering strategies.
