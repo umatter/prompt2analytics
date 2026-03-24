@@ -6,63 +6,63 @@
 
 The introduction identified three concerns with using language models for
 data analysis: correctness, privacy, and reproducibility. This section
-examines these failure modes more carefully, then states the three
+examines these shortcomings more carefully, then states the three
 principles that define chat-first analytics.
 
 \subsection{How LLM-assisted analysis goes wrong}
 
 The appeal of typing ``regress wages on education with robust standard
-errors'' into ChatGPT is obvious. The problems are less visible. They
-fall into four categories.
+errors'' into ChatGPT is obvious. The problems are less visible.
 
-First, LLM-generated code often runs without error but computes the wrong
-quantity. Requesting ``clustered standard errors'' might yield
-heteroskedasticity-robust errors instead. A panel model might omit
-entity fixed effects. A difference-in-differences specification might
-use the wrong interaction term. \citet{Ludwig+Mullainathan+Rambachan:2025}
-document these risks systematically: the code executes, returns
-plausible-looking output, and the user has no way to detect the
-error without the expertise that would have let them write the code
-themselves.
+First, \emph{correctness and auditability.} LLM-generated code often runs
+without error but computes the wrong quantity---for instance, requesting
+``clustered standard errors'' might yield heteroskedasticity-robust
+errors instead, a panel model might omit entity fixed effects, or a
+difference-in-differences specification might use the wrong interaction
+term. \citet{Ludwig+Mullainathan+Rambachan:2025} provide a systematic
+framework for reasoning about these risks: the code executes, returns
+plausible-looking output, and the user has no way to detect the error
+without the expertise that would have let them write the code
+themselves. The problem is
+compounded by opacity: when a system generates 30 lines of
+\proglang{Python} to answer a statistical question, understanding what
+was computed requires reading and auditing those 30 lines. The user
+who could not write the code cannot audit it either. This extends
+beyond research: enterprise text-to-SQL deployments struggle with the
+same issue---ambiguous questions admit multiple valid interpretations,
+and users cannot verify which was
+executed~\citep{Renggli+Ilyas+Rekatsinas:2025}.
 
-Second, code-generation systems require the data. When a user asks ChatGPT
-to analyze a dataset, the data are uploaded to a third-party server
-with unclear retention policies. For survey responses, health records,
-personnel data, or any dataset subject to privacy regulations, this
-may be unacceptable. Even when providers promise not to retain data,
-the transmission itself may violate institutional or regulatory
-requirements.
+Second, \emph{privacy.} Code-generation systems require the data.
+When a user asks ChatGPT to analyze a dataset, the data are uploaded
+to a third-party server with unclear retention policies. For survey
+responses, health records, personnel data, or any dataset subject to
+privacy regulations, this may be unacceptable. Even when providers
+promise not to retain data, the transmission itself may violate
+institutional or regulatory requirements.
 
-Third, the same prompt sent to the same model on different days may produce
-different code. Models are updated, fine-tuned, and retrained. The
-generated \proglang{Python} script that worked in January may not be
-what the model produces in March. Conversational sessions are
-ephemeral---unless the user manually saves the generated code, the
-analysis cannot be reproduced. This contradicts a basic requirement
-of scientific work.
+Third, \emph{reproducibility.} The same prompt sent to the same model
+on different days may produce different code. Models are updated,
+fine-tuned, and retrained. The generated \proglang{Python} script that
+worked in January may not be what the model produces in March.
+Conversational sessions are ephemeral---unless the user manually saves
+the generated code, the analysis cannot be reproduced. This
+contradicts a basic requirement of scientific work.
 
-Fourth, when a system generates 30 lines of \proglang{Python} to answer a
-statistical question, understanding what was computed requires reading
-and auditing those 30 lines of code. The user who could not write the code
-cannot audit it either. This problem extends beyond research:
-enterprise text-to-SQL deployments struggle with the same issue---ambiguous
-questions admit multiple valid interpretations, and users cannot verify
-which was executed~\citep{Renggli+Ilyas+Rekatsinas:2025}.
-
-These four problems are distinct but related. Silent errors arise
+These three problems are distinct but related. Silent errors arise
 because the language model controls both \emph{what} to compute and
-\emph{how} to compute it. Privacy violations arise because
+\emph{how} to compute it, and the computational logic is
+opaque---buried in generated code rather than invoked from a known,
+inspectable implementation. Privacy violations arise because
 computation and data must be co-located on the provider's servers.
 Reproducibility failures arise because the generated code is a
-function of the model's current state. Auditability failures arise
-because the computational logic is opaque---buried in generated code
-rather than invoked from a known, inspectable implementation.
+function of the model's current state.
 Systematic error rates for LLM-generated statistical code are not
 yet well established: \citet{Ludwig+Mullainathan+Rambachan:2025}
 document the \emph{types} of errors that arise, but base rates
 depend on the model, the prompt, and the statistical method. The
 motivation for the architecture described below rests on the
-existence and nature of these failure modes, not on their precise
+existence and nature of these shortcomings, not on their precise
 frequency.
 
 \subsection{Three principles} \label{sec:principles}
@@ -94,10 +94,11 @@ the language model cannot modify.
 
 This division of labor plays to each component's strengths. Language
 models are good at understanding intent, resolving ambiguity, and
-mapping natural language to structured specifications. They are
-unreliable at generating correct numerical code. Separation removes
-the failure mode where the model produces code that runs but computes
-the wrong quantity, because the model never produces code at all.
+mapping natural language to structured specifications. They can also
+generate correct code much of the time---but offer no guarantee that
+they have done so, and no mechanism for the user to verify correctness
+short of reading the code. Separation sidesteps this problem entirely:
+the model never produces code at all.
 Wrong parameter extraction remains possible (Section~\ref{sec:evaluation}),
 but the error surface is smaller: the model selects from a fixed schema
 rather than generating arbitrary code.
@@ -110,14 +111,19 @@ text-to-SQL to text-to-statistics.
 
 \subsubsection{Principle 2: Pre-validate methods, not generated code}
 
-Correctness is established once, through systematic validation against
-reference implementations, rather than hoped for anew with each
-request. When \pkg{prompt2analytics} runs OLS, it uses the same
-\proglang{Rust} function every time---a function validated against
-\proglang{R}'s \fct{lm} on the Longley dataset to $10^{-8}$
-precision (Section~\ref{sec:evaluation}). The user need not audit
-the implementation on each invocation, any more than they audit
-\proglang{R}'s source code when calling \fct{lm}.
+Correctness is established once, through systematic validation,
+rather than hoped for anew with each request. When
+\pkg{prompt2analytics} runs OLS, it uses the same \proglang{Rust}
+function every time---a function validated against \proglang{R}'s
+\fct{lm} on the Longley dataset to $10^{-8}$ precision
+(Section~\ref{sec:evaluation}). Of course, an LLM-generated script
+would also call a trusted function like \fct{lm}---the underlying
+library is not the problem. The problem is the ad-hoc code
+\emph{around} the library call: selecting variables, reshaping data,
+passing options, and post-processing output. In the code-generation
+approach, this glue code is generated anew each time and must be
+audited each time. In the pre-validated approach, it is part of the
+tested implementation and never changes.
 
 This principle also solves the reproducibility problem. The same
 method invocation with the same data produces identical results,
@@ -128,6 +134,28 @@ Two users who phrase the same analysis differently may get different
 tool calls---but once the tool is selected and parameters specified,
 the result is deterministic.
 
+An obvious question is why not wrap existing \proglang{R} or
+\proglang{Python} packages rather than re-implement methods in
+\proglang{Rust}. Three practical considerations favor a unified
+implementation. First, \emph{standardization}: a single library can
+expose every method through a uniform API---the same column-based
+calling convention, the same error types, the same result
+structures---which maps cleanly to tool schemas for language model
+consumption. Wrapping heterogeneous packages (each with its own
+formula syntax, option names, and output format) would require
+per-package glue code that is itself a source of bugs. Second,
+\emph{dependency management}: covering 200+ methods via existing
+packages would require dozens of package dependencies with their own
+version constraints, system library requirements, and breaking
+changes across releases---a maintenance burden that grows
+combinatorially. A self-contained implementation eliminates this
+entirely. Third, \emph{deployment}: a single compiled binary with no
+runtime dependencies is straightforward to distribute and run on any
+platform, which matters for the local-first deployment model
+described in Principle~3. None of this implies that existing packages
+are inadequate---we validate against them precisely because they are
+the reference standard (Section~\ref{sec:evaluation}).
+
 \subsubsection{Principle 3: Keep data local; transmit only structure}
 
 The language model receives column names, data types, and summary
@@ -137,32 +165,35 @@ salary (float, range 28000--185000), department (string, 12 unique
 values), years\_experience (float, range 0.5--35.2).'' Statistical
 computations execute on the user's machine; only aggregated results
 (coefficients, standard errors, test statistics) pass through the
-language model.
+language model for interpretation.
 
 This is not definitionally required for chat-first analytics---a
 cloud-based system satisfying Principles~1 and~2 would still qualify.
 But we consider data locality essential for the use cases that
 motivate this work. Researchers analyzing survey data, firms analyzing
 personnel records, and analysts working under privacy regulations need
-architectures where data isolation is guaranteed by design, not
+architectures where data privacy is guaranteed by design, not
 promised by policy.
 
-For complete isolation, the language model itself can run locally.
+For complete privacy, the language model itself can run locally.
 Open-source models deployed via Ollama~\citep{Ollama} eliminate all
 external network communication. Our evaluation
 (Section~\ref{sec:evaluation}) shows that even a 3-billion-parameter
 model achieves over 80\% adequate rate, making fully local
-deployment practical on consumer hardware.
+deployment practical on consumer hardware. Given the rapid
+improvement in small open-source models---each generation has brought
+substantial gains on structured tasks like tool selection and
+parameter extraction---this lower bound is likely to rise
+considerably in the near term.
 
-Together, the three principles address the four failure modes
-identified above. Separation and pre-validation eliminate silent
-computational errors: the model never generates code, and the code
-it invokes is validated once against reference implementations.
-Pre-validation also ensures reproducibility, because the same method
-invocation with the same data always produces the same result. Data
-locality protects privacy by keeping raw data on the user's machine.
-Auditability improves on all three fronts---the user inspects a
-structured tool call rather than 30 lines of generated code.
+Together, the three principles address the three concerns identified
+above. Separation and pre-validation eliminate silent computational
+errors and improve auditability: the model never generates code, and
+the user inspects a structured tool call rather than 30 lines of
+generated script. Pre-validation also ensures reproducibility, because
+the same method invocation with the same data always produces the same
+result. Data locality protects privacy by keeping raw data on the
+user's machine.
 
 \subsection{Relationship to existing ideas}
 
@@ -219,26 +250,26 @@ generated code across analysis stages. All three generate code;
 none pre-validate implementations or enforce data locality.
 Table~\ref{tab:system-comparison} summarizes these differences.
 
-Hybrid designs are possible. A system
-could generate code for bespoke analyses while routing standard
-requests to pre-validated tools. It could verify generated code
-through static analysis or property checking before execution---for
-instance, confirming that a difference-in-differences specification
-includes the correct interaction term, or that a panel regression
-includes entity fixed effects when requested. It could also combine
-code generation with human review, leveraging the fact that many users
-can \emph{audit} code even if they cannot \emph{write} it from
-scratch. \pkg{prompt2analytics} deliberately occupies one end of
-this spectrum: all computation is pre-validated, with no code
-generation at all. This sacrifices flexibility---analyses outside the
-method library are unavailable, custom data transformations beyond the
-built-in munging tools require the CLI or direct \proglang{Rust}
-code, and ad-hoc visualizations not covered by the visualization
-tools cannot be produced---but it eliminates an entire class of
-failure modes. Whether hybrid designs can achieve a better trade-off
-is an open question; the answer likely depends on the reliability of
-code verification techniques and the target user's ability to review
-generated code.
+Hybrid designs are possible, and the boundaries are not sharp.
+A code-generation system that produces a short script calling
+\proglang{R}'s \fct{felm} or \proglang{Python}'s
+\fct{linearmodels.PanelOLS} already delegates computation to a tested
+library---the remaining vulnerability is in the glue code (variable
+selection, data reshaping, option passing), not in the computation
+itself. A hybrid system could route standard requests to pre-validated
+tools while falling back to code generation for bespoke analyses, or
+it could verify generated scripts through static analysis or human
+review before execution. \pkg{prompt2analytics} deliberately occupies
+one end of this spectrum: all computation is pre-validated, with no
+code generation at all. This sacrifices flexibility---analyses outside
+the method library are unavailable, custom data transformations beyond
+the built-in munging tools require the CLI or direct \proglang{Rust}
+code, and ad-hoc visualizations not covered by the visualization tools
+cannot be produced---but it eliminates the glue-code failure mode
+entirely. Whether hybrid designs can achieve a better trade-off is an
+open question; the answer likely depends on how reliably language
+models can assemble correct pipelines around trusted library calls,
+and on the target user's ability to review what was assembled.
 
 \begin{table}[htbp]
 \centering
@@ -280,12 +311,11 @@ when the analysis provides only associational evidence. Users remain
 responsible for ensuring that their identification strategy supports
 their claims.
 
-Second, method selection is imperfect. Tool selection works well on
-curated prompts (Section~\ref{sec:evaluation}), but users should
-verify that the system understood their request correctly---particularly
-for ambiguous specifications where multiple methods could apply. Users
-should consult the accuracy results before interpreting the curated
-examples in Section~\ref{sec:examples}.
+Second, as in any conversational interface, method selection is
+imperfect. Tool selection works well on curated prompts
+(Section~\ref{sec:evaluation}), but users should verify that the
+system understood their request correctly---particularly for ambiguous
+specifications where multiple methods could apply.
 
 Third, pre-validation trades coverage for correctness. When a user
 requests a method outside the implemented set---Bayesian inference,
@@ -296,7 +326,11 @@ code generation's silent errors: instead of running wrong code, the
 system runs the wrong method. The risk is mitigated by the structured
 tool schema (which makes the selected method visible to the user) and
 by the LLM's ability to explain substitutions, but users must still
-verify that the method matches their intent.
+verify that the method matches their intent.\footnote{This limitation
+will diminish as the library grows. The current implementation covers
+over 200 methods after roughly one year of development; extending
+coverage to additional methods is straightforward within the existing
+architecture.}
 
 These limitations mean that chat-first analytics is a useful tool,
 not an autonomous analyst. Users should verify tool selection, check

@@ -1,12 +1,12 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 700 580" width="700" height="580">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 680" width="720" height="680">
   <defs>
     <style>
-      .title { font-family: 'Helvetica Neue', Arial, sans-serif; font-size: 14px; font-weight: 600; fill: #000; }
-      .label { font-family: 'Helvetica Neue', Arial, sans-serif; font-size: 11px; fill: #333; }
-      .sublabel { font-family: 'Helvetica Neue', Arial, sans-serif; font-size: 9px; fill: #666; }
-      .edge-label { font-family: 'Helvetica Neue', Arial, sans-serif; font-size: 11px; fill: #333; font-weight: 500; }
-      .section-title { font-family: 'Helvetica Neue', Arial, sans-serif; font-size: 10px; font-weight: 600; fill: #666; letter-spacing: 1px; }
+      .title { font-family: 'Helvetica Neue', Arial, sans-serif; font-size: 16px; font-weight: 600; fill: #000; }
+      .label { font-family: 'Helvetica Neue', Arial, sans-serif; font-size: 13px; fill: #333; }
+      .sublabel { font-family: 'Helvetica Neue', Arial, sans-serif; font-size: 11px; fill: #666; }
+      .edge-label { font-family: 'Helvetica Neue', Arial, sans-serif; font-size: 13px; fill: #333; font-weight: 500; }
+      .section-title { font-family: 'Helvetica Neue', Arial, sans-serif; font-size: 12px; font-weight: 600; fill: #666; letter-spacing: 1px; }
     </style>
     <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="userSpaceOnUse">
       <path d="M0,0 L0,6 L9,3 z" fill="#666"/>
@@ -20,192 +20,215 @@
   </defs>
 
   <!-- Background -->
-  <rect width="700" height="580" fill="#fff"/>
+  <rect width="720" height="680" fill="#fff"/>
 
-  <!-- ==================== USER INTERFACES ==================== -->
-  <text x="350" y="25" text-anchor="middle" class="section-title">USER INTERFACES</text>
-
-  <!-- CLI Box (left, separate) -->
-  <g transform="translate(40, 45)">
-    <rect x="0" y="0" width="110" height="65" rx="4" fill="#f5f5f5" stroke="#333" stroke-width="1.5"/>
-    <!-- Terminal icon -->
-    <rect x="12" y="12" width="28" height="20" rx="2" fill="none" stroke="#333" stroke-width="1.5"/>
-    <text x="17" y="26" font-family="monospace" font-size="8" fill="#333">&gt;_</text>
-    <text x="50" y="24" class="label">CLI</text>
-    <text x="50" y="38" class="sublabel">p2a binary</text>
-    <text x="55" y="54" class="sublabel" fill="#E65100">Direct</text>
+  <!-- ==================== NUMBERED STEP LABELS ==================== -->
+  <!-- Step 1: User interfaces -->
+  <g transform="translate(18, 78)">
+    <circle cx="0" cy="0" r="13" fill="#333" stroke="none"/>
+    <text x="0" y="5" text-anchor="middle" font-family="'Helvetica Neue', Arial, sans-serif" font-size="15" font-weight="700" fill="#fff">1</text>
+  </g>
+  <!-- Step 2: LLM layer -->
+  <g transform="translate(138, 210)">
+    <circle cx="0" cy="0" r="13" fill="#0097A7" stroke="none"/>
+    <text x="0" y="5" text-anchor="middle" font-family="'Helvetica Neue', Arial, sans-serif" font-size="15" font-weight="700" fill="#fff">2</text>
+  </g>
+  <!-- Step 3: Core engine -->
+  <g transform="translate(20, 465)">
+    <circle cx="0" cy="0" r="13" fill="#E65100" stroke="none"/>
+    <text x="0" y="5" text-anchor="middle" font-family="'Helvetica Neue', Arial, sans-serif" font-size="15" font-weight="700" fill="#fff">3</text>
   </g>
 
-  <!-- Desktop + Web grouped together above LLM -->
+  <!-- ==================== USER INTERFACES (y=30) ==================== -->
+  <text x="360" y="28" text-anchor="middle" class="section-title">USER INTERFACES</text>
+
+  <!-- CLI Box -->
+  <g transform="translate(35, 45)">
+    <rect x="0" y="0" width="125" height="72" rx="4" fill="#f5f5f5" stroke="#333" stroke-width="1.5"/>
+    <rect x="14" y="14" width="30" height="22" rx="2" fill="none" stroke="#333" stroke-width="1.5"/>
+    <text x="19" y="29" font-family="monospace" font-size="10" fill="#333">&gt;_</text>
+    <text x="54" y="27" class="label">CLI</text>
+    <text x="54" y="42" class="sublabel" font-style="italic">p2a-cli</text>
+    <text x="60" y="60" class="sublabel" fill="#E65100">Direct</text>
+  </g>
+
+  <!-- Chat REPL Box -->
+  <g transform="translate(175, 45)">
+    <rect x="0" y="0" width="125" height="72" rx="4" fill="#f5f5f5" stroke="#333" stroke-width="1.5"/>
+    <rect x="14" y="14" width="30" height="22" rx="2" fill="none" stroke="#0097A7" stroke-width="1.5"/>
+    <text x="19" y="29" font-family="monospace" font-size="10" fill="#0097A7">&gt;_</text>
+    <text x="54" y="27" class="label">Chat REPL</text>
+    <text x="54" y="42" class="sublabel" font-style="italic">p2a-chat</text>
+    <text x="60" y="60" class="sublabel" fill="#0097A7">via LLM</text>
+  </g>
+
   <!-- Desktop App Box -->
-  <g transform="translate(230, 45)">
-    <rect x="0" y="0" width="110" height="65" rx="4" fill="#f5f5f5" stroke="#333" stroke-width="1.5"/>
-    <!-- Window icon -->
-    <rect x="12" y="12" width="28" height="20" rx="2" fill="none" stroke="#333" stroke-width="1.5"/>
-    <line x1="12" y1="19" x2="40" y2="19" stroke="#333" stroke-width="1"/>
-    <circle cx="16" cy="15.5" r="1.5" fill="#333"/>
-    <circle cx="21" cy="15.5" r="1.5" fill="#333"/>
-    <text x="50" y="24" class="label">Desktop</text>
-    <text x="50" y="38" class="sublabel">Chat UI</text>
-    <text x="55" y="54" class="sublabel" fill="#0097A7">via LLM</text>
+  <g transform="translate(315, 45)">
+    <rect x="0" y="0" width="125" height="72" rx="4" fill="#f5f5f5" stroke="#333" stroke-width="1.5"/>
+    <rect x="14" y="14" width="30" height="22" rx="2" fill="none" stroke="#333" stroke-width="1.5"/>
+    <line x1="14" y1="21" x2="44" y2="21" stroke="#333" stroke-width="1"/>
+    <circle cx="18" cy="17.5" r="1.5" fill="#333"/>
+    <circle cx="23" cy="17.5" r="1.5" fill="#333"/>
+    <text x="54" y="27" class="label">Desktop</text>
+    <text x="54" y="42" class="sublabel" font-style="italic">p2a-dioxus</text>
+    <text x="60" y="60" class="sublabel" fill="#0097A7">via LLM</text>
   </g>
 
   <!-- Web Client Box -->
-  <g transform="translate(360, 45)">
-    <rect x="0" y="0" width="110" height="65" rx="4" fill="#f5f5f5" stroke="#333" stroke-width="1.5"/>
-    <!-- Globe icon -->
-    <circle cx="26" cy="22" r="10" fill="none" stroke="#333" stroke-width="1.5"/>
-    <ellipse cx="26" cy="22" rx="4" ry="10" fill="none" stroke="#333" stroke-width="1"/>
-    <line x1="16" y1="22" x2="36" y2="22" stroke="#333" stroke-width="1"/>
-    <text x="50" y="24" class="label">Web</text>
-    <text x="50" y="38" class="sublabel">Browser</text>
-    <text x="55" y="54" class="sublabel" fill="#0097A7">via LLM</text>
+  <g transform="translate(455, 45)">
+    <rect x="0" y="0" width="125" height="72" rx="4" fill="#f5f5f5" stroke="#333" stroke-width="1.5"/>
+    <circle cx="28" cy="25" r="11" fill="none" stroke="#333" stroke-width="1.5"/>
+    <ellipse cx="28" cy="25" rx="5" ry="11" fill="none" stroke="#333" stroke-width="1"/>
+    <line x1="17" y1="25" x2="39" y2="25" stroke="#333" stroke-width="1"/>
+    <text x="54" y="27" class="label">Web</text>
+    <text x="54" y="42" class="sublabel" font-style="italic">p2a-dioxus</text>
+    <text x="60" y="60" class="sublabel" fill="#0097A7">via LLM</text>
   </g>
 
-  <!-- ==================== LLM LAYER (wider) ==================== -->
-  <g transform="translate(160, 140)">
-    <rect x="0" y="0" width="380" height="95" rx="6" fill="#E0F7FA" stroke="#0097A7" stroke-width="2"/>
-    <text x="190" y="20" text-anchor="middle" class="section-title" fill="#0097A7">LLM LAYER</text>
+  <!-- ==================== LLM LAYER (y=160) ==================== -->
+  <g transform="translate(155, 160)">
+    <rect x="0" y="0" width="420" height="100" rx="6" fill="#E0F7FA" stroke="#0097A7" stroke-width="2"/>
+    <text x="210" y="22" text-anchor="middle" class="section-title" fill="#0097A7">LLM LAYER</text>
 
-    <!-- Robot head icons for LLM providers -->
-    <g transform="translate(50, 32)">
+    <g transform="translate(50, 35)">
       <rect x="3" y="6" width="22" height="17" rx="3" fill="none" stroke="#0097A7" stroke-width="1.5"/>
       <circle cx="10" cy="14" r="2.5" fill="#0097A7"/>
       <circle cx="18" cy="14" r="2.5" fill="#0097A7"/>
       <line x1="14" y1="0" x2="14" y2="6" stroke="#0097A7" stroke-width="1.5"/>
       <circle cx="14" cy="0" r="2" fill="none" stroke="#0097A7" stroke-width="1.5"/>
     </g>
-    <text x="95" y="52" class="label">Ollama</text>
-    <text x="95" y="65" class="sublabel">Local</text>
+    <text x="105" y="55" class="label">Ollama</text>
+    <text x="105" y="70" class="sublabel">Local</text>
 
-    <g transform="translate(160, 32)">
+    <g transform="translate(160, 35)">
       <rect x="3" y="6" width="22" height="17" rx="3" fill="none" stroke="#0097A7" stroke-width="1.5"/>
       <circle cx="10" cy="14" r="2.5" fill="#0097A7"/>
       <circle cx="18" cy="14" r="2.5" fill="#0097A7"/>
       <line x1="14" y1="0" x2="14" y2="6" stroke="#0097A7" stroke-width="1.5"/>
       <circle cx="14" cy="0" r="2" fill="none" stroke="#0097A7" stroke-width="1.5"/>
     </g>
-    <text x="205" y="52" class="label">Claude</text>
-    <text x="205" y="65" class="sublabel">Cloud</text>
+    <text x="215" y="55" class="label">Claude</text>
+    <text x="215" y="70" class="sublabel">Cloud</text>
 
-    <g transform="translate(270, 32)">
+    <g transform="translate(270, 35)">
       <rect x="3" y="6" width="22" height="17" rx="3" fill="none" stroke="#0097A7" stroke-width="1.5"/>
       <circle cx="10" cy="14" r="2.5" fill="#0097A7"/>
       <circle cx="18" cy="14" r="2.5" fill="#0097A7"/>
       <line x1="14" y1="0" x2="14" y2="6" stroke="#0097A7" stroke-width="1.5"/>
       <circle cx="14" cy="0" r="2" fill="none" stroke="#0097A7" stroke-width="1.5"/>
     </g>
-    <text x="315" y="52" class="label">GPT</text>
-    <text x="315" y="65" class="sublabel">Cloud</text>
+    <text x="325" y="55" class="label">GPT</text>
+    <text x="325" y="70" class="sublabel">Cloud</text>
 
-    <text x="190" y="85" text-anchor="middle" class="sublabel" fill="#0097A7">Interprets intent, selects tools</text>
+    <text x="210" y="92" text-anchor="middle" class="sublabel" fill="#0097A7">Interprets intent, selects tools</text>
   </g>
 
-  <!-- ==================== MCP SERVER ==================== -->
-  <g transform="translate(270, 265)">
-    <rect x="0" y="0" width="160" height="55" rx="4" fill="#fff" stroke="#666" stroke-width="1.5"/>
-    <!-- Server icon -->
-    <rect x="15" y="12" width="25" height="8" rx="1" fill="none" stroke="#666" stroke-width="1.2"/>
-    <rect x="15" y="24" width="25" height="8" rx="1" fill="none" stroke="#666" stroke-width="1.2"/>
-    <circle cx="35" cy="16" r="2" fill="#0097A7"/>
-    <circle cx="35" cy="28" r="2" fill="#0097A7"/>
-    <text x="55" y="20" class="label">MCP Server</text>
-    <text x="55" y="34" class="sublabel">101 Tools</text>
+  <!-- ==================== MCP SERVER (y=300) ==================== -->
+  <g transform="translate(280, 300)">
+    <rect x="0" y="0" width="170" height="58" rx="4" fill="#fff" stroke="#666" stroke-width="1.5"/>
+    <rect x="16" y="13" width="26" height="9" rx="1" fill="none" stroke="#666" stroke-width="1.2"/>
+    <rect x="16" y="26" width="26" height="9" rx="1" fill="none" stroke="#666" stroke-width="1.2"/>
+    <circle cx="37" cy="17.5" r="2" fill="#0097A7"/>
+    <circle cx="37" cy="30.5" r="2" fill="#0097A7"/>
+    <text x="58" y="22" class="label">MCP Server</text>
+    <text x="58" y="38" class="sublabel" font-style="italic">p2a-mcp</text>
   </g>
 
-  <!-- ==================== CORE ENGINE ==================== -->
-  <g transform="translate(30, 360)">
-    <rect x="0" y="0" width="640" height="115" rx="6" fill="#FFF3E0" stroke="#E65100" stroke-width="2"/>
-    <text x="320" y="20" text-anchor="middle" class="section-title" fill="#E65100">p2a-core ENGINE (LOCAL COMPUTATION)</text>
+  <!-- ==================== CORE ENGINE (y=405) ==================== -->
+  <g transform="translate(40, 405)">
+    <rect x="0" y="0" width="640" height="120" rx="6" fill="#FFF3E0" stroke="#E65100" stroke-width="2"/>
+    <text x="320" y="22" text-anchor="middle" class="section-title" fill="#E65100">p2a-core ENGINE (LOCAL COMPUTATION)</text>
 
-    <!-- Method boxes -->
-    <g transform="translate(15, 32)">
-      <rect x="0" y="0" width="95" height="65" rx="3" fill="#fff" stroke="#E65100" stroke-width="1"/>
-      <text x="47" y="16" text-anchor="middle" class="label" font-weight="600">Regression</text>
-      <text x="47" y="30" text-anchor="middle" class="sublabel">OLS</text>
-      <text x="47" y="42" text-anchor="middle" class="sublabel">Robust SEs</text>
-      <text x="47" y="54" text-anchor="middle" class="sublabel">Clustered</text>
+    <g transform="translate(15, 35)">
+      <rect x="0" y="0" width="95" height="68" rx="3" fill="#fff" stroke="#E65100" stroke-width="1"/>
+      <text x="47" y="17" text-anchor="middle" class="label" font-weight="600">Regression</text>
+      <text x="47" y="32" text-anchor="middle" class="sublabel">OLS</text>
+      <text x="47" y="45" text-anchor="middle" class="sublabel">Robust SEs</text>
+      <text x="47" y="58" text-anchor="middle" class="sublabel">Clustered</text>
     </g>
 
-    <g transform="translate(120, 32)">
-      <rect x="0" y="0" width="95" height="65" rx="3" fill="#fff" stroke="#E65100" stroke-width="1"/>
-      <text x="47" y="16" text-anchor="middle" class="label" font-weight="600">Panel</text>
-      <text x="47" y="30" text-anchor="middle" class="sublabel">Fixed Effects</text>
-      <text x="47" y="42" text-anchor="middle" class="sublabel">Random Effects</text>
-      <text x="47" y="54" text-anchor="middle" class="sublabel">HDFE</text>
+    <g transform="translate(120, 35)">
+      <rect x="0" y="0" width="95" height="68" rx="3" fill="#fff" stroke="#E65100" stroke-width="1"/>
+      <text x="47" y="17" text-anchor="middle" class="label" font-weight="600">Panel</text>
+      <text x="47" y="32" text-anchor="middle" class="sublabel">Fixed Effects</text>
+      <text x="47" y="45" text-anchor="middle" class="sublabel">Random Effects</text>
+      <text x="47" y="58" text-anchor="middle" class="sublabel">HDFE</text>
     </g>
 
-    <g transform="translate(225, 32)">
-      <rect x="0" y="0" width="95" height="65" rx="3" fill="#fff" stroke="#E65100" stroke-width="1"/>
-      <text x="47" y="16" text-anchor="middle" class="label" font-weight="600">Causal</text>
-      <text x="47" y="30" text-anchor="middle" class="sublabel">2SLS / IV</text>
-      <text x="47" y="42" text-anchor="middle" class="sublabel">DiD</text>
-      <text x="47" y="54" text-anchor="middle" class="sublabel">Treatments</text>
+    <g transform="translate(225, 35)">
+      <rect x="0" y="0" width="95" height="68" rx="3" fill="#fff" stroke="#E65100" stroke-width="1"/>
+      <text x="47" y="17" text-anchor="middle" class="label" font-weight="600">Causal</text>
+      <text x="47" y="32" text-anchor="middle" class="sublabel">2SLS / IV</text>
+      <text x="47" y="45" text-anchor="middle" class="sublabel">DiD</text>
+      <text x="47" y="58" text-anchor="middle" class="sublabel">Treatments</text>
     </g>
 
-    <g transform="translate(330, 32)">
-      <rect x="0" y="0" width="95" height="65" rx="3" fill="#fff" stroke="#E65100" stroke-width="1"/>
-      <text x="47" y="16" text-anchor="middle" class="label" font-weight="600">Discrete</text>
-      <text x="47" y="30" text-anchor="middle" class="sublabel">Logit / Probit</text>
-      <text x="47" y="42" text-anchor="middle" class="sublabel">MLE</text>
-      <text x="47" y="54" text-anchor="middle" class="sublabel">Marginal FX</text>
+    <g transform="translate(330, 35)">
+      <rect x="0" y="0" width="95" height="68" rx="3" fill="#fff" stroke="#E65100" stroke-width="1"/>
+      <text x="47" y="17" text-anchor="middle" class="label" font-weight="600">Discrete</text>
+      <text x="47" y="32" text-anchor="middle" class="sublabel">Logit / Probit</text>
+      <text x="47" y="45" text-anchor="middle" class="sublabel">MLE</text>
+      <text x="47" y="58" text-anchor="middle" class="sublabel">Marginal FX</text>
     </g>
 
-    <g transform="translate(435, 32)">
-      <rect x="0" y="0" width="95" height="65" rx="3" fill="#fff" stroke="#E65100" stroke-width="1"/>
-      <text x="47" y="16" text-anchor="middle" class="label" font-weight="600">Time Series</text>
-      <text x="47" y="30" text-anchor="middle" class="sublabel">VAR / VECM</text>
-      <text x="47" y="42" text-anchor="middle" class="sublabel">ARIMA</text>
-      <text x="47" y="54" text-anchor="middle" class="sublabel">Forecasting</text>
+    <g transform="translate(435, 35)">
+      <rect x="0" y="0" width="95" height="68" rx="3" fill="#fff" stroke="#E65100" stroke-width="1"/>
+      <text x="47" y="17" text-anchor="middle" class="label" font-weight="600">Time Series</text>
+      <text x="47" y="32" text-anchor="middle" class="sublabel">VAR / VECM</text>
+      <text x="47" y="45" text-anchor="middle" class="sublabel">ARIMA</text>
+      <text x="47" y="58" text-anchor="middle" class="sublabel">Forecasting</text>
     </g>
 
-    <g transform="translate(540, 32)">
-      <rect x="0" y="0" width="85" height="65" rx="3" fill="#fff" stroke="#E65100" stroke-width="1"/>
-      <text x="42" y="16" text-anchor="middle" class="label" font-weight="600">ML</text>
-      <text x="42" y="30" text-anchor="middle" class="sublabel">K-Means</text>
-      <text x="42" y="42" text-anchor="middle" class="sublabel">PCA</text>
-      <text x="42" y="54" text-anchor="middle" class="sublabel">Clustering</text>
+    <g transform="translate(540, 35)">
+      <rect x="0" y="0" width="88" height="68" rx="3" fill="#fff" stroke="#E65100" stroke-width="1"/>
+      <text x="44" y="17" text-anchor="middle" class="label" font-weight="600">ML</text>
+      <text x="44" y="32" text-anchor="middle" class="sublabel">K-Means</text>
+      <text x="44" y="45" text-anchor="middle" class="sublabel">PCA</text>
+      <text x="44" y="58" text-anchor="middle" class="sublabel">Clustering</text>
     </g>
   </g>
 
-  <!-- ==================== DEPENDENCIES ==================== -->
-  <g transform="translate(150, 505)">
-    <rect x="0" y="0" width="400" height="45" rx="4" fill="#f5f5f5" stroke="#999" stroke-width="1"/>
-    <text x="200" y="17" text-anchor="middle" class="section-title" fill="#666">RUST DEPENDENCIES</text>
-    <text x="60" y="35" text-anchor="middle" class="label">polars</text>
-    <text x="140" y="35" text-anchor="middle" class="label">ndarray</text>
-    <text x="220" y="35" text-anchor="middle" class="label">faer</text>
-    <text x="300" y="35" text-anchor="middle" class="label">statrs</text>
-    <text x="360" y="35" text-anchor="middle" class="label">...</text>
+  <!-- ==================== DEPENDENCIES (y=560) ==================== -->
+  <g transform="translate(155, 560)">
+    <rect x="0" y="0" width="410" height="48" rx="4" fill="#f5f5f5" stroke="#999" stroke-width="1"/>
+    <text x="205" y="18" text-anchor="middle" class="section-title" fill="#666">RUST DEPENDENCIES</text>
+    <text x="60" y="38" text-anchor="middle" class="label">polars</text>
+    <text x="145" y="38" text-anchor="middle" class="label">ndarray</text>
+    <text x="225" y="38" text-anchor="middle" class="label">faer</text>
+    <text x="305" y="38" text-anchor="middle" class="label">statrs</text>
+    <text x="370" y="38" text-anchor="middle" class="label">...</text>
   </g>
 
   <!-- ==================== ARROWS ==================== -->
   <!-- CLI direct to Core (orange, prominent) -->
-  <path d="M95,110 L95,360" stroke="#E65100" stroke-width="2.5" fill="none" marker-end="url(#arrow-orange)"/>
-  <text x="105" y="240" class="edge-label" fill="#E65100">Direct</text>
+  <path d="M97,117 L97,405" stroke="#E65100" stroke-width="2.5" fill="none" marker-end="url(#arrow-orange)"/>
+  <text x="107" y="270" class="edge-label" fill="#E65100">Direct</text>
+
+  <!-- Chat REPL to LLM -->
+  <path d="M237,117 L237,150 L290,150 L290,160" stroke="#0097A7" stroke-width="1.5" fill="none" marker-end="url(#arrow-cyan)"/>
 
   <!-- Desktop to LLM -->
-  <path d="M285,110 L285,135 L310,135 L310,140" stroke="#0097A7" stroke-width="1.5" fill="none" marker-end="url(#arrow-cyan)"/>
+  <path d="M377,117 L377,160" stroke="#0097A7" stroke-width="1.5" fill="none" marker-end="url(#arrow-cyan)"/>
 
   <!-- Web to LLM -->
-  <path d="M415,110 L415,135 L390,135 L390,140" stroke="#0097A7" stroke-width="1.5" fill="none" marker-end="url(#arrow-cyan)"/>
+  <path d="M517,117 L517,150 L450,150 L450,160" stroke="#0097A7" stroke-width="1.5" fill="none" marker-end="url(#arrow-cyan)"/>
 
   <!-- LLM to MCP -->
-  <path d="M350,235 L350,265" stroke="#666" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
-  <text x="360" y="252" class="edge-label">Tool calls</text>
+  <path d="M365,260 L365,300" stroke="#666" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
+  <text x="375" y="284" class="edge-label">Tool calls</text>
 
   <!-- MCP to Core -->
-  <path d="M350,320 L350,360" stroke="#E65100" stroke-width="1.5" fill="none" marker-end="url(#arrow-orange)"/>
-  <text x="360" y="342" class="edge-label" fill="#E65100">Execute</text>
+  <path d="M365,358 L365,405" stroke="#E65100" stroke-width="1.5" fill="none" marker-end="url(#arrow-orange)"/>
+  <text x="375" y="385" class="edge-label" fill="#E65100">Execute</text>
 
   <!-- Core to Dependencies -->
-  <path d="M350,475 L350,505" stroke="#999" stroke-width="1" fill="none" marker-end="url(#arrow)"/>
+  <path d="M360,525 L360,560" stroke="#999" stroke-width="1" fill="none" marker-end="url(#arrow)"/>
 
-  <!-- ==================== KEY INSIGHT CALLOUT (top right) ==================== -->
-  <g transform="translate(540, 45)">
-    <rect x="0" y="0" width="130" height="50" rx="4" fill="#FCE4EC" stroke="#C2185B" stroke-width="1.5"/>
-    <text x="65" y="18" text-anchor="middle" class="label" fill="#C2185B" font-weight="600">Key Design</text>
-    <text x="65" y="32" text-anchor="middle" class="sublabel" fill="#C2185B">LLM decides method</text>
-    <text x="65" y="44" text-anchor="middle" class="sublabel" fill="#C2185B">Compute locally</text>
+  <!-- ==================== KEY INSIGHT CALLOUT ==================== -->
+  <g transform="translate(548, 335)">
+    <rect x="0" y="0" width="132" height="58" rx="4" fill="#FCE4EC" stroke="#C2185B" stroke-width="1.5"/>
+    <text x="66" y="21" text-anchor="middle" class="label" fill="#C2185B" font-weight="600">Key Design</text>
+    <text x="66" y="37" text-anchor="middle" class="sublabel" fill="#C2185B">LLM decides method</text>
+    <text x="66" y="51" text-anchor="middle" class="sublabel" fill="#C2185B">Compute locally</text>
   </g>
 </svg>

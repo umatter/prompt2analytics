@@ -192,7 +192,7 @@ backends (e.g., Vulkan compute, Metal) is left for future work.
 \subsection{Fully local deployment} \label{sec:local}
 
 While cloud-hosted language models offer convenience, many use cases
-require complete data isolation. The fully local configuration runs all
+require complete data privacy. The fully local configuration runs all
 components on the user's machine via Ollama~\citep{Ollama}, eliminating
 all external network communication. Appendix~\ref{app:deployment}
 provides platform-specific installation instructions.
@@ -201,7 +201,7 @@ The evaluation results (Section~\ref{sec:evaluation}) inform practical
 model recommendations. Open-source models deployable via Ollama---such
 as Ministral~3B (80.2\% adequate) and Llama~4~Scout (50.0\%)---enable
 fully local analysis without cloud connectivity, and Ministral~3B's
-80\% adequate rate shows that data isolation need not come at the cost
+80\% adequate rate shows that data privacy need not come at the cost
 of tool selection quality for standard workflows.
 
 Table~\ref{tab:models} summarizes model options with hardware
@@ -260,7 +260,7 @@ common deployment scenarios (Table~\ref{tab:hardware-summary}).
 
 \subsection{Privacy guarantees}
 
-The fully local configuration provides complete data isolation. No
+The fully local configuration provides complete data privacy. No
 network requests are made to external services. All model inference
 occurs on the user's hardware, dataset contents never leave the
 machine, and query history remains in local storage. This architecture

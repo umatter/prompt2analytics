@@ -7,6 +7,9 @@ members = [
     "crates/p2a-chat",
     "crates/p2a-dioxus",
 ]
+exclude = [
+    "paper/code/mc_validation",
+]
 
 [workspace.package]
 version = "0.1.0"

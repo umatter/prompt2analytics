@@ -2,14 +2,14 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 660" width="820" height="660">
   <defs>
     <style>
-      .title { font-family: 'Helvetica Neue', Arial, sans-serif; font-size: 20px; font-weight: 600; fill: #333; }
-      .header { font-family: 'Helvetica Neue', Arial, sans-serif; font-size: 15px; font-weight: 600; fill: #333; }
-      .label { font-family: 'Helvetica Neue', Arial, sans-serif; font-size: 13px; fill: #333; }
-      .sublabel { font-family: 'Helvetica Neue', Arial, sans-serif; font-size: 12px; fill: #666; }
-      .zone-label { font-family: 'Helvetica Neue', Arial, sans-serif; font-size: 12px; fill: #666; }
-      .step { font-family: 'Helvetica Neue', Arial, sans-serif; font-size: 12px; fill: #fff; font-weight: 700; }
-      .message { font-family: 'Helvetica Neue', Arial, sans-serif; font-size: 12px; fill: #555; font-style: italic; }
-      .mono { font-family: 'Monaco', 'Consolas', monospace; font-size: 12px; fill: #333; }
+      .title { font-family: 'Helvetica Neue', Arial, sans-serif; font-size: 22px; font-weight: 600; fill: #333; }
+      .header { font-family: 'Helvetica Neue', Arial, sans-serif; font-size: 16px; font-weight: 600; fill: #333; }
+      .label { font-family: 'Helvetica Neue', Arial, sans-serif; font-size: 14px; fill: #333; }
+      .sublabel { font-family: 'Helvetica Neue', Arial, sans-serif; font-size: 13px; fill: #666; }
+      .zone-label { font-family: 'Helvetica Neue', Arial, sans-serif; font-size: 13px; fill: #666; }
+      .step { font-family: 'Helvetica Neue', Arial, sans-serif; font-size: 13px; fill: #fff; font-weight: 700; }
+      .message { font-family: 'Helvetica Neue', Arial, sans-serif; font-size: 13px; fill: #555; font-style: italic; }
+      .mono { font-family: 'Monaco', 'Consolas', monospace; font-size: 13px; fill: #333; }
     </style>
   </defs>
 
@@ -63,6 +63,7 @@
     <circle cx="14" cy="-9" r="4" fill="#666"/>
     <circle cx="14" cy="9" r="4" fill="#666"/>
     <text x="0" y="40" text-anchor="middle" class="header" fill="#666">MCP</text>
+    <text x="0" y="55" text-anchor="middle" class="sublabel" font-style="italic" fill="#666">p2a-mcp</text>
   </g>
 
   <!-- p2a-core icon -->
@@ -72,6 +73,7 @@
     <line x1="-14" y1="0" x2="14" y2="0" stroke="#E65100" stroke-width="2"/>
     <line x1="-14" y1="7" x2="8" y2="7" stroke="#E65100" stroke-width="2"/>
     <text x="0" y="40" text-anchor="middle" class="header" fill="#E65100">p2a-core</text>
+    <text x="0" y="55" text-anchor="middle" class="sublabel" font-style="italic" fill="#E65100">Engine</text>
   </g>
 
   <!-- Data icon -->
@@ -135,11 +137,11 @@
   <text x="580" y="471" text-anchor="middle" class="sublabel" fill="#E65100">X'X, b, SE, p-val</text>
 
   <!-- Step 5: Core returns to MCP (arrow pointing left, dashed) -->
-  <line x1="560" y1="505" x2="422" y2="505" stroke="#888" stroke-width="1.5" stroke-dasharray="6,3"/>
-  <polygon points="422,505 432,499 432,511" fill="#888"/>
-  <circle cx="595" cy="505" r="14" fill="#E65100"/>
-  <text x="595" y="510" text-anchor="middle" class="step">5</text>
-  <text x="490" y="493" text-anchor="middle" class="sublabel">OlsResult (JSON)</text>
+  <line x1="560" y1="520" x2="422" y2="520" stroke="#888" stroke-width="1.5" stroke-dasharray="6,3"/>
+  <polygon points="422,520 432,514 432,526" fill="#888"/>
+  <circle cx="595" cy="520" r="14" fill="#E65100"/>
+  <text x="595" y="525" text-anchor="middle" class="step">5</text>
+  <text x="490" y="508" text-anchor="middle" class="sublabel">OlsResult (JSON)</text>
 
   <!-- Step 6: MCP to LLM (arrow pointing left, dashed) -->
   <line x1="382" y1="550" x2="232" y2="550" stroke="#888" stroke-width="1.5" stroke-dasharray="6,3"/>

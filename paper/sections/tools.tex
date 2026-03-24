@@ -41,10 +41,14 @@ regardless of the interface used.
 \begin{figure}[htbp]
 \centering
 \includegraphics[width=\textwidth]{figures/architecture_v3}
-\caption{Software architecture of \pkg{prompt2analytics}. The CLI
-accesses the analytics engine directly (orange); chat interfaces route
-through the LLM layer and MCP server (cyan). All computation occurs
-locally in \pkg{p2a-core}.}
+\caption{Software architecture of \pkg{prompt2analytics}.
+\textcircled{\raisebox{-0.5pt}{\scriptsize 1}}~Users interact via
+terminal CLI, chat REPL, desktop app, or browser.
+\textcircled{\raisebox{-0.5pt}{\scriptsize 2}}~An LLM interprets
+the request and selects tools via the MCP server.
+\textcircled{\raisebox{-0.5pt}{\scriptsize 3}}~All computation
+executes locally in \pkg{p2a-core}; the CLI also accesses the
+engine directly (orange path).}
 \label{fig:architecture}
 \end{figure}
 
@@ -94,18 +98,29 @@ Principle~1 (separation) operates concretely:
 \begin{figure}[htbp]
 \centering
 \includegraphics[width=\textwidth]{figures/chat_flow_v2}
-\caption{Interaction flow from user request to result. The LLM
-generates a structured tool call; the MCP server executes the
-\proglang{Rust} method; results flow back for explanation. Data
-processing (shaded) stays local.}
+\caption{Interaction flow from user request to result.
+\textcircled{\raisebox{-0.5pt}{\scriptsize 1}}~The user describes
+an analysis in natural language.
+\textcircled{\raisebox{-0.5pt}{\scriptsize 2}}~The LLM interprets
+the intent and emits a structured tool call with parameters.
+\textcircled{\raisebox{-0.5pt}{\scriptsize 3}}~The MCP server
+dispatches to the \proglang{Rust} engine.
+\textcircled{\raisebox{-0.5pt}{\scriptsize 4}}~Data is loaded
+locally into matrices.
+\textcircled{\raisebox{-0.5pt}{\scriptsize 5}}~Results (JSON)
+flow back through the MCP server.
+\textcircled{\raisebox{-0.5pt}{\scriptsize 6}}--\textcircled{\raisebox{-0.5pt}{\scriptsize 7}}~The
+LLM formats and explains the output to the user.
+Bulk data (shaded region) never leaves the local machine.}
 \label{fig:chat-flow}
 \end{figure}
 
 \noindent The LLM never sees raw data. It receives metadata at dataset
 load time (column names, types, row counts) and aggregated results after
 computation. Data preview tools (\code{head}, \code{sample}) do transmit
-sample rows; for complete isolation, local LLM deployment via Ollama
-eliminates all external transmission.
+a small number of sample rows (default: 5 for \code{head}); for complete
+data privacy, local LLM deployment via Ollama eliminates all external
+transmission.
 
 Each tool returns its full result as serialized text: for regression
 this includes coefficients, standard errors, test statistics,
@@ -117,8 +132,7 @@ context---typically highlighting coefficients and significance for a
 first pass, and surfacing fit measures or diagnostics when the user
 asks follow-up questions or when values are anomalous.
 
-Each tool invokes a fixed \proglang{Rust} function validated against
-reference \proglang{R} implementations
+Each tool invokes a fixed, validated \proglang{Rust} function
 (Section~\ref{sec:evaluation}). For linear regression, a
 \code{LinearEstimator} trait provides a consistent interface:
 
@@ -134,21 +148,21 @@ pub trait LinearEstimator {
 }
 \end{Code}
 
-\noindent Implementors provide core results; derived statistics
-($t$-values, $p$-values, confidence intervals) are computed by default
-implementations, enforced at compile time. The \code{LinearEstimator}
-trait applies only to linear models (OLS, GLS, panel FE/RE). Non-linear
-models use their own result types: discrete choice models
+\noindent Implementors provide core results (coefficients, standard
+errors, residuals); derived statistics ($t$-values, $p$-values,
+confidence intervals) are computed by default implementations, enforced
+at compile time. The \code{LinearEstimator} trait currently covers OLS;
+other model families use their own result types: discrete choice models
 (\code{DiscreteResult}) return $z$-statistics, log-likelihood, and
-pseudo-$R^2$ rather than $t$-statistics and residuals; panel models
-(\code{PanelResult}) include within-$R^2$ and group structure; time
+pseudo-$R^2$; panel models (\code{PanelResult}) include $R^2$
+(within for FE, overall for RE) and group structure; time
 series models return information criteria and forecast output;
-clustering methods (\code{ClusterResult}) return cluster assignments,
-centroids, and fit measures (silhouette, inertia); and survival models
-(\code{SurvivalResult}) return hazard ratios, survival curves, and
-log-rank statistics. Each result type implements a common serialization
+clustering methods return cluster assignments,
+centroids, and inertia; and survival models use separate result types
+for Kaplan-Meier curves, Cox regression (with hazard ratios), and
+log-rank tests. All result types implement a common serialization
 interface so the MCP layer can return structured output regardless of
-the method family. Unlike \proglang{R}'s
+the method family. Unlike, for example, \proglang{R}'s
 formula interface, the API uses explicit column names---the natural
 output of LLM parameter extraction, which identifies individual
 columns rather than constructing formula syntax. This design also
@@ -164,14 +178,15 @@ Validation uses automated test suites that compare \proglang{Rust}
 output against reference \proglang{R} packages on shared datasets.
 Coefficients, standard errors, and test statistics are verified to
 tolerances between $10^{-4}$ and $10^{-8}$ depending on the method.
-When intentional differences exist---for example, defaulting to HC1
-rather than HC3 for robust standard errors, matching \proglang{Stata}'s
-convention---these are documented and tested separately. The validation
+When intentional differences exist---for example, using HC1 as the
+default robust standard error estimator (rather than HC3), following
+\proglang{Stata}'s convention---these are documented and tested
+separately. The validation
 approach is described further in Section~\ref{sec:evaluation};
 Appendix~\ref{app:implementation} lists method-specific caveats and
 known differences.
 
-\subsection{Implemented methods}
+\subsection[Implemented methods (p2a-core)]{Implemented methods (\pkg{p2a-core})}
 
 The \pkg{p2a-core} library implements over 200 statistical and
 econometric methods, exposed as MCP tools.
@@ -191,14 +206,14 @@ Appendix~\ref{app:implementation} provides full documentation.
 \toprule
 Category & Methods \\
 \midrule
-Regression & OLS with HC0--HC3, clustered SEs, HAC, bootstrap, GLS, NLS, LOESS, splines, stepwise, quantile regression~\citep{Koenker+Bassett:1978} \\
-Panel data & FE, RE, Hausman, HDFE, panel GLS, Arellano-Bond GMM~\citep{Arellano+Bond:1991}, panel unit root tests (LLC, IPS, Fisher) \\
-IV & 2SLS, first-stage diagnostics, Sargan test, GMM~\citep{Hansen:1982} \\
+Regression & OLS with HC0--HC3, clustered SEs, HAC, bootstrap, GLS, NLS, LOESS, splines, stepwise, quantile regression \\
+Panel data & FE, RE, Hausman, HDFE~\citep{Gaure:2013}, panel GLS, Arellano-Bond GMM, panel unit root tests (LLC, IPS, Fisher) \\
+IV & 2SLS, first-stage diagnostics, Sargan test, GMM \\
 Causal (design) & DiD, staggered DiD~\citep{Callaway+SantAnna:2021}, Bacon decomposition~\citep{Goodman-Bacon:2021}, ETWFE~\citep{Wooldridge:2021}, sharp/fuzzy RD with CCT~\citep{Calonico+etal:2014}, multi-cutoff RD, synthetic control~\citep{Abadie+etal:2010}, gsynth~\citep{Xu:2017}, SCPI~\citep{Cattaneo+etal:2021} \\
-Causal (treatment) & IPW, AIPW, matching~\citep{Ho+etal:2011}, CBPS~\citep{Imai+Ratkovic:2014}, entropy balancing, GBM weighting, TMLE~\citep{vanderLaan+Rose:2011}, CTMLE, LTMLE, DML~\citep{Chernozhukov+etal:2018} \\
+Causal (treatment) & IPW, AIPW, matching, CBPS~\citep{Imai+Ratkovic:2014}, entropy balancing, GBM weighting, TMLE~\citep{vanderLaan+Rose:2011}, CTMLE, LTMLE, DML~\citep{Chernozhukov+etal:2018} \\
 Discrete choice & Logit, probit, multinomial, conditional, mixed, ordered, negative binomial, ZIP/ZINB, hurdle \\
 Time series & ARIMA, VAR, VARMA, VECM, IRF, Granger causality, STL/MSTL, Holt-Winters, structural TS, Kalman filter, GARCH, changepoint \\
-Spatial & SAR, SEM, SAC~\citep{Anselin:1988}, spatial probit, spatial panel, spatial GMM \\
+Spatial & SAR, SEM, SAC, spatial probit, spatial panel, spatial GMM \\
 Survival & Kaplan-Meier, log-rank, Cox PH, AFT, competing risks \\
 Mediation & Causal mediation, natural effects, sensitivity~\citep{Cinelli+Hazlett:2020}, E-values, Balke-Pearl bounds \\
 Statistical tests & 50+ tests: $t$-tests, ANOVA, MANOVA, $\chi^2$, Fisher, Wilcoxon, Kruskal-Wallis, Friedman, Shapiro-Wilk, KS, Tukey HSD \\
@@ -212,10 +227,10 @@ categories with recommended alternatives.
 \end{threeparttable}
 \end{table}
 
-\subsection{The MCP tool layer}
+\subsection[The MCP tool layer (p2a-mcp)]{The MCP tool layer (\pkg{p2a-mcp})}
 
-The MCP server exposes tools organized into categories that mirror
-the core library (Table~\ref{tab:mcp-tools}).
+The \pkg{p2a-mcp} server exposes tools organized into categories that
+mirror the core library (Table~\ref{tab:mcp-tools}).
 
 \begin{table}[htbp]
 \centering
@@ -276,39 +291,36 @@ covariance estimators (HC0--HC3, clustered, HAC), each a distinct
 method in \pkg{p2a-core}. This many-to-one mapping keeps the LLM's
 selection task manageable while preserving access to the full library.
 
-The full MCP server exposes all methods as individual tools;
-after consolidation (e.g., one \code{regression\_ols} tool covering
-HC0--HC3, HAC, and bootstrap), this yields approximately 250 MCP tools
-whose JSON schemas consume ${\approx}\,32{,}000$ tokens---a
-substantial share of current context windows.  The built-in
-chat interface therefore exposes a curated subset of
-roughly 70 tools covering the most common analytical workflows;
-the evaluation in Section~\ref{sec:evaluation} uses a broader
-set of 119~Tier-1 tools.  All tools remain accessible through the
-CLI and external MCP clients, which receive the complete schema and
-can apply their own filtering.
+After consolidation, the full MCP server exposes approximately
+270~tools whose JSON schemas consume ${\approx}\,32{,}000$
+tokens---a substantial share of current context windows.  Since
+sending all schemas with every request would leave little room for
+conversation history, the built-in chat interface filters to
+119~Tier-1 tools (${\approx}\,20{,}000$ tokens), covering
+the most common analytical workflows.  The evaluation in
+Section~\ref{sec:evaluation} uses this same 119-tool set.
+External MCP clients receive the complete schema and can apply
+their own filtering.
 
 \paragraph{Multi-turn context management.}
-In multi-turn conversations, the system includes prior tool calls and
-their results in the conversation history sent to the LLM. Each
-assistant message that triggered a tool call is preserved with its
-structured \code{tool\_calls} field, followed by a \code{tool} role
-message containing the result (truncated to 2{,}000 characters to
-prevent context overflow). This enables the LLM to resolve references
-like ``those results'' or ``now try with clustered standard errors''
-by inspecting what was previously computed.  A token budget tracker
-estimates context usage across the system prompt, conversation history,
-tool schemas, and the current query; when the budget approaches the
-model's context window, older turns are summarized (retaining tool
-names and key results) while recent turns are kept verbatim.
-
-For the
-curated 70-tool schema (${\approx}\,12{,}000$ tokens), a 128K-context
-model supports roughly 30--40 substantive turns before summarization
-begins; the full ${\approx}\,250$-tool schema (${\approx}\,32{,}000$ tokens) reduces
-this to approximately 20 turns. External MCP clients (e.g., Claude
-Desktop, Cursor) manage their own context windows and may apply
-different truncation or tool-filtering strategies.
+The token cost of tool schemas directly affects how many
+conversational turns a model can sustain.  To manage this, the system
+includes prior tool calls and their results in the conversation
+history sent to the LLM.  Each assistant message that triggered a tool
+call is preserved with its structured \code{tool\_calls} field,
+followed by a \code{tool} role message containing the result
+(truncated to 2{,}000 characters to prevent context overflow). This
+enables the LLM to resolve references like ``those results'' or ``now
+try with clustered standard errors'' by inspecting what was previously
+computed.  A token budget tracker estimates context usage across the
+system prompt, conversation history, tool schemas, and the current
+query; when the budget approaches the model's context window, older
+turns are summarized (retaining tool names and key results) while
+recent turns are kept verbatim.  With the 119-tool schema, a
+128K-context model supports roughly 25--35 substantive turns before
+summarization begins.  External MCP clients (e.g., Claude Desktop,
+Cursor) manage their own context windows and may apply different
+truncation or tool-filtering strategies.
 
 Beyond executing methods, the system generates data-driven warnings
 when results suggest potential violations of identifying assumptions.
@@ -318,7 +330,7 @@ conditions that warrant careful interpretation.
 For instrumental variables, first-stage $F$-statistics are checked
 against the Stock--Yogo threshold of 10~\citep{Stock+Yogo:2005}. For
 staggered difference-in-differences, pre-trend tests are computed
-automatically. For matching and IPW, balance diagnostics flag
+automatically. For matching, balance diagnostics flag
 standardized mean differences exceeding 0.1~\citep{Austin:2011}. For
 regression discontinuity, effective sample sizes within the bandwidth
 are checked against minimum thresholds.
@@ -336,16 +348,33 @@ disregard warnings they judge inapplicable.
 
 \subsection{Implementation choices}
 
-The choice of \proglang{Rust} follows from the principles.
-Principle~2 (pre-validation) requires an implementation language where
-validated methods remain correct across deployments---\proglang{Rust}'s
-compile-time memory safety guarantees eliminate buffer overflows,
-use-after-free, and data races that can cause incorrect results in
-numerical software. Principle~3 (data locality) benefits from compiled
-performance: the same analytics engine runs efficiently on the user's
-machine, not just on cloud servers. A single codebase compiles to
-standalone binaries, WebAssembly for browsers, and shared libraries
-for language integration.
+The choice of \proglang{Rust} follows from two requirements:
+validated methods must remain correct across deployments, and the
+analytics engine must run efficiently on the user's own machine.
+In a chat-first architecture, users interact through natural language
+rather than writing code in \proglang{R} or \proglang{Python}---so the
+implementation language need not be one that researchers already know.
+This frees the choice to optimize for technical properties:
+\proglang{Rust}'s compile-time memory safety eliminates buffer
+overflows, use-after-free, and data races that can cause incorrect
+results in numerical software; its zero-cost abstractions and
+fine-grained control over parallelism and memory layout deliver
+compiled performance that lets the same engine run locally on the
+user's machine rather than requiring cloud infrastructure.
+A single codebase compiles to standalone binaries, WebAssembly for
+browsers, and shared libraries for language integration.
+
+The practical barrier to implementing well-established statistical
+methods in a systems language has also fallen dramatically.  Agentic
+coding tools and highly capable LLMs for code generation make it
+feasible to produce high-quality, validated implementations of
+textbook algorithms at low marginal cost---and this cost continues to
+decline.\footnote{Nearly all \proglang{Rust} code in
+\pkg{prompt2analytics} was written with the assistance of Claude Code
+(Anthropic's agentic coding tool), including the core statistical
+implementations, MCP server, and test suites.  Human review focused on
+algorithmic correctness, API design, and validation against reference
+implementations.}
 
 The ecosystem provides the necessary components: \pkg{polars} for
 data manipulation~\citep{polars}, \pkg{ndarray} for array operations,
