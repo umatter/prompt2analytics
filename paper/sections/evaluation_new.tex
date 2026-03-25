@@ -409,18 +409,15 @@ nominal rates, accounting for finite-simulation variability.
 
 Across 29 methods (OLS with HC0--HC3, panel FE/RE, logit, probit,
 IV/2SLS, DiD, IPW, TMLE, and nine hypothesis tests) and 96 test
-scenarios, standard error calibration and Type~I error control are
-exact: all SE accuracy tests pass (mean SE ratio 1.005) and all
-Type~I error tests pass.  Coverage deviations occur in panel FE/RE
-with few clusters ($G = 14$): entity-clustered SEs are well
-calibrated, but normal-approximation confidence intervals undercover
-(91\% vs.\ 95\%) because the $t$-distribution with $G - 1 = 13$
-degrees of freedom is more appropriate than $z_{0.025} = 1.96$ in
-this regime---a known small-sample issue with cluster-robust
-inference~\citep{Cameron+Miller:2015}.  IV/2SLS shows slightly
-conservative coverage (97.6\%), consistent with finite-sample
-properties of 2SLS. Full results and the simulation code are included
-in the supplementary materials.
+scenarios, 93 pass (96.9\%).  Standard error calibration and Type~I
+error control are exact: all 34 SE accuracy tests pass (mean ratio
+1.006) and all 16 Type~I error tests pass.  Mean confidence interval
+coverage is 0.951 (nominal 0.950).  The three failures are
+over-conservative coverage in IV/2SLS (97.6\% at $n = 200$,
+consistent with finite-sample 2SLS properties) and IPW (99.8--100\%,
+indicating overly wide confidence intervals that warrant further
+investigation).  Full results and the simulation code are included in
+the supplementary materials.
 
 \begin{table}[htbp]
 \centering
