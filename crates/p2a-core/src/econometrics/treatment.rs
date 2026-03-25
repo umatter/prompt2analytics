@@ -561,21 +561,29 @@ pub fn run_ipw_treatment(
                     (n_f, n_f)
                 };
 
+                // IF_i for Hajek ATE:
+                //   IF_i = D_i*Y_i/e_i / (sum_w1/n) - (1-D_i)*Y_i/(1-e_i) / (sum_w0/n) - ATE
+                // Var(ATE) = (1/n) * mean(IF_i^2)
+                let norm1 = sum_w1 / n_f;
+                let norm0 = sum_w0 / n_f;
+
                 let mut sum_if_sq = 0.0;
                 for i in 0..n_trim {
                     let di = d_trim[i];
                     let yi = y_trim[i];
                     let ps_i = ps_trim[i].max(1e-10).min(1.0 - 1e-10);
 
-                    let if_i = if di >= 0.5 {
-                        yi / ps_i / sum_w1 * n_f
+                    let term1 = if di >= 0.5 {
+                        yi / ps_i / norm1
                     } else {
                         0.0
-                    } - if di < 0.5 {
-                        yi / (1.0 - ps_i) / sum_w0 * n_f
+                    };
+                    let term0 = if di < 0.5 {
+                        yi / (1.0 - ps_i) / norm0
                     } else {
                         0.0
-                    } - effect;
+                    };
+                    let if_i = term1 - term0 - effect;
 
                     sum_if_sq += if_i * if_i;
                 }
