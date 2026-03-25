@@ -232,18 +232,18 @@ from data retrieval to statistical computation.
 Third, \emph{automated machine learning}: Auto-sklearn~\citep{Feurer+etal:2015}
 and H2O AutoML~\citep{LeDell+Poirier:2020} automate model selection
 through algorithmic search, and recent work integrates LLMs into
-the pipeline~\citep{Hollmann+etal:2024}. AutoML optimizes for
+the pipeline~\citep{Hollmann+etal:2023}. AutoML optimizes for
 prediction; chat-first analytics interprets user intent across
 prediction, causal inference, hypothesis testing, and description.
 Fourth, \emph{computational econometrics} has established
-standards for numerical accuracy~\citep{McCullough:1997,
+standards for numerical accuracy~\citep{McCullough:1998,
 McCullough+Vinod:1999, Davidson+MacKinnon:2004}, which motivate
 the validation approach described in Section~\ref{sec:evaluation}.
 
 Several systems have explored LLM-assisted data analysis, but with
 a code-generation architecture. \citet{Hong+etal:2024} present a
 ``Data Interpreter'' that generates and executes \proglang{Python}
-code. \citet{Chen+Shen+Ma:2025} develop an ``Econometrics AI Agent''
+code. \citet{Chen+etal:2025} develop an ``Econometrics AI Agent''
 that augments code generation with domain knowledge.
 \citet{Sun+etal:2025:LAMBDA} describe an agent that orchestrates
 generated code across analysis stages. All three generate code;
@@ -291,7 +291,7 @@ Extensibility & Requires Rust impl. & Extends with model & Extends with model & 
 \end{tabular}
 \begin{tablenotes}[flushleft]
 \item \emph{Note:} Econ.\ AI = Econometrics AI
-Agent~\citep{Chen+Shen+Ma:2025}; Data Interpr.\ = Data
+Agent~\citep{Chen+etal:2025}; Data Interpr.\ = Data
 Interpreter~\citep{Hong+etal:2024}; LAMBDA~\citep{Sun+etal:2025:LAMBDA}.
 The trade-off: code-generation systems offer unlimited method
 flexibility at the cost of unvalidated computation; \pkg{p2a}

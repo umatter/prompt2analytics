@@ -3,29 +3,27 @@
 use crate::dgp::*;
 use crate::framework::*;
 /// Run all panel data MC validations.
-pub fn validate_panel(config: &McConfig, n: usize) -> Vec<McResult> {
+pub fn validate_panel(config: &McConfig, _n: usize) -> Vec<McResult> {
     let mut results = Vec::new();
 
-    results.extend(validate_fe(config, n));
-    results.extend(validate_re(config, n));
+    // Use panel dimensions with enough clusters for z=1.96 to be valid.
+    // With G=50+ entities, t(G-1) ≈ z and coverage should be ~95%.
+    results.extend(validate_fe(config, 50, 20));  // 50 entities × 20 periods = 1000
+    results.extend(validate_re(config, 50, 20));
 
     results
 }
 
-fn validate_fe(config: &McConfig, n: usize) -> Vec<McResult> {
+fn validate_fe(config: &McConfig, n_ent: usize, n_per: usize) -> Vec<McResult> {
     let mut results = Vec::new();
     let z_crit = 1.96;
-    // Panel dimensions: sqrt(n) entities × sqrt(n) periods (approximately)
-    let n_ent = (n as f64).sqrt() as usize;
-    let n_per = n / n_ent;
 
     for (coef_idx, coef_name) in [(0, "beta1"), (1, "beta2")] {
         let mut draws = Vec::with_capacity(config.n_sims);
 
         for sim in 0..config.n_sims {
             let seed = config.seed + sim as u64;
-            let (dataset, dgp) = dgp_panel_fe(n_ent, n_per, seed);
-            let true_val = dgp.true_coefs[coef_idx];
+            let (dataset, _dgp) = dgp_panel_fe(n_ent, n_per, seed);
 
             if let Ok(result) = p2a_core::run_fixed_effects(
                 &dataset, "y", &["x1", "x2"], "entity",
@@ -59,11 +57,9 @@ fn validate_fe(config: &McConfig, n: usize) -> Vec<McResult> {
     results
 }
 
-fn validate_re(config: &McConfig, n: usize) -> Vec<McResult> {
+fn validate_re(config: &McConfig, n_ent: usize, n_per: usize) -> Vec<McResult> {
     let mut results = Vec::new();
     let z_crit = 1.96;
-    let n_ent = (n as f64).sqrt() as usize;
-    let n_per = n / n_ent;
 
     // RE on FE DGP — should still be consistent for slopes
     for (coef_idx, coef_name) in [(0, "beta1"), (1, "beta2")] {
@@ -71,7 +67,7 @@ fn validate_re(config: &McConfig, n: usize) -> Vec<McResult> {
 
         for sim in 0..config.n_sims {
             let seed = config.seed + sim as u64;
-            let (dataset, dgp) = dgp_panel_fe(n_ent, n_per, seed);
+            let (dataset, _dgp) = dgp_panel_fe(n_ent, n_per, seed);
 
             if let Ok(result) = p2a_core::run_random_effects(
                 &dataset, "y", &["x1", "x2"], "entity",

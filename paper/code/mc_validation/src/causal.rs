@@ -68,7 +68,7 @@ fn validate_did(config: &McConfig, n: usize) -> Vec<McResult> {
         let (dataset, dgp) = dgp_did(n, seed);
 
         if let Ok(result) = p2a_core::run_did(
-            &dataset, "y", "treatment", "post", Some(&["x1"]),
+            &dataset, "y", "treatment", "post", Some(&["x1"]), None,
         ) {
             let est = result.att;
             let se = result.std_error;
