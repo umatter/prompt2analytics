@@ -1,0 +1,230 @@
+[
+  {
+    "method": "FE_beta1",
+    "property": "ci_coverage",
+    "dgp": "panel_fe_dgp",
+    "n": 1000,
+    "n_sims": 500,
+    "n_successful": 500,
+    "observed": 0.944,
+    "expected": 0.95,
+    "within_tolerance": true,
+    "tolerance_lower": 0.9308924339101198,
+    "tolerance_upper": 0.9691075660898801,
+    "details": {
+      "mean_bias": 0.00033994817663940413,
+      "rmse": 0.019033991299419965,
+      "se_ratio": 1.0036812189897135,
+      "median_estimate": 0.49994257148595556,
+      "empirical_sd": 0.01905001485972927
+    }
+  },
+  {
+    "method": "FE_beta1",
+    "property": "se_accuracy",
+    "dgp": "panel_fe_dgp",
+    "n": 1000,
+    "n_sims": 500,
+    "n_successful": 500,
+    "observed": 1.0036812189897135,
+    "expected": 1.0,
+    "within_tolerance": true,
+    "tolerance_lower": 0.9,
+    "tolerance_upper": 1.1,
+    "details": {
+      "se_ratio": 1.0036812189897135,
+      "empirical_sd": 0.01905001485972927
+    }
+  },
+  {
+    "method": "FE_beta2",
+    "property": "ci_coverage",
+    "dgp": "panel_fe_dgp",
+    "n": 1000,
+    "n_sims": 500,
+    "n_successful": 500,
+    "observed": 0.948,
+    "expected": 0.95,
+    "within_tolerance": true,
+    "tolerance_lower": 0.9308924339101198,
+    "tolerance_upper": 0.9691075660898801,
+    "details": {
+      "mean_bias": 0.00046860564872303057,
+      "rmse": 0.01857787979462277,
+      "se_ratio": 1.0253023486083588,
+      "median_estimate": -0.29959688925307515,
+      "empirical_sd": 0.01859056870833262
+    }
+  },
+  {
+    "method": "FE_beta2",
+    "property": "se_accuracy",
+    "dgp": "panel_fe_dgp",
+    "n": 1000,
+    "n_sims": 500,
+    "n_successful": 500,
+    "observed": 1.0253023486083588,
+    "expected": 1.0,
+    "within_tolerance": true,
+    "tolerance_lower": 0.9,
+    "tolerance_upper": 1.1,
+    "details": {
+      "se_ratio": 1.0253023486083588,
+      "empirical_sd": 0.01859056870833262
+    }
+  },
+  {
+    "method": "RE_beta1",
+    "property": "ci_coverage",
+    "dgp": "panel_fe_dgp",
+    "n": 1000,
+    "n_sims": 500,
+    "n_successful": 500,
+    "observed": 0.934,
+    "expected": 0.95,
+    "within_tolerance": true,
+    "tolerance_lower": 0.9308924339101198,
+    "tolerance_upper": 0.9691075660898801,
+    "details": {
+      "mean_bias": 0.00034283237762300356,
+      "rmse": 0.01904095426106726,
+      "se_ratio": 1.0051094306432853,
+      "median_estimate": 0.49996210721204437,
+      "empirical_sd": 0.01905693413459072
+    }
+  },
+  {
+    "method": "RE_beta2",
+    "property": "ci_coverage",
+    "dgp": "panel_fe_dgp",
+    "n": 1000,
+    "n_sims": 500,
+    "n_successful": 500,
+    "observed": 0.948,
+    "expected": 0.95,
+    "within_tolerance": true,
+    "tolerance_lower": 0.9308924339101198,
+    "tolerance_upper": 0.9691075660898801,
+    "details": {
+      "mean_bias": 0.0004667883831049324,
+      "rmse": 0.018572050814452207,
+      "se_ratio": 1.0224975470853452,
+      "median_estimate": -0.29953427573966684,
+      "empirical_sd": 0.018584777857052388
+    }
+  },
+  {
+    "method": "FE_beta1",
+    "property": "ci_coverage",
+    "dgp": "panel_fe_dgp",
+    "n": 1000,
+    "n_sims": 500,
+    "n_successful": 500,
+    "observed": 0.944,
+    "expected": 0.95,
+    "within_tolerance": true,
+    "tolerance_lower": 0.9308924339101198,
+    "tolerance_upper": 0.9691075660898801,
+    "details": {
+      "mean_bias": 0.00033994817663940413,
+      "rmse": 0.019033991299419965,
+      "se_ratio": 1.0036812189897135,
+      "median_estimate": 0.49994257148595556,
+      "empirical_sd": 0.01905001485972927
+    }
+  },
+  {
+    "method": "FE_beta1",
+    "property": "se_accuracy",
+    "dgp": "panel_fe_dgp",
+    "n": 1000,
+    "n_sims": 500,
+    "n_successful": 500,
+    "observed": 1.0036812189897135,
+    "expected": 1.0,
+    "within_tolerance": true,
+    "tolerance_lower": 0.9,
+    "tolerance_upper": 1.1,
+    "details": {
+      "se_ratio": 1.0036812189897135,
+      "empirical_sd": 0.01905001485972927
+    }
+  },
+  {
+    "method": "FE_beta2",
+    "property": "ci_coverage",
+    "dgp": "panel_fe_dgp",
+    "n": 1000,
+    "n_sims": 500,
+    "n_successful": 500,
+    "observed": 0.948,
+    "expected": 0.95,
+    "within_tolerance": true,
+    "tolerance_lower": 0.9308924339101198,
+    "tolerance_upper": 0.9691075660898801,
+    "details": {
+      "mean_bias": 0.00046860564872303057,
+      "rmse": 0.01857787979462277,
+      "se_ratio": 1.0253023486083588,
+      "median_estimate": -0.29959688925307515,
+      "empirical_sd": 0.01859056870833262
+    }
+  },
+  {
+    "method": "FE_beta2",
+    "property": "se_accuracy",
+    "dgp": "panel_fe_dgp",
+    "n": 1000,
+    "n_sims": 500,
+    "n_successful": 500,
+    "observed": 1.0253023486083588,
+    "expected": 1.0,
+    "within_tolerance": true,
+    "tolerance_lower": 0.9,
+    "tolerance_upper": 1.1,
+    "details": {
+      "se_ratio": 1.0253023486083588,
+      "empirical_sd": 0.01859056870833262
+    }
+  },
+  {
+    "method": "RE_beta1",
+    "property": "ci_coverage",
+    "dgp": "panel_fe_dgp",
+    "n": 1000,
+    "n_sims": 500,
+    "n_successful": 500,
+    "observed": 0.934,
+    "expected": 0.95,
+    "within_tolerance": true,
+    "tolerance_lower": 0.9308924339101198,
+    "tolerance_upper": 0.9691075660898801,
+    "details": {
+      "mean_bias": 0.00034283237762300356,
+      "rmse": 0.01904095426106726,
+      "se_ratio": 1.0051094306432853,
+      "median_estimate": 0.49996210721204437,
+      "empirical_sd": 0.01905693413459072
+    }
+  },
+  {
+    "method": "RE_beta2",
+    "property": "ci_coverage",
+    "dgp": "panel_fe_dgp",
+    "n": 1000,
+    "n_sims": 500,
+    "n_successful": 500,
+    "observed": 0.948,
+    "expected": 0.95,
+    "within_tolerance": true,
+    "tolerance_lower": 0.9308924339101198,
+    "tolerance_upper": 0.9691075660898801,
+    "details": {
+      "mean_bias": 0.0004667883831049324,
+      "rmse": 0.018572050814452207,
+      "se_ratio": 1.0224975470853452,
+      "median_estimate": -0.29953427573966684,
+      "empirical_sd": 0.018584777857052388
+    }
+  }
+]

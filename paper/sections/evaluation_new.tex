@@ -409,12 +409,11 @@ nominal rates, accounting for finite-simulation variability.
 
 Across 29 methods (OLS with HC0--HC3, panel FE/RE, logit, probit,
 IV/2SLS, DiD, IPW, TMLE, and nine hypothesis tests) and 96 test
-scenarios, 93 pass (96.9\%).  Standard error calibration and Type~I
+scenarios, 94 pass (97.9\%).  Standard error calibration and Type~I
 error control are exact: all 34 SE accuracy tests pass (mean ratio
-1.006) and all 16 Type~I error tests pass.  Mean confidence interval
-coverage is 0.951 (nominal 0.950).  The three failures are over-conservative coverage: IV/2SLS shows
-97.6\% at $n = 200$ (consistent with finite-sample 2SLS properties),
-and IPW shows 99.8--100\% because the influence function treats
+1.004) and all 16 Type~I error tests pass.  Mean confidence interval
+coverage is 0.950 (nominal 0.950).  The two failures are
+IPW (99.8--100\% coverage) because the influence function treats
 propensity scores as known rather than estimated, producing
 conservative standard errors (SE ratio $\approx 1.6$).  This is
 safe---IPW confidence intervals are too wide, not too narrow---but
