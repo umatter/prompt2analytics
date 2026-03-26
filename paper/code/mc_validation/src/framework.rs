@@ -21,7 +21,7 @@ pub struct McConfig {
 impl Default for McConfig {
     fn default() -> Self {
         Self {
-            n_sims: 1000,
+            n_sims: 2000,
             seed: 42,
             alpha: 0.05,
             mc_confidence: 0.95,

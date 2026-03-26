@@ -5,8 +5,8 @@
 //! artifact, not part of the core library or CI.
 //!
 //! Usage:
-//!   cargo run --release                          # Full run (1000 sims)
-//!   cargo run --release -- --sims 100            # Quick check
+//!   cargo run --release                          # Full run (2000 sims)
+//!   cargo run --release -- --sims 500            # Quick check
 //!   cargo run --release -- --category regression # Single category
 //!   cargo run --release -- --n 500               # Custom sample size
 
@@ -52,7 +52,7 @@ fn main() {
                 eprintln!("Usage: mc-validation [OPTIONS]");
                 eprintln!();
                 eprintln!("Options:");
-                eprintln!("  --sims N        Number of MC simulations (default: 1000)");
+                eprintln!("  --sims N        Number of MC simulations (default: 2000)");
                 eprintln!("  --seed N        Master seed (default: 42)");
                 eprintln!("  --category CAT  Run only one category:");
                 eprintln!("                  regression, hypothesis, panel, causal, discrete");
@@ -105,16 +105,26 @@ fn main() {
             print!("  {:<15}", name);
 
             let results = runner(&config, n);
-            let n_pass = results.iter().filter(|r| r.within_tolerance).count();
-            let n_total = results.len();
+            // Count only substantive tests (exclude negative controls) for pass/fail
+            let substantive: Vec<&McResult> = results.iter()
+                .filter(|r| !r.property.contains("negative_control"))
+                .collect();
+            let n_pass = substantive.iter().filter(|r| r.within_tolerance).count();
+            let n_total = substantive.len();
+            let n_neg_ctrl = results.len() - substantive.len();
             let elapsed = cat_start.elapsed();
 
-            println!(
-                " {:>3}/{:>3} pass  ({:.1}s)",
-                n_pass,
-                n_total,
-                elapsed.as_secs_f64()
-            );
+            if n_neg_ctrl > 0 {
+                println!(
+                    " {:>3}/{:>3} pass  + {} negative control(s)  ({:.1}s)",
+                    n_pass, n_total, n_neg_ctrl, elapsed.as_secs_f64()
+                );
+            } else {
+                println!(
+                    " {:>3}/{:>3} pass  ({:.1}s)",
+                    n_pass, n_total, elapsed.as_secs_f64()
+                );
+            }
 
             all_results.extend(results);
         }
@@ -123,15 +133,27 @@ fn main() {
 
     let elapsed = start.elapsed();
 
+    // Separate substantive tests from negative controls
+    let substantive: Vec<&McResult> = all_results.iter()
+        .filter(|r| !r.property.contains("negative_control"))
+        .collect();
+    let neg_controls: Vec<&McResult> = all_results.iter()
+        .filter(|r| r.property.contains("negative_control"))
+        .collect();
+
     // Summary
     println!("=== Summary ===\n");
-    let n_pass = all_results.iter().filter(|r| r.within_tolerance).count();
-    let n_total = all_results.len();
+    let n_pass = substantive.iter().filter(|r| r.within_tolerance).count();
+    let n_total = substantive.len();
     println!("Total: {}/{} pass ({:.1}%)", n_pass, n_total, 100.0 * n_pass as f64 / n_total as f64);
+    if !neg_controls.is_empty() {
+        let nc_pass = neg_controls.iter().filter(|r| r.within_tolerance).count();
+        println!("Negative controls: {}/{} behave as expected", nc_pass, neg_controls.len());
+    }
     println!("Time:  {:.1}s\n", elapsed.as_secs_f64());
 
-    // Print failures
-    let failures: Vec<&McResult> = all_results.iter().filter(|r| !r.within_tolerance).collect();
+    // Print failures (substantive only)
+    let failures: Vec<&&McResult> = substantive.iter().filter(|r| !r.within_tolerance).collect();
     if !failures.is_empty() {
         println!("Failures:");
         for r in &failures {
@@ -139,6 +161,19 @@ fn main() {
                 "  {:<35} {:<25} n={:<6} observed={:.4} expected={:.4} [{:.4}, {:.4}]",
                 r.method, r.property, r.n, r.observed, r.expected,
                 r.tolerance_lower, r.tolerance_upper
+            );
+        }
+        println!();
+    }
+
+    // Print negative control results separately
+    if !neg_controls.is_empty() {
+        println!("Negative controls (expected misspecification):");
+        for r in &neg_controls {
+            let status = if r.within_tolerance { "OK" } else { "UNEXPECTED" };
+            println!(
+                "  {:<35} {:<25} n={:<6} coverage={:.4} [{}]",
+                r.method, r.dgp, r.n, r.observed, status
             );
         }
         println!();

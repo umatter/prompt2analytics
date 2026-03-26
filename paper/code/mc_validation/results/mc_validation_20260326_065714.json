@@ -1,0 +1,1694 @@
+[
+  {
+    "method": "OLS_Standard_intercept",
+    "property": "ci_coverage",
+    "dgp": "homoskedastic",
+    "n": 200,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 0.9485,
+    "expected": 0.95,
+    "within_tolerance": true,
+    "tolerance_lower": 0.9404462169550599,
+    "tolerance_upper": 0.95955378304494,
+    "details": {
+      "mean_bias": 0.0019695398951580234,
+      "rmse": 0.0696232341392449,
+      "se_ratio": 1.019451429469975,
+      "median_estimate": 1.00219044701339,
+      "empirical_sd": 0.06961277622618169
+    }
+  },
+  {
+    "method": "OLS_Standard_intercept",
+    "property": "se_accuracy",
+    "dgp": "homoskedastic",
+    "n": 200,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 1.019451429469975,
+    "expected": 1.0,
+    "within_tolerance": true,
+    "tolerance_lower": 0.9,
+    "tolerance_upper": 1.1,
+    "details": {
+      "se_ratio": 1.019451429469975,
+      "empirical_sd": 0.06961277622618169
+    }
+  },
+  {
+    "method": "OLS_Standard_beta1",
+    "property": "ci_coverage",
+    "dgp": "homoskedastic",
+    "n": 200,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 0.9475,
+    "expected": 0.95,
+    "within_tolerance": true,
+    "tolerance_lower": 0.9404462169550599,
+    "tolerance_upper": 0.95955378304494,
+    "details": {
+      "mean_bias": 0.001614990674593253,
+      "rmse": 0.04111723285692769,
+      "se_ratio": 0.9993575810283761,
+      "median_estimate": 0.5000153671785948,
+      "empirical_sd": 0.0410957792780357
+    }
+  },
+  {
+    "method": "OLS_Standard_beta1",
+    "property": "se_accuracy",
+    "dgp": "homoskedastic",
+    "n": 200,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 0.9993575810283761,
+    "expected": 1.0,
+    "within_tolerance": true,
+    "tolerance_lower": 0.9,
+    "tolerance_upper": 1.1,
+    "details": {
+      "se_ratio": 0.9993575810283761,
+      "empirical_sd": 0.0410957792780357
+    }
+  },
+  {
+    "method": "OLS_Standard_beta2",
+    "property": "ci_coverage",
+    "dgp": "homoskedastic",
+    "n": 200,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 0.9545,
+    "expected": 0.95,
+    "within_tolerance": true,
+    "tolerance_lower": 0.9404462169550599,
+    "tolerance_upper": 0.95955378304494,
+    "details": {
+      "mean_bias": 0.0007642039165436931,
+      "rmse": 0.03946229526377293,
+      "se_ratio": 1.0392052718799503,
+      "median_estimate": -0.2993552472670418,
+      "empirical_sd": 0.0394647624292346
+    }
+  },
+  {
+    "method": "OLS_Standard_beta2",
+    "property": "se_accuracy",
+    "dgp": "homoskedastic",
+    "n": 200,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 1.0392052718799503,
+    "expected": 1.0,
+    "within_tolerance": true,
+    "tolerance_lower": 0.9,
+    "tolerance_upper": 1.1,
+    "details": {
+      "se_ratio": 1.0392052718799503,
+      "empirical_sd": 0.0394647624292346
+    }
+  },
+  {
+    "method": "OLS_HC0_beta1",
+    "property": "ci_coverage",
+    "dgp": "heteroskedastic",
+    "n": 200,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 0.9515,
+    "expected": 0.95,
+    "within_tolerance": true,
+    "tolerance_lower": 0.9404462169550599,
+    "tolerance_upper": 0.95955378304494,
+    "details": {
+      "mean_bias": 0.0014467519147246533,
+      "rmse": 0.7173591852218261,
+      "se_ratio": 0.9893342442284162,
+      "median_estimate": 0.504311510717472,
+      "empirical_sd": 0.7175371330458581
+    }
+  },
+  {
+    "method": "OLS_HC0_beta1",
+    "property": "se_accuracy",
+    "dgp": "heteroskedastic",
+    "n": 200,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 0.9893342442284162,
+    "expected": 1.0,
+    "within_tolerance": true,
+    "tolerance_lower": 0.9,
+    "tolerance_upper": 1.1,
+    "details": {
+      "se_ratio": 0.9893342442284162,
+      "empirical_sd": 0.7175371330458581
+    }
+  },
+  {
+    "method": "OLS_HC1_beta1",
+    "property": "ci_coverage",
+    "dgp": "heteroskedastic",
+    "n": 200,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 0.9525,
+    "expected": 0.95,
+    "within_tolerance": true,
+    "tolerance_lower": 0.9404462169550599,
+    "tolerance_upper": 0.95955378304494,
+    "details": {
+      "mean_bias": 0.0014467519147246533,
+      "rmse": 0.7173591852218261,
+      "se_ratio": 0.9968387834580406,
+      "median_estimate": 0.504311510717472,
+      "empirical_sd": 0.7175371330458581
+    }
+  },
+  {
+    "method": "OLS_HC1_beta1",
+    "property": "se_accuracy",
+    "dgp": "heteroskedastic",
+    "n": 200,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 0.9968387834580406,
+    "expected": 1.0,
+    "within_tolerance": true,
+    "tolerance_lower": 0.9,
+    "tolerance_upper": 1.1,
+    "details": {
+      "se_ratio": 0.9968387834580406,
+      "empirical_sd": 0.7175371330458581
+    }
+  },
+  {
+    "method": "OLS_HC2_beta1",
+    "property": "ci_coverage",
+    "dgp": "heteroskedastic",
+    "n": 200,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 0.953,
+    "expected": 0.95,
+    "within_tolerance": true,
+    "tolerance_lower": 0.9404462169550599,
+    "tolerance_upper": 0.95955378304494,
+    "details": {
+      "mean_bias": 0.0014467519147246533,
+      "rmse": 0.7173591852218261,
+      "se_ratio": 0.9996084455558313,
+      "median_estimate": 0.504311510717472,
+      "empirical_sd": 0.7175371330458581
+    }
+  },
+  {
+    "method": "OLS_HC2_beta1",
+    "property": "se_accuracy",
+    "dgp": "heteroskedastic",
+    "n": 200,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 0.9996084455558313,
+    "expected": 1.0,
+    "within_tolerance": true,
+    "tolerance_lower": 0.9,
+    "tolerance_upper": 1.1,
+    "details": {
+      "se_ratio": 0.9996084455558313,
+      "empirical_sd": 0.7175371330458581
+    }
+  },
+  {
+    "method": "OLS_HC3_beta1",
+    "property": "ci_coverage",
+    "dgp": "heteroskedastic",
+    "n": 200,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 0.9555,
+    "expected": 0.95,
+    "within_tolerance": true,
+    "tolerance_lower": 0.9404462169550599,
+    "tolerance_upper": 0.95955378304494,
+    "details": {
+      "mean_bias": 0.0014467519147246533,
+      "rmse": 0.7173591852218261,
+      "se_ratio": 1.0100067564025323,
+      "median_estimate": 0.504311510717472,
+      "empirical_sd": 0.7175371330458581
+    }
+  },
+  {
+    "method": "OLS_HC3_beta1",
+    "property": "se_accuracy",
+    "dgp": "heteroskedastic",
+    "n": 200,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 1.0100067564025323,
+    "expected": 1.0,
+    "within_tolerance": true,
+    "tolerance_lower": 0.9,
+    "tolerance_upper": 1.1,
+    "details": {
+      "se_ratio": 1.0100067564025323,
+      "empirical_sd": 0.7175371330458581
+    }
+  },
+  {
+    "method": "OLS_Standard_beta1",
+    "property": "ci_coverage_negative_control",
+    "dgp": "heteroskedastic",
+    "n": 200,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 0.893,
+    "expected": 0.95,
+    "within_tolerance": true,
+    "tolerance_lower": 0.9404462169550599,
+    "tolerance_upper": 0.95955378304494,
+    "details": {
+      "mean_bias": 0.0014467519147246533,
+      "rmse": 0.7173591852218261,
+      "se_ratio": 0.8112081783385063,
+      "median_estimate": 0.504311510717472,
+      "empirical_sd": 0.7175371330458581
+    }
+  },
+  {
+    "method": "t_test_two_sample",
+    "property": "type_i_error",
+    "dgp": "null_equal_means",
+    "n": 200,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 0.048,
+    "expected": 0.05,
+    "within_tolerance": true,
+    "tolerance_lower": 0.040446216955059934,
+    "tolerance_upper": 0.05955378304494007
+  },
+  {
+    "method": "t_test_two_sample",
+    "property": "power",
+    "dgp": "alt_d=0.5",
+    "n": 200,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 0.9385,
+    "expected": null,
+    "within_tolerance": true,
+    "tolerance_lower": 0.05,
+    "tolerance_upper": 1.0
+  },
+  {
+    "method": "ANOVA_oneway",
+    "property": "type_i_error",
+    "dgp": "null_equal_means",
+    "n": 200,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 0.051,
+    "expected": 0.05,
+    "within_tolerance": true,
+    "tolerance_lower": 0.040446216955059934,
+    "tolerance_upper": 0.05955378304494007
+  },
+  {
+    "method": "wilcoxon_rank_sum",
+    "property": "type_i_error",
+    "dgp": "null_equal_distributions",
+    "n": 200,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 0.049,
+    "expected": 0.05,
+    "within_tolerance": true,
+    "tolerance_lower": 0.040446216955059934,
+    "tolerance_upper": 0.05955378304494007
+  },
+  {
+    "method": "ks_test",
+    "property": "type_i_error",
+    "dgp": "null_equal_distributions",
+    "n": 200,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 0.0555,
+    "expected": 0.05,
+    "within_tolerance": true,
+    "tolerance_lower": 0.040446216955059934,
+    "tolerance_upper": 0.05955378304494007
+  },
+  {
+    "method": "chi_squared",
+    "property": "type_i_error",
+    "dgp": "null_independence",
+    "n": 200,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 0.0475,
+    "expected": 0.05,
+    "within_tolerance": true,
+    "tolerance_lower": 0.040446216955059934,
+    "tolerance_upper": 0.05955378304494007
+  },
+  {
+    "method": "fisher_exact",
+    "property": "type_i_error",
+    "dgp": "null_independence",
+    "n": 200,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 0.0425,
+    "expected": 0.05,
+    "within_tolerance": true,
+    "tolerance_lower": 0.040446216955059934,
+    "tolerance_upper": 0.05955378304494007
+  },
+  {
+    "method": "bartlett",
+    "property": "type_i_error",
+    "dgp": "null_equal_variances",
+    "n": 200,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 0.046,
+    "expected": 0.05,
+    "within_tolerance": true,
+    "tolerance_lower": 0.040446216955059934,
+    "tolerance_upper": 0.05955378304494007
+  },
+  {
+    "method": "kruskal_wallis",
+    "property": "type_i_error",
+    "dgp": "null_equal_distributions",
+    "n": 200,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 0.0525,
+    "expected": 0.05,
+    "within_tolerance": true,
+    "tolerance_lower": 0.040446216955059934,
+    "tolerance_upper": 0.05955378304494007
+  },
+  {
+    "method": "FE_beta1",
+    "property": "ci_coverage",
+    "dgp": "panel_fe_dgp",
+    "n": 1000,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 0.9505,
+    "expected": 0.95,
+    "within_tolerance": true,
+    "tolerance_lower": 0.9404462169550599,
+    "tolerance_upper": 0.95955378304494,
+    "details": {
+      "mean_bias": -0.00005206045486633171,
+      "rmse": 0.018508921155116344,
+      "se_ratio": 1.0327219500600044,
+      "median_estimate": 0.5001697842441435,
+      "empirical_sd": 0.01851347688708353
+    }
+  },
+  {
+    "method": "FE_beta1",
+    "property": "se_accuracy",
+    "dgp": "panel_fe_dgp",
+    "n": 1000,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 1.0327219500600044,
+    "expected": 1.0,
+    "within_tolerance": true,
+    "tolerance_lower": 0.9,
+    "tolerance_upper": 1.1,
+    "details": {
+      "se_ratio": 1.0327219500600044,
+      "empirical_sd": 0.01851347688708353
+    }
+  },
+  {
+    "method": "FE_beta2",
+    "property": "ci_coverage",
+    "dgp": "panel_fe_dgp",
+    "n": 1000,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 0.951,
+    "expected": 0.95,
+    "within_tolerance": true,
+    "tolerance_lower": 0.9404462169550599,
+    "tolerance_upper": 0.95955378304494,
+    "details": {
+      "mean_bias": 0.000627794319816688,
+      "rmse": 0.018443526482761947,
+      "se_ratio": 1.033424357477118,
+      "median_estimate": -0.2996302880998584,
+      "empirical_sd": 0.01843744866213685
+    }
+  },
+  {
+    "method": "FE_beta2",
+    "property": "se_accuracy",
+    "dgp": "panel_fe_dgp",
+    "n": 1000,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 1.033424357477118,
+    "expected": 1.0,
+    "within_tolerance": true,
+    "tolerance_lower": 0.9,
+    "tolerance_upper": 1.1,
+    "details": {
+      "se_ratio": 1.033424357477118,
+      "empirical_sd": 0.01843744866213685
+    }
+  },
+  {
+    "method": "RE_beta1",
+    "property": "ci_coverage",
+    "dgp": "panel_fe_dgp",
+    "n": 1000,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 0.946,
+    "expected": 0.95,
+    "within_tolerance": true,
+    "tolerance_lower": 0.9404462169550599,
+    "tolerance_upper": 0.95955378304494,
+    "details": {
+      "mean_bias": -0.000049678347417925206,
+      "rmse": 0.018514585708320545,
+      "se_ratio": 1.0323849951668063,
+      "median_estimate": 0.5001353239300037,
+      "empirical_sd": 0.018519149425939522
+    }
+  },
+  {
+    "method": "RE_beta2",
+    "property": "ci_coverage",
+    "dgp": "panel_fe_dgp",
+    "n": 1000,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 0.9515,
+    "expected": 0.95,
+    "within_tolerance": true,
+    "tolerance_lower": 0.9404462169550599,
+    "tolerance_upper": 0.95955378304494,
+    "details": {
+      "mean_bias": 0.0006308393161102988,
+      "rmse": 0.0184417745258517,
+      "se_ratio": 1.0335050728630581,
+      "median_estimate": -0.29958012170981746,
+      "empirical_sd": 0.018435591255288448
+    }
+  },
+  {
+    "method": "IV_2SLS_beta_endog",
+    "property": "ci_coverage",
+    "dgp": "endogenous_with_instrument",
+    "n": 1000,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 0.9465,
+    "expected": 0.95,
+    "within_tolerance": true,
+    "tolerance_lower": 0.9404462169550599,
+    "tolerance_upper": 0.95955378304494,
+    "details": {
+      "mean_bias": -0.0009262000677175974,
+      "rmse": 0.046192274922959055,
+      "se_ratio": 0.990718883000731,
+      "median_estimate": 0.8011695251561202,
+      "empirical_sd": 0.04619453846164744
+    }
+  },
+  {
+    "method": "IV_2SLS_beta_endog",
+    "property": "se_accuracy",
+    "dgp": "endogenous_with_instrument",
+    "n": 1000,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 0.990718883000731,
+    "expected": 1.0,
+    "within_tolerance": true,
+    "tolerance_lower": 0.9,
+    "tolerance_upper": 1.1,
+    "details": {
+      "se_ratio": 0.990718883000731,
+      "empirical_sd": 0.04619453846164744
+    }
+  },
+  {
+    "method": "DiD_ATT",
+    "property": "ci_coverage",
+    "dgp": "canonical_2x2",
+    "n": 200,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 0.952,
+    "expected": 0.95,
+    "within_tolerance": true,
+    "tolerance_lower": 0.9404462169550599,
+    "tolerance_upper": 0.95955378304494,
+    "details": {
+      "mean_bias": 0.0068465440925225,
+      "rmse": 0.280619880663565,
+      "se_ratio": 1.0086830326805156,
+      "median_estimate": 2.0008230231609216,
+      "empirical_sd": 0.28060650787847835
+    }
+  },
+  {
+    "method": "DiD_ATT",
+    "property": "se_accuracy",
+    "dgp": "canonical_2x2",
+    "n": 200,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 1.0086830326805156,
+    "expected": 1.0,
+    "within_tolerance": true,
+    "tolerance_lower": 0.9,
+    "tolerance_upper": 1.1,
+    "details": {
+      "se_ratio": 1.0086830326805156,
+      "empirical_sd": 0.28060650787847835
+    }
+  },
+  {
+    "method": "IPW_ATE",
+    "property": "ci_coverage",
+    "dgp": "binary_treatment_confounded",
+    "n": 200,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 0.9465,
+    "expected": 0.95,
+    "within_tolerance": true,
+    "tolerance_lower": 0.9404462169550599,
+    "tolerance_upper": 0.95955378304494,
+    "details": {
+      "mean_bias": 0.00442421545121674,
+      "rmse": 0.14387664765795502,
+      "se_ratio": 1.000454676430711,
+      "median_estimate": 0.5000358579317916,
+      "empirical_sd": 0.1438445747665773
+    }
+  },
+  {
+    "method": "TMLE_ATE",
+    "property": "ci_coverage",
+    "dgp": "binary_treatment_confounded",
+    "n": 200,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 0.947,
+    "expected": 0.95,
+    "within_tolerance": true,
+    "tolerance_lower": 0.9404462169550599,
+    "tolerance_upper": 0.95955378304494,
+    "details": {
+      "mean_bias": 0.004200153076595603,
+      "rmse": 0.14394249370561726,
+      "se_ratio": 1.0031282541884512,
+      "median_estimate": 0.49951255633246106,
+      "empirical_sd": 0.14391718551468455
+    }
+  },
+  {
+    "method": "Logit_intercept",
+    "property": "ci_coverage",
+    "dgp": "logit_dgp",
+    "n": 200,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 0.958,
+    "expected": 0.95,
+    "within_tolerance": true,
+    "tolerance_lower": 0.9404462169550599,
+    "tolerance_upper": 0.95955378304494,
+    "details": {
+      "mean_bias": -0.013960986654451668,
+      "rmse": 0.17381224326087444,
+      "se_ratio": 1.007331401166169,
+      "median_estimate": -0.5141471629144785,
+      "empirical_sd": 0.1732939761217673
+    }
+  },
+  {
+    "method": "Logit_intercept",
+    "property": "se_accuracy",
+    "dgp": "logit_dgp",
+    "n": 200,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 1.007331401166169,
+    "expected": 1.0,
+    "within_tolerance": true,
+    "tolerance_lower": 0.9,
+    "tolerance_upper": 1.1,
+    "details": {
+      "se_ratio": 1.007331401166169,
+      "empirical_sd": 0.1732939761217673
+    }
+  },
+  {
+    "method": "Logit_beta1",
+    "property": "ci_coverage",
+    "dgp": "logit_dgp",
+    "n": 200,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 0.9425,
+    "expected": 0.95,
+    "within_tolerance": true,
+    "tolerance_lower": 0.9404462169550599,
+    "tolerance_upper": 0.95955378304494,
+    "details": {
+      "mean_bias": 0.027079023429718463,
+      "rmse": 0.18295323567313046,
+      "se_ratio": 0.9438925974144902,
+      "median_estimate": 1.0161098349966942,
+      "empirical_sd": 0.1809833982125848
+    }
+  },
+  {
+    "method": "Logit_beta1",
+    "property": "se_accuracy",
+    "dgp": "logit_dgp",
+    "n": 200,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 0.9438925974144902,
+    "expected": 1.0,
+    "within_tolerance": true,
+    "tolerance_lower": 0.9,
+    "tolerance_upper": 1.1,
+    "details": {
+      "se_ratio": 0.9438925974144902,
+      "empirical_sd": 0.1809833982125848
+    }
+  },
+  {
+    "method": "Logit_beta2",
+    "property": "ci_coverage",
+    "dgp": "logit_dgp",
+    "n": 200,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 0.9505,
+    "expected": 0.95,
+    "within_tolerance": true,
+    "tolerance_lower": 0.9404462169550599,
+    "tolerance_upper": 0.95955378304494,
+    "details": {
+      "mean_bias": -0.01590104074225096,
+      "rmse": 0.1570813921509121,
+      "se_ratio": 0.9903456820229803,
+      "median_estimate": -0.5159725145900923,
+      "empirical_sd": 0.1563135874842558
+    }
+  },
+  {
+    "method": "Logit_beta2",
+    "property": "se_accuracy",
+    "dgp": "logit_dgp",
+    "n": 200,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 0.9903456820229803,
+    "expected": 1.0,
+    "within_tolerance": true,
+    "tolerance_lower": 0.9,
+    "tolerance_upper": 1.1,
+    "details": {
+      "se_ratio": 0.9903456820229803,
+      "empirical_sd": 0.1563135874842558
+    }
+  },
+  {
+    "method": "Probit_intercept",
+    "property": "ci_coverage",
+    "dgp": "probit_dgp",
+    "n": 200,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 0.948,
+    "expected": 0.95,
+    "within_tolerance": true,
+    "tolerance_lower": 0.9404462169550599,
+    "tolerance_upper": 0.95955378304494,
+    "details": {
+      "mean_bias": -0.009725415147710192,
+      "rmse": 0.1302763286518267,
+      "se_ratio": 0.9546931190636594,
+      "median_estimate": -0.5040186615843858,
+      "empirical_sd": 0.1299453000215949
+    }
+  },
+  {
+    "method": "Probit_intercept",
+    "property": "se_accuracy",
+    "dgp": "probit_dgp",
+    "n": 200,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 0.9546931190636594,
+    "expected": 1.0,
+    "within_tolerance": true,
+    "tolerance_lower": 0.9,
+    "tolerance_upper": 1.1,
+    "details": {
+      "se_ratio": 0.9546931190636594,
+      "empirical_sd": 0.1299453000215949
+    }
+  },
+  {
+    "method": "Probit_beta1",
+    "property": "ci_coverage",
+    "dgp": "probit_dgp",
+    "n": 200,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 0.9445,
+    "expected": 0.95,
+    "within_tolerance": true,
+    "tolerance_lower": 0.9404462169550599,
+    "tolerance_upper": 0.95955378304494,
+    "details": {
+      "mean_bias": 0.03059857473644123,
+      "rmse": 0.14369610408265773,
+      "se_ratio": 0.9489758249014795,
+      "median_estimate": 1.020695591341073,
+      "empirical_sd": 0.14043560314944498
+    }
+  },
+  {
+    "method": "Probit_beta1",
+    "property": "se_accuracy",
+    "dgp": "probit_dgp",
+    "n": 200,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 0.9489758249014795,
+    "expected": 1.0,
+    "within_tolerance": true,
+    "tolerance_lower": 0.9,
+    "tolerance_upper": 1.1,
+    "details": {
+      "se_ratio": 0.9489758249014795,
+      "empirical_sd": 0.14043560314944498
+    }
+  },
+  {
+    "method": "Probit_beta2",
+    "property": "ci_coverage",
+    "dgp": "probit_dgp",
+    "n": 200,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 0.9525,
+    "expected": 0.95,
+    "within_tolerance": true,
+    "tolerance_lower": 0.9404462169550599,
+    "tolerance_upper": 0.95955378304494,
+    "details": {
+      "mean_bias": -0.015144302381453811,
+      "rmse": 0.1173824851048276,
+      "se_ratio": 0.9592045436682167,
+      "median_estimate": -0.5093516865364931,
+      "empirical_sd": 0.1164305627949146
+    }
+  },
+  {
+    "method": "Probit_beta2",
+    "property": "se_accuracy",
+    "dgp": "probit_dgp",
+    "n": 200,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 0.9592045436682167,
+    "expected": 1.0,
+    "within_tolerance": true,
+    "tolerance_lower": 0.9,
+    "tolerance_upper": 1.1,
+    "details": {
+      "se_ratio": 0.9592045436682167,
+      "empirical_sd": 0.1164305627949146
+    }
+  },
+  {
+    "method": "OLS_Standard_intercept",
+    "property": "ci_coverage",
+    "dgp": "homoskedastic",
+    "n": 1000,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 0.9425,
+    "expected": 0.95,
+    "within_tolerance": true,
+    "tolerance_lower": 0.9404462169550599,
+    "tolerance_upper": 0.95955378304494,
+    "details": {
+      "mean_bias": 0.00010605485957770888,
+      "rmse": 0.03215249575866365,
+      "se_ratio": 0.9833186922041177,
+      "median_estimate": 1.0004279779090905,
+      "empirical_sd": 0.03216036194320274
+    }
+  },
+  {
+    "method": "OLS_Standard_intercept",
+    "property": "se_accuracy",
+    "dgp": "homoskedastic",
+    "n": 1000,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 0.9833186922041177,
+    "expected": 1.0,
+    "within_tolerance": true,
+    "tolerance_lower": 0.9,
+    "tolerance_upper": 1.1,
+    "details": {
+      "se_ratio": 0.9833186922041177,
+      "empirical_sd": 0.03216036194320274
+    }
+  },
+  {
+    "method": "OLS_Standard_beta1",
+    "property": "ci_coverage",
+    "dgp": "homoskedastic",
+    "n": 1000,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 0.958,
+    "expected": 0.95,
+    "within_tolerance": true,
+    "tolerance_lower": 0.9404462169550599,
+    "tolerance_upper": 0.95955378304494,
+    "details": {
+      "mean_bias": 0.00040999246277784174,
+      "rmse": 0.017775740644945734,
+      "se_ratio": 1.0271770642728,
+      "median_estimate": 0.5005977371288439,
+      "empirical_sd": 0.017775456255167677
+    }
+  },
+  {
+    "method": "OLS_Standard_beta1",
+    "property": "se_accuracy",
+    "dgp": "homoskedastic",
+    "n": 1000,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 1.0271770642728,
+    "expected": 1.0,
+    "within_tolerance": true,
+    "tolerance_lower": 0.9,
+    "tolerance_upper": 1.1,
+    "details": {
+      "se_ratio": 1.0271770642728,
+      "empirical_sd": 0.017775456255167677
+    }
+  },
+  {
+    "method": "OLS_Standard_beta2",
+    "property": "ci_coverage",
+    "dgp": "homoskedastic",
+    "n": 1000,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 0.96,
+    "expected": 0.95,
+    "within_tolerance": false,
+    "tolerance_lower": 0.9404462169550599,
+    "tolerance_upper": 0.95955378304494,
+    "details": {
+      "mean_bias": 0.00012365184902557447,
+      "rmse": 0.01827629872464251,
+      "se_ratio": 0.998960723633118,
+      "median_estimate": -0.300271319926791,
+      "empirical_sd": 0.018280451108738313
+    }
+  },
+  {
+    "method": "OLS_Standard_beta2",
+    "property": "se_accuracy",
+    "dgp": "homoskedastic",
+    "n": 1000,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 0.998960723633118,
+    "expected": 1.0,
+    "within_tolerance": true,
+    "tolerance_lower": 0.9,
+    "tolerance_upper": 1.1,
+    "details": {
+      "se_ratio": 0.998960723633118,
+      "empirical_sd": 0.018280451108738313
+    }
+  },
+  {
+    "method": "OLS_HC0_beta1",
+    "property": "ci_coverage",
+    "dgp": "heteroskedastic",
+    "n": 1000,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 0.948,
+    "expected": 0.95,
+    "within_tolerance": true,
+    "tolerance_lower": 0.9404462169550599,
+    "tolerance_upper": 0.95955378304494,
+    "details": {
+      "mean_bias": 0.004843816778950738,
+      "rmse": 0.3175909098570004,
+      "se_ratio": 1.0116794052565483,
+      "median_estimate": 0.5119857248479942,
+      "empirical_sd": 0.31763338764569926
+    }
+  },
+  {
+    "method": "OLS_HC0_beta1",
+    "property": "se_accuracy",
+    "dgp": "heteroskedastic",
+    "n": 1000,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 1.0116794052565483,
+    "expected": 1.0,
+    "within_tolerance": true,
+    "tolerance_lower": 0.9,
+    "tolerance_upper": 1.1,
+    "details": {
+      "se_ratio": 1.0116794052565483,
+      "empirical_sd": 0.31763338764569926
+    }
+  },
+  {
+    "method": "OLS_HC1_beta1",
+    "property": "ci_coverage",
+    "dgp": "heteroskedastic",
+    "n": 1000,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 0.9485,
+    "expected": 0.95,
+    "within_tolerance": true,
+    "tolerance_lower": 0.9404462169550599,
+    "tolerance_upper": 0.95955378304494,
+    "details": {
+      "mean_bias": 0.004843816778950738,
+      "rmse": 0.3175909098570004,
+      "se_ratio": 1.0132003473409368,
+      "median_estimate": 0.5119857248479942,
+      "empirical_sd": 0.31763338764569926
+    }
+  },
+  {
+    "method": "OLS_HC1_beta1",
+    "property": "se_accuracy",
+    "dgp": "heteroskedastic",
+    "n": 1000,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 1.0132003473409368,
+    "expected": 1.0,
+    "within_tolerance": true,
+    "tolerance_lower": 0.9,
+    "tolerance_upper": 1.1,
+    "details": {
+      "se_ratio": 1.0132003473409368,
+      "empirical_sd": 0.31763338764569926
+    }
+  },
+  {
+    "method": "OLS_HC2_beta1",
+    "property": "ci_coverage",
+    "dgp": "heteroskedastic",
+    "n": 1000,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 0.9485,
+    "expected": 0.95,
+    "within_tolerance": true,
+    "tolerance_lower": 0.9404462169550599,
+    "tolerance_upper": 0.95955378304494,
+    "details": {
+      "mean_bias": 0.004843816778950738,
+      "rmse": 0.3175909098570004,
+      "se_ratio": 1.0137478502869304,
+      "median_estimate": 0.5119857248479942,
+      "empirical_sd": 0.31763338764569926
+    }
+  },
+  {
+    "method": "OLS_HC2_beta1",
+    "property": "se_accuracy",
+    "dgp": "heteroskedastic",
+    "n": 1000,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 1.0137478502869304,
+    "expected": 1.0,
+    "within_tolerance": true,
+    "tolerance_lower": 0.9,
+    "tolerance_upper": 1.1,
+    "details": {
+      "se_ratio": 1.0137478502869304,
+      "empirical_sd": 0.31763338764569926
+    }
+  },
+  {
+    "method": "OLS_HC3_beta1",
+    "property": "ci_coverage",
+    "dgp": "heteroskedastic",
+    "n": 1000,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 0.9495,
+    "expected": 0.95,
+    "within_tolerance": true,
+    "tolerance_lower": 0.9404462169550599,
+    "tolerance_upper": 0.95955378304494,
+    "details": {
+      "mean_bias": 0.004843816778950738,
+      "rmse": 0.3175909098570004,
+      "se_ratio": 1.0158211798123806,
+      "median_estimate": 0.5119857248479942,
+      "empirical_sd": 0.31763338764569926
+    }
+  },
+  {
+    "method": "OLS_HC3_beta1",
+    "property": "se_accuracy",
+    "dgp": "heteroskedastic",
+    "n": 1000,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 1.0158211798123806,
+    "expected": 1.0,
+    "within_tolerance": true,
+    "tolerance_lower": 0.9,
+    "tolerance_upper": 1.1,
+    "details": {
+      "se_ratio": 1.0158211798123806,
+      "empirical_sd": 0.31763338764569926
+    }
+  },
+  {
+    "method": "OLS_Standard_beta1",
+    "property": "ci_coverage_negative_control",
+    "dgp": "heteroskedastic",
+    "n": 1000,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 0.8925,
+    "expected": 0.95,
+    "within_tolerance": true,
+    "tolerance_lower": 0.9404462169550599,
+    "tolerance_upper": 0.95955378304494,
+    "details": {
+      "mean_bias": 0.004843816778950738,
+      "rmse": 0.3175909098570004,
+      "se_ratio": 0.8185777752180097,
+      "median_estimate": 0.5119857248479942,
+      "empirical_sd": 0.31763338764569926
+    }
+  },
+  {
+    "method": "t_test_two_sample",
+    "property": "type_i_error",
+    "dgp": "null_equal_means",
+    "n": 1000,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 0.05,
+    "expected": 0.05,
+    "within_tolerance": true,
+    "tolerance_lower": 0.040446216955059934,
+    "tolerance_upper": 0.05955378304494007
+  },
+  {
+    "method": "t_test_two_sample",
+    "property": "power",
+    "dgp": "alt_d=0.5",
+    "n": 1000,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 1.0,
+    "expected": null,
+    "within_tolerance": true,
+    "tolerance_lower": 0.05,
+    "tolerance_upper": 1.0
+  },
+  {
+    "method": "ANOVA_oneway",
+    "property": "type_i_error",
+    "dgp": "null_equal_means",
+    "n": 1000,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 0.047,
+    "expected": 0.05,
+    "within_tolerance": true,
+    "tolerance_lower": 0.040446216955059934,
+    "tolerance_upper": 0.05955378304494007
+  },
+  {
+    "method": "wilcoxon_rank_sum",
+    "property": "type_i_error",
+    "dgp": "null_equal_distributions",
+    "n": 1000,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 0.049,
+    "expected": 0.05,
+    "within_tolerance": true,
+    "tolerance_lower": 0.040446216955059934,
+    "tolerance_upper": 0.05955378304494007
+  },
+  {
+    "method": "ks_test",
+    "property": "type_i_error",
+    "dgp": "null_equal_distributions",
+    "n": 1000,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 0.047,
+    "expected": 0.05,
+    "within_tolerance": true,
+    "tolerance_lower": 0.040446216955059934,
+    "tolerance_upper": 0.05955378304494007
+  },
+  {
+    "method": "chi_squared",
+    "property": "type_i_error",
+    "dgp": "null_independence",
+    "n": 1000,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 0.057,
+    "expected": 0.05,
+    "within_tolerance": true,
+    "tolerance_lower": 0.040446216955059934,
+    "tolerance_upper": 0.05955378304494007
+  },
+  {
+    "method": "fisher_exact",
+    "property": "type_i_error",
+    "dgp": "null_independence",
+    "n": 1000,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 0.0525,
+    "expected": 0.05,
+    "within_tolerance": true,
+    "tolerance_lower": 0.040446216955059934,
+    "tolerance_upper": 0.05955378304494007
+  },
+  {
+    "method": "bartlett",
+    "property": "type_i_error",
+    "dgp": "null_equal_variances",
+    "n": 1000,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 0.05,
+    "expected": 0.05,
+    "within_tolerance": true,
+    "tolerance_lower": 0.040446216955059934,
+    "tolerance_upper": 0.05955378304494007
+  },
+  {
+    "method": "kruskal_wallis",
+    "property": "type_i_error",
+    "dgp": "null_equal_distributions",
+    "n": 1000,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 0.0495,
+    "expected": 0.05,
+    "within_tolerance": true,
+    "tolerance_lower": 0.040446216955059934,
+    "tolerance_upper": 0.05955378304494007
+  },
+  {
+    "method": "FE_beta1",
+    "property": "ci_coverage",
+    "dgp": "panel_fe_dgp",
+    "n": 1000,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 0.9505,
+    "expected": 0.95,
+    "within_tolerance": true,
+    "tolerance_lower": 0.9404462169550599,
+    "tolerance_upper": 0.95955378304494,
+    "details": {
+      "mean_bias": -0.00005206045486633171,
+      "rmse": 0.018508921155116344,
+      "se_ratio": 1.0327219500600044,
+      "median_estimate": 0.5001697842441435,
+      "empirical_sd": 0.01851347688708353
+    }
+  },
+  {
+    "method": "FE_beta1",
+    "property": "se_accuracy",
+    "dgp": "panel_fe_dgp",
+    "n": 1000,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 1.0327219500600044,
+    "expected": 1.0,
+    "within_tolerance": true,
+    "tolerance_lower": 0.9,
+    "tolerance_upper": 1.1,
+    "details": {
+      "se_ratio": 1.0327219500600044,
+      "empirical_sd": 0.01851347688708353
+    }
+  },
+  {
+    "method": "FE_beta2",
+    "property": "ci_coverage",
+    "dgp": "panel_fe_dgp",
+    "n": 1000,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 0.951,
+    "expected": 0.95,
+    "within_tolerance": true,
+    "tolerance_lower": 0.9404462169550599,
+    "tolerance_upper": 0.95955378304494,
+    "details": {
+      "mean_bias": 0.000627794319816688,
+      "rmse": 0.018443526482761947,
+      "se_ratio": 1.033424357477118,
+      "median_estimate": -0.2996302880998584,
+      "empirical_sd": 0.01843744866213685
+    }
+  },
+  {
+    "method": "FE_beta2",
+    "property": "se_accuracy",
+    "dgp": "panel_fe_dgp",
+    "n": 1000,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 1.033424357477118,
+    "expected": 1.0,
+    "within_tolerance": true,
+    "tolerance_lower": 0.9,
+    "tolerance_upper": 1.1,
+    "details": {
+      "se_ratio": 1.033424357477118,
+      "empirical_sd": 0.01843744866213685
+    }
+  },
+  {
+    "method": "RE_beta1",
+    "property": "ci_coverage",
+    "dgp": "panel_fe_dgp",
+    "n": 1000,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 0.946,
+    "expected": 0.95,
+    "within_tolerance": true,
+    "tolerance_lower": 0.9404462169550599,
+    "tolerance_upper": 0.95955378304494,
+    "details": {
+      "mean_bias": -0.000049678347417925206,
+      "rmse": 0.018514585708320545,
+      "se_ratio": 1.0323849951668063,
+      "median_estimate": 0.5001353239300037,
+      "empirical_sd": 0.018519149425939522
+    }
+  },
+  {
+    "method": "RE_beta2",
+    "property": "ci_coverage",
+    "dgp": "panel_fe_dgp",
+    "n": 1000,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 0.9515,
+    "expected": 0.95,
+    "within_tolerance": true,
+    "tolerance_lower": 0.9404462169550599,
+    "tolerance_upper": 0.95955378304494,
+    "details": {
+      "mean_bias": 0.0006308393161102988,
+      "rmse": 0.0184417745258517,
+      "se_ratio": 1.0335050728630581,
+      "median_estimate": -0.29958012170981746,
+      "empirical_sd": 0.018435591255288448
+    }
+  },
+  {
+    "method": "IV_2SLS_beta_endog",
+    "property": "ci_coverage",
+    "dgp": "endogenous_with_instrument",
+    "n": 1000,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 0.9465,
+    "expected": 0.95,
+    "within_tolerance": true,
+    "tolerance_lower": 0.9404462169550599,
+    "tolerance_upper": 0.95955378304494,
+    "details": {
+      "mean_bias": -0.0009262000677175974,
+      "rmse": 0.046192274922959055,
+      "se_ratio": 0.990718883000731,
+      "median_estimate": 0.8011695251561202,
+      "empirical_sd": 0.04619453846164744
+    }
+  },
+  {
+    "method": "IV_2SLS_beta_endog",
+    "property": "se_accuracy",
+    "dgp": "endogenous_with_instrument",
+    "n": 1000,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 0.990718883000731,
+    "expected": 1.0,
+    "within_tolerance": true,
+    "tolerance_lower": 0.9,
+    "tolerance_upper": 1.1,
+    "details": {
+      "se_ratio": 0.990718883000731,
+      "empirical_sd": 0.04619453846164744
+    }
+  },
+  {
+    "method": "DiD_ATT",
+    "property": "ci_coverage",
+    "dgp": "canonical_2x2",
+    "n": 1000,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 0.9555,
+    "expected": 0.95,
+    "within_tolerance": true,
+    "tolerance_lower": 0.9404462169550599,
+    "tolerance_upper": 0.95955378304494,
+    "details": {
+      "mean_bias": 0.0004150486461225178,
+      "rmse": 0.12638871519211145,
+      "se_ratio": 0.999975064603826,
+      "median_estimate": 2.0013316492485105,
+      "empirical_sd": 0.12641964256217006
+    }
+  },
+  {
+    "method": "DiD_ATT",
+    "property": "se_accuracy",
+    "dgp": "canonical_2x2",
+    "n": 1000,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 0.999975064603826,
+    "expected": 1.0,
+    "within_tolerance": true,
+    "tolerance_lower": 0.9,
+    "tolerance_upper": 1.1,
+    "details": {
+      "se_ratio": 0.999975064603826,
+      "empirical_sd": 0.12641964256217006
+    }
+  },
+  {
+    "method": "IPW_ATE",
+    "property": "ci_coverage",
+    "dgp": "binary_treatment_confounded",
+    "n": 1000,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 0.9505,
+    "expected": 0.95,
+    "within_tolerance": true,
+    "tolerance_lower": 0.9404462169550599,
+    "tolerance_upper": 0.95955378304494,
+    "details": {
+      "mean_bias": 0.00015686444809659417,
+      "rmse": 0.06431587717893684,
+      "se_ratio": 1.0034018313375184,
+      "median_estimate": 0.5002597535641999,
+      "empirical_sd": 0.06433177083844832
+    }
+  },
+  {
+    "method": "TMLE_ATE",
+    "property": "ci_coverage",
+    "dgp": "binary_treatment_confounded",
+    "n": 1000,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 0.9515,
+    "expected": 0.95,
+    "within_tolerance": true,
+    "tolerance_lower": 0.9404462169550599,
+    "tolerance_upper": 0.95955378304494,
+    "details": {
+      "mean_bias": 0.00016619722095811973,
+      "rmse": 0.06421666034290513,
+      "se_ratio": 1.005580300213772,
+      "median_estimate": 0.5001560163879935,
+      "empirical_sd": 0.0642325054116334
+    }
+  },
+  {
+    "method": "Logit_intercept",
+    "property": "ci_coverage",
+    "dgp": "logit_dgp",
+    "n": 1000,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 0.9625,
+    "expected": 0.95,
+    "within_tolerance": false,
+    "tolerance_lower": 0.9404462169550599,
+    "tolerance_upper": 0.95955378304494,
+    "details": {
+      "mean_bias": -0.006259920689140497,
+      "rmse": 0.07449684007220216,
+      "se_ratio": 1.0346549538398897,
+      "median_estimate": -0.506256452967488,
+      "empirical_sd": 0.07425193094009806
+    }
+  },
+  {
+    "method": "Logit_intercept",
+    "property": "se_accuracy",
+    "dgp": "logit_dgp",
+    "n": 1000,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 1.0346549538398897,
+    "expected": 1.0,
+    "within_tolerance": true,
+    "tolerance_lower": 0.9,
+    "tolerance_upper": 1.1,
+    "details": {
+      "se_ratio": 1.0346549538398897,
+      "empirical_sd": 0.07425193094009806
+    }
+  },
+  {
+    "method": "Logit_beta1",
+    "property": "ci_coverage",
+    "dgp": "logit_dgp",
+    "n": 1000,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 0.9495,
+    "expected": 0.95,
+    "within_tolerance": true,
+    "tolerance_lower": 0.9404462169550599,
+    "tolerance_upper": 0.95955378304494,
+    "details": {
+      "mean_bias": 0.004705639491089597,
+      "rmse": 0.07444110528890586,
+      "se_ratio": 1.002646966914727,
+      "median_estimate": 1.0018793278142628,
+      "empirical_sd": 0.0743108078390668
+    }
+  },
+  {
+    "method": "Logit_beta1",
+    "property": "se_accuracy",
+    "dgp": "logit_dgp",
+    "n": 1000,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 1.002646966914727,
+    "expected": 1.0,
+    "within_tolerance": true,
+    "tolerance_lower": 0.9,
+    "tolerance_upper": 1.1,
+    "details": {
+      "se_ratio": 1.002646966914727,
+      "empirical_sd": 0.0743108078390668
+    }
+  },
+  {
+    "method": "Logit_beta2",
+    "property": "ci_coverage",
+    "dgp": "logit_dgp",
+    "n": 1000,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 0.9525,
+    "expected": 0.95,
+    "within_tolerance": true,
+    "tolerance_lower": 0.9404462169550599,
+    "tolerance_upper": 0.95955378304494,
+    "details": {
+      "mean_bias": -0.002348755098872446,
+      "rmse": 0.06722809149022564,
+      "se_ratio": 1.0101194295457905,
+      "median_estimate": -0.5015160440424825,
+      "empirical_sd": 0.06720385267088919
+    }
+  },
+  {
+    "method": "Logit_beta2",
+    "property": "se_accuracy",
+    "dgp": "logit_dgp",
+    "n": 1000,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 1.0101194295457905,
+    "expected": 1.0,
+    "within_tolerance": true,
+    "tolerance_lower": 0.9,
+    "tolerance_upper": 1.1,
+    "details": {
+      "se_ratio": 1.0101194295457905,
+      "empirical_sd": 0.06720385267088919
+    }
+  },
+  {
+    "method": "Probit_intercept",
+    "property": "ci_coverage",
+    "dgp": "probit_dgp",
+    "n": 1000,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 0.949,
+    "expected": 0.95,
+    "within_tolerance": true,
+    "tolerance_lower": 0.9404462169550599,
+    "tolerance_upper": 0.95955378304494,
+    "details": {
+      "mean_bias": -0.004045992115126906,
+      "rmse": 0.055252011348723075,
+      "se_ratio": 0.9870687034348852,
+      "median_estimate": -0.5040789507772447,
+      "empirical_sd": 0.05511745343101506
+    }
+  },
+  {
+    "method": "Probit_intercept",
+    "property": "se_accuracy",
+    "dgp": "probit_dgp",
+    "n": 1000,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 0.9870687034348852,
+    "expected": 1.0,
+    "within_tolerance": true,
+    "tolerance_lower": 0.9,
+    "tolerance_upper": 1.1,
+    "details": {
+      "se_ratio": 0.9870687034348852,
+      "empirical_sd": 0.05511745343101506
+    }
+  },
+  {
+    "method": "Probit_beta1",
+    "property": "ci_coverage",
+    "dgp": "probit_dgp",
+    "n": 1000,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 0.9445,
+    "expected": 0.95,
+    "within_tolerance": true,
+    "tolerance_lower": 0.9404462169550599,
+    "tolerance_upper": 0.95955378304494,
+    "details": {
+      "mean_bias": 0.008622083082514331,
+      "rmse": 0.05994402413059831,
+      "se_ratio": 0.9723887199892858,
+      "median_estimate": 1.0080426213141775,
+      "empirical_sd": 0.059335537962679874
+    }
+  },
+  {
+    "method": "Probit_beta1",
+    "property": "se_accuracy",
+    "dgp": "probit_dgp",
+    "n": 1000,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 0.9723887199892858,
+    "expected": 1.0,
+    "within_tolerance": true,
+    "tolerance_lower": 0.9,
+    "tolerance_upper": 1.1,
+    "details": {
+      "se_ratio": 0.9723887199892858,
+      "empirical_sd": 0.059335537962679874
+    }
+  },
+  {
+    "method": "Probit_beta2",
+    "property": "ci_coverage",
+    "dgp": "probit_dgp",
+    "n": 1000,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 0.9485,
+    "expected": 0.95,
+    "within_tolerance": true,
+    "tolerance_lower": 0.9404462169550599,
+    "tolerance_upper": 0.95955378304494,
+    "details": {
+      "mean_bias": -0.005474519542950418,
+      "rmse": 0.04930618494487497,
+      "se_ratio": 0.9952163027663757,
+      "median_estimate": -0.5047947587916592,
+      "empirical_sd": 0.04901357643479527
+    }
+  },
+  {
+    "method": "Probit_beta2",
+    "property": "se_accuracy",
+    "dgp": "probit_dgp",
+    "n": 1000,
+    "n_sims": 2000,
+    "n_successful": 2000,
+    "observed": 0.9952163027663757,
+    "expected": 1.0,
+    "within_tolerance": true,
+    "tolerance_lower": 0.9,
+    "tolerance_upper": 1.1,
+    "details": {
+      "se_ratio": 0.9952163027663757,
+      "empirical_sd": 0.04901357643479527
+    }
+  }
+]

@@ -69,7 +69,16 @@ quality improves sufficiently, the bottleneck shifts from ``did the
 model understand the request?'' to ``does the method library cover this
 analysis?''---at which point extending coverage becomes more valuable
 than improving the language model, which is exactly the division of
-labor the architecture is designed to exploit.
+labor the architecture is designed to exploit. Visualization is one
+area where the fixed-tool approach is most restrictive: the current
+chart types cover common cases but cannot express arbitrary plot
+specifications. A natural extension would accept declarative plot
+descriptions---axes, layers, facets, color mappings---as structured
+tool parameters, following the grammar-of-graphics paradigm. The
+language model would compose the specification from natural language;
+the rendering engine would remain pre-validated code. This would
+bring the flexibility of ad-hoc visualization within the
+pre-validated architecture without requiring code generation.
 
 Even with these extensions, the system's role would remain
 complementary. \pkg{prompt2analytics} is not a replacement for \proglang{R},
@@ -133,7 +142,15 @@ conversational interfaces to scientific software become possible
 without cloud connectivity or high-end hardware---extending the
 separation principle (Section~\ref{sec:defining}) to settings where
 code-generation approaches would require both model capability and
-network access that may not be available.
+network access that may not be available. Importantly, the 80\%
+adequate rate achieved by a 3B-parameter model reflects a snapshot of
+a rapidly moving frontier. Open-source model capabilities for
+structured tasks---tool selection, schema-conformant parameter
+extraction---have improved substantially with each generation, on a
+timeline of months rather than years. The architecture described here
+is designed to benefit directly from these improvements: better
+models translate immediately into higher accuracy without any changes
+to the validated computation layer.
 
 
 %% =============================================================================

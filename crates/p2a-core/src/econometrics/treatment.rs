@@ -500,6 +500,9 @@ pub fn run_ipw_treatment(
     let y_trim: Array1<f64> = keep_idx.iter().map(|&i| y[i]).collect();
     let d_trim: Array1<f64> = keep_idx.iter().map(|&i| d[i]).collect();
     let ps_trim: Array1<f64> = keep_idx.iter().map(|&i| ps[i]).collect();
+    let x_trim = Array2::from_shape_fn((keep_idx.len(), x.ncols()), |(i, j)| {
+        x[[keep_idx[i], j]]
+    });
 
     let n_trim = y_trim.len();
     let n_treated = d_trim.iter().filter(|&&v| v >= 0.5).count();
@@ -533,93 +536,90 @@ pub fn run_ipw_treatment(
         ));
     }
 
-    // Standard errors: analytic influence function (default) or bootstrap
+    // Standard errors: analytic EIF (default) or bootstrap
     let (std_error, ci_lower, ci_upper) = if config.bootstrap == 0 {
-        // Analytic influence function variance (Lunceford & Davidian 2004)
-        // For ATE with Hajek weights:
-        //   IF_i = D_i*Y_i/e(X_i) / E[D/e(X)] - (1-D_i)*Y_i/(1-e(X_i)) / E[(1-D)/(1-e(X))] - ATE
-        // For HT weights:
-        //   IF_i = D_i*Y_i/e(X_i) / n - (1-D_i)*Y_i/(1-e(X_i)) / n - ATE
+        // Efficient influence function variance (Lunceford & Davidian 2004, Theorem 1).
+        //
+        // When propensity scores are estimated via MLE, the asymptotic variance of the
+        // IPW estimator equals the semiparametric efficiency bound.  The correct variance
+        // estimator uses the *augmented* (efficient) influence function, which includes
+        // outcome model projections.  This accounts for the negative covariance between
+        // PS estimation error and the IPW estimator, producing smaller (correct) SEs
+        // compared to the naive IF that treats propensity scores as known.
+        //
+        // For ATE:
+        //   EIF_i = D_i(Y_i - mu1(X_i))/e_i - (1-D_i)(Y_i - mu0(X_i))/(1-e_i)
+        //           + mu1(X_i) - mu0(X_i) - tau
+        //
+        // For ATT:
+        //   EIF_i = (1/p1) * [D_i(Y_i - mu0(X_i) - tau)
+        //           - (1-D_i) e_i/(1-e_i) (Y_i - mu0(X_i))]
+        //
+        // where mu_d(X) = E[Y | D=d, X] estimated by OLS within each treatment group.
         let n_f = n_trim as f64;
+
+        // Fit outcome regression models for EIF correction
+        let mu1_fit = fit_outcome_model(&x_trim, &y_trim, &d_trim, true);
+        let mu0_fit = fit_outcome_model(&x_trim, &y_trim, &d_trim, false);
 
         let se = match config.estimand {
             Estimand::ATE => {
-                // Precompute weight sums for Hajek normalization
-                let (sum_w1, sum_w0) = if config.normalized {
-                    let mut sw1 = 0.0_f64;
-                    let mut sw0 = 0.0_f64;
-                    for i in 0..n_trim {
-                        let ps_i = ps_trim[i].max(1e-10).min(1.0 - 1e-10);
-                        if d_trim[i] >= 0.5 {
-                            sw1 += 1.0 / ps_i;
-                        } else {
-                            sw0 += 1.0 / (1.0 - ps_i);
+                match (mu1_fit, mu0_fit) {
+                    (Ok((mu1, _)), Ok((mu0, _))) => {
+                        // EIF-based variance (Lunceford & Davidian 2004, eq. 3.5)
+                        let mut sum_eif_sq = 0.0;
+                        for i in 0..n_trim {
+                            let di = d_trim[i];
+                            let yi = y_trim[i];
+                            let ei = ps_trim[i].max(1e-10).min(1.0 - 1e-10);
+
+                            let ipw_term = if di >= 0.5 {
+                                (yi - mu1[i]) / ei
+                            } else {
+                                -(yi - mu0[i]) / (1.0 - ei)
+                            };
+                            let eif_i = ipw_term + mu1[i] - mu0[i] - effect;
+
+                            sum_eif_sq += eif_i * eif_i;
                         }
+                        (sum_eif_sq / (n_f * n_f)).sqrt()
                     }
-                    (sw1, sw0)
-                } else {
-                    (n_f, n_f)
-                };
-
-                // IF_i for Hajek ATE:
-                //   IF_i = D_i*Y_i/e_i / (sum_w1/n) - (1-D_i)*Y_i/(1-e_i) / (sum_w0/n) - ATE
-                // Var(ATE) = (1/n) * mean(IF_i^2)
-                let norm1 = sum_w1 / n_f;
-                let norm0 = sum_w0 / n_f;
-
-                let mut sum_if_sq = 0.0;
-                for i in 0..n_trim {
-                    let di = d_trim[i];
-                    let yi = y_trim[i];
-                    let ps_i = ps_trim[i].max(1e-10).min(1.0 - 1e-10);
-
-                    let term1 = if di >= 0.5 {
-                        yi / ps_i / norm1
-                    } else {
-                        0.0
-                    };
-                    let term0 = if di < 0.5 {
-                        yi / (1.0 - ps_i) / norm0
-                    } else {
-                        0.0
-                    };
-                    let if_i = term1 - term0 - effect;
-
-                    sum_if_sq += if_i * if_i;
+                    _ => {
+                        // Fallback: naive IF (treats PS as known) if outcome model fails
+                        naive_if_se_ate(&y_trim, &d_trim, &ps_trim, effect, config.normalized)
+                    }
                 }
-                (sum_if_sq / (n_f * n_f)).sqrt()
             }
             Estimand::ATT => {
-                let n_treated_f = n_treated as f64;
-                // Precompute weight sum for control
-                let sum_w0 = if config.normalized {
-                    let mut sw = 0.0_f64;
-                    for i in 0..n_trim {
-                        if d_trim[i] < 0.5 {
-                            let ps_i = ps_trim[i].max(1e-10).min(1.0 - 1e-10);
-                            sw += ps_i / (1.0 - ps_i);
+                match mu0_fit {
+                    Ok((mu0, _)) => {
+                        // EIF for ATT (Hahn 1998; Hirano, Imbens & Ridder 2003)
+                        let p1 = n_treated as f64 / n_f;
+                        let mut sum_eif_sq = 0.0;
+                        for i in 0..n_trim {
+                            let di = d_trim[i];
+                            let yi = y_trim[i];
+                            let ei = ps_trim[i].max(1e-10).min(1.0 - 1e-10);
+                            let resid0 = yi - mu0[i];
+
+                            let eif_i = if di >= 0.5 {
+                                (resid0 - effect) / p1
+                            } else {
+                                -(ei / (1.0 - ei)) * resid0 / p1
+                            };
+
+                            sum_eif_sq += eif_i * eif_i;
                         }
+                        (sum_eif_sq / (n_f * n_f)).sqrt()
                     }
-                    sw
-                } else {
-                    n_treated_f
-                };
-
-                let mut sum_if_sq = 0.0;
-                for i in 0..n_trim {
-                    let di = d_trim[i];
-                    let yi = y_trim[i];
-                    let ps_i = ps_trim[i].max(1e-10).min(1.0 - 1e-10);
-
-                    let if_i = if di >= 0.5 {
-                        (yi - effect) / n_treated_f
-                    } else {
-                        -(ps_i / (1.0 - ps_i)) * yi / sum_w0 * (n_treated_f / n_f)
-                    };
-
-                    sum_if_sq += if_i * if_i;
+                    _ => {
+                        // Fallback: naive IF if outcome model fails
+                        naive_if_se_att(
+                            &y_trim, &d_trim, &ps_trim, effect,
+                            n_treated, config.normalized,
+                        )
+                    }
                 }
-                (sum_if_sq / (n_f * n_f)).sqrt()
             }
         };
 
@@ -749,6 +749,98 @@ pub fn run_ipw_treatment(
         bootstrap_reps: config.bootstrap,
         warnings,
     })
+}
+
+/// Naive influence function SE for ATE (treats propensity scores as known).
+///
+/// Used as fallback when outcome model fitting fails.
+fn naive_if_se_ate(
+    y: &Array1<f64>,
+    d: &Array1<f64>,
+    ps: &Array1<f64>,
+    effect: f64,
+    normalized: bool,
+) -> f64 {
+    let n = y.len();
+    let n_f = n as f64;
+
+    let (sum_w1, sum_w0) = if normalized {
+        let mut sw1 = 0.0_f64;
+        let mut sw0 = 0.0_f64;
+        for i in 0..n {
+            let ps_i = ps[i].max(1e-10).min(1.0 - 1e-10);
+            if d[i] >= 0.5 {
+                sw1 += 1.0 / ps_i;
+            } else {
+                sw0 += 1.0 / (1.0 - ps_i);
+            }
+        }
+        (sw1, sw0)
+    } else {
+        (n_f, n_f)
+    };
+
+    let norm1 = sum_w1 / n_f;
+    let norm0 = sum_w0 / n_f;
+
+    let mut sum_if_sq = 0.0;
+    for i in 0..n {
+        let di = d[i];
+        let yi = y[i];
+        let ps_i = ps[i].max(1e-10).min(1.0 - 1e-10);
+
+        let term1 = if di >= 0.5 { yi / ps_i / norm1 } else { 0.0 };
+        let term0 = if di < 0.5 { yi / (1.0 - ps_i) / norm0 } else { 0.0 };
+        let if_i = term1 - term0 - effect;
+
+        sum_if_sq += if_i * if_i;
+    }
+    (sum_if_sq / (n_f * n_f)).sqrt()
+}
+
+/// Naive influence function SE for ATT (treats propensity scores as known).
+///
+/// Used as fallback when outcome model fitting fails.
+fn naive_if_se_att(
+    y: &Array1<f64>,
+    d: &Array1<f64>,
+    ps: &Array1<f64>,
+    effect: f64,
+    n_treated: usize,
+    normalized: bool,
+) -> f64 {
+    let n = y.len();
+    let n_f = n as f64;
+    let n_treated_f = n_treated as f64;
+
+    let sum_w0 = if normalized {
+        let mut sw = 0.0_f64;
+        for i in 0..n {
+            if d[i] < 0.5 {
+                let ps_i = ps[i].max(1e-10).min(1.0 - 1e-10);
+                sw += ps_i / (1.0 - ps_i);
+            }
+        }
+        sw
+    } else {
+        n_treated_f
+    };
+
+    let mut sum_if_sq = 0.0;
+    for i in 0..n {
+        let di = d[i];
+        let yi = y[i];
+        let ps_i = ps[i].max(1e-10).min(1.0 - 1e-10);
+
+        let if_i = if di >= 0.5 {
+            (yi - effect) / n_treated_f
+        } else {
+            -(ps_i / (1.0 - ps_i)) * yi / sum_w0 * (n_treated_f / n_f)
+        };
+
+        sum_if_sq += if_i * if_i;
+    }
+    (sum_if_sq / (n_f * n_f)).sqrt()
 }
 
 /// Compute IPW treatment effect estimate.
