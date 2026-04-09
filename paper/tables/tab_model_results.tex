@@ -1,0 +1,28 @@
+\begin{table}[htbp]
+\centering
+\begin{threeparttable}
+\caption{Models evaluated and single-turn adequate rates}
+\label{tab:model-results}
+\small
+\begin{tabular}{lllr}
+\toprule
+Model & Version ID & Parameters & Adequate (\%) \\
+\midrule
+GPT-4.1 Mini & \code{openai/gpt-4.1-mini} & --- & 90.6 \\
+Sonnet 4.6 & \code{claude-sonnet-4-6} & --- & 84.4 \\
+Haiku 4.5 & \code{claude-haiku-4-5-20251001} & --- & 81.2 \\
+Ministral 3B & \code{mistralai/ministral-3b-2512} & 3B & 80.2 \\
+Gemini 2.5 Flash & \code{google/gemini-2.5-flash} & --- & 75.0 \\
+Llama 4 Scout & \code{meta-llama/llama-4-scout} & 109B (17B active) & 50.0 \\
+\bottomrule
+\end{tabular}
+\begin{tablenotes}[flushleft]
+\item \emph{Note:} 96~single-turn prompts (32~test cases $\times$
+3~clarity levels), temperature~$= 0$. Accessed March~2026.
+Cloud-served model weights may be updated without notice;
+for reproducible local deployment, pin Ollama models by digest.
+Parameter counts marked ``---'' are not publicly disclosed.
+\end{tablenotes}
+\end{threeparttable}
+\end{table}
+

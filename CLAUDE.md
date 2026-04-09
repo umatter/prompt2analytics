@@ -802,7 +802,7 @@ Rscript generate_e2e_figures.R
 | Ministral 3B | 80.2% |
 | Gemini 2.5 Flash | 75.0% |
 | Llama 4 Scout | 50.0% |
-| Chrome multi-turn (Sonnet 4.6) | 96.7% |
+| Chrome multi-turn (Sonnet 4.6) | 97.9% |
 
 ## Agentic Engineering Setup
 

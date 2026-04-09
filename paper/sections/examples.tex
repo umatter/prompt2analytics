@@ -5,9 +5,10 @@
 \section{Examples} \label{sec:examples}
 
 This section demonstrates \pkg{prompt2analytics} through
-two interfaces: the natural language chat interface powered by large language
-models, and the command-line interface for scripted workflows. Both interfaces
-access the same underlying \proglang{Rust} analytics engine.
+its natural language chat interface powered by large language models.
+A command-line interface for scripted workflows is also available
+(Appendix~\ref{app:cli-examples}); both interfaces access the same
+underlying \proglang{Rust} analytics engine.
 
 We use the Grunfeld investment data~\citep{Baltagi:2013}, a classic
 panel dataset with 200 observations (10 firms over 20 years) containing
@@ -233,64 +234,12 @@ true collinearity.
 
 
 %% -----------------------------------------------------------------------------
-\subsection{Command-line interface} \label{sec:examples-cli}
+%% JSON output (kept inline; full CLI examples in Appendix~\ref{app:cli-examples})
+%% -----------------------------------------------------------------------------
 
-The command-line interface provides programmatic access for scripted
-workflows.\footnote{The output shown in this section was captured from
-actual CLI invocations; the full transcript is in
-\code{paper/transcripts/section4\_2\_cli\_output.txt}.}
-Commands follow a hierarchical structure with sessions maintaining state
-across invocations:
-
-\begin{Sinput}
-$ p2a --session analysis.json data load grunfeld.csv --name grunfeld
-\end{Sinput}
-
-\begin{Soutput}
-Dataset: grunfeld
-  Rows: 200
-  Columns: 5
-  Column names: firm, year, inv, value, capital
-\end{Soutput}
-
-\begin{Sinput}
-$ p2a --session analysis.json reg ols grunfeld \
-    -y inv -x value capital --robust hc1
-\end{Sinput}
-
-\begin{Soutput}
-OLS Regression Results
-============================================================
-Variable         Coefficient   Std. Error    t-value    p-value
-------------------------------------------------------------
-(Intercept)       -42.714369    11.574701     -3.690     0.0003***
-value               0.115562     0.006811     16.967     0.0000***
-capital             0.230678     0.048866      4.721     0.0000***
-------------------------------------------------------------
-R-squared: 0.812408
-Adj. R-squared: 0.809537
-Observations: 200
-\end{Soutput}
-
-\begin{Sinput}
-$ p2a --session analysis.json panel fe grunfeld \
-    -y inv -x value capital --entity firm
-\end{Sinput}
-
-\begin{Soutput}
-Fixed Effects (Within) Estimation Results
-============================================================
-Variable         Coefficient   Std. Error    t-value    p-value
-------------------------------------------------------------
-value               0.110124     0.011857      9.288     0.0000***
-capital             0.310065     0.017355     17.867     0.0000***
-------------------------------------------------------------
-R-squared: 0.766758,  Observations: 200,  Groups: 10
-F-statistic: 309.0142 (p-value: 0.0000)
-\end{Soutput}
-
-All commands support JSON output (\code{-F json}) for integration with
-other tools and scripts:
+\noindent All analyses are also accessible through a command-line interface
+(Appendix~\ref{app:cli-examples}). The CLI supports JSON output
+(\code{-F json}) for integration with scripting pipelines:
 
 \begin{Sinput}
 $ p2a -F json reg ols grunfeld -y inv -x value capital --robust hc1
@@ -313,10 +262,8 @@ $ p2a -F json reg ols grunfeld -y inv -x value capital --robust hc1
 }
 \end{Soutput}
 
-\noindent This enables integration with analysis pipelines, for example,
-piping results to \code{jq} for extraction or to \proglang{Python}/\proglang{R}
-scripts for further processing. The session mechanism records all commands
-and can export them as an executable shell script for exact reproduction.
+\noindent This enables piping results to \code{jq} for extraction or to
+\proglang{Python}/\proglang{R} scripts for further processing.
 
 %% -----------------------------------------------------------------------------
 \subsection{Realistic use and error handling} \label{sec:examples-realistic}

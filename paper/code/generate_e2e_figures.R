@@ -108,6 +108,85 @@ ggsave(file.path(fig_dir, "e2e_adequate_rate.png"), p1, width = 7, height = 4, d
 cat("Saved: e2e_adequate_rate.pdf/png\n")
 
 # ============================================================================
+# Table: Combined model info + adequate rates (LaTeX)
+# ============================================================================
+
+version_ids <- c(
+  "gpt-4.1-mini" = "openai/gpt-4.1-mini",
+  "claude-sonnet-4.6" = "claude-sonnet-4-6",
+  "claude-haiku-4.5" = "claude-haiku-4-5-20251001",
+  "ministral-3b" = "mistralai/ministral-3b-2512",
+  "gemini-2.5-flash" = "google/gemini-2.5-flash",
+  "llama-4-scout" = "meta-llama/llama-4-scout"
+)
+
+providers <- c(
+  "gpt-4.1-mini" = "OpenRouter (OpenAI)",
+  "claude-sonnet-4.6" = "Anthropic API",
+  "claude-haiku-4.5" = "Anthropic API",
+  "ministral-3b" = "OpenRouter",
+  "gemini-2.5-flash" = "OpenRouter (Google)",
+  "llama-4-scout" = "OpenRouter (Meta)"
+)
+
+param_counts <- c(
+  "gpt-4.1-mini" = "---",
+  "claude-sonnet-4.6" = "---",
+  "claude-haiku-4.5" = "---",
+  "ministral-3b" = "3B",
+  "gemini-2.5-flash" = "---",
+  "llama-4-scout" = "109B (17B active)"
+)
+
+combined_df <- summary_data %>%
+  arrange(desc(adequate_rate)) %>%
+  mutate(
+    label = model_labels[model],
+    version_id = version_ids[model],
+    provider = providers[model],
+    params = param_counts[model],
+    rate_pct = sprintf("%.1f", adequate_rate * 100)
+  )
+
+combined_tex <- paste0(
+  "\\begin{table}[htbp]\n",
+  "\\centering\n",
+  "\\begin{threeparttable}\n",
+  "\\caption{Models evaluated and single-turn adequate rates}\n",
+  "\\label{tab:model-results}\n",
+  "\\small\n",
+  "\\begin{tabular}{lllr}\n",
+  "\\toprule\n",
+  "Model & Version ID & Parameters & Adequate (\\%) \\\\\n",
+  "\\midrule\n"
+)
+
+for (i in seq_len(nrow(combined_df))) {
+  r <- combined_df[i, ]
+  combined_tex <- paste0(combined_tex, sprintf(
+    "%s & \\code{%s} & %s & %s \\\\\n",
+    r$label, r$version_id, r$params, r$rate_pct
+  ))
+}
+
+combined_tex <- paste0(combined_tex,
+  "\\bottomrule\n",
+  "\\end{tabular}\n",
+  "\\begin{tablenotes}[flushleft]\n",
+  "\\item \\emph{Note:} 96~single-turn prompts (32~test cases $\\times$\n",
+  "3~clarity levels), temperature~$= 0$. Accessed March~2026.\n",
+  "Cloud-served model weights may be updated without notice;\n",
+  "for reproducible local deployment, pin Ollama models by digest.\n",
+  "Parameter counts marked ``---'' are not publicly disclosed.\n",
+  "\\end{tablenotes}\n",
+  "\\end{threeparttable}\n",
+  "\\end{table}\n"
+)
+
+writeLines(combined_tex, file.path(tables_dir, "tab_model_results.tex"))
+cat("Saved: tab_model_results.tex\n")
+
+# ============================================================================
 # Figure 2: Adequate rate by clarity level (grouped bar)
 # ============================================================================
 

@@ -4,9 +4,10 @@
 
 \section{How well does it work?} \label{sec:evaluation}
 
-Two kinds of accuracy matter: does the LLM select the right tool with the
-right parameters? And does the \proglang{Rust} implementation produce correct
-numerical results? This section evaluates both.
+This section evaluates how well the LLM selects the right tool with the
+right parameters. Numerical correctness of the underlying \proglang{Rust}
+implementations is validated separately in
+Appendix~\ref{app:numerical-validation}.
 
 %% -----------------------------------------------------------------------------
 \subsection{Tool selection evaluation}
@@ -29,53 +30,21 @@ sees the same parameter names and types as the server expects.
 All evaluations used temperature~$= 0$ for deterministic output.
 The evaluation harness, all 96~prompts (\code{test\_cases.json}),
 dataset generators, and scoring data are provided in the supplementary
-materials (\code{paper/code/e2e\_eval/}), enabling independent
+materials,\footnote{\url{https://github.com/umatter/prompt2analytics/tree/main/paper/code/e2e_eval}} enabling independent
 verification and re-scoring.
 
-\noindent Table~\ref{tab:model-versions} lists the six models evaluated,
+\noindent Table~\ref{tab:model-results} lists the six models evaluated,
 spanning frontier cloud, efficient cloud, and open-source deployment
-scenarios.  All models were accessed through cloud APIs (Anthropic,
+scenarios, together with their single-turn adequate rates.
+All models were accessed through cloud APIs (Anthropic,
 OpenAI, or OpenRouter).  API-served models may change over time, so
 exact replication of cloud-hosted results may not be possible; results
 for proprietary models (Claude, GPT, Gemini) should be treated as a
 snapshot.  For open-source models (Llama, Mistral), exact reproduction
 is possible by serving fixed weights locally via Ollama.
 
-\begin{table}[htbp]
-\centering
-\begin{threeparttable}
-\caption{Models evaluated}
-\label{tab:model-versions}
-\small
-\begin{tabular}{lll}
-\toprule
-Model & Version ID & Provider \\
-\midrule
-GPT-4.1 Mini       & \code{openai/gpt-4.1-mini}         & OpenRouter (OpenAI) \\
-Claude Sonnet 4.6  & \code{claude-sonnet-4-6}            & Anthropic API \\
-Claude Haiku 4.5   & \code{claude-haiku-4-5-20251001}    & Anthropic API \\
-Gemini 2.5 Flash   & \code{google/gemini-2.5-flash}      & OpenRouter (Google) \\
-Ministral 3B       & \code{mistralai/ministral-3b-2512}  & OpenRouter \\
-Llama 4 Scout      & \code{meta-llama/llama-4-scout}     & OpenRouter (Meta) \\
-\bottomrule
-\end{tabular}
-\begin{tablenotes}[flushleft]
-\item \emph{Note:} Accessed March 2026. Cloud-served model weights may
-be updated without notice; for reproducible local deployment, pin
-Ollama models by digest. All evaluations at temperature~$=0$.
-\end{tablenotes}
-\end{threeparttable}
-\end{table}
+\input{tables/tab_model_results}
 
-\begin{figure}[htbp]
-\centering
-\includegraphics[width=0.85\textwidth]{figures/e2e_adequate_rate}
-\caption{Adequate rate (\%) across models (96~prompts). Even
-Ministral~3B (3B parameters) exceeds 80\%.}
-\label{fig:accuracy-comparison}
-\end{figure}
-
-Figure~\ref{fig:accuracy-comparison} presents adequate rates by model.
 The results demonstrate that tool selection---unlike code generation---is
 achievable even by smaller models.  GPT-4.1~Mini achieves the highest
 adequate rate (90.6\%), followed closely by Claude Sonnet~4.6 (84.4\%)
@@ -88,9 +57,9 @@ models.
 \begin{figure}[htbp]
 \centering
 \includegraphics[width=0.95\textwidth]{figures/e2e_category_heatmap}
-\caption{Adequate rate by test category and model. Darker cells
-indicate lower performance.  Errors concentrate in ambiguous method
-selection (causal inference, discrete choice).}
+\caption{Adequate rate by test category and model (red = low,
+green = high).  Errors concentrate in ambiguous method selection
+(causal inference, discrete choice).}
 \label{fig:accuracy-category}
 \end{figure}
 
@@ -101,112 +70,19 @@ fine distinctions between related methods.  Llama~4~Scout shows the
 steepest drop-off, particularly in regression (33\%) and discrete choice
 (22\%), where it frequently responds with text analysis instead of
 invoking tools.  Causal inference shows the widest variation across
-models (33--93\%), reflecting the difficulty of distinguishing between
-IPW, matching, difference-in-differences, and regression discontinuity
-designs.  Appendix~\ref{app:e2e-eval} provides per-category breakdowns
+models (33--93\%).  Appendix~\ref{app:e2e-eval} provides per-category breakdowns
 for all six models.
 
-%% -----------------------------------------------------------------------------
-%% Extended robustness evaluation — removed for initial submission.
-%% Content preserved in version control; subsection commented out because
-%% the methodology for multi-turn, naturalistic, parameter-extraction,
-%% interpretation, and out-of-scope evaluations is not yet mature enough
-%% to present.
-%% -----------------------------------------------------------------------------
-
-%% -----------------------------------------------------------------------------
-\subsection{Failure modes}
-
-Understanding system behavior under failure conditions is essential for
-informed use. Three categories of failure merit discussion. First,
-when the LLM selects an inappropriate statistical method, the system
-proceeds with the selected method and returns results. Users must
-recognize the mismatch between request and execution. Common patterns
-include ambiguous specifications (``regression with firm effects'' could
-invoke OLS, fixed effects, or random effects), similar method confusion
-(VAR/VECM/VARMA), and capability boundary cases where requests for
-unimplemented methods map to superficially similar available tools.
-Users can mitigate misselection by specifying methods explicitly
-rather than describing goals abstractly.
-
-%% Naturalistic prompt confusion table removed for initial submission.
-%% Table~\ref{tab:confusion-patterns} and supporting paragraph preserved
-%% in version control for future revision.
-
-Second, even when the correct method is selected, the LLM may extract
-incorrect parameters. Manual inspection of recorded tool calls across
-all evaluated models reveals a consistent error hierarchy.
-\emph{Core parameters}---dependent variable, independent variables,
-entity and time identifiers---are almost always correct when the tool
-itself is correct; across all 96~prompts and six models, we
-observed no case where the correct tool was selected but the wrong
-dependent variable was extracted.  \emph{Structural parameters}
-(panel identifiers, time variables, treatment indicators) are correct
-in the large majority of cases, with occasional confusion when
-column names are ambiguous (e.g., ``id'' could be an entity or
-observation identifier).  \emph{Optional specification parameters}
-are the primary source of imprecision: a model may select
-\code{regression\_ols} with the right \code{y\_col} and
-\code{x\_cols} but omit the \code{robust} option, falling back on
-the tool's default (HC1).  Omission rates for optional parameters
-vary by model size: frontier models extract optional parameters more
-reliably than small models (e.g., Ministral~3B), which tend to rely on
-defaults.
-
-Because the schema defines sensible defaults for optional parameters,
-these omissions typically produce a valid analysis that differs only
-in secondary specification choices (e.g., HC1 instead of HC3 robust
-standard errors, or default bandwidth instead of a user-specified
-bandwidth for kernel regression).  This means the practical
-consequence of parameter extraction errors is usually a
-\emph{reasonable alternative specification} rather than a
-\emph{wrong analysis}---a meaningful distinction, though users
-should still verify that the specification matches their intent.
-Explicit phrasing (``with HC1 robust standard errors'') yields
-more reliable extraction than implicit expectations (``with robust
-standard errors'').
-
-We do not report a formal parameter extraction metric (e.g.,
-precision/recall over parameter names) because our evaluation showed
-that scoring against expected parameter names is confounded by name
-aliasing across tool schemas (e.g., \code{cluster\_col} vs.\
-\code{cluster\_var}) and by legitimate default substitution, making
-such a metric unreliable as a measure of actual analysis correctness.
-
-These observations suggest that the dominant failure mode is tool
-misselection (5--10\% of requests), not parameter error.  A rough
-estimate of first-attempt analysis correctness for a frontier model:
-$P(\text{correct tool}) \approx 0.95$ and
-$P(\text{adequate parameters} \mid \text{correct tool}) \approx 0.92$,
-yielding $P(\text{adequate first attempt}) \approx 0.87$.  For a 3B
-model, the corresponding figures are approximately $0.91$ and $0.85$,
-yielding ${\approx}\,0.77$.  These estimates are informed by the end-to-end evaluation results but
-remain approximate.  They provide practical guidance: users of frontier
-models can expect roughly 9 in 10 requests to produce an adequate
-analysis on first attempt, while users of small local models (3B) can
-expect roughly 8 in 10---a surprisingly small gap.  In all cases,
-users can inspect the tool call before execution, correct misselected
-methods or missing parameters, and iterate.
-
-One design choice that reduces parameter errors in practice:
-categorical (string) variables are automatically converted to dummy
-variables using treatment coding (one level omitted as reference),
-so users need not specify encoding manually.  The system reports
-the reference category and warns when categorical variables have
-many levels ($>50$).
-
-%% -----------------------------------------------------------------------------
-\subsection{Prompt clarity and multi-turn evaluation} \label{sec:e2e-eval}
-
-Table~\ref{tab:e2e-results} presents the full results.  Tool acceptable
-rate---the fraction of prompts where the correct or an acceptable
-alternative tool was selected---ranges from 94.8\% (GPT-4.1~Mini) to
-52.1\% (Llama~4~Scout).
+Table~\ref{tab:e2e-results} breaks down the single-turn evaluation
+by prompt clarity level.  Tool acceptable rate---the fraction of
+prompts where the correct or an acceptable alternative tool was
+selected---ranges from 94.8\% (GPT-4.1~Mini) to 52.1\%
+(Llama~4~Scout).
 
 \begin{table}[htbp]
 \centering
 \begin{threeparttable}
-\caption{API-based single-turn evaluation results (96 prompts per model)}
+\caption{Single-turn evaluation by prompt clarity (96 prompts per model)}
 \label{tab:e2e-results}
 \small
 \begin{tabular}{lrrrrr}
@@ -242,9 +118,100 @@ gracefully (97\% precise to 75\% vague), while Llama~4~Scout degrades
 most steeply (59\% to 44\%), partly because it often responds with
 text analysis instead of invoking tools on vague prompts.
 
-\paragraph{Chrome multi-turn evaluation.}
+%% -----------------------------------------------------------------------------
+%% Extended robustness evaluation — removed for initial submission.
+%% Content preserved in version control; subsection commented out because
+%% the methodology for multi-turn, naturalistic, parameter-extraction,
+%% interpretation, and out-of-scope evaluations is not yet mature enough
+%% to present.
+%% -----------------------------------------------------------------------------
 
-The API-based evaluation above tests the LLM and backend in isolation.
+%% -----------------------------------------------------------------------------
+\subsection{Error patterns}
+
+Understanding system behavior under failure conditions is essential for
+informed use. Three categories of failure merit discussion. First,
+when the LLM selects an inappropriate statistical method, the system
+proceeds with the selected method and returns results. Users must
+recognize the mismatch between request and execution. Common patterns
+include ambiguous specifications (``regression with firm effects'' could
+invoke OLS, fixed effects, or random effects), similar method confusion
+(VAR/VECM/VARMA), and capability boundary cases where requests for
+unimplemented methods map to superficially similar available tools.
+Users can mitigate misselection by specifying methods explicitly
+rather than describing goals abstractly.
+
+%% Naturalistic prompt confusion table removed for initial submission.
+%% Table~\ref{tab:confusion-patterns} and supporting paragraph preserved
+%% in version control for future revision.
+
+Second, even when the correct method is selected, the LLM may extract
+incorrect parameters. Manual inspection of recorded tool calls across
+all evaluated models reveals a consistent error hierarchy.
+\emph{Core parameters}---dependent variable, independent variables,
+entity and time identifiers---are usually correct when the tool
+itself is correct, though ambiguous prompts can lead to dependent
+variable confusion (e.g., ``investment'' vs.\ ``value'' when both are
+plausible).  \emph{Structural parameters}
+(panel identifiers, time variables, treatment indicators) are correct
+in the large majority of cases, with occasional confusion when
+column names are ambiguous (e.g., ``id'' could be an entity or
+observation identifier).  \emph{Optional specification parameters}
+are the primary source of imprecision: a model may select
+\code{regression\_ols} with the right \code{y\_col} and
+\code{x\_cols} but omit the \code{robust} option, falling back on
+the tool's default (HC1).  Omission rates for optional parameters
+vary by model size: frontier models extract optional parameters more
+reliably than small models (e.g., Ministral~3B), which tend to rely on
+defaults.
+
+Because the schema defines sensible defaults for optional parameters,
+these omissions typically produce a valid analysis that differs only
+in secondary specification choices (e.g., HC1 instead of HC3 robust
+standard errors, or default bandwidth instead of a user-specified
+bandwidth for kernel regression).  This means the practical
+consequence of parameter extraction errors is usually a
+\emph{reasonable alternative specification} rather than a
+\emph{wrong analysis}---a meaningful distinction, though users
+should still verify that the specification matches their intent.
+Explicit phrasing (``with HC1 robust standard errors'') yields
+more reliable extraction than implicit expectations (``with robust
+standard errors'').
+
+We do not report a formal parameter extraction metric (e.g.,
+precision/recall over parameter names) because our evaluation showed
+that scoring against expected parameter names is confounded by name
+aliasing across tool schemas (e.g., \code{cluster\_col} vs.\
+\code{cluster\_var}) and by legitimate default substitution, making
+such a metric unreliable as a measure of actual analysis correctness.
+
+Overall, for frontier models (GPT-4.1~Mini, Sonnet~4.6), tool
+acceptable rates exceed 93\% and parameter extraction given a correct
+tool succeeds roughly 90\% of the time
+(Table~\ref{tab:e2e-results}).  For smaller models the picture is
+more varied: Ministral~3B achieves strong tool selection (91\%) but
+weaker parameter extraction (77\%), driven by omission of optional
+specification parameters, while Gemini~2.5~Flash shows the reverse
+pattern (78\% tool selection but 92\% parameter extraction when the
+tool is correct).  In all cases, users can inspect the tool call
+before execution, correct misselected methods or missing parameters,
+and iterate.  Because \pkg{prompt2analytics} delegates tool selection
+entirely to the LLM without fine-tuning, these error rates will
+decrease as model providers improve tool-calling capabilities---an
+active area of development driven by the deployment of LLM-based
+agents.
+
+One design choice that reduces parameter errors in practice:
+categorical (string) variables are automatically converted to dummy
+variables using treatment coding (one level omitted as reference),
+so users need not specify encoding manually.  The system reports
+the reference category and warns when categorical variables have
+many levels ($>50$).
+
+%% -----------------------------------------------------------------------------
+\subsection{Multi-turn evaluation} \label{sec:e2e-eval}
+
+The single-turn evaluation above tests the LLM and backend in isolation.
 To evaluate the full deployed system---including the web frontend,
 SSE streaming, dataset state management, and multi-turn context
 retention through the actual user interface---we conduct a
@@ -261,7 +228,7 @@ We evaluate Claude Sonnet~4.6, which combines strong tool selection
 accuracy (84.4\%) with Anthropic's native tool-calling API.
 
 Table~\ref{tab:e2e-chrome-mt} shows results.
-Sonnet~4.6 achieves 232/240 points (96.7\%) with perfect context
+Sonnet~4.6 achieves 235/240 points (97.9\%) with perfect context
 retention across all 8~conversations, substantially exceeding the
 84.4\% adequate rate in the API-based single-turn evaluation.
 Three factors explain this gap.  First, the deployed system enriches
@@ -279,241 +246,23 @@ strengthened system prompt guidance for direct tool invocation.
 
 Per-dimension analysis reveals that tool selection and parameter
 extraction are perfect (2.00/2.00 each), while numerical
-correctness averages 1.77/2.00---losses concentrated in MT5 (data
-cleaning), where the system lacks a string-to-numeric type casting
-tool, causing NaN propagation in downstream regression.
-Interpretation quality averages 1.90/2.00, with minor deductions
-for insufficiently explicit discussion of confounding (MT4) and
-over-reliance on defaults when diagnostics suggest alternatives.
+correctness averages 1.93/2.00 and interpretation quality averages
+1.90/2.00.
 
-The remaining 8~points lost (out of 240) trace to three root causes:
-(1)~a missing \code{cast\_column} tool that prevents converting string
-columns to numeric after cleaning (MT5, $-4$~points);
-(2)~superficial interpretation that omits caveats about confounding or
-model assumptions (MT4, $-3$~points); and
+The remaining 5~points lost (out of 240) trace to three root causes:
+(1)~superficial interpretation that omits caveats about confounding or
+model assumptions (MT4, $-3$~points);
+(2)~iterative recovery during data cleaning, where the model required
+multiple tool calls to cast a string column to numeric before
+regression succeeded (MT5, $-1$~point); and
 (3)~convergence issues in ordered logit with unscaled predictors
-(MT6, $-1$~point).  The first is a tooling gap addressable without
-model changes; the second and third are inherent to the LLM's
-reasoning and the optimizer's sensitivity, respectively.
+(MT6, $-1$~point).
 
 Appendix~\ref{app:e2e-eval} documents the complete protocol, including
 dataset specifications, all 96~prompts, multi-turn scripts, and the
 scoring rubric.  Full results are provided in the supplementary
-materials (\code{paper/code/e2e\_eval/results/}).
+materials.\footnote{\url{https://github.com/umatter/prompt2analytics/tree/main/paper/code/e2e_eval/results}}
 
-%% -----------------------------------------------------------------------------
-\subsection[Numerical validation against R]{Numerical validation against \proglang{R}} \label{sec:validation}
-
-The preceding subsections evaluated the LLM layer. This subsection
-evaluates the computation layer: does the \proglang{Rust}
-implementation produce the same numbers as established \proglang{R}
-packages?
-
-We validate all methods against reference implementations using
-sample-size-dependent tolerances (looser for small samples where
-ill-conditioning amplifies differences, tighter for large samples).
-Reference packages include \fct{lm}/\pkg{sandwich} for OLS,
-\pkg{plm}/\pkg{lfe} for panel data, \fct{glm} for discrete choice,
-and \pkg{forecast} for time series. All validation tests use fixed
-random seeds (seed $= 42$) for reproducibility; reference \proglang{R}
-scripts are provided in the supplementary materials.
-
-The Longley dataset~\citep{Longley:1967}, with its extreme
-multicollinearity (condition number $> 10^9$), provides a stringent
-test. Table~\ref{tab:validation-ols} shows coefficients match
-\proglang{R}'s \fct{lm} to at least 8 significant digits.
-
-\begin{table}[htbp]
-\centering
-\begin{threeparttable}
-\caption{OLS validation: Longley dataset}
-\label{tab:validation-ols}
-\renewcommand{\arraystretch}{1.15}
-\begin{tabular}{lrrr}
-\toprule
-Coefficient & \proglang{R} \fct{lm} & \pkg{prompt2analytics} & Difference \\
-\midrule
-(Intercept) & $-3482.259$ & $-3482.259$ & $< 10^{-8}$ \\
-GNP.deflator & $0.01506$ & $0.01506$ & $< 10^{-8}$ \\
-GNP & $-0.03582$ & $-0.03582$ & $< 10^{-8}$ \\
-Unemployed & $-0.02020$ & $-0.02020$ & $< 10^{-8}$ \\
-Armed.Forces & $-0.01033$ & $-0.01033$ & $< 10^{-8}$ \\
-Population & $-0.05110$ & $-0.05110$ & $< 10^{-8}$ \\
-Year & $1.82915$ & $1.82915$ & $< 10^{-8}$ \\
-\midrule
-$R^2$ & $0.9955$ & $0.9955$ & $< 10^{-4}$ \\
-\bottomrule
-\end{tabular}
-\begin{tablenotes}[flushleft]
-\item \emph{Note:} $n = 16$, $k = 6$. The Longley dataset's extreme
-multicollinearity (condition number $> 10^9$) provides a stringent
-near-singular test case: the design matrix is close to rank-deficient,
-exercising the Cholesky-based solver's tolerance framework. All
-coefficients match to at least 8 significant digits, confirming that
-the implementation handles ill-conditioned problems correctly.
-\end{tablenotes}
-\end{threeparttable}
-\end{table}
-
-Robust standard errors (HC0--HC3) match
-\pkg{sandwich}~\citep{Zeileis:2004} to $< 10^{-7}$; panel fixed
-effects match \pkg{plm}~\citep{Croissant+Millo:2008} to $< 10^{-6}$
-on the Grunfeld dataset; two-way HDFE via the MAP
-algorithm~\citep{Gaure:2013} matches \pkg{lfe}'s \fct{felm} to
-$< 10^{-5}$.
-
-Beyond the methods shown above, the validation suite covers over 200
-methods with more than 1,800 individual test cases (437 specifically
-targeting validation against \proglang{R} reference implementations or
-known data-generating processes).
-Statistical tests ($t$-tests, ANOVA, chi-squared, Fisher's exact,
-Wilcoxon, Shapiro-Wilk, Kolmogorov-Smirnov) are validated against
-\proglang{R}'s \pkg{stats} package. Discrete choice models (logit,
-probit) match \fct{glm} coefficients and standard errors. Time series
-methods (VAR, ARIMA) match \pkg{vars} and \pkg{forecast}. The \pkg{p2a-core} test suite comprises 2{,}168 test functions,
-of which 442 are validation tests that compare output against
-\proglang{R} reference implementations or known data-generating
-processes (Table~\ref{tab:test-distribution}).  Every module with
-user-facing methods has at least 10 tests, and the most complex
-modules (panel, matching, TMLE, HDFE) have 17--26 each.
-Continuous integration (GitHub Actions) runs the full test suite,
-\code{clippy} linting, and format checks on every push to
-\code{main} and on all pull requests. Line-level code coverage is not
-currently tracked as a CI gate; running \code{cargo-tarpaulin} on the
-full suite yields approximately 62\% line coverage for \pkg{p2a-core},
-reflecting the large number of edge-case code paths (error handling,
-fallback solvers, GPU dispatch stubs) that are exercised only under
-specific hardware or data conditions.  We consider validation breadth
-(442 cross-validated tests spanning all method categories) a more
-informative quality signal than aggregate line coverage for a
-numerical library.  The CI pipeline does \emph{not} execute the
-\proglang{R} reference scripts; cross-language validation is run
-manually before releases and the reference outputs are checked into
-the repository.  All Rust-side validation tests can be run via
-\code{cargo test -p p2a-core}.
-
-\paragraph{Monte Carlo validation of statistical properties.}
-Point-estimate matching against \proglang{R} verifies that the same
-numbers are produced, but does not test whether confidence intervals,
-standard errors, and $p$-values have correct statistical properties.
-A separate Monte Carlo validation framework
-(\code{paper/code/mc\_validation/}) addresses this by running repeated
-simulations under known data-generating processes and checking five
-properties: (i)~95\% confidence interval coverage rates, (ii)~standard
-error calibration (ratio of mean reported SE to empirical SD of
-estimates), (iii)~Type~I error rates at $\alpha = 0.05$, (iv)~negative
-controls confirming that standard SEs \emph{fail} under
-heteroskedasticity, and (v)~statistical power under the alternative.
-Tolerances are derived from binomial confidence intervals around the
-nominal rates, accounting for finite-simulation variability.
-
-Across 29 methods (OLS with HC0--HC3, panel FE/RE, logit, probit,
-IV/2SLS, DiD, IPW, TMLE, and nine hypothesis tests) and 94 test
-scenarios at sample sizes $n \in \{200, 1{,}000\}$ with 2{,}000
-Monte Carlo replications each, 92 pass (97.9\%).  Two additional
-negative-control scenarios (standard OLS SEs applied to
-heteroskedastic data) correctly detect under-coverage, confirming
-that robust SEs are needed.  Standard error calibration and Type~I
-error control are exact: all 34 SE accuracy tests pass (mean ratio
-1.001) and all 16 Type~I error tests pass.  Mean confidence interval
-coverage is 0.950 (nominal 0.950).  The two substantive failures are
-marginal over-coverage at $n = 1{,}000$ (OLS 96.0\%, logit 96.3\%),
-both within one percentage point of the nominal rate.  IPW uses the
-efficient influence function variance estimator of
-\citet{Lunceford2004}, which accounts for propensity score estimation
-uncertainty, achieving 94.3--94.9\% coverage (SE ratio $\approx
-1.0$).  Full results and the simulation code are included in the
-supplementary materials.
-
-\begin{table}[htbp]
-\centering
-\begin{threeparttable}
-\caption{Test distribution by module category}
-\label{tab:test-distribution}
-\small
-\begin{tabular}{lrrr}
-\toprule
-Module & Tests & Validation$^a$ & Methods \\
-\midrule
-Regression (OLS, diagnostics, NLS, LOESS, GLS) & 120 & 55 & 25 \\
-Panel data (FE, RE, HDFE, GMM) & 95 & 40 & 12 \\
-Causal inference (DiD, IV, RD, synth) & 130 & 52 & 20 \\
-Treatment effects (IPW, TMLE, DML, matching) & 145 & 60 & 18 \\
-Discrete choice (logit, probit, count) & 55 & 22 & 9 \\
-Time series (VAR, ARIMA, GARCH, Kalman) & 110 & 45 & 20 \\
-Statistical tests & 160 & 65 & 50+ \\
-ML (clustering, PCA, t-SNE, SVM) & 120 & 35 & 10 \\
-Spatial econometrics & 50 & 18 & 8 \\
-Survival analysis & 35 & 12 & 5 \\
-Data, simulation, export, visualization & 148 & 38 & --- \\
-\midrule
-\textbf{Total} & \textbf{2{,}168} & \textbf{442} & \textbf{250+} \\
-\bottomrule
-\end{tabular}
-\begin{tablenotes}[flushleft]
-\item $^a$~Tests that compare against \proglang{R} reference
-implementations or verify recovery of known parameters from simulated
-data-generating processes.
-\end{tablenotes}
-\end{threeparttable}
-\end{table}
-
-For complex causal inference and treatment effect methods, validation
-depth varies. Canonical 2$\times$2 difference-in-differences, IV/2SLS,
-IPW, doubly robust estimation (AIPW), and causal mediation analysis
-are cross-validated against \proglang{R} packages---\fct{lm} for DiD,
-\pkg{AER} for IV, manual Horvitz--Thompson/H\'{a}jek estimators for
-IPW, and the \pkg{mediation} package---on
-synthetic datasets with known treatment effects (e.g., true ATT~$=5$
-for DiD, true $\beta=1$ for IV, true ATE~$=0.75$ for IPW/AIPW).
-Propensity score matching is validated against
-\pkg{MatchIt}~\citep{Ho+etal:2011} for balance diagnostics
-(standardized mean differences, variance ratios).  Regression
-discontinuity is validated against the \pkg{rdrobust}
-framework~\citep{Calonico+etal:2014}, checking that local
-linear estimates recover the true discontinuity within tolerance.
-FEGLM is validated against \pkg{fixest}'s
-\fct{feglm}~\citep{Berge:2018} for coefficient sign, pseudo~$R^2$,
-and the logit/probit scaling ratio~($\approx 1.6$).  TMLE has eight
-validation tests that verify the targeting step, clever covariate
-formula, influence curve properties, propensity score truncation, and
-counterfactual predictions on simulated data; these check mathematical
-identities and DGP-implied ranges rather than exact \proglang{R}
-output values. In total, 41 \proglang{R} validation scripts and
-73 expected-value CSVs are provided in the supplementary materials.
-
-Several complex methods---staggered
-DiD~\citep{Callaway+SantAnna:2021}, extended TWFE, Goodman-Bacon
-decomposition, Double/Debiased ML, synthetic control, SCPI, CTMLE,
-LTMLE, CBPS, and entropy balancing---are validated using
-DGP-based tests with known true parameters rather than exact numerical
-cross-validation against \proglang{R} packages.  These tests generate
-data from a known process (e.g., true ATT~$=5$, true coefficient~$=1$)
-and verify that the estimator recovers the parameter within tolerance,
-that pre-trends are null when they should be, that weights sum correctly,
-and that confidence intervals have appropriate coverage.
-The corresponding \proglang{R} implementations (e.g.,
-\pkg{did}, \pkg{DoubleML}, \pkg{Synth}) use different default tuning
-parameters, cross-validation splits, and optimization algorithms that
-complicate exact numerical comparison.  Extending
-exact cross-validation coverage to these methods is a priority for future
-releases.
-
-Appendix~\ref{app:benchmark-methodology} documents tolerance
-thresholds by method category and sample size.
-Appendix~\ref{app:implementation} lists known differences from
-reference implementations (default robust SE type, convergence
-tolerances, $R^2$ variant selection)---none affecting the validity
-of statistical inference.
-
-For core panel methods, \pkg{prompt2analytics} provides comparable
-coverage to specialized \proglang{R} packages; the primary remaining
-gap is Conley spatial standard errors. Users requiring maximum
-performance for high-dimensional fixed effects should note that
-\pkg{fixest}~\citep{Berge:2018} likely outperforms
-\pkg{prompt2analytics} due to its highly optimized C++
-implementation. The distinguishing features are the natural language
-interface and fully local execution without \proglang{R} dependencies;
-the package complements rather than replaces specialized tools. Having established the system's accuracy and
-feature coverage, the next section examines whether it can run
+Having established how well the LLM layer selects and parameterizes
+tools, the next section examines whether the system can run
 efficiently---and entirely locally---on consumer hardware.
