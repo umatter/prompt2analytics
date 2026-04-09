@@ -128,6 +128,12 @@ crates/p2a-core/performance/
 
 # Nested Rust build artifacts
 paper/code/rust_validation/rust_runner/target/
+paper/code/mc_validation/target/
+paper/code/mc_validation/Cargo.lock
+
+# MC validation results (regenerable)
+paper/code/mc_validation/results/
+results/
 
 # Generated synthetic data directory
 paper/code/rust_validation/datasets/synthetic/

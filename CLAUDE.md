@@ -40,6 +40,9 @@ cargo run -p p2a-cli -- <args>
 # Run MCP server (HTTP mode for development)
 cargo run -p p2a-mcp --features full -- --transport http --host 127.0.0.1 --port 8080 --cors-permissive
 
+# Terminal chat client (requires running MCP server)
+cargo run -p p2a-chat
+
 # Dioxus app (web and desktop)
 cd crates/p2a-dioxus && dx serve                      # Web dev server with hot reload
 cd crates/p2a-dioxus && dx serve --platform desktop   # Desktop app
@@ -102,6 +105,7 @@ prompt2analytics is a Rust workspace (edition 2024, requires Rust 1.85+) exposin
 - **p2a-core**: Core analytics library (all algorithms)
 - **p2a-cli**: Command-line interface (`p2a` binary) with session recording, script export, and JSON output
 - **p2a-mcp**: MCP server exposing 257 tools with LLM integration
+- **p2a-chat**: Lightweight terminal chat client (connects to p2a-mcp HTTP server, no p2a-core dependency)
 - **p2a-dioxus**: Cross-platform GUI (web via WASM, desktop via native)
 
 ## CLI (p2a-cli)
