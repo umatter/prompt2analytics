@@ -3530,6 +3530,12 @@ fn compute_pre_mspe(
 }
 
 /// Bootstrap for uncertainty quantification.
+///
+/// When `config.bootstrap_se == false` this is a no-op and returns `None`
+/// for every output, matching the documented contract. When `bootstrap_se`
+/// is requested but not yet implemented, the function returns
+/// `EconError::NotImplemented` so callers can surface the gap instead of
+/// silently dropping the user's request and handing back `None` SEs.
 fn bootstrap_gsynth(
     _y_mat: &Array2<f64>,
     _d_mat: &Array2<f64>,
@@ -3539,14 +3545,18 @@ fn bootstrap_gsynth(
     _n_factors: usize,
     config: &GsynthConfig,
 ) -> EconResult<(Option<f64>, Option<(f64, f64)>, Option<f64>)> {
-    // Placeholder - full bootstrap would resample and re-estimate
-    // For now, return None to indicate bootstrap not performed
     if !config.bootstrap_se {
         return Ok((None, None, None));
     }
 
-    // TODO: Implement full bootstrap
-    Ok((None, None, None))
+    // Bootstrap requested but the resample+re-estimate loop is not yet
+    // wired in. Surface this clearly rather than silently producing `None`
+    // confidence intervals that look like a successful run.
+    Err(EconError::NotImplemented(
+        "gsynth bootstrap standard errors are not yet implemented; \
+         set bootstrap_se=false or use the analytical placeholder"
+            .to_string(),
+    ))
 }
 
 #[cfg(test)]

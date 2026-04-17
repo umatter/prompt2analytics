@@ -1525,26 +1525,8 @@ fn run_gls_method(dataset: &Dataset, args: &Args) -> Result<serde_json::Value> {
         .as_ref()
         .context("indep_vars required")?;
 
-    let y = extract_column(dataset, dep_var)?;
-
-    // Collect all column data upfront to avoid repeated extraction
-    let col_data: Vec<Vec<f64>> = indep_vars
-        .iter()
-        .map(|col_name| extract_column(dataset, col_name))
-        .collect::<Result<Vec<_>>>()?;
-
-    // Build X matrix as flat row-major vector (with intercept column prepended)
-    let n = y.len();
-    let n_cols = indep_vars.len() + 1; // +1 for intercept
-    let mut x_flat = Vec::with_capacity(n * n_cols);
-    for row_idx in 0..n {
-        x_flat.push(1.0); // intercept
-        for col_vec in &col_data {
-            x_flat.push(col_vec[row_idx]);
-        }
-    }
-
-    let result = run_gls(&y, &x_flat, n_cols, "ar1", Some(0.5))
+    let x_refs: Vec<&str> = indep_vars.iter().map(String::as_str).collect();
+    let result = run_gls(dataset, dep_var, &x_refs, true, "ar1", Some(0.5))
         .map_err(|e| anyhow::anyhow!("GLS failed: {}", e))?;
 
     // Build variable name map: intercept + indep_vars

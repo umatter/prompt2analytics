@@ -88,6 +88,40 @@ pub struct PanelGlsResult {
     /// Any warnings generated during estimation
     #[serde(skip)]
     pub warnings: Vec<String>,
+
+    // ── Trait-backing storage (LinearEstimator). Skipped from JSON.
+    #[serde(skip, default)]
+    pub coef_arr: ndarray::Array1<f64>,
+    #[serde(skip, default)]
+    pub se_arr: ndarray::Array1<f64>,
+    #[serde(skip, default)]
+    pub residuals: ndarray::Array1<f64>,
+    #[serde(skip, default)]
+    pub vcov: ndarray::Array2<f64>,
+}
+
+impl crate::traits::estimator::LinearEstimator for PanelGlsResult {
+    fn coefficients(&self) -> &ndarray::Array1<f64> {
+        &self.coef_arr
+    }
+    fn std_errors(&self) -> &ndarray::Array1<f64> {
+        &self.se_arr
+    }
+    fn residuals(&self) -> &ndarray::Array1<f64> {
+        &self.residuals
+    }
+    fn vcov_matrix(&self) -> &ndarray::Array2<f64> {
+        &self.vcov
+    }
+    fn variable_names(&self) -> &[String] {
+        &self.variables
+    }
+    fn degrees_of_freedom(&self) -> usize {
+        self.df_residual
+    }
+    fn n_obs(&self) -> usize {
+        self.n_obs
+    }
 }
 
 impl fmt::Display for PanelGlsResult {
@@ -569,6 +603,11 @@ pub fn run_panel_gls(
         x_cols.iter().map(|s| s.to_string()).collect()
     };
 
+    let coef_arr: Array1<f64> = beta.clone();
+    let se_arr: Array1<f64> = Array1::from_vec(std_errors.clone());
+    // vcov ≈ se_scale * (X'Ω⁻¹X)⁻¹  (the diagonal of which the SEs are derived from)
+    let vcov: ndarray::Array2<f64> = &xtox_inv * se_scale;
+
     Ok(PanelGlsResult {
         model,
         dep_var: y_col.to_string(),
@@ -587,6 +626,10 @@ pub fn run_panel_gls(
         sigma,
         error_cov_dim: t_dim,
         warnings,
+        coef_arr,
+        se_arr,
+        residuals,
+        vcov,
     })
 }
 
