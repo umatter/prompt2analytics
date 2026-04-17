@@ -100,13 +100,15 @@ On ARM64 (aarch64), the project includes a `.cargo/config.toml` that enables `op
 
 ## Project Overview
 
-prompt2analytics is a Rust workspace (edition 2024, requires Rust 1.85+) exposing 257 econometrics, statistics, ML, and visualization methods through multiple interfaces:
+prompt2analytics is a Rust workspace (edition 2024, requires Rust 1.85+) exposing 270 econometrics, statistics, ML, and visualization methods through multiple interfaces:
 
 - **p2a-core**: Core analytics library (all algorithms)
 - **p2a-cli**: Command-line interface (`p2a` binary) with session recording, script export, and JSON output
-- **p2a-mcp**: MCP server exposing 257 tools with LLM integration
-- **p2a-chat**: Lightweight terminal chat client (connects to p2a-mcp HTTP server, no p2a-core dependency)
+- **p2a-mcp**: MCP server exposing 270 tools with LLM integration, plus an HTTP API documented in `API_ENDPOINTS.md`
+- **p2a-chat**: Lightweight terminal REPL that speaks to a running `p2a-mcp` HTTP server (no direct p2a-core dependency). Reach for it when you want to exercise the MCP tool-call path end-to-end from a shell without the Dioxus UI.
 - **p2a-dioxus**: Cross-platform GUI (web via WASM, desktop via native)
+
+Out-of-scope directories (ignore when searching unless specifically asked): `archive/`, `_resources/`, `target/`, `crates/p2a-dioxus/node_modules/`.
 
 ## CLI (p2a-cli)
 
@@ -469,7 +471,7 @@ let result = run_staggered_did(dataset, &config)?;
 
 ### Module Organization
 
-The MCP server exposes 257 tools organized into modular handler files:
+The MCP server exposes 270 tools organized into modular handler files. For the HTTP API surface (sessions, datasets, tools, LLM chat, SSE streaming, conversation persistence), see `API_ENDPOINTS.md` at the repo root — that is the authoritative reference.
 
 ```
 crates/p2a-mcp/src/
@@ -820,6 +822,11 @@ Auto-discovered guidance:
 - `rust-econometrics-patterns` - p2a-core API patterns, LinearEstimator trait
 - `validation-benchmarking` - Validation and benchmarking workflow
 
+### Agents and Tooling
+
+- `.claude/agents/econometrics-implementer.md` - Expert Rust econometrics implementer subagent (use for new method implementation)
+- `.claude/tooling/validation/` - Validation helper scripts used by `/validate-method`
+
 ## Testing Guidelines
 
 ### Test Data
@@ -882,7 +889,7 @@ let df = df! {
 
 **MCP Server:**
 - `crates/p2a-mcp/src/server.rs` - AnalyticsServer struct and router composition
-- `crates/p2a-mcp/src/tools/handlers/` - Tool implementations (257 tools across 17 modules)
+- `crates/p2a-mcp/src/tools/handlers/` - Tool implementations (270 tools across 17 modules)
 - `crates/p2a-mcp/src/tools/requests/` - Request type definitions
 - `crates/p2a-mcp/src/transport/http.rs` - HTTP transport with SSE streaming
 - `crates/p2a-mcp/src/db/` - SurrealDB persistence layer
@@ -936,6 +943,8 @@ let df = df! {
 - `paper/sections/e2e_eval_appendix.tex` - Appendix H (e2e evaluation protocol details)
 
 **Documentation:**
+- `API_ENDPOINTS.md` - Complete HTTP API reference (sessions, datasets, tools, LLM chat, SSE)
+- `CHANGELOG.md` - Actively maintained release notes
 - `DEVELOPMENT_REPORT.md` - Detailed development history and current status
 - `docs/guides/TESTING.md` - Test runtime expectations, validation framework
 - `docs/guides/DATA_SECURITY.md` - Data write locations, offline capability
