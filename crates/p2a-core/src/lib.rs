@@ -229,7 +229,6 @@ pub mod linalg;
 pub mod traits;
 
 // Core feature modules (always available)
-pub mod cache;
 pub mod data;
 pub mod diagnostics;
 pub mod econometrics;
@@ -250,7 +249,6 @@ pub mod forecasting;
 pub mod visualization;
 
 // Re-export foundational types
-pub use cache::{CacheKey, CacheStats, ResultCache};
 pub use errors::{EconError, EconResult, EstimationWarning};
 pub use linalg::{
     DesignError,

@@ -322,7 +322,9 @@ fn demean_map(
 
 /// Demean a matrix column-wise using the Method of Alternating Projections.
 ///
-/// Processes all columns sharing the same scratch buffers for group sums.
+/// Columns are independent under the alternating-projections algorithm, so
+/// we process them in parallel via `rayon` and reduce their per-column
+/// convergence statistics at the end.
 fn demean_matrix_map(
     x: &Array2<f64>,
     factors: &[FactorInfo],
@@ -330,18 +332,27 @@ fn demean_matrix_map(
     max_iter: usize,
     accelerate: bool,
 ) -> (Array2<f64>, usize, f64, bool) {
+    use rayon::prelude::*;
+
     let (n, k) = x.dim();
-    let mut x_demeaned = Array2::zeros((n, k));
+
+    // Fan the columns out, demean each one independently, and collect the
+    // per-column results. Each call to `demean_map` allocates its own scratch
+    // buffers so there is no shared mutable state between workers.
+    let per_column: Vec<(Array1<f64>, usize, f64, bool)> = (0..k)
+        .into_par_iter()
+        .map(|j| {
+            let col = x.column(j).to_owned();
+            demean_map(&col, factors, tolerance, max_iter, accelerate)
+        })
+        .collect();
+
+    let mut x_demeaned = Array2::<f64>::zeros((n, k));
     let mut max_iterations: usize = 0;
     let mut max_change: f64 = 0.0;
     let mut all_converged = true;
-
-    for j in 0..k {
-        let col = x.column(j).to_owned();
-        let (col_demeaned, iters, change, converged) =
-            demean_map(&col, factors, tolerance, max_iter, accelerate);
+    for (j, (col_demeaned, iters, change, converged)) in per_column.into_iter().enumerate() {
         x_demeaned.column_mut(j).assign(&col_demeaned);
-
         max_iterations = max_iterations.max(iters);
         max_change = max_change.max(change);
         all_converged = all_converged && converged;

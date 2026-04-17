@@ -272,21 +272,18 @@ async fn handle_client_message(
                 return Ok(());
             }
 
-            // LLM chat will be implemented in Phase 3
-            // For now, just acknowledge the message
-            tx.send(ServerMessage::Text {
-                id: id.clone(),
-                content: format!(
-                    "Chat functionality coming in Phase 3. Received: {} (stream: {})",
-                    message, stream
-                ),
+            // LLM chat over WebSocket is not implemented. Return an explicit
+            // error so clients don't treat a stub text response as a real
+            // completion.
+            let _ = (message, stream);
+            tx.send(ServerMessage::Error {
+                id,
+                message: "LLM chat over WebSocket is not implemented; use the HTTP \
+                         /api/llm/chat or /api/llm/chat/stream endpoint instead."
+                    .to_string(),
             })
             .await
             .map_err(|_| "Channel closed".to_string())?;
-
-            tx.send(ServerMessage::Done { id })
-                .await
-                .map_err(|_| "Channel closed".to_string())?;
         }
 
         ClientMessage::Ping => {

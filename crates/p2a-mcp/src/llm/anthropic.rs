@@ -4,7 +4,7 @@
 
 use super::{
     LlmError, LlmProvider, Message, MessageRole, ProviderConfig, ProviderType, StreamChunk,
-    ToolCall, ToolDefinition, ToolExecutor, ToolResult,
+    ToolCall, ToolDefinition, ToolExecutor, ToolResult, build_http_client,
 };
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -21,9 +21,11 @@ pub struct AnthropicProvider {
 
 impl AnthropicProvider {
     /// Create a new Anthropic provider with the given configuration.
+    ///
+    /// Uses a `reqwest::Client` built with explicit connect/request timeouts.
     pub fn new(config: ProviderConfig) -> Self {
         Self {
-            client: Client::new(),
+            client: build_http_client("Anthropic"),
             config,
         }
     }
