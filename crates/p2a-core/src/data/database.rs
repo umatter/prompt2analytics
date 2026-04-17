@@ -36,6 +36,69 @@ pub enum DatabaseError {
 
     #[error("Database file not found: {0}")]
     FileNotFound(String),
+
+    #[error("Query rejected: {0}")]
+    Forbidden(String),
+}
+
+/// Validate that a SQL statement is a read-only query.
+///
+/// Accepts `SELECT`, `WITH` (CTE), `EXPLAIN`, `PRAGMA` (metadata), `DESCRIBE`,
+/// and `SHOW`. Anything else — `INSERT`, `UPDATE`, `DELETE`, `DROP`, `ALTER`,
+/// `CREATE`, `ATTACH`, `COPY`, `INSTALL`, `LOAD`, … — is rejected.
+///
+/// This is a keyword-level filter, not a full SQL parser. It strips SQL block
+/// comments (`/* ... */`) and line comments (`-- ...`) from the leading whitespace
+/// before inspecting the first statement keyword.
+pub fn validate_read_only_query(query: &str) -> Result<(), DatabaseError> {
+    const ALLOWED: &[&str] = &["select", "with", "explain", "pragma", "describe", "show"];
+
+    let cleaned = strip_leading_comments(query);
+    let first_token: String = cleaned
+        .chars()
+        .take_while(|c| c.is_alphanumeric())
+        .collect::<String>()
+        .to_ascii_lowercase();
+
+    if first_token.is_empty() {
+        return Err(DatabaseError::Forbidden(
+            "empty SQL statement".to_string(),
+        ));
+    }
+    if !ALLOWED.contains(&first_token.as_str()) {
+        return Err(DatabaseError::Forbidden(format!(
+            "statement starting with `{}` is not allowed; only read-only queries \
+             (SELECT, WITH, EXPLAIN, PRAGMA, DESCRIBE, SHOW) may be executed",
+            first_token
+        )));
+    }
+    Ok(())
+}
+
+fn strip_leading_comments(query: &str) -> &str {
+    let mut rest = query.trim_start();
+    loop {
+        if let Some(after) = rest.strip_prefix("--") {
+            // Line comment: drop through end of line (or end of string).
+            let end = after.find('\n').map(|i| i + 1).unwrap_or(after.len());
+            rest = after[end..].trim_start();
+            continue;
+        }
+        if let Some(after) = rest.strip_prefix("/*") {
+            // Block comment: drop through matching `*/`.
+            match after.find("*/") {
+                Some(i) => {
+                    rest = after[i + 2..].trim_start();
+                    continue;
+                }
+                None => {
+                    // Unterminated comment; let the SQL parser report it.
+                    return rest;
+                }
+            }
+        }
+        return rest;
+    }
 }
 
 /// Result of a database query.
@@ -73,13 +136,19 @@ impl std::fmt::Display for QueryResult {
 /// # Returns
 /// QueryResult containing the DataFrame and metadata
 pub fn query_sqlite(db_path: impl AsRef<Path>, query: &str) -> Result<QueryResult, DatabaseError> {
+    validate_read_only_query(query)?;
     let path = db_path.as_ref();
 
     if !path.exists() {
         return Err(DatabaseError::FileNotFound(path.display().to_string()));
     }
 
-    let conn = rusqlite::Connection::open(path)?;
+    // Open read-only; combined with validate_read_only_query this blocks DDL/DML
+    // even if the keyword filter is ever bypassed.
+    let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+        | rusqlite::OpenFlags::SQLITE_OPEN_URI
+        | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    let conn = rusqlite::Connection::open_with_flags(path, flags)?;
     let mut stmt = conn.prepare(query)?;
 
     // Get column information
@@ -182,7 +251,10 @@ pub fn list_sqlite_tables(db_path: impl AsRef<Path>) -> Result<Vec<String>, Data
         return Err(DatabaseError::FileNotFound(path.display().to_string()));
     }
 
-    let conn = rusqlite::Connection::open(path)?;
+    let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+        | rusqlite::OpenFlags::SQLITE_OPEN_URI
+        | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    let conn = rusqlite::Connection::open_with_flags(path, flags)?;
     let mut stmt =
         conn.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")?;
 
@@ -205,7 +277,10 @@ pub fn sqlite_table_schema(
         return Err(DatabaseError::FileNotFound(path.display().to_string()));
     }
 
-    let conn = rusqlite::Connection::open(path)?;
+    let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+        | rusqlite::OpenFlags::SQLITE_OPEN_URI
+        | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    let conn = rusqlite::Connection::open_with_flags(path, flags)?;
     validate_identifier(table_name)?;
     let mut stmt = conn.prepare(&format!("PRAGMA table_info({})", table_name))?;
 
@@ -232,6 +307,7 @@ pub fn sqlite_table_schema(
 /// # Returns
 /// QueryResult containing the DataFrame and metadata
 pub fn query_duckdb(db_path: impl AsRef<Path>, query: &str) -> Result<QueryResult, DatabaseError> {
+    validate_read_only_query(query)?;
     let path = db_path.as_ref();
     let path_str = path.to_string_lossy();
 
@@ -240,7 +316,14 @@ pub fn query_duckdb(db_path: impl AsRef<Path>, query: &str) -> Result<QueryResul
         return Err(DatabaseError::FileNotFound(path.display().to_string()));
     }
 
-    let conn = duckdb::Connection::open(path)?;
+    // Open read-only. In-memory databases don't support ReadOnly mode so fall back
+    // to the default configuration for those; the keyword filter already rejects DDL/DML.
+    let conn = if path_str == ":memory:" {
+        duckdb::Connection::open(path)?
+    } else {
+        let config = duckdb::Config::default().access_mode(duckdb::AccessMode::ReadOnly)?;
+        duckdb::Connection::open_with_flags(path, config)?
+    };
     let mut stmt = conn.prepare(query)?;
 
     // Execute query first - DuckDB requires this before accessing column info
@@ -369,7 +452,12 @@ pub fn list_duckdb_tables(db_path: impl AsRef<Path>) -> Result<Vec<String>, Data
         return Err(DatabaseError::FileNotFound(path.display().to_string()));
     }
 
-    let conn = duckdb::Connection::open(path)?;
+    let conn = if path_str == ":memory:" {
+        duckdb::Connection::open(path)?
+    } else {
+        let config = duckdb::Config::default().access_mode(duckdb::AccessMode::ReadOnly)?;
+        duckdb::Connection::open_with_flags(path, config)?
+    };
     let mut stmt = conn
         .prepare("SELECT table_name FROM information_schema.tables WHERE table_schema = 'main'")?;
 
@@ -396,7 +484,12 @@ pub fn duckdb_table_schema(
         return Err(DatabaseError::FileNotFound(path.display().to_string()));
     }
 
-    let conn = duckdb::Connection::open(path)?;
+    let conn = if path_str == ":memory:" {
+        duckdb::Connection::open(path)?
+    } else {
+        let config = duckdb::Config::default().access_mode(duckdb::AccessMode::ReadOnly)?;
+        duckdb::Connection::open_with_flags(path, config)?
+    };
     let query = "SELECT column_name, data_type FROM information_schema.columns WHERE table_name = ? ORDER BY ordinal_position";
     let mut stmt = conn.prepare(query)?;
 
@@ -418,6 +511,10 @@ pub fn query_file_with_duckdb(
     file_path: impl AsRef<Path>,
     query: &str,
 ) -> Result<QueryResult, DatabaseError> {
+    // External-access SQL functions (read_csv_auto, read_parquet, …) are the whole
+    // point of this entry point, so we cannot disable external access wholesale;
+    // but the statement itself must still be a read-only query.
+    validate_read_only_query(query)?;
     let path = file_path.as_ref();
 
     if !path.exists() {
@@ -551,6 +648,48 @@ fn query_duckdb_connection(
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn test_validate_read_only_allows_select() {
+        assert!(validate_read_only_query("SELECT * FROM t").is_ok());
+        assert!(validate_read_only_query("  select 1").is_ok());
+        assert!(validate_read_only_query("WITH x AS (SELECT 1) SELECT * FROM x").is_ok());
+        assert!(validate_read_only_query("EXPLAIN SELECT 1").is_ok());
+        assert!(validate_read_only_query("PRAGMA table_info('t')").is_ok());
+        assert!(validate_read_only_query("DESCRIBE t").is_ok());
+        assert!(validate_read_only_query("SHOW TABLES").is_ok());
+    }
+
+    #[test]
+    fn test_validate_read_only_rejects_mutations() {
+        for q in [
+            "INSERT INTO t VALUES (1)",
+            "UPDATE t SET x=1",
+            "DELETE FROM t",
+            "DROP TABLE t",
+            "ALTER TABLE t ADD COLUMN x INT",
+            "CREATE TABLE t (x INT)",
+            "ATTACH 'evil.db' AS e",
+            "COPY t TO 'out.csv'",
+            "INSTALL 'httpfs'",
+            "LOAD 'httpfs'",
+            "",
+            "   ",
+        ] {
+            assert!(
+                validate_read_only_query(q).is_err(),
+                "expected {:?} to be rejected",
+                q
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_read_only_strips_comments() {
+        assert!(validate_read_only_query("-- a comment\nSELECT 1").is_ok());
+        assert!(validate_read_only_query("/* block */ SELECT 1").is_ok());
+        assert!(validate_read_only_query("-- hide\nDROP TABLE t").is_err());
+    }
 
     #[test]
     fn test_sqlite_query() {

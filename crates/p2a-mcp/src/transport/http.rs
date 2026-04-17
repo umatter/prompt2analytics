@@ -421,13 +421,38 @@ pub struct ListFilesResponse {
 }
 
 /// List files in a directory.
+///
+/// The path is validated against the process-wide data root jail (see
+/// `crate::path_jail`). Requests outside the jail return 403.
 async fn list_files(Query(query): Query<ListFilesQuery>) -> impl IntoResponse {
-    use std::path::PathBuf;
+    use crate::path_jail;
 
-    // Default to home directory
-    let path = match &query.path {
-        Some(p) if !p.is_empty() => PathBuf::from(p),
-        _ => dirs::home_dir().unwrap_or_else(|| PathBuf::from("/")),
+    // Default to the configured jail root when no path is provided.
+    let path = match query.path.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(requested) => match path_jail::validate_data_path(requested) {
+            Ok(p) => p,
+            Err(e) => {
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(ApiResponse::<ListFilesResponse>::error(format!(
+                        "Path rejected by data root jail: {}",
+                        e
+                    ))),
+                );
+            }
+        },
+        None => match path_jail::allowed_data_root() {
+            Ok(root) => root,
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ApiResponse::<ListFilesResponse>::error(format!(
+                        "Cannot resolve data root: {}",
+                        e
+                    ))),
+                );
+            }
+        },
     };
 
     // Read directory
@@ -485,7 +510,13 @@ async fn list_files(Query(query): Query<ListFilesQuery>) -> impl IntoResponse {
         }
     };
 
-    let parent = path.parent().map(|p| p.to_string_lossy().to_string());
+    // Only expose a parent link if the parent is still inside the jail; this
+    // prevents the UI from offering a "go up" button that escapes the root.
+    let jail_root = crate::path_jail::allowed_data_root().ok();
+    let parent = path.parent().and_then(|p| match &jail_root {
+        Some(root) if p.starts_with(root) => Some(p.to_string_lossy().to_string()),
+        _ => None,
+    });
 
     (
         StatusCode::OK,

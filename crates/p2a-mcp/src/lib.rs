@@ -9,6 +9,7 @@ pub mod config;
 pub mod db;
 #[cfg(feature = "llm")]
 pub mod llm;
+pub mod path_jail;
 #[cfg(feature = "db")]
 pub mod persistent_session;
 pub mod server;
@@ -33,7 +34,11 @@ pub struct EmbeddedServerConfig {
     pub port: u16,
     /// Host to bind to (default: 127.0.0.1)
     pub host: String,
-    /// Enable CORS for all origins (default: true for embedded)
+    /// Enable CORS for all origins.
+    ///
+    /// Defaults to `false`. Only opt in for local development with a
+    /// loopback-only bind address; enabling this with a non-loopback
+    /// host exposes the server to cross-origin requests from any page.
     pub cors_permissive: bool,
     /// Database path for persistence (default: None = in-memory or auto-detect)
     pub db_path: Option<String>,
@@ -44,7 +49,7 @@ impl Default for EmbeddedServerConfig {
         Self {
             port: 8080,
             host: "127.0.0.1".to_string(),
-            cors_permissive: true,
+            cors_permissive: false,
             db_path: None,
         }
     }
@@ -122,6 +127,15 @@ pub async fn start_embedded_server(
     use std::net::SocketAddr;
 
     let addr: SocketAddr = format!("{}:{}", config.host, config.port).parse()?;
+
+    // Warn when permissive CORS is combined with a non-loopback bind address.
+    if config.cors_permissive && !is_loopback(&config.host) {
+        tracing::warn!(
+            "cors_permissive=true combined with non-loopback host {:?} exposes the server to \
+             cross-origin requests from any web page; set cors_permissive=false in production",
+            config.host
+        );
+    }
 
     // Build server config
     let server_config = ServerConfig {
@@ -257,6 +271,11 @@ async fn run_http_server_with_shutdown(
         .await?;
 
     Ok(())
+}
+
+#[cfg(feature = "http")]
+fn is_loopback(host: &str) -> bool {
+    matches!(host, "127.0.0.1" | "::1" | "localhost")
 }
 
 /// Initialize logging for the embedded server

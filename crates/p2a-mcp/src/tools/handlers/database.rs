@@ -9,6 +9,9 @@ use rmcp::{
     tool, tool_router,
 };
 
+use std::path::PathBuf;
+
+use crate::path_jail;
 use crate::server::AnalyticsServer;
 use crate::tools::requests::database::*;
 
@@ -19,6 +22,29 @@ use p2a_core::{
         query_file_with_duckdb, query_sqlite, sqlite_table_schema,
     },
 };
+
+/// Validate a database file path, allowing the special `:memory:` DuckDB path.
+fn jail_db_path(requested: &str) -> Result<PathBuf, String> {
+    if requested == ":memory:" {
+        return Ok(PathBuf::from(":memory:"));
+    }
+    path_jail::validate_data_path(requested)
+}
+
+/// Helper to short-circuit a handler when the path fails validation.
+macro_rules! jail_or_return {
+    ($input:expr, $action:expr) => {
+        match jail_db_path($input) {
+            Ok(p) => p,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Refused to {}: {}",
+                    $action, e
+                ))]));
+            }
+        }
+    };
+}
 
 #[tool_router(router = database_router, vis = "pub")]
 impl AnalyticsServer {
@@ -34,7 +60,8 @@ impl AnalyticsServer {
         &self,
         Parameters(request): Parameters<SqliteQueryRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let result = match query_sqlite(&request.db_path, &request.query) {
+        let db_path = jail_or_return!(&request.db_path, "query SQLite database");
+        let result = match query_sqlite(&db_path, &request.query) {
             Ok(r) => r,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -87,7 +114,8 @@ impl AnalyticsServer {
         &self,
         Parameters(request): Parameters<SqliteListTablesRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let tables = match list_sqlite_tables(&request.db_path) {
+        let db_path = jail_or_return!(&request.db_path, "list SQLite tables");
+        let tables = match list_sqlite_tables(&db_path) {
             Ok(t) => t,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -123,7 +151,8 @@ impl AnalyticsServer {
         &self,
         Parameters(request): Parameters<SqliteSchemaRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let schema = match sqlite_table_schema(&request.db_path, &request.table_name) {
+        let db_path = jail_or_return!(&request.db_path, "inspect SQLite schema");
+        let schema = match sqlite_table_schema(&db_path, &request.table_name) {
             Ok(s) => s,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -165,7 +194,8 @@ impl AnalyticsServer {
         &self,
         Parameters(request): Parameters<DuckDBQueryRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let result = match query_duckdb(&request.db_path, &request.query) {
+        let db_path = jail_or_return!(&request.db_path, "query DuckDB database");
+        let result = match query_duckdb(&db_path, &request.query) {
             Ok(r) => r,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -218,7 +248,8 @@ impl AnalyticsServer {
         &self,
         Parameters(request): Parameters<DuckDBListTablesRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let tables = match list_duckdb_tables(&request.db_path) {
+        let db_path = jail_or_return!(&request.db_path, "list DuckDB tables");
+        let tables = match list_duckdb_tables(&db_path) {
             Ok(t) => t,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -254,7 +285,8 @@ impl AnalyticsServer {
         &self,
         Parameters(request): Parameters<DuckDBSchemaRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let schema = match duckdb_table_schema(&request.db_path, &request.table_name) {
+        let db_path = jail_or_return!(&request.db_path, "inspect DuckDB schema");
+        let schema = match duckdb_table_schema(&db_path, &request.table_name) {
             Ok(s) => s,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -292,7 +324,8 @@ impl AnalyticsServer {
         &self,
         Parameters(request): Parameters<DuckDBFileQueryRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let result = match query_file_with_duckdb(&request.file_path, &request.query) {
+        let file_path = jail_or_return!(&request.file_path, "query data file");
+        let result = match query_file_with_duckdb(&file_path, &request.query) {
             Ok(r) => r,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -331,7 +364,7 @@ impl AnalyticsServer {
              Columns: {}\n\n\
              Dataset stored as: '{}'\n\n\
              Preview (first 5 rows):\n{}",
-            request.file_path,
+            file_path.display(),
             result.rows,
             result.columns.join(", "),
             name,

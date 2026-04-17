@@ -15,6 +15,7 @@ use rmcp::{
     tool, tool_router,
 };
 
+use crate::path_jail;
 use crate::server::AnalyticsServer;
 use crate::tools::requests::data::*;
 
@@ -67,7 +68,15 @@ impl AnalyticsServer {
         &self,
         Parameters(request): Parameters<LoadDatasetRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let path = PathBuf::from(&request.path);
+        let path = match path_jail::validate_data_path(&request.path) {
+            Ok(p) => p,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Refused to load dataset: {}",
+                    e
+                ))]));
+            }
+        };
 
         // Load the dataset
         let dataset = match DataLoader::load(&path) {
@@ -148,7 +157,15 @@ impl AnalyticsServer {
             }
         };
 
-        let path = PathBuf::from(&request.path);
+        let path = match path_jail::validate_data_path(&request.path) {
+            Ok(p) => p,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Refused to export dataset: {}",
+                    e
+                ))]));
+            }
+        };
 
         // Determine format from extension or explicit parameter
         let format = request
