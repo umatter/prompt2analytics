@@ -366,7 +366,7 @@ fn compute_kaplan_meier(
 
     // Sort by time (ascending)
     let mut sorted: Vec<_> = observations.iter().collect();
-    sorted.sort_by(|a, b| a.time.partial_cmp(&b.time).unwrap());
+    sorted.sort_by(|a, b| a.time.total_cmp(&b.time));
 
     // Count events and censored at each distinct time using BTreeMap for ordered keys
     let mut time_data: BTreeMap<OrderedF64, (usize, usize)> = BTreeMap::new();
@@ -683,7 +683,7 @@ pub fn log_rank_test(
     }
 
     // Sort observations by time
-    all_obs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+    all_obs.sort_by(|a, b| a.0.total_cmp(&b.0));
 
     // Get distinct event times
     let event_times: Vec<f64> = {
@@ -1125,7 +1125,7 @@ pub fn run_cox_ph(
 
     // Sort by time (descending for efficient risk set computation)
     let mut sorted_indices: Vec<usize> = (0..n).collect();
-    sorted_indices.sort_by(|&a, &b| obs_data[b].0.partial_cmp(&obs_data[a].0).unwrap());
+    sorted_indices.sort_by(|&a, &b| obs_data[b].0.total_cmp(&obs_data[a].0));
 
     // Newton-Raphson optimization
     let mut beta: Array1<f64> = Array1::zeros(p);
@@ -1565,12 +1565,15 @@ fn compute_concordance(
     let eta: Vec<f64> = (0..n).map(|i| x.row(i).dot(beta)).collect();
 
     // Create (time, event, risk_score) sorted by time ascending
-    let mut sorted: Vec<(f64, bool, f64)> = obs.iter().map(|&(t, e, ri)| (t, e, eta[ri])).collect();
-    sorted.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+    let mut sorted: Vec<(f64, bool, f64)> = obs
+        .iter()
+        .map(|&(t, e, ri)| (t, e, eta[ri]))
+        .collect();
+    sorted.sort_by(|a, b| a.0.total_cmp(&b.0));
 
     // Coordinate-compress risk scores for Fenwick tree indexing
     let mut scores: Vec<f64> = sorted.iter().map(|s| s.2).collect();
-    scores.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    scores.sort_by(|a, b| a.total_cmp(b));
     scores.dedup();
     let m = scores.len(); // number of distinct risk scores
 
@@ -2540,7 +2543,7 @@ pub fn run_competing_risks(
     }
 
     // Sort by time
-    observations.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+    observations.sort_by(|a, b| a.0.total_cmp(&b.0));
 
     // Count events by type
     let mut n_events_by_type: HashMap<u8, usize> = HashMap::new();

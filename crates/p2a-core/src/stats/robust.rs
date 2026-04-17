@@ -48,7 +48,7 @@ pub fn fivenum(data: &[f64]) -> EconResult<FivenumResult> {
         return Err(EconError::EmptyDataset);
     }
 
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    sorted.sort_by(|a, b| a.total_cmp(b));
 
     let median = median_sorted(&sorted);
 
@@ -122,7 +122,7 @@ pub fn quantile(data: &[f64], p: f64, qtype: usize) -> EconResult<f64> {
         return Err(EconError::EmptyDataset);
     }
 
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    sorted.sort_by(|a, b| a.total_cmp(b));
 
     // R's type 7 (default): p(k) = (k-1)/(n-1)
     // Linear interpolation between sorted[j-1] and sorted[j]
@@ -187,14 +187,14 @@ pub fn mad(data: &[f64], center: Option<f64>, constant: Option<f64>) -> EconResu
     // Center is median by default
     let center = center.unwrap_or_else(|| {
         let mut s = sorted.clone();
-        s.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        s.sort_by(|a, b| a.total_cmp(b));
         median_sorted(&s)
     });
 
     // Compute absolute deviations from center
     let mut deviations: Vec<f64> = sorted.iter().map(|x| (x - center).abs()).collect();
 
-    deviations.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    deviations.sort_by(|a, b| a.total_cmp(b));
 
     // MAD = median of absolute deviations
     let mad_value = median_sorted(&deviations);
@@ -257,7 +257,7 @@ pub fn ecdf(data: &[f64]) -> EconResult<EcdfResult> {
         return Err(EconError::EmptyDataset);
     }
 
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    sorted.sort_by(|a, b| a.total_cmp(b));
 
     // Get unique values and their cumulative proportions
     let mut x_unique = Vec::new();
@@ -513,7 +513,7 @@ fn silverman_bandwidth(data: &[f64]) -> f64 {
 
     // IQR estimate
     let mut sorted = data.to_vec();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    sorted.sort_by(|a, b| a.total_cmp(b));
     let q1 = sorted[(0.25 * n) as usize];
     let q3 = sorted[(0.75 * n).min(n - 1.0) as usize];
     let iqr = q3 - q1;
@@ -623,6 +623,15 @@ mod tests {
         assert_eq!(result.median, 5.0);
         assert!(result.lower_hinge < result.median);
         assert!(result.upper_hinge > result.median);
+    }
+
+    #[test]
+    fn test_fivenum_tolerates_nan() {
+        // Regression guard: the sort used to panic on NaN input.
+        let data = vec![1.0, f64::NAN, 3.0, 5.0, 7.0, 9.0];
+        let result = fivenum(&data).unwrap();
+        assert_eq!(result.minimum, 1.0);
+        assert_eq!(result.maximum, 9.0);
     }
 
     #[test]

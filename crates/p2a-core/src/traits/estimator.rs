@@ -106,12 +106,15 @@ pub trait LinearEstimator {
         let t_stats = self.t_stats();
         let df = self.degrees_of_freedom() as f64;
 
-        if df <= 0.0 {
-            // Return NaN for invalid degrees of freedom
+        if !df.is_finite() || df <= 0.0 {
+            // Return NaN for invalid degrees of freedom (NaN, Inf, <= 0)
             return Array1::from_elem(t_stats.len(), f64::NAN);
         }
 
-        let t_dist = StudentsT::new(0.0, 1.0, df).unwrap();
+        let t_dist = match StudentsT::new(0.0, 1.0, df) {
+            Ok(d) => d,
+            Err(_) => return Array1::from_elem(t_stats.len(), f64::NAN),
+        };
         t_stats.mapv(|t| 2.0 * (1.0 - t_dist.cdf(t.abs())))
     }
 
@@ -129,12 +132,15 @@ pub trait LinearEstimator {
         let ses = self.std_errors();
         let df = self.degrees_of_freedom() as f64;
 
-        if df <= 0.0 {
+        if !df.is_finite() || df <= 0.0 || !level.is_finite() || !(0.0 < level && level < 1.0) {
             return vec![(f64::NAN, f64::NAN); coefs.len()];
         }
 
         let alpha = 1.0 - level;
-        let t_dist = StudentsT::new(0.0, 1.0, df).unwrap();
+        let t_dist = match StudentsT::new(0.0, 1.0, df) {
+            Ok(d) => d,
+            Err(_) => return vec![(f64::NAN, f64::NAN); coefs.len()],
+        };
         let t_crit = t_dist.inverse_cdf(1.0 - alpha / 2.0);
 
         coefs
@@ -215,22 +221,25 @@ pub trait LinearEstimator {
 
 /// Compute p-value from t-statistic and degrees of freedom.
 pub fn t_test_p_value(t_stat: f64, df: f64) -> f64 {
-    // Handle invalid inputs
-    if df <= 0.0 || t_stat.is_nan() {
+    // Handle invalid inputs (NaN, Inf, <= 0 df)
+    if !df.is_finite() || df <= 0.0 || t_stat.is_nan() {
         return f64::NAN;
     }
     // For very large |t|, p-value is essentially 0
     if t_stat.is_infinite() || t_stat.abs() > 1e10 {
         return 0.0;
     }
-    let t_dist = StudentsT::new(0.0, 1.0, df).unwrap();
+    let t_dist = match StudentsT::new(0.0, 1.0, df) {
+        Ok(d) => d,
+        Err(_) => return f64::NAN,
+    };
     2.0 * (1.0 - t_dist.cdf(t_stat.abs()))
 }
 
 /// Compute p-value from chi-squared statistic.
 pub fn chi_squared_p_value(chi2: f64, df: f64) -> f64 {
-    // Handle invalid inputs
-    if df <= 0.0 || chi2.is_nan() || chi2 < 0.0 {
+    // Handle invalid inputs (NaN, Inf, <= 0 df, negative chi2)
+    if !df.is_finite() || df <= 0.0 || chi2.is_nan() || chi2 < 0.0 {
         return f64::NAN;
     }
     // For very large chi2, p-value is essentially 0
@@ -238,14 +247,23 @@ pub fn chi_squared_p_value(chi2: f64, df: f64) -> f64 {
         return 0.0;
     }
     use statrs::distribution::ChiSquared;
-    let chi2_dist = ChiSquared::new(df).unwrap();
+    let chi2_dist = match ChiSquared::new(df) {
+        Ok(d) => d,
+        Err(_) => return f64::NAN,
+    };
     1.0 - chi2_dist.cdf(chi2)
 }
 
 /// Compute p-value from F-statistic.
 pub fn f_test_p_value(f_stat: f64, df1: f64, df2: f64) -> f64 {
-    // Handle invalid inputs
-    if df1 <= 0.0 || df2 <= 0.0 || f_stat.is_nan() || f_stat < 0.0 {
+    // Handle invalid inputs (NaN, Inf, <= 0 df, negative F)
+    if !df1.is_finite()
+        || df1 <= 0.0
+        || !df2.is_finite()
+        || df2 <= 0.0
+        || f_stat.is_nan()
+        || f_stat < 0.0
+    {
         return f64::NAN;
     }
     // For very large F, p-value is essentially 0
@@ -253,16 +271,22 @@ pub fn f_test_p_value(f_stat: f64, df1: f64, df2: f64) -> f64 {
         return 0.0;
     }
     use statrs::distribution::FisherSnedecor;
-    let f_dist = FisherSnedecor::new(df1, df2).unwrap();
+    let f_dist = match FisherSnedecor::new(df1, df2) {
+        Ok(d) => d,
+        Err(_) => return f64::NAN,
+    };
     1.0 - f_dist.cdf(f_stat)
 }
 
 /// Critical value for t-distribution at given significance level.
 pub fn t_critical(alpha: f64, df: f64) -> f64 {
-    if df <= 0.0 {
+    if !df.is_finite() || df <= 0.0 || !alpha.is_finite() || !(0.0 < alpha && alpha < 1.0) {
         return f64::NAN;
     }
-    let t_dist = StudentsT::new(0.0, 1.0, df).unwrap();
+    let t_dist = match StudentsT::new(0.0, 1.0, df) {
+        Ok(d) => d,
+        Err(_) => return f64::NAN,
+    };
     t_dist.inverse_cdf(1.0 - alpha / 2.0)
 }
 
@@ -338,6 +362,28 @@ mod tests {
         // Large t should give small p
         let p = t_test_p_value(10.0, 100.0);
         assert!(p < 0.001);
+    }
+
+    #[test]
+    fn test_p_value_helpers_survive_nonfinite_df() {
+        // Regression guard: StudentsT::new used to panic here on NaN/Inf df.
+        assert!(t_test_p_value(1.5, f64::NAN).is_nan());
+        assert!(t_test_p_value(1.5, f64::INFINITY).is_nan());
+        assert!(t_test_p_value(1.5, f64::NEG_INFINITY).is_nan());
+        assert!(t_test_p_value(1.5, -1.0).is_nan());
+
+        assert!(chi_squared_p_value(2.0, f64::NAN).is_nan());
+        assert!(chi_squared_p_value(2.0, f64::INFINITY).is_nan());
+
+        assert!(f_test_p_value(2.0, f64::NAN, 10.0).is_nan());
+        assert!(f_test_p_value(2.0, 10.0, f64::INFINITY).is_nan());
+
+        assert!(t_critical(0.05, f64::NAN).is_nan());
+        assert!(t_critical(0.05, f64::INFINITY).is_nan());
+        // invalid alpha
+        assert!(t_critical(0.0, 10.0).is_nan());
+        assert!(t_critical(1.0, 10.0).is_nan());
+        assert!(t_critical(f64::NAN, 10.0).is_nan());
     }
 
     #[test]

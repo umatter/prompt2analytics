@@ -784,7 +784,7 @@ pub fn run_vecm(
 
     // Compute eigenvalues (simplified - use diagonal elements as approximation)
     let mut eigenvalues: Vec<f64> = (0..k).map(|i| 1.0 / (1.0 + y1ty1_inv[[i, i]])).collect();
-    eigenvalues.sort_by(|a, b| b.partial_cmp(a).unwrap());
+    eigenvalues.sort_by(|a, b| b.total_cmp(a));
 
     // Trace statistics (approximate)
     let trace_stats: Vec<f64> = (0..k)

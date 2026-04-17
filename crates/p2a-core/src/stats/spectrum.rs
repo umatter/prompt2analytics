@@ -1224,7 +1224,7 @@ mod tests {
 
         // Find the two highest peaks
         let mut indexed: Vec<(usize, f64)> = result.spec.iter().cloned().enumerate().collect();
-        indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        indexed.sort_by(|a, b| b.1.total_cmp(&a.1));
 
         let peak1_freq = result.freq[indexed[0].0];
         let _peak2_freq = result.freq[indexed[1].0];

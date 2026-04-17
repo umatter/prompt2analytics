@@ -945,7 +945,7 @@ where
     for _iter in 0..max_iter {
         // Sort vertices by function value (best first)
         let mut indices: Vec<usize> = (0..=n).collect();
-        indices.sort_by(|&a, &b| values[a].partial_cmp(&values[b]).unwrap());
+        indices.sort_by(|&a, &b| values[a].total_cmp(&values[b]));
 
         let best_idx = indices[0];
         let worst_idx = indices[n];
@@ -1062,7 +1062,7 @@ where
     let best_idx = values
         .iter()
         .enumerate()
-        .min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+        .min_by(|(_, a), (_, b)| a.total_cmp(b))
         .map(|(i, _)| i)
         .unwrap_or(0);
 

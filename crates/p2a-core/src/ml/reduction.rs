@@ -233,7 +233,7 @@ fn pca_via_cov_eigen(
 
     // Sort by descending eigenvalue — return all p eigenvalues for total_variance
     let mut indices: Vec<usize> = (0..p).collect();
-    indices.sort_by(|&a, &b| eigenvalues[b].partial_cmp(&eigenvalues[a]).unwrap());
+    indices.sort_by(|&a, &b| eigenvalues[b].total_cmp(&eigenvalues[a]));
 
     let n_comp = n_components.min(p);
     let mut sorted_eigenvalues = Array1::zeros(p);

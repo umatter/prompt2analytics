@@ -292,7 +292,7 @@ fn prepare_data(
 
     // Create index pairs and sort by x
     let mut indices: Vec<usize> = (0..n).collect();
-    indices.sort_by(|&a, &b| x[a].partial_cmp(&x[b]).unwrap());
+    indices.sort_by(|&a, &b| x[a].total_cmp(&x[b]));
 
     // Default weights
     let w: Vec<f64> = match weights {
