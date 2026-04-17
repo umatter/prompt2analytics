@@ -2,8 +2,19 @@
 //!
 //! Provides a `GpuContext` struct wrapping CUDA device, stream, cuBLAS handle,
 //! and cuSOLVER handle. Uses lazy initialization via `OnceLock` singleton.
+//!
+//! # Thread safety
+//!
+//! The cuBLAS and cuSOLVER C APIs do **not** support concurrent calls on the
+//! same handle. Stacking them behind a single `unsafe impl Sync` was
+//! unsound: two threads reaching for `ctx.blas.gemm(...)` at once could
+//! corrupt internal handle state. To make `Sync` truthful, the handles
+//! are wrapped in [`std::sync::Mutex`], and every call site locks the
+//! mutex before issuing a cuBLAS/cuSOLVER call. The CUDA driver context
+//! and stream are reference-counted (`Arc`) and are designed to be
+//! cloned across threads, so they remain bare fields.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use cudarc::cublas::CudaBlas;
 use cudarc::cusolver::safe::DnHandle;
@@ -16,25 +27,48 @@ use super::dispatch::GpuThresholds;
 /// Created once via `GpuContext::try_init()` and accessed globally via
 /// `GpuContext::get()`. If CUDA is not available, initialization returns
 /// `None` and all operations fall back to CPU.
+///
+/// The cuBLAS and cuSOLVER handles are guarded by mutexes; lock them with
+/// [`GpuContext::blas`] and [`GpuContext::solver`] before issuing calls.
 pub struct GpuContext {
-    /// CUDA context (device handle)
+    /// CUDA context (device handle).
     pub ctx: Arc<CudaCtx>,
-    /// Default CUDA stream for operations
+    /// Default CUDA stream for operations.
     pub stream: Arc<CudaStream>,
-    /// cuBLAS handle for BLAS operations
-    pub blas: CudaBlas,
-    /// cuSOLVER dense handle for factorizations
-    pub solver: DnHandle,
-    /// Dispatch thresholds (from env vars)
+    /// cuBLAS handle for BLAS operations. cuBLAS handles are not thread-safe
+    /// for concurrent calls, so external synchronization is required.
+    blas: Mutex<CudaBlas>,
+    /// cuSOLVER dense handle for factorizations. Same thread-safety
+    /// constraint as `blas`.
+    solver: Mutex<DnHandle>,
+    /// Dispatch thresholds (from env vars).
     pub thresholds: GpuThresholds,
 }
 
-// Safety: CUDA handles are thread-safe when used with proper stream synchronization.
-// cuBLAS and cuSOLVER handles are internally synchronized.
+// SAFETY: CudaBlas and DnHandle are moved between threads with the CUDA
+// driver's activation semantics (stream-bound operations). They are *not*
+// safe for concurrent access on the same handle, which is why the fields
+// are wrapped in `Mutex`. Send is honest because the handles can be moved;
+// Sync is honest because the mutexes serialize all access.
 unsafe impl Send for GpuContext {}
 unsafe impl Sync for GpuContext {}
 
 impl GpuContext {
+    /// Acquire a lock on the cuBLAS handle. The returned guard must be
+    /// held for the duration of any cuBLAS call.
+    pub fn blas(&self) -> std::sync::MutexGuard<'_, CudaBlas> {
+        self.blas
+            .lock()
+            .expect("GPU cuBLAS mutex poisoned (another thread panicked while holding it)")
+    }
+
+    /// Acquire a lock on the cuSOLVER dense handle.
+    pub fn solver(&self) -> std::sync::MutexGuard<'_, DnHandle> {
+        self.solver
+            .lock()
+            .expect("GPU cuSOLVER mutex poisoned (another thread panicked while holding it)")
+    }
+
     /// Attempt to initialize CUDA. Returns `None` if no GPU is available
     /// or if any initialization step fails.
     pub fn try_init() -> Option<Self> {
@@ -73,9 +107,10 @@ impl GpuContext {
         Some(Self {
             ctx,
             stream,
-            blas,
-            solver,
+            blas: Mutex::new(blas),
+            solver: Mutex::new(solver),
             thresholds,
         })
     }
 }
+

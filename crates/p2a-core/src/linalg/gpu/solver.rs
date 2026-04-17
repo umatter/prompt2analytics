@@ -130,8 +130,12 @@ pub fn sandwich_meat_gpu(
         ldc: k as c_int,
     };
 
+    // SAFETY: `dev_scaled` is an (n x k) device buffer laid out row-major
+    // (cuBLAS sees it as (k x n) col-major with lda = k). `dev_c` is
+    // (k x k) with ldc = k. The cuBLAS handle is held exclusively for
+    // the duration of the call via `ctx.blas()`.
     unsafe {
-        ctx.blas.gemm(cfg, &dev_scaled, &dev_scaled, &mut dev_c)?;
+        ctx.blas().gemm(cfg, &dev_scaled, &dev_scaled, &mut dev_c)?;
     }
 
     device_to_array2(&ctx.stream, &dev_c, k, k).map_err(GpuSolverError::from)
