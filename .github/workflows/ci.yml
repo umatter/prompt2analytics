@@ -50,10 +50,10 @@ jobs:
 
       - name: Run tests with memory monitoring (core crates)
         run: |
-          # Set memory limit (4GB virtual memory)
-          ulimit -v 4194304 || true
           # Run tests per-crate with explicit features; skips `cuda` on p2a-core
-          # because CI runners have no CUDA toolkit.
+          # because CI runners have no CUDA toolkit. No explicit ulimit: rustc
+          # compiling p2a-core with --features full needs >4GB virtual memory
+          # and would SIGABRT under a tighter cap.
           /usr/bin/time -v bash -c '
             cargo test -p p2a-core --features full &&
             cargo test -p p2a-mcp --features full &&
