@@ -1565,10 +1565,7 @@ fn compute_concordance(
     let eta: Vec<f64> = (0..n).map(|i| x.row(i).dot(beta)).collect();
 
     // Create (time, event, risk_score) sorted by time ascending
-    let mut sorted: Vec<(f64, bool, f64)> = obs
-        .iter()
-        .map(|&(t, e, ri)| (t, e, eta[ri]))
-        .collect();
+    let mut sorted: Vec<(f64, bool, f64)> = obs.iter().map(|&(t, e, ri)| (t, e, eta[ri])).collect();
     sorted.sort_by(|a, b| a.0.total_cmp(&b.0));
 
     // Coordinate-compress risk scores for Fenwick tree indexing
