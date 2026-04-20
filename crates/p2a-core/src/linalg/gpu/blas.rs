@@ -79,8 +79,12 @@ pub fn xtx_gpu(ctx: &GpuContext, x: &ArrayView2<f64>) -> Result<Array2<f64>, Gpu
         ldc: k as c_int,
     };
 
+    // SAFETY: `dev_x` and `dev_c` are owned device buffers on `ctx.stream`,
+    // their sizes match the cfg's leading dimensions (lda = ldb = ldc = k,
+    // k_inner = n), and alpha/beta are finite. The cuBLAS handle is held
+    // exclusively for the duration of the call via the Mutex guard.
     unsafe {
-        ctx.blas.gemm(cfg, &dev_x, &dev_x, &mut dev_c)?;
+        ctx.blas().gemm(cfg, &dev_x, &dev_x, &mut dev_c)?;
     }
 
     // Copy result back
@@ -120,8 +124,11 @@ pub fn xty_gpu(
         incy: 1,
     };
 
+    // SAFETY: `dev_x` is a (k * n) device buffer with leading dimension k,
+    // `dev_y` has length n, `dev_result` has length k, and increments are 1.
+    // The cuBLAS handle is locked exclusively via `ctx.blas()`.
     unsafe {
-        ctx.blas.gemv(cfg, &dev_x, &dev_y, &mut dev_result)?;
+        ctx.blas().gemv(cfg, &dev_x, &dev_y, &mut dev_result)?;
     }
 
     device_to_array1(&ctx.stream, &dev_result, k).map_err(GpuBlasError::from)
@@ -166,8 +173,13 @@ pub fn matmul_gpu(
         ldc: n_out as c_int, // leading dim of result
     };
 
+    // SAFETY: The row-major -> column-major transpose trick (see module
+    // doc) means cuBLAS sees `dev_b` as (n_out x p) with lda = n_out and
+    // `dev_a` as (p x m_rows) with ldb = p; `dev_c` has ldc = n_out and
+    // is a `m_rows * n_out` buffer. All three buffers live on the same
+    // stream and the cuBLAS handle is locked via `ctx.blas()`.
     unsafe {
-        ctx.blas.gemm(cfg, &dev_b, &dev_a, &mut dev_c)?;
+        ctx.blas().gemm(cfg, &dev_b, &dev_a, &mut dev_c)?;
     }
 
     device_to_array2(&ctx.stream, &dev_c, m_rows, n_out).map_err(GpuBlasError::from)

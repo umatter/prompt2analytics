@@ -100,8 +100,14 @@ pub fn pairwise_distances_gpu(
         ldc: k as c_int, // leading dim of result
     };
 
+    // SAFETY: `dev_cent` is (k x d) row-major (cuBLAS sees col-major
+    // (d x k) with lda = d), `dev_data` is (n x d) row-major (cuBLAS sees
+    // (d x n) with ldb = d), and `dev_cross` is (n * k) with ldc = k.
+    // The transa=T + transb=N combination computes C_cublas = cent * data^T
+    // (k x n col-major), which equals the desired (n x k) row-major result.
+    // The cuBLAS handle is exclusively held via `ctx.blas()`.
     unsafe {
-        ctx.blas.gemm(cfg, &dev_cent, &dev_data, &mut dev_cross)?;
+        ctx.blas().gemm(cfg, &dev_cent, &dev_data, &mut dev_cross)?;
     }
 
     // Copy cross term back and add squared norms
