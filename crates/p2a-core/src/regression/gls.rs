@@ -5,9 +5,9 @@
 
 use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
+use crate::linalg::DesignError;
 use crate::linalg::design::DesignMatrix;
 use crate::linalg::matrix_ops::{safe_inverse, xtx};
-use crate::linalg::{DesignError};
 use crate::traits::estimator::t_test_p_value;
 use ndarray::{Array1, Array2, ArrayView2, s};
 use serde::{Deserialize, Serialize};

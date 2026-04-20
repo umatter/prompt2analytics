@@ -1186,8 +1186,7 @@ pub fn run_doubly_robust(
                     // `unreachable!()` AIPW arm that used to be a maintenance trap.
                     let effect_boot = if method == DRMethod::IPW {
                         // Reuse cached propensity scores (resample them).
-                        let ps_boot: Array1<f64> =
-                            indices.iter().map(|&i| ps_trim[i]).collect();
+                        let ps_boot: Array1<f64> = indices.iter().map(|&i| ps_trim[i]).collect();
                         compute_ipw_effect(&y_boot, &d_boot, &ps_boot, estimand, true)
                     } else {
                         // Reuse cached outcome model predictions (resample them).
