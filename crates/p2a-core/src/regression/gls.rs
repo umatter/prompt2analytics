@@ -3,7 +3,10 @@
 //! GLS extends OLS to handle correlated and heteroscedastic errors.
 //! The model is Y = Xβ + ε where Var(ε) = σ²Ω.
 
+use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
+use crate::linalg::DesignError;
+use crate::linalg::design::DesignMatrix;
 use crate::linalg::matrix_ops::{safe_inverse, xtx};
 use crate::traits::estimator::t_test_p_value;
 use ndarray::{Array1, Array2, ArrayView2, s};
@@ -369,8 +372,11 @@ pub fn gls_ar1_auto(y: &ndarray::ArrayView1<f64>, x: &ArrayView2<f64>) -> EconRe
     gls(y, x, CorrelationStructure::AR1 { rho })
 }
 
-/// Run GLS with string correlation specification (MCP wrapper).
-pub fn run_gls(
+/// Run GLS from raw flat slices.
+///
+/// Lower-level entry point that takes a flat row-major X buffer. Most callers
+/// should prefer [`run_gls`], which extracts columns from a `Dataset`.
+pub fn run_gls_raw(
     y: &[f64],
     x: &[f64],
     n_cols: usize,
@@ -384,7 +390,41 @@ pub fn run_gls(
             message: format!("Invalid X matrix shape: {}", e),
         }
     })?;
+    dispatch_gls(&y_arr, &x_arr, correlation_type, correlation_param)
+}
 
+/// Run GLS against a `Dataset`, matching the column-based pattern used by
+/// [`crate::run_ols`] and the rest of the regression family.
+///
+/// # Arguments
+/// * `dataset` - The source dataset.
+/// * `y_col` - Name of the dependent variable column.
+/// * `x_cols` - Names of the regressor columns.
+/// * `intercept` - If `true`, a leading intercept column of ones is added to X.
+/// * `correlation_type` - One of `"ar1"`, `"ar1_auto"`, `"compound_symmetry"`
+///   (alias `"cs"`), `"identity"` (alias `"ols"`).
+/// * `correlation_param` - Required by `"ar1"` and `"compound_symmetry"`,
+///   ignored by `"ar1_auto"` and `"identity"`.
+pub fn run_gls(
+    dataset: &Dataset,
+    y_col: &str,
+    x_cols: &[&str],
+    intercept: bool,
+    correlation_type: &str,
+    correlation_param: Option<f64>,
+) -> EconResult<GlsResult> {
+    let df = dataset.df();
+    let design = DesignMatrix::from_dataframe(df, x_cols, intercept).map_err(map_design_err)?;
+    let y = DesignMatrix::extract_column(df, y_col).map_err(map_design_err)?;
+    dispatch_gls(&y, &design.data, correlation_type, correlation_param)
+}
+
+fn dispatch_gls(
+    y: &Array1<f64>,
+    x: &Array2<f64>,
+    correlation_type: &str,
+    correlation_param: Option<f64>,
+) -> EconResult<GlsResult> {
     let correlation = match correlation_type.to_lowercase().as_str() {
         "ar1" => {
             let rho = correlation_param.ok_or_else(|| EconError::InvalidSpecification {
@@ -393,7 +433,9 @@ pub fn run_gls(
             CorrelationStructure::AR1 { rho }
         }
         "ar1_auto" => {
-            return gls_ar1_auto(&y_arr.view(), &x_arr.view());
+            // gls_ar1_auto fits ρ from the data and produces a full GlsResult itself,
+            // so we short-circuit here rather than building a CorrelationStructure.
+            return gls_ar1_auto(&y.view(), &x.view());
         }
         "compound_symmetry" | "cs" => {
             let rho = correlation_param.ok_or_else(|| EconError::InvalidSpecification {
@@ -402,14 +444,32 @@ pub fn run_gls(
             CorrelationStructure::CompoundSymmetry { rho }
         }
         "identity" | "ols" => CorrelationStructure::Identity,
-        _ => {
+        other => {
             return Err(EconError::InvalidSpecification {
-                message: format!("Unknown correlation type: {}", correlation_type),
+                message: format!("Unknown correlation type: {}", other),
             });
         }
     };
+    gls(&y.view(), &x.view(), correlation)
+}
 
-    gls(&y_arr.view(), &x_arr.view(), correlation)
+fn map_design_err(e: DesignError) -> EconError {
+    match e {
+        DesignError::ColumnNotFound(c) => EconError::ColumnNotFound {
+            column: c,
+            available: Vec::new(),
+        },
+        DesignError::NonNumericColumn(c) => EconError::NonNumericColumn { column: c },
+        DesignError::NullValues(c, indices) => EconError::NullValues {
+            column: c,
+            count: indices.len(),
+        },
+        DesignError::EmptyDataset => EconError::EmptyDataset,
+        DesignError::NoColumns => EconError::InvalidSpecification {
+            message: "No independent variables specified".to_string(),
+        },
+        DesignError::PolarsError(e) => EconError::Internal(e.to_string()),
+    }
 }
 
 #[cfg(test)]

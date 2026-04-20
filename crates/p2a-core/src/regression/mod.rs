@@ -126,7 +126,7 @@ pub use evalue::{
     evalue_rr_ci,
     evalue_smd,
 };
-pub use gls::{CorrelationStructure, GlsResult, gls, gls_ar1_auto, run_gls};
+pub use gls::{CorrelationStructure, GlsResult, gls, gls_ar1_auto, run_gls, run_gls_raw};
 pub use line::{LineResult, line, run_line};
 pub use loess::{LoessConfig, LoessModel, LoessResult, loess, loess_predict, run_loess};
 pub use marginal_effects::{

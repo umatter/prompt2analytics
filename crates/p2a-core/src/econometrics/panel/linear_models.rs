@@ -195,6 +195,9 @@ pub fn run_fixed_effects(
         .map(|&p| SignificanceLevel::from_p_value(p))
         .collect();
 
+    let coef_arr = ndarray::Array1::from_vec(beta_vec.clone());
+    let se_arr = ndarray::Array1::from_vec(std_errors.clone());
+
     Ok(PanelResult {
         method: PanelMethod::FixedEffects,
         dep_var: y_col.to_string(),
@@ -215,6 +218,10 @@ pub fn run_fixed_effects(
         sigma_u: None,
         sigma_e: Some(sigma2.sqrt()),
         theta: None,
+        coef_arr,
+        se_arr,
+        residuals,
+        vcov,
     })
 }
 
@@ -512,6 +519,9 @@ pub fn run_random_effects(
         .map(|&p| SignificanceLevel::from_p_value(p))
         .collect();
 
+    let coef_arr = ndarray::Array1::from_vec(beta_vec.clone());
+    let se_arr = ndarray::Array1::from_vec(std_errors.clone());
+
     Ok(PanelResult {
         method: PanelMethod::RandomEffects,
         dep_var: y_col.to_string(),
@@ -531,6 +541,10 @@ pub fn run_random_effects(
         significance,
         sigma_u: Some(sigma2_u.sqrt()),
         sigma_e: Some(sigma2_e.sqrt()),
+        coef_arr,
+        se_arr,
+        residuals,
+        vcov,
         theta: Some(theta),
     })
 }

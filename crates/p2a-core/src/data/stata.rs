@@ -166,6 +166,23 @@ impl<R: Read + Seek> StataReader<R> {
         let var_types: Vec<StataType> = self.variables.iter().map(|v| v.dtype.clone()).collect();
         let var_names: Vec<String> = self.variables.iter().map(|v| v.name.clone()).collect();
 
+        // strL columns are not yet decoded (the strls section is skipped); each cell
+        // is replaced with the literal placeholder "<strL>". Surface this clearly so
+        // the caller does not silently consume corrupted string data.
+        let strl_columns: Vec<&String> = var_types
+            .iter()
+            .zip(&var_names)
+            .filter_map(|(dtype, name)| matches!(dtype, StataType::StrL).then_some(name))
+            .collect();
+        if !strl_columns.is_empty() {
+            tracing::warn!(
+                "Stata file contains long-string (strL) columns whose contents are not yet \
+                 supported by this reader; values in column(s) {:?} are replaced with the \
+                 placeholder \"<strL>\"",
+                strl_columns
+            );
+        }
+
         // Prepare column builders
         let mut columns: Vec<Vec<AnyValue>> =
             vec![Vec::with_capacity(self.n_obs as usize); self.n_vars];

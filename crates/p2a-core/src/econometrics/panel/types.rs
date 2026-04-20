@@ -2,10 +2,11 @@
 //!
 //! Contains `PanelResult` and `PanelMethod` used across panel estimators.
 
+use ndarray::{Array1, Array2};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-use crate::traits::estimator::SignificanceLevel;
+use crate::traits::estimator::{LinearEstimator, SignificanceLevel};
 
 /// Result from a panel data estimation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -48,6 +49,47 @@ pub struct PanelResult {
     pub sigma_e: Option<f64>,
     /// Theta (quasi-demeaning factor for RE)
     pub theta: Option<f64>,
+
+    // ── Trait-backing storage (LinearEstimator). Kept out of the public
+    //    JSON surface to avoid duplicating the Vec-typed fields above; round-
+    //    trip deserialization uses `default` to fall back to empty arrays.
+    /// Coefficients as `Array1`, used by `LinearEstimator::coefficients`.
+    #[serde(skip, default)]
+    pub coef_arr: Array1<f64>,
+    /// Standard errors as `Array1`, used by `LinearEstimator::std_errors`.
+    #[serde(skip, default)]
+    pub se_arr: Array1<f64>,
+    /// Residuals (`Array1`), used by `LinearEstimator::residuals`.
+    #[serde(skip, default)]
+    pub residuals: Array1<f64>,
+    /// Coefficient variance-covariance matrix (entity-clustered for FE,
+    /// quasi-GLS for RE), used by `LinearEstimator::vcov_matrix`.
+    #[serde(skip, default)]
+    pub vcov: Array2<f64>,
+}
+
+impl LinearEstimator for PanelResult {
+    fn coefficients(&self) -> &Array1<f64> {
+        &self.coef_arr
+    }
+    fn std_errors(&self) -> &Array1<f64> {
+        &self.se_arr
+    }
+    fn residuals(&self) -> &Array1<f64> {
+        &self.residuals
+    }
+    fn vcov_matrix(&self) -> &Array2<f64> {
+        &self.vcov
+    }
+    fn variable_names(&self) -> &[String] {
+        &self.variables
+    }
+    fn degrees_of_freedom(&self) -> usize {
+        self.df
+    }
+    fn n_obs(&self) -> usize {
+        self.n_obs
+    }
 }
 
 /// Panel estimation method.

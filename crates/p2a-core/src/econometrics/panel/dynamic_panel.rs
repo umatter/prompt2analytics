@@ -152,6 +152,45 @@ pub struct GmmResult {
     pub time_var: String,
     /// Warnings
     pub warnings: Vec<String>,
+
+    // ── Trait-backing storage (LinearEstimator). Skipped from JSON to keep the
+    //    public surface stable.
+    /// Coefficients as `Array1`, used by `LinearEstimator::coefficients`.
+    #[serde(skip, default)]
+    pub coef_arr: ndarray::Array1<f64>,
+    /// Standard errors as `Array1`, used by `LinearEstimator::std_errors`.
+    #[serde(skip, default)]
+    pub se_arr: ndarray::Array1<f64>,
+    /// Residuals from the GMM moment conditions.
+    #[serde(skip, default)]
+    pub residuals: ndarray::Array1<f64>,
+    /// Coefficient variance-covariance matrix.
+    #[serde(skip, default)]
+    pub vcov: ndarray::Array2<f64>,
+}
+
+impl crate::traits::estimator::LinearEstimator for GmmResult {
+    fn coefficients(&self) -> &ndarray::Array1<f64> {
+        &self.coef_arr
+    }
+    fn std_errors(&self) -> &ndarray::Array1<f64> {
+        &self.se_arr
+    }
+    fn residuals(&self) -> &ndarray::Array1<f64> {
+        &self.residuals
+    }
+    fn vcov_matrix(&self) -> &ndarray::Array2<f64> {
+        &self.vcov
+    }
+    fn variable_names(&self) -> &[String] {
+        &self.variables
+    }
+    fn degrees_of_freedom(&self) -> usize {
+        self.n_obs.saturating_sub(self.coefficients.len())
+    }
+    fn n_obs(&self) -> usize {
+        self.n_obs
+    }
 }
 
 impl fmt::Display for GmmResult {
@@ -593,6 +632,9 @@ pub fn run_gmm(
         variables.extend(d.column_names.iter().cloned());
     }
 
+    let coef_arr = ndarray::Array1::from_vec(beta_vec.clone());
+    let se_arr = ndarray::Array1::from_vec(std_errors.clone());
+
     Ok(GmmResult {
         transform: config.transform,
         step: step_used,
@@ -616,6 +658,10 @@ pub fn run_gmm(
         entity_var: entity_col.to_string(),
         time_var: time_col.to_string(),
         warnings,
+        coef_arr,
+        se_arr,
+        residuals: resid,
+        vcov,
     })
 }
 

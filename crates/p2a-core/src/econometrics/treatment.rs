@@ -1181,22 +1181,20 @@ pub fn run_doubly_robust(
                         return None;
                     }
 
-                    let effect_boot = match method {
-                        DRMethod::IPW => {
-                            // Reuse cached propensity scores (resample them)
-                            let ps_boot: Array1<f64> =
-                                indices.iter().map(|&i| ps_trim[i]).collect();
-                            compute_ipw_effect(&y_boot, &d_boot, &ps_boot, estimand, true)
-                        }
-                        DRMethod::Regression => {
-                            // Reuse cached outcome model predictions (resample them)
-                            let mu_1_boot: Array1<f64> = indices.iter().map(|&i| mu_1[i]).collect();
-                            let mu_0_boot: Array1<f64> = indices.iter().map(|&i| mu_0[i]).collect();
-                            let mean_mu1: f64 = mu_1_boot.iter().sum::<f64>() / n_trim as f64;
-                            let mean_mu0: f64 = mu_0_boot.iter().sum::<f64>() / n_trim as f64;
-                            mean_mu1 - mean_mu0
-                        }
-                        DRMethod::AIPW => unreachable!(),
+                    // The outer match arm restricts `method` to IPW or Regression;
+                    // an `if/else` keeps that contract explicit and removes the
+                    // `unreachable!()` AIPW arm that used to be a maintenance trap.
+                    let effect_boot = if method == DRMethod::IPW {
+                        // Reuse cached propensity scores (resample them).
+                        let ps_boot: Array1<f64> = indices.iter().map(|&i| ps_trim[i]).collect();
+                        compute_ipw_effect(&y_boot, &d_boot, &ps_boot, estimand, true)
+                    } else {
+                        // Reuse cached outcome model predictions (resample them).
+                        let mu_1_boot: Array1<f64> = indices.iter().map(|&i| mu_1[i]).collect();
+                        let mu_0_boot: Array1<f64> = indices.iter().map(|&i| mu_0[i]).collect();
+                        let mean_mu1: f64 = mu_1_boot.iter().sum::<f64>() / n_trim as f64;
+                        let mean_mu0: f64 = mu_0_boot.iter().sum::<f64>() / n_trim as f64;
+                        mean_mu1 - mean_mu0
                     };
 
                     if effect_boot.is_finite() {

@@ -1359,6 +1359,7 @@ pub use regression::{
     run_diagnostics,
     run_glmnet,
     run_gls,
+    run_gls_raw,
     run_harvey_collier,
     run_lasso,
     run_line,

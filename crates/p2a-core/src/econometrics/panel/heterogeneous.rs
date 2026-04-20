@@ -71,6 +71,40 @@ pub struct PvcmResult {
     pub df: usize,
     /// Entity variable name
     pub entity_var: String,
+
+    // ── Trait-backing storage (LinearEstimator). Skipped from JSON.
+    #[serde(skip, default)]
+    pub coef_arr: ndarray::Array1<f64>,
+    #[serde(skip, default)]
+    pub se_arr: ndarray::Array1<f64>,
+    #[serde(skip, default)]
+    pub residuals: ndarray::Array1<f64>,
+    #[serde(skip, default)]
+    pub vcov: ndarray::Array2<f64>,
+}
+
+impl crate::traits::estimator::LinearEstimator for PvcmResult {
+    fn coefficients(&self) -> &ndarray::Array1<f64> {
+        &self.coef_arr
+    }
+    fn std_errors(&self) -> &ndarray::Array1<f64> {
+        &self.se_arr
+    }
+    fn residuals(&self) -> &ndarray::Array1<f64> {
+        &self.residuals
+    }
+    fn vcov_matrix(&self) -> &ndarray::Array2<f64> {
+        &self.vcov
+    }
+    fn variable_names(&self) -> &[String] {
+        &self.variables
+    }
+    fn degrees_of_freedom(&self) -> usize {
+        self.df
+    }
+    fn n_obs(&self) -> usize {
+        self.n_obs
+    }
 }
 
 impl fmt::Display for PvcmResult {
@@ -411,6 +445,19 @@ pub fn run_pvcm(
     let homogeneity_df = ((n_valid_entities - 1) * k) as f64;
     let homogeneity_pvalue = chi_squared_p_value(homogeneity_stat, homogeneity_df);
 
+    let coef_arr = Array1::from_vec(coefficients.clone());
+    let se_arr = Array1::from_vec(std_errors.clone());
+    // PVCM aggregates entity-level fits; the overall residual vector and
+    // full vcov matrix are not retained at the aggregate level. Expose
+    // diagonal-only vcov (built from std_errors) and an empty residual
+    // vector via the trait, while keeping the full per-entity detail
+    // available through `individual_coefficients` / `individual_std_errors`.
+    let mut vcov = Array2::<f64>::zeros((coefficients.len(), coefficients.len()));
+    for (i, &se) in std_errors.iter().enumerate() {
+        vcov[[i, i]] = se * se;
+    }
+    let residuals: Array1<f64> = Array1::zeros(0);
+
     Ok(PvcmResult {
         model_type: model,
         dep_var: y_col.to_string(),
@@ -429,6 +476,10 @@ pub fn run_pvcm(
         n_entities,
         df,
         entity_var: entity_col.to_string(),
+        coef_arr,
+        se_arr,
+        residuals,
+        vcov,
     })
 }
 

@@ -1134,47 +1134,8 @@ fn execute_gls(
 
     match dataset {
         Some(ds) => {
-            // Extract y column
-            let df = ds.df();
-            let y_series = match df.column(dep_var) {
-                Ok(s) => s,
-                Err(_) => {
-                    print_error(&format!("Column '{}' not found", dep_var), format);
-                    return Ok(());
-                }
-            };
-            let y: Vec<f64> = y_series
-                .f64()
-                .map(|ca| ca.into_no_null_iter().collect())
-                .unwrap_or_default();
-
-            // Build design matrix with intercept if requested
-            let n = y.len();
-            let mut x_data: Vec<f64> = Vec::new();
-            let n_cols = if intercept {
-                indep_vars.len() + 1
-            } else {
-                indep_vars.len()
-            };
-
-            for i in 0..n {
-                if intercept {
-                    x_data.push(1.0);
-                }
-                for var in indep_vars {
-                    if let Ok(col) = df.column(var) {
-                        if let Ok(ca) = col.f64() {
-                            if let Some(v) = ca.get(i) {
-                                x_data.push(v);
-                            } else {
-                                x_data.push(0.0);
-                            }
-                        }
-                    }
-                }
-            }
-
-            match run_gls(&y, &x_data, n_cols, correlation, rho) {
+            let x_refs: Vec<&str> = indep_vars.iter().map(String::as_str).collect();
+            match run_gls(ds, dep_var, &x_refs, intercept, correlation, rho) {
                 Ok(result) => match format {
                     OutputFormat::Json => {
                         let json = serde_json::json!({

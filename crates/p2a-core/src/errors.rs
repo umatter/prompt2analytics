@@ -261,6 +261,12 @@ pub enum EconError {
 
     #[error("Computation error: {0}")]
     Computation(String),
+
+    /// A code path requested an estimator option that has not been implemented yet.
+    /// Returned in preference to silently dropping the user's request and producing
+    /// `None`/`NaN` outputs.
+    #[error("Not implemented: {0}")]
+    NotImplemented(String),
 }
 
 /// Warnings that don't prevent estimation but should be noted.
