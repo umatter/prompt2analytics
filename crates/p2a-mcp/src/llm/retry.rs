@@ -51,7 +51,11 @@ where
 
     for attempt in 0..=config.max_retries {
         if attempt > 0 {
-            tracing::info!(attempt = attempt, delay_ms = delay_ms, "Retrying API request");
+            tracing::info!(
+                attempt = attempt,
+                delay_ms = delay_ms,
+                "Retrying API request"
+            );
             tokio::time::sleep(Duration::from_millis(delay_ms)).await;
         }
 
@@ -72,10 +76,7 @@ where
                         .and_then(|v| v.parse::<u64>().ok());
 
                     let body = response.text().await.unwrap_or_default();
-                    last_error = Some(LlmError::ApiError(format!(
-                        "Rate limited (429): {}",
-                        body
-                    )));
+                    last_error = Some(LlmError::ApiError(format!("Rate limited (429): {}", body)));
 
                     if attempt < config.max_retries {
                         delay_ms = if let Some(seconds) = retry_after {

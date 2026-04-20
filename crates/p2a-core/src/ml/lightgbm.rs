@@ -42,8 +42,8 @@ use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 use serde::{Deserialize, Serialize};
 use std::collections::BinaryHeap;
 
-use crate::errors::{EconError, EconResult};
 use crate::Dataset;
+use crate::errors::{EconError, EconResult};
 
 /// Objective function for LightGBM.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -316,9 +316,10 @@ impl FeatureBins {
     #[inline]
     fn get_bin(&self, value: f64) -> usize {
         // Binary search for the right bin
-        match self.boundaries.binary_search_by(|b| {
-            b.partial_cmp(&value).unwrap_or(std::cmp::Ordering::Equal)
-        }) {
+        match self
+            .boundaries
+            .binary_search_by(|b| b.partial_cmp(&value).unwrap_or(std::cmp::Ordering::Equal))
+        {
             Ok(i) => i + 1, // Value equals boundary, goes to right bin
             Err(i) => i,    // Value between boundaries[i-1] and boundaries[i]
         }
@@ -655,7 +656,8 @@ fn compute_split_gain(
 ) -> f64 {
     let score_left = grad_left.powi(2) / (hess_left + lambda_l2).max(1e-10);
     let score_right = grad_right.powi(2) / (hess_right + lambda_l2).max(1e-10);
-    let score_parent = (grad_left + grad_right).powi(2) / (hess_left + hess_right + lambda_l2).max(1e-10);
+    let score_parent =
+        (grad_left + grad_right).powi(2) / (hess_left + hess_right + lambda_l2).max(1e-10);
 
     0.5 * (score_left + score_right - score_parent)
 }
@@ -847,8 +849,12 @@ fn fit_tree(
         // Check if we've reached max leaves
         if leaf_count >= config.num_leaves - 1 {
             // Convert remaining to leaf node
-            let value =
-                compute_leaf_value(leaf.grad_sum, leaf.hess_sum, config.lambda_l1, config.lambda_l2);
+            let value = compute_leaf_value(
+                leaf.grad_sum,
+                leaf.hess_sum,
+                config.lambda_l1,
+                config.lambda_l2,
+            );
             nodes[leaf.id] = Some(LgbNode::Leaf {
                 value,
                 n_samples: leaf.indices.len(),
@@ -864,8 +870,12 @@ fn fit_tree(
             config.max_depth as usize
         };
         if leaf.depth >= max_depth {
-            let value =
-                compute_leaf_value(leaf.grad_sum, leaf.hess_sum, config.lambda_l1, config.lambda_l2);
+            let value = compute_leaf_value(
+                leaf.grad_sum,
+                leaf.hess_sum,
+                config.lambda_l1,
+                config.lambda_l2,
+            );
             nodes[leaf.id] = Some(LgbNode::Leaf {
                 value,
                 n_samples: leaf.indices.len(),
@@ -876,8 +886,12 @@ fn fit_tree(
 
         // Check minimum gain
         if leaf.gain <= 0.0 {
-            let value =
-                compute_leaf_value(leaf.grad_sum, leaf.hess_sum, config.lambda_l1, config.lambda_l2);
+            let value = compute_leaf_value(
+                leaf.grad_sum,
+                leaf.hess_sum,
+                config.lambda_l1,
+                config.lambda_l2,
+            );
             nodes[leaf.id] = Some(LgbNode::Leaf {
                 value,
                 n_samples: leaf.indices.len(),
@@ -900,8 +914,12 @@ fn fit_tree(
         if left_indices.len() < config.min_data_in_leaf
             || right_indices.len() < config.min_data_in_leaf
         {
-            let value =
-                compute_leaf_value(leaf.grad_sum, leaf.hess_sum, config.lambda_l1, config.lambda_l2);
+            let value = compute_leaf_value(
+                leaf.grad_sum,
+                leaf.hess_sum,
+                config.lambda_l1,
+                config.lambda_l2,
+            );
             nodes[leaf.id] = Some(LgbNode::Leaf {
                 value,
                 n_samples: leaf.indices.len(),
@@ -921,65 +939,64 @@ fn fit_tree(
         let right_hess = leaf.hess_sum - left_hess;
 
         // Build histograms for smaller child, use subtraction for larger
-        let (left_histograms, right_histograms) =
-            if left_indices.len() < right_indices.len() {
-                let left_hist = build_histograms(
+        let (left_histograms, right_histograms) = if left_indices.len() < right_indices.len() {
+            let left_hist = build_histograms(
+                binned_data,
+                gradients,
+                hessians,
+                &left_indices,
+                feature_bins,
+                feature_subset,
+            );
+
+            // Use subtraction trick for right child
+            let parent_hist = histogram_cache.remove(&leaf.id).unwrap_or_else(|| {
+                build_histograms(
                     binned_data,
                     gradients,
                     hessians,
-                    &left_indices,
+                    &leaf.indices,
                     feature_bins,
                     feature_subset,
-                );
+                )
+            });
 
-                // Use subtraction trick for right child
-                let parent_hist = histogram_cache.remove(&leaf.id).unwrap_or_else(|| {
-                    build_histograms(
-                        binned_data,
-                        gradients,
-                        hessians,
-                        &leaf.indices,
-                        feature_bins,
-                        feature_subset,
-                    )
-                });
+            let right_hist: Vec<Histogram> = parent_hist
+                .iter()
+                .zip(left_hist.iter())
+                .map(|(p, l)| subtract_histograms(p, l))
+                .collect();
 
-                let right_hist: Vec<Histogram> = parent_hist
-                    .iter()
-                    .zip(left_hist.iter())
-                    .map(|(p, l)| subtract_histograms(p, l))
-                    .collect();
+            (left_hist, right_hist)
+        } else {
+            let right_hist = build_histograms(
+                binned_data,
+                gradients,
+                hessians,
+                &right_indices,
+                feature_bins,
+                feature_subset,
+            );
 
-                (left_hist, right_hist)
-            } else {
-                let right_hist = build_histograms(
+            let parent_hist = histogram_cache.remove(&leaf.id).unwrap_or_else(|| {
+                build_histograms(
                     binned_data,
                     gradients,
                     hessians,
-                    &right_indices,
+                    &leaf.indices,
                     feature_bins,
                     feature_subset,
-                );
+                )
+            });
 
-                let parent_hist = histogram_cache.remove(&leaf.id).unwrap_or_else(|| {
-                    build_histograms(
-                        binned_data,
-                        gradients,
-                        hessians,
-                        &leaf.indices,
-                        feature_bins,
-                        feature_subset,
-                    )
-                });
+            let left_hist: Vec<Histogram> = parent_hist
+                .iter()
+                .zip(right_hist.iter())
+                .map(|(p, r)| subtract_histograms(p, r))
+                .collect();
 
-                let left_hist: Vec<Histogram> = parent_hist
-                    .iter()
-                    .zip(right_hist.iter())
-                    .map(|(p, r)| subtract_histograms(p, r))
-                    .collect();
-
-                (left_hist, right_hist)
-            };
+            (left_hist, right_hist)
+        };
 
         // Find best splits for children
         let left_split = find_best_split(
@@ -1060,8 +1077,12 @@ fn fit_tree(
 
     // Convert remaining items in queue to leaves
     for leaf in leaf_queue {
-        let value =
-            compute_leaf_value(leaf.grad_sum, leaf.hess_sum, config.lambda_l1, config.lambda_l2);
+        let value = compute_leaf_value(
+            leaf.grad_sum,
+            leaf.hess_sum,
+            config.lambda_l1,
+            config.lambda_l2,
+        );
         nodes[leaf.id] = Some(LgbNode::Leaf {
             value,
             n_samples: leaf.indices.len(),
@@ -1096,13 +1117,13 @@ fn build_tree_from_nodes(
             ..
         }) => {
             if let Some(&(left_id, right_id)) = child_ids.get(&id) {
-                let left = build_tree_from_nodes(nodes, child_ids, left_id)
-                    .unwrap_or(LgbNode::Leaf {
+                let left =
+                    build_tree_from_nodes(nodes, child_ids, left_id).unwrap_or(LgbNode::Leaf {
                         value: 0.0,
                         n_samples: 0,
                     });
-                let right = build_tree_from_nodes(nodes, child_ids, right_id)
-                    .unwrap_or(LgbNode::Leaf {
+                let right =
+                    build_tree_from_nodes(nodes, child_ids, right_id).unwrap_or(LgbNode::Leaf {
                         value: 0.0,
                         n_samples: 0,
                     });
@@ -1207,7 +1228,12 @@ pub fn lightgbm(
     let mut total_importance_split: Array1<f64> = Array1::zeros(n_features);
 
     // Initial loss
-    train_loss.push(compute_loss(&y, &predictions, config.objective, config.huber_delta));
+    train_loss.push(compute_loss(
+        &y,
+        &predictions,
+        config.objective,
+        config.huber_delta,
+    ));
 
     // Step 4: Boosting iterations
     for iter in 0..config.num_iterations {
@@ -1235,8 +1261,7 @@ pub fn lightgbm(
 
         // Sample features
         let feature_subset: Vec<usize> = if config.feature_fraction < 1.0 {
-            let n_features_sample =
-                ((n_features as f64) * config.feature_fraction).ceil() as usize;
+            let n_features_sample = ((n_features as f64) * config.feature_fraction).ceil() as usize;
             let mut indices: Vec<usize> = (0..n_features).collect();
             for i in 0..n_features_sample.min(indices.len()) {
                 let j = i + lcg_random(&mut rng_state) % (indices.len() - i);
@@ -1453,10 +1478,13 @@ pub fn run_lightgbm(
         .iter()
         .map(|s| s.to_string())
         .collect();
-    let y_series = dataset.df().column(y_col).map_err(|_| EconError::ColumnNotFound {
-        column: y_col.to_string(),
-        available: col_names.clone(),
-    })?;
+    let y_series = dataset
+        .df()
+        .column(y_col)
+        .map_err(|_| EconError::ColumnNotFound {
+            column: y_col.to_string(),
+            available: col_names.clone(),
+        })?;
 
     let y: Vec<f64> = y_series
         .f64()
@@ -1573,8 +1601,16 @@ mod tests {
         // Low values should have low probability, high values should have high probability
         let avg_low: f64 = result.predictions[0..4].iter().sum::<f64>() / 4.0;
         let avg_high: f64 = result.predictions[4..8].iter().sum::<f64>() / 4.0;
-        assert!(avg_low < 0.5, "Average low prediction {} should be < 0.5", avg_low);
-        assert!(avg_high > 0.5, "Average high prediction {} should be > 0.5", avg_high);
+        assert!(
+            avg_low < 0.5,
+            "Average low prediction {} should be < 0.5",
+            avg_low
+        );
+        assert!(
+            avg_high > 0.5,
+            "Average high prediction {} should be > 0.5",
+            avg_high
+        );
     }
 
     #[test]
@@ -1632,7 +1668,11 @@ mod tests {
         assert_eq!(predictions.len(), 3);
         // Predictions should be in reasonable range
         for &p in &predictions {
-            assert!(p > 0.0 && p < 10.0, "Prediction {} out of expected range", p);
+            assert!(
+                p > 0.0 && p < 10.0,
+                "Prediction {} out of expected range",
+                p
+            );
         }
     }
 
@@ -1818,9 +1858,9 @@ mod tests {
     fn test_split_gain_calculation() {
         // Test the split gain formula
         let gain = compute_split_gain(
-            -1.0, 2.0,  // left: grad=-1, hess=2
-            1.0, 2.0,   // right: grad=1, hess=2
-            0.0,        // no regularization
+            -1.0, 2.0, // left: grad=-1, hess=2
+            1.0, 2.0, // right: grad=1, hess=2
+            0.0, // no regularization
         );
 
         // Expected: 0.5 * [1/2 + 1/2 - 0/4] = 0.5

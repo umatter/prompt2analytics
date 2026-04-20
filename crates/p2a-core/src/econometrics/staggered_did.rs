@@ -1841,7 +1841,9 @@ mod tests {
 
         // Check post-treatment group-time ATTs
         let true_atts: std::collections::HashMap<i64, f64> =
-            [(2002, 2.0), (2004, 4.0), (2006, 6.0)].into_iter().collect();
+            [(2002, 2.0), (2004, 4.0), (2006, 6.0)]
+                .into_iter()
+                .collect();
 
         for att in &result.group_time_atts {
             if att.post_treatment {

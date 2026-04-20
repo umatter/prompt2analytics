@@ -1100,6 +1100,9 @@ pub use ml::{
     SmoothingMethod,
     SvmKernel,
     SvmResult,
+    // Tree node (for SHAP)
+    TreeNode,
+    TsneResult,
     VariableImportanceResult,
     // XGBoost
     XGBoostConfig,
@@ -1107,9 +1110,6 @@ pub use ml::{
     XGBoostObjective,
     XGBoostResult,
     XGBoostTree,
-    // Tree node (for SHAP)
-    TreeNode,
-    TsneResult,
     adaboost,
     adaboost_predict,
     adaboost_predict_class,
@@ -1129,14 +1129,14 @@ pub use ml::{
     c50_predict_proba,
     // Causal Forests (Wager & Athey 2018)
     cart,
+    cart_partial_dependence,
     cart_predict,
     cart_prune,
+    cart_variable_importance,
     causal_forest,
     causal_forest_arrays,
     causal_forest_predict,
     causal_forest_predict_arrays,
-    cart_partial_dependence,
-    cart_variable_importance,
     cmdscale,
     cmdscale_from_data,
     compute_ice_curves,

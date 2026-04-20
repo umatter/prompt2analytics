@@ -1476,16 +1476,20 @@ fn cox_gradient_hessian(
 
                             let inv_s0_adj = 1.0 / s0_adj;
                             for jj in 0..p {
-                                let x_bar_jj = (s1[jj] - fraction * sum_x_exp_events[jj]) * inv_s0_adj;
+                                let x_bar_jj =
+                                    (s1[jj] - fraction * sum_x_exp_events[jj]) * inv_s0_adj;
                                 grad[jj] += xi[jj] - x_bar_jj;
                             }
 
                             for jj in 0..p {
-                                let x_bar_jj = (s1[jj] - fraction * sum_x_exp_events[jj]) * inv_s0_adj;
+                                let x_bar_jj =
+                                    (s1[jj] - fraction * sum_x_exp_events[jj]) * inv_s0_adj;
                                 for kk in 0..p {
-                                    let x_bar_kk = (s1[kk] - fraction * sum_x_exp_events[kk]) * inv_s0_adj;
-                                    hess[[jj, kk]] +=
-                                        (s2[[jj, kk]] - fraction * sum_xx_exp_events[[jj, kk]]) * inv_s0_adj
+                                    let x_bar_kk =
+                                        (s1[kk] - fraction * sum_x_exp_events[kk]) * inv_s0_adj;
+                                    hess[[jj, kk]] += (s2[[jj, kk]]
+                                        - fraction * sum_xx_exp_events[[jj, kk]])
+                                        * inv_s0_adj
                                         - x_bar_jj * x_bar_kk;
                                 }
                             }
@@ -1561,10 +1565,7 @@ fn compute_concordance(
     let eta: Vec<f64> = (0..n).map(|i| x.row(i).dot(beta)).collect();
 
     // Create (time, event, risk_score) sorted by time ascending
-    let mut sorted: Vec<(f64, bool, f64)> = obs
-        .iter()
-        .map(|&(t, e, ri)| (t, e, eta[ri]))
-        .collect();
+    let mut sorted: Vec<(f64, bool, f64)> = obs.iter().map(|&(t, e, ri)| (t, e, eta[ri])).collect();
     sorted.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
 
     // Coordinate-compress risk scores for Fenwick tree indexing
@@ -1574,9 +1575,7 @@ fn compute_concordance(
     let m = scores.len(); // number of distinct risk scores
 
     // Map risk score -> 1-indexed rank
-    let score_rank = |s: f64| -> usize {
-        scores.partition_point(|&v| v < s) + 1
-    };
+    let score_rank = |s: f64| -> usize { scores.partition_point(|&v| v < s) + 1 };
 
     let mut concordant = 0.0_f64;
     let mut discordant = 0.0_f64;

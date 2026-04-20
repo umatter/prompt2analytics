@@ -113,13 +113,17 @@ impl OllamaProvider {
     ) -> Result<Message, LlmError> {
         let mut iterations = 0;
         let mut tool_call_history: Vec<u64> = Vec::new();
-        let mut tool_name_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        let mut tool_name_counts: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
         let mut last_text_content = String::new();
 
         loop {
             iterations += 1;
             if iterations > max_iterations {
-                tracing::warn!("Maximum tool execution iterations ({}) exceeded, returning partial results", max_iterations);
+                tracing::warn!(
+                    "Maximum tool execution iterations ({}) exceeded, returning partial results",
+                    max_iterations
+                );
                 let fallback = if last_text_content.is_empty() {
                     "Analysis reached the maximum number of tool calls. Here are the results gathered so far.".to_string()
                 } else {
@@ -154,7 +158,9 @@ impl OllamaProvider {
 
                     // Check for exact repeat of previous iteration
                     if tool_call_history.last() == Some(&hash) {
-                        tracing::warn!("Loop detected: exact repeat of previous tool calls, breaking");
+                        tracing::warn!(
+                            "Loop detected: exact repeat of previous tool calls, breaking"
+                        );
                         let fallback = if last_text_content.is_empty() {
                             "Analysis detected a repeated tool call pattern and stopped. Please try rephrasing your request.".to_string()
                         } else {
@@ -174,9 +180,16 @@ impl OllamaProvider {
                         let count = tool_name_counts.entry(tc.name.clone()).or_insert(0);
                         *count += 1;
                         if *count > 3 {
-                            tracing::warn!("Loop detected: tool '{}' called {} times, breaking", tc.name, count);
+                            tracing::warn!(
+                                "Loop detected: tool '{}' called {} times, breaking",
+                                tc.name,
+                                count
+                            );
                             let fallback = if last_text_content.is_empty() {
-                                format!("Analysis stopped: tool '{}' was called repeatedly. Here are the results gathered so far.", tc.name)
+                                format!(
+                                    "Analysis stopped: tool '{}' was called repeatedly. Here are the results gathered so far.",
+                                    tc.name
+                                )
                             } else {
                                 last_text_content
                             };
@@ -262,11 +275,9 @@ impl OllamaProvider {
 
         let retry_config = super::retry::RetryConfig::default();
         let client = &self.client;
-        let response = super::retry::send_with_retry(
-            || client.post(&url).json(&request_body),
-            &retry_config,
-        )
-        .await?;
+        let response =
+            super::retry::send_with_retry(|| client.post(&url).json(&request_body), &retry_config)
+                .await?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -328,11 +339,9 @@ impl OllamaProvider {
 
         let retry_config = super::retry::RetryConfig::default();
         let client = &self.client;
-        let response = super::retry::send_with_retry(
-            || client.post(&url).json(&request_body),
-            &retry_config,
-        )
-        .await?;
+        let response =
+            super::retry::send_with_retry(|| client.post(&url).json(&request_body), &retry_config)
+                .await?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -440,9 +449,18 @@ impl LlmProvider for OllamaProvider {
         interpret: bool,
     ) -> Result<Message, LlmError> {
         let mut conversation = messages.to_vec();
-        let max_iterations = self.config.max_tool_iterations.unwrap_or(super::provider::DEFAULT_MAX_TOOL_ITERATIONS);
-        self.execute_tool_loop(&mut conversation, tools, tool_executor, max_iterations, interpret)
-            .await
+        let max_iterations = self
+            .config
+            .max_tool_iterations
+            .unwrap_or(super::provider::DEFAULT_MAX_TOOL_ITERATIONS);
+        self.execute_tool_loop(
+            &mut conversation,
+            tools,
+            tool_executor,
+            max_iterations,
+            interpret,
+        )
+        .await
     }
 
     async fn chat_stream(
@@ -455,15 +473,22 @@ impl LlmProvider for OllamaProvider {
     ) -> Result<Message, LlmError> {
         let mut conversation = messages.to_vec();
         let mut iterations = 0;
-        let max_iterations = self.config.max_tool_iterations.unwrap_or(super::provider::DEFAULT_MAX_TOOL_ITERATIONS);
+        let max_iterations = self
+            .config
+            .max_tool_iterations
+            .unwrap_or(super::provider::DEFAULT_MAX_TOOL_ITERATIONS);
         let mut tool_call_history: Vec<u64> = Vec::new();
-        let mut tool_name_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        let mut tool_name_counts: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
         let mut last_text_content = String::new();
 
         loop {
             iterations += 1;
             if iterations > max_iterations {
-                tracing::warn!("Maximum tool execution iterations ({}) exceeded, returning partial results", max_iterations);
+                tracing::warn!(
+                    "Maximum tool execution iterations ({}) exceeded, returning partial results",
+                    max_iterations
+                );
                 let fallback = if last_text_content.is_empty() {
                     "Analysis reached the maximum number of tool calls. Here are the results gathered so far.".to_string()
                 } else {
@@ -500,7 +525,9 @@ impl LlmProvider for OllamaProvider {
 
                     // Check for exact repeat of previous iteration
                     if tool_call_history.last() == Some(&hash) {
-                        tracing::warn!("Loop detected: exact repeat of previous tool calls, breaking");
+                        tracing::warn!(
+                            "Loop detected: exact repeat of previous tool calls, breaking"
+                        );
                         let fallback = if last_text_content.is_empty() {
                             "Analysis detected a repeated tool call pattern and stopped. Please try rephrasing your request.".to_string()
                         } else {
@@ -520,9 +547,16 @@ impl LlmProvider for OllamaProvider {
                         let count = tool_name_counts.entry(tc.name.clone()).or_insert(0);
                         *count += 1;
                         if *count > 3 {
-                            tracing::warn!("Loop detected: tool '{}' called {} times, breaking", tc.name, count);
+                            tracing::warn!(
+                                "Loop detected: tool '{}' called {} times, breaking",
+                                tc.name,
+                                count
+                            );
                             let fallback = if last_text_content.is_empty() {
-                                format!("Analysis stopped: tool '{}' was called repeatedly. Here are the results gathered so far.", tc.name)
+                                format!(
+                                    "Analysis stopped: tool '{}' was called repeatedly. Here are the results gathered so far.",
+                                    tc.name
+                                )
                             } else {
                                 last_text_content
                             };

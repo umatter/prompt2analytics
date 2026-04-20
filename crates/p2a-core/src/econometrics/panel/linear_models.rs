@@ -288,10 +288,11 @@ pub fn run_random_effects(
     } else {
         // Fallback: use pooled OLS residual variance
         let xtx_mat = xtx(&x.view());
-        let (xtx_inv, _) = safe_inverse(&xtx_mat.view()).map_err(|e| EconError::SingularMatrix {
-            context: "X'X in Random Effects".to_string(),
-            suggestion: format!("Check for perfect multicollinearity: {:?}", e),
-        })?;
+        let (xtx_inv, _) =
+            safe_inverse(&xtx_mat.view()).map_err(|e| EconError::SingularMatrix {
+                context: "X'X in Random Effects".to_string(),
+                suggestion: format!("Check for perfect multicollinearity: {:?}", e),
+            })?;
         let xty_vec = xty(&x.view(), &y);
         let beta_pooled: Array1<f64> = xtx_inv.dot(&xty_vec);
         let residuals_pooled = &y - &x.dot(&beta_pooled);

@@ -998,15 +998,8 @@ mod tests {
         ];
         let y = array![0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0];
 
-        let result = linear_svm(
-            x.view(),
-            y.view(),
-            Some(10.0),
-            Some(500),
-            Some(1e-4),
-            None,
-        )
-        .unwrap();
+        let result =
+            linear_svm(x.view(), y.view(), Some(10.0), Some(500), Some(1e-4), None).unwrap();
 
         // Should achieve perfect classification on well-separated data
         let correct: usize = result
@@ -1039,15 +1032,8 @@ mod tests {
         ];
         let y = array![0.0, 0.0, 0.0, 1.0, 1.0, 1.0];
 
-        let result = linear_svm(
-            x.view(),
-            y.view(),
-            Some(1.0),
-            Some(300),
-            Some(1e-4),
-            None,
-        )
-        .unwrap();
+        let result =
+            linear_svm(x.view(), y.view(), Some(1.0), Some(300), Some(1e-4), None).unwrap();
 
         assert!(
             result.n_support_vectors > 0,
@@ -1082,15 +1068,8 @@ mod tests {
         ];
         let y = array![0.0, 0.0, 0.0, 1.0, 1.0, 1.0];
 
-        let result = linear_svm(
-            x.view(),
-            y.view(),
-            Some(1.0),
-            Some(300),
-            Some(1e-4),
-            None,
-        )
-        .unwrap();
+        let result =
+            linear_svm(x.view(), y.view(), Some(1.0), Some(300), Some(1e-4), None).unwrap();
 
         // Weight for feature 0 (the separating feature) should be positive
         // because class 1 has higher x1 values.

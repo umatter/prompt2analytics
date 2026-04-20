@@ -333,11 +333,10 @@ pub fn run_iv2sls(
     let xpzy = ztx_full.t().dot(&ztz_inv_zty);
 
     // β = (X'P_Z X)^{-1} X'P_Z y
-    let (xpzx_inv, _) =
-        safe_inverse(&xpzx.view()).map_err(|e| EconError::SingularMatrix {
-            context: "X'P_Z X in 2SLS second stage".to_string(),
-            suggestion: format!("Check for collinearity: {:?}", e),
-        })?;
+    let (xpzx_inv, _) = safe_inverse(&xpzx.view()).map_err(|e| EconError::SingularMatrix {
+        context: "X'P_Z X in 2SLS second stage".to_string(),
+        suggestion: format!("Check for collinearity: {:?}", e),
+    })?;
 
     let beta: Array1<f64> = xpzx_inv.dot(&xpzy);
 

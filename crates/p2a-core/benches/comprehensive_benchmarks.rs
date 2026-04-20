@@ -17,22 +17,22 @@ use bench_utils::{
 
 #[global_allocator]
 static ALLOC: TrackingAllocator = TrackingAllocator;
+use ndarray::{Array1, Array2};
+use p2a_core::econometrics::{DoubleMLConfig, LtmleConfig, LtmleData, run_double_ml, run_ltmle};
 use p2a_core::regression::CovarianceType;
 use p2a_core::regression::jarque_bera_test;
 use p2a_core::spatial::{Neighbors, SpatialWeights, WeightStyle};
 use p2a_core::stats::{RotationMethod, ScoresMethod, factanal, fisher_exact_test, isoreg};
-use p2a_core::econometrics::{DoubleMLConfig, LtmleConfig, LtmleData, run_double_ml, run_ltmle};
 use p2a_core::{
     CTmleConfig, CostFunction, DRMethod, Dataset, DoublyRobustConfig, Estimand, EtwfeConfig,
     FisherAlternative, IpwConfig, Linkage, MatchMethod, MediationConfig, PredictorSpec, RdConfig,
     SarConfig, SemConfig, StaggeredDidConfig, SynthConfig, TmleConfig, WeightItConfig,
     bacon_decomp, ctmle, dbscan, hierarchical, kmeans, match_it, pca, random_forest, run_arima,
     run_cbps, run_changepoint, run_did, run_doubly_robust, run_etwfe, run_fixed_effects, run_hdfe,
-    run_ipw_treatment, run_iv2sls, run_loess, run_logit, run_mediation_analysis, run_mstl,
-    run_ols, run_probit, run_random_effects, run_rd, run_sar_dataset, run_sem_dataset,
-    run_staggered_did, run_synthetic_control, tmle, weightit,
+    run_ipw_treatment, run_iv2sls, run_loess, run_logit, run_mediation_analysis, run_mstl, run_ols,
+    run_probit, run_random_effects, run_rd, run_sar_dataset, run_sem_dataset, run_staggered_did,
+    run_synthetic_control, tmle, weightit,
 };
-use ndarray::{Array1, Array2};
 use polars::prelude::*;
 use rand::Rng;
 use rand::SeedableRng;
@@ -293,7 +293,11 @@ fn generate_treatment_data(n: usize, seed: u64) -> Dataset {
     let treatment: Vec<f64> = (0..n)
         .map(|i| {
             let prob = 1.0 / (1.0 + (-0.3 * x1[i] - 0.2 * x2[i]).exp());
-            if rng.gen_range(0.0..1.0) < prob { 1.0 } else { 0.0 }
+            if rng.gen_range(0.0..1.0) < prob {
+                1.0
+            } else {
+                0.0
+            }
         })
         .collect();
     let y: Vec<f64> = (0..n)
@@ -324,7 +328,11 @@ fn generate_doubleml_data(n: usize, seed: u64) -> (Array1<f64>, Array1<f64>, Arr
         .map(|i| {
             let lin: f64 = (0..k).map(|j| 0.2 * x[[i, j]]).sum();
             let prob = 1.0 / (1.0 + (-lin).exp());
-            if rng.gen_range(0.0..1.0) < prob { 1.0 } else { 0.0 }
+            if rng.gen_range(0.0..1.0) < prob {
+                1.0
+            } else {
+                0.0
+            }
         })
         .collect();
     let y: Array1<f64> = (0..n)
@@ -342,15 +350,20 @@ fn generate_mediation_data(n: usize, seed: u64) -> Dataset {
 
     let x1: Vec<f64> = (0..n).map(|_| rng.gen_range(-1.0..1.0)).collect();
     let treatment: Vec<f64> = (0..n)
-        .map(|_| if rng.gen_range(0.0..1.0) < 0.5 { 1.0 } else { 0.0 })
+        .map(|_| {
+            if rng.gen_range(0.0..1.0) < 0.5 {
+                1.0
+            } else {
+                0.0
+            }
+        })
         .collect();
     let mediator: Vec<f64> = (0..n)
         .map(|i| 0.5 * treatment[i] + 0.3 * x1[i] + rng.gen_range(-0.5..0.5))
         .collect();
     let y: Vec<f64> = (0..n)
         .map(|i| {
-            1.0 + 0.3 * treatment[i] + 0.5 * mediator[i] + 0.2 * x1[i]
-                + rng.gen_range(-0.5..0.5)
+            1.0 + 0.3 * treatment[i] + 0.5 * mediator[i] + 0.2 * x1[i] + rng.gen_range(-0.5..0.5)
         })
         .collect();
 
@@ -605,7 +618,11 @@ fn main() {
                 unit_ids.push(format!("unit_{}", u));
                 time_ids.push(t as i64);
                 let base = (u as f64) * 0.5 + (t as f64) * 0.1;
-                let treatment_effect = if u == 0 && t >= (n_periods * 7 / 10) { 2.0 } else { 0.0 };
+                let treatment_effect = if u == 0 && t >= (n_periods * 7 / 10) {
+                    2.0
+                } else {
+                    0.0
+                };
                 outcome.push(base + treatment_effect + rng.gen_range(-0.3..0.3));
                 pred1.push(rng.gen_range(0.0..1.0));
                 pred2.push(rng.gen_range(0.0..1.0));
@@ -838,7 +855,14 @@ fn main() {
     for n in [100, 1000, 10000] {
         let dataset = generate_iv_data(n, 42);
         let result = run_benchmark("IV_2SLS", "2sls", n, &slow_config, || {
-            run_iv2sls(&dataset, "y", &["x_exog"], &["x_endog"], &["instrument"], false)
+            run_iv2sls(
+                &dataset,
+                "y",
+                &["x_exog"],
+                &["x_endog"],
+                &["instrument"],
+                false,
+            )
         });
         print_result(&result);
         results.push(result);
@@ -971,7 +995,11 @@ fn main() {
                 &dataset,
                 "treatment",
                 &["x1", "x2"],
-                MatchMethod::NearestNeighbor { ratio: 1, caliper: None, replace: false },
+                MatchMethod::NearestNeighbor {
+                    ratio: 1,
+                    caliper: None,
+                    replace: false,
+                },
                 None,
             )
         });
@@ -1034,13 +1062,21 @@ fn main() {
         let a1: Array1<f64> = (0..n)
             .map(|i| {
                 let p = 1.0 / (1.0 + (-0.3 * x1[[i, 0]]).exp());
-                if rng.gen_range(0.0..1.0) < p { 1.0 } else { 0.0 }
+                if rng.gen_range(0.0..1.0) < p {
+                    1.0
+                } else {
+                    0.0
+                }
             })
             .collect();
         let a2: Array1<f64> = (0..n)
             .map(|i| {
                 let p = 1.0 / (1.0 + (-0.3 * x2[[i, 0]] - 0.2 * a1[i]).exp());
-                if rng.gen_range(0.0..1.0) < p { 1.0 } else { 0.0 }
+                if rng.gen_range(0.0..1.0) < p {
+                    1.0
+                } else {
+                    0.0
+                }
             })
             .collect();
         let y1: Array1<f64> = Array1::zeros(n);
@@ -1048,12 +1084,8 @@ fn main() {
             .map(|i| 1.0 + 0.5 * a1[i] + 0.3 * a2[i] + 0.2 * x1[[i, 0]] + rng.gen_range(-0.5..0.5))
             .collect();
 
-        let ltmle_data = LtmleData::new(
-            vec![y1, y2],
-            vec![a1, a2],
-            vec![x1, x2],
-        )
-        .expect("ltmle data");
+        let ltmle_data =
+            LtmleData::new(vec![y1, y2], vec![a1, a2], vec![x1, x2]).expect("ltmle data");
         let result = run_benchmark("LTMLE", "2-period", n, &slow_config, || {
             run_ltmle(&ltmle_data, LtmleConfig::default())
         });

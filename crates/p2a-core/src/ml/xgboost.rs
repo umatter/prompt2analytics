@@ -43,8 +43,8 @@ use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use crate::errors::{EconError, EconResult};
 use crate::Dataset;
+use crate::errors::{EconError, EconResult};
 
 /// Objective function for XGBoost.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -308,10 +308,7 @@ impl std::fmt::Display for XGBoostResult {
 
         for (i, importance) in indexed.iter().take(10) {
             let name = match &self.feature_names {
-                Some(names) => names
-                    .get(*i)
-                    .cloned()
-                    .unwrap_or_else(|| format!("f{}", i)),
+                Some(names) => names.get(*i).cloned().unwrap_or_else(|| format!("f{}", i)),
                 None => format!("f{}", i),
             };
             writeln!(f, "  {}: {:.4}", name, importance)?;
@@ -386,7 +383,11 @@ fn compute_gradients(
 }
 
 /// Compute training loss.
-fn compute_loss(y: &ArrayView1<f64>, predictions: &Array1<f64>, objective: XGBoostObjective) -> f64 {
+fn compute_loss(
+    y: &ArrayView1<f64>,
+    predictions: &Array1<f64>,
+    objective: XGBoostObjective,
+) -> f64 {
     let n = y.len() as f64;
 
     match objective {
@@ -511,7 +512,10 @@ fn build_tree(
 
     if depth >= max_depth || n <= 1 || h_sum < config.min_child_weight {
         let weight = optimal_weight(g_sum, h_sum, config.lambda, config.alpha);
-        return XGBoostNode::Leaf { weight, cover: h_sum };
+        return XGBoostNode::Leaf {
+            weight,
+            cover: h_sum,
+        };
     }
 
     // Find best split using exact greedy algorithm
@@ -549,7 +553,14 @@ fn build_tree(
                 continue;
             }
 
-            let gain = split_gain(g_left, h_left, g_right, h_right, config.lambda, config.gamma);
+            let gain = split_gain(
+                g_left,
+                h_left,
+                g_right,
+                h_right,
+                config.lambda,
+                config.gamma,
+            );
 
             if gain > best_gain {
                 best_gain = gain;
@@ -566,7 +577,10 @@ fn build_tree(
     // If no good split found (gain <= 0), return leaf
     if best_gain <= 0.0 || best_split.is_none() {
         let weight = optimal_weight(g_sum, h_sum, config.lambda, config.alpha);
-        return XGBoostNode::Leaf { weight, cover: h_sum };
+        return XGBoostNode::Leaf {
+            weight,
+            cover: h_sum,
+        };
     }
 
     let (feature, threshold) = best_split.unwrap();
@@ -656,7 +670,11 @@ fn random_features(n_features: usize, fraction: f64, rng_state: &mut u64) -> Vec
 ///
 /// Chen, T., & Guestrin, C. (2016). "XGBoost: A Scalable Tree Boosting System".
 /// Proceedings of the 22nd ACM SIGKDD, 785-794.
-pub fn xgboost(x: ArrayView2<f64>, y: ArrayView1<f64>, config: &XGBoostConfig) -> EconResult<XGBoostResult> {
+pub fn xgboost(
+    x: ArrayView2<f64>,
+    y: ArrayView1<f64>,
+    config: &XGBoostConfig,
+) -> EconResult<XGBoostResult> {
     let n_samples = x.nrows();
     let n_features = x.ncols();
 
@@ -685,7 +703,9 @@ pub fn xgboost(x: ArrayView2<f64>, y: ArrayView1<f64>, config: &XGBoostConfig) -
     let mut rng_state = config.seed.unwrap_or(42);
 
     // Initialize predictions with base score
-    let base_score = config.base_score.unwrap_or_else(|| compute_base_score(&y, config.objective));
+    let base_score = config
+        .base_score
+        .unwrap_or_else(|| compute_base_score(&y, config.objective));
     let mut predictions = Array1::from_elem(n_samples, base_score);
 
     let mut trees = Vec::with_capacity(config.n_estimators);
@@ -721,10 +741,7 @@ pub fn xgboost(x: ArrayView2<f64>, y: ArrayView1<f64>, config: &XGBoostConfig) -
             0,
         );
 
-        let tree = XGBoostTree {
-            root,
-            n_features,
-        };
+        let tree = XGBoostTree { root, n_features };
 
         // Update predictions for all samples
         for i in 0..n_samples {
@@ -835,9 +852,16 @@ pub fn xgboost_predict(result: &XGBoostResult, x: ArrayView2<f64>) -> EconResult
 }
 
 /// Predict class labels for binary classification.
-pub fn xgboost_predict_class(result: &XGBoostResult, x: ArrayView2<f64>, threshold: f64) -> EconResult<Vec<i32>> {
+pub fn xgboost_predict_class(
+    result: &XGBoostResult,
+    x: ArrayView2<f64>,
+    threshold: f64,
+) -> EconResult<Vec<i32>> {
     let probs = xgboost_predict(result, x)?;
-    Ok(probs.iter().map(|&p| if p >= threshold { 1 } else { 0 }).collect())
+    Ok(probs
+        .iter()
+        .map(|&p| if p >= threshold { 1 } else { 0 })
+        .collect())
 }
 
 /// Run XGBoost on a Dataset.
@@ -895,7 +919,11 @@ pub fn run_xgboost(
 }
 
 /// Convenience function for running XGBoost with default configuration.
-pub fn run_xgboost_default(dataset: &Dataset, y_col: &str, x_cols: &[&str]) -> EconResult<XGBoostResult> {
+pub fn run_xgboost_default(
+    dataset: &Dataset,
+    y_col: &str,
+    x_cols: &[&str],
+) -> EconResult<XGBoostResult> {
     run_xgboost(dataset, y_col, x_cols, &XGBoostConfig::default())
 }
 
@@ -977,11 +1005,7 @@ mod tests {
 
         // Predictions should be probabilities
         for &p in &result.predictions {
-            assert!(
-                (0.0..=1.0).contains(&p),
-                "Probability {} out of range",
-                p
-            );
+            assert!((0.0..=1.0).contains(&p), "Probability {} out of range", p);
         }
 
         // Low x values should have low probability, high values should have high probability

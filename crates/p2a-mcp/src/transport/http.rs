@@ -618,8 +618,7 @@ mod llm_handlers {
     use super::*;
     use crate::llm::{
         AnthropicProvider, LlmProvider, Message, OllamaProvider, OpenAIProvider, ProviderConfig,
-        ProviderType, ToolExecutor, build_enhanced_dataset_context,
-        get_system_prompt_with_context,
+        ProviderType, ToolExecutor, build_enhanced_dataset_context, get_system_prompt_with_context,
     };
     use crate::session::Session;
 
@@ -719,7 +718,10 @@ mod llm_handlers {
     /// If no API key is provided, checks for environment variables:
     /// - OPENAI_API_KEY for OpenAI
     /// - ANTHROPIC_API_KEY for Anthropic
-    fn create_provider_with_iterations(config: Option<ProviderConfig>, max_tool_iterations: Option<usize>) -> Box<dyn LlmProvider> {
+    fn create_provider_with_iterations(
+        config: Option<ProviderConfig>,
+        max_tool_iterations: Option<usize>,
+    ) -> Box<dyn LlmProvider> {
         let mut config = config.unwrap_or_default();
         // Override max_tool_iterations if provided at request level
         if max_tool_iterations.is_some() {
@@ -789,7 +791,8 @@ mod llm_handlers {
         };
 
         // Create provider and tool executor
-        let provider = create_provider_with_iterations(request.provider, request.max_tool_iterations);
+        let provider =
+            create_provider_with_iterations(request.provider, request.max_tool_iterations);
         let tool_executor = SessionToolExecutor::new(state.server.clone(), session.clone());
         let tools = state.server.list_tools_for_llm();
 
@@ -1715,7 +1718,8 @@ mod llm_handlers {
             };
 
             // Create provider and streaming tool executor
-            let provider = create_provider_with_iterations(request.provider, request.max_tool_iterations);
+            let provider =
+                create_provider_with_iterations(request.provider, request.max_tool_iterations);
             let mut tool_executor =
                 StreamingToolExecutor::new(state_clone.server.clone(), session, tx_clone.clone());
 

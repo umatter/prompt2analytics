@@ -706,13 +706,19 @@ mod tests {
         let model =
             StateSpaceModel::new(transition, observation, selection, state_cov, obs_var).unwrap();
 
-        let y: Vec<f64> = (0..50).map(|t| (t as f64) * 0.3 + 0.5 * (t as f64 * 0.2).sin()).collect();
+        let y: Vec<f64> = (0..50)
+            .map(|t| (t as f64) * 0.3 + 0.5 * (t as f64 * 0.2).sin())
+            .collect();
         let init_state = array![y[0]];
         let init_cov = array![[10.0]];
 
         let ll = kalman_loglik(&y, &model, init_state.view(), init_cov.view()).unwrap();
 
-        assert!(ll.is_finite(), "Log-likelihood should be finite, got {}", ll);
+        assert!(
+            ll.is_finite(),
+            "Log-likelihood should be finite, got {}",
+            ll
+        );
         assert!(ll < 0.0, "Log-likelihood should be negative, got {}", ll);
     }
 

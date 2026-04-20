@@ -2376,8 +2376,14 @@ mod tests {
         }
 
         // Should have correct count of treated and control
-        assert!(result.n_treated > 0, "Should have some treated observations");
-        assert!(result.n_control > 0, "Should have some control observations");
+        assert!(
+            result.n_treated > 0,
+            "Should have some treated observations"
+        );
+        assert!(
+            result.n_control > 0,
+            "Should have some control observations"
+        );
         assert_eq!(result.n_treated + result.n_control, result.n_obs);
     }
 }

@@ -335,16 +335,21 @@ mod tests {
         assert_eq!(result.p, 1);
         assert_eq!(result.d, 0);
         assert_eq!(result.q, 0);
-        assert!(!result.ar_coeffs.is_empty(), "Should have at least one AR coefficient");
+        assert!(
+            !result.ar_coeffs.is_empty(),
+            "Should have at least one AR coefficient"
+        );
 
         // The arima crate may return coefficients with an intercept prepended.
         // Check that at least one coefficient is close to the true AR(1) parameter.
-        let close_to_phi = result.ar_coeffs.iter().any(|&c| (c - phi_true).abs() < 0.25);
+        let close_to_phi = result
+            .ar_coeffs
+            .iter()
+            .any(|&c| (c - phi_true).abs() < 0.25);
         assert!(
             close_to_phi,
             "At least one AR coefficient should be close to phi_true={:.4}, got {:?}",
-            phi_true,
-            result.ar_coeffs
+            phi_true, result.ar_coeffs
         );
     }
 
@@ -361,7 +366,11 @@ mod tests {
 
         let result = run_arima(&dataset, "y", 1, 0, 0).unwrap();
 
-        assert!(result.aic.is_finite(), "AIC should be finite, got {}", result.aic);
+        assert!(
+            result.aic.is_finite(),
+            "AIC should be finite, got {}",
+            result.aic
+        );
         assert!(result.ssr.is_finite(), "SSR should be finite");
         assert!(result.ssr > 0.0, "SSR should be positive");
     }
@@ -384,7 +393,12 @@ mod tests {
 
         // All forecast values should be finite
         for (i, &f) in result.forecast.iter().enumerate() {
-            assert!(f.is_finite(), "Forecast at step {} should be finite, got {}", i, f);
+            assert!(
+                f.is_finite(),
+                "Forecast at step {} should be finite, got {}",
+                i,
+                f
+            );
         }
 
         // For a stationary AR(1), successive forecasts should move closer to 0

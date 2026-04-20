@@ -347,8 +347,12 @@ Remember: Your value is in orchestrating these powerful Rust tools, not in doing
 
 /// Categorize a tool by its name prefix and return the category label.
 fn tool_category(name: &str) -> &'static str {
-    if name.starts_with("load_") || name.starts_with("create_") || name.starts_with("list_datasets")
-        || name.starts_with("describe_") || name.starts_with("head_") || name.starts_with("export_")
+    if name.starts_with("load_")
+        || name.starts_with("create_")
+        || name.starts_with("list_datasets")
+        || name.starts_with("describe_")
+        || name.starts_with("head_")
+        || name.starts_with("export_")
         || name.starts_with("upload_")
     {
         "Data Management"
@@ -356,18 +360,30 @@ fn tool_category(name: &str) -> &'static str {
         "Regression"
     } else if name.starts_with("panel_") || name == "hausman_test" || name == "feglm" {
         "Panel Data"
-    } else if name.starts_with("iv_") || name.starts_with("diff_") || name.starts_with("staggered_")
-        || name == "etwfe" || name.starts_with("bacon_") || name.starts_with("rd_")
-        || name.starts_with("synthetic_") || name == "scpi" || name == "gsynth"
-        || name.starts_with("treatment_") || name.starts_with("propensity_")
+    } else if name.starts_with("iv_")
+        || name.starts_with("diff_")
+        || name.starts_with("staggered_")
+        || name == "etwfe"
+        || name.starts_with("bacon_")
+        || name.starts_with("rd_")
+        || name.starts_with("synthetic_")
+        || name == "scpi"
+        || name == "gsynth"
+        || name.starts_with("treatment_")
+        || name.starts_with("propensity_")
         || name == "marginal_effects"
     {
         "Causal Inference"
     } else if name.starts_with("hypothesis_") || name.starts_with("anova_") {
         "Hypothesis Testing"
-    } else if name == "logit" || name == "probit" || name.starts_with("ordered_")
-        || name == "negbin" || name == "mlogit" || name == "poisson"
-        || name.starts_with("zeroinfl") || name.starts_with("hurdle")
+    } else if name == "logit"
+        || name == "probit"
+        || name.starts_with("ordered_")
+        || name == "negbin"
+        || name == "mlogit"
+        || name == "poisson"
+        || name.starts_with("zeroinfl")
+        || name.starts_with("hurdle")
     {
         "Discrete Choice"
     } else if name.starts_with("ts_") || name.starts_with("timeseries_") {
@@ -398,16 +414,30 @@ fn generate_tool_listing(tools: &[ToolDefinition]) -> String {
     for tool in tools {
         let cat = tool_category(&tool.name);
         // Take the first sentence of the description
-        let desc = tool.description.split(". ").next().unwrap_or(&tool.description);
+        let desc = tool
+            .description
+            .split(". ")
+            .next()
+            .unwrap_or(&tool.description);
         categories.entry(cat).or_default().push((&tool.name, desc));
     }
 
     // Define display order
     let order = [
-        "Data Management", "Regression", "Panel Data", "Causal Inference",
-        "Hypothesis Testing", "Discrete Choice", "Time Series", "Machine Learning",
-        "Data Munging", "Visualization", "Database", "Survival Analysis",
-        "Spatial Econometrics", "Other",
+        "Data Management",
+        "Regression",
+        "Panel Data",
+        "Causal Inference",
+        "Hypothesis Testing",
+        "Discrete Choice",
+        "Time Series",
+        "Machine Learning",
+        "Data Munging",
+        "Visualization",
+        "Database",
+        "Survival Analysis",
+        "Spatial Econometrics",
+        "Other",
     ];
 
     let mut out = String::from("## AVAILABLE TOOLS BY CATEGORY\n\n");
@@ -494,13 +524,11 @@ mod tests {
 
     #[test]
     fn test_system_prompt_with_context_includes_tools() {
-        let tools = vec![
-            ToolDefinition {
-                name: "regression_ols".to_string(),
-                description: "Run OLS regression.".to_string(),
-                parameters: serde_json::json!({"type": "object"}),
-            },
-        ];
+        let tools = vec![ToolDefinition {
+            name: "regression_ols".to_string(),
+            description: "Run OLS regression.".to_string(),
+            parameters: serde_json::json!({"type": "object"}),
+        }];
         let prompt = get_system_prompt_with_context(Some("dataset: test"), &tools);
         assert!(prompt.contains("AVAILABLE TOOLS BY CATEGORY"));
         assert!(prompt.contains("`regression_ols`"));

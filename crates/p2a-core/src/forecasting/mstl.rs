@@ -133,7 +133,11 @@ mod tests {
         let result = run_mstl(&dataset, "y", &[7, 28]).unwrap();
 
         // Should extract two seasonal components
-        assert_eq!(result.seasonal.len(), 2, "Should have 2 seasonal components");
+        assert_eq!(
+            result.seasonal.len(),
+            2,
+            "Should have 2 seasonal components"
+        );
         assert_eq!(result.seasonal[0].len(), n);
         assert_eq!(result.seasonal[1].len(), n);
         assert_eq!(result.trend.len(), n);

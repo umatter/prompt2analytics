@@ -1601,10 +1601,7 @@ mod tests {
         assert_eq!(result.targeted_predictions.len(), 2);
 
         // Model should have converged
-        assert!(
-            result.converged,
-            "LTMLE should report convergence"
-        );
+        assert!(result.converged, "LTMLE should report convergence");
     }
 
     /// Validate LTMLE propensity score truncation.
@@ -1642,7 +1639,10 @@ mod tests {
         // Should report treatment counts per time point
         assert_eq!(result.n_treated_by_time.len(), 2);
         for &nt in &result.n_treated_by_time {
-            assert!(nt > 0, "Should have some treated observations at each time point");
+            assert!(
+                nt > 0,
+                "Should have some treated observations at each time point"
+            );
         }
     }
 

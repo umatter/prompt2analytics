@@ -1717,16 +1717,16 @@ mod tests {
         );
 
         // Cumulative bounds should also be ordered
-        assert!(
-            result.summary.cumulative_effect_lower <= result.summary.cumulative_effect,
-        );
-        assert!(
-            result.summary.cumulative_effect_upper >= result.summary.cumulative_effect,
-        );
+        assert!(result.summary.cumulative_effect_lower <= result.summary.cumulative_effect,);
+        assert!(result.summary.cumulative_effect_upper >= result.summary.cumulative_effect,);
 
         // CI width should be positive
         let ci_width = result.summary.average_effect_upper - result.summary.average_effect_lower;
-        assert!(ci_width > 0.0, "CI width should be positive, got {:.4}", ci_width);
+        assert!(
+            ci_width > 0.0,
+            "CI width should be positive, got {:.4}",
+            ci_width
+        );
     }
 
     #[test]

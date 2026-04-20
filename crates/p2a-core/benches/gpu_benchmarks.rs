@@ -58,12 +58,28 @@ fn main() {
         if let Some(ctx) = p2a_core::linalg::gpu::GpuContext::get() {
             println!("GPU: ENABLED (cuBLAS + cuSOLVER active)");
             println!("Thresholds:");
-            println!("  xtx    n*k²  >= {}, k >= {}", ctx.thresholds.xtx_min_nkk, ctx.thresholds.xtx_min_k);
-            println!("  xty    n     >= {} ({})", ctx.thresholds.xty_min_n,
-                if ctx.thresholds.xty_min_n == usize::MAX { "disabled" } else { "active" });
+            println!(
+                "  xtx    n*k²  >= {}, k >= {}",
+                ctx.thresholds.xtx_min_nkk, ctx.thresholds.xtx_min_k
+            );
+            println!(
+                "  xty    n     >= {} ({})",
+                ctx.thresholds.xty_min_n,
+                if ctx.thresholds.xty_min_n == usize::MAX {
+                    "disabled"
+                } else {
+                    "active"
+                }
+            );
             println!("  inv    k     >= {}", ctx.thresholds.inverse_min_k);
-            println!("  matmul mnk   >= {}, shape >= {:.2}", ctx.thresholds.matmul_min_mnk, ctx.thresholds.matmul_min_shape_ratio);
-            println!("  kmeans n     >= {}, d >= {}", ctx.thresholds.kmeans_min_n, ctx.thresholds.kmeans_min_d);
+            println!(
+                "  matmul mnk   >= {}, shape >= {:.2}",
+                ctx.thresholds.matmul_min_mnk, ctx.thresholds.matmul_min_shape_ratio
+            );
+            println!(
+                "  kmeans n     >= {}, d >= {}",
+                ctx.thresholds.kmeans_min_n, ctx.thresholds.kmeans_min_d
+            );
         } else {
             println!("GPU: NOT AVAILABLE (CUDA init failed, CPU-only run)");
         }
@@ -114,7 +130,11 @@ fn main() {
         let cfg = if *large { &lg_config } else { &config };
 
         let nkk = *n * *k * *k;
-        let tag = if *k >= 30 && nkk >= 20_000_000 { "GPU" } else { "CPU" };
+        let tag = if *k >= 30 && nkk >= 20_000_000 {
+            "GPU"
+        } else {
+            "CPU"
+        };
         let r = bench_utils::run_benchmark(
             &format!("xtx_{}", tag),
             &format!("{}x{}", n, k),
@@ -153,13 +173,9 @@ fn main() {
         let cfg = if *large { &lg_config } else { &config };
 
         // xty GPU dispatch is disabled by default (DGEMV slower than CPU)
-        let r = bench_utils::run_benchmark(
-            "xty_CPU",
-            &format!("{}x{}", n, k),
-            *n,
-            cfg,
-            || p2a_core::linalg::xty(&x.view(), &y),
-        );
+        let r = bench_utils::run_benchmark("xty_CPU", &format!("{}x{}", n, k), *n, cfg, || {
+            p2a_core::linalg::xty(&x.view(), &y)
+        });
         print_result(&r);
         results.push(r);
     }
@@ -195,7 +211,11 @@ fn main() {
         let min_d = *dims.iter().min().unwrap() as f64;
         let max_d = *dims.iter().max().unwrap() as f64;
         let shape_ratio = if max_d > 0.0 { min_d / max_d } else { 0.0 };
-        let tag = if mnk >= 1_000_000 && shape_ratio >= 0.1 { "GPU" } else { "CPU" };
+        let tag = if mnk >= 1_000_000 && shape_ratio >= 0.1 {
+            "GPU"
+        } else {
+            "CPU"
+        };
         let r = bench_utils::run_benchmark(
             &format!("matmul_{}", tag),
             &format!("{}x{}x{}", m, p, n_out),
@@ -213,8 +233,14 @@ fn main() {
     // ===================================================================
     println!("--- cholesky_inverse ---");
     print_header();
-    let inv_sizes: Vec<(usize, bool)> =
-        vec![(10, false), (50, false), (100, false), (200, false), (500, false), (1_000, true)];
+    let inv_sizes: Vec<(usize, bool)> = vec![
+        (10, false),
+        (50, false),
+        (100, false),
+        (200, false),
+        (500, false),
+        (1_000, true),
+    ];
     for (k, large) in &inv_sizes {
         let mut rng = ChaCha8Rng::seed_from_u64(42);
         // Positive definite matrix: X'X + I
@@ -262,18 +288,13 @@ fn main() {
         let y = generate_vector(*n, &mut rng);
         let cfg = if *large { &lg_config } else { &config };
 
-        let r = bench_utils::run_benchmark(
-            "ols_pipeline",
-            &format!("{}x{}", n, k),
-            *n,
-            cfg,
-            || {
+        let r =
+            bench_utils::run_benchmark("ols_pipeline", &format!("{}x{}", n, k), *n, cfg, || {
                 let xtx = p2a_core::linalg::xtx(&x.view());
                 let (xtx_inv, _) = p2a_core::linalg::safe_inverse(&xtx.view()).unwrap();
                 let xty_val = p2a_core::linalg::xty(&x.view(), &y);
                 xtx_inv.dot(&xty_val)
-            },
-        );
+            });
         print_result(&r);
         results.push(r);
     }
@@ -327,22 +348,16 @@ fn main() {
         let x_refs: Vec<&str> = x_names.iter().map(|s| s.as_str()).collect();
         let cfg = if *large { &lg_config } else { &config };
 
-        let r = bench_utils::run_benchmark(
-            "run_ols_hc1",
-            &format!("{}x{}", n, k),
-            *n,
-            cfg,
-            || {
-                p2a_core::regression::run_ols(
-                    &dataset,
-                    "y",
-                    &x_refs,
-                    true,
-                    p2a_core::regression::CovarianceType::HC1,
-                )
-                .unwrap()
-            },
-        );
+        let r = bench_utils::run_benchmark("run_ols_hc1", &format!("{}x{}", n, k), *n, cfg, || {
+            p2a_core::regression::run_ols(
+                &dataset,
+                "y",
+                &x_refs,
+                true,
+                p2a_core::regression::CovarianceType::HC1,
+            )
+            .unwrap()
+        });
         print_result(&r);
         results.push(r);
     }
@@ -372,22 +387,19 @@ fn main() {
         let data = generate_matrix(*n, *d, &mut rng);
         let cfg = if *large { &lg_config } else { &config };
 
-        let tag = if *n >= 10_000 && *d >= 20 { "GPU" } else { "CPU" };
+        let tag = if *n >= 10_000 && *d >= 20 {
+            "GPU"
+        } else {
+            "CPU"
+        };
         let r = bench_utils::run_benchmark(
             &format!("kmeans_{}", tag),
             &format!("{}x{}_k{}", n, d, k_clusters),
             *n,
             cfg,
             || {
-                p2a_core::kmeans(
-                    data.view(),
-                    *k_clusters,
-                    Some(50),
-                    None,
-                    Some(1),
-                    Some(42),
-                )
-                .unwrap()
+                p2a_core::kmeans(data.view(), *k_clusters, Some(50), None, Some(1), Some(42))
+                    .unwrap()
             },
         );
         print_result(&r);
@@ -449,14 +461,14 @@ fn main() {
     let hdfe_sizes: Vec<(usize, usize, usize, bool)> = vec![
         // (n_entities, n_periods, n_regressors, large_config)
         // Small: typical panel
-        (100, 50, 2, false),      // n=5K, k=2
-        (500, 100, 5, false),     // n=50K, k=5
-        (1_000, 100, 10, false),  // n=100K, k=10
-        (2_000, 100, 10, true),   // n=200K, k=10
-        (5_000, 100, 10, true),   // n=500K, k=10
+        (100, 50, 2, false),     // n=5K, k=2
+        (500, 100, 5, false),    // n=50K, k=5
+        (1_000, 100, 10, false), // n=100K, k=10
+        (2_000, 100, 10, true),  // n=200K, k=10
+        (5_000, 100, 10, true),  // n=500K, k=10
         // High-dimensional controls
-        (500, 100, 50, true),     // n=50K, k=50 — GPU xtx helps here
-        (1_000, 100, 50, true),   // n=100K, k=50
+        (500, 100, 50, true),   // n=50K, k=50 — GPU xtx helps here
+        (1_000, 100, 50, true), // n=100K, k=50
     ];
     for (n_ent, n_per, n_reg, large) in &hdfe_sizes {
         let n = *n_ent * *n_per;
@@ -496,7 +508,10 @@ fn main() {
         columns.push(polars::prelude::Column::new("entity".into(), &entity_ids));
         columns.push(polars::prelude::Column::new("time".into(), &time_ids));
         for (j, name) in x_names.iter().enumerate() {
-            columns.push(polars::prelude::Column::new(name.as_str().into(), &x_data[j]));
+            columns.push(polars::prelude::Column::new(
+                name.as_str().into(),
+                &x_data[j],
+            ));
         }
 
         let df = polars::prelude::DataFrame::new(columns).unwrap();

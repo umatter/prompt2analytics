@@ -667,7 +667,6 @@ impl AnalyticsServer {
             .collect()
     }
 
-
     /// List tools filtered for LLM function calling (Tier 1 only).
     /// Auto-generates definitions from the router's JsonSchema derives.
     #[cfg(feature = "http")]
@@ -698,7 +697,7 @@ impl AnalyticsServer {
             }
         }
 
-        use crate::llm::{ToolDefinition, TIER1_TOOLS, INTERNAL_TOOLS};
+        use crate::llm::{INTERNAL_TOOLS, TIER1_TOOLS, ToolDefinition};
 
         self.tool_router
             .list_all()
@@ -742,17 +741,15 @@ impl AnalyticsServer {
             let content: Vec<ContentItem> = call_result
                 .content
                 .into_iter()
-                .filter_map(|c| {
-                    match &c.raw {
-                        RawContent::Text(text_content) => Some(ContentItem::Text {
-                            text: text_content.text.clone(),
-                        }),
-                        RawContent::Image(img) => Some(ContentItem::Image {
-                            data: img.data.clone(),
-                            mime_type: img.mime_type.clone(),
-                        }),
-                        _ => None,
-                    }
+                .filter_map(|c| match &c.raw {
+                    RawContent::Text(text_content) => Some(ContentItem::Text {
+                        text: text_content.text.clone(),
+                    }),
+                    RawContent::Image(img) => Some(ContentItem::Image {
+                        data: img.data.clone(),
+                        mime_type: img.mime_type.clone(),
+                    }),
+                    _ => None,
                 })
                 .collect();
 
@@ -781,16 +778,21 @@ impl AnalyticsServer {
         macro_rules! dispatch {
             ($name:literal => no_params => $method:ident) => {
                 if tool_name == $name {
-                    let result = session_server.$method().await
+                    let result = session_server
+                        .$method()
+                        .await
                         .map_err(|e| format!("Tool execution failed: {:?}", e))?;
                     return Ok(convert_result(result));
                 }
             };
             ($name:literal => $req:ty => $method:ident) => {
                 if tool_name == $name {
-                    let request: $req = serde_json::from_value(arguments.clone())
-                        .map_err(|e| format!("Failed to parse arguments for '{}': {}", tool_name, e))?;
-                    let result = session_server.$method(Parameters(request)).await
+                    let request: $req = serde_json::from_value(arguments.clone()).map_err(|e| {
+                        format!("Failed to parse arguments for '{}': {}", tool_name, e)
+                    })?;
+                    let result = session_server
+                        .$method(Parameters(request))
+                        .await
                         .map_err(|e| format!("Tool execution failed: {:?}", e))?;
                     return Ok(convert_result(result));
                 }
@@ -1104,7 +1106,6 @@ impl AnalyticsServer {
         Err(format!("Unknown tool: {}", tool_name))
     }
 
-
     // ========================================================================
     // Cleaning Session Management Tools
     // ========================================================================
@@ -1221,7 +1222,6 @@ impl AnalyticsServer {
     // GLS and Smooth Spline Tools
     // ========================================================================
 }
-
 
 /// Helper function to extract a single column as Vec<f64>.
 fn extract_column_f64(dataset: &Dataset, column: &str) -> Result<Vec<f64>, String> {

@@ -11,26 +11,26 @@ use ndarray::{Array1, Array2, ArrayView2};
 use p2a_core::ml::{
     // C5.0
     C50Config,
-    c50,
-    c50_predict,
-    // Cubist
-    CubistConfig,
-    cubist,
-    cubist_predict,
     // CTree
     CtreeConfig,
-    ctree,
-    ctree_predict,
+    // Cubist
+    CubistConfig,
     // MBoost
     MboostBaseLearner,
     MboostConfig,
     MboostFamily,
-    mboost,
-    mboost_predict,
     // SHAP
     ShapConfig,
-    shap_values_model,
+    c50,
+    c50_predict,
+    ctree,
+    ctree_predict,
+    cubist,
+    cubist_predict,
+    mboost,
+    mboost_predict,
     random_forest_with_trees,
+    shap_values_model,
 };
 
 /// Create synthetic regression data: y = 2*x1 + 0.5*x2 + noise
@@ -38,7 +38,9 @@ fn create_regression_data(n: usize, seed: u64) -> (Array2<f64>, Array1<f64>) {
     // Simple LCG for reproducibility without external RNG
     let mut state = seed;
     let next = |s: &mut u64| -> f64 {
-        *s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        *s = s
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         ((*s >> 11) as f64) / ((1u64 << 53) as f64)
     };
 
@@ -65,7 +67,9 @@ fn create_regression_data(n: usize, seed: u64) -> (Array2<f64>, Array1<f64>) {
 fn create_classification_data(n: usize, seed: u64) -> (Array2<f64>, Array1<f64>) {
     let mut state = seed;
     let next = |s: &mut u64| -> f64 {
-        *s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        *s = s
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         ((*s >> 11) as f64) / ((1u64 << 53) as f64)
     };
 
@@ -134,9 +138,7 @@ fn test_validate_c50_classification() {
     println!("  Number of classes: {}", result.n_classes);
     println!(
         "  Variable importance: x1={:.4}, x2={:.4}, x3={:.4}",
-        result.variable_importance[0],
-        result.variable_importance[1],
-        result.variable_importance[2]
+        result.variable_importance[0], result.variable_importance[1], result.variable_importance[2]
     );
 
     // Training accuracy should be high for separable data
@@ -231,9 +233,7 @@ fn test_validate_cubist_regression() {
     println!("  Number of rules: {}", result.n_rules);
     println!(
         "  Variable importance: x1={:.4}, x2={:.4}, x3={:.4}",
-        result.variable_importance[0],
-        result.variable_importance[1],
-        result.variable_importance[2]
+        result.variable_importance[0], result.variable_importance[1], result.variable_importance[2]
     );
 
     assert!(
@@ -241,7 +241,10 @@ fn test_validate_cubist_regression() {
         "Cubist R² should be > 0.70, got {:.4}",
         result.train_r_squared
     );
-    assert!(result.n_rules > 0, "Cubist should produce at least one rule");
+    assert!(
+        result.n_rules > 0,
+        "Cubist should produce at least one rule"
+    );
 }
 
 #[test]
@@ -324,16 +327,10 @@ fn test_validate_ctree_regression() {
     println!("  Max depth: {}", result.depth);
     println!(
         "  Variable importance: x1={:.4}, x2={:.4}, x3={:.4}",
-        result.variable_importance[0],
-        result.variable_importance[1],
-        result.variable_importance[2]
+        result.variable_importance[0], result.variable_importance[1], result.variable_importance[2]
     );
 
-    assert!(
-        r2 > 0.50,
-        "CTree R² should be > 0.50, got {:.4}",
-        r2
-    );
+    assert!(r2 > 0.50, "CTree R² should be > 0.50, got {:.4}", r2);
 
     // x1 should have significant p-value at root
     println!(
@@ -432,9 +429,7 @@ fn test_validate_mboost_linear_regression() {
     println!("  Variables selected: {}", result.n_selected);
     println!(
         "  Variable importance: x1={:.4}, x2={:.4}, x3={:.4}",
-        result.variable_importance[0],
-        result.variable_importance[1],
-        result.variable_importance[2]
+        result.variable_importance[0], result.variable_importance[1], result.variable_importance[2]
     );
     println!(
         "  Coefficients: x1={:.4}, x2={:.4}, x3={:.4}",
@@ -477,16 +472,10 @@ fn test_validate_mboost_tree_regression() {
     println!("  Iterations: {}", result.iterations);
     println!(
         "  Variable importance: x1={:.4}, x2={:.4}, x3={:.4}",
-        result.variable_importance[0],
-        result.variable_importance[1],
-        result.variable_importance[2]
+        result.variable_importance[0], result.variable_importance[1], result.variable_importance[2]
     );
 
-    assert!(
-        r2 > 0.75,
-        "MBoost tree R² should be > 0.75, got {:.4}",
-        r2
-    );
+    assert!(r2 > 0.75, "MBoost tree R² should be > 0.75, got {:.4}", r2);
 }
 
 #[test]
@@ -521,7 +510,9 @@ fn test_validate_mboost_poisson() {
     // Poisson regression on count-like data: y = exp(0.5*x1 + 0.2*x2)
     let mut state: u64 = 42;
     let next = |s: &mut u64| -> f64 {
-        *s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        *s = s
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         ((*s >> 11) as f64) / ((1u64 << 53) as f64)
     };
 

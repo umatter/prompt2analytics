@@ -209,7 +209,6 @@ pub(crate) fn lcg_random(state: &mut u64) -> usize {
     ((*state >> 33) ^ *state) as usize
 }
 
-
 pub use adaboost::{
     AdaBoostConfig, AdaBoostLoss, AdaBoostResult, AdaBoostType, adaboost, adaboost_predict,
     adaboost_predict_class, run_adaboost, run_adaboost_default,
@@ -401,4 +400,4 @@ pub use mboost_fast::{
     fast_mboost_predict,
 };
 // PDP (Partial Dependence Plot) - original version
-pub use pdp::{partial_dependence};
+pub use pdp::partial_dependence;

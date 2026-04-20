@@ -1143,7 +1143,13 @@ mod tests {
 
         for t in 1..=7i64 {
             for uid in 1..=40i64 {
-                let g: i64 = if uid <= 10 { 3 } else if uid <= 20 { 5 } else { 0 };
+                let g: i64 = if uid <= 10 {
+                    3
+                } else if uid <= 20 {
+                    5
+                } else {
+                    0
+                };
                 let is_treated = g > 0 && t >= g;
                 let att = if is_treated { homogeneous_att } else { 0.0 };
                 let unit_fe = uid as f64 * 0.3;

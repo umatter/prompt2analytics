@@ -189,7 +189,11 @@ impl Recorder {
     }
 
     fn write_banner(&mut self, base_url: &str, provider: &str, model: &str) -> anyhow::Result<()> {
-        writeln!(self.file, "$ p2a chat --provider {} --model {}", provider, model)?;
+        writeln!(
+            self.file,
+            "$ p2a chat --provider {} --model {}",
+            provider, model
+        )?;
         writeln!(self.file, "p2a chat")?;
         writeln!(
             self.file,

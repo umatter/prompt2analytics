@@ -500,9 +500,7 @@ pub fn run_ipw_treatment(
     let y_trim: Array1<f64> = keep_idx.iter().map(|&i| y[i]).collect();
     let d_trim: Array1<f64> = keep_idx.iter().map(|&i| d[i]).collect();
     let ps_trim: Array1<f64> = keep_idx.iter().map(|&i| ps[i]).collect();
-    let x_trim = Array2::from_shape_fn((keep_idx.len(), x.ncols()), |(i, j)| {
-        x[[keep_idx[i], j]]
-    });
+    let x_trim = Array2::from_shape_fn((keep_idx.len(), x.ncols()), |(i, j)| x[[keep_idx[i], j]]);
 
     let n_trim = y_trim.len();
     let n_treated = d_trim.iter().filter(|&&v| v >= 0.5).count();
@@ -615,8 +613,12 @@ pub fn run_ipw_treatment(
                     _ => {
                         // Fallback: naive IF if outcome model fails
                         naive_if_se_att(
-                            &y_trim, &d_trim, &ps_trim, effect,
-                            n_treated, config.normalized,
+                            &y_trim,
+                            &d_trim,
+                            &ps_trim,
+                            effect,
+                            n_treated,
+                            config.normalized,
                         )
                     }
                 }
@@ -790,7 +792,11 @@ fn naive_if_se_ate(
         let ps_i = ps[i].max(1e-10).min(1.0 - 1e-10);
 
         let term1 = if di >= 0.5 { yi / ps_i / norm1 } else { 0.0 };
-        let term0 = if di < 0.5 { yi / (1.0 - ps_i) / norm0 } else { 0.0 };
+        let term0 = if di < 0.5 {
+            yi / (1.0 - ps_i) / norm0
+        } else {
+            0.0
+        };
         let if_i = term1 - term0 - effect;
 
         sum_if_sq += if_i * if_i;

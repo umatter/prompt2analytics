@@ -1320,8 +1320,7 @@ mod tests {
         // Treated unit: weighted combination of donors 0 and 1 in pre-treatment
         // with added treatment effect in post-treatment
         let treated = Array1::from_shape_fn(n_pre + n_post, |t| {
-            let synth_val =
-                0.5 * donors[[t, 0]] + 0.3 * donors[[t, 1]] + 0.2 * donors[[t, 2]];
+            let synth_val = 0.5 * donors[[t, 0]] + 0.3 * donors[[t, 1]] + 0.2 * donors[[t, 2]];
             if t >= n_pre {
                 synth_val + true_effect
             } else {
@@ -1426,10 +1425,7 @@ mod tests {
             result.out_sample_var > 0.0,
             "Out-sample variance should be positive"
         );
-        assert!(
-            result.total_var > 0.0,
-            "Total variance should be positive"
-        );
+        assert!(result.total_var > 0.0, "Total variance should be positive");
 
         // Total variance = in + out
         assert!(

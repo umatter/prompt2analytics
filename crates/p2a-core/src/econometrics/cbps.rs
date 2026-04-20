@@ -1340,7 +1340,9 @@ mod tests {
         // Simple LCG-like deterministic sequence for reproducibility
         let mut seed: u64 = 42;
         let lcg = |s: &mut u64| -> f64 {
-            *s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            *s = s
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             // Map to [0, 1)
             ((*s >> 33) as f64) / (u32::MAX as f64)
         };
@@ -1435,8 +1437,7 @@ mod tests {
 
         // Balance after should not be much worse than before
         assert!(
-            result.balance_after.max_std_diff
-                <= result.balance_before.max_std_diff + 0.2,
+            result.balance_after.max_std_diff <= result.balance_before.max_std_diff + 0.2,
             "CBPS should not greatly worsen balance: before={:.4}, after={:.4}",
             result.balance_before.max_std_diff,
             result.balance_after.max_std_diff
@@ -1519,5 +1520,4 @@ mod tests {
             "JustIdentified should not have a J-statistic"
         );
     }
-
 }
