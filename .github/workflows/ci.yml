@@ -52,8 +52,14 @@ jobs:
         run: |
           # Set memory limit (4GB virtual memory)
           ulimit -v 4194304 || true
-          # Run tests with memory tracking
-          /usr/bin/time -v cargo test --workspace --all-features --exclude p2a-dioxus 2>&1 | tee test-output.txt
+          # Run tests per-crate with explicit features; skips `cuda` on p2a-core
+          # because CI runners have no CUDA toolkit.
+          /usr/bin/time -v bash -c '
+            cargo test -p p2a-core --features full &&
+            cargo test -p p2a-mcp --features full &&
+            cargo test -p p2a-cli &&
+            cargo test -p p2a-chat
+          ' 2>&1 | tee test-output.txt
           # Extract peak memory from output
           grep -E "Maximum resident set size" test-output.txt || true
         env:
@@ -113,7 +119,12 @@ jobs:
             libxdo-dev
 
       - name: Run Clippy (core crates)
-        run: cargo clippy --workspace --all-targets --all-features --exclude p2a-dioxus -- -D warnings
+        run: |
+          # Skips the `cuda` feature on p2a-core because CI runners have no CUDA toolkit.
+          cargo clippy -p p2a-core --all-targets --features full -- -D warnings
+          cargo clippy -p p2a-mcp --all-targets --features full -- -D warnings
+          cargo clippy -p p2a-cli --all-targets -- -D warnings
+          cargo clippy -p p2a-chat --all-targets -- -D warnings
 
       - name: Run Clippy (p2a-dioxus desktop)
         run: cargo clippy -p p2a-dioxus --all-targets --features desktop -- -D warnings
@@ -170,7 +181,12 @@ jobs:
             libxdo-dev
 
       - name: Build core crates
-        run: cargo build --workspace --all-features --exclude p2a-dioxus
+        run: |
+          # Skips the `cuda` feature on p2a-core because CI runners have no CUDA toolkit.
+          cargo build -p p2a-core --features full
+          cargo build -p p2a-mcp --features full
+          cargo build -p p2a-cli
+          cargo build -p p2a-chat
 
       - name: Build p2a-dioxus (desktop)
         run: cargo build -p p2a-dioxus --features desktop
