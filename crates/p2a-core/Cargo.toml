@@ -159,10 +159,6 @@ name = "clustering_benchmarks"
 harness = false
 
 [[bench]]
-name = "cache_benchmarks"
-harness = false
-
-[[bench]]
 name = "data_loading_benchmarks"
 harness = false
 

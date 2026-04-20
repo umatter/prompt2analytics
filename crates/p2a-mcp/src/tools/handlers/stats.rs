@@ -53,15 +53,7 @@ impl AnalyticsServer {
 
         let datasets = self.datasets.read().await;
 
-        let dataset = match datasets.get(&request.dataset) {
-            Some(ds) => ds,
-            None => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
-                    request.dataset
-                ))]));
-            }
-        };
+        let dataset = crate::get_dataset!(datasets, &request.dataset);
 
         let df = dataset.df();
 
@@ -262,15 +254,7 @@ impl AnalyticsServer {
 
         let datasets = self.datasets.read().await;
 
-        let dataset = match datasets.get(&request.dataset) {
-            Some(ds) => ds,
-            None => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
-                    request.dataset
-                ))]));
-            }
-        };
+        let dataset = crate::get_dataset!(datasets, &request.dataset);
 
         let table_type = match request.table_type.as_deref() {
             Some("effects") => TableType::Effects,
@@ -480,15 +464,7 @@ impl AnalyticsServer {
     ) -> Result<CallToolResult, McpError> {
         let datasets = self.datasets.read().await;
 
-        let dataset = match datasets.get(&request.dataset) {
-            Some(ds) => ds,
-            None => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
-                    request.dataset
-                ))]));
-            }
-        };
+        let dataset = crate::get_dataset!(datasets, &request.dataset);
 
         // Run one-way ANOVA first
         let anova = match run_one_way_anova(dataset, &request.response, &request.factor) {
@@ -790,15 +766,7 @@ impl AnalyticsServer {
     ) -> Result<CallToolResult, McpError> {
         let datasets = self.datasets.read().await;
 
-        let dataset = match datasets.get(&request.dataset) {
-            Some(ds) => ds,
-            None => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
-                    request.dataset
-                ))]));
-            }
-        };
+        let dataset = crate::get_dataset!(datasets, &request.dataset);
 
         let values = match extract_column_f64(dataset, &request.column) {
             Ok(v) => v,
@@ -837,15 +805,7 @@ impl AnalyticsServer {
     ) -> Result<CallToolResult, McpError> {
         let datasets = self.datasets.read().await;
 
-        let dataset = match datasets.get(&request.dataset) {
-            Some(ds) => ds,
-            None => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
-                    request.dataset
-                ))]));
-            }
-        };
+        let dataset = crate::get_dataset!(datasets, &request.dataset);
 
         let values = match extract_column_f64(dataset, &request.column) {
             Ok(v) => v,
@@ -879,15 +839,7 @@ impl AnalyticsServer {
     ) -> Result<CallToolResult, McpError> {
         let datasets = self.datasets.read().await;
 
-        let dataset = match datasets.get(&request.dataset) {
-            Some(ds) => ds,
-            None => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
-                    request.dataset
-                ))]));
-            }
-        };
+        let dataset = crate::get_dataset!(datasets, &request.dataset);
 
         let values = match extract_column_f64(dataset, &request.column) {
             Ok(v) => v,
@@ -938,15 +890,7 @@ impl AnalyticsServer {
     ) -> Result<CallToolResult, McpError> {
         let datasets = self.datasets.read().await;
 
-        let dataset = match datasets.get(&request.dataset) {
-            Some(ds) => ds,
-            None => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
-                    request.dataset
-                ))]));
-            }
-        };
+        let dataset = crate::get_dataset!(datasets, &request.dataset);
 
         let values = match extract_column_f64(dataset, &request.column) {
             Ok(v) => v,
@@ -990,15 +934,7 @@ impl AnalyticsServer {
     ) -> Result<CallToolResult, McpError> {
         let datasets = self.datasets.read().await;
 
-        let dataset = match datasets.get(&request.dataset) {
-            Some(ds) => ds,
-            None => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
-                    request.dataset
-                ))]));
-            }
-        };
+        let dataset = crate::get_dataset!(datasets, &request.dataset);
 
         let values = match extract_column_f64(dataset, &request.column) {
             Ok(v) => v,
@@ -1061,15 +997,7 @@ impl AnalyticsServer {
     ) -> Result<CallToolResult, McpError> {
         let datasets = self.datasets.read().await;
 
-        let dataset = match datasets.get(&request.dataset) {
-            Some(ds) => ds,
-            None => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
-                    request.dataset
-                ))]));
-            }
-        };
+        let dataset = crate::get_dataset!(datasets, &request.dataset);
 
         let x = match extract_column_f64(dataset, &request.x) {
             Ok(v) => v,
@@ -1123,15 +1051,7 @@ impl AnalyticsServer {
     ) -> Result<CallToolResult, McpError> {
         let datasets = self.datasets.read().await;
 
-        let dataset = match datasets.get(&request.dataset) {
-            Some(ds) => ds,
-            None => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
-                    request.dataset
-                ))]));
-            }
-        };
+        let dataset = crate::get_dataset!(datasets, &request.dataset);
 
         let x = match extract_column_f64(dataset, &request.x) {
             Ok(v) => v,
@@ -1198,15 +1118,7 @@ impl AnalyticsServer {
     ) -> Result<CallToolResult, McpError> {
         let datasets = self.datasets.read().await;
 
-        let dataset = match datasets.get(&request.dataset) {
-            Some(ds) => ds,
-            None => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
-                    request.dataset
-                ))]));
-            }
-        };
+        let dataset = crate::get_dataset!(datasets, &request.dataset);
 
         if request.response_vars.len() < 2 {
             return Ok(CallToolResult::error(vec![Content::text(
@@ -1301,15 +1213,7 @@ impl AnalyticsServer {
     ) -> Result<CallToolResult, McpError> {
         let datasets = self.datasets.read().await;
 
-        let dataset = match datasets.get(&request.dataset) {
-            Some(ds) => ds,
-            None => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
-                    request.dataset
-                ))]));
-            }
-        };
+        let dataset = crate::get_dataset!(datasets, &request.dataset);
 
         let result = match run_one_way_anova(dataset, &request.response, &request.factor) {
             Ok(r) => r,
@@ -1336,15 +1240,7 @@ impl AnalyticsServer {
     ) -> Result<CallToolResult, McpError> {
         let datasets = self.datasets.read().await;
 
-        let dataset = match datasets.get(&request.dataset) {
-            Some(ds) => ds,
-            None => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
-                    request.dataset
-                ))]));
-            }
-        };
+        let dataset = crate::get_dataset!(datasets, &request.dataset);
 
         let conf_level = request.conf_level.unwrap_or(0.95);
 
@@ -1419,15 +1315,7 @@ impl AnalyticsServer {
     ) -> Result<CallToolResult, McpError> {
         let datasets = self.datasets.read().await;
 
-        let dataset = match datasets.get(&request.dataset) {
-            Some(ds) => ds,
-            None => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
-                    request.dataset
-                ))]));
-            }
-        };
+        let dataset = crate::get_dataset!(datasets, &request.dataset);
 
         let interaction = request.interaction.unwrap_or(true);
 
@@ -1462,15 +1350,7 @@ impl AnalyticsServer {
     ) -> Result<CallToolResult, McpError> {
         let datasets = self.datasets.read().await;
 
-        let dataset = match datasets.get(&request.dataset) {
-            Some(ds) => ds,
-            None => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
-                    request.dataset
-                ))]));
-            }
-        };
+        let dataset = crate::get_dataset!(datasets, &request.dataset);
 
         let corr = match correlation_matrix(dataset) {
             Ok(c) => c,
@@ -1507,15 +1387,7 @@ impl AnalyticsServer {
 
         let datasets = self.datasets.read().await;
 
-        let dataset = match datasets.get(&request.dataset) {
-            Some(ds) => ds,
-            None => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
-                    request.dataset
-                ))]));
-            }
-        };
+        let dataset = crate::get_dataset!(datasets, &request.dataset);
 
         let df = dataset.df();
 
@@ -1621,15 +1493,7 @@ impl AnalyticsServer {
     ) -> Result<CallToolResult, McpError> {
         let datasets = self.datasets.read().await;
 
-        let dataset = match datasets.get(&request.dataset) {
-            Some(ds) => ds,
-            None => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
-                    request.dataset
-                ))]));
-            }
-        };
+        let dataset = crate::get_dataset!(datasets, &request.dataset);
 
         let df = dataset.df();
         let n_rows = df.height();
@@ -1749,15 +1613,7 @@ impl AnalyticsServer {
 
         let datasets = self.datasets.read().await;
 
-        let dataset = match datasets.get(&request.dataset) {
-            Some(ds) => ds,
-            None => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
-                    request.dataset
-                ))]));
-            }
-        };
+        let dataset = crate::get_dataset!(datasets, &request.dataset);
 
         let xcenter = request.xcenter.unwrap_or(true);
         let ycenter = request.ycenter.unwrap_or(true);
@@ -1848,15 +1704,7 @@ impl AnalyticsServer {
 
         let datasets = self.datasets.read().await;
 
-        let dataset = match datasets.get(&request.dataset) {
-            Some(ds) => ds,
-            None => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
-                    request.dataset
-                ))]));
-            }
-        };
+        let dataset = crate::get_dataset!(datasets, &request.dataset);
 
         let rotation = match request.rotation.as_deref() {
             Some("none") => RotationMethod::None,
@@ -1969,15 +1817,7 @@ impl AnalyticsServer {
     ) -> Result<CallToolResult, McpError> {
         let datasets = self.datasets.read().await;
 
-        let dataset = match datasets.get(&request.dataset) {
-            Some(ds) => ds,
-            None => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
-                    request.dataset
-                ))]));
-            }
-        };
+        let dataset = crate::get_dataset!(datasets, &request.dataset);
 
         let col_refs: Vec<&str> = request.columns.iter().map(|s| s.as_str()).collect();
         let center = request.center.as_deref();

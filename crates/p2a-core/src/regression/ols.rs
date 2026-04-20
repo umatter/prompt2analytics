@@ -184,14 +184,12 @@ pub struct OlsResult {
     /// (X'X)^{-1} for later computations
     #[serde(skip)]
     pub(crate) xtx_inv: Array2<f64>,
-    /// Sum of squared residuals (cached for diagnostics)
+    /// Sum of squared residuals (cached; used by R², F-test, diagnostics).
     #[serde(skip)]
-    #[allow(dead_code)]
-    pub(crate) ssr: f64,
-    /// Total sum of squares (cached for diagnostics)
+    pub ssr: f64,
+    /// Total sum of squares (cached; used by R², F-test, diagnostics).
     #[serde(skip)]
-    #[allow(dead_code)]
-    pub(crate) sst: f64,
+    pub sst: f64,
 }
 
 impl LinearEstimator for OlsResult {

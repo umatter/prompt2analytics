@@ -41,15 +41,7 @@ impl AnalyticsServer {
     ) -> Result<CallToolResult, McpError> {
         let datasets = self.datasets.read().await;
 
-        let dataset = match datasets.get(&request.dataset) {
-            Some(ds) => ds,
-            None => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
-                    request.dataset
-                ))]));
-            }
-        };
+        let dataset = crate::get_dataset!(datasets, &request.dataset);
 
         let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
 
@@ -78,15 +70,7 @@ impl AnalyticsServer {
     ) -> Result<CallToolResult, McpError> {
         let datasets = self.datasets.read().await;
 
-        let dataset = match datasets.get(&request.dataset) {
-            Some(ds) => ds,
-            None => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
-                    request.dataset
-                ))]));
-            }
-        };
+        let dataset = crate::get_dataset!(datasets, &request.dataset);
 
         let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
 
@@ -115,15 +99,7 @@ impl AnalyticsServer {
     ) -> Result<CallToolResult, McpError> {
         let datasets = self.datasets.read().await;
 
-        let dataset = match datasets.get(&request.dataset) {
-            Some(ds) => ds,
-            None => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
-                    request.dataset
-                ))]));
-            }
-        };
+        let dataset = crate::get_dataset!(datasets, &request.dataset);
 
         let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
 
@@ -152,15 +128,7 @@ impl AnalyticsServer {
     ) -> Result<CallToolResult, McpError> {
         let datasets = self.datasets.read().await;
 
-        let dataset = match datasets.get(&request.dataset) {
-            Some(ds) => ds,
-            None => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
-                    request.dataset
-                ))]));
-            }
-        };
+        let dataset = crate::get_dataset!(datasets, &request.dataset);
 
         let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
 
@@ -200,15 +168,7 @@ impl AnalyticsServer {
     ) -> Result<CallToolResult, McpError> {
         let datasets = self.datasets.read().await;
 
-        let dataset = match datasets.get(&request.dataset) {
-            Some(ds) => ds,
-            None => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
-                    request.dataset
-                ))]));
-            }
-        };
+        let dataset = crate::get_dataset!(datasets, &request.dataset);
 
         let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
 
@@ -237,15 +197,7 @@ impl AnalyticsServer {
     ) -> Result<CallToolResult, McpError> {
         let datasets = self.datasets.read().await;
 
-        let dataset = match datasets.get(&request.dataset) {
-            Some(ds) => ds,
-            None => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
-                    request.dataset
-                ))]));
-            }
-        };
+        let dataset = crate::get_dataset!(datasets, &request.dataset);
 
         let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
         let lags = request.lags.unwrap_or(1);
@@ -304,15 +256,7 @@ impl AnalyticsServer {
     ) -> Result<CallToolResult, McpError> {
         let datasets = self.datasets.read().await;
 
-        let dataset = match datasets.get(&request.dataset) {
-            Some(ds) => ds,
-            None => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
-                    request.dataset
-                ))]));
-            }
-        };
+        let dataset = crate::get_dataset!(datasets, &request.dataset);
 
         let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
 
@@ -360,15 +304,7 @@ impl AnalyticsServer {
     ) -> Result<CallToolResult, McpError> {
         let datasets = self.datasets.read().await;
 
-        let dataset = match datasets.get(&request.dataset) {
-            Some(ds) => ds,
-            None => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
-                    request.dataset
-                ))]));
-            }
-        };
+        let dataset = crate::get_dataset!(datasets, &request.dataset);
 
         // Parse test type
         let test_type = match request.test.as_deref() {
@@ -423,15 +359,7 @@ impl AnalyticsServer {
     ) -> Result<CallToolResult, McpError> {
         let datasets = self.datasets.read().await;
 
-        let dataset = match datasets.get(&request.dataset) {
-            Some(ds) => ds,
-            None => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
-                    request.dataset
-                ))]));
-            }
-        };
+        let dataset = crate::get_dataset!(datasets, &request.dataset);
 
         let x_refs: Vec<&str> = request.x.iter().map(|s| s.as_str()).collect();
         let fe_refs: Vec<&str> = request.fe.iter().map(|s| s.as_str()).collect();

@@ -438,15 +438,7 @@ impl AnalyticsServer {
     ) -> Result<CallToolResult, McpError> {
         let datasets = self.datasets.read().await;
 
-        let dataset = match datasets.get(&request.dataset) {
-            Some(ds) => ds,
-            None => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Dataset '{}' not found. Use 'list_datasets' to see available datasets.",
-                    request.dataset
-                ))]));
-            }
-        };
+        let dataset = crate::get_dataset!(datasets, &request.dataset);
 
         let result = match filter(dataset, &request.column, &request.op, &request.value) {
             Ok(ds) => ds,

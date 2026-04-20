@@ -4,7 +4,7 @@
 
 use super::{
     LlmError, LlmProvider, Message, MessageRole, ProviderConfig, ProviderType, StreamChunk,
-    ToolCall, ToolDefinition, ToolExecutor, ToolResult,
+    ToolCall, ToolDefinition, ToolExecutor, ToolResult, build_http_client,
 };
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -22,9 +22,13 @@ pub struct OpenAIProvider {
 
 impl OpenAIProvider {
     /// Create a new OpenAI provider with the given configuration.
+    ///
+    /// The underlying `reqwest::Client` is built with explicit connect and
+    /// request timeouts so that a hung OpenAI endpoint cannot block the SSE
+    /// stream indefinitely.
     pub fn new(config: ProviderConfig) -> Self {
         Self {
-            client: Client::new(),
+            client: build_http_client("OpenAI"),
             config,
         }
     }
