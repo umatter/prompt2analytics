@@ -712,7 +712,7 @@ pub fn cv_glmnet(
     let (lambda_min_index, &lambda_min_cvm) = cvm
         .iter()
         .enumerate()
-        .min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+        .min_by(|(_, a), (_, b)| a.total_cmp(b))
         .unwrap();
     let lambda_min = lambda_seq[lambda_min_index];
 

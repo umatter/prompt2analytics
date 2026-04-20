@@ -210,7 +210,7 @@ impl SortedData {
         let n = x.len();
         // Create index array sorted by x values
         let mut order: Vec<usize> = (0..n).collect();
-        order.sort_by(|&a, &b| x[a].partial_cmp(&x[b]).unwrap());
+        order.sort_by(|&a, &b| x[a].total_cmp(&x[b]));
 
         let x_sorted: Vec<f64> = order.iter().map(|&i| x[i]).collect();
         let y_sorted: Vec<f64> = order.iter().map(|&i| y[i]).collect();
@@ -634,7 +634,7 @@ fn compute_robust_weights(residuals: &[f64]) -> Vec<f64> {
 
     // Compute median of absolute residuals
     let mut abs_resid: Vec<f64> = residuals.iter().map(|r| r.abs()).collect();
-    abs_resid.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    abs_resid.sort_by(|a, b| a.total_cmp(b));
     let median_idx = n / 2;
     let mad = if n % 2 == 0 {
         (abs_resid[median_idx - 1] + abs_resid[median_idx]) / 2.0

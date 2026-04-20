@@ -186,7 +186,7 @@ pub fn ansari_test(
     }
 
     // Sort by value
-    combined.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+    combined.sort_by(|a, b| a.0.total_cmp(&b.0));
 
     // Check for ties
     let has_ties = (1..combined.len()).any(|i| combined[i].0 == combined[i - 1].0);

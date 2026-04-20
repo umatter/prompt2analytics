@@ -128,7 +128,7 @@ impl Neighbors {
                 .collect();
 
             // Sort by distance and take k nearest
-            distances.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+            distances.sort_by(|a, b| a.1.total_cmp(&b.1));
             let mut knn: Vec<usize> = distances.iter().take(k).map(|(j, _)| *j).collect();
             knn.sort_unstable();
 

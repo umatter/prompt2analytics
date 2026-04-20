@@ -192,10 +192,17 @@ pub fn extract_groups(
     let mut groups: std::collections::HashMap<String, Vec<usize>> =
         std::collections::HashMap::new();
 
-    // Convert to string representation for grouping
+    // Convert to string representation for grouping. `get()` can fail on
+    // type-cast errors when a column has unexpected dtype for `AnyValue`
+    // extraction; propagate as PolarsError rather than panicking.
     let str_values: Vec<String> = (0..series.len())
-        .map(|i| format!("{:?}", series.get(i).unwrap()))
-        .collect();
+        .map(|i| {
+            series
+                .get(i)
+                .map(|v| format!("{:?}", v))
+                .map_err(DesignError::PolarsError)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
 
     for (i, key) in str_values.iter().enumerate() {
         groups.entry(key.clone()).or_default().push(i);

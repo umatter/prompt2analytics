@@ -134,7 +134,7 @@ pub fn spline(
 
     // Sort by x values
     let mut pairs: Vec<(f64, f64)> = x.iter().zip(y.iter()).map(|(&xi, &yi)| (xi, yi)).collect();
-    pairs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+    pairs.sort_by(|a, b| a.0.total_cmp(&b.0));
 
     let xs: Vec<f64> = pairs.iter().map(|p| p.0).collect();
     let ys: Vec<f64> = pairs.iter().map(|p| p.1).collect();
@@ -235,7 +235,7 @@ pub fn approx(
         .filter(|(xi, yi)| xi.is_finite() && yi.is_finite())
         .map(|(&xi, &yi)| (xi, yi))
         .collect();
-    pairs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+    pairs.sort_by(|a, b| a.0.total_cmp(&b.0));
 
     if pairs.len() < 2 {
         return Err(EconError::InsufficientData {
@@ -296,7 +296,7 @@ pub fn splinefun(x: &[f64], y: &[f64], method: SplineMethod) -> EconResult<impl 
 
     // Sort by x values
     let mut pairs: Vec<(f64, f64)> = x.iter().zip(y.iter()).map(|(&xi, &yi)| (xi, yi)).collect();
-    pairs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+    pairs.sort_by(|a, b| a.0.total_cmp(&b.0));
 
     let xs: Vec<f64> = pairs.iter().map(|p| p.0).collect();
     let ys: Vec<f64> = pairs.iter().map(|p| p.1).collect();
@@ -341,7 +341,7 @@ pub fn approxfun(
         .filter(|(xi, yi)| xi.is_finite() && yi.is_finite())
         .map(|(&xi, &yi)| (xi, yi))
         .collect();
-    pairs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+    pairs.sort_by(|a, b| a.0.total_cmp(&b.0));
 
     let xs: Vec<f64> = pairs.iter().map(|p| p.0).collect();
     let ys: Vec<f64> = pairs.iter().map(|p| p.1).collect();

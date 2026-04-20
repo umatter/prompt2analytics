@@ -1448,7 +1448,7 @@ fn median(x: &[f64]) -> f64 {
     }
 
     let mut sorted: Vec<f64> = x.iter().cloned().filter(|v| !v.is_nan()).collect();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    sorted.sort_by(|a, b| a.total_cmp(b));
 
     let n = sorted.len();
     if n == 0 {

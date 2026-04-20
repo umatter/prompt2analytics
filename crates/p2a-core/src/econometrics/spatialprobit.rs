@@ -224,7 +224,7 @@ impl SpatialProbitResult {
     pub fn credible_interval_beta(&self, idx: usize, level: f64) -> (f64, f64) {
         let alpha = (1.0 - level) / 2.0;
         let mut draws: Vec<f64> = self.beta_draws.column(idx).to_vec();
-        draws.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        draws.sort_by(|a, b| a.total_cmp(b));
         let n = draws.len();
         let lower_idx = ((n as f64) * alpha) as usize;
         let upper_idx = ((n as f64) * (1.0 - alpha)) as usize;
@@ -235,7 +235,7 @@ impl SpatialProbitResult {
     pub fn credible_interval_rho(&self, level: f64) -> (f64, f64) {
         let alpha = (1.0 - level) / 2.0;
         let mut draws: Vec<f64> = self.rho_draws.to_vec();
-        draws.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        draws.sort_by(|a, b| a.total_cmp(b));
         let n = draws.len();
         let lower_idx = ((n as f64) * alpha) as usize;
         let upper_idx = ((n as f64) * (1.0 - alpha)) as usize;

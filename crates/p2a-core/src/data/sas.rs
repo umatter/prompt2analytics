@@ -464,12 +464,24 @@ impl<R: Read + Seek> SasReader<R> {
                 Ok(Some(value as f64))
             }
         } else {
-            // Read truncated double
+            // Read truncated double. Validate the claimed length first so that a
+            // malformed file cannot push us into panicking code paths.
+            if length == 0 || length > 8 {
+                return Err(SasError::InvalidFormat(format!(
+                    "truncated double has invalid length {} (expected 1..=8)",
+                    length
+                )));
+            }
             let mut buf = vec![0u8; 8];
             self.reader.read_exact(&mut buf[8 - length..])?;
+            let fixed: [u8; 8] = buf.as_slice().try_into().map_err(|_| {
+                SasError::InvalidFormat(
+                    "internal: truncated-double buffer was not 8 bytes".to_string(),
+                )
+            })?;
             let value = match self.byte_order {
-                ByteOrder::LittleEndian => f64::from_le_bytes(buf.try_into().unwrap()),
-                ByteOrder::BigEndian => f64::from_be_bytes(buf.try_into().unwrap()),
+                ByteOrder::LittleEndian => f64::from_le_bytes(fixed),
+                ByteOrder::BigEndian => f64::from_be_bytes(fixed),
             };
             if value.is_nan() {
                 Ok(None)

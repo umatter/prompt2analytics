@@ -304,7 +304,7 @@ pub fn run_fligner_test(
 /// Compute median of a slice.
 fn compute_median(data: &[f64]) -> f64 {
     let mut sorted = data.to_vec();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    sorted.sort_by(|a, b| a.total_cmp(b));
     let n = sorted.len();
     if n % 2 == 0 {
         (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
@@ -317,7 +317,7 @@ fn compute_median(data: &[f64]) -> f64 {
 fn compute_ranks(data: &[f64]) -> Vec<f64> {
     let n = data.len();
     let mut indexed: Vec<(usize, f64)> = data.iter().enumerate().map(|(i, &v)| (i, v)).collect();
-    indexed.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+    indexed.sort_by(|a, b| a.1.total_cmp(&b.1));
 
     let mut ranks = vec![0.0; n];
     let mut i = 0;

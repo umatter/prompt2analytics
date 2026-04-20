@@ -178,7 +178,7 @@ pub fn mood_test(x: &[f64], y: &[f64], alternative: Alternative) -> EconResult<M
     }
 
     // Sort by value
-    combined.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+    combined.sort_by(|a, b| a.0.total_cmp(&b.0));
 
     // Check for ties and compute tie structure
     let (has_ties, tie_counts) = compute_tie_structure(&combined);

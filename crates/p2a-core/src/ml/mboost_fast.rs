@@ -273,7 +273,7 @@ fn compute_initial_offset(y: &[f64], family: FastMboostFamily) -> f64 {
         FastMboostFamily::Huber => {
             // Median as robust starting point
             let mut sorted: Vec<f64> = y.to_vec();
-            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            sorted.sort_by(|a, b| a.total_cmp(b));
             sorted[sorted.len() / 2]
         }
     }
@@ -373,7 +373,7 @@ fn fit_componentwise_linear_parallel(
     // Find best feature (maximum R²)
     let (best_feat, best_coef, _) = results
         .into_iter()
-        .max_by(|a, b| a.2.partial_cmp(&b.2).unwrap())
+        .max_by(|a, b| a.2.total_cmp(&b.2))
         .unwrap();
 
     // Compute update values: fitted = coef * (x - x_mean)
@@ -411,7 +411,7 @@ fn fit_stump_parallel(
             // Sort by feature value
             let mut indexed: Vec<(usize, f64)> =
                 col.iter().enumerate().map(|(i, &v)| (i, v)).collect();
-            indexed.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+            indexed.sort_by(|a, b| a.1.total_cmp(&b.1));
 
             // Find best split point
             let mut left_sum = 0.0;
@@ -469,7 +469,7 @@ fn fit_stump_parallel(
     // Find best feature
     let (best_feat, threshold, left_val, right_val, _) = results
         .into_iter()
-        .min_by(|a, b| a.4.partial_cmp(&b.4).unwrap())
+        .min_by(|a, b| a.4.total_cmp(&b.4))
         .unwrap();
 
     // Compute update values
@@ -539,7 +539,7 @@ fn fit_tree(x: ArrayView2<f64>, residuals: &[f64], max_depth: usize) -> (FittedL
             // Get values for this feature
             let mut vals: Vec<(f64, f64)> =
                 samples.iter().map(|&i| (x[[i, j]], residuals[i])).collect();
-            vals.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+            vals.sort_by(|a, b| a.0.total_cmp(&b.0));
 
             let total_sum: f64 = sample_residuals.iter().sum();
             let mut left_sum = 0.0;

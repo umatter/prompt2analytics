@@ -588,7 +588,7 @@ pub fn add1(
     }
 
     // Sort by criterion (best first)
-    results.sort_by(|a, b| a.criterion.partial_cmp(&b.criterion).unwrap());
+    results.sort_by(|a, b| a.criterion.total_cmp(&b.criterion));
 
     Ok(Add1Result {
         current_criterion,
@@ -656,7 +656,7 @@ pub fn drop1(
     }
 
     // Sort by criterion (best first)
-    results.sort_by(|a, b| a.criterion.partial_cmp(&b.criterion).unwrap());
+    results.sort_by(|a, b| a.criterion.total_cmp(&b.criterion));
 
     Ok(Drop1Result {
         current_criterion,
