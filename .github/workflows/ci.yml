@@ -17,8 +17,15 @@ jobs:
     steps:
       - name: Free disk space
         run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          # The duckdb-sys crate alone produces ~1.5 GB of object files; the
+          # combined debug + release builds for core + mcp + cli + dioxus blow
+          # past the default 14 GB the Ubuntu runner offers. Strip everything
+          # we don't need before builds.
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache /usr/share/swift /usr/local/share/boost
+          sudo rm -rf "$AGENT_TOOLSDIRECTORY"
           sudo docker image prune --all --force || true
+          sudo apt-get clean
           df -h /
 
       - uses: actions/checkout@v4
@@ -85,8 +92,15 @@ jobs:
     steps:
       - name: Free disk space
         run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          # The duckdb-sys crate alone produces ~1.5 GB of object files; the
+          # combined debug + release builds for core + mcp + cli + dioxus blow
+          # past the default 14 GB the Ubuntu runner offers. Strip everything
+          # we don't need before builds.
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache /usr/share/swift /usr/local/share/boost
+          sudo rm -rf "$AGENT_TOOLSDIRECTORY"
           sudo docker image prune --all --force || true
+          sudo apt-get clean
           df -h /
 
       - uses: actions/checkout@v4
@@ -149,8 +163,15 @@ jobs:
     steps:
       - name: Free disk space
         run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          # The duckdb-sys crate alone produces ~1.5 GB of object files; the
+          # combined debug + release builds for core + mcp + cli + dioxus blow
+          # past the default 14 GB the Ubuntu runner offers. Strip everything
+          # we don't need before builds.
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache /usr/share/swift /usr/local/share/boost
+          sudo rm -rf "$AGENT_TOOLSDIRECTORY"
           sudo docker image prune --all --force || true
+          sudo apt-get clean
           df -h /
 
       - uses: actions/checkout@v4
