@@ -61,9 +61,7 @@ pub fn validate_read_only_query(query: &str) -> Result<(), DatabaseError> {
         .to_ascii_lowercase();
 
     if first_token.is_empty() {
-        return Err(DatabaseError::Forbidden(
-            "empty SQL statement".to_string(),
-        ));
+        return Err(DatabaseError::Forbidden("empty SQL statement".to_string()));
     }
     if !ALLOWED.contains(&first_token.as_str()) {
         return Err(DatabaseError::Forbidden(format!(

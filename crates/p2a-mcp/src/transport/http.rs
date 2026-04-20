@@ -428,7 +428,12 @@ async fn list_files(Query(query): Query<ListFilesQuery>) -> impl IntoResponse {
     use crate::path_jail;
 
     // Default to the configured jail root when no path is provided.
-    let path = match query.path.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    let path = match query
+        .path
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         Some(requested) => match path_jail::validate_data_path(requested) {
             Ok(p) => p,
             Err(e) => {

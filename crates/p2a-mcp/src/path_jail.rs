@@ -24,9 +24,7 @@ static DATA_ROOT: OnceLock<Result<PathBuf, String>> = OnceLock::new();
 /// The value is cached for the lifetime of the process. In test builds the
 /// `reset_data_root_for_tests` helper is available.
 pub fn allowed_data_root() -> Result<PathBuf, String> {
-    DATA_ROOT
-        .get_or_init(resolve_data_root)
-        .clone()
+    DATA_ROOT.get_or_init(resolve_data_root).clone()
 }
 
 fn resolve_data_root() -> Result<PathBuf, String> {
@@ -35,15 +33,13 @@ fn resolve_data_root() -> Result<PathBuf, String> {
         if !trimmed.is_empty() {
             let candidate = PathBuf::from(trimmed);
             return candidate.canonicalize().map_err(|e| {
-                format!(
-                    "P2A_DATA_ROOT={:?} cannot be canonicalized: {}",
-                    trimmed, e
-                )
+                format!("P2A_DATA_ROOT={:?} cannot be canonicalized: {}", trimmed, e)
             });
         }
     }
-    let home = dirs::home_dir()
-        .ok_or_else(|| "cannot determine home directory and P2A_DATA_ROOT is not set".to_string())?;
+    let home = dirs::home_dir().ok_or_else(|| {
+        "cannot determine home directory and P2A_DATA_ROOT is not set".to_string()
+    })?;
     home.canonicalize()
         .map_err(|e| format!("home directory {:?} cannot be canonicalized: {}", home, e))
 }
@@ -89,15 +85,11 @@ fn canonicalize_within(requested: &Path) -> Result<PathBuf, String> {
             requested.display()
         )
     })?;
-    let filename = requested.file_name().ok_or_else(|| {
-        format!(
-            "path {:?} has no filename component",
-            requested.display()
-        )
-    })?;
+    let filename = requested
+        .file_name()
+        .ok_or_else(|| format!("path {:?} has no filename component", requested.display()))?;
     let parent_canonical = if parent.as_os_str().is_empty() {
-        std::env::current_dir()
-            .map_err(|e| format!("cannot resolve current directory: {}", e))?
+        std::env::current_dir().map_err(|e| format!("cannot resolve current directory: {}", e))?
     } else {
         parent.canonicalize().map_err(|e| {
             format!(
