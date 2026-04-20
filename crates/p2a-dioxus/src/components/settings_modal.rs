@@ -118,16 +118,19 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
             "ollama" => Provider::Ollama,
             "anthropic" => Provider::Anthropic,
             "openai" => Provider::Openai,
-            _ => Provider::Ollama,
+            "openrouter" => Provider::Openrouter,
+            _ => Provider::None,
         };
         local_provider.set(provider);
 
         // Update API key and model for this provider from settings
         let s = settings.read();
         let (api_key, model) = match provider {
+            Provider::None => (String::new(), String::new()),
             Provider::Ollama => ("".to_string(), s.ollama_model.clone()),
             Provider::Anthropic => (s.anthropic_api_key.clone(), s.anthropic_model.clone()),
             Provider::Openai => (s.openai_api_key.clone(), s.openai_model.clone()),
+            Provider::Openrouter => (s.openrouter_api_key.clone(), s.openrouter_model.clone()),
         };
         local_api_key.set(api_key);
         local_model.set(model);
@@ -379,6 +382,15 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
                                 }
                             }
 
+                            // First-run nudge: no provider configured yet.
+                            if current_provider == Provider::None {
+                                div { class: "p-3 bg-teal-50 dark:bg-teal-900/20 rounded-lg border border-teal-200 dark:border-teal-800",
+                                    p { class: "text-sm text-teal-700 dark:text-teal-300",
+                                        "Welcome! Choose an LLM provider below to start chatting. Anthropic and OpenAI need an API key; Ollama runs locally on your machine."
+                                    }
+                                }
+                            }
+
                             // Provider selection
                             div {
                                 label { class: "block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5",
@@ -388,9 +400,25 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
                                     class: "w-full px-3 py-2.5 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-teal-500 focus:border-transparent",
                                     value: "{current_provider.as_str()}",
                                     onchange: handle_provider_change,
-                                    option { value: "ollama", "Ollama (Local)" }
+                                    option { value: "none", disabled: true, "— Select a provider —" }
                                     option { value: "anthropic", "Anthropic (Claude)" }
                                     option { value: "openai", "OpenAI (GPT)" }
+                                    option { value: "openrouter", "OpenRouter (100+ models)" }
+                                    option { value: "ollama", "Ollama (Local)" }
+                                }
+                                // Helper text per provider: where to get an API key.
+                                if current_provider == Provider::Anthropic {
+                                    p { class: "text-xs text-gray-500 dark:text-gray-400 mt-1",
+                                        "Get a key at console.anthropic.com/settings/keys"
+                                    }
+                                } else if current_provider == Provider::Openai {
+                                    p { class: "text-xs text-gray-500 dark:text-gray-400 mt-1",
+                                        "Get a key at platform.openai.com/api-keys"
+                                    }
+                                } else if current_provider == Provider::Openrouter {
+                                    p { class: "text-xs text-gray-500 dark:text-gray-400 mt-1",
+                                        "Get a key at openrouter.ai/keys — one key, 100+ models (model format: provider/model, e.g. openai/gpt-4o-mini)"
+                                    }
                                 }
                             }
 

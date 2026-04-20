@@ -21,6 +21,16 @@ pub fn ChatPanel() -> Element {
     let mut settings_open = use_signal(|| false);
     let mut settings_initial_tab = use_signal(|| "llm".to_string());
 
+    // First-run onboarding: auto-open the settings modal on the LLM tab when
+    // no provider is configured, so users land directly on the setup screen
+    // instead of discovering the confusing "Not connected" header badge.
+    use_effect(move || {
+        if !settings.read().provider.is_configured() {
+            settings_initial_tab.set("llm".to_string());
+            settings_open.set(true);
+        }
+    });
+
     // Track which conversation we've synced from and how many messages we've synced
     let mut synced_conv_id = use_signal(|| Option::<String>::None);
     let mut synced_messages_len = use_signal(|| 0usize);
@@ -177,12 +187,22 @@ pub fn ChatPanel() -> Element {
         .cloned();
 
     // Handle send message
-    let handle_send = move |message: String| {
+    let mut handle_send = move |message: String| {
         tracing::debug!("[ChatPanel] handle_send called with: {}", message);
         let mut session = session_state;
         let mut chat = chat_state;
         let mut conv = conversation_state;
         let settings = settings;
+
+        // First-run gate: if no provider is configured, surface a friendly
+        // inline error and open the settings modal instead of kicking off a
+        // chat that would silently 405 against an unconfigured Ollama.
+        if let Some(err) = settings.read().validation_error() {
+            chat.write().set_error(Some(err));
+            settings_initial_tab.set("llm".to_string());
+            settings_open.set(true);
+            return;
+        }
 
         spawn(async move {
             tracing::debug!("[ChatPanel] spawn started");
@@ -292,7 +312,13 @@ pub fn ChatPanel() -> Element {
 
             // Build history
             let history = chat.read().build_history();
-            let provider_config = settings.read().to_provider_config();
+            // handle_send gates on validation_error() before spawning, so the
+            // provider is guaranteed to be configured here; `expect` documents
+            // that invariant rather than silently sending a garbage request.
+            let provider_config = settings
+                .read()
+                .to_provider_config()
+                .expect("provider configured (gated in handle_send)");
             let interpret = settings.read().interpret_results;
 
             tracing::debug!("[ChatPanel] Calling stream_chat");
@@ -302,7 +328,7 @@ pub fn ChatPanel() -> Element {
 
             // Stream the response
             let result = stream_chat(
-                "http://localhost:8081",
+                "http://localhost:8080",
                 &session_id,
                 &message,
                 history,
@@ -407,12 +433,14 @@ pub fn ChatPanel() -> Element {
                     spawn(async move {
                         let client = api();
 
-                        // Generate title using LLM
+                        // Generate title using LLM. Same invariant as the
+                        // main chat path: we reach here only after the gate
+                        // in handle_send, so the provider is configured.
                         match client
                             .generate_title(
                                 &user_msg,
                                 assistant_response.as_deref(),
-                                Some(settings_clone.to_provider_config()),
+                                settings_clone.to_provider_config(),
                             )
                             .await
                         {
@@ -453,7 +481,7 @@ pub fn ChatPanel() -> Element {
 
     // Handle retry - re-send the last user message
     let handle_retry = {
-        let handle_send = handle_send;
+        let mut handle_send = handle_send;
         move |_| {
             // Find the last user message
             let last_user_msg = chat_state
@@ -526,9 +554,27 @@ pub fn ChatPanel() -> Element {
                                 "/ {conv.title}"
                             }
                         }
-                        // Provider badge - with border for visual weight
-                        span { class: "px-2.5 py-1 text-xs font-medium rounded-full bg-orange-100 text-orange-700 border border-orange-300 dark:bg-orange-900/30 dark:text-orange-300 dark:border-orange-700",
-                            "{settings.read().provider.as_str()} / {settings.read().current_model()}"
+                        // Provider badge: CTA when unconfigured, model pill otherwise.
+                        // Both open the Settings modal on click so users can
+                        // reach the setup flow from the header at any time.
+                        if settings.read().provider.is_configured() {
+                            button {
+                                class: "px-2.5 py-1 text-xs font-medium rounded-full bg-orange-100 text-orange-700 border border-orange-300 hover:bg-orange-200 dark:bg-orange-900/30 dark:text-orange-300 dark:border-orange-700 dark:hover:bg-orange-900/50 transition-colors",
+                                onclick: move |_| {
+                                    settings_initial_tab.set("llm".to_string());
+                                    settings_open.set(true);
+                                },
+                                "{settings.read().provider.display_name()} / {settings.read().current_model()}"
+                            }
+                        } else {
+                            button {
+                                class: "px-3 py-1 text-xs font-semibold rounded-full bg-teal-600 text-white border border-teal-600 hover:bg-teal-700 transition-colors flex items-center gap-1",
+                                onclick: move |_| {
+                                    settings_initial_tab.set("llm".to_string());
+                                    settings_open.set(true);
+                                },
+                                "Connect LLM provider →"
+                            }
                         }
                     }
 
