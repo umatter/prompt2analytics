@@ -173,8 +173,7 @@ mod tests {
             "missing user role in output:\n{json}"
         );
         assert!(
-            json.contains("\"role\":\"assistant\"")
-                || json.contains("\"role\": \"assistant\""),
+            json.contains("\"role\":\"assistant\"") || json.contains("\"role\": \"assistant\""),
             "missing assistant role in output:\n{json}"
         );
     }
