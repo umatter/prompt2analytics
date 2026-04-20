@@ -17,6 +17,7 @@ mod config;
 pub mod db;
 #[cfg(feature = "llm")]
 mod llm;
+mod path_jail;
 #[cfg(feature = "db")]
 pub mod persistent_session;
 mod server;
