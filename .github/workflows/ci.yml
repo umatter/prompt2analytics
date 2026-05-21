@@ -59,9 +59,14 @@ jobs:
             ${{ runner.os }}-cargo-test-
 
       - name: Install system dependencies
+        # `libopenblas-dev` for the matrix backend, `libfontconfig1-dev` for
+        # the `visualization` feature (plotters → yeslogic-fontconfig-sys).
+        # `p2a-cli` and `p2a-mcp` pull `p2a-core/full`, which includes
+        # `visualization`, so fontconfig is required even when `p2a-core`
+        # itself is built with the slimmer `ci` feature alias.
         run: |
           sudo apt-get update
-          sudo apt-get install -y libopenblas-dev
+          sudo apt-get install -y libopenblas-dev libfontconfig1-dev
 
       - name: Run tests (cheap subset)
         # `p2a-core` uses the `ci` feature alias (full minus database) to avoid
@@ -113,9 +118,10 @@ jobs:
             ${{ runner.os }}-cargo-clippy-
 
       - name: Install system dependencies
+        # See the test job for why `libfontconfig1-dev` is required.
         run: |
           sudo apt-get update
-          sudo apt-get install -y libopenblas-dev
+          sudo apt-get install -y libopenblas-dev libfontconfig1-dev
 
       - name: Run Clippy
         # Warnings only — the project still carries a backlog of pre-existing

@@ -62,8 +62,11 @@ pub struct PanelResult {
     /// Residuals (`Array1`), used by `LinearEstimator::residuals`.
     #[serde(skip, default)]
     pub residuals: Array1<f64>,
-    /// Coefficient variance-covariance matrix (entity-clustered for FE,
-    /// quasi-GLS for RE), used by `LinearEstimator::vcov_matrix`.
+    /// Coefficient variance-covariance matrix. For FE this is the classical
+    /// homoskedastic form `sigma^2 * (X̃'X̃)^{-1}` (matching R's
+    /// `plm(model = "within")` default). For RE it is the entity-clustered
+    /// (CR1) form computed on quasi-demeaned design. Used by
+    /// `LinearEstimator::vcov_matrix`.
     #[serde(skip, default)]
     pub vcov: Array2<f64>,
 }
