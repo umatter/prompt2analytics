@@ -6,8 +6,8 @@ use super::types::*;
 use crate::platform::{HttpClient, create_http_client};
 use serde::Deserialize;
 
-/// Default API base URL
-const DEFAULT_BASE_URL: &str = "http://localhost:8081";
+/// Default API base URL (matches the backend port documented in CLAUDE.md).
+const DEFAULT_BASE_URL: &str = "http://localhost:8080";
 
 /// API client for p2a-mcp backend
 #[derive(Clone)]
@@ -210,6 +210,14 @@ impl ApiClient {
     /// Get the base URL for SSE streaming
     pub fn streaming_url(&self, endpoint: &str) -> String {
         format!("{}{}", self.base_url, endpoint)
+    }
+
+    /// Get the configured backend base URL. Used by callers that talk
+    /// directly to the platform streaming layer (which takes a `&str`
+    /// rather than an `ApiClient`), so the URL doesn't have to be
+    /// duplicated.
+    pub fn base_url(&self) -> &str {
+        &self.base_url
     }
 
     // === Conversation endpoints ===
