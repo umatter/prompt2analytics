@@ -944,7 +944,6 @@ let df = df! {
 
 **Documentation:**
 - `API_ENDPOINTS.md` - Complete HTTP API reference (sessions, datasets, tools, LLM chat, SSE)
-- `CHANGELOG.md` - Release notes
 - `docs/guides/TESTING.md` - Test runtime expectations, validation framework
 - `docs/guides/DATA_SECURITY.md` - Data write locations, offline capability
 - `docs/security/PROMPT_INJECTION.md` - MCP security considerations
