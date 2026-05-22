@@ -70,10 +70,13 @@ jobs:
 
       - name: Run tests (cheap subset)
         # `p2a-core` uses the `ci` feature alias (full minus database) to avoid
-        # duckdb-sys compile cost. `p2a-mcp` drops the SurrealDB-backed `db`
-        # feature and the websocket deps. `p2a-cli` and `p2a-chat` use defaults.
-        # `p2a-dioxus` is not compiled here — its WebKit/GTK deps dominate
-        # compile time and it's tested locally.
+        # the ~1.5 GB libduckdb-sys compile. `p2a-mcp` drops the SurrealDB-
+        # backed `db` feature and the websocket deps. `p2a-cli` runs with
+        # its own `database` feature off so feature unification doesn't pull
+        # duckdb-sys back in. `p2a-chat` has no test surface and no p2a-core
+        # dependency, so it's not invoked here. `p2a-dioxus` is not compiled
+        # here — its WebKit/GTK deps dominate compile time and it's tested
+        # locally.
         #
         # --tests runs unit + integration tests but skips doctests; the repo
         # carries a pre-existing backlog of doctest failures that are tracked
@@ -81,8 +84,7 @@ jobs:
         run: |
           cargo test -p p2a-core --tests --no-default-features --features ci
           cargo test -p p2a-mcp --tests --no-default-features --features "http,llm,auth"
-          cargo test -p p2a-cli --tests
-          cargo test -p p2a-chat --tests
+          cargo test -p p2a-cli --tests --no-default-features --features spectral-analysis
         env:
           RUST_TEST_THREADS: 4
 
@@ -126,9 +128,10 @@ jobs:
       - name: Run Clippy
         # Warnings only — the project still carries a backlog of pre-existing
         # clippy violations in p2a-core. The lint runs so new regressions show
-        # up in the logs, but doesn't gate merges.
+        # up in the logs, but doesn't gate merges. Feature flags mirror the
+        # Test job so duckdb-sys isn't pulled in.
         run: |
           cargo clippy -p p2a-core --no-default-features --features ci
           cargo clippy -p p2a-mcp --no-default-features --features "http,llm,auth"
-          cargo clippy -p p2a-cli
+          cargo clippy -p p2a-cli --no-default-features --features spectral-analysis
           cargo clippy -p p2a-chat

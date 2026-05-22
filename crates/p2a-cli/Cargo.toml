@@ -12,12 +12,17 @@ name = "p2a"
 path = "src/main.rs"
 
 [features]
-default = ["spectral-analysis"]
+# `database` is opt-out so CI can avoid the ~1.5 GB libduckdb-sys compile.
+# Local `cargo build -p p2a-cli` retains the previous behavior via default.
+default = ["spectral-analysis", "database"]
 spectral-analysis = ["p2a-core/spectral-analysis"]
+database = ["p2a-core/database"]
 
 [dependencies]
-# Core analytics library
-p2a-core = { path = "../p2a-core", features = ["full"] }
+# Core analytics library. Database support is gated through the `database`
+# feature above so it can be turned off in CI; everything else from `full`
+# stays on unconditionally.
+p2a-core = { path = "../p2a-core", default-features = false, features = ["visualization", "forecasting", "file-formats"] }
 
 # CLI framework
 clap = { version = "4.5", features = ["derive", "env", "string"] }
