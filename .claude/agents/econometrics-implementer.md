@@ -99,7 +99,6 @@ When implementing a new method:
 - [ ] Update documentation
   - [ ] ECONOMETRICS_GUIDE.md **with full References section**
   - [ ] MCP_TOOL_EXAMPLES.md if new tool
-  - [ ] DEVELOPMENT_REPORT.md
 
 ## Key Files Reference
 

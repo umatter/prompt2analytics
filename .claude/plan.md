@@ -461,7 +461,6 @@ No new crates required. Uses existing:
 
 ### Documentation (Phase 5)
 - [ ] Add FEGLM section to ECONOMETRICS_GUIDE.md
-- [ ] Update DEVELOPMENT_REPORT.md
 
 ### Benchmarks (Phase 6)
 - [ ] Add Criterion benchmark for FEGLM

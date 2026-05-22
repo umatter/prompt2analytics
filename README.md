@@ -898,5 +898,4 @@ MIT
 
 Contributions are welcome! See:
 - `CLAUDE.md` - Development guidance for Claude Code
-- `DEVELOPMENT_REPORT.md` - Architecture details and current status
 - `validation/README.md` - How to add validation tests
