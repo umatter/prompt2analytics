@@ -212,6 +212,14 @@ impl ApiClient {
         format!("{}{}", self.base_url, endpoint)
     }
 
+    /// Get the configured backend base URL. Used by callers that talk
+    /// directly to the platform streaming layer (which takes a `&str`
+    /// rather than an `ApiClient`), so the URL doesn't have to be
+    /// duplicated.
+    pub fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
     // === Conversation endpoints ===
 
     /// List all conversations for a session

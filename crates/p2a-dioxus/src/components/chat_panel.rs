@@ -24,10 +24,17 @@ pub fn ChatPanel() -> Element {
     // First-run onboarding: auto-open the settings modal on the LLM tab when
     // no provider is configured, so users land directly on the setup screen
     // instead of discovering the confusing "Not connected" header badge.
+    //
+    // The `first_run_handled` guard makes this strictly one-shot: `use_effect`
+    // re-runs whenever any read signal changes, so without the guard a user
+    // who closed the modal without picking a provider could see it reopen on
+    // the next unrelated settings mutation.
+    let mut first_run_handled = use_signal(|| false);
     use_effect(move || {
-        if !settings.read().provider.is_configured() {
+        if !first_run_handled() && !settings.read().provider.is_configured() {
             settings_initial_tab.set("llm".to_string());
             settings_open.set(true);
+            first_run_handled.set(true);
         }
     });
 
@@ -326,9 +333,13 @@ pub fn ChatPanel() -> Element {
             // Clone conversation_id for the closure
             let conv_id_for_done = conversation_id.clone();
 
+            // Read backend URL from the API client so it stays in sync with
+            // `DEFAULT_BASE_URL` in `api/client.rs`.
+            let backend_url = api().base_url().to_string();
+
             // Stream the response
             let result = stream_chat(
-                "http://localhost:8080",
+                &backend_url,
                 &session_id,
                 &message,
                 history,
