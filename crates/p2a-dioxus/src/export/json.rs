@@ -167,7 +167,14 @@ mod tests {
         let json = result.unwrap();
         assert!(json.contains("Hello, can you help me?"));
         assert!(json.contains("Of course! What do you need?"));
-        assert!(json.contains("\"role\":\"user\""));
-        assert!(json.contains("\"role\":\"assistant\""));
+        // `pretty: true` inserts a space after the colon — match either form.
+        assert!(
+            json.contains("\"role\":\"user\"") || json.contains("\"role\": \"user\""),
+            "missing user role in output:\n{json}"
+        );
+        assert!(
+            json.contains("\"role\":\"assistant\"") || json.contains("\"role\": \"assistant\""),
+            "missing assistant role in output:\n{json}"
+        );
     }
 }

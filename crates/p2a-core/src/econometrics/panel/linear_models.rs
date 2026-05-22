@@ -121,44 +121,10 @@ pub fn run_fixed_effects(
     let ssr: f64 = residuals.iter().map(|r| r * r).sum();
     let sigma2 = ssr / df as f64;
 
-    // Entity-clustered standard errors (CR1) — standard for panel FE.
-    // Cluster meat: sum over entities of (X_g' e_g)(X_g' e_g)'
-    let g = n_groups;
-    let correction = if g > 1 {
-        (g as f64 / (g - 1) as f64) * ((n - 1) as f64 / (n - n_groups - k) as f64)
-    } else {
-        1.0
-    };
-
-    let mut meat = ndarray::Array2::<f64>::zeros((k, k));
-    // Group residuals and X by entity
-    let mut entity_indices: Vec<Vec<usize>> = vec![Vec::new(); n_groups];
-    for i in 0..n {
-        entity_indices[entity_ids[i]].push(i);
-    }
-    for indices in &entity_indices {
-        let mut xe = vec![0.0; k];
-        for &i in indices {
-            let e = residuals[i];
-            for j in 0..k {
-                xe[j] += x_demeaned[[i, j]] * e;
-            }
-        }
-        for j in 0..k {
-            for l in 0..k {
-                meat[[j, l]] += xe[j] * xe[l];
-            }
-        }
-    }
-
-    let temp = xtx_inv.dot(&meat);
-    let vcov = temp.dot(&xtx_inv) * correction;
-
-    // Standard errors (entity-clustered)
+    // Classical (homoskedastic) FE variance, matching R's
+    // `plm(..., model = "within")` default: Var(β̂) = sigma^2 * (X̃'X̃)^{-1}.
+    let vcov = &xtx_inv * sigma2;
     let std_errors: Vec<f64> = vcov.diag().mapv(|v: f64| v.max(0.0).sqrt()).to_vec();
-
-    // Also store homoskedastic sigma2 for R-squared and F-stat
-    let _ = sigma2;
 
     // R-squared (within)
     let y_mean_demeaned = y_demeaned.mean().unwrap_or(0.0);

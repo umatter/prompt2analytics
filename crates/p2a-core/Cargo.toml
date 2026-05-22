@@ -14,6 +14,10 @@ readme = "README.md"
 [features]
 default = ["full"]
 full = ["visualization", "forecasting", "file-formats", "database", "spectral-analysis"]
+# `ci` is `full` minus `database`: duckdb-sys produces ~1.5 GB of native
+# object files and dominates Ubuntu-runner compile time, so the database
+# paths are tested locally / on the self-hosted runner instead.
+ci = ["visualization", "forecasting", "file-formats", "spectral-analysis"]
 cuda = ["dep:cudarc"]
 visualization = ["dep:plotters", "dep:plotlars", "dep:image", "dep:base64"]
 forecasting = ["dep:arima", "dep:augurs-core", "dep:augurs-mstl", "dep:augurs-ets", "dep:stlrs"]
