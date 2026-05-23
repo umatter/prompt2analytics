@@ -56,12 +56,12 @@ parameters for scoring. Table~\ref{tab:e2e-datasets} summarises each dataset.
 \caption{Synthetic evaluation datasets}
 \label{tab:e2e-datasets}
 \small
-\begin{tabular}{llrl}
+\begin{tabularx}{\textwidth}{l l r >{\raggedright\arraybackslash}X}
 \toprule
 Dataset & Type & $n$ & Key DGP features \\
 \midrule
 \code{eval\_cross\_section} & Cross-section & 500 &
-  $\text{salary} = 25000 + 3000 \cdot \text{edu} + 1500 \cdot \text{exp} + 500 \cdot \text{edu} \times \text{exp} + \varepsilon$ \\
+  Salary linear in \code{edu}, \code{exp}, and \code{edu}${\times}$\code{exp}; intercept 25000; $\beta_{\text{edu}}{=}3000$, $\beta_{\text{exp}}{=}1500$, $\beta_{\text{int}}{=}500$ \\
 \code{eval\_panel} & Panel ($N{=}50$, $T{=}10$) & 500 &
   Firm and year FEs; $\beta_{\text{value}} = 0.1$, $\beta_{\text{capital}} = 0.05$ \\
 \code{eval\_timeseries} & Time series & 200 &
@@ -73,7 +73,7 @@ Dataset & Type & $n$ & Key DGP features \\
 \code{eval\_survey} & Survey & 400 &
   Ordinal, binary, count outcomes; logit/probit/Poisson DGPs \\
 \bottomrule
-\end{tabular}
+\end{tabularx}
 \begin{tablenotes}[flushleft]
 \item \emph{Note:} All datasets generated with \code{set.seed(42)} in
 \proglang{R}. True parameter values are documented in \code{PROTOCOL.md}.
