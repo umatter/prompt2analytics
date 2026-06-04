@@ -198,7 +198,7 @@ The `cuda` feature enables transparent GPU dispatch for core linear algebra oper
 - Small matrices (k<30, n<5K): Transfer overhead exceeds compute savings
 - Tall-skinny matmul: CPU BLAS optimized for these shapes
 
-Dispatch thresholds are configurable via environment variables (`P2A_GPU_XTX_MIN_NKK`, etc.) and calibrated on DGX Spark. See `performance/reports/gpu_performance.md` for full benchmark results and threshold rationale.
+Dispatch thresholds are configurable via environment variables (`P2A_GPU_XTX_MIN_NKK`, etc.) and calibrated on DGX Spark. Threshold rationale is documented in `crates/p2a-core/src/linalg/gpu/dispatch.rs`; full benchmark reports live in the companion paper repo.
 
 ```bash
 # GPU benchmarks (95 configurations)
@@ -657,52 +657,15 @@ Key directories:
 - `validation/datasets/` - Reference datasets (Grunfeld, Longley, Iris)
 - `validation/VALIDATION_STATUS.md` - Current coverage report
 
-### Performance Benchmarks (`performance/`)
+### Rust Benchmarks (`crates/p2a-core/benches/`)
 
-The benchmarking system measures Rust vs R performance using matching data-generating processes and matching output statistics (distribution percentiles + memory).
-
-#### Benchmark pipeline
-
-```
-Rust benchmarks (19 files)          R benchmarks (67 scripts)
-  crates/p2a-core/benches/           performance/comparisons/r_comparison/
-         │                                    │
-         ▼                                    ▼
-  rust_comprehensive_*.json             r_*_*.csv files
-         │                                    │
-         └──────────┬─────────────────────────┘
-                    ▼
-            merge_results.R
-                    │
-         ┌──────────┼──────────┐
-         ▼          ▼          ▼
-  comparison_   comparison_   validation_
-  speed.csv     memory.csv    coverage.csv
-         │          │
-         ▼          ▼
-  paper/code/generate_paper_figures.R + generate_paper_tables.R
-         │                              │
-         ▼                              ▼
-  paper/figures/*.pdf           paper/tables/*.tex
-```
-
-#### Running benchmarks
+The Rust benchmarks emit JSON consumed by the cross-language (R vs Rust)
+comparison pipeline, which lives in the companion paper repo
+(`../prompt2analytics-paper`, see "Companion paper repo" below).
 
 ```bash
-# Full pipeline (validation + Rust bench + R bench + merge)
-./performance/comparisons/run_all.sh
-
-# Rust benchmarks only (outputs JSON)
+# Rust benchmarks (outputs rust_*.json for the paper repo's merge pipeline)
 cargo bench -p p2a-core --bench comprehensive_benchmarks
-
-# R benchmarks only (outputs CSV per script)
-cd performance/comparisons/r_comparison && Rscript r_benchmark_runner.R
-
-# Merge existing results only
-./performance/comparisons/run_all.sh --merge-only
-
-# Quick mode (validation + comprehensive R benchmark only)
-./performance/comparisons/run_all.sh --quick
 ```
 
 #### Rust benchmark framework
@@ -724,87 +687,22 @@ Key benchmark files:
 - `forecasting_benchmarks.rs` - ARIMA, STL, MSTL, Holt-Winters, Kalman
 - `clustering_benchmarks.rs` - K-means, DBSCAN, hierarchical, PCA, t-SNE
 
-#### R benchmark framework
+### Companion paper repo (`../prompt2analytics-paper`)
 
-`performance/comparisons/r_comparison/benchmark_*.R` (67 scripts) each benchmark the equivalent R function using `bench::mark()` with identical DGPs (same seeds, sample sizes). Orchestrated by `r_benchmark_runner.R`.
+Everything paper-side lives in a separate repo (conventionally checked out as
+a sibling directory `../prompt2analytics-paper`): the JSS manuscript (LaTeX),
+the R side of the R-vs-Rust benchmark pipeline (67 `benchmark_*.R` scripts,
+`merge_results.R`, comparison CSVs), paper exhibit generation, and the
+end-to-end LLM evaluation harness (`e2e_eval/`).
 
-#### Merge pipeline
+Cross-repo workflow when benchmarking a new method or re-running comparisons:
 
-`performance/comparisons/r_comparison/merge_results.R`:
-1. Loads all timestamped R CSVs + latest Rust JSON
-2. Normalizes method names across languages (e.g., `lagsarlm` → `SAR`)
-3. Matches on method + sample size
-4. Computes `speedup = R_median / Rust_median`
-5. Assigns module categories
-6. Outputs: `comparison_speed.csv`, `comparison_memory.csv`, `validation_coverage.csv`
+1. Here: `cargo bench -p p2a-core --bench comprehensive_benchmarks` → `rust_*.json`
+2. Copy the JSON into the paper repo's `performance/results/`
+3. There: run the R benchmarks and `merge_results.R`, regenerate exhibits
+4. There: update `SOFTWARE_VERSION` with the commit benchmarked here
 
-#### Paper exhibit generation
-
-```bash
-cd paper/code
-Rscript generate_paper_figures.R    # → paper/figures/*.pdf and *.png
-Rscript generate_paper_tables.R     # → paper/tables/*.tex
-```
-
-Generated artifacts:
-- `paper/figures/benchmark_speedup_violin.pdf` - Violin plots by module
-- `paper/figures/benchmark_boxplots.pdf` - Box plots by module
-- `paper/figures/benchmark_histogram.pdf` - Speedup distribution histogram
-- `paper/figures/benchmark_memory.pdf` - Memory comparison
-- `paper/tables/tab_speedup_by_module.tex` - Module-level speedup summary
-- `paper/tables/tab_benchmark_summary.tex` - Representative method benchmarks
-
-#### Results directory
-
-```
-performance/comparisons/r_comparison/results/
-├── comparison_speed.csv          # Merged speed comparison (tracked in git)
-├── comparison_memory.csv         # Merged memory comparison (tracked in git)
-├── validation_coverage.csv       # Method coverage matrix (tracked in git)
-└── r_*_2026*.csv / rust_*.json   # Raw timestamped results (gitignored)
-```
-
-### End-to-End LLM Evaluation (`paper/code/e2e_eval/`)
-
-The paper includes two evaluations of LLM tool-calling accuracy:
-
-1. **96-prompt single-turn evaluation**: Tests tool selection, parameter extraction, numerical correctness, and interpretation quality across 6 models. Each prompt is scored on 4 dimensions (tool acceptable, parameters correct, numerical match, interpretation adequate) and an overall "adequate" rating.
-
-2. **Chrome-based multi-turn evaluation**: Uses Claude-in-Chrome browser automation to test 8 multi-step analytical conversations (30 total turns) with Claude Sonnet 4.6.
-
-#### Running the evaluation
-
-```bash
-# Single-turn evaluation (requires API keys)
-cd paper/code/e2e_eval
-python3 run_evaluation.py --models gpt-4.1-mini claude-sonnet-4.6
-
-# Re-score existing results without API calls
-python3 rescore.py
-
-# Generate evaluation figures and tables for the paper
-cd paper/code
-Rscript generate_e2e_figures.R
-```
-
-#### Key files
-
-- `test_cases.json` - 96 prompts organized by category (regression, panel, causal, etc.)
-- `run_evaluation.py` - Sends prompts to LLM APIs, executes returned tool calls, scores results
-- `rescore.py` - Re-scores saved result JSONs (useful after updating scoring logic)
-- `results/` - Per-model JSON results and Chrome multi-turn results (gitignored)
-
-#### Current results (paper numbers)
-
-| Model | Adequate Rate |
-|-------|--------------|
-| GPT-4.1 Mini | 90.6% |
-| Sonnet 4.6 | 84.4% |
-| Haiku 4.5 | 81.2% |
-| Ministral 3B | 80.2% |
-| Gemini 2.5 Flash | 75.0% |
-| Llama 4 Scout | 50.0% |
-| Chrome multi-turn (Sonnet 4.6) | 97.9% |
+The paper repo's `CLAUDE.md` documents its pipeline in detail.
 
 ## Agentic Engineering Setup
 
@@ -909,38 +807,12 @@ let df = df! {
 - `crates/p2a-core/src/linalg/gpu/` - GPU module (cuBLAS + cuSOLVER wrappers)
 - `crates/p2a-core/src/linalg/gpu/dispatch.rs` - Calibrated dispatch thresholds
 - `crates/p2a-core/benches/gpu_benchmarks.rs` - GPU vs CPU benchmarks (95 configurations)
-- `performance/reports/gpu_performance.md` - GPU benchmark results and threshold rationale
 
 **Benchmarking:**
 - `crates/p2a-core/benches/bench_utils.rs` - Custom benchmark runner (distribution stats + memory)
 - `crates/p2a-core/benches/comprehensive_benchmarks.rs` - Master Rust benchmark (all methods)
-- `performance/comparisons/run_all.sh` - Full pipeline orchestration script
-- `performance/comparisons/r_comparison/r_benchmark_runner.R` - R benchmark orchestrator
-- `performance/comparisons/r_comparison/merge_results.R` - Merge Rust JSON + R CSV → comparison CSVs
-- `performance/comparisons/r_comparison/results/comparison_speed.csv` - Merged speed comparison
-- `performance/comparisons/r_comparison/results/comparison_memory.csv` - Merged memory comparison
-
-**Paper Exhibits:**
-- `paper/code/generate_paper_figures.R` - Generate all paper figures from comparison CSVs
-- `paper/code/generate_paper_tables.R` - Generate all paper LaTeX tables from comparison CSVs
-- `paper/code/generate_e2e_figures.R` - Generate evaluation figures from e2e results
-- `paper/figures/` - Generated benchmark and evaluation figures (PDF + PNG)
-- `paper/tables/` - Generated LaTeX tables
-
-**End-to-End Evaluation:**
-- `paper/code/e2e_eval/test_cases.json` - 96 evaluation prompts with expected tools and parameters
-- `paper/code/e2e_eval/run_evaluation.py` - Evaluation runner (calls LLM APIs, scores responses)
-- `paper/code/e2e_eval/rescore.py` - Re-score existing result JSONs without re-running API calls
-- `paper/code/e2e_eval/generate_datasets.R` - Generate evaluation datasets (eval_clean, eval_messy)
-- `paper/code/e2e_eval/PROTOCOL.md` - Full evaluation protocol documentation
-- `paper/code/e2e_eval/results/` - Per-model result JSONs and Chrome multi-turn results (gitignored)
-
-**Paper Sections (LaTeX):**
-- `paper/article-jss.tex` - Main JSS document wrapper
-- `paper/paper.tex` - Section includes
-- `paper/sections/evaluation_new.tex` - Evaluation section (96-prompt e2e + Chrome multi-turn)
-- `paper/sections/appendices.tex` - Appendices A–G
-- `paper/sections/e2e_eval_appendix.tex` - Appendix H (e2e evaluation protocol details)
+- R-vs-Rust comparison pipeline, paper exhibits, and the e2e LLM evaluation
+  live in the companion paper repo (`../prompt2analytics-paper`)
 
 **Documentation:**
 - `API_ENDPOINTS.md` - Complete HTTP API reference (sessions, datasets, tools, LLM chat, SSE)

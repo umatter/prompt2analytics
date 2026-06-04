@@ -173,7 +173,7 @@ After implement_metrics completes successfully:
 
    Artifacts:
    - Validation doc: validation/[category]/[method].md
-   - R benchmark:    performance/comparisons/r_comparison/benchmark_[method].R
+   - R benchmark:    ../prompt2analytics-paper/performance/comparisons/r_comparison/benchmark_[method].R
 
    Progress: [completed]/[total] methods done ([percentage]%)
 

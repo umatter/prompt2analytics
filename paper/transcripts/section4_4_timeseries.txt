@@ -1,8 +1,0 @@
-# Section 4.4 — Time series workflow
-# Uses gdp_quarterly.csv (280 quarters, 1954-2023)
-
-Load validation/datasets/gdp_quarterly.csv as gdp and check whether GDP growth is stationary.
-
-Fit an ARIMA model to GDP growth. Let the system pick the order.
-
-Check for residual autocorrelation in the ARIMA model.

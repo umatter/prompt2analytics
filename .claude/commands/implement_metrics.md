@@ -259,7 +259,7 @@ The user has provided: $ARGUMENTS
   "category": "[category]",
   "rust_module": "crates/p2a-core/src/[path]/[file].rs",
   "rust_function": "[function_name]",
-  "r_benchmark_script": "performance/comparisons/r_comparison/benchmark_[method].R",
+  "r_benchmark_script": "../prompt2analytics-paper/performance/comparisons/r_comparison/benchmark_[method].R",
   "criterion_benchmark": "crates/p2a-core/benches/[category]_benchmarks.rs",
   "criterion_group": "[BenchmarkGroupName]",
   "validation_doc": "validation/[category]/[method].md",
@@ -297,7 +297,7 @@ The user has provided: $ARGUMENTS
 
 **Check if R benchmark script exists.** If not, the `/validate-method` command will offer to generate one from the template at `.claude/tooling/validation/templates/r_benchmark.R.template`.
 
-Alternatively, create it manually in `performance/comparisons/r_comparison/benchmark_[method].R`.
+Alternatively, create it manually in `../prompt2analytics-paper/performance/comparisons/r_comparison/benchmark_[method].R`.
 
 #### 6d. Create Basic Validation Document Structure
 
@@ -552,7 +552,7 @@ For EVERY new econometric method, the following artifacts MUST be delivered:
 | 4b | Rust validation tests | `test_validate_*` in implementation file |
 | 6a | Method registry entry | `.claude/tooling/validation/method_registry.json` |
 | 6b | Criterion benchmark | `crates/p2a-core/benches/` |
-| 6c | R benchmark script | `performance/comparisons/r_comparison/benchmark_[method].R` |
+| 6c | R benchmark script | `../prompt2analytics-paper/performance/comparisons/r_comparison/benchmark_[method].R` |
 | 6d | Validation document | `validation/[category]/[method].md` |
 | 7 | **/validate-method execution** | Runs all validation and benchmarks automatically |
 | 7 | **Validation report** | `validation/reports/[method]_[date].md` |

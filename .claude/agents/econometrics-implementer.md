@@ -232,12 +232,16 @@ After implementation and testing, complete the following to ensure the method is
   ```
 
 - [ ] Update performance reports
-  - [ ] Add results to `performance/reports/[category]_performance.md`
+  - [ ] Add results to `../prompt2analytics-paper/performance/reports/[category]_performance.md`
   - [ ] Document hardware configuration used
 
 ### Cross-Language Comparison (For JSS Publication)
 
-- [ ] Create R benchmark script in `performance/comparisons/r_comparison/`
+Note: the R-vs-Rust comparison pipeline lives in the companion paper repo
+(`prompt2analytics-paper`, conventionally a sibling checkout). Skip this
+section if that repo is not checked out.
+
+- [ ] Create R benchmark script in `../prompt2analytics-paper/performance/comparisons/r_comparison/`
 - [ ] Run R benchmarks on same hardware
 - [ ] Add results to combined comparison CSV
 - [ ] Document any performance differences

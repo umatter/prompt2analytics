@@ -56,7 +56,7 @@ When the user invokes this command with a method name, follow this workflow:
    Rust module: crates/p2a-core/src/regression/ols.rs
 
    Artifacts:
-     [X] R benchmark script: performance/comparisons/r_comparison/benchmark_regression.R
+     [X] R benchmark script: ../prompt2analytics-paper/performance/comparisons/r_comparison/benchmark_regression.R
      [X] Criterion benchmark: crates/p2a-core/benches/regression_benchmarks.rs (OLS_Standard)
      [X] Validation doc: validation/regression/ols.md
      [X] Rust tests: test_validate_ols, test_validate_longley
@@ -135,7 +135,7 @@ Execute these steps to compare performance:
 
 2. **Run R benchmarks:**
    ```bash
-   cd performance/comparisons/r_comparison && Rscript {{r_benchmark_script}}
+   cd ../prompt2analytics-paper/performance/comparisons/r_comparison && Rscript {{r_benchmark_script}}
    ```
    If the R script doesn't exist, offer to generate it from template.
 
@@ -203,7 +203,7 @@ If the R benchmark script doesn't exist:
 2. Look at the method's `r_packages`, `r_name`, and similar existing scripts
 3. Generate a customized script with proper data generation and benchmark code
 4. Ask user for confirmation before writing
-5. Write to `performance/comparisons/r_comparison/benchmark_{{method}}.R`
+5. Write to `../prompt2analytics-paper/performance/comparisons/r_comparison/benchmark_{{method}}.R`
 
 ### Missing Validation Documentation
 
@@ -240,7 +240,7 @@ R equivalent: lm() from stats package
 Rust module: crates/p2a-core/src/regression/ols.rs
 
 Artifacts:
-  [X] R benchmark script: performance/comparisons/r_comparison/benchmark_regression.R
+  [X] R benchmark script: ../prompt2analytics-paper/performance/comparisons/r_comparison/benchmark_regression.R
   [X] Criterion benchmark: crates/p2a-core/benches/regression_benchmarks.rs (OLS_Standard)
   [X] Validation doc: validation/regression/ols.md
   [X] Rust tests: test_validate_ols, test_validate_longley
@@ -314,7 +314,7 @@ cargo test -p p2a-core -- test_validate --nocapture
 cargo bench -p p2a-core -- {{criterion_group}}
 
 # Run R benchmarks
-Rscript performance/comparisons/r_comparison/benchmark_{{method}}.R
+Rscript ../prompt2analytics-paper/performance/comparisons/r_comparison/benchmark_{{method}}.R
 
 # View Criterion HTML report
 open target/criterion/report/index.html
@@ -382,4 +382,4 @@ The command enforces these speedup factors over R:
 - `.claude/skills/validation-benchmarking/SKILL.md` - Detailed validation workflow
 - `.claude/tooling/validation/README.md` - Template documentation
 - `validation/README.md` - Validation docs index
-- `performance/comparisons/r_comparison/run_all_benchmarks.R` - Run all R benchmarks
+- `../prompt2analytics-paper/performance/comparisons/r_comparison/run_all_benchmarks.R` - Run all R benchmarks

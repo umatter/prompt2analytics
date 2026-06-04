@@ -27,7 +27,7 @@ The `method_registry.json` file maps each p2a-core method to its artifacts:
       "category": "regression",
       "rust_module": "crates/p2a-core/src/regression/ols.rs",
       "rust_function": "run_ols",
-      "r_benchmark_script": "performance/comparisons/r_comparison/benchmark_regression.R",
+      "r_benchmark_script": "../prompt2analytics-paper/performance/comparisons/r_comparison/benchmark_regression.R",
       "criterion_benchmark": "crates/p2a-core/benches/regression_benchmarks.rs",
       "criterion_group": "OLS_Standard",
       "validation_doc": "validation/regression/ols.md",
@@ -116,7 +116,7 @@ When the `/validate-method` command encounters a missing R benchmark script:
 
 **Example generated script path:**
 ```
-performance/comparisons/r_comparison/benchmark_new_method.R
+../prompt2analytics-paper/performance/comparisons/r_comparison/benchmark_new_method.R
 ```
 
 ## Tolerance Guidelines
@@ -169,7 +169,7 @@ If Rust is slower than R, the validation reports a warning.
 
 - **Slash Command**: `.claude/commands/validate-method.md`
 - **Validation Skill**: `.claude/skills/validation-benchmarking/SKILL.md`
-- **R Benchmarks**: `performance/comparisons/r_comparison/`
+- **R Benchmarks**: `../prompt2analytics-paper/performance/comparisons/r_comparison/`
 - **Criterion Benchmarks**: `crates/p2a-core/benches/`
 - **Validation Docs**: `validation/`
 - **Validation Reports**: `validation/reports/`
@@ -192,7 +192,7 @@ Periodically run benchmarks to track performance:
 
 ```bash
 # Run all R benchmarks
-cd performance/comparisons/r_comparison
+cd ../prompt2analytics-paper/performance/comparisons/r_comparison
 Rscript run_all_benchmarks.R
 
 # Run all Criterion benchmarks

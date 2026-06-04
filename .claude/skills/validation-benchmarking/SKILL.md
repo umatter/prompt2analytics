@@ -180,7 +180,7 @@ cargo bench -p p2a-core -- --save-baseline $(date +%Y-%m-%d)
 
 ### Step 3: Cross-Language Comparison
 
-**R Benchmark Script** (`performance/comparisons/r_comparison/benchmark_[method].R`):
+**R Benchmark Script** (`../prompt2analytics-paper/performance/comparisons/r_comparison/benchmark_[method].R`):
 ```r
 library(microbenchmark)
 library(lfe)  # or relevant package
@@ -209,7 +209,7 @@ write.csv(
 
 ### Step 4: Document Performance
 
-**Update**: `performance/reports/[category]_performance.md`
+**Update**: `../prompt2analytics-paper/performance/reports/[category]_performance.md`
 
 **Include**:
 - Benchmark results table (mean, median, std)
@@ -245,7 +245,7 @@ After completing validation and benchmarking, verify:
 
 ### Performance (All items mandatory for new methods)
 - [ ] Criterion benchmark added to `crates/p2a-core/benches/`
-- [ ] R benchmark script created in `performance/comparisons/r_comparison/`
+- [ ] R benchmark script created in `../prompt2analytics-paper/performance/comparisons/r_comparison/`
 - [ ] **Rust benchmarks executed** (`cargo bench -p p2a-core -- [method]`)
 - [ ] **R benchmarks executed** (`Rscript benchmark_[method].R`)
 - [ ] Performance table in validation doc filled with **actual numbers**
@@ -272,7 +272,7 @@ cargo bench -p p2a-core
 open target/criterion/report/index.html
 
 # Run R benchmarks for a specific method (MANDATORY)
-Rscript performance/comparisons/r_comparison/benchmark_[method].R
+Rscript ../prompt2analytics-paper/performance/comparisons/r_comparison/benchmark_[method].R
 
 # Fallback if microbenchmark not available - use system.time() in R
 ```
@@ -289,7 +289,7 @@ cargo test -p p2a-core -- test_validate_[method] --nocapture
 cargo bench -p p2a-core -- [method]
 
 # 3. Run R performance benchmarks
-Rscript performance/comparisons/r_comparison/benchmark_[method].R
+Rscript ../prompt2analytics-paper/performance/comparisons/r_comparison/benchmark_[method].R
 
 # 4. Update validation document with actual results
 # Edit: validation/[category]/[method].md

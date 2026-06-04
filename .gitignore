@@ -39,122 +39,35 @@ coverage/
 # Personal notes
 _notes/
 TODO.md
+next_steps.md
 
 # Machine-specific MCP config (absolute paths)
 mcp-config.json
 
-# LaTeX intermediate and output files
-paper/paper.pdf
-paper/*.aux
-paper/*.bbl
-paper/*.blg
-paper/*.fdb_latexmk
-paper/*.fls
-paper/*.log
-paper/*.out
-paper/*.synctex.gz
-paper/*.toc
-paper/*.lof
-paper/*.lot
-paper/*.nav
-paper/*.snm
-paper/*.vrb
-_resources/literature/
-
-
-# Other
-docs/DIOXUS_MIGRATION_FEASIBILITY.md
-ideas.md
-next_steps.md
-paper/CODE_REVIEW.md
-
 # Benchmark result files
 crates/p2a-core/rust_*.json
-
-# End-to-end evaluation results (regenerable via run_evaluation.py)
-paper/code/e2e_eval/results/*.json
-paper/code/e2e_eval/results/screenshots/
-paper/code/e2e_eval/__pycache__/
-paper/code/e2e_eval/*.csv
-paper/code/e2e_eval/*.parquet
-paper/code/e2e_eval/texput.log
-
-# Simulated review reports
-paper/_resources/review_reports/
-paper/_resources/
-paper/figures/test.pdf
-paper/code/paper/
-review_reports/
-
-# Generated synthetic datasets
-paper/code/rust_validation/datasets/synthetic_*.csv
-
-# Generated validation reports (timestamped)
-validation/reports/
-
-# Generated output reports
-reports/
-
-# One-off generated reports
-new_code_review_report.md
-
-# LaTeX build output
-paper/build/
-
-# R auto-generated plot device output
-performance/comparisons/r_comparison/Rplots.pdf
-
-# Benchmark results: ignore everything except final merged outputs
-# (comparison_speed.csv, comparison_memory.csv, comparison_unified.csv, validation_coverage.csv)
-# All intermediate/raw CSVs are regenerable via the benchmark pipeline
-performance/comparisons/r_comparison/results/*
-!performance/comparisons/r_comparison/results/comparison_speed.csv
-!performance/comparisons/r_comparison/results/comparison_memory.csv
-!performance/comparisons/r_comparison/results/comparison_unified.csv
-!performance/comparisons/r_comparison/results/validation_coverage.csv
-
-# Legacy benchmark CSVs in parent directory (regenerable)
-performance/comparisons/r_comparison/r_*_benchmark_results.csv
-performance/comparisons/r_comparison/rust_*_benchmark_results*.csv
-performance/comparisons/r_comparison/test_data/
-performance/comparisons/r_comparison/validation_data/
-performance/results/
-
-# Generated benchmark data (R-generated CSVs, regenerable via run_unified.sh)
-performance/comparisons/data/
 
 # Stale benchmark output in crate directory
 crates/p2a-core/performance/
 
-# Nested Rust build artifacts
-paper/code/rust_validation/rust_runner/target/
-paper/code/mc_validation/target/
-paper/code/mc_validation/Cargo.lock
+# Generated validation reports (timestamped)
+validation/reports/
 
-# MC validation results (regenerable)
-paper/code/mc_validation/results/
-results/
-
-# Generated synthetic data directory
-paper/code/rust_validation/datasets/synthetic/
-
-# Generated review/copyedit reports
-copyedit_reports/
-paper/copyedit_reports/
-paper/narrative_review/
-paper/jss_*.md
+# One-off generated reports
+new_code_review_report.md
+code_review_report.md
 
 # Archive directories (superseded/stale files)
 archive/
-paper/archive/
 
 # External resources
+_resources/literature/
 _resources/tidy-data.pdf
 
 # Python
 __pycache__/
 *.pyc
 
-
-# other notes
+# Other notes
 validation_benchmarking_report.md
+docs/DIOXUS_MIGRATION_FEASIBILITY.md

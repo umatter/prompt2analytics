@@ -1,6 +1,0 @@
-"test","metric","r_value"
-"basic_synth","weight_b",0.499999999993777
-"basic_synth","weight_c",0.500000000004729
-"basic_synth","pre_rmspe",1.15457847147627e-11
-"basic_synth","avg_post_effect",5.00000000004282
-"placebo","p_value",0.666666666666667

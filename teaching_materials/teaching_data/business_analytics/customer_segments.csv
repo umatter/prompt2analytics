@@ -1,7 +1,0 @@
-customer_id,segment,age,income,purchase_frequency
-C001,Premium,45,95000,12
-C002,Standard,32,55000,6
-C003,Premium,52,120000,15
-C004,Budget,28,35000,3
-C005,Standard,41,62000,8
-C006,Budget,24,28000,2
