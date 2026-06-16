@@ -7,7 +7,7 @@
 
 A comprehensive analytics toolkit exposing econometrics, machine learning, and visualization capabilities through multiple interfaces:
 - **CLI (`p2a`)**: Direct command-line execution for scripted workflows
-- **MCP Server**: Model Context Protocol integration for AI assistants (257 tools)
+- **MCP Server**: Model Context Protocol integration for AI assistants (270 tools)
 - **Dioxus App**: Cross-platform frontend (web, desktop) with LLM-powered natural language analysis
 
 **Requirements**: Rust 1.85+ (edition 2024)
@@ -106,7 +106,7 @@ brew install openblas
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/prompt2analytics.git
+git clone https://github.com/umatter/prompt2analytics.git
 cd prompt2analytics
 
 # Build the CLI
@@ -409,7 +409,7 @@ p2a script run analysis.sh
 
 ### MCP Server
 
-The MCP server exposes 257 analytics tools via the Model Context Protocol. Configure it in your MCP client (e.g., Claude Desktop):
+The MCP server exposes 270 analytics tools via the Model Context Protocol. Configure it in your MCP client (e.g., Claude Desktop):
 
 ```json
 {
@@ -443,7 +443,7 @@ dx serve
 dx serve --platform desktop
 ```
 
-Open http://localhost:8080 in your browser (web) or the native window (desktop). Features:
+Open the URL printed by `dx serve` in your browser (web), or use the native window (desktop). The backend MCP server runs separately on port 8080. Features:
 - Chat interface with streaming LLM responses
 - Support for Ollama, Anthropic, and OpenAI providers
 - Conversation management with persistent history (SurrealDB)
@@ -492,7 +492,7 @@ prompt2analytics/
 │   │   ├── linalg/        # Matrix operations (via faer)
 │   │   └── traits/        # LinearEstimator trait
 │   ├── p2a-cli/           # CLI binary (`p2a`)
-│   ├── p2a-mcp/           # MCP server (257 tools)
+│   ├── p2a-mcp/           # MCP server (270 tools)
 │   │   └── db/            # SurrealDB persistence layer
 │   └── p2a-dioxus/        # Cross-platform Dioxus app
 │       ├── api/           # HTTP client and SSE streaming
@@ -506,12 +506,9 @@ prompt2analytics/
 └── docs/                  # Guides, design notes, security docs
 ```
 
-The JSS manuscript, the R-vs-Rust benchmark pipeline, and the end-to-end
-LLM evaluation live in a companion repo (`prompt2analytics-paper`).
+## MCP Tools (270 total)
 
-## MCP Tools (257 total)
-
-The MCP server exposes 257 analytics tools. Key categories include:
+The MCP server exposes 270 analytics tools. Key categories include:
 
 | Category | Example Tools |
 |----------|---------------|
@@ -613,14 +610,11 @@ Key design choices:
 - Custom `bench_utils.rs` runner (not Criterion) to produce distribution statistics compatible with R's `bench::mark()`
 - Reproducible data generation via seeded ChaCha8Rng (seed=42)
 - Memory tracking via `memory_stats` crate (physical memory before/after/peak)
-- JSON output for automated merging with R results
+- JSON output for programmatic consumption and cross-language comparison
 
-The R side of the comparison (67 DGP-matched `benchmark_*.R` scripts, the merge pipeline, and paper figures/tables) lives in the companion `prompt2analytics-paper` repo, which consumes the JSON emitted here.
-
-The benchmark harness writes timestamped JSON (`rust_comprehensive_*.json`)
-to a local `performance/results/` staging directory (falling back to the
-current directory if it cannot be created); copy that JSON into the companion
-paper repo to feed its R-vs-Rust merge pipeline.
+The harness writes timestamped JSON (`rust_comprehensive_*.json`) to a local
+`performance/results/` directory, falling back to the current directory if it
+cannot be created.
 
 ## Development
 
@@ -691,23 +685,6 @@ cd crates/p2a-dioxus && dx serve
 | MCP Protocol | `rmcp` | 0.8 |
 | Database | `surrealdb` | embedded RocksDB |
 | Web Frontend | `dioxus` | 0.7 |
-
-## Paper
-
-The Journal of Statistical Software (JSS) article describing the chat-first
-data analytics approach lives in a separate companion repository,
-**prompt2analytics-paper**, along with the R-vs-Rust benchmark pipeline, the
-end-to-end LLM evaluation harness, and all paper figures and tables.
-
-This repository emits the Rust benchmark JSON the paper consumes:
-
-```bash
-cargo bench -p p2a-core --bench comprehensive_benchmarks
-```
-
-The companion repo's README documents the full reproduction pipeline (R
-benchmarks, result merging, exhibit generation, evaluation). See
-`CLAUDE.md` ("Companion paper repo") for the cross-repo workflow.
 
 ## License
 
