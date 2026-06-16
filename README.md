@@ -617,17 +617,10 @@ Key design choices:
 
 The R side of the comparison (67 DGP-matched `benchmark_*.R` scripts, the merge pipeline, and paper figures/tables) lives in the companion `prompt2analytics-paper` repo, which consumes the JSON emitted here.
 
-### Results Directory
-
-```
-performance/comparisons/r_comparison/results/
-├── comparison_speed.csv          # Merged Rust vs R speed comparison
-├── comparison_memory.csv         # Merged memory comparison
-├── validation_coverage.csv       # Method coverage matrix
-└── *.log                         # Execution logs from run_all.sh
-```
-
-Raw timestamped results (`r_*_2026*.csv`, `rust_comprehensive_2026*.json`) are gitignored. Only the merged comparison CSVs are tracked.
+The benchmark harness writes timestamped JSON (`rust_comprehensive_*.json`)
+to a local `performance/results/` staging directory (falling back to the
+current directory if it cannot be created); copy that JSON into the companion
+paper repo to feed its R-vs-Rust merge pipeline.
 
 ## Development
 
@@ -701,88 +694,20 @@ cd crates/p2a-dioxus && dx serve
 
 ## Paper
 
-The `paper/` directory contains materials for a Journal of Statistical Software (JSS) article describing the chat-first data analytics approach.
+The Journal of Statistical Software (JSS) article describing the chat-first
+data analytics approach lives in a separate companion repository,
+**prompt2analytics-paper**, along with the R-vs-Rust benchmark pipeline, the
+end-to-end LLM evaluation harness, and all paper figures and tables.
 
-### Building the Paper
-
-```bash
-# Build PDF (requires pdfLaTeX and BibTeX)
-cd paper && pdflatex article-jss && bibtex article-jss && pdflatex article-jss && pdflatex article-jss
-```
-
-### Reproducing Benchmark Exhibits
-
-All figures and tables in the paper are generated from benchmark data via R scripts. To reproduce from scratch:
+This repository emits the Rust benchmark JSON the paper consumes:
 
 ```bash
-# Step 1: Run Rust benchmarks
 cargo bench -p p2a-core --bench comprehensive_benchmarks
-
-# Step 2: Run R benchmarks (requires R + benchmark packages)
-cd performance/comparisons/r_comparison && Rscript r_benchmark_runner.R
-
-# Step 3: Merge results
-Rscript merge_results.R
-
-# Step 4: Generate figures and tables
-cd ../../paper/code
-Rscript generate_paper_figures.R    # → paper/figures/*.pdf
-Rscript generate_paper_tables.R     # → paper/tables/*.tex
-
-# Or run the full pipeline in one command:
-./performance/comparisons/run_all.sh
 ```
 
-### Reproducing End-to-End Evaluation
-
-The paper reports two evaluations:
-1. **96-prompt single-turn evaluation** across 6 models (GPT-4.1 Mini, Sonnet 4.6, Haiku 4.5, Gemini 2.5 Flash, Ministral 3B, Llama 4 Scout), scored on tool selection, parameter extraction, numerical correctness, and interpretation quality.
-2. **Chrome-based multi-turn evaluation** with Claude Sonnet 4.6 (8 conversations, 30 turns, 96.7% adequate).
-
-```bash
-# Run single-turn evaluation (requires API keys for each provider)
-cd paper/code/e2e_eval
-python3 run_evaluation.py --models gpt-4.1-mini claude-sonnet-4.6 claude-haiku-4.5
-
-# Re-score existing results
-python3 rescore.py
-
-# Generate evaluation figures and tables
-cd paper/code
-Rscript generate_e2e_figures.R
-```
-
-### Paper Directory Structure
-
-```
-paper/
-├── article-jss.tex                # Main JSS wrapper (title, abstract, bibliography)
-├── paper.tex                      # Section includes
-├── sections/                      # Paper sections
-│   ├── introduction_new.tex       # Introduction
-│   ├── defining.tex               # Background and design principles
-│   ├── tools.tex                  # Software implementation
-│   ├── examples.tex               # Worked examples
-│   ├── evaluation_new.tex         # Evaluation (96-prompt e2e + multi-turn)
-│   ├── deployment.tex             # Performance benchmarks and local deployment
-│   ├── discussion.tex             # Discussion and appendix TOC
-│   ├── appendices.tex             # Appendices A–G
-│   └── e2e_eval_appendix.tex      # Appendix H (e2e evaluation protocol)
-├── code/
-│   ├── generate_paper_figures.R   # Benchmark figure generator
-│   ├── generate_paper_tables.R    # Benchmark table generator
-│   ├── generate_e2e_figures.R     # Evaluation figure generator
-│   └── e2e_eval/                  # End-to-end evaluation framework
-│       ├── test_cases.json        # 96 evaluation prompts with expected tools
-│       ├── run_evaluation.py      # Evaluation runner (API calls + scoring)
-│       ├── rescore.py             # Re-score existing results
-│       ├── generate_datasets.R    # Generate evaluation datasets
-│       ├── PROTOCOL.md            # Evaluation protocol documentation
-│       └── results/               # Result JSONs per model (gitignored)
-├── figures/                       # Generated PDF/PNG figures
-├── tables/                        # Generated LaTeX tables
-└── references.bib                 # Bibliography
-```
+The companion repo's README documents the full reproduction pipeline (R
+benchmarks, result merging, exhibit generation, evaluation). See
+`CLAUDE.md` ("Companion paper repo") for the cross-repo workflow.
 
 ## License
 

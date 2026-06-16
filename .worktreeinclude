@@ -31,23 +31,7 @@ _notes/
 # Machine-specific MCP config (absolute paths)
 mcp-config.json
 
-# LaTeX intermediate files
-paper/*.aux
-paper/*.bbl
-paper/*.blg
-paper/*.fdb_latexmk
-paper/*.fls
-paper/*.log
-paper/*.out
-paper/*.synctex.gz
-paper/*.toc
-paper/*.lof
-paper/*.lot
-paper/*.nav
-paper/*.snm
-paper/*.vrb
 _resources/literature/
-
 
 # other
 docs/DIOXUS_MIGRATION_FEASIBILITY.md

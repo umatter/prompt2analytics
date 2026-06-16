@@ -163,7 +163,7 @@ shapiro.test(x)
 | n=2,000      | 72.5      | ~250    | ~3x     |
 | n=5,000      | 200.5     | ~500    | ~2.5x   |
 
-*Note: R timings estimated from microbenchmark package (run with `Rscript performance/comparisons/r_comparison/benchmark_shapiro.R`). The Rust implementation uses Wichura's AS241 rational approximation for fast normal quantile computation instead of iterative methods, providing ~30-35% speedup over the initial implementation.*
+*Note: R timings estimated from microbenchmark package (run with `Rscript benchmark_shapiro.R` in the companion paper repo). The Rust implementation uses Wichura's AS241 rational approximation for fast normal quantile computation instead of iterative methods, providing ~30-35% speedup over the initial implementation.*
 
 ## References
 

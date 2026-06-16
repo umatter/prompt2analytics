@@ -200,7 +200,7 @@ Spatial R benchmarks consolidated from 5 to 2 files. Redundant `ml_benchmarks.rs
 - **Validation Docs:** `validation/[category]/`
 - **Reports:** `validation/reports/`
 - **Pipeline Overview:** `performance/README.md`
-- **Coverage Check:** `performance/comparisons/check_coverage.R`
+- **Coverage Check:** `performance/comparisons/check_coverage.R` (companion paper repo)
 
 ## Adding New Validations
 
