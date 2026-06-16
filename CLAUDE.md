@@ -198,7 +198,7 @@ The `cuda` feature enables transparent GPU dispatch for core linear algebra oper
 - Small matrices (k<30, n<5K): Transfer overhead exceeds compute savings
 - Tall-skinny matmul: CPU BLAS optimized for these shapes
 
-Dispatch thresholds are configurable via environment variables (`P2A_GPU_XTX_MIN_NKK`, etc.) and calibrated on DGX Spark. Threshold rationale is documented in `crates/p2a-core/src/linalg/gpu/dispatch.rs`; full benchmark reports live in the companion paper repo.
+Dispatch thresholds are configurable via environment variables (`P2A_GPU_XTX_MIN_NKK`, etc.) and calibrated on DGX Spark. Threshold rationale is documented in `crates/p2a-core/src/linalg/gpu/dispatch.rs`.
 
 ```bash
 # GPU benchmarks (95 configurations)
@@ -659,12 +659,11 @@ Key directories:
 
 ### Rust Benchmarks (`crates/p2a-core/benches/`)
 
-The Rust benchmarks emit JSON consumed by the cross-language (R vs Rust)
-comparison pipeline, which lives in the companion paper repo
-(`../prompt2analytics-paper`, see "Companion paper repo" below).
+The Rust benchmarks emit JSON with distribution statistics formatted to match
+R's `bench::mark()`, for optional cross-language (R vs Rust) comparison.
 
 ```bash
-# Rust benchmarks (outputs rust_*.json for the paper repo's merge pipeline)
+# Rust benchmarks (outputs rust_*.json to performance/results/)
 cargo bench -p p2a-core --bench comprehensive_benchmarks
 ```
 
@@ -686,23 +685,6 @@ Key benchmark files:
 - `hypothesis_benchmarks.rs` - 20+ hypothesis tests
 - `forecasting_benchmarks.rs` - ARIMA, STL, MSTL, Holt-Winters, Kalman
 - `clustering_benchmarks.rs` - K-means, DBSCAN, hierarchical, PCA, t-SNE
-
-### Companion paper repo (`../prompt2analytics-paper`)
-
-Everything paper-side lives in a separate repo (conventionally checked out as
-a sibling directory `../prompt2analytics-paper`): the JSS manuscript (LaTeX),
-the R side of the R-vs-Rust benchmark pipeline (67 `benchmark_*.R` scripts,
-`merge_results.R`, comparison CSVs), paper exhibit generation, and the
-end-to-end LLM evaluation harness (`e2e_eval/`).
-
-Cross-repo workflow when benchmarking a new method or re-running comparisons:
-
-1. Here: `cargo bench -p p2a-core --bench comprehensive_benchmarks` → `rust_*.json`
-2. Copy the JSON into the paper repo's `performance/results/`
-3. There: run the R benchmarks and `merge_results.R`, regenerate exhibits
-4. There: update `SOFTWARE_VERSION` with the commit benchmarked here
-
-The paper repo's `CLAUDE.md` documents its pipeline in detail.
 
 ## Agentic Engineering Setup
 
@@ -811,8 +793,6 @@ let df = df! {
 **Benchmarking:**
 - `crates/p2a-core/benches/bench_utils.rs` - Custom benchmark runner (distribution stats + memory)
 - `crates/p2a-core/benches/comprehensive_benchmarks.rs` - Master Rust benchmark (all methods)
-- R-vs-Rust comparison pipeline, paper exhibits, and the e2e LLM evaluation
-  live in the companion paper repo (`../prompt2analytics-paper`)
 
 **Documentation:**
 - `API_ENDPOINTS.md` - Complete HTTP API reference (sessions, datasets, tools, LLM chat, SSE)
