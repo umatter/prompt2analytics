@@ -88,9 +88,16 @@ pub fn App() -> Element {
 
     // Initialize session on mount
     use_effect(move || {
-        let mut session = session_state;
+        let session = session_state;
         spawn(async move {
-            if let Err(e) = session.write().initialize().await {
+            // Do NOT hold a signal borrow across `.await`: a `session.write()`
+            // (or `.read()`) guard kept alive during the session-creation network
+            // call makes any concurrent access to `session_state` (e.g. ChatPanel
+            // reading `loaded_datasets` during a re-render) panic with
+            // `AlreadyBorrowedMut`. Clone a snapshot first so the borrow is
+            // released before we await.
+            let snapshot = session.read().clone();
+            if let Err(e) = snapshot.initialize().await {
                 tracing::error!("Failed to initialize session: {}", e);
             }
         });

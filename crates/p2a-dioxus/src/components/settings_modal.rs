@@ -217,13 +217,26 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
 
         let mut session = session_state;
         spawn(async move {
-            // Ensure session exists (creates one if needed)
-            let session_id = match session.write().ensure_session().await {
-                Ok(id) => id,
-                Err(e) => {
-                    load_error.set(Some(format!("Session error: {}", e)));
-                    load_status.set(None);
-                    return;
+            // Ensure session exists (creates one if needed) WITHOUT holding a
+            // signal borrow across `.await`. Holding `session.write()` across the
+            // session-creation network call makes concurrent reads of
+            // `session_state` (e.g. ChatPanel rendering `loaded_datasets`) panic
+            // with `AlreadyBorrowedMut`. Mirrors the pattern used in ChatPanel.
+            let existing_id = session.read().session_id.clone();
+            let session_id = if let Some(id) = existing_id {
+                id
+            } else {
+                let snapshot = session.read().clone();
+                match snapshot.initialize().await {
+                    Ok(id) => {
+                        session.write().set_session_id(id.clone());
+                        id
+                    }
+                    Err(e) => {
+                        load_error.set(Some(format!("Session error: {}", e)));
+                        load_status.set(None);
+                        return;
+                    }
                 }
             };
 
