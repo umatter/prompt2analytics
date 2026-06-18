@@ -147,7 +147,6 @@ impl DbConnection {
             DEFINE FIELD IF NOT EXISTS session_id ON settings TYPE string;
             DEFINE FIELD IF NOT EXISTS provider ON settings TYPE string DEFAULT 'ollama';
             DEFINE FIELD IF NOT EXISTS model ON settings TYPE string DEFAULT 'llama3.1';
-            DEFINE FIELD IF NOT EXISTS api_key_encrypted ON settings TYPE option<string>;
             DEFINE FIELD IF NOT EXISTS base_url ON settings TYPE option<string>;
             DEFINE FIELD IF NOT EXISTS temperature ON settings TYPE float DEFAULT 0.7;
             DEFINE FIELD IF NOT EXISTS max_tokens ON settings TYPE int DEFAULT 4096;

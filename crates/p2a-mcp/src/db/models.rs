@@ -319,8 +319,6 @@ pub struct Settings {
     pub provider: String,
     /// Model name
     pub model: String,
-    /// Encrypted API key (optional)
-    pub api_key_encrypted: Option<String>,
     /// Base URL for provider (optional)
     pub base_url: Option<String>,
     /// Temperature setting
@@ -341,7 +339,6 @@ impl Settings {
             session_id: session_id.clone(),
             provider: "ollama".to_string(),
             model: "llama3.1".to_string(),
-            api_key_encrypted: None,
             base_url: None,
             temperature: 0.7,
             max_tokens: 4096,
