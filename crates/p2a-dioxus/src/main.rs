@@ -98,6 +98,27 @@ fn main() {
     // Initialize logging for the current platform
     init_logging();
 
+    // On web, WASM has no default panic backtrace: a Rust panic compiles to an
+    // `unreachable` trap and the console only shows "RuntimeError: unreachable".
+    // Install a hook that logs the panic location + message via tracing (which
+    // routes to the browser console) BEFORE the trap aborts execution.
+    #[cfg(feature = "web")]
+    {
+        std::panic::set_hook(Box::new(|info| {
+            let msg = info
+                .payload()
+                .downcast_ref::<&str>()
+                .map(|s| s.to_string())
+                .or_else(|| info.payload().downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "<non-string panic payload>".to_string());
+            let loc = info
+                .location()
+                .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+                .unwrap_or_else(|| "<unknown location>".to_string());
+            tracing::error!("WASM PANIC at {} :: {}", loc, msg);
+        }));
+    }
+
     tracing::info!(
         "Starting prompt2analytics Dioxus frontend on {}",
         platform_name()
