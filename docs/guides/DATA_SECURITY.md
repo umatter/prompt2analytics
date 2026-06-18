@@ -90,6 +90,10 @@ See [PROMPT_INJECTION.md](../security/PROMPT_INJECTION.md) for security consider
 
 ## Docker Deployment
 
+> Hosting the web app publicly (e.g. a bring-your-own-key demo)? See
+> [DEPLOYMENT.md](DEPLOYMENT.md) for the required security checklist (no shared
+> LLM keys, TLS, CORS lock-down, rate-limiting, container hardening).
+
 When running via Docker:
 
 | Data Type | Location | Notes |

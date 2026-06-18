@@ -10,6 +10,18 @@
 
 services:
   # Rust backend (p2a-mcp with HTTP transport)
+  #
+  # SECURITY — read before exposing this publicly (e.g. a bring-your-own-key demo):
+  #   * Do NOT set OPENAI_API_KEY / ANTHROPIC_API_KEY / OPENROUTER_API_KEY here.
+  #     If present, the backend uses them for any request that omits a key
+  #     (transport/http.rs), turning an unauthenticated public backend into an
+  #     open proxy billed to your account. Leaving them unset = true BYOK.
+  #   * The HTTP API has NO enforced authentication (P2A_AUTH_ENABLED config
+  #     exists but is not wired into the router), so anyone who can reach this
+  #     port can call all tools. Put it behind a TLS-terminating reverse proxy
+  #     that adds HTTPS, rate-limiting, and request timeouts (exclude the SSE
+  #     path /api/llm/chat/stream from response buffering / idle timeouts).
+  #   * Set P2A_CORS_ORIGINS to your frontend origin; never use cors-permissive.
   backend:
     build:
       context: .
@@ -20,7 +32,32 @@ services:
     environment:
       - RUST_LOG=info
       - RUST_BACKTRACE=1
+      - P2A_HOST=0.0.0.0
+      - P2A_PORT=8080
+      # Lock CORS to your deployed frontend origin (comma-separated for several).
+      # Leave empty to disallow cross-origin browser access entirely.
+      - P2A_CORS_ORIGINS=${P2A_CORS_ORIGINS:-}
+      # Max accepted request body (MiB); caps memory from oversized uploads.
+      - P2A_MAX_HTTP_BODY_MB=${P2A_MAX_HTTP_BODY_MB:-32}
+      # Persist the database under the mounted data volume (see below).
+      - P2A_DB_PATH=/data
     restart: unless-stopped
+    # --- Container hardening ---
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 512
+    mem_limit: 2g
+    cpus: "2.0"
+    # Writable data lives on a named volume; everything else can be read-only.
+    volumes:
+      - p2a-data:/data
+    tmpfs:
+      - /tmp
+    # read_only rootfs is recommended but VERIFY first with `docker compose up`
+    # that the only write paths are /data and /tmp, then uncomment:
+    # read_only: true
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
       interval: 30s
@@ -55,4 +92,6 @@ networks:
 
 volumes:
   ollama_data:
+    driver: local
+  p2a-data:
     driver: local

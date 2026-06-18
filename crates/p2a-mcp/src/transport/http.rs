@@ -14,6 +14,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use tower_http::cors::{Any, CorsLayer};
+use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::trace::TraceLayer;
 
 use crate::audit::AuditLogger;
@@ -124,8 +125,7 @@ pub fn create_router(
     let router = create_base_router(state, config);
 
     // Add conversation routes if persistent manager is available
-
-    if let Some(manager) = persistent_manager {
+    let router = if let Some(manager) = persistent_manager {
         tracing::info!("Adding conversation routes to /api/*");
         let conv_state = super::conversation::ConversationState {
             session_manager: manager,
@@ -134,18 +134,28 @@ pub fn create_router(
     } else {
         tracing::warn!("Conversation routes NOT added (no persistent manager)");
         router
-    }
+    };
+
+    // Apply global middleware LAST, so it also covers the nested conversation
+    // routes (e.g. /api/sessions/{id}/datasets). Applying CORS inside
+    // create_base_router would skip routes nested afterwards.
+    apply_global_middleware(router, config)
 }
 
 /// Create the axum router with all routes (without db feature).
 #[cfg(not(feature = "db"))]
 pub fn create_router(state: AppState, config: &ServerConfig) -> Router {
-    create_base_router(state, config)
+    apply_global_middleware(create_base_router(state, config), config)
 }
 
-/// Create the base router with core routes.
-fn create_base_router(state: AppState, config: &ServerConfig) -> Router {
-    let cors = if config.http.cors_permissive {
+/// Build the CORS layer from configuration.
+///
+/// - `cors_permissive`: allow any origin/method/header (dev only — do NOT use
+///   for a public deployment).
+/// - `cors_origins` set: allow exactly those origins (recommended for deploys).
+/// - neither: a restrictive default `CorsLayer` (no cross-origin access).
+fn build_cors(config: &ServerConfig) -> CorsLayer {
+    if config.http.cors_permissive {
         CorsLayer::new()
             .allow_origin(Any)
             .allow_methods(Any)
@@ -163,8 +173,39 @@ fn create_base_router(state: AppState, config: &ServerConfig) -> Router {
             .allow_headers(Any)
     } else {
         CorsLayer::new()
-    };
+    }
+}
 
+/// Maximum accepted HTTP request body size, in bytes.
+///
+/// Caps memory use from oversized requests (e.g. large base64 dataset uploads)
+/// on a publicly reachable backend. Defaults to 32 MiB; override with the
+/// `P2A_MAX_HTTP_BODY_MB` environment variable. This only limits request
+/// bodies and does not affect SSE/streaming responses.
+fn max_request_body_bytes() -> usize {
+    const DEFAULT_MB: usize = 32;
+    let mb = std::env::var("P2A_MAX_HTTP_BODY_MB")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&mb| mb > 0)
+        .unwrap_or(DEFAULT_MB);
+    mb * 1024 * 1024
+}
+
+/// Apply global middleware to the fully-composed router.
+///
+/// Must run AFTER all routes (including nested ones) are registered so the
+/// layers cover every route. CORS is outermost so preflight `OPTIONS` is
+/// handled before the body-size limit.
+fn apply_global_middleware(router: Router, config: &ServerConfig) -> Router {
+    router
+        .layer(build_cors(config))
+        .layer(RequestBodyLimitLayer::new(max_request_body_bytes()))
+        .layer(TraceLayer::new_for_http())
+}
+
+/// Create the base router with core routes.
+fn create_base_router(state: AppState, _config: &ServerConfig) -> Router {
     let router = Router::new()
         // Health check
         .route("/health", get(health_check))
@@ -193,11 +234,10 @@ fn create_base_router(state: AppState, config: &ServerConfig) -> Router {
         .route("/api/llm/env-keys", get(llm_env_keys))
         .route("/api/llm/generate-title", post(llm_generate_title));
 
-    router
-        // Add middleware
-        .layer(cors)
-        .layer(TraceLayer::new_for_http())
-        .with_state(state)
+    // NOTE: global middleware (CORS, body limit, trace) is applied in
+    // `apply_global_middleware` after all routes — including nested conversation
+    // routes — are composed in `create_router`.
+    router.with_state(state)
 }
 
 // =============================================================================
