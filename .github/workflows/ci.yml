@@ -9,6 +9,14 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # Keep CI within the free runner's memory/disk budget. Debug info on the huge
+  # dependency tree (polars, faer, plotters, ravif, …) is the dominant driver of
+  # link-time memory + target/ size, and was crashing `ld` with SIGBUS during the
+  # link of the large test binaries. Tests don't need debug symbols, and
+  # incremental compilation only adds disk in a fresh CI build.
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+  CARGO_INCREMENTAL: "0"
 
 # This workflow runs on the free GitHub-hosted Ubuntu runner. The heavier
 # checks (release builds, the `database` feature that pulls in duckdb-sys,
