@@ -5,6 +5,44 @@
 use dioxus::prelude::*;
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 
+/// Neutralize unsafe URL schemes in markdown links/images.
+///
+/// Markdown destinations are attacker-influenceable (LLM output, user text,
+/// tool results). Rendering `[x](javascript:…)` / `data:` URLs as an `href`
+/// allows script execution in the page origin on click — which on the web
+/// build can read the bring-your-own-key API key from `localStorage`.
+///
+/// Only an allowlist of schemes is permitted; everything else collapses to
+/// `"#"`. Relative URLs (no scheme) and fragments/queries are allowed. Control
+/// characters are stripped first because browsers ignore them when resolving a
+/// URL, so `java&#9;script:` style obfuscation can't slip a scheme past us.
+fn sanitize_url(url: &str) -> String {
+    let cleaned: String = url.chars().filter(|c| !c.is_control()).collect();
+    let trimmed = cleaned.trim();
+
+    if let Some(colon) = trimmed.find(':') {
+        let scheme = &trimmed[..colon];
+        let looks_like_scheme = !scheme.is_empty()
+            && scheme
+                .bytes()
+                .next()
+                .is_some_and(|b| b.is_ascii_alphabetic())
+            && scheme
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.'));
+        if looks_like_scheme
+            && !matches!(
+                scheme.to_ascii_lowercase().as_str(),
+                "http" | "https" | "mailto" | "tel"
+            )
+        {
+            return "#".to_string();
+        }
+    }
+
+    trimmed.to_string()
+}
+
 /// Render markdown text to RSX elements with proper styling
 pub fn render_markdown(text: &str) -> Element {
     let options = Options::all();
@@ -223,7 +261,7 @@ fn render_tag(tag: &Tag, events: &[Event]) -> (Element, usize) {
             dest_url, title, ..
         } => {
             let children = render_events(inner_events);
-            let href = dest_url.to_string();
+            let href = sanitize_url(dest_url);
             let title_attr = title.to_string();
             (
                 rsx! {
@@ -242,7 +280,7 @@ fn render_tag(tag: &Tag, events: &[Event]) -> (Element, usize) {
         Tag::Image {
             dest_url, title, ..
         } => {
-            let src = dest_url.to_string();
+            let src = sanitize_url(dest_url);
             let alt = extract_text(inner_events);
             let title_attr = title.to_string();
             (
@@ -499,4 +537,41 @@ fn find_table_section_end(events: &[Event], end_tag: TagEnd) -> usize {
         }
     }
     events.len() - 1
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sanitize_url;
+
+    #[test]
+    fn allows_safe_and_relative_urls() {
+        for url in [
+            "https://example.com/a?b=c#d",
+            "http://example.com",
+            "mailto:a@b.com",
+            "tel:+123",
+            "/relative/path",
+            "../up",
+            "#section",
+            "page?q=a:b",  // colon in query, not a scheme
+            "foo/bar:baz", // colon in path, not a scheme
+        ] {
+            assert_eq!(sanitize_url(url), url, "should pass through: {url}");
+        }
+    }
+
+    #[test]
+    fn blocks_script_bearing_schemes() {
+        for url in [
+            "javascript:alert(1)",
+            "JaVaScript:alert(1)",
+            "  javascript:alert(1)  ",
+            "java\tscript:alert(1)", // control-char obfuscation
+            "java\nscript:alert(1)",
+            "data:text/html,<script>alert(1)</script>",
+            "vbscript:msgbox(1)",
+        ] {
+            assert_eq!(sanitize_url(url), "#", "should be neutralized: {url:?}");
+        }
+    }
 }
