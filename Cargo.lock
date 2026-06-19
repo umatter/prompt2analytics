@@ -6836,7 +6836,7 @@ dependencies = [
 
 [[package]]
 name = "p2a-chat"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -6854,7 +6854,7 @@ dependencies = [
 
 [[package]]
 name = "p2a-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -6881,7 +6881,7 @@ dependencies = [
 
 [[package]]
 name = "p2a-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "approx 0.5.1",
@@ -6926,7 +6926,7 @@ dependencies = [
 
 [[package]]
 name = "p2a-dioxus"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -6954,7 +6954,7 @@ dependencies = [
 
 [[package]]
 name = "p2a-mcp"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "async-stream",
