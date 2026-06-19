@@ -7,26 +7,37 @@ FROM rust:latest AS builder
 
 WORKDIR /app
 
-# Install build dependencies
+# Install build dependencies.
+# clang + libclang-dev: required by bindgen-based -sys crates pulled in by the
+#   `full` feature (duckdb-sys, librocksdb-sys) — without libclang the release
+#   build fails with "Unable to find libclang".
+# cmake: needed by some native -sys builds.
 RUN apt-get update && apt-get install -y \
     pkg-config \
     libssl-dev \
+    clang \
+    libclang-dev \
+    cmake \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy workspace manifest files first for dependency caching
 COPY Cargo.toml Cargo.lock ./
 
-# Copy all workspace member Cargo.toml files (needed for workspace resolution)
+# Copy all workspace member Cargo.toml files (needed for workspace resolution).
+# Every member in the root Cargo.toml must be present or cargo fails to resolve
+# the workspace ("failed to read crates/<x>/Cargo.toml").
 COPY crates/p2a-core/Cargo.toml ./crates/p2a-core/
 COPY crates/p2a-mcp/Cargo.toml ./crates/p2a-mcp/
 COPY crates/p2a-cli/Cargo.toml ./crates/p2a-cli/
+COPY crates/p2a-chat/Cargo.toml ./crates/p2a-chat/
 COPY crates/p2a-dioxus/Cargo.toml ./crates/p2a-dioxus/
 
 # Create dummy source files for all workspace members
-RUN mkdir -p crates/p2a-core/src crates/p2a-mcp/src crates/p2a-cli/src crates/p2a-dioxus/src && \
+RUN mkdir -p crates/p2a-core/src crates/p2a-mcp/src crates/p2a-cli/src crates/p2a-chat/src crates/p2a-dioxus/src && \
     echo "pub fn dummy() {}" > crates/p2a-core/src/lib.rs && \
     echo "fn main() {}" > crates/p2a-mcp/src/main.rs && \
     echo "fn main() {}" > crates/p2a-cli/src/main.rs && \
+    echo "fn main() {}" > crates/p2a-chat/src/main.rs && \
     echo "fn main() {}" > crates/p2a-dioxus/src/main.rs
 
 # Build dependencies only (cached layer) - this may fail but will cache deps
