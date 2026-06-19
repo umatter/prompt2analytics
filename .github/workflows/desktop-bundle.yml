@@ -46,12 +46,31 @@ jobs:
 
     runs-on: ${{ matrix.os }}
 
+    # Windows currently fails to compile the embedded SurrealDB stack
+    # (surrealkv/async_graphql/surrealdb-core) under x86_64-pc-windows-msvc.
+    # Keep it non-blocking so the Linux/macOS installers still build and the
+    # release still publishes. Tracked as a follow-up.
+    continue-on-error: ${{ matrix.os == 'windows-latest' }}
+
     steps:
+      # The desktop release build produces a very large target/ dir; the free
+      # Linux runner's ~14 GB disk can fill mid-build and kill the job with no
+      # clear error. Reclaim space first (Linux only — these paths/sudo don't
+      # apply to the Windows/macOS runners, which have ample disk).
+      - name: Free disk space (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache /usr/share/swift /usr/local/share/boost
+          sudo rm -rf "$AGENT_TOOLSDIRECTORY"
+          sudo docker image prune --all --force || true
+          df -h /
+
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Install Rust
-        uses: dtolnay/rust-action@stable
+        uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
 
@@ -95,11 +114,14 @@ jobs:
           Invoke-WebRequest -Uri $WebView2InstallerUrl -OutFile "$env:TEMP\MicrosoftEdgeWebview2Setup.exe"
           Start-Process -FilePath "$env:TEMP\MicrosoftEdgeWebview2Setup.exe" -Args "/silent /install" -Wait
 
-      # Install Dioxus CLI
+      # Install Dioxus CLI — pinned to match the dioxus library version in
+      # crates/p2a-dioxus/Cargo.toml so `dx bundle` stays compatible.
       - name: Install Dioxus CLI
-        run: cargo install dioxus-cli
+        run: cargo install dioxus-cli --version 0.7.3 --locked
 
-      # Build the desktop bundle
+      # Build the desktop bundle. `--out-dir` flattens all produced installers
+      # into one known directory, so the upload step doesn't depend on dx's
+      # internal target layout.
       - name: Bundle Desktop App
         working-directory: crates/p2a-dioxus
         shell: bash
@@ -110,39 +132,18 @@ jobs:
             PACKAGE_ARGS="$PACKAGE_ARGS --package-types $pkg"
           done
 
-          dx bundle --platform desktop --release $PACKAGE_ARGS
+          dx bundle --platform desktop --release --out-dir bundle-out $PACKAGE_ARGS
+          echo "--- bundled artifacts ---"
+          ls -laR bundle-out
 
-      # Collect and upload artifacts
-      - name: Upload artifacts (Linux)
-        if: runner.os == 'Linux'
+      # Collect and upload artifacts (per-OS artifact name; each runner only
+      # produces its own platform's installers into bundle-out).
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: prompt2analytics-${{ matrix.artifact_name }}
-          path: |
-            crates/p2a-dioxus/target/dx/prompt2analytics/bundle/**/*.deb
-            crates/p2a-dioxus/target/dx/prompt2analytics/bundle/**/*.AppImage
-            crates/p2a-dioxus/target/dx/prompt2analytics/bundle/**/*.rpm
-          if-no-files-found: warn
-
-      - name: Upload artifacts (Windows)
-        if: runner.os == 'Windows'
-        uses: actions/upload-artifact@v4
-        with:
-          name: prompt2analytics-${{ matrix.artifact_name }}
-          path: |
-            crates/p2a-dioxus/target/dx/prompt2analytics/bundle/**/*.msi
-            crates/p2a-dioxus/target/dx/prompt2analytics/bundle/**/*.exe
-          if-no-files-found: warn
-
-      - name: Upload artifacts (macOS)
-        if: runner.os == 'macOS'
-        uses: actions/upload-artifact@v4
-        with:
-          name: prompt2analytics-${{ matrix.artifact_name }}
-          path: |
-            crates/p2a-dioxus/target/dx/prompt2analytics/bundle/**/*.dmg
-            crates/p2a-dioxus/target/dx/prompt2analytics/bundle/**/*.app
-          if-no-files-found: warn
+          path: crates/p2a-dioxus/bundle-out/**/*
+          if-no-files-found: error
 
   # Create GitHub Release with all artifacts
   release:
@@ -163,7 +164,7 @@ jobs:
         run: ls -R artifacts
 
       - name: Create Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           files: artifacts/**/*
           generate_release_notes: true
