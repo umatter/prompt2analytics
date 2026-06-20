@@ -20,23 +20,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Linux - builds .deb, .rpm, .appimage
+          # Linux - builds .deb, .AppImage
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             package_types: "deb appimage"
             artifact_name: linux
-
-          # Windows - builds .msi, .exe installer
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            package_types: "msi"
-            artifact_name: windows
-
-          # macOS Intel
-          - os: macos-13
-            target: x86_64-apple-darwin
-            package_types: "macos dmg"
-            artifact_name: macos-intel
 
           # macOS Apple Silicon
           - os: macos-14
@@ -44,13 +32,14 @@ jobs:
             package_types: "macos dmg"
             artifact_name: macos-arm64
 
-    runs-on: ${{ matrix.os }}
+          # FOLLOW-UPS (intentionally omitted for now):
+          # - Windows (windows-latest): fails to compile the embedded SurrealDB
+          #   stack (surrealkv/async_graphql/surrealdb-core) under MSVC.
+          # - macOS Intel (macos-13): free-tier Intel runners are effectively
+          #   unavailable and were blocking the release.
+          # Re-add these once each is resolved.
 
-    # Windows currently fails to compile the embedded SurrealDB stack
-    # (surrealkv/async_graphql/surrealdb-core) under x86_64-pc-windows-msvc.
-    # Keep it non-blocking so the Linux/macOS installers still build and the
-    # release still publishes. Tracked as a follow-up.
-    continue-on-error: ${{ matrix.os == 'windows-latest' }}
+    runs-on: ${{ matrix.os }}
 
     steps:
       # The desktop release build produces a very large target/ dir; the free
