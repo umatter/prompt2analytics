@@ -29,7 +29,9 @@ jobs:
           # macOS Apple Silicon
           - os: macos-14
             target: aarch64-apple-darwin
-            package_types: "macos dmg"
+            # `dmg` only — the .dmg contains the .app; building the bare `macos`
+            # (.app) type too just spills the bundle's internal files into out-dir.
+            package_types: "dmg"
             artifact_name: macos-arm64
 
           # FOLLOW-UPS (intentionally omitted for now):
@@ -125,13 +127,22 @@ jobs:
           echo "--- bundled artifacts ---"
           ls -laR bundle-out
 
-      # Collect and upload artifacts (per-OS artifact name; each runner only
-      # produces its own platform's installers into bundle-out).
+      # Collect and upload artifacts — only the actual installer files, by
+      # extension. `--out-dir` flattens everything (incl. a .app bundle's
+      # internal files and stray assets) into bundle-out, so a blanket glob
+      # would sweep loose junk into the release. Each runner only produces its
+      # own platform's installers.
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: prompt2analytics-${{ matrix.artifact_name }}
-          path: crates/p2a-dioxus/bundle-out/**/*
+          path: |
+            crates/p2a-dioxus/bundle-out/*.dmg
+            crates/p2a-dioxus/bundle-out/*.deb
+            crates/p2a-dioxus/bundle-out/*.AppImage
+            crates/p2a-dioxus/bundle-out/*.rpm
+            crates/p2a-dioxus/bundle-out/*.msi
+            crates/p2a-dioxus/bundle-out/*.exe
           if-no-files-found: error
 
   # Create GitHub Release with all artifacts
