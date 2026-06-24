@@ -1,0 +1,123 @@
+name: Deploy Web App (GitHub Pages)
+
+# Builds the Dioxus frontend to static WASM and publishes it to GitHub Pages.
+# This is the hosted, bring-your-own-key (BYOK) demo — visitors supply their own
+# LLM API key in the browser; the heavy Rust backend (p2a-mcp) runs separately
+# (see docs/guides/DEPLOYMENT.md) and is reached over HTTPS.
+#
+# Two repo-level config values drive this (Settings -> Secrets and variables ->
+# Actions -> Variables):
+#   * P2A_BACKEND_URL  – public HTTPS URL of the deployed p2a-mcp backend,
+#                        e.g. https://api.p2a.qamelab.org  (baked into the WASM)
+#   * WEB_DOMAIN       – custom domain the site is served at, e.g. p2a.qamelab.org
+#                        (written to CNAME). Leave unset to serve at the default
+#                        <user>.github.io/<repo> URL.
+#
+# After the first successful run, enable Pages: Settings -> Pages ->
+# Source: "GitHub Actions".
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/p2a-dioxus/**'
+      - '.github/workflows/web-deploy.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: web-pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (wasm target)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-wasm-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-wasm-cargo-
+
+      - name: Setup Node (Tailwind CSS)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # Regenerate the Tailwind stylesheet from src/input.css so the shipped CSS
+      # matches the current markup (assets/styles.css is committed but can drift).
+      - name: Build CSS
+        working-directory: crates/p2a-dioxus
+        run: |
+          npm install
+          npm run css:build
+
+      - name: Install Dioxus CLI
+        run: cargo install dioxus-cli --version 0.7.3 --locked
+
+      # The public backend URL is compile-time-baked into the WASM via
+      # P2A_BACKEND_URL (see crates/p2a-dioxus/src/api/client.rs). If the repo
+      # variable is unset the build still succeeds and falls back to localhost.
+      - name: Build web bundle
+        working-directory: crates/p2a-dioxus
+        env:
+          P2A_BACKEND_URL: ${{ vars.P2A_BACKEND_URL }}
+        run: |
+          if [ -z "$P2A_BACKEND_URL" ]; then
+            echo "::warning::P2A_BACKEND_URL repo variable is unset — the build will point at localhost:8080 and won't work when hosted."
+          fi
+          dx build --platform web --release
+
+      # Locate the web bundle. Dioxus 0.7 writes it under
+      # target/dx/<app>/release/web/public; older layouts use dist/web. Find the
+      # directory that actually contains index.html rather than hardcoding it.
+      - name: Stage Pages artifact
+        working-directory: crates/p2a-dioxus
+        run: |
+          OUT="$(find dist target/dx -type f -name index.html 2>/dev/null \
+                 | grep -E '/(web|public)/index.html$' | head -n1 | xargs -r dirname)"
+          if [ -z "$OUT" ]; then
+            echo "Could not find the web build output"; find dist target/dx -name index.html 2>/dev/null; exit 1
+          fi
+          echo "Web bundle: $OUT"
+          # SPA fallback: serve index.html for unknown deep-link paths.
+          cp "$OUT/index.html" "$OUT/404.html"
+          # Custom domain (CNAME) — only when WEB_DOMAIN is configured.
+          if [ -n "${WEB_DOMAIN}" ]; then
+            echo "${WEB_DOMAIN}" > "$OUT/CNAME"
+            echo "CNAME -> ${WEB_DOMAIN}"
+          fi
+          echo "PAGES_DIR=crates/p2a-dioxus/$OUT" >> "$GITHUB_ENV"
+        env:
+          WEB_DOMAIN: ${{ vars.WEB_DOMAIN }}
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: ${{ env.PAGES_DIR }}
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

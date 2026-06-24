@@ -6,8 +6,16 @@ use super::types::*;
 use crate::platform::{HttpClient, create_http_client};
 use serde::Deserialize;
 
-/// Default API base URL (matches the backend port documented in CLAUDE.md).
-const DEFAULT_BASE_URL: &str = "http://localhost:8080";
+/// Default API base URL.
+///
+/// Resolved at *compile time*: a hosted web build bakes in the public backend
+/// URL via the `P2A_BACKEND_URL` env var (set by the Pages deploy workflow);
+/// every other build (local dev, desktop) leaves it unset and falls back to the
+/// localhost backend documented in CLAUDE.md, so behavior is unchanged.
+const DEFAULT_BASE_URL: &str = match option_env!("P2A_BACKEND_URL") {
+    Some(url) => url,
+    None => "http://localhost:8080",
+};
 
 /// API client for p2a-mcp backend
 #[derive(Clone)]

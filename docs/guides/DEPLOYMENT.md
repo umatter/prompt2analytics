@@ -4,6 +4,47 @@ This guide covers hosting the p2a web UI publicly — e.g. a demo for reviewers 
 in **bring-your-own-key (BYOK)** mode, where each visitor supplies their own LLM
 API key in the browser.
 
+## Two pieces, hosted separately
+
+Unlike a purely static site (e.g. the Prompt Arena classroom app, which is a
+static frontend + a serverless Cloudflare Worker), p2a has a **heavyweight,
+stateful backend** that cannot run on Workers/Pages:
+
+| Piece | What it is | Where it runs |
+|-------|-----------|---------------|
+| **Frontend** | Dioxus → static WASM + assets | GitHub Pages (free, fits the qamelab pattern) |
+| **Backend** | `p2a-mcp` axum server (270 tools, SurrealDB/RocksDB, ~575 MB image) | An always-on host with HTTPS (VPS / Fly.io / Render / a box) |
+
+The frontend half mirrors how the other qamelab sites deploy. The backend is the
+genuinely new piece — it needs a real server, so it gets its own HTTPS endpoint
+(e.g. `https://api.p2a.qamelab.org`) that the frontend is built to talk to.
+
+## Frontend: GitHub Pages on a qamelab subdomain
+
+The repo lives under `umatter/`, not the `qamelab` org, so a path like
+`qamelab.org/p2a` (how Prompt Arena is served) isn't available — a **subdomain**
+CNAME'd to GitHub Pages is the clean route. The `.github/workflows/web-deploy.yml`
+workflow builds the WASM and publishes it; it reads two repo **Variables**
+(Settings → Secrets and variables → Actions → Variables):
+
+- `P2A_BACKEND_URL` — public HTTPS URL of the backend, baked into the WASM at
+  build time (e.g. `https://api.p2a.qamelab.org`).
+- `WEB_DOMAIN` — the custom domain, written to `CNAME` (e.g. `p2a.qamelab.org`).
+
+Deploy steps:
+
+1. Set the two repo Variables above.
+2. Add a DNS record at the qamelab.org zone:
+   `CNAME p2a.qamelab.org → umatter.github.io.`
+3. Deploy the backend (next section) and note its HTTPS URL → that's
+   `P2A_BACKEND_URL`.
+4. Run the **Deploy Web App** workflow (push to `main` or trigger manually).
+5. Settings → Pages → Source: **GitHub Actions**; set the custom domain to
+   `p2a.qamelab.org` and tick **Enforce HTTPS** once the cert provisions.
+6. Add `https://p2a.qamelab.org` to the backend's `P2A_CORS_ORIGINS`.
+7. Add the live URL to the qamelab site card (`qamelab.github.io`,
+   `src/content/software/p2a.md` → `liveUrl: https://p2a.qamelab.org`).
+
 ## Threat model in one paragraph
 
 The `p2a-mcp` HTTP backend has **no enforced authentication** (the
