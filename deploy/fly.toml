@@ -1,0 +1,45 @@
+# Fly.io deployment for the p2a-mcp backend (hosted bring-your-own-key demo).
+#
+# This deploys the PREBUILT image from GHCR — it does not build from source.
+# Pair with the GitHub Pages frontend (see ../.github/workflows/web-deploy.yml)
+# and docs/guides/DEPLOYMENT.md.
+#
+# Deploy:   fly deploy -c deploy/fly.toml
+# Cert:     fly certs add api.p2a.qamelab.org -a p2a-qamelab-backend
+#
+# Prereqs:
+#   * The GHCR package ghcr.io/umatter/prompt2analytics/backend must be PUBLIC.
+#   * NEVER set OPENAI_API_KEY / ANTHROPIC_API_KEY / OPENROUTER_API_KEY here —
+#     a shared key on this unauthenticated endpoint turns it into an open proxy
+#     billed to you. Unset = true BYOK.
+
+app = "p2a-qamelab-backend"
+primary_region = "fra"          # Frankfurt — EU
+
+[build]
+  image = "ghcr.io/umatter/prompt2analytics/backend:latest"
+
+[env]
+  P2A_HOST = "0.0.0.0"
+  P2A_PORT = "8080"
+  P2A_CORS_ORIGINS = "https://p2a.qamelab.org"
+  P2A_MAX_HTTP_BODY_MB = "32"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  # 1 = keep a machine warm during the review window (no cold starts, ~$5/mo).
+  # Set to 0 afterwards to scale to zero and pay almost nothing.
+  min_machines_running = 1
+
+  [[http_service.checks]]
+    path = "/health"
+    interval = "15s"
+    timeout = "5s"
+    grace_period = "10s"
+
+[[vm]]
+  size   = "shared-cpu-1x"
+  memory = "1gb"

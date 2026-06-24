@@ -83,16 +83,19 @@ jobs:
           fi
           dx build --platform web --release
 
-      # Locate the web bundle. Dioxus 0.7 writes it under
-      # target/dx/<app>/release/web/public; older layouts use dist/web. Find the
-      # directory that actually contains index.html rather than hardcoding it.
+      # Locate the web bundle. In a Cargo workspace, dx writes it to the
+      # workspace-root target/dx/<app>/release/web/public — NOT under the crate
+      # dir — so search from $GITHUB_WORKSPACE (skipping node_modules) for the
+      # index.html that lives under a web/ or public/ dir.
       - name: Stage Pages artifact
-        working-directory: crates/p2a-dioxus
         run: |
-          OUT="$(find dist target/dx -type f -name index.html 2>/dev/null \
+          OUT="$(find "$GITHUB_WORKSPACE" -type d -name node_modules -prune -o \
+                   -type f -name index.html -print 2>/dev/null \
                  | grep -E '/(web|public)/index.html$' | head -n1 | xargs -r dirname)"
           if [ -z "$OUT" ]; then
-            echo "Could not find the web build output"; find dist target/dx -name index.html 2>/dev/null; exit 1
+            echo "Could not find the web build output. index.html locations:"
+            find "$GITHUB_WORKSPACE" -type d -name node_modules -prune -o -type f -name index.html -print 2>/dev/null
+            exit 1
           fi
           echo "Web bundle: $OUT"
           # SPA fallback: serve index.html for unknown deep-link paths.
@@ -102,7 +105,7 @@ jobs:
             echo "${WEB_DOMAIN}" > "$OUT/CNAME"
             echo "CNAME -> ${WEB_DOMAIN}"
           fi
-          echo "PAGES_DIR=crates/p2a-dioxus/$OUT" >> "$GITHUB_ENV"
+          echo "PAGES_DIR=${OUT#$GITHUB_WORKSPACE/}" >> "$GITHUB_ENV"
         env:
           WEB_DOMAIN: ${{ vars.WEB_DOMAIN }}
 
