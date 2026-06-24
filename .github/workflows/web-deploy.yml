@@ -98,6 +98,16 @@ jobs:
             exit 1
           fi
           echo "Web bundle: $OUT"
+          # dx's asset!() pipeline records unhashed paths (assets/styles.css,
+          # assets/welcome-*.png, assets/icons/...) but does NOT copy the raw
+          # files into the bundle, so they 404 at runtime (unstyled page, broken
+          # images). Copy the source assets in to fill those literal paths.
+          SRC="$GITHUB_WORKSPACE/crates/p2a-dioxus/assets"
+          mkdir -p "$OUT/assets"
+          cp "$SRC/styles.css" "$OUT/assets/" 2>/dev/null || true
+          cp "$SRC"/*.png "$SRC"/*.gif "$OUT/assets/" 2>/dev/null || true
+          cp -r "$SRC/icons" "$OUT/assets/" 2>/dev/null || true
+          echo "--- assets in bundle ---"; ls "$OUT/assets"
           # SPA fallback: serve index.html for unknown deep-link paths.
           cp "$OUT/index.html" "$OUT/404.html"
           # Custom domain (CNAME) — only when WEB_DOMAIN is configured.
