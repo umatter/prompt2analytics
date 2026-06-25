@@ -10,6 +10,8 @@ A comprehensive analytics toolkit exposing econometrics, machine learning, and v
 - **MCP Server**: Model Context Protocol integration for AI assistants (270 tools)
 - **Dioxus App**: Cross-platform frontend (web, desktop) with LLM-powered natural language analysis
 
+**🌐 Live demo (bring your own key):** [p2a.qamelab.org](https://p2a.qamelab.org) — the hosted web app. You supply your own LLM API key in the browser; it is never stored server-side. This is a small **demo deployment**: it runs on a modest single instance (limited performance) and caps uploads at ~24 MB, so expect slower responses and use small datasets. For full performance and large data, run the desktop app or self-host the backend container `ghcr.io/umatter/prompt2analytics/backend` (see [docs/guides/DEPLOYMENT.md](docs/guides/DEPLOYMENT.md)).
+
 **Requirements**: Rust 1.85+ (edition 2024)
 
 ## Features
