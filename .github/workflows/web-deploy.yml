@@ -67,8 +67,15 @@ jobs:
           npm install
           npm run css:build
 
-      - name: Install Dioxus CLI
-        run: cargo install dioxus-cli --version 0.7.3 --locked
+      # Install the Dioxus CLI from a prebuilt binary instead of compiling it
+      # from source — drops this step from ~10-15 min to well under a minute.
+      # cargo-binstall falls back to a source build automatically if no prebuilt
+      # binary matches, so the build still succeeds in the worst case.
+      - name: Install cargo-binstall
+        uses: cargo-bins/cargo-binstall@main
+
+      - name: Install Dioxus CLI (prebuilt)
+        run: cargo binstall dioxus-cli@0.7.3 --no-confirm
 
       # The public backend URL is compile-time-baked into the WASM via
       # P2A_BACKEND_URL (see crates/p2a-dioxus/src/api/client.rs). If the repo
