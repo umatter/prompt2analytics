@@ -365,29 +365,91 @@ fn demean_matrix_map(
 // Degrees of Freedom
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Compute degrees of freedom absorbed by fixed effects.
-///
-/// For multi-way fixed effects, there is redundancy because the grand mean
-/// is absorbed multiple times. This function computes the total absorbed DF.
-///
-/// For two-way FE (entity + time): df_absorbed = N + T - 1
-/// (the -1 accounts for the grand mean being absorbed twice)
-fn compute_absorbed_df(factors: &[FactorInfo]) -> usize {
-    if factors.is_empty() {
-        return 0;
+/// Union-find `find` with path compression over a flat parent array.
+fn uf_find(parent: &mut [usize], x: usize) -> usize {
+    let mut root = x;
+    while parent[root] != root {
+        root = parent[root];
+    }
+    // Path compression.
+    let mut cur = x;
+    while parent[cur] != root {
+        let next = parent[cur];
+        parent[cur] = root;
+        cur = next;
+    }
+    root
+}
+
+/// Union-find `union` by rank.
+fn uf_union(parent: &mut [usize], rank: &mut [u8], a: usize, b: usize) {
+    let ra = uf_find(parent, a);
+    let rb = uf_find(parent, b);
+    if ra == rb {
+        return;
+    }
+    match rank[ra].cmp(&rank[rb]) {
+        std::cmp::Ordering::Less => parent[ra] = rb,
+        std::cmp::Ordering::Greater => parent[rb] = ra,
+        std::cmp::Ordering::Equal => {
+            parent[rb] = ra;
+            rank[ra] += 1;
+        }
+    }
+}
+
+/// Count connected components ("mobility groups") of the bipartite graph whose
+/// vertices are the levels of `f0` and `f1` and whose edges are the observed
+/// (level_0, level_1) co-occurrences. Levels of `f1` are offset by `f0.n_levels`
+/// so the two factors occupy disjoint vertex ranges.
+fn count_connected_components(f0: &FactorInfo, f1: &FactorInfo) -> usize {
+    let n0 = f0.n_levels;
+    let total = n0 + f1.n_levels;
+    let mut parent: Vec<usize> = (0..total).collect();
+    let mut rank = vec![0u8; total];
+
+    let n_obs = f0.ids.len().min(f1.ids.len());
+    for i in 0..n_obs {
+        uf_union(&mut parent, &mut rank, f0.ids[i], n0 + f1.ids[i]);
     }
 
-    let total_levels: usize = factors.iter().map(|f| f.n_levels).sum();
+    let mut roots = std::collections::HashSet::new();
+    for x in 0..total {
+        roots.insert(uf_find(&mut parent, x));
+    }
+    roots.len()
+}
 
-    // For multi-way FE, there's redundancy
-    // Simplified approach: subtract (num_factors - 1) for redundant grand means
-    let redundant = if factors.len() > 1 {
-        factors.len() - 1
-    } else {
-        0
-    };
-
-    total_levels.saturating_sub(redundant)
+/// Compute degrees of freedom absorbed by fixed effects.
+///
+/// For a single FE the absorbed DF is simply its number of levels.
+///
+/// For two-way FE the redundancy equals the number of connected components
+/// ("mobility groups") of the bipartite graph linking the two factors' levels
+/// (Abowd–Creecy–Kramarz; Correia 2017): `df = n_0 + n_1 - C`. When the graph
+/// is a single connected component this reduces to the familiar `N + T - 1`,
+/// but for disconnected groups the naive `N + T - 1` under-counts absorbed DF —
+/// which would overstate residual DF and deflate the standard errors — so the
+/// component count must be computed explicitly.
+///
+/// For three or more FE dimensions there is no simple closed form; we use the
+/// connected-components count for the first two dimensions and add
+/// `n_levels - 1` for each additional dimension (the `reghdfe` default, exact
+/// in the fully-connected case).
+fn compute_absorbed_df(factors: &[FactorInfo]) -> usize {
+    match factors.len() {
+        0 => 0,
+        1 => factors[0].n_levels,
+        _ => {
+            let components = count_connected_components(&factors[0], &factors[1]);
+            let mut df =
+                (factors[0].n_levels + factors[1].n_levels).saturating_sub(components);
+            for f in &factors[2..] {
+                df += f.n_levels.saturating_sub(1);
+            }
+            df
+        }
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -995,6 +1057,46 @@ mod tests {
         assert!(converged);
         assert!(iters < 100); // Should converge reasonably fast
         assert!(change < 1e-8);
+    }
+
+    #[test]
+    fn test_compute_absorbed_df_connected() {
+        // Fully connected 2-way FE: 2 entities x 3 times, every pair observed.
+        let entity = FactorInfo {
+            name: "entity".to_string(),
+            n_levels: 2,
+            ids: vec![0, 0, 0, 1, 1, 1],
+            counts: vec![3, 3],
+        };
+        let time = FactorInfo {
+            name: "time".to_string(),
+            n_levels: 3,
+            ids: vec![0, 1, 2, 0, 1, 2],
+            counts: vec![2, 2, 2],
+        };
+        // Single connected component => N + T - 1 = 2 + 3 - 1 = 4.
+        assert_eq!(compute_absorbed_df(&[entity, time]), 4);
+    }
+
+    #[test]
+    fn test_compute_absorbed_df_disconnected() {
+        // Two firm/period clusters that never co-occur => 2 components.
+        // Firms {0,1} only appear in periods {0,1}; firms {2,3} only in {2,3}.
+        let firm = FactorInfo {
+            name: "firm".to_string(),
+            n_levels: 4,
+            ids: vec![0, 0, 1, 1, 2, 2, 3, 3],
+            counts: vec![2, 2, 2, 2],
+        };
+        let period = FactorInfo {
+            name: "period".to_string(),
+            n_levels: 4,
+            ids: vec![0, 1, 0, 1, 2, 3, 2, 3],
+            counts: vec![2, 2, 2, 2],
+        };
+        // Correct: n0 + n1 - C = 4 + 4 - 2 = 6 (the naive N + T - 1 would give 7,
+        // under-counting absorbed DF and deflating standard errors).
+        assert_eq!(compute_absorbed_df(&[firm, period]), 6);
     }
 
     #[test]

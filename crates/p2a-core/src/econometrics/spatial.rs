@@ -103,6 +103,12 @@ pub struct SpatialImpacts {
     pub total: Vec<f64>,
     /// Variable names
     pub var_names: Vec<String>,
+    /// Non-fatal warnings about the impact computation. Non-empty when the
+    /// spatial multiplier (I - ρW)^{-1} could not be computed and the impacts
+    /// were degraded to a fallback (e.g. indirect effects reported as zero),
+    /// so callers can distinguish "no spillovers" from "computation failed".
+    #[serde(default)]
+    pub warnings: Vec<String>,
 }
 
 /// Result from SAR (Spatial Autoregressive Lag) model.
@@ -1641,12 +1647,23 @@ fn compute_impacts(
             match pseudoinverse(&i_rho_w.view()) {
                 Ok(pinv) => pinv,
                 Err(_) => {
-                    // Return simplified impacts if all inversion methods fail
+                    // Both the LU inverse and the SVD pseudoinverse of (I - ρW)
+                    // failed (e.g. ρ near 1/λ_max makes it ill-conditioned).
+                    // Return degraded impacts (indirect = 0) but flag it loudly
+                    // so this is not mistaken for a genuine "no spillovers"
+                    // result.
                     return Ok(SpatialImpacts {
                         direct: beta.slice(ndarray::s![1..]).to_vec(),
                         indirect: vec![0.0; k],
                         total: beta.slice(ndarray::s![1..]).to_vec(),
                         var_names: var_names.to_vec(),
+                        warnings: vec![
+                            "(I - rho*W) could not be inverted (LU and pseudoinverse both \
+                             failed); indirect/spillover effects are reported as zero and are \
+                             NOT reliable. Check for a near-unit-root spatial parameter or an \
+                             ill-conditioned weight matrix."
+                                .to_string(),
+                        ],
                     });
                 }
             }
@@ -1681,6 +1698,7 @@ fn compute_impacts(
         indirect,
         total,
         var_names: var_names.to_vec(),
+        warnings: Vec::new(),
     })
 }
 

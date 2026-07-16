@@ -162,7 +162,7 @@ sens <- sensemakr(model, treatment = "treatment")
 
 ## Known Differences
 
-1. **Benchmark computation**: The Rust implementation uses an approximation for R²_{D~X_j|X_{-j}} based on the benchmark's t-statistic rather than computing it directly from auxiliary regressions. This may cause minor differences in benchmark bounds.
+1. **Benchmark computation**: `run_sensemakr(dataset, ...)` now computes R²_{D~X_j|X_{-j}} exactly, via an auxiliary regression of the treatment on the control covariates (the design matrix is available on this path). The OLS-only `sensemakr(&ols_result, ...)` entry point still approximates R²_{D~X_j|X_{-j}} ≈ 0.5 · R²_{Y~X_j} because it has no design matrix, and now flags this in `SensemakrResult.warnings`. The exact benchmark-bounds path has not yet been cross-checked against the R `sensemakr` package to a fixed numerical tolerance (see status below).
 
 2. **Standard error adjustment**: The adjusted SE formula is an approximation. For exact results, the full sensitivity formula from Cinelli & Hazlett (2020) Equation 9 should be used.
 
@@ -179,5 +179,6 @@ sens <- sensemakr(model, treatment = "treatment")
 | Partial R² formula | Validated | Exact match |
 | RV formula | Validated | Within tolerance |
 | Bias calculation | Validated | Within tolerance |
-| Benchmark bounds | Partial | Uses approximation |
+| Benchmark bounds (run_sensemakr) | Exact method | Auxiliary regression; not yet cross-checked vs R to tolerance |
+| Benchmark bounds (sensemakr, OLS-only) | Approximate | 0.5·R²_{Y~X_j} fallback, flagged in warnings |
 | Contour data | Validated | Grid matches expected |

@@ -328,55 +328,67 @@ impl AnalyticsServer {
 
             let df = dataset.df();
 
-            // Extract response and factors
-            let y: Vec<f64> = match df.column(&request.response) {
-                Ok(c) => match c.cast(&DataType::Float64) {
-                    Ok(c) => c.f64().unwrap().into_no_null_iter().collect(),
+            // Extract response and factors. All three columns must be filtered
+            // by ONE combined null mask: dropping nulls per column independently
+            // would desynchronize the row alignment and either mispair factor
+            // levels with responses or panic on an out-of-bounds index below.
+            let response_col =
+                match df.column(&request.response).and_then(|c| c.cast(&DataType::Float64)) {
+                    Ok(c) => c,
                     Err(e) => {
                         return Ok(CallToolResult::error(vec![Content::text(format!(
-                            "Response not numeric: {}",
-                            e
+                            "Response column '{}' not found or not numeric: {}",
+                            request.response, e
                         ))]));
                     }
-                },
-                Err(e) => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Response column not found: {}",
-                        e
-                    ))]));
-                }
-            };
+                };
+            let response_f64 = response_col.f64().unwrap();
 
-            let get_factor = |name: &str| -> Result<Vec<String>, CallToolResult> {
-                match df.column(name) {
-                    Ok(c) => match c.cast(&DataType::String) {
-                        Ok(c) => Ok(c
-                            .str()
-                            .unwrap()
-                            .into_no_null_iter()
-                            .map(|s| s.to_string())
-                            .collect()),
-                        Err(e) => Err(CallToolResult::error(vec![Content::text(format!(
-                            "Cannot read factor '{}': {}",
+            let get_factor_col = |name: &str| {
+                df.column(name)
+                    .and_then(|c| c.cast(&DataType::String))
+                    .map_err(|e| {
+                        CallToolResult::error(vec![Content::text(format!(
+                            "Factor column '{}' not found or not readable: {}",
                             name, e
-                        ))])),
-                    },
-                    Err(e) => Err(CallToolResult::error(vec![Content::text(format!(
-                        "Factor column '{}' not found: {}",
-                        name, e
-                    ))])),
+                        ))])
+                    })
+            };
+            let factor_a_col = match get_factor_col(&request.factors[0]) {
+                Ok(c) => c,
+                Err(e) => return Ok(e),
+            };
+            let factor_b_col = match get_factor_col(&request.factors[1]) {
+                Ok(c) => c,
+                Err(e) => return Ok(e),
+            };
+            let factor_a_str = factor_a_col.str().unwrap();
+            let factor_b_str = factor_b_col.str().unwrap();
+
+            // Keep only rows where response and both factors are all non-null.
+            let n_rows = df.height();
+            let mut y: Vec<f64> = Vec::with_capacity(n_rows);
+            let mut factor_a: Vec<String> = Vec::with_capacity(n_rows);
+            let mut factor_b: Vec<String> = Vec::with_capacity(n_rows);
+            for i in 0..n_rows {
+                if let (Some(yi), Some(a), Some(b)) = (
+                    response_f64.get(i),
+                    factor_a_str.get(i),
+                    factor_b_str.get(i),
+                ) {
+                    y.push(yi);
+                    factor_a.push(a.to_string());
+                    factor_b.push(b.to_string());
                 }
-            };
+            }
 
-            let factor_a = match get_factor(&request.factors[0]) {
-                Ok(f) => f,
-                Err(e) => return Ok(e),
-            };
-
-            let factor_b = match get_factor(&request.factors[1]) {
-                Ok(f) => f,
-                Err(e) => return Ok(e),
-            };
+            if y.is_empty() {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    "No complete rows (response and both factors non-null) for the descriptive \
+                     cell-means table."
+                        .to_string(),
+                )]));
+            }
 
             // Compute grand mean
             let grand_mean = y.iter().sum::<f64>() / y.len() as f64;
