@@ -56,12 +56,25 @@ pub struct CliArgs {
     #[arg(long, env = "P2A_CORS_ORIGINS", value_delimiter = ',')]
     pub cors_origins: Vec<String>,
 
-    /// Enable authentication
+    /// Shared bearer token required on all `/api` routes (HTTP transport).
+    ///
+    /// When set, every request must carry `Authorization: Bearer <token>`;
+    /// `/health` and CORS preflight are exempt. A token is REQUIRED for any
+    /// non-loopback bind — the server refuses to start on a public address
+    /// without one. Distribute the token to authorized clients out-of-band.
+    #[cfg(feature = "http")]
+    #[arg(long, env = "P2A_ACCESS_TOKEN")]
+    pub access_token: Option<String>,
+
+    /// Deprecated: superseded by `--access-token` / `P2A_ACCESS_TOKEN`. This
+    /// flag no longer enables any access control on its own and is kept only
+    /// for backward compatibility.
     #[cfg(feature = "auth")]
     #[arg(long, env = "P2A_AUTH_ENABLED")]
     pub auth_enabled: bool,
 
-    /// JWT secret for authentication (required if auth is enabled)
+    /// Deprecated: unused. JWT authentication is not implemented; use the
+    /// shared bearer token (`--access-token`) instead.
     #[cfg(feature = "auth")]
     #[arg(long, env = "P2A_JWT_SECRET")]
     pub jwt_secret: Option<String>,
@@ -107,6 +120,9 @@ pub struct HttpConfig {
     pub addr: SocketAddr,
     pub cors_permissive: bool,
     pub cors_origins: Vec<String>,
+    /// Shared bearer token required on all `/api` routes (None = no auth,
+    /// permitted only for loopback binds).
+    pub access_token: Option<String>,
     /// Database path for persistence (None = in-memory)
     #[cfg(feature = "db")]
     pub db_path: Option<String>,
@@ -148,6 +164,10 @@ impl ServerConfig {
                     .context(format!("Invalid host:port '{}:{}'", args.host, args.port))?,
                 cors_permissive: args.cors_permissive,
                 cors_origins: args.cors_origins,
+                access_token: args
+                    .access_token
+                    .map(|t| t.trim().to_string())
+                    .filter(|t| !t.is_empty()),
                 #[cfg(feature = "db")]
                 db_path: args.db_path,
             },
@@ -179,6 +199,7 @@ impl Default for ServerConfig {
                 addr: "127.0.0.1:8080".parse().unwrap(),
                 cors_permissive: false,
                 cors_origins: vec![],
+                access_token: None,
                 #[cfg(feature = "db")]
                 db_path: None,
             },

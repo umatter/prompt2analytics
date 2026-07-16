@@ -144,6 +144,10 @@ pub async fn start_embedded_server(
             addr,
             cors_permissive: config.cors_permissive,
             cors_origins: vec![],
+            // The embedded server is intended for local (loopback) desktop use;
+            // no shared token. A non-loopback bind is rejected by the HTTP
+            // transport's startup guard.
+            access_token: None,
             #[cfg(feature = "db")]
             db_path: config.db_path.clone(),
         },

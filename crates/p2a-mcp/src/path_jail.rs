@@ -2,8 +2,9 @@
 //!
 //! All user-supplied paths that touch the filesystem must be run through
 //! [`validate_data_path`] before being passed to loaders, writers, or
-//! database drivers. The jail root defaults to the user's home directory
-//! and can be overridden with the `P2A_DATA_ROOT` environment variable.
+//! database drivers. The jail root defaults to the process's current working
+//! directory and can be overridden with the `P2A_DATA_ROOT` environment
+//! variable, which any exposed deployment should set to a narrow data dir.
 //!
 //! The validator canonicalizes the requested path and rejects anything
 //! that resolves outside the configured root, blocking `../` traversal
@@ -19,7 +20,13 @@ static DATA_ROOT: OnceLock<Result<PathBuf, String>> = OnceLock::new();
 ///
 /// Resolution order:
 /// 1. `P2A_DATA_ROOT` environment variable (if set and non-empty)
-/// 2. `dirs::home_dir()`
+/// 2. The process's current working directory
+///
+/// The default is deliberately the current working directory, **not** the
+/// user's home directory: a public deployment that forgets to set
+/// `P2A_DATA_ROOT` should expose only the directory the server was launched
+/// from, never the whole of `$HOME`. Operators should set `P2A_DATA_ROOT` to a
+/// narrow, dedicated data directory for any exposed deployment.
 ///
 /// The value is cached for the lifetime of the process. In test builds the
 /// `reset_data_root_for_tests` helper is available.
@@ -37,11 +44,10 @@ fn resolve_data_root() -> Result<PathBuf, String> {
             });
         }
     }
-    let home = dirs::home_dir().ok_or_else(|| {
-        "cannot determine home directory and P2A_DATA_ROOT is not set".to_string()
-    })?;
-    home.canonicalize()
-        .map_err(|e| format!("home directory {:?} cannot be canonicalized: {}", home, e))
+    let cwd = std::env::current_dir()
+        .map_err(|e| format!("cannot determine current working directory: {}", e))?;
+    cwd.canonicalize()
+        .map_err(|e| format!("working directory {:?} cannot be canonicalized: {}", cwd, e))
 }
 
 /// Validate a user-supplied path against the jail root.

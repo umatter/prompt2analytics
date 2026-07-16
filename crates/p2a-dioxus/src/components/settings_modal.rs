@@ -477,7 +477,7 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
                                                 d: "M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"
                                             }
                                         }
-                                        "API keys are stored locally and never sent to our servers."
+                                        "Your API key is stored only in this browser and is sent with each request through our backend to your chosen provider. It is never logged or persisted server-side."
                                     }
                                 }
                             }
