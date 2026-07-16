@@ -95,7 +95,7 @@ fn format_message(msg: &ChatMessage, options: &MarkdownExportOptions) -> String 
                 output.push_str("**Result:**\n```\n");
                 // Truncate very long results
                 if result.len() > 2000 {
-                    output.push_str(&result[..2000]);
+                    output.push_str(crate::utils::truncate_on_char_boundary(result, 2000));
                     output.push_str("\n... (truncated)");
                 } else {
                     output.push_str(result);

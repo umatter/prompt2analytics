@@ -638,18 +638,22 @@ async fn stream_chat(
     }
 
     let mut stream = resp.bytes_stream();
-    let mut buffer = String::new();
+    let mut buffer: Vec<u8> = Vec::new();
     let mut final_message: Option<Message> = None;
 
     while let Some(chunk_result) = stream.next().await {
         let bytes = chunk_result?;
-        let text = String::from_utf8_lossy(&bytes);
-        buffer.push_str(&text);
-
-        while let Some(newline_pos) = buffer.find('\n') {
-            let line = buffer[..newline_pos].to_string();
-            buffer = buffer[newline_pos + 1..].to_string();
-
+        // Buffer raw bytes and decode only complete lines, so a multi-byte
+        // UTF-8 character split across network chunks is never corrupted by
+        // per-chunk lossy decoding.
+        buffer.extend_from_slice(&bytes);
+        while let Some(pos) = buffer.iter().position(|&b| b == b'\n') {
+            let line_bytes: Vec<u8> = buffer.drain(..=pos).collect();
+            let mut end = line_bytes.len() - 1;
+            if end > 0 && line_bytes[end - 1] == b'\r' {
+                end -= 1;
+            }
+            let line = String::from_utf8_lossy(&line_bytes[..end]).into_owned();
             if let Some(event) = parse_sse_line(&line) {
                 if let StreamEvent::Done { ref message } = event {
                     final_message = Some(message.clone());
@@ -659,9 +663,10 @@ async fn stream_chat(
         }
     }
 
-    // Process remaining buffer
+    // Process any trailing bytes with no final newline.
     if !buffer.is_empty() {
-        if let Some(event) = parse_sse_line(&buffer) {
+        let line = String::from_utf8_lossy(&buffer).into_owned();
+        if let Some(event) = parse_sse_line(&line) {
             if let StreamEvent::Done { ref message } = event {
                 final_message = Some(message.clone());
             }

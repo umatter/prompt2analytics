@@ -65,7 +65,7 @@ impl Suggestion {
     pub fn history(prompt: &str) -> Self {
         // Truncate long prompts for display
         let display = if prompt.len() > 60 {
-            format!("{}...", &prompt[..57])
+            format!("{}...", crate::utils::truncate_on_char_boundary(prompt, 57))
         } else {
             prompt.to_string()
         };

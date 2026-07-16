@@ -7,13 +7,14 @@ use dioxus::prelude::*;
 
 use crate::api::Conversation;
 use crate::components::P2aIconMinimal;
-use crate::state::{ConversationState, SessionState};
+use crate::state::{ChatState, ConversationState, SessionState};
 
 /// Conversation sidebar component
 #[component]
 pub fn ConversationSidebar() -> Element {
     let session_state = use_context::<Signal<SessionState>>();
     let conversation_state = use_context::<Signal<ConversationState>>();
+    let chat_state = use_context::<Signal<ChatState>>();
     let mut sidebar_visible = use_context::<Signal<bool>>();
 
     // Editing state for rename
@@ -47,6 +48,12 @@ pub fn ConversationSidebar() -> Element {
 
     // Handle new conversation
     let handle_new_conversation = move |_| {
+        // Starting a new conversation mid-stream would redirect the in-flight
+        // response into the new conversation; block it while streaming.
+        if chat_state.read().is_processing {
+            tracing::warn!("Ignoring new-conversation while a response is streaming");
+            return;
+        }
         let session = session_state.read();
         let mut conv = conversation_state;
 
@@ -75,6 +82,14 @@ pub fn ConversationSidebar() -> Element {
 
     // Handle select conversation
     let handle_select = move |id: String| {
+        // Do not switch conversations while a response is streaming: the
+        // in-flight stream writes into the currently-selected conversation's
+        // message list, so switching mid-stream would append streamed content
+        // to the wrong conversation in the UI.
+        if chat_state.read().is_processing {
+            tracing::warn!("Ignoring conversation switch while a response is streaming");
+            return;
+        }
         let mut conv = conversation_state;
         spawn(async move {
             conv.write().set_current_conversation(Some(id.clone()));
@@ -141,6 +156,12 @@ pub fn ConversationSidebar() -> Element {
 
     // Handle confirmed delete
     let handle_confirm_delete = move |_| {
+        // Deleting a conversation while a response streams into it would leave
+        // the stream writing to a removed conversation; block it.
+        if chat_state.read().is_processing {
+            tracing::warn!("Ignoring delete while a response is streaming");
+            return;
+        }
         let id = delete_confirm_id.read().clone();
         let mut conv = conversation_state;
         let mut confirm_id = delete_confirm_id;

@@ -324,14 +324,11 @@ fn detect_and_generate_suggestions(
     datasets: &[DatasetMeta],
     history: &[String],
 ) -> Option<Vec<Suggestion>> {
-    // Find the last trigger character and its position
-    let chars: Vec<char> = input.chars().collect();
-
-    // Look for @ or / triggers by scanning backwards from cursor (end of input)
-    // We want to find the most recent trigger that could be active
+    // Look for @ or / triggers by scanning for the most recent trigger that
+    // could be active. `find_last_trigger` returns a byte offset into `input`.
 
     // Check for @dataset. pattern first (column mode)
-    if let Some(at_pos) = find_last_trigger(&chars, '@') {
+    if let Some(at_pos) = find_last_trigger(input, '@') {
         let after_at = &input[at_pos + 1..];
 
         // Check if we have a complete dataset name followed by a dot
@@ -392,7 +389,7 @@ fn detect_and_generate_suggestions(
     }
 
     // Check for / trigger (tools)
-    if let Some(slash_pos) = find_last_trigger(&chars, '/') {
+    if let Some(slash_pos) = find_last_trigger(input, '/') {
         let filter = &input[slash_pos + 1..];
 
         // Make sure there's no space after / (which would cancel the trigger)
@@ -454,19 +451,26 @@ fn detect_and_generate_suggestions(
     None
 }
 
-/// Find the position of the last occurrence of a trigger character
-/// that could be the start of an autocomplete pattern
-fn find_last_trigger(chars: &[char], trigger: char) -> Option<usize> {
-    // Search backwards for the trigger
-    for (i, &c) in chars.iter().enumerate().rev() {
-        if c == trigger {
-            // Make sure this trigger is either at the start or after a space
-            if i == 0 || chars[i - 1].is_whitespace() {
-                return Some(i);
-            }
+/// Find the **byte offset** of the last occurrence of a trigger character
+/// (`@` or `/`) that could start an autocomplete pattern — i.e. one at the
+/// start of the input or immediately after whitespace.
+///
+/// Returns a byte offset (not a char index) so callers can slice the input
+/// string directly. The trigger characters are single-byte ASCII, so the
+/// offset immediately after the trigger is always a valid char boundary.
+/// (The previous version returned a `Vec<char>` index that callers used as a
+/// byte index — corrupting the filter text, or panicking, whenever a
+/// multi-byte character preceded the trigger.)
+fn find_last_trigger(input: &str, trigger: char) -> Option<usize> {
+    let mut result = None;
+    let mut prev_is_boundary = true; // start of string counts as a boundary
+    for (byte_idx, c) in input.char_indices() {
+        if c == trigger && prev_is_boundary {
+            result = Some(byte_idx);
         }
+        prev_is_boundary = c.is_whitespace();
     }
-    None
+    result
 }
 
 /// Accept a suggestion and insert it into the textarea
@@ -543,4 +547,39 @@ fn accept_suggestion(
     drop(ac);
     textarea_value.set(new_value.trim_end().to_string() + " ");
     autocomplete.write().close();
+}
+
+#[cfg(test)]
+mod trigger_tests {
+    use super::find_last_trigger;
+
+    #[test]
+    fn returns_byte_offset_after_multibyte_chars() {
+        // "café @data" — 'é' is 2 bytes, so the '@' is at byte offset 6, not
+        // char index 5. The returned offset must let `&input[pos + 1..]` slice
+        // correctly to "data".
+        let input = "café @data";
+        let at = find_last_trigger(input, '@').unwrap();
+        assert_eq!(&input[at..at + 1], "@");
+        assert_eq!(&input[at + 1..], "data");
+    }
+
+    #[test]
+    fn requires_start_or_whitespace_before_trigger() {
+        // '@' embedded in a word (email-like) is not a trigger.
+        assert_eq!(find_last_trigger("foo@bar", '@'), None);
+        // At start.
+        assert_eq!(find_last_trigger("@ds", '@'), Some(0));
+        // Picks the last valid trigger.
+        let input = "@a @b";
+        let at = find_last_trigger(input, '@').unwrap();
+        assert_eq!(&input[at + 1..], "b");
+    }
+
+    #[test]
+    fn slash_trigger_after_multibyte() {
+        let input = "λ /tool";
+        let slash = find_last_trigger(input, '/').unwrap();
+        assert_eq!(&input[slash + 1..], "tool");
+    }
 }
