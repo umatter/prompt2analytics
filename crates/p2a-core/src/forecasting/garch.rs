@@ -234,6 +234,29 @@ pub fn garch(data: &[f64], config: Option<GarchConfig>) -> EconResult<GarchResul
         });
     }
 
+    // Validate the ARCH/GARCH orders. `p`/`q` come from the caller (and, via the
+    // MCP/CLI tools, ultimately from untrusted input). The warm-up loop in
+    // `compute_garch_quantities` indexes the series up to `p.max(q)`, so an order
+    // at or beyond `n` would index out of bounds and panic. Also cap the orders
+    // to a sane maximum to avoid pathological parameter counts.
+    const MAX_GARCH_ORDER: usize = 20;
+    if config.p > MAX_GARCH_ORDER || config.q > MAX_GARCH_ORDER {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "GARCH orders p={} and q={} must not exceed {}",
+                config.p, config.q, MAX_GARCH_ORDER
+            ),
+        });
+    }
+    if config.p.max(config.q) >= n {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "GARCH orders p={} and q={} must be smaller than the number of observations ({})",
+                config.p, config.q, n
+            ),
+        });
+    }
+
     // Calculate initial estimates
     let mean: f64 = data.iter().sum::<f64>() / n as f64;
     let residuals: Vec<f64> = data.iter().map(|&x| x - mean).collect();
@@ -713,6 +736,35 @@ mod tests {
             result.converged || result.iterations > 0,
             "Model should iterate"
         );
+    }
+
+    #[test]
+    fn test_garch_rejects_orders_at_or_above_n() {
+        // Orders >= n must error rather than panic in the warm-up indexing.
+        let data = generate_garch_data(25, 0.0001, 0.1, 0.8);
+        let config = GarchConfig {
+            p: 30,
+            q: 1,
+            ..Default::default()
+        };
+        assert!(matches!(
+            garch(&data, Some(config)),
+            Err(EconError::InvalidSpecification { .. })
+        ));
+    }
+
+    #[test]
+    fn test_garch_rejects_excessive_orders() {
+        let data = generate_garch_data(200, 0.0001, 0.1, 0.8);
+        let config = GarchConfig {
+            p: 25,
+            q: 25,
+            ..Default::default()
+        };
+        assert!(matches!(
+            garch(&data, Some(config)),
+            Err(EconError::InvalidSpecification { .. })
+        ));
     }
 
     #[test]
