@@ -128,7 +128,40 @@ pub enum Commands {
     SmokeTest,
 }
 
+/// Extract the command-portion argv (category, subcommand, and args) from the
+/// raw process arguments, dropping the program name and the global flags
+/// (`--format`/`-F`, `--session`, `--quiet`/`-q`, `--verbose`/`-v…`). These are
+/// `global = true`, so they may appear anywhere, not only before the subcommand.
+fn command_argv(raw: &[String]) -> Vec<String> {
+    fn is_verbose_short(tok: &str) -> bool {
+        tok.len() >= 2
+            && tok.starts_with('-')
+            && !tok.starts_with("--")
+            && tok[1..].bytes().all(|b| b == b'v')
+    }
+
+    let mut out = Vec::new();
+    let mut i = 1; // skip the program name
+    while i < raw.len() {
+        let tok = raw[i].as_str();
+        match tok {
+            // Value-taking globals: skip the flag and its separate value.
+            "--format" | "-F" | "--session" => i += 2,
+            _ if tok.starts_with("--format=") || tok.starts_with("--session=") => i += 1,
+            // Boolean / count globals: skip just the flag.
+            "--quiet" | "-q" | "--verbose" => i += 1,
+            _ if is_verbose_short(tok) => i += 1,
+            _ => {
+                out.push(raw[i].clone());
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
 fn main() -> anyhow::Result<()> {
+    let raw_args: Vec<String> = std::env::args().collect();
     let cli = Cli::parse();
 
     // Initialize logger based on verbosity level
@@ -152,6 +185,9 @@ fn main() -> anyhow::Result<()> {
     } else {
         None
     };
+    if let Some(ref mut manager) = session_manager {
+        manager.start_command();
+    }
 
     // Execute the command
     let result = match &cli.command {
@@ -197,12 +233,37 @@ fn main() -> anyhow::Result<()> {
         Commands::SmokeTest => run_smoke_test(&cli.format),
     };
 
-    // Save session if recording
+    // Record this invocation centrally (every analytics command; meta commands
+    // like `script`/`chat`/`smoke-test` are not recorded) and save the session.
     if let Some(ref mut manager) = session_manager {
+        let is_meta = matches!(
+            cli.command,
+            Commands::Script(_) | Commands::Chat(_) | Commands::SmokeTest
+        );
+        if !is_meta {
+            let argv = command_argv(&raw_args);
+            let success = result.is_ok() && !output::error_was_reported();
+            let error = result.as_ref().err().map(|e| e.to_string());
+            manager.record_invocation(argv, success, error);
+        }
         manager.save()?;
     }
 
-    result
+    // Exit non-zero on any error — including "soft" errors that a handler
+    // printed via print_error before returning Ok(()) — so scripts and CI can
+    // detect failures. Route hard errors through the format-aware printer too.
+    match result {
+        Ok(()) => {
+            if output::error_was_reported() {
+                std::process::exit(1);
+            }
+            Ok(())
+        }
+        Err(e) => {
+            output::print_error(&e.to_string(), &cli.format);
+            std::process::exit(1);
+        }
+    }
 }
 
 /// Run a smoke test to verify the CLI works correctly.
@@ -293,4 +354,49 @@ fn run_smoke_test(format: &OutputFormat) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod command_argv_tests {
+    use super::command_argv;
+
+    fn argv(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn strips_leading_globals() {
+        let raw = argv(&[
+            "p2a", "--session", "s.json", "reg", "ols", "sales", "-y", "price",
+        ]);
+        assert_eq!(
+            command_argv(&raw),
+            argv(&["reg", "ols", "sales", "-y", "price"])
+        );
+    }
+
+    #[test]
+    fn strips_globals_anywhere() {
+        // Global flags may appear after the subcommand (clap global = true).
+        let raw = argv(&[
+            "p2a", "data", "load", "f.csv", "--session", "s.json", "-F", "json", "--name", "d",
+        ]);
+        assert_eq!(
+            command_argv(&raw),
+            argv(&["data", "load", "f.csv", "--name", "d"])
+        );
+    }
+
+    #[test]
+    fn strips_equals_form_and_verbose() {
+        let raw = argv(&["p2a", "--session=s.json", "-vv", "stats", "describe", "d"]);
+        assert_eq!(command_argv(&raw), argv(&["stats", "describe", "d"]));
+    }
+
+    #[test]
+    fn preserves_command_values_that_look_like_flags_values() {
+        // A column literally named after a flag value is kept.
+        let raw = argv(&["p2a", "reg", "ols", "d", "-x", "price"]);
+        assert_eq!(command_argv(&raw), argv(&["reg", "ols", "d", "-x", "price"]));
+    }
 }
