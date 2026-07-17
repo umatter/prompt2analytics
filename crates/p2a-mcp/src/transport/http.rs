@@ -104,17 +104,29 @@ pub async fn start_http_transport(config: &ServerConfig) -> TransportResult<()> 
 
     let addr = config.http.addr;
 
-    // Refuse to expose an unauthenticated server on a non-loopback address.
-    // A shared bearer token (P2A_ACCESS_TOKEN) is mandatory for any public bind;
-    // loopback-only development binds may run without one.
-    if !addr.ip().is_loopback() && config.http.access_token.is_none() {
+    // A non-loopback bind with no access token is refused by default, to avoid
+    // an accidental open deployment. It is allowed only when the operator
+    // explicitly opts in with --allow-unauthenticated (P2A_ALLOW_UNAUTHENTICATED),
+    // which also drops the enumeration endpoints (see create_base_router).
+    if !addr.ip().is_loopback()
+        && config.http.access_token.is_none()
+        && !config.http.allow_unauthenticated
+    {
         return Err(crate::transport::TransportError::Http(format!(
-            "refusing to bind {addr}: binding a non-loopback address requires an access token. \
-             Set P2A_ACCESS_TOKEN (or --access-token), or bind 127.0.0.1 for local development."
+            "refusing to bind {addr}: a non-loopback bind requires an access token. \
+             Set P2A_ACCESS_TOKEN (or --access-token) for a private/authenticated deployment, \
+             or set P2A_ALLOW_UNAUTHENTICATED=1 (--allow-unauthenticated) for an intentional \
+             open bring-your-own-key demo, or bind 127.0.0.1 for local development."
         )));
     }
     if config.http.access_token.is_some() {
         tracing::info!("HTTP access-token authentication is ENABLED for /api routes");
+    } else if config.http.is_open_unauthenticated() {
+        tracing::warn!(
+            "HTTP running OPEN and UNAUTHENTICATED on {addr} (P2A_ALLOW_UNAUTHENTICATED). \
+             Session-list and file-browser endpoints are disabled; isolation relies on \
+             unguessable session IDs. Put an edge rate-limiter in front for abuse/DoS control."
+        );
     } else {
         tracing::warn!(
             "HTTP access-token authentication is DISABLED (loopback bind only); \
@@ -289,21 +301,33 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 }
 
 /// Create the base router with core routes.
-fn create_base_router(state: AppState, _config: &ServerConfig) -> Router {
-    let router = Router::new()
+fn create_base_router(state: AppState, config: &ServerConfig) -> Router {
+    // In the intentionally-open public mode (non-loopback bind, no access
+    // token), the two enumeration surfaces are omitted entirely: `GET
+    // /api/sessions` (which would list every active session ID and defeat the
+    // unguessable-session-ID isolation) and `GET /api/files` (a filesystem
+    // browser). The web frontend uses neither. They remain available for
+    // loopback/desktop use and for authenticated (token-gated) deployments.
+    let hide_enumeration = config.http.is_open_unauthenticated();
+
+    let mut router = Router::new()
         // Health check
         .route("/health", get(health_check))
         // Session management
         .route("/api/sessions", post(create_session))
-        .route("/api/sessions", get(list_sessions))
         .route("/api/sessions/{id}", get(get_session))
         .route("/api/sessions/{id}", delete(delete_session))
         // Tool discovery
         .route("/api/tools", get(list_tools))
         // Tool execution
-        .route("/api/tools/{name}", post(call_tool))
-        // File browser
-        .route("/api/files", get(list_files));
+        .route("/api/tools/{name}", post(call_tool));
+
+    if !hide_enumeration {
+        router = router
+            .route("/api/sessions", get(list_sessions))
+            // File browser
+            .route("/api/files", get(list_files));
+    }
 
     // Add WebSocket route if feature is enabled
     #[cfg(feature = "websocket")]

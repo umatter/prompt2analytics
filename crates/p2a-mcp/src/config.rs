@@ -8,6 +8,15 @@ use clap::{Parser, ValueEnum};
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 
+/// Whether an environment variable is set to a truthy value
+/// (`1`, `true`, `yes`, `on`, case-insensitive). Empty/unset/other = false.
+#[cfg(feature = "http")]
+fn env_flag_enabled(name: &str) -> bool {
+    std::env::var(name)
+        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false)
+}
+
 /// Transport type for the MCP server.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
@@ -60,11 +69,30 @@ pub struct CliArgs {
     ///
     /// When set, every request must carry `Authorization: Bearer <token>`;
     /// `/health` and CORS preflight are exempt. A token is REQUIRED for any
-    /// non-loopback bind — the server refuses to start on a public address
-    /// without one. Distribute the token to authorized clients out-of-band.
+    /// non-loopback bind unless `--allow-unauthenticated` is set. Distribute
+    /// the token to authorized clients out-of-band.
     #[cfg(feature = "http")]
     #[arg(long, env = "P2A_ACCESS_TOKEN")]
     pub access_token: Option<String>,
+
+    /// Explicitly permit an unauthenticated public bind (no access token).
+    ///
+    /// This is the "open but hardened" deployment mode for a public
+    /// bring-your-own-key demo: there is no login, and per-visitor isolation
+    /// relies on unguessable, non-enumerable session IDs. When set, the
+    /// session-list and file-browser endpoints are NOT exposed (they are the
+    /// enumeration surfaces), and abuse/DoS protection is expected to come from
+    /// an edge layer (e.g. a reverse proxy or CDN rate limit). Without this
+    /// flag, the server refuses to bind a non-loopback address that has no
+    /// access token, to avoid an accidental open deployment.
+    ///
+    /// The `P2A_ALLOW_UNAUTHENTICATED` environment variable enables the same
+    /// behavior and accepts any truthy value (`1`, `true`, `yes`, `on`). It is
+    /// read in `from_args` rather than via clap, because clap's env-backed
+    /// bools only accept `true`/`false` (so `=1` would error at startup).
+    #[cfg(feature = "http")]
+    #[arg(long)]
+    pub allow_unauthenticated: bool,
 
     /// Deprecated: superseded by `--access-token` / `P2A_ACCESS_TOKEN`. This
     /// flag no longer enables any access control on its own and is kept only
@@ -121,11 +149,23 @@ pub struct HttpConfig {
     pub cors_permissive: bool,
     pub cors_origins: Vec<String>,
     /// Shared bearer token required on all `/api` routes (None = no auth,
-    /// permitted only for loopback binds).
+    /// permitted only for loopback binds or when `allow_unauthenticated`).
     pub access_token: Option<String>,
+    /// Explicitly allow an unauthenticated non-loopback bind (open-but-hardened
+    /// mode); also hides the session-list and file-browser endpoints.
+    pub allow_unauthenticated: bool,
     /// Database path for persistence (None = in-memory)
     #[cfg(feature = "db")]
     pub db_path: Option<String>,
+}
+
+impl HttpConfig {
+    /// True in the intentionally-open public deployment mode: a non-loopback
+    /// bind with no access token. In this mode the enumeration endpoints
+    /// (`GET /api/sessions`, `GET /api/files`) are not registered.
+    pub fn is_open_unauthenticated(&self) -> bool {
+        self.access_token.is_none() && !self.addr.ip().is_loopback()
+    }
 }
 
 /// Session management configuration.
@@ -168,6 +208,8 @@ impl ServerConfig {
                     .access_token
                     .map(|t| t.trim().to_string())
                     .filter(|t| !t.is_empty()),
+                allow_unauthenticated: args.allow_unauthenticated
+                    || env_flag_enabled("P2A_ALLOW_UNAUTHENTICATED"),
                 #[cfg(feature = "db")]
                 db_path: args.db_path,
             },
@@ -200,6 +242,7 @@ impl Default for ServerConfig {
                 cors_permissive: false,
                 cors_origins: vec![],
                 access_token: None,
+                allow_unauthenticated: false,
                 #[cfg(feature = "db")]
                 db_path: None,
             },
@@ -217,5 +260,33 @@ impl Default for ServerConfig {
                 path: "p2a-audit.log".to_string(),
             },
         }
+    }
+}
+
+#[cfg(all(test, feature = "http"))]
+mod open_mode_tests {
+    use super::HttpConfig;
+
+    fn http(addr: &str, token: Option<&str>) -> HttpConfig {
+        HttpConfig {
+            addr: addr.parse().unwrap(),
+            cors_permissive: false,
+            cors_origins: vec![],
+            access_token: token.map(str::to_string),
+            allow_unauthenticated: false,
+            #[cfg(feature = "db")]
+            db_path: None,
+        }
+    }
+
+    #[test]
+    fn open_only_when_public_and_tokenless() {
+        // Public bind, no token -> open (enumeration endpoints hidden).
+        assert!(http("0.0.0.0:8080", None).is_open_unauthenticated());
+        // Public bind WITH a token -> not "open" (auth-gated).
+        assert!(!http("0.0.0.0:8080", Some("secret")).is_open_unauthenticated());
+        // Loopback, no token -> trusted local, not "open".
+        assert!(!http("127.0.0.1:8080", None).is_open_unauthenticated());
+        assert!(!http("[::1]:8080", None).is_open_unauthenticated());
     }
 }

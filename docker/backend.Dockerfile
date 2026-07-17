@@ -76,6 +76,11 @@ COPY --from=builder /app/target/release/p2a-mcp /usr/local/bin/
 # Set ownership
 RUN chown p2a:p2a /usr/local/bin/p2a-mcp
 
+# Dedicated, empty data-root directory for the path jail (P2A_DATA_ROOT=/data).
+# Keeping the jail root here — rather than the container home or the binary's
+# working directory — narrows what any filesystem/DB tool can reach.
+RUN mkdir -p /data && chown p2a:p2a /data
+
 # Switch to non-root user
 USER p2a
 WORKDIR /home/p2a
