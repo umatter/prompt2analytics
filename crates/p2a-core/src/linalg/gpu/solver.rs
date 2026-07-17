@@ -53,17 +53,17 @@ impl From<CusolverError> for GpuSolverError {
     }
 }
 
-/// Compute Cholesky-based inverse of a symmetric positive definite matrix on GPU.
+/// Cholesky-based inverse of a symmetric positive definite matrix.
 ///
-/// Uses an explicit inversion approach:
-/// 1. Cholesky: A = L * L^T via faer on CPU (k x k is fast)
-/// 2. Solve A * X = I via Cholesky factorization
-///
-/// For small k (< 100), the CPU faer path is often faster due to transfer
-/// overhead. This function is primarily beneficial for large k matrices.
-///
-/// The main GPU benefit for econometrics comes from O(nk^2) operations
-/// (xtx, sandwich estimators) rather than the O(k^3) inverse.
+/// IMPORTANT: despite the `_gpu` name and the `GpuContext` parameter, this is
+/// currently a **CPU** computation (faer Cholesky + solve) — no cuSOLVER/device
+/// path is implemented, and `_ctx` is unused. The Cholesky inverse is O(k^3)
+/// and, for the small `k` typical in econometrics (k << n), the CPU path is
+/// as fast or faster than a GPU round-trip, so the dispatch that routes here
+/// yields no speedup. The real GPU wins are the O(nk^2) operations (xtx,
+/// sandwich estimators) elsewhere in this module. Retained so the dispatch
+/// surface is stable; implement a cuSOLVER DPOTRF/DPOTRI path here if a device
+/// inverse is ever needed.
 pub fn cholesky_inverse_gpu(
     _ctx: &GpuContext,
     m: &ArrayView2<f64>,

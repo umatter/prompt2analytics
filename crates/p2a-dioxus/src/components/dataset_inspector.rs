@@ -51,7 +51,12 @@ pub fn DatasetInspectorModal(props: DatasetInspectorModalProps) -> Element {
             }
             #[cfg(not(target_arch = "wasm32"))]
             {
-                let js = format!("navigator.clipboard.writeText('{}')", name);
+                // Escape the name so a value containing quotes/backslashes cannot
+                // break out of the JS string literal and run arbitrary code.
+                let js = format!(
+                    "navigator.clipboard.writeText('{}')",
+                    crate::utils::js_single_quoted(&name)
+                );
                 dioxus::document::eval(&js);
             }
             copied.set(true);

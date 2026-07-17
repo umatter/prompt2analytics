@@ -19,9 +19,34 @@ pub fn truncate_on_char_boundary(s: &str, max_bytes: usize) -> &str {
     &s[..end]
 }
 
+/// Escape a string for safe interpolation inside a **single-quoted** JavaScript
+/// string literal (as used with `dioxus::document::eval` on the desktop path).
+///
+/// Without this, a value containing `'`, `\`, or a newline (e.g. a dataset or
+/// column name) could break out of the literal and execute arbitrary JS in the
+/// webview. Escapes backslash first, then the single quote and newlines.
+pub fn js_single_quoted(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('\'', "\\'")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+}
+
 #[cfg(test)]
 mod tests {
-    use super::truncate_on_char_boundary;
+    use super::{js_single_quoted, truncate_on_char_boundary};
+
+    #[test]
+    fn js_escaping_neutralizes_breakouts() {
+        assert_eq!(js_single_quoted("plain"), "plain");
+        // A quote that would otherwise close the literal is escaped.
+        assert_eq!(
+            js_single_quoted("x'); alert('pwned"),
+            "x\\'); alert(\\'pwned"
+        );
+        assert_eq!(js_single_quoted("a\\b"), "a\\\\b");
+        assert_eq!(js_single_quoted("line1\nline2"), "line1\\nline2");
+    }
 
     #[test]
     fn does_not_split_multibyte_char() {

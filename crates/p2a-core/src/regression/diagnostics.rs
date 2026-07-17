@@ -207,7 +207,12 @@ pub enum ResetType {
     Fitted,
     /// Use powers of regressors (x², x³, ...)
     Regressor,
-    /// Use powers of first principal component
+    /// Use powers of the first principal component of the regressors.
+    ///
+    /// NOTE: not yet implemented as described — this currently reuses the
+    /// powers-of-fitted-values augmentation (identical to `Fitted`) and emits a
+    /// runtime warning. It does not compute a principal component, so it does
+    /// not match R's `lmtest::resettest(type = "princomp")`.
     PrinComp,
 }
 
@@ -1044,8 +1049,15 @@ pub fn reset_test(
                 });
             }
 
-            // Compute first PC (simple approach: use fitted values as proxy)
-            // This is a simplification - R uses prcomp on regressors
+            // Not yet implemented: this reuses the powers-of-fitted-values
+            // augmentation (identical to ResetType::Fitted) rather than
+            // computing the first principal component of the regressors, so it
+            // does not match R's resettest(type = "princomp").
+            tracing::warn!(
+                "RESET test: the 'princomp' augmentation is not implemented; using the \
+                 powers-of-fitted-values augmentation (identical to 'fitted'). Results will \
+                 not match R's resettest(type = \"princomp\")."
+            );
             powers
                 .iter()
                 .map(|&p| fitted.mapv(|f| f.powi(p as i32)))
