@@ -2,8 +2,10 @@
 # Build: docker build -f docker/backend.Dockerfile -t p2a-mcp .
 
 # Stage 1: Build
-# Requires Rust 1.88+ for latest dependency compatibility
-FROM rust:latest AS builder
+# Pinned to a specific Rust version (not the floating `rust:latest`) so a given
+# release tag rebuilds reproducibly. Requires Rust 1.88+ (edition 2024 +
+# let-chains); bump this deliberately.
+FROM rust:1.90-bookworm AS builder
 
 WORKDIR /app
 
