@@ -103,7 +103,10 @@ fn format_message_html(msg: &ChatMessage, options: &HtmlExportOptions) -> String
 
             let result_html = if let Some(ref result) = tc.result {
                 let truncated = if result.len() > 2000 {
-                    format!("{}... (truncated)", &result[..2000])
+                    format!(
+                        "{}... (truncated)",
+                        crate::utils::truncate_on_char_boundary(result, 2000)
+                    )
                 } else {
                     result.clone()
                 };

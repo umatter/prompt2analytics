@@ -41,6 +41,37 @@ fn parse_sse_line(line: &str) -> Option<StreamEvent> {
     None
 }
 
+/// Append `chunk` to the raw byte buffer and invoke `on_line` for each complete
+/// newline-terminated line.
+///
+/// Decoding is deferred until a full line is present, so a multi-byte UTF-8
+/// character split across two network chunks is never decoded until all of its
+/// bytes have arrived. This avoids the corruption caused by calling
+/// `String::from_utf8_lossy` on each raw chunk independently (which would
+/// replace the split character's leading bytes with U+FFFD).
+fn drain_complete_lines(buf: &mut Vec<u8>, chunk: &[u8], mut on_line: impl FnMut(String)) {
+    buf.extend_from_slice(chunk);
+    while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
+        let line_bytes: Vec<u8> = buf.drain(..=pos).collect();
+        // Strip the trailing '\n' and an optional preceding '\r'.
+        let mut end = line_bytes.len() - 1;
+        if end > 0 && line_bytes[end - 1] == b'\r' {
+            end -= 1;
+        }
+        on_line(String::from_utf8_lossy(&line_bytes[..end]).into_owned());
+    }
+}
+
+/// Decode any bytes left in the buffer after the stream ends (a final line with
+/// no trailing newline).
+fn decode_trailing(buf: &[u8]) -> Option<String> {
+    if buf.is_empty() {
+        None
+    } else {
+        Some(String::from_utf8_lossy(buf).into_owned())
+    }
+}
+
 // ============================================================================
 // Web implementation (WASM with ReadableStream)
 // ============================================================================
@@ -130,7 +161,7 @@ pub mod web {
         // Use the BYOB reader approach with JS interop
         let reader = body.get_reader();
 
-        let mut buffer = String::new();
+        let mut buffer: Vec<u8> = Vec::new();
         tracing::debug!("[SSE] Starting read loop");
 
         loop {
@@ -179,27 +210,23 @@ pub mod web {
                 .map_err(|_| StreamError("Value is not Uint8Array".to_string()))?;
 
             let bytes = array.to_vec();
-            let text = String::from_utf8_lossy(&bytes);
             tracing::debug!("[SSE] Got chunk: {} bytes", bytes.len());
-            buffer.push_str(&text);
 
-            // Process complete lines
-            while let Some(newline_pos) = buffer.find('\n') {
-                let line = buffer[..newline_pos].to_string();
-                buffer = buffer[newline_pos + 1..].to_string();
-
+            // Buffer raw bytes and process only complete lines, so a multi-byte
+            // UTF-8 character split across chunks is not corrupted.
+            drain_complete_lines(&mut buffer, &bytes, |line| {
                 if let Some(event) = parse_sse_line(&line) {
                     tracing::debug!("[SSE] Parsed event, calling callback");
                     on_event(event);
                 }
-            }
+            });
         }
 
-        // Process remaining buffer
-        if !buffer.is_empty() {
-            if let Some(event) = parse_sse_line(&buffer) {
-                on_event(event);
-            }
+        // Process any trailing bytes with no final newline.
+        if let Some(line) = decode_trailing(&buffer)
+            && let Some(event) = parse_sse_line(&line)
+        {
+            on_event(event);
         }
 
         tracing::debug!("[SSE] stream_chat completed");
@@ -297,30 +324,26 @@ pub mod native {
         }
 
         let mut stream = response.bytes_stream();
-        let mut buffer = String::new();
+        let mut buffer: Vec<u8> = Vec::new();
         tracing::debug!("[SSE] Starting read loop");
 
         while let Some(chunk_result) = stream.next().await {
             let bytes = chunk_result.map_err(|e| StreamError(format!("Read error: {}", e)))?;
-            let text = String::from_utf8_lossy(&bytes);
             tracing::debug!("[SSE] Got chunk: {} bytes", bytes.len());
-            buffer.push_str(&text);
 
-            // Process complete lines
-            while let Some(newline_pos) = buffer.find('\n') {
-                let line = buffer[..newline_pos].to_string();
-                buffer = buffer[newline_pos + 1..].to_string();
-
+            // Buffer raw bytes and process only complete lines, so a multi-byte
+            // UTF-8 character split across chunks is not corrupted.
+            drain_complete_lines(&mut buffer, &bytes, |line| {
                 if let Some(event) = parse_sse_line(&line) {
                     tracing::debug!("[SSE] Parsed event, calling callback");
                     on_event(event);
                 }
-            }
+            });
         }
 
-        // Process remaining buffer
-        if !buffer.is_empty()
-            && let Some(event) = parse_sse_line(&buffer)
+        // Process any trailing bytes with no final newline.
+        if let Some(line) = decode_trailing(&buffer)
+            && let Some(event) = parse_sse_line(&line)
         {
             on_event(event);
         }
@@ -422,3 +445,34 @@ pub use native::stream_chat;
     not(feature = "mobile")
 ))]
 pub use stub::stream_chat;
+
+#[cfg(test)]
+mod line_buffer_tests {
+    use super::{decode_trailing, drain_complete_lines};
+
+    #[test]
+    fn reassembles_multibyte_char_split_across_chunks() {
+        // "data: héllo\n" — the 'é' is 0xC3 0xA9. Split the stream mid-character.
+        let full = "data: héllo\n".as_bytes();
+        let split = full.iter().position(|&b| b == 0xC3).unwrap() + 1; // between 0xC3 and 0xA9
+        let (a, b) = full.split_at(split);
+
+        let mut buf = Vec::new();
+        let mut lines = Vec::new();
+        drain_complete_lines(&mut buf, a, |l| lines.push(l));
+        assert!(lines.is_empty(), "no complete line yet");
+        drain_complete_lines(&mut buf, b, |l| lines.push(l));
+
+        assert_eq!(lines, vec!["data: héllo".to_string()]);
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn handles_crlf_and_multiple_lines_and_trailing() {
+        let mut buf = Vec::new();
+        let mut lines = Vec::new();
+        drain_complete_lines(&mut buf, b"one\r\ntwo\ntrail", |l| lines.push(l));
+        assert_eq!(lines, vec!["one".to_string(), "two".to_string()]);
+        assert_eq!(decode_trailing(&buf), Some("trail".to_string()));
+    }
+}

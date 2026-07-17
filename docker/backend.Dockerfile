@@ -2,8 +2,10 @@
 # Build: docker build -f docker/backend.Dockerfile -t p2a-mcp .
 
 # Stage 1: Build
-# Requires Rust 1.88+ for latest dependency compatibility
-FROM rust:latest AS builder
+# Pinned to a specific Rust version (not the floating `rust:latest`) so a given
+# release tag rebuilds reproducibly. Requires Rust 1.88+ (edition 2024 +
+# let-chains); bump this deliberately.
+FROM rust:1.90-bookworm AS builder
 
 WORKDIR /app
 
@@ -73,6 +75,11 @@ COPY --from=builder /app/target/release/p2a-mcp /usr/local/bin/
 
 # Set ownership
 RUN chown p2a:p2a /usr/local/bin/p2a-mcp
+
+# Dedicated, empty data-root directory for the path jail (P2A_DATA_ROOT=/data).
+# Keeping the jail root here — rather than the container home or the binary's
+# working directory — narrows what any filesystem/DB tool can reach.
+RUN mkdir -p /data && chown p2a:p2a /data
 
 # Switch to non-root user
 USER p2a

@@ -459,7 +459,7 @@ impl ChatState {
                             let truncated = if result_content.len() > 2000 {
                                 format!(
                                     "{}...\n[Result truncated, {} chars total]",
-                                    &result_content[..2000],
+                                    crate::utils::truncate_on_char_boundary(result_content, 2000),
                                     result_content.len()
                                 )
                             } else {
@@ -513,7 +513,7 @@ impl ChatState {
                     .as_deref()
                     .map(|r| {
                         if r.len() > 200 {
-                            format!("{}...", &r[..200])
+                            format!("{}...", crate::utils::truncate_on_char_boundary(r, 200))
                         } else {
                             r.to_string()
                         }

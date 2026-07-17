@@ -72,7 +72,10 @@ jobs:
       # cargo-binstall falls back to a source build automatically if no prebuilt
       # binary matches, so the build still succeeds in the worst case.
       - name: Install cargo-binstall
-        uses: cargo-bins/cargo-binstall@main
+        # Pinned to a released tag (not the mutable @main branch) so a change to
+        # that branch cannot run unreviewed in this pages:write / id-token:write
+        # deploy pipeline.
+        uses: cargo-bins/cargo-binstall@v1.21.0
 
       - name: Install Dioxus CLI (prebuilt)
         run: cargo binstall dioxus-cli@0.7.3 --no-confirm

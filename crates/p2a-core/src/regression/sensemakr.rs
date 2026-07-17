@@ -62,8 +62,11 @@
 use ndarray::{Array1, Array2};
 use serde::{Deserialize, Serialize};
 
+use std::collections::HashMap;
+
 use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
+use crate::linalg::design::DesignMatrix;
 use crate::linalg::{safe_inverse, xtx, xty};
 use crate::regression::ols::{CovarianceType, OlsResult, run_ols};
 use crate::traits::t_critical;
@@ -110,6 +113,13 @@ pub struct SensemakrResult {
     // ═══════════════════════════════════════════════════════════════════════
     /// Contour data for sensitivity plots
     pub contour_data: Option<ContourData>,
+
+    /// Non-fatal warnings. Populated, for example, when benchmark bounds fall
+    /// back to an approximation because the design matrix was unavailable
+    /// (the OLS-only `sensemakr` entry point); `run_sensemakr` computes the
+    /// exact benchmark partial R² and leaves this empty.
+    #[serde(default)]
+    pub warnings: Vec<String>,
 }
 
 /// Sensitivity bounds computed using a benchmark covariate.
@@ -228,6 +238,11 @@ impl std::fmt::Display for SensemakrResult {
             "  residual variance of both the treatment and the outcome to fully"
         )?;
         writeln!(f, "  account for the estimated effect.")?;
+
+        for warning in &self.warnings {
+            writeln!(f)?;
+            writeln!(f, "⚠ WARNING: {}", warning)?;
+        }
 
         Ok(())
     }
@@ -529,6 +544,38 @@ pub fn sensemakr(
     q: f64,
     alpha: f64,
 ) -> EconResult<SensemakrResult> {
+    // No design matrix available here, so benchmark bounds fall back to the
+    // approximation (disclosed via a warning on the result). Callers that have
+    // the data should use `run_sensemakr`, which computes exact bounds.
+    sensemakr_impl(
+        ols_result,
+        treatment,
+        benchmark_covariates,
+        None,
+        kd,
+        ky,
+        q,
+        alpha,
+    )
+}
+
+/// Internal sensitivity-analysis implementation.
+///
+/// `benchmark_treatment_r2`, when supplied, maps each benchmark covariate name
+/// to the exact partial R² of the treatment on that covariate given the others
+/// (R²_{D~X_j|X_{-j}}). When it is `None` (or a benchmark is missing from it),
+/// the benchmark's treatment partial R² is approximated and a warning is added.
+#[allow(clippy::too_many_arguments)]
+fn sensemakr_impl(
+    ols_result: &OlsResult,
+    treatment: &str,
+    benchmark_covariates: Option<&[&str]>,
+    benchmark_treatment_r2: Option<&HashMap<String, f64>>,
+    kd: Option<f64>,
+    ky: Option<f64>,
+    q: f64,
+    alpha: f64,
+) -> EconResult<SensemakrResult> {
     // Find treatment in variable names
     let treatment_idx = ols_result
         .variable_names
@@ -552,6 +599,8 @@ pub fn sensemakr(
 
     // Compute benchmark bounds if covariates provided
     let mut benchmark_bounds = Vec::new();
+    let mut warnings: Vec<String> = Vec::new();
+    let mut approx_benchmarks: Vec<String> = Vec::new();
 
     if let Some(benchmarks) = benchmark_covariates {
         let kd = kd.unwrap_or(1.0);
@@ -574,12 +623,23 @@ pub fn sensemakr(
                     .iter()
                     .find(|c| c.name == benchmark_name)
                 {
-                    // Approximate benchmark partial R² from its t-stat
+                    // Benchmark partial R² with the OUTCOME (R²_{Y~X_j|X_{-j}}),
+                    // recovered from the benchmark's t-statistic.
                     let r2_benchmark_y = partial_r2(bench_coef.t_value, df);
 
-                    // For R²_{D~X_j}, we'd need the treatment regressed on covariates
-                    // Approximation: assume similar magnitude
-                    let r2_benchmark_d = r2_benchmark_y * 0.5; // Conservative approximation
+                    // Benchmark partial R² with the TREATMENT (R²_{D~X_j|X_{-j}}).
+                    // Use the exact value computed from the design matrix when the
+                    // caller supplied it (run_sensemakr); otherwise fall back to a
+                    // crude 0.5 * R²_{Y~X_j} approximation and flag it.
+                    let r2_benchmark_d = match benchmark_treatment_r2
+                        .and_then(|m| m.get(benchmark_name))
+                    {
+                        Some(&r2) => r2,
+                        None => {
+                            approx_benchmarks.push(benchmark_name.to_string());
+                            r2_benchmark_y * 0.5
+                        }
+                    };
 
                     // Apply multipliers
                     let r2_yd_bound = (ky * r2_benchmark_y).min(1.0);
@@ -616,6 +676,15 @@ pub fn sensemakr(
         }
     }
 
+    if !approx_benchmarks.is_empty() {
+        warnings.push(format!(
+            "Benchmark bounds for [{}] use an approximation (R²_(D~X_j) ≈ 0.5 · R²_(Y~X_j)) \
+             because the design matrix was not available; call run_sensemakr(dataset, ...) for \
+             exact benchmark bounds.",
+            approx_benchmarks.join(", ")
+        ));
+    }
+
     Ok(SensemakrResult {
         treatment: treatment.to_string(),
         estimate,
@@ -629,6 +698,7 @@ pub fn sensemakr(
         rv_alpha: alpha,
         benchmark_bounds,
         contour_data: None,
+        warnings,
     })
 }
 
@@ -677,11 +747,52 @@ pub fn run_sensemakr(
     // Run OLS with HC1 robust standard errors
     let ols_result = run_ols(dataset, y_col, &x_cols, true, CovarianceType::HC1)?;
 
-    // Run sensitivity analysis
-    sensemakr(
+    // Compute the exact benchmark partial R² of the treatment on each benchmark
+    // covariate, R²_{D~X_j|X_{-j}}, by regressing the treatment on the control
+    // covariates (with intercept). This replaces the crude 0.5 approximation
+    // that the OLS-only entry point must use for lack of the design matrix.
+    let benchmark_treatment_r2 = match benchmark_covariates {
+        Some(benchmarks) if !benchmarks.is_empty() => {
+            let df = dataset.df();
+            let treatment_vec = DesignMatrix::extract_column(df, treatment_col).map_err(|e| {
+                EconError::InvalidSpecification {
+                    message: format!(
+                        "sensemakr benchmark: cannot read treatment '{treatment_col}': {e}"
+                    ),
+                }
+            })?;
+            let n = treatment_vec.len();
+
+            // Design matrix for D ~ [intercept, control covariates].
+            let mut x = Array2::<f64>::ones((n, covariate_cols.len() + 1));
+            for (j, &cov) in covariate_cols.iter().enumerate() {
+                let col = DesignMatrix::extract_column(df, cov).map_err(|e| {
+                    EconError::InvalidSpecification {
+                        message: format!("sensemakr benchmark: cannot read covariate '{cov}': {e}"),
+                    }
+                })?;
+                x.column_mut(j + 1).assign(&col);
+            }
+
+            let mut map = HashMap::new();
+            for &b in benchmarks {
+                if let Some(pos) = covariate_cols.iter().position(|&c| c == b) {
+                    // pos + 1 skips the intercept column at index 0.
+                    let r2 = partial_r2_covariate_treatment(&treatment_vec, &x, pos + 1)?;
+                    map.insert(b.to_string(), r2);
+                }
+            }
+            Some(map)
+        }
+        _ => None,
+    };
+
+    // Run sensitivity analysis with the exact benchmark partial R² values.
+    sensemakr_impl(
         &ols_result,
         treatment_col,
         benchmark_covariates,
+        benchmark_treatment_r2.as_ref(),
         kd,
         ky,
         q,

@@ -15,9 +15,12 @@
 //!
 //! # Algorithms
 //!
-//! - **Interior Point**: Efficient for large problems (Portnoy & Koenker, 1997)
-//! - **Simplex**: Barrodale-Roberts algorithm for exact solution
-//! - **IRLS**: Iteratively reweighted least squares approximation
+//! - **IRLS**: Iteratively reweighted least squares (the algorithm actually
+//!   implemented and used).
+//! - **Interior Point** (Portnoy & Koenker, 1997) and **Simplex**
+//!   (Barrodale-Roberts): selectable for API stability but not yet implemented
+//!   as distinct algorithms — both currently fall back to IRLS and emit a
+//!   runtime warning.
 //!
 //! # References
 //!
@@ -91,22 +94,28 @@ pub struct QuantRegCoefficient {
 }
 
 /// Algorithm for quantile regression.
+///
+/// NOTE: `InteriorPoint` and `Simplex` are not yet implemented as distinct
+/// algorithms — both currently fall back to `IRLS` (a runtime warning is
+/// emitted when they are selected). They are retained so the public API and
+/// the parsed CLI/MCP options are stable, but they do not change the numerical
+/// result relative to `IRLS`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum QuantRegAlgorithm {
-    /// Interior point method (efficient for large problems)
+    /// Interior point method. Currently falls back to IRLS.
     #[default]
     InteriorPoint,
-    /// Barrodale-Roberts simplex algorithm
+    /// Barrodale-Roberts simplex algorithm. Currently falls back to IRLS.
     Simplex,
-    /// Iteratively reweighted least squares
+    /// Iteratively reweighted least squares (the algorithm actually used).
     IRLS,
 }
 
 impl std::fmt::Display for QuantRegAlgorithm {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::InteriorPoint => write!(f, "Interior Point"),
-            Self::Simplex => write!(f, "Simplex (Barrodale-Roberts)"),
+            Self::InteriorPoint => write!(f, "Interior Point (IRLS fallback)"),
+            Self::Simplex => write!(f, "Simplex (IRLS fallback)"),
             Self::IRLS => write!(f, "IRLS"),
         }
     }
@@ -167,7 +176,11 @@ pub struct QuantRegConfig {
     pub tol: f64,
     /// Include intercept
     pub intercept: bool,
-    /// Number of bootstrap samples for standard errors (0 = use approximation)
+    /// Number of bootstrap samples for standard errors.
+    ///
+    /// NOTE: not yet implemented — standard errors always use the Powell (1991)
+    /// sandwich estimator regardless of this value. A runtime warning is
+    /// emitted when it is set to a non-zero value.
     pub bootstrap_samples: usize,
 }
 
@@ -219,6 +232,14 @@ pub fn quantreg(
         return Err(EconError::InvalidSpecification {
             message: format!("tau must be in (0, 1), got {}", config.tau),
         });
+    }
+
+    if config.bootstrap_samples > 0 {
+        tracing::warn!(
+            "quantile regression: bootstrap_samples={} was requested, but bootstrap standard \
+             errors are not implemented; using the Powell (1991) sandwich estimator instead",
+            config.bootstrap_samples
+        );
     }
 
     // Extract data
@@ -417,8 +438,12 @@ fn interior_point_quantreg(
     max_iter: usize,
     tol: f64,
 ) -> EconResult<(Array1<f64>, usize)> {
-    // For simplicity, fall back to IRLS for now
-    // A full interior point implementation would use a log barrier
+    // Not yet implemented as a distinct algorithm — fall back to IRLS.
+    // A full interior point implementation would use a log barrier.
+    tracing::warn!(
+        "quantile regression: the 'interior point' algorithm is not implemented; \
+         falling back to IRLS (results are identical to selecting IRLS)"
+    );
     irls_quantreg(x, y, tau, max_iter, tol)
 }
 
@@ -429,7 +454,11 @@ fn simplex_quantreg(
     y: &Array1<f64>,
     tau: f64,
 ) -> EconResult<(Array1<f64>, usize)> {
-    // For simplicity, use IRLS as approximation
+    // Not yet implemented as a distinct algorithm — fall back to IRLS.
+    tracing::warn!(
+        "quantile regression: the 'simplex' (Barrodale-Roberts) algorithm is not implemented; \
+         falling back to IRLS (results are identical to selecting IRLS)"
+    );
     irls_quantreg(x, y, tau, 200, 1e-8)
 }
 

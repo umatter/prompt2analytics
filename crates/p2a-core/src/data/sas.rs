@@ -111,21 +111,60 @@ impl<R: Read + Seek> SasReader<R> {
         let a1 = if is_64bit { 4 } else { 0 };
         let _a2 = if align2_byte[0] == 0x33 { 4 } else { 0 };
 
+        // Total file length, used to reject header fields that describe more
+        // data than the file can possibly contain. These fields are read as
+        // signed integers straight from the file: a negative value would wrap
+        // to a huge `usize`, and an oversized value would drive unbounded
+        // allocation and out-of-range seeks, so each is validated here.
+        let file_len = {
+            let cur = reader.stream_position()?;
+            let end = reader.seek(SeekFrom::End(0))?;
+            reader.seek(SeekFrom::Start(cur))?;
+            end
+        };
+        let check_offset = |raw: i64, name: &str| -> Result<usize, SasError> {
+            if raw < 0 || raw as u64 > file_len {
+                return Err(SasError::InvalidFormat(format!(
+                    "{name} = {raw} is negative or exceeds the file size ({file_len} bytes); \
+                     the file is corrupt or truncated"
+                )));
+            }
+            Ok(raw as usize)
+        };
+
         // Read header length
         reader.seek(SeekFrom::Start((196 + a1) as u64))?;
-        let header_length = Self::read_i32(&mut reader, byte_order)? as usize;
+        let header_length = check_offset(Self::read_i32(&mut reader, byte_order)? as i64, "header_length")?;
 
         // Read page size
         reader.seek(SeekFrom::Start((200 + a1) as u64))?;
-        let page_size = Self::read_i32(&mut reader, byte_order)? as usize;
+        let page_size = check_offset(Self::read_i32(&mut reader, byte_order)? as i64, "page_size")?;
+        if page_size == 0 {
+            return Err(SasError::InvalidFormat("page_size is zero".to_string()));
+        }
 
         // Read page count
         reader.seek(SeekFrom::Start((204 + a1) as u64))?;
-        let page_count = if is_64bit {
-            Self::read_i64(&mut reader, byte_order)? as usize
+        let page_count_raw = if is_64bit {
+            Self::read_i64(&mut reader, byte_order)?
         } else {
-            Self::read_i32(&mut reader, byte_order)? as usize
+            Self::read_i32(&mut reader, byte_order)? as i64
         };
+        if page_count_raw < 0 {
+            return Err(SasError::InvalidFormat(format!(
+                "page_count = {page_count_raw} is negative; the file is corrupt"
+            )));
+        }
+        let page_count = page_count_raw as usize;
+        // A page_count larger than the file can hold indicates corruption and
+        // would drive out-of-range page seeks in `parse_metadata`.
+        let max_pages = file_len.saturating_sub(header_length as u64) / page_size as u64;
+        if page_count as u64 > max_pages {
+            return Err(SasError::InvalidFormat(format!(
+                "declared page_count {page_count} exceeds file capacity ({max_pages} pages of \
+                 {page_size} bytes after a {header_length}-byte header in a {file_len}-byte file)"
+            )));
+        }
 
         let mut sas_reader = SasReader {
             reader,
@@ -155,7 +194,14 @@ impl<R: Read + Seek> SasReader<R> {
         let mut col_attrs: Vec<(usize, usize, ColumnType)> = Vec::new(); // (offset, length, type)
 
         for page_idx in 0..self.page_count {
-            let page_offset = self.header_length + page_idx * self.page_size;
+            let page_offset = self
+                .header_length
+                .checked_add(page_idx.checked_mul(self.page_size).ok_or_else(|| {
+                    SasError::InvalidFormat("page offset arithmetic overflowed".to_string())
+                })?)
+                .ok_or_else(|| {
+                    SasError::InvalidFormat("page offset arithmetic overflowed".to_string())
+                })?;
             self.reader.seek(SeekFrom::Start(page_offset as u64))?;
 
             // Read page type
@@ -353,14 +399,18 @@ impl<R: Read + Seek> SasReader<R> {
         let mut string_cols: Vec<Vec<Option<String>>> = Vec::new();
         let mut col_is_numeric: Vec<bool> = Vec::new();
 
+        // Bound the pre-allocation: `row_count` is parsed from a page subheader
+        // and must not be trusted to size buffers directly (a corrupt value
+        // would trigger a huge allocation). It grows as rows are actually read.
+        let row_capacity = self.row_count.min(1 << 20);
         for (_, col_type, _, _) in &col_info {
             col_is_numeric.push(*col_type == ColumnType::Numeric);
             if *col_type == ColumnType::Numeric {
-                numeric_cols.push(Vec::with_capacity(self.row_count));
+                numeric_cols.push(Vec::with_capacity(row_capacity));
                 string_cols.push(Vec::new()); // Placeholder
             } else {
                 numeric_cols.push(Vec::new()); // Placeholder
-                string_cols.push(Vec::with_capacity(self.row_count));
+                string_cols.push(Vec::with_capacity(row_capacity));
             }
         }
 
@@ -368,7 +418,14 @@ impl<R: Read + Seek> SasReader<R> {
         let page_header_size = if self.is_64bit { 40 } else { 24 };
 
         for page_idx in 0..self.page_count {
-            let page_offset = self.header_length + page_idx * self.page_size;
+            let page_offset = self
+                .header_length
+                .checked_add(page_idx.checked_mul(self.page_size).ok_or_else(|| {
+                    SasError::InvalidFormat("page offset arithmetic overflowed".to_string())
+                })?)
+                .ok_or_else(|| {
+                    SasError::InvalidFormat("page offset arithmetic overflowed".to_string())
+                })?;
             self.reader.seek(SeekFrom::Start(page_offset as u64))?;
 
             // Read page type

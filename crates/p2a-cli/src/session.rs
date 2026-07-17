@@ -39,6 +39,11 @@ pub struct CommandRecord {
     pub subcommand: String,
     /// Structured arguments for reconstruction
     pub arguments: serde_json::Value,
+    /// The command-portion argv (category, subcommand, and args) as actually
+    /// invoked, without the program name or global flags. Preferred over
+    /// `arguments` for faithful, injection-safe script export.
+    #[serde(default)]
+    pub argv: Vec<String>,
     /// Referenced datasets by name
     pub dataset_refs: Vec<String>,
     /// Output file paths (for viz commands)
@@ -205,8 +210,46 @@ impl SessionManager {
             category: category.to_string(),
             subcommand: subcommand.to_string(),
             arguments,
+            argv: Vec::new(),
             dataset_refs,
             output_files,
+            success,
+            error,
+            duration_ms,
+        };
+
+        self.session.record_command(record);
+        self.command_start = None;
+    }
+
+    /// Record a command invocation from its command-portion argv (category,
+    /// subcommand, and arguments — no program name or global flags).
+    ///
+    /// This is the central recording path used by `main` for every analytics
+    /// command, so reproducibility does not depend on each of the ~150 handlers
+    /// remembering to record itself.
+    pub fn record_invocation(&mut self, argv: Vec<String>, success: bool, error: Option<String>) {
+        if argv.is_empty() {
+            return;
+        }
+        let duration_ms = self
+            .command_start
+            .map(|start| start.elapsed().as_millis() as u64)
+            .unwrap_or(0);
+        let category = argv.first().cloned().unwrap_or_default();
+        let subcommand = argv.get(1).cloned().unwrap_or_default();
+        let command_line = crate::output::shell_join(&argv);
+
+        let record = CommandRecord {
+            id: uuid::Uuid::new_v4().to_string(),
+            timestamp: Utc::now(),
+            command_line,
+            category,
+            subcommand,
+            arguments: serde_json::Value::Null,
+            argv,
+            dataset_refs: Vec::new(),
+            output_files: Vec::new(),
             success,
             error,
             duration_ms,

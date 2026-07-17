@@ -41,7 +41,8 @@ pub use ollama::OllamaProvider;
 pub use openai::OpenAIProvider;
 pub use provider::{
     LlmError, LlmProvider, Message, MessageRole, ProviderConfig, ProviderType, StreamChunk,
-    ToolCall, ToolDefinition, ToolExecutor, ToolResult,
+    ToolCall, ToolDefinition, ToolExecutor, ToolResult, validate_base_url,
+    validate_provider_config,
 };
 pub use retry::{RetryConfig, send_with_retry};
 pub use tokens::{

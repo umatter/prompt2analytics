@@ -7,9 +7,10 @@ use std::sync::Arc;
 
 use axum::{
     Json, Router,
-    extract::{Path, Query, State},
-    http::StatusCode,
-    response::IntoResponse,
+    extract::{Path, Query, Request, State},
+    http::{StatusCode, header},
+    middleware::{self, Next},
+    response::{IntoResponse, Response},
     routing::{delete, get, post},
 };
 use serde::{Deserialize, Serialize};
@@ -102,6 +103,37 @@ pub async fn start_http_transport(config: &ServerConfig) -> TransportResult<()> 
     let app = create_router(state, config);
 
     let addr = config.http.addr;
+
+    // A non-loopback bind with no access token is refused by default, to avoid
+    // an accidental open deployment. It is allowed only when the operator
+    // explicitly opts in with --allow-unauthenticated (P2A_ALLOW_UNAUTHENTICATED),
+    // which also drops the enumeration endpoints (see create_base_router).
+    if !addr.ip().is_loopback()
+        && config.http.access_token.is_none()
+        && !config.http.allow_unauthenticated
+    {
+        return Err(crate::transport::TransportError::Http(format!(
+            "refusing to bind {addr}: a non-loopback bind requires an access token. \
+             Set P2A_ACCESS_TOKEN (or --access-token) for a private/authenticated deployment, \
+             or set P2A_ALLOW_UNAUTHENTICATED=1 (--allow-unauthenticated) for an intentional \
+             open bring-your-own-key demo, or bind 127.0.0.1 for local development."
+        )));
+    }
+    if config.http.access_token.is_some() {
+        tracing::info!("HTTP access-token authentication is ENABLED for /api routes");
+    } else if config.http.is_open_unauthenticated() {
+        tracing::warn!(
+            "HTTP running OPEN and UNAUTHENTICATED on {addr} (P2A_ALLOW_UNAUTHENTICATED). \
+             Session-list and file-browser endpoints are disabled; isolation relies on \
+             unguessable session IDs. Put an edge rate-limiter in front for abuse/DoS control."
+        );
+    } else {
+        tracing::warn!(
+            "HTTP access-token authentication is DISABLED (loopback bind only); \
+             set P2A_ACCESS_TOKEN before exposing this server"
+        );
+    }
+
     tracing::info!("Starting HTTP transport on {}", addr);
 
     let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
@@ -198,28 +230,104 @@ fn max_request_body_bytes() -> usize {
 /// layers cover every route. CORS is outermost so preflight `OPTIONS` is
 /// handled before the body-size limit.
 fn apply_global_middleware(router: Router, config: &ServerConfig) -> Router {
+    // Shared bearer token, if configured. `None` disables the check (loopback
+    // development only; the startup guard forbids this on a public bind).
+    let token_state: Option<Arc<str>> = config.http.access_token.as_deref().map(Arc::from);
     router
+        // CORS stays outermost so preflight is handled and error responses
+        // (including 401s from the auth layer below) carry CORS headers.
         .layer(build_cors(config))
+        .layer(middleware::from_fn_with_state(
+            token_state,
+            require_access_token,
+        ))
         .layer(RequestBodyLimitLayer::new(max_request_body_bytes()))
         .layer(TraceLayer::new_for_http())
 }
 
+/// Middleware enforcing a shared bearer token on all routes except `/health`
+/// and CORS preflight (`OPTIONS`). When no token is configured the request is
+/// passed through unchanged.
+async fn require_access_token(
+    State(expected): State<Option<Arc<str>>>,
+    req: Request,
+    next: Next,
+) -> Response {
+    use axum::http::Method;
+
+    // Health checks and CORS preflight are always allowed through.
+    if req.method() == Method::OPTIONS || req.uri().path() == "/health" {
+        return next.run(req).await;
+    }
+
+    let Some(expected) = expected.as_deref() else {
+        return next.run(req).await;
+    };
+
+    let provided = req
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(str::trim);
+
+    let authorized = provided
+        .map(|p| constant_time_eq(p.as_bytes(), expected.as_bytes()))
+        .unwrap_or(false);
+
+    if authorized {
+        next.run(req).await
+    } else {
+        (
+            StatusCode::UNAUTHORIZED,
+            [(header::WWW_AUTHENTICATE, "Bearer")],
+            "missing or invalid bearer token",
+        )
+            .into_response()
+    }
+}
+
+/// Length-checked, constant-time byte comparison to avoid leaking the token
+/// via response timing.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
 /// Create the base router with core routes.
-fn create_base_router(state: AppState, _config: &ServerConfig) -> Router {
-    let router = Router::new()
+fn create_base_router(state: AppState, config: &ServerConfig) -> Router {
+    // In the intentionally-open public mode (non-loopback bind, no access
+    // token), the two enumeration surfaces are omitted entirely: `GET
+    // /api/sessions` (which would list every active session ID and defeat the
+    // unguessable-session-ID isolation) and `GET /api/files` (a filesystem
+    // browser). The web frontend uses neither. They remain available for
+    // loopback/desktop use and for authenticated (token-gated) deployments.
+    let hide_enumeration = config.http.is_open_unauthenticated();
+
+    let mut router = Router::new()
         // Health check
         .route("/health", get(health_check))
         // Session management
         .route("/api/sessions", post(create_session))
-        .route("/api/sessions", get(list_sessions))
         .route("/api/sessions/{id}", get(get_session))
         .route("/api/sessions/{id}", delete(delete_session))
         // Tool discovery
         .route("/api/tools", get(list_tools))
         // Tool execution
-        .route("/api/tools/{name}", post(call_tool))
-        // File browser
-        .route("/api/files", get(list_files));
+        .route("/api/tools/{name}", post(call_tool));
+
+    if !hide_enumeration {
+        router = router
+            .route("/api/sessions", get(list_sessions))
+            // File browser
+            .route("/api/files", get(list_files));
+    }
 
     // Add WebSocket route if feature is enabled
     #[cfg(feature = "websocket")]
@@ -695,6 +803,7 @@ mod llm_handlers {
     use crate::llm::{
         AnthropicProvider, LlmProvider, Message, OllamaProvider, OpenAIProvider, ProviderConfig,
         ProviderType, ToolExecutor, build_enhanced_dataset_context, get_system_prompt_with_context,
+        validate_provider_config,
     };
     use crate::session::Session;
 
@@ -866,6 +975,18 @@ mod llm_handlers {
             }
         };
 
+        // Reject an SSRF-unsafe provider base_url before making any request.
+        if let Some(cfg) = &request.provider
+            && let Err(e) = validate_provider_config(cfg)
+        {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::error(format!(
+                    "Rejected LLM provider base_url: {e}"
+                ))),
+            );
+        }
+
         // Create provider and tool executor
         let provider =
             create_provider_with_iterations(request.provider, request.max_tool_iterations);
@@ -979,6 +1100,18 @@ mod llm_handlers {
     pub async fn llm_generate_title(
         Json(request): Json<GenerateTitleRequest>,
     ) -> impl IntoResponse {
+        // Reject an SSRF-unsafe provider base_url before making any request.
+        if let Some(cfg) = &request.provider
+            && let Err(e) = validate_provider_config(cfg)
+        {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::error(format!(
+                    "Rejected LLM provider base_url: {e}"
+                ))),
+            );
+        }
+
         let provider = create_provider(request.provider);
 
         // Build a simple prompt for title generation
@@ -1792,6 +1925,18 @@ mod llm_handlers {
                 let datasets = session.datasets.read().await;
                 build_enhanced_dataset_context(&datasets)
             };
+
+            // Reject an SSRF-unsafe provider base_url before making any request.
+            if let Some(cfg) = &request.provider
+                && let Err(e) = validate_provider_config(cfg)
+            {
+                let _ = tx_clone
+                    .send(ProgressEvent::Error {
+                        error: format!("Rejected LLM provider base_url: {e}"),
+                    })
+                    .await;
+                return;
+            }
 
             // Create provider and streaming tool executor
             let provider =

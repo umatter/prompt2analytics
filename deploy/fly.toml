@@ -17,13 +17,28 @@ app = "p2a-qamelab-backend"
 primary_region = "fra"          # Frankfurt — EU
 
 [build]
-  image = "ghcr.io/umatter/prompt2analytics/backend:latest"
+  # Pin an explicit version tag (not the mutable :latest) for reproducible
+  # deploys. Bump deliberately when shipping a new backend release.
+  image = "ghcr.io/umatter/prompt2analytics/backend:0.1.2"
 
 [env]
   P2A_HOST = "0.0.0.0"
   P2A_PORT = "8080"
   P2A_CORS_ORIGINS = "https://p2a.qamelab.org"
   P2A_MAX_HTTP_BODY_MB = "32"
+
+  # Open-but-hardened bring-your-own-key demo: no login. Per-visitor isolation
+  # relies on unguessable, non-enumerable session IDs; the code hardening
+  # (base_url SSRF allowlist, SQL file-read guard, parser bounds) closes the
+  # server-exploitation vectors, and this flag drops the session-list and
+  # file-browser enumeration endpoints. Abuse/DoS control is expected from an
+  # edge rate-limiter in front of this app (see docs/guides/DEPLOYMENT.md).
+  # Requires the hardened v0.1.2 image above; do NOT set this on an older image.
+  P2A_ALLOW_UNAUTHENTICATED = "1"
+
+  # Confine any filesystem/DB tool access to a dedicated, empty directory
+  # rather than the container's home. This directory should exist in the image.
+  P2A_DATA_ROOT = "/data"
 
 [http_service]
   internal_port = 8080

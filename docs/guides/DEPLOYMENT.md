@@ -47,12 +47,27 @@ Deploy steps:
 
 ## Threat model in one paragraph
 
-The `p2a-mcp` HTTP backend has **no enforced authentication** (the
-`P2A_AUTH_ENABLED` / `P2A_JWT_SECRET` config exists but is *not* wired into the
-router) and exposes all analytics tools, including data-loading and database
-tools. Anyone who can reach the port can call them. BYOK is safe **only because
-no shared LLM key is present** on the backend — so the must-dos below are about
-(a) keeping it that way, (b) encrypting traffic, and (c) limiting blast radius.
+As of **v0.1.2** the `p2a-mcp` backend supports two safe postures for a public
+bind, and refuses to start on a non-loopback address that has neither:
+
+- **Authenticated** — set `P2A_ACCESS_TOKEN`; every `/api` route then requires
+  `Authorization: Bearer <token>` (`/health` and CORS preflight are exempt).
+  Use this to restrict *who* can reach the demo.
+- **Open but hardened** — set `P2A_ALLOW_UNAUTHENTICATED=1` for a no-login BYOK
+  demo. There are no user accounts; per-visitor isolation relies on the
+  **unguessable, non-enumerable session ID** the frontend mints (a capability,
+  like an unlisted share link). In this mode the two enumeration endpoints
+  (`GET /api/sessions` list and `GET /api/files`) are **not registered**, so
+  nobody can list other sessions or browse the filesystem.
+
+Either way, the v0.1.2 code hardening closes the server-exploitation vectors: an
+allowlist on the LLM `base_url` blocks SSRF, the SQL tools reject file-reading
+functions with literal paths (no `read_csv_auto('/etc/passwd')`), and the
+data-file parsers bound-check declared sizes (no allocation-DoS). BYOK stays
+safe **only because no shared LLM key is present** on the backend. The must-dos
+below keep it that way, encrypt traffic, confine the filesystem, and push
+abuse/DoS control to the edge (open mode has no per-request auth to throttle
+behind).
 
 ## Must-do checklist
 
@@ -70,16 +85,28 @@ no shared LLM key is present** on the backend — so the must-dos below are abou
    Set `P2A_CORS_ORIGINS=https://your-demo.example` (comma-separated for several).
    Never use `--cors-permissive` / `P2A_CORS_PERMISSIVE` in production.
 
-4. **Rate-limit and time out at the proxy.**
-   Add per-IP rate limiting and request timeouts at the reverse proxy — the
+4. **Rate-limit and time out at the edge.**
+   Add per-IP rate limiting and request timeouts at a reverse proxy or CDN — the
    *compute* (regressions, ML) runs on your server even though LLM cost is the
-   user's. **Exclude the SSE path** `/api/llm/chat/stream` from response
-   buffering and idle timeouts, or streaming chat will break.
+   user's. This is **the** abuse/DoS control in open-unauthenticated mode (there
+   is no per-request auth to throttle behind), so do not skip it. A CDN in front
+   (e.g. **Cloudflare**, free tier: a Rate Limiting rule on `/api/*`, plus WAF
+   for obvious abuse) works well and is invisible to reviewers; a reverse proxy
+   (Caddy/nginx) rule works too. **Exclude the SSE path**
+   `/api/llm/chat/stream` from response buffering and idle timeouts, or
+   streaming chat will break.
 
 5. **Cap request body size.**
    `P2A_MAX_HTTP_BODY_MB` (default 32) limits memory from oversized uploads.
 
-6. **Run the container locked down.**
+6. **Confine the filesystem jail (`P2A_DATA_ROOT`).**
+   Set `P2A_DATA_ROOT` to a dedicated, **empty** directory (e.g. `/data`, which
+   the backend image creates) so any filesystem/DB tool can only reach that
+   directory. Unset, it defaults to the process working directory — never leave
+   it defaulting to a home directory on an exposed host. The directory must
+   exist (it is canonicalized at startup).
+
+7. **Run the container locked down.**
    `docker-compose.yml` ships with `cap_drop: ALL`, `no-new-privileges`,
    `pids_limit`, and memory/CPU limits. Writable state is confined to the
    `p2a-data` volume and a `/tmp` tmpfs; enable `read_only: true` after verifying
@@ -112,8 +139,32 @@ your-demo.example {
 
 ## What this does NOT give you
 
-This setup is appropriate for an **open demo with disposable, isolated sessions**.
-It is *not* a multi-tenant SaaS: there are no user accounts, no per-user
-authorization, and no server-side key storage. If you need those, add real
-authentication in front of the backend (and only then consider server-side key
-storage, with a KMS-managed master key — see the discussion in project memory).
+The open-but-hardened mode is appropriate for an **open demo with disposable,
+isolated sessions**. It is *not* a multi-tenant SaaS: there are no user
+accounts and no server-side key storage, and per-visitor isolation is only as
+strong as keeping session IDs secret (they are unguessable and non-enumerable,
+but treat a leaked session URL like a leaked share link). Anonymous callers can
+still *use compute* (bounded by your edge rate limit and machine size) — that is
+the accepted trade for a zero-friction demo. If you need to restrict *who* can
+use it, switch to the authenticated posture (`P2A_ACCESS_TOKEN`) and distribute
+the token; if you need real multi-tenant accounts and server-side key storage,
+add an identity layer in front of the backend (KMS-managed master key — see the
+discussion in project memory).
+
+## Fly.io quick reference
+
+`deploy/fly.toml` is configured for the open-but-hardened posture: it pins an
+explicit image tag, sets `P2A_ALLOW_UNAUTHENTICATED=1`, `P2A_DATA_ROOT=/data`,
+and locks CORS. Ship a new backend build with:
+
+```bash
+# 1. Build & publish the image for the release tag (from main):
+#    push tag vX.Y.Z, then run the "Backend Image" workflow via workflow_dispatch
+#    on main so the vX.Y.Z tag is published to GHCR.
+# 2. Point deploy/fly.toml [build].image at ghcr.io/.../backend:X.Y.Z
+# 3. Deploy:
+fly deploy -c deploy/fly.toml
+```
+
+Put Cloudflare (or your CDN) in front of `api.p2a.qamelab.org` with a Rate
+Limiting rule on `/api/*` for abuse/DoS control.

@@ -191,7 +191,7 @@ The `cuda` feature enables transparent GPU dispatch for core linear algebra oper
 - **K-means distances**: 2-3x speedup for d>=20 via DGEMM reformulation
 - **matmul**: 1.4-2.4x speedup for near-square matrices
 - **Sandwich estimators**: 2-3x speedup for k>=50 (HC0-HC3, HAC)
-- **cholesky_inverse**: Marginal; mainly avoids host-device round-trips
+- **cholesky_inverse**: CPU passthrough (no cuSOLVER path implemented); the O(k^3) inverse for small k is not worth a device round-trip
 
 **Not GPU-accelerated** (CPU always faster):
 - xty (X'y): DGEMV is bandwidth-bound; CPU OpenBLAS is faster
@@ -224,7 +224,7 @@ src/
 │       ├── memory.rs       # ndarray <-> CudaSlice (row-major handling)
 │       ├── dispatch.rs     # Size thresholds (env-configurable)
 │       ├── blas.rs         # cuBLAS: xtx (DSYRK→DGEMM), xty (DGEMV), matmul (DGEMM)
-│       ├── solver.rs       # cuSOLVER: cholesky_inverse, sandwich_meat
+│       ├── solver.rs       # cuSOLVER: sandwich_meat (cholesky_inverse is a CPU passthrough)
 │       └── kernels.rs      # Custom: pairwise_distances (K-means)
 │   └── design.rs          # DesignMatrix, demeaning functions
 ├── traits/

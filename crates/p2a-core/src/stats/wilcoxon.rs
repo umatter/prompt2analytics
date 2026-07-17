@@ -311,9 +311,12 @@ pub fn wilcoxon_rank_sum(
 
     // Compute p-value
     let (p_value, z_score, exact_used) = if use_exact && n_ties == 0 {
-        // Exact p-value using enumeration (for small samples without ties)
-        let p = exact_rank_sum_p_value(w, n1, n2, alternative);
-        (p, None, true)
+        // Exact p-value using enumeration (for small samples without ties).
+        // `exact_rank_sum_p_value` falls back to the normal approximation for
+        // n > 20 and reports that via the returned flag, so `exact_used`
+        // reflects the computation actually performed rather than the request.
+        let (p, was_exact) = exact_rank_sum_p_value(w, n1, n2, alternative);
+        (p, None, was_exact)
     } else {
         // Normal approximation
         let (p, z) = normal_approx_rank_sum(w, n1, n2, n_ties, alternative, config.correct);
@@ -462,9 +465,10 @@ pub fn wilcoxon_signed_rank(
 
     // Compute p-value
     let (p_value, z_score, exact_used) = if use_exact && n_ties == 0 {
-        // Exact p-value
-        let p = exact_signed_rank_p_value(v, n, alternative);
-        (p, None, true)
+        // Exact p-value (falls back to the normal approximation for n > 20,
+        // reporting that via the returned flag so we don't mislabel it).
+        let (p, was_exact) = exact_signed_rank_p_value(v, n, alternative);
+        (p, None, was_exact)
     } else {
         // Normal approximation
         let (p, z) = normal_approx_signed_rank(v, n, n_ties, alternative, config.correct);
@@ -730,15 +734,24 @@ fn compute_signed_ranks(diffs: &[f64]) -> (Vec<f64>, Vec<i8>, usize, f64) {
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Exact p-value for rank sum test using enumeration.
-/// Only accurate for small samples without ties.
-fn exact_rank_sum_p_value(w: f64, n1: usize, n2: usize, alternative: Alternative) -> f64 {
+///
+/// Returns `(p_value, exact_used)`. Exact enumeration is only performed for
+/// small samples (n <= 20); for larger samples this falls back to the normal
+/// approximation and reports `exact_used == false` so the caller does not
+/// mislabel the result as exact.
+fn exact_rank_sum_p_value(
+    w: f64,
+    n1: usize,
+    n2: usize,
+    alternative: Alternative,
+) -> (f64, bool) {
     let n = n1 + n2;
 
     // For very small samples, enumerate all permutations
     if n > 20 {
         // Fall back to approximation for larger samples
         let (p, _) = normal_approx_rank_sum(w, n1, n2, 0, alternative, true);
-        return p;
+        return (p, false);
     }
 
     // Count permutations where W <= w or W >= w
@@ -752,7 +765,7 @@ fn exact_rank_sum_p_value(w: f64, n1: usize, n2: usize, alternative: Alternative
     let count_le = count_rank_sums_le(w as usize, n1, n2);
     let count_ge = count_rank_sums_ge(w as usize, n1, n2);
 
-    match alternative {
+    let p = match alternative {
         Alternative::TwoSided => {
             // Two-sided: P(W <= w) + P(W >= symmetric value) or 2*min(P(W<=w), P(W>=w))
             let p_lower = count_le as f64 / total_perms as f64;
@@ -772,11 +785,16 @@ fn exact_rank_sum_p_value(w: f64, n1: usize, n2: usize, alternative: Alternative
             // Left-tailed: P(W <= w)
             count_le as f64 / total_perms as f64
         }
-    }
+    };
+    (p, true)
 }
 
 /// Exact p-value for signed rank test.
-fn exact_signed_rank_p_value(v: f64, n: usize, alternative: Alternative) -> f64 {
+///
+/// Returns `(p_value, exact_used)`. Exact enumeration is only performed for
+/// small samples (n <= 20); larger samples fall back to the normal
+/// approximation and report `exact_used == false`.
+fn exact_signed_rank_p_value(v: f64, n: usize, alternative: Alternative) -> (f64, bool) {
     // The signed rank statistic V ranges from 0 to n(n+1)/2
     let max_v = (n * (n + 1)) / 2;
     let mean_v = max_v as f64 / 2.0;
@@ -784,7 +802,7 @@ fn exact_signed_rank_p_value(v: f64, n: usize, alternative: Alternative) -> f64 
     if n > 20 {
         // Fall back to approximation
         let (p, _) = normal_approx_signed_rank(v, n, 0, alternative, true);
-        return p;
+        return (p, false);
     }
 
     // Count permutations using DP
@@ -792,7 +810,7 @@ fn exact_signed_rank_p_value(v: f64, n: usize, alternative: Alternative) -> f64 
     let count_le = count_signed_rank_sums_le(v as usize, n);
     let count_ge = count_signed_rank_sums_ge(v as usize, n);
 
-    match alternative {
+    let p = match alternative {
         Alternative::TwoSided => {
             let p_lower = count_le as f64 / total_perms as f64;
             let p_upper = count_ge as f64 / total_perms as f64;
@@ -805,7 +823,8 @@ fn exact_signed_rank_p_value(v: f64, n: usize, alternative: Alternative) -> f64 
         }
         Alternative::Greater => count_ge as f64 / total_perms as f64,
         Alternative::Less => count_le as f64 / total_perms as f64,
-    }
+    };
+    (p, true)
 }
 
 /// Count rank sums <= w using DP.

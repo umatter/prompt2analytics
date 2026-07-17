@@ -16,11 +16,16 @@ services:
   #     If present, the backend uses them for any request that omits a key
   #     (transport/http.rs), turning an unauthenticated public backend into an
   #     open proxy billed to your account. Leaving them unset = true BYOK.
-  #   * The HTTP API has NO enforced authentication (P2A_AUTH_ENABLED config
-  #     exists but is not wired into the router), so anyone who can reach this
-  #     port can call all tools. Put it behind a TLS-terminating reverse proxy
-  #     that adds HTTPS, rate-limiting, and request timeouts (exclude the SSE
-  #     path /api/llm/chat/stream from response buffering / idle timeouts).
+  #   * The server binds 0.0.0.0 (all interfaces) inside the container, so it
+  #     will REFUSE to start unless you pick one posture:
+  #       - authenticated: set P2A_ACCESS_TOKEN=<secret> (every /api route then
+  #         needs `Authorization: Bearer <secret>`), or
+  #       - open but hardened: set P2A_ALLOW_UNAUTHENTICATED=1 (no login;
+  #         isolation via unguessable session IDs; enumeration endpoints dropped).
+  #     Either way, front it with a TLS-terminating proxy / CDN that adds HTTPS,
+  #     rate-limiting, and request timeouts (exclude the SSE path
+  #     /api/llm/chat/stream from response buffering / idle timeouts). See
+  #     docs/guides/DEPLOYMENT.md.
   #   * Set P2A_CORS_ORIGINS to your frontend origin; never use cors-permissive.
   backend:
     build:
@@ -34,11 +39,20 @@ services:
       - RUST_BACKTRACE=1
       - P2A_HOST=0.0.0.0
       - P2A_PORT=8080
+      # Pick ONE: a shared bearer token (authenticated), or explicit open mode.
+      # The server refuses to start on 0.0.0.0 with neither set. These use the
+      # bare pass-through form: set them in your shell / .env to enable, and
+      # they are simply absent (not empty) otherwise — so open mode is never
+      # switched on by accident.
+      - P2A_ACCESS_TOKEN
+      - P2A_ALLOW_UNAUTHENTICATED
       # Lock CORS to your deployed frontend origin (comma-separated for several).
       # Leave empty to disallow cross-origin browser access entirely.
       - P2A_CORS_ORIGINS=${P2A_CORS_ORIGINS:-}
       # Max accepted request body (MiB); caps memory from oversized uploads.
       - P2A_MAX_HTTP_BODY_MB=${P2A_MAX_HTTP_BODY_MB:-32}
+      # Confine the filesystem/DB jail to the mounted data volume.
+      - P2A_DATA_ROOT=/data
       # Persist the database under the mounted data volume (see below).
       - P2A_DB_PATH=/data
     restart: unless-stopped

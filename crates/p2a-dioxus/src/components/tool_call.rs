@@ -243,8 +243,10 @@ pub fn ToolCallDisplay(props: ToolCallProps) -> Element {
                                     }
                                     #[cfg(not(target_arch = "wasm32"))]
                                     {
-                                        let escaped = result_for_copy.replace('\\', "\\\\").replace('\'', "\\'").replace('\n', "\\n");
-                                        let js = format!("navigator.clipboard.writeText('{}')", escaped);
+                                        let js = format!(
+                                            "navigator.clipboard.writeText('{}')",
+                                            crate::utils::js_single_quoted(&result_for_copy)
+                                        );
                                         dioxus::document::eval(&js);
                                     }
                                     copied.set(true);

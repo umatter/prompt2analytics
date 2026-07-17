@@ -108,8 +108,12 @@ pub fn pseudoinverse(m: &ArrayView2<f64>) -> Result<Array2<f64>, LinalgError> {
     let u = svd.U();
     let v = svd.V();
 
-    // Compute S^+: reciprocal of non-zero singular values
-    let mut s_inv = Mat::<f64>::zeros(cols, rows);
+    // Compute S^+: reciprocal of non-zero singular values. With the thin SVD,
+    // U is (rows x min_dim) and V is (cols x min_dim), so S^+ must be
+    // (min_dim x min_dim) for `V * S^+ * U^T` to be conformable and yield the
+    // (cols x rows) pseudoinverse. Allocating (cols x rows) here only happens
+    // to be conformable when the input is square.
+    let mut s_inv = Mat::<f64>::zeros(min_dim, min_dim);
     for i in 0..min_dim {
         let val = s_vals[i];
         if val.abs() > tol {
@@ -481,5 +485,46 @@ mod tests {
         assert_eq!(result.dim(), (2, 2));
         // [1,3,5]'[1,3,5] = 1+9+25 = 35
         assert!((result[[0, 0]] - 35.0).abs() < 1e-10);
+    }
+
+    /// A * A^+ * A == A (Moore-Penrose property) for a wide matrix.
+    #[test]
+    fn test_pseudoinverse_wide() {
+        let a = array![[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]; // 2x3
+        let pinv = pseudoinverse(&a.view()).unwrap();
+        assert_eq!(pinv.dim(), (3, 2));
+        let reconstructed = a.dot(&pinv).dot(&a);
+        for (orig, recon) in a.iter().zip(reconstructed.iter()) {
+            assert!(
+                (orig - recon).abs() < 1e-9,
+                "A*A+*A != A: {orig} vs {recon}"
+            );
+        }
+    }
+
+    /// A * A^+ * A == A (Moore-Penrose property) for a tall matrix.
+    #[test]
+    fn test_pseudoinverse_tall() {
+        let a = array![[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]; // 3x2
+        let pinv = pseudoinverse(&a.view()).unwrap();
+        assert_eq!(pinv.dim(), (2, 3));
+        let reconstructed = a.dot(&pinv).dot(&a);
+        for (orig, recon) in a.iter().zip(reconstructed.iter()) {
+            assert!(
+                (orig - recon).abs() < 1e-9,
+                "A*A+*A != A: {orig} vs {recon}"
+            );
+        }
+    }
+
+    /// For a square invertible matrix the pseudoinverse equals the inverse.
+    #[test]
+    fn test_pseudoinverse_square_matches_inverse() {
+        let a = array![[4.0, 7.0], [2.0, 6.0]];
+        let pinv = pseudoinverse(&a.view()).unwrap();
+        let inv = matrix_inverse(&a.view()).unwrap();
+        for (p, i) in pinv.iter().zip(inv.iter()) {
+            assert!((p - i).abs() < 1e-9, "pinv != inv: {p} vs {i}");
+        }
     }
 }

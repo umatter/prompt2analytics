@@ -480,6 +480,9 @@ impl AnalyticsServer {
                     output.push_str(
                         "\nNote: Direct = own effect, Indirect = spillover effects from neighbors",
                     );
+                    for warning in &impacts.warnings {
+                        output.push_str(&format!("\n⚠ WARNING: {}", warning));
+                    }
                 }
 
                 Ok(CallToolResult::success(vec![Content::text(output)]))

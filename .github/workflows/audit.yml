@@ -1,0 +1,30 @@
+name: Security audit
+
+on:
+  schedule:
+    # Weekly, Monday 06:00 UTC. Kept off the PR path to conserve free-tier
+    # minutes; advisories change slowly, so a weekly cadence is sufficient.
+    - cron: "0 6 * * 1"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  cargo-audit:
+    name: cargo audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      # Audits Cargo.lock against the RustSec advisory database. Informational:
+      # this reports known-vulnerable dependencies but does not gate anything,
+      # matching the project's non-blocking-lint posture.
+      - name: Run cargo audit
+        run: cargo audit

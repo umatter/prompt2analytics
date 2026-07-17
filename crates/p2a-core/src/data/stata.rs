@@ -64,7 +64,6 @@ impl StataType {
         }
     }
 
-    #[allow(dead_code)]
     fn size(&self) -> usize {
         match self {
             StataType::Byte => 1,
@@ -183,9 +182,31 @@ impl<R: Read + Seek> StataReader<R> {
             );
         }
 
-        // Prepare column builders
-        let mut columns: Vec<Vec<AnyValue>> =
-            vec![Vec::with_capacity(self.n_obs as usize); self.n_vars];
+        // Guard against a corrupt/malicious header declaring an implausible
+        // observation count. `n_obs` comes straight from the file's `<N>` tag;
+        // using it to pre-size the column buffers below would let a tiny file
+        // trigger a multi-gigabyte allocation. Bound it by the bytes actually
+        // available in the data section (each row occupies `row_size` bytes).
+        let row_size: usize = var_types.iter().map(StataType::size).sum();
+        if row_size > 0 {
+            let cur = self.reader.stream_position()?;
+            let end = self.reader.seek(SeekFrom::End(0))?;
+            self.reader.seek(SeekFrom::Start(cur))?;
+            let available = end.saturating_sub(cur);
+            let max_obs = available / row_size as u64;
+            if self.n_obs > max_obs {
+                return Err(StataError::InvalidFormat(format!(
+                    "declared observation count {} exceeds what the file can hold \
+                     ({} rows of {} bytes in {} remaining bytes); file is truncated or corrupt",
+                    self.n_obs, max_obs, row_size, available
+                )));
+            }
+        }
+
+        // Prepare column builders. Capacity is bounded above (see the guard
+        // just above), so this cannot be abused for a huge allocation.
+        let capacity = (self.n_obs as usize).min(1 << 20);
+        let mut columns: Vec<Vec<AnyValue>> = vec![Vec::with_capacity(capacity); self.n_vars];
 
         // Read observations
         for _ in 0..self.n_obs {

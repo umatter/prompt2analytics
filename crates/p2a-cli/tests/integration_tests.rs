@@ -158,6 +158,7 @@ fn test_data_head_command() {
     // Create a temporary CSV file with .csv suffix
     let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
     let csv_path = temp_dir.path().join("head_test.csv");
+    let session_path = temp_dir.path().join("session.json");
 
     let mut content = String::from("a,b\n");
     for i in 0..20 {
@@ -165,10 +166,105 @@ fn test_data_head_command() {
     }
     std::fs::write(&csv_path, content).expect("Failed to write CSV");
 
+    // `data head` operates on a session-loaded dataset by name, so load first,
+    // then head the loaded dataset (both within the same session).
     p2a()
-        .args(["data", "head", csv_path.to_str().unwrap(), "-n", "5"])
+        .args([
+            "--session",
+            session_path.to_str().unwrap(),
+            "data",
+            "load",
+            csv_path.to_str().unwrap(),
+            "--name",
+            "head_data",
+        ])
         .assert()
         .success();
+
+    p2a()
+        .args([
+            "--session",
+            session_path.to_str().unwrap(),
+            "data",
+            "head",
+            "head_data",
+            "-n",
+            "5",
+        ])
+        .assert()
+        .success();
+}
+
+/// A "soft" usage error (referencing a nonexistent dataset) must exit non-zero
+/// so scripts and CI can detect the failure.
+#[test]
+fn test_soft_error_exits_nonzero() {
+    let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+    let session_path = temp_dir.path().join("session.json");
+    p2a()
+        .args([
+            "--session",
+            session_path.to_str().unwrap(),
+            "data",
+            "describe",
+            "does_not_exist",
+        ])
+        .assert()
+        .failure();
+}
+
+/// Commands run under `--session` are recorded and reproduced by `script export`.
+#[test]
+fn test_session_records_and_exports() {
+    let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+    let csv_path = temp_dir.path().join("rec.csv");
+    std::fs::write(&csv_path, "x,y\n1,2\n3,4\n5,6\n").expect("write csv");
+    let session_path = temp_dir.path().join("session.json");
+    let script_path = temp_dir.path().join("out.sh");
+
+    p2a()
+        .args([
+            "--session",
+            session_path.to_str().unwrap(),
+            "data",
+            "load",
+            csv_path.to_str().unwrap(),
+            "--name",
+            "rec",
+        ])
+        .assert()
+        .success();
+    p2a()
+        .args([
+            "--session",
+            session_path.to_str().unwrap(),
+            "data",
+            "describe",
+            "rec",
+        ])
+        .assert()
+        .success();
+
+    p2a()
+        .args([
+            "script",
+            "export",
+            session_path.to_str().unwrap(),
+            "-o",
+            script_path.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let exported = std::fs::read_to_string(&script_path).expect("read exported script");
+    assert!(
+        exported.contains("data load"),
+        "exported script should contain the recorded load command:\n{exported}"
+    );
+    assert!(
+        exported.contains("data describe rec"),
+        "exported script should contain the recorded describe command:\n{exported}"
+    );
 }
 
 /// Test that output formats can be specified.

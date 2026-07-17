@@ -321,6 +321,16 @@ pub fn kalman_smoother(
     let n = filter_result.n_obs;
     let m = filter_result.state_dim;
 
+    // An empty filter result has no final state to seed the backward pass;
+    // indexing `[n - 1]` would underflow/panic. Reject it cleanly instead.
+    if n == 0 {
+        return Err(EconError::InsufficientData {
+            required: 1,
+            provided: 0,
+            context: "Kalman smoother requires a non-empty filter result".to_string(),
+        });
+    }
+
     let mut smoothed_states = vec![vec![0.0; m]; n];
     let mut smoothed_covs = vec![vec![vec![0.0; m]; m]; n];
 
@@ -391,6 +401,16 @@ pub fn kalman_forecast(
 
     let n = filter_result.n_obs;
     let _m = filter_result.state_dim;
+
+    // Forecasting starts from the final filtered state; an empty filter result
+    // has none, so indexing `[n - 1]` would underflow/panic.
+    if n == 0 {
+        return Err(EconError::InsufficientData {
+            required: 1,
+            provided: 0,
+            context: "Kalman forecast requires a non-empty filter result".to_string(),
+        });
+    }
 
     // Start from final filtered state
     let mut state = vec_to_array1(&filter_result.filtered_states[n - 1]);
