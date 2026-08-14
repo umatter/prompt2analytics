@@ -419,11 +419,7 @@ mod shell_quote_tests {
 
     #[test]
     fn joins_arguments() {
-        let args = vec![
-            "reg".to_string(),
-            "ols".to_string(),
-            "my data".to_string(),
-        ];
+        let args = vec!["reg".to_string(), "ols".to_string(), "my data".to_string()];
         assert_eq!(shell_join(&args), "reg ols 'my data'");
     }
 }

@@ -739,12 +739,7 @@ fn compute_signed_ranks(diffs: &[f64]) -> (Vec<f64>, Vec<i8>, usize, f64) {
 /// small samples (n <= 20); for larger samples this falls back to the normal
 /// approximation and reports `exact_used == false` so the caller does not
 /// mislabel the result as exact.
-fn exact_rank_sum_p_value(
-    w: f64,
-    n1: usize,
-    n2: usize,
-    alternative: Alternative,
-) -> (f64, bool) {
+fn exact_rank_sum_p_value(w: f64, n1: usize, n2: usize, alternative: Alternative) -> (f64, bool) {
     let n = n1 + n2;
 
     // For very small samples, enumerate all permutations

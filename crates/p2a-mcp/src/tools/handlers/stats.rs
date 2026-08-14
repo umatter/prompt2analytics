@@ -332,16 +332,18 @@ impl AnalyticsServer {
             // by ONE combined null mask: dropping nulls per column independently
             // would desynchronize the row alignment and either mispair factor
             // levels with responses or panic on an out-of-bounds index below.
-            let response_col =
-                match df.column(&request.response).and_then(|c| c.cast(&DataType::Float64)) {
-                    Ok(c) => c,
-                    Err(e) => {
-                        return Ok(CallToolResult::error(vec![Content::text(format!(
-                            "Response column '{}' not found or not numeric: {}",
-                            request.response, e
-                        ))]));
-                    }
-                };
+            let response_col = match df
+                .column(&request.response)
+                .and_then(|c| c.cast(&DataType::Float64))
+            {
+                Ok(c) => c,
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Response column '{}' not found or not numeric: {}",
+                        request.response, e
+                    ))]));
+                }
+            };
             let response_f64 = response_col.f64().unwrap();
 
             let get_factor_col = |name: &str| {

@@ -631,15 +631,14 @@ fn sensemakr_impl(
                     // Use the exact value computed from the design matrix when the
                     // caller supplied it (run_sensemakr); otherwise fall back to a
                     // crude 0.5 * R²_{Y~X_j} approximation and flag it.
-                    let r2_benchmark_d = match benchmark_treatment_r2
-                        .and_then(|m| m.get(benchmark_name))
-                    {
-                        Some(&r2) => r2,
-                        None => {
-                            approx_benchmarks.push(benchmark_name.to_string());
-                            r2_benchmark_y * 0.5
-                        }
-                    };
+                    let r2_benchmark_d =
+                        match benchmark_treatment_r2.and_then(|m| m.get(benchmark_name)) {
+                            Some(&r2) => r2,
+                            None => {
+                                approx_benchmarks.push(benchmark_name.to_string());
+                                r2_benchmark_y * 0.5
+                            }
+                        };
 
                     // Apply multipliers
                     let r2_yd_bound = (ky * r2_benchmark_y).min(1.0);

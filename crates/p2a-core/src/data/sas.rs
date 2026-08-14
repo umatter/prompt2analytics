@@ -134,7 +134,10 @@ impl<R: Read + Seek> SasReader<R> {
 
         // Read header length
         reader.seek(SeekFrom::Start((196 + a1) as u64))?;
-        let header_length = check_offset(Self::read_i32(&mut reader, byte_order)? as i64, "header_length")?;
+        let header_length = check_offset(
+            Self::read_i32(&mut reader, byte_order)? as i64,
+            "header_length",
+        )?;
 
         // Read page size
         reader.seek(SeekFrom::Start((200 + a1) as u64))?;

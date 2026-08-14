@@ -367,7 +367,14 @@ mod command_argv_tests {
     #[test]
     fn strips_leading_globals() {
         let raw = argv(&[
-            "p2a", "--session", "s.json", "reg", "ols", "sales", "-y", "price",
+            "p2a",
+            "--session",
+            "s.json",
+            "reg",
+            "ols",
+            "sales",
+            "-y",
+            "price",
         ]);
         assert_eq!(
             command_argv(&raw),
@@ -379,7 +386,16 @@ mod command_argv_tests {
     fn strips_globals_anywhere() {
         // Global flags may appear after the subcommand (clap global = true).
         let raw = argv(&[
-            "p2a", "data", "load", "f.csv", "--session", "s.json", "-F", "json", "--name", "d",
+            "p2a",
+            "data",
+            "load",
+            "f.csv",
+            "--session",
+            "s.json",
+            "-F",
+            "json",
+            "--name",
+            "d",
         ]);
         assert_eq!(
             command_argv(&raw),
@@ -397,6 +413,9 @@ mod command_argv_tests {
     fn preserves_command_values_that_look_like_flags_values() {
         // A column literally named after a flag value is kept.
         let raw = argv(&["p2a", "reg", "ols", "d", "-x", "price"]);
-        assert_eq!(command_argv(&raw), argv(&["reg", "ols", "d", "-x", "price"]));
+        assert_eq!(
+            command_argv(&raw),
+            argv(&["reg", "ols", "d", "-x", "price"])
+        );
     }
 }

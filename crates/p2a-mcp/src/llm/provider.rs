@@ -368,9 +368,7 @@ mod base_url_tests {
     #[test]
     fn accepts_https_provider_hosts() {
         assert!(validate_base_url(ProviderType::OpenAI, "https://api.openai.com/v1").is_ok());
-        assert!(
-            validate_base_url(ProviderType::Anthropic, "https://api.anthropic.com").is_ok()
-        );
+        assert!(validate_base_url(ProviderType::Anthropic, "https://api.anthropic.com").is_ok());
     }
 
     #[test]

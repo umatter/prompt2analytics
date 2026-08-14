@@ -442,8 +442,7 @@ fn compute_absorbed_df(factors: &[FactorInfo]) -> usize {
         1 => factors[0].n_levels,
         _ => {
             let components = count_connected_components(&factors[0], &factors[1]);
-            let mut df =
-                (factors[0].n_levels + factors[1].n_levels).saturating_sub(components);
+            let mut df = (factors[0].n_levels + factors[1].n_levels).saturating_sub(components);
             for f in &factors[2..] {
                 df += f.n_levels.saturating_sub(1);
             }
