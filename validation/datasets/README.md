@@ -90,6 +90,32 @@ write.csv(iris, "iris.csv", row.names = FALSE)
 
 ---
 
+### Quarterly GDP growth (synthetic)
+**File**: `gdp_quarterly.csv`
+
+| Variable | Description |
+|----------|-------------|
+| date | Quarter label, `YYYY-Qn` |
+| year | Year (1954-2023) |
+| quarter | Quarter within year (1-4) |
+| gdp_growth | Quarterly growth rate (synthetic) |
+
+**Size**: 280 observations (quarters labeled 1954-Q1 to 2023-Q4)
+
+**Use Cases**:
+- Time series workflow demonstration (stationarity testing, ARIMA, residual diagnostics)
+- Used in the paper's §4.3 time series example
+
+**Source**: **Synthetic.** This is *not* real national accounts data. The values
+are a simulated stationary series (roughly mean 0.5, sd 0.8, no recession
+structure) dressed with real-looking quarterly date labels; e.g. 2020-Q2 shows
+no COVID collapse, so it cannot be matched to any actual GDP series. It exists
+only to exercise the time series tools on a GDP-shaped, stationary series. The
+original generation script/seed was not preserved; treat the checked-in CSV as
+the canonical artifact. Do not cite it as empirical GDP data.
+
+---
+
 ## Adding New Datasets
 
 When adding a new reference dataset:
