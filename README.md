@@ -12,6 +12,8 @@ A comprehensive analytics toolkit exposing econometrics, machine learning, and v
 
 **🌐 Live demo (bring your own key):** [p2a.qamelab.org](https://p2a.qamelab.org) — the hosted web app. You supply your own LLM API key in the browser; it is never stored server-side. This is a small **demo deployment**: it runs on a modest single instance (limited performance) and caps uploads at ~24 MB, so expect slower responses and use small datasets. For full performance and large data, run the desktop app or self-host the backend container `ghcr.io/umatter/prompt2analytics/backend` (see [docs/guides/DEPLOYMENT.md](docs/guides/DEPLOYMENT.md)).
 
+The demo runs the latest tagged release (check [`/health`](https://api.p2a.qamelab.org/health)) in the hardened no-login mode introduced in v0.1.2: there are no user accounts, per-visitor isolation relies on unguessable session IDs, and the session-list and file-browser endpoints are disabled (threat model in [docs/guides/DEPLOYMENT.md](docs/guides/DEPLOYMENT.md)). Two caveats follow from it being a **public, shared instance**: do **not** upload confidential or personal data — for sensitive work use the desktop app or a self-hosted backend, the deployment mode the project is designed around — and treat sessions as **ephemeral**: the instance has no persistent volume, so uploaded data and results disappear whenever it restarts or is redeployed.
+
 **Requirements**: Rust 1.85+ (edition 2024)
 
 ## Features
