@@ -2,8 +2,8 @@
 
 use dioxus::prelude::*;
 
-use crate::components::{Message, P2aBadge};
-use crate::state::{ChatState, Settings, Theme};
+use crate::components::{Message, P2aWordmark};
+use crate::state::ChatState;
 
 /// Props for MessageList
 #[derive(Props, Clone, PartialEq)]
@@ -18,7 +18,6 @@ pub struct MessageListProps {
 pub fn MessageList(props: MessageListProps) -> Element {
     // Get chat state from context
     let chat_state = use_context::<Signal<ChatState>>();
-    let settings = use_context::<Signal<Settings>>();
 
     // Reference for scrolling using Dioxus's platform-agnostic MountedData
     let mut scroll_element: Signal<Option<std::rc::Rc<MountedData>>> = use_signal(|| None);
@@ -42,31 +41,28 @@ pub fn MessageList(props: MessageListProps) -> Element {
     rsx! {
         div { class: "py-6 h-full",
             if messages.is_empty() {
-                // Empty state with welcome animation - centered in full container
+                // Empty state: centered wordmark + a row of greetings in one size.
+                // Previous layout had "Grüezi" as an oversized headline with the
+                // other languages demoted below it; it now sits inline with the
+                // rest so no one language feels singled out.
                 div { class: "flex flex-col items-center justify-center min-h-[400px] h-full text-center mx-auto",
-                    // Brand badge
-                    div { class: "mb-6",
-                        P2aBadge { width: 150.0 }
+                    // Wordmark
+                    div { class: "mb-20",
+                        P2aWordmark { width: 280.0 }
                     }
-                    // Welcome image - theme-aware
-                    // For System theme, default to light (media queries will handle actual display)
-                    div { class: "mb-4",
-                        match settings.read().theme {
-                            Theme::Dark => rsx! {
-                                img {
-                                    src: asset!("/assets/welcome-dark.png"),
-                                    alt: "Welcome",
-                                    class: "w-auto h-auto max-w-[360px]"
-                                }
-                            },
-                            _ => rsx! {
-                                img {
-                                    src: asset!("/assets/welcome-light.png"),
-                                    alt: "Welcome",
-                                    class: "w-auto h-auto max-w-[360px]"
-                                }
-                            }
-                        }
+                    // Multilingual welcome — all greetings at equal weight.
+                    div { class: "mb-4 flex flex-wrap justify-center gap-x-3 gap-y-1 text-base text-gray-700 dark:text-gray-300 max-w-md",
+                        span { "Welcome" }
+                        span { class: "text-gray-400 dark:text-gray-600", "·" }
+                        span { "Bienvenue" }
+                        span { class: "text-gray-400 dark:text-gray-600", "·" }
+                        span { "Willkommen" }
+                        span { class: "text-gray-400 dark:text-gray-600", "·" }
+                        span { "Grüezi" }
+                        span { class: "text-gray-400 dark:text-gray-600", "·" }
+                        span { "Benvenuto" }
+                        span { class: "text-gray-400 dark:text-gray-600", "·" }
+                        span { "欢迎" }
                     }
                     p { class: "text-sm text-gray-500 dark:text-gray-400 max-w-sm",
                         "Start a conversation to get help with your data analysis."
