@@ -947,6 +947,28 @@ mod llm_handlers {
         create_provider_with_iterations(config, None)
     }
 
+    /// Human-readable provider name for UI status messages. OpenRouter is
+    /// routed through the OpenAI-compatible client, so the provider_type
+    /// alone would say "openai" even when the user picked OpenRouter.
+    fn provider_display_name(config: Option<&ProviderConfig>) -> String {
+        let Some(cfg) = config else {
+            return "Ollama".to_string();
+        };
+        if cfg.provider_type == ProviderType::OpenAI
+            && cfg
+                .base_url
+                .as_deref()
+                .is_some_and(|url| url.contains("openrouter.ai"))
+        {
+            return "OpenRouter".to_string();
+        }
+        match cfg.provider_type {
+            ProviderType::OpenAI => "OpenAI".to_string(),
+            ProviderType::Anthropic => "Anthropic".to_string(),
+            ProviderType::Ollama => "Ollama".to_string(),
+        }
+    }
+
     /// LLM chat endpoint.
     pub async fn llm_chat(
         State(state): State<AppState>,
@@ -1938,6 +1960,12 @@ mod llm_handlers {
                 return;
             }
 
+            // Compute a human-readable provider name for the status message
+            // before `request.provider` is moved into the factory — OpenRouter
+            // is routed through the OpenAI client with a custom base_url, so
+            // "openai" alone would be misleading in the connecting banner.
+            let provider_display = provider_display_name(request.provider.as_ref());
+
             // Create provider and streaming tool executor
             let provider =
                 create_provider_with_iterations(request.provider, request.max_tool_iterations);
@@ -1976,7 +2004,7 @@ mod llm_handlers {
 
             let _ = tx_clone
                 .send(ProgressEvent::Status {
-                    message: format!("Connecting to {} LLM...", provider.provider_type()),
+                    message: format!("Connecting to {provider_display}..."),
                 })
                 .await;
 
