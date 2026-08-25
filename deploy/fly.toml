@@ -5,7 +5,7 @@
 # and docs/guides/DEPLOYMENT.md.
 #
 # Deploy:   fly deploy -c deploy/fly.toml
-# Cert:     fly certs add api.p2a.qamelab.org -a p2a-qamelab-backend
+# Cert:     fly certs add p2a-api.qamelab.org -a p2a-qamelab-backend
 #
 # Prereqs:
 #   * The GHCR package ghcr.io/umatter/prompt2analytics/backend must be PUBLIC.

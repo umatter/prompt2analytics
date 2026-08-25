@@ -17,7 +17,7 @@ stateful backend** that cannot run on Workers/Pages:
 
 The frontend half mirrors how the other qamelab sites deploy. The backend is the
 genuinely new piece — it needs a real server, so it gets its own HTTPS endpoint
-(e.g. `https://api.p2a.qamelab.org`) that the frontend is built to talk to.
+(e.g. `https://p2a-api.qamelab.org`) that the frontend is built to talk to.
 
 ## Frontend: GitHub Pages on a qamelab subdomain
 
@@ -28,7 +28,7 @@ workflow builds the WASM and publishes it; it reads two repo **Variables**
 (Settings → Secrets and variables → Actions → Variables):
 
 - `P2A_BACKEND_URL` — public HTTPS URL of the backend, baked into the WASM at
-  build time (e.g. `https://api.p2a.qamelab.org`).
+  build time (e.g. `https://p2a-api.qamelab.org`).
 - `WEB_DOMAIN` — the custom domain, written to `CNAME` (e.g. `p2a.qamelab.org`).
 
 Deploy steps:
@@ -206,5 +206,20 @@ and locks CORS. Ship a new backend build with:
 fly deploy -c deploy/fly.toml
 ```
 
-Put Cloudflare (or your CDN) in front of `api.p2a.qamelab.org` with a Rate
+Put Cloudflare (or your CDN) in front of `p2a-api.qamelab.org` with a Rate
 Limiting rule on `/api/*` for abuse/DoS control.
+
+**Keep the backend hostname one level deep.** It is `p2a-api.qamelab.org` and not
+`api.p2a.qamelab.org` for a reason: on a Cloudflare full setup, Universal SSL
+covers the apex and *first-level* subdomains only, and a `*.example.com`
+wildcard does not match `api.staging.example.com`. Proxying a second-level host
+therefore leaves the edge with no certificate to present, and it aborts the TLS
+handshake outright — the origin stays healthy while every client gets a
+handshake failure, and `curl -k` fails too, since nothing is served to
+distrust. Covering a deeper name needs Advanced Certificate Manager, Total TLS,
+or an uploaded wildcard. Renaming is free; those are not.
+
+Fly issues its own certificate for the origin, so add the hostname
+DNS-only first (`fly certs add`, then A/AAAA records with the proxy off) and
+only enable the proxy once `fly certs check` reports `Issued`. Verify TLS on the
+new hostname *before* repointing `P2A_BACKEND_URL` at it.
