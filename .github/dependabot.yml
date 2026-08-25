@@ -1,0 +1,20 @@
+# Pinning every action to a SHA (see .github/workflows/*.yml) removes the
+# supply-chain risk of a mutable tag or branch being repointed, but replaces it
+# with staleness: a pinned digest never picks up an upstream security fix on its
+# own. This is the other half of that trade — Dependabot opens PRs bumping the
+# digests, and the `# <tag>` comment beside each pin is what it rewrites.
+#
+# Actions only. Cargo updates for this workspace are deliberately handled by
+# hand: the tree resolves ~1250 crates, most advisories reach it transitively,
+# and several are upstream-blocked, so a per-crate PR stream would be noise
+# rather than signal. The weekly `Security audit` workflow is the tripwire there.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "ci"
