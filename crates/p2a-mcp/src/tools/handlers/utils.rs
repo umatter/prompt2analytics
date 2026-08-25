@@ -9,7 +9,19 @@ use rmcp::{
     tool, tool_router,
 };
 
+use crate::path_jail;
 use crate::server::AnalyticsServer;
+
+/// Ceiling on `n_rows * columns.len()` for `generate_random_data`.
+///
+/// Cells rather than rows, because memory scales with the product: 5M rows is
+/// cheap at one column and ruinous at fifty. At 10M cells a f64 column set costs
+/// roughly 80 MB, which a 1 GB deployment survives; the unbounded `n_rows` this
+/// replaces let one anonymous request exhaust the machine, and since sessions
+/// are held in process memory that OOM took every other user's data with it.
+/// Deliberately lives here and not in p2a-core, so p2a-cli users running
+/// locally keep generating whatever size they like.
+const MAX_GENERATED_CELLS: usize = 10_000_000;
 use crate::tools::requests::utils::{
     ColumnSpecInput, ExportSessionRequest, GenerateRandomDataRequest, GenerateReportRequest,
     GetSeedRequest, ImportSessionRequest, ReportContentInput, ReportSectionInput,
@@ -211,6 +223,21 @@ impl AnalyticsServer {
         &self,
         Parameters(request): Parameters<GenerateRandomDataRequest>,
     ) -> Result<CallToolResult, McpError> {
+        // Bound the allocation before doing any work. `saturating_mul` matters:
+        // a plain multiply would wrap for a large enough `n_rows` and land back
+        // under the cap.
+        let requested_cells = request.n_rows.saturating_mul(request.columns.len());
+        if requested_cells > MAX_GENERATED_CELLS {
+            return Ok(CallToolResult::error(vec![Content::text(format!(
+                "Refused to generate {} rows x {} columns ({} cells): the limit is {} cells. \
+                 Reduce n_rows or the number of columns.",
+                request.n_rows,
+                request.columns.len(),
+                requested_cells,
+                MAX_GENERATED_CELLS
+            ))]));
+        }
+
         // Parse column specifications
         let mut columns: Vec<ColumnSpec> = Vec::with_capacity(request.columns.len());
 
@@ -485,7 +512,17 @@ impl AnalyticsServer {
         })?;
 
         if let Some(file_path) = request.file_path {
-            fs::write(&file_path, &json_output).map_err(|e| {
+            let path = match path_jail::validate_data_path(&file_path) {
+                Ok(p) => p,
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Refused to export session: {}",
+                        e
+                    ))]));
+                }
+            };
+
+            fs::write(&path, &json_output).map_err(|e| {
                 McpError::internal_error(format!("Failed to write session file: {}", e), None)
             })?;
 
@@ -493,7 +530,7 @@ impl AnalyticsServer {
                 "Session exported successfully to: {}\n\
                  Datasets saved: {}\n\
                  Include data: {}",
-                file_path,
+                path.display(),
                 datasets.len(),
                 include_data
             ))]))
@@ -519,7 +556,17 @@ impl AnalyticsServer {
         use p2a_core::polars::prelude::*;
         use std::fs;
 
-        let json_content = fs::read_to_string(&request.file_path).map_err(|e| {
+        let path = match path_jail::validate_data_path(&request.file_path) {
+            Ok(p) => p,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Refused to import session: {}",
+                    e
+                ))]));
+            }
+        };
+
+        let json_content = fs::read_to_string(&path).map_err(|e| {
             McpError::internal_error(format!("Failed to read session file: {}", e), None)
         })?;
 
@@ -624,7 +671,7 @@ impl AnalyticsServer {
              Mode: {}\n\
              Datasets imported: {}\n",
             "=".repeat(40),
-            request.file_path,
+            path.display(),
             if merge { "merge" } else { "replace" },
             imported_count
         );
@@ -634,5 +681,122 @@ impl AnalyticsServer {
         }
 
         Ok(CallToolResult::success(vec![Content::text(output)]))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A path guaranteed to sit outside the jail root, whatever it resolves to:
+    /// the root is either the process CWD (this crate's directory under the repo)
+    /// or a `P2A_DATA_ROOT` another test set to its own tempdir. A fresh tempdir
+    /// is outside both, so this needs no coordination with the process-global
+    /// `DATA_ROOT` cache.
+    fn canary_outside_jail() -> (tempfile::TempDir, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("escaped.json");
+        (dir, path.to_str().unwrap().to_string())
+    }
+
+    #[tokio::test]
+    async fn export_session_refuses_path_outside_data_root() {
+        let (_dir, target) = canary_outside_jail();
+        let server = AnalyticsServer::new();
+
+        let result = server
+            .export_session(Parameters(ExportSessionRequest {
+                file_path: Some(target.clone()),
+                include_data: Some(false),
+            }))
+            .await
+            .expect("handler should refuse in-band, not fail the call");
+
+        assert!(
+            !std::path::Path::new(&target).exists(),
+            "export_session wrote outside the data root: {target}"
+        );
+        assert_eq!(result.is_error, Some(true), "refusal must be a tool error");
+    }
+
+    fn normal_column(name: &str) -> ColumnSpecInput {
+        ColumnSpecInput {
+            name: name.to_string(),
+            distribution: serde_json::json!({"type": "normal", "mean": 0.0, "std": 1.0}),
+        }
+    }
+
+    /// `n_rows` is an unbounded `usize` on an endpoint anonymous callers can
+    /// reach, and p2a-core only rejects zero — so the ceiling has to live here.
+    /// Sized just over the cap rather than absurdly high on purpose: an
+    /// uncapped build has to be able to finish this allocation and return, or
+    /// the test would hang instead of failing.
+    #[tokio::test]
+    async fn generate_random_data_refuses_oversized_request() {
+        let server = AnalyticsServer::new();
+
+        let result = server
+            .generate_random_data(Parameters(GenerateRandomDataRequest {
+                n_rows: MAX_GENERATED_CELLS / 2 + 1,
+                columns: vec![normal_column("a"), normal_column("b")],
+                seed: Some(1),
+                name: None,
+            }))
+            .await
+            .expect("handler should refuse in-band, not fail the call");
+
+        assert_eq!(
+            result.is_error,
+            Some(true),
+            "a request over the cell cap must be refused"
+        );
+    }
+
+    /// Guards the cap from being tightened into uselessness. Unlike the test
+    /// above this one passes with or without the cap — it exists to fail if
+    /// someone later lowers `MAX_GENERATED_CELLS` below ordinary simulation use.
+    #[tokio::test]
+    async fn generate_random_data_allows_ordinary_request() {
+        let server = AnalyticsServer::new();
+
+        let result = server
+            .generate_random_data(Parameters(GenerateRandomDataRequest {
+                n_rows: 10_000,
+                columns: vec![normal_column("a"), normal_column("b")],
+                seed: Some(1),
+                name: Some("ordinary".to_string()),
+            }))
+            .await
+            .expect("handler should not fail the call");
+
+        assert_ne!(
+            result.is_error,
+            Some(true),
+            "an ordinary 10k x 2 request must still succeed"
+        );
+    }
+
+    #[tokio::test]
+    async fn import_session_refuses_path_outside_data_root() {
+        let (dir, target) = canary_outside_jail();
+        // Valid session JSON, so a refusal can only come from the jail check —
+        // not from a read failure or a parse error.
+        std::fs::write(&target, r#"{"datasets":{}}"#).unwrap();
+        let server = AnalyticsServer::new();
+
+        let result = server
+            .import_session(Parameters(ImportSessionRequest {
+                file_path: target.clone(),
+                merge: Some(false),
+            }))
+            .await
+            .expect("handler should refuse in-band, not fail the call");
+
+        assert_eq!(
+            result.is_error,
+            Some(true),
+            "import_session read outside the data root: {}",
+            dir.path().display()
+        );
     }
 }

@@ -160,6 +160,8 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -172,10 +174,13 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-dioxus-
 
-      # Web-only check: the WASM/web configuration compiles for the host target
-      # without the WebKit/GTK desktop deps, so it is cheap enough for PR CI and
-      # catches type errors in p2a-dioxus before the release/deploy workflows do.
-      - name: cargo check + test (web)
+      # Web-only check, without the WebKit/GTK desktop deps. The check targets
+      # wasm32 because that is what actually ships: web-deploy.yml holds the only
+      # other wasm32 build in the repo, so a wasm-only break would otherwise first
+      # surface inside the privileged `pages: write` deploy job, on main, after
+      # merge. Tests stay on the host target — there is no wasm test runner here.
+      - name: cargo check (web, wasm32) + test (web)
         run: |
-          cargo check -p p2a-dioxus --no-default-features --features web
+          cargo check -p p2a-dioxus --no-default-features --features web \
+            --target wasm32-unknown-unknown
           cargo test -p p2a-dioxus --no-default-features --features web --tests
