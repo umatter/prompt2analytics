@@ -77,15 +77,27 @@ behind).
    request that omits a key (`transport/http.rs`), turning an unauthenticated
    public endpoint into an open proxy billed to your account. Unset = true BYOK.
 
-2. **Terminate TLS in front of the backend.**
+2. **Pin the LLM egress allowlist (`P2A_LLM_ALLOWED_HOSTS`).**
+   Callers supply their own provider `base_url`, so set
+   `P2A_LLM_ALLOWED_HOSTS=api.openai.com,api.anthropic.com,openrouter.ai`
+   (bare hostnames, matched exactly and case-insensitively against the URL
+   host). Leave it unset and the LLM routes will POST a caller-chosen body to
+   any https host and relay the response back — an SSRF and an open relay
+   through your egress IP, carrying whatever key the caller supplied. The
+   scheme and private-IP checks still apply when it is unset, but every public
+   host is reachable. Setting it also revokes the Ollama loopback exemption,
+   which a remote caller would otherwise use to read the backend's own ports; a
+   hosted backend cannot reach a user's local Ollama regardless.
+
+3. **Terminate TLS in front of the backend.**
    BYOK keys travel in request bodies; without HTTPS they're exposed on the wire.
    Run a reverse proxy (Caddy/nginx/Traefik) or a platform that provides HTTPS.
 
-3. **Lock CORS to your frontend origin.**
+4. **Lock CORS to your frontend origin.**
    Set `P2A_CORS_ORIGINS=https://your-demo.example` (comma-separated for several).
    Never use `--cors-permissive` / `P2A_CORS_PERMISSIVE` in production.
 
-4. **Rate-limit and time out at the edge.**
+5. **Rate-limit and time out at the edge.**
    Add per-IP rate limiting and request timeouts at a reverse proxy or CDN — the
    *compute* (regressions, ML) runs on your server even though LLM cost is the
    user's. This is **the** abuse/DoS control in open-unauthenticated mode (there
@@ -96,17 +108,28 @@ behind).
    `/api/llm/chat/stream` from response buffering and idle timeouts, or
    streaming chat will break.
 
-5. **Cap request body size.**
+   Putting Cloudflare in front does not break the SSE path, as long as you do
+   not disable the server's keep-alive: the stream emits an axum keep-alive
+   every 15s against a 900s Proxy Idle Timeout, and the 125s Proxy Read Timeout
+   applies to the response *headers*, which the handler sends immediately. A
+   long tool loop therefore does not trip a 524. If you ever remove the
+   keep-alive, that stops being true.
+
+   `[http_service.concurrency]` in `deploy/fly.toml` caps in-flight requests,
+   but it is a backstop, not a substitute: it cannot distinguish one abusive
+   caller from several legitimate ones.
+
+6. **Cap request body size.**
    `P2A_MAX_HTTP_BODY_MB` (default 32) limits memory from oversized uploads.
 
-6. **Confine the filesystem jail (`P2A_DATA_ROOT`).**
+7. **Confine the filesystem jail (`P2A_DATA_ROOT`).**
    Set `P2A_DATA_ROOT` to a dedicated, **empty** directory (e.g. `/data`, which
    the backend image creates) so any filesystem/DB tool can only reach that
    directory. Unset, it defaults to the process working directory — never leave
    it defaulting to a home directory on an exposed host. The directory must
    exist (it is canonicalized at startup).
 
-7. **Run the container locked down.**
+8. **Run the container locked down.**
    `docker-compose.yml` ships with `cap_drop: ALL`, `no-new-privileges`,
    `pids_limit`, and memory/CPU limits. Writable state is confined to the
    `p2a-data` volume and a `/tmp` tmpfs; enable `read_only: true` after verifying
@@ -115,13 +138,30 @@ behind).
 ## API-key handling (for transparency)
 
 User keys are **never persisted or logged** server-side. Each request constructs
-a per-request provider, uses the key only to set the outbound `Authorization`
-header to OpenAI/Anthropic, then drops it. There is no server-side key store
-(the former unused `settings.api_key_encrypted` field was removed). The keys'
-only exposure point is **in transit** — hence the TLS requirement above. Note
-the frontend's "stored locally, never sent to our servers" copy is accurate for
-desktop/self-host but, in a hosted setup, the key does transit your backend to
-reach the LLM.
+a per-request provider, sets one outbound auth header — `Authorization: Bearer`
+for OpenAI-compatible providers including OpenRouter, `x-api-key` for Anthropic
+— then drops the key. There is no server-side key store (the former unused
+`settings.api_key_encrypted` field was removed). The keys' only exposure point
+is **in transit** — hence the TLS requirement above.
+
+**Transit is web-only.** Desktop and mobile builds start an embedded backend on
+loopback, so the key never leaves the device there. On a hosted deployment it
+does pass through your backend, on every route that carries a provider config:
+`/api/llm/chat`, `/api/llm/chat/stream`, and `/api/llm/generate-title`. The
+frontend says so — "sent with each request through our backend to your chosen
+provider" — so keep this section and that copy in agreement.
+
+**The destination is only as constrained as `P2A_LLM_ALLOWED_HOSTS`.** Callers
+supply their own `base_url`, so on an exposed deployment this variable is not
+optional: without it the LLM routes will POST to any https host a caller names
+and relay the response back, which is an SSRF and an open relay through your
+egress IP, using whatever key the caller supplied. See step 2 above.
+
+**Keys are the smaller half of the story.** Every tool call also sends the
+user's dataset, prompt, and tool arguments to your server — that is the larger
+disclosure, and it is inherent to running the analytics server-side. Tool
+arguments are not written to disk unless you set `P2A_AUDIT_LOG`; leave it
+unset on a demo, or say plainly that you have enabled it.
 
 ## Example: Caddy reverse proxy
 
