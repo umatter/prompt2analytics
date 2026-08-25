@@ -22,6 +22,14 @@ on:
     paths:
       - 'crates/p2a-dioxus/**'
       - '.github/workflows/web-deploy.yml'
+      # A lockfile-only commit (e.g. a `cargo update` for an advisory) changes the
+      # dependency versions the shipped wasm bundle is built from without touching
+      # p2a-dioxus, so it must redeploy too or the live site silently drifts from
+      # main. p2a-core/p2a-mcp are deliberately absent: the `web` feature does not
+      # depend on them (only `desktop`/`mobile` do), and assets live under
+      # crates/p2a-dioxus/assets, already covered above.
+      - 'Cargo.lock'
+      - 'Cargo.toml'
   workflow_dispatch:
 
 permissions:
