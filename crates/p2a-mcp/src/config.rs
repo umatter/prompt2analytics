@@ -164,6 +164,7 @@ pub struct HttpConfig {
     pub db_path: Option<String>,
 }
 
+#[cfg(feature = "http")]
 impl HttpConfig {
     /// True in the intentionally-open public deployment mode: a non-loopback
     /// bind with no access token. In this mode the enumeration endpoints
