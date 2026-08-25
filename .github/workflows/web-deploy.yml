@@ -8,7 +8,7 @@ name: Deploy Web App (GitHub Pages)
 # Two repo-level config values drive this (Settings -> Secrets and variables ->
 # Actions -> Variables):
 #   * P2A_BACKEND_URL  – public HTTPS URL of the deployed p2a-mcp backend,
-#                        e.g. https://api.p2a.qamelab.org  (baked into the WASM)
+#                        e.g. https://p2a-api.qamelab.org  (baked into the WASM)
 #   * WEB_DOMAIN       – custom domain the site is served at, e.g. p2a.qamelab.org
 #                        (written to CNAME). Leave unset to serve at the default
 #                        <user>.github.io/<repo> URL.
