@@ -27,6 +27,16 @@ primary_region = "fra"          # Frankfurt — EU
   P2A_CORS_ORIGINS = "https://p2a.qamelab.org"
   P2A_MAX_HTTP_BODY_MB = "32"
 
+  # Outbound counterpart to P2A_CORS_ORIGINS above. Callers supply their own
+  # provider base_url, so without this the LLM routes will POST a caller-chosen
+  # body to any https host and relay the response back — an SSRF and open relay
+  # through this app's egress IP. Bare hostnames, matched exactly against the
+  # URL host (case-insensitive); a scheme or path here would never match.
+  # Also revokes the Ollama loopback exemption, which is what a remote caller
+  # would otherwise use to read this machine's own ports. Ollama is unreachable
+  # from a hosted backend anyway; desktop and self-host builds leave this unset.
+  P2A_LLM_ALLOWED_HOSTS = "api.openai.com,api.anthropic.com,openrouter.ai"
+
   # Open-but-hardened bring-your-own-key demo: no login. Per-visitor isolation
   # relies on unguessable, non-enumerable session IDs; the code hardening
   # (base_url SSRF allowlist, SQL file-read guard, parser bounds) closes the
@@ -48,6 +58,21 @@ primary_region = "fra"          # Frankfurt — EU
   # 1 = keep a machine warm during the review window (no cold starts, ~$5/mo).
   # Set to 0 afterwards to scale to zero and pay almost nothing.
   min_machines_running = 1
+
+  # Backstop only — this is a ceiling on in-flight requests, not a rate limit:
+  # it cannot tell one abusive caller from many reviewers. The real abuse control
+  # belongs at the edge (checklist step 5 in docs/guides/DEPLOYMENT.md). What it
+  # does buy is a bound on concurrent CPU-bound tool calls, which would otherwise
+  # be unbounded on a 1-vCPU machine and can OOM it.
+  #
+  # Sized with SSE in mind: an /api/llm/chat/stream connection holds a slot for
+  # the life of the stream (minutes), so these have to clear the number of
+  # reviewers plausibly streaming at once by a wide margin. Requests past
+  # hard_limit get a 503.
+  [http_service.concurrency]
+    type = "requests"
+    soft_limit = 25
+    hard_limit = 50
 
   [[http_service.checks]]
     path = "/health"
