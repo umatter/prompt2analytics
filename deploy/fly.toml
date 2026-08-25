@@ -19,7 +19,7 @@ primary_region = "fra"          # Frankfurt — EU
 [build]
   # Pin an explicit version tag (not the mutable :latest) for reproducible
   # deploys. Bump deliberately when shipping a new backend release.
-  image = "ghcr.io/umatter/prompt2analytics/backend:0.1.2"
+  image = "ghcr.io/umatter/prompt2analytics/backend:0.1.3"
 
 [env]
   P2A_HOST = "0.0.0.0"
@@ -43,7 +43,8 @@ primary_region = "fra"          # Frankfurt — EU
   # server-exploitation vectors, and this flag drops the session-list and
   # file-browser enumeration endpoints. Abuse/DoS control is expected from an
   # edge rate-limiter in front of this app (see docs/guides/DEPLOYMENT.md).
-  # Requires the hardened v0.1.2 image above; do NOT set this on an older image.
+  # Requires the hardened image pinned above (v0.1.2 or newer); do NOT set
+  # this on an older image.
   P2A_ALLOW_UNAUTHENTICATED = "1"
 
   # Confine any filesystem/DB tool access to a dedicated, empty directory
