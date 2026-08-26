@@ -71,3 +71,6 @@ __pycache__/
 # Other notes
 validation_benchmarking_report.md
 docs/DIOXUS_MIGRATION_FEASIBILITY.md
+
+# Stray run artifact: some validation R scripts write here from the repo root
+/reports/

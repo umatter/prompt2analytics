@@ -135,9 +135,11 @@ cat(sprintf("total_effect (ATE): %.6f\n", med_result$tau.coef))
 cat(sprintf("direct_effect (ADE): %.6f\n", med_result$z0))
 cat(sprintf("indirect_effect (ACME): %.6f\n", med_result$d0))
 cat(sprintf("proportion_mediated: %.6f\n", med_result$n0))
-cat(sprintf("se_total: %.6f\n", sqrt(med_result$tau.var)))
-cat(sprintf("se_direct: %.6f\n", sqrt(med_result$z0.var)))
-cat(sprintf("se_indirect: %.6f\n", sqrt(med_result$d0.var)))
+# The mediation package no longer exposes `*.var`; the simulation draws in
+# `*.sims` are the supported source, and their SD is the standard error.
+cat(sprintf("se_total: %.6f\n", sd(med_result$tau.sims)))
+cat(sprintf("se_direct: %.6f\n", sd(med_result$z0.sims)))
+cat(sprintf("se_indirect: %.6f\n", sd(med_result$d0.sims)))
 
 # Save for validation
 mediation_df <- data.frame(
@@ -145,8 +147,8 @@ mediation_df <- data.frame(
                "proportion_mediated", "se_total", "se_direct", "se_indirect",
                "p_total", "p_direct", "p_indirect"),
     value = c(med_result$tau.coef, med_result$z0, med_result$d0,
-              med_result$n0, sqrt(med_result$tau.var), sqrt(med_result$z0.var),
-              sqrt(med_result$d0.var),
+              med_result$n0, sd(med_result$tau.sims), sd(med_result$z0.sims),
+              sd(med_result$d0.sims),
               med_result$tau.p, med_result$z0.p, med_result$d0.p)
 )
 write.csv(mediation_df, "validation/expected/mediation.csv", row.names = FALSE)

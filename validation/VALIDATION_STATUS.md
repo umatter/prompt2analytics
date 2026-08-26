@@ -1,24 +1,62 @@
 # Validation Status Report
 
-**Last Updated:** 2026-03-05
+**Last Updated:** 2026-08-26
 **Branch:** main
 
 ## Summary
 
 | Metric | Count | Status |
 |--------|-------|--------|
-| **Rust Validation Tests** (`test_validate_*`) | 437 | All Pass |
+| **Rust Validation Tests** (`test_validate_*`) | 440 | All Pass |
 | **R Validation Scripts** | 41 | All Pass |
-| **R Expected Value CSVs** | 73 | All Pass |
-| **Total Test Functions** | 1,848 | All pass (0 failures) |
+| **R Expected Value CSVs** | 96 | All Pass |
+| **Total Test Functions** | 2,059 workspace / 1,867 in p2a-core | All pass (0 failures) |
+
+**Verified:** `./validation/run_validation.sh` on 2026-08-26 reported
+`Rust tests: 440/440 passed`, `R scripts: 41 passed`, `Overall Status: PASS`.
+Counts above are from that run, not carried forward.
 
 ### Recent Changes
+
+**2026-08** — Full suite re-verified end to end (Rust 440/440, R 41/41). Fixed
+two R scripts that had broken against upstream package changes rather than
+against p2a-core: `validate_treatment.R` used `mediation`'s removed `$tau.var`
+(now `sd()` of the `$*.sims` draws) and `validate_causal_design.R` used
+`WeightIt`'s removed `$ess` (now `summary()$effective.sample.size`). In both
+cases the comparison values still computed correctly; the scripts failed while
+formatting output. Added the R package prerequisites above, which were
+previously undocumented.
+
+**Earlier**
 - Added 15 ML validation tests: C5.0 (3), Cubist (3), CTree (3), MBoost (4), SHAP (2)
 - Fixed LightGBM index-out-of-bounds bug and consolidated validation tests
 - Added 15 causal/econometrics Rust benchmarks to comprehensive_benchmarks.rs
 - Consolidated spatial R benchmarks from 5 to 2 files
 - Integrated tracking allocator for per-method heap measurement
 - Added validation docs for staggered DiD, ETWFE, Bacon, DoubleML, CTMLE
+
+## Prerequisites
+
+The Rust half needs only a toolchain meeting the workspace MSRV. The R half
+compares against reference implementations and therefore needs their packages
+installed — missing ones surface as `there is no package called 'x'`, which
+looks like a validation failure but is not one:
+
+```r
+install.packages(c(
+  "AER", "BART", "boot", "e1071", "EValue", "gbm", "glmnet", "lightgbm",
+  "lmtest", "MASS", "MatchIt", "mboost", "medflex", "mediation",
+  "microbenchmark", "nlme", "nnet", "optmatch", "pdp", "plm", "pROC", "pscl",
+  "quantreg", "randomForest", "rdrobust", "rpart", "sandwich", "tmle", "vars",
+  "WeightIt", "xgboost"
+))
+```
+
+`optmatch` is not loaded directly by any script but is required by `MatchIt`
+for full matching. `stats` is base R. Note that reference packages change their
+APIs over time: two scripts had to be updated in 2026-08 when `mediation`
+dropped `$tau.var` and `WeightIt` dropped `$ess`. When a script fails, check
+whether the R package's return shape changed before suspecting p2a-core.
 
 ## How to Run Validation
 
