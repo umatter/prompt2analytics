@@ -5,6 +5,15 @@ library(rdrobust)
 library(MatchIt)
 library(WeightIt)
 
+
+# WeightIt no longer exposes `$ess`. The effective sample size now lives in
+# summary()$effective.sample.size, a matrix with Unweighted/Weighted rows and
+# Control/Treated columns; the weighted row is what these comparisons want.
+ess_of <- function(w) {
+    e <- summary(w)$effective.sample.size
+    c(control = unname(e["Weighted", "Control"]),
+      treated = unname(e["Weighted", "Treated"]))
+}
 set.seed(42)
 
 # ==============================================================================
@@ -136,8 +145,8 @@ cat(sprintf("ps_mean: %.6f\n", mean(W$ps)))
 cat(sprintf("ps_sd: %.6f\n", sd(W$ps)))
 cat(sprintf("ps_min: %.6f\n", min(W$ps)))
 cat(sprintf("ps_max: %.6f\n", max(W$ps)))
-cat(sprintf("ess_treated: %.2f\n", W$ess[2]))
-cat(sprintf("ess_control: %.2f\n", W$ess[1]))
+cat(sprintf("ess_treated: %.2f\n", ess_of(W)["treated"]))
+cat(sprintf("ess_control: %.2f\n", ess_of(W)["control"]))
 
 # Compute ATE manually with IPW
 weights <- W$weights
@@ -148,7 +157,7 @@ cat(sprintf("ipw_ate: %.6f\n", ipw_ate))
 # Save for validation
 ipw_result <- data.frame(
     metric = c("ps_mean", "ps_sd", "ps_min", "ps_max", "ess_treated", "ess_control", "ipw_ate"),
-    value = c(mean(W$ps), sd(W$ps), min(W$ps), max(W$ps), W$ess[2], W$ess[1], ipw_ate)
+    value = c(mean(W$ps), sd(W$ps), min(W$ps), max(W$ps), ess_of(W)["treated"], ess_of(W)["control"], ipw_ate)
 )
 write.csv(ipw_result, "validation/expected/ipw_weightit.csv", row.names = FALSE)
 
@@ -164,7 +173,7 @@ print(summary(W_ebal))
 # Save for validation
 ebal_result <- data.frame(
     metric = c("ess_control", "weight_mean", "weight_sd"),
-    value = c(W_ebal$ess[1], mean(W_ebal$weights), sd(W_ebal$weights))
+    value = c(ess_of(W_ebal)["control"], mean(W_ebal$weights), sd(W_ebal$weights))
 )
 write.csv(ebal_result, "validation/expected/ebal_weightit.csv", row.names = FALSE)
 
@@ -184,7 +193,7 @@ cat(sprintf("cbps_ps_sd: %.6f\n", sd(W_cbps$ps)))
 
 cbps_result <- data.frame(
     metric = c("ps_mean", "ps_sd", "ess_treated", "ess_control"),
-    value = c(mean(W_cbps$ps), sd(W_cbps$ps), W_cbps$ess[2], W_cbps$ess[1])
+    value = c(mean(W_cbps$ps), sd(W_cbps$ps), ess_of(W_cbps)["treated"], ess_of(W_cbps)["control"])
 )
 write.csv(cbps_result, "validation/expected/cbps_weightit.csv", row.names = FALSE)
 

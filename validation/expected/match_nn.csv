@@ -1,0 +1,7 @@
+"metric","value"
+"n_treated",182
+"n_control",318
+"smd_before_x1",0.571331123229633
+"smd_before_x2",0.326048138294808
+"smd_after_x1",0.130431347580283
+"smd_after_x2",-0.00188985805423033

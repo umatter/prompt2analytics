@@ -1,0 +1,11 @@
+"metric","value"
+"tau_conventional",0.52984448254459
+"tau_bc",0.541587503203416
+"tau_robust",0.541587503203416
+"se_conventional",0.0665191137564274
+"se_bc",0.0665191137564274
+"se_robust",0.0805435891935657
+"h_left",0.323487480523295
+"h_right",0.323487480523295
+"n_eff_left",88
+"n_eff_right",74
