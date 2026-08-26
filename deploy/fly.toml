@@ -56,8 +56,19 @@ primary_region = "fra"          # Frankfurt — EU
   force_https = true
   auto_stop_machines = "stop"
   auto_start_machines = true
-  # 1 = keep a machine warm during the review window (no cold starts, ~$5/mo).
-  # Set to 0 afterwards to scale to zero and pay almost nothing.
+  # Deliberately 1, and not just to avoid cold starts. There is no [[mounts]]
+  # block and P2A_DB_PATH is unset, so persistent_session.rs falls through to
+  # connect_memory(): every session, uploaded dataset, and result lives only in
+  # this machine's RAM. Letting auto_stop_machines take it to zero would
+  # therefore discard a visitor's work whenever they idle long enough, and they
+  # would see "dataset not found" rather than anything explaining why.
+  #
+  # ~$5/mo (shared-cpu-1x, 1gb) is worth that during a review window. Dropping
+  # to 0 is reasonable once the demo is just a README link and nobody is
+  # mid-analysis — or sooner, if a volume plus P2A_DB_PATH is added first so
+  # sessions survive a stop. Note that persisting user data on disk cuts against
+  # the "ephemeral, do not upload anything sensitive" posture in the README, so
+  # it is a real decision rather than a config tweak.
   min_machines_running = 1
 
   # Backstop only — this is a ceiling on in-flight requests, not a rate limit:
