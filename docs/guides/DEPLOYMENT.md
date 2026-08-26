@@ -119,6 +119,27 @@ behind).
    but it is a backstop, not a substitute: it cannot distinguish one abusive
    caller from several legitimate ones.
 
+   **The rule, for a Cloudflare Free plan.** Free gives you exactly **one**
+   rate limiting rule, counted per *IP* (the characteristic is fixed), with a
+   period of 10s or 1min, and *Block* as the only action. So it has to be one
+   broad rule rather than a per-endpoint set:
+
+   - Expression: `starts_with(http.request.uri.path, "/api/")`
+   - When rate exceeds: **60 requests / 1 minute** (per IP)
+   - Action: *Block*
+
+   That threshold is deliberately generous for a human and still cuts off a
+   script, because **a browser session makes far fewer requests than it looks
+   like**. The LLM tool loop runs server-side: one `POST /api/llm/chat/stream`
+   can drive many tool calls without any of them crossing the edge. A reviewer
+   uploading data and chatting generates single-digit requests per minute.
+
+   Note that an SSE stream counts as **one** request no matter how long it stays
+   open, so it does not need excluding from a *rate* limit — that is a different
+   concern from excluding it from response buffering and idle timeouts, which it
+   does need (see above). Tighten the threshold if you ever see abuse; the cost
+   of being wrong is a reviewer seeing Cloudflare error 1015.
+
 6. **Cap request body size.**
    `P2A_MAX_HTTP_BODY_MB` (default 32) limits memory from oversized uploads.
 
