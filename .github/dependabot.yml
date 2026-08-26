@@ -18,3 +18,17 @@ updates:
     open-pull-requests-limit: 5
     commit-message:
       prefix: "ci"
+    # One PR for all action updates, not one per action. Several of these actions
+    # are only correct in matched sets, and ungrouped PRs are individually
+    # plausible while jointly broken:
+    #   * upload-artifact / download-artifact must move together — desktop-bundle
+    #     uploads in `build` and downloads in `release`, and v3 -> v4 was already
+    #     a breaking change across that pair.
+    #   * configure-pages / upload-pages-artifact / deploy-pages are a coordinated
+    #     trio, in the job holding `pages: write` and `id-token: write`.
+    # Grouping also means CI validates the whole set at once, which is the only
+    # way the pairing above actually gets exercised before merge.
+    groups:
+      github-actions:
+        patterns:
+          - "*"
