@@ -160,7 +160,7 @@ let csv = result.to_csv();
 
 ## Requirements
 
-- Rust 1.85+ (Edition 2024)
+- Rust 1.88+ (Edition 2024)
 - Linux/macOS/Windows
 
 ### System Dependencies

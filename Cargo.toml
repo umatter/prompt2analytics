@@ -13,7 +13,7 @@ edition = "2024"
 authors = ["prompt2analytics contributors"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/umatter/prompt2analytics"
-rust-version = "1.85"
+rust-version = "1.88"
 
 [workspace.dependencies]
 # DataFrame and data manipulation

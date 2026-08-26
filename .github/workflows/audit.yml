@@ -25,8 +25,41 @@ jobs:
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked
 
-      # Audits Cargo.lock against the RustSec advisory database. Informational:
-      # this reports known-vulnerable dependencies but does not gate anything,
-      # matching the project's non-blocking-lint posture.
+      # Audits Cargo.lock against the RustSec advisory database. This DOES gate:
+      # cargo audit exits non-zero on vulnerabilities. (It exits 0 on unmaintained
+      # and yanked crates, which it reports as allowed warnings — the ~30 of those
+      # here are the GTK/desktop stack and are not what turns this job red.)
+      #
+      # Exemptions live here, as flags, rather than in .cargo/audit.toml: .cargo/
+      # is gitignored, so a config file there never reaches CI and the job would
+      # stay red while looking configured. Each entry needs a reason, and any
+      # entry that stops being true should be deleted rather than left to rot —
+      # a permanently-red audit is one nobody reads, which is how the 19
+      # advisories cleared in this commit went unnoticed for two weeks.
+      #
+      #   RUSTSEC-2026-0189  rmcp — DNS rebinding in the Streamable HTTP server
+      #     transport. Not applicable: rmcp resolves to
+      #     base64,default,macros,server,transport-async-rw,transport-io — the
+      #     streamable-http transport is not compiled, and p2a-mcp's HTTP surface
+      #     is its own axum server (no `streamable` reference in crates/p2a-mcp).
+      #     Re-check if rmcp features change. Tracked separately: our axum server
+      #     does no Host-header validation either, which is the same rebinding
+      #     class in first-party code.
+      #
+      #   RUSTSEC-2026-0235  rkyv — not in the dependency graph at all.
+      #     `cargo tree -i rkyv --workspace --all-features -e all` prints nothing;
+      #     it is a Cargo.lock entry only, held by rust_decimal.
+      #
+      #   RUSTSEC-2026-0194  quick-xml — quadratic run time on duplicate attrs
+      #   RUSTSEC-2026-0195  quick-xml — unbounded namespace allocation (DoS)
+      #     Upstream-blocked: object_store 0.12.4 (via polars 0.52) requires
+      #     quick-xml ^0.38, and the fix is in 0.41. Bumping our own calamine 0.32
+      #     -> 0.36 does NOT help — 0.36 wants ^0.41, so both majors would simply
+      #     coexist and 0.38 would stay in the tree. Revisit when polars moves.
       - name: Run cargo audit
-        run: cargo audit
+        run: |
+          cargo audit \
+            --ignore RUSTSEC-2026-0189 \
+            --ignore RUSTSEC-2026-0235 \
+            --ignore RUSTSEC-2026-0194 \
+            --ignore RUSTSEC-2026-0195
