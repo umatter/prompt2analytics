@@ -589,22 +589,58 @@ pub fn one_hot_encode(dataset: &Dataset, column: &str, drop_first: bool) -> Mung
         })
         .collect();
 
-    let mut result = df.clone();
+    let feature_err = |e: crate::errors::EconError| MungeError::FeatureError(e.to_string());
 
     // Skip first category if drop_first is true
     let start_idx = if drop_first { 1 } else { 0 };
 
-    for cat in unique_str.iter().skip(start_idx) {
-        let dummy_name = format!("{}_{}", column, cat);
-        let mut dummy_values: Vec<i32> = Vec::with_capacity(df.height());
+    // The k x n dummy cells, checked before anything is built
+    let height = df.height();
+    let n_dummies = unique_str.len().saturating_sub(start_idx);
+    let cells = crate::resource::checked_len(&[n_dummies, height], "one-hot dummy columns")
+        .map_err(feature_err)?;
+    crate::resource::check_alloc::<i32>(cells, "one-hot dummy columns").map_err(feature_err)?;
 
-        for row_idx in 0..df.height() {
-            let val = col_data
-                .get(row_idx)
-                .map(|v| format!("{}", v))
-                .unwrap_or_else(|_| "null".to_string());
-            dummy_values.push(if val == *cat { 1 } else { 0 });
+    // Each distinct display string maps to the index of its first occurrence,
+    // so categories whose display strings coincide get the same dummy values,
+    // as with the per-cell string comparison.
+    let mut category_ids: std::collections::HashMap<&str, u32> =
+        std::collections::HashMap::with_capacity(unique_str.len());
+    for (i, cat) in unique_str.iter().enumerate() {
+        // u32::MAX marks a row without a category below.
+        let id = u32::try_from(i)
+            .ok()
+            .filter(|&id| id != u32::MAX)
+            .ok_or_else(|| {
+                MungeError::FeatureError(format!(
+                    "column `{column}` has too many distinct values to one-hot encode"
+                ))
+            })?;
+        category_ids.entry(cat.as_str()).or_insert(id);
+    }
+
+    // Format every cell once and record its category (u32::MAX if none)
+    let mut row_ids: Vec<u32> =
+        crate::resource::try_with_capacity(height, "one-hot row categories")
+            .map_err(feature_err)?;
+    for row_idx in 0..height {
+        if row_idx.is_multiple_of(CHECKPOINT_EVERY) {
+            crate::resource::checkpoint().map_err(feature_err)?;
         }
+        let val = col_data
+            .get(row_idx)
+            .map(|v| format!("{}", v))
+            .unwrap_or_else(|_| "null".to_string());
+        row_ids.push(category_ids.get(val.as_str()).copied().unwrap_or(u32::MAX));
+    }
+
+    let mut result = df.clone();
+
+    for cat in unique_str.iter().skip(start_idx) {
+        crate::resource::checkpoint().map_err(feature_err)?;
+        let id = category_ids[cat.as_str()];
+        let dummy_name = format!("{}_{}", column, cat);
+        let dummy_values: Vec<i32> = row_ids.iter().map(|&r| i32::from(r == id)).collect();
 
         let dummy_col = Column::new(dummy_name.into(), dummy_values);
         result
@@ -925,6 +961,80 @@ mod tests {
             bin(&ds, "x", BinStrategy::EqualWidth(1_000_000), None)
         }));
         assert!(e.contains("limit"), "{e}");
+    }
+
+    /// The pre-fix algorithm, verbatim, as the reference (formats every cell
+    /// once per category).
+    fn one_hot_reference(ds: &Dataset, column: &str, drop_first: bool) -> DataFrame {
+        let df = ds.df();
+        let col_data = df.column(column).unwrap();
+        let unique = col_data.unique().unwrap();
+        let unique_str: Vec<String> = (0..unique.len())
+            .map(|i| {
+                unique
+                    .get(i)
+                    .map(|v| format!("{}", v))
+                    .unwrap_or_else(|_| "null".to_string())
+            })
+            .collect();
+        let mut result = df.clone();
+        let start_idx = if drop_first { 1 } else { 0 };
+        for cat in unique_str.iter().skip(start_idx) {
+            let dummy_name = format!("{}_{}", column, cat);
+            let mut dummy_values: Vec<i32> = Vec::with_capacity(df.height());
+            for row_idx in 0..df.height() {
+                let val = col_data
+                    .get(row_idx)
+                    .map(|v| format!("{}", v))
+                    .unwrap_or_else(|_| "null".to_string());
+                dummy_values.push(if val == *cat { 1 } else { 0 });
+            }
+            let dummy_col = Column::new(dummy_name.into(), dummy_values);
+            result.with_column(dummy_col).unwrap();
+        }
+        result
+    }
+
+    #[test]
+    fn one_hot_matches_per_cell_reference() {
+        let ds = Dataset::new(
+            df!(
+                "region" => [Some("north"), Some("south"), None, Some("west"), Some("north"), Some("east")],
+                "g" => [Some(1i64), Some(2), Some(2), None, Some(3), Some(1)],
+                "h" => [1.5, 3.0, 1.5, 2.25, 3.0, 1.5],
+            )
+            .unwrap(),
+        );
+        for col in ["region", "g", "h"] {
+            let got = one_hot_encode(&ds, col, false).unwrap();
+            let want = one_hot_reference(&ds, col, false);
+            assert_eq!(got.df().width(), want.width(), "{col}");
+            for c in want.get_columns() {
+                let g = got.df().column(c.name().as_str()).unwrap();
+                assert!(
+                    g.as_materialized_series()
+                        .equals_missing(c.as_materialized_series()),
+                    "{col}: {}",
+                    c.name()
+                );
+            }
+        }
+        // 5 levels including null; drop_first removes one (which one depends
+        // on polars' unique order).
+        assert_eq!(
+            one_hot_encode(&ds, "region", true).unwrap().df().width(),
+            3 + 4
+        );
+    }
+
+    #[test]
+    fn one_hot_output_size_is_checked() {
+        let ds = Dataset::new(df!("id" => (0..600i64).collect::<Vec<_>>()).unwrap());
+        // 600 x 600 x 4 bytes > 1 MiB
+        let r =
+            crate::resource::with_alloc_ceiling(Some(1 << 20), || one_hot_encode(&ds, "id", false));
+        assert!(err_text(r).contains("limit"));
+        assert_eq!(one_hot_encode(&ds, "id", false).unwrap().df().width(), 601);
     }
 
     #[test]
