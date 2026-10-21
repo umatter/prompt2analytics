@@ -1317,22 +1317,21 @@ mod schema_tests {
                     Kind::Array => arrays += 1,
                     Kind::Tolerance => tols += 1,
                 }
-                let ok = rules
-                    .iter()
-                    .filter(|r| r.path == path)
-                    .any(|r| match (kind, r.rule) {
-                        (_, Rule::Exempt(_)) => true,
-                        (Kind::Integer, Rule::Max(_)) => true,
-                        (Kind::Tolerance, Rule::Tolerance | Rule::Max(_)) => true,
-                        (
-                            Kind::Array,
-                            Rule::ArrayLen(_)
-                            | Rule::ArrayElemMax(_)
-                            | Rule::UniqueList(_)
-                            | Rule::SquareLen,
-                        ) => true,
-                        _ => false,
-                    });
+                let ok = rules.iter().filter(|r| r.path == path).any(|r| {
+                    matches!(
+                        (kind, r.rule),
+                        (_, Rule::Exempt(_))
+                            | (Kind::Integer, Rule::Max(_))
+                            | (Kind::Tolerance, Rule::Tolerance | Rule::Max(_))
+                            | (
+                                Kind::Array,
+                                Rule::ArrayLen(_)
+                                    | Rule::ArrayElemMax(_)
+                                    | Rule::UniqueList(_)
+                                    | Rule::SquareLen,
+                            )
+                    )
+                });
                 if !ok {
                     missing.push(format!("{tool}.{path} ({kind:?})"));
                 }

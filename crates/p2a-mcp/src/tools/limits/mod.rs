@@ -38,6 +38,15 @@
 //! with [`install`] and enforces it before every tool call; handlers read named budgets through
 //! [`current`]. Until something is installed, [`current`] returns the off profile.
 
+// `LimitViolation` (five `String`s and a `&'static str`) is the error type of the published
+// limits API that T0-WP06 to T0-WP20 compile against. It is built only when a request is
+// refused, once per tool call at most, so the size of `Result<(), LimitViolation>` does not
+// matter here and boxing it would change that API.
+#![allow(
+    clippy::result_large_err,
+    reason = "LimitViolation is the fixed, rarely constructed error type of the limits API"
+)]
+
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::sync::{Arc, OnceLock, PoisonError, RwLock};
