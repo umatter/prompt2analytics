@@ -68,6 +68,7 @@ pub use clean::{
     str_length,
     str_pad,
     str_split,
+    str_split_part_count,
     str_substring,
     to_lowercase,
     to_uppercase,

@@ -905,49 +905,114 @@ pub fn str_split(
     })?;
 
     let ca = col.str()?;
-    let n_splits = max_splits.unwrap_or(usize::MAX);
+    let resource_err = |max_parts: usize, e: crate::errors::EconError| MungeError::InvalidValue {
+        column: column.to_string(),
+        value: format!("{max_parts} parts"),
+        reason: e.to_string(),
+    };
 
-    // First pass: determine how many columns we need
+    // First pass: split every row (parts borrow from the column) and find how
+    // many columns we need
     let mut max_parts = 0;
-    let splits: Vec<Vec<String>> = ca
-        .into_iter()
-        .map(|opt| {
-            let parts: Vec<String> = match opt {
-                Some(s) => {
-                    let mut parts: Vec<String> =
-                        re.splitn(s, n_splits + 1).map(|p| p.to_string()).collect();
-                    if max_splits.is_some() && parts.len() > n_splits + 1 {
-                        parts.truncate(n_splits + 1);
-                    }
-                    parts
-                }
-                None => vec![],
-            };
-            if parts.len() > max_parts {
-                max_parts = parts.len();
-            }
-            parts
-        })
-        .collect();
+    let mut splits: Vec<Vec<&str>> = Vec::with_capacity(ca.len());
+    for (row, opt) in ca.into_iter().enumerate() {
+        if row.is_multiple_of(CHECKPOINT_EVERY) {
+            crate::resource::checkpoint().map_err(|e| resource_err(max_parts, e))?;
+        }
+        let parts = match opt {
+            Some(s) => split_parts(&re, s, max_splits),
+            None => Vec::new(),
+        };
+        max_parts = max_parts.max(parts.len());
+        splits.push(parts);
+    }
 
     // Cap max_parts if max_splits was specified
     if let Some(max) = max_splits {
-        max_parts = max_parts.min(max + 1);
+        max_parts = max_parts.min(max.saturating_add(1));
     }
+
+    // The rows x parts output, checked before it is built
+    let cells = crate::resource::checked_len(&[df.height(), max_parts], "str_split output")
+        .map_err(|e| resource_err(max_parts, e))?;
+    crate::resource::check_alloc::<[u8; 16]>(cells, "str_split output")
+        .map_err(|e| resource_err(max_parts, e))?;
 
     // Create columns for each split part
     let mut result_df = df.clone();
     for i in 0..max_parts {
+        crate::resource::checkpoint().map_err(|e| resource_err(max_parts, e))?;
         let col_name = format!("{}_{}", prefix, i);
-        let values: StringChunked = splits
-            .iter()
-            .map(|parts| parts.get(i).map(|s| s.as_str()))
-            .collect();
+        let values: StringChunked = splits.iter().map(|parts| parts.get(i).copied()).collect();
         let new_col = values.with_name(col_name.into()).into_column();
         result_df = result_df.with_column(new_col)?.clone();
     }
 
     Ok(Dataset::new(result_df))
+}
+
+/// Loop iterations between two cooperative-cancellation checkpoints.
+const CHECKPOINT_EVERY: usize = 65_536;
+
+/// The parts of `s` split on `re`: at most `max_splits + 1` parts when
+/// `max_splits` is given (saturating), otherwise split on every match.
+fn split_parts<'s>(re: &Regex, s: &'s str, max_splits: Option<usize>) -> Vec<&'s str> {
+    match max_splits {
+        Some(m) => re.splitn(s, m.saturating_add(1)).collect(),
+        None => re.split(s).collect(),
+    }
+}
+
+/// The number of parts [`split_parts`] would return, without allocating.
+fn count_parts(re: &Regex, s: &str, max_splits: Option<usize>) -> usize {
+    match max_splits {
+        Some(m) => re.splitn(s, m.saturating_add(1)).count(),
+        None => re.split(s).count(),
+    }
+}
+
+/// The largest number of parts any row of `column` splits into under
+/// `pattern` and `max_splits`: the number of columns [`str_split`] would add
+/// (at most `max_splits + 1`, saturating; `0` when every row is null).
+///
+/// Validates the column and the pattern as [`str_split`] does and allocates
+/// nothing per part, so a caller can check the output width before splitting.
+pub fn str_split_part_count(
+    dataset: &Dataset,
+    column: &str,
+    pattern: &str,
+    max_splits: Option<usize>,
+) -> MungeResult<usize> {
+    let df = dataset.df();
+
+    let col = df.column(column)?;
+    if col.dtype() != &DataType::String {
+        return Err(MungeError::TypeMismatch {
+            column: column.to_string(),
+            expected: "String".to_string(),
+            found: format!("{:?}", col.dtype()),
+        });
+    }
+
+    let re = Regex::new(pattern).map_err(|e| {
+        MungeError::InvalidExpression(format!("Invalid regex pattern '{}': {}", pattern, e))
+    })?;
+
+    let ca = col.str()?;
+    let mut max_parts = 0;
+    for (row, opt) in ca.into_iter().enumerate() {
+        if row.is_multiple_of(CHECKPOINT_EVERY) {
+            crate::resource::checkpoint().map_err(|e| MungeError::InvalidValue {
+                column: column.to_string(),
+                value: pattern.to_string(),
+                reason: e.to_string(),
+            })?;
+        }
+        if let Some(s) = opt {
+            max_parts = max_parts.max(count_parts(&re, s, max_splits));
+        }
+    }
+    Ok(max_parts)
 }
 
 /// Concatenate multiple string columns into one.
@@ -1029,25 +1094,58 @@ pub fn str_pad(
 
     let pad = pad_char.unwrap_or(' ');
     let pad_side = side.unwrap_or("left");
+    let pad_len = pad.len_utf8();
+    let size_err = |reason: String| MungeError::InvalidValue {
+        column: column.to_string(),
+        value: format!("width {width}"),
+        reason,
+    };
 
     let ca = col.str()?;
-    let padded: StringChunked = ca
-        .into_iter()
-        .map(|opt| {
-            opt.map(|s| {
-                let len = s.chars().count();
-                if len >= width {
-                    s.to_string()
-                } else {
-                    let padding: String = std::iter::repeat_n(pad, width - len).collect();
-                    match pad_side {
-                        "left" | "start" => format!("{}{}", padding, s),
-                        _ => format!("{}{}", s, padding),
-                    }
-                }
-            })
-        })
-        .collect();
+
+    // Upper bound of the padding bytes, checked before anything is built
+    let non_null = ca.len() - ca.null_count();
+    let bound = crate::resource::checked_len(&[non_null, width, pad_len], "str_pad output")
+        .map_err(|e| size_err(e.to_string()))?;
+    crate::resource::check_alloc::<u8>(bound, "str_pad output")
+        .map_err(|e| size_err(e.to_string()))?;
+
+    let mut values: Vec<Option<String>> = Vec::with_capacity(ca.len());
+    for (row, opt) in ca.into_iter().enumerate() {
+        if row.is_multiple_of(CHECKPOINT_EVERY) {
+            crate::resource::checkpoint().map_err(|e| size_err(e.to_string()))?;
+        }
+        let Some(s) = opt else {
+            values.push(None);
+            continue;
+        };
+        let len = s.chars().count();
+        if len >= width {
+            values.push(Some(s.to_string()));
+            continue;
+        }
+        let n_pad = width - len;
+        let total = n_pad
+            .checked_mul(pad_len)
+            .and_then(|b| b.checked_add(s.len()))
+            .ok_or_else(|| size_err("the padded string length overflows".to_string()))?;
+        let mut padded = String::new();
+        padded.try_reserve_exact(total).map_err(|_| {
+            size_err(format!(
+                "a padded value would need {total} bytes, which could not be allocated"
+            ))
+        })?;
+        let left = matches!(pad_side, "left" | "start");
+        if !left {
+            padded.push_str(s);
+        }
+        padded.extend(std::iter::repeat_n(pad, n_pad));
+        if left {
+            padded.push_str(s);
+        }
+        values.push(Some(padded));
+    }
+    let padded: StringChunked = values.into_iter().collect();
 
     let padded_col = padded.with_name(col.name().clone()).into_column();
 
@@ -1143,6 +1241,75 @@ pub fn str_length(dataset: &Dataset, column: &str, new_column: &str) -> MungeRes
 mod tests {
     use super::*;
     use polars::prelude::df;
+
+    fn split_col(ds: &Dataset, name: &str) -> Vec<Option<String>> {
+        ds.df()
+            .column(name)
+            .unwrap()
+            .str()
+            .unwrap()
+            .into_iter()
+            .map(|v| v.map(str::to_string))
+            .collect()
+    }
+
+    /// The error text of a call that must fail (`Dataset` is not `Debug`).
+    fn err_text(r: MungeResult<Dataset>) -> String {
+        match r {
+            Ok(_) => panic!("expected an error"),
+            Err(e) => e.to_string(),
+        }
+    }
+
+    #[test]
+    fn str_split_default_path_splits_on_every_match() {
+        let ds = Dataset::new(df!("s" => [Some("a,b,c"), Some("d"), None]).unwrap());
+        let out = str_split(&ds, "s", ",", None, "p").unwrap();
+        assert_eq!(
+            split_col(&out, "p_0"),
+            vec![Some("a".into()), Some("d".into()), None]
+        );
+        assert_eq!(split_col(&out, "p_1"), vec![Some("b".into()), None, None]);
+        assert_eq!(split_col(&out, "p_2"), vec![Some("c".into()), None, None]);
+        assert!(out.df().column("p_3").is_err());
+        assert!(
+            str_split(&ds, "s", ",", Some(usize::MAX), "p")
+                .unwrap()
+                .df()
+                .column("p_2")
+                .is_ok()
+        );
+        let one = str_split(&ds, "s", ",", Some(1), "p").unwrap();
+        assert_eq!(split_col(&one, "p_1"), vec![Some("b,c".into()), None, None]);
+        assert!(one.df().column("p_2").is_err());
+    }
+
+    #[test]
+    fn str_split_part_count_and_output_size() {
+        let ds = Dataset::new(df!("s" => [Some("a,b,c"), Some("d"), None]).unwrap());
+        assert_eq!(str_split_part_count(&ds, "s", ",", None).unwrap(), 3);
+        assert_eq!(str_split_part_count(&ds, "s", ",", Some(0)).unwrap(), 1);
+        assert_eq!(str_split_part_count(&ds, "s", ",", Some(1)).unwrap(), 2);
+        assert_eq!(
+            str_split_part_count(&ds, "s", ",", Some(usize::MAX)).unwrap(),
+            3
+        );
+        let rows = Dataset::new(df!("s" => vec!["a,b,c"; 10]).unwrap());
+        let r =
+            crate::resource::with_alloc_ceiling(Some(64), || str_split(&rows, "s", ",", None, "p"));
+        assert!(err_text(r).contains("limit")); // 10 x 3 cells x 16 bytes
+    }
+
+    #[test]
+    fn str_pad_impossible_width_is_an_error() {
+        let ds = Dataset::new(df!("s" => ["ab", "abc"]).unwrap());
+        assert!(str_pad(&ds, "s", usize::MAX / 2, Some('x'), None).is_err());
+        let ok = str_pad(&ds, "s", 5, Some('0'), Some("left")).unwrap();
+        assert_eq!(
+            split_col(&ok, "s"),
+            vec![Some("000ab".into()), Some("00abc".into())]
+        );
+    }
 
     fn test_dataset_with_nulls() -> Dataset {
         let df = df! {
