@@ -92,6 +92,17 @@ async fn wait_until(mut cond: impl FnMut() -> bool, what: &str) {
     }
 }
 
+/// Sets its flag when dropped. A test that holds a spinning closure keeps
+/// one alive, so the closure gets its exit even when an assertion fails
+/// first: dropping a runtime waits for its blocking tasks.
+struct Release(Arc<AtomicBool>);
+
+impl Drop for Release {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
 /// The default local configuration.
 fn local() -> ServerConfig {
     http_cfg("127.0.0.1:8080", None, false)
@@ -251,6 +262,7 @@ async fn uncooperative_work_is_reported_overdue() {
     let sid = new_session(&app).await;
     let gov = state.governor.clone();
     let release = Arc::new(AtomicBool::new(false));
+    let _release_on_exit = Release(release.clone());
     let rel = release.clone();
     let r = gov
         .run_blocking(&session_of(&state, &sid).await, "spin", move |_budget| {
@@ -269,9 +281,17 @@ async fn uncooperative_work_is_reported_overdue() {
         (h.in_flight, h.overdue, h.capacity, h.healthy),
         (1, 1, 1, false)
     );
+    let (s, _, body) = send(&app, get("/health")).await;
+    assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(body["status"], json!("degraded"));
+    assert_eq!(body["governor"]["overdue"], json!(1));
+    assert_eq!(body["governor"]["capacity"], json!(1));
     release.store(true, Ordering::SeqCst);
     wait_until(|| gov.health().in_flight == 0, "the work to end").await;
     assert!(gov.health().healthy);
+    let (s, _, body) = send(&app, get("/health")).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    assert_eq!(body["status"], json!("ok"));
 }
 
 #[tokio::test]
@@ -316,6 +336,7 @@ async fn saturation_refuses_with_retry_after() {
     let gov = state.governor.clone();
     let (sa, sb) = (session_of(&state, &a).await, session_of(&state, &b).await);
     let release = Arc::new(AtomicBool::new(false));
+    let _release_on_exit = Release(release.clone());
     let rel = release.clone();
     let (g, s) = (gov.clone(), sa.clone());
     let holder = tokio::spawn(async move {
@@ -471,4 +492,21 @@ async fn full_session_table_answers_503_with_code() {
     assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(b["code"], json!("capacity"));
     assert!(h.contains_key(header::RETRY_AFTER));
+}
+// ---------------------------------------------------------------------------
+// Governor health (MCP-1)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn health_reports_governor_fields() {
+    let (app, _) = build_app(&local()).await.unwrap();
+    let (s, _, body) = send(&app, get("/health")).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(body["status"], json!("ok"));
+    for key in ["in_flight", "overdue", "capacity", "healthy"] {
+        assert!(
+            body["governor"].get(key).is_some(),
+            "missing governor.{key}: {body}"
+        );
+    }
 }

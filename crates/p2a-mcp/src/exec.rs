@@ -629,6 +629,35 @@ fn fmt_bytes(bytes: u64) -> String {
     format_bytes(usize::try_from(bytes).unwrap_or(usize::MAX))
 }
 
+/// Exits the process when the governor stays unhealthy (every permit held by
+/// overdue work) for `limit` without a break.
+#[derive(Debug)]
+pub struct StuckWatchdog {
+    limit: Duration,
+    unhealthy_since: Option<Instant>,
+}
+
+impl StuckWatchdog {
+    /// A watchdog that fires after `limit` of continuous unhealth.
+    pub fn new(limit: Duration) -> Self {
+        Self {
+            limit,
+            unhealthy_since: None,
+        }
+    }
+
+    /// Record one observation; true once the governor has been unhealthy
+    /// for at least `limit` without a healthy observation in between.
+    pub fn observe(&mut self, healthy: bool, now: Instant) -> bool {
+        if healthy {
+            self.unhealthy_since = None;
+            return false;
+        }
+        let since = *self.unhealthy_since.get_or_insert(now);
+        now.saturating_duration_since(since) >= self.limit
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -742,6 +771,18 @@ mod tests {
         assert!(matches!(&e, ToolCallError::InvalidArguments(m) if m == "bad column"));
         let e = ToolCallError::from_handler_error("t", rmcp::ErrorData::internal_error("x", None));
         assert!(matches!(&e, ToolCallError::Internal(m) if m.contains("Tool 't' failed")));
+    }
+
+    #[test]
+    fn watchdog_fires_only_after_continuous_unhealth() {
+        let t0 = Instant::now();
+        let mut w = StuckWatchdog::new(Duration::from_secs(300));
+        assert!(!w.observe(true, t0));
+        assert!(!w.observe(false, t0));
+        assert!(!w.observe(false, t0 + Duration::from_secs(299)));
+        assert!(!w.observe(true, t0 + Duration::from_secs(299))); // resets
+        assert!(!w.observe(false, t0 + Duration::from_secs(300)));
+        assert!(w.observe(false, t0 + Duration::from_secs(600)));
     }
 
     #[test]

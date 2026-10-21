@@ -9,11 +9,13 @@
 
 use std::future::Future;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use axum::{
     Json, Router,
     extract::State,
-    response::IntoResponse,
+    http::StatusCode,
+    response::{IntoResponse, Response},
     routing::{delete, get, post},
 };
 use serde::Serialize;
@@ -25,7 +27,7 @@ use super::routes_sessions::{
 use super::routes_tools::{call_tool, list_tools};
 use crate::audit::AuditLogger;
 use crate::config::{DeploymentMode, ServerConfig};
-use crate::exec::{ExecConfig, ToolGovernor};
+use crate::exec::{ExecConfig, StuckWatchdog, ToolGovernor};
 use crate::server::AnalyticsServer;
 use crate::session::SessionManager;
 use crate::transport::{TransportError, TransportResult};
@@ -160,6 +162,9 @@ pub async fn serve(
     let exec = state.governor.config().clone();
     crate::exec::install_process_policies(&exec);
     log_startup(&config, &exec, &listener);
+    if let Some(limit) = exec.stuck_exit {
+        spawn_stuck_watchdog(state.governor.clone(), limit);
+    }
 
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown)
@@ -210,6 +215,26 @@ fn log_startup(config: &ServerConfig, exec: &ExecConfig, listener: &tokio::net::
         exec.concurrency,
         exec.deadline
     );
+}
+
+/// Exit with code 70 when every tool permit stays held by overdue work for
+/// `limit`, so the platform restarts the machine instead of leaving it
+/// wedged. Set by the hosted profile (300 s) or `--stuck-exit-secs`.
+fn spawn_stuck_watchdog(governor: Arc<ToolGovernor>, limit: Duration) {
+    tokio::spawn(async move {
+        let mut watchdog = StuckWatchdog::new(limit);
+        let mut tick = tokio::time::interval(Duration::from_secs(5));
+        loop {
+            tick.tick().await;
+            if watchdog.observe(governor.health().healthy, Instant::now()) {
+                tracing::error!(
+                    "tool workers stuck past their deadline for {limit:?}; exiting so the \
+                     platform restarts the machine"
+                );
+                std::process::exit(70);
+            }
+        }
+    });
 }
 
 /// Create the axum router with all routes.
@@ -380,13 +405,26 @@ pub struct ToolDefinition {
 // Route Handlers
 // =============================================================================
 
-/// Health check endpoint.
-async fn health_check(State(state): State<AppState>) -> impl IntoResponse {
+/// Health check endpoint: 200 with `"status": "ok"`, or 503 with
+/// `"status": "degraded"` while every tool permit is held by work past its
+/// deadline. The `governor` object reports in-flight and overdue work.
+async fn health_check(State(state): State<AppState>) -> Response {
     let session_count = state.session_manager.session_count().await;
-    Json(serde_json::json!({
-        "status": "ok",
-        "server": "p2a-mcp",
-        "version": env!("CARGO_PKG_VERSION"),
-        "active_sessions": session_count
-    }))
+    let governor = state.governor.health();
+    let (status, label) = if governor.healthy {
+        (StatusCode::OK, "ok")
+    } else {
+        (StatusCode::SERVICE_UNAVAILABLE, "degraded")
+    };
+    (
+        status,
+        Json(serde_json::json!({
+            "status": label,
+            "server": "p2a-mcp",
+            "version": env!("CARGO_PKG_VERSION"),
+            "active_sessions": session_count,
+            "governor": governor,
+        })),
+    )
+        .into_response()
 }
