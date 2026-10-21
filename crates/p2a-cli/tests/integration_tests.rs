@@ -10,6 +10,69 @@ fn p2a() -> Command {
     Command::cargo_bin("p2a").expect("Failed to find p2a binary")
 }
 
+/// Every non-comment line must be one of the fixed script lines or one replayed command.
+fn assert_only_intended_lines(script: &str, expected_commands: usize) {
+    assert!(
+        script.chars().all(|c| c == '\n' || !c.is_control()),
+        "raw control character:\n{script}"
+    );
+    let mut commands = 0;
+    for line in script.lines() {
+        let t = line.trim_start();
+        if t.is_empty() || t.starts_with('#') {
+            continue;
+        }
+        if t.starts_with("p2a --session \"$SESSION_FILE\" ") {
+            commands += 1;
+            continue;
+        }
+        assert!(
+            matches!(
+                t,
+                "set -euo pipefail"
+                    | "rm -f \"$SESSION_FILE\""
+                    | "echo \"Script completed successfully\""
+            ) || t.starts_with("SESSION_FILE=\".p2a_session_"),
+            "unexpected executable line {line:?} in:\n{script}"
+        );
+    }
+    assert_eq!(commands, expected_commands, "{script}");
+}
+
+/// Replay an exported script under bash with a stub `p2a` that logs its argv (NUL-separated).
+#[cfg(unix)]
+fn replay_with_stub(dir: &std::path::Path, script: &std::path::Path) -> Vec<String> {
+    use std::os::unix::fs::PermissionsExt;
+    let bin = dir.join("stub_bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let stub = bin.join("p2a");
+    std::fs::write(
+        &stub,
+        "#!/bin/bash\nprintf '%s\\0' \"$@\" >> \"$P2A_STUB_LOG\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let log = dir.join("stub.log");
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let status = std::process::Command::new("bash")
+        .arg(script)
+        .current_dir(dir)
+        .env("PATH", path)
+        .env("P2A_STUB_LOG", &log)
+        .status()
+        .expect("bash");
+    assert!(status.success());
+    let raw = std::fs::read(&log).unwrap_or_default();
+    raw.split(|b| *b == 0)
+        .filter(|s| !s.is_empty())
+        .map(|s| String::from_utf8_lossy(s).into_owned())
+        .collect()
+}
+
 /// Test that the help command works.
 #[test]
 fn test_help_command() {
@@ -265,6 +328,116 @@ fn test_session_records_and_exports() {
         exported.contains("data describe rec"),
         "exported script should contain the recorded describe command:\n{exported}"
     );
+}
+
+/// A recorded argument containing a newline must stay inside its comment and its quoted argument.
+#[test]
+fn test_script_export_keeps_newline_argument_inert() {
+    let tmp = tempfile::tempdir().unwrap();
+    let session = tmp.path().join("s.json");
+    let script = tmp.path().join("out.sh");
+    let payload = "nodata\ntouch injected_marker #";
+    p2a()
+        .args([
+            "--session",
+            session.to_str().unwrap(),
+            "data",
+            "describe",
+            payload,
+        ])
+        .assert()
+        .failure(); // unknown dataset; still recorded
+    p2a()
+        .args([
+            "script",
+            "export",
+            session.to_str().unwrap(),
+            "-o",
+            script.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let text = std::fs::read_to_string(&script).unwrap();
+    assert_only_intended_lines(&text, 1);
+    assert!(
+        text.contains("# data describe 'nodata\\ntouch injected_marker #'\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "p2a --session \"$SESSION_FILE\" data describe $'nodata\\ntouch injected_marker #'\n"
+        ),
+        "{text}"
+    );
+    #[cfg(unix)]
+    {
+        let args = replay_with_stub(tmp.path(), &script);
+        assert!(!tmp.path().join("injected_marker").exists());
+        assert_eq!(args[2..], ["data", "describe", payload]); // the argument round-trips exactly
+    }
+}
+
+/// Title, version, comment and legacy category/arguments from a crafted session file stay inert.
+#[test]
+fn test_script_export_neutralises_crafted_session_fields() {
+    let tmp = tempfile::tempdir().unwrap();
+    let session = tmp.path().join("crafted.json");
+    let script = tmp.path().join("out.sh");
+    let json = serde_json::json!({
+        "id": "crafted", "title": "t\ntouch injected_title",
+        "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
+        "working_dir": "/tmp", "datasets": {}, "version": "0.1.3\ntouch injected_version",
+        "commands": [{
+            "id": "c1", "timestamp": "2026-01-01T00:00:00Z",
+            "command_line": "legacy\ntouch injected_comment",
+            "category": "data;touch injected_category;", "subcommand": "describe",
+            "arguments": {"dataset": "d\ntouch injected_arg"},
+            "dataset_refs": [], "output_files": [], "success": true, "error": null, "duration_ms": 0
+        }]
+    });
+    std::fs::write(&session, serde_json::to_string(&json).unwrap()).unwrap();
+    p2a()
+        .args([
+            "script",
+            "export",
+            session.to_str().unwrap(),
+            "-o",
+            script.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let text = std::fs::read_to_string(&script).unwrap();
+    assert_only_intended_lines(&text, 1);
+    assert!(text.contains("# t\\ntouch injected_title\n"));
+    assert!(text.contains("# p2a version: 0.1.3\\ntouch injected_version\n"));
+    assert!(text.contains("# legacy\\ntouch injected_comment\n"));
+    assert!(
+        text.contains(
+            "p2a --session \"$SESSION_FILE\" 'data;touch injected_category;' describe $'d\\ntouch injected_arg'\n"
+        ),
+        "{text}"
+    );
+    #[cfg(unix)]
+    {
+        let args = replay_with_stub(tmp.path(), &script);
+        for m in [
+            "injected_title",
+            "injected_version",
+            "injected_comment",
+            "injected_category",
+            "injected_arg",
+        ] {
+            assert!(!tmp.path().join(m).exists(), "{m} was created");
+        }
+        assert_eq!(
+            args[2..],
+            [
+                "data;touch injected_category;",
+                "describe",
+                "d\ntouch injected_arg"
+            ]
+        );
+    }
 }
 
 /// Test that output formats can be specified.

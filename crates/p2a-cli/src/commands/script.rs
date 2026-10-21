@@ -3,12 +3,16 @@
 use clap::Subcommand;
 use std::path::PathBuf;
 
-use crate::output::{OutputFormat, print_error, print_message};
+use crate::output::{OutputFormat, print_error, print_message, shell_quote};
 use crate::session::Session;
 
 #[derive(Subcommand)]
 pub enum ScriptCommands {
     /// Export session to a reproducible bash script
+    ///
+    /// Every recorded string is written either as one escaped comment line or
+    /// as one quoted argument. Replaying a session file runs the p2a commands
+    /// it contains, so review a session from someone else like any script.
     Export {
         /// Session file to export
         session_file: PathBuf,
@@ -47,6 +51,13 @@ pub fn execute(cmd: &ScriptCommands, format: &OutputFormat) -> anyhow::Result<()
     }
 }
 
+/// Export a session file as a bash script.
+///
+/// Every recorded string (title, version, each command line and argument) is
+/// written either as one `# ` comment line with control characters escaped,
+/// or as one quoted argument on its command's line. Replaying a session file
+/// runs the p2a commands it contains, so a session from someone else should
+/// be reviewed like any script.
 fn execute_export(
     session_file: &PathBuf,
     output: &PathBuf,
@@ -62,51 +73,9 @@ fn execute_export(
         }
     };
 
-    // Generate the bash script
-    let mut script = String::new();
-
-    // Shebang and header
-    script.push_str("#!/bin/bash\n");
-    script.push_str("# p2a analytics script\n");
-
-    if let Some(title) = &session.title {
-        script.push_str(&format!("# {}\n", title));
-    }
-
-    script.push_str(&format!("# Generated: {}\n", session.updated_at));
-    script.push_str(&format!("# p2a version: {}\n", session.version));
-    script.push('\n');
-    script.push_str("set -euo pipefail\n");
-    script.push('\n');
-
-    // Create a temporary session file for the replay
+    // Generate the bash script, replaying into a temporary session file
     let temp_session = format!(".p2a_session_{}.json", uuid::Uuid::new_v4());
-    script.push_str(&format!("SESSION_FILE=\"{}\"\n", temp_session));
-    script.push('\n');
-
-    // Generate commands from the session
-    for record in &session.commands {
-        if comments {
-            script.push_str(&format!("# {}\n", record.command_line));
-        }
-
-        // Prefer the recorded argv (shell-escaped) for a faithful and
-        // injection-safe reproduction; fall back to reconstructing from the
-        // structured arguments for legacy records that predate `argv`.
-        let cmd = if !record.argv.is_empty() {
-            crate::output::shell_join(&record.argv)
-        } else {
-            reconstruct_command(record)
-        };
-        script.push_str(&format!("p2a --session \"$SESSION_FILE\" {}\n", cmd));
-        script.push('\n');
-    }
-
-    // Cleanup
-    script.push_str("# Cleanup temporary session file\n");
-    script.push_str("rm -f \"$SESSION_FILE\"\n");
-    script.push('\n');
-    script.push_str("echo \"Script completed successfully\"\n");
+    let script = render_script(&session, comments, &temp_session);
 
     // Write the script
     std::fs::write(output, &script)?;
@@ -130,6 +99,123 @@ fn execute_export(
     );
 
     Ok(())
+}
+
+/// Render the bash script for `session`, replaying into `temp_session`.
+fn render_script(session: &Session, comments: bool, temp_session: &str) -> String {
+    let mut script = String::new();
+
+    // Shebang and header
+    script.push_str("#!/bin/bash\n");
+    script.push_str("# p2a analytics script\n");
+
+    if let Some(title) = &session.title {
+        push_comment(&mut script, title);
+    }
+
+    script.push_str(&format!("# Generated: {}\n", session.updated_at));
+    script.push_str(&format!(
+        "# p2a version: {}\n",
+        comment_text(&session.version)
+    ));
+    script.push('\n');
+    script.push_str("set -euo pipefail\n");
+    script.push('\n');
+
+    // Create a temporary session file for the replay
+    script.push_str(&format!("SESSION_FILE=\"{}\"\n", temp_session));
+    script.push('\n');
+
+    // Generate commands from the session
+    for record in &session.commands {
+        if comments {
+            push_comment(&mut script, &record.command_line);
+        }
+
+        // Prefer the recorded argv (shell-escaped) for a faithful and
+        // injection-safe reproduction; fall back to reconstructing from the
+        // structured arguments for legacy records that predate `argv`.
+        let cmd = if !record.argv.is_empty() {
+            script_join(&record.argv)
+        } else {
+            reconstruct_command(record)
+        };
+        script.push_str(&format!("p2a --session \"$SESSION_FILE\" {}\n", cmd));
+        script.push('\n');
+    }
+
+    // Cleanup
+    script.push_str("# Cleanup temporary session file\n");
+    script.push_str("rm -f \"$SESSION_FILE\"\n");
+    script.push('\n');
+    script.push_str("echo \"Script completed successfully\"\n");
+
+    script
+}
+
+/// Text for a `# ` comment line, with control characters shown as escapes
+/// (`\n`, `\r`, `\t`, `\u{..}`), so the comment cannot end early.
+fn comment_text(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if c.is_control() {
+            out.extend(c.escape_default());
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Append `text` to the script as exactly one `# ` comment line.
+fn push_comment(script: &mut String, text: &str) {
+    script.push_str("# ");
+    script.push_str(&comment_text(text));
+    script.push('\n');
+}
+
+/// Quote one argument so that it stays on its command's line.
+///
+/// Arguments without control characters use [`shell_quote`] unchanged. An
+/// argument with a control character is written in bash ANSI-C quoting
+/// (`$'...'`): backslash and single quote are escaped, LF, CR and TAB become
+/// `\n`, `\r` and `\t`, and every other control character becomes `\xHH` per
+/// UTF-8 byte (`\x` rather than `\u`, which bash 3.2 does not support).
+fn script_quote(s: &str) -> String {
+    use std::fmt::Write as _;
+
+    if !s.chars().any(char::is_control) {
+        return shell_quote(s);
+    }
+    let mut out = String::with_capacity(s.len() + 3);
+    out.push_str("$'");
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '\'' => out.push_str("\\'"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() => {
+                let mut buf = [0u8; 4];
+                for b in c.encode_utf8(&mut buf).bytes() {
+                    // Writing to a String cannot fail.
+                    let _ = write!(out, "\\x{b:02x}");
+                }
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('\'');
+    out
+}
+
+/// [`script_quote`] each argument and join them with spaces.
+fn script_join(args: &[String]) -> String {
+    args.iter()
+        .map(|a| script_quote(a))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn execute_history(session_file: &PathBuf, format: &OutputFormat) -> anyhow::Result<()> {
@@ -240,39 +326,42 @@ fn execute_run(script_file: &PathBuf, format: &OutputFormat) -> anyhow::Result<(
 
 /// Reconstruct a CLI command from a CommandRecord
 fn reconstruct_command(record: &crate::session::CommandRecord) -> String {
-    use crate::output::shell_quote;
-
     // Quote a space-separated list of values, escaping each element.
     let quote_list = |vals: &[&str]| -> String {
         vals.iter()
-            .map(|v| shell_quote(v))
+            .map(|v| script_quote(v))
             .collect::<Vec<_>>()
             .join(" ")
     };
 
-    // Start with category and subcommand (method identifiers, not user data).
-    let mut cmd = format!("{} {}", record.category, record.subcommand);
+    // Start with category and subcommand. They come from the session file,
+    // so they are quoted like any other argument.
+    let mut cmd = format!(
+        "{} {}",
+        script_quote(&record.category),
+        script_quote(&record.subcommand)
+    );
 
     // Add arguments based on the stored JSON
     if let Some(args) = record.arguments.as_object() {
         // Dataset reference (first positional arg for most commands)
         if let Some(dataset) = args.get("dataset").and_then(|v| v.as_str()) {
-            cmd.push_str(&format!(" {}", shell_quote(dataset)));
+            cmd.push_str(&format!(" {}", script_quote(dataset)));
         }
 
         // Path (for data load)
         if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
-            cmd.push_str(&format!(" {}", shell_quote(path)));
+            cmd.push_str(&format!(" {}", script_quote(path)));
         }
 
         // Name
         if let Some(name) = args.get("name").and_then(|v| v.as_str()) {
-            cmd.push_str(&format!(" --name {}", shell_quote(name)));
+            cmd.push_str(&format!(" --name {}", script_quote(name)));
         }
 
         // Dependent variable
         if let Some(dep_var) = args.get("dep_var").and_then(|v| v.as_str()) {
-            cmd.push_str(&format!(" -y {}", shell_quote(dep_var)));
+            cmd.push_str(&format!(" -y {}", script_quote(dep_var)));
         }
 
         // Independent variables
@@ -285,32 +374,32 @@ fn reconstruct_command(record: &crate::session::CommandRecord) -> String {
 
         // Entity (for panel data)
         if let Some(entity) = args.get("entity").and_then(|v| v.as_str()) {
-            cmd.push_str(&format!(" --entity {}", shell_quote(entity)));
+            cmd.push_str(&format!(" --entity {}", script_quote(entity)));
         }
 
         // Time (for two-way FE)
         if let Some(time) = args.get("time").and_then(|v| v.as_str()) {
-            cmd.push_str(&format!(" --time {}", shell_quote(time)));
+            cmd.push_str(&format!(" --time {}", script_quote(time)));
         }
 
         // Cluster
         if let Some(cluster) = args.get("cluster").and_then(|v| v.as_str()) {
-            cmd.push_str(&format!(" --cluster {}", shell_quote(cluster)));
+            cmd.push_str(&format!(" --cluster {}", script_quote(cluster)));
         }
 
         // Robust SE type
         if let Some(robust) = args.get("robust").and_then(|v| v.as_str()) {
-            cmd.push_str(&format!(" --robust {}", shell_quote(robust)));
+            cmd.push_str(&format!(" --robust {}", script_quote(robust)));
         }
 
         // Output file
         if let Some(output) = args.get("output").and_then(|v| v.as_str()) {
-            cmd.push_str(&format!(" -o {}", shell_quote(output)));
+            cmd.push_str(&format!(" -o {}", script_quote(output)));
         }
 
         // Column
         if let Some(col) = args.get("col").and_then(|v| v.as_str()) {
-            cmd.push_str(&format!(" --col {}", shell_quote(col)));
+            cmd.push_str(&format!(" --col {}", script_quote(col)));
         }
 
         // Columns (multiple)
@@ -375,12 +464,101 @@ fn reconstruct_command(record: &crate::session::CommandRecord) -> String {
 
         // Treatment and post (for DiD)
         if let Some(treat) = args.get("treat").and_then(|v| v.as_str()) {
-            cmd.push_str(&format!(" --treat {}", shell_quote(treat)));
+            cmd.push_str(&format!(" --treat {}", script_quote(treat)));
         }
         if let Some(post) = args.get("post").and_then(|v| v.as_str()) {
-            cmd.push_str(&format!(" --post {}", shell_quote(post)));
+            cmd.push_str(&format!(" --post {}", script_quote(post)));
         }
     }
 
     cmd
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::session::CommandRecord;
+    use chrono::Utc;
+
+    fn record(
+        argv: &[&str],
+        command_line: &str,
+        category: &str,
+        subcommand: &str,
+        arguments: serde_json::Value,
+    ) -> CommandRecord {
+        CommandRecord {
+            id: "test".into(),
+            timestamp: Utc::now(),
+            command_line: command_line.into(),
+            category: category.into(),
+            subcommand: subcommand.into(),
+            arguments,
+            argv: argv.iter().map(|s| s.to_string()).collect(),
+            dataset_refs: vec![],
+            output_files: vec![],
+            success: true,
+            error: None,
+            duration_ms: 0,
+        }
+    }
+
+    #[test]
+    fn render_script_ordinary_session_is_unchanged() {
+        let mut s = Session::new();
+        s.title = Some("Demo".into());
+        s.version = "0.1.3".into();
+        s.updated_at = "2026-01-01T00:00:00Z".parse().unwrap();
+        s.commands.push(record(
+            &["data", "load", "d.csv", "--name", "d"],
+            "data load d.csv --name d",
+            "data",
+            "load",
+            serde_json::Value::Null,
+        ));
+        s.commands.push(record(
+            &[],
+            "reg ols d -y y -x x1 x2",
+            "reg",
+            "ols",
+            serde_json::json!({"dataset": "d", "dep_var": "y", "indep_vars": ["x1", "x2"], "robust": "hc1"}),
+        ));
+        assert_eq!(
+            render_script(&s, true, ".p2a_session_test.json"),
+            "#!/bin/bash\n# p2a analytics script\n# Demo\n# Generated: 2026-01-01 00:00:00 UTC\n# p2a version: 0.1.3\n\nset -euo pipefail\n\nSESSION_FILE=\".p2a_session_test.json\"\n\n# data load d.csv --name d\np2a --session \"$SESSION_FILE\" data load d.csv --name d\n\n# reg ols d -y y -x x1 x2\np2a --session \"$SESSION_FILE\" reg ols d -y y -x x1 x2 --robust hc1\n\n# Cleanup temporary session file\nrm -f \"$SESSION_FILE\"\n\necho \"Script completed successfully\"\n"
+        );
+    }
+
+    #[test]
+    fn comment_text_escapes_control_characters() {
+        assert_eq!(
+            comment_text("a\nb\rc\td\u{1b}[0m"),
+            "a\\nb\\rc\\td\\u{1b}[0m"
+        );
+        assert_eq!(comment_text("C:\\data\\x.csv"), "C:\\data\\x.csv");
+        assert_eq!(comment_text("plain 'quoted' text"), "plain 'quoted' text");
+    }
+
+    #[test]
+    fn script_quote_keeps_arguments_on_one_line() {
+        assert_eq!(script_quote("plain"), "plain");
+        assert_eq!(script_quote("two words"), "'two words'");
+        assert_eq!(script_quote("x\ny"), "$'x\\ny'");
+        assert_eq!(script_quote("it's\tok"), "$'it\\'s\\tok'");
+        assert_eq!(script_quote("a\\b\r"), "$'a\\\\b\\r'");
+        assert_eq!(script_quote("\u{1b}[1m"), "$'\\x1b[1m'");
+        assert_eq!(script_quote("\u{85}"), "$'\\xc2\\x85'");
+    }
+
+    #[test]
+    fn reconstruct_command_quotes_legacy_fields() {
+        let r = record(
+            &[],
+            "x",
+            "data;touch x;",
+            "describe",
+            serde_json::json!({"dataset": "d\ny"}),
+        );
+        assert_eq!(reconstruct_command(&r), "'data;touch x;' describe $'d\\ny'");
+    }
 }
