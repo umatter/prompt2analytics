@@ -11,12 +11,19 @@
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
 use axum::Router;
-use axum::routing::get;
-use p2a_mcp::llm::LlmError;
+use axum::http::{StatusCode, header};
+use axum::routing::{any, get, post};
 use p2a_mcp::llm::egress::{EgressPolicy, GuardedResolver, Lookup, guarded_client_builder};
+use p2a_mcp::llm::{
+    LlmError, LlmProvider, LlmSettings, Message, OllamaProvider, ProviderConfig, ProviderType,
+    RetryConfig, ToolExecutor, send_with_retry,
+};
+use p2a_mcp::tools::limits::Limits;
 use reqwest::dns::Resolve;
+use serde_json::Value;
 
 /// Bind `127.0.0.1:0` and serve `router` on it in the background.
 async fn spawn_stub(router: Router) -> SocketAddr {
@@ -153,4 +160,256 @@ async fn guarded_client_never_connects_to_a_denied_address() {
             .is_success()
     );
     assert_eq!(hits.load(Ordering::SeqCst), 1);
+}
+
+// ---------------------------------------------------------------------------
+// Task 2: redirects, upstream errors, retries, timeouts, response caps
+// ---------------------------------------------------------------------------
+
+fn off_settings() -> LlmSettings {
+    LlmSettings::from_limits(&Limits::off(), None)
+}
+
+/// An Ollama provider pointed at a stub. Off allows loopback for Ollama, and
+/// an IP-literal host never reaches the resolver.
+fn ollama(addr: SocketAddr, s: &LlmSettings) -> OllamaProvider {
+    OllamaProvider::with_settings(
+        ProviderConfig {
+            provider_type: ProviderType::Ollama,
+            base_url: Some(format!("http://{addr}")),
+            model: "stub".into(),
+            ..ProviderConfig::default()
+        },
+        s,
+    )
+}
+
+/// A tool executor that refuses every call.
+struct NoTools;
+
+#[async_trait::async_trait]
+impl ToolExecutor for NoTools {
+    async fn execute(&self, _name: &str, _arguments: Value) -> Result<String, String> {
+        Err("no tools".into())
+    }
+}
+
+/// A tool executor that answers every call with "ok".
+struct EchoTools;
+
+#[async_trait::async_trait]
+impl ToolExecutor for EchoTools {
+    async fn execute(&self, _name: &str, _arguments: Value) -> Result<String, String> {
+        Ok("ok".into())
+    }
+}
+
+fn counter() -> Arc<AtomicUsize> {
+    Arc::new(AtomicUsize::new(0))
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn redirects_are_not_followed() {
+    let after_hits = counter();
+    let a = after_hits.clone();
+    let addr = spawn_stub(
+        Router::new()
+            .route(
+                "/api/chat",
+                post(|| async {
+                    (
+                        StatusCode::TEMPORARY_REDIRECT,
+                        [(header::LOCATION, "/after")],
+                    )
+                }),
+            )
+            .route(
+                "/after",
+                any(move || {
+                    let a = a.clone();
+                    async move {
+                        a.fetch_add(1, Ordering::SeqCst);
+                        r#"{"message":{"role":"assistant","content":"ok"},"done":true}"#
+                    }
+                }),
+            ),
+    )
+    .await;
+    let err = ollama(addr, &off_settings())
+        .chat(&[Message::user("hi")], &[], &NoTools, true)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, LlmError::Upstream { status: 307, .. }),
+        "{err}"
+    );
+    assert_eq!(after_hits.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn upstream_error_bodies_are_not_reflected() {
+    let addr = spawn_stub(Router::new().route(
+        "/api/chat",
+        post(|| async {
+            (
+                StatusCode::UNAUTHORIZED,
+                "UPSTREAM_BODY_MARKER internal detail",
+            )
+        }),
+    ))
+    .await;
+    let err = ollama(addr, &off_settings())
+        .chat(&[Message::user("hi")], &[], &NoTools, true)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "Ollama returned HTTP 401; check the API key"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn server_errors_are_retried_at_most_three_times() {
+    let hits = counter();
+    let h = hits.clone();
+    let addr = spawn_stub(Router::new().route(
+        "/api/chat",
+        post(move || {
+            let h = h.clone();
+            async move {
+                h.fetch_add(1, Ordering::SeqCst);
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    [(header::RETRY_AFTER, "0")],
+                    "UPSTREAM_BODY_MARKER",
+                )
+            }
+        }),
+    ))
+    .await;
+    let err = ollama(addr, &off_settings())
+        .chat(&[Message::user("hi")], &[], &NoTools, true)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, LlmError::Upstream { status: 503, .. }),
+        "{err}"
+    );
+    assert!(!err.to_string().contains("UPSTREAM_BODY_MARKER"));
+    assert_eq!(hits.load(Ordering::SeqCst), 3);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn completion_timeout_is_not_retried() {
+    let hits = counter();
+    let h = hits.clone();
+    let addr = spawn_stub(Router::new().route(
+        "/api/chat",
+        post(move || {
+            let h = h.clone();
+            async move {
+                h.fetch_add(1, Ordering::SeqCst);
+                std::future::pending::<()>().await;
+                "never"
+            }
+        }),
+    ))
+    .await;
+    let s = LlmSettings {
+        timeout: Duration::from_millis(300),
+        ..off_settings()
+    };
+    let err = ollama(addr, &s)
+        .chat(&[Message::user("hi")], &[], &NoTools, true)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, LlmError::Timeout), "{err}");
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn connect_errors_are_retried_before_send() {
+    // A port that was free a moment ago: the listener closes on drop.
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let client = guarded_client_builder(GuardedResolver::new(open_policy(), true))
+        .build()
+        .unwrap();
+    let n = AtomicUsize::new(0);
+    let cfg = RetryConfig {
+        max_retries: 2,
+        initial_delay_ms: 1,
+        max_delay_ms: 5,
+        backoff_factor: 2.0,
+    };
+    let res = send_with_retry(
+        || {
+            n.fetch_add(1, Ordering::SeqCst);
+            client.post(format!("http://127.0.0.1:{port}/api/chat"))
+        },
+        &cfg,
+    )
+    .await;
+    assert!(matches!(res, Err(LlmError::NetworkError(_))), "{res:?}");
+    assert_eq!(n.load(Ordering::SeqCst), 3);
+    assert_eq!(RetryConfig::default().max_retries, 2);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn egress_denial_is_not_retried() {
+    let hits = counter();
+    let h = hits.clone();
+    let addr = spawn_stub(Router::new().route(
+        "/api/chat",
+        post(move || {
+            let h = h.clone();
+            async move {
+                h.fetch_add(1, Ordering::SeqCst);
+                "{}"
+            }
+        }),
+    ))
+    .await;
+    let client = guarded_client_builder(GuardedResolver::with_lookup(
+        open_policy(),
+        false,
+        fake_lookup(counter()),
+    ))
+    .build()
+    .unwrap();
+    let n = AtomicUsize::new(0);
+    let cfg = RetryConfig {
+        max_retries: 2,
+        initial_delay_ms: 1,
+        max_delay_ms: 5,
+        backoff_factor: 2.0,
+    };
+    let url = format!("http://internal.test:{}/api/chat", addr.port());
+    let res = send_with_retry(
+        || {
+            n.fetch_add(1, Ordering::SeqCst);
+            client.post(&url)
+        },
+        &cfg,
+    )
+    .await;
+    assert!(matches!(res, Err(LlmError::EgressDenied(_))), "{res:?}");
+    assert_eq!(n.load(Ordering::SeqCst), 1);
+    assert_eq!(hits.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oversized_upstream_body_is_refused() {
+    let addr = spawn_stub(
+        Router::new().route("/api/chat", post(|| async { vec![b'x'; 9 * 1024 * 1024] })),
+    )
+    .await;
+    let err = ollama(addr, &off_settings())
+        .chat(&[Message::user("hi")], &[], &NoTools, true)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, LlmError::ResponseTooLarge(_)), "{err}");
 }

@@ -2,6 +2,8 @@
 //!
 //! Connects to Anthropic's Messages API for LLM inference with tool calling support.
 
+use super::LlmSettings;
+use super::retry::{MAX_UPSTREAM_BODY_BYTES, count_streamed, read_json_capped, upstream_error};
 use super::{
     LlmError, LlmProvider, Message, MessageRole, ProviderConfig, ProviderType, StreamChunk,
     ToolCall, ToolDefinition, ToolExecutor, ToolResult, build_http_client,
@@ -13,21 +15,41 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::hash::{Hash, Hasher};
 
+/// The name used in upstream error messages.
+const PROVIDER: &str = "Anthropic";
+
 /// Anthropic provider for LLM inference.
 pub struct AnthropicProvider {
-    client: Client,
+    /// `None` when the guarded client could not be built; every call then
+    /// fails with [`LlmError::NotAvailable`].
+    client: Option<Client>,
     config: ProviderConfig,
+    /// Total time allowed for one non-streaming call.
+    timeout: std::time::Duration,
 }
 
 impl AnthropicProvider {
-    /// Create a new Anthropic provider with the given configuration.
-    ///
-    /// Uses a `reqwest::Client` built with explicit connect/request timeouts.
+    /// Create a new Anthropic provider with the server's current LLM
+    /// settings.
     pub fn new(config: ProviderConfig) -> Self {
+        Self::with_settings(config, &LlmSettings::current())
+    }
+
+    /// Create a new Anthropic provider with explicit LLM settings (egress
+    /// policy, timeout).
+    pub fn with_settings(config: ProviderConfig, settings: &LlmSettings) -> Self {
         Self {
-            client: build_http_client("Anthropic"),
+            client: build_http_client(ProviderType::Anthropic, settings),
             config,
+            timeout: settings.timeout,
         }
+    }
+
+    /// The HTTP client, or `NotAvailable` when it could not be built.
+    fn client(&self) -> Result<&Client, LlmError> {
+        self.client.as_ref().ok_or_else(|| {
+            LlmError::NotAvailable("the HTTP client could not be initialised".to_string())
+        })
     }
 
     /// Get the base URL for the Anthropic API.
@@ -313,11 +335,13 @@ impl AnthropicProvider {
         );
 
         let retry_config = super::retry::RetryConfig::default();
-        let client = &self.client;
+        let client = self.client()?;
+        let timeout = self.timeout;
         let response = super::retry::send_with_retry(
             || {
                 client
                     .post(&url)
+                    .timeout(timeout)
                     .header("x-api-key", api_key)
                     .header("anthropic-version", "2023-06-01")
                     .header("Content-Type", "application/json")
@@ -328,15 +352,11 @@ impl AnthropicProvider {
         .await?;
 
         if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            return Err(LlmError::ApiError(format!(
-                "Anthropic API error ({}): {}",
-                status, body
-            )));
+            return Err(upstream_error(PROVIDER, response).await);
         }
 
-        let chat_response: AnthropicChatResponse = response.json().await?;
+        let chat_response: AnthropicChatResponse =
+            read_json_capped(response, MAX_UPSTREAM_BODY_BYTES).await?;
 
         // Parse the response content blocks
         let mut text_content = String::new();
@@ -395,8 +415,10 @@ impl AnthropicProvider {
             stream: Some(true),
         };
 
+        // No total timeout: a stream is bounded by the client's per-read
+        // (idle) timeout and the response-size cap.
         let retry_config = super::retry::RetryConfig::default();
-        let client = &self.client;
+        let client = self.client()?;
         let response = super::retry::send_with_retry(
             || {
                 client
@@ -411,12 +433,7 @@ impl AnthropicProvider {
         .await?;
 
         if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            return Err(LlmError::ApiError(format!(
-                "Anthropic API error ({}): {}",
-                status, body
-            )));
+            return Err(upstream_error(PROVIDER, response).await);
         }
 
         // Process SSE stream
@@ -427,9 +444,11 @@ impl AnthropicProvider {
         let mut current_tool_id = String::new();
         let mut current_tool_name = String::new();
         let mut current_tool_input = String::new();
+        let mut received = 0usize;
 
         while let Some(chunk_result) = stream.next().await {
-            let chunk = chunk_result.map_err(|e| LlmError::NetworkError(e.to_string()))?;
+            let chunk = chunk_result?;
+            count_streamed(&mut received, chunk.len())?;
             let chunk_str = String::from_utf8_lossy(&chunk);
             buffer.push_str(&chunk_str);
 

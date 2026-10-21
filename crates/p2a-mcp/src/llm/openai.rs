@@ -2,6 +2,8 @@
 //!
 //! Connects to OpenAI's Chat Completions API for LLM inference with tool calling support.
 
+use super::LlmSettings;
+use super::retry::{MAX_UPSTREAM_BODY_BYTES, count_streamed, read_json_capped, upstream_error};
 use super::{
     LlmError, LlmProvider, Message, MessageRole, ProviderConfig, ProviderType, StreamChunk,
     ToolCall, ToolDefinition, ToolExecutor, ToolResult, build_http_client,
@@ -14,23 +16,41 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 
+/// The name used in upstream error messages.
+const PROVIDER: &str = "OpenAI";
+
 /// OpenAI provider for LLM inference.
 pub struct OpenAIProvider {
-    client: Client,
+    /// `None` when the guarded client could not be built; every call then
+    /// fails with [`LlmError::NotAvailable`].
+    client: Option<Client>,
     config: ProviderConfig,
+    /// Total time allowed for one non-streaming call.
+    timeout: std::time::Duration,
 }
 
 impl OpenAIProvider {
-    /// Create a new OpenAI provider with the given configuration.
-    ///
-    /// The underlying `reqwest::Client` is built with explicit connect and
-    /// request timeouts so that a hung OpenAI endpoint cannot block the SSE
-    /// stream indefinitely.
+    /// Create a new OpenAI provider with the server's current LLM settings.
     pub fn new(config: ProviderConfig) -> Self {
+        Self::with_settings(config, &LlmSettings::current())
+    }
+
+    /// Create a new OpenAI provider with explicit LLM settings (egress
+    /// policy, timeout). The client follows no redirects, and a hung
+    /// endpoint is bounded by the timeout.
+    pub fn with_settings(config: ProviderConfig, settings: &LlmSettings) -> Self {
         Self {
-            client: build_http_client("OpenAI"),
+            client: build_http_client(ProviderType::OpenAI, settings),
             config,
+            timeout: settings.timeout,
         }
+    }
+
+    /// The HTTP client, or `NotAvailable` when it could not be built.
+    fn client(&self) -> Result<&Client, LlmError> {
+        self.client.as_ref().ok_or_else(|| {
+            LlmError::NotAvailable("the HTTP client could not be initialised".to_string())
+        })
     }
 
     /// Get the base URL for the OpenAI API.
@@ -306,12 +326,14 @@ impl OpenAIProvider {
         };
 
         let retry_config = super::retry::RetryConfig::default();
-        let client = &self.client;
+        let client = self.client()?;
+        let timeout = self.timeout;
         let auth_header = format!("Bearer {}", api_key);
         let response = super::retry::send_with_retry(
             || {
                 client
                     .post(&url)
+                    .timeout(timeout)
                     .header("Authorization", &auth_header)
                     .header("Content-Type", "application/json")
                     .json(&request_body)
@@ -321,15 +343,11 @@ impl OpenAIProvider {
         .await?;
 
         if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            return Err(LlmError::ApiError(format!(
-                "OpenAI API error ({}): {}",
-                status, body
-            )));
+            return Err(upstream_error(PROVIDER, response).await);
         }
 
-        let chat_response: OpenAIChatResponse = response.json().await?;
+        let chat_response: OpenAIChatResponse =
+            read_json_capped(response, MAX_UPSTREAM_BODY_BYTES).await?;
 
         // Get the first choice
         let choice = chat_response
@@ -389,8 +407,10 @@ impl OpenAIProvider {
             stream: Some(true),
         };
 
+        // No total timeout: a stream is bounded by the client's per-read
+        // (idle) timeout and the response-size cap.
         let retry_config = super::retry::RetryConfig::default();
-        let client = &self.client;
+        let client = self.client()?;
         let auth_header = format!("Bearer {}", api_key);
         let response = super::retry::send_with_retry(
             || {
@@ -405,24 +425,21 @@ impl OpenAIProvider {
         .await?;
 
         if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            return Err(LlmError::ApiError(format!(
-                "OpenAI API error ({}): {}",
-                status, body
-            )));
+            return Err(upstream_error(PROVIDER, response).await);
         }
 
         // Process SSE stream
         let mut stream = response.bytes_stream();
         let mut buffer = String::new();
         let mut content = String::new();
+        let mut received = 0usize;
 
         // For accumulating tool calls across chunks
         let mut tool_calls_map: HashMap<usize, (String, String, String)> = HashMap::new(); // index -> (id, name, arguments)
 
         while let Some(chunk_result) = stream.next().await {
-            let chunk = chunk_result.map_err(|e| LlmError::NetworkError(e.to_string()))?;
+            let chunk = chunk_result?;
+            count_streamed(&mut received, chunk.len())?;
             let chunk_str = String::from_utf8_lossy(&chunk);
             buffer.push_str(&chunk_str);
 
@@ -679,22 +696,19 @@ impl LlmProvider for OpenAIProvider {
         let api_key = self.api_key()?;
 
         let response = self
-            .client
+            .client()?
             .get(&url)
+            .timeout(self.timeout)
             .header("Authorization", format!("Bearer {}", api_key))
             .send()
             .await?;
 
         if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            return Err(LlmError::ApiError(format!(
-                "OpenAI API error ({}): {}",
-                status, body
-            )));
+            return Err(upstream_error(PROVIDER, response).await);
         }
 
-        let models_response: OpenAIModelsResponse = response.json().await?;
+        let models_response: OpenAIModelsResponse =
+            read_json_capped(response, MAX_UPSTREAM_BODY_BYTES).await?;
 
         // Filter to chat models only
         let chat_models: Vec<String> = models_response

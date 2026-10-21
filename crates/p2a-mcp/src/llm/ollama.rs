@@ -2,6 +2,8 @@
 //!
 //! Connects to a local Ollama instance for LLM inference with tool calling support.
 
+use super::LlmSettings;
+use super::retry::{MAX_UPSTREAM_BODY_BYTES, count_streamed, read_json_capped, upstream_error};
 use super::{
     LlmError, LlmProvider, Message, MessageRole, ProviderConfig, ProviderType, StreamChunk,
     ToolCall, ToolDefinition, ToolExecutor, ToolResult, build_http_client,
@@ -13,21 +15,40 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::hash::{Hash, Hasher};
 
+/// The name used in upstream error messages.
+const PROVIDER: &str = "Ollama";
+
 /// Ollama provider for local LLM inference.
 pub struct OllamaProvider {
-    client: Client,
+    /// `None` when the guarded client could not be built; every call then
+    /// fails with [`LlmError::NotAvailable`].
+    client: Option<Client>,
     config: ProviderConfig,
+    /// Total time allowed for one non-streaming call.
+    timeout: std::time::Duration,
 }
 
 impl OllamaProvider {
-    /// Create a new Ollama provider with the given configuration.
-    ///
-    /// Uses a `reqwest::Client` built with explicit connect/request timeouts.
+    /// Create a new Ollama provider with the server's current LLM settings.
     pub fn new(config: ProviderConfig) -> Self {
+        Self::with_settings(config, &LlmSettings::current())
+    }
+
+    /// Create a new Ollama provider with explicit LLM settings (egress
+    /// policy, timeout).
+    pub fn with_settings(config: ProviderConfig, settings: &LlmSettings) -> Self {
         Self {
-            client: build_http_client("Ollama"),
+            client: build_http_client(ProviderType::Ollama, settings),
             config,
+            timeout: settings.timeout,
         }
+    }
+
+    /// The HTTP client, or `NotAvailable` when it could not be built.
+    fn client(&self) -> Result<&Client, LlmError> {
+        self.client.as_ref().ok_or_else(|| {
+            LlmError::NotAvailable("the HTTP client could not be initialised".to_string())
+        })
     }
 
     /// Get the base URL for the Ollama API.
@@ -277,21 +298,20 @@ impl OllamaProvider {
         };
 
         let retry_config = super::retry::RetryConfig::default();
-        let client = &self.client;
-        let response =
-            super::retry::send_with_retry(|| client.post(&url).json(&request_body), &retry_config)
-                .await?;
+        let client = self.client()?;
+        let timeout = self.timeout;
+        let response = super::retry::send_with_retry(
+            || client.post(&url).timeout(timeout).json(&request_body),
+            &retry_config,
+        )
+        .await?;
 
         if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            return Err(LlmError::ApiError(format!(
-                "Ollama API error ({}): {}",
-                status, body
-            )));
+            return Err(upstream_error(PROVIDER, response).await);
         }
 
-        let chat_response: OllamaChatResponse = response.json().await?;
+        let chat_response: OllamaChatResponse =
+            read_json_capped(response, MAX_UPSTREAM_BODY_BYTES).await?;
 
         // Convert response to our Message format
         let tool_calls = chat_response.message.tool_calls.map(|tcs| {
@@ -340,27 +360,26 @@ impl OllamaProvider {
             }),
         };
 
+        // No total timeout: a stream is bounded by the client's per-read
+        // (idle) timeout and the response-size cap.
         let retry_config = super::retry::RetryConfig::default();
-        let client = &self.client;
+        let client = self.client()?;
         let response =
             super::retry::send_with_retry(|| client.post(&url).json(&request_body), &retry_config)
                 .await?;
 
         if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            return Err(LlmError::ApiError(format!(
-                "Ollama API error ({}): {}",
-                status, body
-            )));
+            return Err(upstream_error(PROVIDER, response).await);
         }
 
         let mut stream = response.bytes_stream();
         let mut full_content = String::new();
         let mut tool_calls: Option<Vec<ToolCall>> = None;
+        let mut received = 0usize;
 
         while let Some(chunk_result) = stream.next().await {
             let chunk = chunk_result?;
+            count_streamed(&mut received, chunk.len())?;
             let text = String::from_utf8_lossy(&chunk);
 
             // Ollama streams JSON objects, one per line
@@ -424,7 +443,10 @@ impl LlmProvider for OllamaProvider {
 
     async fn is_available(&self) -> Result<bool, LlmError> {
         let url = format!("{}/api/tags", self.base_url());
-        match self.client.get(&url).send().await {
+        let Ok(client) = self.client() else {
+            return Ok(false);
+        };
+        match client.get(&url).timeout(self.timeout).send().await {
             Ok(response) => Ok(response.status().is_success()),
             Err(_) => Ok(false),
         }
@@ -432,7 +454,12 @@ impl LlmProvider for OllamaProvider {
 
     async fn list_models(&self) -> Result<Vec<String>, LlmError> {
         let url = format!("{}/api/tags", self.base_url());
-        let response = self.client.get(&url).send().await?;
+        let response = self
+            .client()?
+            .get(&url)
+            .timeout(self.timeout)
+            .send()
+            .await?;
 
         if !response.status().is_success() {
             return Err(LlmError::NotAvailable(
@@ -440,7 +467,7 @@ impl LlmProvider for OllamaProvider {
             ));
         }
 
-        let tags: OllamaTagsResponse = response.json().await?;
+        let tags: OllamaTagsResponse = read_json_capped(response, MAX_UPSTREAM_BODY_BYTES).await?;
         Ok(tags.models.into_iter().map(|m| m.name).collect())
     }
 

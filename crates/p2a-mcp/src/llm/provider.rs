@@ -244,14 +244,54 @@ pub enum LlmError {
     /// The egress policy refused the provider host.
     #[error("{0}")]
     EgressDenied(String),
+
+    /// The provider answered with a non-success status. The body is never
+    /// part of the error.
+    #[error("{provider} returned HTTP {status}; {}", upstream_hint(*.status))]
+    Upstream { provider: &'static str, status: u16 },
+
+    /// The provider did not answer within `llm_timeout_secs`.
+    #[error("The LLM provider did not respond in time")]
+    Timeout,
+
+    /// The provider's response body exceeded the size cap.
+    #[error("The LLM provider's response exceeded {0} bytes")]
+    ResponseTooLarge(usize),
+}
+
+/// What a caller can do about an upstream status.
+fn upstream_hint(status: u16) -> &'static str {
+    match status {
+        300..=399 => {
+            "the provider redirected the request, and redirects are not followed; set base_url \
+             to the final endpoint"
+        }
+        400 => {
+            "the provider rejected the request; the conversation or the dataset context may be \
+             too long for this model"
+        }
+        401 | 403 => "check the API key",
+        404 => "check the model name and base_url",
+        408 => "the provider timed out; try again",
+        413 => "the request is too large for this provider",
+        422 => "the provider rejected the request parameters",
+        429 => "the provider is rate limiting requests; try again later",
+        500..=599 => "the provider is unavailable; try again later",
+        _ => "unexpected response from the provider",
+    }
 }
 
 impl From<reqwest::Error> for LlmError {
+    /// An egress refusal anywhere in the source chain, a timeout after
+    /// connecting, or a network error without the URL.
     fn from(err: reqwest::Error) -> Self {
         if let Some(denied) = super::egress::find_egress_error(&err) {
             return LlmError::EgressDenied(denied.0.clone());
         }
-        LlmError::NetworkError(err.to_string())
+        if err.is_timeout() && !err.is_connect() {
+            return LlmError::Timeout;
+        }
+        LlmError::NetworkError(err.without_url().to_string())
     }
 }
 
@@ -345,5 +385,27 @@ mod base_url_tests {
     #[test]
     fn rejects_malformed_url() {
         assert!(validate_base_url(ProviderType::OpenAI, "not a url").is_err());
+    }
+
+    #[test]
+    fn upstream_error_display() {
+        use super::LlmError;
+        assert_eq!(
+            LlmError::Upstream {
+                provider: "OpenAI",
+                status: 401
+            }
+            .to_string(),
+            "OpenAI returned HTTP 401; check the API key"
+        );
+        assert_eq!(
+            LlmError::Upstream {
+                provider: "Anthropic",
+                status: 400
+            }
+            .to_string(),
+            "Anthropic returned HTTP 400; the provider rejected the request; the conversation \
+             or the dataset context may be too long for this model"
+        );
     }
 }
