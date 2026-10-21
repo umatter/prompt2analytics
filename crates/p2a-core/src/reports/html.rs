@@ -35,10 +35,16 @@ pub enum ReportContent {
     /// Plain text paragraph
     Text { text: String },
     /// Markdown text (will be converted to HTML)
+    ///
+    /// Only a small subset is supported: `#`, `##` and `###` headers, `- ` and
+    /// `* ` list items, `**bold**` and fenced code blocks. All text is
+    /// HTML-escaped; raw HTML is not passed through.
     Markdown { markdown: String },
     /// Pre-formatted code block
     Code {
         code: String,
+        /// Language name, emitted as `class="language-<name>"` only when it is
+        /// 1 to 64 characters from `[A-Za-z0-9_+-]`; anything else is dropped.
         language: Option<String>,
     },
     /// Data table
@@ -46,6 +52,9 @@ pub enum ReportContent {
     /// Chart image (base64 encoded PNG)
     Chart {
         title: Option<String>,
+        /// Standard base64 PNG data, optionally with a `data:image/png;base64,`
+        /// prefix (ASCII whitespace is ignored). Invalid data renders a
+        /// "Chart omitted" placeholder instead of an image.
         image_base64: String,
         caption: Option<String>,
     },
@@ -282,8 +291,8 @@ fn render_content(content: &ReportContent) -> String {
         }
         ReportContent::Code { code, language } => {
             let lang_class = language
-                .as_ref()
-                .map(|l| format!(" class=\"language-{}\"", l))
+                .as_deref()
+                .and_then(code_language_class)
                 .unwrap_or_default();
             format!(
                 "            <pre><code{}>{}</code></pre>\n",
@@ -304,10 +313,15 @@ fn render_content(content: &ReportContent) -> String {
                     escape_html(t)
                 ));
             }
-            html.push_str(&format!(
-                "                <img src=\"data:image/png;base64,{}\" alt=\"Chart\">\n",
-                image_base64
-            ));
+            match normalize_base64_png(image_base64) {
+                Some(data) => html.push_str(&format!(
+                    "                <img src=\"data:image/png;base64,{}\" alt=\"Chart\">\n",
+                    data
+                )),
+                None => html.push_str(
+                    "                <p class=\"chart-error\">Chart omitted: the image data is not valid base64.</p>\n",
+                ),
+            }
             if let Some(c) = caption {
                 html.push_str(&format!(
                     "                <figcaption>{}</figcaption>\n",
@@ -406,7 +420,63 @@ fn escape_html(s: &str) -> String {
         .replace('\'', "&#39;")
 }
 
+/// The ` class="language-..."` attribute for a code block, or `None` when the
+/// language is not 1 to 64 characters from `[A-Za-z0-9_+-]`.
+fn code_language_class(lang: &str) -> Option<String> {
+    let valid = (1..=64).contains(&lang.len())
+        && lang
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '+' | '-'));
+    valid.then(|| format!(" class=\"language-{}\"", escape_html(lang)))
+}
+
+/// Normalise chart data to bare standard base64, or `None` if it is not valid.
+///
+/// One leading `data:image/png;base64,` prefix and all ASCII whitespace are
+/// removed. The rest must be non-empty `[A-Za-z0-9+/]` followed by at most two
+/// `=` padding characters, with nothing after the padding.
+fn normalize_base64_png(s: &str) -> Option<String> {
+    let s = s.strip_prefix("data:image/png;base64,").unwrap_or(s);
+    let data: String = s.chars().filter(|c| !c.is_ascii_whitespace()).collect();
+    let body = data.trim_end_matches('=');
+    let padding = data.len() - body.len();
+    let valid = !body.is_empty()
+        && padding <= 2
+        && body
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/');
+    valid.then_some(data)
+}
+
+/// Escape a line of Markdown text and render its `**bold**` pairs.
+///
+/// Markers are paired left to right into `<strong>`/`</strong>`; an unpaired
+/// trailing `**` stays literal.
+fn render_inline(text: &str) -> String {
+    let escaped = escape_html(text);
+    let parts: Vec<&str> = escaped.split("**").collect();
+    let markers = parts.len() - 1;
+    let paired = markers - markers % 2;
+    let mut out = String::with_capacity(escaped.len() + markers * 8);
+    for (i, part) in parts.iter().enumerate() {
+        if i > 0 {
+            let marker = i - 1;
+            out.push_str(if marker >= paired {
+                "**"
+            } else if marker % 2 == 0 {
+                "<strong>"
+            } else {
+                "</strong>"
+            });
+        }
+        out.push_str(part);
+    }
+    out
+}
+
 /// Simple markdown to HTML conversion (basic support).
+///
+/// All text is HTML-escaped; see [`ReportContent::Markdown`] for the subset.
 fn simple_markdown_to_html(md: &str) -> String {
     let mut html = String::new();
     let mut in_code_block = false;
@@ -437,25 +507,17 @@ fn simple_markdown_to_html(md: &str) -> String {
         } else if line.starts_with("# ") {
             html.push_str(&format!("<h3>{}</h3>\n", escape_html(&line[2..])));
         }
-        // Bold
-        else if line.contains("**") {
-            let processed = line
-                .replace("**", "<strong>")
-                .replace("<strong>", "</strong>");
-            // This is a simple approach - proper parsing would be more complex
-            html.push_str(&format!("<p>{}</p>\n", processed));
-        }
-        // List items
+        // List items (checked before inline formatting so bold items stay items)
         else if line.starts_with("- ") || line.starts_with("* ") {
-            html.push_str(&format!("<li>{}</li>\n", escape_html(&line[2..])));
+            html.push_str(&format!("<li>{}</li>\n", render_inline(&line[2..])));
         }
         // Empty line
         else if line.trim().is_empty() {
             html.push_str("<br>\n");
         }
-        // Regular paragraph
+        // Regular paragraph, with **bold** pairs
         else {
-            html.push_str(&format!("<p>{}</p>\n", escape_html(line)));
+            html.push_str(&format!("<p>{}</p>\n", render_inline(line)));
         }
     }
 
@@ -783,5 +845,148 @@ mod tests {
         let escaped = escape_html(text);
         assert!(!escaped.contains("<script>"));
         assert!(escaped.contains("&lt;script&gt;"));
+    }
+
+    #[test]
+    fn test_ordinary_content_is_unchanged() {
+        let p12 = " ".repeat(12);
+        let p16 = " ".repeat(16);
+        assert_eq!(
+            render_content(&ReportContent::Text {
+                text: "Hello".into()
+            }),
+            format!("{p12}<p>Hello</p>\n")
+        );
+        assert_eq!(
+            render_content(&ReportContent::Code {
+                code: "let x = 1;".into(),
+                language: Some("rust".into())
+            }),
+            format!("{p12}<pre><code class=\"language-rust\">let x = 1;</code></pre>\n")
+        );
+        assert_eq!(
+            render_content(&ReportContent::Code {
+                code: "x".into(),
+                language: None
+            }),
+            format!("{p12}<pre><code>x</code></pre>\n")
+        );
+        assert_eq!(
+            render_content(&ReportContent::Chart {
+                title: Some("Fit".into()),
+                image_base64: "iVBORw0KGgo=".into(),
+                caption: Some("Note".into())
+            }),
+            format!(
+                "{p12}<figure class=\"chart\">\n{p16}<figcaption class=\"chart-title\">Fit</figcaption>\n{p16}<img src=\"data:image/png;base64,iVBORw0KGgo=\" alt=\"Chart\">\n{p16}<figcaption>Note</figcaption>\n{p12}</figure>\n"
+            )
+        );
+        assert_eq!(
+            simple_markdown_to_html("# Title\n- item\nplain & text\n\n```\ncode\n```"),
+            "<h3>Title</h3>\n<li>item</li>\n<p>plain &amp; text</p>\n<br>\n<pre><code>code\n</code></pre>\n"
+        );
+    }
+
+    #[test]
+    fn test_code_language_is_restricted() {
+        let p12 = " ".repeat(12);
+        let hostile = ReportContent::Code {
+            code: "x".into(),
+            language: Some("r\"><b>INJ</b><x \"".into()),
+        };
+        assert_eq!(
+            render_content(&hostile),
+            format!("{p12}<pre><code>x</code></pre>\n")
+        );
+        for ok in ["c++", "objective-c", "r", "Python_3"] {
+            let html = render_content(&ReportContent::Code {
+                code: "x".into(),
+                language: Some(ok.into()),
+            });
+            assert!(
+                html.contains(&format!("<code class=\"language-{ok}\">")),
+                "{html}"
+            );
+        }
+        let long = "x".repeat(65);
+        for bad in ["", "c#", "a b", long.as_str()] {
+            let html = render_content(&ReportContent::Code {
+                code: "x".into(),
+                language: Some(bad.to_string()),
+            });
+            assert!(
+                html.contains("<pre><code>x</code></pre>"),
+                "{bad:?} -> {html}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_chart_rejects_non_base64_data() {
+        let html = render_content(&ReportContent::Chart {
+            title: Some("T <1>".into()),
+            image_base64: "A\" data-inj=\"x".into(),
+            caption: Some("C".into()),
+        });
+        assert!(!html.contains("data-inj"), "{html}");
+        assert!(!html.contains("<img"), "{html}");
+        assert!(html.contains(
+            "<p class=\"chart-error\">Chart omitted: the image data is not valid base64.</p>"
+        ));
+        assert!(html.contains("T &lt;1&gt;") && html.contains("<figcaption>C</figcaption>"));
+        // a data-URL prefix and line breaks are normalised, not refused
+        let html = render_content(&ReportContent::Chart {
+            title: None,
+            image_base64: "data:image/png;base64,iVBORw0K\nGgo=".into(),
+            caption: None,
+        });
+        assert!(
+            html.contains("<img src=\"data:image/png;base64,iVBORw0KGgo=\" alt=\"Chart\">"),
+            "{html}"
+        );
+        for bad in [
+            "",
+            "====",
+            "iVBO=Rw",
+            "iVBO-Rw_",
+            "data:image/jpeg;base64,iVBO",
+        ] {
+            let html = render_content(&ReportContent::Chart {
+                title: None,
+                image_base64: bad.into(),
+                caption: None,
+            });
+            assert!(!html.contains("<img"), "{bad:?} -> {html}");
+        }
+    }
+
+    #[test]
+    fn test_markdown_bold_is_escaped_and_paired() {
+        assert_eq!(
+            simple_markdown_to_html("**Note** <i>raw</i>"),
+            "<p><strong>Note</strong> &lt;i&gt;raw&lt;/i&gt;</p>\n"
+        );
+        assert_eq!(
+            simple_markdown_to_html("a **b** c **d"),
+            "<p>a <strong>b</strong> c **d</p>\n"
+        );
+        assert_eq!(
+            simple_markdown_to_html("- **x** y"),
+            "<li><strong>x</strong> y</li>\n"
+        );
+        let doc = HtmlReport {
+            sections: vec![ReportSection {
+                title: "S".into(),
+                content: vec![ReportContent::Markdown {
+                    markdown: "**a** <b>INJ</b>".into(),
+                }],
+            }],
+            ..HtmlReport::new("R")
+        }
+        .to_html();
+        assert!(
+            !doc.contains("<b>INJ</b>") && !doc.contains("</strong>a</strong>"),
+            "{doc}"
+        );
     }
 }
