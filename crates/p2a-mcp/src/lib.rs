@@ -17,7 +17,6 @@ pub mod session;
 pub mod tools;
 pub mod transport;
 
-use std::sync::Arc;
 use tokio::sync::oneshot;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -195,73 +194,7 @@ async fn run_http_server_with_shutdown(
     config: ServerConfig,
     shutdown_rx: oneshot::Receiver<()>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    use crate::transport::http::AppState;
-
-    let session_manager = Arc::new(SessionManager::new(config.session.clone()));
-    session_manager.clone().start_cleanup_task(10);
-
-    let server = Arc::new(AnalyticsServer::new());
-
-    // Initialize audit logger
-    let audit_logger = match crate::audit::AuditLogger::new(&config.audit) {
-        Ok(logger) => Arc::new(logger),
-        Err(e) => {
-            tracing::warn!(
-                "Failed to initialize audit logger: {}. Proceeding without audit logging.",
-                e
-            );
-            Arc::new(crate::audit::AuditLogger::disabled())
-        }
-    };
-
-    #[cfg(feature = "db")]
-    let persistent_manager = {
-        let db_path = config.http.db_path.as_deref();
-        tracing::info!("Initializing database with path: {:?}", db_path);
-        match crate::persistent_session::PersistentSessionManager::new(
-            db_path,
-            config.session.max_sessions,
-            config.session.ttl_minutes,
-        )
-        .await
-        {
-            Ok(manager) => {
-                tracing::info!(
-                    "Database persistence enabled - conversation routes will be available"
-                );
-                Some(Arc::new(manager))
-            }
-            Err(e) => {
-                tracing::error!(
-                    "Failed to initialize database, running WITHOUT persistence (conversations disabled): {}",
-                    e
-                );
-                None
-            }
-        }
-    };
-
-    #[cfg(feature = "db")]
-    let state = AppState {
-        server,
-        session_manager,
-        persistent_manager: persistent_manager.clone(),
-        audit_logger: audit_logger.clone(),
-    };
-
-    #[cfg(not(feature = "db"))]
-    let state = AppState {
-        server,
-        session_manager,
-        audit_logger,
-    };
-
-    // Build router using the transport module's create_router
-    #[cfg(feature = "db")]
-    let app = crate::transport::http::create_router(state, &config, persistent_manager);
-
-    #[cfg(not(feature = "db"))]
-    let app = crate::transport::http::create_router(state, &config);
+    let (app, _state) = crate::transport::http::build_app(&config).await?;
 
     let addr = config.http.addr;
     tracing::info!("Starting embedded HTTP server on {}", addr);

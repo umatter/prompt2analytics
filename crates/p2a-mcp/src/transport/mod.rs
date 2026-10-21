@@ -7,6 +7,18 @@
 #[cfg(feature = "http")]
 pub mod http;
 
+#[cfg(feature = "http")]
+pub mod middleware;
+
+#[cfg(feature = "http")]
+pub mod routes_sessions;
+
+#[cfg(feature = "http")]
+pub mod routes_tools;
+
+#[cfg(all(feature = "http", feature = "llm"))]
+pub mod llm_routes;
+
 #[cfg(feature = "websocket")]
 pub mod websocket;
 
