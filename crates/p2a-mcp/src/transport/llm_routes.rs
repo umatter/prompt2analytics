@@ -15,10 +15,10 @@ use serde::{Deserialize, Serialize};
 use super::http::{ApiResponse, AppState, ContentItem};
 use crate::exec::{CallOrigin, ToolCallError, ToolGovernor};
 use crate::llm::{
-    AnthropicProvider, LlmProvider, LlmSettings, Message, OllamaProvider, OpenAIProvider,
-    ProviderConfig, ProviderType, ToolExecutor, build_enhanced_dataset_context,
-    check_llm_tool_call, get_system_prompt_with_context, resolve_provider_config,
-    server_key_availability,
+    AnthropicProvider, ContextManager, LlmProvider, LlmSettings, Message, OllamaProvider,
+    OpenAIProvider, ProviderConfig, ProviderType, ToolDefinition, ToolExecutor,
+    build_dataset_context_bounded, check_llm_tool_call, get_system_prompt_with_context,
+    resolve_provider_config, server_key_availability,
 };
 use crate::session::Session;
 
@@ -192,10 +192,12 @@ fn provider_display_name(config: Option<&ProviderConfig>) -> String {
 /// numeric ranges) is real work on a large session, and it runs before any
 /// provider or key is contacted. The datasets are cloned first (cheap: the
 /// columns are shared), so no dataset lock is held while it runs. A session
-/// without datasets needs no work and takes no permit.
+/// without datasets needs no work and takes no permit. The block is at most
+/// `context_bytes` long (`llm_context_bytes`).
 async fn governed_dataset_context(
     governor: &ToolGovernor,
     session: &Arc<Session>,
+    context_bytes: usize,
 ) -> Result<Option<String>, ToolCallError> {
     let datasets = session.datasets.read().await.clone();
     if datasets.is_empty() {
@@ -203,9 +205,48 @@ async fn governed_dataset_context(
     }
     governor
         .run_blocking(session, "llm_context", move |_budget| {
-            Ok(build_enhanced_dataset_context(&datasets))
+            Ok(build_dataset_context_bounded(&datasets, context_bytes))
         })
         .await
+}
+
+/// The messages of one chat request: the system prompt with the bounded
+/// dataset block, the history fitted by [`ContextManager`] to the byte cap
+/// (`llm_history_bytes`) and, for a model with a known window, its token
+/// budget, then the user's message, which is never compacted.
+async fn build_chat_messages(
+    governor: &ToolGovernor,
+    session: &Arc<Session>,
+    history: Vec<Message>,
+    user_message: String,
+    tools: &[ToolDefinition],
+    cfg: &ProviderConfig,
+    settings: &LlmSettings,
+) -> Result<Vec<Message>, ToolCallError> {
+    let dataset_context =
+        governed_dataset_context(governor, session, settings.context_bytes).await?;
+    let system_prompt = get_system_prompt_with_context(dataset_context.as_deref(), tools);
+    let reserved_for_response = cfg.max_tokens.unwrap_or(4096) as usize;
+    let processed = ContextManager::for_request(
+        &cfg.model,
+        cfg.provider_type,
+        settings.history_bytes,
+        reserved_for_response,
+    )
+    .with_tools(tools)
+    .process_history(history, &system_prompt);
+    tracing::info!(
+        has_datasets = dataset_context.is_some(),
+        history_messages = processed.messages.len(),
+        turns_summarized = processed.turns_summarized,
+        "Built the chat context"
+    );
+
+    let mut messages = Vec::with_capacity(processed.messages.len() + 2);
+    messages.push(Message::system(system_prompt));
+    messages.extend(processed.messages);
+    messages.push(Message::user(user_message));
+    Ok(messages)
 }
 
 /// LLM chat endpoint.
@@ -254,6 +295,25 @@ pub async fn llm_chat(
         }
     };
 
+    let tools = state.server.list_tools_for_llm();
+
+    // The bounded dataset block (built under the governor), the history
+    // fitted to the request's budget, and the user's message.
+    let messages = match build_chat_messages(
+        &state.governor,
+        &session,
+        request.history,
+        request.message,
+        &tools,
+        &provider_config,
+        &settings,
+    )
+    .await
+    {
+        Ok(messages) => messages,
+        Err(e) => return e.into_response(),
+    };
+
     // Create provider and tool executor
     let provider = build_provider(provider_config, &settings);
     let tool_executor = SessionToolExecutor::new(
@@ -261,22 +321,8 @@ pub async fn llm_chat(
         state.server.clone(),
         session.clone(),
     );
-    let tools = state.server.list_tools_for_llm();
 
-    // Build enhanced dataset context from currently loaded datasets
-    // This includes data types, sample values, and basic statistics
-    let dataset_context = match governed_dataset_context(&state.governor, &session).await {
-        Ok(context) => context,
-        Err(e) => return e.into_response(),
-    };
-
-    tracing::info!(provider = %provider.provider_type(), num_tools = %tools.len(), has_datasets = dataset_context.is_some(), "Starting LLM chat");
-
-    // Build message history with dataset context
-    let system_prompt = get_system_prompt_with_context(dataset_context.as_deref(), &tools);
-    let mut messages = vec![Message::system(system_prompt)];
-    messages.extend(request.history);
-    messages.push(Message::user(request.message));
+    tracing::info!(provider = %provider.provider_type(), num_tools = %tools.len(), "Starting LLM chat");
 
     // Execute chat
     let start = std::time::Instant::now();
@@ -1191,21 +1237,6 @@ pub async fn llm_chat_stream(
             None
         };
 
-        // Build enhanced dataset context from currently loaded datasets
-        // This includes data types, sample values, and basic statistics
-        let dataset_context = match governed_dataset_context(&state_clone.governor, &session).await
-        {
-            Ok(context) => context,
-            Err(e) => {
-                let _ = tx_clone
-                    .send(ProgressEvent::Error {
-                        error: e.to_string(),
-                    })
-                    .await;
-                return;
-            }
-        };
-
         // Compute a human-readable provider name for the status message
         // before `request.provider` is moved into the resolver — OpenRouter
         // is routed through the OpenAI client with a custom base_url, so
@@ -1228,14 +1259,14 @@ pub async fn llm_chat_stream(
             }
         };
 
-        // Create provider and streaming tool executor
-        let provider = build_provider(provider_config, &settings);
+        // Create streaming tool executor (the provider is built once the
+        // messages are, below)
         // Only the db build reconfigures the executor below.
         #[cfg_attr(not(feature = "db"), allow(unused_mut))]
         let mut tool_executor = StreamingToolExecutor::new(
             state_clone.governor.clone(),
             state_clone.server.clone(),
-            session,
+            session.clone(),
             tx_clone.clone(),
         );
 
@@ -1274,11 +1305,6 @@ pub async fn llm_chat_stream(
                 message: format!("Connecting to {provider_display}..."),
             })
             .await;
-
-        tracing::info!(
-            has_datasets = dataset_context.is_some(),
-            "Building system prompt with dataset context"
-        );
 
         // Auto-retrieve history from database if:
         // 1. conversation_id is provided
@@ -1409,11 +1435,36 @@ pub async fn llm_chat_stream(
             request.history.clone()
         };
 
-        // Build message history with dataset context
-        let system_prompt = get_system_prompt_with_context(dataset_context.as_deref(), &tools);
-        let mut messages = vec![Message::system(system_prompt)];
-        messages.extend(history_to_use);
-        messages.push(Message::user(request.message.clone()));
+        // The bounded dataset block (built under the governor), the history
+        // fitted to the request's budget, and the user's message.
+        let messages = match build_chat_messages(
+            &state_clone.governor,
+            &session,
+            history_to_use,
+            request.message.clone(),
+            &tools,
+            &provider_config,
+            &settings,
+        )
+        .await
+        {
+            Ok(messages) => messages,
+            Err(e) => {
+                #[cfg(feature = "db")]
+                if let (Some(db), Some(msg_id)) = (&db_connection, &message_id) {
+                    let _ = db
+                        .update_message_content(msg_id, &format!("[Error: {e}]"))
+                        .await;
+                }
+                let _ = tx_clone
+                    .send(ProgressEvent::Error {
+                        error: e.to_string(),
+                    })
+                    .await;
+                return;
+            }
+        };
+        let provider = build_provider(provider_config, &settings);
 
         // Create streaming callback that forwards content chunks
         let tx_for_callback = tx_clone.clone();
@@ -1541,7 +1592,7 @@ mod tests {
         let (governor, _server, session) = governed_parts().await;
         // No datasets: nothing to summarize, no permit taken, no refusal.
         assert!(matches!(
-            governed_dataset_context(&governor, &session).await,
+            governed_dataset_context(&governor, &session, 65_536).await,
             Ok(None)
         ));
         let df = polars::prelude::df! {
@@ -1555,7 +1606,7 @@ mod tests {
             .await
             .insert("d".into(), p2a_core::data::Dataset::new(df));
         // The refusing governor's memory admission applies to the context.
-        let r = governed_dataset_context(&governor, &session).await;
+        let r = governed_dataset_context(&governor, &session, 65_536).await;
         assert!(
             matches!(r, Err(ToolCallError::MemoryPressure { .. })),
             "{r:?}"
@@ -1567,7 +1618,7 @@ mod tests {
             evict_idle_minutes: None,
         }));
         let admitting = ToolGovernor::new(ExecConfig::default(), sessions);
-        let context = governed_dataset_context(&admitting, &session)
+        let context = governed_dataset_context(&admitting, &session, 65_536)
             .await
             .unwrap()
             .expect("a context for one dataset");
@@ -1604,5 +1655,90 @@ mod tests {
         }
         let text = tool_end.expect("a ToolEnd event with a result");
         assert!(text.starts_with("Error:"), "{text}");
+    }
+}
+
+/// Tests that run on every platform (the governor tests above are
+/// Linux-only because they rely on RSS readings).
+#[cfg(test)]
+mod chat_tests {
+    use super::*;
+    use crate::config::SessionConfig;
+    use crate::exec::ExecConfig;
+    use crate::session::SessionManager;
+    use crate::tools::limits::Limits;
+
+    /// An admitting governor and one live session.
+    async fn admitting_parts() -> (Arc<ToolGovernor>, Arc<Session>) {
+        let sessions = Arc::new(SessionManager::new(SessionConfig {
+            ttl_minutes: 60,
+            max_sessions: 10,
+            evict_idle_minutes: None,
+        }));
+        let id = sessions.create_session(None).await.unwrap();
+        let session = sessions.get_session(&id).await.unwrap();
+        let governor = Arc::new(ToolGovernor::new(ExecConfig::default(), sessions));
+        (governor, session)
+    }
+
+    #[tokio::test]
+    async fn chat_messages_use_the_request_budgets() {
+        let (governor, session) = admitting_parts().await;
+        let cols: Vec<polars::prelude::Column> = (0..3000)
+            .map(|j| {
+                let v: Vec<f64> = (0..3).map(|i| i as f64 * 0.37 + j as f64 * 0.011).collect();
+                polars::prelude::Column::new(format!("c{j}").into(), v)
+            })
+            .collect();
+        let df = polars::prelude::DataFrame::new(cols).unwrap();
+        session
+            .datasets
+            .write()
+            .await
+            .insert("wide".into(), p2a_core::data::Dataset::new(df));
+        let settings = LlmSettings {
+            context_bytes: 4_096,
+            history_bytes: 20_000,
+            ..LlmSettings::from_limits(&Limits::off(), None)
+        };
+        let history: Vec<Message> = (0..30)
+            .flat_map(|i| {
+                [
+                    Message::user(format!("u{i:02}:{}", "x".repeat(996))),
+                    Message::assistant(format!("a{i:02}:{}", "y".repeat(996))),
+                ]
+            })
+            .collect();
+        let last = history.last().unwrap().content.clone();
+        // Ollama: only the byte cap applies to the history.
+        let cfg = ProviderConfig::default();
+        let msgs = build_chat_messages(
+            &governor,
+            &session,
+            history,
+            "now".to_string(),
+            &[],
+            &cfg,
+            &settings,
+        )
+        .await
+        .unwrap();
+
+        let sys = &msgs[0].content;
+        assert_eq!(msgs[0].role, crate::llm::MessageRole::System);
+        let block = &sys[sys.find("<<<DATASETS").unwrap()..sys.find("DATASETS>>>").unwrap()];
+        assert!(block.len() <= 4_096 + 32, "{}", block.len());
+        assert!(block.contains("\"c0\""));
+
+        let hist = &msgs[1..msgs.len() - 1];
+        let bytes: usize = hist.iter().map(|m| m.content.len()).sum();
+        assert!(bytes <= 20_000, "{bytes}");
+        assert!(
+            hist[0]
+                .content
+                .starts_with("[Conversation context from earlier in this session:]")
+        );
+        assert_eq!(hist.last().unwrap().content, last);
+        assert_eq!(msgs.last().unwrap().content, "now");
     }
 }

@@ -511,3 +511,114 @@ async fn llm_executor_refuses_internal_and_unknown_tools() {
         "{c2}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Task 5b: the bounded context on the chat paths
+// ---------------------------------------------------------------------------
+
+type Recorded = Arc<std::sync::Mutex<Vec<Value>>>;
+
+/// An Ollama stub that records each request body and answers "ok".
+async fn recording_stub() -> (SocketAddr, Recorded) {
+    let recorded: Recorded = Arc::default();
+    let r = recorded.clone();
+    let addr = spawn_stub(Router::new().route(
+        "/api/chat",
+        post(move |axum::Json(body): axum::Json<Value>| {
+            let r = r.clone();
+            async move {
+                r.lock().unwrap().push(body);
+                axum::Json(json!({"message": {"role": "assistant", "content": "ok"}, "done": true}))
+            }
+        }),
+    ))
+    .await;
+    (addr, recorded)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn system_prompt_dataset_block_is_bounded() {
+    let (app, _state) = app().await;
+    let sid = new_session(&app).await;
+    let mut csv = (0..3000)
+        .map(|j| format!("c{j}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    for i in 0..3 {
+        csv.push('\n');
+        csv.push_str(
+            &(0..3000)
+                .map(|j| format!("{:.3}", i as f64 * 0.37 + j as f64 * 0.011))
+                .collect::<Vec<_>>()
+                .join(","),
+        );
+    }
+    let (status, body) = send_json(
+        &app,
+        "/api/tools/create_dataset",
+        json!({"session_id": sid, "arguments": {"name": "wide", "csv_content": csv}}),
+    )
+    .await;
+    assert!(status.is_success(), "{body}");
+
+    let (addr, recorded) = recording_stub().await;
+    let (status, body) = send_json(
+        &app,
+        "/api/llm/chat",
+        json!({"session_id": sid, "message": "hi", "provider": stub_provider(addr)}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let recorded = recorded.lock().unwrap();
+    let sys = recorded[0]["messages"][0]["content"].as_str().unwrap();
+    let start = sys.find("<<<DATASETS").expect("an opening delimiter");
+    let end = sys.find("DATASETS>>>").expect("a closing delimiter");
+    let block = &sys[start..end];
+    // The context budget plus the opening delimiter line.
+    assert!(block.len() <= 65_536 + 32, "{}", block.len());
+    assert!(block.contains("\"c0\"") && block.contains("and 2940 more columns"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn long_history_is_compacted_before_sending() {
+    let (app, _state) = app().await;
+    let sid = new_session(&app).await;
+    // 300 messages of 2,000 ASCII bytes each: 600 KB > 524,288.
+    let history: Vec<Value> = (0..300)
+        .map(|i| {
+            json!({
+                "role": if i % 2 == 0 { "user" } else { "assistant" },
+                "content": format!("{i:03}:{}", "h".repeat(1996)),
+            })
+        })
+        .collect();
+    let (addr, recorded) = recording_stub().await;
+    let (status, body) = send_json(
+        &app,
+        "/api/llm/chat",
+        json!({"session_id": sid, "message": "now", "history": history,
+               "provider": stub_provider(addr)}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let recorded = recorded.lock().unwrap();
+    let msgs = recorded[0]["messages"].as_array().unwrap();
+    let hist = &msgs[1..msgs.len() - 1];
+    let bytes: usize = hist
+        .iter()
+        .map(|m| m["content"].as_str().unwrap_or("").len())
+        .sum();
+    assert!(bytes <= 524_288, "{bytes}");
+    assert!(
+        hist[0]["content"]
+            .as_str()
+            .unwrap()
+            .starts_with("[Conversation context from earlier in this session:]")
+    );
+    assert_eq!(
+        hist.last().unwrap()["content"],
+        history.last().unwrap()["content"]
+    );
+    // The current message is never compacted.
+    assert_eq!(msgs.last().unwrap()["content"], "now");
+}
