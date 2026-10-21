@@ -226,6 +226,7 @@
 // Foundation modules (pure Rust implementations)
 pub mod errors;
 pub mod linalg;
+pub mod resource;
 pub mod traits;
 
 // Core feature modules (always available)
