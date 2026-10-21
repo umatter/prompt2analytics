@@ -38,7 +38,9 @@
 //! with [`install`] and enforces it before every tool call; handlers read named budgets through
 //! [`current`]. Until something is installed, [`current`] returns the off profile.
 
+use std::cell::RefCell;
 use std::collections::HashSet;
+use std::sync::{Arc, OnceLock, PoisonError, RwLock};
 
 use serde_json::Value;
 
@@ -988,6 +990,63 @@ impl Limits {
     }
 }
 
+/// The process-wide limits, set once at startup by [`install`].
+static INSTALLED: RwLock<Option<Arc<Limits>>> = RwLock::new(None);
+
+/// The shared off profile returned while nothing is installed (allocated once).
+static OFF: OnceLock<Arc<Limits>> = OnceLock::new();
+
+thread_local! {
+    /// The test override set by [`with_limits`] on this thread.
+    static OVERRIDE: RefCell<Option<Arc<Limits>>> = const { RefCell::new(None) };
+}
+
+/// The active limits: this thread's [`with_limits`] override if one is set, else the limits
+/// passed to [`install`], else the off profile.
+pub fn current() -> Arc<Limits> {
+    if let Some(limits) = OVERRIDE.with(|o| o.borrow().clone()) {
+        return limits;
+    }
+    current_from(&INSTALLED)
+}
+
+/// Installs the process-wide limits (startup; a later call replaces them).
+pub fn install(limits: Limits) {
+    install_into(&INSTALLED, limits);
+}
+
+/// Runs `f` with `limits` as this thread's active limits and restores the previous ones
+/// afterwards, also when `f` panics. Calls nest.
+///
+/// This is meant for tests. The override is thread-local: it does not follow an async task
+/// that moves to another worker thread, and threads spawned inside `f` do not see it.
+pub fn with_limits<R>(limits: Limits, f: impl FnOnce() -> R) -> R {
+    /// Restores the previous override on drop (normal return or unwinding).
+    struct Restore(Option<Arc<Limits>>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            let previous = self.0.take();
+            // `try_with`: never panic while the thread's locals are being torn down.
+            let _ = OVERRIDE.try_with(|o| *o.borrow_mut() = previous);
+        }
+    }
+    let previous = OVERRIDE.with(|o| o.replace(Some(Arc::new(limits))));
+    let _restore = Restore(previous);
+    f()
+}
+
+fn install_into(slot: &RwLock<Option<Arc<Limits>>>, limits: Limits) {
+    *slot.write().unwrap_or_else(PoisonError::into_inner) = Some(Arc::new(limits));
+}
+
+fn current_from(slot: &RwLock<Option<Arc<Limits>>>) -> Arc<Limits> {
+    let installed = slot.read().unwrap_or_else(PoisonError::into_inner);
+    match installed.as_ref() {
+        Some(limits) => Arc::clone(limits),
+        None => Arc::clone(OFF.get_or_init(|| Arc::new(Limits::off()))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1587,5 +1646,41 @@ mod tests {
                 .with_overrides(&[format!("{k}={v}")])
                 .unwrap_or_else(|e| panic!("{k}: {e}"));
         }
+    }
+
+    #[test]
+    fn install_and_current_use_the_given_slot() {
+        static SLOT: std::sync::RwLock<Option<std::sync::Arc<Limits>>> =
+            std::sync::RwLock::new(None);
+        assert!(current_from(&SLOT).is_off());
+        install_into(&SLOT, Limits::hosted());
+        assert_eq!(current_from(&SLOT).cap(Family::Folds), Some(20));
+        install_into(&SLOT, Limits::off());
+        assert!(current_from(&SLOT).is_off());
+    }
+
+    #[test]
+    fn with_limits_is_thread_local_nestable_and_panic_safe() {
+        let outer = with_limits(Limits::hosted(), || {
+            let inner = with_limits(Limits::off(), || current().is_off());
+            (inner, current().cap(Family::Trees))
+        });
+        assert_eq!(outer, (true, Some(5_000)));
+        // a panic inside the inner override restores the outer override (drop guard)
+        let restored = with_limits(Limits::off(), || {
+            let r = std::panic::catch_unwind(|| {
+                with_limits(Limits::hosted(), || -> () { panic!("boom") })
+            });
+            assert!(r.is_err());
+            current().is_off()
+        });
+        assert!(restored);
+        // the override is per thread
+        let other = with_limits(Limits::off(), || {
+            std::thread::spawn(|| with_limits(Limits::hosted(), || current().cap(Family::Trees)))
+                .join()
+                .unwrap()
+        });
+        assert_eq!(other, Some(5_000));
     }
 }
