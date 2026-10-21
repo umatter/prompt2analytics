@@ -65,6 +65,7 @@ use crate::errors::{EconError, EconResult, EstimationWarning};
 use crate::linalg::{
     CONDITION_THRESHOLD, DesignError, DesignMatrix, matmul, safe_inverse, xtx, xty,
 };
+use crate::resource;
 use crate::traits::{LinearEstimator, SignificanceLevel, f_test_p_value, t_test_p_value};
 
 /// Type of covariance/standard error estimation.
@@ -1230,6 +1231,9 @@ pub struct HacResult {
     pub names: Vec<String>,
     /// Whether the prewhitening option was used
     pub prewhiten: bool,
+    /// Warnings about the estimate
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 impl std::fmt::Display for HacResult {
@@ -1249,8 +1253,21 @@ impl std::fmt::Display for HacResult {
                 name, self.coefficients[i], self.std_errors[i]
             )?;
         }
-        Ok(())
+        write_warnings(f, &self.warnings)
     }
+}
+
+/// Append a `Warnings:` block to a result's `Display` output (nothing when empty).
+fn write_warnings(f: &mut std::fmt::Formatter<'_>, warnings: &[String]) -> std::fmt::Result {
+    if warnings.is_empty() {
+        return Ok(());
+    }
+    writeln!(f)?;
+    writeln!(f, "Warnings:")?;
+    for w in warnings {
+        writeln!(f, "  - {w}")?;
+    }
+    Ok(())
 }
 
 /// Kernel type for HAC estimation.
@@ -1420,6 +1437,27 @@ pub fn vcov_hac(
         });
     }
 
+    // A user bandwidth must leave data at every lag; a large fraction of the
+    // sample is accepted with a warning (sandwich::NeweyWest warns too).
+    let mut warnings = Vec::new();
+    if let Some(bw) = bandwidth {
+        if bw >= n {
+            return Err(EconError::InvalidSpecification {
+                message: format!(
+                    "HAC bandwidth {bw} must be smaller than the number of observations ({n}): \
+                     lags of n or more have no data, and bandwidths close to n shrink the \
+                     standard errors towards zero"
+                ),
+            });
+        }
+        if bw.saturating_mul(4) > n {
+            warnings.push(format!(
+                "Bandwidth {bw} exceeds a quarter of the {n} observations; HAC standard errors \
+                 are biased towards zero when the bandwidth is a large fraction of the sample"
+            ));
+        }
+    }
+
     // Automatic bandwidth selection (Newey-West rule of thumb)
     let bw = bandwidth.unwrap_or_else(|| {
         // NW rule: floor(4 * (n/100)^(2/9))
@@ -1463,7 +1501,8 @@ pub fn vcov_hac(
     }
 
     // Lags 1 to bw: add cross-products with kernel weights
-    for lag in 1..=bw {
+    for lag in 1..=bw.min(n.saturating_sub(1)) {
+        resource::checkpoint()?;
         let w = kernel.weight(lag, bw);
         if w.abs() < 1e-15 {
             continue;
@@ -1542,6 +1581,7 @@ pub fn vcov_hac(
         coefficients,
         names,
         prewhiten,
+        warnings,
     })
 }
 
@@ -1979,6 +2019,9 @@ pub struct DriscollKraayResult {
     pub bandwidth: usize,
     /// Kernel type used.
     pub kernel: HacKernel,
+    /// Warnings about the estimate
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 impl std::fmt::Display for DriscollKraayResult {
@@ -2018,7 +2061,7 @@ impl std::fmt::Display for DriscollKraayResult {
             f,
             "Standard errors robust to cross-sectional and serial correlation."
         )?;
-        Ok(())
+        write_warnings(f, &self.warnings)
     }
 }
 
@@ -2108,6 +2151,28 @@ pub fn vcov_driscoll_kraay(
         });
     }
 
+    // A user bandwidth must leave data at every lag of the period series; a
+    // large fraction of the periods is accepted with a warning.
+    let mut warnings = Vec::new();
+    if let Some(bw) = bandwidth {
+        if bw >= n_periods {
+            return Err(EconError::InvalidSpecification {
+                message: format!(
+                    "Driscoll-Kraay bandwidth {bw} must be smaller than the number of time \
+                     periods ({n_periods}): lags of T or more have no data, and bandwidths \
+                     close to T shrink the standard errors towards zero"
+                ),
+            });
+        }
+        if bw.saturating_mul(4) > n_periods {
+            warnings.push(format!(
+                "Bandwidth {bw} exceeds a quarter of the {n_periods} time periods; \
+                 Driscoll-Kraay standard errors are biased towards zero when the bandwidth \
+                 is a large fraction of the sample"
+            ));
+        }
+    }
+
     // Compute (X'X)^{-1}
     let xtx_mat = xtx(&x.view());
     let (xtx_inv, _) = safe_inverse(&xtx_mat.view()).map_err(|e| EconError::SingularMatrix {
@@ -2155,7 +2220,8 @@ pub fn vcov_driscoll_kraay(
     }
 
     // Lags 1 to bw
-    for lag in 1..=bw {
+    for lag in 1..=bw.min(n_periods - 1) {
+        resource::checkpoint()?;
         let w = kernel.weight(lag, bw);
         if w.abs() < 1e-15 {
             continue;
@@ -2235,6 +2301,7 @@ pub fn vcov_driscoll_kraay(
         n_units,
         bandwidth: bw,
         kernel,
+        warnings,
     })
 }
 
@@ -2324,6 +2391,7 @@ pub fn run_vcov_driscoll_kraay(
 mod tests {
     use super::*;
     use crate::data::Dataset;
+    use crate::resource::{self, Budget, CancelToken};
 
     fn create_test_dataset() -> Dataset {
         // y = x1 + noise (not perfect linear relationship)
@@ -3430,6 +3498,77 @@ mod tests {
     // ========================================
     // Resource bounds (T0-WP14)
     // ========================================
+
+    fn cancelled() -> Budget {
+        let t = CancelToken::new();
+        t.cancel();
+        Budget::new(None, t)
+    }
+
+    #[test]
+    fn test_hac_rejects_bandwidth_at_or_above_n() {
+        let ds = create_timeseries_dataset();
+        for bw in [30usize, 31, 300] {
+            match run_vcov_hac(&ds, "y", &["x"], Some(bw), None, false).unwrap_err() {
+                EconError::InvalidSpecification { message } => {
+                    assert!(
+                        message.contains("bandwidth") && message.contains("30"),
+                        "{message}"
+                    )
+                }
+                e => panic!("bw {bw}: {e:?}"),
+            }
+        }
+        assert!(run_vcov_hac(&ds, "y", &["x"], Some(29), None, false).is_ok());
+    }
+
+    #[test]
+    fn test_hac_warns_when_bandwidth_exceeds_quarter_of_n() {
+        let ds = create_timeseries_dataset();
+        let r = run_vcov_hac(&ds, "y", &["x"], Some(8), None, false).unwrap(); // 32 > 30
+        assert_eq!(r.warnings.len(), 1);
+        assert!(r.to_string().contains("Warnings:"));
+        // 28 <= 30
+        let r = run_vcov_hac(&ds, "y", &["x"], Some(7), None, false).unwrap();
+        assert!(r.warnings.is_empty());
+        assert!(!r.to_string().contains("Warnings:"));
+        // the default rule never warns
+        let r = run_vcov_hac(&ds, "y", &["x"], None, None, false).unwrap();
+        assert!(r.warnings.is_empty());
+        // JSON is unchanged without warnings
+        assert!(!serde_json::to_string(&r).unwrap().contains("warnings"));
+    }
+
+    #[test]
+    fn test_driscoll_kraay_rejects_bandwidth_at_or_above_t() {
+        let ds = create_panel_dataset();
+        let e = run_vcov_driscoll_kraay(&ds, "y", &["x"], "time", Some(10), None).unwrap_err();
+        assert!(
+            matches!(&e, EconError::InvalidSpecification { message } if message.contains("bandwidth")),
+            "{e:?}"
+        );
+        let r = run_vcov_driscoll_kraay(&ds, "y", &["x"], "time", Some(9), None).unwrap();
+        assert_eq!(r.warnings.len(), 1);
+        assert!(r.to_string().contains("Warnings:"));
+        let r = run_vcov_driscoll_kraay(&ds, "y", &["x"], "time", Some(2), None).unwrap();
+        assert!(r.warnings.is_empty());
+    }
+
+    #[test]
+    fn test_hac_and_dk_stop_when_cancelled() {
+        let ts = create_timeseries_dataset();
+        let e = resource::with_budget(cancelled(), || {
+            run_vcov_hac(&ts, "y", &["x"], Some(5), None, false)
+        })
+        .unwrap_err();
+        assert!(matches!(e, EconError::Cancelled(_)), "{e:?}");
+        let p = create_panel_dataset();
+        let e = resource::with_budget(cancelled(), || {
+            run_vcov_driscoll_kraay(&p, "y", &["x"], "time", Some(3), None)
+        })
+        .unwrap_err();
+        assert!(matches!(e, EconError::Cancelled(_)), "{e:?}");
+    }
 
     /// Pinned-value check. A wrong or empty `expected` prints the actual values to paste.
     fn assert_pinned(what: &str, actual: &[f64], expected: &[f64]) {
