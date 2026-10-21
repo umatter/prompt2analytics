@@ -3426,4 +3426,67 @@ mod tests {
             ratio
         );
     }
+
+    // ========================================
+    // Resource bounds (T0-WP14)
+    // ========================================
+
+    /// Pinned-value check. A wrong or empty `expected` prints the actual values to paste.
+    fn assert_pinned(what: &str, actual: &[f64], expected: &[f64]) {
+        assert_eq!(
+            actual.len(),
+            expected.len(),
+            "{what}: pin these values: {actual:?}"
+        );
+        for (i, (a, e)) in actual.iter().zip(expected).enumerate() {
+            assert!(
+                (a - e).abs() <= 1e-9 * e.abs().max(1e-3),
+                "{what}[{i}]: got {a}, pinned {e}; all: {actual:?}"
+            );
+        }
+    }
+
+    /// Characterisation test recorded from the code before the T0-WP14 resource
+    /// bounds; the refactor must not move these numbers.
+    #[test]
+    fn test_pinned_hac_dk_bootstrap_outputs() {
+        let ts = create_timeseries_dataset();
+        let mut v = Vec::new();
+        for (bw, kernel) in [(5usize, "bartlett"), (29, "bartlett"), (29, "truncated")] {
+            let r = run_vcov_hac(&ts, "y", &["x"], Some(bw), Some(kernel), false).unwrap();
+            v.extend(&r.std_errors);
+        }
+        let panel = create_panel_dataset();
+        let dk = run_vcov_driscoll_kraay(&panel, "y", &["x"], "time", Some(9), None).unwrap();
+        v.extend(&dk.std_errors);
+        let ds = create_test_dataset();
+        for kind in ["pairs", "residual", "wild"] {
+            let b = run_vcov_bootstrap(&ds, "y", &["x1"], Some(200), Some(kind), Some(42)).unwrap();
+            v.extend(&b.std_errors);
+            v.push(b.convergence_rate);
+        }
+        assert_pinned(
+            "HAC/DK/bootstrap",
+            &v,
+            &[
+                0.1380678477098943,
+                0.0067448421041296615,
+                0.10055839075154051,
+                0.005817042539300054,
+                0.0,
+                0.0,
+                0.01250309685000187,
+                0.0011882147319589296,
+                0.09631970723095434,
+                0.01566998133541119,
+                1.0,
+                0.10357515044968392,
+                0.017372550023008526,
+                1.0,
+                0.08621209537976078,
+                0.01294828222674302,
+                1.0,
+            ],
+        );
+    }
 }

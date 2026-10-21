@@ -756,6 +756,63 @@ mod tests {
         assert_eq!(result.distributions[1], RandomDistribution::Fixed);
     }
 
+    /// Pinned-value check. A wrong or empty `expected` prints the actual values to paste.
+    fn assert_pinned(what: &str, actual: &[f64], expected: &[f64]) {
+        assert_eq!(
+            actual.len(),
+            expected.len(),
+            "{what}: pin these values: {actual:?}"
+        );
+        for (i, (a, e)) in actual.iter().zip(expected).enumerate() {
+            assert!(
+                (a - e).abs() <= 1e-9 * e.abs().max(1e-3),
+                "{what}[{i}]: got {a}, pinned {e}; all: {actual:?}"
+            );
+        }
+    }
+
+    /// Characterisation test recorded from the code before the T0-WP14 resource
+    /// bounds (the `test_mixed_logit_basic` call); the refactor must not move
+    /// these numbers.
+    #[test]
+    fn test_pinned_mixed_logit_outputs() {
+        let r = run_mixed_logit(
+            &create_mlogit_dataset(),
+            "choice_id",
+            "alt_id",
+            "choice",
+            &["cost", "time"],
+            &[RandomParameterSpec {
+                name: "cost".to_string(),
+                distribution: RandomDistribution::Normal,
+            }],
+            Some(MixedLogitConfig {
+                n_draws: 50,
+                halton: true,
+                max_iter: 50,
+                tolerance: 1e-4,
+                seed: Some(42),
+            }),
+        )
+        .unwrap();
+        let mut v = r.means.clone();
+        v.extend(&r.std_devs);
+        v.push(r.log_likelihood);
+        v.push(r.iterations as f64);
+        assert_pinned(
+            "mixed logit",
+            &v,
+            &[
+                -0.937956316132693,
+                -0.1483991201329387,
+                0.9909120948804444,
+                0.0,
+                -2.6330359066917888,
+                50.0,
+            ],
+        );
+    }
+
     #[test]
     fn test_gmnl_convenience() {
         let dataset = create_mlogit_dataset();

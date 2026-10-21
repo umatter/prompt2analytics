@@ -668,3 +668,100 @@ pub fn run_pooled_gls(
         Some(PanelGlsModel::Pooling),
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const GRUNFELD_CSV: &str = include_str!("../../../../../validation/datasets/grunfeld.csv");
+
+    /// Grunfeld with years up to `last_year` (firm, year, inv, value, capital).
+    fn grunfeld_until(last_year: i64) -> Dataset {
+        let csv: String = GRUNFELD_CSV
+            .lines()
+            .enumerate()
+            .filter(|(i, line)| {
+                *i == 0
+                    || line
+                        .split(',')
+                        .nth(1)
+                        .and_then(|y| y.trim().parse::<i64>().ok())
+                        .is_some_and(|y| y <= last_year)
+            })
+            .map(|(_, line)| format!("{line}\n"))
+            .collect();
+        Dataset::new(crate::data::DataLoader::from_csv_string(&csv).unwrap())
+    }
+
+    /// Pinned-value check. A wrong or empty `expected` prints the actual values to paste.
+    fn assert_pinned(what: &str, actual: &[f64], expected: &[f64]) {
+        assert_eq!(
+            actual.len(),
+            expected.len(),
+            "{what}: pin these values: {actual:?}"
+        );
+        for (i, (a, e)) in actual.iter().zip(expected).enumerate() {
+            assert!(
+                (a - e).abs() <= 1e-9 * e.abs().max(1e-3),
+                "{what}[{i}]: got {a}, pinned {e}; all: {actual:?}"
+            );
+        }
+    }
+
+    /// Characterisation test recorded from the code before the T0-WP14 resource
+    /// bounds (Grunfeld 1935-1944, N = T = 10); the refactor must not move these
+    /// numbers.
+    #[test]
+    fn test_pinned_panel_gls_outputs() {
+        let ds = grunfeld_until(1944);
+        let mut v = Vec::new();
+        for model in [
+            PanelGlsModel::Pooling,
+            PanelGlsModel::FixedEffects,
+            PanelGlsModel::FirstDifference,
+        ] {
+            let r = run_panel_gls(
+                &ds,
+                "inv",
+                &["value", "capital"],
+                "firm",
+                "year",
+                Some(model),
+            )
+            .unwrap();
+            assert_eq!((r.n_groups, r.n_periods), (10, 10));
+            v.extend(&r.coefficients);
+            v.extend(&r.std_errors);
+            v.push(r.rss);
+            v.push(r.r_squared);
+        }
+        assert_pinned(
+            "panel GLS",
+            &v,
+            &[
+                -13.746532198161622,
+                0.09591408245586196,
+                0.15963893877650104,
+                110.35059790229461,
+                0.05939444350853668,
+                0.32641053705590134,
+                498646.34093838633,
+                0.7644231283694306,
+                0.09607722792206687,
+                0.09128252097477796,
+                1.0075131531233855e-9,
+                8.925756228872445e-9,
+                507404.47605919285,
+                0.7602854983425167,
+                -25.192548642621333,
+                0.09050252616477833,
+                0.28254346945169106,
+                125.19568572838462,
+                0.08611173202631575,
+                0.6826921128016088,
+                522284.18158618984,
+                0.7532558378576177,
+            ],
+        );
+    }
+}

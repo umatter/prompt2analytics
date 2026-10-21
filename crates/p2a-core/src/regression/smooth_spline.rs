@@ -963,4 +963,102 @@ mod tests {
         let max_resid = result.residuals.iter().map(|r| r.abs()).fold(0.0, f64::max);
         assert!(max_resid < 0.5, "Residuals too large: max = {}", max_resid);
     }
+
+    /// Pinned-value check. A wrong or empty `expected` prints the actual values to paste.
+    fn assert_pinned(what: &str, actual: &[f64], expected: &[f64]) {
+        assert_eq!(
+            actual.len(),
+            expected.len(),
+            "{what}: pin these values: {actual:?}"
+        );
+        for (i, (a, e)) in actual.iter().zip(expected).enumerate() {
+            assert!(
+                (a - e).abs() <= 1e-9 * e.abs().max(1e-3),
+                "{what}[{i}]: got {a}, pinned {e}; all: {actual:?}"
+            );
+        }
+    }
+
+    /// Characterisation test recorded from the code before the T0-WP14 resource
+    /// bounds: 120 points with ties (108 unique x values, so knots are
+    /// subsampled). The refactor must not move these numbers.
+    #[test]
+    fn test_pinned_smooth_spline_outputs() {
+        let x: Vec<f64> = (0..120)
+            .map(|i| ((i as f64 * 0.37) % 11.0 * 10.0).round() / 10.0)
+            .collect();
+        let y: Vec<f64> = x
+            .iter()
+            .enumerate()
+            .map(|(i, &xi)| xi.sin() + 0.2 * (13.7 * i as f64).sin())
+            .collect();
+        let mut v = Vec::new();
+        for config in [
+            SmoothSplineConfig::with_df(8.0),
+            SmoothSplineConfig::with_cv(true),
+            SmoothSplineConfig::with_cv(false),
+            SmoothSplineConfig::with_spar(0.5),
+        ] {
+            let r = smooth_spline(&x, &y, config).unwrap();
+            assert!(r.x.len() > 50 && r.x.len() < x.len());
+            v.push(r.df);
+            v.push(r.lambda);
+            v.push(r.cv_crit.unwrap_or(-1.0));
+            v.push(r.y[0]);
+            v.push(r.y[r.y.len() / 2]);
+            v.push(r.y[r.y.len() - 1]);
+            v.push(r.residuals.iter().map(|e| e * e).sum::<f64>());
+            v.extend(smooth_spline_predict(&r, &[-1.0, 0.5, 5.25, 12.0]).unwrap());
+        }
+        assert_pinned(
+            "smooth spline",
+            &v,
+            &[
+                7.959650339740675,
+                0.31765311974565075,
+                -1.0,
+                0.039855882916652235,
+                -0.741512866824391,
+                -0.9894474775718114,
+                2.208640342105104,
+                -0.574606194806342,
+                0.5178801934638836,
+                -0.8798477928818665,
+                -2.3711789722590013,
+                3.385695443841225,
+                1.2589254117941675,
+                0.02009268620312995,
+                0.07080868290266186,
+                -0.7193031982347561,
+                -1.0182308450943232,
+                2.2761536407365695,
+                -0.6673589267151805,
+                0.5085642766694489,
+                -0.8637937775405333,
+                -1.8037473116242337,
+                3.385695443841225,
+                1.2589254117941675,
+                0.02061709010005428,
+                0.07080868290266186,
+                -0.7193031982347561,
+                -1.0182308450943232,
+                2.2761536407365695,
+                -0.6673589267151805,
+                0.5085642766694489,
+                -0.8637937775405333,
+                -1.8037473116242337,
+                0.3910712187506279,
+                191.85614814814815,
+                -1.0,
+                0.7089811199425499,
+                -0.2561670964031391,
+                -0.7676214379156595,
+                20.123882967936165,
+                0.7986745269386725,
+                0.6678437240664398,
+                -0.32252981657746854,
+                -1.4014086129325052,
+            ],
+        );
+    }
 }

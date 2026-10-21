@@ -538,6 +538,95 @@ mod tests {
         }
     }
 
+    /// Pinned-value check. A wrong or empty `expected` prints the actual values to paste.
+    fn assert_pinned(what: &str, actual: &[f64], expected: &[f64]) {
+        assert_eq!(
+            actual.len(),
+            expected.len(),
+            "{what}: pin these values: {actual:?}"
+        );
+        for (i, (a, e)) in actual.iter().zip(expected).enumerate() {
+            assert!(
+                (a - e).abs() <= 1e-9 * e.abs().max(1e-3),
+                "{what}[{i}]: got {a}, pinned {e}; all: {actual:?}"
+            );
+        }
+    }
+
+    /// 60 noisy rows with two regressors and four ordered categories
+    /// (14, 15, 15 and 16 rows).
+    fn create_ordered_dataset_60() -> Dataset {
+        let mut y: Vec<&str> = Vec::with_capacity(60);
+        let mut x1: Vec<f64> = Vec::with_capacity(60);
+        let mut x2: Vec<f64> = Vec::with_capacity(60);
+        for i in 0..60usize {
+            let a = ((i * 37) % 23) as f64 / 4.0;
+            let b = ((i * 11) % 7) as f64 - 3.0 + 0.05 * i as f64;
+            let z = 0.6 * a - 0.4 * b + (((i * 7919) % 101) as f64 / 101.0 - 0.5);
+            y.push(if z < 0.0 {
+                "a"
+            } else if z < 1.0 {
+                "b"
+            } else if z < 2.0 {
+                "c"
+            } else {
+                "d"
+            });
+            x1.push(a);
+            x2.push(b);
+        }
+        for cat in ["a", "b", "c", "d"] {
+            assert!(y.contains(&cat), "category {cat} missing");
+        }
+        Dataset::new(df! { "y" => y, "x1" => x1, "x2" => x2 }.unwrap())
+    }
+
+    fn ordered_outputs(r: &OrderedResult) -> Vec<f64> {
+        let mut v = r.coefficients.clone();
+        v.extend(&r.thresholds);
+        v.push(r.log_likelihood);
+        v.push(r.iterations as f64);
+        v
+    }
+
+    /// Characterisation test recorded from the code before the T0-WP14 resource
+    /// bounds; the refactor must not move these numbers.
+    #[test]
+    fn test_pinned_ordered_outputs() {
+        let ds = create_ordered_dataset();
+        let mut v = ordered_outputs(&run_ordered_logit(&ds, "y", &["x"]).unwrap());
+        v.extend(ordered_outputs(
+            &run_ordered_probit(&ds, "y", &["x"]).unwrap(),
+        ));
+        let ds60 = create_ordered_dataset_60();
+        v.extend(ordered_outputs(
+            &run_ordered_logit(&ds60, "y", &["x1", "x2"]).unwrap(),
+        ));
+        assert_pinned(
+            "ordered",
+            &v,
+            &[
+                0.3752165575229469,
+                -1.2899202006035233,
+                1.2960992251299421,
+                -20.825411738564778,
+                100.0,
+                0.14718029310181532,
+                -1.6730261733593013,
+                0.4754700045772722,
+                -28.113493958327997,
+                100.0,
+                -0.8444065857208708,
+                0.48623222352263373,
+                -1.4516923297598314,
+                -0.28377059830396983,
+                4.250486294194607,
+                -205.37544947447003,
+                100.0,
+            ],
+        );
+    }
+
     // ==========================================================================
     // R Validation Tests
     // ==========================================================================

@@ -677,3 +677,102 @@ pub fn run_arellano_bond(
 ) -> EconResult<GmmResult> {
     run_gmm(dataset, y_col, x_cols, entity_col, time_col, 1, None)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const GRUNFELD_CSV: &str = include_str!("../../../../../validation/datasets/grunfeld.csv");
+
+    fn grunfeld() -> Dataset {
+        Dataset::new(crate::data::DataLoader::from_csv_string(GRUNFELD_CSV).unwrap())
+    }
+
+    /// Pinned-value check. A wrong or empty `expected` prints the actual values to paste.
+    fn assert_pinned(what: &str, actual: &[f64], expected: &[f64]) {
+        assert_eq!(
+            actual.len(),
+            expected.len(),
+            "{what}: pin these values: {actual:?}"
+        );
+        for (i, (a, e)) in actual.iter().zip(expected).enumerate() {
+            assert!(
+                (a - e).abs() <= 1e-9 * e.abs().max(1e-3),
+                "{what}[{i}]: got {a}, pinned {e}; all: {actual:?}"
+            );
+        }
+    }
+
+    /// Characterisation test recorded from the code before the T0-WP14 resource
+    /// bounds (full Grunfeld); the refactor must not move these numbers.
+    #[test]
+    fn test_pinned_gmm_outputs() {
+        let ds = grunfeld();
+        let mut v = Vec::new();
+        for cfg in [
+            GmmConfig::default(),
+            GmmConfig {
+                step: GmmStep::OneStep,
+                robust: false,
+                ..Default::default()
+            },
+            GmmConfig {
+                collapse: true,
+                ..Default::default()
+            },
+        ] {
+            let r = run_gmm(
+                &ds,
+                "inv",
+                &["value", "capital"],
+                "firm",
+                "year",
+                1,
+                Some(cfg),
+            )
+            .unwrap();
+            v.extend(&r.coefficients);
+            v.extend(&r.std_errors);
+            v.push(r.sargan_statistic);
+            v.push(r.ar1_statistic);
+            v.push(r.ar2_statistic);
+            v.push(r.n_instruments as f64);
+        }
+        assert_pinned(
+            "GMM",
+            &v,
+            &[
+                0.29933753513614647,
+                0.09658128264550214,
+                0.1124788052693475,
+                0.042556680865382786,
+                0.010836030299237687,
+                0.12914909016526244,
+                145.0345170734227,
+                -0.45394170305449977,
+                -0.7125582997514519,
+                155.0,
+                0.263063356103039,
+                0.09857082152215238,
+                0.15393705960952475,
+                0.07625725241170737,
+                0.008469925443997283,
+                0.05957087254941484,
+                144.39190430609358,
+                -0.5501390898230673,
+                -0.821665673760031,
+                155.0,
+                0.4846652156775235,
+                0.10013294300551934,
+                0.031961729288013885,
+                0.29735479082733934,
+                0.0084031363117453,
+                0.19262156673623862,
+                71.07621397410315,
+                -1.5530614549570625,
+                -0.5429454402428089,
+                20.0,
+            ],
+        );
+    }
+}

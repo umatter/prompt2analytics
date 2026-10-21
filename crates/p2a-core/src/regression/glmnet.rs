@@ -1064,4 +1064,72 @@ mod tests {
         assert_eq!(cv_result.cvm.len(), cv_result.lambda.len());
         assert_eq!(cv_result.cvsd.len(), cv_result.lambda.len());
     }
+
+    /// Pinned-value check. A wrong or empty `expected` prints the actual values to paste.
+    fn assert_pinned(what: &str, actual: &[f64], expected: &[f64]) {
+        assert_eq!(
+            actual.len(),
+            expected.len(),
+            "{what}: pin these values: {actual:?}"
+        );
+        for (i, (a, e)) in actual.iter().zip(expected).enumerate() {
+            assert!(
+                (a - e).abs() <= 1e-9 * e.abs().max(1e-3),
+                "{what}[{i}]: got {a}, pinned {e}; all: {actual:?}"
+            );
+        }
+    }
+
+    /// Characterisation test recorded from the code before the T0-WP14 resource
+    /// bounds (the `test_lambda_path` and `test_cv_glmnet` fits); the refactor
+    /// must not move these numbers.
+    #[test]
+    fn test_pinned_glmnet_outputs() {
+        let x = array![[1.0, 2.0], [2.0, 3.0], [3.0, 4.0], [4.0, 5.0], [5.0, 6.0]];
+        let y = array![2.0, 4.0, 5.0, 7.0, 9.0];
+        let config = GlmnetConfig {
+            alpha: 0.5,
+            nlambda: 20,
+            ..Default::default()
+        };
+        let r = glmnet(x.view(), y.view(), &config).unwrap();
+        let last = r.fits.last().unwrap();
+        let mut v = vec![r.lambda[0], r.lambda[r.lambda.len() - 1], last.intercept];
+        v.extend(&last.coefficients);
+
+        let x = array![
+            [1.0, 2.0],
+            [2.0, 3.0],
+            [3.0, 4.0],
+            [4.0, 5.0],
+            [5.0, 6.0],
+            [6.0, 7.0],
+            [7.0, 8.0],
+            [8.0, 9.0],
+            [9.0, 10.0],
+            [10.0, 11.0]
+        ];
+        let y = array![2.0, 4.0, 5.0, 7.0, 9.0, 11.0, 13.0, 15.0, 17.0, 19.0];
+        let config = GlmnetConfig {
+            alpha: 1.0,
+            nlambda: 20,
+            ..Default::default()
+        };
+        let cv = cv_glmnet(x.view(), y.view(), &config, 5, Some(42)).unwrap();
+        v.extend([cv.lambda_min, cv.lambda_1se, cv.cvm[0]]);
+        assert_pinned(
+            "glmnet",
+            &v,
+            &[
+                4.808326112068522,
+                0.00048083261120685276,
+                -0.548543031199773,
+                0.8499598746999023,
+                0.8496658517750166,
+                0.0005466038397008906,
+                0.11309988200086778,
+                39.7064688694004,
+            ],
+        );
+    }
 }

@@ -492,6 +492,48 @@ mod tests {
         assert_eq!(result.reference_category, "B");
     }
 
+    /// Pinned-value check. A wrong or empty `expected` prints the actual values to paste.
+    fn assert_pinned(what: &str, actual: &[f64], expected: &[f64]) {
+        assert_eq!(
+            actual.len(),
+            expected.len(),
+            "{what}: pin these values: {actual:?}"
+        );
+        for (i, (a, e)) in actual.iter().zip(expected).enumerate() {
+            assert!(
+                (a - e).abs() <= 1e-9 * e.abs().max(1e-3),
+                "{what}[{i}]: got {a}, pinned {e}; all: {actual:?}"
+            );
+        }
+    }
+
+    /// Characterisation test recorded from the code before the T0-WP14 resource
+    /// bounds; the refactor must not move these numbers.
+    #[test]
+    fn test_pinned_multinom_outputs() {
+        let r = run_multinom(&create_multinomial_dataset(), "y", &["x"], None).unwrap();
+        let mut v: Vec<f64> = r.coefficients.iter().flatten().copied().collect();
+        v.extend(r.std_errors.iter().flatten().copied());
+        v.push(r.log_likelihood);
+        v.push(r.iterations as f64);
+        assert_pinned(
+            "multinom",
+            &v,
+            &[
+                -100.48495558501233,
+                31.245875144862595,
+                -414.0551734919908,
+                80.36245457923923,
+                93622.81655799173,
+                17141.214740327898,
+                93622.81671314879,
+                17141.21475376697,
+                -3.4657359035423543,
+                50.0,
+            ],
+        );
+    }
+
     // ==========================================================================
     // R Validation Tests
     // ==========================================================================

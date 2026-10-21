@@ -514,3 +514,91 @@ pub fn run_random_effects(
         theta: Some(theta),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const GRUNFELD_CSV: &str = include_str!("../../../../../validation/datasets/grunfeld.csv");
+
+    /// Grunfeld rows for which `keep(firm, year)` holds.
+    fn grunfeld_where(keep: impl Fn(i64, i64) -> bool) -> Dataset {
+        let csv: String = GRUNFELD_CSV
+            .lines()
+            .enumerate()
+            .filter(|(i, line)| {
+                if *i == 0 {
+                    return true;
+                }
+                let mut fields = line.split(',').map(|f| f.trim().parse::<i64>());
+                match (fields.next(), fields.next()) {
+                    (Some(Ok(firm)), Some(Ok(year))) => keep(firm, year),
+                    _ => false,
+                }
+            })
+            .map(|(_, line)| format!("{line}\n"))
+            .collect();
+        Dataset::new(crate::data::DataLoader::from_csv_string(&csv).unwrap())
+    }
+
+    /// Pinned-value check. A wrong or empty `expected` prints the actual values to paste.
+    fn assert_pinned(what: &str, actual: &[f64], expected: &[f64]) {
+        assert_eq!(
+            actual.len(),
+            expected.len(),
+            "{what}: pin these values: {actual:?}"
+        );
+        for (i, (a, e)) in actual.iter().zip(expected).enumerate() {
+            assert!(
+                (a - e).abs() <= 1e-9 * e.abs().max(1e-3),
+                "{what}[{i}]: got {a}, pinned {e}; all: {actual:?}"
+            );
+        }
+    }
+
+    /// Characterisation test recorded from the code before the T0-WP14 resource
+    /// bounds (full Grunfeld, and an unbalanced copy); the refactor must not move
+    /// these numbers.
+    #[test]
+    fn test_pinned_random_effects_outputs() {
+        let mut v = Vec::new();
+        for ds in [
+            grunfeld_where(|_, _| true),
+            grunfeld_where(|firm, year| (firm + year) % 7 != 0),
+        ] {
+            let r = run_random_effects(&ds, "inv", &["value", "capital"], "firm").unwrap();
+            v.extend(&r.coefficients);
+            v.extend(&r.std_errors);
+            v.push(r.theta.unwrap());
+            v.push(r.sigma_u.unwrap());
+            v.push(r.sigma_e.unwrap());
+            v.push(r.r_squared);
+        }
+        assert_pinned(
+            "random effects",
+            &v,
+            &[
+                -57.83441490503308,
+                0.10978115223248376,
+                0.308112982830713,
+                168.5470799771813,
+                0.033513202175696935,
+                0.05825701517154266,
+                0.8612236207478787,
+                84.20095070311291,
+                52.767965952630156,
+                0.8061042277659057,
+                -51.80460190637258,
+                0.10171042934454234,
+                0.31778453800732426,
+                144.18764163473352,
+                0.03756116091391904,
+                0.060083300300656194,
+                0.8421608692254301,
+                83.23435669958732,
+                55.00850791319012,
+                0.8021936587934488,
+            ],
+        );
+    }
+}
