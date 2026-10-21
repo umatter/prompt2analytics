@@ -219,18 +219,21 @@ pub struct EcdfResult {
 }
 
 impl EcdfResult {
-    /// Evaluate the ECDF at a point.
+    /// Evaluate the ECDF at a point: the proportion of data values `<= point`.
+    ///
+    /// The step is found by binary search over the sorted knots. A NaN point gives NaN
+    /// (R: `ecdf(x)(NA)` is `NA`).
     pub fn evaluate(&self, point: f64) -> f64 {
+        if point.is_nan() {
+            return f64::NAN;
+        }
         if self.x.is_empty() {
             return 0.0;
         }
 
-        // Find largest x <= point
-        match self.x.iter().position(|&xi| xi > point) {
-            Some(0) => 0.0,
-            Some(i) => self.y[i - 1],
-            None => 1.0,
-        }
+        // Number of knots <= point; the step value is the last of them
+        let i = self.x.partition_point(|&xi| xi <= point);
+        if i == 0 { 0.0 } else { self.y[i - 1] }
     }
 
     /// Evaluate ECDF at multiple points.
@@ -269,7 +272,8 @@ pub fn ecdf(data: &[f64]) -> EconResult<EcdfResult> {
         let val = sorted[i];
         // Count how many equal values
         let mut count = 1;
-        while i + count < n && (sorted[i + count] - val).abs() < 1e-15 {
+        while i + count < n && (sorted[i + count] == val || (sorted[i + count] - val).abs() < 1e-15)
+        {
             count += 1;
         }
 
@@ -847,6 +851,69 @@ mod tests {
             )
         });
         assert!(matches!(r, Err(EconError::Cancelled(_))));
+    }
+
+    // R 4.3.3: ex <- c(2.3,-0.7,1.1,2.3,0.4,-0.7,3.9,1.1,1.1,0.0,-2.5,0.4); Fn <- ecdf(ex); Fn(at)
+    #[test]
+    fn test_validate_ecdf_against_r() {
+        let ex = [
+            2.3, -0.7, 1.1, 2.3, 0.4, -0.7, 3.9, 1.1, 1.1, 0.0, -2.5, 0.4,
+        ];
+        let at = [
+            -3.0, -2.5, -1.0, -0.7, 0.0, 0.2, 0.4, 1.1, 1.5, 2.3, 3.9, 4.5,
+        ];
+        let r_at = [
+            0.0,
+            1.0 / 12.0,
+            1.0 / 12.0,
+            3.0 / 12.0,
+            4.0 / 12.0,
+            4.0 / 12.0,
+            6.0 / 12.0,
+            9.0 / 12.0,
+            9.0 / 12.0,
+            11.0 / 12.0,
+            1.0,
+            1.0,
+        ];
+        let f = ecdf(&ex).unwrap();
+        assert_eq!(f.x, vec![-2.5, -0.7, 0.0, 0.4, 1.1, 2.3, 3.9]); // R: knots(Fn)
+        for (got, want) in f.evaluate_many(&at).iter().zip(r_at) {
+            assert!((got - want).abs() < 1e-15);
+        }
+    }
+
+    #[test]
+    fn test_ecdf_evaluate_nan_is_nan() {
+        // R: ecdf(x)(NA) is NA; pre-fix returned 1.0
+        assert!(ecdf(&[1.0, 2.0, 3.0]).unwrap().evaluate(f64::NAN).is_nan());
+    }
+
+    #[test]
+    fn test_ecdf_evaluate_matches_linear_scan() {
+        let data: Vec<f64> = (0..500)
+            .map(|i| ((i * 7919) % 103) as f64 * 0.25 - 10.0)
+            .collect(); // many ties
+        let f = ecdf(&data).unwrap();
+        let naive = |p: f64| match f.x.iter().position(|&xi| xi > p) {
+            Some(0) => 0.0,
+            Some(i) => f.y[i - 1],
+            None => 1.0,
+        };
+        let mut pts: Vec<f64> = f.x.clone();
+        pts.extend(f.x.iter().map(|v| v + 0.125));
+        pts.extend([f64::NEG_INFINITY, f64::INFINITY, -1e300, 1e300]);
+        for p in pts {
+            assert_eq!(f.evaluate(p), naive(p), "p={p}");
+        }
+    }
+
+    #[test]
+    fn test_ecdf_groups_equal_infinities() {
+        // R: knots(ecdf(c(1, Inf, Inf))) = c(1, Inf)
+        let f = ecdf(&[1.0, f64::INFINITY, f64::INFINITY]).unwrap();
+        assert_eq!(f.x, vec![1.0, f64::INFINITY]);
+        assert_eq!(f.y, vec![1.0 / 3.0, 1.0]);
     }
 
     #[cfg(feature = "spectral-analysis")]
