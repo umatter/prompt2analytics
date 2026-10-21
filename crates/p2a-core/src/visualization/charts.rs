@@ -2132,6 +2132,7 @@ pub fn dendrogram(
 
     let n_merges = linkage_matrix.len();
     let n_samples = n_merges + 1;
+    validate_linkage(linkage_matrix, n_samples)?;
 
     let max_distance = linkage_matrix
         .iter()
@@ -2200,6 +2201,7 @@ pub fn dendrogram(
 
         // Draw the dendrogram links
         for (i, (c1, c2, dist, _size)) in linkage_matrix.iter().enumerate() {
+            resource::checkpoint().map_err(invalid_data)?;
             let (x1, y1) = cluster_pos[*c1];
             let (x2, y2) = cluster_pos[*c2];
             let new_cluster_idx = n_samples + i;
@@ -2316,39 +2318,81 @@ pub fn dendrogram(
     })
 }
 
+/// Check a linkage matrix before it is used to index the cluster table.
+///
+/// Merge `i` creates cluster `n_samples + i`, so it may only refer to the
+/// samples and the clusters created by earlier merges; it must join two
+/// different clusters, neither of which was merged before, at a finite,
+/// non-negative height.
+fn validate_linkage(
+    linkage: &[(usize, usize, f64, usize)],
+    n_samples: usize,
+) -> Result<(), VisualizationError> {
+    let n_clusters = n_samples
+        .checked_add(linkage.len())
+        .ok_or_else(|| VisualizationError::InvalidData("linkage matrix is too large".into()))?;
+    let mut merged = vec![false; n_clusters];
+    for (i, &(c1, c2, height, _)) in linkage.iter().enumerate() {
+        let existing = n_samples + i;
+        for c in [c1, c2] {
+            if c >= existing {
+                return Err(VisualizationError::InvalidData(format!(
+                    "linkage row {i} refers to cluster {c}, which does not exist yet"
+                )));
+            }
+        }
+        if c1 == c2 {
+            return Err(VisualizationError::InvalidData(format!(
+                "linkage row {i} merges cluster {c1} with itself"
+            )));
+        }
+        for c in [c1, c2] {
+            if merged[c] {
+                return Err(VisualizationError::InvalidData(format!(
+                    "linkage row {i} merges cluster {c}, which an earlier row already merged"
+                )));
+            }
+            merged[c] = true;
+        }
+        if !height.is_finite() || height < 0.0 {
+            return Err(VisualizationError::InvalidData(format!(
+                "linkage row {i} has merge height {height}; heights must be finite and \
+                 non-negative"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Compute the optimal leaf ordering for dendrogram visualization.
 /// Returns the order in which leaves should be placed (left to right).
+///
+/// The leaves of the last cluster, left subtree before right subtree, found
+/// by one depth-first traversal of the merge tree (O(n) time and memory).
+/// The linkage must have passed [`validate_linkage`].
 fn compute_leaf_order(
     linkage_matrix: &[(usize, usize, f64, usize)],
     n_samples: usize,
 ) -> Vec<usize> {
-    // Build a tree structure from linkage matrix
-    // Each cluster has left and right children (or is a leaf)
+    let n_clusters = n_samples + linkage_matrix.len();
+    let Some(root) = n_clusters.checked_sub(1) else {
+        return Vec::new();
+    };
 
-    let n_merges = linkage_matrix.len();
-
-    // For each cluster, store its leaves in order
-    let mut cluster_leaves: Vec<Vec<usize>> = Vec::with_capacity(n_samples + n_merges);
-
-    // Initialize leaves (original samples)
-    for i in 0..n_samples {
-        cluster_leaves.push(vec![i]);
+    let mut order = Vec::new();
+    let mut stack = vec![root];
+    while let Some(id) = stack.pop() {
+        if id < n_samples {
+            order.push(id);
+        } else {
+            // Merge `id - n_samples` created cluster `id`; visit its left
+            // child first, so push the right child first.
+            let (left, right, _, _) = linkage_matrix[id - n_samples];
+            stack.push(right);
+            stack.push(left);
+        }
     }
-
-    // Process merges
-    for (c1, c2, _, _) in linkage_matrix.iter() {
-        let left_leaves = cluster_leaves[*c1].clone();
-        let right_leaves = cluster_leaves[*c2].clone();
-        let mut merged = left_leaves;
-        merged.extend(right_leaves);
-        cluster_leaves.push(merged);
-    }
-
-    // The last cluster contains all leaves in order
-    cluster_leaves
-        .last()
-        .cloned()
-        .unwrap_or_else(|| (0..n_samples).collect())
+    order
 }
 
 #[cfg(test)]
@@ -2485,6 +2529,73 @@ mod tests {
             cfg()
         )
         .map(|_| ())));
+    }
+
+    #[test]
+    fn dendrogram_rejects_malformed_linkage() {
+        let cfg = || ChartConfig {
+            width: 200,
+            height: 150,
+            ..ChartConfig::default()
+        };
+        for bad in [
+            vec![(0usize, 7usize, 1.0f64, 2usize)], // cluster 7 does not exist yet
+            vec![(0, 1, 1.0, 2), (0, 2, 2.0, 2)],   // cluster 0 merged twice
+            vec![(1, 1, 1.0, 2)],                   // self-merge
+            vec![(0, 1, f64::NAN, 2)],              // non-finite height
+            vec![(0, 1, -1.0, 2)],                  // negative height
+        ] {
+            assert!(
+                matches!(
+                    dendrogram(&bad, None, cfg()),
+                    Err(VisualizationError::InvalidData(_))
+                ),
+                "{bad:?}"
+            );
+        }
+    }
+
+    /// The pre-fix leaf order (one cloned leaf list per merge), kept as the
+    /// reference.
+    fn leaf_order_reference(linkage: &[(usize, usize, f64, usize)], n: usize) -> Vec<usize> {
+        let mut cluster_leaves: Vec<Vec<usize>> = Vec::with_capacity(n + linkage.len());
+        for i in 0..n {
+            cluster_leaves.push(vec![i]);
+        }
+        for (c1, c2, _, _) in linkage.iter() {
+            let mut merged = cluster_leaves[*c1].clone();
+            merged.extend(cluster_leaves[*c2].clone());
+            cluster_leaves.push(merged);
+        }
+        cluster_leaves
+            .last()
+            .cloned()
+            .unwrap_or_else(|| (0..n).collect())
+    }
+
+    #[test]
+    fn leaf_order_matches_reference_on_random_trees() {
+        use rand::{Rng, SeedableRng};
+        let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(7);
+        let n = 300;
+        let (mut active, mut next, mut linkage) = ((0..n).collect::<Vec<usize>>(), n, Vec::new());
+        while active.len() > 1 {
+            let a = active.swap_remove(rng.gen_range(0..active.len()));
+            let b = active.swap_remove(rng.gen_range(0..active.len()));
+            linkage.push((a, b, linkage.len() as f64 + rng.gen_range(0.0..0.5), 2));
+            active.push(next);
+            next += 1;
+        }
+        assert_eq!(
+            compute_leaf_order(&linkage, n),
+            leaf_order_reference(&linkage, n)
+        );
+        // A forest: the order of the last cluster's leaves.
+        let partial = &linkage[..n / 2];
+        assert_eq!(
+            compute_leaf_order(partial, n),
+            leaf_order_reference(partial, n)
+        );
     }
 
     #[test]
