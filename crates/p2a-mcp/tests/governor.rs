@@ -602,3 +602,70 @@ async fn local_mode_rejects_foreign_host_headers() {
         StatusCode::OK
     );
 }
+
+// ---------------------------------------------------------------------------
+// CORS (MCP-16, server half)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn cors_headers_on_auth_failures_and_preflight() {
+    let mut c = http_cfg("0.0.0.0:8080", Some("t"), false);
+    c.http.cors_origins = vec!["http://allowed.example".into()];
+    let (app, _) = build_app(&c).await.unwrap();
+    let r = Request::get("/api/tools")
+        .header(header::ORIGIN, "http://allowed.example")
+        .body(Body::empty())
+        .unwrap();
+    let (s, h, _) = send(&app, r).await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        h[header::ACCESS_CONTROL_ALLOW_ORIGIN],
+        "http://allowed.example"
+    ); // was missing
+    let pre = Request::builder()
+        .method("OPTIONS")
+        .uri("/api/tools")
+        .header(header::ORIGIN, "http://allowed.example")
+        .header(header::ACCESS_CONTROL_REQUEST_METHOD, "GET")
+        .header(
+            header::ACCESS_CONTROL_REQUEST_HEADERS,
+            "authorization,content-type,x-p2a-session-id",
+        )
+        .body(Body::empty())
+        .unwrap();
+    let (s, h, _) = send(&app, pre).await;
+    assert!(s.is_success(), "{s}");
+    let allow = h[header::ACCESS_CONTROL_ALLOW_HEADERS]
+        .to_str()
+        .unwrap()
+        .to_ascii_lowercase();
+    assert!(
+        allow != "*" && allow.contains("authorization") && allow.contains("x-p2a-session-id"),
+        "{allow}"
+    );
+    let big = Request::post("/api/tools/list_datasets")
+        .header(header::ORIGIN, "http://allowed.example")
+        .header(header::AUTHORIZATION, "Bearer t")
+        .header(header::CONTENT_LENGTH, "40000000")
+        .body(Body::empty())
+        .unwrap(); // limit checks the header
+    let (s, h, _) = send(&app, big).await;
+    assert_eq!(s, StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(
+        h[header::ACCESS_CONTROL_ALLOW_ORIGIN],
+        "http://allowed.example"
+    );
+    let ok = Request::get("/api/tools")
+        .header(header::ORIGIN, "http://allowed.example")
+        .header(header::AUTHORIZATION, "Bearer t")
+        .body(Body::empty())
+        .unwrap();
+    let (_, h, _) = send(&app, ok).await;
+    assert!(
+        h[header::ACCESS_CONTROL_EXPOSE_HEADERS]
+            .to_str()
+            .unwrap()
+            .to_ascii_lowercase()
+            .contains("retry-after")
+    );
+}
