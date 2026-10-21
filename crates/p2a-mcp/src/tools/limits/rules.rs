@@ -1178,3 +1178,253 @@ mod tests {
         assert_eq!(ROW_RULES.len(), 16);
     }
 }
+
+/// Fail-closed guarantee: every cost-bearing field of every registered tool has a rule.
+#[cfg(all(test, feature = "http"))]
+mod schema_tests {
+    use super::super::{Limits, Rule, rules_for};
+    use super::{PARAM_RULES, ROW_RULES};
+    use crate::server::AnalyticsServer;
+    use serde_json::{Value, json};
+
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    enum Kind {
+        Integer,
+        Tolerance,
+        Array,
+    }
+
+    /// Most `$ref` hops followed from one schema.
+    const MAX_REF_HOPS: usize = 16;
+    /// Deepest nesting of object and array-of-object properties walked.
+    const MAX_DEPTH: usize = 8;
+
+    /// Collects `schema` and every schema it stands for: `$ref` targets (`#/definitions/...` and
+    /// `#/$defs/...`, resolved against `root`) and `anyOf` / `oneOf` / `allOf` variants.
+    fn variants<'a>(root: &'a Value, schema: &'a Value, hops: usize, out: &mut Vec<&'a Value>) {
+        if hops > MAX_REF_HOPS {
+            return;
+        }
+        out.push(schema);
+        if let Some(reference) = schema.get("$ref").and_then(Value::as_str) {
+            let target = if let Some(name) = reference.strip_prefix("#/definitions/") {
+                &root["definitions"][name]
+            } else if let Some(name) = reference.strip_prefix("#/$defs/") {
+                &root["$defs"][name]
+            } else {
+                &Value::Null
+            };
+            if !target.is_null() {
+                variants(root, target, hops + 1, out);
+            }
+        }
+        for key in ["anyOf", "oneOf", "allOf"] {
+            for variant in schema
+                .get(key)
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                variants(root, variant, hops + 1, out);
+            }
+        }
+    }
+
+    /// The JSON types of a set of variants, `"null"` ignored.
+    fn types<'a>(variants: &[&'a Value]) -> Vec<&'a str> {
+        let mut out = Vec::new();
+        for v in variants {
+            match v.get("type") {
+                Some(Value::String(t)) => out.push(t.as_str()),
+                Some(Value::Array(ts)) => out.extend(ts.iter().filter_map(Value::as_str)),
+                _ => {}
+            }
+        }
+        out.retain(|t| *t != "null");
+        out
+    }
+
+    fn walk(
+        root: &Value,
+        schema: &Value,
+        prefix: &str,
+        depth: usize,
+        out: &mut Vec<(String, Kind)>,
+    ) {
+        if depth > MAX_DEPTH {
+            return;
+        }
+        let mut own = Vec::new();
+        variants(root, schema, 0, &mut own);
+        for props in own
+            .iter()
+            .filter_map(|v| v.get("properties").and_then(Value::as_object))
+        {
+            for (name, prop) in props {
+                let path = format!("{prefix}{name}");
+                let mut pvs = Vec::new();
+                variants(root, prop, 0, &mut pvs);
+                let ts = types(&pvs);
+                let mut push = |kind: Kind| {
+                    if !out.iter().any(|(p, k)| *p == path && *k == kind) {
+                        out.push((path.clone(), kind));
+                    }
+                };
+                if ts.contains(&"integer") {
+                    push(Kind::Integer);
+                }
+                if ts.contains(&"number") && (name.contains("tol") || name.contains("eps")) {
+                    push(Kind::Tolerance);
+                }
+                if ts.contains(&"array") {
+                    push(Kind::Array);
+                    for items in pvs.iter().filter_map(|v| v.get("items")) {
+                        walk(root, items, &format!("{path}[]."), depth + 1, out);
+                    }
+                }
+                if ts.contains(&"object") {
+                    walk(root, prop, &format!("{path}."), depth + 1, out);
+                }
+            }
+        }
+    }
+
+    /// Walks one tool's input schema and returns every (path, kind) that must be classified.
+    fn cost_properties(schema: &Value) -> Vec<(String, Kind)> {
+        let mut out = Vec::new();
+        walk(schema, schema, "", 0, &mut out);
+        out
+    }
+
+    fn tools() -> Vec<(String, Value)> {
+        AnalyticsServer::new()
+            .list_tools()
+            .into_iter()
+            .map(|t| (t.name, t.input_schema))
+            .collect()
+    }
+
+    #[test]
+    fn every_cost_property_of_every_tool_is_classified() {
+        let tools = tools();
+        assert!(tools.len() >= 250, "walker saw {} tools", tools.len());
+        let (mut ints, mut arrays, mut tols, mut missing) = (0, 0, 0, Vec::new());
+        for (tool, schema) in &tools {
+            let rules = rules_for(tool);
+            for (path, kind) in cost_properties(schema) {
+                match kind {
+                    Kind::Integer => ints += 1,
+                    Kind::Array => arrays += 1,
+                    Kind::Tolerance => tols += 1,
+                }
+                let ok = rules
+                    .iter()
+                    .filter(|r| r.path == path)
+                    .any(|r| match (kind, r.rule) {
+                        (_, Rule::Exempt(_)) => true,
+                        (Kind::Integer, Rule::Max(_)) => true,
+                        (Kind::Tolerance, Rule::Tolerance | Rule::Max(_)) => true,
+                        (
+                            Kind::Array,
+                            Rule::ArrayLen(_)
+                            | Rule::ArrayElemMax(_)
+                            | Rule::UniqueList(_)
+                            | Rule::SquareLen,
+                        ) => true,
+                        _ => false,
+                    });
+                if !ok {
+                    missing.push(format!("{tool}.{path} ({kind:?})"));
+                }
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "request fields without a limits rule (add a ParamRule or a reasoned Exempt in \
+             tools/limits/rules.rs):\n{}",
+            missing.join("\n")
+        );
+        eprintln!(
+            "schema walker: {} tools, {ints} integer, {arrays} array, {tols} tolerance fields",
+            tools.len()
+        );
+        // Sanity: a schema format change must not silently hide properties
+        // (counts at d6a3a3b: 191 / 199 / 10).
+        assert!(
+            ints >= 150 && arrays >= 150 && tols >= 8,
+            "walker saw {ints} integer, {arrays} array, {tols} tolerance fields"
+        );
+    }
+
+    #[test]
+    fn rules_point_at_real_tools_and_fields() {
+        let tools: std::collections::HashMap<String, Value> = tools().into_iter().collect();
+        for r in PARAM_RULES {
+            let first = r.path.split(['.', '[']).next().unwrap();
+            if r.tool == "*" {
+                assert!(
+                    tools.values().any(|s| s["properties"].get(first).is_some()),
+                    "generic rule `{}` matches no tool",
+                    r.path
+                );
+            } else {
+                let s = tools
+                    .get(r.tool)
+                    .unwrap_or_else(|| panic!("rule for unknown tool `{}`", r.tool));
+                assert!(
+                    s["properties"].get(first).is_some(),
+                    "{}.{} is not a field",
+                    r.tool,
+                    r.path
+                );
+            }
+        }
+        for rr in ROW_RULES {
+            let s = tools
+                .get(rr.tool)
+                .unwrap_or_else(|| panic!("row rule for unknown tool `{}`", rr.tool));
+            assert_eq!(
+                s["properties"][rr.dataset_field]["type"], "string",
+                "{}",
+                rr.tool
+            );
+            assert!(
+                s["required"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|v| v == rr.dataset_field),
+                "{}",
+                rr.tool
+            );
+        }
+    }
+
+    #[test]
+    fn small_typical_arguments_pass_for_every_tool_in_hosted_profile() {
+        let h = Limits::hosted();
+        for (tool, schema) in tools() {
+            let mut args = serde_json::Map::new();
+            for (path, kind) in cost_properties(&schema) {
+                if path.contains(['.', '[']) {
+                    continue;
+                }
+                args.insert(
+                    path,
+                    match kind {
+                        Kind::Integer => json!(1),
+                        Kind::Tolerance => json!(1e-6),
+                        Kind::Array => json!([]),
+                    },
+                );
+            }
+            let args = Value::Object(args);
+            assert!(
+                h.check_tool_arguments(&tool, &args).is_ok(),
+                "{tool}: {:?}",
+                h.check_tool_arguments(&tool, &args)
+            );
+            assert!(Limits::off().check_tool_arguments(&tool, &args).is_ok());
+        }
+    }
+}
