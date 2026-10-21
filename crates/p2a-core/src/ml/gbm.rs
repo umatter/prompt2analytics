@@ -12,8 +12,8 @@
 //!
 //! ## Example
 //!
-//! ```rust,no_run
-//! use p2a_core::ml::{gbm, GbmConfig, GbmFamily};
+//! ```rust
+//! use p2a_core::ml::{gbm, gbm_predict, GbmConfig, GbmFamily};
 //! use ndarray::array;
 //!
 //! let x = array![[1.0], [2.0], [3.0], [4.0], [5.0]];
@@ -21,16 +21,34 @@
 //!
 //! let config = GbmConfig {
 //!     n_trees: 100,
-//!     learning_rate: 0.1,
+//!     learning_rate: 0.1,   // shrinkage
 //!     max_depth: 3,
 //!     min_samples_split: 2,
-//!     subsample: 0.8,
+//!     subsample: 0.8,       // stochastic gradient boosting: 80% of rows per tree
 //!     family: GbmFamily::Gaussian,
 //!     ..Default::default()
 //! };
 //!
 //! let result = gbm(x.view(), y.view(), &config).unwrap();
-//! println!("Training MSE: {:.4}", result.train_loss);
+//!
+//! // `train_loss` is the loss *trajectory*: the loss of the constant starting
+//! // model followed by one entry per boosting iteration. `final_train_loss`
+//! // is the scalar at the end of that trajectory.
+//! assert_eq!(result.train_loss.len(), config.n_trees + 1);
+//! assert_eq!(result.final_train_loss, *result.train_loss.last().unwrap());
+//!
+//! // The starting model is F0 = mean(y) = 3.02, so the first entry is the
+//! // variance of y: sum((y - 3.02)^2) / 5 = 9.908 / 5 = 1.9816.
+//! assert!((result.train_loss[0] - 1.9816).abs() < 1e-9);
+//!
+//! // Boosting drives the Gaussian (MSE) loss below that starting point.
+//! assert!(result.final_train_loss < result.train_loss[0]);
+//! println!("Training MSE: {:.4}", result.final_train_loss);
+//!
+//! // The fitted ensemble scores new points.
+//! let x_new = array![[1.5], [4.5]];
+//! let preds = gbm_predict(&result, x_new.view()).unwrap();
+//! assert_eq!(preds.len(), 2);
 //! ```
 
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, s};

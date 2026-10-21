@@ -26,29 +26,53 @@
 //! # Example
 //!
 //! ```
-//! use p2a_core::ml::quantile_rf::{QuantileRfConfig, quantile_rf, predict_quantiles};
-//! use ndarray::{Array1, Array2, array};
+//! use p2a_core::ml::{
+//!     QuantileRfConfig, predict_quantiles_with_y, prediction_intervals, quantile_rf,
+//! };
+//! use ndarray::array;
 //!
-//! // Generate sample data
+//! // Ten observations of a noisy monotone relationship.
 //! let x = array![
 //!     [1.0, 2.0], [2.0, 3.0], [3.0, 4.0], [4.0, 5.0], [5.0, 6.0],
 //!     [1.5, 2.5], [2.5, 3.5], [3.5, 4.5], [4.5, 5.5], [5.5, 6.5],
 //! ];
 //! let y = array![1.1, 2.0, 3.1, 4.0, 5.2, 1.5, 2.6, 3.5, 4.6, 5.5];
 //!
-//! // Configure and fit QRF
+//! // Configure and fit QRF. A node is only split while it holds more than
+//! // `2 * min_node_size` rows, so the default of 5 would leave every tree in a
+//! // 10-row sample as a stump; shrink it for a toy dataset like this one.
 //! let config = QuantileRfConfig {
 //!     n_trees: 50,
 //!     quantiles: vec![0.1, 0.5, 0.9],
+//!     min_node_size: 1,
+//!     seed: Some(42),
 //!     ..Default::default()
 //! };
 //!
 //! let result = quantile_rf(x.view(), y.view(), &config).unwrap();
-//! println!("OOB Error: {:.4}", result.oob_error.unwrap_or(0.0));
+//! // One row per training observation, one column per requested quantile.
+//! assert_eq!(result.predictions.dim(), (10, 3));
+//! // `keep_inbag` defaults to true, so out-of-bag predictions are computed too.
+//! assert!(result.oob_predictions.is_some());
 //!
-//! // Predict quantiles for new data
+//! // Predict quantiles for new data. QRF reads the conditional distribution off
+//! // the training responses sitting in each leaf, so `y` is passed back in.
 //! let x_new = array![[2.5, 3.5], [4.0, 5.0]];
-//! let predictions = predict_quantiles(&result, x_new.view()).unwrap();
+//! let predictions = predict_quantiles_with_y(&result, x_new.view(), y.view()).unwrap();
+//! assert_eq!(predictions.dim(), (2, 3));
+//!
+//! // The three columns are quantiles of one pooled empirical distribution, so
+//! // they are ordered and always lie inside the observed range of `y`
+//! // (1.1 to 5.5). The 1e-9 slack is float noise from the interpolation.
+//! for row in predictions.rows() {
+//!     assert!(row[0] <= row[1] + 1e-9 && row[1] <= row[2] + 1e-9);
+//!     assert!(row[0] >= 1.1 - 1e-9 && row[2] <= 5.5 + 1e-9);
+//! }
+//!
+//! // Columns 0 and 2 bracket an 80% prediction interval.
+//! let intervals = prediction_intervals(&predictions, 0, 2).unwrap();
+//! assert_eq!(intervals.len(), 2);
+//! assert!(intervals.iter().all(|&(lo, hi)| lo <= hi + 1e-9));
 //! ```
 
 use crate::Dataset;
@@ -606,7 +630,7 @@ fn empirical_quantile(values: &mut [f64], quantile: f64) -> f64 {
 /// # Example
 ///
 /// ```
-/// use p2a_core::ml::quantile_rf::{QuantileRfConfig, quantile_rf};
+/// use p2a_core::ml::{QuantileRfConfig, quantile_rf};
 /// use ndarray::array;
 ///
 /// let x = array![
@@ -615,8 +639,39 @@ fn empirical_quantile(values: &mut [f64], quantile: f64) -> f64 {
 /// ];
 /// let y = array![1.1, 2.0, 3.1, 4.0, 5.2, 6.0, 7.1, 8.0, 9.1, 10.0];
 ///
-/// let config = QuantileRfConfig::default();
+/// // Defaults except for the node size: splitting stops once a node holds
+/// // `2 * min_node_size` rows or fewer, and the default 5 would stop every tree
+/// // immediately on a 10-row bootstrap sample.
+/// let config = QuantileRfConfig {
+///     min_node_size: 1,
+///     seed: Some(42),
+///     ..Default::default()
+/// };
 /// let result = quantile_rf(x.view(), y.view(), &config).unwrap();
+///
+/// assert_eq!(result.n_obs, 10);
+/// assert_eq!(result.n_features, 2);
+/// assert_eq!(result.n_trees, 500); // QuantileRfConfig::default().n_trees
+/// // The default quantiles bracket a 95% prediction interval.
+/// assert_eq!(result.quantiles, vec![0.025, 0.5, 0.975]);
+/// assert_eq!(result.predictions.dim(), (10, 3));
+///
+/// // In-sample quantile predictions are ordered across the columns and stay
+/// // within the observed range of `y` (1.1 to 10.0), because each one is an
+/// // interpolation between training responses pooled from the leaves.
+/// for row in result.predictions.rows() {
+///     assert!(row[0] <= row[1] + 1e-9 && row[1] <= row[2] + 1e-9);
+///     assert!(row[0] >= 1.1 - 1e-9 && row[2] <= 10.0 + 1e-9);
+/// }
+///
+/// // Each split contributes the share of training rows reaching it, summed per
+/// // feature, normalised to one within a tree and then averaged over trees, so
+/// // importances are non-negative and sum to one (less only if a tree made no
+/// // split at all).
+/// assert_eq!(result.variable_importance.len(), 2);
+/// assert!(result.variable_importance.iter().all(|&v| v >= 0.0));
+/// let total: f64 = result.variable_importance.iter().sum();
+/// assert!(total <= 1.0 + 1e-9);
 /// ```
 ///
 /// # References
@@ -825,6 +880,15 @@ fn compute_oob_predictions(
 
 /// Predict quantiles for new observations.
 ///
+/// # Not usable out of sample
+///
+/// A QRF prediction is an empirical quantile of the *training* responses that
+/// land in the same leaves as `x_new`, and [`QuantileRfResult`] keeps only the
+/// leaf membership, not the responses themselves. This entry point therefore
+/// rejects every call, with an error naming [`predict_quantiles_with_y`], the
+/// variant that takes the training `y` as an extra argument. It exists so that a
+/// caller holding the model alone gets a diagnostic instead of silent nonsense.
+///
 /// # Arguments
 ///
 /// * `model` - Fitted QuantileRfResult
@@ -832,12 +896,15 @@ fn compute_oob_predictions(
 ///
 /// # Returns
 ///
-/// * Matrix of quantile predictions (n_samples x n_quantiles)
+/// * Always `Err`: either a shape/quantile validation message, or the message
+///   redirecting to [`predict_quantiles_with_y`].
 ///
 /// # Example
 ///
 /// ```
-/// use p2a_core::ml::quantile_rf::{QuantileRfConfig, quantile_rf, predict_quantiles};
+/// use p2a_core::ml::{
+///     QuantileRfConfig, predict_quantiles, predict_quantiles_with_y, quantile_rf,
+/// };
 /// use ndarray::array;
 ///
 /// let x = array![
@@ -846,11 +913,28 @@ fn compute_oob_predictions(
 /// ];
 /// let y = array![1.1, 2.0, 3.1, 4.0, 5.2, 6.0, 7.1, 8.0, 9.1, 10.0];
 ///
-/// let config = QuantileRfConfig::default();
+/// let config = QuantileRfConfig {
+///     n_trees: 100,
+///     quantiles: vec![0.1, 0.5, 0.9],
+///     min_node_size: 1,
+///     seed: Some(42),
+///     ..Default::default()
+/// };
 /// let model = quantile_rf(x.view(), y.view(), &config).unwrap();
-///
 /// let x_new = array![[2.5, 3.5], [7.5, 8.5]];
-/// let predictions = predict_quantiles(&model, x_new.view()).unwrap();
+///
+/// // Without the training responses the leaf distributions cannot be rebuilt.
+/// let err = predict_quantiles(&model, x_new.view()).unwrap_err();
+/// assert!(err.contains("predict_quantiles_with_y"), "{}", err);
+///
+/// // Hand `y` back and the prediction succeeds: one column per fitted quantile,
+/// // ordered, and inside the observed range of `y` (1.1 to 10.0).
+/// let predictions = predict_quantiles_with_y(&model, x_new.view(), y.view()).unwrap();
+/// assert_eq!(predictions.dim(), (2, 3));
+/// for row in predictions.rows() {
+///     assert!(row[0] <= row[1] + 1e-9 && row[1] <= row[2] + 1e-9);
+///     assert!(row[0] >= 1.1 - 1e-9 && row[2] <= 10.0 + 1e-9);
+/// }
 /// ```
 pub fn predict_quantiles(
     model: &QuantileRfResult,

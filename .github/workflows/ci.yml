@@ -89,15 +89,34 @@ jobs:
         # here — its WebKit/GTK deps dominate compile time and it's tested
         # locally.
         #
-        # --tests runs unit + integration tests but skips doctests; the repo
-        # carries a pre-existing backlog of doctest failures that are tracked
-        # separately from CI.
+        # --tests runs unit + integration tests only; doctests are gated
+        # separately in the step below so a failing example is distinguishable
+        # from a failing unit test in the log.
         run: |
           cargo test -p p2a-core --tests --no-default-features --features ci
           cargo test -p p2a-mcp --tests --no-default-features --features "http,llm,auth"
           cargo test -p p2a-cli --tests --no-default-features --features spectral-analysis
         env:
           RUST_TEST_THREADS: 4
+
+      - name: Run doctests
+        # The doc examples are the crates' user-facing documentation, so they
+        # are gated: an example that no longer compiles is a documentation bug
+        # and should fail the build. This reuses the build from the step above,
+        # so it costs little beyond the doctest link+run itself.
+        #
+        # Measured 2026-09-04: p2a-core 79 pass / 0 fail / 189 ignored,
+        # p2a-mcp 1 pass / 0 fail / 2 ignored. p2a-cli is intentionally absent:
+        # it is a binary-only crate, so `cargo test --doc` there fails outright
+        # with "no library targets found in package `p2a-cli`".
+        #
+        # The 189 ignored p2a-core examples are incomplete fragments that
+        # reference an undefined `dataset`; they are NOT compiled and so cannot
+        # be caught here. Converting them to runnable examples with hidden
+        # `# ` setup lines is tracked separately.
+        run: |
+          cargo test -p p2a-core --doc --no-default-features --features ci
+          cargo test -p p2a-mcp --doc --no-default-features --features "http,llm,auth"
 
   clippy:
     name: Clippy

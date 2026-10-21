@@ -35,17 +35,33 @@
 //! Generate comprehensive quality profiles for LLM-assisted cleaning:
 //!
 //! ```
-//! use p2a_core::data::{generate_quality_profile, Dataset};
+//! use p2a_core::data::{generate_quality_profile, DataIssue, Dataset};
 //! use polars::prelude::*;
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let df = df! {
-//!     "x" => [1.0, 2.0, f64::NAN, 4.0],
+//!     "x" => [Some(1.0), Some(2.0), None, Some(4.0)],
 //!     "y" => [Some("a"), Some("b"), None, Some("d")]
 //! }?;
 //! let dataset = Dataset::new(df);
 //! let profile = generate_quality_profile(&dataset);
-//! println!("Issues found: {:?}", profile.issues);
+//!
+//! // 2 of the 8 cells are missing, so completeness is 6/8.
+//! assert_eq!(profile.row_count, 4);
+//! assert_eq!(profile.duplicate_rows, 0);
+//! assert!((profile.completeness_score - 0.75).abs() < 1e-12);
+//!
+//! // Detected problems hang off the column that raised them; only
+//! // whole-dataset findings (e.g. duplicate rows) go in `dataset_issues`.
+//! let x = profile.columns.iter().find(|c| c.name == "x").unwrap();
+//! assert_eq!(x.null_count, 1);
+//! assert!(x.issues.iter().any(|i| matches!(i, DataIssue::HighNullRate { .. })));
+//! assert!(profile.dataset_issues.is_empty());
+//!
+//! // `all_issues` flattens both levels, most severe first.
+//! for issue in profile.all_issues() {
+//!     println!("[severity {}] {}", issue.severity(), issue.description());
+//! }
 //! # Ok(())
 //! # }
 //! ```
@@ -57,14 +73,42 @@
 //! ```
 //! use p2a_core::data::{CleaningSession, Dataset};
 //! use polars::prelude::*;
+//! use std::collections::HashMap;
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! let df = df! { "x" => [1, 2, 3] }?;
+//! let df = df! { "x" => [Some(1), Some(2), None, Some(4)] }?;
 //! let dataset = Dataset::new(df);
+//! // Checkpoint 0 is the untouched input; each applied operation appends one.
 //! let mut session = CleaningSession::new(dataset, "mydata");
-//! session.checkpoint("Initial state");
-//! // ... apply cleaning operations ...
-//! session.rollback();  // Undo last operation
+//! assert_eq!(session.current_checkpoint, 0);
+//!
+//! // Cleaning operations are closures over the current dataset. The session
+//! // snapshots the result and hands back a verification report.
+//! let report = session.apply_operation(
+//!     "filter",
+//!     "Drop rows with missing x",
+//!     HashMap::new(),
+//!     |ds| {
+//!         let filtered = ds
+//!             .df()
+//!             .clone()
+//!             .lazy()
+//!             .filter(col("x").is_not_null())
+//!             .collect()
+//!             .map_err(|e: PolarsError| e.to_string())?;
+//!         Ok(Dataset::new(filtered))
+//!     },
+//! )?;
+//! assert_eq!(report.rows_before, 4);
+//! assert_eq!(report.rows_after, 3);
+//! assert_eq!(report.quality_delta.completeness_after, 1.0);
+//! assert_eq!(session.current_checkpoint, 1);
+//!
+//! session.rollback()?; // Undo last operation
+//! assert_eq!(session.current_checkpoint, 0);
+//! assert_eq!(session.current_dataset().nrows(), 4);
+//! // Rolling back moves the cursor; the checkpoint history is kept.
+//! assert_eq!(session.list_checkpoints().len(), 2);
 //! # Ok(())
 //! # }
 //! ```
@@ -78,13 +122,16 @@
 //! use polars::prelude::*;
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! // NB: use a null, not f64::NAN, to represent a missing number. polars counts
+//! // NaN as a present value, so a NaN never raises a missing-data issue here.
 //! let df = df! {
-//!     "x" => [1.0, 2.0, f64::NAN, 4.0],
+//!     "x" => [Some(1.0), Some(2.0), None, Some(4.0)],
 //!     "y" => [Some("a"), Some("b"), None, Some("d")]
 //! }?;
 //! let dataset = Dataset::new(df);
 //! let profile = generate_quality_profile(&dataset);
 //! let suggestions = generate_suggestions(&profile);
+//! assert!(!suggestions.suggestions.is_empty()); // both columns are 25% null
 //! for s in suggestions.suggestions {
 //!     println!("{:?}: {}", s.priority, s.description);
 //! }

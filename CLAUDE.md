@@ -31,8 +31,15 @@ cargo test -p p2a-core -- test_validate # Run validation tests only
 
 # Linting
 cargo clippy --all-targets --all-features
-cargo fmt --check                        # Check formatting
+cargo fmt --all -- --check               # What CI gates on
 cargo fmt                                # Apply formatting
+
+# What CI (.github/workflows/ci.yml) actually runs on the free runner. Use these
+# feature sets when a full build is too heavy or when reproducing a CI failure:
+cargo test -p p2a-core --tests --no-default-features --features ci
+cargo test -p p2a-mcp  --tests --no-default-features --features "http,llm,auth"
+cargo test -p p2a-cli  --tests --no-default-features --features spectral-analysis
+cargo check -p p2a-dioxus --no-default-features --features web --target wasm32-unknown-unknown
 
 # Run CLI
 cargo run -p p2a-cli -- <args>
@@ -92,9 +99,14 @@ rustup target add wasm32-unknown-unknown
 
 ### ARM64 Build Notes
 
-On ARM64 (aarch64), the project includes a `.cargo/config.toml` that enables `opt-level = 1` for debug builds. This is required because p2a-mcp is a large binary that exceeds ARM64's ±128MB relocation range in pure debug mode.
+On ARM64 (aarch64), debug builds need `opt-level = 1` because p2a-mcp is a large binary that exceeds ARM64's ±128MB relocation range in pure debug mode. **`.cargo/` is gitignored**, so this is not shipped with the repo: create `.cargo/config.toml` locally on an ARM64 machine with
 
-- **Debug builds**: Work with `opt-level = 1` (configured automatically)
+```toml
+[profile.dev]
+opt-level = 1
+```
+
+- **Debug builds**: Work once the local `.cargo/config.toml` above exists
 - **Release builds**: Work without modification
 - **Desktop builds**: Require `libxdo-dev` for X11 automation support
 
@@ -172,13 +184,19 @@ Key dependencies for econometrics:
 
 ### Feature Flags
 
-```bash
-# Build with all features
-cargo build -p p2a-core --all-features
+`p2a-core` defaults to `full` = `visualization + forecasting + file-formats + database + spectral-analysis`.
+The `ci` alias is `full` minus `database`: the `database` feature pulls in `duckdb-sys`, which compiles
+~1.5 GB of native objects and dominates build time, so CI and quick local iterations drop it.
+`forecasting` and `visualization` gate whole modules (`#[cfg(feature = ...)]` in `lib.rs`), so code that
+touches them must be feature-gated too. `p2a-cli` re-exports `database` and `spectral-analysis` (both on by
+default); `p2a-mcp` defaults to no features and needs `--features full` (or `embedded`) for the HTTP/LLM/DB
+server; `p2a-dioxus` has no default and is selected per platform (`web`, `desktop`, `mobile`) by `dx`.
 
-# Specific features
-cargo build -p p2a-core --features spectral-analysis  # Spectral analysis (spectrum, periodogram)
-cargo build -p p2a-core --features cuda               # GPU acceleration (requires CUDA toolkit)
+```bash
+cargo build -p p2a-core --all-features                  # everything incl. cuda (needs CUDA toolkit)
+cargo build -p p2a-core --no-default-features --features ci   # fast: skips duckdb-sys
+cargo build -p p2a-core --features spectral-analysis    # Spectral analysis (spectrum, periodogram)
+cargo build -p p2a-core --features cuda                 # GPU acceleration
 ```
 
 ### GPU Acceleration (Optional)
@@ -229,6 +247,11 @@ src/
 │   └── design.rs          # DesignMatrix, demeaning functions
 ├── traits/
 │   └── estimator.rs       # LinearEstimator trait, SignificanceLevel, p-value helpers
+│
+├── diagnostics/           # Identification warnings (non-blocking) for IV, DiD, matching/IPW, RD
+│                          #   design: docs/design/IDENTIFICATION_WARNINGS.md
+├── spatial/               # Spatial *infrastructure*: neighbors, weights matrices, Moran/Geary
+│                          #   (the SAR/SEM/SAC estimators themselves live in econometrics/spatial.rs)
 │
 ├── regression/            # Regression methods
 │   ├── ols.rs             # OLS, HC0-HC3, clustered SEs, HAC (Newey-West), bootstrap, Driscoll-Kraay
@@ -315,11 +338,15 @@ src/
 │   ├── causal_impact.rs   # Bayesian structural time series causal inference
 │   └── tsutils.rs         # lag, embed, diffinv, filter, window, arima_sim, runmed
 │
-├── ml/                    # Machine learning
+├── ml/                    # Machine learning (35+ files)
 │   ├── clustering.rs      # K-means (k-means++), DBSCAN, Hierarchical (Ward, single, complete, average)
 │   ├── reduction.rs       # PCA (via SVD), t-SNE
 │   ├── trees.rs           # Random Forest (CART)
-│   └── svm.rs             # Linear SVM (SMO)
+│   ├── svm.rs             # Linear SVM (SMO)
+│   ├── gbm.rs, xgboost.rs, lightgbm.rs, adaboost.rs, mboost.rs   # Boosting family
+│   ├── bart.rs, bart_causal.rs, causal_forest.rs                 # Bayesian trees, heterogeneous effects
+│   ├── shap.rs, pdp.rs, ice.rs, interpretability.rs              # Model interpretation
+│   └── *_fast.rs          # Optimized variants of svm/xgboost/mboost/evaluation kept alongside originals
 │
 ├── simulation/            # Data simulation
 │   └── generator.rs       # Synthetic data generation for testing
@@ -476,6 +503,16 @@ The MCP server exposes 270 tools organized into modular handler files. For the H
 ```
 crates/p2a-mcp/src/
 ├── server.rs              # AnalyticsServer struct + router composition
+├── config.rs              # clap CLI args; every flag also has a P2A_* env var (P2A_TRANSPORT, P2A_PORT,
+│                          #   P2A_ACCESS_TOKEN, P2A_CORS_ORIGINS, P2A_DB_PATH, P2A_AUDIT_LOG, ...)
+├── path_jail.rs           # validate_data_path(): all user-supplied filesystem paths MUST go through
+│                          #   this; root = P2A_DATA_ROOT or cwd; blocks ../ and symlink escapes
+├── audit.rs               # Per-tool-call audit log (sanitized args, duration, status)
+├── session.rs             # In-memory per-session dataset storage (HTTP multi-user isolation)
+├── persistent_session.rs  # SurrealDB-backed sessions/conversations (feature `db`)
+├── llm/                   # Provider abstraction: anthropic.rs, openai.rs, ollama.rs; tools.rs holds the
+│                          #   *curated* LLM-facing tool subset, context.rs/tokens.rs manage the budget
+├── transport/             # http.rs (axum + SSE), websocket.rs, conversation.rs
 ├── tools/
 │   ├── mod.rs             # Re-exports
 │   ├── registry.rs        # Tool metadata for documentation
@@ -558,8 +595,15 @@ let tool_router = Self::tool_router()
     + Self::spatial_router()
     + Self::munging_router()
     + Self::survival_router()
-    + Self::cleaning_router();
+    + Self::cleaning_router()
+    + Self::search_router();
 ```
+
+`search_router` (`handlers/search.rs`) is a meta-layer, not an analytics category: it exposes
+`search_tools`, `list_tool_categories`, and `tool_info` so an LLM can discover any of the 270 tools by natural-language query.
+It exists because most LLM APIs cap a request at 128 tool definitions, so `llm/tools.rs` sends only a
+curated subset and relies on search for the rest. A new tool is reachable through search automatically
+once its handler is registered; if it should be in the always-visible subset, add it to `llm/tools.rs` too.
 
 ### Database Layer (SurrealDB)
 
@@ -686,6 +730,58 @@ Key benchmark files:
 - `forecasting_benchmarks.rs` - ARIMA, STL, MSTL, Holt-Winters, Kalman
 - `clustering_benchmarks.rs` - K-means, DBSCAN, hierarchical, PCA, t-SNE
 
+## Companion paper repo (`../prompt2analytics-paper`)
+
+The JSS manuscript ("Chat-First Data Analytics") lives in a **separate, private** sibling checkout,
+`~/tools/prompt2analytics-paper`, split out of this repo in June 2026. It has its own `CLAUDE.md`
+(paper build, exhibit pipeline, LLM evaluation harness); read that before touching paper files.
+Division of labour: **validation stays with the code it certifies** (this repo: `validation/`,
+`test_validate_*` tests, `crates/p2a-core/benches/`); **anything that produces a paper exhibit and its
+inputs is paper-side** (R benchmark scripts, comparison CSVs, e2e evaluation results, figures, tables).
+Never commit paper material here; `p2a-paper.zip` and similar strays do not belong in either tree.
+
+`SOFTWARE_VERSION` in the paper repo pins the software commit the paper describes (currently tag
+`v0.1.0`, results produced at `d6c6d2d`). Bump it whenever benchmarks, validation coverage, or
+evaluation results are regenerated against newer software.
+
+### What in this repo the paper depends on
+
+Changing any of these silently changes or breaks a paper exhibit; check the paper side when you do:
+
+| This repo | Paper consumer | What breaks |
+|---|---|---|
+| `bench_utils.rs` JSON schema and method names emitted by `comprehensive_benchmarks`, `unified_benchmarks`, `benchmark_n10000` | `performance/results/rust_*.json` → `merge_results.R` (name normalization across R/Rust) | Renaming a benchmark or a JSON field drops the method from the speed/memory comparison |
+| MCP **tool names** (270 handlers) | `paper/code/e2e_eval/test_cases.json` expects exact names for the 96 single-turn prompts (`regression_ols`, `panel_fixed_effects`, `rd_estimate`, `ts_arima_fit`, ...); `rescore.py` scores them with an alias table | Renaming a tool turns every single-turn prompt targeting it into a scored miss. Multi-turn (MT1–MT8) scoring only checks that *some* tool was called, so names there are documentation |
+| HTTP API contract in `API_ENDPOINTS.md` (`/api/sessions`, `/api/tools/load_dataset`, `/api/llm/chat/stream`, `/health`) | `run_evaluation.py` (backend URL from `P2A_BASE_URL`, default `localhost:8081`, the Dioxus dev-proxy port used for the paper runs) | Endpoint or SSE event changes break the eval harness |
+| `p2a` **text output format** for `data describe/head`, `reg ols` (text and `--format json`), `panel fe/re/hausman/hdfe`, diagnostics | `paper/code/generate_outputs.sh` → `paper/generated/cli_*.tex`, included verbatim; finds the binary via `SW_REPO`/`P2A`/`P2A_DATA_DIR` (default sibling checkout, release build) | Output formatter changes alter exhibits. `make jss` there re-runs the capture whenever the script is newer than the `.tex` files, so a rebuild after touching the script silently re-captures from whatever `p2a` you have built |
+| `validation/datasets/` (Grunfeld etc.) | CLI captures above, `rust_validation/scripts/run_validation.sh`, several R benchmark DGPs | Moving a dataset breaks `make generate` |
+| Counts and claims stated as prose in `paper/sections/*.tex`: "over 200 methods", test-function and validation-test counts, ~62% line coverage, version, Rust version, and the description of what CI runs | none (hand-written) | They drift silently; re-derive them when re-pinning `SOFTWARE_VERSION` |
+
+### Paper-side code that points back here
+
+- `paper/code/mc_validation/` and `paper/code/rust_validation/rust_runner/` are nested Cargo crates with a
+  **path dependency on this checkout** (`../prompt2analytics/crates/p2a-core` relative to the paper root).
+  They build against whatever is checked out here, not the pinned tag, so check out `SOFTWARE_VERSION`'s
+  commit (or a worktree of it) before regenerating paper numbers. Their `Cargo.lock` files are gitignored.
+- `paper/Makefile` `validate*`/`benchmark*` targets `cd` into this repo via `SW_REPO` (default sibling);
+  `paper/Dockerfile.reproduce` clones this repo from GitHub at `--build-arg P2A_REF` (default `v0.1.0`).
+- `build_replication_archive.sh` runs `git -C ../prompt2analytics archive` at the pinned commit, so the
+  sibling checkout must contain that commit (fetch tags before packaging).
+- The `/implement_metrics`, `/implement_next`, and `/validate-method` commands and the
+  `econometrics-implementer` agent **write R benchmark scripts into**
+  `../prompt2analytics-paper/performance/comparisons/r_comparison/benchmark_<method>.R` and update
+  `../prompt2analytics-paper/performance/reports/`. Adding a method therefore produces commits in both
+  repos; if the paper checkout is absent those steps are skipped, not failed.
+
+### Cross-repo workflow when software and paper change together
+
+1. Here: implement, `cargo test -p p2a-core -- test_validate`, then `cargo bench -p p2a-core --bench comprehensive_benchmarks` → `rust_*.json`.
+2. Copy the JSON from `crates/p2a-core/performance/results/` (the bench writes relative to the crate dir; gitignored here) into `../prompt2analytics-paper/performance/results/`. `make -C paper benchmark-full` in the paper repo does steps 1–3.
+3. There: `Rscript r_benchmark_runner.R` and `Rscript merge_results.R` in `performance/comparisons/r_comparison/`.
+4. There: regenerate exhibits (`cd paper && make exhibits`, needs a built `p2a` via `P2A=`), then `make jss`.
+5. There: update `SOFTWARE_VERSION` to the software commit (tag it here first if this is a release).
+6. Commit in each repo separately; the software repo is public, the paper repo is private.
+
 ## Agentic Engineering Setup
 
 ### Slash Commands (`.claude/commands/`)
@@ -708,6 +804,51 @@ Auto-discovered guidance:
 - `.claude/tooling/validation/` - Validation helper scripts used by `/validate-method`
 
 ## Testing Guidelines
+
+### What CI checks (and what it deliberately does not)
+
+`.github/workflows/ci.yml` runs on the free GitHub runner and is kept cheap on purpose:
+
+- **Gating**: `cargo fmt --all -- --check`; `cargo test --tests` for p2a-core (`ci` feature), p2a-mcp
+  (`http,llm,auth`), p2a-cli (`spectral-analysis`); `cargo test -p p2a-core --doc` (its own step); plus a
+  wasm32 `cargo check` + host tests for p2a-dioxus (`web`).
+- **Doctests are gated as of Sep 2026** and currently run 79 passed / 0 failed / 189 ignored. A doc example
+  that stops compiling is a build failure, so keep `use p2a_core::...` paths in doc comments pointing at
+  what `mod.rs` actually re-exports. The 189 examples fenced as ignore are NOT compiled and can still rot silently.
+- **Clippy runs but does not gate**: p2a-core has a pre-existing backlog of clippy violations, and
+  `Cargo.toml` `[workspace.lints]` allows a long list of lints (dead_code, unused_imports, too_many_arguments, ...).
+  Do not "fix" the allow-list to make a build green; do keep new code warning-free.
+- **Excluded from CI**: release builds, the `database` feature (duckdb-sys), `cuda`, the Dioxus desktop
+  target (WebKit/GTK), and `p2a-chat` tests (it has no test surface). These are exercised locally or on
+  the self-hosted runner. A weekly `audit.yml` runs `cargo audit`; its RUSTSEC exemptions live as flags
+  in that file (not `.cargo/audit.toml`, which is gitignored and would never reach CI).
+- Only one test is `#[ignore]`d (an HDBSCAN benchmark in `ml/advanced_clustering_mod/advanced.rs`);
+  run it with `--release -- --ignored`. `docs/guides/TESTING.md` lists expected runtimes and memory needs.
+- **`tests/benchmark_ml_rust.rs` and `tests/benchmark_fast_implementations.rs` are benchmarks, not
+  correctness tests**, and `cargo test -p p2a-core` runs them. In a debug build the ML one has been
+  observed to burn 16+ minutes of CPU. Use `--lib` for a fast correctness loop.
+- **Wall-clock assertions**: only one exists (`test_fast_mboost_componentwise_speed`) and it is gated
+  behind `if !cfg!(debug_assertions)`. Do not add ungated timing assertions — they fail on loaded or
+  slower machines and make `cargo test` machine-dependent, which the paper's reviewers will run.
+
+### Two traps on a dev box: disk and rustdoc
+
+Both produce failures that look like broken code and are not.
+
+1. **A full disk makes `ld` die with SIGBUS**, which rustdoc reports as `Couldn't compile the test` —
+   indistinguishable from a broken doc example. `target/debug` has been measured at 127 GB. **Run
+   `df -h /` before believing any link failure.** Mitigations: `rm -rf target/debug/incremental` (pure
+   cache) and `TMPDIR=/dev/shm` so linker temporaries never touch the full disk. A doctest run that
+   showed 53 spurious failures in 418 s went to 0 failures in 94 s after doing both.
+2. **A distro `rustdoc` may not match its `libLLVM`**, so `cargo test` dies at the doctest step with
+   `error while loading shared libraries: libLLVM.so...`. Run doctests through the rustup toolchain,
+   setting `RUSTC`/`RUSTDOC` explicitly (calling that cargo directly still resolves `rustdoc` from PATH):
+
+```bash
+TC=~/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin
+TMPDIR=/dev/shm RUSTC=$TC/rustc RUSTDOC=$TC/rustdoc CARGO_TARGET_DIR=/tmp/p2a-doc \
+  $TC/cargo test -p p2a-core --doc --no-default-features --features ci
+```
 
 ### Test Data
 
@@ -739,7 +880,9 @@ let df = df! {
    - Markdown tables (documentation, GitHub)
    - HTML tables (self-contained with CSS)
    - CSV via `CsvExport` trait (all result types)
-6. **ARM64 builds**: On aarch64-linux, debug builds require `opt-level = 1` due to relocation range limits with large binaries. This is configured in `.cargo/config.toml`. Release builds work without modification.
+6. **ARM64 builds**: On aarch64-linux, debug builds require `opt-level = 1` due to relocation range limits with large binaries. Create `.cargo/config.toml` locally (see ARM64 Build Notes); it is gitignored. Release builds work without modification.
+8. **Filesystem access in p2a-mcp**: any tool or HTTP handler that takes a path must call `path_jail::validate_data_path` first. The hosted demo (p2a.qamelab.org) runs in no-login mode with `P2A_DATA_ROOT` narrowed and session-list/file-browser endpoints disabled; see `docs/guides/DEPLOYMENT.md` for the threat model before changing anything on the HTTP surface.
+9. **Native Dioxus builds embed the backend**: `desktop`/`mobile` features depend on `p2a-mcp` and start an in-process server (`start_embedded_server` in `p2a-dioxus/src/main.rs`); the web build talks to `P2A_BACKEND_URL` baked in at build time. A change to `p2a-mcp`'s public API can break the desktop build even when the web build passes.
 7. **Disk space**: The `target/` directory can grow large. Use `cargo clean` to reclaim space.
 
 ## Key Files
@@ -773,6 +916,9 @@ let df = df! {
 - `crates/p2a-mcp/src/tools/requests/` - Request type definitions
 - `crates/p2a-mcp/src/transport/http.rs` - HTTP transport with SSE streaming
 - `crates/p2a-mcp/src/db/` - SurrealDB persistence layer
+- `crates/p2a-mcp/src/path_jail.rs` - Filesystem path validation (P2A_DATA_ROOT)
+- `crates/p2a-mcp/src/tools/handlers/search.rs` - Tool search meta-tools (128-tool API limit workaround)
+- `crates/p2a-mcp/src/llm/tools.rs` - Curated LLM-facing tool subset and few-shot examples
 
 **Dioxus App:**
 - `crates/p2a-dioxus/src/components/chat_panel.rs` - Main chat interface
@@ -798,7 +944,11 @@ let df = df! {
 - `API_ENDPOINTS.md` - Complete HTTP API reference (sessions, datasets, tools, LLM chat, SSE)
 - `docs/guides/TESTING.md` - Test runtime expectations, validation framework
 - `docs/guides/DATA_SECURITY.md` - Data write locations, offline capability
+- `docs/guides/DEPLOYMENT.md` - BYOK web deployment, threat model, Fly.io/GHCR release steps
+- `docs/guides/CLI_REFERENCE.md` - Full `p2a` command reference; `docs/cookbook.md` - worked workflows
+- `docs/design/IDENTIFICATION_WARNINGS.md` - Design of the `diagnostics/` identification-warning system
 - `docs/security/PROMPT_INJECTION.md` - MCP security considerations
+- `.github/workflows/ci.yml` - Source of truth for which feature sets are tested on every push
 
 **Export Module:**
 - `crates/p2a-core/src/export/latex.rs` - LaTeX table builders

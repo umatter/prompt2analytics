@@ -123,22 +123,36 @@
 //! use ndarray::Array2;
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! let data: Array2<f64> = Array2::from_shape_vec(
-//!     (100, 3),
-//!     (0..300).map(|x| x as f64).collect()
-//! )?;
+//! // 90 observations in 3 dimensions: three tight blobs of 30 points each,
+//! // centred on (0,0,0), (10,10,10) and (20,20,20).
+//! let mut values: Vec<f64> = Vec::with_capacity(270);
+//! for i in 0..90 {
+//!     let centre = (i / 30) as f64 * 10.0;
+//!     let jitter = (i % 30) as f64 * 0.01;
+//!     values.extend_from_slice(&[centre + jitter, centre - jitter, centre + 2.0 * jitter]);
+//! }
+//! let data: Array2<f64> = Array2::from_shape_vec((90, 3), values)?;
 //!
-//! // Cluster with k-means
-//! let clusters = kmeans(&data.view(), 3, Some(100), Some(42))?;
+//! // Cluster with k-means (data, k, max_iterations, tolerance, n_init, seed)
+//! let clusters = kmeans(data.view(), 3, Some(100), Some(1e-4), Some(10), Some(42))?;
 //! println!("Cluster sizes: {:?}", clusters.cluster_sizes);
+//! let mut sizes = clusters.cluster_sizes.clone();
+//! sizes.sort();
+//! assert_eq!(sizes, vec![30, 30, 30]); // each blob recovered exactly
 //!
-//! // Validate clusters
-//! let sil = silhouette(&data.view(), &clusters.labels)?;
+//! // Validate clusters: blobs are ~17 apart but only ~0.3 wide, so s(i) is close to 1
+//! let sil = silhouette(data.view(), &clusters.labels)?;
 //! println!("Silhouette score: {:.3}", sil.average_silhouette);
+//! assert!(sil.average_silhouette > 0.9);
 //!
 //! // Reduce dimensions with PCA (data, n_components, transform)
 //! let pca_result = pca(data.view(), Some(2), false)?;
 //! println!("Variance explained: {:.1}%", pca_result.explained_variance_ratio.sum() * 100.0);
+//! // The points lie exactly in the plane spanned by (1,1,1) and (1,-1,2), so two
+//! // components capture all the variance; the between-blob direction dominates
+//! // (between-blob variance 200 vs. within-blob 0.045).
+//! assert!(pca_result.explained_variance_ratio[0] > 0.99);
+//! assert!((pca_result.explained_variance_ratio.sum() - 1.0).abs() < 1e-6);
 //! # Ok(())
 //! # }
 //! ```
@@ -399,5 +413,11 @@ pub use mboost_fast::{
     FastMboostConfig, FastMboostFamily, FastMboostLearner, FastMboostResult, fast_mboost,
     fast_mboost_predict,
 };
-// PDP (Partial Dependence Plot) - original version
-pub use pdp::partial_dependence;
+// PDP (Partial Dependence Plot) - original version.
+// The config and result types are part of the callable surface: `partial_dependence`
+// takes `&PdpConfig`, so without it no caller outside the crate can set
+// `grid_resolution`, `use_quantiles`, `quantiles`, or `center`.
+pub use pdp::{
+    Pdp2dResult, PdpConfig, PdpResult, partial_dependence, partial_dependence_2d,
+    partial_dependence_2d_named, partial_dependence_named,
+};

@@ -31,40 +31,50 @@
 //!
 //! # Example
 //!
-//! ```rust,no_run
-//! use p2a_core::ml::{random_forest, ice_curves, IceConfig};
-//! use ndarray::{array, Array2};
+//! ```rust
+//! use ndarray::{ArrayView2, array};
+//! use p2a_core::ml::{IceConfig, compute_ice_curves};
 //!
-//! // Train a model
+//! // Stands in for a fitted model's prediction function: f(x0, x1) = x0 * x1.
+//! // The interaction means the effect of x0 depends on each observation's x1.
+//! fn predict(x: ArrayView2<f64>) -> Vec<f64> {
+//!     (0..x.nrows()).map(|i| x[[i, 0]] * x[[i, 1]]).collect()
+//! }
+//!
 //! let x = array![[1.0, 2.0], [2.0, 3.0], [3.0, 4.0], [4.0, 5.0], [5.0, 6.0]];
-//! let y = array![1.0, 2.0, 3.0, 4.0, 5.0];
-//! let rf = random_forest(x.view(), y.view(), Some(10), None, None, None, Some(42), None).unwrap();
 //!
-//! // Compute ICE curves for feature 0
+//! // Compute centered ICE curves (c-ICE) for feature 0
 //! let config = IceConfig {
 //!     feature_index: 0,
-//!     grid_resolution: 20,
+//!     grid_resolution: 5,
 //!     center: true,
 //!     ..Default::default()
 //! };
 //!
-//! let result = compute_ice_curves(
-//!     x.view(),
-//!     |x_data| {
-//!         // Predict using the model
-//!         (0..x_data.nrows())
-//!             .map(|i| {
-//!                 let row = x_data.row(i);
-//!                 // Simple average for RF prediction
-//!                 row.mean().unwrap_or(0.0)
-//!             })
-//!             .collect()
-//!     },
-//!     &config,
-//! ).unwrap();
+//! let result = compute_ice_curves(x.view(), predict, &config).unwrap();
 //!
-//! println!("Grid: {:?}", result.grid_values);
-//! println!("PDP: {:?}", result.pdp_curve);
+//! // The grid spans the observed range of feature 0: 1.0, 2.0, ..., 5.0
+//! assert_eq!(result.n_grid, 5);
+//! assert!((result.grid_values[0] - 1.0).abs() < 1e-10);
+//! assert!((result.grid_values[4] - 5.0).abs() < 1e-10);
+//!
+//! // Centering anchors every curve at the first grid point, so each starts at 0.
+//! // From there c-ICE_i(x_s) = (x_s - 1) * x1_i, i.e. a slope of x1_i: the curves
+//! // fan out instead of running parallel, which is the interaction made visible.
+//! assert!(result.ice_curves[[0, 0]].abs() < 1e-10);
+//! assert!((result.ice_curves[[0, 4]] - 8.0).abs() < 1e-10); // 4 * x1 = 4 * 2
+//! assert!((result.ice_curves[[4, 4]] - 24.0).abs() < 1e-10); // 4 * x1 = 4 * 6
+//!
+//! // The PDP is the average of the ICE curves (mean x1 = 4), and on its own it
+//! // shows none of that spread.
+//! assert!((result.pdp_curve[4] - 16.0).abs() < 1e-10);
+//!
+//! // `ice_spread` quantifies what the PDP hides: max(std) / mean(|PDP|),
+//! // here (4 * sqrt(2)) / 8 = 1 / sqrt(2) ~= 0.707, well above the 0.5 at which
+//! // the Display impl flags interaction effects.
+//! assert!(
+//!     (result.ice_spread.heterogeneity_index - std::f64::consts::FRAC_1_SQRT_2).abs() < 1e-10
+//! );
 //! ```
 
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, Axis};
@@ -246,7 +256,8 @@ impl std::fmt::Display for IceResult {
 ///
 /// This is an enhanced version of ICE curves that includes heterogeneity analysis,
 /// sampling for large datasets, and detailed spread statistics. For a simpler
-/// version, see [`crate::ml::ice_curves`] in the pdp module.
+/// version that reports only the averaged curve, see
+/// [`crate::ml::partial_dependence`] in the pdp module.
 ///
 /// ICE curves show how each observation's prediction changes as a single feature
 /// varies across its range. This reveals heterogeneous effects that may be hidden

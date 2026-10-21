@@ -15,12 +15,13 @@ mod tools;
 /// Build a `reqwest::Client` with timeouts appropriate for LLM calls.
 ///
 /// The connect timeout (10 s) fails fast on network errors; the overall
-/// request timeout (5 min) accommodates long completions but ensures a
-/// stalled endpoint cannot pin the SSE stream forever.
+/// request timeout (15 min) accommodates long completions from local
+/// reasoning models, which can take over 5 min for one tool-calling turn,
+/// but ensures a stalled endpoint cannot pin the SSE stream forever.
 pub(crate) fn build_http_client(provider_name: &'static str) -> reqwest::Client {
     reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(10))
-        .timeout(std::time::Duration::from_secs(300))
+        .timeout(std::time::Duration::from_secs(900))
         .build()
         .unwrap_or_else(|e| {
             tracing::warn!(

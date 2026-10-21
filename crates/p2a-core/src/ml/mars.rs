@@ -439,18 +439,50 @@ impl std::fmt::Display for MarsResult {
 ///
 /// # Example
 /// ```
-/// use p2a_core::ml::mars::{mars, MarsConfig};
 /// use ndarray::{Array1, Array2};
+/// use p2a_core::ml::{MarsConfig, mars};
 ///
-/// let x = Array2::from_shape_vec((10, 2), vec![
-///     1.0, 2.0, 2.0, 3.0, 3.0, 4.0, 4.0, 5.0, 5.0, 6.0,
-///     6.0, 7.0, 7.0, 8.0, 8.0, 9.0, 9.0, 10.0, 10.0, 11.0,
-/// ]).unwrap();
-/// let y = Array1::from_vec(vec![3.0, 5.0, 7.0, 9.0, 11.0, 13.0, 15.0, 17.0, 19.0, 21.0]);
+/// // Piecewise-linear response with a kink at x = 5:
+/// //   y = x        for x < 5
+/// //   y = 2x - 5   for x >= 5
+/// // plus a small deterministic wobble so the fit is not exact.
+/// let n = 100;
+/// let mut x_data = Vec::with_capacity(n);
+/// let mut y_data = Vec::with_capacity(n);
+/// for i in 0..n {
+///     let xi = i as f64 / 10.0;
+///     let yi = if xi < 5.0 { xi } else { 2.0 * xi - 5.0 };
+///     x_data.push(xi);
+///     y_data.push(yi + 0.05 * (i as f64 % 5.0 - 2.0));
+/// }
+/// let x = Array2::from_shape_vec((n, 1), x_data).unwrap();
+/// let y = Array1::from_vec(y_data);
 ///
-/// let config = MarsConfig::default();
-/// let result = mars(x.view(), y.view(), config, None).unwrap();
-/// println!("R-squared: {:.3}", result.r_squared);
+/// let result = mars(
+///     x.view(),
+///     y.view(),
+///     MarsConfig::default(),
+///     Some(vec!["x".to_string()]),
+/// )
+/// .unwrap();
+///
+/// // The hinge basis reproduces the kink, so the fit is near-perfect.
+/// assert!(result.r_squared > 0.95, "R-squared = {}", result.r_squared);
+/// assert_eq!(result.n_obs, 100);
+/// assert_eq!(result.n_features, 1);
+///
+/// // The forward pass places a knot at the break point.
+/// let knots = result.cuts.get(&0).expect("a knot on the only predictor");
+/// assert!(
+///     knots.iter().any(|&k| (k - 5.0).abs() < 1.0),
+///     "knots = {:?}",
+///     knots
+/// );
+///
+/// // Predict at a new point: the true value at x = 5.5 is 2 * 5.5 - 5 = 6.0.
+/// let x_new = Array2::from_shape_vec((1, 1), vec![5.5]).unwrap();
+/// let pred = result.predict(&x_new.view());
+/// assert!((pred[0] - 6.0).abs() < 1.0, "prediction = {}", pred[0]);
 /// ```
 ///
 /// # References

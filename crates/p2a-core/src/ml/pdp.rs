@@ -17,30 +17,43 @@
 //!
 //! ## Example
 //!
-//! ```rust,no_run
-//! use p2a_core::ml::{random_forest, partial_dependence, PdpConfig};
-//! use ndarray::{array, Array2};
+//! ```rust
+//! use p2a_core::ml::{PdpConfig, partial_dependence, random_forest_with_trees};
+//! use ndarray::Array2;
 //!
-//! // Fit a model
-//! let x = array![[1.0, 2.0], [2.0, 3.0], [3.0, 4.0], [4.0, 5.0]];
-//! let y = array![1.0, 2.0, 3.0, 4.0];
-//! let rf = random_forest(x.view(), y.view(), Some(10), None, None, None, None, None).unwrap();
+//! // 60 observations: the target depends on x0 alone, x1 is a nuisance feature.
+//! let x = Array2::from_shape_fn((60, 2), |(i, j)| {
+//!     if j == 0 { i as f64 / 10.0 } else { (i % 5) as f64 }
+//! });
+//! let y = x.column(0).mapv(|x0| 2.0 * x0);
+//! let model =
+//!     random_forest_with_trees(x.view(), y.view(), Some(25), None, None, None, Some(42), None)
+//!         .unwrap();
 //!
-//! // Compute PDP for feature 0
-//! let config = PdpConfig::default();
-//! let pdp = partial_dependence(
-//!     &x,
-//!     0,
-//!     |data| {
-//!         // Predict function using the model
-//!         data.rows().into_iter()
-//!             .map(|row| rf.predictions.iter().sum::<f64>() / rf.predictions.len() as f64)
-//!             .collect()
-//!     },
-//!     &config,
-//! ).unwrap();
-//! println!("Grid values: {:?}", pdp.grid_values);
-//! println!("PDP values: {:?}", pdp.pdp_values);
+//! // A forest prediction is the mean over its trees, so this closure is the
+//! // fitted model's prediction function for an arbitrary design matrix.
+//! let predict = |data: &Array2<f64>| -> Vec<f64> {
+//!     data.rows()
+//!         .into_iter()
+//!         .map(|row| {
+//!             model.trees.iter().map(|t| t.predict_one(&row)).sum::<f64>()
+//!                 / model.trees.len() as f64
+//!         })
+//!         .collect()
+//! };
+//!
+//! // Marginal effect of feature 0, averaging over the observed values of x1.
+//! // `PdpConfig` controls the grid; the default is 20 quantile points, uncentered.
+//! let config = PdpConfig {
+//!     grid_resolution: 25,
+//!     ..Default::default()
+//! };
+//! let pdp = partial_dependence(&x, 0, predict, &config).unwrap();
+//!
+//! assert_eq!(pdp.grid_values.len(), 25);
+//! assert_eq!(pdp.n_obs, 60);
+//! // y increases in x0, so the partial dependence rises across the grid.
+//! assert!(*pdp.pdp_values.last().unwrap() > pdp.pdp_values[0]);
 //! ```
 //!
 //! ## References
@@ -277,10 +290,12 @@ impl std::fmt::Display for Pdp2dResult {
 ///
 /// # Example
 ///
-/// ```rust,no_run
-/// use p2a_core::ml::{partial_dependence, PdpConfig};
+/// ```rust
+/// use p2a_core::ml::partial_dependence;
 /// use ndarray::Array2;
 ///
+/// // Row i is [3i/100, (3i+1)/100, (3i+2)/100], so x0 runs 0.00..=2.97
+/// // and the mean of x1 is 1.495.
 /// let data = Array2::from_shape_vec((100, 3), (0..300).map(|x| x as f64 / 100.0).collect()).unwrap();
 ///
 /// // Simple linear prediction function for example
@@ -288,7 +303,18 @@ impl std::fmt::Display for Pdp2dResult {
 ///     x.rows().into_iter().map(|row| row[0] + 2.0 * row[1]).collect()
 /// };
 ///
-/// let result = partial_dependence(&data, 0, predict_fn, &PdpConfig::default()).unwrap();
+/// // `&Default::default()` is a `PdpConfig`: a 20-point quantile grid, uncentered.
+/// let result = partial_dependence(&data, 0, predict_fn, &Default::default()).unwrap();
+///
+/// assert_eq!(result.grid_values.len(), 20);
+/// assert_eq!(result.n_obs, 100);
+///
+/// // For a linear predictor the PDP is exact: PDP(g) = g + 2 * mean(x1) = g + 2.99,
+/// // i.e. a line through 2.99 with slope equal to the coefficient on x0.
+/// assert!((result.pdp_values[0] - 2.99).abs() < 1e-9); // grid starts at x0 = 0
+/// let slope = (result.pdp_values[19] - result.pdp_values[0])
+///     / (result.grid_values[19] - result.grid_values[0]);
+/// assert!((slope - 1.0).abs() < 1e-9);
 /// ```
 ///
 /// # References
