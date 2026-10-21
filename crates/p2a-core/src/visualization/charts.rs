@@ -126,6 +126,7 @@ pub fn histogram(
     }
 
     let max_count = *counts.iter().max().unwrap_or(&1);
+    let x_range = checked_axis_range(min_val, max_val + bin_width * 0.01, "x")?;
 
     // Create image buffer
     let mut buffer = rgb_buffer(config.width, config.height)?;
@@ -140,7 +141,6 @@ pub fn histogram(
         let x_label = config.x_label.as_deref().unwrap_or("Value");
         let y_label = config.y_label.as_deref().unwrap_or("Frequency");
 
-        let x_range = min_val..(max_val + bin_width * 0.01);
         let y_range = 0u32..(max_count + max_count / 10 + 1);
 
         let mut chart = ChartBuilder::on(&root)
@@ -264,6 +264,9 @@ pub fn scatter_plot(
     // Calculate correlation
     let correlation = calculate_correlation(&points);
 
+    let x_range = checked_axis_range(x_min - x_pad, x_max + x_pad, "x")?;
+    let y_range = checked_axis_range(y_min - y_pad, y_max + y_pad, "y")?;
+
     // Create image buffer
     let mut buffer = rgb_buffer(config.width, config.height)?;
 
@@ -282,10 +285,7 @@ pub fn scatter_plot(
             .margin(10)
             .x_label_area_size(40)
             .y_label_area_size(50)
-            .build_cartesian_2d(
-                (x_min - x_pad)..(x_max + x_pad),
-                (y_min - y_pad)..(y_max + y_pad),
-            )
+            .build_cartesian_2d(x_range, y_range)
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
         chart
@@ -395,6 +395,11 @@ pub fn box_plot(
     let y_max = all_values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
     let y_pad = (y_max - y_min).max(0.1) * 0.1;
 
+    // x-axis with continuous coordinates (0 to n_groups)
+    let n_groups = statistics.len() as f64;
+    let x_range = checked_axis_range(-0.5, n_groups - 0.5, "x")?;
+    let y_range = checked_axis_range(y_min - y_pad, y_max + y_pad, "y")?;
+
     // Create image buffer
     let mut buffer = rgb_buffer(config.width, config.height)?;
 
@@ -407,16 +412,14 @@ pub fn box_plot(
         let title = config.title.as_deref().unwrap_or("Box Plot");
         let y_label = config.y_label.as_deref().unwrap_or("Value");
 
-        // Build x-axis with continuous coordinates (0 to n_groups)
         let labels: Vec<String> = statistics.iter().map(|s| s.label.clone()).collect();
-        let n_groups = labels.len() as f64;
 
         let mut chart = ChartBuilder::on(&root)
             .caption(title, ("sans-serif", config.title_font_size))
             .margin(10)
             .x_label_area_size(40)
             .y_label_area_size(50)
-            .build_cartesian_2d(-0.5..(n_groups - 0.5), (y_min - y_pad)..(y_max + y_pad))
+            .build_cartesian_2d(x_range, y_range)
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
         chart
@@ -577,6 +580,9 @@ pub fn line_chart(
     let x_pad = (x_max - x_min).max(0.1) * 0.05;
     let y_pad = (y_max - y_min).max(0.1) * 0.05;
 
+    let x_range = checked_axis_range(x_min - x_pad, x_max + x_pad, "x")?;
+    let y_range = checked_axis_range(y_min - y_pad, y_max + y_pad, "y")?;
+
     // Colors for multiple series (brand palette)
     let colors = CHART_PALETTE;
 
@@ -598,10 +604,7 @@ pub fn line_chart(
             .margin(10)
             .x_label_area_size(40)
             .y_label_area_size(50)
-            .build_cartesian_2d(
-                (x_min - x_pad)..(x_max + x_pad),
-                (y_min - y_pad)..(y_max + y_pad),
-            )
+            .build_cartesian_2d(x_range, y_range)
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
         chart
@@ -741,6 +744,8 @@ pub fn event_study_plot(
 
     let x_pad = (x_max - x_min).max(1.0) * 0.1;
     let y_pad = (y_max - y_min).max(0.1) * 0.1;
+    let x_range = checked_axis_range(x_min - x_pad, x_max + x_pad, "x")?;
+    let y_range = checked_axis_range(y_min - y_pad, y_max + y_pad, "y")?;
 
     // Detect treatment period (typically 0)
     let treatment_period = if valid_points.iter().any(|p| (p.0 - 0.0).abs() < 0.01) {
@@ -770,10 +775,7 @@ pub fn event_study_plot(
             .margin(10)
             .x_label_area_size(40)
             .y_label_area_size(60)
-            .build_cartesian_2d(
-                (x_min - x_pad)..(x_max + x_pad),
-                (y_min - y_pad)..(y_max + y_pad),
-            )
+            .build_cartesian_2d(x_range, y_range)
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
         chart
@@ -936,6 +938,13 @@ pub fn coefficient_plot(
     let x_range_min = x_min.min(0.0) - x_pad;
     let x_range_max = x_max.max(0.0) + x_pad;
 
+    // The estimates run along x (horizontal layout) or y (vertical layout),
+    // the coefficients along the other axis.
+    let n_coefs = valid_coefs.len() as f64;
+    let (value_axis, coef_axis) = if horizontal { ("x", "y") } else { ("y", "x") };
+    let value_range = checked_axis_range(x_range_min, x_range_max, value_axis)?;
+    let coef_range = checked_axis_range(-0.5, n_coefs - 0.5, coef_axis)?;
+
     // Create image buffer
     let mut buffer = rgb_buffer(config.width, config.height)?;
 
@@ -948,8 +957,6 @@ pub fn coefficient_plot(
         let title = config.title.as_deref().unwrap_or("Coefficient Plot");
         let x_label = config.x_label.as_deref().unwrap_or("Estimate");
 
-        let n_coefs = valid_coefs.len() as f64;
-
         if horizontal {
             // Horizontal layout: coefficients on Y-axis, values on X-axis
             let mut chart = ChartBuilder::on(&root)
@@ -957,7 +964,7 @@ pub fn coefficient_plot(
                 .margin(10)
                 .x_label_area_size(40)
                 .y_label_area_size(120) // More space for variable names
-                .build_cartesian_2d(x_range_min..x_range_max, -0.5..(n_coefs - 0.5))
+                .build_cartesian_2d(value_range, coef_range)
                 .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
             chart
@@ -1019,15 +1026,12 @@ pub fn coefficient_plot(
             }
         } else {
             // Vertical layout: coefficients on X-axis, values on Y-axis
-            let y_range_min = x_range_min; // Swap x and y ranges
-            let y_range_max = x_range_max;
-
             let mut chart = ChartBuilder::on(&root)
                 .caption(title, ("sans-serif", config.title_font_size))
                 .margin(10)
                 .x_label_area_size(60)
                 .y_label_area_size(60)
-                .build_cartesian_2d(-0.5..(n_coefs - 0.5), y_range_min..y_range_max)
+                .build_cartesian_2d(coef_range, value_range)
                 .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
             chart
@@ -1234,6 +1238,9 @@ pub fn irf_plot(
     y_min = y_min.min(0.0);
     y_max = y_max.max(0.0);
 
+    let x_range = checked_axis_range(x_min - x_pad, x_max + x_pad, "x")?;
+    let y_range = checked_axis_range(y_min - y_pad, y_max + y_pad, "y")?;
+
     // Create image buffer
     let mut buffer = rgb_buffer(config.width, config.height)?;
 
@@ -1258,10 +1265,7 @@ pub fn irf_plot(
             .margin(10)
             .x_label_area_size(40)
             .y_label_area_size(60)
-            .build_cartesian_2d(
-                (x_min - x_pad)..(x_max + x_pad),
-                (y_min - y_pad)..(y_max + y_pad),
-            )
+            .build_cartesian_2d(x_range, y_range)
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
         chart
@@ -1526,6 +1530,9 @@ fn generate_residuals_vs_fitted(
     let y_min_adj = y_min.min(0.0) - y_pad;
     let y_max_adj = y_max.max(0.0) + y_pad;
 
+    let x_range = checked_axis_range(x_min - x_pad, x_max + x_pad, "x")?;
+    let y_range = checked_axis_range(y_min_adj, y_max_adj, "y")?;
+
     let mut buffer = rgb_buffer(config.width, config.height)?;
 
     {
@@ -1539,7 +1546,7 @@ fn generate_residuals_vs_fitted(
             .margin(10)
             .x_label_area_size(40)
             .y_label_area_size(50)
-            .build_cartesian_2d((x_min - x_pad)..(x_max + x_pad), y_min_adj..y_max_adj)
+            .build_cartesian_2d(x_range, y_range)
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
         chart
@@ -1617,6 +1624,9 @@ fn generate_qq_plot(
     let x_pad = range * 0.1;
     let y_pad = range * 0.1;
 
+    let x_range = checked_axis_range(x_min - x_pad, x_max + x_pad, "x")?;
+    let y_range = checked_axis_range(y_min - y_pad, y_max + y_pad, "y")?;
+
     let mut buffer = rgb_buffer(config.width, config.height)?;
 
     {
@@ -1630,10 +1640,7 @@ fn generate_qq_plot(
             .margin(10)
             .x_label_area_size(40)
             .y_label_area_size(50)
-            .build_cartesian_2d(
-                (x_min - x_pad)..(x_max + x_pad),
-                (y_min - y_pad)..(y_max + y_pad),
-            )
+            .build_cartesian_2d(x_range, y_range)
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
         chart
@@ -1696,6 +1703,9 @@ fn generate_scale_location(
     let x_pad = (x_max - x_min).max(0.1) * 0.05;
     let y_pad = y_max * 0.1;
 
+    let x_range = checked_axis_range(x_min - x_pad, x_max + x_pad, "x")?;
+    let y_range = checked_axis_range(0.0, y_max + y_pad, "y")?;
+
     let mut buffer = rgb_buffer(config.width, config.height)?;
 
     {
@@ -1709,7 +1719,7 @@ fn generate_scale_location(
             .margin(10)
             .x_label_area_size(40)
             .y_label_area_size(50)
-            .build_cartesian_2d((x_min - x_pad)..(x_max + x_pad), 0.0..(y_max + y_pad))
+            .build_cartesian_2d(x_range, y_range)
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
         chart
@@ -1773,6 +1783,9 @@ fn generate_residuals_vs_leverage(
     let cooks_threshold = 0.5;
     let has_influential = cooks_distance.iter().any(|&c| c > cooks_threshold);
 
+    let x_range = checked_axis_range(x_min, x_max + x_pad, "x")?;
+    let y_range = checked_axis_range(y_min - y_pad, y_max + y_pad, "y")?;
+
     let mut buffer = rgb_buffer(config.width, config.height)?;
 
     {
@@ -1786,7 +1799,7 @@ fn generate_residuals_vs_leverage(
             .margin(10)
             .x_label_area_size(40)
             .y_label_area_size(50)
-            .build_cartesian_2d(x_min..(x_max + x_pad), (y_min - y_pad)..(y_max + y_pad))
+            .build_cartesian_2d(x_range, y_range)
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
         chart
@@ -1999,6 +2012,46 @@ fn calculate_box_stats(label: String, data: &[f64]) -> BoxPlotStats {
 /// this module's invalid-data error, keeping its text.
 fn invalid_data(e: crate::errors::EconError) -> VisualizationError {
     VisualizationError::InvalidData(e.to_string())
+}
+
+/// The widest f64 axis a chart may have.
+///
+/// plotters 0.3.7's f64 key-point search (`coord/ranged1d/types/numeric.rs:157`)
+/// never terminates when the axis width is infinite, which finite data near
+/// `f64::MAX` produce through their spread or the padding, and with a single
+/// key point (a very small axis) its scale also overflows once the width
+/// reaches 1e308. Below this width the search terminates for any number of
+/// key points.
+const MAX_AXIS_WIDTH: f64 = 1e308;
+
+/// The axis range `lo..hi` if plotters can lay it out: both ends finite,
+/// `hi >= lo` and a width below [`MAX_AXIS_WIDTH`]. A zero-width range is
+/// accepted (plotters returns early on it, so constant data still render).
+/// Anything else is `InvalidData` naming the axis, so that no chart reaches
+/// `build_cartesian_2d` with a range its key-point search cannot handle.
+fn checked_axis_range(
+    lo: f64,
+    hi: f64,
+    axis: &str,
+) -> Result<std::ops::Range<f64>, VisualizationError> {
+    if !lo.is_finite() || !hi.is_finite() {
+        return Err(VisualizationError::InvalidData(format!(
+            "the {axis} axis range is not finite; the data contain values too large to plot"
+        )));
+    }
+    if hi < lo {
+        return Err(VisualizationError::InvalidData(format!(
+            "the {axis} axis range is empty"
+        )));
+    }
+    // Both ends are finite and hi >= lo, so the width is finite and >= 0, or +inf.
+    if hi - lo >= MAX_AXIS_WIDTH {
+        return Err(VisualizationError::InvalidData(format!(
+            "the {axis} axis would span from {lo:e} to {hi:e}, which is too wide to draw; \
+             rescale the data (for example divide by a power of ten)"
+        )));
+    }
+    Ok(lo..hi)
 }
 
 /// A zeroed RGB buffer for a `width` x `height` image, sized with checked
@@ -2352,6 +2405,86 @@ mod tests {
         let r =
             crate::resource::with_alloc_ceiling(Some(256 << 20), || dendrogram(&link, None, big));
         assert!(matches!(r, Err(VisualizationError::InvalidData(_))));
+    }
+
+    #[test]
+    fn axis_range_refuses_non_finite_and_overflowing_widths() {
+        assert!(checked_axis_range(-1e308, f64::INFINITY, "x").is_err());
+        assert!(checked_axis_range(f64::NEG_INFINITY, f64::INFINITY, "y").is_err());
+        assert!(checked_axis_range(f64::NAN, 1.0, "x").is_err());
+        assert!(checked_axis_range(-1.1e308, 1.1e308, "x").is_err()); // finite ends, infinite width
+        assert!(checked_axis_range(0.0, 1.5e308, "x").is_err()); // finite width >= 1e308
+        assert!(checked_axis_range(2.0, 1.0, "x").is_err()); // reversed
+        assert!(matches!(checked_axis_range(-1e308, 1e308, "x"),
+            Err(VisualizationError::InvalidData(m)) if m.contains("x axis")));
+        assert_eq!(checked_axis_range(0.0, 1.0, "x").unwrap(), 0.0..1.0);
+        assert_eq!(checked_axis_range(5.0, 5.0, "y").unwrap(), 5.0..5.0);
+        assert_eq!(
+            checked_axis_range(-4.9e307, 4.9e307, "y").unwrap(),
+            -4.9e307..4.9e307
+        );
+    }
+
+    #[test]
+    fn charts_refuse_ranges_that_overflow() {
+        let cfg = ChartConfig::default;
+        let v = [-1e308, 0.0, 1e308];
+        let bad = |r: Result<(), VisualizationError>| {
+            matches!(r, Err(VisualizationError::InvalidData(_)))
+        };
+        assert!(bad(histogram(&v, Some(3), cfg()).map(|_| ())));
+        assert!(histogram(&[-1e300, 0.0, 1e300], Some(3), cfg()).is_ok()); // control
+        assert!(bad(scatter_plot(&v, &[1.0, 2.0, 3.0], cfg()).map(|_| ())));
+        // padding overflow
+        assert!(bad(scatter_plot(
+            &[0.0, 1.0, 1.75e308],
+            &[1.0, 2.0, 3.0],
+            cfg()
+        )
+        .map(|_| ())));
+        assert!(bad(line_chart(
+            &[("s".into(), vec![0.0, 1.0, 2.0], v.to_vec())],
+            cfg()
+        )
+        .map(|_| ())));
+        assert!(bad(box_plot(&[("g".into(), v.to_vec())], cfg()).map(|_| ())));
+        assert!(bad(event_study_plot(
+            &[-1.0, 0.0, 1.0],
+            &[0.0; 3],
+            &[-1e308, 0.0, 0.0],
+            &[0.0, 0.0, 1e308],
+            cfg()
+        )
+        .map(|_| ())));
+        let names = ["a".to_string(), "b".to_string()];
+        for horizontal in [true, false] {
+            assert!(bad(coefficient_plot(
+                &names,
+                &[0.0, 0.0],
+                &[-1e308, 0.0],
+                &[0.0, 1e308],
+                cfg(),
+                horizontal
+            )
+            .map(|_| ())));
+        }
+        assert!(bad(irf_plot(
+            &[0.0, 1.0, 2.0],
+            &v,
+            None,
+            None,
+            None,
+            None,
+            cfg()
+        )
+        .map(|_| ())));
+        assert!(bad(residual_diagnostics(
+            &[-1e308, 0.0, 1e308, 1.0],
+            &[0.1, -0.2, 0.3, -0.1],
+            None,
+            cfg()
+        )
+        .map(|_| ())));
     }
 
     #[test]
