@@ -62,7 +62,36 @@ fn execute_export(
         }
     };
 
-    // Generate the bash script
+    // Generate the bash script, replaying into a temporary session file
+    let temp_session = format!(".p2a_session_{}.json", uuid::Uuid::new_v4());
+    let script = render_script(&session, comments, &temp_session);
+
+    // Write the script
+    std::fs::write(output, &script)?;
+
+    // Make executable on Unix
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(output)?.permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(output, perms)?;
+    }
+
+    print_message(
+        &format!(
+            "Exported {} commands to: {}",
+            session.commands.len(),
+            output.display()
+        ),
+        format,
+    );
+
+    Ok(())
+}
+
+/// Render the bash script for `session`, replaying into `temp_session`.
+fn render_script(session: &Session, comments: bool, temp_session: &str) -> String {
     let mut script = String::new();
 
     // Shebang and header
@@ -80,7 +109,6 @@ fn execute_export(
     script.push('\n');
 
     // Create a temporary session file for the replay
-    let temp_session = format!(".p2a_session_{}.json", uuid::Uuid::new_v4());
     script.push_str(&format!("SESSION_FILE=\"{}\"\n", temp_session));
     script.push('\n');
 
@@ -108,28 +136,7 @@ fn execute_export(
     script.push('\n');
     script.push_str("echo \"Script completed successfully\"\n");
 
-    // Write the script
-    std::fs::write(output, &script)?;
-
-    // Make executable on Unix
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(output)?.permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(output, perms)?;
-    }
-
-    print_message(
-        &format!(
-            "Exported {} commands to: {}",
-            session.commands.len(),
-            output.display()
-        ),
-        format,
-    );
-
-    Ok(())
+    script
 }
 
 fn execute_history(session_file: &PathBuf, format: &OutputFormat) -> anyhow::Result<()> {
@@ -383,4 +390,60 @@ fn reconstruct_command(record: &crate::session::CommandRecord) -> String {
     }
 
     cmd
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::session::CommandRecord;
+    use chrono::Utc;
+
+    fn record(
+        argv: &[&str],
+        command_line: &str,
+        category: &str,
+        subcommand: &str,
+        arguments: serde_json::Value,
+    ) -> CommandRecord {
+        CommandRecord {
+            id: "test".into(),
+            timestamp: Utc::now(),
+            command_line: command_line.into(),
+            category: category.into(),
+            subcommand: subcommand.into(),
+            arguments,
+            argv: argv.iter().map(|s| s.to_string()).collect(),
+            dataset_refs: vec![],
+            output_files: vec![],
+            success: true,
+            error: None,
+            duration_ms: 0,
+        }
+    }
+
+    #[test]
+    fn render_script_ordinary_session_is_unchanged() {
+        let mut s = Session::new();
+        s.title = Some("Demo".into());
+        s.version = "0.1.3".into();
+        s.updated_at = "2026-01-01T00:00:00Z".parse().unwrap();
+        s.commands.push(record(
+            &["data", "load", "d.csv", "--name", "d"],
+            "data load d.csv --name d",
+            "data",
+            "load",
+            serde_json::Value::Null,
+        ));
+        s.commands.push(record(
+            &[],
+            "reg ols d -y y -x x1 x2",
+            "reg",
+            "ols",
+            serde_json::json!({"dataset": "d", "dep_var": "y", "indep_vars": ["x1", "x2"], "robust": "hc1"}),
+        ));
+        assert_eq!(
+            render_script(&s, true, ".p2a_session_test.json"),
+            "#!/bin/bash\n# p2a analytics script\n# Demo\n# Generated: 2026-01-01 00:00:00 UTC\n# p2a version: 0.1.3\n\nset -euo pipefail\n\nSESSION_FILE=\".p2a_session_test.json\"\n\n# data load d.csv --name d\np2a --session \"$SESSION_FILE\" data load d.csv --name d\n\n# reg ols d -y y -x x1 x2\np2a --session \"$SESSION_FILE\" reg ols d -y y -x x1 x2 --robust hc1\n\n# Cleanup temporary session file\nrm -f \"$SESSION_FILE\"\n\necho \"Script completed successfully\"\n"
+        );
+    }
 }
