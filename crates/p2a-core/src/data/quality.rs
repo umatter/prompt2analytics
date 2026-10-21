@@ -529,8 +529,12 @@ fn compute_string_stats(col: &Column, _name: &str) -> Option<StringStats> {
 
         // Count values for top values
         *value_counts.entry(val.to_string()).or_insert(0) += 1;
+    }
 
-        // Pattern detection (simple heuristics)
+    // Pattern detection (simple heuristics), once per distinct value: a
+    // pattern is reported iff some row matches, which is the same as some
+    // distinct value matching.
+    for val in value_counts.keys() {
         if !has_email_pattern && val.contains('@') && val.contains('.') {
             has_email_pattern = true;
         }
@@ -591,25 +595,28 @@ fn compute_string_stats(col: &Column, _name: &str) -> Option<StringStats> {
     })
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Calls of `detect_date_pattern` on this thread (tests only).
+    static DATE_CHECKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Detect if a string matches a date pattern.
 fn detect_date_pattern(s: &str) -> bool {
-    // Common date patterns
-    let patterns = [
-        r"^\d{4}-\d{2}-\d{2}$", // YYYY-MM-DD
-        r"^\d{2}/\d{2}/\d{4}$", // MM/DD/YYYY or DD/MM/YYYY
-        r"^\d{2}-\d{2}-\d{4}$", // MM-DD-YYYY or DD-MM-YYYY
-        r"^\d{4}/\d{2}/\d{2}$", // YYYY/MM/DD
-    ];
-
-    for pattern in &patterns {
-        if let Ok(re) = regex::Regex::new(pattern) {
-            if re.is_match(s) {
-                return true;
-            }
-        }
-    }
-    false
+    #[cfg(test)]
+    DATE_CHECKS.with(|c| c.set(c.get() + 1));
+    DATE_PATTERN.as_ref().is_some_and(|re| re.is_match(s))
 }
+
+/// Common date patterns, compiled once: YYYY-MM-DD, MM/DD/YYYY or DD/MM/YYYY,
+/// MM-DD-YYYY or DD-MM-YYYY, and YYYY/MM/DD. `None` (never expected) means no
+/// value is reported as a date.
+static DATE_PATTERN: std::sync::LazyLock<Option<regex::Regex>> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(
+        r"^(?:\d{4}-\d{2}-\d{2}|\d{2}/\d{2}/\d{4}|\d{2}-\d{2}-\d{4}|\d{4}/\d{2}/\d{2})$",
+    )
+    .ok()
+});
 
 /// Detect if a string matches a phone pattern.
 fn detect_phone_pattern(s: &str) -> bool {
@@ -712,6 +719,49 @@ impl DataQualityProfile {
 mod tests {
     use super::*;
     use polars::prelude::df;
+
+    #[test]
+    fn date_detection_runs_once_per_distinct_value() {
+        let values: Vec<String> = (0..2_000).map(|i| format!("name_{}", i % 100)).collect();
+        let df = df!("s" => values).unwrap();
+        DATE_CHECKS.with(|c| c.set(0));
+        let stats = compute_string_stats(df.column("s").unwrap(), "s").unwrap();
+        let calls = DATE_CHECKS.with(|c| c.get());
+        assert!(
+            calls <= 100,
+            "detect_date_pattern ran {calls} times for 100 distinct values"
+        );
+        assert!(stats.detected_patterns.is_empty());
+    }
+
+    #[test]
+    fn pattern_detection_keeps_per_row_semantics() {
+        let mut s: Vec<String> = (0..10_000).map(|i| format!("name_{}", i % 500)).collect();
+        s[9_999] = "2024-01-31".to_string(); // the only date is the last row
+        let cases: Vec<(Vec<String>, Vec<&str>)> = vec![
+            (s, vec!["date", "numeric_string"]),
+            (
+                vec![
+                    "alice@example.com".into(),
+                    "(555) 123-4567".into(),
+                    "plain".into(),
+                ],
+                vec!["email", "phone"],
+            ),
+            (vec!["12/31/2024".into(), "x".into()], vec!["date"]),
+            (vec!["31-12-2024".into()], vec!["date", "numeric_string"]),
+            (vec!["2024/01/31".into()], vec!["date"]),
+            (
+                (0..10_000).map(|i| format!("name_{}", i % 500)).collect(),
+                vec![],
+            ),
+        ];
+        for (values, want) in cases {
+            let df = df!("s" => values).unwrap();
+            let stats = compute_string_stats(df.column("s").unwrap(), "s").unwrap();
+            assert_eq!(stats.detected_patterns, want);
+        }
+    }
 
     #[test]
     fn test_generate_quality_profile_basic() {
