@@ -10,6 +10,19 @@
 //! requests are never refused. [`Limits::with_overrides`] adjusts either profile from
 //! `key=value` pairs (`P2A_LIMIT_OVERRIDES`); [`Limits::known_keys`] lists the valid keys.
 //!
+//! # What is checked
+//!
+//! - [`Limits::check_tool_arguments`] checks a tool call's JSON arguments against
+//!   [`PARAM_RULES`]: each rule maps a `(tool, path)` to a cost [`Family`] (or another [`Rule`]).
+//! - [`Limits::check_rows`] checks a dataset's height for the tools in [`ROW_RULES`], whose cost
+//!   grows faster than linearly in the number of rows ([`RowClass`]).
+//! - [`Limits::check_budget`] lets a handler check a quantity it computes itself (for example a
+//!   predicted join size) against a named budget field such as [`Limits::join_output_rows`].
+//!
+//! Every refusal is a [`LimitViolation`] whose message tells an LLM caller what to change. It never
+//! contains filesystem paths, environment variable names or internals; `override_key` names the
+//! knob for server logs.
+//!
 //! # Classifying a new request field
 //!
 //! Every integer field, every array field and every float field whose name contains `tol` or
@@ -25,7 +38,12 @@
 //! with [`install`] and enforces it before every tool call; handlers read named budgets through
 //! [`current`]. Until something is installed, [`current`] returns the off profile.
 
+use std::collections::HashSet;
+
+use serde_json::Value;
+
 mod rules;
+pub use rules::{PARAM_RULES, ROW_RULES};
 
 /// A family of cost parameters that share one cap (for example every bootstrap replication count).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -631,9 +649,658 @@ fn parse_flag(key: &str, value: &str) -> Result<bool, String> {
     }
 }
 
+/// Tool-specific rules for `tool` (table order), then the `"*"` rules whose path has no
+/// tool-specific rule for `tool` (table order).
+pub fn rules_for(tool: &str) -> Vec<&'static ParamRule> {
+    select_rules(tool, PARAM_RULES)
+}
+
+/// The row rule of `tool`, if its dataset height is limited.
+pub fn row_rule(tool: &str) -> Option<&'static RowRule> {
+    ROW_RULES.iter().find(|r| r.tool == tool)
+}
+
+fn select_rules<'a>(tool: &str, rules: &'a [ParamRule]) -> Vec<&'a ParamRule> {
+    let mut selected: Vec<&'a ParamRule> = rules.iter().filter(|r| r.tool == tool).collect();
+    let specific = selected.len();
+    for rule in rules.iter().filter(|r| r.tool == "*") {
+        if !selected[..specific].iter().any(|s| s.path == rule.path) {
+            selected.push(rule);
+        }
+    }
+    selected
+}
+
+/// A request that exceeds a limit. `message` is written for the caller (an LLM or a person)
+/// and is the error's `Display`; `override_key` names the knob for server logs.
+#[derive(Debug, Clone, thiserror::Error)]
+#[error("{message}")]
+pub struct LimitViolation {
+    /// The tool that was called.
+    pub tool: String,
+    /// The rule path, `dataset_field` (row limits) or budget key that was exceeded.
+    pub parameter: String,
+    /// What the request asked for.
+    pub requested: String,
+    /// The limit that applies.
+    pub limit: String,
+    /// The `P2A_LIMIT_OVERRIDES` key that raises the limit.
+    pub override_key: &'static str,
+    /// The refusal shown to the caller.
+    pub message: String,
+}
+
+/// Longest echo of a caller string in a refusal, in characters.
+const ECHO_CHARS: usize = 64;
+
+/// Cuts a caller string to [`ECHO_CHARS`] characters (at a char boundary, never mid-character).
+fn echo(s: &str) -> String {
+    match s.char_indices().nth(ECHO_CHARS) {
+        Some((end, _)) => s[..end].to_string(),
+        None => s.to_string(),
+    }
+}
+
+/// Collects every non-null value `path` resolves to inside `value` (path grammar: see
+/// [`ParamRule`]). A missing key, `null` or a type that does not fit a segment (`[]` on a
+/// non-array, a field on a non-object) yields nothing.
+fn resolve<'v>(value: &'v Value, path: &str, out: &mut Vec<&'v Value>) {
+    let (segment, rest) = match path.split_once('.') {
+        Some((segment, rest)) => (segment, Some(rest)),
+        None => (path, None),
+    };
+    let mut name = segment;
+    let mut depth = 0;
+    while let Some(stripped) = name.strip_suffix("[]") {
+        name = stripped;
+        depth += 1;
+    }
+    if let Some(field) = value.as_object().and_then(|o| o.get(name)) {
+        expand(field, depth, rest, out);
+    }
+}
+
+/// Descends `depth` array levels from `value`, then resolves `rest` (or collects the value).
+fn expand<'v>(value: &'v Value, depth: usize, rest: Option<&str>, out: &mut Vec<&'v Value>) {
+    if depth > 0 {
+        for item in value.as_array().into_iter().flatten() {
+            expand(item, depth - 1, rest, out);
+        }
+    } else if let Some(rest) = rest {
+        resolve(value, rest, out);
+    } else if !value.is_null() {
+        out.push(value);
+    }
+}
+
+/// True when a JSON number exceeds `cap` by absolute value.
+fn number_exceeds(n: &serde_json::Number, cap: u64) -> bool {
+    if let Some(u) = n.as_u64() {
+        u > cap
+    } else if let Some(i) = n.as_i64() {
+        i.unsigned_abs() > cap
+    } else if let Some(f) = n.as_f64() {
+        f.abs() > cap as f64
+    } else {
+        false
+    }
+}
+
+impl Limits {
+    /// Checks a tool call's JSON arguments against [`PARAM_RULES`]; returns the first violation
+    /// in [`rules_for`] order. Arguments that are not an object, and the off profile, pass.
+    pub fn check_tool_arguments(&self, tool: &str, args: &Value) -> Result<(), LimitViolation> {
+        self.check_with(tool, args, PARAM_RULES)
+    }
+
+    /// Checks a dataset's height for a tool in [`ROW_RULES`]; other tools pass.
+    pub fn check_rows(
+        &self,
+        tool: &str,
+        n_rows: usize,
+        n_cols: usize,
+    ) -> Result<(), LimitViolation> {
+        let Some(rule) = row_rule(tool) else {
+            return Ok(());
+        };
+        let Some(cap) = self.row_cap(rule.class) else {
+            return Ok(());
+        };
+        if n_rows <= cap {
+            return Ok(());
+        }
+        let tool = echo(tool);
+        Err(LimitViolation {
+            message: format!(
+                "The dataset for `{tool}` has {n_rows} rows and {n_cols} columns, but this server \
+                 allows at most {cap} rows for this method because {}. Use a sample of at most \
+                 {cap} rows, for example with munge_sample.",
+                rule.class.reason()
+            ),
+            tool,
+            parameter: rule.dataset_field.to_string(),
+            requested: n_rows.to_string(),
+            limit: cap.to_string(),
+            override_key: rule.class.key(),
+        })
+    }
+
+    /// Checks a quantity a handler computed (for example predicted join rows) against a named
+    /// budget; `knob` is the budget's key and `limit` its value (`None` passes).
+    pub fn check_budget(
+        &self,
+        tool: &str,
+        knob: &'static str,
+        requested: u64,
+        limit: Option<u64>,
+    ) -> Result<(), LimitViolation> {
+        match limit {
+            Some(limit) if requested > limit => {
+                let tool = echo(tool);
+                Err(LimitViolation {
+                    message: format!(
+                        "This request to `{tool}` needs {requested} ({knob}), which exceeds this \
+                         server's limit of {limit}. Use a smaller request."
+                    ),
+                    tool,
+                    parameter: knob.to_string(),
+                    requested: requested.to_string(),
+                    limit: limit.to_string(),
+                    override_key: knob,
+                })
+            }
+            _ => Ok(()),
+        }
+    }
+
+    fn check_with(
+        &self,
+        tool: &str,
+        args: &Value,
+        rules: &[ParamRule],
+    ) -> Result<(), LimitViolation> {
+        if self.is_off() || !args.is_object() {
+            return Ok(());
+        }
+        let mut values = Vec::new();
+        for rule in select_rules(tool, rules) {
+            values.clear();
+            resolve(args, rule.path, &mut values);
+            for value in &values {
+                self.check_value(tool, rule, value)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Applies one rule to one resolved value.
+    fn check_value(
+        &self,
+        tool: &str,
+        rule: &ParamRule,
+        value: &Value,
+    ) -> Result<(), LimitViolation> {
+        let path = rule.path;
+        let tool_echo = echo(tool);
+        let violation =
+            |requested: String, limit: String, override_key: &'static str, message: String| {
+                Err(LimitViolation {
+                    tool: echo(tool),
+                    parameter: path.to_string(),
+                    requested,
+                    limit,
+                    override_key,
+                    message,
+                })
+            };
+        match rule.rule {
+            Rule::Exempt(_) => Ok(()),
+            Rule::Max(Family::StringBytes) => {
+                let (Some(cap), Some(s)) = (self.cap(Family::StringBytes), value.as_str()) else {
+                    return Ok(());
+                };
+                let len = s.len() as u64;
+                if len <= cap {
+                    return Ok(());
+                }
+                violation(
+                    len.to_string(),
+                    cap.to_string(),
+                    Family::StringBytes.key(),
+                    format!(
+                        "Parameter `{path}` is {len} bytes long, which exceeds this server's limit \
+                         of {cap} bytes (string_bytes) for `{tool_echo}`. Use a shorter value."
+                    ),
+                )
+            }
+            Rule::Max(family) => {
+                let (Some(cap), Some(n)) = (self.cap(family), value.as_number()) else {
+                    return Ok(());
+                };
+                if !number_exceeds(n, cap) {
+                    return Ok(());
+                }
+                let key = family.key();
+                violation(
+                    n.to_string(),
+                    cap.to_string(),
+                    key,
+                    format!(
+                        "Parameter `{path}` = {n} exceeds this server's limit of {cap} ({key}) for \
+                         `{tool_echo}`. Use a smaller value."
+                    ),
+                )
+            }
+            Rule::ArrayLen(family) | Rule::UniqueList(family) => {
+                let (Some(cap), Some(items)) = (self.cap(family), value.as_array()) else {
+                    return Ok(());
+                };
+                let key = family.key();
+                let len = items.len() as u64;
+                if len > cap {
+                    return violation(
+                        len.to_string(),
+                        cap.to_string(),
+                        key,
+                        format!(
+                            "Parameter `{path}` has {len} elements, which exceeds this server's \
+                             limit of {cap} ({key}) for `{tool_echo}`. Use fewer elements."
+                        ),
+                    );
+                }
+                if matches!(rule.rule, Rule::UniqueList(_)) {
+                    let mut seen = HashSet::with_capacity(items.len());
+                    for name in items.iter().filter_map(Value::as_str) {
+                        if !seen.insert(name) {
+                            let name = echo(name);
+                            return violation(
+                                name.clone(),
+                                "no duplicates".to_string(),
+                                key,
+                                format!(
+                                    "Parameter `{path}` lists `{name}` more than once for \
+                                     `{tool_echo}`. List each name once."
+                                ),
+                            );
+                        }
+                    }
+                }
+                Ok(())
+            }
+            Rule::ArrayElemMax(family) => {
+                let (Some(cap), Some(items)) = (self.cap(family), value.as_array()) else {
+                    return Ok(());
+                };
+                let key = family.key();
+                for n in items.iter().filter_map(Value::as_number) {
+                    if number_exceeds(n, cap) {
+                        return violation(
+                            n.to_string(),
+                            cap.to_string(),
+                            key,
+                            format!(
+                                "Parameter `{path}` contains {n}, which exceeds this server's limit \
+                                 of {cap} ({key}) for `{tool_echo}`. Use smaller values."
+                            ),
+                        );
+                    }
+                }
+                Ok(())
+            }
+            Rule::Tolerance => {
+                let (Some(min), Some(n)) = (self.min_tolerance, value.as_number()) else {
+                    return Ok(());
+                };
+                match n.as_f64() {
+                    Some(x) if x < min => violation(
+                        n.to_string(),
+                        format!("{min:e}"),
+                        "min_tolerance",
+                        format!(
+                            "Parameter `{path}` = {n} is below this server's minimum of {min:e} \
+                             (min_tolerance) for `{tool_echo}`. Use a larger tolerance such as 1e-8."
+                        ),
+                    ),
+                    _ => Ok(()),
+                }
+            }
+            Rule::SquareLen => {
+                let (Some(cells), Some(items)) = (self.table_cells, value.as_array()) else {
+                    return Ok(());
+                };
+                let n = items.len() as u64;
+                match n.checked_mul(n) {
+                    Some(square) if square <= cells => Ok(()),
+                    _ => violation(
+                        n.to_string(),
+                        cells.to_string(),
+                        "table_cells",
+                        format!(
+                            "Parameter `{path}` has {n} elements, which would produce a {n} x {n} \
+                             result and exceeds this server's limit of {cells} cells (table_cells) \
+                             for `{tool_echo}`. Use at most {} elements.",
+                            cells.isqrt()
+                        ),
+                    ),
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use serde_json::json;
+
+    const T: &[ParamRule] = &[
+        ParamRule {
+            tool: "*",
+            path: "reps",
+            rule: Rule::Max(Family::Replications),
+        },
+        ParamRule {
+            tool: "special",
+            path: "reps",
+            rule: Rule::Max(Family::Folds),
+        },
+        ParamRule {
+            tool: "*",
+            path: "cols",
+            rule: Rule::UniqueList(Family::ListLength),
+        },
+        ParamRule {
+            tool: "*",
+            path: "tol",
+            rule: Rule::Tolerance,
+        },
+        ParamRule {
+            tool: "*",
+            path: "label",
+            rule: Rule::Max(Family::StringBytes),
+        },
+        ParamRule {
+            tool: "*",
+            path: "items[].name",
+            rule: Rule::Max(Family::StringBytes),
+        },
+        ParamRule {
+            tool: "*",
+            path: "items[].spec.cats",
+            rule: Rule::ArrayLen(Family::ListLength),
+        },
+        ParamRule {
+            tool: "*",
+            path: "grid[]",
+            rule: Rule::ArrayLen(Family::ListLength),
+        },
+        ParamRule {
+            tool: "*",
+            path: "spans",
+            rule: Rule::ArrayLen(Family::ListLength),
+        },
+        ParamRule {
+            tool: "*",
+            path: "spans",
+            rule: Rule::ArrayElemMax(Family::SpanWidth),
+        },
+        ParamRule {
+            tool: "*",
+            path: "vals",
+            rule: Rule::SquareLen,
+        },
+        ParamRule {
+            tool: "*",
+            path: "free",
+            rule: Rule::Exempt("test"),
+        },
+    ];
+
+    #[test]
+    fn max_rule_message_and_fields() {
+        let h = Limits::hosted();
+        let v = h
+            .check_with(
+                "mediation_analysis",
+                &json!({"reps": 1_000_000_000_000u64}),
+                T,
+            )
+            .unwrap_err();
+        assert_eq!(
+            v.message,
+            "Parameter `reps` = 1000000000000 exceeds this server's limit of 10000 (replications) for `mediation_analysis`. Use a smaller value."
+        );
+        assert_eq!(
+            (
+                v.tool.as_str(),
+                v.parameter.as_str(),
+                v.requested.as_str(),
+                v.limit.as_str(),
+                v.override_key
+            ),
+            (
+                "mediation_analysis",
+                "reps",
+                "1000000000000",
+                "10000",
+                "replications"
+            )
+        );
+        assert_eq!(v.to_string(), v.message);
+        assert!(h.check_with("t", &json!({"reps": 10_000}), T).is_ok());
+        assert!(h.check_with("t", &json!({"reps": 10_001}), T).is_err());
+        // `requested` is the JSON number's own `to_string()` (serde_json 1.0.148 writes "1e+30").
+        assert_eq!(
+            h.check_with("t", &json!({"reps": 1e30}), T)
+                .unwrap_err()
+                .requested,
+            json!(1e30).to_string()
+        );
+        // absolute value
+        assert!(h.check_with("t", &json!({"reps": -10_001}), T).is_err());
+        assert!(
+            h.check_with("t", &json!({"reps": null, "other": 1e30}), T)
+                .is_ok()
+        );
+        // not a number: serde's job
+        assert!(h.check_with("t", &json!({"reps": "1e30"}), T).is_ok());
+        // not an object
+        assert!(h.check_with("t", &json!([1, 2]), T).is_ok());
+    }
+
+    #[test]
+    fn tool_specific_rule_replaces_generic_rule_for_that_path() {
+        let h = Limits::hosted();
+        let v = h
+            .check_with("special", &json!({"reps": 21}), T)
+            .unwrap_err();
+        assert_eq!(v.override_key, "folds");
+        assert!(h.check_with("special", &json!({"reps": 20}), T).is_ok());
+    }
+
+    #[test]
+    fn list_string_tolerance_square_and_nested_rules() {
+        let h = Limits::hosted();
+        let dup = h
+            .check_with("multivariate_cancor", &json!({"cols": ["a", "b", "a"]}), T)
+            .unwrap_err();
+        assert!(
+            dup.message.contains("lists `a` more than once") && dup.limit == "no duplicates",
+            "{}",
+            dup.message
+        );
+        let long: Vec<String> = (0..501).map(|i| format!("c{i}")).collect();
+        assert_eq!(
+            h.check_with("t", &json!({"cols": long}), T)
+                .unwrap_err()
+                .requested,
+            "501"
+        );
+        // non-strings: no duplicate check
+        assert!(h.check_with("t", &json!({"cols": [1, 1]}), T).is_ok());
+        // echoed name is char-truncated
+        let name = "é".repeat(80);
+        let v = h
+            .check_with("t", &json!({"cols": [name.clone(), name]}), T)
+            .unwrap_err();
+        assert_eq!(v.requested, "é".repeat(64));
+
+        // 4096 bytes
+        assert!(
+            h.check_with("t", &json!({"label": "é".repeat(2048)}), T)
+                .is_ok()
+        );
+        // 4098 bytes
+        let v = h
+            .check_with("t", &json!({"label": "é".repeat(2049)}), T)
+            .unwrap_err();
+        assert_eq!(
+            (v.requested.as_str(), v.override_key),
+            ("4098", "string_bytes")
+        );
+        // StringBytes ignores numbers
+        assert!(h.check_with("t", &json!({"label": 1e30}), T).is_ok());
+
+        assert!(h.check_with("panel_hdfe", &json!({"tol": 1e-8}), T).is_ok());
+        for bad in [json!(0.0), json!(-1.0), json!(1e-16)] {
+            let v = h
+                .check_with("panel_hdfe", &json!({"tol": bad}), T)
+                .unwrap_err();
+            assert_eq!(v.override_key, "min_tolerance");
+            assert!(v.message.contains("1e-15"), "{}", v.message);
+        }
+
+        assert!(
+            h.check_with("t", &json!({"vals": vec![0.0; 1000]}), T)
+                .is_ok()
+        );
+        let v = h
+            .check_with("linalg_toeplitz", &json!({"vals": vec![0.0; 1001]}), T)
+            .unwrap_err();
+        assert!(
+            v.message.contains("1001 x 1001") && v.message.contains("at most 1000 elements"),
+            "{}",
+            v.message
+        );
+
+        let nested =
+            json!({"items": [{"name": "ok", "spec": {"cats": ["a"]}}, {"name": "x".repeat(4097)}]});
+        assert_eq!(
+            h.check_with("t", &nested, T).unwrap_err().parameter,
+            "items[].name"
+        );
+        let cats: Vec<String> = (0..501).map(|i| i.to_string()).collect();
+        assert_eq!(
+            h.check_with("t", &json!({"items": [{"spec": {"cats": cats}}]}), T)
+                .unwrap_err()
+                .parameter,
+            "items[].spec.cats"
+        );
+        // [] on non-array
+        assert!(
+            h.check_with("t", &json!({"items": {"name": "x".repeat(5000)}}), T)
+                .is_ok()
+        );
+        let inner: Vec<u8> = vec![0; 501];
+        assert_eq!(
+            h.check_with("t", &json!({"grid": [[1], inner]}), T)
+                .unwrap_err()
+                .parameter,
+            "grid[]"
+        );
+
+        assert!(h.check_with("t", &json!({"spans": [3, 1001]}), T).is_ok());
+        let v = h
+            .check_with("timeseries_spectrum", &json!({"spans": [3, 1003]}), T)
+            .unwrap_err();
+        assert!(
+            v.message.contains("contains 1003") && v.override_key == "span_width",
+            "{}",
+            v.message
+        );
+        assert!(h.check_with("t", &json!({"free": 1e300}), T).is_ok());
+    }
+
+    #[test]
+    fn off_profile_checks_nothing() {
+        let o = Limits::off();
+        let absurd = json!({"reps": 1e30, "cols": ["a", "a"], "tol": 0.0, "label": "x".repeat(100_000),
+                            "vals": vec![0; 5000], "spans": [1_000_001]});
+        assert!(o.check_with("t", &absurd, T).is_ok());
+        assert!(o.check_rows("ml_tsne", 1_000_000_000, 10).is_ok());
+        assert!(
+            o.check_budget(
+                "munge_join",
+                "join_output_rows",
+                u64::MAX,
+                o.join_output_rows
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn rows_and_budgets() {
+        let h = Limits::hosted();
+        assert!(h.check_rows("ml_tsne", 2_000, 3).is_ok());
+        let v = h.check_rows("ml_tsne", 2_001, 3).unwrap_err();
+        assert_eq!(
+            (
+                v.parameter.as_str(),
+                v.requested.as_str(),
+                v.limit.as_str(),
+                v.override_key
+            ),
+            ("dataset", "2001", "2000", "cubic_rows")
+        );
+        assert!(
+            v.message.contains("2001 rows and 3 columns") && v.message.contains("munge_sample"),
+            "{}",
+            v.message
+        );
+        assert!(h.check_rows("ml_hierarchical", 5_000, 2).is_ok());
+        assert_eq!(
+            h.check_rows("ml_hierarchical", 5_001, 2)
+                .unwrap_err()
+                .override_key,
+            "dense_rows"
+        );
+        assert!(h.check_rows("ml_svm", 50_000, 2).is_ok());
+        assert_eq!(
+            h.check_rows("ml_svm", 50_001, 2).unwrap_err().override_key,
+            "quadratic_rows"
+        );
+        // no row rule
+        assert!(h.check_rows("regression_ols", 10_000_000, 50).is_ok());
+
+        let v = h
+            .check_budget(
+                "munge_join",
+                "join_output_rows",
+                3_000_000,
+                h.join_output_rows,
+            )
+            .unwrap_err();
+        assert_eq!(
+            v.message,
+            "This request to `munge_join` needs 3000000 (join_output_rows), which exceeds this server's limit of 2000000. Use a smaller request."
+        );
+        assert_eq!(
+            (v.parameter.as_str(), v.override_key),
+            ("join_output_rows", "join_output_rows")
+        );
+        assert!(
+            h.check_budget(
+                "munge_join",
+                "join_output_rows",
+                2_000_000,
+                h.join_output_rows
+            )
+            .is_ok()
+        );
+        assert!(h.check_budget("x", "anything", u64::MAX, None).is_ok());
+    }
 
     #[test]
     fn hosted_family_caps_match_design() {
