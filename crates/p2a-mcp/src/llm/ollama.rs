@@ -35,7 +35,8 @@ impl OllamaProvider {
         self.config
             .base_url
             .as_deref()
-            .unwrap_or("http://localhost:11434")
+            .filter(|u| !u.trim().is_empty())
+            .unwrap_or(ProviderType::Ollama.default_base_url())
     }
 
     /// Convert our Message format to Ollama's message format.

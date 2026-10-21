@@ -5,6 +5,7 @@
 
 mod anthropic;
 mod context;
+pub mod egress;
 mod ollama;
 mod openai;
 mod provider;

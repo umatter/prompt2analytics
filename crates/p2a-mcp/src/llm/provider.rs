@@ -43,114 +43,51 @@ pub enum ProviderType {
     OpenAI,
 }
 
+impl ProviderType {
+    /// The provider's built-in endpoint, used when a config has no
+    /// `base_url`.
+    pub fn default_base_url(self) -> &'static str {
+        match self {
+            ProviderType::Ollama => "http://localhost:11434",
+            ProviderType::Anthropic => "https://api.anthropic.com",
+            ProviderType::OpenAI => "https://api.openai.com/v1",
+        }
+    }
+}
+
 /// Validate a user-supplied provider `base_url` before the server issues any
 /// request to it.
 ///
 /// The `base_url` field arrives from the untrusted request body, and the
 /// server would otherwise make a server-side request to it carrying the
-/// caller's bearer token — a classic SSRF sink (cloud metadata endpoints,
-/// internal admin panels, loopback services). This applies defence-in-depth:
+/// caller's bearer token: a classic SSRF sink (cloud metadata endpoints,
+/// internal admin panels, loopback services). The check is
+/// [`EgressPolicy::check_base_url`](super::egress::EgressPolicy::check_base_url)
+/// under the server's current policy:
 ///
-/// - The scheme must be `https`. The one exception is Ollama, which is
-///   commonly a local `http://localhost:11434`, so `http` to a loopback host
-///   is permitted only for [`ProviderType::Ollama`].
-/// - IP-literal hosts in private, loopback, link-local, or unspecified ranges
-///   are rejected (again except loopback for Ollama). This blocks the
-///   `http://169.254.169.254/` metadata vector and direct-to-internal-IP SSRF.
-/// - If `P2A_LLM_ALLOWED_HOSTS` is set (comma-separated), the host must match
-///   one of its entries — a hard allowlist operators can use to lock the proxy
-///   to known provider hosts.
+/// - If a host allowlist applies (`P2A_LLM_ALLOWED_HOSTS`, or the hosted
+///   profile's default provider list), the host must be on it.
+/// - The scheme must be `https`, except `http` to a loopback host for
+///   [`ProviderType::Ollama`] when the profile allows loopback.
+/// - IP-literal hosts in private, loopback, link-local, CGNAT, reserved or
+///   documentation ranges, including the IPv4 address embedded in an IPv6
+///   literal, are rejected (again except loopback for Ollama).
 ///
-/// Returns `Ok(())` when `base_url` is `None` (the provider uses its built-in
-/// default, which is trusted).
+/// Host names are checked again when they are resolved: the LLM HTTP client
+/// refuses a name that resolves to any such address.
 pub fn validate_base_url(provider_type: ProviderType, base_url: &str) -> Result<(), String> {
-    use std::net::IpAddr;
-
-    let url = reqwest::Url::parse(base_url).map_err(|e| format!("invalid base_url: {e}"))?;
-    let host = url
-        .host_str()
-        .ok_or_else(|| "base_url has no host".to_string())?;
-
-    // `host_str` serializes IPv6 literals with brackets (e.g. "[::1]"), which do
-    // not parse as `IpAddr`; strip them for the IP-range check.
-    let host_ip = host
-        .strip_prefix('[')
-        .and_then(|h| h.strip_suffix(']'))
-        .unwrap_or(host)
-        .parse::<IpAddr>()
-        .ok();
-
-    let is_ollama_loopback = provider_type == ProviderType::Ollama
-        && (host.eq_ignore_ascii_case("localhost")
-            || host_ip.map(|ip| ip.is_loopback()).unwrap_or(false));
-
-    match url.scheme() {
-        "https" => {}
-        "http" if is_ollama_loopback => {}
-        other => {
-            return Err(format!(
-                "base_url scheme `{other}` is not allowed; use https \
-                 (http is permitted only for a local Ollama endpoint)"
-            ));
-        }
-    }
-
-    if let Some(ip) = host_ip
-        && is_disallowed_ip(ip)
-        && !is_ollama_loopback
-    {
-        return Err(format!(
-            "base_url host {ip} is in a private, loopback, or link-local range \
-             and is not allowed"
-        ));
-    }
-
-    if let Ok(list) = std::env::var("P2A_LLM_ALLOWED_HOSTS") {
-        let allowed: Vec<&str> = list
-            .split(',')
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .collect();
-        if !allowed.is_empty() && !allowed.iter().any(|h| h.eq_ignore_ascii_case(host)) {
-            return Err(format!(
-                "base_url host `{host}` is not in the P2A_LLM_ALLOWED_HOSTS allowlist"
-            ));
-        }
-    }
-
-    Ok(())
+    super::egress::EgressPolicy::current()
+        .check_base_url(provider_type, base_url)
+        .map_err(|e| e.0)
 }
 
-/// True if an IP literal is one the server must never be pointed at from an
-/// untrusted `base_url` (private, loopback, link-local, or unspecified).
-fn is_disallowed_ip(ip: std::net::IpAddr) -> bool {
-    use std::net::IpAddr;
-    match ip {
-        IpAddr::V4(v4) => {
-            v4.is_private()
-                || v4.is_loopback()
-                || v4.is_link_local()
-                || v4.is_broadcast()
-                || v4.is_unspecified()
-                || v4.octets()[0] == 0
-        }
-        IpAddr::V6(v6) => {
-            v6.is_loopback()
-                || v6.is_unspecified()
-                // fc00::/7 unique-local
-                || (v6.segments()[0] & 0xfe00) == 0xfc00
-                // fe80::/10 link-local
-                || (v6.segments()[0] & 0xffc0) == 0xfe80
-        }
-    }
-}
-
-/// Validate the optional `base_url` on a provider config (no-op when unset).
+/// Validate the endpoint a provider config will use: its `base_url`, or the
+/// provider's built-in default when none is set (the default Ollama endpoint
+/// is checked like any other).
 pub fn validate_provider_config(config: &ProviderConfig) -> Result<(), String> {
-    match &config.base_url {
-        Some(url) if !url.trim().is_empty() => validate_base_url(config.provider_type, url),
-        _ => Ok(()),
-    }
+    super::egress::EgressPolicy::current()
+        .check_provider_config(config)
+        .map_err(|e| e.0)
 }
 
 impl std::fmt::Display for ProviderType {
@@ -303,10 +240,17 @@ pub enum LlmError {
 
     #[error("Tool execution error: {0}")]
     ToolError(String),
+
+    /// The egress policy refused the provider host.
+    #[error("{0}")]
+    EgressDenied(String),
 }
 
 impl From<reqwest::Error> for LlmError {
     fn from(err: reqwest::Error) -> Self {
+        if let Some(denied) = super::egress::find_egress_error(&err) {
+            return LlmError::EgressDenied(denied.0.clone());
+        }
         LlmError::NetworkError(err.to_string())
     }
 }
@@ -385,6 +329,9 @@ mod base_url_tests {
         assert!(validate_base_url(ProviderType::OpenAI, "https://10.0.0.5").is_err());
         assert!(validate_base_url(ProviderType::OpenAI, "https://192.168.1.1").is_err());
         assert!(validate_base_url(ProviderType::Anthropic, "https://[::1]/").is_err());
+        // IPv4-mapped IPv6 and CGNAT literals.
+        assert!(validate_base_url(ProviderType::OpenAI, "https://[::ffff:127.0.0.1]/").is_err());
+        assert!(validate_base_url(ProviderType::OpenAI, "https://100.64.0.1/").is_err());
     }
 
     #[test]

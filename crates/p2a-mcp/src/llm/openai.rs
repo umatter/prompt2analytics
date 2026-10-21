@@ -38,7 +38,8 @@ impl OpenAIProvider {
         self.config
             .base_url
             .as_deref()
-            .unwrap_or("https://api.openai.com/v1")
+            .filter(|u| !u.trim().is_empty())
+            .unwrap_or(ProviderType::OpenAI.default_base_url())
     }
 
     /// Get the API key.
