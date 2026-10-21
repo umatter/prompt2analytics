@@ -3,6 +3,7 @@
 //! Connects to a local Ollama instance for LLM inference with tool calling support.
 
 use super::LlmSettings;
+use super::context::push_tool_results_for_model;
 use super::retry::{MAX_UPSTREAM_BODY_BYTES, count_streamed, read_json_capped, upstream_error};
 use super::{
     LlmError, LlmProvider, Message, MessageRole, ProviderConfig, ProviderType, StreamChunk,
@@ -26,6 +27,9 @@ pub struct OllamaProvider {
     config: ProviderConfig,
     /// Total time allowed for one non-streaming call.
     timeout: std::time::Duration,
+    /// Cap on the tool-result text re-sent to the model in one tool loop
+    /// (`llm_history_bytes`).
+    loop_tool_bytes: usize,
 }
 
 impl OllamaProvider {
@@ -41,6 +45,7 @@ impl OllamaProvider {
             client: build_http_client(ProviderType::Ollama, settings),
             config,
             timeout: settings.timeout,
+            loop_tool_bytes: settings.history_bytes,
         }
     }
 
@@ -245,7 +250,7 @@ impl OllamaProvider {
                     }
 
                     // Add tool results as a new message
-                    messages.push(Message::tool_result(tool_results.clone()));
+                    push_tool_results_for_model(messages, &tool_results, self.loop_tool_bytes);
 
                     // If interpret is false, return raw tool output without calling LLM again
                     if !interpret {
@@ -624,7 +629,11 @@ impl LlmProvider for OllamaProvider {
                     }
 
                     // Add tool results as a new message
-                    conversation.push(Message::tool_result(tool_results.clone()));
+                    push_tool_results_for_model(
+                        &mut conversation,
+                        &tool_results,
+                        self.loop_tool_bytes,
+                    );
 
                     // If interpret is false, return raw tool output without calling LLM again
                     if !interpret {

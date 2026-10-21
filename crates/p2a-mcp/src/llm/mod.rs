@@ -97,8 +97,9 @@ pub(crate) fn build_http_client(
 
 pub use anthropic::AnthropicProvider;
 pub use context::{
-    ContextConfig, ContextManager, ProcessedContext, build_enhanced_dataset_context,
-    summarize_tool_call, truncate_tool_result,
+    ContextConfig, ContextManager, MAX_COLUMNS_PER_DATASET, MAX_DATASETS_IN_CONTEXT,
+    MAX_TOOL_RESULT_BYTES_IN_LOOP, ProcessedContext, build_dataset_context_bounded,
+    build_enhanced_dataset_context, summarize_tool_call, truncate_str, truncate_tool_result,
 };
 pub use ollama::OllamaProvider;
 pub use openai::OpenAIProvider;
@@ -110,7 +111,7 @@ pub use provider::{
 pub use retry::{RetryConfig, send_with_retry};
 pub use tokens::{
     ContextBudget, estimate_message_tokens, estimate_tokens, estimate_tool_definition_tokens,
-    get_model_context_size,
+    get_model_context_size, known_model_context_size,
 };
 pub use tools::{INTERNAL_TOOLS, TIER1_TOOLS, check_llm_tool_call, get_system_prompt_with_context};
 
