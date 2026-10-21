@@ -168,6 +168,30 @@ pub const INTERNAL_TOOLS: &[&str] = &[
     "generate_report",
 ];
 
+/// Check a tool name the model emitted before it is executed.
+///
+/// Names in [`INTERNAL_TOOLS`] are refused even when registered (they are
+/// never offered to the model), and so are names no handler registers
+/// (`is_registered`). Registered analytical tools outside the advertised
+/// subset stay callable: the model can find them through the search
+/// meta-tools' descriptions. The refusal is a tool error the model can act
+/// on; the name in it is cut to 64 characters.
+pub fn check_llm_tool_call(name: &str, is_registered: impl Fn(&str) -> bool) -> Result<(), String> {
+    let shown: String = name.chars().take(64).collect();
+    if INTERNAL_TOOLS.contains(&name) {
+        return Err(format!(
+            "Tool `{shown}` is not available to the assistant. Use one of the tools in your tool \
+             list."
+        ));
+    }
+    if !is_registered(name) {
+        return Err(format!(
+            "Unknown tool `{shown}`. Use one of the tools in your tool list."
+        ));
+    }
+    Ok(())
+}
+
 /// Returns the base system prompt for the data analytics assistant.
 fn get_base_system_prompt() -> &'static str {
     r#"You are a data analytics assistant for prompt2analytics. You help users analyze data by invoking specialized Rust-powered tools.
@@ -554,5 +578,28 @@ mod tests {
                 tool
             );
         }
+    }
+
+    #[test]
+    fn internal_and_unknown_tools_are_refused() {
+        for t in INTERNAL_TOOLS {
+            let e = check_llm_tool_call(t, |_| true).unwrap_err();
+            assert!(e.contains("is not available to the assistant"), "{e}");
+        }
+        assert!(
+            check_llm_tool_call("definitely_not_a_tool", |_| false)
+                .unwrap_err()
+                .contains("Unknown tool")
+        );
+        assert!(check_llm_tool_call("regression_ols", |_| true).is_ok());
+        // Registered, not advertised, not internal.
+        assert!(check_llm_tool_call("descriptive_medpolish", |_| true).is_ok());
+        // The name is truncated in the message.
+        assert!(
+            check_llm_tool_call(&"x".repeat(10_000), |_| false)
+                .unwrap_err()
+                .len()
+                < 300
+        );
     }
 }

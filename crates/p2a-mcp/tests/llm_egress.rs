@@ -14,16 +14,20 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use axum::Router;
-use axum::http::{StatusCode, header};
+use axum::body::Body;
+use axum::http::{Request, StatusCode, header};
 use axum::routing::{any, get, post};
+use p2a_mcp::config::ServerConfig;
 use p2a_mcp::llm::egress::{EgressPolicy, GuardedResolver, Lookup, guarded_client_builder};
 use p2a_mcp::llm::{
     LlmError, LlmProvider, LlmSettings, Message, OllamaProvider, ProviderConfig, ProviderType,
     RetryConfig, ToolExecutor, send_with_retry,
 };
 use p2a_mcp::tools::limits::Limits;
+use p2a_mcp::transport::http::{AppState, build_app};
 use reqwest::dns::Resolve;
-use serde_json::Value;
+use serde_json::{Value, json};
+use tower::ServiceExt;
 
 /// Bind `127.0.0.1:0` and serve `router` on it in the background.
 async fn spawn_stub(router: Router) -> SocketAddr {
@@ -412,4 +416,98 @@ async fn oversized_upstream_body_is_refused() {
         .await
         .unwrap_err();
     assert!(matches!(err, LlmError::ResponseTooLarge(_)), "{err}");
+}
+
+// ---------------------------------------------------------------------------
+// The HTTP app: helpers
+// ---------------------------------------------------------------------------
+
+async fn app() -> (Router, AppState) {
+    build_app(&ServerConfig::default()).await.unwrap()
+}
+
+fn post_json(uri: &str, body: &Value) -> Request<Body> {
+    Request::post(uri)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
+async fn send_json(app: &Router, uri: &str, body: Value) -> (StatusCode, Value) {
+    let resp = app.clone().oneshot(post_json(uri, &body)).await.unwrap();
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
+}
+
+async fn new_session(app: &Router) -> String {
+    let (s, b) = send_json(app, "/api/sessions", json!({})).await;
+    assert_eq!(s, StatusCode::CREATED, "{b}");
+    b["data"]["session_id"].as_str().unwrap().to_string()
+}
+
+/// The provider block of a chat request pointing at an Ollama stub.
+fn stub_provider(addr: SocketAddr) -> Value {
+    json!({"provider_type": "ollama", "base_url": format!("http://{addr}"), "model": "stub"})
+}
+
+// ---------------------------------------------------------------------------
+// Task 4: the tool allowlist of the LLM executors
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn llm_executor_refuses_internal_and_unknown_tools() {
+    let (app, _state) = app().await;
+    let sid = new_session(&app).await;
+    let addr = spawn_stub(Router::new().route(
+        "/api/chat",
+        post(|| async {
+            axum::Json(json!({
+                "message": {"role": "assistant", "content": "", "tool_calls": [
+                    {"function": {"name": "server_stats", "arguments": {}}},
+                    {"function": {"name": "definitely_not_a_tool", "arguments": {}}},
+                    {"function": {"name": "hypothesis_poisson", "arguments": {}}}
+                ]},
+                "done": true
+            }))
+        }),
+    ))
+    .await;
+    let (status, body) = send_json(
+        &app,
+        "/api/llm/chat",
+        json!({"session_id": sid, "message": "go", "interpret": false,
+               "provider": stub_provider(addr)}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let r = body["data"]["message"]["tool_results"]
+        .as_array()
+        .unwrap_or_else(|| panic!("tool_results in {body}"));
+    assert!(
+        r[0]["is_error"].as_bool().unwrap()
+            && r[0]["content"]
+                .as_str()
+                .unwrap()
+                .contains("is not available to the assistant"),
+        "{}",
+        r[0]
+    );
+    assert!(
+        r[1]["is_error"].as_bool().unwrap()
+            && r[1]["content"].as_str().unwrap().contains("Unknown tool"),
+        "{}",
+        r[1]
+    );
+    // Dispatched (it fails on its own arguments), not refused.
+    let c2 = r[2]["content"].as_str().unwrap();
+    assert!(
+        !c2.contains("is not available to the assistant") && !c2.contains("Unknown tool"),
+        "{c2}"
+    );
 }

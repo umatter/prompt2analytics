@@ -1,7 +1,8 @@
 //! LLM chat routes (`/api/llm/*`) and the two tool executors the LLM tool
 //! loop uses. This was the `llm_handlers` module of `transport/http.rs`.
 
-use std::sync::Arc;
+use std::collections::HashSet;
+use std::sync::{Arc, OnceLock};
 
 use axum::{
     Json,
@@ -16,7 +17,8 @@ use crate::exec::{CallOrigin, ToolCallError, ToolGovernor};
 use crate::llm::{
     AnthropicProvider, LlmProvider, LlmSettings, Message, OllamaProvider, OpenAIProvider,
     ProviderConfig, ProviderType, ToolExecutor, build_enhanced_dataset_context,
-    get_system_prompt_with_context, resolve_provider_config, server_key_availability,
+    check_llm_tool_call, get_system_prompt_with_context, resolve_provider_config,
+    server_key_availability,
 };
 use crate::session::Session;
 
@@ -91,6 +93,7 @@ impl SessionToolExecutor {
 #[async_trait::async_trait]
 impl ToolExecutor for SessionToolExecutor {
     async fn execute(&self, name: &str, arguments: serde_json::Value) -> Result<String, String> {
+        refuse_unless_callable(&self.server, name)?;
         tracing::warn!(">>> SessionToolExecutor::execute called for tool: {}", name);
         tracing::info!(tool = %name, "Executing tool");
         let start = std::time::Instant::now();
@@ -124,6 +127,25 @@ impl ToolExecutor for SessionToolExecutor {
             Err(e) => Err(e),
         }
     }
+}
+
+/// The names of every registered tool. The tool set is fixed per binary,
+/// so it is collected once.
+fn llm_callable_tools(server: &crate::server::AnalyticsServer) -> &'static HashSet<String> {
+    static TOOLS: OnceLock<HashSet<String>> = OnceLock::new();
+    TOOLS.get_or_init(|| server.list_tools().into_iter().map(|t| t.name).collect())
+}
+
+/// Refuse a model-emitted tool name the assistant may not call: an internal
+/// tool, or one no handler registers. The refusal is the tool's error text.
+fn refuse_unless_callable(
+    server: &crate::server::AnalyticsServer,
+    name: &str,
+) -> Result<(), String> {
+    check_llm_tool_call(name, |n| llm_callable_tools(server).contains(n)).inspect_err(|_| {
+        let shown: String = name.chars().take(64).collect();
+        tracing::warn!(tool = %shown, "Refused a tool call the assistant may not make");
+    })
 }
 
 /// Read a server environment variable (the key lookup of
@@ -879,6 +901,8 @@ impl StreamingToolExecutor {
 #[async_trait::async_trait]
 impl ToolExecutor for StreamingToolExecutor {
     async fn execute(&self, name: &str, arguments: serde_json::Value) -> Result<String, String> {
+        // Before any ToolStart event, DB tool-call row or governor call.
+        refuse_unless_callable(&self.server, name)?;
         tracing::warn!(
             ">>> StreamingToolExecutor::execute called for tool: {}",
             name
