@@ -617,6 +617,71 @@ fn sweep_period(ttl_minutes: u64) -> std::time::Duration {
     std::time::Duration::from_secs(ttl_minutes.saturating_mul(30).clamp(60, 600))
 }
 
+/// Refuse a database path inside the path-jail root, where file tools can
+/// write (and so corrupt the store).
+///
+/// A relative `db_path` is taken against the current directory. Its deepest
+/// existing ancestor is canonicalised (resolving symlinks) and the rest is
+/// appended with `..` and `.` resolved lexically, so a path that does not
+/// exist yet is judged by where it would be created. `data_root` is
+/// canonicalised when it exists. The error is an operator startup message
+/// and names both paths.
+pub fn check_db_path_outside_data_root(
+    db_path: &std::path::Path,
+    data_root: &std::path::Path,
+) -> Result<(), String> {
+    use std::path::{Component, PathBuf};
+
+    let absolute = if db_path.is_absolute() {
+        db_path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|e| format!("cannot resolve P2A_DB_PATH against the current directory: {e}"))?
+            .join(db_path)
+    };
+    // Split into the deepest existing ancestor and the components below it.
+    let mut base = absolute.as_path();
+    let mut rest = Vec::new();
+    let mut resolved = loop {
+        if let Ok(canonical) = base.canonicalize() {
+            break canonical;
+        }
+        match (base.parent(), base.file_name()) {
+            (Some(parent), Some(name)) => {
+                rest.push(Component::Normal(name));
+                base = parent;
+            }
+            // `..` or `.` as the last component of a missing path.
+            (Some(parent), None) => {
+                rest.push(base.components().next_back().unwrap_or(Component::CurDir));
+                base = parent;
+            }
+            (None, _) => break PathBuf::from(base),
+        }
+    };
+    for component in rest.into_iter().rev() {
+        match component {
+            Component::ParentDir => {
+                resolved.pop();
+            }
+            Component::CurDir => {}
+            other => resolved.push(other.as_os_str()),
+        }
+    }
+    let root = data_root
+        .canonicalize()
+        .unwrap_or_else(|_| data_root.to_path_buf());
+    if resolved.starts_with(&root) {
+        return Err(format!(
+            "P2A_DB_PATH ({}) is inside the data root ({}); file tools can write there. Put \
+             the database outside P2A_DATA_ROOT, e.g. /var/lib/p2a/db",
+            db_path.display(),
+            root.display()
+        ));
+    }
+    Ok(())
+}
+
 /// Result of reloading session datasets.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct ReloadResult {
@@ -994,6 +1059,35 @@ mod tests {
             .await,
             "the removed session's rows were not deleted"
         );
+    }
+
+    #[test]
+    fn db_path_inside_the_data_root_is_refused() {
+        let root_dir = tempfile::tempdir().unwrap();
+        let r = root_dir.path().canonicalize().unwrap();
+        for inside in [r.join("db"), r.clone(), r.join("a/../db"), r.join("./x/db")] {
+            let err = check_db_path_outside_data_root(&inside, &r).unwrap_err();
+            assert!(
+                err.contains("P2A_DB_PATH") && err.contains("data root"),
+                "{err}"
+            );
+        }
+        let other = tempfile::tempdir().unwrap();
+        for outside in [other.path().join("db"), r.join("../p2a-outside-db")] {
+            assert!(
+                check_db_path_outside_data_root(&outside, &r).is_ok(),
+                "{}",
+                outside.display()
+            );
+        }
+        // A symlink outside the root that points into it does not hide the
+        // path the store would really be created at.
+        #[cfg(unix)]
+        {
+            let link = other.path().join("link-into-root");
+            std::os::unix::fs::symlink(&r, &link).unwrap();
+            assert!(check_db_path_outside_data_root(&link.join("db"), &r).is_err());
+        }
     }
 
     #[test]

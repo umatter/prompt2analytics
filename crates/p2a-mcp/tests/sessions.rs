@@ -693,3 +693,31 @@ async fn open_public_mode_ignores_user_id() {
         None
     );
 }
+
+// =============================================================================
+// Task 5: the session database outside the data root (INF-1)
+// =============================================================================
+
+/// An authenticated server refuses to start with its database inside the
+/// path-jail root, where file tools can write.
+#[tokio::test]
+async fn database_inside_the_data_root_is_refused() {
+    let root = allowed_data_root().unwrap();
+    let tmp = tempfile::Builder::new()
+        .prefix(".p2a-wp07-")
+        .tempdir_in(&root)
+        .unwrap();
+    let mut cfg = ServerConfig::default();
+    cfg.http.access_token = Some("test-token".into()); // Authenticated mode
+    cfg.http.db_path = Some(tmp.path().join("db").to_string_lossy().into_owned());
+    let err = build_app(&cfg)
+        .await
+        .err()
+        .expect("startup must be refused");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("P2A_DB_PATH") && msg.contains("data root"),
+        "{msg}"
+    );
+    assert!(!tmp.path().join("db").exists());
+}

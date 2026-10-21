@@ -92,6 +92,14 @@ pub async fn build_app_with(
     // start without leaving tasks behind.
     #[cfg(feature = "db")]
     let limits = resolve_limits(config)?;
+    #[cfg(feature = "db")]
+    if let Some(db_path) = config.http.db_path.as_deref() {
+        enforce_db_path_policy(
+            config.deployment_mode(),
+            std::path::Path::new(db_path),
+            crate::path_jail::allowed_data_root(),
+        )?;
+    }
     // The eviction threshold follows the resource profile here, like the
     // deadlines and quotas, whichever way `config` was built.
     let session_manager = Arc::new(SessionManager::new(SessionConfig {
@@ -148,6 +156,33 @@ fn resolve_limits(config: &ServerConfig) -> Result<crate::tools::limits::Limits,
     }
     .with_overrides(&config.limits.overrides)
     .map_err(TransportError::Config)
+}
+
+/// The session database must lie outside the path-jail root (INF-1): file
+/// tools can write anywhere under it. An authenticated or open public server
+/// refuses to start otherwise; a local one (the desktop app keeps its store
+/// under the user's data directory, which can be inside a data root that
+/// defaults to the working directory) logs a warning and starts. A data root
+/// that cannot be resolved is treated the same way.
+#[cfg(feature = "db")]
+fn enforce_db_path_policy(
+    mode: DeploymentMode,
+    db_path: &std::path::Path,
+    data_root: Result<std::path::PathBuf, String>,
+) -> Result<(), TransportError> {
+    let verdict = data_root
+        .map_err(|e| format!("cannot check P2A_DB_PATH against the data root: {e}"))
+        .and_then(|root| {
+            crate::persistent_session::check_db_path_outside_data_root(db_path, &root)
+        });
+    match verdict {
+        Ok(()) => Ok(()),
+        Err(message) if mode == DeploymentMode::Local => {
+            tracing::warn!("{message}");
+            Ok(())
+        }
+        Err(message) => Err(TransportError::Config(message)),
+    }
 }
 
 /// The conversation-store bounds from the resolved request limits and the
@@ -539,4 +574,37 @@ async fn health_check(State(state): State<AppState>) -> Response {
         })),
     )
         .into_response()
+}
+
+#[cfg(all(test, feature = "db"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn db_path_policy_by_mode() {
+        let root = tempfile::tempdir().unwrap();
+        let r = root.path().canonicalize().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let inside = r.join("db");
+        let outside = other.path().join("db");
+
+        // Local mode (the desktop app) only warns.
+        assert!(enforce_db_path_policy(DeploymentMode::Local, &inside, Ok(r.clone())).is_ok());
+        assert!(
+            enforce_db_path_policy(DeploymentMode::Local, &inside, Err("no root".into())).is_ok()
+        );
+        for mode in [DeploymentMode::Authenticated, DeploymentMode::OpenPublic] {
+            match enforce_db_path_policy(mode, &inside, Ok(r.clone())) {
+                Err(TransportError::Config(message)) => {
+                    assert!(message.contains("P2A_DB_PATH"), "{message}")
+                }
+                other => panic!("{mode:?}: expected a config error, got {other:?}"),
+            }
+            assert!(enforce_db_path_policy(mode, &outside, Ok(r.clone())).is_ok());
+            assert!(matches!(
+                enforce_db_path_policy(mode, &outside, Err("no root".into())),
+                Err(TransportError::Config(_))
+            ));
+        }
+    }
 }
