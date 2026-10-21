@@ -192,11 +192,17 @@ fn log_startup(config: &ServerConfig, exec: &ExecConfig, listener: &tokio::net::
                  profile applies; isolation relies on unguessable session IDs. Put an edge \
                  rate-limiter in front for abuse/DoS control."
             );
+            if config.http.expose_enumeration {
+                tracing::warn!(
+                    "--expose-enumeration (P2A_EXPOSE_ENUMERATION) is ignored in open public mode"
+                );
+            }
         }
         DeploymentMode::Local => {
             tracing::warn!(
-                "HTTP access-token authentication is DISABLED (local mode: loopback bind); \
-                 set P2A_ACCESS_TOKEN before exposing this server"
+                "HTTP access-token authentication is DISABLED (local mode: loopback bind, \
+                 requests must be addressed to localhost); set P2A_ACCESS_TOKEN before \
+                 exposing this server"
             );
         }
     }
@@ -268,13 +274,20 @@ pub fn create_router(state: AppState, config: &ServerConfig) -> Router {
 
 /// Create the base router with core routes.
 fn create_base_router(state: AppState, config: &ServerConfig) -> Router {
-    // In the intentionally-open public mode (non-loopback bind, no access
-    // token), the two enumeration surfaces are omitted entirely: `GET
-    // /api/sessions` (which would list every active session ID and defeat the
-    // unguessable-session-ID isolation) and `GET /api/files` (a filesystem
-    // browser). The web frontend uses neither. They remain available for
-    // loopback/desktop use and for authenticated (token-gated) deployments.
-    let hide_enumeration = config.http.is_open_unauthenticated();
+    let mode = config.deployment_mode();
+
+    // The two enumeration surfaces, `GET /api/sessions` (every active session
+    // ID, which would defeat the unguessable-session-ID isolation) and `GET
+    // /api/files` (a filesystem browser), are registered only for an
+    // authenticated server or a local one started with --expose-enumeration,
+    // and never in open public mode (which includes a loopback bind with
+    // --allow-unauthenticated behind a proxy). Neither shipped client uses
+    // them.
+    let expose_enumeration = match mode {
+        DeploymentMode::OpenPublic => false,
+        DeploymentMode::Authenticated => true,
+        DeploymentMode::Local => config.http.expose_enumeration,
+    };
 
     let mut router = Router::new()
         // Health check
@@ -288,7 +301,7 @@ fn create_base_router(state: AppState, config: &ServerConfig) -> Router {
         // Tool execution
         .route("/api/tools/{name}", post(call_tool));
 
-    if !hide_enumeration {
+    if expose_enumeration {
         router = router
             .route("/api/sessions", get(list_sessions))
             // File browser

@@ -1,10 +1,11 @@
-//! HTTP middleware: CORS, bearer-token authentication and the request body
-//! limit, plus the order in which they wrap the router.
+//! HTTP middleware: CORS, bearer-token authentication, the request body
+//! limit and the local-mode Host check, plus the order in which they wrap
+//! the router.
 
 use std::sync::Arc;
 
 use axum::{
-    Router,
+    Json, Router,
     extract::{Request, State},
     http::{StatusCode, header},
     middleware::{self, Next},
@@ -14,7 +15,8 @@ use tower_http::cors::{Any, CorsLayer};
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::trace::TraceLayer;
 
-use crate::config::ServerConfig;
+use super::http::ApiResponse;
+use crate::config::{DeploymentMode, ServerConfig};
 
 /// Build the CORS layer from configuration.
 ///
@@ -69,6 +71,12 @@ pub(crate) fn apply_global_middleware(router: Router, config: &ServerConfig) -> 
     // Shared bearer token, if configured. `None` disables the check (loopback
     // development only; the startup guard forbids this on a public bind).
     let token_state: Option<Arc<str>> = config.http.access_token.as_deref().map(Arc::from);
+    // DNS-rebinding guard, local mode only (applied inside CORS).
+    let router = if config.deployment_mode() == DeploymentMode::Local {
+        router.layer(middleware::from_fn(require_local_host))
+    } else {
+        router
+    };
     router
         // CORS stays outermost so preflight is handled and error responses
         // (including 401s from the auth layer below) carry CORS headers.
@@ -134,4 +142,89 @@ pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
         diff |= x ^ y;
     }
     diff == 0
+}
+
+/// Whether `host` (a Host header or URI authority) names this machine:
+/// `localhost` (any case) or a loopback IP literal, with or without a port.
+pub(crate) fn is_local_host(host: &str) -> bool {
+    let name = if let Some(rest) = host.strip_prefix('[') {
+        // Bracketed IPv6 literal: "[::1]" or "[::1]:8080".
+        match rest.split_once(']') {
+            Some((inside, _)) => inside,
+            None => return false,
+        }
+    } else {
+        match host.rsplit_once(':') {
+            Some((name, port)) if !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) => {
+                name
+            }
+            _ => host,
+        }
+    };
+    if name.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    name.parse::<std::net::IpAddr>()
+        .is_ok_and(|ip| ip.is_loopback())
+}
+
+/// DNS-rebinding guard for a local server: a request addressed to any host
+/// other than `localhost` or a loopback address gets 421. A request without
+/// a host (not a browser) passes.
+pub(crate) async fn require_local_host(req: Request, next: Next) -> Response {
+    let host = req.uri().host().map(str::to_string).or_else(|| {
+        req.headers()
+            .get(header::HOST)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string)
+    });
+    match host {
+        Some(h) if !is_local_host(&h) => (
+            StatusCode::MISDIRECTED_REQUEST,
+            Json(ApiResponse::<()>::error_with_code(
+                "This server only accepts requests addressed to localhost. To serve other \
+                 hostnames, configure an access token or --allow-unauthenticated.",
+                "misdirected",
+                None,
+            )),
+        )
+            .into_response(),
+        _ => next.run(req).await,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn local_host_detection() {
+        for ok in [
+            "localhost:8081",
+            "LOCALHOST",
+            "127.0.0.1:8080",
+            "[::1]:8080",
+            "127.0.0.5",
+            "[::1]",
+        ] {
+            assert!(is_local_host(ok), "{ok}");
+        }
+        for bad in [
+            "evil.example",
+            "localhost.evil.example",
+            "0.0.0.0:8080",
+            "127.0.0.1.nip.io",
+            "",
+            "[::]:80",
+        ] {
+            assert!(!is_local_host(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn constant_time_eq_compares_bytes() {
+        assert!(constant_time_eq(b"token", b"token"));
+        assert!(!constant_time_eq(b"token", b"tokem"));
+        assert!(!constant_time_eq(b"token", b"tok"));
+    }
 }

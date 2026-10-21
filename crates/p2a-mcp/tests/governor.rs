@@ -510,3 +510,95 @@ async fn health_reports_governor_fields() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Deployment modes: enumeration routes and the Host check (MCP-5)
+// ---------------------------------------------------------------------------
+
+fn with_bearer(mut req: Request<Body>, bearer: Option<&str>) -> Request<Body> {
+    if let Some(t) = bearer {
+        req.headers_mut().insert(
+            header::AUTHORIZATION,
+            format!("Bearer {t}").parse().unwrap(),
+        );
+    }
+    req
+}
+
+/// Status of `GET /api/sessions` and `GET /api/files`.
+async fn enum_status(cfg: &ServerConfig, bearer: Option<&str>) -> (StatusCode, StatusCode) {
+    let (app, _) = build_app(cfg).await.unwrap();
+    let sessions = send(&app, with_bearer(get("/api/sessions"), bearer))
+        .await
+        .0;
+    let files = send(&app, with_bearer(get("/api/files"), bearer)).await.0;
+    (sessions, files)
+}
+
+#[tokio::test]
+async fn enumeration_routes_follow_the_mode() {
+    // Local default: hidden (405 = POST-only path, 404 = unregistered)
+    assert_eq!(
+        enum_status(&http_cfg("127.0.0.1:8080", None, false), None).await,
+        (StatusCode::METHOD_NOT_ALLOWED, StatusCode::NOT_FOUND)
+    );
+    // MCP-5 repro: loopback + P2A_ALLOW_UNAUTHENTICATED -> OpenPublic -> hidden (was 200, 200)
+    assert_eq!(
+        enum_status(&http_cfg("127.0.0.1:8080", None, true), None).await,
+        (StatusCode::METHOD_NOT_ALLOWED, StatusCode::NOT_FOUND)
+    );
+    let mut c = http_cfg("127.0.0.1:8080", None, false);
+    c.http.expose_enumeration = true;
+    assert_eq!(
+        enum_status(&c, None).await,
+        (StatusCode::OK, StatusCode::OK)
+    );
+    let mut c = http_cfg("0.0.0.0:8080", None, true);
+    c.http.expose_enumeration = true; // never in OpenPublic
+    assert_eq!(
+        enum_status(&c, None).await,
+        (StatusCode::METHOD_NOT_ALLOWED, StatusCode::NOT_FOUND)
+    );
+    assert_eq!(
+        enum_status(&http_cfg("0.0.0.0:8080", Some("t"), false), Some("t")).await,
+        (StatusCode::OK, StatusCode::OK)
+    );
+}
+
+#[tokio::test]
+async fn local_mode_rejects_foreign_host_headers() {
+    let (app, _) = build_app(&local()).await.unwrap();
+    let with_host = |h: &str| {
+        Request::get("/health")
+            .header(header::HOST, h)
+            .body(Body::empty())
+            .unwrap()
+    };
+    for ok in [
+        "localhost:8081",
+        "LOCALHOST",
+        "127.0.0.1:8080",
+        "[::1]:8080",
+        "127.0.0.5",
+    ] {
+        assert_eq!(send(&app, with_host(ok)).await.0, StatusCode::OK, "{ok}");
+    }
+    for bad in [
+        "evil.example",
+        "localhost.evil.example",
+        "0.0.0.0:8080",
+        "127.0.0.1.nip.io",
+    ] {
+        let (s, _, b) = send(&app, with_host(bad)).await;
+        assert_eq!(s, StatusCode::MISDIRECTED_REQUEST, "{bad}");
+        assert_eq!(b["code"], json!("misdirected"));
+    }
+    assert_eq!(send(&app, get("/health")).await.0, StatusCode::OK); // no Host header: not a browser
+    let (app, _) = build_app(&http_cfg("0.0.0.0:8080", None, true))
+        .await
+        .unwrap();
+    assert_eq!(
+        send(&app, with_host("p2a-api.qamelab.org")).await.0,
+        StatusCode::OK
+    );
+}
