@@ -1,5 +1,6 @@
 [workspace]
-resolver = "2"
+# 3 = 2 + MSRV-aware updates: cargo update prefers versions whose rust-version fits 1.88.
+resolver = "3"
 members = [
     "crates/p2a-core",
     "crates/p2a-mcp",
