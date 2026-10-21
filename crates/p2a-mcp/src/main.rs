@@ -6,29 +6,18 @@
 //! Supports multiple transports:
 //! - `stdio`: Standard input/output for CLI and desktop integration (default)
 //! - `http`: HTTP REST API with optional WebSocket for web clients (requires `http` feature)
+//!
+//! The binary is a thin wrapper over the `p2a_mcp` library: it parses the
+//! configuration, validates it, builds the async runtime explicitly and runs
+//! the configured transport.
 
 use anyhow::Result;
 use clap::Parser;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-mod audit;
-mod config;
-#[cfg(feature = "db")]
-pub mod db;
-#[cfg(feature = "llm")]
-mod llm;
-mod path_jail;
-#[cfg(feature = "db")]
-pub mod persistent_session;
-mod server;
-mod session;
-mod tools;
-mod transport;
+use p2a_mcp::config::{CliArgs, ServerConfig};
 
-use config::{CliArgs, ServerConfig};
-
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     // Parse command-line arguments
     let args = CliArgs::parse();
     let config = ServerConfig::from_args(args)?;
@@ -42,14 +31,25 @@ async fn main() -> Result<()> {
         .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
         .init();
 
+    config.validate()?;
+
     tracing::info!("Starting prompt2analytics MCP server...");
     tracing::info!("Transport: {:?}", config.transport);
 
+    // At least two workers, so /health and SSE keep-alives are served on a
+    // one-CPU machine while tool work runs on the blocking pool.
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(config.worker_threads())
+        .enable_all()
+        .build()?;
+
     // Start the appropriate transport
-    transport::start_transport(&config).await.map_err(|e| {
-        tracing::error!("Transport error: {}", e);
-        anyhow::anyhow!("{}", e)
-    })?;
+    runtime
+        .block_on(p2a_mcp::transport::start_transport(&config))
+        .map_err(|e| {
+            tracing::error!("Transport error: {}", e);
+            anyhow::anyhow!("{}", e)
+        })?;
 
     tracing::info!("MCP server shutting down");
     Ok(())

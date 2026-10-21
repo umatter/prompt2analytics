@@ -52,16 +52,22 @@ pub async fn start_transport(config: &ServerConfig) -> TransportResult<()> {
     use crate::config::TransportType;
 
     match config.transport {
-        TransportType::Stdio => start_stdio_transport().await,
+        TransportType::Stdio => start_stdio_transport(config).await,
         #[cfg(feature = "http")]
         TransportType::Http => http::start_http_transport(config).await,
     }
 }
 
 /// Start the stdio transport (existing behavior).
-async fn start_stdio_transport() -> TransportResult<()> {
+///
+/// The per-allocation ceiling of the configured resource profile applies
+/// here too (none unless `--limits hosted` or `--max-alloc-mb` is set);
+/// deadlines and quotas are HTTP-only.
+async fn start_stdio_transport(config: &ServerConfig) -> TransportResult<()> {
     use crate::server::AnalyticsServer;
     use rmcp::{ServiceExt, transport::stdio};
+
+    p2a_core::resource::set_alloc_ceiling_bytes(config.alloc_ceiling_bytes());
 
     tracing::info!("Starting stdio transport...");
 
