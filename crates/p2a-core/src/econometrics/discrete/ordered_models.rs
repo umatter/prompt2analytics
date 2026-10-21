@@ -14,7 +14,7 @@
 //!
 //! R equivalent: `MASS::polr()`
 
-use ndarray::Array1;
+use ndarray::{Array1, Array2};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -314,6 +314,10 @@ fn run_ordered_model(
         OrderedModelType::Probit => "ordered probit Hessian",
     };
     ensure_dense_inverse_fits(n_params, hessian_what)?;
+    // Positions and values of the non-zero score entries of one observation:
+    // the k slopes and at most two thresholds.
+    let mut score_idx: Vec<usize> = Vec::with_capacity(k + 2);
+    let mut score_val: Vec<f64> = Vec::with_capacity(k + 2);
 
     for iter in 0..max_iter {
         resource::checkpoint()?;
@@ -377,32 +381,23 @@ fn run_ordered_model(
                 gradient[k + yi] += f_high / p_i;
             }
 
-            // Hessian (approximate using outer product)
-            for a in 0..n_params {
-                for b in 0..n_params {
-                    let g_a = if a < k {
-                        x[[i, a]] * grad_beta
-                    } else if a - k == yi.saturating_sub(1) && yi > 0 {
-                        -f_low / p_i
-                    } else if a - k == yi && yi < j - 1 {
-                        f_high / p_i
-                    } else {
-                        0.0
-                    };
-
-                    let g_b = if b < k {
-                        x[[i, b]] * grad_beta
-                    } else if b - k == yi.saturating_sub(1) && yi > 0 {
-                        -f_low / p_i
-                    } else if b - k == yi && yi < j - 1 {
-                        f_high / p_i
-                    } else {
-                        0.0
-                    };
-
-                    hess[[a, b]] -= g_a * g_b / p_i;
-                }
+            // Hessian (approximate using outer product), over the non-zero
+            // score entries only
+            score_idx.clear();
+            score_val.clear();
+            for kk in 0..k {
+                score_idx.push(kk);
+                score_val.push(x[[i, kk]] * grad_beta);
             }
+            if yi > 0 {
+                score_idx.push(k + yi - 1);
+                score_val.push(-f_low / p_i);
+            }
+            if yi < j - 1 {
+                score_idx.push(k + yi);
+                score_val.push(f_high / p_i);
+            }
+            subtract_scaled_outer(&mut hess, &score_idx, &score_val, p_i);
         }
 
         // Add regularization to diagonal
@@ -521,6 +516,19 @@ fn run_ordered_model(
     })
 }
 
+/// Subtract `g g' / p_i` from `hess` for a score `g` that is zero except at the
+/// positions `idx`, where it takes the values `val`.
+///
+/// Only the non-zero pairs are visited. The terms the dense double loop would
+/// add for the other pairs are exact zeros, so the result is bit-identical.
+fn subtract_scaled_outer(hess: &mut Array2<f64>, idx: &[usize], val: &[f64], p_i: f64) {
+    for (&a, &g_a) in idx.iter().zip(val) {
+        for (&b, &g_b) in idx.iter().zip(val) {
+            hess[[a, b]] -= g_a * g_b / p_i;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -586,6 +594,29 @@ mod tests {
         let e = resource::with_alloc_ceiling(Some(256), || run_ordered_logit(&ds, "y", &["x"]))
             .unwrap_err();
         assert!(matches!(e, EconError::ResourceLimit(_)), "{e:?}");
+    }
+
+    #[test]
+    fn test_sparse_outer_product_matches_dense_loop() {
+        let n_params = 9;
+        let idx = [0usize, 1, 2, 5, 6];
+        let val = [0.31, -1.7, 2.25, -0.42, 0.9];
+        let p_i = 0.37;
+        let mut base = Array2::<f64>::from_shape_fn((n_params, n_params), |(a, b)| {
+            0.01 * (a * 3 + b) as f64 - 0.2
+        });
+        let mut dense = base.clone();
+        let mut g = vec![0.0; n_params];
+        for (&i, &v) in idx.iter().zip(&val) {
+            g[i] = v;
+        }
+        for a in 0..n_params {
+            for b in 0..n_params {
+                dense[[a, b]] -= g[a] * g[b] / p_i;
+            }
+        }
+        subtract_scaled_outer(&mut base, &idx, &val, p_i);
+        assert_eq!(base, dense); // bitwise: skipped entries would only subtract +-0.0
     }
 
     #[test]
