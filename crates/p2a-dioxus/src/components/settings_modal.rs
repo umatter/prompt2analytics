@@ -6,7 +6,24 @@ use dioxus::prelude::*;
 use crate::api::ApiClient;
 use crate::app::apply_theme;
 use crate::state::SessionState;
-use crate::state::settings::{Provider, Settings, Theme};
+use crate::state::settings::{KeySource, Provider, Settings, Theme};
+
+/// Where the API key lives, phrased for the platform the app runs on.
+///
+/// The web build keeps settings in the browser's localStorage; the desktop
+/// build keeps them in an owner-only settings file. A key read from the
+/// provider's environment variable is used but never saved.
+fn api_key_storage_note(is_web: bool, source: KeySource, env_var: Option<&str>) -> String {
+    if is_web {
+        return "Your API key is saved in this browser's local storage for this site and is sent with each chat request to the p2a backend, which passes it to your chosen provider and does not store it.".to_string();
+    }
+    match (source, env_var) {
+        (KeySource::Environment, Some(var)) => format!(
+            "Using the key from the {var} environment variable. It is not saved to disk; type a different key here to save that one instead."
+        ),
+        _ => "Your API key is saved in the p2a settings file in your user configuration folder, readable only by your account, and is sent to the p2a backend, which passes it to your chosen provider.".to_string(),
+    }
+}
 
 /// Parse dimensions from dataset load result message
 fn parse_dimensions(msg: &str) -> (usize, usize) {
@@ -316,6 +333,23 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
     let current_theme = *local_theme.read();
     let requires_api_key = current_provider.requires_api_key();
     let current_tab = active_tab.read().clone();
+    // The environment notice applies only while the field still shows the
+    // environment key; once the user edits it, the typed key will be saved.
+    let key_source = {
+        let s = settings.read();
+        if s.key_source(current_provider) == KeySource::Environment
+            && *local_api_key.read() == s.api_key_for(current_provider)
+        {
+            KeySource::Environment
+        } else {
+            KeySource::User
+        }
+    };
+    let key_storage_note = api_key_storage_note(
+        crate::platform::is_web(),
+        key_source,
+        current_provider.env_var(),
+    );
 
     rsx! {
         // Container for backdrop and modal (siblings for clean event handling)
@@ -477,7 +511,7 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
                                                 d: "M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"
                                             }
                                         }
-                                        "Your API key is stored only in this browser and is sent with each request through our backend to your chosen provider. It is never logged or persisted server-side."
+                                        "{key_storage_note}"
                                     }
                                 }
                             }
@@ -736,5 +770,20 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn key_storage_copy_is_platform_specific() {
+        let web = api_key_storage_note(true, KeySource::User, Some("ANTHROPIC_API_KEY"));
+        assert!(web.contains("browser"));
+        let desk = api_key_storage_note(false, KeySource::User, Some("ANTHROPIC_API_KEY"));
+        assert!(!desk.contains("browser") && desk.contains("settings file"));
+        let env = api_key_storage_note(false, KeySource::Environment, Some("ANTHROPIC_API_KEY"));
+        assert!(env.contains("ANTHROPIC_API_KEY") && env.contains("not saved"));
     }
 }

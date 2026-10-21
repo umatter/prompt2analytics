@@ -1,10 +1,14 @@
 //! Settings state management with platform-agnostic persistence
 //!
 //! - Web: Uses localStorage via gloo_storage
-//! - Native: Uses file-based storage in config directory
+//! - Native: Uses a file in the user's config directory, written owner-only
+//!   (mode 0600 in a 0700 directory on Unix)
 //!
-//! On native platforms (desktop/mobile), API keys are also read from environment
-//! variables (OPENAI_API_KEY, ANTHROPIC_API_KEY) if not already set.
+//! On native platforms (desktop/mobile), API keys are also read from the
+//! environment variables `OPENAI_API_KEY`, `ANTHROPIC_API_KEY` and
+//! `OPENROUTER_API_KEY` when no key was typed in. Keys from the environment
+//! are used but never saved: [`Settings::save`] persists
+//! [`Settings::to_persisted`], which drops them.
 
 use crate::api::ProviderConfig;
 use crate::platform::{StorageBackend, create_storage, is_native};
@@ -12,6 +16,10 @@ use serde::{Deserialize, Serialize};
 
 /// Storage key for settings
 const SETTINGS_KEY: &str = "p2a-settings";
+
+/// Providers that take an API key.
+const KEYED_PROVIDERS: [Provider; 3] =
+    [Provider::Anthropic, Provider::Openai, Provider::Openrouter];
 
 /// Theme preference
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -87,6 +95,37 @@ impl Provider {
     pub fn is_configured(&self) -> bool {
         !matches!(self, Provider::None)
     }
+
+    /// The environment variable the native app reads this provider's API
+    /// key from, if any.
+    pub fn env_var(&self) -> Option<&'static str> {
+        match self {
+            Provider::None | Provider::Ollama => None,
+            Provider::Anthropic => Some("ANTHROPIC_API_KEY"),
+            Provider::Openai => Some("OPENAI_API_KEY"),
+            Provider::Openrouter => Some("OPENROUTER_API_KEY"),
+        }
+    }
+}
+
+/// Where an API key in [`Settings`] came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum KeySource {
+    /// No key.
+    #[default]
+    Unset,
+    /// Typed into the app (or loaded from storage): persisted on save.
+    User,
+    /// Read from the provider's environment variable: never persisted.
+    Environment,
+}
+
+/// The source of each provider's API key. Not serialized.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct KeySources {
+    pub anthropic: KeySource,
+    pub openai: KeySource,
+    pub openrouter: KeySource,
 }
 
 /// Application settings
@@ -104,17 +143,17 @@ pub struct Settings {
     pub ollama_model: String,
 
     // Anthropic settings
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub anthropic_api_key: String,
     pub anthropic_model: String,
 
     // OpenAI settings
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub openai_api_key: String,
     pub openai_model: String,
 
     // OpenRouter settings (routed through the OpenAI-compatible backend client)
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub openrouter_api_key: String,
     #[serde(default = "default_openrouter_model")]
     pub openrouter_model: String,
@@ -125,6 +164,17 @@ pub struct Settings {
 
     // Feature toggles
     pub interpret_results: bool,
+
+    /// Optional bearer token for a p2a-mcp server started with
+    /// `--access-token` (`P2A_ACCESS_TOKEN`). Stored the same way as the API
+    /// keys; sent only to the backend.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub backend_access_token: String,
+
+    /// Where each API key came from; decides what [`Settings::to_persisted`]
+    /// keeps.
+    #[serde(skip)]
+    pub key_sources: KeySources,
 }
 
 impl Default for Settings {
@@ -145,6 +195,8 @@ impl Default for Settings {
             temperature: 0.7,
             max_tokens: 4096,
             interpret_results: true,
+            backend_access_token: String::new(),
+            key_sources: KeySources::default(),
         }
     }
 }
@@ -169,6 +221,8 @@ impl Settings {
             }
         };
 
+        settings.mark_stored_keys();
+
         // On native platforms, populate API keys from environment variables if not set
         if is_native() {
             settings.populate_from_env();
@@ -177,65 +231,102 @@ impl Settings {
         settings
     }
 
+    /// Mutable access to a provider's key and its source (`None` for
+    /// providers without a key).
+    fn key_slot(&mut self, provider: Provider) -> Option<(&mut String, &mut KeySource)> {
+        match provider {
+            Provider::None | Provider::Ollama => None,
+            Provider::Anthropic => {
+                Some((&mut self.anthropic_api_key, &mut self.key_sources.anthropic))
+            }
+            Provider::Openai => Some((&mut self.openai_api_key, &mut self.key_sources.openai)),
+            Provider::Openrouter => Some((
+                &mut self.openrouter_api_key,
+                &mut self.key_sources.openrouter,
+            )),
+        }
+    }
+
+    /// Where the given provider's API key came from (`Unset` for providers
+    /// without a key).
+    pub fn key_source(&self, provider: Provider) -> KeySource {
+        match provider {
+            Provider::None | Provider::Ollama => KeySource::Unset,
+            Provider::Anthropic => self.key_sources.anthropic,
+            Provider::Openai => self.key_sources.openai,
+            Provider::Openrouter => self.key_sources.openrouter,
+        }
+    }
+
+    /// A copy fit for storage: identical, except that keys read from the
+    /// environment are cleared, so they are never written anywhere.
+    pub fn to_persisted(&self) -> Settings {
+        let mut persisted = self.clone();
+        for provider in KEYED_PROVIDERS {
+            if let Some((key, source)) = persisted.key_slot(provider)
+                && *source == KeySource::Environment
+            {
+                key.clear();
+                *source = KeySource::Unset;
+            }
+        }
+        persisted
+    }
+
+    /// Mark every non-empty key as user-provided (used right after loading
+    /// from storage, before the environment is consulted).
+    fn mark_stored_keys(&mut self) {
+        for provider in KEYED_PROVIDERS {
+            if let Some((key, source)) = self.key_slot(provider)
+                && !key.is_empty()
+            {
+                *source = KeySource::User;
+            }
+        }
+    }
+
+    /// Fill API keys from environment variables, looked up through `lookup`.
+    ///
+    /// An empty key takes the environment value and is marked
+    /// `Environment`. A stored key equal to the environment value is also
+    /// marked `Environment`: that is a key an older version copied to disk,
+    /// and the next save removes it. Any other key is left alone. Values are
+    /// never logged, only their length.
+    fn populate_from_env_with(&mut self, lookup: impl Fn(&str) -> Option<String>) {
+        for provider in KEYED_PROVIDERS {
+            let Some(var) = provider.env_var() else {
+                continue;
+            };
+            let env = lookup(var).filter(|v| !v.is_empty());
+            let Some((key, source)) = self.key_slot(provider) else {
+                continue;
+            };
+            match env {
+                Some(value) if key.is_empty() => {
+                    tracing::info!("Detected {var} from environment ({} chars)", value.len());
+                    *key = value;
+                    *source = KeySource::Environment;
+                }
+                Some(value) if *key == value => {
+                    tracing::info!("Stored key equals {var}; it will not be saved again");
+                    *source = KeySource::Environment;
+                }
+                Some(_) => {
+                    tracing::info!("{var} is set, but the key from settings takes precedence");
+                }
+                None => {
+                    tracing::info!("{var} not set in the environment");
+                }
+            }
+        }
+    }
+
     /// Populate API keys from environment variables if not already set.
     /// This only works on native platforms (desktop/mobile).
     #[cfg(not(target_arch = "wasm32"))]
     fn populate_from_env(&mut self) {
         tracing::info!("Checking environment variables for API keys...");
-
-        // Check OPENAI_API_KEY
-        if self.openai_api_key.is_empty() {
-            match std::env::var("OPENAI_API_KEY") {
-                Ok(key) if !key.is_empty() => {
-                    tracing::info!(
-                        "Detected OPENAI_API_KEY from environment ({} chars)",
-                        key.len()
-                    );
-                    self.openai_api_key = key;
-                }
-                Ok(_) => {
-                    tracing::info!("OPENAI_API_KEY env var is empty");
-                }
-                Err(e) => {
-                    tracing::info!("OPENAI_API_KEY not found in environment: {}", e);
-                }
-            }
-        } else {
-            tracing::info!("OPENAI_API_KEY already set in settings, skipping env check");
-        }
-
-        // Check ANTHROPIC_API_KEY
-        if self.anthropic_api_key.is_empty() {
-            match std::env::var("ANTHROPIC_API_KEY") {
-                Ok(key) if !key.is_empty() => {
-                    tracing::info!(
-                        "Detected ANTHROPIC_API_KEY from environment ({} chars)",
-                        key.len()
-                    );
-                    self.anthropic_api_key = key;
-                }
-                Ok(_) => {
-                    tracing::info!("ANTHROPIC_API_KEY env var is empty");
-                }
-                Err(e) => {
-                    tracing::info!("ANTHROPIC_API_KEY not found in environment: {}", e);
-                }
-            }
-        } else {
-            tracing::info!("ANTHROPIC_API_KEY already set in settings, skipping env check");
-        }
-
-        // Check OPENROUTER_API_KEY
-        if self.openrouter_api_key.is_empty()
-            && let Ok(key) = std::env::var("OPENROUTER_API_KEY")
-            && !key.is_empty()
-        {
-            tracing::info!(
-                "Detected OPENROUTER_API_KEY from environment ({} chars)",
-                key.len()
-            );
-            self.openrouter_api_key = key;
-        }
+        self.populate_from_env_with(|k| std::env::var(k).ok());
     }
 
     /// No-op on web platform
@@ -244,10 +335,11 @@ impl Settings {
         // Environment variables not available on web
     }
 
-    /// Save settings to platform-appropriate storage
+    /// Save settings to platform-appropriate storage. Keys read from the
+    /// environment are not written.
     pub fn save(&self) {
         let storage = create_storage();
-        if let Err(e) = storage.set(SETTINGS_KEY, self) {
+        if let Err(e) = storage.set(SETTINGS_KEY, &self.to_persisted()) {
             tracing::error!("Failed to save settings: {}", e);
         } else {
             tracing::info!("Settings saved to storage");
@@ -333,7 +425,12 @@ impl Settings {
 
     /// Get current API key based on provider (empty for Ollama / None)
     pub fn current_api_key(&self) -> &str {
-        match self.provider {
+        self.api_key_for(self.provider)
+    }
+
+    /// API key stored for the given provider (empty for Ollama / None)
+    pub fn api_key_for(&self, provider: Provider) -> &str {
+        match provider {
             Provider::None | Provider::Ollama => "",
             Provider::Anthropic => &self.anthropic_api_key,
             Provider::Openai => &self.openai_api_key,
@@ -341,13 +438,22 @@ impl Settings {
         }
     }
 
-    /// Set current API key based on provider
+    /// Set current API key based on provider.
+    ///
+    /// A changed value becomes user-provided (or unset when blank) and is
+    /// persisted on save. Writing back the unchanged value keeps its source,
+    /// so saving the settings modal does not persist an environment key.
     pub fn set_current_api_key(&mut self, key: &str) {
-        match self.provider {
-            Provider::None | Provider::Ollama => {}
-            Provider::Anthropic => self.anthropic_api_key = key.to_string(),
-            Provider::Openai => self.openai_api_key = key.to_string(),
-            Provider::Openrouter => self.openrouter_api_key = key.to_string(),
+        let provider = self.provider;
+        if let Some((current, source)) = self.key_slot(provider)
+            && current.as_str() != key
+        {
+            *current = key.to_string();
+            *source = if key.trim().is_empty() {
+                KeySource::Unset
+            } else {
+                KeySource::User
+            };
         }
     }
 
@@ -384,5 +490,95 @@ impl Settings {
         }
 
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn env<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
+        move |k| {
+            pairs
+                .iter()
+                .find(|(n, _)| *n == k)
+                .map(|(_, v)| v.to_string())
+        }
+    }
+
+    #[test]
+    fn env_sourced_keys_are_never_persisted() {
+        let mut s = Settings::default();
+        s.populate_from_env_with(env(&[
+            ("ANTHROPIC_API_KEY", "sk-ant-from-env"),
+            ("OPENAI_API_KEY", "sk-oai-from-env"),
+        ]));
+        assert_eq!(s.anthropic_api_key, "sk-ant-from-env");
+        assert_eq!(s.key_source(Provider::Anthropic), KeySource::Environment);
+        let json = serde_json::to_string(&s.to_persisted()).unwrap();
+        assert!(
+            !json.contains("sk-ant-from-env") && !json.contains("sk-oai-from-env"),
+            "{json}"
+        );
+        assert!(!json.contains("anthropic_api_key"), "{json}");
+    }
+
+    #[test]
+    fn typed_key_is_persisted_and_overrides_env() {
+        let mut s = Settings::default();
+        s.populate_from_env_with(env(&[("ANTHROPIC_API_KEY", "sk-ant-from-env")]));
+        s.provider = Provider::Anthropic;
+        s.set_current_api_key("sk-ant-typed");
+        assert_eq!(s.key_source(Provider::Anthropic), KeySource::User);
+        assert_eq!(
+            serde_json::to_value(s.to_persisted()).unwrap()["anthropic_api_key"],
+            "sk-ant-typed"
+        );
+    }
+
+    #[test]
+    fn saving_the_modal_unchanged_keeps_env_key_unpersisted() {
+        let mut s = Settings::default();
+        s.populate_from_env_with(env(&[("OPENROUTER_API_KEY", "sk-or-env")]));
+        s.provider = Provider::Openrouter;
+        s.set_current_api_key("sk-or-env"); // the modal writes back the value it displayed
+        assert_eq!(s.key_source(Provider::Openrouter), KeySource::Environment);
+        assert!(
+            !serde_json::to_string(&s.to_persisted())
+                .unwrap()
+                .contains("sk-or-env")
+        );
+    }
+
+    #[test]
+    fn key_leaked_by_older_version_is_dropped_when_env_matches() {
+        let mut v = serde_json::to_value(Settings::default()).unwrap();
+        v["anthropic_api_key"] = "sk-ant-from-env".into();
+        let mut s: Settings = serde_json::from_value(v).unwrap();
+        s.mark_stored_keys();
+        assert_eq!(s.key_source(Provider::Anthropic), KeySource::User);
+        s.populate_from_env_with(env(&[("ANTHROPIC_API_KEY", "sk-ant-from-env")]));
+        assert_eq!(s.key_source(Provider::Anthropic), KeySource::Environment);
+        assert!(
+            !serde_json::to_string(&s.to_persisted())
+                .unwrap()
+                .contains("sk-ant-from-env")
+        );
+    }
+
+    #[test]
+    fn persisted_settings_round_trip_and_keep_backend_token() {
+        let mut s = Settings::default();
+        s.backend_access_token = "tok-123".into();
+        let json = serde_json::to_string(&s.to_persisted()).unwrap();
+        assert!(json.contains("\"backend_access_token\":\"tok-123\""));
+        let back: Settings = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.anthropic_api_key, "");
+        assert_eq!(back.backend_access_token, "tok-123");
+        assert!(
+            !serde_json::to_string(&Settings::default().to_persisted())
+                .unwrap()
+                .contains("backend_access_token")
+        );
     }
 }
