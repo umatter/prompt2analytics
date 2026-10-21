@@ -22,7 +22,7 @@ use rmcp::{
 const MAX_MATRIX_ELEMENTS: usize = 10_000_000;
 
 use crate::server::AnalyticsServer;
-use crate::tools::common::{extract_column_f64, extract_numeric_matrix};
+use crate::tools::common::{check_named_budget, extract_column_f64, extract_numeric_matrix};
 use crate::tools::requests::stats::{
     ApproxRequest, CancorRequest, CorrelationRequest, CovWtRequest, DensityRequest, EcdfRequest,
     FactorAnalysisRequest, FivenumRequest, IqrRequest, IsoregRequest, LoglinRequest, MadRequest,
@@ -162,11 +162,52 @@ impl AnalyticsServer {
         // Build dimensions
         let dimensions: Vec<usize> = factor_levels.iter().map(|l| l.len()).collect();
 
+        // Size the contingency table with checked arithmetic, then hold it to the budget
+        let n_cells = match p2a_core::resource::checked_len(&dimensions, "contingency table") {
+            Ok(n) => n,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Log-linear model refused: {e}"
+                ))]));
+            }
+        };
+        let limits = crate::tools::limits::current();
+        if let Err(msg) = check_named_budget(
+            "stats_loglin",
+            "table_cells",
+            n_cells as u64,
+            limits.table_cells,
+        ) {
+            let dims = dimensions
+                .iter()
+                .map(|d| d.to_string())
+                .collect::<Vec<_>>()
+                .join(" x ");
+            return Ok(CallToolResult::error(vec![Content::text(format!(
+                "Log-linear model refused: the contingency table of {} would have {n_cells} cells \
+                 ({dims}). {msg} Use factor columns with fewer distinct values.",
+                request.factor_columns.join(", ")
+            ))]));
+        }
+
         // Build flattened contingency table
-        let n_cells: usize = dimensions.iter().product();
-        let mut table = vec![0.0; n_cells];
+        let mut table = match p2a_core::resource::try_vec(n_cells, 0.0, "contingency table") {
+            Ok(t) => t,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Log-linear model refused: {e}"
+                ))]));
+            }
+        };
 
         for (i, &count) in counts.iter().enumerate() {
+            if i % 65_536 == 0
+                && let Err(e) = p2a_core::resource::checkpoint()
+            {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Log-linear model fitting stopped: {e}"
+                ))]));
+            }
             // Compute cell index from factor indices
             let mut cell_idx = 0;
             let mut multiplier = 1;
@@ -2092,5 +2133,85 @@ impl AnalyticsServer {
                 e
             ))])),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tools::common::test_support::{server_with, text};
+    use crate::tools::limits::{self, Limits};
+    use p2a_core::polars::prelude::*;
+
+    /// One unique string level per row and column, and a count column `n` = 1.0.
+    fn ids(n: usize, cols: &[&str]) -> DataFrame {
+        let mut columns: Vec<Column> = cols
+            .iter()
+            .map(|c| {
+                Column::new(
+                    (*c).into(),
+                    (0..n).map(|i| format!("{c}{i}")).collect::<Vec<_>>(),
+                )
+            })
+            .collect();
+        columns.push(Column::new("n".into(), vec![1.0f64; n]));
+        DataFrame::new(columns).unwrap()
+    }
+
+    fn loglin_req(cols: &[&str]) -> LoglinRequest {
+        LoglinRequest {
+            dataset: "d".into(),
+            count_column: "n".into(),
+            factor_columns: cols.iter().map(|c| c.to_string()).collect(),
+            margins: None,
+            eps: None,
+            max_iter: None,
+        }
+    }
+
+    #[test]
+    fn loglin_refuses_table_above_table_cells() {
+        // 120 x 120 x 120 = 1,728,000 cells > 1,000,000 (hosted). Pre-fix: allocates and fits it.
+        let (rt, server) = server_with(vec![("d", ids(120, &["a", "b", "c"]))]);
+        let r = limits::with_limits(Limits::hosted(), || {
+            rt.block_on(server.stats_loglin(Parameters(loglin_req(&["a", "b", "c"]))))
+        })
+        .unwrap();
+        assert_eq!(r.is_error, Some(true));
+        let t = text(&r);
+        assert!(
+            t.contains("1728000") && t.contains("table_cells") && t.contains("1000000"),
+            "{t}"
+        );
+    }
+
+    #[test]
+    fn loglin_reports_overflowing_table_instead_of_panicking() {
+        // 1000^7 overflows usize. Pre-fix: debug panic "attempt to multiply with overflow".
+        let cols = ["a", "b", "c", "d", "e", "f", "g"];
+        let (rt, server) = server_with(vec![("d", ids(1000, &cols))]);
+        let r = limits::with_limits(Limits::off(), || {
+            rt.block_on(server.stats_loglin(Parameters(loglin_req(&cols))))
+        })
+        .unwrap();
+        assert_eq!(r.is_error, Some(true));
+        assert!(text(&r).contains("too large"), "{}", text(&r));
+    }
+
+    #[test]
+    fn loglin_small_table_still_runs_under_hosted_limits() {
+        let df = df!(
+            "a" => ["a1", "a1", "a1", "a2", "a2", "a2"],
+            "b" => ["b1", "b2", "b3", "b1", "b2", "b3"],
+            "n" => [12.0, 7.0, 9.0, 8.0, 11.0, 14.0]
+        )
+        .unwrap();
+        let (rt, server) = server_with(vec![("d", df)]);
+        let r = limits::with_limits(Limits::hosted(), || {
+            rt.block_on(server.stats_loglin(Parameters(loglin_req(&["a", "b"]))))
+        })
+        .unwrap();
+        assert_ne!(r.is_error, Some(true), "{}", text(&r));
+        assert!(text(&r).contains("\"df\": 2"), "{}", text(&r));
     }
 }

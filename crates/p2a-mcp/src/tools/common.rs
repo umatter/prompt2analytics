@@ -184,3 +184,88 @@ pub fn extract_numeric_matrix(
 
     Ok(data)
 }
+
+/// Check a size derived from the data (not a request field) against a named budget of the
+/// installed request limits.
+///
+/// `limit` is the budget value the caller read from [`crate::tools::limits::current`] (for
+/// example `limits.table_cells`); `None` passes. On refusal this returns the LLM-readable message
+/// and logs the override key an operator would raise.
+pub fn check_named_budget(
+    tool: &str,
+    knob: &'static str,
+    requested: u64,
+    limit: Option<u64>,
+) -> Result<(), String> {
+    crate::tools::limits::current()
+        .check_budget(tool, knob, requested, limit)
+        .map_err(|v| {
+            tracing::info!(
+                tool,
+                knob = v.override_key,
+                requested,
+                limit = %v.limit,
+                "request refused by a named budget"
+            );
+            v.message
+        })
+}
+
+/// Shared helpers for handler unit tests.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use crate::server::AnalyticsServer;
+    use crate::tools::limits::Limits;
+    use p2a_core::polars::prelude::DataFrame;
+    use rmcp::model::CallToolResult;
+
+    /// A current-thread runtime and a server holding each (name, frame) as a dataset.
+    pub(crate) fn server_with(
+        datasets: Vec<(&str, DataFrame)>,
+    ) -> (tokio::runtime::Runtime, AnalyticsServer) {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        let server = AnalyticsServer::new();
+        rt.block_on(async {
+            let mut map = server.datasets.write().await;
+            for (name, df) in datasets {
+                map.insert(name.to_string(), p2a_core::data::Dataset::new(df));
+            }
+        });
+        (rt, server)
+    }
+
+    /// The concatenated text content of a tool result.
+    pub(crate) fn text(r: &CallToolResult) -> String {
+        r.content
+            .iter()
+            .filter_map(|c| c.raw.as_text())
+            .map(|t| t.text.as_str())
+            .collect()
+    }
+
+    /// `Limits::hosted()` with `key=value` overrides applied.
+    pub(crate) fn hosted_with(overrides: &[&str]) -> Limits {
+        Limits::hosted()
+            .with_overrides(&overrides.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+            .expect("valid limit overrides")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn check_named_budget_refuses_over_and_passes_unlimited() {
+        let e = check_named_budget("stats_loglin", "table_cells", 2_000_000, Some(1_000_000))
+            .unwrap_err();
+        assert!(
+            e.contains("table_cells") && e.contains("2000000") && e.contains("1000000"),
+            "{e}"
+        );
+        assert!(check_named_budget("stats_loglin", "table_cells", u64::MAX, None).is_ok());
+    }
+}
