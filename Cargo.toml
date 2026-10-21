@@ -54,7 +54,7 @@ rand = "0.8"
 rand_distr = "0.4"
 
 # File format support
-calamine = "0.32"  # Excel file reading (xlsx, xls, xlsb, ods)
+calamine = "0.37"  # Excel file reading (xlsx, xls, xlsb, ods); 0.37 is the first release on zip >= 9
 
 # Database connectivity
 rusqlite = { version = "0.33", features = ["bundled"] }
