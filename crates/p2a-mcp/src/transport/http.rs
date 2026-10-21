@@ -308,9 +308,13 @@ fn create_base_router(state: AppState, config: &ServerConfig) -> Router {
             .route("/api/files", get(list_files));
     }
 
-    // Add WebSocket route if feature is enabled
+    // WebSocket route: off in open public mode unless --enable-ws
+    // (P2A_ENABLE_WS). Its tool messages run under the governor like HTTP
+    // calls, and its message and frame sizes are capped like request bodies.
     #[cfg(feature = "websocket")]
-    let router = router.route("/ws", get(super::websocket::ws_handler));
+    if mode != DeploymentMode::OpenPublic || config.http.enable_ws {
+        router = router.route("/ws", get(super::websocket::ws_handler));
+    }
 
     // Add LLM routes if feature is enabled
     #[cfg(feature = "llm")]

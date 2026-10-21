@@ -604,6 +604,26 @@ async fn local_mode_rejects_foreign_host_headers() {
 }
 
 // ---------------------------------------------------------------------------
+// WebSocket route (MCP-21)
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "websocket")]
+#[tokio::test]
+async fn ws_route_follows_the_mode() {
+    async fn ws_status(cfg: &ServerConfig) -> StatusCode {
+        let (app, _) = build_app(cfg).await.unwrap();
+        send(&app, get("/ws")).await.0
+    }
+    let open = http_cfg("0.0.0.0:8080", None, true);
+    assert_eq!(ws_status(&open).await, StatusCode::NOT_FOUND);
+    let mut open_ws = open.clone();
+    open_ws.http.enable_ws = true;
+    // Without upgrade headers axum answers 400/426: the route is registered.
+    assert_ne!(ws_status(&open_ws).await, StatusCode::NOT_FOUND);
+    assert_ne!(ws_status(&local()).await, StatusCode::NOT_FOUND);
+}
+
+// ---------------------------------------------------------------------------
 // CORS (MCP-16, server half)
 // ---------------------------------------------------------------------------
 

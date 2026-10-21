@@ -70,8 +70,14 @@ pub enum ServerMessage {
     },
     /// Request completed
     Done { id: String },
-    /// Error occurred
-    Error { id: String, message: String },
+    /// Error occurred. `code` is the machine-readable code of a governor or
+    /// tool-call refusal (for example `server_busy`), when there is one.
+    Error {
+        id: String,
+        message: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        code: Option<String>,
+    },
     /// Pong response
     Pong,
 }
@@ -108,9 +114,13 @@ pub async fn ws_handler(
     ws: WebSocketUpgrade,
     State(state): State<super::http::AppState>,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| {
-        handle_socket(socket, state.server, state.session_manager, state.governor)
-    })
+    // Bound messages and frames like HTTP request bodies.
+    let cap = super::middleware::max_request_body_bytes();
+    ws.max_message_size(cap)
+        .max_frame_size(cap)
+        .on_upgrade(move |socket| {
+            handle_socket(socket, state.server, state.session_manager, state.governor)
+        })
 }
 
 /// Handle a WebSocket connection.
@@ -152,6 +162,7 @@ async fn handle_socket(
                                 .send(ServerMessage::Error {
                                     id: "system".to_string(),
                                     message: e,
+                                    code: None,
                                 })
                                 .await;
                         }
@@ -161,6 +172,7 @@ async fn handle_socket(
                             .send(ServerMessage::Error {
                                 id: "system".to_string(),
                                 message: format!("Invalid message format: {}", e),
+                                code: None,
                             })
                             .await;
                     }
@@ -232,6 +244,7 @@ async fn handle_client_message(
                 tx.send(ServerMessage::Error {
                     id: id.clone(),
                     message: "Not authenticated. Send auth message first.".to_string(),
+                    code: None,
                 })
                 .await
                 .map_err(|_| "Channel closed".to_string())?;
@@ -255,7 +268,7 @@ async fn handle_client_message(
                 Ok(result) => {
                     tx.send(ServerMessage::ToolResult {
                         id: id.clone(),
-                        success: true,
+                        success: result.success,
                         result,
                     })
                     .await
@@ -269,6 +282,7 @@ async fn handle_client_message(
                     tx.send(ServerMessage::Error {
                         id,
                         message: e.to_string(),
+                        code: Some(e.code().to_string()),
                     })
                     .await
                     .map_err(|_| "Channel closed".to_string())?;
@@ -285,6 +299,7 @@ async fn handle_client_message(
                 tx.send(ServerMessage::Error {
                     id: id.clone(),
                     message: "Not authenticated. Send auth message first.".to_string(),
+                    code: None,
                 })
                 .await
                 .map_err(|_| "Channel closed".to_string())?;
@@ -300,6 +315,7 @@ async fn handle_client_message(
                 message: "LLM chat over WebSocket is not implemented; use the HTTP \
                          /api/llm/chat or /api/llm/chat/stream endpoint instead."
                     .to_string(),
+                code: None,
             })
             .await
             .map_err(|_| "Channel closed".to_string())?;
@@ -371,5 +387,71 @@ mod tests {
         let json = serde_json::to_string(&text).unwrap();
         assert!(json.contains("\"type\":\"text\""));
         assert!(json.contains("\"content\":\"Hello\""));
+    }
+
+    #[test]
+    fn error_message_carries_code() {
+        let with = ServerMessage::Error {
+            id: "1".into(),
+            message: "m".into(),
+            code: Some("server_busy".into()),
+        };
+        let json = serde_json::to_string(&with).unwrap();
+        assert!(json.contains("\"code\":\"server_busy\""), "{json}");
+        let without = ServerMessage::Error {
+            id: "1".into(),
+            message: "m".into(),
+            code: None,
+        };
+        let json = serde_json::to_string(&without).unwrap();
+        assert!(!json.contains("\"code\""), "{json}");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn tool_message_is_governed() {
+        use crate::config::SessionConfig;
+        use crate::exec::ExecConfig;
+
+        let sessions = Arc::new(SessionManager::new(SessionConfig {
+            ttl_minutes: 60,
+            max_sessions: 10,
+            evict_idle_minutes: None,
+        }));
+        let session_id = sessions.create_session(None).await.unwrap();
+        let governor = Arc::new(ToolGovernor::new(
+            ExecConfig {
+                rss_soft_limit_bytes: Some(1),
+                ..Default::default()
+            },
+            sessions.clone(),
+        ));
+        let mut state = WsState::new(Arc::new(AnalyticsServer::new()), sessions, governor);
+        let (tx, mut rx) = mpsc::channel(8);
+        handle_client_message(&mut state, ClientMessage::Auth { session_id }, &tx)
+            .await
+            .unwrap();
+        handle_client_message(
+            &mut state,
+            ClientMessage::Tool {
+                id: "t1".into(),
+                name: "list_datasets".into(),
+                args: serde_json::json!({}),
+            },
+            &tx,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            rx.recv().await,
+            Some(ServerMessage::AuthResult { success: true, .. })
+        ));
+        match rx.recv().await {
+            Some(ServerMessage::Error { id, code, .. }) => {
+                assert_eq!(id, "t1");
+                assert_eq!(code.as_deref(), Some("memory_pressure"));
+            }
+            other => panic!("expected a coded error, got {other:?}"),
+        }
     }
 }
