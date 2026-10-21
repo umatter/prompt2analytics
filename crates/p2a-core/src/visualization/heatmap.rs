@@ -1,7 +1,7 @@
 //! Heatmap visualization for correlation matrices and other 2D data.
 
+use super::charts::{encode_rgb_to_png_base64, rgb_buffer};
 use super::{DEFAULT_HEIGHT, DEFAULT_WIDTH, VisualizationError};
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use plotters::prelude::*;
 
 /// Result of heatmap generation.
@@ -88,7 +88,7 @@ pub fn correlation_heatmap(
     };
 
     // Create image buffer
-    let mut buffer = vec![0u8; (width * height * 3) as usize];
+    let mut buffer = rgb_buffer(width, height)?;
 
     {
         let root = BitMapBackend::with_buffer(&mut buffer, (width, height)).into_drawing_area();
@@ -112,8 +112,9 @@ pub fn correlation_heatmap(
             .map_err(|e| VisualizationError::PlottingError(e.to_string()))?;
 
         // Calculate cell size
-        let available_width = width - 2 * label_margin - 60; // Extra for colorbar
-        let available_height = height - label_margin - 80; // Title + margin
+        // Saturating: a canvas smaller than the margins gets the minimum cell size.
+        let available_width = width.saturating_sub(2 * label_margin + 60); // Extra for colorbar
+        let available_height = height.saturating_sub(label_margin + 80); // Title + margin
         let cell_width = (available_width / n_cols as u32).max(20);
         let cell_height = (available_height / n_rows as u32).max(20);
 
@@ -125,6 +126,8 @@ pub fn correlation_heatmap(
 
         // Draw heatmap cells
         for (i, row) in matrix.iter().enumerate() {
+            crate::resource::checkpoint()
+                .map_err(|e| VisualizationError::InvalidData(e.to_string()))?;
             for (j, &val) in row.iter().enumerate() {
                 let x = x_offset + j as u32 * cell_width;
                 let y = y_offset + i as u32 * cell_height;
@@ -303,28 +306,6 @@ fn value_to_color(val: f64, min: f64, max: f64) -> RGBColor {
     RGBColor(r, g, b)
 }
 
-fn encode_rgb_to_png_base64(
-    rgb_buffer: &[u8],
-    width: u32,
-    height: u32,
-) -> Result<String, VisualizationError> {
-    use image::{ColorType, ImageBuffer, ImageEncoder, Rgb, codecs::png::PngEncoder};
-    use std::io::Cursor;
-
-    let img: ImageBuffer<Rgb<u8>, Vec<u8>> =
-        ImageBuffer::from_raw(width, height, rgb_buffer.to_vec()).ok_or_else(|| {
-            VisualizationError::EncodingError("Failed to create image buffer".to_string())
-        })?;
-
-    let mut png_data = Vec::new();
-    let encoder = PngEncoder::new(Cursor::new(&mut png_data));
-    encoder
-        .write_image(img.as_raw(), width, height, ColorType::Rgb8)
-        .map_err(|e: image::ImageError| VisualizationError::EncodingError(e.to_string()))?;
-
-    Ok(BASE64.encode(&png_data))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -342,5 +323,13 @@ mod tests {
         assert_eq!(result.n_rows, 3);
         assert_eq!(result.n_cols, 3);
         assert!(!result.image_base64.is_empty());
+    }
+
+    #[test]
+    fn small_canvas_does_not_underflow_layout() {
+        let m = vec![vec![1.0, 0.5], vec![0.5, 1.0]];
+        let l = vec!["A".to_string(), "B".to_string()];
+        assert!(correlation_heatmap(&m, &l, &l, None, Some(50), Some(50)).is_ok());
+        assert!(correlation_heatmap(&m, &l, &l, None, Some(0), Some(50)).is_err());
     }
 }

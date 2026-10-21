@@ -2,6 +2,7 @@
 
 use super::colors::{CHART_PALETTE, DEFAULT_SERIES_COLOR, OUTLIER_COLOR, TREND_LINE_COLOR};
 use super::{DEFAULT_HEIGHT, DEFAULT_WIDTH, VisualizationError};
+use crate::resource;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use plotters::prelude::*;
 
@@ -91,6 +92,12 @@ pub fn histogram(
     let max_val = clean_data.iter().copied().fold(f64::NEG_INFINITY, f64::max);
     let mean_val: f64 = clean_data.iter().sum::<f64>() / clean_data.len() as f64;
 
+    if bins == Some(0) {
+        return Err(VisualizationError::InvalidData(
+            "bins must be at least 1".to_string(),
+        ));
+    }
+
     // Auto-calculate bins using Sturges' rule if not specified
     let n_bins = bins
         .unwrap_or_else(|| {
@@ -106,7 +113,7 @@ pub fn histogram(
         (max_val - min_val) / n_bins as f64
     };
 
-    let mut counts = vec![0u32; n_bins];
+    let mut counts = resource::try_vec(n_bins, 0u32, "histogram bins").map_err(invalid_data)?;
 
     for &val in &clean_data {
         let bin_idx = if bin_width > 0.0 {
@@ -121,7 +128,7 @@ pub fn histogram(
     let max_count = *counts.iter().max().unwrap_or(&1);
 
     // Create image buffer
-    let mut buffer = vec![0u8; (config.width * config.height * 3) as usize];
+    let mut buffer = rgb_buffer(config.width, config.height)?;
 
     {
         let root = BitMapBackend::with_buffer(&mut buffer, (config.width, config.height))
@@ -155,6 +162,7 @@ pub fn histogram(
 
         // Draw histogram bars as rectangles
         for (i, &count) in counts.iter().enumerate() {
+            resource::checkpoint().map_err(invalid_data)?;
             let x0 = min_val + i as f64 * bin_width;
             let x1 = x0 + bin_width;
 
@@ -257,7 +265,7 @@ pub fn scatter_plot(
     let correlation = calculate_correlation(&points);
 
     // Create image buffer
-    let mut buffer = vec![0u8; (config.width * config.height * 3) as usize];
+    let mut buffer = rgb_buffer(config.width, config.height)?;
 
     {
         let root = BitMapBackend::with_buffer(&mut buffer, (config.width, config.height))
@@ -388,7 +396,7 @@ pub fn box_plot(
     let y_pad = (y_max - y_min).max(0.1) * 0.1;
 
     // Create image buffer
-    let mut buffer = vec![0u8; (config.width * config.height * 3) as usize];
+    let mut buffer = rgb_buffer(config.width, config.height)?;
 
     {
         let root = BitMapBackend::with_buffer(&mut buffer, (config.width, config.height))
@@ -573,7 +581,7 @@ pub fn line_chart(
     let colors = CHART_PALETTE;
 
     // Create image buffer
-    let mut buffer = vec![0u8; (config.width * config.height * 3) as usize];
+    let mut buffer = rgb_buffer(config.width, config.height)?;
 
     {
         let root = BitMapBackend::with_buffer(&mut buffer, (config.width, config.height))
@@ -742,7 +750,7 @@ pub fn event_study_plot(
     };
 
     // Create image buffer
-    let mut buffer = vec![0u8; (config.width * config.height * 3) as usize];
+    let mut buffer = rgb_buffer(config.width, config.height)?;
 
     {
         let root = BitMapBackend::with_buffer(&mut buffer, (config.width, config.height))
@@ -929,7 +937,7 @@ pub fn coefficient_plot(
     let x_range_max = x_max.max(0.0) + x_pad;
 
     // Create image buffer
-    let mut buffer = vec![0u8; (config.width * config.height * 3) as usize];
+    let mut buffer = rgb_buffer(config.width, config.height)?;
 
     {
         let root = BitMapBackend::with_buffer(&mut buffer, (config.width, config.height))
@@ -1227,7 +1235,7 @@ pub fn irf_plot(
     y_max = y_max.max(0.0);
 
     // Create image buffer
-    let mut buffer = vec![0u8; (config.width * config.height * 3) as usize];
+    let mut buffer = rgb_buffer(config.width, config.height)?;
 
     {
         let root = BitMapBackend::with_buffer(&mut buffer, (config.width, config.height))
@@ -1518,7 +1526,7 @@ fn generate_residuals_vs_fitted(
     let y_min_adj = y_min.min(0.0) - y_pad;
     let y_max_adj = y_max.max(0.0) + y_pad;
 
-    let mut buffer = vec![0u8; (config.width * config.height * 3) as usize];
+    let mut buffer = rgb_buffer(config.width, config.height)?;
 
     {
         let root = BitMapBackend::with_buffer(&mut buffer, (config.width, config.height))
@@ -1609,7 +1617,7 @@ fn generate_qq_plot(
     let x_pad = range * 0.1;
     let y_pad = range * 0.1;
 
-    let mut buffer = vec![0u8; (config.width * config.height * 3) as usize];
+    let mut buffer = rgb_buffer(config.width, config.height)?;
 
     {
         let root = BitMapBackend::with_buffer(&mut buffer, (config.width, config.height))
@@ -1688,7 +1696,7 @@ fn generate_scale_location(
     let x_pad = (x_max - x_min).max(0.1) * 0.05;
     let y_pad = y_max * 0.1;
 
-    let mut buffer = vec![0u8; (config.width * config.height * 3) as usize];
+    let mut buffer = rgb_buffer(config.width, config.height)?;
 
     {
         let root = BitMapBackend::with_buffer(&mut buffer, (config.width, config.height))
@@ -1765,7 +1773,7 @@ fn generate_residuals_vs_leverage(
     let cooks_threshold = 0.5;
     let has_influential = cooks_distance.iter().any(|&c| c > cooks_threshold);
 
-    let mut buffer = vec![0u8; (config.width * config.height * 3) as usize];
+    let mut buffer = rgb_buffer(config.width, config.height)?;
 
     {
         let root = BitMapBackend::with_buffer(&mut buffer, (config.width, config.height))
@@ -1987,25 +1995,50 @@ fn calculate_box_stats(label: String, data: &[f64]) -> BoxPlotStats {
     }
 }
 
-fn encode_rgb_to_png_base64(
-    rgb_buffer: &[u8],
+/// Map a core resource error (allocation, size arithmetic, cancellation) to
+/// this module's invalid-data error, keeping its text.
+fn invalid_data(e: crate::errors::EconError) -> VisualizationError {
+    VisualizationError::InvalidData(e.to_string())
+}
+
+/// A zeroed RGB buffer for a `width` x `height` image, sized with checked
+/// arithmetic and allocated fallibly, so an impossible size is an error
+/// instead of a wrapped `u32` product, a panic or a process abort.
+pub(super) fn rgb_buffer(width: u32, height: u32) -> Result<Vec<u8>, VisualizationError> {
+    if width == 0 || height == 0 {
+        return Err(VisualizationError::InvalidData(format!(
+            "image size {width} x {height}: width and height must be at least 1"
+        )));
+    }
+    let len = resource::checked_len(&[width as usize, height as usize, 3], "image buffer")
+        .map_err(invalid_data)?;
+    resource::try_vec(len, 0u8, "image buffer").map_err(invalid_data)
+}
+
+/// Encode an RGB buffer of `width` x `height` pixels as a base64 PNG, without
+/// copying the buffer.
+pub(super) fn encode_rgb_to_png_base64(
+    rgb: &[u8],
     width: u32,
     height: u32,
 ) -> Result<String, VisualizationError> {
-    use image::{ColorType, ImageBuffer, ImageEncoder, Rgb, codecs::png::PngEncoder};
+    use image::{ColorType, ImageEncoder, codecs::png::PngEncoder};
     use std::io::Cursor;
 
-    // Create image from RGB buffer
-    let img: ImageBuffer<Rgb<u8>, Vec<u8>> =
-        ImageBuffer::from_raw(width, height, rgb_buffer.to_vec()).ok_or_else(|| {
-            VisualizationError::EncodingError("Failed to create image buffer".to_string())
-        })?;
+    let expected = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|n| n.checked_mul(3));
+    if expected != Some(rgb.len()) {
+        return Err(VisualizationError::EncodingError(
+            "Failed to create image buffer".to_string(),
+        ));
+    }
 
     // Encode to PNG
     let mut png_data = Vec::new();
     let encoder = PngEncoder::new(Cursor::new(&mut png_data));
     encoder
-        .write_image(img.as_raw(), width, height, ColorType::Rgb8)
+        .write_image(rgb, width, height, ColorType::Rgb8)
         .map_err(|e: image::ImageError| VisualizationError::EncodingError(e.to_string()))?;
 
     Ok(BASE64.encode(&png_data))
@@ -2057,7 +2090,7 @@ pub fn dendrogram(
     let title = config.title.unwrap_or_else(|| "Dendrogram".to_string());
 
     // Create drawing area
-    let mut buffer = vec![0u8; (width * height * 3) as usize];
+    let mut buffer = rgb_buffer(width, height)?;
     {
         let root = BitMapBackend::with_buffer(&mut buffer, (width, height)).into_drawing_area();
         root.fill(&WHITE)
@@ -2268,6 +2301,58 @@ fn compute_leaf_order(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn wavy(n: usize) -> Vec<f64> {
+        (0..n)
+            .map(|i| (i as f64 * 0.37).sin() * 10.0 + i as f64)
+            .collect()
+    }
+
+    #[test]
+    fn histogram_rejects_zero_and_impossible_bin_counts() {
+        let data = wavy(50);
+        assert!(matches!(histogram(&data, Some(0), ChartConfig::default()),
+            Err(VisualizationError::InvalidData(m)) if m.contains("bins")));
+        assert!(matches!(
+            histogram(&data, Some(usize::MAX), ChartConfig::default()),
+            Err(VisualizationError::InvalidData(_))
+        ));
+        let small = ChartConfig {
+            width: 100,
+            height: 100,
+            ..ChartConfig::default()
+        };
+        let r = crate::resource::with_alloc_ceiling(Some(1 << 20), || {
+            histogram(&data, Some(300_000), small)
+        });
+        assert!(matches!(r, Err(VisualizationError::InvalidData(m)) if m.contains("bins")));
+    }
+
+    #[test]
+    fn image_buffers_use_checked_sizes() {
+        assert!(rgb_buffer(0, 10).is_err());
+        assert!(rgb_buffer(10, 0).is_err());
+        assert_eq!(rgb_buffer(10, 20).unwrap().len(), 600);
+        assert!(rgb_buffer(u32::MAX, u32::MAX).is_err()); // product overflows usize
+        let link = [(0usize, 1usize, 1.0f64, 2usize)];
+        let huge = ChartConfig {
+            width: u32::MAX,
+            height: u32::MAX,
+            ..ChartConfig::default()
+        };
+        assert!(matches!(
+            dendrogram(&link, None, huge),
+            Err(VisualizationError::InvalidData(_))
+        ));
+        let big = ChartConfig {
+            width: 65_536,
+            height: 65_536,
+            ..ChartConfig::default()
+        };
+        let r =
+            crate::resource::with_alloc_ceiling(Some(256 << 20), || dendrogram(&link, None, big));
+        assert!(matches!(r, Err(VisualizationError::InvalidData(_))));
+    }
 
     #[test]
     fn test_histogram() {
