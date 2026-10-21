@@ -31,11 +31,44 @@ impl From<surrealdb::Error> for DbError {
     }
 }
 
+/// Bounds on what the conversation store keeps. The server resolves them
+/// from its resource profile (`tools::limits`) and hands them over with
+/// [`DbConnection::with_limits`]; `None` means unlimited. The default is the
+/// `Off` profile: 2 MiB per message and nothing else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PersistenceLimits {
+    /// Bytes of one client-posted message, title or settings string; longer
+    /// server-produced text is truncated to it.
+    pub message_bytes: Option<usize>,
+    /// Conversations one session may hold.
+    pub conversations_per_session: Option<usize>,
+    /// Messages one conversation may hold.
+    pub messages_per_conversation: Option<usize>,
+    /// Bytes one session's conversation history may hold (titles, message
+    /// contents, tool-call arguments, results and errors).
+    pub session_db_bytes: Option<u64>,
+    /// Writes are refused while the process's resident memory is above this.
+    pub rss_soft_limit_bytes: Option<u64>,
+}
+
+impl Default for PersistenceLimits {
+    fn default() -> Self {
+        Self {
+            message_bytes: Some(2_097_152),
+            conversations_per_session: None,
+            messages_per_conversation: None,
+            session_db_bytes: None,
+            rss_soft_limit_bytes: None,
+        }
+    }
+}
+
 /// Database connection wrapper
 ///
 /// Supports both RocksDB (persistent) and in-memory backends.
 pub struct DbConnection {
     db: Arc<Surreal<Db>>,
+    limits: PersistenceLimits,
 }
 
 impl DbConnection {
@@ -79,7 +112,21 @@ impl DbConnection {
 
         tracing::info!("SurrealDB connected and schema initialized");
 
-        Ok(Self { db: Arc::new(db) })
+        Ok(Self {
+            db: Arc::new(db),
+            limits: PersistenceLimits::default(),
+        })
+    }
+
+    /// This connection with `limits` applied to every later write.
+    pub fn with_limits(mut self, limits: PersistenceLimits) -> Self {
+        self.limits = limits;
+        self
+    }
+
+    /// The limits this connection applies.
+    pub fn limits(&self) -> &PersistenceLimits {
+        &self.limits
     }
 
     /// Initialize database schema
@@ -223,6 +270,7 @@ impl Clone for DbConnection {
     fn clone(&self) -> Self {
         Self {
             db: Arc::clone(&self.db),
+            limits: self.limits,
         }
     }
 }

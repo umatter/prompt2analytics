@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
-use tokio::sync::{RwLock, Semaphore};
+use tokio::sync::{RwLock, Semaphore, broadcast};
 use uuid::Uuid;
 
 use p2a_core::data::Dataset;
@@ -75,9 +75,8 @@ impl Session {
 
     /// Check if the session has expired.
     pub async fn is_expired(&self, ttl_minutes: u64) -> bool {
-        let last_accessed = self.last_accessed.read().await;
-        let elapsed = Utc::now().signed_duration_since(*last_accessed);
-        elapsed.num_minutes() as u64 > ttl_minutes
+        let last_accessed = *self.last_accessed.read().await;
+        is_past_ttl(last_accessed, Utc::now(), ttl_minutes)
     }
 
     /// Get session info for API responses.
@@ -151,6 +150,26 @@ pub fn datasets_bytes(map: &HashMap<String, Dataset>) -> u64 {
         .fold(0u64, u64::saturating_add)
 }
 
+/// Whether a session last accessed at `last_accessed` has expired at `now`
+/// under `ttl_minutes`: more whole minutes have elapsed than the TTL. The
+/// comparison is signed, so a `last_accessed` in the future (clock skew, a
+/// stored row) is not expired. The live table and the persisted rows use the
+/// same rule.
+pub(crate) fn is_past_ttl(
+    last_accessed: DateTime<Utc>,
+    now: DateTime<Utc>,
+    ttl_minutes: u64,
+) -> bool {
+    let elapsed = now.signed_duration_since(last_accessed);
+    elapsed.num_minutes() > i64::try_from(ttl_minutes).unwrap_or(i64::MAX)
+}
+
+/// Whether `id` has the form of a session id: a UUID in the hyphenated
+/// lower-case form `SessionManager::create_session` produces.
+pub(crate) fn is_session_id(id: &str) -> bool {
+    Uuid::parse_str(id).is_ok_and(|u| u.hyphenated().to_string() == id)
+}
+
 /// Session information for API responses.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SessionInfo {
@@ -172,22 +191,59 @@ pub enum RemovalReason {
     Evicted,
 }
 
+/// Capacity of the removal channel. A receiver that falls further behind
+/// sees `RecvError::Lagged` and is expected to resynchronise (the persistent
+/// manager runs a sweep).
+const REMOVAL_CHANNEL_CAPACITY: usize = 1024;
+
 /// Manages all active sessions.
+///
+/// This is the only registry of live sessions and the only owner of their
+/// `last_accessed` and TTL; the persistent manager holds a shared reference
+/// to it and makes stored sessions live again with [`SessionManager::adopt`].
 #[derive(Debug)]
 pub struct SessionManager {
     /// Active sessions keyed by session ID
     sessions: Arc<RwLock<HashMap<SessionId, Arc<Session>>>>,
     /// Configuration for session management
     config: SessionConfig,
+    /// Every removal (delete, expiry, cleanup, eviction) is sent here.
+    removals: broadcast::Sender<SessionId>,
 }
 
 impl SessionManager {
     /// Create a new session manager with the given configuration.
     pub fn new(config: SessionConfig) -> Self {
+        let (removals, _) = broadcast::channel(REMOVAL_CHANNEL_CAPACITY);
         Self {
             sessions: Arc::new(RwLock::new(HashMap::new())),
             config,
+            removals,
         }
+    }
+
+    /// Subscribe to session removals. Every session that leaves the table
+    /// (deleted, expired on access or by cleanup, evicted) is sent once,
+    /// after it has left. Removals before the call are not replayed.
+    pub fn subscribe_removals(&self) -> broadcast::Receiver<SessionId> {
+        self.removals.subscribe()
+    }
+
+    /// The idle time after which a session expires, in minutes.
+    pub fn ttl_minutes(&self) -> u64 {
+        self.config.ttl_minutes
+    }
+
+    /// A snapshot of every live session's id and last access.
+    pub async fn live_last_accessed(&self) -> Vec<(SessionId, DateTime<Utc>)> {
+        // Collect first so no last_accessed lock is awaited under the map lock.
+        let sessions: Vec<Arc<Session>> = self.sessions.read().await.values().cloned().collect();
+        let mut out = Vec::with_capacity(sessions.len());
+        for session in sessions {
+            let last = *session.last_accessed.read().await;
+            out.push((session.id.clone(), last));
+        }
+        out
     }
 
     /// Create a new session and return its ID.
@@ -199,6 +255,46 @@ impl SessionManager {
     /// evicted to make room; otherwise this returns `MaxSessionsReached`.
     pub async fn create_session(&self, user_id: Option<String>) -> Result<SessionId, SessionError> {
         let mut sessions = self.sessions.write().await;
+        let id = Uuid::new_v4().to_string();
+        let session = Arc::new(Session::new(id.clone(), user_id));
+        self.admit(&mut sessions, session).await?;
+
+        tracing::info!(session_id = %id, "Created new session");
+        Ok(id)
+    }
+
+    /// Make a stored session live again under its own id (a persisted session
+    /// after a restart). `id` must be a UUID in the hyphenated lower-case form
+    /// `create_session` produces; anything else is `NotFound`. A session that
+    /// is already live is returned as it is. Otherwise a fresh session
+    /// (`last_accessed` = now, no datasets) goes through the same capacity and
+    /// eviction rules as `create_session`.
+    pub async fn adopt(
+        &self,
+        id: &str,
+        user_id: Option<String>,
+    ) -> Result<Arc<Session>, SessionError> {
+        if !is_session_id(id) {
+            return Err(SessionError::NotFound);
+        }
+        let mut sessions = self.sessions.write().await;
+        if let Some(existing) = sessions.get(id) {
+            return Ok(existing.clone());
+        }
+        let session = Arc::new(Session::new(id.to_string(), user_id));
+        self.admit(&mut sessions, session.clone()).await?;
+        tracing::info!(session_id = %id, "Adopted stored session");
+        Ok(session)
+    }
+
+    /// Insert `session` into the write-locked table, evicting the least
+    /// recently used idle session first when the table is full and eviction
+    /// is on (see [`create_session`](Self::create_session)).
+    async fn admit(
+        &self,
+        sessions: &mut HashMap<SessionId, Arc<Session>>,
+        session: Arc<Session>,
+    ) -> Result<(), SessionError> {
         if sessions.len() >= self.config.max_sessions {
             // A threshold too large for a chrono::Duration means never evict.
             let Some(threshold) = self
@@ -231,13 +327,8 @@ impl SessionManager {
             tracing::info!(session_id = %victim_id, "Evicted least recently used idle session");
             self.session_removed(&victim_id, RemovalReason::Evicted);
         }
-
-        let id = Uuid::new_v4().to_string();
-        let session = Arc::new(Session::new(id.clone(), user_id));
-        sessions.insert(id.clone(), session);
-
-        tracing::info!(session_id = %id, "Created new session");
-        Ok(id)
+        sessions.insert(session.id.clone(), session);
+        Ok(())
     }
 
     /// Get a session by ID, updating its last accessed time.
@@ -312,10 +403,13 @@ impl SessionManager {
     }
 
     /// The single hook every removal path (delete, expiry, cleanup, eviction)
-    /// calls once the session has left the table. It removes the session's
-    /// data directory off the async runtime.
+    /// calls once the session has left the table. It tells the removal
+    /// subscribers (the persistent manager deletes the session's rows) and
+    /// removes the session's data directory off the async runtime.
     fn session_removed(&self, id: &str, reason: RemovalReason) {
         tracing::debug!(session_id = %id, ?reason, "Session removed");
+        // An error only means that nobody is subscribed.
+        let _ = self.removals.send(id.to_string());
         let id = id.to_string();
         tokio::task::spawn_blocking(move || {
             if let Err(e) = crate::path_jail::remove_session_dir(&id) {
@@ -580,6 +674,95 @@ mod tests {
         let ok = futures_count(hs).await;
         assert_eq!(ok, 5);
         assert_eq!(m.session_count().await, 5);
+    }
+
+    #[tokio::test]
+    async fn adopt_respects_capacity_and_ids() {
+        let m = SessionManager::new(cfg(1, None));
+        let a = m.create_session(None).await.unwrap();
+        let id2 = Uuid::new_v4().to_string();
+        assert!(matches!(
+            m.adopt(&id2, None).await,
+            Err(SessionError::MaxSessionsReached)
+        ));
+        m.delete_session(&a).await.unwrap();
+        let adopted = m.adopt(&id2, Some("u1".into())).await.unwrap();
+        assert_eq!(adopted.user_id.as_deref(), Some("u1"));
+        assert!(Arc::ptr_eq(&adopted, &m.get_session(&id2).await.unwrap()));
+        // Adopting a live id returns the live session, not a second one.
+        assert!(Arc::ptr_eq(&adopted, &m.adopt(&id2, None).await.unwrap()));
+        assert_eq!(m.session_count().await, 1);
+        for bad in [
+            "not-a-uuid".to_string(),
+            id2.to_uppercase(),
+            id2.replace('-', ""),
+            format!("{{{id2}}}"),
+        ] {
+            assert!(
+                matches!(m.adopt(&bad, None).await, Err(SessionError::NotFound)),
+                "{bad}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn removals_are_broadcast() {
+        use tokio::sync::broadcast::error::TryRecvError;
+        let m = SessionManager::new(cfg(1, Some(10)));
+        let mut rx = m.subscribe_removals();
+
+        let a = m.create_session(None).await.unwrap();
+        m.delete_session(&a).await.unwrap();
+        assert_eq!(rx.recv().await.unwrap(), a);
+
+        let b = m.create_session(None).await.unwrap();
+        backdate(&m, &b, 65).await;
+        assert!(matches!(
+            m.get_session(&b).await,
+            Err(SessionError::Expired)
+        ));
+        assert_eq!(rx.recv().await.unwrap(), b);
+
+        let c = m.create_session(None).await.unwrap();
+        backdate(&m, &c, 65).await;
+        assert_eq!(m.cleanup_expired().await, 1);
+        assert_eq!(rx.recv().await.unwrap(), c);
+
+        let d = m.create_session(None).await.unwrap();
+        backdate(&m, &d, 11).await;
+        m.create_session(None).await.unwrap(); // evicts d
+        assert_eq!(rx.recv().await.unwrap(), d);
+
+        assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    #[test]
+    fn ttl_comparison_is_signed() {
+        let now = Utc::now();
+        // A last access in the future (clock skew, a stored row) is not expired.
+        assert!(!is_past_ttl(now + chrono::Duration::minutes(90), now, 60));
+        assert!(!is_past_ttl(now - chrono::Duration::minutes(60), now, 60));
+        assert!(is_past_ttl(now - chrono::Duration::minutes(61), now, 60));
+        assert!(!is_past_ttl(
+            now - chrono::Duration::days(365),
+            now,
+            u64::MAX
+        ));
+    }
+
+    #[tokio::test]
+    async fn live_last_accessed_snapshots_every_session() {
+        let m = SessionManager::new(cfg(10, None));
+        assert_eq!(m.ttl_minutes(), 60);
+        let a = m.create_session(None).await.unwrap();
+        let b = m.create_session(None).await.unwrap();
+        backdate(&m, &a, 7).await;
+        let mut snap = m.live_last_accessed().await;
+        snap.sort_by_key(|(_, t)| *t);
+        assert_eq!(snap.len(), 2);
+        assert_eq!(snap[0].0, a);
+        assert_eq!(snap[1].0, b);
+        assert!(Utc::now().signed_duration_since(snap[0].1).num_minutes() >= 7);
     }
 
     #[tokio::test]

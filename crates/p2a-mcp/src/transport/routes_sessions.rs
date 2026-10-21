@@ -90,12 +90,32 @@ pub(crate) async fn list_sessions(State(state): State<AppState>) -> impl IntoRes
     Json(ApiResponse::success(sessions))
 }
 
+/// Look up a live session. With persistence, a stored session still within
+/// its TTL is adopted (a RocksDB server after a restart).
+async fn live_session(
+    state: &AppState,
+    id: &str,
+) -> Result<std::sync::Arc<crate::session::Session>, SessionError> {
+    #[cfg(feature = "db")]
+    if let Some(pm) = &state.persistent_manager {
+        use crate::persistent_session::PersistentSessionError;
+        return pm.get_session(id).await.map_err(|e| match e {
+            PersistentSessionError::Session(e) => e,
+            other => {
+                tracing::warn!(session_id = %id, error = %other, "Session lookup failed");
+                SessionError::NotFound
+            }
+        });
+    }
+    state.session_manager.get_session(id).await
+}
+
 /// Get session information.
 pub(crate) async fn get_session(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    match state.session_manager.get_session(&id).await {
+    match live_session(&state, &id).await {
         Ok(session) => {
             let info = session.info().await;
             (StatusCode::OK, Json(ApiResponse::success(info)))

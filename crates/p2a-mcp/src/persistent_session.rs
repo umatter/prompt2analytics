@@ -1,147 +1,128 @@
 //! Persistent session management using SurrealDB.
 //!
-//! This module extends the basic in-memory session management with
-//! database persistence for sessions, conversations, and settings.
+//! This module adds database persistence (session rows, conversations,
+//! messages, tool calls, settings and dataset metadata) to the live session
+//! registry. [`SessionManager`] stays the only registry of live sessions and
+//! the only owner of `last_accessed` and the TTL; the persistent manager holds
+//! a shared reference to it, makes a stored session live again after a
+//! restart, and never deletes rows on a read path.
 
 #[cfg(feature = "db")]
 use crate::db::{
-    Conversation, ConversationWithMessages, DbConnection, DbError, DbSession, Message, Settings,
+    Conversation, ConversationWithMessages, DbConnection, DbError, DbSession, Message,
+    PersistenceLimits, Settings,
 };
-use crate::session::{DatasetStore, Session, SessionError, SessionId};
-use std::collections::HashMap;
+use crate::session::{
+    DatasetStore, Session, SessionError, SessionId, SessionManager, is_past_ttl, is_session_id,
+};
 use std::sync::Arc;
-use tokio::sync::RwLock;
 
 /// A session manager that persists sessions to SurrealDB.
 ///
-/// This combines in-memory dataset storage (for fast access to loaded data)
-/// with database persistence (for conversations, settings, and session metadata).
+/// Live sessions (with their in-memory datasets) belong to the shared
+/// [`SessionManager`]; this type adds the database rows for conversations,
+/// settings and session metadata.
 #[cfg(feature = "db")]
 pub struct PersistentSessionManager {
-    /// In-memory session cache (datasets are not serializable)
-    sessions: Arc<RwLock<HashMap<SessionId, Arc<Session>>>>,
+    /// The live session registry, shared with the rest of the server
+    sessions: Arc<SessionManager>,
     /// Database connection for persistence
     db: Arc<DbConnection>,
-    /// Session configuration
-    max_sessions: usize,
-    ttl_minutes: u64,
 }
 
 #[cfg(feature = "db")]
 impl PersistentSessionManager {
-    /// Create a new persistent session manager.
+    /// Create a persistent session manager over a RocksDB store at `db_path`
+    /// (in memory when `None`), sharing the live registry `sessions` and
+    /// applying `limits` to every write.
     pub async fn new(
         db_path: Option<&str>,
-        max_sessions: usize,
-        ttl_minutes: u64,
+        sessions: Arc<SessionManager>,
+        limits: PersistenceLimits,
     ) -> Result<Self, DbError> {
         let db = match db_path {
             Some(path) => DbConnection::connect_rocksdb(path).await?,
             None => DbConnection::connect_memory().await?,
         };
-
-        Ok(Self {
-            sessions: Arc::new(RwLock::new(HashMap::new())),
-            db: Arc::new(db),
-            max_sessions,
-            ttl_minutes,
-        })
+        Ok(Self::from_connection(db, sessions, limits))
     }
 
-    /// Create a new session and persist it.
+    /// Create a persistent session manager over an open connection.
+    pub fn from_connection(
+        db: DbConnection,
+        sessions: Arc<SessionManager>,
+        limits: PersistenceLimits,
+    ) -> Self {
+        Self {
+            sessions,
+            db: Arc::new(db.with_limits(limits)),
+        }
+    }
+
+    /// The live session registry this manager shares.
+    pub fn sessions(&self) -> &Arc<SessionManager> {
+        &self.sessions
+    }
+
+    /// Create a new live session and persist its row.
     pub async fn create_session(
         &self,
         user_id: Option<String>,
     ) -> Result<SessionId, PersistentSessionError> {
-        // Check max sessions
-        let sessions = self.sessions.read().await;
-        if sessions.len() >= self.max_sessions {
-            return Err(PersistentSessionError::Session(
-                SessionError::MaxSessionsReached,
-            ));
+        let id = self.sessions.create_session(user_id.clone()).await?;
+        if let Err(e) = self.register_session(&id, user_id).await {
+            let _ = self.sessions.delete_session(&id).await;
+            return Err(e);
         }
-        drop(sessions);
-
-        // Create in-memory session
-        let id = uuid::Uuid::new_v4().to_string();
-        let session = Arc::new(Session::new(id.clone(), user_id.clone()));
-
-        // Persist to database
-        let db_session = DbSession::new(id.clone(), user_id);
-        self.db.upsert_session(&db_session).await?;
-
-        // Store in memory
-        let mut sessions = self.sessions.write().await;
-        sessions.insert(id.clone(), session);
-
         tracing::info!(session_id = %id, "Created new persistent session");
         Ok(id)
     }
 
-    /// Register an existing session ID in the database.
-    /// This is used when a session was created by the in-memory SessionManager
-    /// and we need to persist it for conversation support.
+    /// Store the row of a live session (created by the shared
+    /// `SessionManager`) unless it already exists.
     pub async fn register_session(
         &self,
         session_id: &str,
         user_id: Option<String>,
     ) -> Result<(), PersistentSessionError> {
-        // Check if session already exists in DB
-        if let Ok(Some(_)) = self.db.get_session(session_id).await {
+        if self.db.get_session(session_id).await?.is_some() {
             tracing::debug!(session_id = %session_id, "Session already registered in database");
             return Ok(());
         }
-
-        // Create DB record for the session
-        let db_session = DbSession::new(session_id.to_string(), user_id.clone());
+        let db_session = DbSession::new(session_id.to_string(), user_id);
         self.db.upsert_session(&db_session).await?;
-
-        // Also store in our in-memory cache
-        let session = Arc::new(Session::new(session_id.to_string(), user_id));
-        let mut sessions = self.sessions.write().await;
-        sessions.insert(session_id.to_string(), session);
-
         tracing::info!(session_id = %session_id, "Registered existing session in database");
         Ok(())
     }
 
-    /// Get a session by ID, loading from DB if not in memory.
+    /// Get a live session by ID, touching it.
+    ///
+    /// A session that is not live but whose row was accessed within the TTL
+    /// (a RocksDB store after a restart) is adopted into the live registry,
+    /// subject to its capacity. A row older than the TTL gives `Expired`, no
+    /// row gives `NotFound`. This never deletes rows: the removal listener and
+    /// the sweep do that.
     pub async fn get_session(&self, id: &str) -> Result<Arc<Session>, PersistentSessionError> {
-        // Try memory first
-        let sessions = self.sessions.read().await;
-        if let Some(session) = sessions.get(id).cloned() {
-            drop(sessions);
-
-            // Check if expired
-            if session.is_expired(self.ttl_minutes).await {
-                self.delete_session(id).await?;
-                return Err(PersistentSessionError::Session(SessionError::Expired));
-            }
-
-            // Update timestamps
-            session.touch().await;
-            self.db.touch_session(id).await?;
-            return Ok(session);
+        match self.sessions.get_session(id).await {
+            Ok(session) => return Ok(session),
+            Err(SessionError::NotFound) => {}
+            Err(e) => return Err(e.into()),
         }
-        drop(sessions);
-
-        // Try loading from database
-        if let Some(db_session) = self.db.get_session(id).await? {
-            // Restore in-memory session (without datasets - those need to be reloaded)
-            let session = Arc::new(Session::new(id.to_string(), db_session.user_id.clone()));
-
-            // Store in memory
-            let mut sessions = self.sessions.write().await;
-            sessions.insert(id.to_string(), session.clone());
-
-            // Update timestamps
-            self.db.touch_session(id).await?;
-
-            tracing::info!(session_id = %id, "Restored session from database");
-            return Ok(session);
+        // Only ids of the form `create_session` produces can have rows.
+        if !is_session_id(id) {
+            return Err(SessionError::NotFound.into());
         }
-
-        Err(PersistentSessionError::Session(SessionError::NotFound))
+        let Some(row) = self.db.get_session(id).await? else {
+            return Err(SessionError::NotFound.into());
+        };
+        if is_past_ttl(
+            row.last_accessed_chrono(),
+            chrono::Utc::now(),
+            self.sessions.ttl_minutes(),
+        ) {
+            return Err(SessionError::Expired.into());
+        }
+        Ok(self.sessions.adopt(id, row.user_id).await?)
     }
 
     /// Get the dataset store for a session.
@@ -153,16 +134,19 @@ impl PersistentSessionManager {
         Ok(DatasetStore::from_session(&session))
     }
 
-    /// Delete a session and all its data.
+    /// End a session: remove it from the live registry and delete all of its
+    /// rows. `NotFound` only when it was neither live nor stored.
     pub async fn delete_session(&self, id: &str) -> Result<(), PersistentSessionError> {
-        // Remove from memory
-        let mut sessions = self.sessions.write().await;
-        sessions.remove(id);
-        drop(sessions);
-
-        // Remove from database
+        let was_live = match self.sessions.delete_session(id).await {
+            Ok(()) => true,
+            Err(SessionError::NotFound) => false,
+            Err(e) => return Err(e.into()),
+        };
+        let was_stored = self.db.get_session(id).await?.is_some();
         self.db.delete_session(id).await?;
-
+        if !was_live && !was_stored {
+            return Err(SessionError::NotFound.into());
+        }
         tracing::info!(session_id = %id, "Deleted persistent session");
         Ok(())
     }
@@ -170,28 +154,6 @@ impl PersistentSessionManager {
     /// List all sessions (from database).
     pub async fn list_sessions(&self) -> Result<Vec<DbSession>, PersistentSessionError> {
         Ok(self.db.list_sessions().await?)
-    }
-
-    /// Clean up old sessions (both memory and database).
-    pub async fn cleanup_old_sessions(&self, days: u32) -> Result<u32, PersistentSessionError> {
-        let count = self.db.cleanup_old_sessions(days).await?;
-
-        if count > 0 {
-            // Also clean up memory cache
-            let mut sessions = self.sessions.write().await;
-            let old_count = sessions.len();
-            sessions.retain(|_id, _| {
-                // Keep if exists in DB (will be checked on next access)
-                true
-            });
-            tracing::info!(
-                db_cleaned = count,
-                memory_before = old_count,
-                "Cleaned up old sessions"
-            );
-        }
-
-        Ok(count)
     }
 
     // ==================== Conversation Operations ====================
@@ -202,8 +164,11 @@ impl PersistentSessionManager {
         session_id: &str,
         title: &str,
     ) -> Result<Conversation, PersistentSessionError> {
-        // Verify session exists
-        let _ = self.get_session(session_id).await?;
+        // The session must be live; its row must exist so the conversation
+        // is never an orphan (registration can have failed at creation).
+        let session = self.get_session(session_id).await?;
+        self.register_session(session_id, session.user_id.clone())
+            .await?;
 
         // Create conversation
         let conv = self.db.create_conversation(session_id, title).await?;
@@ -382,72 +347,77 @@ impl PersistentSessionManager {
     }
 
     /// Reload datasets for a session from their original source paths.
+    ///
+    /// The datasets go into the live session (adopted if necessary). Every
+    /// stored path is validated through the path jail inside the session's
+    /// scope, and the files are loaded on the blocking pool without holding
+    /// the session's dataset lock. Failure texts are fixed and never contain
+    /// server paths; the details are logged at debug level.
     pub async fn reload_session_datasets(
         &self,
         session_id: &str,
     ) -> Result<ReloadResult, PersistentSessionError> {
         use p2a_core::DataLoader;
-        use std::path::PathBuf;
 
-        // Get the session (to load datasets into)
         let session = self.get_session(session_id).await?;
-        let mut datasets = session.datasets.write().await;
-
-        // Get all dataset metadata for this session
         let metas = self.db.get_datasets_for_session(session_id).await?;
 
         let mut result = ReloadResult::default();
-
+        let mut to_load = Vec::new();
         for meta in metas {
-            // Skip if no source path (e.g., uploaded datasets without file path)
-            let source_path = match &meta.source_path {
-                Some(path) => path.clone(),
-                None => {
-                    result.skipped.push(ReloadSkip {
-                        name: meta.name.clone(),
-                        reason: "No source path stored".to_string(),
-                    });
-                    continue;
-                }
-            };
-
-            // Check if file exists
-            let path = PathBuf::from(&source_path);
-            if !path.exists() {
-                result.failed.push(ReloadFailure {
-                    name: meta.name.clone(),
-                    source_path: source_path.clone(),
-                    error: "File not found".to_string(),
-                });
-                continue;
-            }
-
-            // Try to load the dataset
-            match DataLoader::load(&path) {
-                Ok(dataset) => {
-                    datasets.insert(meta.name.clone(), dataset);
-                    result.succeeded.push(meta.name.clone());
-                    tracing::info!(
-                        dataset = %meta.name,
-                        path = %source_path,
-                        "Reloaded dataset from file"
-                    );
-                }
-                Err(e) => {
-                    result.failed.push(ReloadFailure {
-                        name: meta.name.clone(),
-                        source_path: source_path.clone(),
-                        error: e.to_string(),
-                    });
-                    tracing::warn!(
-                        dataset = %meta.name,
-                        path = %source_path,
-                        error = %e,
-                        "Failed to reload dataset"
-                    );
-                }
+            match meta.source_path {
+                Some(source_path) => to_load.push((meta.name, source_path)),
+                // e.g. uploaded datasets without a file path
+                None => result.skipped.push(ReloadSkip {
+                    name: meta.name,
+                    reason: RELOAD_NO_SOURCE.to_string(),
+                }),
             }
         }
+
+        let scope_id = session.id.clone();
+        let loaded = tokio::task::spawn_blocking(move || {
+            let _scope = crate::path_jail::enter_session_scope(&scope_id);
+            to_load
+                .into_iter()
+                .map(|(name, source_path)| {
+                    let outcome = match crate::path_jail::validate_data_path(&source_path) {
+                        Err(e) => {
+                            tracing::debug!(dataset = %name, error = %e, "Reload path rejected by the path jail");
+                            Err(RELOAD_OUTSIDE_JAIL)
+                        }
+                        Ok(path) => DataLoader::load(&path).map_err(|e| {
+                            tracing::debug!(dataset = %name, error = %e, "Failed to reload dataset");
+                            RELOAD_LOAD_FAILED
+                        }),
+                    };
+                    (name, source_path, outcome)
+                })
+                .collect::<Vec<_>>()
+        })
+        .await
+        .map_err(|e| {
+            tracing::warn!(session_id = %session_id, error = %e, "Dataset reload task failed");
+            PersistentSessionError::Internal("dataset reload failed".to_string())
+        })?;
+
+        let mut datasets = session.datasets.write().await;
+        for (name, source_path, outcome) in loaded {
+            match outcome {
+                Ok(dataset) => {
+                    tracing::info!(dataset = %name, "Reloaded dataset from file");
+                    datasets.insert(name.clone(), dataset);
+                    result.succeeded.push(name);
+                }
+                Err(error) => result.failed.push(ReloadFailure {
+                    name,
+                    source_path,
+                    error: error.to_string(),
+                }),
+            }
+        }
+        drop(datasets);
+        session.refresh_data_bytes().await;
 
         tracing::info!(
             session_id = %session_id,
@@ -460,6 +430,11 @@ impl PersistentSessionManager {
         Ok(result)
     }
 }
+
+/// Reload texts. They are fixed so that no server path reaches a caller.
+const RELOAD_NO_SOURCE: &str = "no source path stored";
+const RELOAD_OUTSIDE_JAIL: &str = "path is not inside this session's data directory";
+const RELOAD_LOAD_FAILED: &str = "the file could not be loaded";
 
 /// Result of reloading session datasets.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
@@ -501,18 +476,139 @@ pub enum PersistentSessionError {
     #[cfg(feature = "db")]
     #[error("Database error: {0}")]
     Database(#[from] DbError),
+
+    /// A failure inside the server (a panicked worker); the text is generic.
+    #[error("Internal error: {0}")]
+    Internal(String),
 }
 
 #[cfg(test)]
 #[cfg(feature = "db")]
 mod tests {
     use super::*;
+    use crate::config::SessionConfig;
+
+    fn registry(ttl_minutes: u64) -> Arc<SessionManager> {
+        Arc::new(SessionManager::new(SessionConfig {
+            ttl_minutes,
+            max_sessions: 100,
+            evict_idle_minutes: None,
+        }))
+    }
+
+    async fn manager() -> PersistentSessionManager {
+        PersistentSessionManager::new(None, registry(60), PersistenceLimits::default())
+            .await
+            .expect("Failed to create manager")
+    }
+
+    /// Two managers over one store with separate live registries: the second
+    /// one sees the store as a restarted server would.
+    async fn restarted_pair() -> (
+        DbConnection,
+        PersistentSessionManager,
+        PersistentSessionManager,
+        Arc<SessionManager>,
+    ) {
+        let db = DbConnection::connect_memory().await.unwrap();
+        let pm1 = PersistentSessionManager::from_connection(
+            db.clone(),
+            registry(60),
+            PersistenceLimits::default(),
+        );
+        let sm2 = registry(60);
+        let pm2 = PersistentSessionManager::from_connection(
+            db.clone(),
+            sm2.clone(),
+            PersistenceLimits::default(),
+        );
+        (db, pm1, pm2, sm2)
+    }
+
+    #[tokio::test]
+    async fn adopts_db_session_within_ttl_after_restart() {
+        let (_db, pm1, pm2, sm2) = restarted_pair().await;
+        let sid = pm1.create_session(Some("u1".into())).await.unwrap();
+        pm1.create_conversation(&sid, "kept").await.unwrap();
+
+        let adopted = pm2.get_session(&sid).await.unwrap();
+        assert!(Arc::ptr_eq(&adopted, &sm2.get_session(&sid).await.unwrap()));
+        assert_eq!(adopted.user_id.as_deref(), Some("u1"));
+        assert_eq!(pm2.list_conversations(&sid).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn stale_db_session_is_expired_not_deleted() {
+        let (db, pm1, pm2, _sm2) = restarted_pair().await;
+        let sid = pm1.create_session(None).await.unwrap();
+        let conv = pm1.create_conversation(&sid, "kept").await.unwrap();
+        db.set_session_last_accessed(&sid, chrono::Utc::now() - chrono::Duration::hours(2))
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            pm2.get_session(&sid).await,
+            Err(PersistentSessionError::Session(SessionError::Expired))
+        ));
+        assert!(db.get_session(&sid).await.unwrap().is_some());
+        assert!(db.get_conversation(&conv.id_string()).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn read_path_never_deletes() {
+        let pm = manager().await;
+        let sid = pm.create_session(None).await.unwrap();
+        let conv = pm.create_conversation(&sid, "kept").await.unwrap();
+        pm.add_message(&conv.id_string(), "user", "hello")
+            .await
+            .unwrap();
+        let live = pm.sessions().get_session(&sid).await.unwrap();
+        *live.last_accessed.write().await = chrono::Utc::now() - chrono::Duration::minutes(65);
+
+        assert!(matches!(
+            pm.get_session(&sid).await,
+            Err(PersistentSessionError::Session(SessionError::Expired))
+        ));
+        assert!(pm.db().get_session(&sid).await.unwrap().is_some());
+        assert_eq!(
+            pm.db().get_messages(&conv.id_string()).await.unwrap().len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn non_session_ids_are_not_looked_up_or_adopted() {
+        let pm = manager().await;
+        for id in ["random-xyz-1", "", "../x"] {
+            assert!(matches!(
+                pm.get_session(id).await,
+                Err(PersistentSessionError::Session(SessionError::NotFound))
+            ));
+        }
+        assert_eq!(pm.sessions().session_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn delete_session_ends_the_live_session_and_its_rows() {
+        let pm = manager().await;
+        let sid = pm.create_session(None).await.unwrap();
+        let conv = pm.create_conversation(&sid, "gone").await.unwrap();
+        pm.delete_session(&sid).await.unwrap();
+        assert!(matches!(
+            pm.sessions().get_session(&sid).await,
+            Err(SessionError::NotFound)
+        ));
+        assert!(pm.db().get_session(&sid).await.unwrap().is_none());
+        assert!(pm.db().get_conversation(&conv.id_string()).await.is_err());
+        assert!(matches!(
+            pm.delete_session(&sid).await,
+            Err(PersistentSessionError::Session(SessionError::NotFound))
+        ));
+    }
 
     #[tokio::test]
     async fn test_create_session() {
-        let manager = PersistentSessionManager::new(None, 100, 60)
-            .await
-            .expect("Failed to create manager");
+        let manager = manager().await;
 
         let session_id = manager
             .create_session(None)
@@ -531,9 +627,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_conversation_workflow() {
-        let manager = PersistentSessionManager::new(None, 100, 60)
-            .await
-            .expect("Failed to create manager");
+        let manager = manager().await;
 
         // Create session
         let session_id = manager

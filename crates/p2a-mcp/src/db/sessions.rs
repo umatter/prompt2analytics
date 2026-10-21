@@ -1,6 +1,6 @@
 //! Session persistence operations
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use surrealdb::RecordId;
 use surrealdb::sql::Datetime;
 
@@ -34,6 +34,28 @@ impl DbConnection {
             .query("UPDATE sessions SET last_accessed = time::now() WHERE id = $id")
             .bind(("id", RecordId::from(("sessions", id_owned.as_str()))))
             .await?;
+        Ok(())
+    }
+
+    /// Set a session row's `last_accessed` to `at` (the live session's own
+    /// value, flushed by the sweep). A missing row is created.
+    pub async fn set_session_last_accessed(
+        &self,
+        id: &str,
+        at: DateTime<Utc>,
+    ) -> Result<(), DbError> {
+        let mut result = self
+            .db()
+            .query("UPDATE $id SET last_accessed = $at RETURN AFTER")
+            .bind(("id", RecordId::from(("sessions", id))))
+            .bind(("at", Datetime::from(at)))
+            .await?;
+        let updated: Vec<DbSession> = result.take(0)?;
+        if updated.is_empty() {
+            let mut row = DbSession::new(id.to_string(), None);
+            row.last_accessed = Datetime::from(at);
+            self.upsert_session(&row).await?;
+        }
         Ok(())
     }
 

@@ -88,6 +88,10 @@ pub async fn build_app_with(
     exec: ExecConfig,
 ) -> Result<(Router, AppState), TransportError> {
     let config = &as_http(config);
+    // Resolved before anything is spawned, so a bad override refuses the
+    // start without leaving tasks behind.
+    #[cfg(feature = "db")]
+    let limits = resolve_limits(config)?;
     // The eviction threshold follows the resource profile here, like the
     // deadlines and quotas, whichever way `config` was built.
     let session_manager = Arc::new(SessionManager::new(SessionConfig {
@@ -111,11 +115,19 @@ pub async fn build_app_with(
 
     let governor = Arc::new(ToolGovernor::new(exec, session_manager.clone()));
 
+    #[cfg(feature = "db")]
+    let persistent_manager = init_persistence(
+        config,
+        session_manager.clone(),
+        persistence_limits(&limits, governor.config().rss_soft_limit_bytes),
+    )
+    .await;
+
     let state = AppState {
         server,
         session_manager,
         #[cfg(feature = "db")]
-        persistent_manager: init_persistence(config).await,
+        persistent_manager,
         audit_logger,
         governor,
     };
@@ -123,20 +135,50 @@ pub async fn build_app_with(
     Ok((create_router(state.clone(), config), state))
 }
 
-/// Create the persistent session manager, or `None` (with a log line) when
-/// the database cannot be opened.
+/// The request limits of `config`'s resource profile with its overrides
+/// applied, the values `tools::limits::current()` holds once installed. An
+/// invalid override refuses the start.
+#[cfg(feature = "db")]
+fn resolve_limits(config: &ServerConfig) -> Result<crate::tools::limits::Limits, TransportError> {
+    use crate::config::ResourceProfile;
+    use crate::tools::limits::Limits;
+    match config.resource_profile() {
+        ResourceProfile::Off => Limits::off(),
+        ResourceProfile::Hosted => Limits::hosted(),
+    }
+    .with_overrides(&config.limits.overrides)
+    .map_err(TransportError::Config)
+}
+
+/// The conversation-store bounds from the resolved request limits and the
+/// governor's resident-memory floor. They are handed to the store, so the db
+/// module never reads the process-wide limits.
+#[cfg(feature = "db")]
+fn persistence_limits(
+    limits: &crate::tools::limits::Limits,
+    rss_soft_limit_bytes: Option<u64>,
+) -> crate::db::PersistenceLimits {
+    crate::db::PersistenceLimits {
+        message_bytes: Some(usize::try_from(limits.message_bytes).unwrap_or(usize::MAX)),
+        conversations_per_session: limits.conversations_per_session,
+        messages_per_conversation: limits.messages_per_conversation,
+        session_db_bytes: limits.session_db_bytes,
+        rss_soft_limit_bytes,
+    }
+}
+
+/// Create the persistent session manager over the shared live registry, or
+/// `None` (with a log line) when the database cannot be opened.
 #[cfg(feature = "db")]
 async fn init_persistence(
     config: &ServerConfig,
+    session_manager: Arc<SessionManager>,
+    limits: crate::db::PersistenceLimits,
 ) -> Option<Arc<crate::persistent_session::PersistentSessionManager>> {
     let db_path = config.http.db_path.as_deref();
     tracing::info!("Initializing database with path: {:?}", db_path);
-    match crate::persistent_session::PersistentSessionManager::new(
-        db_path,
-        config.session.max_sessions,
-        config.session.ttl_minutes,
-    )
-    .await
+    match crate::persistent_session::PersistentSessionManager::new(db_path, session_manager, limits)
+        .await
     {
         Ok(manager) => {
             tracing::info!("Database persistence enabled - conversation routes will be available");
