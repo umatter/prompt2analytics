@@ -53,6 +53,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
+use crate::resource;
 use crate::traits::{SignificanceLevel, chi_squared_p_value};
 
 /// Result of a chi-squared test.
@@ -390,18 +391,51 @@ pub fn chisq_test_independence(table: &[Vec<f64>], correct: bool) -> EconResult<
         });
     }
 
+    // A `Vec<Vec>` passes a per-allocation ceiling row by row, so check the total first
+    let cells = resource::checked_len(&[n_rows, n_cols], "contingency table")?;
+    resource::check_alloc::<f64>(cells, "contingency table")?;
+    let mut observed: Vec<f64> = resource::try_with_capacity(cells, "contingency table")?;
+    for row in table {
+        observed.extend_from_slice(row);
+    }
+
+    independence_from_flat(observed, n_rows, n_cols, correct)
+}
+
+/// The chi-squared test of independence on a row-major `n_rows x n_cols` table of counts
+/// (`n_rows, n_cols >= 2`). The expected values and both residual tables are allocated
+/// fallibly.
+fn independence_from_flat(
+    observed: Vec<f64>,
+    n_rows: usize,
+    n_cols: usize,
+    correct: bool,
+) -> EconResult<ChiSquaredResult> {
+    let cells = resource::checked_len(&[n_rows, n_cols], "contingency table")?;
+
     // Validate all counts are non-negative
-    if table.iter().flatten().any(|&x| x < 0.0) {
+    if observed.iter().any(|&x| x < 0.0) {
         return Err(EconError::InvalidSpecification {
             message: "All counts must be non-negative".to_string(),
         });
     }
 
-    // Calculate marginals
-    let row_totals: Vec<f64> = table.iter().map(|row| row.iter().sum()).collect();
-    let col_totals: Vec<f64> = (0..n_cols)
-        .map(|j| table.iter().map(|row| row[j]).sum())
-        .collect();
+    // Calculate marginals (each total sums its cells in row-major order)
+    let mut row_totals: Vec<f64> = resource::try_with_capacity(n_rows, "row totals")?;
+    row_totals.extend(
+        observed
+            .chunks_exact(n_cols)
+            .map(|row| row.iter().sum::<f64>()),
+    );
+    let mut col_totals: Vec<f64> = resource::try_with_capacity(n_cols, "column totals")?;
+    col_totals.extend((0..n_cols).map(|j| {
+        observed
+            .iter()
+            .skip(j)
+            .step_by(n_cols)
+            .copied()
+            .sum::<f64>()
+    }));
     let grand_total: f64 = row_totals.iter().sum();
 
     if grand_total <= 0.0 {
@@ -413,15 +447,12 @@ pub fn chisq_test_independence(table: &[Vec<f64>], correct: bool) -> EconResult<
     }
 
     // Calculate expected values: E_ij = row_i × col_j / n
-    let mut expected: Vec<f64> = Vec::with_capacity(n_rows * n_cols);
+    let mut expected: Vec<f64> = resource::try_with_capacity(cells, "expected counts")?;
     for i in 0..n_rows {
         for j in 0..n_cols {
             expected.push(row_totals[i] * col_totals[j] / grand_total);
         }
     }
-
-    // Flatten observed
-    let observed: Vec<f64> = table.iter().flatten().copied().collect();
 
     // Determine if Yates' correction should be applied
     let apply_yates = correct && n_rows == 2 && n_cols == 2;
@@ -456,14 +487,16 @@ pub fn chisq_test_independence(table: &[Vec<f64>], correct: bool) -> EconResult<
     let significance = SignificanceLevel::from_p_value(p_value);
 
     // Pearson residuals: (O - E) / sqrt(E)
-    let residuals: Vec<f64> = observed
-        .iter()
-        .zip(&expected)
-        .map(|(&o, &e)| if e > 0.0 { (o - e) / e.sqrt() } else { 0.0 })
-        .collect();
+    let mut residuals: Vec<f64> = resource::try_with_capacity(cells, "Pearson residuals")?;
+    residuals.extend(
+        observed
+            .iter()
+            .zip(&expected)
+            .map(|(&o, &e)| if e > 0.0 { (o - e) / e.sqrt() } else { 0.0 }),
+    );
 
     // Standardized residuals: (O - E) / sqrt(E × (1 - row_prop) × (1 - col_prop))
-    let mut std_residuals: Vec<f64> = Vec::with_capacity(n_rows * n_cols);
+    let mut std_residuals: Vec<f64> = resource::try_with_capacity(cells, "standardized residuals")?;
     for i in 0..n_rows {
         for j in 0..n_cols {
             let idx = i * n_cols + j;
@@ -651,18 +684,6 @@ pub fn run_chisq_independence(
         });
     }
 
-    // Build contingency table using group_by and count
-    // Group by both columns
-    let grouped = df
-        .clone()
-        .lazy()
-        .group_by([col(row_col), col(col_col)])
-        .agg([len().alias("count")])
-        .collect()
-        .map_err(|e| EconError::InvalidSpecification {
-            message: format!("Failed to group data: {}", e),
-        })?;
-
     // Convert to contingency table matrix
     // Get sorted unique values for consistent ordering
     let mut row_values: Vec<String> = Vec::new();
@@ -679,33 +700,99 @@ pub fn run_chisq_independence(
     row_values.sort();
     col_values.sort();
 
-    // Initialize table with zeros
-    let mut table: Vec<Vec<f64>> = vec![vec![0.0; n_cols]; n_rows];
+    // A flat, fallibly allocated r x c table of counts
+    let cells = resource::checked_len(&[n_rows, n_cols], "contingency table")?;
+    resource::check_alloc::<f64>(cells, "contingency table")?;
+    let mut observed: Vec<f64> = resource::try_vec(cells, 0.0, "contingency table")?;
 
-    // Fill in counts from grouped result
-    let row_data = grouped.column(row_col).unwrap();
-    let col_data = grouped.column(col_col).unwrap();
-    let count_data = grouped.column("count").unwrap();
+    // Level key -> position in the sorted level order (the first position for equal keys)
+    fn index_of(values: &[String]) -> std::collections::HashMap<&str, usize> {
+        let mut index = std::collections::HashMap::with_capacity(values.len());
+        for (i, v) in values.iter().enumerate() {
+            index.entry(v.as_str()).or_insert(i);
+        }
+        index
+    }
+    let row_index = index_of(&row_values);
+    let col_index = index_of(&col_values);
 
-    for i in 0..grouped.height() {
-        let row_val = format!("{:?}", row_data.get(i).unwrap());
-        let col_val = format!("{:?}", col_data.get(i).unwrap());
-        let count = count_data.get(i).unwrap().try_extract::<u64>().unwrap_or(0) as f64;
-
-        if let (Some(row_idx), Some(col_idx)) = (
-            row_values.iter().position(|v| v == &row_val),
-            col_values.iter().position(|v| v == &col_val),
+    // Count the rows in one pass (no lazy engine, so no nested async runtime)
+    let lookup_error = |e: PolarsError| EconError::InvalidSpecification {
+        message: format!("Failed to read a value: {}", e),
+    };
+    for i in 0..df.height() {
+        if i % 65_536 == 0 {
+            resource::checkpoint()?;
+        }
+        let row_val = format!("{:?}", row_series.get(i).map_err(lookup_error)?);
+        let col_val = format!("{:?}", col_series.get(i).map_err(lookup_error)?);
+        if let (Some(&row_idx), Some(&col_idx)) = (
+            row_index.get(row_val.as_str()),
+            col_index.get(col_val.as_str()),
         ) {
-            table[row_idx][col_idx] = count;
+            observed[row_idx * n_cols + col_idx] += 1.0;
         }
     }
 
-    chisq_test_independence(&table, correct)
+    independence_from_flat(observed, n_rows, n_cols, correct)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::resource::{self, Budget, CancelToken};
+    use polars::prelude::*;
+
+    fn gh_dataset() -> Dataset {
+        // table(g, h) = [[7, 5, 8], [4, 9, 7]] (rows a, b; columns x, y, z), 40 rows
+        let mut h: Vec<&str> = Vec::new();
+        for (lvl, k) in [("x", 7), ("y", 5), ("z", 8), ("x", 4), ("y", 9), ("z", 7)] {
+            h.extend(std::iter::repeat_n(lvl, k));
+        }
+        let g: Vec<&str> = (0..40).map(|i| if i < 20 { "a" } else { "b" }).collect();
+        Dataset::new(df!("g" => g, "h" => h).unwrap())
+    }
+
+    #[test]
+    fn test_validate_run_chisq_independence_from_data_against_r() {
+        // R: chisq.test(table(g, h)) -> X-squared = 2.0277056277056276, df = 2, p = 0.36281841143824806
+        let r = run_chisq_independence(&gh_dataset(), "g", "h", true).unwrap();
+        assert!((r.statistic - 2.0277056277056276).abs() < 1e-10);
+        assert!((r.p_value - 0.36281841143824806).abs() < 1e-10);
+        assert_eq!((r.df, r.n_rows, r.n_cols), (2, Some(2), Some(3)));
+        assert_eq!(r.observed, vec![7.0, 5.0, 8.0, 4.0, 9.0, 7.0]);
+        assert_eq!(r.expected, vec![5.5, 7.0, 7.5, 5.5, 7.0, 7.5]);
+    }
+
+    #[test]
+    fn test_run_chisq_independence_inside_async_runtime() {
+        // STAT-10: the lazy group_by panicked with "Cannot start a runtime from within a runtime"
+        // for >= 20 rows when called from inside a tokio runtime. Counting without the lazy engine fixes it.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let r = rt
+            .block_on(async { run_chisq_independence(&gh_dataset(), "g", "h", true) })
+            .unwrap();
+        assert!((r.statistic - 2.0277056277056276).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_chisq_independence_respects_allocation_ceiling() {
+        let table = vec![vec![1.0; 12]; 12]; // 144 cells x 8 bytes = 1152 > 1024
+        let r = resource::with_alloc_ceiling(Some(1024), || chisq_test_independence(&table, false));
+        assert!(matches!(r, Err(EconError::ResourceLimit(_))));
+    }
+
+    #[test]
+    fn test_run_chisq_independence_honours_cancellation() {
+        let t = CancelToken::new();
+        t.cancel();
+        let r = resource::with_budget(Budget::new(None, t), || {
+            run_chisq_independence(&gh_dataset(), "g", "h", true)
+        });
+        assert!(matches!(r, Err(EconError::Cancelled(_))));
+    }
 
     #[test]
     fn test_gof_uniform() {

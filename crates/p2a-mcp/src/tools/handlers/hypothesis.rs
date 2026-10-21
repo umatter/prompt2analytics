@@ -12,6 +12,7 @@
 //! - And more
 
 use crate::server::AnalyticsServer;
+use crate::tools::common::check_named_budget;
 use crate::tools::requests::hypothesis::*;
 use p2a_core::stats::{
     Alternative, CmhAlternative, PValueAdjustMethod, PoissonAlternative, mcnemar_test, mood_test,
@@ -143,22 +144,76 @@ impl AnalyticsServer {
 
         let correct = request.correct.unwrap_or(true);
 
+        // Size the table before any work: both counts include null as a level, as the core's
+        // `unique()` does. A missing column is left to the core to report.
+        let limits = crate::tools::limits::current();
+        let df = dataset.df();
+        let levels = |name: &str| df.column(name).ok().and_then(|c| c.n_unique().ok());
+        let mut cells: Option<usize> = None;
+        if let (Some(r), Some(c)) = (levels(&request.row_var), levels(&request.col_var)) {
+            let Some(n) = r.checked_mul(c) else {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Chi-squared test of independence refused: `{}` has {r} levels and `{}` has \
+                     {c}, a table that is too large to count.",
+                    request.row_var, request.col_var
+                ))]));
+            };
+            if let Err(msg) = check_named_budget(
+                "hypothesis_chisq_independence",
+                "table_cells",
+                n as u64,
+                limits.table_cells,
+            ) {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Chi-squared test of independence refused: `{}` has {r} levels and `{}` has \
+                     {c}, a table of {n} cells. {msg} Use columns with fewer distinct values.",
+                    request.row_var, request.col_var
+                ))]));
+            }
+            cells = Some(n);
+        }
+
         match run_chisq_independence(dataset, &request.row_var, &request.col_var, correct) {
             Ok(result) => {
-                let json_output = serde_json::json!({
-                    "test": result.test_name,
-                    "statistic": result.statistic,
-                    "df": result.df,
-                    "p_value": result.p_value,
-                    "significance": result.significance.to_string(),
-                    "n_rows": result.n_rows,
-                    "n_cols": result.n_cols,
-                    "observed": result.observed,
-                    "expected": result.expected,
-                    "residuals": result.residuals,
-                    "std_residuals": result.std_residuals,
-                    "yates_correction": result.yates_correction,
-                });
+                // The four per-cell arrays take about 4 x 32 bytes of JSON per cell; leave them
+                // out when they could not fit the response budget.
+                let n_cells = cells.unwrap_or(result.observed.len());
+                let fits = limits
+                    .response_bytes
+                    .is_none_or(|cap| (n_cells as u64).saturating_mul(128) <= cap);
+                let mut out = serde_json::Map::new();
+                out.insert("test".into(), serde_json::json!(result.test_name));
+                out.insert("statistic".into(), serde_json::json!(result.statistic));
+                out.insert("df".into(), serde_json::json!(result.df));
+                out.insert("p_value".into(), serde_json::json!(result.p_value));
+                out.insert(
+                    "significance".into(),
+                    serde_json::json!(result.significance.to_string()),
+                );
+                out.insert("n_rows".into(), serde_json::json!(result.n_rows));
+                out.insert("n_cols".into(), serde_json::json!(result.n_cols));
+                if fits {
+                    out.insert("observed".into(), serde_json::json!(result.observed));
+                    out.insert("expected".into(), serde_json::json!(result.expected));
+                    out.insert("residuals".into(), serde_json::json!(result.residuals));
+                    out.insert(
+                        "std_residuals".into(),
+                        serde_json::json!(result.std_residuals),
+                    );
+                } else {
+                    out.insert(
+                        "per_cell_arrays".into(),
+                        serde_json::json!(format!(
+                            "omitted: a table of {n_cells} cells is too large to return; the \
+                             statistic, df and p-value are complete"
+                        )),
+                    );
+                }
+                out.insert(
+                    "yates_correction".into(),
+                    serde_json::json!(result.yates_correction),
+                );
+                let json_output = serde_json::Value::Object(out);
                 Ok(CallToolResult::success(vec![Content::text(
                     serde_json::to_string_pretty(&json_output).unwrap(),
                 )]))
@@ -1612,5 +1667,79 @@ impl AnalyticsServer {
                 e
             ))])),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tools::common::test_support::{server_with, text};
+    use crate::tools::limits::{self, Limits};
+    use p2a_core::polars::prelude::*;
+
+    /// `r{i}`, `c{i}`: an n x n table
+    fn pair_ids(n: usize) -> DataFrame {
+        df!(
+            "id1" => (0..n).map(|i| format!("r{i}")).collect::<Vec<_>>(),
+            "id2" => (0..n).map(|i| format!("c{i}")).collect::<Vec<_>>()
+        )
+        .unwrap()
+    }
+
+    fn chisq_req(row: &str, col: &str) -> ChiSquaredIndependenceRequest {
+        ChiSquaredIndependenceRequest {
+            dataset: "d".into(),
+            row_var: row.into(),
+            col_var: col.into(),
+            correct: None,
+        }
+    }
+
+    #[test]
+    fn chisq_independence_refuses_table_above_table_cells() {
+        // 1001 x 1001 = 1,002,001 > 1,000,000 cells
+        let (rt, server) = server_with(vec![("d", pair_ids(1001))]);
+        let r = limits::with_limits(Limits::hosted(), || {
+            rt.block_on(server.hypothesis_chisq_independence(Parameters(chisq_req("id1", "id2"))))
+        })
+        .unwrap();
+        assert_eq!(r.is_error, Some(true));
+        let t = text(&r);
+        assert!(t.contains("1002001") && t.contains("table_cells"), "{t}");
+    }
+
+    #[test]
+    fn chisq_independence_omits_per_cell_arrays_above_response_budget() {
+        // 400 x 400 = 160,000 cells: within table_cells, but 4 arrays x 32 bytes x 160,000 > 16 MiB
+        let (rt, server) = server_with(vec![("d", pair_ids(400))]);
+        let r = limits::with_limits(Limits::hosted(), || {
+            rt.block_on(server.hypothesis_chisq_independence(Parameters(chisq_req("id1", "id2"))))
+        })
+        .unwrap();
+        assert_ne!(r.is_error, Some(true), "{}", text(&r));
+        let t = text(&r);
+        assert!(
+            t.contains("\"statistic\"") && t.contains("omitted") && !t.contains("\"expected\""),
+            "{}",
+            t.chars().take(400).collect::<String>()
+        );
+    }
+
+    #[test]
+    fn chisq_independence_small_table_matches_r_under_hosted_limits() {
+        // same 40 rows as the core test; pre-fix this panicked inside the runtime (STAT-10)
+        let mut h: Vec<&str> = Vec::new();
+        for (lvl, k) in [("x", 7), ("y", 5), ("z", 8), ("x", 4), ("y", 9), ("z", 7)] {
+            h.extend(std::iter::repeat_n(lvl, k));
+        }
+        let g: Vec<&str> = (0..40).map(|i| if i < 20 { "a" } else { "b" }).collect();
+        let (rt, server) = server_with(vec![("d", df!("g" => g, "h" => h).unwrap())]);
+        let r = limits::with_limits(Limits::hosted(), || {
+            rt.block_on(server.hypothesis_chisq_independence(Parameters(chisq_req("g", "h"))))
+        })
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&text(&r)).unwrap();
+        assert!((v["statistic"].as_f64().unwrap() - 2.0277056277056276).abs() < 1e-10);
+        assert!(v["expected"].is_array());
     }
 }
