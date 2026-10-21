@@ -5,7 +5,13 @@ use surrealdb::RecordId;
 use surrealdb::sql::Datetime;
 
 use super::connection::{DbConnection, DbError};
-use super::models::{DbSession, Settings};
+use super::models::{Conversation, DbSession, Settings};
+
+/// One row of `SELECT count() ... GROUP ALL`.
+#[derive(serde::Deserialize)]
+struct CountRow {
+    count: i64,
+}
 
 impl DbConnection {
     // ==================== Session Operations ====================
@@ -120,9 +126,14 @@ impl DbConnection {
         // Get all conversations for this session
         let conversations = self.list_conversations(id).await?;
 
-        // Delete each conversation (which also deletes messages and tool calls)
+        // Delete each conversation (which also deletes messages and tool
+        // calls). One that is already gone was deleted concurrently (the
+        // removal listener and DELETE /api/sessions/{id} can both run).
         for conv in conversations {
-            self.delete_conversation(&conv.id_string()).await?;
+            match self.delete_conversation(&conv.id_string()).await {
+                Ok(()) | Err(DbError::NotFound(_)) => {}
+                Err(e) => return Err(e),
+            }
         }
 
         // Delete settings
@@ -137,8 +148,175 @@ impl DbConnection {
 
         // Delete session
         let _: Option<DbSession> = self.db().delete(("sessions", id)).await?;
+        self.forget_session_bytes(id);
 
         Ok(())
+    }
+
+    /// Ids of the session rows whose `last_accessed` is before `cutoff`.
+    pub async fn session_ids_last_accessed_before(
+        &self,
+        cutoff: DateTime<Utc>,
+    ) -> Result<Vec<String>, DbError> {
+        let mut result = self
+            .db()
+            .query("SELECT * FROM sessions WHERE last_accessed < $cutoff")
+            .bind(("cutoff", Datetime::from(cutoff)))
+            .await?;
+        let rows: Vec<DbSession> = result.take(0)?;
+        Ok(rows.iter().map(DbSession::id_string).collect())
+    }
+
+    /// Number of conversations the session holds.
+    pub async fn count_conversations(&self, session_id: &str) -> Result<usize, DbError> {
+        let mut result = self
+            .db()
+            .query("SELECT count() FROM conversations WHERE session_id = $session_id GROUP ALL")
+            .bind(("session_id", session_id.to_string()))
+            .await?;
+        let count: Option<CountRow> = result.take(0)?;
+        Ok(count.map_or(0, |c| usize::try_from(c.count).unwrap_or(0)))
+    }
+
+    /// Bytes the session's conversations store: titles, message contents
+    /// and tool-call arguments, results and errors, as UTF-8 bytes (summed
+    /// here; SurrealQL's `string::len` counts characters). Seeds the
+    /// `session_db_bytes` counter.
+    pub async fn session_stored_bytes(&self, session_id: &str) -> Result<u64, DbError> {
+        #[derive(serde::Deserialize)]
+        struct Content {
+            content: String,
+        }
+        #[derive(serde::Deserialize)]
+        struct ToolText {
+            arguments: String,
+            result: Option<String>,
+            error: Option<String>,
+        }
+        let len = |s: &str| s.len() as u64;
+
+        let conversations = self.list_conversations(session_id).await?;
+        let ids: Vec<String> = conversations.iter().map(|c| c.id_string()).collect();
+        let mut total = conversations
+            .iter()
+            .map(|c| len(&c.title))
+            .fold(0u64, u64::saturating_add);
+        if ids.is_empty() {
+            return Ok(total);
+        }
+        let mut result = self
+            .db()
+            .query("SELECT content FROM messages WHERE conversation_id INSIDE $ids")
+            .query(
+                "SELECT arguments, result, error FROM tool_calls WHERE conversation_id INSIDE $ids",
+            )
+            .bind(("ids", ids))
+            .await?;
+        let contents: Vec<Content> = result.take(0)?;
+        let tool_texts: Vec<ToolText> = result.take(1)?;
+        total = contents
+            .iter()
+            .map(|m| len(&m.content))
+            .fold(total, u64::saturating_add);
+        total = tool_texts
+            .iter()
+            .map(|t| {
+                len(&t.arguments)
+                    .saturating_add(t.result.as_deref().map_or(0, len))
+                    .saturating_add(t.error.as_deref().map_or(0, len))
+            })
+            .fold(total, u64::saturating_add);
+        Ok(total)
+    }
+
+    /// Delete the rows that no session or conversation owns any more:
+    /// conversations, settings and dataset metadata whose session row is
+    /// missing, and messages and tool calls whose conversation is missing.
+    /// Rows written after the call started are left alone, so a session or
+    /// conversation being created concurrently cannot lose its first rows.
+    /// Returns the number of rows deleted.
+    pub async fn delete_orphans(&self) -> Result<usize, DbError> {
+        #[derive(serde::Deserialize)]
+        struct SessionRef {
+            session_id: String,
+        }
+
+        let started = Datetime::from(Utc::now());
+        let session_ids: std::collections::HashSet<String> = {
+            let mut result = self.db().query("SELECT * FROM sessions").await?;
+            let rows: Vec<DbSession> = result.take(0)?;
+            rows.iter().map(DbSession::id_string).collect()
+        };
+        let mut deleted = 0usize;
+
+        // Conversations (with their messages and tool calls).
+        let mut result = self
+            .db()
+            .query("SELECT * FROM conversations WHERE created_at < $started")
+            .bind(("started", started.clone()))
+            .await?;
+        let conversations: Vec<Conversation> = result.take(0)?;
+        for conv in conversations
+            .iter()
+            .filter(|c| !session_ids.contains(&c.session_id))
+        {
+            match self.delete_conversation(&conv.id_string()).await {
+                Ok(()) => deleted += 1,
+                Err(DbError::NotFound(_)) => {}
+                Err(e) => return Err(e),
+            }
+            self.forget_session_bytes(&conv.session_id);
+        }
+
+        let known: Vec<String> = session_ids.into_iter().collect();
+        // Settings and dataset metadata of sessions without a row.
+        for (table, stamp) in [("settings", "updated_at"), ("dataset_meta", "loaded_at")] {
+            let mut result = self
+                .db()
+                .query(format!(
+                    "SELECT session_id FROM {table} \
+                     WHERE session_id NOTINSIDE $known AND {stamp} < $started"
+                ))
+                .query(format!(
+                    "DELETE FROM {table} WHERE session_id NOTINSIDE $known AND {stamp} < $started"
+                ))
+                .bind(("known", known.clone()))
+                .bind(("started", started.clone()))
+                .await?
+                .check()?;
+            let rows: Vec<SessionRef> = result.take(0)?;
+            deleted += rows.len();
+        }
+
+        // Messages and tool calls of conversations that no longer exist.
+        let conversation_ids: Vec<String> = {
+            let mut result = self.db().query("SELECT * FROM conversations").await?;
+            let rows: Vec<Conversation> = result.take(0)?;
+            rows.iter().map(|c| c.id_string()).collect()
+        };
+        for (table, stamp) in [("messages", "created_at"), ("tool_calls", "started_at")] {
+            let mut result = self
+                .db()
+                .query(format!(
+                    "SELECT count() FROM {table} \
+                     WHERE conversation_id NOTINSIDE $known AND {stamp} < $started GROUP ALL"
+                ))
+                .query(format!(
+                    "DELETE FROM {table} \
+                     WHERE conversation_id NOTINSIDE $known AND {stamp} < $started"
+                ))
+                .bind(("known", conversation_ids.clone()))
+                .bind(("started", started.clone()))
+                .await?
+                .check()?;
+            let count: Option<CountRow> = result.take(0)?;
+            deleted += count.map_or(0, |c| usize::try_from(c.count).unwrap_or(0));
+        }
+
+        if deleted > 0 {
+            tracing::info!(deleted, "Deleted orphaned conversation-store rows");
+        }
+        Ok(deleted)
     }
 
     /// Clean up sessions older than the given number of days
@@ -199,6 +377,14 @@ impl DbConnection {
 
     /// Update settings for a session
     pub async fn update_settings(&self, settings: &Settings) -> Result<Settings, DbError> {
+        for (what, value) in [
+            ("provider", Some(&settings.provider)),
+            ("model", Some(&settings.model)),
+            ("base_url", settings.base_url.as_ref()),
+            ("system_prompt", settings.system_prompt.as_ref()),
+        ] {
+            self.check_message_bytes(what, "setting", value.map_or(0, String::len))?;
+        }
         let mut updated_settings = settings.clone();
         updated_settings.updated_at = Datetime::from(Utc::now());
         let session_id = settings.session_id.clone();
@@ -221,6 +407,9 @@ impl DbConnection {
         temperature: Option<f64>,
         max_tokens: Option<i32>,
     ) -> Result<Settings, DbError> {
+        for (what, value) in [("provider", provider), ("model", model)] {
+            self.check_message_bytes(what, "setting", value.map_or(0, str::len))?;
+        }
         // Build update SET clauses dynamically
         let mut set_parts = vec!["updated_at = time::now()".to_string()];
 

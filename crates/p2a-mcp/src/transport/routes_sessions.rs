@@ -135,11 +135,30 @@ pub(crate) async fn get_session(
     }
 }
 
-/// Delete a session.
+/// Delete a session. With persistence, its rows are deleted before the
+/// answer (a stored session that is no longer live is deleted too).
 pub(crate) async fn delete_session(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
+    #[cfg(feature = "db")]
+    if let Some(pm) = &state.persistent_manager {
+        use crate::persistent_session::PersistentSessionError;
+        return match pm.delete_session(&id).await {
+            Ok(()) => (StatusCode::NO_CONTENT, Json(ApiResponse::success(()))),
+            Err(PersistentSessionError::Session(SessionError::NotFound)) => (
+                StatusCode::NOT_FOUND,
+                Json(ApiResponse::error("Session not found")),
+            ),
+            Err(e) => {
+                tracing::warn!(session_id = %id, error = %e, "Failed to delete session");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ApiResponse::error("internal error")),
+                )
+            }
+        };
+    }
     match state.session_manager.delete_session(&id).await {
         Ok(()) => (StatusCode::NO_CONTENT, Json(ApiResponse::success(()))),
         Err(SessionError::NotFound) => (

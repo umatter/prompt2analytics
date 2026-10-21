@@ -89,7 +89,6 @@ fn pm(s: &AppState) -> &Arc<PersistentSessionManager> {
 }
 
 /// Poll `f` until it returns true, up to 250 x 20 ms. No timing assertion.
-#[allow(dead_code)]
 async fn wait_until<F, Fut>(f: F) -> bool
 where
     F: Fn() -> Fut,
@@ -386,5 +385,216 @@ async fn settings_require_a_live_session() {
         .await
         .0,
         StatusCode::NOT_FOUND
+    );
+}
+
+// =============================================================================
+// Task 3: bounded persistence and deletion when a session ends (MCP-7)
+// =============================================================================
+
+/// A message to a conversation that does not exist is refused on the route
+/// and on the store call the chat stream uses; nothing is stored.
+#[tokio::test]
+async fn messages_to_unknown_conversations_are_refused() {
+    let (r, state) = app(ServerConfig::default()).await;
+    let sid = new_session(&r).await;
+    let before = pm(&state).db().stats().await.unwrap().message_count;
+    let (st, body) = call(
+        &r,
+        "POST",
+        "/api/conversations/does-not-exist-123/messages",
+        Some(&sid),
+        Some(json!({"role": "user", "content": "x"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(pm(&state).db().stats().await.unwrap().message_count, before);
+    // The chat-stream path writes through the store directly.
+    assert!(matches!(
+        pm(&state)
+            .db()
+            .add_message("does-not-exist-123", "assistant", "")
+            .await,
+        Err(p2a_mcp::db::DbError::NotFound(_))
+    ));
+    assert_eq!(pm(&state).db().stats().await.unwrap().message_count, before);
+}
+
+/// Message size, messages per conversation and conversations per session
+/// are bounded by the resolved limits.
+#[tokio::test]
+async fn message_size_and_counts_are_bounded() {
+    let mut cfg = ServerConfig::default();
+    cfg.limits.overrides = vec![
+        "message_bytes=1024".into(),
+        "messages_per_conversation=2".into(),
+        "conversations_per_session=1".into(),
+    ];
+    let (r, _state) = app(cfg).await;
+    let sid = new_session(&r).await;
+    let c = new_conversation(&r, &sid, "t").await;
+
+    let (st, body) = add_msg(&r, &sid, &c, &"a".repeat(1025)).await;
+    assert_eq!(st, StatusCode::PAYLOAD_TOO_LARGE, "{body}");
+    assert_eq!(body["code"], "payload_too_large");
+    assert!(body["error"].as_str().unwrap().contains("1024"), "{body}");
+    assert_eq!(
+        add_msg(&r, &sid, &c, &"a".repeat(1024)).await.0,
+        StatusCode::CREATED
+    );
+    assert_eq!(add_msg(&r, &sid, &c, "second").await.0, StatusCode::CREATED);
+    let (st, body) = add_msg(&r, &sid, &c, "third").await;
+    assert_eq!(
+        (st, body["code"].as_str()),
+        (StatusCode::UNPROCESSABLE_ENTITY, Some("quota_exceeded")),
+        "{body}"
+    );
+    let (st, body) = call(
+        &r,
+        "POST",
+        "/api/conversations",
+        Some(&sid),
+        Some(json!({"session_id": sid, "title": "another"})),
+    )
+    .await;
+    assert_eq!(
+        (st, body["code"].as_str()),
+        (StatusCode::UNPROCESSABLE_ENTITY, Some("quota_exceeded")),
+        "{body}"
+    );
+}
+
+/// A session removed for expiry loses its rows (through the removal
+/// notification), not only its live state.
+#[tokio::test]
+async fn expired_sessions_lose_their_rows() {
+    let mut cfg = ServerConfig::default();
+    cfg.session.ttl_minutes = 1;
+    let (r, state) = app(cfg).await;
+    let sid = new_session(&r).await;
+    let c = new_conversation(&r, &sid, "t").await;
+    assert_eq!(add_msg(&r, &sid, &c, "hello").await.0, StatusCode::CREATED);
+    assert_eq!(
+        call(
+            &r,
+            "GET",
+            &format!("/api/sessions/{sid}/settings"),
+            Some(&sid),
+            None
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+
+    let live = state.session_manager.get_session(&sid).await.unwrap();
+    *live.last_accessed.write().await = chrono::Utc::now() - chrono::Duration::minutes(5);
+    assert_eq!(state.session_manager.cleanup_expired().await, 1);
+    let db = pm(&state).db().clone();
+    assert!(
+        wait_until(|| {
+            let (db, sid, c) = (db.clone(), sid.clone(), c.clone());
+            async move {
+                db.get_session(&sid).await.unwrap().is_none()
+                    && db.get_conversation(&c).await.is_err()
+            }
+        })
+        .await,
+        "rows of the expired session were not deleted"
+    );
+    assert!(db.get_messages(&c).await.unwrap().is_empty());
+}
+
+/// DELETE /api/sessions/{id} deletes the session's rows before it answers.
+#[tokio::test]
+async fn deleting_a_session_deletes_its_rows() {
+    let (r, state) = app(ServerConfig::default()).await;
+    let sid = new_session(&r).await;
+    let c = new_conversation(&r, &sid, "t").await;
+    assert_eq!(add_msg(&r, &sid, &c, "hello").await.0, StatusCode::CREATED);
+
+    assert_eq!(
+        call(
+            &r,
+            "DELETE",
+            &format!("/api/sessions/{sid}"),
+            Some(&sid),
+            None
+        )
+        .await
+        .0,
+        StatusCode::NO_CONTENT
+    );
+    // Synchronous: no wait.
+    assert!(pm(&state).db().get_session(&sid).await.unwrap().is_none());
+    assert!(pm(&state).db().get_conversation(&c).await.is_err());
+    assert_eq!(
+        call(
+            &r,
+            "POST",
+            "/api/conversations",
+            Some(&sid),
+            Some(json!({"session_id": sid, "title": "x"}))
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+}
+
+/// The bytes one session's conversation history holds are capped by
+/// session_db_bytes; the budget is per session, and deleting a conversation
+/// frees its bytes.
+#[tokio::test]
+async fn session_db_bytes_caps_a_sessions_history() {
+    let mut cfg = ServerConfig::default();
+    cfg.limits.overrides = vec!["session_db_bytes=2048".into()];
+    let (r, _state) = app(cfg).await;
+
+    let s1 = new_session(&r).await;
+    let c1 = new_conversation(&r, &s1, "t").await; // 1 byte
+    assert_eq!(
+        add_msg(&r, &s1, &c1, &"a".repeat(1500)).await.0,
+        StatusCode::CREATED
+    );
+    // 1 + 1500 + 600 > 2048
+    let (st, body) = add_msg(&r, &s1, &c1, &"b".repeat(600)).await;
+    assert_eq!(
+        (st, body["code"].as_str()),
+        (StatusCode::UNPROCESSABLE_ENTITY, Some("quota_exceeded")),
+        "{body}"
+    );
+    assert!(body["error"].as_str().unwrap().contains("2048"), "{body}");
+    // Exactly 2048.
+    assert_eq!(
+        add_msg(&r, &s1, &c1, &"c".repeat(547)).await.0,
+        StatusCode::CREATED
+    );
+
+    // The budget is per session.
+    let s2 = new_session(&r).await;
+    let c2 = new_conversation(&r, &s2, "t").await;
+    assert_eq!(
+        add_msg(&r, &s2, &c2, &"d".repeat(1500)).await.0,
+        StatusCode::CREATED
+    );
+
+    assert_eq!(
+        call(
+            &r,
+            "DELETE",
+            &format!("/api/conversations/{c1}"),
+            Some(&s1),
+            None
+        )
+        .await
+        .0,
+        StatusCode::NO_CONTENT
+    );
+    // Deleting the conversation freed its bytes.
+    let c3 = new_conversation(&r, &s1, "t").await;
+    assert_eq!(
+        add_msg(&r, &s1, &c3, &"e".repeat(1500)).await.0,
+        StatusCode::CREATED
     );
 }

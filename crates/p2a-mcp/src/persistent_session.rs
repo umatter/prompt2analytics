@@ -134,16 +134,20 @@ impl PersistentSessionManager {
         Ok(DatasetStore::from_session(&session))
     }
 
-    /// End a session: remove it from the live registry and delete all of its
-    /// rows. `NotFound` only when it was neither live nor stored.
+    /// End a session: delete all of its rows and remove it from the live
+    /// registry. `NotFound` only when it was neither live nor stored.
+    ///
+    /// The rows go first, so this call's delete never runs concurrently
+    /// with the one the removal listener starts when the live session goes;
+    /// that second delete also catches a row written in between.
     pub async fn delete_session(&self, id: &str) -> Result<(), PersistentSessionError> {
+        let was_stored = self.db.get_session(id).await?.is_some();
+        self.db.delete_session(id).await?;
         let was_live = match self.sessions.delete_session(id).await {
             Ok(()) => true,
             Err(SessionError::NotFound) => false,
             Err(e) => return Err(e.into()),
         };
-        let was_stored = self.db.get_session(id).await?.is_some();
-        self.db.delete_session(id).await?;
         if !was_live && !was_stored {
             return Err(SessionError::NotFound.into());
         }
@@ -355,6 +359,113 @@ impl PersistentSessionManager {
         &self.db
     }
 
+    // ==================== Cleanup ====================
+
+    /// Bring the store in line with the live registry:
+    ///
+    /// 1. write each live session's own `last_accessed` to its row (creating
+    ///    a missing row);
+    /// 2. delete the rows of every session that is not live and whose row was
+    ///    last accessed longer ago than the TTL (the whole-minute rule the
+    ///    live table uses);
+    /// 3. delete orphaned rows (see `DbConnection::delete_orphans`).
+    pub async fn sweep(&self) -> Result<SweepStats, PersistentSessionError> {
+        let mut stats = SweepStats::default();
+        for (id, at) in self.sessions.live_last_accessed().await {
+            self.db.set_session_last_accessed(&id, at).await?;
+            stats.refreshed += 1;
+        }
+
+        // A row is past the TTL once more whole minutes than the TTL have
+        // elapsed (`is_past_ttl`), i.e. at least ttl + 1 minutes. A TTL too
+        // large for a date never expires a row.
+        let cutoff = i64::try_from(self.sessions.ttl_minutes())
+            .ok()
+            .and_then(|ttl| ttl.checked_add(1))
+            .and_then(chrono::Duration::try_minutes)
+            .and_then(|ttl| chrono::Utc::now().checked_sub_signed(ttl));
+        if let Some(cutoff) = cutoff {
+            let live: std::collections::HashSet<SessionId> = self
+                .sessions
+                .live_last_accessed()
+                .await
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect();
+            for id in self.db.session_ids_last_accessed_before(cutoff).await? {
+                if live.contains(&id) {
+                    continue;
+                }
+                self.db.delete_session(&id).await?;
+                stats.expired_deleted += 1;
+            }
+        }
+
+        stats.orphans_deleted = self.db.delete_orphans().await?;
+        if stats.expired_deleted > 0 || stats.orphans_deleted > 0 {
+            tracing::info!(
+                refreshed = stats.refreshed,
+                expired_deleted = stats.expired_deleted,
+                orphans_deleted = stats.orphans_deleted,
+                "Swept the conversation store"
+            );
+        }
+        Ok(stats)
+    }
+
+    /// Start the two tasks that keep the store in line with the live
+    /// registry. Both hold only a weak reference and stop once the manager
+    /// is dropped.
+    ///
+    /// - A listener on [`SessionManager::subscribe_removals`] deletes the
+    ///   rows of every session that leaves the registry (deleted, expired,
+    ///   evicted). When it falls behind it runs a [`sweep`](Self::sweep).
+    /// - A timer runs a sweep at start and then every 30 s per TTL minute,
+    ///   clamped to 60 s ..= 600 s.
+    pub fn start_background_tasks(self: &Arc<Self>) {
+        use tokio::sync::broadcast::error::RecvError;
+
+        let mut removals = self.sessions.subscribe_removals();
+        let weak = Arc::downgrade(self);
+        tokio::spawn(async move {
+            loop {
+                let event = removals.recv().await;
+                let Some(pm) = weak.upgrade() else { break };
+                match event {
+                    Ok(id) => {
+                        if let Err(e) = pm.db.delete_session(&id).await {
+                            tracing::warn!(session_id = %id, error = %e, "Failed to delete the rows of a removed session");
+                        }
+                    }
+                    Err(RecvError::Lagged(missed)) => {
+                        tracing::warn!(
+                            missed,
+                            "Session removal listener fell behind; sweeping the store"
+                        );
+                        if let Err(e) = pm.sweep().await {
+                            tracing::warn!(error = %e, "Conversation-store sweep failed");
+                        }
+                    }
+                    Err(RecvError::Closed) => break,
+                }
+            }
+        });
+
+        let weak = Arc::downgrade(self);
+        let period = sweep_period(self.sessions.ttl_minutes());
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(period);
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tick.tick().await;
+                let Some(pm) = weak.upgrade() else { break };
+                if let Err(e) = pm.sweep().await {
+                    tracing::warn!(error = %e, "Conversation-store sweep failed");
+                }
+            }
+        });
+    }
+
     // ==================== Tool Call Operations ====================
 
     /// Get tool calls for a conversation.
@@ -488,6 +599,23 @@ const MESSAGE_NOT_FOUND: &str = "Message not found";
 const RELOAD_NO_SOURCE: &str = "no source path stored";
 const RELOAD_OUTSIDE_JAIL: &str = "path is not inside this session's data directory";
 const RELOAD_LOAD_FAILED: &str = "the file could not be loaded";
+
+/// What one [`PersistentSessionManager::sweep`] did.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct SweepStats {
+    /// Live sessions whose row got their `last_accessed`.
+    pub refreshed: usize,
+    /// Sessions past the TTL, not live, whose rows were deleted.
+    pub expired_deleted: usize,
+    /// Orphaned rows deleted.
+    pub orphans_deleted: usize,
+}
+
+/// How often the background sweep runs: 30 s per TTL minute, clamped to
+/// 60 s ..= 600 s.
+fn sweep_period(ttl_minutes: u64) -> std::time::Duration {
+    std::time::Duration::from_secs(ttl_minutes.saturating_mul(30).clamp(60, 600))
+}
 
 /// Result of reloading session datasets.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
@@ -721,6 +849,159 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(patched.model, "m");
+    }
+
+    /// Poll `f` until it returns true, up to 250 x 20 ms. No timing assertion.
+    async fn wait_until<F, Fut>(f: F) -> bool
+    where
+        F: Fn() -> Fut,
+        Fut: std::future::Future<Output = bool>,
+    {
+        for _ in 0..250 {
+            if f().await {
+                return true;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        false
+    }
+
+    /// A stored session row (with one conversation) that is not live.
+    async fn stored_only(
+        db: &DbConnection,
+        last_accessed_ago: chrono::Duration,
+    ) -> (String, String) {
+        let sid = uuid::Uuid::new_v4().to_string();
+        db.set_session_last_accessed(&sid, chrono::Utc::now() - last_accessed_ago)
+            .await
+            .unwrap();
+        let conv = db.create_conversation(&sid, "stored").await.unwrap();
+        (sid, conv.id_string())
+    }
+
+    #[tokio::test]
+    async fn sweep_deletes_stale_non_live_rows() {
+        let pm = manager().await;
+        let (stale, stale_conv) = stored_only(pm.db(), chrono::Duration::hours(2)).await;
+        let (recent, recent_conv) = stored_only(pm.db(), chrono::Duration::minutes(5)).await;
+
+        let stats = pm.sweep().await.unwrap();
+        assert_eq!(stats.expired_deleted, 1);
+        assert!(pm.db().get_session(&stale).await.unwrap().is_none());
+        assert!(pm.db().get_conversation(&stale_conv).await.is_err());
+        // Within the TTL: kept, still adoptable after a restart.
+        assert!(pm.db().get_session(&recent).await.unwrap().is_some());
+        assert!(pm.db().get_conversation(&recent_conv).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn sweep_keeps_and_refreshes_live_sessions() {
+        let pm = manager().await;
+        let sid = pm.create_session(None).await.unwrap();
+        let conv = pm.create_conversation(&sid, "live").await.unwrap();
+        pm.db()
+            .set_session_last_accessed(&sid, chrono::Utc::now() - chrono::Duration::hours(2))
+            .await
+            .unwrap();
+
+        let stats = pm.sweep().await.unwrap();
+        assert_eq!((stats.refreshed, stats.expired_deleted), (1, 0));
+        let row = pm.db().get_session(&sid).await.unwrap().expect("row kept");
+        let live = *pm
+            .sessions()
+            .get_session(&sid)
+            .await
+            .unwrap()
+            .last_accessed
+            .read()
+            .await;
+        let drift = live.signed_duration_since(row.last_accessed_chrono());
+        assert!(drift.num_seconds().abs() < 1, "{drift}");
+        assert!(pm.db().get_conversation(&conv.id_string()).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn sweep_removes_orphans() {
+        let pm = manager().await;
+        let db = pm.db();
+        // A message whose conversation does not exist.
+        let ghost = Message::user("ghost".into(), "orphan".into());
+        let ghost_id = ghost.id_string();
+        let _: Option<Message> = db
+            .db()
+            .create(ghost.id.clone())
+            .content(ghost)
+            .await
+            .unwrap();
+        // Settings and a conversation of a session without a row.
+        db.get_or_create_settings("no-row-session").await.unwrap();
+        let orphan_conv = db.create_conversation("no-row-session", "t").await.unwrap();
+        db.add_message(&orphan_conv.id_string(), "user", "x")
+            .await
+            .unwrap();
+        // A live session's rows stay.
+        let sid = pm.create_session(None).await.unwrap();
+        let conv = pm.create_conversation(&sid, "kept").await.unwrap();
+        pm.add_message(&conv.id_string(), "user", "kept")
+            .await
+            .unwrap();
+        pm.get_settings(&sid).await.unwrap();
+
+        let stats = pm.sweep().await.unwrap();
+        assert!(stats.orphans_deleted >= 3, "{stats:?}");
+        assert!(matches!(
+            db.get_message(&ghost_id).await,
+            Err(DbError::NotFound(_))
+        ));
+        let row: Option<Settings> = db
+            .db()
+            .select(("settings", "no-row-session"))
+            .await
+            .unwrap();
+        assert!(row.is_none());
+        assert!(db.get_conversation(&orphan_conv.id_string()).await.is_err());
+        assert!(
+            db.get_messages(&orphan_conv.id_string())
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(db.get_messages(&conv.id_string()).await.unwrap().len(), 1);
+        let row: Option<Settings> = db.db().select(("settings", sid.as_str())).await.unwrap();
+        assert!(row.is_some());
+        // A second sweep finds nothing left to do.
+        assert_eq!(pm.sweep().await.unwrap().orphans_deleted, 0);
+    }
+
+    #[tokio::test]
+    async fn removal_notification_deletes_rows() {
+        let pm = Arc::new(manager().await);
+        pm.start_background_tasks();
+        let sid = pm.create_session(None).await.unwrap();
+        let conv = pm.create_conversation(&sid, "gone").await.unwrap();
+        pm.get_settings(&sid).await.unwrap();
+
+        pm.sessions().delete_session(&sid).await.unwrap();
+        let (db, c) = (pm.db().clone(), conv.id_string());
+        assert!(
+            wait_until(|| {
+                let (db, sid, c) = (db.clone(), sid.clone(), c.clone());
+                async move {
+                    db.get_session(&sid).await.unwrap().is_none()
+                        && db.get_conversation(&c).await.is_err()
+                }
+            })
+            .await,
+            "the removed session's rows were not deleted"
+        );
+    }
+
+    #[test]
+    fn sweep_period_follows_the_ttl() {
+        assert_eq!(sweep_period(1).as_secs(), 60);
+        assert_eq!(sweep_period(10).as_secs(), 300);
+        assert_eq!(sweep_period(60).as_secs(), 600);
+        assert_eq!(sweep_period(u64::MAX).as_secs(), 600);
     }
 
     #[tokio::test]

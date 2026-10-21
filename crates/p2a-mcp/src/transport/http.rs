@@ -167,8 +167,10 @@ fn persistence_limits(
     }
 }
 
-/// Create the persistent session manager over the shared live registry, or
-/// `None` (with a log line) when the database cannot be opened.
+/// Create the persistent session manager over the shared live registry and
+/// start its background tasks (row deletion on session removal, the
+/// periodic sweep), or `None` (with a log line) when the database cannot be
+/// opened.
 #[cfg(feature = "db")]
 async fn init_persistence(
     config: &ServerConfig,
@@ -182,7 +184,10 @@ async fn init_persistence(
     {
         Ok(manager) => {
             tracing::info!("Database persistence enabled - conversation routes will be available");
-            Some(Arc::new(manager))
+            let manager = Arc::new(manager);
+            // Delete the rows of removed sessions and sweep stale ones.
+            manager.start_background_tasks();
+            Some(manager)
         }
         Err(e) => {
             tracing::warn!(

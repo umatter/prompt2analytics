@@ -13,12 +13,31 @@ use super::models::{Conversation, ConversationWithMessages, Message, MessageRole
 impl DbConnection {
     // ==================== Conversation Operations ====================
 
-    /// Create a new conversation
+    /// Create a new conversation.
+    ///
+    /// Refused with `MemoryPressure` above the RSS soft limit, `TooLarge`
+    /// for a title longer than `message_bytes`, and `QuotaExceeded` when the
+    /// session already holds `conversations_per_session` conversations or
+    /// the title would pass its `session_db_bytes` budget.
     pub async fn create_conversation(
         &self,
         session_id: &str,
         title: &str,
     ) -> Result<Conversation, DbError> {
+        self.check_memory()?;
+        self.check_message_bytes("title", "title", title.len())?;
+        if let Some(max) = self.limits().conversations_per_session {
+            let n = self.count_conversations(session_id).await?;
+            if n >= max {
+                return Err(DbError::QuotaExceeded(format!(
+                    "this session already has {n} conversations, the most this server keeps; \
+                     delete one first"
+                )));
+            }
+        }
+        self.reserve_session_bytes(session_id, title.len() as u64)
+            .await?;
+
         let conv = Conversation::new(session_id.to_string(), title.to_string());
 
         let created: Option<Conversation> = self.db().create(conv.id.clone()).content(conv).await?;
@@ -59,12 +78,21 @@ impl DbConnection {
         Ok(conversations)
     }
 
-    /// Update a conversation's title
+    /// Update a conversation's title. A title longer than `message_bytes` is
+    /// `TooLarge`; with a `session_db_bytes` budget, the bytes the new title
+    /// adds count against it (`QuotaExceeded` when they would pass it).
     pub async fn update_conversation_title(
         &self,
         id: &str,
         title: &str,
     ) -> Result<Conversation, DbError> {
+        self.check_message_bytes("title", "title", title.len())?;
+        if self.tracks_session_bytes() {
+            let conv = self.get_conversation(id).await?;
+            let added = title.len().saturating_sub(conv.title.len());
+            self.reserve_session_bytes(&conv.session_id, added as u64)
+                .await?;
+        }
         let id_owned = id.to_string();
         let mut result = self
             .db()
@@ -95,8 +123,11 @@ impl DbConnection {
         updated.ok_or_else(|| DbError::NotFound(format!("Conversation not found: {}", id)))
     }
 
-    /// Delete a conversation and all its messages
+    /// Delete a conversation and all its messages. With a `session_db_bytes`
+    /// budget, the session's byte counter is dropped, so its next write
+    /// re-seeds it from what is left.
     pub async fn delete_conversation(&self, id: &str) -> Result<(), DbError> {
+        let owner = self.budget_owner(id).await?;
         let id_owned = id.to_string();
 
         // Delete tool calls first
@@ -113,12 +144,55 @@ impl DbConnection {
 
         // Delete conversation
         let deleted: Option<Conversation> = self.db().delete(("conversations", id)).await?;
+        if let Some(session_id) = owner {
+            self.forget_session_bytes(&session_id);
+        }
 
         if deleted.is_some() {
             Ok(())
         } else {
             Err(DbError::NotFound(format!("Conversation not found: {}", id)))
         }
+    }
+
+    /// The session whose `session_db_bytes` counter a change to conversation
+    /// `id` affects: `None` without the budget or when the conversation does
+    /// not exist.
+    async fn budget_owner(&self, id: &str) -> Result<Option<String>, DbError> {
+        if !self.tracks_session_bytes() {
+            return Ok(None);
+        }
+        match self.get_conversation(id).await {
+            Ok(conv) => Ok(Some(conv.session_id)),
+            Err(DbError::NotFound(_)) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// The conversation a client-posted message of `content_len` bytes goes
+    /// to, after the store's checks: memory, the conversation must exist
+    /// (`NotFound`), `message_bytes` (`TooLarge`), `messages_per_conversation`
+    /// and `session_db_bytes` (`QuotaExceeded`; the bytes are counted).
+    async fn admit_message(
+        &self,
+        conversation_id: &str,
+        content_len: usize,
+    ) -> Result<Conversation, DbError> {
+        self.check_memory()?;
+        let conv = self.get_conversation(conversation_id).await?;
+        self.check_message_bytes("message", "message", content_len)?;
+        if let Some(max) = self.limits().messages_per_conversation {
+            let n = usize::try_from(conv.message_count).unwrap_or(0);
+            if n >= max {
+                return Err(DbError::QuotaExceeded(format!(
+                    "this conversation already has {n} messages, the most this server keeps; \
+                     start a new conversation"
+                )));
+            }
+        }
+        self.reserve_session_bytes(&conv.session_id, content_len as u64)
+            .await?;
+        Ok(conv)
     }
 
     /// Update conversation metadata after adding a message
@@ -165,7 +239,12 @@ impl DbConnection {
 
     // ==================== Message Operations ====================
 
-    /// Add a message to a conversation
+    /// Add a message to a conversation.
+    ///
+    /// The conversation must exist (`NotFound`). Refused with
+    /// `MemoryPressure` above the RSS soft limit, `TooLarge` for content
+    /// longer than `message_bytes`, and `QuotaExceeded` when the conversation
+    /// is full or the content would pass the session's `session_db_bytes`.
     pub async fn add_message(
         &self,
         conversation_id: &str,
@@ -180,6 +259,7 @@ impl DbConnection {
                 return Err(DbError::Query(format!("Invalid message role: {}", role)));
             }
         };
+        self.admit_message(conversation_id, content.len()).await?;
 
         let msg_id = uuid::Uuid::new_v4().to_string();
         let message = Message {
@@ -206,8 +286,11 @@ impl DbConnection {
         created.ok_or_else(|| DbError::Query("Failed to create message".to_string()))
     }
 
-    /// Add a full message object
+    /// Add a full message object, with the checks of
+    /// [`add_message`](Self::add_message).
     pub async fn save_message(&self, message: &Message) -> Result<Message, DbError> {
+        self.admit_message(&message.conversation_id, message.content.len())
+            .await?;
         let created: Option<Message> = self
             .db()
             .create(message.id.clone())
@@ -234,25 +317,34 @@ impl DbConnection {
         Ok(messages)
     }
 
-    /// Update the content of an existing message
+    /// Update the content of an existing message (the server's final
+    /// answer). The content is never refused for size: it is cut at a char
+    /// boundary to `message_bytes` and, with a `session_db_bytes` budget, to
+    /// the bytes the session has left (possibly to the empty string).
     pub async fn update_message_content(
         &self,
         message_id: &str,
         content: &str,
     ) -> Result<Message, DbError> {
+        let mut content = self.truncate_server_text(content);
+        if self.tracks_session_bytes() {
+            let message = self.get_message(message_id).await?;
+            let conv = self.get_conversation(&message.conversation_id).await?;
+            content = self.fit_session_bytes(&conv.session_id, content).await?;
+        }
         let msg_id_owned = message_id.to_string();
         let mut result = self
             .db()
             .query("UPDATE messages SET content = $content WHERE id = $id RETURN AFTER")
             .bind(("id", RecordId::from(("messages", msg_id_owned.as_str()))))
-            .bind(("content", content.to_string()))
+            .bind(("content", content.clone()))
             .await?;
 
         let updated: Option<Message> = result.take(0)?;
 
         if let Some(msg) = &updated {
             // Update conversation metadata with new preview
-            self.update_conversation_after_message(&msg.conversation_id, content)
+            self.update_conversation_after_message(&msg.conversation_id, &content)
                 .await?;
         }
 
@@ -265,8 +357,11 @@ impl DbConnection {
         msg.ok_or_else(|| DbError::NotFound(format!("Message not found: {}", message_id)))
     }
 
-    /// Delete all messages in a conversation
+    /// Delete all messages in a conversation. With a `session_db_bytes`
+    /// budget, the session's byte counter is dropped and re-seeded on its
+    /// next write.
     pub async fn clear_messages(&self, conversation_id: &str) -> Result<u32, DbError> {
+        let owner = self.budget_owner(conversation_id).await?;
         let conv_id_owned = conversation_id.to_string();
 
         // Delete tool calls first
@@ -302,6 +397,9 @@ impl DbConnection {
             .query("UPDATE conversations SET message_count = 0, last_message_preview = NONE, updated_at = time::now() WHERE id = $id")
             .bind(("id", RecordId::from(("conversations", conv_id.as_str()))))
             .await?;
+        if let Some(session_id) = owner {
+            self.forget_session_bytes(&session_id);
+        }
 
         Ok(deleted_count)
     }

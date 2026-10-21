@@ -156,8 +156,12 @@ fn error_with(status: StatusCode, message: impl Into<String>, code: &'static str
         .into_response()
 }
 
+/// Seconds a client should wait before retrying a write refused for memory.
+const MEMORY_PRESSURE_RETRY_AFTER_SECS: &str = "15";
+
 /// The one mapping from store errors to responses: 404 `not_found`, 410
-/// `session_expired`, 503 `capacity` (with `Retry-After`), and 500 `internal`
+/// `session_expired`, 413 `payload_too_large`, 422 `quota_exceeded`, 503
+/// `capacity` and `memory_pressure` (with `Retry-After`), and 500 `internal`
 /// with a generic text for everything else (the details are logged).
 fn error_response(err: PersistentSessionError) -> Response {
     match err {
@@ -180,6 +184,22 @@ fn error_response(err: PersistentSessionError) -> Response {
         PersistentSessionError::Database(DbError::NotFound(message)) => {
             error_with(StatusCode::NOT_FOUND, message, "not_found")
         }
+        PersistentSessionError::Database(DbError::TooLarge(message)) => {
+            error_with(StatusCode::PAYLOAD_TOO_LARGE, message, "payload_too_large")
+        }
+        PersistentSessionError::Database(DbError::QuotaExceeded(message)) => {
+            error_with(StatusCode::UNPROCESSABLE_ENTITY, message, "quota_exceeded")
+        }
+        PersistentSessionError::Database(e @ DbError::MemoryPressure) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [(header::RETRY_AFTER, MEMORY_PRESSURE_RETRY_AFTER_SECS)],
+            Json(ApiResponse::<()>::error_with_code(
+                e.to_string(),
+                "memory_pressure",
+                None,
+            )),
+        )
+            .into_response(),
         other => {
             tracing::warn!(error = %other, "Conversation route failed");
             error_with(
