@@ -22,7 +22,25 @@ use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
 use crate::linalg::design::DesignMatrix;
 use crate::linalg::matrix_ops::safe_inverse;
+use crate::resource;
 use crate::traits::estimator::normal_cdf;
+
+/// Most outcome categories a multinomial logit accepts.
+///
+/// A method-level cap, the analogue of `nnet::multinom`'s `MaxNWts`, active in
+/// every mode: each category adds a block of K parameters, and the Newton step
+/// builds and inverts a dense ((J - 1) K)^2 Hessian, so a continuous column
+/// passed as the outcome would otherwise create one category per observation.
+const MAX_OUTCOME_CATEGORIES: usize = 100;
+
+/// `safe_inverse` holds several m x m copies at once (faer copy, factor, identity, solution,
+/// SVD fallback). Check the working set against the allocation ceiling before building it.
+const DENSE_INVERSE_COPIES: usize = 6;
+
+fn ensure_dense_inverse_fits(m: usize, what: &str) -> EconResult<()> {
+    let cells = resource::checked_len(&[m, m, DENSE_INVERSE_COPIES], what)?;
+    resource::check_alloc::<f64>(cells, what)
+}
 
 /// Result from multinomial logit regression.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -183,6 +201,16 @@ pub fn run_multinom(
             message: "Multinomial logit requires at least 2 categories".to_string(),
         });
     }
+    if j > MAX_OUTCOME_CATEGORIES {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "Outcome column '{y_col}' has {j} distinct values; multinomial logit supports \
+                 at most {MAX_OUTCOME_CATEGORIES} outcome categories (like nnet::multinom's \
+                 MaxNWts limit). Check that '{y_col}' is a categorical outcome, not a \
+                 continuous variable, or recode it into fewer categories."
+            ),
+        });
+    }
 
     // Set reference category
     let ref_cat = reference
@@ -231,6 +259,10 @@ pub fn run_multinom(
     let n_cats = j - 1; // Non-reference categories
     let n_params = n_cats * k;
     let mut beta = vec![0.0; n_params];
+    ensure_dense_inverse_fits(n_params, "multinomial logit Hessian")?;
+
+    // Probabilities for each observation and category, overwritten every iteration
+    let mut probs = resource::try_zeros2(n, j, "multinomial logit probabilities")?;
 
     // Newton-Raphson iteration
     let max_iter = 50;
@@ -239,12 +271,14 @@ pub fn run_multinom(
     let mut iterations = 0;
 
     for iter in 0..max_iter {
+        resource::checkpoint()?;
         iterations = iter + 1;
 
         // Compute probabilities for each observation and category
-        let mut probs = vec![vec![0.0; j]; n];
-
         for i in 0..n {
+            if i % 256 == 0 {
+                resource::checkpoint()?;
+            }
             let mut exp_xb = vec![0.0; j];
             exp_xb[0] = 1.0; // Reference category (beta = 0)
 
@@ -258,18 +292,21 @@ pub fn run_multinom(
 
             let sum_exp: f64 = exp_xb.iter().sum();
             for jj in 0..j {
-                probs[i][jj] = exp_xb[jj] / sum_exp;
+                probs[[i, jj]] = exp_xb[jj] / sum_exp;
             }
         }
 
         // Compute gradient and Hessian
         let mut gradient = vec![0.0; n_params];
-        let mut hessian = vec![vec![0.0; n_params]; n_params];
+        let mut hess_arr = resource::try_zeros2(n_params, n_params, "multinomial logit Hessian")?;
 
         for i in 0..n {
+            if i % 256 == 0 {
+                resource::checkpoint()?;
+            }
             for cat_idx in 0..n_cats {
                 let y_indicator = if y_idx[i] == cat_idx + 1 { 1.0 } else { 0.0 };
-                let residual = y_indicator - probs[i][cat_idx + 1];
+                let residual = y_indicator - probs[[i, cat_idx + 1]];
 
                 for kk in 0..k {
                     gradient[cat_idx * k + kk] += x[[i, kk]] * residual;
@@ -278,27 +315,20 @@ pub fn run_multinom(
                 // Hessian
                 for cat_idx2 in 0..n_cats {
                     let w = if cat_idx == cat_idx2 {
-                        probs[i][cat_idx + 1] * (1.0 - probs[i][cat_idx + 1])
+                        probs[[i, cat_idx + 1]] * (1.0 - probs[[i, cat_idx + 1]])
                     } else {
-                        -probs[i][cat_idx + 1] * probs[i][cat_idx2 + 1]
+                        -probs[[i, cat_idx + 1]] * probs[[i, cat_idx2 + 1]]
                     };
 
                     for kk in 0..k {
                         for ll in 0..k {
-                            hessian[cat_idx * k + kk][cat_idx2 * k + ll] -=
+                            hess_arr[[cat_idx * k + kk, cat_idx2 * k + ll]] -=
                                 w * x[[i, kk]] * x[[i, ll]];
                         }
                     }
                 }
             }
         }
-
-        // Convert hessian to Array2 for inversion
-        let hess_arr = Array2::from_shape_vec(
-            (n_params, n_params),
-            hessian.iter().flatten().copied().collect(),
-        )
-        .unwrap();
 
         let (hess_inv, _) = match safe_inverse(&hess_arr.view()) {
             Ok(inv) => inv,
@@ -366,8 +396,12 @@ pub fn run_multinom(
     let bic = -2.0 * log_likelihood + (n_params as f64) * (n as f64).ln();
 
     // Standard errors from Hessian inverse
-    let mut hessian_final = vec![vec![0.0; n_params]; n_params];
+    let mut hess_final_arr =
+        resource::try_zeros2(n_params, n_params, "multinomial logit final Hessian")?;
     for i in 0..n {
+        if i % 256 == 0 {
+            resource::checkpoint()?;
+        }
         let mut exp_xb = vec![0.0; j];
         exp_xb[0] = 1.0;
         for cat_idx in 0..n_cats {
@@ -390,19 +424,13 @@ pub fn run_multinom(
 
                 for kk in 0..k {
                     for ll in 0..k {
-                        hessian_final[cat_idx * k + kk][cat_idx2 * k + ll] +=
+                        hess_final_arr[[cat_idx * k + kk, cat_idx2 * k + ll]] +=
                             w * x[[i, kk]] * x[[i, ll]];
                     }
                 }
             }
         }
     }
-
-    let hess_final_arr = Array2::from_shape_vec(
-        (n_params, n_params),
-        hessian_final.iter().flatten().copied().collect(),
-    )
-    .unwrap();
 
     let (vcov, _) =
         safe_inverse(&hess_final_arr.view()).unwrap_or_else(|_| (Array2::eye(n_params), None));
@@ -462,6 +490,7 @@ pub fn run_multinom(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::resource::{self, Budget, CancelToken};
     use polars::prelude::*;
 
     fn create_multinomial_dataset() -> Dataset {
@@ -471,6 +500,58 @@ mod tests {
         }
         .unwrap();
         Dataset::new(df)
+    }
+
+    fn cancelled() -> Budget {
+        let t = CancelToken::new();
+        t.cancel();
+        Budget::new(None, t)
+    }
+
+    /// A continuous outcome with `n` distinct values.
+    fn continuous_y_dataset(n: usize) -> Dataset {
+        let y: Vec<f64> = (0..n).map(|i| i as f64 + 0.5).collect();
+        let x: Vec<f64> = (0..n)
+            .map(|i| ((i * 7) % 13) as f64 + 0.1 * i as f64)
+            .collect();
+        Dataset::new(df! { "y" => y, "x" => x }.unwrap())
+    }
+
+    #[test]
+    fn test_multinom_refuses_more_than_100_categories() {
+        let err = run_multinom(&continuous_y_dataset(101), "y", &["x"], None).unwrap_err();
+        match err {
+            EconError::InvalidSpecification { message } => {
+                assert!(
+                    message.contains("'y'") && message.contains("101") && message.contains("100"),
+                    "{message}"
+                )
+            }
+            other => panic!("expected InvalidSpecification, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_multinom_accepts_100_categories() {
+        let r = run_multinom(&continuous_y_dataset(100), "y", &["x"], None).unwrap();
+        assert_eq!(r.categories.len(), 100);
+    }
+
+    #[test]
+    fn test_multinom_stops_when_cancelled() {
+        let ds = create_multinomial_dataset();
+        let e = resource::with_budget(cancelled(), || run_multinom(&ds, "y", &["x"], None))
+            .unwrap_err();
+        assert!(matches!(e, EconError::Cancelled(_)), "{e:?}");
+    }
+
+    #[test]
+    fn test_multinom_hessian_respects_alloc_ceiling() {
+        // n_params = 2 * 2 = 4; working set 4*4*6*8 = 768 bytes > 512
+        let ds = create_multinomial_dataset();
+        let e = resource::with_alloc_ceiling(Some(512), || run_multinom(&ds, "y", &["x"], None))
+            .unwrap_err();
+        assert!(matches!(e, EconError::ResourceLimit(_)), "{e:?}");
     }
 
     #[test]

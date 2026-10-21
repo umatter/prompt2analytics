@@ -14,7 +14,7 @@
 //!
 //! R equivalent: `MASS::polr()`
 
-use ndarray::{Array1, Array2};
+use ndarray::Array1;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -22,7 +22,25 @@ use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
 use crate::linalg::design::DesignMatrix;
 use crate::linalg::matrix_ops::safe_inverse;
+use crate::resource;
 use crate::traits::estimator::{logistic_cdf, logistic_pdf, normal_cdf, normal_pdf};
+
+/// Most outcome categories an ordered logit/probit accepts.
+///
+/// A method-level cap, the analogue of `nnet::multinom`'s `MaxNWts`, active in
+/// every mode: each category adds a threshold parameter to a dense Hessian
+/// that is rebuilt and inverted every Newton iteration, so a continuous column
+/// passed as the outcome would otherwise create one category per observation.
+const MAX_OUTCOME_CATEGORIES: usize = 100;
+
+/// `safe_inverse` holds several m x m copies at once (faer copy, factor, identity, solution,
+/// SVD fallback). Check the working set against the allocation ceiling before building it.
+const DENSE_INVERSE_COPIES: usize = 6;
+
+fn ensure_dense_inverse_fits(m: usize, what: &str) -> EconResult<()> {
+    let cells = resource::checked_len(&[m, m, DENSE_INVERSE_COPIES], what)?;
+    resource::check_alloc::<f64>(cells, what)
+}
 
 /// Type of ordered discrete choice model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -211,6 +229,16 @@ fn run_ordered_model(
             message: "Ordered model requires at least 2 categories".to_string(),
         });
     }
+    if j > MAX_OUTCOME_CATEGORIES {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "Outcome column '{y_col}' has {j} distinct values; ordered logit/probit \
+                 supports at most {MAX_OUTCOME_CATEGORIES} outcome categories (like \
+                 nnet::multinom's MaxNWts limit). Check that '{y_col}' is a categorical \
+                 outcome, not a continuous variable, or recode it into fewer categories."
+            ),
+        });
+    }
 
     // Category counts
     let category_counts: Vec<usize> = categories
@@ -281,8 +309,14 @@ fn run_ordered_model(
     let tol = 1e-8;
     let mut converged = false;
     let mut iterations = 0;
+    let hessian_what = match model_type {
+        OrderedModelType::Logit => "ordered logit Hessian",
+        OrderedModelType::Probit => "ordered probit Hessian",
+    };
+    ensure_dense_inverse_fits(n_params, hessian_what)?;
 
     for iter in 0..max_iter {
+        resource::checkpoint()?;
         iterations = iter + 1;
 
         // Extract current parameters
@@ -291,9 +325,12 @@ fn run_ordered_model(
 
         // Compute gradient and Hessian
         let mut gradient = vec![0.0; n_params];
-        let mut hessian = vec![vec![0.0; n_params]; n_params];
+        let mut hess = resource::try_zeros2(n_params, n_params, hessian_what)?;
 
         for i in 0..n {
+            if i % 256 == 0 {
+                resource::checkpoint()?;
+            }
             let yi = y_idx[i];
 
             // Compute X'beta
@@ -363,25 +400,17 @@ fn run_ordered_model(
                         0.0
                     };
 
-                    hessian[a][b] -= g_a * g_b / p_i;
+                    hess[[a, b]] -= g_a * g_b / p_i;
                 }
             }
         }
 
-        // Convert hessian to Array2
-        let hess_arr = Array2::from_shape_vec(
-            (n_params, n_params),
-            hessian.iter().flatten().copied().collect(),
-        )
-        .unwrap();
-
         // Add regularization to diagonal
-        let mut hess_reg = hess_arr.clone();
         for i in 0..n_params {
-            hess_reg[[i, i]] -= 1e-6;
+            hess[[i, i]] -= 1e-6;
         }
 
-        let (hess_inv, _) = match safe_inverse(&hess_reg.view()) {
+        let (hess_inv, _) = match safe_inverse(&hess.view()) {
             Ok(inv) => inv,
             Err(_) => {
                 // Fall back to gradient descent step
@@ -495,6 +524,7 @@ fn run_ordered_model(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::resource::{self, Budget, CancelToken};
     use polars::prelude::*;
 
     fn create_ordered_dataset() -> Dataset {
@@ -504,6 +534,58 @@ mod tests {
         }
         .unwrap();
         Dataset::new(df)
+    }
+
+    fn cancelled() -> Budget {
+        let t = CancelToken::new();
+        t.cancel();
+        Budget::new(None, t)
+    }
+
+    /// A continuous outcome with `n` distinct values.
+    fn continuous_y_dataset(n: usize) -> Dataset {
+        let y: Vec<f64> = (0..n).map(|i| i as f64 + 0.5).collect();
+        let x: Vec<f64> = (0..n)
+            .map(|i| ((i * 7) % 13) as f64 + 0.1 * i as f64)
+            .collect();
+        Dataset::new(df! { "y" => y, "x" => x }.unwrap())
+    }
+
+    #[test]
+    fn test_ordered_refuses_more_than_100_categories() {
+        let err = run_ordered_logit(&continuous_y_dataset(101), "y", &["x"]).unwrap_err();
+        match err {
+            EconError::InvalidSpecification { message } => {
+                assert!(
+                    message.contains("'y'") && message.contains("101") && message.contains("100"),
+                    "{message}"
+                )
+            }
+            other => panic!("expected InvalidSpecification, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_ordered_accepts_100_categories() {
+        let r = run_ordered_logit(&continuous_y_dataset(100), "y", &["x"]).unwrap();
+        assert_eq!(r.categories.len(), 100);
+    }
+
+    #[test]
+    fn test_ordered_stops_when_cancelled() {
+        let ds = create_ordered_dataset();
+        let e =
+            resource::with_budget(cancelled(), || run_ordered_logit(&ds, "y", &["x"])).unwrap_err();
+        assert!(matches!(e, EconError::Cancelled(_)), "{e:?}");
+    }
+
+    #[test]
+    fn test_ordered_hessian_respects_alloc_ceiling() {
+        // n_params = 1 + 2 = 3; working set 3*3*6*8 = 432 bytes > 256
+        let ds = create_ordered_dataset();
+        let e = resource::with_alloc_ceiling(Some(256), || run_ordered_logit(&ds, "y", &["x"]))
+            .unwrap_err();
+        assert!(matches!(e, EconError::ResourceLimit(_)), "{e:?}");
     }
 
     #[test]
