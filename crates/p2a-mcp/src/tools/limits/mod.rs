@@ -378,7 +378,8 @@ macro_rules! named_limits {
         required { $($req:ident),* $(,)? }
         flags { $($flag:ident),* $(,)? }
     ) => {
-        /// Keys of the row caps, the minimum tolerance and the named budgets, in declaration order.
+        /// Keys of the row caps, the minimum tolerance and the named budgets: the `Option` limits,
+        /// then the required budgets, then the flags, each group in the order listed below.
         const NAMED_KEYS: &[&str] = &[
             $(stringify!($opt),)*
             $(stringify!($req),)*
