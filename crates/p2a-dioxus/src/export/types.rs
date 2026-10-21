@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 /// Export format options
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExportFormat {
-    /// Full JSON archive (can be re-imported)
+    /// Shareable JSON archive (contains no session or server identifiers)
     Json,
     /// Human-readable Markdown
     Markdown,
@@ -61,12 +61,11 @@ pub struct ExportedMessage {
 /// Conversation metadata in the exported format
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExportedConversationMeta {
+    /// Export-local id; not the server's conversation id
     pub id: String,
     pub title: String,
     pub created_at: String,
     pub updated_at: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub session_id: Option<String>,
 }
 
 /// A dataset reference used in the conversation

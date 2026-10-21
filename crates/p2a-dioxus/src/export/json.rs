@@ -10,7 +10,18 @@ use super::types::{
     ExportedToolCall, JsonExportOptions,
 };
 
-/// Export a conversation and its messages to JSON format
+/// Shortest session id that is redacted from exported text. Session ids are
+/// UUIDs (36 bytes); the floor keeps a degenerate id from blanking out
+/// ordinary words.
+const MIN_REDACTED_SESSION_ID_LEN: usize = 16;
+
+/// Export a conversation and its messages to JSON format.
+///
+/// The export is meant to be shared, so it carries no live identifiers: the
+/// session id (the only credential for a visitor's datasets on the open
+/// demo) is never written, and any occurrence of it in message text, tool
+/// arguments or results is replaced by `[redacted]`. The conversation and
+/// message ids are export-local, not the server's.
 pub fn export_to_json(
     conversation: Option<&Conversation>,
     messages: &[ChatMessage],
@@ -18,11 +29,27 @@ pub fn export_to_json(
 ) -> Result<String, String> {
     let exported = build_exported_conversation(conversation, messages, options);
 
-    if options.pretty {
+    let json = if options.pretty {
         serde_json::to_string_pretty(&exported)
-            .map_err(|e| format!("JSON serialization error: {}", e))
     } else {
-        serde_json::to_string(&exported).map_err(|e| format!("JSON serialization error: {}", e))
+        serde_json::to_string(&exported)
+    }
+    .map_err(|e| format!("JSON serialization error: {}", e))?;
+
+    Ok(redact_session_id(
+        json,
+        conversation.map(|c| c.session_id.as_str()),
+    ))
+}
+
+/// Replace every occurrence of the session id in the serialized export.
+///
+/// Safe on serialized JSON because a session id is a UUID and contains no
+/// JSON metacharacters.
+fn redact_session_id(json: String, session_id: Option<&str>) -> String {
+    match session_id {
+        Some(sid) if sid.len() >= MIN_REDACTED_SESSION_ID_LEN => json.replace(sid, "[redacted]"),
+        _ => json,
     }
 }
 
@@ -34,30 +61,33 @@ fn build_exported_conversation(
 ) -> ExportedConversation {
     let now = Utc::now();
 
-    // Build conversation metadata
+    // Build conversation metadata. The id is always export-local: the
+    // server's conversation id grants access to the conversation, so it is
+    // not written to a file meant for sharing.
+    let export_id = uuid::Uuid::new_v4().to_string();
     let conversation_meta = if let Some(conv) = conversation {
         ExportedConversationMeta {
-            id: conv.id.clone(),
+            id: export_id,
             title: conv.title.clone(),
             created_at: conv.created_at.clone(),
             updated_at: conv.updated_at.clone(),
-            session_id: Some(conv.session_id.clone()),
         }
     } else {
         ExportedConversationMeta {
-            id: uuid::Uuid::new_v4().to_string(),
+            id: export_id,
             title: "Untitled Conversation".to_string(),
             created_at: now.to_rfc3339(),
             updated_at: now.to_rfc3339(),
-            session_id: None,
         }
     };
 
-    // Convert messages
+    // Convert messages, numbering them after dropping incomplete streaming
+    // messages.
     let exported_messages: Vec<ExportedMessage> = messages
         .iter()
-        .filter(|m| !m.is_streaming) // Don't export incomplete streaming messages
-        .map(|m| convert_message(m, options))
+        .filter(|m| !m.is_streaming)
+        .enumerate()
+        .map(|(index, m)| convert_message(m, index, options))
         .collect();
 
     // Extract dataset references from tool call arguments
@@ -72,8 +102,16 @@ fn build_exported_conversation(
     }
 }
 
-/// Convert a ChatMessage to ExportedMessage
-fn convert_message(msg: &ChatMessage, options: &JsonExportOptions) -> ExportedMessage {
+/// Convert a ChatMessage to ExportedMessage.
+///
+/// The message id is `msg-<index + 1>`: server message ids are capabilities
+/// on the tool-call history endpoint. Tool-call ids come from the LLM
+/// provider and grant nothing, so they are kept.
+fn convert_message(
+    msg: &ChatMessage,
+    index: usize,
+    options: &JsonExportOptions,
+) -> ExportedMessage {
     let tool_calls: Vec<ExportedToolCall> = msg
         .tool_calls
         .iter()
@@ -97,7 +135,7 @@ fn convert_message(msg: &ChatMessage, options: &JsonExportOptions) -> ExportedMe
     };
 
     ExportedMessage {
-        id: msg.id.clone(),
+        id: format!("msg-{}", index + 1),
         role: msg.role.clone(),
         content: msg.content.clone(),
         tool_calls,
@@ -133,7 +171,58 @@ fn extract_datasets(messages: &[ChatMessage]) -> Vec<ExportedDataset> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::ChatMessage;
+    use crate::api::Conversation;
+    use crate::state::{ChatMessage, ToolCallInfo};
+
+    #[test]
+    fn json_export_omits_session_and_backend_ids() {
+        let sid = "b01dc9ce-1111-2222-3333-444455556666";
+        let conv = Conversation {
+            id: "conv-backend-7f3a".into(),
+            session_id: sid.into(),
+            title: "Wage study".into(),
+            created_at: "2026-10-01T00:00:00Z".into(),
+            updated_at: "2026-10-01T00:00:00Z".into(),
+            is_archived: false,
+            message_count: 2,
+            last_message_preview: None,
+        };
+        let mut user = ChatMessage::user("hi");
+        user.id = "msg-backend-42".into();
+        let mut asst = ChatMessage::assistant_streaming();
+        asst.is_streaming = false;
+        asst.id = "msg-backend-43".into();
+        asst.content = format!("session {sid} is active");
+        asst.tool_calls.push(ToolCallInfo {
+            id: "call_1".into(),
+            name: "head_dataset".into(),
+            arguments: serde_json::json!({"dataset": "wages"}),
+            result: Some("ok".into()),
+            success: Some(true),
+            is_expanded: false,
+        });
+        let opts = JsonExportOptions {
+            pretty: false,
+            include_tool_results: true,
+            include_images: true,
+        };
+        let json = export_to_json(Some(&conv), &[user, asst], &opts).unwrap();
+        for leaked in [
+            sid,
+            "conv-backend-7f3a",
+            "msg-backend-42",
+            "msg-backend-43",
+            "session_id",
+        ] {
+            assert!(!json.contains(leaked), "{leaked} leaked: {json}");
+        }
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["conversation"]["title"], "Wage study");
+        assert_eq!(v["messages"][0]["id"], "msg-1");
+        assert_eq!(v["messages"][1]["id"], "msg-2");
+        assert_eq!(v["messages"][1]["content"], "session [redacted] is active");
+        assert_eq!(v["messages"][1]["tool_calls"][0]["name"], "head_dataset");
+    }
 
     #[test]
     fn test_export_empty_conversation() {
