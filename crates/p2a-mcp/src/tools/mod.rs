@@ -15,6 +15,7 @@
 //! - `common`: Shared utilities (success_text, error_text, macros)
 //! - `requests`: Request structs organized by category
 //! - `handlers`: Tool implementations organized by category
+//! - `limits`: request-limit catalogue (families, rule tables, row classes, named budgets)
 //!
 //! # Example
 //!
@@ -40,6 +41,7 @@ pub mod requests;
 
 // Handler implementations organized by category
 pub mod handlers;
+pub mod limits;
 
 pub use registry::{
     ToolCategory, ToolInfo, ToolSearchResult, category_counts, generate_markdown_docs,
