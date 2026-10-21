@@ -16,7 +16,7 @@
 //!
 //! ## Generalized & Specialized Regression
 //!
-//! - [`run_gls`] - Generalized least squares (AR1, MA1, ARMA correlation)
+//! - [`run_gls`] - Generalized least squares (AR(1), compound symmetry or identity; `gls()` also takes a known Omega)
 //! - [`run_quantreg`] - Quantile/median regression
 //! - [`run_loess`] - Local polynomial regression (LOESS/LOWESS)
 //! - [`smooth_spline`] - Smoothing splines
