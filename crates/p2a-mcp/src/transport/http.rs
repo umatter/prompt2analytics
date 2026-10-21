@@ -26,7 +26,7 @@ use super::routes_sessions::{
 };
 use super::routes_tools::{call_tool, list_tools};
 use crate::audit::AuditLogger;
-use crate::config::{DeploymentMode, ServerConfig};
+use crate::config::{DeploymentMode, ServerConfig, SessionConfig};
 use crate::exec::{ExecConfig, StuckWatchdog, ToolGovernor};
 use crate::server::AnalyticsServer;
 use crate::session::SessionManager;
@@ -72,7 +72,12 @@ pub async fn build_app_with(
     config: &ServerConfig,
     exec: ExecConfig,
 ) -> Result<(Router, AppState), TransportError> {
-    let session_manager = Arc::new(SessionManager::new(config.session.clone()));
+    // The eviction threshold follows the resource profile here, like the
+    // deadlines and quotas, whichever way `config` was built.
+    let session_manager = Arc::new(SessionManager::new(SessionConfig {
+        evict_idle_minutes: config.resolved_evict_idle_minutes(),
+        ..config.session.clone()
+    }));
 
     // Start background cleanup task (every 10 minutes)
     session_manager.clone().start_cleanup_task(10);
@@ -147,21 +152,27 @@ pub async fn bind(config: &ServerConfig) -> TransportResult<tokio::net::TcpListe
 
 /// Serve the app on `listener` until `shutdown` resolves.
 ///
-/// Validates the configuration again, so no caller can skip the guard, then
+/// The configuration's address is replaced by the socket's own, so the
+/// deployment mode, resource profile, bind guard and Host check follow the
+/// socket actually served, not the address a caller wrote in `config`. Then
+/// it validates the configuration again, so no caller can skip the guard,
 /// builds the app, installs the process-wide policies (allocation ceiling,
 /// session directories) and serves it with graceful shutdown.
 pub async fn serve(
     listener: tokio::net::TcpListener,
-    config: ServerConfig,
+    mut config: ServerConfig,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> TransportResult<()> {
+    config.http.addr = listener
+        .local_addr()
+        .map_err(|e| TransportError::Http(format!("Failed to read the bound address: {e}")))?;
     config
         .validate()
         .map_err(|e| TransportError::Config(e.to_string()))?;
     let (app, state) = build_app(&config).await?;
     let exec = state.governor.config().clone();
     crate::exec::install_process_policies(&exec);
-    log_startup(&config, &exec, &listener);
+    log_startup(&config, &exec);
     if let Some(limit) = exec.stuck_exit {
         spawn_stuck_watchdog(state.governor.clone(), limit);
     }
@@ -178,8 +189,8 @@ pub async fn start_http_transport(config: &ServerConfig) -> TransportResult<()> 
     serve(listener, config.clone(), std::future::pending()).await
 }
 
-fn log_startup(config: &ServerConfig, exec: &ExecConfig, listener: &tokio::net::TcpListener) {
-    let addr = listener.local_addr().unwrap_or(config.http.addr);
+fn log_startup(config: &ServerConfig, exec: &ExecConfig) {
+    let addr = config.http.addr;
     let mode = config.deployment_mode();
     match mode {
         DeploymentMode::Authenticated => {
@@ -214,6 +225,13 @@ fn log_startup(config: &ServerConfig, exec: &ExecConfig, listener: &tokio::net::
              undone by restoring the session's datasets, which assumes one call per session"
         );
     }
+    if exec.rss_soft_limit_bytes.is_some() && p2a_core::get_process_memory().is_none() {
+        tracing::warn!(
+            "--memory-soft-limit-mb (P2A_MEMORY_SOFT_LIMIT_MB) is set, but this platform does \
+             not report the process memory; memory admission is disabled"
+        );
+    }
+    config.warn_unapplied_limit_overrides();
     tracing::info!(
         "Starting HTTP transport on {addr} (mode {mode:?}, resource profile {:?}, \
          tool concurrency {}, deadline {:?})",
@@ -424,11 +442,14 @@ pub struct ToolDefinition {
 
 /// Health check endpoint: 200 with `"status": "ok"`, or 503 with
 /// `"status": "degraded"` while every tool permit is held by work past its
-/// deadline. The `governor` object reports in-flight and overdue work.
+/// deadline. The `governor` object reports in-flight and overdue work; in
+/// open public mode it leaves out the in-flight count and the process memory
+/// (`ToolGovernor::health_report`).
 async fn health_check(State(state): State<AppState>) -> Response {
     let session_count = state.session_manager.session_count().await;
-    let governor = state.governor.health();
-    let (status, label) = if governor.healthy {
+    let health = state.governor.health();
+    let governor = state.governor.health_report(&health);
+    let (status, label) = if health.healthy {
         (StatusCode::OK, "ok")
     } else {
         (StatusCode::SERVICE_UNAVAILABLE, "degraded")

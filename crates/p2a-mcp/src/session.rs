@@ -93,11 +93,12 @@ impl Session {
         }
     }
 
-    /// The session's execution semaphore. It is created with `permits` on the
-    /// first call; later calls return the same semaphore whatever they pass.
+    /// The session's execution semaphore. It is created with `permits`
+    /// (clamped to `1..=Semaphore::MAX_PERMITS`) on the first call; later
+    /// calls return the same semaphore whatever they pass.
     pub fn exec_semaphore(&self, permits: usize) -> Arc<Semaphore> {
         self.exec_slots
-            .get_or_init(|| Arc::new(Semaphore::new(permits)))
+            .get_or_init(|| Arc::new(Semaphore::new(permits.clamp(1, Semaphore::MAX_PERMITS))))
             .clone()
     }
 
@@ -199,11 +200,16 @@ impl SessionManager {
     pub async fn create_session(&self, user_id: Option<String>) -> Result<SessionId, SessionError> {
         let mut sessions = self.sessions.write().await;
         if sessions.len() >= self.config.max_sessions {
-            let Some(threshold) = self.config.evict_idle_minutes else {
+            // A threshold too large for a chrono::Duration means never evict.
+            let Some(threshold) = self
+                .config
+                .evict_idle_minutes
+                .and_then(|m| i64::try_from(m).ok())
+                .and_then(chrono::Duration::try_minutes)
+            else {
                 return Err(SessionError::MaxSessionsReached);
             };
             let now = Utc::now();
-            let threshold = chrono::Duration::minutes(i64::try_from(threshold).unwrap_or(i64::MAX));
             // Lock order: the sessions map, then a session's last_accessed.
             let mut victim: Option<(SessionId, DateTime<Utc>)> = None;
             for (id, session) in sessions.iter() {
@@ -500,6 +506,35 @@ mod tests {
             m.create_session(None).await,
             Err(SessionError::MaxSessionsReached)
         ));
+    }
+
+    #[tokio::test]
+    async fn huge_eviction_threshold_means_never_evict() {
+        // A threshold no chrono::Duration can hold must not panic in
+        // create_session; it means "never evict".
+        for minutes in [u64::MAX, i64::MAX as u64, (i64::MAX / 60) as u64 + 1] {
+            let m = SessionManager::new(cfg(1, Some(minutes)));
+            let a = m.create_session(None).await.unwrap();
+            backdate(&m, &a, 59).await;
+            assert!(
+                matches!(
+                    m.create_session(None).await,
+                    Err(SessionError::MaxSessionsReached)
+                ),
+                "{minutes}"
+            );
+        }
+    }
+
+    #[test]
+    fn exec_semaphore_clamps_its_permits() {
+        let s = Session::new("s".into(), None);
+        assert_eq!(
+            s.exec_semaphore(usize::MAX).available_permits(),
+            Semaphore::MAX_PERMITS
+        );
+        let s = Session::new("s".into(), None);
+        assert_eq!(s.exec_semaphore(0).available_permits(), 1);
     }
 
     #[tokio::test]

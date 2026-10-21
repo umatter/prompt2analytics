@@ -149,6 +149,17 @@ async fn embedded_server_refuses_non_loopback_bind() {
 }
 
 #[tokio::test]
+async fn serve_follows_the_socket_it_is_given() {
+    // A caller that binds a public socket itself and passes a loopback
+    // configuration must not get local mode (no token, no limits) on it.
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
+    let e = p2a_mcp::transport::http::serve(listener, local(), std::future::ready(()))
+        .await
+        .expect_err("a public socket without a token must be refused");
+    assert!(e.to_string().contains("requires an access token"), "{e}");
+}
+
+#[tokio::test]
 async fn embedded_server_binds_before_returning_and_reports_real_port() {
     let s = p2a_mcp::start_embedded_server(p2a_mcp::EmbeddedServerConfig::default().with_port(0))
         .await
@@ -479,6 +490,37 @@ async fn unknown_tool_and_bad_arguments_have_codes() {
     let (s, _, b) = call(&app, &sid, "generate_random_data", json!({"n_rows": "x"})).await;
     assert_eq!(s, StatusCode::BAD_REQUEST);
     assert_eq!(b["code"], json!("invalid_arguments"));
+    // Handlers report a caller's mistake with ErrorCode::INVALID_REQUEST too:
+    // still the caller's problem (400), not a server fault (500).
+    assert_eq!(generate(&app, &sid, "d", 50).await.0, StatusCode::OK);
+    let (s, _, b) = call(
+        &app,
+        &sid,
+        "preview_cleaning",
+        json!({"dataset": "d", "operation": "filter"}),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{b}");
+    assert_eq!(b["code"], json!("invalid_arguments"));
+    assert!(
+        b["error"].as_str().unwrap().contains("requires a column"),
+        "{b}"
+    );
+}
+
+#[tokio::test]
+async fn open_public_app_evicts_idle_sessions() {
+    // The hosted eviction default comes from the profile wherever the app is
+    // built, not only from the CLI path.
+    let mut cfg = http_cfg("0.0.0.0:8080", None, true);
+    cfg.session.max_sessions = 1;
+    let (app, state) = build_app(&cfg).await.unwrap();
+    let old = new_session(&app).await;
+    *session_of(&state, &old).await.last_accessed.write().await =
+        chrono::Utc::now() - chrono::Duration::minutes(11);
+    let (s, _, b) = send(&app, post_json("/api/sessions", json!({}))).await;
+    assert_eq!(s, StatusCode::CREATED, "{b}");
+    assert!(state.session_manager.get_session(&old).await.is_err());
 }
 
 #[tokio::test]
@@ -509,6 +551,96 @@ async fn health_reports_governor_fields() {
             "missing governor.{key}: {body}"
         );
     }
+}
+
+#[tokio::test]
+async fn open_public_health_hides_process_figures() {
+    // The unauthenticated /health of an open server must not publish the
+    // process memory or the in-flight count.
+    let (app, _) = build_app(&http_cfg("0.0.0.0:8080", None, true))
+        .await
+        .unwrap();
+    let (s, _, body) = send(&app, get("/health")).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    assert_eq!(body["status"], json!("ok"));
+    let governor = &body["governor"];
+    assert_eq!(governor["rss_bytes"], Value::Null, "{body}");
+    assert!(governor.get("in_flight").is_none(), "{body}");
+    for key in ["overdue", "capacity", "healthy"] {
+        assert!(
+            governor.get(key).is_some(),
+            "missing governor.{key}: {body}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// LLM dataset context runs under the governor (MCP-1)
+// ---------------------------------------------------------------------------
+
+/// A local app whose governor refuses every call on memory admission, with
+/// one session holding a dataset. Nothing here reaches an LLM provider: the
+/// refusal comes before any provider is contacted.
+#[cfg(all(feature = "llm", target_os = "linux"))]
+async fn refusing_app_with_data() -> (Router, String) {
+    let exec = ExecConfig {
+        rss_soft_limit_bytes: Some(1),
+        ..Default::default()
+    };
+    let (app, state) = app_with(&local(), exec).await;
+    let sid = new_session(&app).await;
+    let df = polars::prelude::df! {
+        "y" => [1.1, 1.9, 3.2, 3.8, 5.1],
+        "x" => [1.0, 2.0, 3.0, 4.0, 5.0],
+    }
+    .unwrap();
+    session_of(&state, &sid)
+        .await
+        .datasets
+        .write()
+        .await
+        .insert("d".into(), p2a_core::data::Dataset::new(df));
+    (app, sid)
+}
+
+#[cfg(all(feature = "llm", target_os = "linux"))]
+#[tokio::test]
+async fn llm_chat_dataset_context_is_governed() {
+    let (app, sid) = refusing_app_with_data().await;
+    let (s, h, b) = send(
+        &app,
+        post_json(
+            "/api/llm/chat",
+            json!({"session_id": sid, "message": "describe d"}),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE, "{b}");
+    assert_eq!(b["code"], json!("memory_pressure"));
+    assert_eq!(h[header::RETRY_AFTER], "15");
+}
+
+#[cfg(all(feature = "llm", target_os = "linux"))]
+#[tokio::test]
+async fn llm_chat_stream_dataset_context_is_governed() {
+    let (app, sid) = refusing_app_with_data().await;
+    let resp = app
+        .clone()
+        .oneshot(post_json(
+            "/api/llm/chat/stream",
+            json!({"session_id": sid, "message": "describe d"}),
+        ))
+        .await
+        .unwrap();
+    // The stream ends after its error event.
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let text = String::from_utf8_lossy(&bytes);
+    assert!(
+        text.contains("\"type\":\"error\"") && text.contains("low on memory"),
+        "{text}"
+    );
 }
 
 // ---------------------------------------------------------------------------

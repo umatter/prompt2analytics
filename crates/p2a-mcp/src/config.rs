@@ -377,7 +377,11 @@ pub struct SessionConfig {
     pub ttl_minutes: u64,
     pub max_sessions: usize,
     /// When the table is full, evict the least recently used session idle for
-    /// at least this many minutes (resolved; `None` = never evict).
+    /// at least this many minutes (`None` = never evict), as the
+    /// `SessionManager` applies it. The HTTP app resolves the value it passes
+    /// with `ServerConfig::resolved_evict_idle_minutes`: the
+    /// `--session-evict-idle-minutes` knob, else a value set here, else the
+    /// hosted profile's default.
     pub evict_idle_minutes: Option<u64>,
 }
 
@@ -402,6 +406,10 @@ pub struct AuditConfig {
 const HOSTED_EVICT_IDLE_MINUTES: u64 = 10;
 /// Default per-allocation ceiling in the hosted profile, in MiB.
 const HOSTED_MAX_ALLOC_MB: u64 = 256;
+/// Largest accepted value of a governor knob given in seconds (one year).
+const MAX_KNOB_SECS: u64 = 31_536_000;
+/// Largest accepted session eviction threshold, in minutes (one year).
+const MAX_EVICT_IDLE_MINUTES: u64 = 525_600;
 
 /// MiB to bytes as `usize`, saturating.
 fn mib_to_usize(mb: u64) -> usize {
@@ -418,7 +426,7 @@ pub(crate) fn available_cpus() -> usize {
 impl ServerConfig {
     /// Create configuration from CLI arguments.
     pub fn from_args(args: CliArgs) -> anyhow::Result<Self> {
-        let mut config = Self {
+        let config = Self {
             transport: args.transport,
             #[cfg(feature = "http")]
             http: HttpConfig {
@@ -474,7 +482,6 @@ impl ServerConfig {
                 overrides: args.limit_overrides,
             },
         };
-        config.session.evict_idle_minutes = config.resolved_evict_idle_minutes();
         Ok(config)
     }
 
@@ -501,7 +508,8 @@ impl ServerConfig {
     }
 
     /// Startup refusals: the bind guard, `P2A_LIMITS=off` in open public mode,
-    /// and zero threads or concurrency.
+    /// zero threads or concurrency, and governor knobs too large to apply
+    /// (each refusal names the flag, its environment variable and the bound).
     pub fn validate(&self) -> anyhow::Result<()> {
         #[cfg(feature = "http")]
         if self.transport == TransportType::Http {
@@ -513,8 +521,8 @@ impl ServerConfig {
             anyhow::bail!(
                 "P2A_LIMITS=off (--limits off) is not allowed for an open public server \
                  (no access token): the hosted resource profile always applies there. \
-                 Raise individual limits with P2A_LIMIT_OVERRIDES (--limit-override key=value) \
-                 or the governor flags instead."
+                 Raise individual governor limits with their flags instead (for example \
+                 --tool-timeout-secs or --session-data-mb)."
             );
         }
         for (flag, value) in [
@@ -533,6 +541,51 @@ impl ServerConfig {
         ] {
             if value == Some(0) {
                 anyhow::bail!("{flag} must be at least 1");
+            }
+        }
+        let max_permits = tokio::sync::Semaphore::MAX_PERMITS;
+        for (flag, value) in [
+            (
+                "--tool-concurrency (P2A_TOOL_CONCURRENCY)",
+                self.exec.tool_concurrency,
+            ),
+            (
+                "--session-concurrency (P2A_SESSION_CONCURRENCY)",
+                self.exec.session_concurrency,
+            ),
+        ] {
+            if value.is_some_and(|v| v > max_permits) {
+                anyhow::bail!("{flag} must be at most {max_permits}");
+            }
+        }
+        for (flag, value, max, unit) in [
+            (
+                "--tool-queue-wait-secs (P2A_TOOL_QUEUE_WAIT_SECS)",
+                self.exec.tool_queue_wait_secs,
+                MAX_KNOB_SECS,
+                "seconds (one year)",
+            ),
+            (
+                "--tool-timeout-secs (P2A_TOOL_TIMEOUT_SECS)",
+                self.exec.tool_timeout_secs,
+                MAX_KNOB_SECS,
+                "seconds (one year; 0 means no limit)",
+            ),
+            (
+                "--stuck-exit-secs (P2A_STUCK_EXIT_SECS)",
+                self.exec.stuck_exit_secs,
+                MAX_KNOB_SECS,
+                "seconds (one year; 0 means never)",
+            ),
+            (
+                "--session-evict-idle-minutes (P2A_SESSION_EVICT_IDLE_MINUTES)",
+                self.exec.session_evict_idle_minutes,
+                MAX_EVICT_IDLE_MINUTES,
+                "minutes (one year; 0 means never evict)",
+            ),
+        ] {
+            if value.is_some_and(|v| v > max) {
+                anyhow::bail!("{flag} must be at most {max} {unit}");
             }
         }
         Ok(())
@@ -560,14 +613,47 @@ impl ServerConfig {
         }
     }
 
-    /// The eviction threshold: the explicit setting (`0` = never), else 10
-    /// minutes in the hosted profile and never otherwise.
-    fn resolved_evict_idle_minutes(&self) -> Option<u64> {
+    /// The eviction threshold the HTTP app gives its `SessionManager`: the
+    /// explicit `--session-evict-idle-minutes` (`0` = never), else
+    /// `session.evict_idle_minutes` when a caller set it, else 10 minutes in
+    /// the hosted profile and never otherwise. It is resolved where the app
+    /// is built, so a programmatic open public configuration gets the hosted
+    /// default too.
+    pub(crate) fn resolved_evict_idle_minutes(&self) -> Option<u64> {
         match self.exec.session_evict_idle_minutes {
             Some(0) => None,
             Some(m) => Some(m),
-            None => (self.resource_profile() == ResourceProfile::Hosted)
-                .then_some(HOSTED_EVICT_IDLE_MINUTES),
+            None => self.session.evict_idle_minutes.or_else(|| {
+                (self.resource_profile() == ResourceProfile::Hosted)
+                    .then_some(HOSTED_EVICT_IDLE_MINUTES)
+            }),
+        }
+    }
+
+    /// The keys of the `--limit-override` (`P2A_LIMIT_OVERRIDES`) entries,
+    /// empty entries skipped.
+    pub(crate) fn limit_override_keys(&self) -> Vec<String> {
+        self.limits
+            .overrides
+            .iter()
+            .map(|entry| entry.split_once('=').map_or(entry.as_str(), |(key, _)| key))
+            .map(str::trim)
+            .filter(|key| !key.is_empty())
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// Warn that request-limit overrides are configured: this build parses
+    /// them, but nothing applies them yet, so they would otherwise be dropped
+    /// silently. Called at startup by the HTTP and stdio transports.
+    pub(crate) fn warn_unapplied_limit_overrides(&self) {
+        let keys = self.limit_override_keys();
+        if !keys.is_empty() {
+            tracing::warn!(
+                "--limit-override (P2A_LIMIT_OVERRIDES) is not applied in this build; \
+                 ignoring the overrides for: {}",
+                keys.join(", ")
+            );
         }
     }
 }
@@ -771,7 +857,120 @@ mod open_mode_tests {
         assert_eq!(c.http.session_dirs, SessionDirsSetting::On);
         assert!(c.http.expose_enumeration && c.http.enable_ws);
         assert_eq!(c.worker_threads(), 3);
-        assert_eq!(c.session.evict_idle_minutes, Some(10)); // Hosted default resolved in from_args
+        assert_eq!(c.session.evict_idle_minutes, None); // resolved where the app is built
+        assert_eq!(c.resolved_evict_idle_minutes(), Some(10)); // the hosted default
+        assert_eq!(c.limit_override_keys(), vec!["replications", "folds"]);
+    }
+
+    #[test]
+    fn eviction_threshold_resolution() {
+        let open = cfg("0.0.0.0:8080", None, true);
+        assert_eq!(open.resolved_evict_idle_minutes(), Some(10));
+        assert_eq!(
+            cfg("127.0.0.1:8080", None, false).resolved_evict_idle_minutes(),
+            None
+        );
+        let mut c = open.clone();
+        c.exec.session_evict_idle_minutes = Some(0);
+        assert_eq!(c.resolved_evict_idle_minutes(), None);
+        let mut c = open.clone();
+        c.exec.session_evict_idle_minutes = Some(3);
+        c.session.evict_idle_minutes = Some(30);
+        assert_eq!(c.resolved_evict_idle_minutes(), Some(3)); // the knob wins
+        let mut c = cfg("127.0.0.1:8080", None, false);
+        c.session.evict_idle_minutes = Some(30);
+        assert_eq!(c.resolved_evict_idle_minutes(), Some(30));
+    }
+
+    #[test]
+    fn limit_override_keys_skip_empty_entries() {
+        let mut c = cfg("127.0.0.1:8080", None, false);
+        assert!(c.limit_override_keys().is_empty());
+        c.limits.overrides = vec![
+            String::new(),
+            " dense_rows = 100".into(),
+            "bare".into(),
+            "=5".into(),
+        ];
+        assert_eq!(c.limit_override_keys(), vec!["dense_rows", "bare"]);
+    }
+
+    #[test]
+    fn off_refusal_does_not_point_at_unapplied_overrides() {
+        let mut c = cfg("0.0.0.0:8080", None, true);
+        c.limits.profile = Some(ResourceProfile::Off);
+        let e = c.validate().unwrap_err().to_string();
+        assert!(!e.contains("P2A_LIMIT_OVERRIDES"), "{e}");
+    }
+
+    #[test]
+    fn out_of_range_knobs_are_refused() {
+        let max_permits = tokio::sync::Semaphore::MAX_PERMITS;
+        type Set = fn(&mut ServerConfig);
+        let refused: [(Set, &str, &str); 6] = [
+            (
+                |c| c.exec.tool_timeout_secs = Some(31_536_001),
+                "--tool-timeout-secs (P2A_TOOL_TIMEOUT_SECS)",
+                "31536000",
+            ),
+            (
+                |c| c.exec.tool_timeout_secs = Some(u64::MAX),
+                "--tool-timeout-secs (P2A_TOOL_TIMEOUT_SECS)",
+                "31536000",
+            ),
+            (
+                |c| c.exec.stuck_exit_secs = Some(31_536_001),
+                "--stuck-exit-secs (P2A_STUCK_EXIT_SECS)",
+                "31536000",
+            ),
+            (
+                |c| c.exec.tool_queue_wait_secs = Some(u64::MAX),
+                "--tool-queue-wait-secs (P2A_TOOL_QUEUE_WAIT_SECS)",
+                "31536000",
+            ),
+            (
+                |c| c.exec.session_evict_idle_minutes = Some(525_601),
+                "--session-evict-idle-minutes (P2A_SESSION_EVICT_IDLE_MINUTES)",
+                "525600",
+            ),
+            (
+                |c| c.exec.session_evict_idle_minutes = Some(u64::MAX),
+                "--session-evict-idle-minutes (P2A_SESSION_EVICT_IDLE_MINUTES)",
+                "525600",
+            ),
+        ];
+        for (set, flag, max) in refused {
+            let mut c = cfg("127.0.0.1:8080", None, false);
+            set(&mut c);
+            let e = c.validate().unwrap_err().to_string();
+            assert!(e.contains(flag) && e.contains(max), "{e}");
+        }
+        let over = Some(max_permits + 1);
+        let mut c = cfg("127.0.0.1:8080", None, false);
+        c.exec.tool_concurrency = over;
+        let e = c.validate().unwrap_err().to_string();
+        assert!(
+            e.contains("--tool-concurrency (P2A_TOOL_CONCURRENCY)")
+                && e.contains(&max_permits.to_string()),
+            "{e}"
+        );
+        let mut c = cfg("127.0.0.1:8080", None, false);
+        c.exec.session_concurrency = over;
+        let e = c.validate().unwrap_err().to_string();
+        assert!(
+            e.contains("--session-concurrency (P2A_SESSION_CONCURRENCY)")
+                && e.contains(&max_permits.to_string()),
+            "{e}"
+        );
+        // The bounds themselves are accepted.
+        let mut c = cfg("127.0.0.1:8080", None, false);
+        c.exec.tool_timeout_secs = Some(31_536_000);
+        c.exec.stuck_exit_secs = Some(31_536_000);
+        c.exec.tool_queue_wait_secs = Some(31_536_000);
+        c.exec.session_evict_idle_minutes = Some(525_600);
+        c.exec.tool_concurrency = Some(max_permits);
+        c.exec.session_concurrency = Some(max_permits);
+        assert!(c.validate().is_ok());
     }
 
     #[test]

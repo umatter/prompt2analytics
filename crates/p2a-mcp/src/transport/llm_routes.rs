@@ -3,11 +3,16 @@
 
 use std::sync::Arc;
 
-use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
+use axum::{
+    Json,
+    extract::State,
+    http::StatusCode,
+    response::{IntoResponse, Response},
+};
 use serde::{Deserialize, Serialize};
 
 use super::http::{ApiResponse, AppState, ContentItem};
-use crate::exec::{CallOrigin, ToolGovernor};
+use crate::exec::{CallOrigin, ToolCallError, ToolGovernor};
 use crate::llm::{
     AnthropicProvider, LlmProvider, Message, OllamaProvider, OpenAIProvider, ProviderConfig,
     ProviderType, ToolExecutor, build_enhanced_dataset_context, get_system_prompt_with_context,
@@ -191,31 +196,56 @@ fn provider_display_name(config: Option<&ProviderConfig>) -> String {
     }
 }
 
+/// Build the LLM's dataset context for `session` off the async runtime,
+/// under the governor's admission control, permits and deadline:
+/// summarizing every column of every dataset (unique counts, null masks,
+/// numeric ranges) is real work on a large session, and it runs before any
+/// provider or key is contacted. The datasets are cloned first (cheap: the
+/// columns are shared), so no dataset lock is held while it runs. A session
+/// without datasets needs no work and takes no permit.
+async fn governed_dataset_context(
+    governor: &ToolGovernor,
+    session: &Arc<Session>,
+) -> Result<Option<String>, ToolCallError> {
+    let datasets = session.datasets.read().await.clone();
+    if datasets.is_empty() {
+        return Ok(None);
+    }
+    governor
+        .run_blocking(session, "llm_context", move |_budget| {
+            Ok(build_enhanced_dataset_context(&datasets))
+        })
+        .await
+}
+
 /// LLM chat endpoint.
 pub async fn llm_chat(
     State(state): State<AppState>,
     Json(request): Json<LlmChatRequest>,
-) -> impl IntoResponse {
+) -> Response {
     // Get the session
     let session = match state.session_manager.get_session(&request.session_id).await {
         Ok(s) => s,
         Err(crate::session::SessionError::NotFound) => {
             return (
                 StatusCode::NOT_FOUND,
-                Json(ApiResponse::error("Session not found")),
-            );
+                Json(ApiResponse::<()>::error("Session not found")),
+            )
+                .into_response();
         }
         Err(crate::session::SessionError::Expired) => {
             return (
                 StatusCode::GONE,
-                Json(ApiResponse::error("Session expired")),
-            );
+                Json(ApiResponse::<()>::error("Session expired")),
+            )
+                .into_response();
         }
         Err(e) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ApiResponse::error(e.to_string())),
-            );
+                Json(ApiResponse::<()>::error(e.to_string())),
+            )
+                .into_response();
         }
     };
 
@@ -225,10 +255,11 @@ pub async fn llm_chat(
     {
         return (
             StatusCode::BAD_REQUEST,
-            Json(ApiResponse::error(format!(
+            Json(ApiResponse::<()>::error(format!(
                 "Rejected LLM provider base_url: {e}"
             ))),
-        );
+        )
+            .into_response();
     }
 
     // Create provider and tool executor
@@ -242,9 +273,9 @@ pub async fn llm_chat(
 
     // Build enhanced dataset context from currently loaded datasets
     // This includes data types, sample values, and basic statistics
-    let dataset_context = {
-        let datasets = session.datasets.read().await;
-        build_enhanced_dataset_context(&datasets)
+    let dataset_context = match governed_dataset_context(&state.governor, &session).await {
+        Ok(context) => context,
+        Err(e) => return e.into_response(),
     };
 
     tracing::info!(provider = %provider.provider_type(), num_tools = %tools.len(), has_datasets = dataset_context.is_some(), "Starting LLM chat");
@@ -269,13 +300,15 @@ pub async fn llm_chat(
                 StatusCode::OK,
                 Json(ApiResponse::success(LlmChatResponse { message: response })),
             )
+                .into_response()
         }
         Err(e) => {
             tracing::error!(error = %e, elapsed_ms = %elapsed.as_millis(), "LLM chat failed");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ApiResponse::error(e.to_string())),
+                Json(ApiResponse::<()>::error(e.to_string())),
             )
+                .into_response()
         }
     }
 }
@@ -1161,9 +1194,17 @@ pub async fn llm_chat_stream(
 
         // Build enhanced dataset context from currently loaded datasets
         // This includes data types, sample values, and basic statistics
-        let dataset_context = {
-            let datasets = session.datasets.read().await;
-            build_enhanced_dataset_context(&datasets)
+        let dataset_context = match governed_dataset_context(&state_clone.governor, &session).await
+        {
+            Ok(context) => context,
+            Err(e) => {
+                let _ = tx_clone
+                    .send(ProgressEvent::Error {
+                        error: e.to_string(),
+                    })
+                    .await;
+                return;
+            }
         };
 
         // Reject an SSRF-unsafe provider base_url before making any request.
@@ -1491,6 +1532,45 @@ mod tests {
             Arc::new(crate::server::AnalyticsServer::new()),
             session,
         )
+    }
+
+    #[tokio::test]
+    async fn dataset_context_runs_under_the_governor() {
+        let (governor, _server, session) = governed_parts().await;
+        // No datasets: nothing to summarize, no permit taken, no refusal.
+        assert!(matches!(
+            governed_dataset_context(&governor, &session).await,
+            Ok(None)
+        ));
+        let df = polars::prelude::df! {
+            "y" => [1.1, 1.9, 3.2, 3.8, 5.1],
+            "x" => [1.0, 2.0, 3.0, 4.0, 5.0],
+        }
+        .unwrap();
+        session
+            .datasets
+            .write()
+            .await
+            .insert("d".into(), p2a_core::data::Dataset::new(df));
+        // The refusing governor's memory admission applies to the context.
+        let r = governed_dataset_context(&governor, &session).await;
+        assert!(
+            matches!(r, Err(ToolCallError::MemoryPressure { .. })),
+            "{r:?}"
+        );
+        // An admitting governor builds it off the runtime.
+        let sessions = Arc::new(SessionManager::new(SessionConfig {
+            ttl_minutes: 60,
+            max_sessions: 10,
+            evict_idle_minutes: None,
+        }));
+        let admitting = ToolGovernor::new(ExecConfig::default(), sessions);
+        let context = governed_dataset_context(&admitting, &session)
+            .await
+            .unwrap()
+            .expect("a context for one dataset");
+        assert!(context.contains('y') && context.contains('x'), "{context}");
+        assert_eq!(admitting.health().in_flight, 0);
     }
 
     #[tokio::test]

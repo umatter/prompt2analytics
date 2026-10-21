@@ -240,7 +240,7 @@ async fn handle_client_message(
         }
 
         ClientMessage::Tool { id, name, args } => {
-            if !state.is_authenticated() {
+            let Some(auth_session_id) = state.session.as_ref().map(|s| s.id.clone()) else {
                 tx.send(ServerMessage::Error {
                     id: id.clone(),
                     message: "Not authenticated. Send auth message first.".to_string(),
@@ -249,9 +249,31 @@ async fn handle_client_message(
                 .await
                 .map_err(|_| "Channel closed".to_string())?;
                 return Ok(());
-            }
+            };
 
-            let session = state.session.clone().unwrap();
+            // Resolve the session again for every call, like an HTTP tool
+            // call: a session deleted, evicted or expired since `Auth` is no
+            // longer in the table (or in its dataset accounting) and must not
+            // keep running tools. A successful lookup also refreshes its
+            // last-accessed time.
+            let session = match state.session_manager.get_session(&auth_session_id).await {
+                Ok(session) => session,
+                Err(e) => {
+                    state.session = None;
+                    let code = match e {
+                        SessionError::Expired => "session_expired",
+                        _ => "session_not_found",
+                    };
+                    tx.send(ServerMessage::Error {
+                        id,
+                        message: format!("{e}. Create a session and authenticate again."),
+                        code: Some(code.to_string()),
+                    })
+                    .await
+                    .map_err(|_| "Channel closed".to_string())?;
+                    return Ok(());
+                }
+            };
 
             // Execute the tool under the governor, like an HTTP tool call
             match state
@@ -405,6 +427,55 @@ mod tests {
         };
         let json = serde_json::to_string(&without).unwrap();
         assert!(!json.contains("\"code\""), "{json}");
+    }
+
+    #[tokio::test]
+    async fn tool_message_after_the_session_is_gone_is_refused() {
+        use crate::config::SessionConfig;
+        use crate::exec::ExecConfig;
+
+        let sessions = Arc::new(SessionManager::new(SessionConfig {
+            ttl_minutes: 60,
+            max_sessions: 10,
+            evict_idle_minutes: None,
+        }));
+        let session_id = sessions.create_session(None).await.unwrap();
+        let governor = Arc::new(ToolGovernor::new(ExecConfig::default(), sessions.clone()));
+        let mut state = WsState::new(Arc::new(AnalyticsServer::new()), sessions.clone(), governor);
+        let (tx, mut rx) = mpsc::channel(8);
+        handle_client_message(
+            &mut state,
+            ClientMessage::Auth {
+                session_id: session_id.clone(),
+            },
+            &tx,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            rx.recv().await,
+            Some(ServerMessage::AuthResult { success: true, .. })
+        ));
+        // Deleted (or evicted, or expired) while the socket stays open.
+        sessions.delete_session(&session_id).await.unwrap();
+        handle_client_message(
+            &mut state,
+            ClientMessage::Tool {
+                id: "t1".into(),
+                name: "list_datasets".into(),
+                args: serde_json::json!({}),
+            },
+            &tx,
+        )
+        .await
+        .unwrap();
+        match rx.recv().await {
+            Some(ServerMessage::Error { id, code, .. }) => {
+                assert_eq!(id, "t1");
+                assert_eq!(code.as_deref(), Some("session_not_found"));
+            }
+            other => panic!("expected a coded error, got {other:?}"),
+        }
     }
 
     #[cfg(target_os = "linux")]

@@ -5,21 +5,29 @@
 //! [`ToolGovernor::call`], which applies, in order:
 //!
 //! 1. memory admission (refuse while the process RSS is above a soft limit);
-//! 2. a per-session and a global permit, each with a bounded queue wait;
+//! 2. a per-session and a global permit, within one bounded queue wait;
 //! 3. execution on tokio's blocking pool, so the async runtime keeps serving
 //!    `/health`, SSE keep-alives and other visitors;
 //! 4. a per-call [`Budget`] installed for p2a-core's cooperative
-//!    [`resource::checkpoint`]s, cancelled when the caller goes away;
+//!    [`resource::checkpoint`]s, cancelled at the deadline and when the
+//!    future driving the call is dropped (for `POST /api/tools/{name}`, when
+//!    the client disconnects and the handler future is dropped);
 //! 5. a wall-clock deadline (504) and panic isolation (500, session intact);
 //! 6. per-session and total dataset-byte quotas that undo the call that
 //!    crossed them.
 //!
+//! The streaming chat (`POST /api/llm/chat/stream`) runs its tool loop in a
+//! detached task that is not aborted when the SSE client disconnects, so the
+//! tool calls of an abandoned stream keep running until they finish or reach
+//! their deadline.
+//!
 //! The permits, the in-flight registry entry and the session's active-call
 //! count are moved into the blocking closure, so they are released when the
 //! work actually stops, not when the HTTP response is sent. Work that ignores
-//! its budget past the deadline stays counted as overdue until it ends; when
-//! every permit is held by overdue work, [`ToolGovernor::health`] reports the
-//! server unhealthy.
+//! its budget past the deadline is detached, not stopped: its result is
+//! discarded, but it keeps running (and may still change the session) and
+//! stays counted as overdue until it ends. When every permit is held by
+//! overdue work, [`ToolGovernor::health`] reports the server unhealthy.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -74,6 +82,9 @@ pub struct ExecConfig {
     pub alloc_ceiling_bytes: Option<usize>,
     /// Enter the `path_jail` session scope per call.
     pub session_dirs: bool,
+    /// Leave the process memory and the in-flight count out of `/health`
+    /// (open public mode, where `/health` is unauthenticated).
+    pub redact_health: bool,
 }
 
 const MIB: u64 = 1 << 20;
@@ -94,6 +105,7 @@ impl Default for ExecConfig {
             total_data_bytes: None,
             alloc_ceiling_bytes: None,
             session_dirs: false,
+            redact_health: false,
         }
     }
 }
@@ -143,6 +155,7 @@ impl ExecConfig {
                 SessionDirsSetting::On => true,
                 SessionDirsSetting::Off => false,
             },
+            redact_health: cfg.deployment_mode() == DeploymentMode::OpenPublic,
         }
     }
 
@@ -152,7 +165,7 @@ impl ExecConfig {
 }
 
 fn ceil_secs(d: Duration) -> u64 {
-    d.as_secs() + u64::from(d.subsec_nanos() > 0)
+    d.as_secs().saturating_add(u64::from(d.subsec_nanos() > 0))
 }
 
 /// Install the process-wide policies the governor relies on: the p2a-core
@@ -214,10 +227,13 @@ pub enum ToolCallError {
     /// The process is above its memory soft limit.
     #[error("The server is low on memory; retry in {retry_after_secs} s or use a smaller dataset.")]
     MemoryPressure { retry_after_secs: u64 },
-    /// The call ran past the server's time limit and was stopped.
+    /// The call ran past the server's time limit and its result was
+    /// discarded. Work that does not check its budget is detached, not
+    /// stopped, and may still finish (and change the session) later.
     #[error(
-        "The tool call exceeded this server's time limit of {limit_secs} s and was stopped. \
-         Use a smaller dataset or fewer iterations or replications."
+        "The tool call exceeded this server's time limit of {limit_secs} s; its result was \
+         discarded, and work already under way may still finish in the background. Use a \
+         smaller dataset or fewer iterations or replications."
     )]
     DeadlineExceeded { limit_secs: u64 },
     /// The tool panicked or failed in the server itself.
@@ -265,13 +281,27 @@ impl ToolCallError {
         }
     }
 
-    /// Map a handler's `ErrorData`: invalid parameters stay the caller's
-    /// problem (400); anything else is a server-side failure (500).
+    /// Map a handler's `ErrorData`. The handlers report a caller's mistake
+    /// (a missing column, a bad parameter combination) as either
+    /// `INVALID_PARAMS` or `INVALID_REQUEST`; both stay the caller's problem
+    /// (400 `invalid_arguments`). Any other code is a server-side failure
+    /// (500 `internal`).
     pub fn from_handler_error(tool: &str, e: rmcp::ErrorData) -> Self {
-        if e.code == ErrorCode::INVALID_PARAMS {
+        if e.code == ErrorCode::INVALID_PARAMS || e.code == ErrorCode::INVALID_REQUEST {
             Self::InvalidArguments(e.message.to_string())
         } else {
             Self::Internal(format!("Tool '{tool}' failed: {}", e.message))
+        }
+    }
+
+    /// The error a call reports when its work returned `self` at or after
+    /// its deadline. A server-side failure there is most likely the work
+    /// giving up on its budget, so it reads as the deadline; a specific
+    /// refusal (quota, arguments, unknown tool, limit) is kept.
+    fn after_deadline(self, limit_secs: u64) -> Self {
+        match self {
+            Self::Internal(_) => Self::DeadlineExceeded { limit_secs },
+            other => other,
         }
     }
 
@@ -302,8 +332,10 @@ impl IntoResponse for ToolCallError {
     }
 }
 
-/// Cancels the call's token when the governing future is dropped (client
-/// disconnect, aborted SSE task) or returns.
+/// Cancels the call's token when the governing future returns or is
+/// dropped. A dropped HTTP handler future (client disconnect) drops it; the
+/// detached streaming-chat task is not aborted on an SSE disconnect, so its
+/// calls are not cancelled that way.
 struct CancelOnDrop(CancelToken);
 
 impl Drop for CancelOnDrop {
@@ -345,8 +377,60 @@ pub struct ToolGovernor {
     cfg: ExecConfig,
     sessions: Arc<SessionManager>,
     global: Arc<Semaphore>,
+    /// Global permits actually created (`cfg.concurrency` clamped to
+    /// `1..=Semaphore::MAX_PERMITS`).
+    capacity: usize,
     in_flight: InFlight,
     next_id: AtomicU64,
+}
+
+/// Wait for a permit of `slots` until `give_up` (`None` = no limit).
+/// `None` means the wait timed out.
+async fn acquire_until(
+    slots: Arc<Semaphore>,
+    give_up: Option<tokio::time::Instant>,
+) -> Option<Result<tokio::sync::OwnedSemaphorePermit, tokio::sync::AcquireError>> {
+    match give_up {
+        Some(at) => tokio::time::timeout_at(at, slots.acquire_owned())
+            .await
+            .ok(),
+        None => Some(slots.acquire_owned().await),
+    }
+}
+
+/// Take the session's permit, then a global one, both within the one
+/// `queue_wait` (so a call never waits longer than that in total).
+async fn acquire_permits(
+    session_slots: Arc<Semaphore>,
+    global: Arc<Semaphore>,
+    queue_wait: Duration,
+) -> Result<
+    (
+        tokio::sync::OwnedSemaphorePermit,
+        tokio::sync::OwnedSemaphorePermit,
+    ),
+    ToolCallError,
+> {
+    let give_up = tokio::time::Instant::now().checked_add(queue_wait);
+    let session_permit = match acquire_until(session_slots, give_up).await {
+        Some(Ok(permit)) => permit,
+        Some(Err(_)) => return Err(ToolCallError::Internal("session is closed".into())),
+        None => {
+            return Err(ToolCallError::SessionBusy {
+                retry_after_secs: SESSION_BUSY_RETRY_SECS,
+            });
+        }
+    };
+    let global_permit = match acquire_until(global, give_up).await {
+        Some(Ok(permit)) => permit,
+        Some(Err(_)) => return Err(ToolCallError::Internal("server is closed".into())),
+        None => {
+            return Err(ToolCallError::ServerBusy {
+                retry_after_secs: SERVER_BUSY_RETRY_SECS,
+            });
+        }
+    };
+    Ok((session_permit, global_permit))
 }
 
 impl std::fmt::Debug for ToolGovernor {
@@ -358,13 +442,15 @@ impl std::fmt::Debug for ToolGovernor {
 }
 
 impl ToolGovernor {
-    /// A governor with `cfg.concurrency` global permits over `sessions`.
+    /// A governor with `cfg.concurrency` global permits over `sessions`
+    /// (at least 1, at most `Semaphore::MAX_PERMITS`).
     pub fn new(cfg: ExecConfig, sessions: Arc<SessionManager>) -> Self {
-        let global = Arc::new(Semaphore::new(cfg.concurrency.max(1)));
+        let capacity = cfg.concurrency.clamp(1, Semaphore::MAX_PERMITS);
         Self {
             cfg,
             sessions,
-            global,
+            global: Arc::new(Semaphore::new(capacity)),
+            capacity,
             in_flight: Arc::new(Mutex::new(HashMap::new())),
             next_id: AtomicU64::new(0),
         }
@@ -375,25 +461,50 @@ impl ToolGovernor {
         &self.cfg
     }
 
-    /// In-flight and overdue work, capacity and process memory.
+    /// In-flight and overdue work, capacity and process memory. With
+    /// `redact_health` (open public mode) `rss_bytes` is `None`.
     pub fn health(&self) -> GovernorHealth {
         let now = Instant::now();
         let (in_flight, overdue) = {
             let map = lock(&self.in_flight);
             let overdue = map
                 .values()
-                .filter(|deadline| deadline.is_some_and(|at| now >= at + DEADLINE_GRACE))
+                .filter(|deadline| {
+                    deadline
+                        .and_then(|at| at.checked_add(DEADLINE_GRACE))
+                        .is_some_and(|late| now >= late)
+                })
                 .count();
             (map.len(), overdue)
         };
-        let capacity = self.cfg.concurrency.max(1);
+        let rss_bytes = if self.cfg.redact_health {
+            None
+        } else {
+            p2a_core::get_process_memory().map(|m| m.rss_bytes as u64)
+        };
         GovernorHealth {
             in_flight,
             overdue,
-            capacity,
-            rss_bytes: p2a_core::get_process_memory().map(|m| m.rss_bytes as u64),
-            healthy: overdue < capacity,
+            capacity: self.capacity,
+            rss_bytes,
+            healthy: overdue < self.capacity,
         }
+    }
+
+    /// The `governor` object `/health` publishes for `health`. In open public
+    /// mode (`redact_health`) it leaves out the in-flight count and reports no
+    /// process memory, so an unauthenticated visitor cannot poll them to time
+    /// saturation or memory-pressure attempts; `overdue`, `capacity` and
+    /// `healthy` stay.
+    pub fn health_report(&self, health: &GovernorHealth) -> serde_json::Value {
+        let mut report = serde_json::to_value(health).unwrap_or(serde_json::Value::Null);
+        if self.cfg.redact_health
+            && let Some(fields) = report.as_object_mut()
+        {
+            fields.remove("in_flight");
+            fields.insert("rss_bytes".into(), serde_json::Value::Null);
+        }
+        report
     }
 
     /// Run one tool call for `session` under admission control, permits, a
@@ -469,36 +580,18 @@ impl ToolGovernor {
             });
         }
 
-        // 2. Permits: the session's first, then a global one.
-        let session_slots = session.exec_semaphore(self.cfg.session_concurrency.max(1));
-        let session_permit =
-            match tokio::time::timeout(self.cfg.queue_wait, session_slots.acquire_owned()).await {
-                Ok(Ok(permit)) => permit,
-                Ok(Err(_)) => return Err(ToolCallError::Internal("session is closed".into())),
-                Err(_) => {
-                    return Err(ToolCallError::SessionBusy {
-                        retry_after_secs: SESSION_BUSY_RETRY_SECS,
-                    });
-                }
-            };
-        let global_permit = match tokio::time::timeout(
+        // 2. Permits: the session's first, then a global one, within one wait.
+        let (session_permit, global_permit) = acquire_permits(
+            session.exec_semaphore(self.cfg.session_concurrency),
+            Arc::clone(&self.global),
             self.cfg.queue_wait,
-            Arc::clone(&self.global).acquire_owned(),
         )
-        .await
-        {
-            Ok(Ok(permit)) => permit,
-            Ok(Err(_)) => return Err(ToolCallError::Internal("server is closed".into())),
-            Err(_) => {
-                return Err(ToolCallError::ServerBusy {
-                    retry_after_secs: SERVER_BUSY_RETRY_SECS,
-                });
-            }
-        };
+        .await?;
 
-        // 3. Budget, cancellation and bookkeeping.
+        // 3. Budget, cancellation and bookkeeping. A deadline too far away to
+        // represent is no deadline.
         let started = Instant::now();
-        let deadline_at = self.cfg.deadline.map(|d| started + d);
+        let deadline_at = self.cfg.deadline.and_then(|d| started.checked_add(d));
         let token = CancelToken::new();
         let budget = Budget::new(deadline_at, token.clone());
         let _cancel_on_drop = CancelOnDrop(token.clone());
@@ -518,9 +611,11 @@ impl ToolGovernor {
 
         // 5. Deadline.
         let limit_secs = self.cfg.deadline_secs();
-        let outcome = match deadline_at {
-            Some(at) => {
-                let give_up = tokio::time::Instant::from_std(at + DEADLINE_GRACE);
+        let give_up = deadline_at
+            .and_then(|at| at.checked_add(DEADLINE_GRACE))
+            .map(tokio::time::Instant::from_std);
+        let outcome = match give_up {
+            Some(give_up) => {
                 tokio::select! {
                     joined = &mut join => joined,
                     () = tokio::time::sleep_until(give_up) => {
@@ -542,7 +637,7 @@ impl ToolGovernor {
             Ok(Ok(value)) => Ok(value),
             Ok(Err(e)) => {
                 if deadline_at.is_some_and(|at| Instant::now() >= at) {
-                    Err(ToolCallError::DeadlineExceeded { limit_secs })
+                    Err(e.after_deadline(limit_secs))
                 } else {
                     Err(e)
                 }
@@ -769,8 +864,133 @@ mod tests {
             rmcp::ErrorData::invalid_params("bad column", None),
         );
         assert!(matches!(&e, ToolCallError::InvalidArguments(m) if m == "bad column"));
+        // Handlers also report caller mistakes as INVALID_REQUEST.
+        let e = ToolCallError::from_handler_error(
+            "t",
+            rmcp::ErrorData::invalid_request("filter requires a column", None),
+        );
+        assert!(
+            matches!(&e, ToolCallError::InvalidArguments(m) if m == "filter requires a column"),
+            "{e:?}"
+        );
         let e = ToolCallError::from_handler_error("t", rmcp::ErrorData::internal_error("x", None));
         assert!(matches!(&e, ToolCallError::Internal(m) if m.contains("Tool 't' failed")));
+    }
+
+    #[test]
+    fn deadline_only_masks_internal_errors() {
+        use ToolCallError::*;
+        assert!(matches!(
+            Internal("stopped".into()).after_deadline(60),
+            DeadlineExceeded { limit_secs: 60 }
+        ));
+        // A specific refusal the work returned late keeps its own code.
+        for e in [
+            QuotaExceeded("q".into()),
+            InvalidArguments("a".into()),
+            UnknownTool("t".into()),
+            LimitExceeded {
+                parameter: "p".into(),
+                message: "m".into(),
+            },
+        ] {
+            let code = e.code();
+            assert_eq!(e.after_deadline(60).code(), code);
+        }
+    }
+
+    #[test]
+    fn deadline_text_does_not_claim_the_work_stopped() {
+        let m = ToolCallError::DeadlineExceeded { limit_secs: 60 }.to_string();
+        assert!(m.contains("60 s") && m.contains("discarded"), "{m}");
+        assert!(!m.contains("was stopped"), "{m}");
+    }
+
+    #[tokio::test]
+    async fn queue_wait_bounds_both_permits_together() {
+        // The session permit frees after half the wait; the global one only
+        // after the whole wait. With one shared deadline the call is refused;
+        // with a fresh wait per permit it would have got the global permit.
+        let wait = Duration::from_secs(2);
+        let session_slots = Arc::new(Semaphore::new(1));
+        let global = Arc::new(Semaphore::new(1));
+        let session_held = Arc::clone(&session_slots).acquire_owned().await.unwrap();
+        let global_held = Arc::clone(&global).acquire_owned().await.unwrap();
+        tokio::spawn(async move {
+            tokio::time::sleep(wait / 2).await;
+            drop(session_held);
+        });
+        tokio::spawn(async move {
+            tokio::time::sleep(wait + wait / 4).await;
+            drop(global_held);
+        });
+        let r = acquire_permits(session_slots, global, wait).await;
+        assert!(
+            matches!(
+                r,
+                Err(ToolCallError::ServerBusy {
+                    retry_after_secs: SERVER_BUSY_RETRY_SECS
+                })
+            ),
+            "{r:?}"
+        );
+    }
+
+    #[test]
+    fn health_report_redacts_in_open_public_mode() {
+        let sessions = Arc::new(SessionManager::new(crate::config::SessionConfig {
+            ttl_minutes: 60,
+            max_sessions: 10,
+            evict_idle_minutes: None,
+        }));
+        let open = ExecConfig::from_config(&http_cfg("0.0.0.0:8080", None, true));
+        assert!(open.redact_health);
+        let gov = ToolGovernor::new(open, sessions.clone());
+        let h = gov.health();
+        assert_eq!(h.rss_bytes, None);
+        let report = gov.health_report(&h);
+        assert!(report.get("in_flight").is_none(), "{report}");
+        assert_eq!(report["rss_bytes"], serde_json::Value::Null);
+        for key in ["overdue", "capacity", "healthy"] {
+            assert!(report.get(key).is_some(), "{report}");
+        }
+
+        let local = ExecConfig::from_config(&http_cfg("127.0.0.1:8080", None, false));
+        assert!(!local.redact_health);
+        let gov = ToolGovernor::new(local, sessions);
+        let report = gov.health_report(&gov.health());
+        assert!(report.get("in_flight").is_some(), "{report}");
+    }
+
+    /// A governor over a fresh session manager, and one session in it.
+    async fn governor_and_session(cfg: ExecConfig) -> (ToolGovernor, Arc<Session>) {
+        let sessions = Arc::new(SessionManager::new(crate::config::SessionConfig {
+            ttl_minutes: 60,
+            max_sessions: 10,
+            evict_idle_minutes: None,
+        }));
+        let id = sessions.create_session(None).await.unwrap();
+        let session = sessions.get_session(&id).await.unwrap();
+        (ToolGovernor::new(cfg, sessions), session)
+    }
+
+    #[tokio::test]
+    async fn huge_settings_do_not_panic() {
+        // Values an embedder might pass to mean "unlimited": no deadline
+        // arithmetic, semaphore size or queue deadline may panic.
+        let (gov, session) = governor_and_session(ExecConfig {
+            concurrency: usize::MAX,
+            session_concurrency: usize::MAX,
+            queue_wait: Duration::MAX,
+            deadline: Some(Duration::MAX),
+            ..Default::default()
+        })
+        .await;
+        let r = gov.run_blocking(&session, "x", |_| Ok(7)).await;
+        assert!(matches!(r, Ok(7)), "{r:?}");
+        let h = gov.health();
+        assert_eq!((h.in_flight, h.overdue), (0, 0));
+        assert!(h.healthy);
     }
 
     #[test]
@@ -798,6 +1018,7 @@ mod tests {
         assert_eq!(c.total_data_bytes, Some(500 << 20));
         assert_eq!(c.alloc_ceiling_bytes, Some(256 << 20));
         assert!(c.session_dirs);
+        assert!(c.redact_health);
     }
 
     #[test]
@@ -817,6 +1038,7 @@ mod tests {
             assert_eq!(c.total_data_bytes, None);
             assert_eq!(c.alloc_ceiling_bytes, None);
             assert!(!c.session_dirs);
+            assert!(!c.redact_health);
         }
     }
 

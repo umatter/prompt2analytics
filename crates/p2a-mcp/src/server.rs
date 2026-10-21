@@ -691,7 +691,7 @@ impl AnalyticsServer {
     /// handler errors come back as `ToolCallError`; a tool's own error result
     /// is an `Ok` with `success == false`.
     #[cfg(feature = "http")]
-    pub async fn call_tool_with_session(
+    pub(crate) async fn call_tool_with_session(
         &self,
         tool_name: &str,
         arguments: serde_json::Value,

@@ -68,6 +68,7 @@ async fn start_stdio_transport(config: &ServerConfig) -> TransportResult<()> {
     use rmcp::{ServiceExt, transport::stdio};
 
     p2a_core::resource::set_alloc_ceiling_bytes(config.alloc_ceiling_bytes());
+    config.warn_unapplied_limit_overrides();
 
     tracing::info!("Starting stdio transport...");
 
