@@ -76,8 +76,8 @@ pub use clean::{
 
 // Re-export join operations
 pub use join::{
-    JoinType, anti_join, concat, cross_join, full_join, hconcat, inner_join, join, left_join,
-    right_join, semi_join,
+    JoinOptions, JoinType, anti_join, concat, cross_join, cross_join_with, estimate_join_rows,
+    full_join, hconcat, inner_join, join, join_with, left_join, right_join, semi_join,
 };
 
 // Re-export aggregate operations
