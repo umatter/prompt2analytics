@@ -11,6 +11,7 @@
 //!   "Computer Methods for Mathematical Computations". Prentice-Hall.
 
 use crate::errors::{EconError, EconResult};
+use crate::resource;
 use serde::{Deserialize, Serialize};
 
 /// Method for spline interpolation.
@@ -111,6 +112,129 @@ pub fn spline(
     n: Option<usize>,
     method: SplineMethod,
 ) -> EconResult<SplineResult> {
+    let (xs, ys) = prepare_spline_knots(x, y)?;
+
+    // Compute spline coefficients
+    let coeffs = match method {
+        SplineMethod::Natural => compute_natural_spline(&xs, &ys)?,
+        SplineMethod::Fmm => compute_fmm_spline(&xs, &ys)?,
+        SplineMethod::Periodic => compute_periodic_spline(&xs, &ys)?,
+        SplineMethod::MonotoneFC => compute_monotone_spline(&xs, &ys)?,
+    };
+
+    // Determine output x values
+    let x_out = output_points(&xs, xout, n)?;
+
+    // Evaluate spline at output points
+    let mut y_out: Vec<f64> = resource::try_with_capacity(x_out.len(), "interpolation points")?;
+    for (i, &xi) in x_out.iter().enumerate() {
+        if i % 65_536 == 0 {
+            resource::checkpoint()?;
+        }
+        y_out.push(evaluate_cubic_spline(&xs, &ys, &coeffs, xi));
+    }
+
+    Ok(SplineResult {
+        n: x_out.len(),
+        x: x_out,
+        y: y_out,
+        method,
+    })
+}
+
+/// Perform linear or constant interpolation.
+///
+/// Interpolates the given data points using either linear interpolation
+/// or a step function (constant interpolation).
+///
+/// # Arguments
+///
+/// * `x` - Input x values (will be sorted internally)
+/// * `y` - Input y values (same length as x)
+/// * `xout` - Optional x values at which to interpolate. If None, uses n equally spaced points.
+/// * `n` - Number of interpolation points if xout is None (default 50)
+/// * `method` - Interpolation method (Linear or Constant)
+/// * `rule` - How to handle values outside the x range
+/// * `f` - For constant method: 0 = left-continuous, 1 = right-continuous, 0.5 = midpoint
+///
+/// # Returns
+///
+/// `ApproxResult` containing interpolated x and y values.
+///
+/// # References
+///
+/// - R function `stats::approx()`
+pub fn approx(
+    x: &[f64],
+    y: &[f64],
+    xout: Option<&[f64]>,
+    n: Option<usize>,
+    method: ApproxMethod,
+    rule: ApproxRule,
+    f: f64,
+) -> EconResult<ApproxResult> {
+    let (xs, ys) = prepare_approx_knots(x, y)?;
+
+    // Determine output x values
+    let x_out = output_points(&xs, xout, n)?;
+
+    // Interpolate at output points
+    let mut y_out: Vec<f64> = resource::try_with_capacity(x_out.len(), "interpolation points")?;
+    for (i, &xi) in x_out.iter().enumerate() {
+        if i % 65_536 == 0 {
+            resource::checkpoint()?;
+        }
+        y_out.push(interpolate_approx(&xs, &ys, xi, method, rule, f));
+    }
+
+    Ok(ApproxResult {
+        n: x_out.len(),
+        x: x_out,
+        y: y_out,
+        method,
+    })
+}
+
+/// Create an interpolating function from data points.
+///
+/// This is a convenience wrapper that returns a closure for evaluating
+/// the interpolation at arbitrary points.
+///
+/// The knots are validated as in [`spline`]: at least 4 finite points with distinct x values.
+pub fn splinefun(x: &[f64], y: &[f64], method: SplineMethod) -> EconResult<impl Fn(f64) -> f64> {
+    let (xs, ys) = prepare_spline_knots(x, y)?;
+
+    // Compute spline coefficients
+    let coeffs = match method {
+        SplineMethod::Natural => compute_natural_spline(&xs, &ys)?,
+        SplineMethod::Fmm => compute_fmm_spline(&xs, &ys)?,
+        SplineMethod::Periodic => compute_periodic_spline(&xs, &ys)?,
+        SplineMethod::MonotoneFC => compute_monotone_spline(&xs, &ys)?,
+    };
+
+    Ok(move |xi: f64| evaluate_cubic_spline(&xs, &ys, &coeffs, xi))
+}
+
+/// Create an approx interpolating function from data points.
+///
+/// The knots are validated as in [`approx`]: at least 2 points with finite x and y.
+pub fn approxfun(
+    x: &[f64],
+    y: &[f64],
+    method: ApproxMethod,
+    rule: ApproxRule,
+    f: f64,
+) -> EconResult<impl Fn(f64) -> f64> {
+    let (xs, ys) = prepare_approx_knots(x, y)?;
+
+    Ok(move |xi: f64| interpolate_approx(&xs, &ys, xi, method, rule, f))
+}
+
+// ========== Internal helper functions ==========
+
+/// Validate and sort cubic-spline knots: equal lengths, at least 4 points, finite values and
+/// distinct x values (within 1e-14). Returns the knots sorted by x.
+fn prepare_spline_knots(x: &[f64], y: &[f64]) -> EconResult<(Vec<f64>, Vec<f64>)> {
     if x.len() != y.len() {
         return Err(EconError::InvalidSpecification {
             message: format!("x and y must have same length: {} vs {}", x.len(), y.len()),
@@ -148,72 +272,11 @@ pub fn spline(
         }
     }
 
-    // Compute spline coefficients
-    let coeffs = match method {
-        SplineMethod::Natural => compute_natural_spline(&xs, &ys)?,
-        SplineMethod::Fmm => compute_fmm_spline(&xs, &ys)?,
-        SplineMethod::Periodic => compute_periodic_spline(&xs, &ys)?,
-        SplineMethod::MonotoneFC => compute_monotone_spline(&xs, &ys)?,
-    };
-
-    // Determine output x values
-    let x_out: Vec<f64> = match xout {
-        Some(xo) => xo.to_vec(),
-        None => {
-            let n_pts = n.unwrap_or(50);
-            let x_min = xs[0];
-            let x_max = xs[xs.len() - 1];
-            (0..n_pts)
-                .map(|i| x_min + (x_max - x_min) * i as f64 / (n_pts - 1) as f64)
-                .collect()
-        }
-    };
-
-    // Evaluate spline at output points
-    let y_out: Vec<f64> = x_out
-        .iter()
-        .map(|&xi| evaluate_cubic_spline(&xs, &ys, &coeffs, xi))
-        .collect();
-
-    Ok(SplineResult {
-        x: x_out.clone(),
-        y: y_out,
-        method,
-        n: x_out.len(),
-    })
+    Ok((xs, ys))
 }
 
-/// Perform linear or constant interpolation.
-///
-/// Interpolates the given data points using either linear interpolation
-/// or a step function (constant interpolation).
-///
-/// # Arguments
-///
-/// * `x` - Input x values (will be sorted internally)
-/// * `y` - Input y values (same length as x)
-/// * `xout` - Optional x values at which to interpolate. If None, uses n equally spaced points.
-/// * `n` - Number of interpolation points if xout is None (default 50)
-/// * `method` - Interpolation method (Linear or Constant)
-/// * `rule` - How to handle values outside the x range
-/// * `f` - For constant method: 0 = left-continuous, 1 = right-continuous, 0.5 = midpoint
-///
-/// # Returns
-///
-/// `ApproxResult` containing interpolated x and y values.
-///
-/// # References
-///
-/// - R function `stats::approx()`
-pub fn approx(
-    x: &[f64],
-    y: &[f64],
-    xout: Option<&[f64]>,
-    n: Option<usize>,
-    method: ApproxMethod,
-    rule: ApproxRule,
-    f: f64,
-) -> EconResult<ApproxResult> {
+/// Keep the points with finite x and y, sort them by x and require at least 2 of them.
+fn prepare_approx_knots(x: &[f64], y: &[f64]) -> EconResult<(Vec<f64>, Vec<f64>)> {
     if x.len() != y.len() {
         return Err(EconError::InvalidSpecification {
             message: format!("x and y must have same length: {} vs {}", x.len(), y.len()),
@@ -247,109 +310,28 @@ pub fn approx(
 
     let xs: Vec<f64> = pairs.iter().map(|p| p.0).collect();
     let ys: Vec<f64> = pairs.iter().map(|p| p.1).collect();
+    Ok((xs, ys))
+}
 
-    // Determine output x values
-    let x_out: Vec<f64> = match xout {
-        Some(xo) => xo.to_vec(),
+/// The output points: a copy of `xout`, or `n` (default 50) equally spaced points over the
+/// knots' range. The buffer is allocated fallibly.
+fn output_points(xs: &[f64], xout: Option<&[f64]>, n: Option<usize>) -> EconResult<Vec<f64>> {
+    match xout {
+        Some(xo) => {
+            let mut out = resource::try_with_capacity(xo.len(), "interpolation points")?;
+            out.extend_from_slice(xo);
+            Ok(out)
+        }
         None => {
             let n_pts = n.unwrap_or(50);
             let x_min = xs[0];
             let x_max = xs[xs.len() - 1];
-            (0..n_pts)
-                .map(|i| x_min + (x_max - x_min) * i as f64 / (n_pts - 1) as f64)
-                .collect()
+            let mut out = resource::try_with_capacity(n_pts, "interpolation points")?;
+            out.extend((0..n_pts).map(|i| x_min + (x_max - x_min) * i as f64 / (n_pts - 1) as f64));
+            Ok(out)
         }
-    };
-
-    // Interpolate at output points
-    let y_out: Vec<f64> = x_out
-        .iter()
-        .map(|&xi| interpolate_approx(&xs, &ys, xi, method, rule, f))
-        .collect();
-
-    Ok(ApproxResult {
-        x: x_out.clone(),
-        y: y_out,
-        method,
-        n: x_out.len(),
-    })
+    }
 }
-
-/// Create an interpolating function from data points.
-///
-/// This is a convenience wrapper that returns a closure for evaluating
-/// the interpolation at arbitrary points.
-pub fn splinefun(x: &[f64], y: &[f64], method: SplineMethod) -> EconResult<impl Fn(f64) -> f64> {
-    if x.len() != y.len() {
-        return Err(EconError::InvalidSpecification {
-            message: format!("x and y must have same length: {} vs {}", x.len(), y.len()),
-        });
-    }
-
-    if x.len() < 4 {
-        return Err(EconError::InsufficientData {
-            required: 4,
-            provided: x.len(),
-            context: "cubic spline interpolation".to_string(),
-        });
-    }
-
-    // Sort by x values
-    let mut pairs: Vec<(f64, f64)> = x.iter().zip(y.iter()).map(|(&xi, &yi)| (xi, yi)).collect();
-    pairs.sort_by(|a, b| a.0.total_cmp(&b.0));
-
-    let xs: Vec<f64> = pairs.iter().map(|p| p.0).collect();
-    let ys: Vec<f64> = pairs.iter().map(|p| p.1).collect();
-
-    // Compute spline coefficients
-    let coeffs = match method {
-        SplineMethod::Natural => compute_natural_spline(&xs, &ys)?,
-        SplineMethod::Fmm => compute_fmm_spline(&xs, &ys)?,
-        SplineMethod::Periodic => compute_periodic_spline(&xs, &ys)?,
-        SplineMethod::MonotoneFC => compute_monotone_spline(&xs, &ys)?,
-    };
-
-    Ok(move |xi: f64| evaluate_cubic_spline(&xs, &ys, &coeffs, xi))
-}
-
-/// Create an approx interpolating function from data points.
-pub fn approxfun(
-    x: &[f64],
-    y: &[f64],
-    method: ApproxMethod,
-    rule: ApproxRule,
-    f: f64,
-) -> EconResult<impl Fn(f64) -> f64> {
-    if x.len() != y.len() {
-        return Err(EconError::InvalidSpecification {
-            message: format!("x and y must have same length: {} vs {}", x.len(), y.len()),
-        });
-    }
-
-    if x.len() < 2 {
-        return Err(EconError::InsufficientData {
-            required: 2,
-            provided: x.len(),
-            context: "interpolation".to_string(),
-        });
-    }
-
-    // Sort by x values
-    let mut pairs: Vec<(f64, f64)> = x
-        .iter()
-        .zip(y.iter())
-        .filter(|(xi, yi)| xi.is_finite() && yi.is_finite())
-        .map(|(&xi, &yi)| (xi, yi))
-        .collect();
-    pairs.sort_by(|a, b| a.0.total_cmp(&b.0));
-
-    let xs: Vec<f64> = pairs.iter().map(|p| p.0).collect();
-    let ys: Vec<f64> = pairs.iter().map(|p| p.1).collect();
-
-    Ok(move |xi: f64| interpolate_approx(&xs, &ys, xi, method, rule, f))
-}
-
-// ========== Internal helper functions ==========
 
 /// Spline coefficients: for each interval, stores second derivatives at knots.
 struct SplineCoeffs {
@@ -664,23 +646,19 @@ fn solve_cyclic_tridiagonal(
     Ok(x)
 }
 
+/// The knot interval for `xi`: the first `j` with `x[j] <= xi <= x[j + 1]`, clamped to
+/// `[0, n - 2]`, found by binary search over the sorted knots `x` (`x.len() >= 2`). A NaN
+/// point gives 0. Equal to a linear scan from the first knot for every input.
+fn find_interval(x: &[f64], xi: f64) -> usize {
+    x.partition_point(|&k| k < xi)
+        .saturating_sub(1)
+        .min(x.len() - 2)
+}
+
 /// Evaluate cubic spline at a point.
 fn evaluate_cubic_spline(x: &[f64], y: &[f64], coeffs: &SplineCoeffs, xi: f64) -> f64 {
-    let n = x.len();
-
-    // Find the interval containing xi
-    let mut i = 0;
-    for j in 0..n - 1 {
-        if xi >= x[j] && xi <= x[j + 1] {
-            i = j;
-            break;
-        }
-    }
-    if xi < x[0] {
-        i = 0;
-    } else if xi > x[n - 1] {
-        i = n - 2;
-    }
+    // Find the interval containing xi (clamped to the end intervals outside the range)
+    let i = find_interval(x, xi);
 
     // Evaluate cubic spline in interval [x[i], x[i+1]]
     let h = x[i + 1] - x[i];
@@ -720,13 +698,7 @@ fn interpolate_approx(
     }
 
     // Find the interval containing xi
-    let mut i = 0;
-    for j in 0..n - 1 {
-        if xi >= x[j] && xi <= x[j + 1] {
-            i = j;
-            break;
-        }
-    }
+    let i = find_interval(x, xi);
 
     match method {
         ApproxMethod::Linear => {
@@ -747,6 +719,181 @@ fn interpolate_approx(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::resource::{self, Budget, CancelToken};
+
+    // R 4.3.3:
+    //   sx <- c(0.0, 1.3, 0.6, 2.2, 3.1, 4.0, 2.7, 5.2, 4.6, 6.0)
+    //   sy <- c(1.00, 0.35, 0.92, -0.41, -0.88, -0.62, -0.79, 0.37, -0.12, 0.81)
+    //   xo <- c(0.15, 0.95, 1.75, 2.45, 2.9, 3.55, 4.3, 4.9, 5.6, 5.95)
+    //   spline(sx, sy, method = "natural", xout = xo)$y
+    //   approx(sx, sy, xout = c(-0.5, xo, 6.5), method = "linear", rule = 1 / rule = 2)$y
+    const SX: [f64; 10] = [0.0, 1.3, 0.6, 2.2, 3.1, 4.0, 2.7, 5.2, 4.6, 6.0];
+    const SY: [f64; 10] = [
+        1.00, 0.35, 0.92, -0.41, -0.88, -0.62, -0.79, 0.37, -0.12, 0.81,
+    ];
+    const XO: [f64; 10] = [0.15, 0.95, 1.75, 2.45, 2.9, 3.55, 4.3, 4.9, 5.6, 5.95];
+
+    #[test]
+    fn test_validate_natural_spline_against_r() {
+        let r_y = [
+            1.0035342841021795,
+            0.6746362317515617,
+            -0.03664486690060831,
+            -0.6229938475881653,
+            -0.8581626978141365,
+            -0.8276939305271469,
+            -0.38793707175681735,
+            0.14034763562371816,
+            0.6116496312127426,
+            0.7860941770568031,
+        ];
+        let s = spline(&SX, &SY, Some(&XO), None, SplineMethod::Natural).unwrap();
+        for (got, want) in s.y.iter().zip(r_y) {
+            assert!((got - want).abs() < 1e-12, "{got} vs {want}");
+        }
+    }
+
+    #[test]
+    fn test_validate_approx_linear_against_r() {
+        let inner = [
+            0.98,
+            0.635,
+            -0.029999999999999916,
+            -0.6,
+            -0.835,
+            -0.75,
+            -0.37,
+            0.1250000000000004,
+            0.5899999999999997,
+            0.7825000000000002,
+        ];
+        let mut xo = vec![-0.5];
+        xo.extend(XO);
+        xo.push(6.5);
+        let na = approx(
+            &SX,
+            &SY,
+            Some(&xo),
+            None,
+            ApproxMethod::Linear,
+            ApproxRule::Na,
+            0.0,
+        )
+        .unwrap();
+        let nearest = approx(
+            &SX,
+            &SY,
+            Some(&xo),
+            None,
+            ApproxMethod::Linear,
+            ApproxRule::Nearest,
+            0.0,
+        )
+        .unwrap();
+        assert!(na.y[0].is_nan() && na.y[11].is_nan());
+        assert_eq!((nearest.y[0], nearest.y[11]), (1.0, 0.81));
+        for i in 0..10 {
+            assert!((na.y[i + 1] - inner[i]).abs() < 1e-12);
+            assert!((nearest.y[i + 1] - inner[i]).abs() < 1e-12);
+        }
+    }
+
+    #[test]
+    fn test_find_interval_matches_linear_scan() {
+        fn naive(x: &[f64], xi: f64) -> usize {
+            // today's scan, with the spline evaluator's clamps
+            let n = x.len();
+            let mut i = 0;
+            for j in 0..n - 1 {
+                if xi >= x[j] && xi <= x[j + 1] {
+                    i = j;
+                    break;
+                }
+            }
+            if xi < x[0] {
+                0
+            } else if xi > x[n - 1] {
+                n - 2
+            } else {
+                i
+            }
+        }
+        for knots in [
+            vec![0.0, 1.0, 2.0, 3.5, 7.0],
+            vec![0.0, 1.0, 1.0, 1.0, 2.0, 2.0, 5.0],
+            vec![-1.0, 4.0],
+        ] {
+            let mut pts: Vec<f64> = knots.clone();
+            pts.extend(knots.windows(2).map(|w| 0.5 * (w[0] + w[1])));
+            pts.extend([-1e9, 1e9, f64::NEG_INFINITY, f64::INFINITY, f64::NAN]);
+            for p in pts {
+                assert_eq!(
+                    find_interval(&knots, p),
+                    naive(&knots, p),
+                    "knots {knots:?}, p {p}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_splinefun_validates_knots_like_spline() {
+        assert!(
+            splinefun(
+                &[0.0, 1.0, 2.0, f64::NAN],
+                &[1.0, 2.0, 3.0, 4.0],
+                SplineMethod::Natural
+            )
+            .is_err()
+        );
+        let e = splinefun(
+            &[0.0, 1.0, 1.0, 2.0],
+            &[1.0, 2.0, 3.0, 4.0],
+            SplineMethod::Natural,
+        )
+        .err()
+        .unwrap();
+        assert!(e.to_string().contains("Duplicate"), "{e}");
+    }
+
+    #[test]
+    fn test_approxfun_needs_two_finite_points() {
+        // pre-fix: the closure indexes x[1] and panics for points equal to the single knot
+        assert!(
+            approxfun(
+                &[1.0, f64::NAN],
+                &[1.0, 2.0],
+                ApproxMethod::Linear,
+                ApproxRule::Na,
+                0.0
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn test_spline_and_approx_honour_cancellation() {
+        let t = CancelToken::new();
+        t.cancel();
+        resource::with_budget(Budget::new(None, t), || {
+            assert!(matches!(
+                spline(&SX, &SY, Some(&XO), None, SplineMethod::Natural),
+                Err(EconError::Cancelled(_))
+            ));
+            assert!(matches!(
+                approx(
+                    &SX,
+                    &SY,
+                    Some(&XO),
+                    None,
+                    ApproxMethod::Linear,
+                    ApproxRule::Na,
+                    0.0
+                ),
+                Err(EconError::Cancelled(_))
+            ));
+        });
+    }
 
     #[test]
     fn test_spline_natural_basic() {
