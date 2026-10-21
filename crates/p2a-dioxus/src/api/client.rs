@@ -536,3 +536,170 @@ impl ApiClient {
 pub fn api() -> ApiClient {
     ApiClient::new()
 }
+
+/// The origin (`scheme://host[:port]`) of a backend base URL, for use as a
+/// CSP source expression.
+///
+/// Returns `None` unless the URL parses with an `http` or `https` scheme and
+/// its serialized origin consists only of `[A-Za-z0-9.:/\-\[\]]`, so a
+/// malformed `P2A_BACKEND_URL` can never inject extra CSP tokens or
+/// directives.
+pub fn backend_origin(base_url: &str) -> Option<String> {
+    let url = reqwest::Url::parse(base_url.trim()).ok()?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return None;
+    }
+    let origin = url.origin().ascii_serialization();
+    let safe = !origin.is_empty()
+        && origin
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | ':' | '/' | '-' | '[' | ']'));
+    safe.then_some(origin)
+}
+
+/// The runtime `connect-src` directive: `'self'` plus the backend origin
+/// when it is a valid http(s) origin.
+pub fn connect_src_policy(base_url: &str) -> String {
+    match backend_origin(base_url) {
+        Some(origin) => format!("connect-src 'self' {origin}"),
+        None => "connect-src 'self'".to_string(),
+    }
+}
+
+/// Narrow `connect-src` to the compiled-in backend.
+///
+/// `index.html` ships a static CSP whose `connect-src` must also allow the
+/// backend, which is only known at compile time (`P2A_BACKEND_URL`). This
+/// appends a second CSP `<meta>` with `connect-src 'self' <backend origin>`;
+/// browsers enforce every policy, so the effective `connect-src` is the
+/// intersection. Call it before `dioxus::launch`, so nothing untrusted has
+/// rendered yet. On non-wasm targets it is a no-op.
+pub fn install_backend_csp() {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let Some(document) = web_sys::window().and_then(|w| w.document()) else {
+            tracing::warn!("CSP: no document; runtime connect-src narrowing skipped");
+            return;
+        };
+        match document.query_selector("meta[data-p2a-csp]") {
+            Ok(Some(_)) => return,
+            Ok(None) => {}
+            Err(e) => {
+                tracing::warn!("CSP: meta lookup failed: {e:?}");
+                return;
+            }
+        }
+        let head = match document.query_selector("head") {
+            Ok(Some(head)) => head,
+            Ok(None) => {
+                tracing::warn!("CSP: no <head>; runtime connect-src narrowing skipped");
+                return;
+            }
+            Err(e) => {
+                tracing::warn!("CSP: <head> lookup failed: {e:?}");
+                return;
+            }
+        };
+        let meta = match document.create_element("meta") {
+            Ok(meta) => meta,
+            Err(e) => {
+                tracing::warn!("CSP: could not create <meta>: {e:?}");
+                return;
+            }
+        };
+        let policy = connect_src_policy(DEFAULT_BASE_URL);
+        for (name, value) in [
+            ("http-equiv", "Content-Security-Policy"),
+            ("content", policy.as_str()),
+            ("data-p2a-csp", "backend"),
+        ] {
+            if let Err(e) = meta.set_attribute(name, value) {
+                tracing::warn!("CSP: could not set {name}: {e:?}");
+                return;
+            }
+        }
+        if let Err(e) = head.append_child(&meta) {
+            tracing::warn!("CSP: could not append <meta>: {e:?}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backend_origin_of_base_urls() {
+        assert_eq!(
+            backend_origin("https://p2a-api.qamelab.org").as_deref(),
+            Some("https://p2a-api.qamelab.org")
+        );
+        assert_eq!(
+            backend_origin("https://p2a-api.qamelab.org/").as_deref(),
+            Some("https://p2a-api.qamelab.org")
+        );
+        assert_eq!(
+            backend_origin("http://localhost:8080").as_deref(),
+            Some("http://localhost:8080")
+        );
+        assert_eq!(
+            backend_origin("https://example.org:443/api").as_deref(),
+            Some("https://example.org")
+        );
+        assert_eq!(backend_origin("not a url"), None);
+        assert_eq!(backend_origin("javascript:alert(1)"), None);
+    }
+
+    #[test]
+    fn connect_src_policy_names_only_self_and_backend() {
+        assert_eq!(
+            connect_src_policy("https://p2a-api.qamelab.org"),
+            "connect-src 'self' https://p2a-api.qamelab.org"
+        );
+        assert_eq!(
+            connect_src_policy("http://localhost:8080/"),
+            "connect-src 'self' http://localhost:8080"
+        );
+        assert_eq!(connect_src_policy("not a url"), "connect-src 'self'");
+        for hostile in [
+            "https://a.example;x",
+            "https://a.example; script-src *",
+            "https://a example",
+        ] {
+            let p = connect_src_policy(hostile);
+            assert!(
+                p.starts_with("connect-src 'self'") && !p.contains(';'),
+                "{p}"
+            );
+        }
+    }
+
+    #[test]
+    fn index_html_ships_a_restrictive_csp() {
+        let html = include_str!("../../index.html");
+        let at = html
+            .find("http-equiv=\"Content-Security-Policy\"")
+            .expect("CSP meta present");
+        assert!(
+            at < html.find("<link").unwrap(),
+            "CSP must precede the stylesheet link"
+        );
+        let content = &html[at..];
+        let start = content.find("content=\"").unwrap() + "content=\"".len();
+        let policy = &content[start..start + content[start..].find('"').unwrap()];
+        let d = |name: &str| {
+            policy
+                .split(';')
+                .map(str::trim)
+                .find(|x| x.split_whitespace().next() == Some(name))
+                .unwrap_or_else(|| panic!("missing {name}"))
+                .to_string()
+        };
+        assert_eq!(d("default-src"), "default-src 'self'");
+        assert_eq!(d("script-src"), "script-src 'self' 'wasm-unsafe-eval'");
+        assert_eq!(d("img-src"), "img-src 'self' data:");
+        assert_eq!(d("object-src"), "object-src 'none'");
+        assert_eq!(d("base-uri"), "base-uri 'none'");
+        assert!(d("connect-src").starts_with("connect-src 'self'"));
+    }
+}

@@ -165,6 +165,9 @@ fn main() {
 
     #[cfg(feature = "web")]
     {
+        // Narrow the static CSP's connect-src to the compiled-in backend
+        // before anything renders.
+        api::install_backend_csp();
         dioxus::launch(app::App);
     }
 }

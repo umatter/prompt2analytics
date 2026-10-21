@@ -5,7 +5,7 @@
 use dioxus::prelude::*;
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 
-/// Neutralize unsafe URL schemes in markdown links/images.
+/// Neutralize unsafe URL schemes in markdown link destinations.
 ///
 /// Markdown destinations are attacker-influenceable (LLM output, user text,
 /// tool results). Rendering `[x](javascript:…)` / `data:` URLs as an `href`
@@ -16,9 +16,12 @@ use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 /// `"#"`. Relative URLs (no scheme) and fragments/queries are allowed. Control
 /// characters are stripped first because browsers ignore them when resolving a
 /// URL, so `java&#9;script:` style obfuscation can't slip a scheme past us.
+///
+/// Images do not use this directly: [`classify_image`] decides whether an
+/// image is inlined at all, and only the link fallback goes through here.
 fn sanitize_url(url: &str) -> String {
-    let cleaned: String = url.chars().filter(|c| !c.is_control()).collect();
-    let trimmed = cleaned.trim();
+    let cleaned = strip_control_and_trim(url);
+    let trimmed = cleaned.as_str();
 
     if let Some(colon) = trimmed.find(':') {
         let scheme = &trimmed[..colon];
@@ -41,6 +44,55 @@ fn sanitize_url(url: &str) -> String {
     }
 
     trimmed.to_string()
+}
+
+/// Remove control characters (which browsers ignore when resolving a URL) and
+/// surrounding whitespace.
+fn strip_control_and_trim(url: &str) -> String {
+    let cleaned: String = url.chars().filter(|c| !c.is_control()).collect();
+    cleaned.trim().to_string()
+}
+
+/// How a markdown image is rendered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ImageRender {
+    /// Rendered as an `<img>`: an inline base64 raster `data:` URI, which the
+    /// browser decodes locally without any network request.
+    Inline { src: String },
+    /// Rendered as a link the user can choose to open; nothing is fetched
+    /// automatically. `href` has been through [`sanitize_url`].
+    Link { href: String },
+}
+
+/// `data:` prefixes (compared ASCII-case-insensitively) that may be inlined.
+/// SVG is excluded because it is script-capable.
+const INLINE_IMAGE_PREFIXES: [&str; 4] = [
+    "data:image/png;base64,",
+    "data:image/jpeg;base64,",
+    "data:image/gif;base64,",
+    "data:image/webp;base64,",
+];
+
+/// Decide how a markdown image destination is rendered.
+///
+/// Assistant markdown is attacker-influenceable (prompt injection through a
+/// loaded dataset), so an `<img>` pointing at a remote URL would make the
+/// browser send data to a model-chosen host as soon as the reply renders.
+/// Only base64 PNG/JPEG/GIF/WebP `data:` images are inlined; every other
+/// image, remote or relative, becomes a link.
+fn classify_image(dest_url: &str) -> ImageRender {
+    let cleaned = strip_control_and_trim(dest_url);
+    let lower = cleaned.to_ascii_lowercase();
+    if INLINE_IMAGE_PREFIXES
+        .iter()
+        .any(|prefix| lower.starts_with(prefix))
+    {
+        ImageRender::Inline { src: cleaned }
+    } else {
+        ImageRender::Link {
+            href: sanitize_url(dest_url),
+        }
+    }
 }
 
 /// Render markdown text to RSX elements with proper styling
@@ -280,20 +332,38 @@ fn render_tag(tag: &Tag, events: &[Event]) -> (Element, usize) {
         Tag::Image {
             dest_url, title, ..
         } => {
-            let src = sanitize_url(dest_url);
             let alt = extract_text(inner_events);
-            let title_attr = title.to_string();
-            (
-                rsx! {
-                    img {
-                        class: "max-w-full h-auto rounded-lg my-4",
-                        src: "{src}",
-                        alt: "{alt}",
-                        title: "{title_attr}"
+            let element = match classify_image(dest_url) {
+                ImageRender::Inline { src } => {
+                    let title_attr = title.to_string();
+                    rsx! {
+                        img {
+                            class: "max-w-full h-auto rounded-lg my-4",
+                            src: "{src}",
+                            alt: "{alt}",
+                            title: "{title_attr}"
+                        }
                     }
-                },
-                end_idx + 1,
-            )
+                }
+                ImageRender::Link { href } => {
+                    let label = if alt.trim().is_empty() {
+                        "[image]".to_string()
+                    } else {
+                        format!("[image: {alt}]")
+                    };
+                    rsx! {
+                        a {
+                            class: "text-blue-600 dark:text-blue-400 hover:underline",
+                            href: "{href}",
+                            title: "External image (not loaded automatically): {href}",
+                            target: "_blank",
+                            rel: "noopener noreferrer nofollow",
+                            "{label}"
+                        }
+                    }
+                }
+            };
+            (element, end_idx + 1)
         }
         Tag::Table(_) => {
             let children = render_table_content(inner_events);
@@ -541,7 +611,87 @@ fn find_table_section_end(events: &[Event], end_tag: TagEnd) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::sanitize_url;
+    use super::{ImageRender, classify_image, sanitize_url};
+    use pulldown_cmark::{Event, Options, Parser, Tag};
+
+    #[test]
+    fn remote_and_relative_images_become_links() {
+        for url in [
+            "https://evil.example/p?d=secret",
+            "http://evil.example/x.png",
+            "//evil.example/x.png",
+            "/assets/welcome.png",
+            "x.png",
+        ] {
+            assert_eq!(
+                classify_image(url),
+                ImageRender::Link {
+                    href: url.to_string()
+                },
+                "{url}"
+            );
+        }
+    }
+
+    #[test]
+    fn inline_raster_data_images_are_kept() {
+        assert_eq!(
+            classify_image(" data:image/gif;base64,R0lGODlh "),
+            ImageRender::Inline {
+                src: "data:image/gif;base64,R0lGODlh".into()
+            }
+        );
+        for url in [
+            "data:image/png;base64,iVBORw0KGgo=",
+            "data:image/jpeg;base64,/9j/4AAQ",
+            "DATA:IMAGE/PNG;BASE64,iVBORw0KGgo=",
+            "data:image/webp;base64,UklGRg==",
+        ] {
+            assert!(
+                matches!(classify_image(url), ImageRender::Inline { .. }),
+                "{url:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn script_capable_or_unknown_data_images_are_neutralised() {
+        for url in [
+            "data:image/svg+xml;base64,PHN2Zz4=",
+            "data:text/html,<b>x</b>",
+            "javascript:alert(1)",
+            "java\tscript:alert(1)",
+            "data:image/png,rawbytes",
+        ] {
+            assert_eq!(
+                classify_image(url),
+                ImageRender::Link { href: "#".into() },
+                "{url:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn markdown_image_events_are_classified() {
+        let md = "![chart](data:image/png;base64,iVBORw0KGgo=) and ![x](https://evil.example/?d=1)";
+        let got: Vec<ImageRender> = Parser::new_ext(md, Options::all())
+            .filter_map(|e| match e {
+                Event::Start(Tag::Image { dest_url, .. }) => Some(classify_image(&dest_url)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ImageRender::Inline {
+                    src: "data:image/png;base64,iVBORw0KGgo=".into()
+                },
+                ImageRender::Link {
+                    href: "https://evil.example/?d=1".into()
+                },
+            ]
+        );
+    }
 
     #[test]
     fn allows_safe_and_relative_urls() {
