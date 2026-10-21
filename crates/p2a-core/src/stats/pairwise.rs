@@ -38,6 +38,7 @@ use super::ttest::{Alternative, two_sample_t_test};
 use super::wilcoxon::{WilcoxonConfig, wilcoxon_rank_sum};
 use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
+use crate::resource;
 use crate::traits::SignificanceLevel;
 
 /// Method for adjusting p-values in multiple comparisons.
@@ -507,13 +508,14 @@ pub fn pairwise_t_test<T: AsRef<str> + Clone + Eq + std::hash::Hash + ToString>(
     };
 
     // Number of comparisons: k*(k-1)/2
-    let n_comparisons = k * (k - 1) / 2;
-    let mut p_values_raw = Vec::with_capacity(n_comparisons);
-    let mut t_statistics = Vec::with_capacity(n_comparisons);
-    let mut df_values = Vec::with_capacity(n_comparisons);
+    let n_comparisons = comparison_count(k)?;
+    let mut p_values_raw = resource::try_with_capacity(n_comparisons, "pairwise p-values")?;
+    let mut t_statistics = resource::try_with_capacity(n_comparisons, "pairwise t statistics")?;
+    let mut df_values = resource::try_with_capacity(n_comparisons, "pairwise degrees of freedom")?;
 
     // Perform pairwise t-tests (lower triangular)
     for i in 1..k {
+        resource::checkpoint()?;
         for j in 0..i {
             let x = group_vecs[i];
             let y = group_vecs[j];
@@ -664,6 +666,17 @@ pub fn run_pairwise_t_test(
     }
 
     pairwise_t_test(&values, &groups, pool_sd, alternative, p_adjust_method)
+}
+
+/// `k(k-1)/2`, the number of pairwise comparisons among `k` groups (checked).
+fn comparison_count(k: usize) -> EconResult<usize> {
+    k.checked_mul(k.saturating_sub(1))
+        .map(|v| v / 2)
+        .ok_or_else(|| {
+            EconError::ResourceLimit(format!(
+                "pairwise comparisons among {k} groups are too many: the count overflows"
+            ))
+        })
 }
 
 /// Compute p-value for t-statistic.
@@ -926,9 +939,9 @@ pub fn pairwise_wilcox_test<T: AsRef<str> + Clone + Eq + std::hash::Hash + ToStr
     }
 
     // Number of comparisons: k*(k-1)/2
-    let n_comparisons = k * (k - 1) / 2;
-    let mut p_values_raw = Vec::with_capacity(n_comparisons);
-    let mut w_statistics = Vec::with_capacity(n_comparisons);
+    let n_comparisons = comparison_count(k)?;
+    let mut p_values_raw = resource::try_with_capacity(n_comparisons, "pairwise p-values")?;
+    let mut w_statistics = resource::try_with_capacity(n_comparisons, "pairwise W statistics")?;
     let mut has_ties = false;
     let mut all_exact = true;
 
@@ -942,6 +955,7 @@ pub fn pairwise_wilcox_test<T: AsRef<str> + Clone + Eq + std::hash::Hash + ToStr
 
     // Perform pairwise Wilcoxon rank sum tests (lower triangular)
     for i in 1..k {
+        resource::checkpoint()?;
         for j in 0..i {
             let x = group_vecs[i];
             let y = group_vecs[j];
@@ -1096,6 +1110,37 @@ pub fn run_pairwise_wilcox_test(
 mod tests {
     use super::*;
     use polars::prelude::*;
+
+    #[test]
+    fn test_pairwise_tests_honour_cancellation() {
+        use crate::resource::{self, Budget, CancelToken};
+        let values = [5.1, 4.9, 5.3, 6.2, 6.0, 6.4, 7.1, 7.3, 6.9];
+        let groups = ["a", "a", "a", "b", "b", "b", "c", "c", "c"];
+        let t = CancelToken::new();
+        t.cancel();
+        resource::with_budget(Budget::new(None, t), || {
+            assert!(matches!(
+                pairwise_t_test(
+                    &values,
+                    &groups,
+                    false,
+                    Alternative::TwoSided,
+                    PValueAdjustMethod::Holm
+                ),
+                Err(EconError::Cancelled(_))
+            ));
+            assert!(matches!(
+                pairwise_wilcox_test(
+                    &values,
+                    &groups,
+                    Alternative::TwoSided,
+                    PValueAdjustMethod::Holm,
+                    None
+                ),
+                Err(EconError::Cancelled(_))
+            ));
+        });
+    }
 
     #[test]
     fn test_p_adjust_bonferroni() {

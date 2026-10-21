@@ -1042,6 +1042,15 @@ impl AnalyticsServer {
 
         let pool_sd = request.pool_sd.unwrap_or(false);
 
+        if let Err(msg) = check_pairwise_groups(
+            dataset,
+            "hypothesis_pairwise_t_test",
+            "t-test",
+            &request.factor,
+        ) {
+            return Ok(CallToolResult::error(vec![Content::text(msg)]));
+        }
+
         match run_pairwise_t_test(
             dataset,
             &request.response,
@@ -1051,13 +1060,16 @@ impl AnalyticsServer {
             p_adjust_method,
         ) {
             Ok(result) => {
-                let k = result.group_names.len();
-                let mut p_matrix: Vec<Vec<Option<f64>>> = vec![vec![None; k]; k];
-                for i in 1..k {
-                    for j in 0..i {
-                        p_matrix[i][j] = Some(result.p_values_adj[result.index(i, j)]);
+                let p_matrix = match lower_triangular_p_matrix(result.group_names.len(), |i, j| {
+                    result.p_values_adj[result.index(i, j)]
+                }) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        return Ok(CallToolResult::error(vec![Content::text(format!(
+                            "Pairwise t-test failed: {e}"
+                        ))]));
                     }
-                }
+                };
 
                 let output = serde_json::json!({
                     "test": result.test_name,
@@ -1132,6 +1144,15 @@ impl AnalyticsServer {
             None => Alternative::TwoSided,
         };
 
+        if let Err(msg) = check_pairwise_groups(
+            dataset,
+            "hypothesis_pairwise_wilcox",
+            "Wilcoxon test",
+            &request.factor,
+        ) {
+            return Ok(CallToolResult::error(vec![Content::text(msg)]));
+        }
+
         match run_pairwise_wilcox_test(
             dataset,
             &request.response,
@@ -1141,13 +1162,16 @@ impl AnalyticsServer {
             request.exact,
         ) {
             Ok(result) => {
-                let k = result.group_names.len();
-                let mut p_matrix: Vec<Vec<Option<f64>>> = vec![vec![None; k]; k];
-                for i in 1..k {
-                    for j in 0..i {
-                        p_matrix[i][j] = Some(result.p_values_adj[result.index(i, j)]);
+                let p_matrix = match lower_triangular_p_matrix(result.group_names.len(), |i, j| {
+                    result.p_values_adj[result.index(i, j)]
+                }) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        return Ok(CallToolResult::error(vec![Content::text(format!(
+                            "Pairwise Wilcoxon test failed: {e}"
+                        ))]));
                     }
-                }
+                };
 
                 let output = serde_json::json!({
                     "test": result.test_name,
@@ -1670,10 +1694,59 @@ impl AnalyticsServer {
     }
 }
 
+/// Refuses a pairwise test whose factor has more groups than the `max_groups` budget, before any
+/// of the k(k-1)/2 tests run.
+///
+/// The count is the factor's distinct values minus one for null, an upper bound on the core's k
+/// (the core also drops rows whose response is missing). A missing column is left to the core to
+/// report.
+fn check_pairwise_groups(
+    dataset: &p2a_core::data::Dataset,
+    tool: &str,
+    label: &str,
+    factor: &str,
+) -> Result<(), String> {
+    let Ok(col) = dataset.df().column(factor) else {
+        return Ok(());
+    };
+    let Ok(n_unique) = col.n_unique() else {
+        return Ok(());
+    };
+    let k = n_unique.saturating_sub(usize::from(col.null_count() > 0)) as u64;
+    let limits = crate::tools::limits::current();
+    check_named_budget(tool, "max_groups", k, limits.max_groups.map(|v| v as u64)).map_err(|msg| {
+        let comparisons = k.saturating_mul(k.saturating_sub(1)) / 2;
+        format!(
+            "Pairwise {label} refused: factor `{factor}` has {k} groups, which needs \
+             {comparisons} comparisons. {msg} Use a factor with fewer levels or filter the data \
+             first."
+        )
+    })
+}
+
+/// The k x k lower-triangular matrix of adjusted p-values (row i, column j < i), with its size
+/// checked before it is built.
+fn lower_triangular_p_matrix(
+    k: usize,
+    p_value: impl Fn(usize, usize) -> f64,
+) -> Result<Vec<Vec<Option<f64>>>, String> {
+    let cells =
+        p2a_core::resource::checked_len(&[k, k], "p-value matrix").map_err(|e| e.to_string())?;
+    p2a_core::resource::check_alloc::<Option<f64>>(cells, "p-value matrix")
+        .map_err(|e| e.to_string())?;
+    let mut p_matrix: Vec<Vec<Option<f64>>> = vec![vec![None; k]; k];
+    for (i, row) in p_matrix.iter_mut().enumerate().skip(1) {
+        for (j, cell) in row.iter_mut().enumerate().take(i) {
+            *cell = Some(p_value(i, j));
+        }
+    }
+    Ok(p_matrix)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tools::common::test_support::{server_with, text};
+    use crate::tools::common::test_support::{hosted_with, server_with, text};
     use crate::tools::limits::{self, Limits};
     use p2a_core::polars::prelude::*;
 
@@ -1741,5 +1814,99 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&text(&r)).unwrap();
         assert!((v["statistic"].as_f64().unwrap() - 2.0277056277056276).abs() < 1e-10);
         assert!(v["expected"].is_array());
+    }
+
+    fn grouped(n_rows: usize, rows_per_group: usize) -> DataFrame {
+        df!(
+            "y" => (0..n_rows)
+                .map(|i| (i as f64 * 0.37).sin() + (i % 7) as f64 * 0.1)
+                .collect::<Vec<_>>(),
+            "g" => (0..n_rows)
+                .map(|i| format!("g{}", i / rows_per_group))
+                .collect::<Vec<_>>()
+        )
+        .unwrap()
+    }
+
+    fn ttest_req() -> PairwiseTTestRequest {
+        PairwiseTTestRequest {
+            dataset: "d".into(),
+            response: "y".into(),
+            factor: "g".into(),
+            p_adjust_method: None,
+            pool_sd: None,
+            alternative: None,
+        }
+    }
+
+    #[test]
+    fn pairwise_t_test_refuses_more_groups_than_max_groups() {
+        let (rt, server) = server_with(vec![("d", grouped(202, 2))]); // 101 groups > 100
+        let r = limits::with_limits(Limits::hosted(), || {
+            rt.block_on(server.hypothesis_pairwise_t_test(Parameters(ttest_req())))
+        })
+        .unwrap();
+        assert_eq!(r.is_error, Some(true));
+        assert!(
+            text(&r).contains("max_groups") && text(&r).contains("101"),
+            "{}",
+            text(&r)
+        );
+    }
+
+    #[test]
+    fn pairwise_wilcox_refuses_more_groups_than_max_groups() {
+        let (rt, server) = server_with(vec![("d", grouped(101, 1))]); // 101 singleton groups
+        let req = PairwiseWilcoxRequest {
+            dataset: "d".into(),
+            response: "y".into(),
+            factor: "g".into(),
+            p_adjust_method: None,
+            alternative: None,
+            exact: None,
+        };
+        let r = limits::with_limits(Limits::hosted(), || {
+            rt.block_on(server.hypothesis_pairwise_wilcox(Parameters(req)))
+        })
+        .unwrap();
+        assert_eq!(r.is_error, Some(true));
+        assert!(text(&r).contains("max_groups"), "{}", text(&r));
+    }
+
+    #[test]
+    fn pairwise_group_cap_boundary() {
+        let l = hosted_with(&["max_groups=3"]);
+        let (rt, server) = server_with(vec![("ok", grouped(15, 5)), ("over", grouped(20, 5))]);
+        let ok = PairwiseTTestRequest {
+            dataset: "ok".into(),
+            ..ttest_req()
+        };
+        let over = PairwiseTTestRequest {
+            dataset: "over".into(),
+            ..ttest_req()
+        };
+        let r = limits::with_limits(l.clone(), || {
+            rt.block_on(server.hypothesis_pairwise_t_test(Parameters(ok)))
+        })
+        .unwrap();
+        assert_ne!(r.is_error, Some(true), "{}", text(&r));
+        let r = limits::with_limits(l, || {
+            rt.block_on(server.hypothesis_pairwise_t_test(Parameters(over)))
+        })
+        .unwrap();
+        assert_eq!(r.is_error, Some(true));
+    }
+
+    #[test]
+    fn pairwise_p_matrix_layout_is_lower_triangular() {
+        let m = lower_triangular_p_matrix(3, |i, j| (i * 10 + j) as f64).unwrap();
+        assert_eq!(
+            m,
+            vec![
+                vec![None, None, None],
+                vec![Some(10.0), None, None],
+                vec![Some(20.0), Some(21.0), None],
+            ]
+        );
     }
 }
