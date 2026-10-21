@@ -176,30 +176,31 @@ pub fn estimate_join_rows(
     const RIGHT_N: &str = "__p2a_right_n";
 
     let right_keys = join_keys(left, right, left_on, right_on)?;
-    let left_exprs: Vec<Expr> = left_on.iter().map(|k| col(*k)).collect();
-    let right_exprs: Vec<Expr> = right_keys.iter().map(|k| col(*k)).collect();
+    let join_err = |e: PolarsError| MungeError::JoinError(e.to_string());
 
-    let left_counts = left
-        .df()
-        .clone()
-        .lazy()
-        .group_by(left_exprs.clone())
-        .agg([len().alias(LEFT_N)]);
-    let right_counts = right
-        .df()
-        .clone()
-        .lazy()
-        .group_by(right_exprs.clone())
-        .agg([len().alias(RIGHT_N)]);
+    // Per-key row counts on each side, with eager group-bys: polars runs a
+    // lazy group-by of this shape on its streaming engine, which blocks on a
+    // tokio runtime of its own and therefore panics when it is called from
+    // inside another one, as every MCP tool call is.
+    let key_counts = |ds: &Dataset, keys: &[&str], name: &str| -> MungeResult<DataFrame> {
+        let groups = ds.df().group_by(keys.iter().copied()).map_err(join_err)?;
+        let mut columns = groups.keys();
+        let counts = groups.get_groups().group_count().with_name(name.into());
+        columns.push(counts.into_series().into_column());
+        DataFrame::new(columns).map_err(join_err)
+    };
+    let left_counts = key_counts(left, left_on, LEFT_N)?;
+    let right_counts = key_counts(right, &right_keys, RIGHT_N)?;
+    // Null keys never match (the JoinArgs default), as in `join`.
     let matched = left_counts
         .join(
-            right_counts,
-            left_exprs,
-            right_exprs,
+            &right_counts,
+            left_on.iter().copied(),
+            right_keys.iter().copied(),
             JoinArgs::new(polars::prelude::JoinType::Inner),
+            None,
         )
-        .collect()
-        .map_err(|e| MungeError::JoinError(e.to_string()))?;
+        .map_err(join_err)?;
 
     let counts = |name: &str| -> MungeResult<UInt64Chunked> {
         let column = matched
@@ -606,6 +607,28 @@ mod tests {
             estimate_join_rows(&l, &r, &["nope"], None, JoinType::Inner),
             Err(MungeError::ColumnNotFound(_))
         ));
+    }
+
+    #[test]
+    fn estimate_join_rows_runs_inside_a_tokio_runtime() {
+        // MCP tool calls run inside a tokio runtime. A lazy group-by on at
+        // least 1000 rows (15 with debug assertions) with few distinct keys
+        // runs on polars' streaming engine, which blocks on a runtime of its
+        // own and panics there.
+        let k: Vec<i64> = (0..2_000).map(|i| i % 10).collect();
+        let v: Vec<f64> = (0..2_000).map(|i| (i as f64 * 0.37).sin()).collect();
+        let d = Dataset::new(df!("k" => k, "v" => v).unwrap());
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let rows = rt.block_on(async {
+            (
+                estimate_join_rows(&d, &d, &["k"], None, JoinType::Inner),
+                estimate_join_rows(&d, &d, &["k"], None, JoinType::Full),
+            )
+        });
+        assert_eq!(rows.0.unwrap(), 400_000); // 10 keys x 200 x 200
+        assert_eq!(rows.1.unwrap(), 400_000);
     }
 
     #[test]
