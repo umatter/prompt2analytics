@@ -687,11 +687,13 @@ impl AnalyticsServer {
     /// ToolRouter (which requires a Peer that cannot be constructed outside rmcp).
     ///
     /// Only `exec::ToolGovernor::call` calls this, so every HTTP-side tool
-    /// call runs under the governor. Unknown names, unparsable arguments and
-    /// handler errors come back as `ToolCallError`; a tool's own error result
-    /// is an `Ok` with `success == false`.
+    /// call runs under the governor. In-crate HTTP-side code must go through
+    /// `exec::ToolGovernor::call`; direct calls are for tests and embedders.
+    /// Unknown names, unparsable arguments and handler errors come back as
+    /// `ToolCallError`; a tool's own error result is an `Ok` with
+    /// `success == false`.
     #[cfg(feature = "http")]
-    pub(crate) async fn call_tool_with_session(
+    pub async fn call_tool_with_session(
         &self,
         tool_name: &str,
         arguments: serde_json::Value,

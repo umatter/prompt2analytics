@@ -159,6 +159,73 @@ async fn serve_follows_the_socket_it_is_given() {
     assert!(e.to_string().contains("requires an access token"), "{e}");
 }
 
+/// `ServerConfig::default()` bound to `addr`, with the transport left at its
+/// default (stdio): what a library caller who only sets the address passes.
+fn default_transport_cfg(addr: &str) -> ServerConfig {
+    let mut c = ServerConfig::default();
+    c.http.addr = addr.parse().unwrap();
+    c
+}
+
+#[tokio::test]
+async fn bind_guards_a_config_left_at_the_default_transport() {
+    // bind() serves HTTP whatever `transport` says; a stdio default must not
+    // skip the bind guard.
+    let cfg = default_transport_cfg("0.0.0.0:0");
+    assert_eq!(cfg.transport, TransportType::default());
+    let e = p2a_mcp::transport::http::bind(&cfg)
+        .await
+        .expect_err("a public bind without a token must be refused");
+    assert!(e.to_string().contains("requires an access token"), "{e}");
+}
+
+#[tokio::test]
+async fn serve_guards_a_config_left_at_the_default_transport() {
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
+    let e =
+        p2a_mcp::transport::http::serve(listener, ServerConfig::default(), std::future::ready(()))
+            .await
+            .expect_err("a public socket without a token must be refused");
+    assert!(e.to_string().contains("requires an access token"), "{e}");
+}
+
+#[tokio::test]
+async fn build_app_reads_a_default_transport_config_as_http() {
+    // An open public configuration (public bind, --allow-unauthenticated)
+    // left at the default transport gets open public mode: the hosted
+    // profile and no enumeration routes, not local mode with no limits.
+    let mut c = default_transport_cfg("0.0.0.0:8080");
+    c.http.allow_unauthenticated = true;
+    c.http.expose_enumeration = true; // ignored in open public mode
+    let (app, state) = build_app(&c).await.unwrap();
+    let exec = state.governor.config();
+    assert!(exec.deadline.is_some(), "{exec:?}");
+    assert!(exec.session_data_bytes.is_some(), "{exec:?}");
+    assert!(exec.redact_health, "{exec:?}");
+    assert_eq!(
+        send(&app, get("/api/sessions")).await.0,
+        StatusCode::METHOD_NOT_ALLOWED
+    );
+    assert_eq!(send(&app, get("/api/files")).await.0, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn call_tool_with_session_is_public_for_tests_and_embedders() {
+    // Integration crates (the Tier 2 tests) call the dispatcher directly.
+    let session = Session::new("direct-call".into(), None);
+    let server = p2a_mcp::AnalyticsServer::with_session(&session);
+    let r = server
+        .call_tool_with_session("list_datasets", json!({}), &session)
+        .await
+        .unwrap();
+    assert!(r.success, "{:?}", r.error);
+    let e = server
+        .call_tool_with_session("no_such_tool", json!({}), &session)
+        .await
+        .expect_err("an unknown tool is an error");
+    assert!(matches!(e, ToolCallError::UnknownTool(_)), "{e:?}");
+}
+
 #[tokio::test]
 async fn embedded_server_binds_before_returning_and_reports_real_port() {
     let s = p2a_mcp::start_embedded_server(p2a_mcp::EmbeddedServerConfig::default().with_port(0))

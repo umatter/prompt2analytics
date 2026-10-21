@@ -26,7 +26,7 @@ use super::routes_sessions::{
 };
 use super::routes_tools::{call_tool, list_tools};
 use crate::audit::AuditLogger;
-use crate::config::{DeploymentMode, ServerConfig, SessionConfig};
+use crate::config::{DeploymentMode, ServerConfig, SessionConfig, TransportType};
 use crate::exec::{ExecConfig, StuckWatchdog, ToolGovernor};
 use crate::server::AnalyticsServer;
 use crate::session::SessionManager;
@@ -53,10 +53,24 @@ pub struct AppState {
     pub governor: Arc<ToolGovernor>,
 }
 
+/// `config` with its transport set to HTTP. Everything in this module serves
+/// HTTP, and `ServerConfig`'s default transport is stdio, which reads as
+/// local mode with no bind guard; so `bind`, `serve` and the app builders
+/// derive the deployment mode, resource profile and bind guard from the HTTP
+/// settings whatever `config.transport` says.
+fn as_http(config: &ServerConfig) -> ServerConfig {
+    ServerConfig {
+        transport: TransportType::Http,
+        ..config.clone()
+    }
+}
+
 /// Build the shared state and the router for `config`, with the governor
-/// settings resolved from it (`ExecConfig::from_config`).
+/// settings resolved from it (`ExecConfig::from_config`). The configuration
+/// is read as an HTTP one whatever its `transport` field says.
 pub async fn build_app(config: &ServerConfig) -> Result<(Router, AppState), TransportError> {
-    build_app_with(config, ExecConfig::from_config(config)).await
+    let config = as_http(config);
+    build_app_with(&config, ExecConfig::from_config(&config)).await
 }
 
 /// Build the shared state and the router for `config` with explicit governor
@@ -67,11 +81,13 @@ pub async fn build_app(config: &ServerConfig) -> Result<(Router, AppState), Tran
 /// governor and, with the `db` feature, the persistent session manager. The
 /// HTTP transport, the embedded desktop server and the integration tests all
 /// start from here. Process-wide policies are installed by [`serve`], not
-/// here, so tests can build several apps.
+/// here, so tests can build several apps. Like [`build_app`], it reads
+/// `config` as an HTTP configuration whatever its `transport` field says.
 pub async fn build_app_with(
     config: &ServerConfig,
     exec: ExecConfig,
 ) -> Result<(Router, AppState), TransportError> {
+    let config = &as_http(config);
     // The eviction threshold follows the resource profile here, like the
     // deadlines and quotas, whichever way `config` was built.
     let session_manager = Arc::new(SessionManager::new(SessionConfig {
@@ -136,12 +152,14 @@ async fn init_persistence(
     }
 }
 
-/// Validate `config` and bind its address. Every HTTP start path (the
-/// binary, the embedded desktop server) goes through here, so the bind guard
-/// (`config::check_bind_policy`, part of `ServerConfig::validate`) cannot be
-/// skipped.
+/// Validate `config` as an HTTP configuration and bind its address. Every
+/// HTTP start path (the binary, the embedded desktop server) goes through
+/// here, so the bind guard (`config::check_bind_policy`, part of
+/// `ServerConfig::validate`) cannot be skipped: it applies whatever
+/// `config.transport` says, including the stdio default of
+/// `ServerConfig::default()`.
 pub async fn bind(config: &ServerConfig) -> TransportResult<tokio::net::TcpListener> {
-    config
+    as_http(config)
         .validate()
         .map_err(|e| TransportError::Config(e.to_string()))?;
     let addr = config.http.addr;
@@ -152,12 +170,13 @@ pub async fn bind(config: &ServerConfig) -> TransportResult<tokio::net::TcpListe
 
 /// Serve the app on `listener` until `shutdown` resolves.
 ///
-/// The configuration's address is replaced by the socket's own, so the
-/// deployment mode, resource profile, bind guard and Host check follow the
-/// socket actually served, not the address a caller wrote in `config`. Then
-/// it validates the configuration again, so no caller can skip the guard,
-/// builds the app, installs the process-wide policies (allocation ceiling,
-/// session directories) and serves it with graceful shutdown.
+/// The configuration's address is replaced by the socket's own and its
+/// transport set to HTTP, so the deployment mode, resource profile, bind
+/// guard and Host check follow the socket actually served, not the address
+/// or transport a caller wrote in `config` (the default transport is stdio).
+/// Then it validates the configuration again, so no caller can skip the
+/// guard, builds the app, installs the process-wide policies (allocation
+/// ceiling, session directories) and serves it with graceful shutdown.
 pub async fn serve(
     listener: tokio::net::TcpListener,
     mut config: ServerConfig,
@@ -166,6 +185,7 @@ pub async fn serve(
     config.http.addr = listener
         .local_addr()
         .map_err(|e| TransportError::Http(format!("Failed to read the bound address: {e}")))?;
+    config.transport = TransportType::Http;
     config
         .validate()
         .map_err(|e| TransportError::Config(e.to_string()))?;
@@ -264,8 +284,10 @@ fn spawn_stuck_watchdog(governor: Arc<ToolGovernor>, limit: Duration) {
 /// Create the axum router with all routes.
 ///
 /// With the `db` feature, the conversation routes are nested when
-/// `state.persistent_manager` is set.
+/// `state.persistent_manager` is set. The routes and middleware follow the
+/// HTTP deployment mode of `config` whatever its `transport` field says.
 pub fn create_router(state: AppState, config: &ServerConfig) -> Router {
+    let config = &as_http(config);
     #[cfg(feature = "db")]
     let persistent_manager = state.persistent_manager.clone();
 
