@@ -104,8 +104,8 @@ pub use ollama::OllamaProvider;
 pub use openai::OpenAIProvider;
 pub use provider::{
     LlmError, LlmProvider, Message, MessageRole, ProviderConfig, ProviderType, StreamChunk,
-    ToolCall, ToolDefinition, ToolExecutor, ToolResult, validate_base_url,
-    validate_provider_config,
+    ToolCall, ToolDefinition, ToolExecutor, ToolResult, resolve_provider_config,
+    server_key_availability, validate_base_url, validate_provider_config,
 };
 pub use retry::{RetryConfig, send_with_retry};
 pub use tokens::{

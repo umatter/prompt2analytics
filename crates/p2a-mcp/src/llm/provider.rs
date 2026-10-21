@@ -90,6 +90,113 @@ pub fn validate_provider_config(config: &ProviderConfig) -> Result<(), String> {
         .map_err(|e| e.0)
 }
 
+/// The provider's name in messages.
+fn provider_name(t: ProviderType) -> &'static str {
+    match t {
+        ProviderType::Ollama => "Ollama",
+        ProviderType::Anthropic => "Anthropic",
+        ProviderType::OpenAI => "OpenAI",
+    }
+}
+
+/// The environment variable holding the server's own key for `t`.
+fn server_key_var(t: ProviderType) -> Option<&'static str> {
+    match t {
+        ProviderType::OpenAI => Some("OPENAI_API_KEY"),
+        ProviderType::Anthropic => Some("ANTHROPIC_API_KEY"),
+        ProviderType::Ollama => None,
+    }
+}
+
+/// Whether `base_url` (unset, or after trimming one trailing `/`) is the
+/// provider's built-in endpoint.
+fn is_default_endpoint(t: ProviderType, base_url: Option<&str>) -> bool {
+    match base_url {
+        None => true,
+        Some(url) => url.strip_suffix('/').unwrap_or(url) == t.default_base_url(),
+    }
+}
+
+/// The provider config a chat request runs with, or the message of a 400.
+///
+/// 1. A missing config is the default (local Ollama); a blank `base_url` or
+///    `api_key` counts as unset.
+/// 2. `max_tool_iterations` is the request's value, else the config's, else
+///    the default, clamped to `settings.max_tool_iterations`.
+/// 3. The effective endpoint must pass the egress policy.
+/// 4. Without a caller key, OpenAI and Anthropic get the server's key only
+///    when server keys are enabled and the endpoint is the provider's
+///    built-in one; otherwise the caller must supply `api_key`. The server's
+///    key is never sent to a host the caller picked. Ollama needs no key.
+///
+/// `env` reads an environment variable (a test seam for `std::env::var`).
+pub fn resolve_provider_config(
+    cfg: Option<ProviderConfig>,
+    request_max_tool_iterations: Option<usize>,
+    settings: &super::LlmSettings,
+    env: &dyn Fn(&str) -> Option<String>,
+) -> Result<ProviderConfig, String> {
+    let mut cfg = cfg.unwrap_or_default();
+    cfg.base_url = cfg
+        .base_url
+        .map(|u| u.trim().to_string())
+        .filter(|u| !u.is_empty());
+    cfg.api_key = cfg.api_key.filter(|k| !k.trim().is_empty());
+    cfg.max_tool_iterations = Some(
+        request_max_tool_iterations
+            .or(cfg.max_tool_iterations)
+            .unwrap_or(DEFAULT_MAX_TOOL_ITERATIONS),
+    );
+
+    settings
+        .egress
+        .check_provider_config(&cfg)
+        .map_err(|e| format!("Rejected LLM provider base_url: {e}"))?;
+
+    if cfg.api_key.is_none()
+        && let Some(var) = server_key_var(cfg.provider_type)
+    {
+        let name = provider_name(cfg.provider_type);
+        if !settings.server_keys {
+            return Err(format!(
+                "Provide an API key for {name} in the provider settings; this server does not \
+                 supply one."
+            ));
+        }
+        if !is_default_endpoint(cfg.provider_type, cfg.base_url.as_deref()) {
+            return Err(format!(
+                "Provide an API key for {name} (api_key): this server's own key is used only \
+                 with the default {name} endpoint."
+            ));
+        }
+        match env(var).filter(|k| !k.trim().is_empty()) {
+            Some(key) => {
+                tracing::info!(
+                    provider = %cfg.provider_type,
+                    "Using the server's API key for the provider's default endpoint"
+                );
+                cfg.api_key = Some(key);
+            }
+            None => {
+                return Err(format!(
+                    "Provide an API key for {name} in the provider settings (api_key)."
+                ));
+            }
+        }
+    }
+    Ok(cfg)
+}
+
+/// Whether the server would supply its own key for (OpenAI, Anthropic):
+/// server keys are enabled and the environment holds a non-empty key.
+pub fn server_key_availability(
+    settings: &super::LlmSettings,
+    env: &dyn Fn(&str) -> Option<String>,
+) -> (bool, bool) {
+    let has = |var: &str| settings.server_keys && env(var).is_some_and(|k| !k.trim().is_empty());
+    (has("OPENAI_API_KEY"), has("ANTHROPIC_API_KEY"))
+}
+
 impl std::fmt::Display for ProviderType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -406,6 +513,136 @@ mod base_url_tests {
             .to_string(),
             "Anthropic returned HTTP 400; the provider rejected the request; the conversation \
              or the dataset context may be too long for this model"
+        );
+    }
+}
+
+#[cfg(test)]
+mod key_policy_tests {
+    use super::*;
+    use crate::llm::LlmSettings;
+    use crate::tools::limits::Limits;
+
+    fn env(k: &str) -> Option<String> {
+        match k {
+            "OPENAI_API_KEY" => Some("SENTINEL_OPENAI".into()),
+            "ANTHROPIC_API_KEY" => Some("SENTINEL_ANTHROPIC".into()),
+            _ => None,
+        }
+    }
+
+    fn cfg(t: ProviderType, url: Option<&str>, key: Option<&str>) -> ProviderConfig {
+        ProviderConfig {
+            provider_type: t,
+            base_url: url.map(Into::into),
+            api_key: key.map(Into::into),
+            model: "m".into(),
+            ..ProviderConfig::default()
+        }
+    }
+
+    #[test]
+    fn server_key_only_for_default_endpoint() {
+        let off = LlmSettings::from_limits(&Limits::off(), None);
+        let c = resolve_provider_config(
+            Some(cfg(ProviderType::OpenAI, None, None)),
+            None,
+            &off,
+            &env,
+        )
+        .unwrap();
+        assert_eq!(c.api_key.as_deref(), Some("SENTINEL_OPENAI"));
+        let c = resolve_provider_config(
+            Some(cfg(
+                ProviderType::OpenAI,
+                Some("https://api.openai.com/v1/"),
+                None,
+            )),
+            None,
+            &off,
+            &env,
+        )
+        .unwrap();
+        assert_eq!(c.api_key.as_deref(), Some("SENTINEL_OPENAI"));
+        let c = resolve_provider_config(
+            Some(cfg(
+                ProviderType::Anthropic,
+                Some("https://api.anthropic.com"),
+                Some(""),
+            )),
+            None,
+            &off,
+            &env,
+        )
+        .unwrap();
+        assert_eq!(c.api_key.as_deref(), Some("SENTINEL_ANTHROPIC"));
+        for (t, url) in [
+            (ProviderType::OpenAI, "https://openrouter.ai/api/v1"),
+            (ProviderType::Anthropic, "https://llm.example.com"),
+        ] {
+            let e = resolve_provider_config(Some(cfg(t, Some(url), None)), None, &off, &env)
+                .unwrap_err();
+            assert!(e.contains("api_key") && !e.contains("SENTINEL"), "{e}");
+        }
+        let c = resolve_provider_config(
+            Some(cfg(
+                ProviderType::OpenAI,
+                Some("https://openrouter.ai/api/v1"),
+                Some("caller"),
+            )),
+            None,
+            &off,
+            &env,
+        )
+        .unwrap();
+        assert_eq!(c.api_key.as_deref(), Some("caller"));
+        // A blank base_url means the default endpoint.
+        let c = resolve_provider_config(
+            Some(cfg(ProviderType::OpenAI, Some("  "), None)),
+            None,
+            &off,
+            &env,
+        )
+        .unwrap();
+        assert_eq!(
+            (c.base_url, c.api_key.as_deref()),
+            (None, Some("SENTINEL_OPENAI"))
+        );
+    }
+
+    #[test]
+    fn hosted_profile_never_uses_server_keys() {
+        let h = LlmSettings::from_limits(&Limits::hosted(), None);
+        assert!(
+            resolve_provider_config(Some(cfg(ProviderType::OpenAI, None, None)), None, &h, &env)
+                .is_err()
+        );
+        assert!(
+            resolve_provider_config(
+                Some(cfg(ProviderType::OpenAI, None, Some("caller"))),
+                None,
+                &h,
+                &env
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn env_keys_endpoint_reflects_policy() {
+        assert_eq!(
+            server_key_availability(&LlmSettings::from_limits(&Limits::off(), None), &env),
+            (true, true)
+        );
+        assert_eq!(
+            server_key_availability(&LlmSettings::from_limits(&Limits::hosted(), None), &env),
+            (false, false)
+        );
+        assert_eq!(
+            server_key_availability(&LlmSettings::from_limits(&Limits::off(), None), &|_| Some(
+                String::new()
+            )),
+            (false, false)
         );
     }
 }

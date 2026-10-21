@@ -14,9 +14,9 @@ use serde::{Deserialize, Serialize};
 use super::http::{ApiResponse, AppState, ContentItem};
 use crate::exec::{CallOrigin, ToolCallError, ToolGovernor};
 use crate::llm::{
-    AnthropicProvider, LlmProvider, Message, OllamaProvider, OpenAIProvider, ProviderConfig,
-    ProviderType, ToolExecutor, build_enhanced_dataset_context, get_system_prompt_with_context,
-    validate_provider_config,
+    AnthropicProvider, LlmProvider, LlmSettings, Message, OllamaProvider, OpenAIProvider,
+    ProviderConfig, ProviderType, ToolExecutor, build_enhanced_dataset_context,
+    get_system_prompt_with_context, resolve_provider_config, server_key_availability,
 };
 use crate::session::Session;
 
@@ -126,52 +126,20 @@ impl ToolExecutor for SessionToolExecutor {
     }
 }
 
-/// Create a provider from config (defaults to Ollama).
-/// If no API key is provided, checks for environment variables:
-/// - OPENAI_API_KEY for OpenAI
-/// - ANTHROPIC_API_KEY for Anthropic
-fn create_provider_with_iterations(
-    config: Option<ProviderConfig>,
-    max_tool_iterations: Option<usize>,
-) -> Box<dyn LlmProvider> {
-    let mut config = config.unwrap_or_default();
-    // Override max_tool_iterations if provided at request level
-    if max_tool_iterations.is_some() {
-        config.max_tool_iterations = max_tool_iterations;
-    }
-
-    // Fill in API key from environment variable if not provided
-    if config.api_key.is_none()
-        || config
-            .api_key
-            .as_ref()
-            .map(|k| k.is_empty())
-            .unwrap_or(false)
-    {
-        let env_key = match config.provider_type {
-            ProviderType::OpenAI => std::env::var("OPENAI_API_KEY").ok(),
-            ProviderType::Anthropic => std::env::var("ANTHROPIC_API_KEY").ok(),
-            ProviderType::Ollama => None, // Ollama doesn't need an API key
-        };
-        if env_key.is_some() {
-            tracing::info!(
-                provider = %config.provider_type,
-                "Using API key from environment variable"
-            );
-            config.api_key = env_key;
-        }
-    }
-
-    match config.provider_type {
-        ProviderType::Ollama => Box::new(OllamaProvider::new(config)),
-        ProviderType::OpenAI => Box::new(OpenAIProvider::new(config)),
-        ProviderType::Anthropic => Box::new(AnthropicProvider::new(config)),
-    }
+/// Read a server environment variable (the key lookup of
+/// `resolve_provider_config` and `server_key_availability`).
+fn server_env(var: &str) -> Option<String> {
+    std::env::var(var).ok()
 }
 
-/// Create a provider from config without extra iteration override.
-fn create_provider(config: Option<ProviderConfig>) -> Box<dyn LlmProvider> {
-    create_provider_with_iterations(config, None)
+/// Build the provider for a config that `resolve_provider_config` accepted:
+/// its endpoint passed the egress policy and its key follows the key policy.
+fn build_provider(cfg: ProviderConfig, settings: &LlmSettings) -> Box<dyn LlmProvider> {
+    match cfg.provider_type {
+        ProviderType::Ollama => Box::new(OllamaProvider::with_settings(cfg, settings)),
+        ProviderType::OpenAI => Box::new(OpenAIProvider::with_settings(cfg, settings)),
+        ProviderType::Anthropic => Box::new(AnthropicProvider::with_settings(cfg, settings)),
+    }
 }
 
 /// Human-readable provider name for UI status messages. OpenRouter is
@@ -223,6 +191,21 @@ pub async fn llm_chat(
     State(state): State<AppState>,
     Json(request): Json<LlmChatRequest>,
 ) -> Response {
+    // Resolve the provider (egress policy, key policy, iteration clamp)
+    // before anything else, so a refused config costs nothing.
+    let settings = LlmSettings::current();
+    let provider_config = match resolve_provider_config(
+        request.provider,
+        request.max_tool_iterations,
+        &settings,
+        &server_env,
+    ) {
+        Ok(cfg) => cfg,
+        Err(msg) => {
+            return (StatusCode::BAD_REQUEST, Json(ApiResponse::<()>::error(msg))).into_response();
+        }
+    };
+
     // Get the session
     let session = match state.session_manager.get_session(&request.session_id).await {
         Ok(s) => s,
@@ -249,21 +232,8 @@ pub async fn llm_chat(
         }
     };
 
-    // Reject an SSRF-unsafe provider base_url before making any request.
-    if let Some(cfg) = &request.provider
-        && let Err(e) = validate_provider_config(cfg)
-    {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(ApiResponse::<()>::error(format!(
-                "Rejected LLM provider base_url: {e}"
-            ))),
-        )
-            .into_response();
-    }
-
     // Create provider and tool executor
-    let provider = create_provider_with_iterations(request.provider, request.max_tool_iterations);
+    let provider = build_provider(provider_config, &settings);
     let tool_executor = SessionToolExecutor::new(
         state.governor.clone(),
         state.server.clone(),
@@ -315,7 +285,20 @@ pub async fn llm_chat(
 
 /// List available LLM models.
 pub async fn llm_list_models(State(_state): State<AppState>) -> impl IntoResponse {
-    let provider = create_provider(None);
+    // The model list comes from the default local Ollama endpoint, which the
+    // egress policy may not allow (hosted profile, explicit allowlist).
+    let settings = LlmSettings::current();
+    let config = ProviderConfig::default();
+    if settings.egress.check_provider_config(&config).is_err() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ApiResponse::error(
+                "LLM provider not available: the default local Ollama endpoint is not enabled \
+                 on this server",
+            )),
+        );
+    }
+    let provider = build_provider(config, &settings);
 
     match provider.list_models().await {
         Ok(models) => (
@@ -342,14 +325,10 @@ pub struct EnvKeysResponse {
     pub anthropic: bool,
 }
 
-/// Check which API keys are available from environment variables.
+/// Report for which providers the server would supply its own API key:
+/// false for both when server keys are disabled (hosted profile).
 pub async fn llm_env_keys() -> impl IntoResponse {
-    let openai = std::env::var("OPENAI_API_KEY")
-        .map(|k| !k.is_empty())
-        .unwrap_or(false);
-    let anthropic = std::env::var("ANTHROPIC_API_KEY")
-        .map(|k| !k.is_empty())
-        .unwrap_or(false);
+    let (openai, anthropic) = server_key_availability(&LlmSettings::current(), &server_env);
 
     (
         StatusCode::OK,
@@ -378,19 +357,15 @@ pub struct GenerateTitleResponse {
 
 /// Generate a conversation title using the LLM.
 pub async fn llm_generate_title(Json(request): Json<GenerateTitleRequest>) -> impl IntoResponse {
-    // Reject an SSRF-unsafe provider base_url before making any request.
-    if let Some(cfg) = &request.provider
-        && let Err(e) = validate_provider_config(cfg)
-    {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(ApiResponse::error(format!(
-                "Rejected LLM provider base_url: {e}"
-            ))),
-        );
-    }
+    // Resolve the provider (egress policy, key policy) before any request.
+    let settings = LlmSettings::current();
+    let provider_config =
+        match resolve_provider_config(request.provider, None, &settings, &server_env) {
+            Ok(cfg) => cfg,
+            Err(msg) => return (StatusCode::BAD_REQUEST, Json(ApiResponse::error(msg))),
+        };
 
-    let provider = create_provider(request.provider);
+    let provider = build_provider(provider_config, &settings);
 
     // Build a simple prompt for title generation
     let context = if let Some(ref response) = request.assistant_response {
@@ -1207,27 +1182,30 @@ pub async fn llm_chat_stream(
             }
         };
 
-        // Reject an SSRF-unsafe provider base_url before making any request.
-        if let Some(cfg) = &request.provider
-            && let Err(e) = validate_provider_config(cfg)
-        {
-            let _ = tx_clone
-                .send(ProgressEvent::Error {
-                    error: format!("Rejected LLM provider base_url: {e}"),
-                })
-                .await;
-            return;
-        }
-
         // Compute a human-readable provider name for the status message
-        // before `request.provider` is moved into the factory — OpenRouter
+        // before `request.provider` is moved into the resolver — OpenRouter
         // is routed through the OpenAI client with a custom base_url, so
         // "openai" alone would be misleading in the connecting banner.
         let provider_display = provider_display_name(request.provider.as_ref());
 
+        // Resolve the provider (egress policy, key policy, iteration clamp)
+        // before making any request.
+        let settings = LlmSettings::current();
+        let provider_config = match resolve_provider_config(
+            request.provider.clone(),
+            request.max_tool_iterations,
+            &settings,
+            &server_env,
+        ) {
+            Ok(cfg) => cfg,
+            Err(msg) => {
+                let _ = tx_clone.send(ProgressEvent::Error { error: msg }).await;
+                return;
+            }
+        };
+
         // Create provider and streaming tool executor
-        let provider =
-            create_provider_with_iterations(request.provider, request.max_tool_iterations);
+        let provider = build_provider(provider_config, &settings);
         // Only the db build reconfigures the executor below.
         #[cfg_attr(not(feature = "db"), allow(unused_mut))]
         let mut tool_executor = StreamingToolExecutor::new(
