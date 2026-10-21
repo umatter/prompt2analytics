@@ -208,6 +208,7 @@ fn default_openrouter_model() -> String {
 impl Settings {
     /// Load settings from platform-appropriate storage.
     /// On native platforms, also checks environment variables for API keys.
+    /// Publishes the backend access token for ApiClient and the chat stream.
     pub fn load() -> Self {
         let storage = create_storage();
         let mut settings = match storage.get::<Self>(SETTINGS_KEY) {
@@ -227,6 +228,9 @@ impl Settings {
         if is_native() {
             settings.populate_from_env();
         }
+
+        // Publish the backend access token for ApiClient and the chat stream.
+        crate::platform::set_backend_access_token(Some(&settings.backend_access_token));
 
         settings
     }
@@ -336,7 +340,8 @@ impl Settings {
     }
 
     /// Save settings to platform-appropriate storage. Keys read from the
-    /// environment are not written.
+    /// environment are not written. Also publishes the backend access token
+    /// for ApiClient and the chat stream.
     pub fn save(&self) {
         let storage = create_storage();
         if let Err(e) = storage.set(SETTINGS_KEY, &self.to_persisted()) {
@@ -344,6 +349,7 @@ impl Settings {
         } else {
             tracing::info!("Settings saved to storage");
         }
+        crate::platform::set_backend_access_token(Some(&self.backend_access_token));
     }
 
     /// Convert to ProviderConfig for API requests. `None` when no provider

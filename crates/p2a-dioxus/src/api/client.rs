@@ -3,8 +3,12 @@
 //! Uses platform abstraction to work on web (fetch API) and native (reqwest)
 
 use super::types::*;
-use crate::platform::{HttpClient, create_http_client};
+use crate::platform::{
+    HttpClient, HttpResponse, authorization_header, backend_access_token, create_http_client,
+    http_status_message, normalize_access_token,
+};
 use serde::Deserialize;
+use std::collections::HashMap;
 
 /// Default API base URL.
 ///
@@ -18,9 +22,14 @@ const DEFAULT_BASE_URL: &str = match option_env!("P2A_BACKEND_URL") {
 };
 
 /// API client for p2a-mcp backend
+///
+/// Every REST call goes through [`ApiClient::send`], which attaches the
+/// backend access token (when one is configured) as
+/// `Authorization: Bearer <token>`.
 #[derive(Clone)]
 pub struct ApiClient {
     base_url: String,
+    access_token: Option<String>,
 }
 
 impl Default for ApiClient {
@@ -30,18 +39,66 @@ impl Default for ApiClient {
 }
 
 impl ApiClient {
-    /// Create a new API client with default base URL
+    /// Create a new API client with default base URL and the published
+    /// backend access token
     pub fn new() -> Self {
         Self {
             base_url: DEFAULT_BASE_URL.to_string(),
+            access_token: backend_access_token(),
         }
     }
 
-    /// Create a new API client with custom base URL
+    /// Create a new API client with custom base URL and the published
+    /// backend access token
     pub fn with_base_url(base_url: &str) -> Self {
         Self {
             base_url: base_url.trim_end_matches('/').to_string(),
+            access_token: backend_access_token(),
         }
+    }
+
+    /// Replace the access token (normalized; blank or invalid means none)
+    pub fn with_access_token(mut self, token: Option<String>) -> Self {
+        self.access_token = token.as_deref().and_then(normalize_access_token);
+        self
+    }
+
+    /// Headers every backend request carries: `Authorization` when a token
+    /// is configured, nothing otherwise.
+    pub(crate) fn auth_headers(&self) -> HashMap<String, String> {
+        authorization_header(self.access_token.as_deref())
+            .into_iter()
+            .collect()
+    }
+
+    /// The single path for every REST call: adds [`Self::auth_headers`] and
+    /// `extra_headers`, and maps a non-2xx status to an error message (a 401
+    /// is explained as a missing or rejected access token).
+    async fn send(
+        &self,
+        method: &str,
+        endpoint: &str,
+        body: Option<String>,
+        extra_headers: &[(&str, &str)],
+    ) -> Result<HttpResponse, String> {
+        let url = format!("{}{}", self.base_url, endpoint);
+        let mut headers = self.auth_headers();
+        for (name, value) in extra_headers {
+            headers.insert((*name).to_string(), (*value).to_string());
+        }
+        let response = create_http_client()
+            .request(&url, method, body.as_deref(), &headers)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        if !response.is_ok() {
+            return Err(http_status_message(
+                response.status,
+                self.access_token.is_some(),
+            ));
+        }
+
+        Ok(response)
     }
 
     /// Perform a GET request
@@ -49,14 +106,7 @@ impl ApiClient {
     where
         T: for<'de> serde::Deserialize<'de>,
     {
-        let url = format!("{}{}", self.base_url, endpoint);
-        let client = create_http_client();
-        let response = client.get(&url).await.map_err(|e| e.to_string())?;
-
-        if !response.is_ok() {
-            return Err(format!("HTTP error: {}", response.status));
-        }
-
+        let response = self.send("GET", endpoint, None, &[]).await?;
         serde_json::from_str(&response.body).map_err(|e| format!("JSON parse error: {}", e))
     }
 
@@ -66,18 +116,8 @@ impl ApiClient {
         T: for<'de> serde::Deserialize<'de>,
         B: serde::Serialize,
     {
-        let url = format!("{}{}", self.base_url, endpoint);
         let body_json = serde_json::to_string(body).map_err(|e| e.to_string())?;
-        let client = create_http_client();
-        let response = client
-            .post(&url, &body_json)
-            .await
-            .map_err(|e| e.to_string())?;
-
-        if !response.is_ok() {
-            return Err(format!("HTTP error: {}", response.status));
-        }
-
+        let response = self.send("POST", endpoint, Some(body_json), &[]).await?;
         serde_json::from_str(&response.body).map_err(|e| format!("JSON parse error: {}", e))
     }
 
@@ -87,31 +127,14 @@ impl ApiClient {
         T: for<'de> serde::Deserialize<'de>,
         B: serde::Serialize,
     {
-        let url = format!("{}{}", self.base_url, endpoint);
         let body_json = serde_json::to_string(body).map_err(|e| e.to_string())?;
-        let client = create_http_client();
-        let response = client
-            .put(&url, &body_json)
-            .await
-            .map_err(|e| e.to_string())?;
-
-        if !response.is_ok() {
-            return Err(format!("HTTP error: {}", response.status));
-        }
-
+        let response = self.send("PUT", endpoint, Some(body_json), &[]).await?;
         serde_json::from_str(&response.body).map_err(|e| format!("JSON parse error: {}", e))
     }
 
     /// Perform a DELETE request
     async fn delete(&self, endpoint: &str) -> Result<(), String> {
-        let url = format!("{}{}", self.base_url, endpoint);
-        let client = create_http_client();
-        let response = client.delete(&url).await.map_err(|e| e.to_string())?;
-
-        if !response.is_ok() {
-            return Err(format!("HTTP error: {}", response.status));
-        }
-
+        self.send("DELETE", endpoint, None, &[]).await?;
         Ok(())
     }
 
@@ -204,14 +227,7 @@ impl ApiClient {
 
     /// Check server health
     pub async fn health(&self) -> Result<HealthResponse, String> {
-        let url = format!("{}/health", self.base_url);
-        let client = create_http_client();
-        let response = client.get(&url).await.map_err(|e| e.to_string())?;
-
-        if !response.is_ok() {
-            return Err(format!("HTTP error: {}", response.status));
-        }
-
+        let response = self.send("GET", "/health", None, &[]).await?;
         serde_json::from_str(&response.body).map_err(|e| format!("JSON parse error: {}", e))
     }
 
@@ -627,6 +643,23 @@ pub fn install_backend_csp() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn auth_header_is_attached_only_with_a_token() {
+        let c =
+            ApiClient::with_base_url("http://127.0.0.1:9").with_access_token(Some("s3cret".into()));
+        assert_eq!(
+            c.auth_headers().get("Authorization").map(String::as_str),
+            Some("Bearer s3cret")
+        );
+        assert!(c.with_access_token(None).auth_headers().is_empty());
+        assert!(
+            ApiClient::with_base_url("http://x")
+                .with_access_token(Some("  ".into()))
+                .auth_headers()
+                .is_empty()
+        );
+    }
 
     #[test]
     fn backend_origin_of_base_urls() {

@@ -71,6 +71,8 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
     let mut local_model = use_signal(|| settings.read().current_model().to_string());
     let mut local_temperature = use_signal(|| settings.read().temperature);
     let mut local_base_url = use_signal(|| settings.read().ollama_base_url.clone());
+    let mut local_access_token = use_signal(|| settings.read().backend_access_token.clone());
+    let mut token_error = use_signal(|| None::<String>);
 
     // Data loading state
     let mut file_path = use_signal(String::new);
@@ -100,6 +102,8 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
         local_model.set(s.current_model().to_string());
         local_temperature.set(s.temperature);
         local_base_url.set(s.ollama_base_url.clone());
+        local_access_token.set(s.backend_access_token.clone());
+        token_error.set(None);
     }
 
     // Update tracking state
@@ -112,7 +116,17 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
     }
 
     let handle_save = move |_| {
+        let tok = local_access_token.read().trim().to_string();
+        if !tok.is_empty() && crate::platform::normalize_access_token(&tok).is_none() {
+            token_error.set(Some(
+                "The access token may contain only visible ASCII characters (no spaces)."
+                    .to_string(),
+            ));
+            return;
+        }
+        token_error.set(None);
         let mut s = settings.write();
+        s.backend_access_token = tok;
         s.theme = *local_theme.read();
         s.provider = *local_provider.read();
         s.set_current_api_key(&local_api_key.read());
@@ -550,6 +564,31 @@ pub fn SettingsModal(props: SettingsModalProps) -> Element {
                                 div { class: "flex justify-between text-xs text-gray-500 dark:text-gray-400 mt-1",
                                     span { "Precise" }
                                     span { "Creative" }
+                                }
+                            }
+
+                            // Backend access token (for servers started with --access-token)
+                            div {
+                                label { class: "block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5",
+                                    "Backend access token (optional)"
+                                }
+                                input {
+                                    class: "w-full px-3 py-2.5 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg text-gray-900 dark:text-white focus:ring-2 focus:ring-teal-500 focus:border-transparent",
+                                    r#type: "password",
+                                    placeholder: "Leave empty unless your server requires one",
+                                    value: "{local_access_token}",
+                                    oninput: move |evt| {
+                                        local_access_token.set(evt.value().clone());
+                                        token_error.set(None);
+                                    }
+                                }
+                                p { class: "text-xs text-gray-500 dark:text-gray-400 mt-1",
+                                    "Only needed when the server operator has enabled token access (P2A_ACCESS_TOKEN). Stored the same way as your API key."
+                                }
+                                if let Some(ref error) = *token_error.read() {
+                                    p { class: "text-xs text-red-600 dark:text-red-400 mt-1",
+                                        "{error}"
+                                    }
                                 }
                             }
                         }
