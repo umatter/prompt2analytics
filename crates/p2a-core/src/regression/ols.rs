@@ -1794,6 +1794,15 @@ pub fn vcov_bootstrap(
     let k = x.ncols();
     let replications = n_boot.unwrap_or(999);
 
+    if replications < 10 {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "n_boot must be at least 10 (got {replications}): the bootstrap covariance \
+                 needs at least 10 successful replications"
+            ),
+        });
+    }
+
     if n < k {
         return Err(EconError::InsufficientData {
             required: k,
@@ -1801,6 +1810,13 @@ pub fn vcov_bootstrap(
             context: "Bootstrap covariance requires n >= k".to_string(),
         });
     }
+
+    // Replicate storage: k coefficients plus a `Vec` header (3 words) each
+    let what = "bootstrap replicate storage";
+    resource::check_alloc::<f64>(
+        resource::checked_len(&[replications, k.saturating_add(3)], what)?,
+        what,
+    )?;
 
     // Initialize RNG
     let mut rng = match seed {
@@ -1813,10 +1829,11 @@ pub fn vcov_bootstrap(
     let residuals = ols_result.residuals();
 
     // Storage for bootstrap coefficient estimates
-    let mut boot_coefs: Vec<Vec<f64>> = Vec::with_capacity(replications);
+    let mut boot_coefs: Vec<Vec<f64>> = resource::try_with_capacity(replications, what)?;
     let indices: Vec<usize> = (0..n).collect();
 
     for _ in 0..replications {
+        resource::checkpoint()?;
         let (y_boot, x_boot) = match bootstrap_type {
             BootstrapType::Pairs => {
                 // Pairs bootstrap: resample (y_i, x_i) pairs together
@@ -3565,6 +3582,55 @@ mod tests {
         let p = create_panel_dataset();
         let e = resource::with_budget(cancelled(), || {
             run_vcov_driscoll_kraay(&p, "y", &["x"], "time", Some(3), None)
+        })
+        .unwrap_err();
+        assert!(matches!(e, EconError::Cancelled(_)), "{e:?}");
+    }
+
+    #[test]
+    fn test_bootstrap_rejects_too_few_replications() {
+        let ds = create_test_dataset();
+        for b in [0usize, 9] {
+            let e = run_vcov_bootstrap(&ds, "y", &["x1"], Some(b), Some("pairs"), Some(42))
+                .unwrap_err();
+            assert!(
+                matches!(&e, EconError::InvalidSpecification { message } if message.contains("n_boot")),
+                "{e:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_bootstrap_impossible_replication_count_is_an_error() {
+        let ds = create_test_dataset();
+        let e = run_vcov_bootstrap(
+            &ds,
+            "y",
+            &["x1"],
+            Some(1usize << 61),
+            Some("pairs"),
+            Some(42),
+        )
+        .unwrap_err();
+        assert!(matches!(e, EconError::ResourceLimit(_)), "{e:?}");
+    }
+
+    #[test]
+    fn test_bootstrap_replicate_storage_respects_alloc_ceiling() {
+        // 100_000 replicates * (k + 3) * 8 bytes = 4 MB > 1 MiB
+        let ds = create_test_dataset();
+        let e = resource::with_alloc_ceiling(Some(1 << 20), || {
+            run_vcov_bootstrap(&ds, "y", &["x1"], Some(100_000), Some("pairs"), Some(42))
+        })
+        .unwrap_err();
+        assert!(matches!(e, EconError::ResourceLimit(_)), "{e:?}");
+    }
+
+    #[test]
+    fn test_bootstrap_stops_when_cancelled() {
+        let ds = create_test_dataset();
+        let e = resource::with_budget(cancelled(), || {
+            run_vcov_bootstrap(&ds, "y", &["x1"], Some(200), Some("wild"), Some(42))
         })
         .unwrap_err();
         assert!(matches!(e, EconError::Cancelled(_)), "{e:?}");
