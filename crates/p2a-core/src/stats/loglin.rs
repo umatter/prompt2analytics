@@ -13,6 +13,10 @@
 
 use serde::{Deserialize, Serialize};
 use statrs::distribution::{ChiSquared, ContinuousCDF};
+use std::collections::HashSet;
+
+use crate::errors::{EconError, EconResult};
+use crate::resource;
 
 /// Result of log-linear model fitting.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -102,8 +106,8 @@ impl std::fmt::Display for LoglinResult {
 /// * `dimensions` - Shape of the table (e.g., [2, 3, 4] for a 2×3×4 table)
 /// * `margins` - List of margins to fit. Each margin is a vector of dimension indices (0-based).
 ///   For example, `[[0, 1], [1, 2]]` fits the (0,1) and (1,2) two-way margins.
-/// * `eps` - Convergence tolerance (default: 0.1)
-/// * `max_iter` - Maximum iterations (default: 20)
+/// * `eps` - Convergence tolerance (default: 0.1); must be finite and greater than 0
+/// * `max_iter` - Maximum iterations (default: 20); must be at least 1
 ///
 /// # Returns
 /// * `LoglinResult` containing fitted values and test statistics
@@ -131,8 +135,22 @@ pub fn loglin(
     let eps = eps.unwrap_or(0.1);
     let max_iter = max_iter.unwrap_or(20);
 
-    // Validate inputs
-    let n_cells: usize = dimensions.iter().product();
+    // Validate the parameters
+    if !(eps.is_finite() && eps > 0.0) {
+        return Err(format!(
+            "eps must be a finite number greater than 0, got {eps}"
+        ));
+    }
+    if max_iter < 1 {
+        return Err("max_iter must be at least 1".to_string());
+    }
+
+    // Validate the table shape; the cell count uses checked arithmetic
+    if let Some(i) = dimensions.iter().position(|&d| d == 0) {
+        return Err(format!("dimension {i} has no levels"));
+    }
+    let n_cells =
+        resource::checked_len(dimensions, "contingency table").map_err(|e| e.to_string())?;
     if table.len() != n_cells {
         return Err(format!(
             "Table length ({}) doesn't match dimensions product ({})",
@@ -157,6 +175,36 @@ pub fn loglin(
         }
     }
 
+    // A margin may name each dimension at most once
+    let mut listed = vec![false; n_dims];
+    for (i, margin) in margins.iter().enumerate() {
+        let mut repeated = None;
+        for &dim in margin {
+            if listed[dim] {
+                repeated = Some(dim);
+                break;
+            }
+            listed[dim] = true;
+        }
+        for &dim in margin {
+            listed[dim] = false;
+        }
+        if let Some(dim) = repeated {
+            return Err(format!("margin {i} lists dimension {dim} more than once"));
+        }
+    }
+
+    // Every cell must be a finite, non-negative count
+    if let Some((idx, v)) = table
+        .iter()
+        .enumerate()
+        .find(|&(_, &v)| !(v.is_finite() && v >= 0.0))
+    {
+        return Err(format!(
+            "table cells must be finite and non-negative (cell {idx} is {v})"
+        ));
+    }
+
     // Total count
     let total: f64 = table.iter().sum();
     if total <= 0.0 {
@@ -164,27 +212,29 @@ pub fn loglin(
     }
 
     // Initialize fitted values uniformly
-    let mut fit: Vec<f64> = vec![total / n_cells as f64; n_cells];
+    let mut fit: Vec<f64> = resource::try_vec(n_cells, total / n_cells as f64, "fitted table")
+        .map_err(|e| e.to_string())?;
 
     // Iterative Proportional Fitting
     let mut n_iter = 0;
     let mut converged = false;
 
     for iter in 0..max_iter {
+        resource::checkpoint().map_err(|e| e.to_string())?;
         n_iter = iter + 1;
         let mut max_dev: f64 = 0.0;
 
         // Apply each margin
         for margin in margins {
             // Compute observed margin
-            let obs_margin = compute_margin(table, dimensions, margin);
+            let obs_margin = compute_margin(table, dimensions, margin)?;
 
             // Compute fitted margin
-            let fit_margin = compute_margin(&fit, dimensions, margin);
+            let fit_margin = compute_margin(&fit, dimensions, margin)?;
 
             // Compute adjustment factors
-            let margin_size = margin_shape(dimensions, margin);
-            let mut adjustments = vec![0.0; obs_margin.len()];
+            let mut adjustments = resource::try_vec(obs_margin.len(), 0.0, "margin adjustments")
+                .map_err(|e| e.to_string())?;
             for i in 0..obs_margin.len() {
                 if fit_margin[i] > 1e-10 {
                     adjustments[i] = obs_margin[i] / fit_margin[i];
@@ -194,14 +244,12 @@ pub fn loglin(
             }
 
             // Apply adjustments to fitted values
-            for cell_idx in 0..n_cells {
-                let coords = index_to_coords(cell_idx, dimensions);
-                let margin_idx = coords_to_margin_index(&coords, margin, &margin_size);
+            for_each_margin_index(dimensions, margin, |cell_idx, margin_idx| {
                 fit[cell_idx] *= adjustments[margin_idx];
-            }
+            });
 
             // Check convergence for this margin
-            let new_fit_margin = compute_margin(&fit, dimensions, margin);
+            let new_fit_margin = compute_margin(&fit, dimensions, margin)?;
             for i in 0..obs_margin.len() {
                 let dev = (new_fit_margin[i] - obs_margin[i]).abs();
                 max_dev = max_dev.max(dev);
@@ -220,7 +268,8 @@ pub fn loglin(
     // Compute degrees of freedom
     // df = n_cells - 1 - (number of independent parameters)
     // For log-linear models: df = n_cells - number of free parameters
-    let df = compute_degrees_of_freedom(dimensions, margins, n_cells);
+    let df = n_cells
+        .saturating_sub(count_free_parameters(dimensions, margins).map_err(|e| e.to_string())?);
 
     // Compute p-values
     let (p_value_lrt, p_value_pearson) = if df > 0 {
@@ -247,18 +296,24 @@ pub fn loglin(
 }
 
 /// Compute a margin (sum over specified dimensions) of a table.
-fn compute_margin(table: &[f64], dimensions: &[usize], margin: &[usize]) -> Vec<f64> {
+///
+/// The margin buffer is allocated fallibly. `margin` must not repeat a dimension.
+fn compute_margin(
+    table: &[f64],
+    dimensions: &[usize],
+    margin: &[usize],
+) -> Result<Vec<f64>, String> {
     let margin_shape = margin_shape(dimensions, margin);
-    let margin_size: usize = margin_shape.iter().product();
-    let mut result = vec![0.0; margin_size];
+    let margin_size =
+        resource::checked_len(&margin_shape, "margin table").map_err(|e| e.to_string())?;
+    let mut result =
+        resource::try_vec(margin_size, 0.0, "margin table").map_err(|e| e.to_string())?;
 
-    for (cell_idx, &value) in table.iter().enumerate() {
-        let coords = index_to_coords(cell_idx, dimensions);
-        let margin_idx = coords_to_margin_index(&coords, margin, &margin_shape);
-        result[margin_idx] += value;
-    }
+    for_each_margin_index(dimensions, margin, |cell_idx, margin_idx| {
+        result[margin_idx] += table[cell_idx];
+    });
 
-    result
+    Ok(result)
 }
 
 /// Get the shape of a margin.
@@ -266,26 +321,47 @@ fn margin_shape(dimensions: &[usize], margin: &[usize]) -> Vec<usize> {
     margin.iter().map(|&d| dimensions[d]).collect()
 }
 
-/// Convert a linear index to multidimensional coordinates.
-fn index_to_coords(index: usize, dimensions: &[usize]) -> Vec<usize> {
-    let mut coords = vec![0; dimensions.len()];
-    let mut remaining = index;
-    for i in (0..dimensions.len()).rev() {
-        coords[i] = remaining % dimensions[i];
-        remaining /= dimensions[i];
+/// Call `f(cell, margin_index)` for every cell of the table, in row-major cell order.
+///
+/// `margin_index` is the row-major index of the cell's coordinates in the margin table whose
+/// axes are `margin` in the listed order. Coordinates are walked with an odometer (last dimension
+/// fastest) and the margin index is updated with per-dimension strides, so no coordinate vector is
+/// built per cell. Dimensions with one level never change coordinate and are skipped.
+///
+/// The caller guarantees that the product of `dimensions` fits in `usize` and that `margin` lists
+/// valid dimensions, each at most once.
+fn for_each_margin_index(dimensions: &[usize], margin: &[usize], mut f: impl FnMut(usize, usize)) {
+    // Margin stride of each table dimension (0 when the dimension is not in the margin)
+    let mut margin_stride = vec![0usize; dimensions.len()];
+    let mut stride = 1usize;
+    for &d in margin.iter().rev() {
+        margin_stride[d] = stride;
+        stride *= dimensions[d];
     }
-    coords
-}
 
-/// Convert multidimensional coordinates to a linear index for a margin.
-fn coords_to_margin_index(coords: &[usize], margin: &[usize], margin_shape: &[usize]) -> usize {
-    let mut idx = 0;
-    let mut multiplier = 1;
-    for i in (0..margin.len()).rev() {
-        idx += coords[margin[i]] * multiplier;
-        multiplier *= margin_shape[i];
+    // Dimensions that actually vary, in table order: (levels, margin stride)
+    let active: Vec<(usize, usize)> = dimensions
+        .iter()
+        .zip(&margin_stride)
+        .filter(|&(&levels, _)| levels > 1)
+        .map(|(&levels, &s)| (levels, s))
+        .collect();
+    let n_cells: usize = active.iter().map(|&(levels, _)| levels).product();
+
+    let mut coords = vec![0usize; active.len()];
+    let mut margin_idx = 0usize;
+    for cell in 0..n_cells {
+        f(cell, margin_idx);
+        for (k, &(levels, s)) in active.iter().enumerate().rev() {
+            coords[k] += 1;
+            if coords[k] < levels {
+                margin_idx += s;
+                break;
+            }
+            coords[k] = 0;
+            margin_idx -= s * (levels - 1);
+        }
     }
-    idx
 }
 
 /// Compute test statistics: Likelihood Ratio (G²) and Pearson Chi-squared (X²).
@@ -306,55 +382,57 @@ fn compute_test_statistics(observed: &[f64], fitted: &[f64]) -> (f64, f64) {
     (lrt, pearson)
 }
 
-/// Compute degrees of freedom for the log-linear model.
-fn compute_degrees_of_freedom(
-    dimensions: &[usize],
-    margins: &[Vec<usize>],
-    n_cells: usize,
-) -> usize {
-    // For a saturated model: df = 0
-    // For an independence model: df = n_cells - 1 - sum(dim_i - 1)
-
-    // Count free parameters for each margin
-    // This is a simplification; exact calculation depends on the model structure
-    let mut n_params = 1; // grand mean
-
-    // Collect unique effects
-    let mut counted_effects: std::collections::HashSet<Vec<usize>> =
-        std::collections::HashSet::new();
-
-    for margin in margins {
-        // Add parameters for this margin and all its sub-margins
-        add_margin_params(&mut counted_effects, margin, dimensions);
-    }
-
-    for effect in &counted_effects {
-        let effect_size: usize = effect.iter().map(|&d| dimensions[d] - 1).product();
-        n_params += effect_size;
-    }
-
-    // df = n_cells - 1 - (n_params - 1) = n_cells - n_params
-    n_cells.saturating_sub(n_params)
-}
-
-/// Add a margin and all its sub-margins to the set of effects.
-fn add_margin_params(
-    effects: &mut std::collections::HashSet<Vec<usize>>,
-    margin: &[usize],
-    _dimensions: &[usize],
-) {
-    // Add all subsets of the margin (including the margin itself)
-    let n = margin.len();
-    for mask in 1..(1 << n) {
-        let mut subset: Vec<usize> = Vec::new();
-        for i in 0..n {
-            if (mask >> i) & 1 == 1 {
-                subset.push(margin[i]);
+/// Count the free parameters of a hierarchical log-linear model: the grand mean plus, for every
+/// distinct effect generated by the margins (each margin and all of its non-empty subsets), the
+/// product of `levels - 1` over the effect's dimensions. `df = n_cells - free parameters`.
+///
+/// A dimension with one level makes every effect that contains it contribute 0, so only the
+/// dimensions with two or more levels are mapped to bits, and each margin's effects are the
+/// non-empty submasks of its mask. There are at most 63 such dimensions because `2^k <= n_cells`,
+/// and a margin visits at most `n_cells` submasks.
+fn count_free_parameters(dimensions: &[usize], margins: &[Vec<usize>]) -> EconResult<usize> {
+    let mut bit_of: Vec<Option<u32>> = vec![None; dimensions.len()];
+    let mut free_levels: Vec<usize> = Vec::new();
+    for (d, &levels) in dimensions.iter().enumerate() {
+        if levels >= 2 {
+            if free_levels.len() >= 63 {
+                return Err(EconError::ResourceLimit(
+                    "contingency table has too many dimensions with two or more levels".to_string(),
+                ));
             }
+            bit_of[d] = Some(free_levels.len() as u32);
+            free_levels.push(levels - 1);
         }
-        subset.sort();
-        effects.insert(subset);
     }
+
+    let mut counted: HashSet<u64> = HashSet::new();
+    let mut n_params = 1usize; // grand mean
+    let mut visited = 0u64;
+    for margin in margins {
+        let mask = margin
+            .iter()
+            .filter_map(|&d| bit_of[d])
+            .fold(0u64, |m, b| m | (1u64 << b));
+        let mut sub = mask;
+        while sub != 0 {
+            visited += 1;
+            if visited % 65_536 == 0 {
+                resource::checkpoint()?;
+            }
+            if counted.insert(sub) {
+                let mut bits = sub;
+                let mut effect_size = 1usize;
+                while bits != 0 {
+                    effect_size =
+                        effect_size.saturating_mul(free_levels[bits.trailing_zeros() as usize]);
+                    bits &= bits - 1;
+                }
+                n_params = n_params.saturating_add(effect_size);
+            }
+            sub = (sub - 1) & mask;
+        }
+    }
+    Ok(n_params)
 }
 
 /// Fit a simple independence model for a two-way table.
@@ -395,6 +473,240 @@ pub fn run_loglin(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::resource::{self, Budget, CancelToken};
+
+    /// Reference: convert a linear index to multidimensional coordinates.
+    fn index_to_coords(index: usize, dimensions: &[usize]) -> Vec<usize> {
+        let mut coords = vec![0; dimensions.len()];
+        let mut remaining = index;
+        for i in (0..dimensions.len()).rev() {
+            coords[i] = remaining % dimensions[i];
+            remaining /= dimensions[i];
+        }
+        coords
+    }
+
+    /// Reference: convert multidimensional coordinates to a linear index for a margin.
+    fn coords_to_margin_index(coords: &[usize], margin: &[usize], margin_shape: &[usize]) -> usize {
+        let mut idx = 0;
+        let mut multiplier = 1;
+        for i in (0..margin.len()).rev() {
+            idx += coords[margin[i]] * multiplier;
+            multiplier *= margin_shape[i];
+        }
+        idx
+    }
+
+    #[test]
+    fn test_loglin_rejects_overflowing_dimensions() {
+        // pre-fix: `dimensions.iter().product()` overflows (debug panic, release wraps)
+        let e = loglin(&[1.0; 4], &[2, usize::MAX], &[vec![0], vec![1]], None, None).unwrap_err();
+        assert!(e.contains("too large"), "{e}");
+    }
+
+    #[test]
+    fn test_loglin_rejects_bad_parameters() {
+        let t = [15.0, 15.0, 25.0, 45.0];
+        let m = [vec![0], vec![1]];
+        for eps in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            let e = loglin(&t, &[2, 2], &m, Some(eps), None).unwrap_err();
+            assert!(e.contains("eps"), "eps={eps}: {e}");
+        }
+        assert!(
+            loglin(&t, &[2, 2], &m, None, Some(0))
+                .unwrap_err()
+                .contains("max_iter")
+        );
+        for bad in [-2.0, f64::NAN, f64::INFINITY] {
+            let e = loglin(&[1.0, bad, 3.0, 4.0], &[2, 2], &m, None, None).unwrap_err();
+            assert!(e.contains("non-negative"), "{e}");
+        }
+        assert!(
+            loglin(&t, &[2, 2], &[vec![0, 0]], None, None)
+                .unwrap_err()
+                .contains("more than once")
+        );
+        assert!(
+            loglin(&[], &[2, 0], &m, None, None)
+                .unwrap_err()
+                .contains("no levels")
+        );
+    }
+
+    #[test]
+    fn test_loglin_df_with_many_single_level_dimensions() {
+        // pre-fix: add_margin_params computes `1 << 42` on i32 and panics (shift overflow)
+        let mut dims = vec![2, 2];
+        dims.extend(std::iter::repeat_n(1, 40));
+        let all: Vec<usize> = (0..dims.len()).collect();
+        assert_eq!(
+            loglin(&[10.0, 20.0, 30.0, 40.0], &dims, &[all], None, None)
+                .unwrap()
+                .df,
+            0
+        );
+        let mains: Vec<Vec<usize>> = (0..dims.len()).map(|d| vec![d]).collect();
+        assert_eq!(
+            loglin(&[15.0, 15.0, 25.0, 45.0], &dims, &mains, None, None)
+                .unwrap()
+                .df,
+            1
+        );
+    }
+
+    #[test]
+    fn test_margin_index_matches_coordinate_reference() {
+        let dims = [2usize, 3, 4];
+        for margin in [
+            vec![0],
+            vec![1],
+            vec![2],
+            vec![0, 1],
+            vec![1, 2],
+            vec![0, 2],
+            vec![2, 0],
+            vec![0, 1, 2],
+            vec![2, 1, 0],
+        ] {
+            let shape: Vec<usize> = margin.iter().map(|&d| dims[d]).collect();
+            let expected: Vec<usize> = (0..24)
+                .map(|c| coords_to_margin_index(&index_to_coords(c, &dims), &margin, &shape))
+                .collect();
+            let mut got = Vec::new();
+            for_each_margin_index(&dims, &margin, |cell, m| {
+                assert_eq!(cell, got.len());
+                got.push(m);
+            });
+            assert_eq!(got, expected, "margin {margin:?}");
+        }
+    }
+
+    // R 4.3.3: obs <- c(12,7,9,15, 8,11,14,6, 10,13,5,9, 6,14,11,8, 13,9,7,12, 9,6,15,10)
+    //   A <- array(0, c(2,3,4)); for (i in 0:1) for (j in 0:2) for (k in 0:3) A[i+1,j+1,k+1] <- obs[i*12+j*4+k+1]
+    //   r <- loglin(A, list(c(1,2), c(2,3)), fit = TRUE); r$fit flattened back to row-major
+    const LOGLIN_OBS: [f64; 24] = [
+        12., 7., 9., 15., 8., 11., 14., 6., 10., 13., 5., 9., 6., 14., 11., 8., 13., 9., 7., 12.,
+        9., 6., 15., 10.,
+    ];
+    const R_FIT: [f64; 24] = [
+        9.439024390243903,
+        11.012195121951219,
+        10.487804878048781,
+        12.060975609756097,
+        10.2375,
+        9.75,
+        10.2375,
+        8.775,
+        9.12987012987013,
+        9.12987012987013,
+        9.61038961038961,
+        9.12987012987013,
+        8.560975609756097,
+        9.987804878048781,
+        9.512195121951219,
+        10.939024390243903,
+        10.7625,
+        10.25,
+        10.7625,
+        9.225,
+        9.87012987012987,
+        9.87012987012987,
+        10.38961038961039,
+        9.87012987012987,
+    ];
+
+    #[test]
+    fn test_validate_loglin_decomposable_against_r() {
+        let r = loglin(
+            &LOGLIN_OBS,
+            &[2, 3, 4],
+            &[vec![0, 1], vec![1, 2]],
+            None,
+            None,
+        )
+        .unwrap();
+        assert!((r.lrt - 20.21839799570819).abs() < 1e-10, "{}", r.lrt);
+        assert!(
+            (r.pearson - 19.740264919955614).abs() < 1e-10,
+            "{}",
+            r.pearson
+        );
+        assert!((r.p_value_lrt - 0.016611401640345802).abs() < 1e-10);
+        assert_eq!(r.df, 9);
+        for (f, e) in r.fit.iter().zip(R_FIT) {
+            assert!((f - e).abs() < 1e-10, "{f} vs {e}");
+        }
+    }
+
+    #[test]
+    fn test_validate_loglin_df_against_r() {
+        // R: loglin(A, m, print = FALSE)$df on any 2x3x4 table with positive cells
+        let cases: Vec<(Vec<Vec<usize>>, usize)> = vec![
+            (vec![vec![0, 1], vec![1, 2]], 9),
+            (vec![vec![0, 1], vec![0, 2], vec![1, 2]], 6),
+            (vec![vec![0], vec![1, 2]], 11),
+            (vec![vec![0], vec![1], vec![2]], 17),
+            (vec![vec![0, 1, 2]], 0),
+        ];
+        for (margins, df) in cases {
+            assert_eq!(
+                loglin(&LOGLIN_OBS, &[2, 3, 4], &margins, None, None)
+                    .unwrap()
+                    .df,
+                df,
+                "{margins:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_loglin_one_cycle_values_unchanged() {
+        // Pins today's single-IPF-cycle answer for a non-decomposable model. It equals R's
+        // loglin(A, list(c(1,2), c(1,3), c(2,3)), iter = 1), where obs <- c(10,20,30,40,15,25,35,5) is
+        // laid out row-major in dims (2,2,2). STAT-28 (tier 3) will change these numbers deliberately.
+        let r = loglin(
+            &[10., 20., 30., 40., 15., 25., 35., 5.],
+            &[2, 2, 2],
+            &[vec![0, 1], vec![0, 2], vec![1, 2]],
+            None,
+            None,
+        )
+        .unwrap();
+        assert!((r.lrt - 10.018549340799476).abs() < 1e-10, "{}", r.lrt);
+        assert!(
+            (r.pearson - 9.032901912901915).abs() < 1e-10,
+            "{}",
+            r.pearson
+        );
+        assert_eq!(r.df, 1);
+    }
+
+    #[test]
+    fn test_loglin_honours_cancellation() {
+        let t = CancelToken::new();
+        t.cancel();
+        let e = resource::with_budget(Budget::new(None, t), || {
+            loglin(
+                &[15.0, 15.0, 25.0, 45.0],
+                &[2, 2],
+                &[vec![0], vec![1]],
+                None,
+                None,
+            )
+        })
+        .unwrap_err();
+        assert!(e.contains("stopped"), "{e}");
+    }
+
+    #[test]
+    fn test_loglin_respects_allocation_ceiling() {
+        // 24 cells x 8 bytes = 192 bytes > 64
+        let e = resource::with_alloc_ceiling(Some(64), || {
+            loglin(&LOGLIN_OBS, &[2, 3, 4], &[vec![0, 1]], None, None)
+        })
+        .unwrap_err();
+        assert!(e.contains("limit"), "{e}");
+    }
 
     #[test]
     fn test_loglin_2x2_independence() {
@@ -489,11 +801,11 @@ mod tests {
         let dims = vec![2, 3];
 
         // Row margin (sum over columns)
-        let row_margin = compute_margin(&table, &dims, &[0]);
+        let row_margin = compute_margin(&table, &dims, &[0]).unwrap();
         assert_eq!(row_margin, vec![6.0, 15.0]); // 1+2+3, 4+5+6
 
         // Column margin (sum over rows)
-        let col_margin = compute_margin(&table, &dims, &[1]);
+        let col_margin = compute_margin(&table, &dims, &[1]).unwrap();
         assert_eq!(col_margin, vec![5.0, 7.0, 9.0]); // 1+4, 2+5, 3+6
     }
 
