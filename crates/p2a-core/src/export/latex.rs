@@ -4,6 +4,11 @@
 //! - Significance stars (*, **, ***)
 //! - Standard errors in parentheses
 //! - Model statistics footer (N, R², F-stat)
+//!
+//! Model names, captions and variable names are plain text: LaTeX special
+//! characters in them (`\ { } _ % & # $ ^ ~ < > |`) are escaped and control
+//! characters become spaces, so pass no LaTeX markup. Labels are restricted
+//! to `[A-Za-z0-9:._-]`.
 
 use crate::econometrics::{DiscreteResult, PanelResult};
 use crate::regression::OlsResult;
@@ -28,9 +33,11 @@ pub struct LatexStyle {
     pub show_adj_r_squared: bool,
     /// Include F-statistic in footer
     pub show_f_stat: bool,
-    /// Table caption (optional)
+    /// Table caption (optional). Plain text: LaTeX special characters are
+    /// escaped, so pass no LaTeX markup.
     pub caption: Option<String>,
-    /// Table label for cross-references (optional)
+    /// Table label for cross-references (optional). Every character outside
+    /// `[A-Za-z0-9:._-]` is replaced by `-`; an empty label is left out.
     pub label: Option<String>,
 }
 
@@ -70,8 +77,10 @@ impl LatexTableBuilder {
     /// Add a model result to the table.
     ///
     /// # Arguments
-    /// * `name` - Column header for this model (e.g., "(1)", "OLS", "FE")
-    /// * `result` - The OLS regression result
+    /// * `name` - Column header for this model (e.g., "(1)", "OLS", "FE").
+    ///   Plain text: LaTeX special characters are escaped, so pass no markup.
+    /// * `result` - The OLS regression result. Its `variable_names` are
+    ///   plain text and escaped the same way.
     pub fn add_model(mut self, name: impl Into<String>, result: OlsResult) -> Self {
         self.results.push((name.into(), result));
         self
@@ -84,12 +93,18 @@ impl LatexTableBuilder {
     }
 
     /// Set the table caption.
+    ///
+    /// The caption is plain text: LaTeX special characters are escaped, so
+    /// pass no LaTeX markup.
     pub fn caption(mut self, caption: impl Into<String>) -> Self {
         self.style.caption = Some(caption.into());
         self
     }
 
     /// Set the table label for cross-references.
+    ///
+    /// Every character outside `[A-Za-z0-9:._-]` is replaced by `-`; an empty
+    /// label is left out.
     pub fn label(mut self, label: impl Into<String>) -> Self {
         self.style.label = Some(label.into());
         self
@@ -121,11 +136,11 @@ impl LatexTableBuilder {
 
         // Caption
         if let Some(cap) = &self.style.caption {
-            latex.push_str(&format!("\\caption{{{}}}\n", cap));
+            latex.push_str(&format!("\\caption{{{}}}\n", escape_latex(cap)));
         }
 
         // Label
-        if let Some(lab) = &self.style.label {
+        if let Some(lab) = self.style.label.as_deref().and_then(sanitize_label) {
             latex.push_str(&format!("\\label{{{}}}\n", lab));
         }
 
@@ -137,7 +152,7 @@ impl LatexTableBuilder {
         // Header row
         latex.push_str("Variable");
         for (name, _) in &self.results {
-            latex.push_str(&format!(" & {}", name));
+            latex.push_str(&format!(" & {}", escape_latex(name)));
         }
         latex.push_str(" \\\\\n");
         latex.push_str("\\hline\n");
@@ -256,13 +271,51 @@ fn significance_stars(level: &SignificanceLevel) -> String {
     }
 }
 
-/// Escape special LaTeX characters.
+/// Escape text for LaTeX in a single pass over its characters.
+///
+/// A chain of replacements would re-escape the braces that
+/// `\textbackslash{}` introduces. Control characters become spaces.
 fn escape_latex(s: &str) -> String {
-    s.replace('_', "\\_")
-        .replace('%', "\\%")
-        .replace('&', "\\&")
-        .replace('#', "\\#")
-        .replace('$', "\\$")
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\textbackslash{}"),
+            '{' => out.push_str("\\{"),
+            '}' => out.push_str("\\}"),
+            '_' => out.push_str("\\_"),
+            '%' => out.push_str("\\%"),
+            '&' => out.push_str("\\&"),
+            '#' => out.push_str("\\#"),
+            '$' => out.push_str("\\$"),
+            '^' => out.push_str("\\textasciicircum{}"),
+            '~' => out.push_str("\\textasciitilde{}"),
+            '<' => out.push_str("\\textless{}"),
+            '>' => out.push_str("\\textgreater{}"),
+            '|' => out.push_str("\\textbar{}"),
+            c if c.is_control() => out.push(' '),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Restrict a `\label` key to `[A-Za-z0-9:._-]`, mapping any other character
+/// to `-`. Returns `None` for an empty label.
+fn sanitize_label(s: &str) -> Option<String> {
+    if s.is_empty() {
+        return None;
+    }
+    Some(
+        s.chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || matches!(c, ':' | '.' | '_' | '-') {
+                    c
+                } else {
+                    '-'
+                }
+            })
+            .collect(),
+    )
 }
 
 impl OlsResult {
@@ -294,7 +347,7 @@ impl DiscreteResult {
         latex.push_str("\\centering\n");
         latex.push_str(&format!(
             "\\caption{{{} Regression Results}}\n",
-            self.model_type
+            escape_latex(&self.model_type.to_string())
         ));
 
         // Begin tabular
@@ -367,7 +420,7 @@ impl PanelResult {
         latex.push_str("\\centering\n");
         latex.push_str(&format!(
             "\\caption{{{} Panel Regression Results}}\n",
-            self.method
+            escape_latex(&self.method.to_string())
         ));
 
         // Begin tabular
@@ -433,12 +486,94 @@ impl PanelResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::regression::{CovarianceType, run_ols_raw};
+    use ndarray::{Array1, Array2};
+
+    fn ols_with_names(names: [&str; 2]) -> OlsResult {
+        let x = Array2::from_shape_fn((8, 2), |(i, j)| if j == 0 { 1.0 } else { (i + 1) as f64 });
+        let y = Array1::from(vec![1.1, 1.9, 3.2, 3.8, 5.1, 6.2, 6.8, 8.1]);
+        let names: Vec<String> = names.iter().map(|s| s.to_string()).collect();
+        run_ols_raw(&x, &y, &names, "y", CovarianceType::HC1).expect("ols")
+    }
+
+    fn braces_balanced(tex: &str) -> bool {
+        let s = tex.replace("\\{", "").replace("\\}", "");
+        let mut depth = 0i64;
+        for c in s.chars() {
+            match c {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth < 0 {
+                        return false;
+                    }
+                }
+                _ => {}
+            }
+        }
+        depth == 0
+    }
 
     #[test]
     fn test_escape_latex() {
         assert_eq!(escape_latex("x_1"), "x\\_1");
         assert_eq!(escape_latex("100%"), "100\\%");
         assert_eq!(escape_latex("a & b"), "a \\& b");
+    }
+
+    #[test]
+    fn test_escape_latex_complete() {
+        assert_eq!(escape_latex("a\\b"), "a\\textbackslash{}b");
+        assert_eq!(escape_latex("{x}"), "\\{x\\}");
+        assert_eq!(
+            escape_latex("x^2~y"),
+            "x\\textasciicircum{}2\\textasciitilde{}y"
+        );
+        assert_eq!(escape_latex("a<b>c"), "a\\textless{}b\\textgreater{}c");
+        assert_eq!(escape_latex("a|b"), "a\\textbar{}b");
+        assert_eq!(escape_latex("\\input{f}"), "\\textbackslash{}input\\{f\\}");
+        assert_eq!(escape_latex("a\nb\tc"), "a b c");
+        assert_eq!(escape_latex("#1 $5"), "\\#1 \\$5");
+    }
+
+    #[test]
+    fn test_build_escapes_names_caption_label() {
+        let tex = LatexTableBuilder::new()
+            .add_model("OLS & HC1", ols_with_names(["(Intercept)", "cap^2{x}"]))
+            .add_model(
+                "FE (50% sample)",
+                ols_with_names(["(Intercept)", "cap^2{x}"]),
+            )
+            .caption("Wages & {hours}\\")
+            .label("tab:main}\\input{x}")
+            .build();
+        assert!(
+            tex.contains("\\caption{Wages \\& \\{hours\\}\\textbackslash{}}\n"),
+            "{tex}"
+        );
+        assert!(tex.contains("\\label{tab:main--input-x-}\n"), "{tex}");
+        assert!(
+            tex.contains("Variable & OLS \\& HC1 & FE (50\\% sample) \\\\\n"),
+            "{tex}"
+        );
+        assert!(tex.contains("cap\\textasciicircum{}2\\{x\\}"), "{tex}");
+        assert!(!tex.contains("\\input{"), "{tex}");
+        assert!(braces_balanced(&tex), "{tex}");
+    }
+
+    #[test]
+    fn test_ordinary_names_unchanged() {
+        // passes before and after
+        let tex = LatexTableBuilder::new()
+            .add_model("(1)", ols_with_names(["(Intercept)", "x_1"]))
+            .add_model("OLS", ols_with_names(["(Intercept)", "x_1"]))
+            .caption("Regression Results")
+            .label("tab:results")
+            .build();
+        assert!(tex.contains("\\caption{Regression Results}\n\\label{tab:results}\n"));
+        assert!(tex.contains("Variable & (1) & OLS \\\\\n"));
+        assert!(tex.lines().any(|l| l.starts_with("x\\_1 & ")));
+        assert!(tex.lines().any(|l| l.starts_with("(Intercept) & ")));
     }
 
     #[test]
