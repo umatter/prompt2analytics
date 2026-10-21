@@ -267,6 +267,19 @@ pub enum EconError {
     /// `None`/`NaN` outputs.
     #[error("Not implemented: {0}")]
     NotImplemented(String),
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Resource Errors (see `crate::resource`)
+    // ═══════════════════════════════════════════════════════════════════
+    /// A caller-sized allocation is impossible (its size overflows) or above
+    /// the process-wide per-allocation ceiling.
+    #[error("Resource limit: {0}")]
+    ResourceLimit(String),
+
+    /// The computation stopped at a checkpoint because its budget was
+    /// cancelled or its deadline passed.
+    #[error("Computation stopped: {0}")]
+    Cancelled(String),
 }
 
 /// Warnings that don't prevent estimation but should be noted.

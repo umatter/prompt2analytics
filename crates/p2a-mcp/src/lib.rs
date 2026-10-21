@@ -7,6 +7,8 @@ pub mod audit;
 pub mod config;
 #[cfg(feature = "db")]
 pub mod db;
+#[cfg(feature = "http")]
+pub mod exec;
 #[cfg(feature = "llm")]
 pub mod llm;
 pub mod path_jail;
@@ -17,7 +19,6 @@ pub mod session;
 pub mod tools;
 pub mod transport;
 
-use std::sync::Arc;
 use tokio::sync::oneshot;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -111,6 +112,10 @@ impl Drop for EmbeddedServer {
 
 /// Start the embedded server in the background
 ///
+/// Binds before returning, so a refused or failed bind is reported here and
+/// the handle carries the real port (also when `port` is 0). The server uses
+/// the same guarded start path as `p2a-mcp --transport http`.
+///
 /// Returns an `EmbeddedServer` handle that can be used to get the URL
 /// or shut down the server.
 ///
@@ -129,7 +134,7 @@ pub async fn start_embedded_server(
     let addr: SocketAddr = format!("{}:{}", config.host, config.port).parse()?;
 
     // Warn when permissive CORS is combined with a non-loopback bind address.
-    if config.cors_permissive && !is_loopback(&config.host) {
+    if config.cors_permissive && !addr.ip().is_loopback() {
         tracing::warn!(
             "cors_permissive=true combined with non-loopback host {:?} exposes the server to \
              cross-origin requests from any web page; set cors_permissive=false in production",
@@ -144,17 +149,21 @@ pub async fn start_embedded_server(
             addr,
             cors_permissive: config.cors_permissive,
             cors_origins: vec![],
-            // The embedded server is intended for local (loopback) desktop use;
-            // no shared token. A non-loopback bind is rejected by the HTTP
-            // transport's startup guard unless explicitly opened.
+            // The embedded server is intended for local (loopback) desktop use
+            // with no shared token. `bind` below applies the same guard as the
+            // binary, so a non-loopback host is refused here.
             access_token: None,
             allow_unauthenticated: false,
+            expose_enumeration: false,
+            enable_ws: false,
+            session_dirs: config::SessionDirsSetting::Auto,
             #[cfg(feature = "db")]
             db_path: config.db_path.clone(),
         },
         session: SessionConfig {
             ttl_minutes: 60,
             max_sessions: 100,
+            evict_idle_minutes: None,
         },
         #[cfg(feature = "auth")]
         auth: config::AuthConfig {
@@ -165,122 +174,30 @@ pub async fn start_embedded_server(
             enabled: false,
             path: String::new(),
         },
+        exec: config::ExecSettings::default(),
+        limits: config::LimitsSettings::default(),
     };
 
+    // Bind first, so the guard's refusal or a bind error returns to the caller.
+    let listener = transport::http::bind(&server_config).await?;
+    let port = listener.local_addr()?.port();
+
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
-
-    // Spawn the server in a background task
-    let host = config.host.clone();
-    let port = config.port;
-
     tokio::spawn(async move {
-        if let Err(e) = run_http_server_with_shutdown(server_config, shutdown_rx).await {
+        let shutdown = async {
+            let _ = shutdown_rx.await;
+            tracing::info!("Embedded server shutting down");
+        };
+        if let Err(e) = transport::http::serve(listener, server_config, shutdown).await {
             tracing::error!("Embedded server error: {}", e);
         }
     });
 
-    // Give the server a moment to start
-    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
     Ok(EmbeddedServer {
         shutdown_tx: Some(shutdown_tx),
         port,
-        host,
+        host: config.host,
     })
-}
-
-/// Run HTTP server with graceful shutdown support
-#[cfg(feature = "http")]
-async fn run_http_server_with_shutdown(
-    config: ServerConfig,
-    shutdown_rx: oneshot::Receiver<()>,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    use crate::transport::http::AppState;
-
-    let session_manager = Arc::new(SessionManager::new(config.session.clone()));
-    session_manager.clone().start_cleanup_task(10);
-
-    let server = Arc::new(AnalyticsServer::new());
-
-    // Initialize audit logger
-    let audit_logger = match crate::audit::AuditLogger::new(&config.audit) {
-        Ok(logger) => Arc::new(logger),
-        Err(e) => {
-            tracing::warn!(
-                "Failed to initialize audit logger: {}. Proceeding without audit logging.",
-                e
-            );
-            Arc::new(crate::audit::AuditLogger::disabled())
-        }
-    };
-
-    #[cfg(feature = "db")]
-    let persistent_manager = {
-        let db_path = config.http.db_path.as_deref();
-        tracing::info!("Initializing database with path: {:?}", db_path);
-        match crate::persistent_session::PersistentSessionManager::new(
-            db_path,
-            config.session.max_sessions,
-            config.session.ttl_minutes,
-        )
-        .await
-        {
-            Ok(manager) => {
-                tracing::info!(
-                    "Database persistence enabled - conversation routes will be available"
-                );
-                Some(Arc::new(manager))
-            }
-            Err(e) => {
-                tracing::error!(
-                    "Failed to initialize database, running WITHOUT persistence (conversations disabled): {}",
-                    e
-                );
-                None
-            }
-        }
-    };
-
-    #[cfg(feature = "db")]
-    let state = AppState {
-        server,
-        session_manager,
-        persistent_manager: persistent_manager.clone(),
-        audit_logger: audit_logger.clone(),
-    };
-
-    #[cfg(not(feature = "db"))]
-    let state = AppState {
-        server,
-        session_manager,
-        audit_logger,
-    };
-
-    // Build router using the transport module's create_router
-    #[cfg(feature = "db")]
-    let app = crate::transport::http::create_router(state, &config, persistent_manager);
-
-    #[cfg(not(feature = "db"))]
-    let app = crate::transport::http::create_router(state, &config);
-
-    let addr = config.http.addr;
-    tracing::info!("Starting embedded HTTP server on {}", addr);
-
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async {
-            let _ = shutdown_rx.await;
-            tracing::info!("Embedded server shutting down");
-        })
-        .await?;
-
-    Ok(())
-}
-
-#[cfg(feature = "http")]
-fn is_loopback(host: &str) -> bool {
-    matches!(host, "127.0.0.1" | "::1" | "localhost")
 }
 
 /// Initialize logging for the embedded server

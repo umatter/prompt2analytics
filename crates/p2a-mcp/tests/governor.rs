@@ -1,0 +1,890 @@
+//! Integration tests for the HTTP transport: routes, the tool governor,
+//! deployment modes and middleware (T0-WP01).
+//!
+//! Servers are built in-process and driven with `tower::ServiceExt::oneshot`;
+//! nothing binds a socket except the embedded-server tests.
+#![cfg(feature = "http")]
+
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
+
+use axum::Router;
+use axum::body::Body;
+use axum::http::{HeaderMap, Request, StatusCode, header};
+use p2a_mcp::config::{ServerConfig, TransportType};
+use p2a_mcp::exec::{ExecConfig, ToolCallError};
+use p2a_mcp::session::Session;
+use p2a_mcp::transport::http::{AppState, build_app, build_app_with};
+use serde_json::{Value, json};
+use tower::ServiceExt;
+
+/// An HTTP server configuration with the given bind address, token and
+/// open-mode flag; everything else at its default.
+fn http_cfg(addr: &str, token: Option<&str>, allow_unauth: bool) -> ServerConfig {
+    let mut c = ServerConfig {
+        transport: TransportType::Http,
+        ..Default::default()
+    };
+    c.http.addr = addr.parse().unwrap();
+    c.http.access_token = token.map(str::to_string);
+    c.http.allow_unauthenticated = allow_unauth;
+    c
+}
+
+async fn app(cfg: &ServerConfig) -> (Router, AppState) {
+    build_app(cfg).await.unwrap()
+}
+
+async fn send(app: &Router, req: Request<Body>) -> (StatusCode, HeaderMap, Value) {
+    let resp = app.clone().oneshot(req).await.unwrap();
+    let status = resp.status();
+    let headers = resp.headers().clone();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    (status, headers, body)
+}
+
+fn get(uri: &str) -> Request<Body> {
+    Request::get(uri).body(Body::empty()).unwrap()
+}
+
+fn delete(uri: &str) -> Request<Body> {
+    Request::delete(uri).body(Body::empty()).unwrap()
+}
+
+fn post_json(uri: &str, body: Value) -> Request<Body> {
+    Request::post(uri)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
+async fn new_session(app: &Router) -> String {
+    let (s, _, b) = send(app, post_json("/api/sessions", json!({}))).await;
+    assert_eq!(s, StatusCode::CREATED, "{b}");
+    b["data"]["session_id"].as_str().unwrap().to_string()
+}
+
+async fn call(app: &Router, sid: &str, tool: &str, args: Value) -> (StatusCode, HeaderMap, Value) {
+    send(
+        app,
+        post_json(
+            &format!("/api/tools/{tool}"),
+            json!({"session_id": sid, "arguments": args}),
+        ),
+    )
+    .await
+}
+
+/// Poll `cond` every 20 ms for up to 10 s; panic if it never holds.
+async fn wait_until(mut cond: impl FnMut() -> bool, what: &str) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !cond() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for: {what}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// Sets its flag when dropped. A test that holds a spinning closure keeps
+/// one alive, so the closure gets its exit even when an assertion fails
+/// first: dropping a runtime waits for its blocking tasks.
+struct Release(Arc<AtomicBool>);
+
+impl Drop for Release {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
+/// The default local configuration.
+fn local() -> ServerConfig {
+    http_cfg("127.0.0.1:8080", None, false)
+}
+
+#[tokio::test]
+async fn characterization_core_routes() {
+    let (app, _) = app(&http_cfg("127.0.0.1:8080", None, false)).await;
+    assert_eq!(send(&app, get("/health")).await.0, StatusCode::OK);
+    let sid = new_session(&app).await;
+    assert_eq!(
+        send(&app, get(&format!("/api/sessions/{sid}"))).await.0,
+        StatusCode::OK
+    );
+    assert_eq!(send(&app, get("/api/tools")).await.0, StatusCode::OK);
+    let (s, _, b) = call(&app, &sid, "list_datasets", json!({})).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(b["data"]["success"], json!(true));
+    assert_eq!(
+        call(&app, &sid, "no_such_tool", json!({})).await.0,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        send(&app, delete(&format!("/api/sessions/{sid}"))).await.0,
+        StatusCode::NO_CONTENT
+    );
+}
+
+// ---------------------------------------------------------------------------
+// One guarded start path (MCP-24)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn embedded_server_refuses_non_loopback_bind() {
+    let r = p2a_mcp::start_embedded_server(
+        p2a_mcp::EmbeddedServerConfig::default()
+            .with_host("0.0.0.0")
+            .with_port(0),
+    )
+    .await;
+    let e = r
+        .err()
+        .expect("a public bind without a token must be refused");
+    assert!(e.to_string().contains("requires an access token"), "{e}");
+}
+
+#[tokio::test]
+async fn serve_follows_the_socket_it_is_given() {
+    // A caller that binds a public socket itself and passes a loopback
+    // configuration must not get local mode (no token, no limits) on it.
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
+    let e = p2a_mcp::transport::http::serve(listener, local(), std::future::ready(()))
+        .await
+        .expect_err("a public socket without a token must be refused");
+    assert!(e.to_string().contains("requires an access token"), "{e}");
+}
+
+/// `ServerConfig::default()` bound to `addr`, with the transport left at its
+/// default (stdio): what a library caller who only sets the address passes.
+fn default_transport_cfg(addr: &str) -> ServerConfig {
+    let mut c = ServerConfig::default();
+    c.http.addr = addr.parse().unwrap();
+    c
+}
+
+#[tokio::test]
+async fn bind_guards_a_config_left_at_the_default_transport() {
+    // bind() serves HTTP whatever `transport` says; a stdio default must not
+    // skip the bind guard.
+    let cfg = default_transport_cfg("0.0.0.0:0");
+    assert_eq!(cfg.transport, TransportType::default());
+    let e = p2a_mcp::transport::http::bind(&cfg)
+        .await
+        .expect_err("a public bind without a token must be refused");
+    assert!(e.to_string().contains("requires an access token"), "{e}");
+}
+
+#[tokio::test]
+async fn serve_guards_a_config_left_at_the_default_transport() {
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
+    let e =
+        p2a_mcp::transport::http::serve(listener, ServerConfig::default(), std::future::ready(()))
+            .await
+            .expect_err("a public socket without a token must be refused");
+    assert!(e.to_string().contains("requires an access token"), "{e}");
+}
+
+#[tokio::test]
+async fn build_app_reads_a_default_transport_config_as_http() {
+    // An open public configuration (public bind, --allow-unauthenticated)
+    // left at the default transport gets open public mode: the hosted
+    // profile and no enumeration routes, not local mode with no limits.
+    let mut c = default_transport_cfg("0.0.0.0:8080");
+    c.http.allow_unauthenticated = true;
+    c.http.expose_enumeration = true; // ignored in open public mode
+    let (app, state) = build_app(&c).await.unwrap();
+    let exec = state.governor.config();
+    assert!(exec.deadline.is_some(), "{exec:?}");
+    assert!(exec.session_data_bytes.is_some(), "{exec:?}");
+    assert!(exec.redact_health, "{exec:?}");
+    assert_eq!(
+        send(&app, get("/api/sessions")).await.0,
+        StatusCode::METHOD_NOT_ALLOWED
+    );
+    assert_eq!(send(&app, get("/api/files")).await.0, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn call_tool_with_session_is_public_for_tests_and_embedders() {
+    // Integration crates (the Tier 2 tests) call the dispatcher directly.
+    let session = Session::new("direct-call".into(), None);
+    let server = p2a_mcp::AnalyticsServer::with_session(&session);
+    let r = server
+        .call_tool_with_session("list_datasets", json!({}), &session)
+        .await
+        .unwrap();
+    assert!(r.success, "{:?}", r.error);
+    let e = server
+        .call_tool_with_session("no_such_tool", json!({}), &session)
+        .await
+        .expect_err("an unknown tool is an error");
+    assert!(matches!(e, ToolCallError::UnknownTool(_)), "{e:?}");
+}
+
+#[tokio::test]
+async fn embedded_server_binds_before_returning_and_reports_real_port() {
+    let s = p2a_mcp::start_embedded_server(p2a_mcp::EmbeddedServerConfig::default().with_port(0))
+        .await
+        .unwrap();
+    assert_ne!(s.port(), 0);
+    s.shutdown();
+}
+
+// ---------------------------------------------------------------------------
+// The tool governor (MCP-1, MCP-10)
+// ---------------------------------------------------------------------------
+
+async fn app_with(cfg: &ServerConfig, exec: ExecConfig) -> (Router, AppState) {
+    build_app_with(cfg, exec).await.unwrap()
+}
+
+async fn session_of(state: &AppState, sid: &str) -> Arc<Session> {
+    state.session_manager.get_session(sid).await.unwrap()
+}
+
+async fn generate(
+    app: &Router,
+    sid: &str,
+    name: &str,
+    rows: usize,
+) -> (StatusCode, HeaderMap, Value) {
+    call(
+        app,
+        sid,
+        "generate_random_data",
+        json!({
+            "n_rows": rows,
+            "columns": [
+                {"name": "y", "distribution": {"type": "normal", "mean": 0.0, "std": 1.0}},
+                {"name": "x", "distribution": {"type": "normal", "mean": 0.0, "std": 1.0}}
+            ],
+            "seed": 7,
+            "name": name
+        }),
+    )
+    .await
+}
+
+#[tokio::test(flavor = "current_thread")] // one runtime thread, like the 1-vCPU deploy
+async fn health_answers_while_a_tool_runs_on_one_thread() {
+    let (app, _) = build_app(&local()).await.unwrap();
+    let sid = new_session(&app).await;
+    assert_eq!(generate(&app, &sid, "d", 500).await.0, StatusCode::OK);
+    let done = Arc::new(AtomicBool::new(false));
+    let (app2, sid2, done2) = (app.clone(), sid.clone(), done.clone());
+    let tool = tokio::spawn(async move {
+        let r = call(
+            &app2,
+            &sid2,
+            "regression_bootstrap_cov",
+            json!({"dataset": "d", "y": "y", "x": ["x"], "n_boot": 20000, "seed": 1}),
+        )
+        .await;
+        done2.store(true, Ordering::SeqCst);
+        r
+    });
+    for _ in 0..3 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(send(&app, get("/health")).await.0, StatusCode::OK);
+    assert!(
+        !done.load(Ordering::SeqCst),
+        "/health must answer while the tool is still running"
+    );
+    let (s, _, b) = tool.await.unwrap();
+    assert_eq!(s, StatusCode::OK, "{b}");
+    assert_eq!(b["data"]["success"], json!(true), "{b}");
+}
+
+#[tokio::test]
+async fn cooperative_work_stops_at_deadline() {
+    let exec = ExecConfig {
+        deadline: Some(Duration::from_millis(200)),
+        ..Default::default()
+    };
+    let (app, state) = app_with(&local(), exec).await;
+    let sid = new_session(&app).await;
+    let gov = state.governor.clone();
+    let r = gov
+        .run_blocking(&session_of(&state, &sid).await, "loop", |_budget| {
+            loop {
+                if p2a_core::resource::checkpoint().is_err() {
+                    return Err::<(), _>(ToolCallError::Internal("stopped".into()));
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        })
+        .await;
+    assert!(
+        matches!(r, Err(ToolCallError::DeadlineExceeded { .. })),
+        "{r:?}"
+    );
+    wait_until(|| gov.health().in_flight == 0, "the work to end").await;
+    assert_eq!(gov.health().overdue, 0);
+}
+
+#[tokio::test]
+async fn uncooperative_work_is_reported_overdue() {
+    let exec = ExecConfig {
+        concurrency: 1,
+        deadline: Some(Duration::from_millis(200)),
+        ..Default::default()
+    };
+    let (app, state) = app_with(&local(), exec).await;
+    let sid = new_session(&app).await;
+    let gov = state.governor.clone();
+    let release = Arc::new(AtomicBool::new(false));
+    let _release_on_exit = Release(release.clone());
+    let rel = release.clone();
+    let r = gov
+        .run_blocking(&session_of(&state, &sid).await, "spin", move |_budget| {
+            while !rel.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Ok(())
+        })
+        .await;
+    assert!(
+        matches!(r, Err(ToolCallError::DeadlineExceeded { .. })),
+        "{r:?}"
+    );
+    let h = gov.health();
+    assert_eq!(
+        (h.in_flight, h.overdue, h.capacity, h.healthy),
+        (1, 1, 1, false)
+    );
+    let (s, _, body) = send(&app, get("/health")).await;
+    assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(body["status"], json!("degraded"));
+    assert_eq!(body["governor"]["overdue"], json!(1));
+    assert_eq!(body["governor"]["capacity"], json!(1));
+    release.store(true, Ordering::SeqCst);
+    wait_until(|| gov.health().in_flight == 0, "the work to end").await;
+    assert!(gov.health().healthy);
+    let (s, _, body) = send(&app, get("/health")).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    assert_eq!(body["status"], json!("ok"));
+}
+
+#[tokio::test]
+async fn dropping_the_call_cancels_the_work() {
+    let (app, state) = app_with(&local(), ExecConfig::default()).await;
+    let sid = new_session(&app).await;
+    let gov = state.governor.clone();
+    let session = session_of(&state, &sid).await;
+    let observed = Arc::new(AtomicBool::new(false));
+    let seen = observed.clone();
+    let g = gov.clone();
+    let task = tokio::spawn(async move {
+        g.run_blocking(&session, "wait", move |_budget| {
+            while p2a_core::resource::checkpoint().is_ok() {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            seen.store(true, Ordering::SeqCst);
+            Ok(())
+        })
+        .await
+    });
+    wait_until(|| gov.health().in_flight == 1, "the work to start").await;
+    task.abort();
+    wait_until(
+        || observed.load(Ordering::SeqCst),
+        "the work to see the cancel",
+    )
+    .await;
+    wait_until(|| gov.health().in_flight == 0, "the work to end").await;
+}
+
+#[tokio::test]
+async fn saturation_refuses_with_retry_after() {
+    let exec = ExecConfig {
+        concurrency: 1,
+        session_concurrency: 1,
+        queue_wait: Duration::from_millis(100),
+        ..Default::default()
+    };
+    let (app, state) = app_with(&local(), exec).await;
+    let (a, b) = (new_session(&app).await, new_session(&app).await);
+    let gov = state.governor.clone();
+    let (sa, sb) = (session_of(&state, &a).await, session_of(&state, &b).await);
+    let release = Arc::new(AtomicBool::new(false));
+    let _release_on_exit = Release(release.clone());
+    let rel = release.clone();
+    let (g, s) = (gov.clone(), sa.clone());
+    let holder = tokio::spawn(async move {
+        g.run_blocking(&s, "hold", move |_budget| {
+            while !rel.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Ok(())
+        })
+        .await
+    });
+    wait_until(|| gov.health().in_flight == 1, "the holder to start").await;
+
+    let r = gov.run_blocking(&sa, "second", |_| Ok(())).await;
+    assert!(
+        matches!(
+            r,
+            Err(ToolCallError::SessionBusy {
+                retry_after_secs: 2
+            })
+        ),
+        "{r:?}"
+    );
+    let r = gov.run_blocking(&sb, "other", |_| Ok(())).await;
+    assert!(
+        matches!(
+            r,
+            Err(ToolCallError::ServerBusy {
+                retry_after_secs: 5
+            })
+        ),
+        "{r:?}"
+    );
+
+    let (s, h, body) = call(&app, &b, "list_datasets", json!({})).await;
+    assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(h[header::RETRY_AFTER], "5");
+    assert_eq!(body["code"], json!("server_busy"));
+    let (s, h, body) = call(&app, &a, "list_datasets", json!({})).await;
+    assert_eq!(s, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(h[header::RETRY_AFTER], "2");
+    assert_eq!(body["code"], json!("session_busy"));
+
+    release.store(true, Ordering::SeqCst);
+    assert!(holder.await.unwrap().is_ok());
+}
+
+#[tokio::test]
+async fn panic_leaves_the_session_usable() {
+    let (app, state) = app_with(&local(), ExecConfig::default()).await;
+    let sid = new_session(&app).await;
+    let gov = state.governor.clone();
+    let session = session_of(&state, &sid).await;
+    let handle = tokio::runtime::Handle::current();
+    let s = session.clone();
+    let r = gov
+        .run_blocking(
+            &session,
+            "boom",
+            move |_budget| -> Result<(), ToolCallError> {
+                let _guard = handle.block_on(s.datasets.write());
+                panic!("boom")
+            },
+        )
+        .await;
+    match r {
+        Err(ToolCallError::Internal(m)) => assert!(m.contains("failed unexpectedly"), "{m}"),
+        other => panic!("expected Internal, got {other:?}"),
+    }
+    let (s, _, b) = call(&app, &sid, "list_datasets", json!({})).await;
+    assert_eq!(s, StatusCode::OK, "{b}");
+    assert_eq!(b["data"]["success"], json!(true));
+    wait_until(|| gov.health().in_flight == 0, "the work to end").await;
+}
+
+#[tokio::test]
+async fn session_quota_rolls_back_the_new_dataset() {
+    let exec = ExecConfig {
+        session_data_bytes: Some(1_000_000),
+        ..Default::default()
+    };
+    let (app, _) = app_with(&local(), exec).await;
+    let sid = new_session(&app).await;
+    assert_eq!(generate(&app, &sid, "small", 1000).await.0, StatusCode::OK);
+    let (s, _, b) = generate(&app, &sid, "big", 100_000).await; // about 1.6 MB
+    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "{b}");
+    assert_eq!(b["code"], json!("quota_exceeded"));
+    let msg = b["error"].as_str().unwrap();
+    assert!(
+        msg.contains("per session") && msg.contains("undone"),
+        "{msg}"
+    );
+    let (_, _, b) = call(&app, &sid, "list_datasets", json!({})).await;
+    let listing = b.to_string();
+    assert!(
+        listing.contains("**small**") && !listing.contains("**big**"),
+        "{listing}"
+    );
+}
+
+#[tokio::test]
+async fn total_quota_spans_sessions() {
+    let exec = ExecConfig {
+        total_data_bytes: Some(1_000_000),
+        ..Default::default()
+    };
+    let (app, _) = app_with(&local(), exec).await;
+    let (a, b) = (new_session(&app).await, new_session(&app).await);
+    assert_eq!(generate(&app, &a, "first", 40_000).await.0, StatusCode::OK); // about 640 kB
+    let (s, _, body) = generate(&app, &b, "second", 40_000).await;
+    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(body["code"], json!("quota_exceeded"));
+    let (_, _, listing_b) = call(&app, &b, "list_datasets", json!({})).await;
+    assert!(!listing_b.to_string().contains("**second**"), "{listing_b}");
+    let (_, _, listing_a) = call(&app, &a, "list_datasets", json!({})).await;
+    assert!(listing_a.to_string().contains("**first**"), "{listing_a}");
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn every_http_entry_is_governed() {
+    let exec = ExecConfig {
+        rss_soft_limit_bytes: Some(1),
+        ..Default::default()
+    };
+    let (app, _) = app_with(&local(), exec).await;
+    let sid = new_session(&app).await;
+    let (s, h, b) = call(&app, &sid, "list_datasets", json!({})).await;
+    assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(b["code"], json!("memory_pressure"));
+    assert_eq!(h[header::RETRY_AFTER], "15");
+}
+
+#[tokio::test]
+async fn unknown_tool_and_bad_arguments_have_codes() {
+    let (app, _) = build_app(&local()).await.unwrap();
+    let sid = new_session(&app).await;
+    let (s, _, b) = call(&app, &sid, "no_such_tool", json!({})).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    assert_eq!(b["code"], json!("unknown_tool"));
+    let (s, _, b) = call(&app, &sid, "generate_random_data", json!({"n_rows": "x"})).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    assert_eq!(b["code"], json!("invalid_arguments"));
+    // Handlers report a caller's mistake with ErrorCode::INVALID_REQUEST too:
+    // still the caller's problem (400), not a server fault (500).
+    assert_eq!(generate(&app, &sid, "d", 50).await.0, StatusCode::OK);
+    let (s, _, b) = call(
+        &app,
+        &sid,
+        "preview_cleaning",
+        json!({"dataset": "d", "operation": "filter"}),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{b}");
+    assert_eq!(b["code"], json!("invalid_arguments"));
+    assert!(
+        b["error"].as_str().unwrap().contains("requires a column"),
+        "{b}"
+    );
+}
+
+#[tokio::test]
+async fn open_public_app_evicts_idle_sessions() {
+    // The hosted eviction default comes from the profile wherever the app is
+    // built, not only from the CLI path.
+    let mut cfg = http_cfg("0.0.0.0:8080", None, true);
+    cfg.session.max_sessions = 1;
+    let (app, state) = build_app(&cfg).await.unwrap();
+    let old = new_session(&app).await;
+    *session_of(&state, &old).await.last_accessed.write().await =
+        chrono::Utc::now() - chrono::Duration::minutes(11);
+    let (s, _, b) = send(&app, post_json("/api/sessions", json!({}))).await;
+    assert_eq!(s, StatusCode::CREATED, "{b}");
+    assert!(state.session_manager.get_session(&old).await.is_err());
+}
+
+#[tokio::test]
+async fn full_session_table_answers_503_with_code() {
+    let mut cfg = local();
+    cfg.session.max_sessions = 1;
+    let (app, _) = build_app(&cfg).await.unwrap();
+    new_session(&app).await;
+    let (s, h, b) = send(&app, post_json("/api/sessions", json!({}))).await;
+    assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(b["code"], json!("capacity"));
+    assert!(h.contains_key(header::RETRY_AFTER));
+}
+
+// ---------------------------------------------------------------------------
+// Governor health (MCP-1)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn health_reports_governor_fields() {
+    let (app, _) = build_app(&local()).await.unwrap();
+    let (s, _, body) = send(&app, get("/health")).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(body["status"], json!("ok"));
+    for key in ["in_flight", "overdue", "capacity", "healthy"] {
+        assert!(
+            body["governor"].get(key).is_some(),
+            "missing governor.{key}: {body}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn open_public_health_hides_process_figures() {
+    // The unauthenticated /health of an open server must not publish the
+    // process memory or the in-flight count.
+    let (app, _) = build_app(&http_cfg("0.0.0.0:8080", None, true))
+        .await
+        .unwrap();
+    let (s, _, body) = send(&app, get("/health")).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    assert_eq!(body["status"], json!("ok"));
+    let governor = &body["governor"];
+    assert_eq!(governor["rss_bytes"], Value::Null, "{body}");
+    assert!(governor.get("in_flight").is_none(), "{body}");
+    for key in ["overdue", "capacity", "healthy"] {
+        assert!(
+            governor.get(key).is_some(),
+            "missing governor.{key}: {body}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// LLM dataset context runs under the governor (MCP-1)
+// ---------------------------------------------------------------------------
+
+/// A local app whose governor refuses every call on memory admission, with
+/// one session holding a dataset. Nothing here reaches an LLM provider: the
+/// refusal comes before any provider is contacted.
+#[cfg(all(feature = "llm", target_os = "linux"))]
+async fn refusing_app_with_data() -> (Router, String) {
+    let exec = ExecConfig {
+        rss_soft_limit_bytes: Some(1),
+        ..Default::default()
+    };
+    let (app, state) = app_with(&local(), exec).await;
+    let sid = new_session(&app).await;
+    let df = polars::prelude::df! {
+        "y" => [1.1, 1.9, 3.2, 3.8, 5.1],
+        "x" => [1.0, 2.0, 3.0, 4.0, 5.0],
+    }
+    .unwrap();
+    session_of(&state, &sid)
+        .await
+        .datasets
+        .write()
+        .await
+        .insert("d".into(), p2a_core::data::Dataset::new(df));
+    (app, sid)
+}
+
+#[cfg(all(feature = "llm", target_os = "linux"))]
+#[tokio::test]
+async fn llm_chat_dataset_context_is_governed() {
+    let (app, sid) = refusing_app_with_data().await;
+    let (s, h, b) = send(
+        &app,
+        post_json(
+            "/api/llm/chat",
+            json!({"session_id": sid, "message": "describe d"}),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE, "{b}");
+    assert_eq!(b["code"], json!("memory_pressure"));
+    assert_eq!(h[header::RETRY_AFTER], "15");
+}
+
+#[cfg(all(feature = "llm", target_os = "linux"))]
+#[tokio::test]
+async fn llm_chat_stream_dataset_context_is_governed() {
+    let (app, sid) = refusing_app_with_data().await;
+    let resp = app
+        .clone()
+        .oneshot(post_json(
+            "/api/llm/chat/stream",
+            json!({"session_id": sid, "message": "describe d"}),
+        ))
+        .await
+        .unwrap();
+    // The stream ends after its error event.
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let text = String::from_utf8_lossy(&bytes);
+    assert!(
+        text.contains("\"type\":\"error\"") && text.contains("low on memory"),
+        "{text}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Deployment modes: enumeration routes and the Host check (MCP-5)
+// ---------------------------------------------------------------------------
+
+fn with_bearer(mut req: Request<Body>, bearer: Option<&str>) -> Request<Body> {
+    if let Some(t) = bearer {
+        req.headers_mut().insert(
+            header::AUTHORIZATION,
+            format!("Bearer {t}").parse().unwrap(),
+        );
+    }
+    req
+}
+
+/// Status of `GET /api/sessions` and `GET /api/files`.
+async fn enum_status(cfg: &ServerConfig, bearer: Option<&str>) -> (StatusCode, StatusCode) {
+    let (app, _) = build_app(cfg).await.unwrap();
+    let sessions = send(&app, with_bearer(get("/api/sessions"), bearer))
+        .await
+        .0;
+    let files = send(&app, with_bearer(get("/api/files"), bearer)).await.0;
+    (sessions, files)
+}
+
+#[tokio::test]
+async fn enumeration_routes_follow_the_mode() {
+    // Local default: hidden (405 = POST-only path, 404 = unregistered)
+    assert_eq!(
+        enum_status(&http_cfg("127.0.0.1:8080", None, false), None).await,
+        (StatusCode::METHOD_NOT_ALLOWED, StatusCode::NOT_FOUND)
+    );
+    // MCP-5 repro: loopback + P2A_ALLOW_UNAUTHENTICATED -> OpenPublic -> hidden (was 200, 200)
+    assert_eq!(
+        enum_status(&http_cfg("127.0.0.1:8080", None, true), None).await,
+        (StatusCode::METHOD_NOT_ALLOWED, StatusCode::NOT_FOUND)
+    );
+    let mut c = http_cfg("127.0.0.1:8080", None, false);
+    c.http.expose_enumeration = true;
+    assert_eq!(
+        enum_status(&c, None).await,
+        (StatusCode::OK, StatusCode::OK)
+    );
+    let mut c = http_cfg("0.0.0.0:8080", None, true);
+    c.http.expose_enumeration = true; // never in OpenPublic
+    assert_eq!(
+        enum_status(&c, None).await,
+        (StatusCode::METHOD_NOT_ALLOWED, StatusCode::NOT_FOUND)
+    );
+    assert_eq!(
+        enum_status(&http_cfg("0.0.0.0:8080", Some("t"), false), Some("t")).await,
+        (StatusCode::OK, StatusCode::OK)
+    );
+}
+
+#[tokio::test]
+async fn local_mode_rejects_foreign_host_headers() {
+    let (app, _) = build_app(&local()).await.unwrap();
+    let with_host = |h: &str| {
+        Request::get("/health")
+            .header(header::HOST, h)
+            .body(Body::empty())
+            .unwrap()
+    };
+    for ok in [
+        "localhost:8081",
+        "LOCALHOST",
+        "127.0.0.1:8080",
+        "[::1]:8080",
+        "127.0.0.5",
+    ] {
+        assert_eq!(send(&app, with_host(ok)).await.0, StatusCode::OK, "{ok}");
+    }
+    for bad in [
+        "evil.example",
+        "localhost.evil.example",
+        "0.0.0.0:8080",
+        "127.0.0.1.nip.io",
+    ] {
+        let (s, _, b) = send(&app, with_host(bad)).await;
+        assert_eq!(s, StatusCode::MISDIRECTED_REQUEST, "{bad}");
+        assert_eq!(b["code"], json!("misdirected"));
+    }
+    assert_eq!(send(&app, get("/health")).await.0, StatusCode::OK); // no Host header: not a browser
+    let (app, _) = build_app(&http_cfg("0.0.0.0:8080", None, true))
+        .await
+        .unwrap();
+    assert_eq!(
+        send(&app, with_host("p2a-api.qamelab.org")).await.0,
+        StatusCode::OK
+    );
+}
+
+// ---------------------------------------------------------------------------
+// WebSocket route (MCP-21)
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "websocket")]
+#[tokio::test]
+async fn ws_route_follows_the_mode() {
+    async fn ws_status(cfg: &ServerConfig) -> StatusCode {
+        let (app, _) = build_app(cfg).await.unwrap();
+        send(&app, get("/ws")).await.0
+    }
+    let open = http_cfg("0.0.0.0:8080", None, true);
+    assert_eq!(ws_status(&open).await, StatusCode::NOT_FOUND);
+    let mut open_ws = open.clone();
+    open_ws.http.enable_ws = true;
+    // Without upgrade headers axum answers 400/426: the route is registered.
+    assert_ne!(ws_status(&open_ws).await, StatusCode::NOT_FOUND);
+    assert_ne!(ws_status(&local()).await, StatusCode::NOT_FOUND);
+}
+
+// ---------------------------------------------------------------------------
+// CORS (MCP-16, server half)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn cors_headers_on_auth_failures_and_preflight() {
+    let mut c = http_cfg("0.0.0.0:8080", Some("t"), false);
+    c.http.cors_origins = vec!["http://allowed.example".into()];
+    let (app, _) = build_app(&c).await.unwrap();
+    let r = Request::get("/api/tools")
+        .header(header::ORIGIN, "http://allowed.example")
+        .body(Body::empty())
+        .unwrap();
+    let (s, h, _) = send(&app, r).await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        h[header::ACCESS_CONTROL_ALLOW_ORIGIN],
+        "http://allowed.example"
+    ); // was missing
+    let pre = Request::builder()
+        .method("OPTIONS")
+        .uri("/api/tools")
+        .header(header::ORIGIN, "http://allowed.example")
+        .header(header::ACCESS_CONTROL_REQUEST_METHOD, "GET")
+        .header(
+            header::ACCESS_CONTROL_REQUEST_HEADERS,
+            "authorization,content-type,x-p2a-session-id",
+        )
+        .body(Body::empty())
+        .unwrap();
+    let (s, h, _) = send(&app, pre).await;
+    assert!(s.is_success(), "{s}");
+    let allow = h[header::ACCESS_CONTROL_ALLOW_HEADERS]
+        .to_str()
+        .unwrap()
+        .to_ascii_lowercase();
+    assert!(
+        allow != "*" && allow.contains("authorization") && allow.contains("x-p2a-session-id"),
+        "{allow}"
+    );
+    let big = Request::post("/api/tools/list_datasets")
+        .header(header::ORIGIN, "http://allowed.example")
+        .header(header::AUTHORIZATION, "Bearer t")
+        .header(header::CONTENT_LENGTH, "40000000")
+        .body(Body::empty())
+        .unwrap(); // limit checks the header
+    let (s, h, _) = send(&app, big).await;
+    assert_eq!(s, StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(
+        h[header::ACCESS_CONTROL_ALLOW_ORIGIN],
+        "http://allowed.example"
+    );
+    let ok = Request::get("/api/tools")
+        .header(header::ORIGIN, "http://allowed.example")
+        .header(header::AUTHORIZATION, "Bearer t")
+        .body(Body::empty())
+        .unwrap();
+    let (_, h, _) = send(&app, ok).await;
+    assert!(
+        h[header::ACCESS_CONTROL_EXPOSE_HEADERS]
+            .to_str()
+            .unwrap()
+            .to_ascii_lowercase()
+            .contains("retry-after")
+    );
+}

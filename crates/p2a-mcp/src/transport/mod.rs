@@ -7,6 +7,18 @@
 #[cfg(feature = "http")]
 pub mod http;
 
+#[cfg(feature = "http")]
+pub mod middleware;
+
+#[cfg(feature = "http")]
+pub mod routes_sessions;
+
+#[cfg(feature = "http")]
+pub mod routes_tools;
+
+#[cfg(all(feature = "http", feature = "llm"))]
+pub mod llm_routes;
+
 #[cfg(feature = "websocket")]
 pub mod websocket;
 
@@ -40,16 +52,23 @@ pub async fn start_transport(config: &ServerConfig) -> TransportResult<()> {
     use crate::config::TransportType;
 
     match config.transport {
-        TransportType::Stdio => start_stdio_transport().await,
+        TransportType::Stdio => start_stdio_transport(config).await,
         #[cfg(feature = "http")]
         TransportType::Http => http::start_http_transport(config).await,
     }
 }
 
 /// Start the stdio transport (existing behavior).
-async fn start_stdio_transport() -> TransportResult<()> {
+///
+/// The per-allocation ceiling of the configured resource profile applies
+/// here too (none unless `--limits hosted` or `--max-alloc-mb` is set);
+/// deadlines and quotas are HTTP-only.
+async fn start_stdio_transport(config: &ServerConfig) -> TransportResult<()> {
     use crate::server::AnalyticsServer;
     use rmcp::{ServiceExt, transport::stdio};
+
+    p2a_core::resource::set_alloc_ceiling_bytes(config.alloc_ceiling_bytes());
+    config.warn_unapplied_limit_overrides();
 
     tracing::info!("Starting stdio transport...");
 

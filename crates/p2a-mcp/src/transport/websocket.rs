@@ -15,6 +15,7 @@ use futures::{sink::SinkExt, stream::StreamExt};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
+use crate::exec::{CallOrigin, ToolGovernor};
 use crate::server::AnalyticsServer;
 use crate::session::{Session, SessionError, SessionManager};
 use crate::transport::http::ToolResult;
@@ -69,8 +70,14 @@ pub enum ServerMessage {
     },
     /// Request completed
     Done { id: String },
-    /// Error occurred
-    Error { id: String, message: String },
+    /// Error occurred. `code` is the machine-readable code of a governor or
+    /// tool-call refusal (for example `server_busy`), when there is one.
+    Error {
+        id: String,
+        message: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        code: Option<String>,
+    },
     /// Pong response
     Pong,
 }
@@ -80,14 +87,20 @@ struct WsState {
     session: Option<Arc<Session>>,
     server: Arc<AnalyticsServer>,
     session_manager: Arc<SessionManager>,
+    governor: Arc<ToolGovernor>,
 }
 
 impl WsState {
-    fn new(server: Arc<AnalyticsServer>, session_manager: Arc<SessionManager>) -> Self {
+    fn new(
+        server: Arc<AnalyticsServer>,
+        session_manager: Arc<SessionManager>,
+        governor: Arc<ToolGovernor>,
+    ) -> Self {
         Self {
             session: None,
             server,
             session_manager,
+            governor,
         }
     }
 
@@ -101,7 +114,13 @@ pub async fn ws_handler(
     ws: WebSocketUpgrade,
     State(state): State<super::http::AppState>,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_socket(socket, state.server, state.session_manager))
+    // Bound messages and frames like HTTP request bodies.
+    let cap = super::middleware::max_request_body_bytes();
+    ws.max_message_size(cap)
+        .max_frame_size(cap)
+        .on_upgrade(move |socket| {
+            handle_socket(socket, state.server, state.session_manager, state.governor)
+        })
 }
 
 /// Handle a WebSocket connection.
@@ -109,6 +128,7 @@ async fn handle_socket(
     socket: WebSocket,
     server: Arc<AnalyticsServer>,
     session_manager: Arc<SessionManager>,
+    governor: Arc<ToolGovernor>,
 ) {
     let (mut sender, mut receiver) = socket.split();
 
@@ -127,7 +147,7 @@ async fn handle_socket(
     });
 
     // Connection state
-    let mut ws_state = WsState::new(server, session_manager);
+    let mut ws_state = WsState::new(server, session_manager, governor);
 
     // Process incoming messages
     while let Some(msg) = receiver.next().await {
@@ -142,6 +162,7 @@ async fn handle_socket(
                                 .send(ServerMessage::Error {
                                     id: "system".to_string(),
                                     message: e,
+                                    code: None,
                                 })
                                 .await;
                         }
@@ -151,6 +172,7 @@ async fn handle_socket(
                             .send(ServerMessage::Error {
                                 id: "system".to_string(),
                                 message: format!("Invalid message format: {}", e),
+                                code: None,
                             })
                             .await;
                     }
@@ -218,28 +240,57 @@ async fn handle_client_message(
         }
 
         ClientMessage::Tool { id, name, args } => {
-            if !state.is_authenticated() {
+            let Some(auth_session_id) = state.session.as_ref().map(|s| s.id.clone()) else {
                 tx.send(ServerMessage::Error {
                     id: id.clone(),
                     message: "Not authenticated. Send auth message first.".to_string(),
+                    code: None,
                 })
                 .await
                 .map_err(|_| "Channel closed".to_string())?;
                 return Ok(());
-            }
+            };
 
-            let session = state.session.as_ref().unwrap();
+            // Resolve the session again for every call, like an HTTP tool
+            // call: a session deleted, evicted or expired since `Auth` is no
+            // longer in the table (or in its dataset accounting) and must not
+            // keep running tools. A successful lookup also refreshes its
+            // last-accessed time.
+            let session = match state.session_manager.get_session(&auth_session_id).await {
+                Ok(session) => session,
+                Err(e) => {
+                    state.session = None;
+                    let code = match e {
+                        SessionError::Expired => "session_expired",
+                        _ => "session_not_found",
+                    };
+                    tx.send(ServerMessage::Error {
+                        id,
+                        message: format!("{e}. Create a session and authenticate again."),
+                        code: Some(code.to_string()),
+                    })
+                    .await
+                    .map_err(|_| "Channel closed".to_string())?;
+                    return Ok(());
+                }
+            };
 
-            // Execute the tool
+            // Execute the tool under the governor, like an HTTP tool call
             match state
-                .server
-                .call_tool_with_session(&name, args.clone(), session)
+                .governor
+                .call(
+                    state.server.clone(),
+                    session,
+                    &name,
+                    args,
+                    CallOrigin::WebSocket,
+                )
                 .await
             {
                 Ok(result) => {
                     tx.send(ServerMessage::ToolResult {
                         id: id.clone(),
-                        success: true,
+                        success: result.success,
                         result,
                     })
                     .await
@@ -250,9 +301,13 @@ async fn handle_client_message(
                         .map_err(|_| "Channel closed".to_string())?;
                 }
                 Err(e) => {
-                    tx.send(ServerMessage::Error { id, message: e })
-                        .await
-                        .map_err(|_| "Channel closed".to_string())?;
+                    tx.send(ServerMessage::Error {
+                        id,
+                        message: e.to_string(),
+                        code: Some(e.code().to_string()),
+                    })
+                    .await
+                    .map_err(|_| "Channel closed".to_string())?;
                 }
             }
         }
@@ -266,6 +321,7 @@ async fn handle_client_message(
                 tx.send(ServerMessage::Error {
                     id: id.clone(),
                     message: "Not authenticated. Send auth message first.".to_string(),
+                    code: None,
                 })
                 .await
                 .map_err(|_| "Channel closed".to_string())?;
@@ -281,6 +337,7 @@ async fn handle_client_message(
                 message: "LLM chat over WebSocket is not implemented; use the HTTP \
                          /api/llm/chat or /api/llm/chat/stream endpoint instead."
                     .to_string(),
+                code: None,
             })
             .await
             .map_err(|_| "Channel closed".to_string())?;
@@ -352,5 +409,120 @@ mod tests {
         let json = serde_json::to_string(&text).unwrap();
         assert!(json.contains("\"type\":\"text\""));
         assert!(json.contains("\"content\":\"Hello\""));
+    }
+
+    #[test]
+    fn error_message_carries_code() {
+        let with = ServerMessage::Error {
+            id: "1".into(),
+            message: "m".into(),
+            code: Some("server_busy".into()),
+        };
+        let json = serde_json::to_string(&with).unwrap();
+        assert!(json.contains("\"code\":\"server_busy\""), "{json}");
+        let without = ServerMessage::Error {
+            id: "1".into(),
+            message: "m".into(),
+            code: None,
+        };
+        let json = serde_json::to_string(&without).unwrap();
+        assert!(!json.contains("\"code\""), "{json}");
+    }
+
+    #[tokio::test]
+    async fn tool_message_after_the_session_is_gone_is_refused() {
+        use crate::config::SessionConfig;
+        use crate::exec::ExecConfig;
+
+        let sessions = Arc::new(SessionManager::new(SessionConfig {
+            ttl_minutes: 60,
+            max_sessions: 10,
+            evict_idle_minutes: None,
+        }));
+        let session_id = sessions.create_session(None).await.unwrap();
+        let governor = Arc::new(ToolGovernor::new(ExecConfig::default(), sessions.clone()));
+        let mut state = WsState::new(Arc::new(AnalyticsServer::new()), sessions.clone(), governor);
+        let (tx, mut rx) = mpsc::channel(8);
+        handle_client_message(
+            &mut state,
+            ClientMessage::Auth {
+                session_id: session_id.clone(),
+            },
+            &tx,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            rx.recv().await,
+            Some(ServerMessage::AuthResult { success: true, .. })
+        ));
+        // Deleted (or evicted, or expired) while the socket stays open.
+        sessions.delete_session(&session_id).await.unwrap();
+        handle_client_message(
+            &mut state,
+            ClientMessage::Tool {
+                id: "t1".into(),
+                name: "list_datasets".into(),
+                args: serde_json::json!({}),
+            },
+            &tx,
+        )
+        .await
+        .unwrap();
+        match rx.recv().await {
+            Some(ServerMessage::Error { id, code, .. }) => {
+                assert_eq!(id, "t1");
+                assert_eq!(code.as_deref(), Some("session_not_found"));
+            }
+            other => panic!("expected a coded error, got {other:?}"),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn tool_message_is_governed() {
+        use crate::config::SessionConfig;
+        use crate::exec::ExecConfig;
+
+        let sessions = Arc::new(SessionManager::new(SessionConfig {
+            ttl_minutes: 60,
+            max_sessions: 10,
+            evict_idle_minutes: None,
+        }));
+        let session_id = sessions.create_session(None).await.unwrap();
+        let governor = Arc::new(ToolGovernor::new(
+            ExecConfig {
+                rss_soft_limit_bytes: Some(1),
+                ..Default::default()
+            },
+            sessions.clone(),
+        ));
+        let mut state = WsState::new(Arc::new(AnalyticsServer::new()), sessions, governor);
+        let (tx, mut rx) = mpsc::channel(8);
+        handle_client_message(&mut state, ClientMessage::Auth { session_id }, &tx)
+            .await
+            .unwrap();
+        handle_client_message(
+            &mut state,
+            ClientMessage::Tool {
+                id: "t1".into(),
+                name: "list_datasets".into(),
+                args: serde_json::json!({}),
+            },
+            &tx,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            rx.recv().await,
+            Some(ServerMessage::AuthResult { success: true, .. })
+        ));
+        match rx.recv().await {
+            Some(ServerMessage::Error { id, code, .. }) => {
+                assert_eq!(id, "t1");
+                assert_eq!(code.as_deref(), Some("memory_pressure"));
+            }
+            other => panic!("expected a coded error, got {other:?}"),
+        }
     }
 }
