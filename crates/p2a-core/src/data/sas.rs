@@ -40,6 +40,39 @@ pub enum SasError {
     PolarsError(#[from] PolarsError),
 }
 
+/// A signed size or offset field read from the file, as `usize`: negative
+/// values are a format error instead of wrapping to a huge `usize`.
+fn field_usize(raw: i64, name: &str) -> Result<usize, SasError> {
+    if raw < 0 {
+        return Err(SasError::InvalidFormat(format!(
+            "{name} = {raw} is negative; the file is corrupt"
+        )));
+    }
+    usize::try_from(raw).map_err(|_| {
+        SasError::InvalidFormat(format!("{name} = {raw} is too large; the file is corrupt"))
+    })
+}
+
+fn offset_overflow() -> SasError {
+    SasError::InvalidFormat("offset arithmetic overflowed; the file is corrupt".to_string())
+}
+
+/// Checked `a + b` for offsets computed from file fields.
+fn add(a: usize, b: usize) -> Result<usize, SasError> {
+    a.checked_add(b).ok_or_else(offset_overflow)
+}
+
+/// Checked `a * b` for offsets computed from file fields.
+fn mul(a: usize, b: usize) -> Result<usize, SasError> {
+    a.checked_mul(b).ok_or_else(offset_overflow)
+}
+
+/// Map a core resource error (allocation size, cancellation) to a parse
+/// error: a large valid file is not a corrupt one.
+fn resource_err(e: crate::errors::EconError) -> SasError {
+    SasError::ParseError(e.to_string())
+}
+
 /// Byte order for the file
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum ByteOrder {
@@ -197,20 +230,14 @@ impl<R: Read + Seek> SasReader<R> {
         let mut col_attrs: Vec<(usize, usize, ColumnType)> = Vec::new(); // (offset, length, type)
 
         for page_idx in 0..self.page_count {
-            let page_offset = self
-                .header_length
-                .checked_add(page_idx.checked_mul(self.page_size).ok_or_else(|| {
-                    SasError::InvalidFormat("page offset arithmetic overflowed".to_string())
-                })?)
-                .ok_or_else(|| {
-                    SasError::InvalidFormat("page offset arithmetic overflowed".to_string())
-                })?;
+            crate::resource::checkpoint().map_err(resource_err)?;
+            let page_offset = add(self.header_length, mul(page_idx, self.page_size)?)?;
             self.reader.seek(SeekFrom::Start(page_offset as u64))?;
 
             // Read page type
             let page_type_offset = if self.is_64bit { 32 } else { 16 };
             self.reader
-                .seek(SeekFrom::Start((page_offset + page_type_offset) as u64))?;
+                .seek(SeekFrom::Start(add(page_offset, page_type_offset)? as u64))?;
             let page_type = Self::read_i16(&mut self.reader, self.byte_order)?;
 
             // Only process metadata pages (0) and mixed pages (512)
@@ -221,33 +248,58 @@ impl<R: Read + Seek> SasReader<R> {
             // Read subheader count
             let sh_count_offset = if self.is_64bit { 34 } else { 18 };
             self.reader
-                .seek(SeekFrom::Start((page_offset + sh_count_offset) as u64))?;
-            let subheader_count = Self::read_i16(&mut self.reader, self.byte_order)? as usize;
+                .seek(SeekFrom::Start(add(page_offset, sh_count_offset)? as u64))?;
+            let subheader_count = field_usize(
+                Self::read_i16(&mut self.reader, self.byte_order)? as i64,
+                "subheader count",
+            )?;
+            // The pointer table must lie inside the page.
+            if add(page_header_size, mul(subheader_count, subheader_ptr_size)?)? > self.page_size {
+                return Err(SasError::InvalidFormat(format!(
+                    "subheader count {subheader_count} on page {page_idx} does not fit in the page"
+                )));
+            }
 
             // Process subheaders
             for sh_idx in 0..subheader_count {
-                let sh_ptr_offset = page_offset + page_header_size + sh_idx * subheader_ptr_size;
+                let sh_ptr_offset = add(
+                    add(page_offset, page_header_size)?,
+                    mul(sh_idx, subheader_ptr_size)?,
+                )?;
                 self.reader.seek(SeekFrom::Start(sh_ptr_offset as u64))?;
 
                 // Read subheader offset and length
-                let sh_offset = if self.is_64bit {
-                    Self::read_i64(&mut self.reader, self.byte_order)? as usize
-                } else {
-                    Self::read_i32(&mut self.reader, self.byte_order)? as usize
-                };
+                let sh_offset = field_usize(
+                    if self.is_64bit {
+                        Self::read_i64(&mut self.reader, self.byte_order)?
+                    } else {
+                        Self::read_i32(&mut self.reader, self.byte_order)? as i64
+                    },
+                    "subheader offset",
+                )?;
 
-                let sh_length = if self.is_64bit {
-                    Self::read_i64(&mut self.reader, self.byte_order)? as usize
-                } else {
-                    Self::read_i32(&mut self.reader, self.byte_order)? as usize
-                };
+                let sh_length = field_usize(
+                    if self.is_64bit {
+                        Self::read_i64(&mut self.reader, self.byte_order)?
+                    } else {
+                        Self::read_i32(&mut self.reader, self.byte_order)? as i64
+                    },
+                    "subheader length",
+                )?;
 
                 if sh_length == 0 {
                     continue;
                 }
 
+                // A subheader must lie inside its page.
+                if add(sh_offset, sh_length)? > self.page_size {
+                    return Err(SasError::InvalidFormat(format!(
+                        "subheader {sh_idx} on page {page_idx} extends past the page"
+                    )));
+                }
+
                 // Read subheader signature
-                let sh_abs_offset = page_offset + sh_offset;
+                let sh_abs_offset = add(page_offset, sh_offset)?;
                 self.reader.seek(SeekFrom::Start(sh_abs_offset as u64))?;
                 let mut signature = [0u8; 4];
                 self.reader.read_exact(&mut signature)?;
@@ -257,21 +309,27 @@ impl<R: Read + Seek> SasReader<R> {
                     // Row size subheader
                     let row_len_offset = if self.is_64bit { 40 } else { 20 };
                     self.reader
-                        .seek(SeekFrom::Start((sh_abs_offset + row_len_offset) as u64))?;
-                    self.row_length = if self.is_64bit {
-                        Self::read_i64(&mut self.reader, self.byte_order)? as usize
-                    } else {
-                        Self::read_i32(&mut self.reader, self.byte_order)? as usize
-                    };
+                        .seek(SeekFrom::Start(add(sh_abs_offset, row_len_offset)? as u64))?;
+                    self.row_length = field_usize(
+                        if self.is_64bit {
+                            Self::read_i64(&mut self.reader, self.byte_order)?
+                        } else {
+                            Self::read_i32(&mut self.reader, self.byte_order)? as i64
+                        },
+                        "row_length",
+                    )?;
 
                     let row_count_offset = if self.is_64bit { 48 } else { 24 };
                     self.reader
-                        .seek(SeekFrom::Start((sh_abs_offset + row_count_offset) as u64))?;
-                    self.row_count = if self.is_64bit {
-                        Self::read_i64(&mut self.reader, self.byte_order)? as usize
-                    } else {
-                        Self::read_i32(&mut self.reader, self.byte_order)? as usize
-                    };
+                        .seek(SeekFrom::Start(add(sh_abs_offset, row_count_offset)? as u64))?;
+                    self.row_count = field_usize(
+                        if self.is_64bit {
+                            Self::read_i64(&mut self.reader, self.byte_order)?
+                        } else {
+                            Self::read_i32(&mut self.reader, self.byte_order)? as i64
+                        },
+                        "row_count",
+                    )?;
                 } else if signature == COL_SIZE_SIGNATURE {
                     // Column size subheader - we get column count here but use attrs
                 } else if signature == COL_NAME_SIGNATURE {
@@ -298,6 +356,54 @@ impl<R: Read + Seek> SasReader<R> {
             });
         }
 
+        if !self.columns.is_empty() {
+            self.validate_layout()?;
+        }
+
+        Ok(())
+    }
+
+    /// Check the row and column layout against the page geometry: the row
+    /// length is between 1 and the page size, the row count fits the pages,
+    /// and every column lies inside the row without overlapping the others.
+    /// A valid file satisfies all of these (columns are disjoint byte ranges
+    /// of a row), and together they bound the cells read by the file size.
+    fn validate_layout(&self) -> Result<(), SasError> {
+        let row_length = self.row_length;
+        if row_length == 0 {
+            return Err(SasError::InvalidFormat("row_length is zero".to_string()));
+        }
+        if row_length > self.page_size {
+            return Err(SasError::InvalidFormat(format!(
+                "row_length {row_length} exceeds the page size of {} bytes",
+                self.page_size
+            )));
+        }
+        let max_rows = self.page_count.saturating_mul(self.page_size / row_length);
+        if self.row_count > max_rows {
+            return Err(SasError::InvalidFormat(format!(
+                "row_count {} exceeds what {} pages of {} bytes can hold",
+                self.row_count, self.page_count, self.page_size
+            )));
+        }
+
+        let mut total_width = 0usize;
+        for (i, column) in self.columns.iter().enumerate() {
+            let (offset, width) = (column.offset, column.length);
+            if width == 0 || add(offset, width)? > row_length {
+                return Err(SasError::InvalidFormat(format!(
+                    "column {i} (offset {offset}, width {width}) extends past the row_length \
+                     of {row_length}"
+                )));
+            }
+            total_width = add(total_width, width)?;
+        }
+        if total_width > row_length {
+            return Err(SasError::InvalidFormat(format!(
+                "column widths add up to {total_width} bytes, more than the row_length of \
+                 {row_length}"
+            )));
+        }
         Ok(())
     }
 
@@ -309,7 +415,7 @@ impl<R: Read + Seek> SasReader<R> {
         names: &mut Vec<String>,
     ) -> Result<(), SasError> {
         let int_size = if self.is_64bit { 8 } else { 4 };
-        let base_offset = sh_offset + 8 + int_size * 2;
+        let base_offset = add(sh_offset, 8 + int_size * 2)?;
 
         // Read column name pointers
         let _ptr_size = if self.is_64bit { 8 } else { 4 };
@@ -319,7 +425,7 @@ impl<R: Read + Seek> SasReader<R> {
         let entry_count = remaining / entry_size;
 
         for i in 0..entry_count {
-            let entry_offset = base_offset + i * entry_size;
+            let entry_offset = add(base_offset, mul(i, entry_size)?)?;
             self.reader.seek(SeekFrom::Start(entry_offset as u64))?;
 
             // Read text index, offset, and length
@@ -345,25 +451,31 @@ impl<R: Read + Seek> SasReader<R> {
         attrs: &mut Vec<(usize, usize, ColumnType)>,
     ) -> Result<(), SasError> {
         let _int_size = if self.is_64bit { 8 } else { 4 };
-        let base_offset = sh_offset + if self.is_64bit { 16 } else { 12 };
+        let base_offset = add(sh_offset, if self.is_64bit { 16 } else { 12 })?;
 
         let attr_size = if self.is_64bit { 16 } else { 12 };
         let remaining = sh_length.saturating_sub(if self.is_64bit { 16 } else { 12 });
         let attr_count = remaining / attr_size;
 
         for i in 0..attr_count {
-            let attr_offset = base_offset + i * attr_size;
+            let attr_offset = add(base_offset, mul(i, attr_size)?)?;
             self.reader.seek(SeekFrom::Start(attr_offset as u64))?;
 
             // Read offset within row
-            let col_offset = if self.is_64bit {
-                Self::read_i64(&mut self.reader, self.byte_order)? as usize
-            } else {
-                Self::read_i32(&mut self.reader, self.byte_order)? as usize
-            };
+            let col_offset = field_usize(
+                if self.is_64bit {
+                    Self::read_i64(&mut self.reader, self.byte_order)?
+                } else {
+                    Self::read_i32(&mut self.reader, self.byte_order)? as i64
+                },
+                "column offset",
+            )?;
 
             // Read column width
-            let col_width = Self::read_i32(&mut self.reader, self.byte_order)? as usize;
+            let col_width = field_usize(
+                Self::read_i32(&mut self.reader, self.byte_order)? as i64,
+                "column width",
+            )?;
 
             // Read column type (1=numeric, 2=character)
             let type_byte = {
@@ -406,6 +518,10 @@ impl<R: Read + Seek> SasReader<R> {
         // and must not be trusted to size buffers directly (a corrupt value
         // would trigger a huge allocation). It grows as rows are actually read.
         let row_capacity = self.row_count.min(1 << 20);
+        let cells = crate::resource::checked_len(&[col_info.len(), row_capacity], "SAS columns")
+            .map_err(resource_err)?;
+        crate::resource::check_alloc::<Option<String>>(cells, "SAS columns")
+            .map_err(resource_err)?;
         for (_, col_type, _, _) in &col_info {
             col_is_numeric.push(*col_type == ColumnType::Numeric);
             if *col_type == ColumnType::Numeric {
@@ -419,22 +535,24 @@ impl<R: Read + Seek> SasReader<R> {
 
         // Read data pages
         let page_header_size = if self.is_64bit { 40 } else { 24 };
+        if self.row_length == 0 {
+            return Err(SasError::InvalidFormat("row_length is zero".to_string()));
+        }
 
+        // Rows read so far, over all pages and whatever the column types.
+        let mut rows_read = 0usize;
         for page_idx in 0..self.page_count {
-            let page_offset = self
-                .header_length
-                .checked_add(page_idx.checked_mul(self.page_size).ok_or_else(|| {
-                    SasError::InvalidFormat("page offset arithmetic overflowed".to_string())
-                })?)
-                .ok_or_else(|| {
-                    SasError::InvalidFormat("page offset arithmetic overflowed".to_string())
-                })?;
+            if rows_read >= self.row_count {
+                break;
+            }
+            crate::resource::checkpoint().map_err(resource_err)?;
+            let page_offset = add(self.header_length, mul(page_idx, self.page_size)?)?;
             self.reader.seek(SeekFrom::Start(page_offset as u64))?;
 
             // Read page type
             let page_type_offset = if self.is_64bit { 32 } else { 16 };
             self.reader
-                .seek(SeekFrom::Start((page_offset + page_type_offset) as u64))?;
+                .seek(SeekFrom::Start(add(page_offset, page_type_offset)? as u64))?;
             let page_type = Self::read_i16(&mut self.reader, self.byte_order)?;
 
             // Data pages (256) or mixed pages (512)
@@ -444,41 +562,58 @@ impl<R: Read + Seek> SasReader<R> {
 
             // Calculate data start offset
             let data_start = if page_type == 256 {
-                page_offset + page_header_size
+                add(page_offset, page_header_size)?
             } else {
                 // For mixed pages, skip subheader pointers
                 let sh_count_offset = if self.is_64bit { 34 } else { 18 };
                 self.reader
-                    .seek(SeekFrom::Start((page_offset + sh_count_offset) as u64))?;
-                let sh_count = Self::read_i16(&mut self.reader, self.byte_order)? as usize;
+                    .seek(SeekFrom::Start(add(page_offset, sh_count_offset)? as u64))?;
+                let sh_count = field_usize(
+                    Self::read_i16(&mut self.reader, self.byte_order)? as i64,
+                    "subheader count",
+                )?;
                 let subheader_ptr_size = if self.is_64bit { 24 } else { 12 };
-                page_offset + page_header_size + sh_count * subheader_ptr_size
+                add(
+                    add(page_offset, page_header_size)?,
+                    mul(sh_count, subheader_ptr_size)?,
+                )?
             };
 
             // Read block count for data pages
             let block_count_offset = if self.is_64bit { 36 } else { 20 };
             self.reader
-                .seek(SeekFrom::Start((page_offset + block_count_offset) as u64))?;
-            let block_count = Self::read_i16(&mut self.reader, self.byte_order)? as usize;
+                .seek(SeekFrom::Start(add(page_offset, block_count_offset)? as u64))?;
+            let block_count = field_usize(
+                Self::read_i16(&mut self.reader, self.byte_order)? as i64,
+                "block count",
+            )?;
+
+            // The rows of a page must fit in the page.
+            let page_end = add(page_offset, self.page_size)?;
+            if data_start > page_end {
+                return Err(SasError::InvalidFormat(format!(
+                    "the data on page {page_idx} would start past the end of the page"
+                )));
+            }
+            let capacity = (page_end - data_start) / self.row_length;
+            if block_count > capacity {
+                return Err(SasError::InvalidFormat(format!(
+                    "block count {block_count} on page {page_idx} exceeds the {capacity} rows \
+                     that fit in the page"
+                )));
+            }
 
             // Read rows
             for row_idx in 0..block_count {
-                if numeric_cols
-                    .iter()
-                    .filter(|c| !c.is_empty())
-                    .map(|c| c.len())
-                    .next()
-                    .unwrap_or(0)
-                    >= self.row_count
-                {
+                if rows_read >= self.row_count {
                     break;
                 }
 
-                let row_offset = data_start + row_idx * self.row_length;
+                let row_offset = add(data_start, mul(row_idx, self.row_length)?)?;
 
                 for (col_idx, (_, col_type, col_offset, col_length)) in col_info.iter().enumerate()
                 {
-                    let value_offset = row_offset + col_offset;
+                    let value_offset = add(row_offset, *col_offset)?;
                     self.reader.seek(SeekFrom::Start(value_offset as u64))?;
 
                     if *col_type == ColumnType::Numeric {
@@ -489,6 +624,7 @@ impl<R: Read + Seek> SasReader<R> {
                         string_cols[col_idx].push(value);
                     }
                 }
+                rows_read += 1;
             }
         }
 
@@ -804,6 +940,87 @@ mod tests {
         buf[data_base + 40..data_base + 48].copy_from_slice(&6.0f64.to_le_bytes());
 
         buf
+    }
+
+    const PAGE0: usize = 8192; // metadata page
+    const PAGE1: usize = 8192 + 4096; // data page
+    const ROW_SH: usize = PAGE0 + 72; // row-size subheader: row_length at +20, row_count at +24
+    const ATTR1: usize = PAGE0 + 168 + 12; // column attributes: offset +0, width +4, type +8
+    const ATTR2: usize = PAGE0 + 168 + 24;
+
+    fn put_i32(b: &mut [u8], at: usize, v: i32) {
+        b[at..at + 4].copy_from_slice(&v.to_le_bytes());
+    }
+
+    fn put_i16(b: &mut [u8], at: usize, v: i16) {
+        b[at..at + 2].copy_from_slice(&v.to_le_bytes());
+    }
+
+    fn load(b: Vec<u8>) -> Result<DataFrame, SasError> {
+        SasReader::new(Cursor::new(b))?.read_to_dataframe()
+    }
+
+    fn assert_invalid(r: Result<DataFrame, SasError>, needle: &str) {
+        match r {
+            Err(SasError::InvalidFormat(m)) => assert!(m.contains(needle), "{m}"),
+            other => panic!(
+                "expected InvalidFormat mentioning {needle}, got {:?}",
+                other.map(|d| d.shape())
+            ),
+        }
+    }
+
+    #[test]
+    fn sas_rejects_zero_row_length() {
+        let mut b = create_minimal_sas_file();
+        put_i32(&mut b, ROW_SH + 20, 0);
+        put_i32(&mut b, ROW_SH + 24, 100_000);
+        put_i16(&mut b, PAGE1 + 20, -1);
+        assert_invalid(load(b), "row_length");
+    }
+
+    #[test]
+    fn sas_rejects_negative_fields() {
+        let mut b = create_minimal_sas_file();
+        b[ATTR2 + 8] = 2; // character column
+        put_i32(&mut b, ATTR2 + 4, -1); // width -1
+        assert_invalid(load(b), "width");
+        let mut b = create_minimal_sas_file();
+        put_i32(&mut b, PAGE0 + 24, -100); // first subheader pointer offset
+        assert_invalid(load(b), "subheader offset");
+        let mut b = create_minimal_sas_file();
+        put_i16(&mut b, PAGE0 + 18, -1); // subheader count
+        assert_invalid(load(b), "subheader count");
+        let mut b = create_minimal_sas_file();
+        put_i16(&mut b, PAGE1 + 20, -1); // block count
+        assert_invalid(load(b), "block count");
+    }
+
+    #[test]
+    fn sas_bounds_rows_and_columns_by_the_layout() {
+        let mut b = create_minimal_sas_file();
+        put_i32(&mut b, ROW_SH + 24, 1_000_000); // > 2 pages x (4096 / 16) rows
+        assert_invalid(load(b), "row_count");
+        let mut b = create_minimal_sas_file();
+        put_i32(&mut b, ROW_SH + 24, 300); // fits the file, not the data page
+        put_i16(&mut b, PAGE1 + 20, 300); // page holds (4096 - 24) / 16 = 254 rows
+        assert_invalid(load(b), "block count");
+        let mut b = create_minimal_sas_file();
+        put_i32(&mut b, ATTR2, 0);
+        put_i32(&mut b, ATTR2 + 4, 16); // widths 8 + 16 > row_length 16 (overlap)
+        assert_invalid(load(b), "widths");
+        let mut b = create_minimal_sas_file();
+        put_i32(&mut b, ATTR2, 12); // offset 12 + width 8 > row_length 16
+        assert_invalid(load(b), "extends past");
+    }
+
+    #[test]
+    fn sas_stops_at_row_count_for_character_only_files() {
+        let mut b = create_minimal_sas_file();
+        b[ATTR1 + 8] = 2;
+        b[ATTR2 + 8] = 2;
+        put_i32(&mut b, ROW_SH + 24, 2); // block count stays 3
+        assert_eq!(load(b).unwrap().height(), 2);
     }
 
     #[test]
