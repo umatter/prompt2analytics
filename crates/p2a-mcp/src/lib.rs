@@ -148,12 +148,16 @@ pub async fn start_embedded_server(
             // transport's startup guard unless explicitly opened.
             access_token: None,
             allow_unauthenticated: false,
+            expose_enumeration: false,
+            enable_ws: false,
+            session_dirs: config::SessionDirsSetting::Auto,
             #[cfg(feature = "db")]
             db_path: config.db_path.clone(),
         },
         session: SessionConfig {
             ttl_minutes: 60,
             max_sessions: 100,
+            evict_idle_minutes: None,
         },
         #[cfg(feature = "auth")]
         auth: config::AuthConfig {
@@ -164,6 +168,8 @@ pub async fn start_embedded_server(
             enabled: false,
             path: String::new(),
         },
+        exec: config::ExecSettings::default(),
+        limits: config::LimitsSettings::default(),
     };
 
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
