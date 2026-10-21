@@ -68,7 +68,10 @@ clap = { version = "4.5", features = ["derive", "env"] }
 uuid = { version = "1.11", features = ["v4"] }
 
 # Database persistence (optional)
-surrealdb = { version = "2.4", features = ["kv-rocksdb", "kv-mem"], optional = true }
+# Embedded engines only (engine::local::{Mem, RocksDb}). The default features
+# add the remote WebSocket client and its TLS stack (protocol-ws, rustls),
+# which nothing here uses and which held webpki-roots 0.26 in the tree.
+surrealdb = { version = "2.4", default-features = false, features = ["kv-rocksdb", "kv-mem"], optional = true }
 
 # JWT authentication (optional)
 jsonwebtoken = { version = "9.3", optional = true }
