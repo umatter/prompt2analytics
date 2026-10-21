@@ -5,6 +5,16 @@
 //! - Data interchange with other tools (Excel, R, Python)
 //! - Archiving results
 //! - Downstream processing
+//!
+//! # Escaping
+//!
+//! String cells (variable names, `dep_var`, `entity_var`, the Hausman
+//! recommendation) are quoted per RFC 4180 when they contain a comma, a double
+//! quote, LF or CR, with embedded double quotes doubled. A string cell that
+//! starts with `=`, `+`, `-`, `@`, TAB, CR or one of their full-width forms,
+//! and is not a finite number, gets a leading single quote: spreadsheet
+//! applications would otherwise evaluate it as a formula. Numeric columns are
+//! never prefixed.
 
 use std::io::Write;
 use std::path::Path;
@@ -14,6 +24,14 @@ use crate::ml::{DBSCANResult, KMeansResult, PCAResult};
 use crate::regression::OlsResult;
 
 /// Trait for exporting results to CSV format.
+///
+/// # Escaping
+///
+/// String cells are quoted per RFC 4180 when they contain `,`, `"`, LF or CR.
+/// String cells that start with `=`, `+`, `-`, `@`, TAB, CR or their
+/// full-width forms and do not parse as a finite number are prefixed with a
+/// single quote, so spreadsheet applications do not evaluate them as formulas.
+/// Numeric columns are never prefixed.
 pub trait CsvExport {
     /// Export to a CSV string.
     fn to_csv_string(&self) -> String;
@@ -92,7 +110,10 @@ impl CsvExport for DiscreteResult {
         // Model statistics
         csv.push_str("\n# Model Statistics\n");
         csv.push_str("statistic,value\n");
-        csv.push_str(&format!("model_type,{}\n", self.model_type));
+        csv.push_str(&format!(
+            "model_type,{}\n",
+            escape_csv(&self.model_type.to_string())
+        ));
         csv.push_str(&format!("dep_var,{}\n", escape_csv(&self.dep_var)));
         csv.push_str(&format!("n_obs,{}\n", self.n_obs));
         csv.push_str(&format!("n_positive,{}\n", self.n_positive));
@@ -134,7 +155,10 @@ impl CsvExport for PanelResult {
         // Model statistics
         csv.push_str("\n# Model Statistics\n");
         csv.push_str("statistic,value\n");
-        csv.push_str(&format!("method,{}\n", self.method));
+        csv.push_str(&format!(
+            "method,{}\n",
+            escape_csv(&self.method.to_string())
+        ));
         csv.push_str(&format!("dep_var,{}\n", escape_csv(&self.dep_var)));
         csv.push_str(&format!("entity_var,{}\n", escape_csv(&self.entity_var)));
         csv.push_str(&format!("n_obs,{}\n", self.n_obs));
@@ -355,18 +379,44 @@ impl CsvExport for DBSCANResult {
     }
 }
 
-/// Escape a string for CSV (handle commas and quotes).
+/// Leading characters that make spreadsheet applications treat a cell as a
+/// formula (TAB and CR included, as OWASP recommends), with the full-width
+/// forms of `=`, `+`, `-` and `@`.
+const FORMULA_TRIGGERS: [char; 10] = [
+    '=', '+', '-', '@', '\t', '\r', '\u{FF1D}', '\u{FF0B}', '\u{FF0D}', '\u{FF20}',
+];
+
+/// Escape a string cell for CSV.
+///
+/// A cell starting with a [`FORMULA_TRIGGERS`] character that is not a finite
+/// number gets a leading single quote. The result is then quoted per RFC 4180
+/// if it contains a comma, double quote, LF or CR.
 fn escape_csv(s: &str) -> String {
-    if s.contains(',') || s.contains('"') || s.contains('\n') {
-        format!("\"{}\"", s.replace('"', "\"\""))
+    let guarded = s.starts_with(FORMULA_TRIGGERS) && !s.parse::<f64>().is_ok_and(f64::is_finite);
+    let cell = if guarded {
+        format!("'{s}")
     } else {
         s.to_string()
+    };
+    if cell.contains([',', '"', '\n', '\r']) {
+        format!("\"{}\"", cell.replace('"', "\"\""))
+    } else {
+        cell
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::regression::{CovarianceType, OlsResult, run_ols_raw};
+    use ndarray::{Array1, Array2};
+
+    fn ols_with_names(names: [&str; 2]) -> OlsResult {
+        let x = Array2::from_shape_fn((8, 2), |(i, j)| if j == 0 { 1.0 } else { (i + 1) as f64 });
+        let y = Array1::from(vec![1.1, 1.9, 3.2, 3.8, 5.1, 6.2, 6.8, 8.1]);
+        let names: Vec<String> = names.iter().map(|s| s.to_string()).collect();
+        run_ols_raw(&x, &y, &names, "y", CovarianceType::HC1).expect("ols")
+    }
 
     #[test]
     fn test_escape_csv() {
@@ -374,5 +424,35 @@ mod tests {
         assert_eq!(escape_csv("with,comma"), "\"with,comma\"");
         assert_eq!(escape_csv("with\"quote"), "\"with\"\"quote\"");
         assert_eq!(escape_csv("with\nnewline"), "\"with\nnewline\"");
+    }
+
+    #[test]
+    fn test_escape_csv_quotes_carriage_return() {
+        assert_eq!(escape_csv("with\rcr"), "\"with\rcr\"");
+    }
+
+    #[test]
+    fn test_escape_csv_guards_formula_cells() {
+        assert_eq!(escape_csv("=1+2"), "'=1+2");
+        assert_eq!(escape_csv("+x"), "'+x");
+        assert_eq!(escape_csv("-x"), "'-x");
+        assert_eq!(escape_csv("@SUM(A1)"), "'@SUM(A1)");
+        assert_eq!(escape_csv("\tx"), "'\tx");
+        assert_eq!(escape_csv("\rx"), "\"'\rx\"");
+        assert_eq!(escape_csv("\u{FF1D}1+2"), "'\u{FF1D}1+2");
+        assert_eq!(escape_csv("=A1,B1"), "\"'=A1,B1\"");
+        assert_eq!(escape_csv("-inf"), "'-inf"); // parses, but not finite
+        // numbers keep their sign; ordinary names are untouched
+        for same in ["-1.5", "+3", "-2e-3", "x1", "log(wage)", "(Intercept)", ""] {
+            assert_eq!(escape_csv(same), same);
+        }
+    }
+
+    #[test]
+    fn test_csv_export_trait_applies_guard() {
+        let r = ols_with_names(["(Intercept)", "=1+2"]);
+        let csv = <OlsResult as CsvExport>::to_csv_string(&r);
+        assert!(csv.lines().any(|l| l.starts_with("'=1+2,")), "{csv}");
+        assert!(csv.lines().any(|l| l.starts_with("(Intercept),")), "{csv}");
     }
 }
