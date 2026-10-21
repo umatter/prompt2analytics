@@ -80,7 +80,6 @@ async fn call(app: &Router, sid: &str, tool: &str, args: Value) -> (StatusCode, 
 }
 
 /// Poll `cond` every 20 ms for up to 10 s; panic if it never holds.
-#[allow(dead_code)]
 async fn wait_until(mut cond: impl FnMut() -> bool, what: &str) {
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     while !cond() {
@@ -493,6 +492,7 @@ async fn full_session_table_answers_503_with_code() {
     assert_eq!(b["code"], json!("capacity"));
     assert!(h.contains_key(header::RETRY_AFTER));
 }
+
 // ---------------------------------------------------------------------------
 // Governor health (MCP-1)
 // ---------------------------------------------------------------------------
