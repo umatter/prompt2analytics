@@ -356,7 +356,12 @@ pub fn create_router(state: AppState, config: &ServerConfig) -> Router {
     // Apply global middleware LAST, so it also covers the nested conversation
     // routes (e.g. /api/sessions/{id}/datasets). Applying CORS inside
     // create_base_router would skip routes nested afterwards.
+    //
+    // The deployment mode (of the HTTP-forced config) is handed to the
+    // handlers that depend on it, e.g. session creation ignores `user_id`
+    // in open public mode.
     middleware::apply_global_middleware(router, config)
+        .layer(axum::Extension(config.deployment_mode()))
 }
 
 /// Create the base router with core routes.

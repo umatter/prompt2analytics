@@ -164,6 +164,26 @@ pub(crate) fn is_past_ttl(
     elapsed.num_minutes() > i64::try_from(ttl_minutes).unwrap_or(i64::MAX)
 }
 
+/// The longest `user_id` a session accepts, in bytes.
+const MAX_USER_ID_BYTES: usize = 128;
+
+/// Check a client-supplied `user_id`: at most 128 bytes, each an ASCII
+/// letter or digit or one of `.`, `_`, `@` and `-`. An empty id is `None`.
+pub fn validate_user_id(raw: Option<String>) -> Result<Option<String>, String> {
+    let Some(id) = raw.filter(|id| !id.is_empty()) else {
+        return Ok(None);
+    };
+    let allowed = |b: u8| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'@' | b'-');
+    if id.len() <= MAX_USER_ID_BYTES && id.bytes().all(allowed) {
+        Ok(Some(id))
+    } else {
+        Err(format!(
+            "user_id must be at most {MAX_USER_ID_BYTES} characters from A-Z, a-z, 0-9, '.', \
+             '_', '@' and '-'"
+        ))
+    }
+}
+
 /// Whether `id` has the form of a session id: a UUID in the hyphenated
 /// lower-case form `SessionManager::create_session` produces.
 pub(crate) fn is_session_id(id: &str) -> bool {
@@ -734,6 +754,26 @@ mod tests {
         assert_eq!(rx.recv().await.unwrap(), d);
 
         assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    #[test]
+    fn validate_user_id_rules() {
+        assert_eq!(validate_user_id(None), Ok(None));
+        assert_eq!(validate_user_id(Some(String::new())), Ok(None));
+        let max = "a".repeat(128);
+        assert_eq!(validate_user_id(Some(max.clone())), Ok(Some(max)));
+        assert!(validate_user_id(Some("a".repeat(129))).is_err());
+        for ok in ["a.b", "a_b", "a@b", "a-b", "Z9", "alice.o-k_1@example.org"] {
+            assert_eq!(
+                validate_user_id(Some(ok.into())),
+                Ok(Some(ok.into())),
+                "{ok}"
+            );
+        }
+        for bad in ["has space", "semi;colon", "ü", "a/b", "a\nb", "a+b", "<x>"] {
+            let err = validate_user_id(Some(bad.into())).unwrap_err();
+            assert!(err.contains("128"), "{err}");
+        }
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! Session routes (`/api/sessions*`) and the file browser (`/api/files`).
 
 use axum::{
-    Json,
+    Extension, Json,
     extract::{Path, Query, State},
     http::{StatusCode, header},
     response::{IntoResponse, Response},
@@ -9,7 +9,8 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use super::http::{ApiResponse, AppState};
-use crate::session::SessionError;
+use crate::config::DeploymentMode;
+use crate::session::{SessionError, validate_user_id};
 
 /// Request to create a new session.
 #[derive(Debug, Deserialize)]
@@ -28,23 +29,40 @@ pub struct CreateSessionResponse {
 pub(crate) const CAPACITY_RETRY_AFTER_SECS: &str = "60";
 
 /// Create a new session. A full session table answers 503 with code
-/// `capacity` and `Retry-After`.
+/// `capacity` and `Retry-After`. The `user_id` must pass
+/// [`validate_user_id`] (400 `invalid_arguments` otherwise); in open public
+/// mode it has no meaning and is not stored.
 pub(crate) async fn create_session(
     State(state): State<AppState>,
+    Extension(mode): Extension<DeploymentMode>,
     Json(request): Json<CreateSessionRequest>,
 ) -> Response {
+    let user_id = if mode == DeploymentMode::OpenPublic {
+        None
+    } else {
+        match validate_user_id(request.user_id) {
+            Ok(user_id) => user_id,
+            Err(message) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(ApiResponse::<()>::error_with_code(
+                        message,
+                        "invalid_arguments",
+                        None,
+                    )),
+                )
+                    .into_response();
+            }
+        }
+    };
     // First create the in-memory session
-    match state
-        .session_manager
-        .create_session(request.user_id.clone())
-        .await
-    {
+    match state.session_manager.create_session(user_id.clone()).await {
         Ok(session_id) => {
             // Also register in persistent storage if available (for conversation support)
             #[cfg(feature = "db")]
             if let Some(ref persistent_manager) = state.persistent_manager {
                 match persistent_manager
-                    .register_session(&session_id, request.user_id)
+                    .register_session(&session_id, user_id)
                     .await
                 {
                     Ok(()) => {

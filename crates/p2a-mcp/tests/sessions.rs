@@ -598,3 +598,98 @@ async fn session_db_bytes_caps_a_sessions_history() {
         StatusCode::CREATED
     );
 }
+
+// =============================================================================
+// Task 4: user_id validation (MCP-17)
+// =============================================================================
+
+/// `user_id` is at most 128 bytes of `[A-Za-z0-9._@-]`.
+#[tokio::test]
+async fn user_id_is_validated() {
+    let (r, _state) = app(ServerConfig::default()).await;
+    for bad in [
+        "a".repeat(129),
+        "has space".to_string(),
+        "semi;colon".to_string(),
+        "ü".to_string(),
+    ] {
+        let (st, body) = call(
+            &r,
+            "POST",
+            "/api/sessions",
+            None,
+            Some(json!({"user_id": bad})),
+        )
+        .await;
+        assert_eq!(
+            (st, body["code"].as_str()),
+            (StatusCode::BAD_REQUEST, Some("invalid_arguments")),
+            "{bad}: {body}"
+        );
+    }
+    assert_eq!(
+        call(
+            &r,
+            "POST",
+            "/api/sessions",
+            None,
+            Some(json!({"user_id": "a".repeat(128)}))
+        )
+        .await
+        .0,
+        StatusCode::CREATED
+    );
+    let (_, body) = call(
+        &r,
+        "POST",
+        "/api/sessions",
+        None,
+        Some(json!({"user_id": "alice.o-k_1@example.org"})),
+    )
+    .await;
+    let sid = body["data"]["session_id"].as_str().unwrap();
+    assert_eq!(
+        call(&r, "GET", &format!("/api/sessions/{sid}"), None, None)
+            .await
+            .1["data"]["user_id"],
+        "alice.o-k_1@example.org"
+    );
+}
+
+/// In open public mode the `user_id` means nothing and is not stored.
+#[tokio::test]
+async fn open_public_mode_ignores_user_id() {
+    let mut cfg = ServerConfig::default();
+    cfg.http.allow_unauthenticated = true;
+    cfg.http.session_dirs = p2a_mcp::config::SessionDirsSetting::Off;
+    let (r, state) = app(cfg).await;
+    let (st, body) = call(
+        &r,
+        "POST",
+        "/api/sessions",
+        None,
+        Some(json!({"user_id": "x".repeat(4096)})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "{body}");
+    let sid = body["data"]["session_id"].as_str().unwrap();
+    assert_eq!(
+        state
+            .session_manager
+            .get_session(sid)
+            .await
+            .unwrap()
+            .user_id,
+        None
+    );
+    assert_eq!(
+        pm(&state)
+            .db()
+            .get_session(sid)
+            .await
+            .unwrap()
+            .unwrap()
+            .user_id,
+        None
+    );
+}
