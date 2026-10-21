@@ -7,6 +7,7 @@
 //! and startup. The route handlers live in `routes_sessions`, `routes_tools`
 //! and `llm_routes`; CORS, authentication and the body limit in `middleware`.
 
+use std::future::Future;
 use std::sync::Arc;
 
 use axum::{
@@ -23,7 +24,7 @@ use super::routes_sessions::{
 };
 use super::routes_tools::{call_tool, list_tools};
 use crate::audit::AuditLogger;
-use crate::config::ServerConfig;
+use crate::config::{DeploymentMode, ServerConfig};
 use crate::server::AnalyticsServer;
 use crate::session::SessionManager;
 use crate::transport::{TransportError, TransportResult};
@@ -111,53 +112,73 @@ async fn init_persistence(
     }
 }
 
-/// Start the HTTP transport.
-pub async fn start_http_transport(config: &ServerConfig) -> TransportResult<()> {
-    let (app, _state) = build_app(config).await?;
-
+/// Validate `config` and bind its address. Every HTTP start path (the
+/// binary, the embedded desktop server) goes through here, so the bind guard
+/// (`config::check_bind_policy`, part of `ServerConfig::validate`) cannot be
+/// skipped.
+pub async fn bind(config: &ServerConfig) -> TransportResult<tokio::net::TcpListener> {
+    config
+        .validate()
+        .map_err(|e| TransportError::Config(e.to_string()))?;
     let addr = config.http.addr;
-
-    // A non-loopback bind with no access token is refused by default, to avoid
-    // an accidental open deployment. It is allowed only when the operator
-    // explicitly opts in with --allow-unauthenticated (P2A_ALLOW_UNAUTHENTICATED),
-    // which also drops the enumeration endpoints (see create_base_router).
-    if !addr.ip().is_loopback()
-        && config.http.access_token.is_none()
-        && !config.http.allow_unauthenticated
-    {
-        return Err(TransportError::Http(format!(
-            "refusing to bind {addr}: a non-loopback bind requires an access token. \
-             Set P2A_ACCESS_TOKEN (or --access-token) for a private/authenticated deployment, \
-             or set P2A_ALLOW_UNAUTHENTICATED=1 (--allow-unauthenticated) for an intentional \
-             open bring-your-own-key demo, or bind 127.0.0.1 for local development."
-        )));
-    }
-    if config.http.access_token.is_some() {
-        tracing::info!("HTTP access-token authentication is ENABLED for /api routes");
-    } else if config.http.is_open_unauthenticated() {
-        tracing::warn!(
-            "HTTP running OPEN and UNAUTHENTICATED on {addr} (P2A_ALLOW_UNAUTHENTICATED). \
-             Session-list and file-browser endpoints are disabled; isolation relies on \
-             unguessable session IDs. Put an edge rate-limiter in front for abuse/DoS control."
-        );
-    } else {
-        tracing::warn!(
-            "HTTP access-token authentication is DISABLED (loopback bind only); \
-             set P2A_ACCESS_TOKEN before exposing this server"
-        );
-    }
-
-    tracing::info!("Starting HTTP transport on {}", addr);
-
-    let listener = tokio::net::TcpListener::bind(addr)
+    tokio::net::TcpListener::bind(addr)
         .await
-        .map_err(|e| TransportError::Http(format!("Failed to bind to {}: {}", addr, e)))?;
+        .map_err(|e| TransportError::Http(format!("Failed to bind to {}: {}", addr, e)))
+}
+
+/// Serve the app on `listener` until `shutdown` resolves.
+///
+/// Validates the configuration again, so no caller can skip the guard, then
+/// builds the app and serves it with graceful shutdown.
+pub async fn serve(
+    listener: tokio::net::TcpListener,
+    config: ServerConfig,
+    shutdown: impl Future<Output = ()> + Send + 'static,
+) -> TransportResult<()> {
+    config
+        .validate()
+        .map_err(|e| TransportError::Config(e.to_string()))?;
+    let (app, _state) = build_app(&config).await?;
+    log_startup(&config, &listener);
 
     axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown)
         .await
-        .map_err(|e| TransportError::Http(format!("HTTP server error: {}", e)))?;
+        .map_err(|e| TransportError::Http(format!("HTTP server error: {}", e)))
+}
 
-    Ok(())
+/// Start the HTTP transport: [`bind`], then [`serve`] until the process ends.
+pub async fn start_http_transport(config: &ServerConfig) -> TransportResult<()> {
+    let listener = bind(config).await?;
+    serve(listener, config.clone(), std::future::pending()).await
+}
+
+fn log_startup(config: &ServerConfig, listener: &tokio::net::TcpListener) {
+    let addr = listener.local_addr().unwrap_or(config.http.addr);
+    let mode = config.deployment_mode();
+    match mode {
+        DeploymentMode::Authenticated => {
+            tracing::info!("HTTP access-token authentication is ENABLED for /api routes");
+        }
+        DeploymentMode::OpenPublic => {
+            tracing::warn!(
+                "HTTP running OPEN and UNAUTHENTICATED on {addr} (open public mode). \
+                 Session-list and file-browser endpoints are disabled and the hosted resource \
+                 profile applies; isolation relies on unguessable session IDs. Put an edge \
+                 rate-limiter in front for abuse/DoS control."
+            );
+        }
+        DeploymentMode::Local => {
+            tracing::warn!(
+                "HTTP access-token authentication is DISABLED (local mode: loopback bind); \
+                 set P2A_ACCESS_TOKEN before exposing this server"
+            );
+        }
+    }
+    tracing::info!(
+        "Starting HTTP transport on {addr} (mode {mode:?}, resource profile {:?})",
+        config.resource_profile()
+    );
 }
 
 /// Create the axum router with all routes.

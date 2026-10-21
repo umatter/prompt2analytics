@@ -5,6 +5,8 @@
 //! nothing binds a socket except the embedded-server tests.
 #![cfg(feature = "http")]
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use axum::Router;
@@ -88,6 +90,11 @@ async fn wait_until(mut cond: impl FnMut() -> bool, what: &str) {
     }
 }
 
+/// The default local configuration.
+fn local() -> ServerConfig {
+    http_cfg("127.0.0.1:8080", None, false)
+}
+
 #[tokio::test]
 async fn characterization_core_routes() {
     let (app, _) = app(&http_cfg("127.0.0.1:8080", None, false)).await;
@@ -110,3 +117,31 @@ async fn characterization_core_routes() {
         StatusCode::NO_CONTENT
     );
 }
+
+// ---------------------------------------------------------------------------
+// One guarded start path (MCP-24)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn embedded_server_refuses_non_loopback_bind() {
+    let r = p2a_mcp::start_embedded_server(
+        p2a_mcp::EmbeddedServerConfig::default()
+            .with_host("0.0.0.0")
+            .with_port(0),
+    )
+    .await;
+    let e = r
+        .err()
+        .expect("a public bind without a token must be refused");
+    assert!(e.to_string().contains("requires an access token"), "{e}");
+}
+
+#[tokio::test]
+async fn embedded_server_binds_before_returning_and_reports_real_port() {
+    let s = p2a_mcp::start_embedded_server(p2a_mcp::EmbeddedServerConfig::default().with_port(0))
+        .await
+        .unwrap();
+    assert_ne!(s.port(), 0);
+    s.shutdown();
+}
+
