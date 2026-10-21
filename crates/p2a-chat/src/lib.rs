@@ -153,8 +153,12 @@ pub struct ChatArgs {
     pub model: String,
 
     /// API key for the provider
-    #[arg(long, env = "P2A_API_KEY")]
+    #[arg(long, env = "P2A_API_KEY", hide_env_values = true)]
     pub api_key: Option<String>,
+
+    /// Bearer token for a p2a-mcp server started with --access-token
+    #[arg(long, env = "P2A_ACCESS_TOKEN", hide_env_values = true)]
+    pub access_token: Option<String>,
 
     /// Override the LLM API base URL
     #[arg(long, env = "P2A_BASE_URL")]
@@ -409,27 +413,125 @@ fn save_image(base64_data: &str, path: &std::path::Path) -> anyhow::Result<()> {
 }
 
 // ---------------------------------------------------------------------------
+// HTTP client and connection errors
+// ---------------------------------------------------------------------------
+
+/// The command that starts a local server, shown when it cannot be reached.
+const START_SERVER_COMMAND: &str =
+    "cargo run -p p2a-mcp --features full -- --transport http --port 8080";
+
+/// Client builder with the backend access token, if any, as a default
+/// `Authorization: Bearer <token>` header marked sensitive (so it is never
+/// shown in debug output). A blank token means none.
+fn client_builder(access_token: Option<&str>) -> anyhow::Result<reqwest::ClientBuilder> {
+    let builder = reqwest::Client::builder();
+    let Some(token) = access_token.map(str::trim).filter(|t| !t.is_empty()) else {
+        return Ok(builder);
+    };
+    let mut value =
+        reqwest::header::HeaderValue::from_str(&format!("Bearer {token}")).map_err(|_| {
+            anyhow::anyhow!(
+                "the access token contains characters that cannot be sent in an HTTP header"
+            )
+        })?;
+    value.set_sensitive(true);
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(reqwest::header::AUTHORIZATION, value);
+    Ok(builder.default_headers(headers))
+}
+
+/// HTTP client for the p2a-mcp server, sending `access_token` as a bearer
+/// token on every request when one is given.
+pub fn build_http_client(access_token: Option<&str>) -> anyhow::Result<reqwest::Client> {
+    Ok(client_builder(access_token)?.build()?)
+}
+
+/// Why the initial connection to the server failed.
+#[derive(Debug)]
+pub enum ConnectError {
+    /// The server could not be reached at all.
+    Unreachable(String),
+    /// The server answered 401: the token is missing or was rejected.
+    Unauthorized { token_sent: bool },
+    /// The server answered with another non-2xx status.
+    Http { status: u16 },
+    /// The response was not the expected session JSON.
+    BadResponse(String),
+}
+
+impl std::fmt::Display for ConnectError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ConnectError::Unreachable(e) => write!(f, "could not reach the server: {e}"),
+            ConnectError::Unauthorized { token_sent } => {
+                f.write_str(unauthorized_message(*token_sent))
+            }
+            ConnectError::Http { status } => write!(f, "the server answered HTTP {status}"),
+            ConnectError::BadResponse(e) => write!(f, "unexpected response from the server: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for ConnectError {}
+
+/// What to tell the user about a 401.
+fn unauthorized_message(token_sent: bool) -> &'static str {
+    if token_sent {
+        "The server rejected the access token. Check --access-token or P2A_ACCESS_TOKEN."
+    } else {
+        "The server requires an access token. Pass --access-token <token> or set P2A_ACCESS_TOKEN."
+    }
+}
+
+/// The lines printed when the session cannot be created. Only an
+/// unreachable server gets the "start the server" advice.
+fn connect_failure_hint(err: &ConnectError) -> Vec<String> {
+    match err {
+        ConnectError::Unreachable(_) => vec![
+            "Could not connect to p2a-mcp server.".to_string(),
+            format!("  {err}"),
+            String::new(),
+            "Start the server first:".to_string(),
+            format!("  {START_SERVER_COMMAND}"),
+        ],
+        ConnectError::Unauthorized { token_sent } => vec![
+            "The p2a-mcp server refused the request (HTTP 401).".to_string(),
+            format!("  {}", unauthorized_message(*token_sent)),
+        ],
+        ConnectError::Http { .. } | ConnectError::BadResponse(_) => vec![err.to_string()],
+    }
+}
+
+// ---------------------------------------------------------------------------
 // REPL
 // ---------------------------------------------------------------------------
 
 pub async fn run(args: &ChatArgs) -> anyhow::Result<()> {
-    let client = reqwest::Client::new();
+    let token = args
+        .access_token
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty());
+    let client = build_http_client(token)?;
+    let token_sent = token.is_some();
     let base_url = args.url.trim_end_matches('/');
 
     // Create session
-    let session_id = match create_session(&client, base_url).await {
+    let session_id = match create_session(&client, base_url, token_sent).await {
         Ok(id) => id,
-        Err(e) => {
-            eprintln!("{}", "Could not connect to p2a-mcp server.".red().bold());
-            eprintln!("  {}", e);
-            eprintln!();
-            eprintln!("Start the server first:");
-            eprintln!(
-                "  {}",
-                "cargo run -p p2a-mcp --features full -- --transport http --port 8080"
-                    .bright_cyan()
-            );
-            return Err(e);
+        Err(err) => {
+            let mut lines = connect_failure_hint(&err).into_iter();
+            if let Some(first) = lines.next() {
+                eprintln!("{}", first.red().bold());
+            }
+            for line in lines {
+                if line.trim() == START_SERVER_COMMAND {
+                    eprintln!("  {}", START_SERVER_COMMAND.bright_cyan());
+                } else {
+                    eprintln!("{line}");
+                }
+            }
+            return Err(anyhow::Error::new(err));
         }
     };
 
@@ -508,7 +610,16 @@ pub async fn run(args: &ChatArgs) -> anyhow::Result<()> {
                 retrieve_history: false,
             };
 
-            match stream_chat(&client, base_url, &request, &args.output_dir, &mut recorder).await {
+            match stream_chat(
+                &client,
+                base_url,
+                &request,
+                &args.output_dir,
+                &mut recorder,
+                token_sent,
+            )
+            .await
+            {
                 Ok(msg) => {
                     history.push(Message {
                         role: "user".to_string(),
@@ -580,7 +691,16 @@ pub async fn run(args: &ChatArgs) -> anyhow::Result<()> {
                 retrieve_history: false,
             };
 
-            match stream_chat(&client, base_url, &request, &args.output_dir, &mut recorder).await {
+            match stream_chat(
+                &client,
+                base_url,
+                &request,
+                &args.output_dir,
+                &mut recorder,
+                token_sent,
+            )
+            .await
+            {
                 Ok(msg) => {
                     history.push(Message {
                         role: "user".to_string(),
@@ -600,21 +720,37 @@ pub async fn run(args: &ChatArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn create_session(client: &reqwest::Client, base_url: &str) -> anyhow::Result<String> {
+/// Create a session. `token_sent` only shapes the 401 message; the token
+/// itself travels as the client's default header.
+async fn create_session(
+    client: &reqwest::Client,
+    base_url: &str,
+    token_sent: bool,
+) -> Result<String, ConnectError> {
     let resp = client
         .post(format!("{}/api/sessions", base_url))
         .json(&serde_json::json!({}))
         .send()
-        .await?;
+        .await
+        .map_err(|e| ConnectError::Unreachable(e.to_string()))?;
 
-    if !resp.status().is_success() {
-        anyhow::bail!("Server returned {}", resp.status());
+    let status = resp.status();
+    if status == reqwest::StatusCode::UNAUTHORIZED {
+        return Err(ConnectError::Unauthorized { token_sent });
+    }
+    if !status.is_success() {
+        return Err(ConnectError::Http {
+            status: status.as_u16(),
+        });
     }
 
-    let body: ApiResponse<CreateSessionData> = resp.json().await?;
+    let body: ApiResponse<CreateSessionData> = resp
+        .json()
+        .await
+        .map_err(|e| ConnectError::BadResponse(e.to_string()))?;
     let data = body
         .data
-        .ok_or_else(|| anyhow::anyhow!("No data in session response"))?;
+        .ok_or_else(|| ConnectError::BadResponse("no data in session response".to_string()))?;
     Ok(data.session_id)
 }
 
@@ -624,6 +760,7 @@ async fn stream_chat(
     request: &LlmChatRequest,
     output_dir: &PathBuf,
     recorder: &mut Option<Recorder>,
+    token_sent: bool,
 ) -> anyhow::Result<Message> {
     let resp = client
         .post(format!("{}/api/llm/chat/stream", base_url))
@@ -631,6 +768,9 @@ async fn stream_chat(
         .send()
         .await?;
 
+    if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+        anyhow::bail!("{}", unauthorized_message(token_sent));
+    }
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
@@ -692,4 +832,162 @@ fn print_help() {
     println!("{}", "Recording:".bold());
     println!("  --record file.txt   Save transcript to file");
     println!("  --script file.txt   Read prompts from file");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+
+    /// Serve exactly one HTTP request on a loopback port with a canned
+    /// response; the raw request text is sent back on the channel.
+    fn one_shot_server(
+        status_line: &'static str,
+        body: &'static str,
+    ) -> (String, std::sync::mpsc::Receiver<String>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            let mut raw = Vec::new();
+            let mut buf = [0u8; 1024];
+            let header_end = loop {
+                let n = stream.read(&mut buf).unwrap_or(0);
+                if n == 0 {
+                    break None;
+                }
+                raw.extend_from_slice(&buf[..n]);
+                if let Some(pos) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
+                    break Some(pos + 4);
+                }
+            };
+            if let Some(end) = header_end {
+                let head = String::from_utf8_lossy(&raw[..end]).to_ascii_lowercase();
+                let content_length = head
+                    .lines()
+                    .find_map(|l| l.strip_prefix("content-length:"))
+                    .and_then(|v| v.trim().parse::<usize>().ok())
+                    .unwrap_or(0);
+                while raw.len() < end + content_length {
+                    let n = stream.read(&mut buf).unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    raw.extend_from_slice(&buf[..n]);
+                }
+            }
+            let response = format!(
+                "HTTP/1.1 {status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.flush();
+            let _ = tx.send(String::from_utf8_lossy(&raw).into_owned());
+        });
+        (format!("http://{addr}"), rx)
+    }
+
+    const OK_SESSION: &str = r#"{"success":true,"data":{"session_id":"abc123"},"error":null}"#;
+
+    #[tokio::test]
+    async fn create_session_sends_bearer_token() {
+        let (url, rx) = one_shot_server("200 OK", OK_SESSION);
+        let client = client_builder(Some("s3cret-token"))
+            .unwrap()
+            .no_proxy()
+            .build()
+            .unwrap();
+        assert_eq!(create_session(&client, &url, true).await.unwrap(), "abc123");
+        let req = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap()
+            .to_ascii_lowercase();
+        assert!(req.contains("authorization: bearer s3cret-token"), "{req}");
+    }
+
+    #[tokio::test]
+    async fn no_token_sends_no_authorization_header() {
+        let (url, rx) = one_shot_server("200 OK", OK_SESSION);
+        let client = client_builder(None).unwrap().no_proxy().build().unwrap();
+        create_session(&client, &url, false).await.unwrap();
+        assert!(
+            !rx.recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap()
+                .to_ascii_lowercase()
+                .contains("authorization:")
+        );
+    }
+
+    #[tokio::test]
+    async fn http_401_without_token_asks_for_one() {
+        let (url, _rx) = one_shot_server("401 Unauthorized", "missing or invalid bearer token");
+        let client = client_builder(None).unwrap().no_proxy().build().unwrap();
+        let err = create_session(&client, &url, false).await.unwrap_err();
+        assert!(
+            matches!(err, ConnectError::Unauthorized { token_sent: false }),
+            "{err:?}"
+        );
+        let hint = connect_failure_hint(&err).join("\n");
+        assert!(
+            hint.contains("--access-token") && hint.contains("P2A_ACCESS_TOKEN"),
+            "{hint}"
+        );
+        assert!(!hint.contains("Start the server first"), "{hint}");
+    }
+
+    #[tokio::test]
+    async fn http_401_with_token_says_it_was_rejected() {
+        let (url, _rx) = one_shot_server("401 Unauthorized", "missing or invalid bearer token");
+        let client = client_builder(Some("wrong"))
+            .unwrap()
+            .no_proxy()
+            .build()
+            .unwrap();
+        let err = create_session(&client, &url, true).await.unwrap_err();
+        assert!(matches!(
+            err,
+            ConnectError::Unauthorized { token_sent: true }
+        ));
+        assert!(connect_failure_hint(&err).join("\n").contains("rejected"));
+    }
+
+    #[tokio::test]
+    async fn refused_connection_still_suggests_starting_the_server() {
+        // Bind and drop: the port is closed by the time the client connects.
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let client = client_builder(None).unwrap().no_proxy().build().unwrap();
+        let err = create_session(&client, &format!("http://127.0.0.1:{port}"), false)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ConnectError::Unreachable(_)), "{err:?}");
+        assert!(
+            connect_failure_hint(&err)
+                .join("\n")
+                .contains("Start the server first")
+        );
+    }
+
+    #[test]
+    fn token_flag_parses_and_secret_env_values_are_hidden() {
+        use clap::CommandFactory;
+        let cmd = ChatArgs::command();
+        for id in ["access_token", "api_key"] {
+            let arg = cmd.get_arguments().find(|a| a.get_id() == id).unwrap();
+            assert!(arg.is_hide_env_values_set(), "{id}");
+        }
+        let args = ChatArgs::try_parse_from(["p2a-chat", "--access-token", "t0k"]).unwrap();
+        assert_eq!(args.access_token.as_deref(), Some("t0k"));
+    }
+
+    #[test]
+    fn token_with_control_characters_is_refused_before_sending() {
+        assert!(build_http_client(Some("bad\r\ntoken")).is_err());
+    }
 }
