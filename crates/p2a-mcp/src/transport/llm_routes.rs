@@ -7,6 +7,7 @@ use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
 use serde::{Deserialize, Serialize};
 
 use super::http::{ApiResponse, AppState, ContentItem};
+use crate::exec::{CallOrigin, ToolGovernor};
 use crate::llm::{
     AnthropicProvider, LlmProvider, Message, OllamaProvider, OpenAIProvider, ProviderConfig,
     ProviderType, ToolExecutor, build_enhanced_dataset_context, get_system_prompt_with_context,
@@ -59,15 +60,26 @@ pub struct LlmModelsResponse {
     pub models: Vec<String>,
 }
 
-/// Internal tool executor that uses the analytics server.
+/// Internal tool executor that runs the LLM's tool calls through the
+/// governor. A refusal or failure becomes the tool's error text, so the
+/// model can retry with smaller parameters.
 pub struct SessionToolExecutor {
+    governor: Arc<ToolGovernor>,
     server: Arc<crate::server::AnalyticsServer>,
     session: Arc<Session>,
 }
 
 impl SessionToolExecutor {
-    pub fn new(server: Arc<crate::server::AnalyticsServer>, session: Arc<Session>) -> Self {
-        Self { server, session }
+    pub fn new(
+        governor: Arc<ToolGovernor>,
+        server: Arc<crate::server::AnalyticsServer>,
+        session: Arc<Session>,
+    ) -> Self {
+        Self {
+            governor,
+            server,
+            session,
+        }
     }
 }
 
@@ -78,9 +90,16 @@ impl ToolExecutor for SessionToolExecutor {
         tracing::info!(tool = %name, "Executing tool");
         let start = std::time::Instant::now();
         let result = self
-            .server
-            .call_tool_with_session(name, arguments, &self.session)
-            .await;
+            .governor
+            .call(
+                self.server.clone(),
+                self.session.clone(),
+                name,
+                arguments,
+                CallOrigin::LlmTool,
+            )
+            .await
+            .map_err(|e| e.to_string());
         let elapsed = start.elapsed();
         tracing::info!(tool = %name, elapsed_ms = %elapsed.as_millis(), "Tool execution completed");
         match result {
@@ -214,7 +233,11 @@ pub async fn llm_chat(
 
     // Create provider and tool executor
     let provider = create_provider_with_iterations(request.provider, request.max_tool_iterations);
-    let tool_executor = SessionToolExecutor::new(state.server.clone(), session.clone());
+    let tool_executor = SessionToolExecutor::new(
+        state.governor.clone(),
+        state.server.clone(),
+        session.clone(),
+    );
     let tools = state.server.list_tools_for_llm();
 
     // Build enhanced dataset context from currently loaded datasets
@@ -452,8 +475,10 @@ pub struct ImageData {
     pub mime_type: String,
 }
 
-/// Streaming tool executor that sends progress events.
+/// Streaming tool executor that sends progress events. Tool calls run
+/// through the governor, like [`SessionToolExecutor`].
 pub struct StreamingToolExecutor {
+    governor: Arc<ToolGovernor>,
     server: Arc<crate::server::AnalyticsServer>,
     session: Arc<Session>,
     sender: tokio::sync::mpsc::Sender<ProgressEvent>,
@@ -473,11 +498,13 @@ pub struct StreamingToolExecutor {
 
 impl StreamingToolExecutor {
     pub fn new(
+        governor: Arc<ToolGovernor>,
         server: Arc<crate::server::AnalyticsServer>,
         session: Arc<Session>,
         sender: tokio::sync::mpsc::Sender<ProgressEvent>,
     ) -> Self {
         Self {
+            governor,
             server,
             session,
             sender,
@@ -896,9 +923,16 @@ impl ToolExecutor for StreamingToolExecutor {
         tracing::info!(tool = %name, "Executing tool");
         let start = std::time::Instant::now();
         let result = self
-            .server
-            .call_tool_with_session(name, arguments, &self.session)
-            .await;
+            .governor
+            .call(
+                self.server.clone(),
+                self.session.clone(),
+                name,
+                arguments,
+                CallOrigin::LlmTool,
+            )
+            .await
+            .map_err(|e| e.to_string());
         let elapsed = start.elapsed();
         let duration_ms = elapsed.as_millis() as i32;
 
@@ -1155,8 +1189,12 @@ pub async fn llm_chat_stream(
             create_provider_with_iterations(request.provider, request.max_tool_iterations);
         // Only the db build reconfigures the executor below.
         #[cfg_attr(not(feature = "db"), allow(unused_mut))]
-        let mut tool_executor =
-            StreamingToolExecutor::new(state_clone.server.clone(), session, tx_clone.clone());
+        let mut tool_executor = StreamingToolExecutor::new(
+            state_clone.governor.clone(),
+            state_clone.server.clone(),
+            session,
+            tx_clone.clone(),
+        );
 
         // Track whether we've set up the executor for persistence
         #[cfg(feature = "db")]
@@ -1419,4 +1457,70 @@ pub async fn llm_chat_stream(
     };
 
     axum::response::sse::Sse::new(stream).keep_alive(axum::response::sse::KeepAlive::default())
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+    use crate::config::SessionConfig;
+    use crate::exec::ExecConfig;
+    use crate::session::SessionManager;
+
+    /// A governor that refuses every call on memory admission (RSS > 1 byte).
+    async fn governed_parts() -> (
+        Arc<ToolGovernor>,
+        Arc<crate::server::AnalyticsServer>,
+        Arc<Session>,
+    ) {
+        let sessions = Arc::new(SessionManager::new(SessionConfig {
+            ttl_minutes: 60,
+            max_sessions: 10,
+            evict_idle_minutes: None,
+        }));
+        let id = sessions.create_session(None).await.unwrap();
+        let session = sessions.get_session(&id).await.unwrap();
+        let governor = Arc::new(ToolGovernor::new(
+            ExecConfig {
+                rss_soft_limit_bytes: Some(1),
+                ..Default::default()
+            },
+            sessions,
+        ));
+        (
+            governor,
+            Arc::new(crate::server::AnalyticsServer::new()),
+            session,
+        )
+    }
+
+    #[tokio::test]
+    async fn session_tool_executor_is_governed() {
+        let (governor, server, session) = governed_parts().await;
+        let executor = SessionToolExecutor::new(governor, server, session);
+        let err = executor
+            .execute("list_datasets", serde_json::json!({}))
+            .await
+            .unwrap_err();
+        assert!(err.contains("low on memory"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn streaming_tool_executor_is_governed() {
+        let (governor, server, session) = governed_parts().await;
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        let executor = StreamingToolExecutor::new(governor, server, session, tx);
+        let err = executor
+            .execute("list_datasets", serde_json::json!({}))
+            .await
+            .unwrap_err();
+        assert!(err.contains("low on memory"), "{err}");
+        let mut tool_end = None;
+        while let Ok(event) = rx.try_recv() {
+            if let ProgressEvent::ToolEnd { result, .. } = event {
+                tool_end = result;
+            }
+        }
+        let text = tool_end.expect("a ToolEnd event with a result");
+        assert!(text.starts_with("Error:"), "{text}");
+    }
 }

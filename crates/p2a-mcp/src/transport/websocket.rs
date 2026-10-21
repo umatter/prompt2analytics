@@ -15,6 +15,7 @@ use futures::{sink::SinkExt, stream::StreamExt};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
+use crate::exec::{CallOrigin, ToolGovernor};
 use crate::server::AnalyticsServer;
 use crate::session::{Session, SessionError, SessionManager};
 use crate::transport::http::ToolResult;
@@ -80,14 +81,20 @@ struct WsState {
     session: Option<Arc<Session>>,
     server: Arc<AnalyticsServer>,
     session_manager: Arc<SessionManager>,
+    governor: Arc<ToolGovernor>,
 }
 
 impl WsState {
-    fn new(server: Arc<AnalyticsServer>, session_manager: Arc<SessionManager>) -> Self {
+    fn new(
+        server: Arc<AnalyticsServer>,
+        session_manager: Arc<SessionManager>,
+        governor: Arc<ToolGovernor>,
+    ) -> Self {
         Self {
             session: None,
             server,
             session_manager,
+            governor,
         }
     }
 
@@ -101,7 +108,9 @@ pub async fn ws_handler(
     ws: WebSocketUpgrade,
     State(state): State<super::http::AppState>,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_socket(socket, state.server, state.session_manager))
+    ws.on_upgrade(move |socket| {
+        handle_socket(socket, state.server, state.session_manager, state.governor)
+    })
 }
 
 /// Handle a WebSocket connection.
@@ -109,6 +118,7 @@ async fn handle_socket(
     socket: WebSocket,
     server: Arc<AnalyticsServer>,
     session_manager: Arc<SessionManager>,
+    governor: Arc<ToolGovernor>,
 ) {
     let (mut sender, mut receiver) = socket.split();
 
@@ -127,7 +137,7 @@ async fn handle_socket(
     });
 
     // Connection state
-    let mut ws_state = WsState::new(server, session_manager);
+    let mut ws_state = WsState::new(server, session_manager, governor);
 
     // Process incoming messages
     while let Some(msg) = receiver.next().await {
@@ -228,12 +238,18 @@ async fn handle_client_message(
                 return Ok(());
             }
 
-            let session = state.session.as_ref().unwrap();
+            let session = state.session.clone().unwrap();
 
-            // Execute the tool
+            // Execute the tool under the governor, like an HTTP tool call
             match state
-                .server
-                .call_tool_with_session(&name, args.clone(), session)
+                .governor
+                .call(
+                    state.server.clone(),
+                    session,
+                    &name,
+                    args,
+                    CallOrigin::WebSocket,
+                )
                 .await
             {
                 Ok(result) => {
@@ -250,9 +266,12 @@ async fn handle_client_message(
                         .map_err(|_| "Channel closed".to_string())?;
                 }
                 Err(e) => {
-                    tx.send(ServerMessage::Error { id, message: e })
-                        .await
-                        .map_err(|_| "Channel closed".to_string())?;
+                    tx.send(ServerMessage::Error {
+                        id,
+                        message: e.to_string(),
+                    })
+                    .await
+                    .map_err(|_| "Channel closed".to_string())?;
                 }
             }
         }

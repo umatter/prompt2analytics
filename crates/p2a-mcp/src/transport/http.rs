@@ -25,6 +25,7 @@ use super::routes_sessions::{
 use super::routes_tools::{call_tool, list_tools};
 use crate::audit::AuditLogger;
 use crate::config::{DeploymentMode, ServerConfig};
+use crate::exec::{ExecConfig, ToolGovernor};
 use crate::server::AnalyticsServer;
 use crate::session::SessionManager;
 use crate::transport::{TransportError, TransportResult};
@@ -46,16 +47,29 @@ pub struct AppState {
     pub persistent_manager: Option<Arc<crate::persistent_session::PersistentSessionManager>>,
     /// Audit logger for tool call logging
     pub audit_logger: Arc<AuditLogger>,
+    /// Admission control and off-runtime execution for every tool call
+    pub governor: Arc<ToolGovernor>,
 }
 
-/// Build the shared state and the router for `config`.
+/// Build the shared state and the router for `config`, with the governor
+/// settings resolved from it (`ExecConfig::from_config`).
+pub async fn build_app(config: &ServerConfig) -> Result<(Router, AppState), TransportError> {
+    build_app_with(config, ExecConfig::from_config(config)).await
+}
+
+/// Build the shared state and the router for `config` with explicit governor
+/// settings.
 ///
 /// This is the one place that creates the session manager (with its
-/// 10-minute cleanup task), the analytics server, the audit logger and,
-/// with the `db` feature, the persistent session manager. The HTTP
-/// transport, the embedded desktop server and the integration tests all
-/// start from here.
-pub async fn build_app(config: &ServerConfig) -> Result<(Router, AppState), TransportError> {
+/// 10-minute cleanup task), the analytics server, the audit logger, the tool
+/// governor and, with the `db` feature, the persistent session manager. The
+/// HTTP transport, the embedded desktop server and the integration tests all
+/// start from here. Process-wide policies are installed by [`serve`], not
+/// here, so tests can build several apps.
+pub async fn build_app_with(
+    config: &ServerConfig,
+    exec: ExecConfig,
+) -> Result<(Router, AppState), TransportError> {
     let session_manager = Arc::new(SessionManager::new(config.session.clone()));
 
     // Start background cleanup task (every 10 minutes)
@@ -72,12 +86,15 @@ pub async fn build_app(config: &ServerConfig) -> Result<(Router, AppState), Tran
         }
     });
 
+    let governor = Arc::new(ToolGovernor::new(exec, session_manager.clone()));
+
     let state = AppState {
         server,
         session_manager,
         #[cfg(feature = "db")]
         persistent_manager: init_persistence(config).await,
         audit_logger,
+        governor,
     };
 
     Ok((create_router(state.clone(), config), state))
@@ -129,7 +146,8 @@ pub async fn bind(config: &ServerConfig) -> TransportResult<tokio::net::TcpListe
 /// Serve the app on `listener` until `shutdown` resolves.
 ///
 /// Validates the configuration again, so no caller can skip the guard, then
-/// builds the app and serves it with graceful shutdown.
+/// builds the app, installs the process-wide policies (allocation ceiling,
+/// session directories) and serves it with graceful shutdown.
 pub async fn serve(
     listener: tokio::net::TcpListener,
     config: ServerConfig,
@@ -138,8 +156,10 @@ pub async fn serve(
     config
         .validate()
         .map_err(|e| TransportError::Config(e.to_string()))?;
-    let (app, _state) = build_app(&config).await?;
-    log_startup(&config, &listener);
+    let (app, state) = build_app(&config).await?;
+    let exec = state.governor.config().clone();
+    crate::exec::install_process_policies(&exec);
+    log_startup(&config, &exec, &listener);
 
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown)
@@ -153,7 +173,7 @@ pub async fn start_http_transport(config: &ServerConfig) -> TransportResult<()> 
     serve(listener, config.clone(), std::future::pending()).await
 }
 
-fn log_startup(config: &ServerConfig, listener: &tokio::net::TcpListener) {
+fn log_startup(config: &ServerConfig, exec: &ExecConfig, listener: &tokio::net::TcpListener) {
     let addr = listener.local_addr().unwrap_or(config.http.addr);
     let mode = config.deployment_mode();
     match mode {
@@ -175,9 +195,20 @@ fn log_startup(config: &ServerConfig, listener: &tokio::net::TcpListener) {
             );
         }
     }
+    if (exec.session_data_bytes.is_some() || exec.total_data_bytes.is_some())
+        && exec.session_concurrency > 1
+    {
+        tracing::warn!(
+            "dataset quotas are configured with --session-concurrency > 1; a refused call is \
+             undone by restoring the session's datasets, which assumes one call per session"
+        );
+    }
     tracing::info!(
-        "Starting HTTP transport on {addr} (mode {mode:?}, resource profile {:?})",
-        config.resource_profile()
+        "Starting HTTP transport on {addr} (mode {mode:?}, resource profile {:?}, \
+         tool concurrency {}, deadline {:?})",
+        config.resource_profile(),
+        exec.concurrency,
+        exec.deadline
     );
 }
 
@@ -275,6 +306,12 @@ pub struct ApiResponse<T> {
     pub data: Option<T>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Machine-readable error code (for example `server_busy`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<&'static str>,
+    /// Structured error details (for example `{"parameter": "bootstrap"}`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub details: Option<serde_json::Value>,
 }
 
 impl<T: Serialize> ApiResponse<T> {
@@ -283,6 +320,8 @@ impl<T: Serialize> ApiResponse<T> {
             success: true,
             data: Some(data),
             error: None,
+            code: None,
+            details: None,
         }
     }
 
@@ -291,6 +330,23 @@ impl<T: Serialize> ApiResponse<T> {
             success: false,
             data: None,
             error: Some(message.into()),
+            code: None,
+            details: None,
+        }
+    }
+
+    /// An error with a machine-readable code and optional details.
+    pub fn error_with_code(
+        message: impl Into<String>,
+        code: &'static str,
+        details: Option<serde_json::Value>,
+    ) -> Self {
+        Self {
+            success: false,
+            data: None,
+            error: Some(message.into()),
+            code: Some(code),
+            details,
         }
     }
 }

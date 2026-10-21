@@ -1,16 +1,17 @@
 //! Tool routes: discovery (`GET /api/tools`) and execution
-//! (`POST /api/tools/{name}`).
+//! (`POST /api/tools/{name}`, through the tool governor).
 
 use axum::{
     Json,
     extract::{Path, State},
     http::StatusCode,
-    response::IntoResponse,
+    response::{IntoResponse, Response},
 };
 use serde::Deserialize;
 
 use super::http::{ApiResponse, AppState, ContentItem};
 use crate::audit::AuditLogger;
+use crate::exec::CallOrigin;
 use crate::session::SessionError;
 
 /// Request to call a tool.
@@ -29,40 +30,50 @@ pub(crate) async fn list_tools(State(state): State<AppState>) -> impl IntoRespon
     Json(ApiResponse::success(tools))
 }
 
-/// Call a tool.
+/// Call a tool. The call runs under the tool governor; its refusals and
+/// failures answer with their own status, code and `Retry-After`.
 pub(crate) async fn call_tool(
     State(state): State<AppState>,
     Path(name): Path<String>,
     Json(request): Json<CallToolRequest>,
-) -> impl IntoResponse {
+) -> Response {
     // Get the session
     let session = match state.session_manager.get_session(&request.session_id).await {
         Ok(s) => s,
         Err(SessionError::NotFound) => {
             return (
                 StatusCode::NOT_FOUND,
-                Json(ApiResponse::error("Session not found")),
-            );
+                Json(ApiResponse::<()>::error("Session not found")),
+            )
+                .into_response();
         }
         Err(SessionError::Expired) => {
             return (
                 StatusCode::GONE,
-                Json(ApiResponse::error("Session expired")),
-            );
+                Json(ApiResponse::<()>::error("Session expired")),
+            )
+                .into_response();
         }
         Err(e) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ApiResponse::error(e.to_string())),
-            );
+                Json(ApiResponse::<()>::error(e.to_string())),
+            )
+                .into_response();
         }
     };
 
     // Execute the tool with session context and timing
     let start = std::time::Instant::now();
     let tool_result = state
-        .server
-        .call_tool_with_session(&name, request.arguments.clone(), &session)
+        .governor
+        .call(
+            state.server.clone(),
+            session,
+            &name,
+            request.arguments.clone(),
+            CallOrigin::Http,
+        )
         .await;
     let duration_ms = start.elapsed().as_millis() as u64;
 
@@ -119,7 +130,7 @@ pub(crate) async fn call_tool(
                 }
             }
 
-            (StatusCode::OK, Json(ApiResponse::success(result)))
+            (StatusCode::OK, Json(ApiResponse::success(result))).into_response()
         }
         Err(e) => {
             // Audit log for failures
@@ -130,13 +141,13 @@ pub(crate) async fn call_tool(
                     &request.arguments,
                     false,
                     duration_ms,
-                    &e,
+                    &e.to_string(),
                     None,
                 );
                 state.audit_logger.log(entry).await;
             }
 
-            (StatusCode::BAD_REQUEST, Json(ApiResponse::error(e)))
+            e.into_response()
         }
     }
 }

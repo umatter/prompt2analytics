@@ -685,13 +685,19 @@ impl AnalyticsServer {
     /// Call a tool by name with session context (for HTTP transport).
     /// Dispatches to all registered tool handler methods directly, bypassing the
     /// ToolRouter (which requires a Peer that cannot be constructed outside rmcp).
+    ///
+    /// Only `exec::ToolGovernor::call` calls this, so every HTTP-side tool
+    /// call runs under the governor. Unknown names, unparsable arguments and
+    /// handler errors come back as `ToolCallError`; a tool's own error result
+    /// is an `Ok` with `success == false`.
     #[cfg(feature = "http")]
     pub async fn call_tool_with_session(
         &self,
         tool_name: &str,
         arguments: serde_json::Value,
         session: &crate::session::Session,
-    ) -> Result<crate::transport::http::ToolResult, String> {
+    ) -> Result<crate::transport::http::ToolResult, crate::exec::ToolCallError> {
+        use crate::exec::ToolCallError;
         use crate::transport::http::{ContentItem, ToolResult};
 
         // Create a session-scoped server instance that shares the session's datasets
@@ -743,19 +749,22 @@ impl AnalyticsServer {
                     let result = session_server
                         .$method()
                         .await
-                        .map_err(|e| format!("Tool execution failed: {:?}", e))?;
+                        .map_err(|e| ToolCallError::from_handler_error(tool_name, e))?;
                     return Ok(convert_result(result));
                 }
             };
             ($name:literal => $req:ty => $method:ident) => {
                 if tool_name == $name {
                     let request: $req = serde_json::from_value(arguments.clone()).map_err(|e| {
-                        format!("Failed to parse arguments for '{}': {}", tool_name, e)
+                        ToolCallError::InvalidArguments(format!(
+                            "Failed to parse arguments for '{}': {}",
+                            tool_name, e
+                        ))
                     })?;
                     let result = session_server
                         .$method(Parameters(request))
                         .await
-                        .map_err(|e| format!("Tool execution failed: {:?}", e))?;
+                        .map_err(|e| ToolCallError::from_handler_error(tool_name, e))?;
                     return Ok(convert_result(result));
                 }
             };
@@ -1065,7 +1074,7 @@ impl AnalyticsServer {
         dispatch!("tool_info" => crate::tools::handlers::search::ToolInfoRequest => tool_info);
 
         // If no tool matched, return an error
-        Err(format!("Unknown tool: {}", tool_name))
+        Err(ToolCallError::UnknownTool(tool_name.to_string()))
     }
 
     // ========================================================================

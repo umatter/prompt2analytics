@@ -7,6 +7,8 @@ pub mod audit;
 pub mod config;
 #[cfg(feature = "db")]
 pub mod db;
+#[cfg(feature = "http")]
+pub mod exec;
 #[cfg(feature = "llm")]
 pub mod llm;
 pub mod path_jail;

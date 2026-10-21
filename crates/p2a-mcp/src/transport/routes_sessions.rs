@@ -3,8 +3,8 @@
 use axum::{
     Json,
     extract::{Path, Query, State},
-    http::StatusCode,
-    response::IntoResponse,
+    http::{StatusCode, header},
+    response::{IntoResponse, Response},
 };
 use serde::{Deserialize, Serialize};
 
@@ -24,11 +24,15 @@ pub struct CreateSessionResponse {
     pub session_id: String,
 }
 
-/// Create a new session.
+/// Seconds a client should wait before retrying when the session table is full.
+const CAPACITY_RETRY_AFTER_SECS: &str = "60";
+
+/// Create a new session. A full session table answers 503 with code
+/// `capacity` and `Retry-After`.
 pub(crate) async fn create_session(
     State(state): State<AppState>,
     Json(request): Json<CreateSessionRequest>,
-) -> impl IntoResponse {
+) -> Response {
     // First create the in-memory session
     match state
         .session_manager
@@ -60,15 +64,23 @@ pub(crate) async fn create_session(
                 StatusCode::CREATED,
                 Json(ApiResponse::success(CreateSessionResponse { session_id })),
             )
+                .into_response()
         }
         Err(SessionError::MaxSessionsReached) => (
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(ApiResponse::error("Maximum number of sessions reached")),
-        ),
+            [(header::RETRY_AFTER, CAPACITY_RETRY_AFTER_SECS)],
+            Json(ApiResponse::<()>::error_with_code(
+                "Maximum number of sessions reached",
+                "capacity",
+                None,
+            )),
+        )
+            .into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ApiResponse::error(e.to_string())),
-        ),
+            Json(ApiResponse::<()>::error(e.to_string())),
+        )
+            .into_response(),
     }
 }
 
