@@ -17,6 +17,15 @@ impl std::fmt::Display for StreamError {
 
 impl std::error::Error for StreamError {}
 
+/// Headers for the chat-stream request: `Content-Type: application/json`,
+/// plus `Authorization: Bearer <token>` when a backend access token is set.
+/// Header values are never logged.
+fn stream_request_headers(token: Option<&str>) -> Vec<(String, String)> {
+    let mut headers = vec![("Content-Type".to_string(), "application/json".to_string())];
+    headers.extend(crate::platform::authorization_header(token));
+    headers
+}
+
 /// Parse a single SSE line into a StreamEvent
 fn parse_sse_line(line: &str) -> Option<StreamEvent> {
     let line = line.trim();
@@ -125,10 +134,14 @@ pub mod web {
         let request = Request::new_with_str_and_init(&url, &opts)
             .map_err(|e| StreamError(format!("{e:?}")))?;
 
-        request
-            .headers()
-            .set("Content-Type", "application/json")
-            .map_err(|e| StreamError(format!("{e:?}")))?;
+        // The token is read at request time, so call sites need not pass it.
+        let token = crate::platform::backend_access_token();
+        for (name, value) in stream_request_headers(token.as_deref()) {
+            request
+                .headers()
+                .set(&name, &value)
+                .map_err(|e| StreamError(format!("Failed to set header {name}: {e:?}")))?;
+        }
 
         tracing::debug!("[SSE] Executing fetch");
         // Execute fetch
@@ -144,6 +157,12 @@ pub mod web {
             .map_err(|_| StreamError("Response is not a Response object".to_string()))?;
 
         tracing::debug!("[SSE] Response status: {}", response.status());
+        if response.status() == 401 {
+            return Err(StreamError(crate::platform::http_status_message(
+                401,
+                token.is_some(),
+            )));
+        }
         if !response.ok() {
             return Err(StreamError(format!(
                 "HTTP error: {} {}",
@@ -309,16 +328,26 @@ pub mod native {
             serde_json::to_string(&request_body).map_err(|e| StreamError(e.to_string()))?;
         tracing::debug!("[SSE] Request body length: {}", body_json.len());
 
+        // The token is read at request time, so call sites need not pass it.
+        let token = crate::platform::backend_access_token();
         let client = reqwest::Client::new();
-        let response = client
-            .post(&url)
-            .header("Content-Type", "application/json")
+        let mut request = client.post(&url);
+        for (name, value) in stream_request_headers(token.as_deref()) {
+            request = request.header(name, value);
+        }
+        let response = request
             .body(body_json)
             .send()
             .await
             .map_err(|e| StreamError(format!("Fetch error: {}", e)))?;
 
         tracing::debug!("[SSE] Response status: {}", response.status());
+        if response.status().as_u16() == 401 {
+            return Err(StreamError(crate::platform::http_status_message(
+                401,
+                token.is_some(),
+            )));
+        }
         if !response.status().is_success() {
             return Err(StreamError(format!("HTTP error: {}", response.status())));
         }
@@ -445,6 +474,23 @@ pub use native::stream_chat;
     not(feature = "mobile")
 ))]
 pub use stub::stream_chat;
+
+#[cfg(test)]
+mod request_header_tests {
+    use super::stream_request_headers;
+
+    #[test]
+    fn stream_request_carries_bearer_token() {
+        let h = stream_request_headers(Some("s3cret"));
+        assert!(h.contains(&("Authorization".to_string(), "Bearer s3cret".to_string())));
+        assert!(h.contains(&("Content-Type".to_string(), "application/json".to_string())));
+        assert!(
+            !stream_request_headers(None)
+                .iter()
+                .any(|(k, _)| k == "Authorization")
+        );
+    }
+}
 
 #[cfg(test)]
 mod line_buffer_tests {

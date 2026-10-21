@@ -1,9 +1,73 @@
 //! Platform-agnostic storage abstraction
 //!
 //! - Web: Uses localStorage via gloo_storage
-//! - Native: Uses file-based storage in the user's config directory
+//! - Native: Uses file-based storage in the user's config directory. Files are
+//!   written through a temp file and a rename; on Unix the file is mode 0600
+//!   and the directory 0700, because the settings can hold API keys and the
+//!   backend access token.
 
 use serde::{Serialize, de::DeserializeOwned};
+
+/// Write `contents` to `path` so that only the owner can read it.
+///
+/// The data goes to a fresh temp file in the same directory (created with
+/// mode 0600 on Unix), is synced, and is renamed onto `path`. The rename
+/// replaces an existing file atomically, which also tightens a file that an
+/// older version wrote with default permissions. On failure the temp file is
+/// removed. On non-Unix targets only the temp-and-rename part applies; the
+/// per-user config directory carries the ACL there.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn write_private_file(path: &std::path::Path, contents: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "path has no file name")
+        })?
+        .to_string_lossy()
+        .into_owned();
+    let tmp = path.with_file_name(format!("{file_name}.tmp-{}", uuid::Uuid::new_v4()));
+
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+
+    let result = options.open(&tmp).and_then(|mut file| {
+        file.write_all(contents)?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&tmp, path)
+    });
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
+}
+
+/// Create `dir` (and its parents) if needed, and make it owner-only (0700)
+/// on Unix, tightening a directory that already exists.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn ensure_private_dir(dir: &std::path::Path) -> std::io::Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
 
 /// Error type for storage operations
 #[derive(Debug, Clone)]
@@ -100,8 +164,8 @@ mod native {
                 .unwrap_or_else(|| PathBuf::from("."))
                 .join("p2a");
 
-            // Ensure directory exists
-            if let Err(e) = fs::create_dir_all(&storage_dir) {
+            // Ensure the directory exists and is owner-only
+            if let Err(e) = ensure_private_dir(&storage_dir) {
                 tracing::warn!("Failed to create storage directory: {}", e);
             }
 
@@ -134,7 +198,7 @@ mod native {
             let path = self.key_path(key);
             let content = serde_json::to_string_pretty(value)
                 .map_err(|e| StorageError(format!("Failed to serialize: {}", e)))?;
-            fs::write(&path, content)
+            write_private_file(&path, content.as_bytes())
                 .map_err(|e| StorageError(format!("Failed to write {}: {}", path.display(), e)))
         }
 
@@ -237,4 +301,68 @@ impl StorageBackend for StubStorage {
 /// Create a new platform-appropriate storage backend
 pub fn create_storage() -> PlatformStorage {
     PlatformStorage::new()
+}
+
+#[cfg(all(test, unix))]
+mod private_file_tests {
+    use super::{ensure_private_dir, write_private_file};
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::PathBuf;
+
+    /// A fresh temp dir, removed when dropped.
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new() -> Self {
+            let dir = std::env::temp_dir().join(format!("p2a-storage-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn settings_file_is_owner_only_and_replaces_world_readable_file() {
+        let tmp = TempDir::new();
+        let dir = &tmp.0;
+        let path = dir.join("p2a-settings.json");
+        std::fs::write(&path, "old").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        write_private_file(&path, b"{\"a\":1}").unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{\"a\":1}");
+        assert_eq!(
+            std::fs::read_dir(dir).unwrap().count(),
+            1,
+            "temp file left behind"
+        );
+    }
+
+    #[test]
+    fn storage_dir_is_owner_only() {
+        let tmp = TempDir::new();
+        let dir = &tmp.0;
+        let sub = dir.join("p2a");
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        ensure_private_dir(&sub).unwrap();
+        assert_eq!(
+            std::fs::metadata(&sub).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        let fresh = dir.join("fresh/p2a");
+        ensure_private_dir(&fresh).unwrap();
+        assert_eq!(
+            std::fs::metadata(&fresh).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+    }
 }

@@ -3,8 +3,12 @@
 //! Uses platform abstraction to work on web (fetch API) and native (reqwest)
 
 use super::types::*;
-use crate::platform::{HttpClient, create_http_client};
+use crate::platform::{
+    HttpClient, HttpResponse, authorization_header, backend_access_token, create_http_client,
+    http_status_message, normalize_access_token,
+};
 use serde::Deserialize;
+use std::collections::HashMap;
 
 /// Default API base URL.
 ///
@@ -18,9 +22,14 @@ const DEFAULT_BASE_URL: &str = match option_env!("P2A_BACKEND_URL") {
 };
 
 /// API client for p2a-mcp backend
+///
+/// Every REST call goes through [`ApiClient::send`], which attaches the
+/// backend access token (when one is configured) as
+/// `Authorization: Bearer <token>`.
 #[derive(Clone)]
 pub struct ApiClient {
     base_url: String,
+    access_token: Option<String>,
 }
 
 impl Default for ApiClient {
@@ -30,18 +39,66 @@ impl Default for ApiClient {
 }
 
 impl ApiClient {
-    /// Create a new API client with default base URL
+    /// Create a new API client with default base URL and the published
+    /// backend access token
     pub fn new() -> Self {
         Self {
             base_url: DEFAULT_BASE_URL.to_string(),
+            access_token: backend_access_token(),
         }
     }
 
-    /// Create a new API client with custom base URL
+    /// Create a new API client with custom base URL and the published
+    /// backend access token
     pub fn with_base_url(base_url: &str) -> Self {
         Self {
             base_url: base_url.trim_end_matches('/').to_string(),
+            access_token: backend_access_token(),
         }
+    }
+
+    /// Replace the access token (normalized; blank or invalid means none)
+    pub fn with_access_token(mut self, token: Option<String>) -> Self {
+        self.access_token = token.as_deref().and_then(normalize_access_token);
+        self
+    }
+
+    /// Headers every backend request carries: `Authorization` when a token
+    /// is configured, nothing otherwise.
+    pub(crate) fn auth_headers(&self) -> HashMap<String, String> {
+        authorization_header(self.access_token.as_deref())
+            .into_iter()
+            .collect()
+    }
+
+    /// The single path for every REST call: adds [`Self::auth_headers`] and
+    /// `extra_headers`, and maps a non-2xx status to an error message (a 401
+    /// is explained as a missing or rejected access token).
+    async fn send(
+        &self,
+        method: &str,
+        endpoint: &str,
+        body: Option<String>,
+        extra_headers: &[(&str, &str)],
+    ) -> Result<HttpResponse, String> {
+        let url = format!("{}{}", self.base_url, endpoint);
+        let mut headers = self.auth_headers();
+        for (name, value) in extra_headers {
+            headers.insert((*name).to_string(), (*value).to_string());
+        }
+        let response = create_http_client()
+            .request(&url, method, body.as_deref(), &headers)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        if !response.is_ok() {
+            return Err(http_status_message(
+                response.status,
+                self.access_token.is_some(),
+            ));
+        }
+
+        Ok(response)
     }
 
     /// Perform a GET request
@@ -49,14 +106,7 @@ impl ApiClient {
     where
         T: for<'de> serde::Deserialize<'de>,
     {
-        let url = format!("{}{}", self.base_url, endpoint);
-        let client = create_http_client();
-        let response = client.get(&url).await.map_err(|e| e.to_string())?;
-
-        if !response.is_ok() {
-            return Err(format!("HTTP error: {}", response.status));
-        }
-
+        let response = self.send("GET", endpoint, None, &[]).await?;
         serde_json::from_str(&response.body).map_err(|e| format!("JSON parse error: {}", e))
     }
 
@@ -66,18 +116,8 @@ impl ApiClient {
         T: for<'de> serde::Deserialize<'de>,
         B: serde::Serialize,
     {
-        let url = format!("{}{}", self.base_url, endpoint);
         let body_json = serde_json::to_string(body).map_err(|e| e.to_string())?;
-        let client = create_http_client();
-        let response = client
-            .post(&url, &body_json)
-            .await
-            .map_err(|e| e.to_string())?;
-
-        if !response.is_ok() {
-            return Err(format!("HTTP error: {}", response.status));
-        }
-
+        let response = self.send("POST", endpoint, Some(body_json), &[]).await?;
         serde_json::from_str(&response.body).map_err(|e| format!("JSON parse error: {}", e))
     }
 
@@ -87,31 +127,14 @@ impl ApiClient {
         T: for<'de> serde::Deserialize<'de>,
         B: serde::Serialize,
     {
-        let url = format!("{}{}", self.base_url, endpoint);
         let body_json = serde_json::to_string(body).map_err(|e| e.to_string())?;
-        let client = create_http_client();
-        let response = client
-            .put(&url, &body_json)
-            .await
-            .map_err(|e| e.to_string())?;
-
-        if !response.is_ok() {
-            return Err(format!("HTTP error: {}", response.status));
-        }
-
+        let response = self.send("PUT", endpoint, Some(body_json), &[]).await?;
         serde_json::from_str(&response.body).map_err(|e| format!("JSON parse error: {}", e))
     }
 
     /// Perform a DELETE request
     async fn delete(&self, endpoint: &str) -> Result<(), String> {
-        let url = format!("{}{}", self.base_url, endpoint);
-        let client = create_http_client();
-        let response = client.delete(&url).await.map_err(|e| e.to_string())?;
-
-        if !response.is_ok() {
-            return Err(format!("HTTP error: {}", response.status));
-        }
-
+        self.send("DELETE", endpoint, None, &[]).await?;
         Ok(())
     }
 
@@ -204,14 +227,7 @@ impl ApiClient {
 
     /// Check server health
     pub async fn health(&self) -> Result<HealthResponse, String> {
-        let url = format!("{}/health", self.base_url);
-        let client = create_http_client();
-        let response = client.get(&url).await.map_err(|e| e.to_string())?;
-
-        if !response.is_ok() {
-            return Err(format!("HTTP error: {}", response.status));
-        }
-
+        let response = self.send("GET", "/health", None, &[]).await?;
         serde_json::from_str(&response.body).map_err(|e| format!("JSON parse error: {}", e))
     }
 
@@ -535,4 +551,188 @@ impl ApiClient {
 /// Global API client instance
 pub fn api() -> ApiClient {
     ApiClient::new()
+}
+
+/// The origin (`scheme://host[:port]`) of a backend base URL, for use as a
+/// CSP source expression.
+///
+/// Returns `None` unless the URL parses with an `http` or `https` scheme and
+/// its serialized origin consists only of `[A-Za-z0-9.:/\-\[\]]`, so a
+/// malformed `P2A_BACKEND_URL` can never inject extra CSP tokens or
+/// directives.
+pub fn backend_origin(base_url: &str) -> Option<String> {
+    let url = reqwest::Url::parse(base_url.trim()).ok()?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return None;
+    }
+    let origin = url.origin().ascii_serialization();
+    let safe = !origin.is_empty()
+        && origin
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | ':' | '/' | '-' | '[' | ']'));
+    safe.then_some(origin)
+}
+
+/// The runtime `connect-src` directive: `'self'` plus the backend origin
+/// when it is a valid http(s) origin.
+pub fn connect_src_policy(base_url: &str) -> String {
+    match backend_origin(base_url) {
+        Some(origin) => format!("connect-src 'self' {origin}"),
+        None => "connect-src 'self'".to_string(),
+    }
+}
+
+/// Narrow `connect-src` to the compiled-in backend.
+///
+/// `index.html` ships a static CSP whose `connect-src` must also allow the
+/// backend, which is only known at compile time (`P2A_BACKEND_URL`). This
+/// appends a second CSP `<meta>` with `connect-src 'self' <backend origin>`;
+/// browsers enforce every policy, so the effective `connect-src` is the
+/// intersection. Call it before `dioxus::launch`, so nothing untrusted has
+/// rendered yet. On non-wasm targets it is a no-op.
+pub fn install_backend_csp() {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let Some(document) = web_sys::window().and_then(|w| w.document()) else {
+            tracing::warn!("CSP: no document; runtime connect-src narrowing skipped");
+            return;
+        };
+        match document.query_selector("meta[data-p2a-csp]") {
+            Ok(Some(_)) => return,
+            Ok(None) => {}
+            Err(e) => {
+                tracing::warn!("CSP: meta lookup failed: {e:?}");
+                return;
+            }
+        }
+        let head = match document.query_selector("head") {
+            Ok(Some(head)) => head,
+            Ok(None) => {
+                tracing::warn!("CSP: no <head>; runtime connect-src narrowing skipped");
+                return;
+            }
+            Err(e) => {
+                tracing::warn!("CSP: <head> lookup failed: {e:?}");
+                return;
+            }
+        };
+        let meta = match document.create_element("meta") {
+            Ok(meta) => meta,
+            Err(e) => {
+                tracing::warn!("CSP: could not create <meta>: {e:?}");
+                return;
+            }
+        };
+        let policy = connect_src_policy(DEFAULT_BASE_URL);
+        for (name, value) in [
+            ("http-equiv", "Content-Security-Policy"),
+            ("content", policy.as_str()),
+            ("data-p2a-csp", "backend"),
+        ] {
+            if let Err(e) = meta.set_attribute(name, value) {
+                tracing::warn!("CSP: could not set {name}: {e:?}");
+                return;
+            }
+        }
+        if let Err(e) = head.append_child(&meta) {
+            tracing::warn!("CSP: could not append <meta>: {e:?}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn auth_header_is_attached_only_with_a_token() {
+        let c =
+            ApiClient::with_base_url("http://127.0.0.1:9").with_access_token(Some("s3cret".into()));
+        assert_eq!(
+            c.auth_headers().get("Authorization").map(String::as_str),
+            Some("Bearer s3cret")
+        );
+        assert!(c.with_access_token(None).auth_headers().is_empty());
+        assert!(
+            ApiClient::with_base_url("http://x")
+                .with_access_token(Some("  ".into()))
+                .auth_headers()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn backend_origin_of_base_urls() {
+        assert_eq!(
+            backend_origin("https://p2a-api.qamelab.org").as_deref(),
+            Some("https://p2a-api.qamelab.org")
+        );
+        assert_eq!(
+            backend_origin("https://p2a-api.qamelab.org/").as_deref(),
+            Some("https://p2a-api.qamelab.org")
+        );
+        assert_eq!(
+            backend_origin("http://localhost:8080").as_deref(),
+            Some("http://localhost:8080")
+        );
+        assert_eq!(
+            backend_origin("https://example.org:443/api").as_deref(),
+            Some("https://example.org")
+        );
+        assert_eq!(backend_origin("not a url"), None);
+        assert_eq!(backend_origin("javascript:alert(1)"), None);
+    }
+
+    #[test]
+    fn connect_src_policy_names_only_self_and_backend() {
+        assert_eq!(
+            connect_src_policy("https://p2a-api.qamelab.org"),
+            "connect-src 'self' https://p2a-api.qamelab.org"
+        );
+        assert_eq!(
+            connect_src_policy("http://localhost:8080/"),
+            "connect-src 'self' http://localhost:8080"
+        );
+        assert_eq!(connect_src_policy("not a url"), "connect-src 'self'");
+        for hostile in [
+            "https://a.example;x",
+            "https://a.example; script-src *",
+            "https://a example",
+        ] {
+            let p = connect_src_policy(hostile);
+            assert!(
+                p.starts_with("connect-src 'self'") && !p.contains(';'),
+                "{p}"
+            );
+        }
+    }
+
+    #[test]
+    fn index_html_ships_a_restrictive_csp() {
+        let html = include_str!("../../index.html");
+        let at = html
+            .find("http-equiv=\"Content-Security-Policy\"")
+            .expect("CSP meta present");
+        assert!(
+            at < html.find("<link").unwrap(),
+            "CSP must precede the stylesheet link"
+        );
+        let content = &html[at..];
+        let start = content.find("content=\"").unwrap() + "content=\"".len();
+        let policy = &content[start..start + content[start..].find('"').unwrap()];
+        let d = |name: &str| {
+            policy
+                .split(';')
+                .map(str::trim)
+                .find(|x| x.split_whitespace().next() == Some(name))
+                .unwrap_or_else(|| panic!("missing {name}"))
+                .to_string()
+        };
+        assert_eq!(d("default-src"), "default-src 'self'");
+        assert_eq!(d("script-src"), "script-src 'self' 'wasm-unsafe-eval'");
+        assert_eq!(d("img-src"), "img-src 'self' data:");
+        assert_eq!(d("object-src"), "object-src 'none'");
+        assert_eq!(d("base-uri"), "base-uri 'none'");
+        assert!(d("connect-src").starts_with("connect-src 'self'"));
+    }
 }

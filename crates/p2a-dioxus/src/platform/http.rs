@@ -4,6 +4,60 @@
 //! - Native: Uses reqwest
 
 use std::collections::HashMap;
+use std::sync::{PoisonError, RwLock};
+
+// ============================================================================
+// Backend access token (bearer token for `P2A_ACCESS_TOKEN` servers)
+// ============================================================================
+
+/// Process-wide backend access token, published by `Settings::load`/`save`.
+///
+/// Only `ApiClient` and the chat stream read it, and they only send it to the
+/// backend; the generic `HttpClient` implementations never add it, so the
+/// token cannot reach any other URL. (On wasm32 std's RwLock is the
+/// single-threaded implementation, which is fine here.)
+static BACKEND_ACCESS_TOKEN: RwLock<Option<String>> = RwLock::new(None);
+
+/// Trim a token and accept it only if it is non-empty and every character is
+/// visible ASCII (`'!'..='~'`), so it can be sent in an HTTP header and
+/// cannot inject a second header.
+pub fn normalize_access_token(raw: &str) -> Option<String> {
+    let token = raw.trim();
+    (!token.is_empty() && token.chars().all(|c| ('!'..='~').contains(&c)))
+        .then(|| token.to_string())
+}
+
+/// Publish the backend access token; an empty or invalid token clears it.
+pub fn set_backend_access_token(token: Option<&str>) {
+    let normalized = token.and_then(normalize_access_token);
+    *BACKEND_ACCESS_TOKEN
+        .write()
+        .unwrap_or_else(PoisonError::into_inner) = normalized;
+}
+
+/// The published backend access token, if any.
+pub fn backend_access_token() -> Option<String> {
+    BACKEND_ACCESS_TOKEN
+        .read()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone()
+}
+
+/// The `Authorization: Bearer <token>` header pair for a token.
+pub fn authorization_header(token: Option<&str>) -> Option<(String, String)> {
+    token.map(|t| ("Authorization".to_string(), format!("Bearer {t}")))
+}
+
+/// User-facing message for a non-2xx backend response. A 401 is explained
+/// as a missing or rejected access token; other statuses keep the plain
+/// `HTTP error: <status>` form.
+pub fn http_status_message(status: u16, token_sent: bool) -> String {
+    match (status, token_sent) {
+        (401, false) => "The backend requires an access token (HTTP 401). Enter it in Settings under Backend access token.".to_string(),
+        (401, true) => "The backend rejected the access token (HTTP 401). Check Settings under Backend access token.".to_string(),
+        _ => format!("HTTP error: {status}"),
+    }
+}
 
 /// HTTP response wrapper
 #[derive(Debug, Clone)]
@@ -326,4 +380,47 @@ pub type PlatformHttpClient = native::NativeHttpClient;
 /// Create a new platform-appropriate HTTP client
 pub fn create_http_client() -> PlatformHttpClient {
     PlatformHttpClient::new()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_access_token_rules() {
+        assert_eq!(
+            normalize_access_token("  abc.DEF-123_~+/=  ").as_deref(),
+            Some("abc.DEF-123_~+/=")
+        );
+        for bad in ["", "   ", "abc\r\nX-Other: 1", "tök", "a b"] {
+            assert_eq!(normalize_access_token(bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn bearer_header_pair() {
+        assert_eq!(
+            authorization_header(Some("s3cret")),
+            Some(("Authorization".into(), "Bearer s3cret".into()))
+        );
+        assert_eq!(authorization_header(None), None);
+    }
+
+    #[test]
+    fn status_401_explains_the_token() {
+        assert!(http_status_message(401, false).contains("requires an access token"));
+        assert!(http_status_message(401, true).contains("rejected the access token"));
+        assert_eq!(http_status_message(503, false), "HTTP error: 503");
+    }
+
+    #[test]
+    fn backend_token_store_round_trip() {
+        // the only test that touches the global
+        set_backend_access_token(Some("  t0k  "));
+        assert_eq!(backend_access_token().as_deref(), Some("t0k"));
+        set_backend_access_token(Some("bad\ntoken"));
+        assert_eq!(backend_access_token(), None);
+        set_backend_access_token(None);
+        assert_eq!(backend_access_token(), None);
+    }
 }
