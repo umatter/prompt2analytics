@@ -2,10 +2,24 @@ name: Security audit
 
 on:
   schedule:
-    # Weekly, Monday 06:00 UTC. Kept off the PR path to conserve free-tier
-    # minutes; advisories change slowly, so a weekly cadence is sufficient.
+    # Weekly, Monday 06:00 UTC: catches advisories published against a lockfile
+    # nobody touched.
     - cron: "0 6 * * 1"
   workflow_dispatch: {}
+  # Also on any change to the dependency set, so a Dependabot PR or a hand bump
+  # is audited before it merges instead of failing the next Monday run.
+  # Path-filtered, so ordinary PRs do not pay for the cargo-audit install.
+  pull_request:
+    paths:
+      - "Cargo.lock"
+      - "**/Cargo.toml"
+      - ".github/workflows/audit.yml"
+  push:
+    branches: [main]
+    paths:
+      - "Cargo.lock"
+      - "**/Cargo.toml"
+      - ".github/workflows/audit.yml"
 
 permissions:
   contents: read
@@ -26,36 +40,43 @@ jobs:
         run: cargo install cargo-audit --locked
 
       # Audits Cargo.lock against the RustSec advisory database. This DOES gate:
-      # cargo audit exits non-zero on vulnerabilities. (It exits 0 on unmaintained
-      # and yanked crates, which it reports as allowed warnings — the ~30 of those
-      # here are the GTK/desktop stack and are not what turns this job red.)
+      # cargo audit exits non-zero on vulnerabilities. (It exits 0 on unmaintained,
+      # unsound and yanked crates, which it reports as warnings.)
       #
       # Exemptions live here, as flags, rather than in .cargo/audit.toml: .cargo/
       # is gitignored, so a config file there never reaches CI and the job would
-      # stay red while looking configured. Each entry needs a reason, and any
-      # entry that stops being true should be deleted rather than left to rot —
-      # a permanently-red audit is one nobody reads, which is how the 19
-      # advisories cleared in this commit went unnoticed for two weeks.
+      # stay red while looking configured. Each entry needs a reason and a
+      # condition for re-checking it; delete an entry as soon as it stops being
+      # true. A permanently red audit is one nobody reads: this job failed every
+      # week from 2026-09-21 to 2026-10-19 before anyone acted on it.
       #
-      #   RUSTSEC-2026-0189  rmcp — DNS rebinding in the Streamable HTTP server
-      #     transport. Not applicable: rmcp resolves to
-      #     base64,default,macros,server,transport-async-rw,transport-io — the
-      #     streamable-http transport is not compiled, and p2a-mcp's HTTP surface
-      #     is its own axum server (no `streamable` reference in crates/p2a-mcp).
-      #     Re-check if rmcp features change. Tracked separately: our axum server
-      #     does no Host-header validation either, which is the same rebinding
-      #     class in first-party code.
+      # Cargo.lock lists more than is compiled: an optional dependency named in a
+      # weak feature (`dep?/feature`) is locked even when nothing enables it.
+      # "Lockfile-only" below means `cargo tree --workspace --all-features
+      # --target all -e normal,build -i <crate>@<version>` prints nothing.
       #
-      #   RUSTSEC-2026-0235  rkyv — not in the dependency graph at all.
-      #     `cargo tree -i rkyv --workspace --all-features -e all` prints nothing;
-      #     it is a Cargo.lock entry only, held by rust_decimal.
+      #   RUSTSEC-2026-0189  rmcp 0.8.5: DNS rebinding in the Streamable HTTP
+      #     server transport, fixed in rmcp 1.4.0 (a breaking upgrade). Not
+      #     compiled here: rmcp resolves to base64, default, macros, server,
+      #     transport-async-rw and transport-io, so the streamable-http transport
+      #     is absent. p2a-mcp's HTTP surface is its own axum server;
+      #     DNS-rebinding protection for it belongs there, not in rmcp. Re-check
+      #     if rmcp's features change; delete when rmcp >= 1.4.
       #
-      #   RUSTSEC-2026-0194  quick-xml — quadratic run time on duplicate attrs
-      #   RUSTSEC-2026-0195  quick-xml — unbounded namespace allocation (DoS)
-      #     Upstream-blocked: object_store 0.12.4 (via polars 0.52) requires
-      #     quick-xml ^0.38, and the fix is in 0.41. Bumping our own calamine 0.32
-      #     -> 0.36 does NOT help — 0.36 wants ^0.41, so both majors would simply
-      #     coexist and 0.38 would stay in the tree. Revisit when polars moves.
+      #   RUSTSEC-2026-0235  rkyv 0.7.46: lockfile-only. rust_decimal names it in
+      #     the weak feature `rkyv?/std`, but nothing enables rust_decimal's
+      #     `rkyv` feature. Re-check if rust_decimal's features change.
+      #
+      #   RUSTSEC-2026-0194, RUSTSEC-2026-0195  quick-xml 0.38.4: compiled into
+      #     p2a-core and everything above it through object_store's `cloud`
+      #     feature, which polars-io turns on (polars-stream -> file_cache ->
+      #     cloud -> http). object_store uses it only to parse remote object-store
+      #     responses (S3, Azure, WebDAV listings). p2a configures no remote
+      #     store, and p2a-mcp hands polars only local paths from path_jail.
+      #     Held by object_store 0.12 under polars 0.52, which is pinned
+      #     (calamine no longer holds it; 0.37 uses quick-xml 0.42).
+      #     object_store first requires ^0.41 in 0.14.1, and polars 0.53 still uses
+      #     object_store 0.13. Revisit when polars moves to object_store >= 0.14.1.
       - name: Run cargo audit
         run: |
           cargo audit \
