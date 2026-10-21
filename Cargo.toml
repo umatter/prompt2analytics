@@ -1,5 +1,6 @@
 [workspace]
-resolver = "2"
+# 3 = 2 + MSRV-aware updates: cargo update prefers versions whose rust-version fits 1.88.
+resolver = "3"
 members = [
     "crates/p2a-core",
     "crates/p2a-mcp",
@@ -53,11 +54,13 @@ rand = "0.8"
 rand_distr = "0.4"
 
 # File format support
-calamine = "0.32"  # Excel file reading (xlsx, xls, xlsb, ods)
+calamine = "0.37"  # Excel file reading (xlsx, xls, xlsb, ods); 0.37 is the first release on zip >= 9
 
 # Database connectivity
 rusqlite = { version = "0.33", features = ["bundled"] }
-duckdb = { version = "1.2", features = ["bundled"] }
+# parquet: compile the extension in, so Parquet queries never download it at
+# run time (the bundled build otherwise autoinstalls extensions on demand).
+duckdb = { version = "1.2", features = ["bundled", "parquet"] }
 
 # Visualization
 plotters = "0.3"
