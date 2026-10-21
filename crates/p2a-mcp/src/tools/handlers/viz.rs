@@ -10,6 +10,7 @@ use rmcp::{
 };
 
 use crate::server::AnalyticsServer;
+use crate::tools::limits::{self, LimitViolation};
 use crate::tools::requests::viz::*;
 
 use p2a_core::{
@@ -36,8 +37,11 @@ impl AnalyticsServer {
     ) -> Result<CallToolResult, McpError> {
         use p2a_core::polars::prelude::*;
 
-        let datasets = self.datasets.read().await;
-        let dataset = match datasets.get(&request.dataset) {
+        // An owned copy (polars columns are reference-counted): the read lock is
+        // released at the end of the statement, not held while the chart is
+        // computed and rendered. Every handler below does the same.
+        let dataset = self.datasets.read().await.get(&request.dataset).cloned();
+        let dataset = match dataset {
             Some(ds) => ds,
             None => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -92,7 +96,7 @@ impl AnalyticsServer {
                 let description = format!(
                     "Histogram of '{}' generated successfully.\nBins: {}\nData points: {}",
                     request.column,
-                    request.bins.unwrap_or(10),
+                    result.bins,
                     values.len()
                 );
                 Ok(CallToolResult::success(vec![
@@ -117,8 +121,8 @@ impl AnalyticsServer {
     ) -> Result<CallToolResult, McpError> {
         use p2a_core::polars::prelude::*;
 
-        let datasets = self.datasets.read().await;
-        let dataset = match datasets.get(&request.dataset) {
+        let dataset = self.datasets.read().await.get(&request.dataset).cloned();
+        let dataset = match dataset {
             Some(ds) => ds,
             None => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -224,8 +228,8 @@ impl AnalyticsServer {
     ) -> Result<CallToolResult, McpError> {
         use p2a_core::polars::prelude::*;
 
-        let datasets = self.datasets.read().await;
-        let dataset = match datasets.get(&request.dataset) {
+        let dataset = self.datasets.read().await.get(&request.dataset).cloned();
+        let dataset = match dataset {
             Some(ds) => ds,
             None => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -335,8 +339,8 @@ impl AnalyticsServer {
     ) -> Result<CallToolResult, McpError> {
         use p2a_core::polars::prelude::*;
 
-        let datasets = self.datasets.read().await;
-        let dataset = match datasets.get(&request.dataset) {
+        let dataset = self.datasets.read().await.get(&request.dataset).cloned();
+        let dataset = match dataset {
             Some(ds) => ds,
             None => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -421,8 +425,8 @@ impl AnalyticsServer {
         &self,
         Parameters(request): Parameters<HeatmapRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let datasets = self.datasets.read().await;
-        let dataset = match datasets.get(&request.dataset) {
+        let dataset = self.datasets.read().await.get(&request.dataset).cloned();
+        let dataset = match dataset {
             Some(ds) => ds,
             None => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -433,7 +437,7 @@ impl AnalyticsServer {
         };
 
         // Compute correlation matrix
-        let corr_result = match p2a_core::stats::correlation_matrix(dataset) {
+        let corr_result = match p2a_core::stats::correlation_matrix(&dataset) {
             Ok(r) => r,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -517,8 +521,8 @@ impl AnalyticsServer {
     ) -> Result<CallToolResult, McpError> {
         use p2a_core::visualization::{InteractiveConfig, scatter_interactive};
 
-        let datasets = self.datasets.read().await;
-        let dataset = match datasets.get(&request.dataset) {
+        let dataset = self.datasets.read().await.get(&request.dataset).cloned();
+        let dataset = match dataset {
             Some(ds) => ds,
             None => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -572,8 +576,8 @@ impl AnalyticsServer {
     ) -> Result<CallToolResult, McpError> {
         use p2a_core::visualization::{InteractiveConfig, histogram_interactive};
 
-        let datasets = self.datasets.read().await;
-        let dataset = match datasets.get(&request.dataset) {
+        let dataset = self.datasets.read().await.get(&request.dataset).cloned();
+        let dataset = match dataset {
             Some(ds) => ds,
             None => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -625,8 +629,8 @@ impl AnalyticsServer {
     ) -> Result<CallToolResult, McpError> {
         use p2a_core::visualization::{InteractiveConfig, line_interactive};
 
-        let datasets = self.datasets.read().await;
-        let dataset = match datasets.get(&request.dataset) {
+        let dataset = self.datasets.read().await.get(&request.dataset).cloned();
+        let dataset = match dataset {
             Some(ds) => ds,
             None => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -678,8 +682,8 @@ impl AnalyticsServer {
     ) -> Result<CallToolResult, McpError> {
         use p2a_core::polars::prelude::*;
 
-        let datasets = self.datasets.read().await;
-        let dataset = match datasets.get(&request.dataset) {
+        let dataset = self.datasets.read().await.get(&request.dataset).cloned();
+        let dataset = match dataset {
             Some(ds) => ds,
             None => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -755,8 +759,8 @@ impl AnalyticsServer {
     ) -> Result<CallToolResult, McpError> {
         use p2a_core::polars::prelude::*;
 
-        let datasets = self.datasets.read().await;
-        let dataset = match datasets.get(&request.dataset) {
+        let dataset = self.datasets.read().await.get(&request.dataset).cloned();
+        let dataset = match dataset {
             Some(ds) => ds,
             None => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -844,8 +848,8 @@ impl AnalyticsServer {
     ) -> Result<CallToolResult, McpError> {
         use p2a_core::polars::prelude::*;
 
-        let datasets = self.datasets.read().await;
-        let dataset = match datasets.get(&request.dataset) {
+        let dataset = self.datasets.read().await.get(&request.dataset).cloned();
+        let dataset = match dataset {
             Some(ds) => ds,
             None => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -947,8 +951,8 @@ impl AnalyticsServer {
     ) -> Result<CallToolResult, McpError> {
         use p2a_core::polars::prelude::*;
 
-        let datasets = self.datasets.read().await;
-        let dataset = match datasets.get(&request.dataset) {
+        let dataset = self.datasets.read().await.get(&request.dataset).cloned();
+        let dataset = match dataset {
             Some(ds) => ds,
             None => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -1060,9 +1064,21 @@ impl AnalyticsServer {
             )]));
         }
 
+        let width = request.width.unwrap_or(800);
+        let height = request.height.unwrap_or(600);
+        let limits = limits::current();
+        if let Err(v) = limits.check_budget(
+            "viz_dendrogram",
+            "image_pixels",
+            u64::from(width) * u64::from(height),
+            limits.image_pixels,
+        ) {
+            return Ok(refused(v));
+        }
+
         let config = ChartConfig {
-            width: request.width.unwrap_or(800),
-            height: request.height.unwrap_or(600),
+            width,
+            height,
             title: request.title,
             x_label: None,
             y_label: Some("Distance".to_string()),
@@ -1085,5 +1101,131 @@ impl AnalyticsServer {
                 e
             ))])),
         }
+    }
+}
+
+/// A request refused by a resource limit: logged, and returned as an in-band
+/// tool error whose text names the parameter, the requested size and the limit.
+fn refused(v: LimitViolation) -> CallToolResult {
+    tracing::info!(
+        tool = %v.tool,
+        knob = v.override_key,
+        requested = %v.requested,
+        limit = %v.limit,
+        "tool request refused by a resource limit"
+    );
+    CallToolResult::error(vec![Content::text(v.message)])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tools::limits::{self, Limits};
+    use p2a_core::Dataset;
+    use p2a_core::polars::prelude::*;
+    use rmcp::model::RawContent;
+
+    fn server_with(datasets: Vec<(&str, DataFrame)>) -> AnalyticsServer {
+        let server = AnalyticsServer::new();
+        for (name, df) in datasets {
+            server
+                .datasets
+                .blocking_write()
+                .insert(name.to_string(), Dataset::new(df));
+        }
+        server
+    }
+
+    fn run(
+        limits: Limits,
+        fut: impl std::future::Future<Output = Result<CallToolResult, McpError>>,
+    ) -> CallToolResult {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        limits::with_limits(limits, || rt.block_on(fut)).expect("refusals are in-band tool errors")
+    }
+
+    fn text(r: &CallToolResult) -> String {
+        match &r.content[0].raw {
+            RawContent::Text(t) => t.text.clone(),
+            _ => String::new(),
+        }
+    }
+
+    fn hosted_with(o: &str) -> Limits {
+        Limits::hosted().with_overrides(&[o.to_string()]).unwrap()
+    }
+
+    #[test]
+    fn dendrogram_pixels_are_budgeted() {
+        let server = AnalyticsServer::new();
+        let req = |w: u32, h: u32| DendrogramRequest {
+            linkage_matrix: vec![vec![0.0, 1.0, 1.0, 2.0], vec![2.0, 3.0, 1.5, 3.0]],
+            labels: None,
+            width: Some(w),
+            height: Some(h),
+            title: None,
+        };
+        let r = run(
+            hosted_with("image_pixels=100000"),
+            server.viz_dendrogram(Parameters(req(400, 300))),
+        );
+        assert_eq!(r.is_error, Some(true));
+        assert!(
+            text(&r).contains("needs 120000 (image_pixels)"),
+            "{}",
+            text(&r)
+        );
+        let ok = run(
+            hosted_with("image_pixels=100000"),
+            server.viz_dendrogram(Parameters(req(300, 300))),
+        );
+        assert_ne!(ok.is_error, Some(true), "{}", text(&ok));
+    }
+
+    #[test]
+    fn histogram_reports_the_bins_it_used() {
+        let v: Vec<f64> = (0..100)
+            .map(|i| (i as f64 * 0.41).sin() * 3.0 + i as f64 * 0.05)
+            .collect();
+        let server = server_with(vec![("d", df!("v" => v).unwrap())]);
+        let req = |bins| HistogramRequest {
+            dataset: "d".into(),
+            column: "v".into(),
+            bins,
+            title: None,
+        };
+        // Sturges' rule for n = 100 gives 8 bins.
+        let t = text(&run(
+            Limits::off(),
+            server.viz_histogram(Parameters(req(None))),
+        ));
+        assert!(t.contains("Bins: 8"), "{t}");
+        let t = text(&run(
+            Limits::off(),
+            server.viz_histogram(Parameters(req(Some(4)))),
+        ));
+        assert!(t.contains("Bins: 4"), "{t}");
+    }
+
+    #[test]
+    fn charts_of_overflowing_data_are_tool_errors() {
+        let server = server_with(vec![(
+            "h",
+            df!("v" => [-1e308, 0.0, 1e308], "w" => [1.0, 2.0, 3.0]).unwrap(),
+        )]);
+        let r = run(
+            Limits::off(),
+            server.viz_histogram(Parameters(HistogramRequest {
+                dataset: "h".into(),
+                column: "v".into(),
+                bins: None,
+                title: None,
+            })),
+        );
+        assert_eq!(r.is_error, Some(true));
+        assert!(text(&r).contains("axis"), "{}", text(&r));
     }
 }
