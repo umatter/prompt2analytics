@@ -9,6 +9,51 @@ use crate::platform::{
 };
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::sync::RwLock;
+
+/// The header the backend reads the caller's session id from on
+/// conversation, message and tool-call routes.
+const SESSION_HEADER: &str = "X-P2A-Session-Id";
+
+/// The session this client last created; sent as [`SESSION_HEADER`] on
+/// conversation, message and tool-call calls.
+static CURRENT_SESSION_ID: RwLock<Option<String>> = RwLock::new(None);
+
+/// Set (or clear) the session id sent on conversation, message and
+/// tool-call calls. [`ApiClient::create_session`] sets it and
+/// [`ApiClient::delete_session`] clears it.
+pub fn set_current_session_id(id: Option<String>) {
+    match CURRENT_SESSION_ID.write() {
+        Ok(mut current) => *current = id,
+        Err(poisoned) => *poisoned.into_inner() = id,
+    }
+}
+
+fn current_session_id() -> Option<String> {
+    match CURRENT_SESSION_ID.read() {
+        Ok(current) => current.clone(),
+        Err(poisoned) => poisoned.into_inner().clone(),
+    }
+}
+
+/// `{X-P2A-Session-Id: id}` for `explicit`, else for the current session;
+/// empty when neither is known.
+fn session_headers(explicit: Option<&str>) -> HashMap<String, String> {
+    explicit
+        .map(str::to_string)
+        .or_else(current_session_id)
+        .filter(|id| !id.is_empty())
+        .map(|id| HashMap::from([(SESSION_HEADER.to_string(), id)]))
+        .unwrap_or_default()
+}
+
+/// `headers` as the pairs [`ApiClient::send`] takes.
+fn header_pairs(headers: &HashMap<String, String>) -> Vec<(&str, &str)> {
+    headers
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect()
+}
 
 /// Default API base URL.
 ///
@@ -106,7 +151,21 @@ impl ApiClient {
     where
         T: for<'de> serde::Deserialize<'de>,
     {
-        let response = self.send("GET", endpoint, None, &[]).await?;
+        self.get_with(endpoint, &HashMap::new()).await
+    }
+
+    /// Perform a GET request with extra headers
+    async fn get_with<T>(
+        &self,
+        endpoint: &str,
+        headers: &HashMap<String, String>,
+    ) -> Result<ApiResponse<T>, String>
+    where
+        T: for<'de> serde::Deserialize<'de>,
+    {
+        let response = self
+            .send("GET", endpoint, None, &header_pairs(headers))
+            .await?;
         serde_json::from_str(&response.body).map_err(|e| format!("JSON parse error: {}", e))
     }
 
@@ -116,41 +175,77 @@ impl ApiClient {
         T: for<'de> serde::Deserialize<'de>,
         B: serde::Serialize,
     {
-        let body_json = serde_json::to_string(body).map_err(|e| e.to_string())?;
-        let response = self.send("POST", endpoint, Some(body_json), &[]).await?;
-        serde_json::from_str(&response.body).map_err(|e| format!("JSON parse error: {}", e))
+        self.post_with(endpoint, body, &HashMap::new()).await
     }
 
-    /// Perform a PUT request with JSON body
-    async fn put<T, B>(&self, endpoint: &str, body: &B) -> Result<ApiResponse<T>, String>
+    /// Perform a POST request with JSON body and extra headers
+    async fn post_with<T, B>(
+        &self,
+        endpoint: &str,
+        body: &B,
+        headers: &HashMap<String, String>,
+    ) -> Result<ApiResponse<T>, String>
     where
         T: for<'de> serde::Deserialize<'de>,
         B: serde::Serialize,
     {
         let body_json = serde_json::to_string(body).map_err(|e| e.to_string())?;
-        let response = self.send("PUT", endpoint, Some(body_json), &[]).await?;
+        let response = self
+            .send("POST", endpoint, Some(body_json), &header_pairs(headers))
+            .await?;
+        serde_json::from_str(&response.body).map_err(|e| format!("JSON parse error: {}", e))
+    }
+
+    /// Perform a PUT request with JSON body and extra headers
+    async fn put_with<T, B>(
+        &self,
+        endpoint: &str,
+        body: &B,
+        headers: &HashMap<String, String>,
+    ) -> Result<ApiResponse<T>, String>
+    where
+        T: for<'de> serde::Deserialize<'de>,
+        B: serde::Serialize,
+    {
+        let body_json = serde_json::to_string(body).map_err(|e| e.to_string())?;
+        let response = self
+            .send("PUT", endpoint, Some(body_json), &header_pairs(headers))
+            .await?;
         serde_json::from_str(&response.body).map_err(|e| format!("JSON parse error: {}", e))
     }
 
     /// Perform a DELETE request
     async fn delete(&self, endpoint: &str) -> Result<(), String> {
-        self.send("DELETE", endpoint, None, &[]).await?;
+        self.delete_with(endpoint, &HashMap::new()).await
+    }
+
+    /// Perform a DELETE request with extra headers
+    async fn delete_with(
+        &self,
+        endpoint: &str,
+        headers: &HashMap<String, String>,
+    ) -> Result<(), String> {
+        self.send("DELETE", endpoint, None, &header_pairs(headers))
+            .await?;
         Ok(())
     }
 
     // === Session endpoints ===
 
-    /// Create a new session
+    /// Create a new session; it becomes the current session whose id the
+    /// conversation, message and tool-call calls send.
     pub async fn create_session(&self) -> Result<String, String> {
         let request = CreateSessionRequest { user_id: None };
         let response: ApiResponse<CreateSessionResponse> =
             self.post("/api/sessions", &request).await?;
 
         if response.success {
-            response
+            let session_id = response
                 .data
                 .map(|d| d.session_id)
-                .ok_or_else(|| "No session ID in response".to_string())
+                .ok_or_else(|| "No session ID in response".to_string())?;
+            set_current_session_id(Some(session_id.clone()));
+            Ok(session_id)
         } else {
             Err(response
                 .error
@@ -174,9 +269,13 @@ impl ApiClient {
         }
     }
 
-    /// Delete a session
+    /// Delete a session (and stop sending its id when it is the current one)
     pub async fn delete_session(&self, session_id: &str) -> Result<(), String> {
-        self.delete(&format!("/api/sessions/{session_id}")).await
+        self.delete(&format!("/api/sessions/{session_id}")).await?;
+        if current_session_id().as_deref() == Some(session_id) {
+            set_current_session_id(None);
+        }
+        Ok(())
     }
 
     // === Tool endpoints ===
@@ -249,7 +348,10 @@ impl ApiClient {
     /// List all conversations for a session
     pub async fn list_conversations(&self, session_id: &str) -> Result<Vec<Conversation>, String> {
         let response: ApiResponse<Vec<Conversation>> = self
-            .get(&format!("/api/conversations?session_id={session_id}"))
+            .get_with(
+                &format!("/api/conversations?session_id={session_id}"),
+                &session_headers(Some(session_id)),
+            )
             .await?;
 
         if response.success {
@@ -274,7 +376,13 @@ impl ApiClient {
             title: title.to_string(),
         };
 
-        let response: ApiResponse<Conversation> = self.post("/api/conversations", &request).await?;
+        let response: ApiResponse<Conversation> = self
+            .post_with(
+                "/api/conversations",
+                &request,
+                &session_headers(Some(session_id)),
+            )
+            .await?;
 
         if response.success {
             response
@@ -290,7 +398,10 @@ impl ApiClient {
     /// Get a conversation by ID
     pub async fn get_conversation(&self, conversation_id: &str) -> Result<Conversation, String> {
         let response: ApiResponse<Conversation> = self
-            .get(&format!("/api/conversations/{conversation_id}"))
+            .get_with(
+                &format!("/api/conversations/{conversation_id}"),
+                &session_headers(None),
+            )
             .await?;
 
         if response.success {
@@ -310,7 +421,10 @@ impl ApiClient {
         conversation_id: &str,
     ) -> Result<ConversationWithMessages, String> {
         let response: ApiResponse<ConversationWithMessages> = self
-            .get(&format!("/api/conversations/{conversation_id}/full"))
+            .get_with(
+                &format!("/api/conversations/{conversation_id}/full"),
+                &session_headers(None),
+            )
             .await?;
 
         if response.success {
@@ -337,7 +451,11 @@ impl ApiClient {
         };
 
         let response: ApiResponse<Conversation> = self
-            .put(&format!("/api/conversations/{conversation_id}"), &request)
+            .put_with(
+                &format!("/api/conversations/{conversation_id}"),
+                &request,
+                &session_headers(None),
+            )
             .await?;
 
         if response.success {
@@ -353,8 +471,11 @@ impl ApiClient {
 
     /// Delete a conversation
     pub async fn delete_conversation(&self, conversation_id: &str) -> Result<(), String> {
-        self.delete(&format!("/api/conversations/{conversation_id}"))
-            .await
+        self.delete_with(
+            &format!("/api/conversations/{conversation_id}"),
+            &session_headers(None),
+        )
+        .await
     }
 
     /// Get messages for a conversation
@@ -363,7 +484,10 @@ impl ApiClient {
         conversation_id: &str,
     ) -> Result<Vec<ConversationMessage>, String> {
         let response: ApiResponse<Vec<ConversationMessage>> = self
-            .get(&format!("/api/conversations/{conversation_id}/messages"))
+            .get_with(
+                &format!("/api/conversations/{conversation_id}/messages"),
+                &session_headers(None),
+            )
             .await?;
 
         if response.success {
@@ -390,9 +514,10 @@ impl ApiClient {
         };
 
         let response: ApiResponse<ConversationMessage> = self
-            .post(
+            .post_with(
                 &format!("/api/conversations/{conversation_id}/messages"),
                 &request,
+                &session_headers(None),
             )
             .await?;
 
@@ -415,9 +540,10 @@ impl ApiClient {
         }
 
         let response: ApiResponse<ClearResponse> = self
-            .post(
+            .post_with(
                 &format!("/api/conversations/{conversation_id}/messages/clear"),
                 &serde_json::json!({}),
+                &session_headers(None),
             )
             .await?;
 
@@ -471,7 +597,10 @@ impl ApiClient {
         conversation_id: &str,
     ) -> Result<Vec<PersistedToolCall>, String> {
         let response: ApiResponse<Vec<PersistedToolCall>> = self
-            .get(&format!("/api/conversations/{conversation_id}/tool-calls"))
+            .get_with(
+                &format!("/api/conversations/{conversation_id}/tool-calls"),
+                &session_headers(None),
+            )
             .await?;
 
         if response.success {
@@ -491,7 +620,10 @@ impl ApiClient {
         message_id: &str,
     ) -> Result<Vec<PersistedToolCall>, String> {
         let response: ApiResponse<Vec<PersistedToolCall>> = self
-            .get(&format!("/api/messages/{message_id}/tool-calls"))
+            .get_with(
+                &format!("/api/messages/{message_id}/tool-calls"),
+                &session_headers(None),
+            )
             .await?;
 
         if response.success {
@@ -659,6 +791,26 @@ mod tests {
                 .auth_headers()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn session_header_follows_current_session() {
+        set_current_session_id(Some("abc".into()));
+        assert_eq!(
+            session_headers(None)
+                .get(SESSION_HEADER)
+                .map(String::as_str),
+            Some("abc")
+        );
+        assert_eq!(
+            session_headers(Some("xyz"))
+                .get(SESSION_HEADER)
+                .map(String::as_str),
+            Some("xyz")
+        );
+        set_current_session_id(None);
+        assert!(session_headers(None).is_empty());
+        assert_eq!(session_headers(Some("xyz")).len(), 1);
     }
 
     #[test]

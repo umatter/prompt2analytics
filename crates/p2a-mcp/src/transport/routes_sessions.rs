@@ -25,7 +25,7 @@ pub struct CreateSessionResponse {
 }
 
 /// Seconds a client should wait before retrying when the session table is full.
-const CAPACITY_RETRY_AFTER_SECS: &str = "60";
+pub(crate) const CAPACITY_RETRY_AFTER_SECS: &str = "60";
 
 /// Create a new session. A full session table answers 503 with code
 /// `capacity` and `Retry-After`.

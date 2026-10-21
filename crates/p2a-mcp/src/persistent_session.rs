@@ -186,6 +186,48 @@ impl PersistentSessionManager {
         Ok(conv)
     }
 
+    /// The conversation `conversation_id` if the live session `session_id`
+    /// owns it. The session is looked up (and touched) first; a conversation
+    /// that is missing or belongs to another session is the same
+    /// `NotFound("Conversation not found")`, without the id.
+    pub async fn authorize_conversation(
+        &self,
+        session_id: &str,
+        conversation_id: &str,
+    ) -> Result<Conversation, PersistentSessionError> {
+        self.get_session(session_id).await?;
+        match self.db.get_conversation(conversation_id).await {
+            Ok(conv) if conv.session_id == session_id => Ok(conv),
+            Ok(_) | Err(DbError::NotFound(_)) => {
+                Err(DbError::NotFound(CONVERSATION_NOT_FOUND.to_string()).into())
+            }
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// The message `message_id` if the live session `session_id` owns its
+    /// conversation; otherwise `NotFound("Message not found")`, the same for
+    /// a missing and a foreign message.
+    pub async fn authorize_message(
+        &self,
+        session_id: &str,
+        message_id: &str,
+    ) -> Result<Message, PersistentSessionError> {
+        self.get_session(session_id).await?;
+        let not_found =
+            || PersistentSessionError::from(DbError::NotFound(MESSAGE_NOT_FOUND.to_string()));
+        let message = match self.db.get_message(message_id).await {
+            Ok(message) => message,
+            Err(DbError::NotFound(_)) => return Err(not_found()),
+            Err(e) => return Err(e.into()),
+        };
+        match self.db.get_conversation(&message.conversation_id).await {
+            Ok(conv) if conv.session_id == session_id => Ok(message),
+            Ok(_) | Err(DbError::NotFound(_)) => Err(not_found()),
+            Err(e) => Err(e.into()),
+        }
+    }
+
     /// Get a conversation by ID.
     pub async fn get_conversation(&self, id: &str) -> Result<Conversation, PersistentSessionError> {
         Ok(self.db.get_conversation(id).await?)
@@ -262,20 +304,24 @@ impl PersistentSessionManager {
 
     // ==================== Settings Operations ====================
 
-    /// Get or create settings for a session.
+    /// Get or create settings for a live session. No row is created for a
+    /// session that is not live.
     pub async fn get_settings(&self, session_id: &str) -> Result<Settings, PersistentSessionError> {
+        self.get_session(session_id).await?;
         Ok(self.db.get_or_create_settings(session_id).await?)
     }
 
-    /// Update settings for a session.
+    /// Update settings for a live session.
     pub async fn update_settings(
         &self,
         settings: &Settings,
     ) -> Result<Settings, PersistentSessionError> {
+        self.get_session(&settings.session_id).await?;
         Ok(self.db.update_settings(settings).await?)
     }
 
-    /// Patch specific settings fields.
+    /// Patch specific settings fields of a live session, creating its
+    /// settings row first when it has none.
     pub async fn patch_settings(
         &self,
         session_id: &str,
@@ -284,6 +330,8 @@ impl PersistentSessionManager {
         temperature: Option<f64>,
         max_tokens: Option<i32>,
     ) -> Result<Settings, PersistentSessionError> {
+        self.get_session(session_id).await?;
+        self.db.get_or_create_settings(session_id).await?;
         Ok(self
             .db
             .patch_settings(session_id, provider, model, temperature, max_tokens)
@@ -430,6 +478,11 @@ impl PersistentSessionManager {
         Ok(result)
     }
 }
+
+/// The answer for a conversation or message the caller does not own; the
+/// same whether it exists or not.
+const CONVERSATION_NOT_FOUND: &str = "Conversation not found";
+const MESSAGE_NOT_FOUND: &str = "Message not found";
 
 /// Reload texts. They are fixed so that no server path reaches a caller.
 const RELOAD_NO_SOURCE: &str = "no source path stored";
@@ -604,6 +657,70 @@ mod tests {
             pm.delete_session(&sid).await,
             Err(PersistentSessionError::Session(SessionError::NotFound))
         ));
+    }
+
+    #[tokio::test]
+    async fn authorize_hides_foreign_and_missing_objects() {
+        let pm = manager().await;
+        let s1 = pm.create_session(None).await.unwrap();
+        let s2 = pm.create_session(None).await.unwrap();
+        let conv = pm.create_conversation(&s1, "mine").await.unwrap();
+        let msg = pm
+            .add_message(&conv.id_string(), "user", "private")
+            .await
+            .unwrap();
+        let (c, m) = (conv.id_string(), msg.id_string());
+
+        assert!(pm.authorize_conversation(&s1, &c).await.is_ok());
+        assert!(pm.authorize_message(&s1, &m).await.is_ok());
+        let text = |r: Result<(), PersistentSessionError>| match r {
+            Err(PersistentSessionError::Database(DbError::NotFound(t))) => t,
+            other => panic!("expected NotFound, got {other:?}"),
+        };
+        let foreign = text(pm.authorize_conversation(&s2, &c).await.map(|_| ()));
+        let missing = text(
+            pm.authorize_conversation(&s2, "no-such-id")
+                .await
+                .map(|_| ()),
+        );
+        assert_eq!(foreign, missing);
+        assert!(!foreign.contains(&c));
+        let foreign = text(pm.authorize_message(&s2, &m).await.map(|_| ()));
+        let missing = text(pm.authorize_message(&s2, "no-such-id").await.map(|_| ()));
+        assert_eq!(foreign, missing);
+        // A caller that is not live is a session error, not an object error.
+        assert!(matches!(
+            pm.authorize_conversation("random-xyz-1", &c).await,
+            Err(PersistentSessionError::Session(SessionError::NotFound))
+        ));
+    }
+
+    #[tokio::test]
+    async fn settings_rows_only_for_live_sessions() {
+        let pm = manager().await;
+        assert!(matches!(
+            pm.get_settings("random-xyz-1").await,
+            Err(PersistentSessionError::Session(SessionError::NotFound))
+        ));
+        assert!(
+            pm.patch_settings("random-xyz-1", None, Some("m"), None, None)
+                .await
+                .is_err()
+        );
+        let row: Option<Settings> = pm
+            .db()
+            .db()
+            .select(("settings", "random-xyz-1"))
+            .await
+            .unwrap();
+        assert!(row.is_none());
+        // A live session can patch before it ever read its settings.
+        let sid = pm.create_session(None).await.unwrap();
+        let patched = pm
+            .patch_settings(&sid, None, Some("m"), None, None)
+            .await
+            .unwrap();
+        assert_eq!(patched.model, "m");
     }
 
     #[tokio::test]

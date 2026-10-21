@@ -205,3 +205,186 @@ async fn reload_restores_datasets_into_the_live_session() {
             .contains_key("d")
     );
 }
+
+// =============================================================================
+// Task 2: the owning session on every conversation route (MCP-11; MCP-7 settings)
+// =============================================================================
+
+/// Every conversation, message and tool-call route answers 404 to a session
+/// that does not own the object, identically for missing and foreign ids.
+#[tokio::test]
+async fn conversation_routes_answer_404_to_other_sessions() {
+    let (r, state) = app(ServerConfig::default()).await;
+    let s1 = new_session(&r).await;
+    let s2 = new_session(&r).await;
+    let c1 = new_conversation(&r, &s1, "mine").await;
+    let (st, body) = add_msg(&r, &s1, &c1, "S1 PRIVATE").await;
+    assert_eq!(st, StatusCode::CREATED, "{body}");
+    let m1 = body["data"]["id"].as_str().unwrap().to_string();
+
+    let requests: Vec<(&str, String, Option<Value>)> = vec![
+        ("GET", format!("/api/conversations/{c1}"), None),
+        (
+            "PUT",
+            format!("/api/conversations/{c1}"),
+            Some(json!({"title": "x"})),
+        ),
+        (
+            "POST",
+            format!("/api/conversations/{c1}/archive"),
+            Some(json!({"is_archived": true})),
+        ),
+        ("GET", format!("/api/conversations/{c1}/messages"), None),
+        (
+            "POST",
+            format!("/api/conversations/{c1}/messages"),
+            Some(json!({"role": "user", "content": "intruder"})),
+        ),
+        ("DELETE", format!("/api/conversations/{c1}/messages"), None),
+        ("GET", format!("/api/conversations/{c1}/tool-calls"), None),
+        ("GET", format!("/api/messages/{m1}/tool-calls"), None),
+        ("DELETE", format!("/api/conversations/{c1}"), None),
+    ];
+    for (method, uri, body) in requests {
+        let (st, body) = call(&r, method, &uri, Some(&s2), body).await;
+        assert_eq!(st, StatusCode::NOT_FOUND, "{method} {uri}: {body}");
+        assert!(!body.to_string().contains("S1 PRIVATE"), "{method} {uri}");
+    }
+
+    let msgs = pm(&state).db().get_messages(&c1).await.unwrap();
+    assert_eq!((msgs.len(), msgs[0].content.as_str()), (1, "S1 PRIVATE"));
+    assert_eq!(
+        pm(&state).db().get_conversation(&c1).await.unwrap().title,
+        "mine"
+    );
+    let foreign = call(
+        &r,
+        "GET",
+        &format!("/api/conversations/{c1}"),
+        Some(&s2),
+        None,
+    )
+    .await
+    .1;
+    let missing = call(
+        &r,
+        "GET",
+        &format!("/api/conversations/{}", uuid::Uuid::new_v4()),
+        Some(&s2),
+        None,
+    )
+    .await
+    .1;
+    assert_eq!(foreign["error"], missing["error"]); // indistinguishable
+    assert_eq!(
+        call(
+            &r,
+            "GET",
+            &format!("/api/conversations/{c1}"),
+            Some(&s1),
+            None
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        call(
+            &r,
+            "GET",
+            &format!("/api/conversations/{c1}?session_id={s1}"),
+            None,
+            None
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        call(&r, "GET", &format!("/api/conversations/{c1}"), None, None)
+            .await
+            .0,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        call(
+            &r,
+            "GET",
+            "/api/conversations?session_id=not-live",
+            None,
+            None
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+}
+
+/// Settings rows are created only for live sessions, and the path id is the
+/// caller.
+#[tokio::test]
+async fn settings_require_a_live_session() {
+    let (r, state) = app(ServerConfig::default()).await;
+    assert_eq!(
+        call(&r, "GET", "/api/sessions/random-xyz-1/settings", None, None)
+            .await
+            .0,
+        StatusCode::NOT_FOUND
+    );
+    let row: Option<p2a_mcp::db::Settings> = pm(&state)
+        .db()
+        .db()
+        .select(("settings", "random-xyz-1"))
+        .await
+        .unwrap();
+    assert!(row.is_none());
+    assert_eq!(
+        call(
+            &r,
+            "PUT",
+            "/api/sessions/random-xyz-1/settings",
+            None,
+            Some(json!({"model": "m"}))
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+    let sid = new_session(&r).await;
+    assert_eq!(
+        call(
+            &r,
+            "GET",
+            &format!("/api/sessions/{sid}/settings"),
+            Some(&sid),
+            None
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        call(
+            &r,
+            "PUT",
+            &format!("/api/sessions/{sid}/settings"),
+            Some(&sid),
+            Some(json!({"model": "m"}))
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        call(
+            &r,
+            "GET",
+            &format!("/api/sessions/{sid}/settings"),
+            Some("other"),
+            None
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+}
