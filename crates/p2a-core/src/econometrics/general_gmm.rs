@@ -43,6 +43,7 @@ use crate::errors::{EconError, EconResult};
 use crate::linalg::design::{DesignMatrix, get_column_names};
 use crate::linalg::matrix_ops::{safe_inverse, xtx};
 use crate::regression::HacKernel;
+use crate::resource;
 use crate::traits::estimator::{SignificanceLevel, chi_squared_p_value};
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -357,6 +358,8 @@ fn estimate_linear_iv(
         });
     }
 
+    validate_config(&config, n)?;
+
     // Compute Z'Z and Z'X
     let zz = xtx(&z.view());
     let zx = z.t().dot(x);
@@ -370,6 +373,36 @@ fn estimate_linear_iv(
             estimate_iterative_iv(y, x, z, &zz, &zx, &zy, n, k, q, &config)
         }
     }
+}
+
+/// Check the iteration controls and, for HAC weighting, the bandwidth against
+/// the sample size.
+fn validate_config(config: &GeneralGmmConfig, n: usize) -> EconResult<()> {
+    if !(config.tolerance.is_finite() && config.tolerance > 0.0) {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "tolerance must be a finite number greater than 0 (got {})",
+                config.tolerance
+            ),
+        });
+    }
+    if config.max_iter == 0 {
+        return Err(EconError::InvalidSpecification {
+            message: "max_iter must be at least 1 (got 0)".to_string(),
+        });
+    }
+    if config.vcov == GmmVcov::HAC
+        && let Some(b) = config.bandwidth
+        && b >= n
+    {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "bandwidth = {} must be less than the number of observations ({})",
+                b, n
+            ),
+        });
+    }
+    Ok(())
 }
 
 fn estimate_two_step_iv(
@@ -515,6 +548,7 @@ fn estimate_iterative_iv(
     let mut converged = false;
 
     for iter in 0..config.max_iter {
+        resource::checkpoint()?;
         iterations = iter + 1;
 
         // Compute residuals
@@ -669,14 +703,19 @@ fn compute_optimal_weight(
                 }
             }
 
-            // Lags 1 to bw
-            for lag in 1..=bw {
+            // Lags 1 to bw. A lag of n or more has no pairs of observations and
+            // contributes nothing, so the loop stops at n - 1; kernel weights
+            // still use bw.
+            let max_lag = bw.min(n.saturating_sub(1));
+            let mut gamma_lag = Array2::<f64>::zeros((q, q));
+            for lag in 1..=max_lag {
+                resource::checkpoint()?;
                 let w = config.kernel.weight(lag, bw);
                 if w.abs() < 1e-15 {
                     continue;
                 }
 
-                let mut gamma_lag = Array2::<f64>::zeros((q, q));
+                gamma_lag.fill(0.0);
                 for i in lag..n {
                     for j in 0..q {
                         for l in 0..q {
@@ -799,7 +838,35 @@ fn estimate_normal_distribution(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::resource::{Budget, CancelToken, with_budget};
     use ndarray::Array1;
+
+    fn cancelled() -> Budget {
+        let token = CancelToken::new();
+        token.cancel();
+        Budget::new(None, token)
+    }
+
+    fn expect_invalid<T>(res: EconResult<T>, needle: &str) {
+        match res {
+            Err(EconError::InvalidSpecification { message }) => {
+                assert!(
+                    message.contains(needle),
+                    "message {message:?} should name `{needle}`"
+                )
+            }
+            Err(e) => panic!("expected InvalidSpecification naming `{needle}`, got: {e}"),
+            Ok(_) => panic!("expected InvalidSpecification naming `{needle}`, got Ok"),
+        }
+    }
+
+    fn expect_cancelled<T>(res: EconResult<T>) {
+        match res {
+            Err(EconError::Cancelled(_)) => {}
+            Err(e) => panic!("expected Cancelled, got: {e}"),
+            Ok(_) => panic!("expected Cancelled, got Ok"),
+        }
+    }
 
     #[test]
     fn test_normal_distribution_gmm() {
@@ -894,5 +961,114 @@ mod tests {
         assert!(display.contains("GMM"));
         assert!(display.contains("Coefficients"));
         assert!(display.contains("J-Test"));
+    }
+
+    /// The y, X and Z of `test_linear_iv_gmm` (n = 50, q = 3).
+    fn iv_data() -> (Array1<f64>, Array2<f64>, Array2<f64>) {
+        let n = 50;
+        let y = Array1::from_iter((0..n).map(|i| 2.0 + 3.0 * (i as f64) + (i % 5) as f64 * 0.1));
+        let x = Array2::from_shape_fn((n, 2), |(i, j)| if j == 0 { 1.0 } else { i as f64 });
+        let z = Array2::from_shape_fn((n, 3), |(i, j)| match j {
+            0 => 1.0,
+            1 => i as f64,
+            2 => (i * i) as f64 / 100.0,
+            _ => 0.0,
+        });
+        (y, x, z)
+    }
+
+    #[test]
+    fn test_gmm_rejects_hac_bandwidth_not_below_n() {
+        let (y, x, z) = iv_data();
+        let run = |vcov: GmmVcov, bandwidth: Option<usize>| {
+            run_general_gmm(
+                MomentCondition::LinearIV {
+                    y: y.clone(),
+                    x: x.clone(),
+                    z: z.clone(),
+                },
+                GeneralGmmConfig {
+                    vcov,
+                    bandwidth,
+                    ..Default::default()
+                },
+            )
+        };
+        expect_invalid(run(GmmVcov::HAC, Some(50)), "bandwidth");
+        expect_invalid(run(GmmVcov::HAC, Some(usize::MAX)), "bandwidth");
+        assert!(!matches!(
+            run(GmmVcov::HAC, Some(49)),
+            Err(EconError::InvalidSpecification { .. })
+        ));
+        // the bandwidth only applies to HAC and stays ignored otherwise
+        assert!(!matches!(
+            run(GmmVcov::IID, Some(1_000_000)),
+            Err(EconError::InvalidSpecification { .. })
+        ));
+    }
+
+    #[test]
+    fn test_gmm_rejects_invalid_iteration_controls() {
+        let (y, x, z) = iv_data();
+        let run = |tolerance: f64, max_iter: usize| {
+            run_general_gmm(
+                MomentCondition::LinearIV {
+                    y: y.clone(),
+                    x: x.clone(),
+                    z: z.clone(),
+                },
+                GeneralGmmConfig {
+                    method: GmmMethod::Iterative,
+                    tolerance,
+                    max_iter,
+                    ..Default::default()
+                },
+            )
+        };
+        expect_invalid(run(0.0, 100), "tolerance");
+        expect_invalid(run(f64::NAN, 100), "tolerance");
+        expect_invalid(run(1e-7, 0), "max_iter");
+    }
+
+    #[test]
+    fn test_gmm_stops_when_cancelled() {
+        let (y, x, z) = iv_data();
+        expect_cancelled(with_budget(cancelled(), || {
+            run_general_gmm(
+                MomentCondition::LinearIV { y, x, z },
+                GeneralGmmConfig {
+                    method: GmmMethod::Iterative,
+                    ..Default::default()
+                },
+            )
+        }));
+    }
+
+    #[test]
+    fn test_hac_lag_loop_stops_at_sample_size() {
+        let (y, x, z) = iv_data();
+        let resid = &y - &x.dot(&Array1::from(vec![2.0, 3.0]));
+        let w = |bw: usize| {
+            compute_optimal_weight(
+                &resid,
+                &z,
+                50,
+                3,
+                &GeneralGmmConfig {
+                    kernel: HacKernel::Truncated,
+                    bandwidth: Some(bw),
+                    ..Default::default()
+                },
+            )
+        };
+        // Truncated: weight 1 for every lag <= bw, so lags 1..=49 for all of these
+        let reference = w(49);
+        for bw in [50, 500, usize::MAX] {
+            match (&reference, &w(bw)) {
+                (Ok(a), Ok(b)) => assert_eq!(a, b, "bandwidth {bw}"),
+                (Err(_), Err(_)) => {}
+                (a, b) => panic!("bandwidth {bw}: {a:?} vs {b:?}"),
+            }
+        }
     }
 }
