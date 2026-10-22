@@ -1055,16 +1055,16 @@ mod tests {
     fn moran_matches_r_reference() {
         let y = Array1::from(Y.to_vec());
         let r = moran_test(&y, &knn3(WeightStyle::RowStd), MoranAlternative::TwoSided).unwrap();
-        assert_close(r.statistic, 0.484512219447362502, 1e-12);
+        assert_close(r.statistic, 0.4845122194473625, 1e-12);
         assert_close(r.expectation, -0.034482758620689655, 1e-15);
         assert_close(r.variance, 0.017150361023634795, 1e-12);
         assert_close(r.z_score, 3.963022355681558, 1e-10);
         let b = moran_test(&y, &knn3(WeightStyle::Binary), MoranAlternative::TwoSided).unwrap();
-        assert_close(b.statistic, 0.484512219447362502, 1e-12);
+        assert_close(b.statistic, 0.4845122194473625, 1e-12);
         assert_close(b.variance, 0.017150361023634802, 1e-12);
         let d = moran_test(&y, &band2(WeightStyle::RowStd), MoranAlternative::TwoSided).unwrap();
-        assert_close(d.statistic, 0.453288253607957159, 1e-12);
-        assert_close(d.variance, 0.019046478838964480, 1e-12);
+        assert_close(d.statistic, 0.45328825360795716, 1e-12);
+        assert_close(d.variance, 0.01904647883896448, 1e-12);
         assert_close(d.z_score, 3.534342538179581, 1e-10);
     }
 
@@ -1103,10 +1103,10 @@ mod tests {
                 17.333333333333332,
                 16.996459496295262,
                 [
-                    1.13308021718770231e1,
-                    2.26624242994720726e0,
-                    3.29499564316506621e1,
-                    4.42807586035276870e1,
+                    11.330802171877023,
+                    2.2662424299472073,
+                    32.94995643165066,
+                    44.28075860352769,
                 ],
             ),
             (
@@ -1114,10 +1114,10 @@ mod tests {
                 156.0,
                 16.996459496295262,
                 [
-                    1.13308021718770142e1,
-                    2.26624242994720593e0,
-                    4.45394259364320888e1,
-                    5.58702281083091066e1,
+                    11.330802171877014,
+                    2.266242429947206,
+                    44.53942593643209,
+                    55.87022810830911,
                 ],
             ),
             (
@@ -1125,10 +1125,10 @@ mod tests {
                 15.712222222222223,
                 13.374603292722762,
                 [
-                    8.09353518719906972e0,
-                    1.99097423272287011e0,
-                    2.18817434925747740e1,
-                    2.99752786797738437e1,
+                    8.09353518719907,
+                    1.99097423272287,
+                    21.881743492574774,
+                    29.975278679773844,
                 ],
             ),
         ] {

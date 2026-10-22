@@ -2304,15 +2304,15 @@ mod tests {
         };
         let r = run_spgm(&d, "y", &["x1", "x2"], "entity", "time", &mut w, config).unwrap();
         // Values printed by the code that formed the dense NT x NT projection P_Z.
-        assert_rel(r.rho.unwrap(), -1.88081326776697644e-1, 1e-10);
-        let coefficients = [6.77819816100274863e-1, -3.66417317278429022e-1];
-        let std_errors = [6.93026770814074711e-2, 6.31177888519705993e-2];
+        assert_rel(r.rho.unwrap(), -0.18808132677669764, 1e-10);
+        let coefficients = [0.6778198161002749, -0.366417317278429];
+        let std_errors = [0.06930267708140747, 0.0631177888519706];
         for j in 0..2 {
             assert_rel(r.coefficients[j], coefficients[j], 1e-10);
             assert_rel(r.std_errors[j], std_errors[j], 1e-10);
         }
-        assert_rel(r.sigma2, 7.53118009560483671e-3, 1e-10);
-        assert_rel(r.sargan_stat.unwrap(), 2.35585157146568891e0, 1e-10);
+        assert_rel(r.sigma2, 0.007531180095604837, 1e-10);
+        assert_rel(r.sargan_stat.unwrap(), 2.355851571465689, 1e-10);
         assert_eq!((r.n_instruments, r.sargan_df), (4, Some(1)));
     }
 
