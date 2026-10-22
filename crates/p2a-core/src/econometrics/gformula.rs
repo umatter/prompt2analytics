@@ -1498,6 +1498,26 @@ mod tests {
     }
 
     #[test]
+    fn test_gformula_bootstrap_unchanged_by_chunking() {
+        // Pinned at 1fdb22f; per-replicate seeds are seed + 1000 b, unchanged.
+        // 130 replicates cross the 64-replicate chunk boundary twice.
+        const SE_RD: [(usize, f64); 2] = [(20, 36.45400422031243), (130, 46.5715124639952)];
+        for (b, se_rd) in SE_RD {
+            let cfg = GFormulaConfig {
+                n_simulations: 200,
+                time_points: 2,
+                intervention: GFormulaIntervention::Static { treat_all: true },
+                outcome_type: GFormulaOutcomeType::Continuous,
+                n_bootstrap: b,
+                seed: Some(42),
+                ..Default::default()
+            };
+            let r = run_gformula(&create_test_data(), cfg).unwrap();
+            assert_eq!(r.se_risk_difference, se_rd, "n_bootstrap {b}");
+        }
+    }
+
+    #[test]
     fn test_gformula_static_interventions() {
         let data = create_test_data();
 
