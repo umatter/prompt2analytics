@@ -699,7 +699,11 @@ fn prepare_synth_data(
     let j = donor_units.len();
 
     let mut x1 = Array1::zeros(k);
-    let mut x0 = Array2::zeros((k, j));
+    let mut x0 = crate::resource::try_zeros2(
+        k,
+        j,
+        "synthetic-control predictor matrix (predictors x donors)",
+    )?;
     let mut predictor_names = Vec::with_capacity(k);
 
     // Each get_outcome call filters the whole frame, so building these matrices
@@ -757,9 +761,17 @@ fn prepare_synth_data(
     let t_post = post_times.len();
 
     let mut z1 = Array1::zeros(t0);
-    let mut z0 = Array2::zeros((t0, j));
+    let mut z0 = crate::resource::try_zeros2(
+        t0,
+        j,
+        "synthetic-control outcome matrix (pre-treatment periods x donors)",
+    )?;
     let mut y1_post = Array1::zeros(t_post);
-    let mut y0_post = Array2::zeros((t_post, j));
+    let mut y0_post = crate::resource::try_zeros2(
+        t_post,
+        j,
+        "synthetic-control outcome matrix (post-treatment periods x donors)",
+    )?;
 
     // Pre-treatment outcomes
     for (t_idx, &time) in opt_times.iter().enumerate() {
@@ -1044,6 +1056,21 @@ fn optimize_synth_weights(
     max_iter: usize,
 ) -> EconResult<(Array1<f64>, Array1<f64>, usize, f64)> {
     let k = data.x1.len();
+
+    // The weight solvers work on donor-by-donor matrices; the data-driven V
+    // search also precomputes one per predictor. Their total is checked
+    // against the allocation ceiling before any is built.
+    let j = data.x0.ncols();
+    let n_matrices = if matches!(v_method, VOptimization::DataDriven) {
+        k.saturating_add(1)
+    } else {
+        1
+    };
+    let what = "synthetic-control donor-by-donor matrices";
+    crate::resource::check_alloc::<f64>(
+        crate::resource::checked_len(&[n_matrices, j, j], what)?,
+        what,
+    )?;
 
     // Initialize V weights
     let v = match v_method {
@@ -2313,6 +2340,57 @@ mod tests {
         assert!(val < 1e-6 && iters >= 1 && best.len() == 2);
     }
 
+    /// Unit "A" treated from t = 3 plus `n_donors` donors over t = 1..=3.
+    fn wide_panel(n_donors: usize) -> Dataset {
+        let (mut u, mut t, mut y, mut x) = (vec![], vec![], vec![], vec![]);
+        for d in 0..=n_donors {
+            let name = if d == 0 {
+                "A".to_string()
+            } else {
+                format!("D{d}")
+            };
+            for time in 1..=3i64 {
+                u.push(name.clone());
+                t.push(time);
+                let noise = 0.3 * ((d * 7 + time as usize * 3) as f64).sin();
+                y.push(10.0 + d as f64 * 0.1 + time as f64 + noise);
+                x.push(5.0 + d as f64 * 0.05 + noise);
+            }
+        }
+        Dataset::new(df! { "unit" => u, "time" => t, "outcome" => y, "x1" => x }.unwrap())
+    }
+
+    #[test]
+    fn test_synth_matrices_respect_allocation_ceiling() {
+        let preds = vec![PredictorSpec::new("x1")];
+        // the 3 x 2 pre-period outcome matrix (48 bytes) is over a 16-byte ceiling
+        let ds = create_test_panel();
+        let r = crate::resource::with_alloc_ceiling(Some(16), || {
+            run_synthetic_control(&ds, "outcome", "unit", "time", &preds, synth_cfg())
+        });
+        assert!(
+            matches!(r, Err(EconError::ResourceLimit(ref m)) if m.contains("outcome matrix")),
+            "ok={}",
+            r.is_ok()
+        );
+        // 20 donors: the outcome matrices (320 bytes) fit under 1000 bytes, the
+        // donor-by-donor QP matrices (20 x 20 each) do not
+        let ds = wide_panel(20);
+        let cfg = SynthConfig {
+            treatment_time: 3,
+            ..synth_cfg()
+        };
+        let r = crate::resource::with_alloc_ceiling(Some(1000), || {
+            run_synthetic_control(&ds, "outcome", "unit", "time", &preds, cfg.clone())
+        });
+        assert!(
+            matches!(r, Err(EconError::ResourceLimit(ref m)) if m.contains("donor-by-donor")),
+            "ok={}",
+            r.is_ok()
+        );
+        assert!(run_synthetic_control(&ds, "outcome", "unit", "time", &preds, cfg).is_ok());
+    }
+
     // =========================================================================
     // Validation tests (test_validate_* prefix)
     // =========================================================================
@@ -2804,8 +2882,13 @@ pub fn run_gsynth(
         .collect();
 
     // Build Y and D matrices (units x times)
-    let mut y_mat = Array2::<f64>::from_elem((n_units, n_times), f64::NAN);
-    let mut d_mat = Array2::<f64>::zeros((n_units, n_times));
+    // n_units x n_times can be quadratic in the number of rows (a panel in
+    // which every row is its own unit and period), so these are fallible.
+    let mut y_mat =
+        crate::resource::try_zeros2(n_units, n_times, "gsynth outcome panel (units x periods)")?;
+    y_mat.fill(f64::NAN);
+    let mut d_mat =
+        crate::resource::try_zeros2(n_units, n_times, "gsynth treatment panel (units x periods)")?;
 
     for (row_idx, (unit, time)) in units.iter().zip(times.iter()).enumerate() {
         let ui = unit_idx[unit.as_str()];
@@ -2910,7 +2993,12 @@ pub fn run_gsynth(
         let mut x_data: Vec<Array2<f64>> = Vec::new();
         for col in x_cols {
             let x_vec = extract_numeric_column(df, col)?;
-            let mut x_panel = Array2::<f64>::from_elem((n_units, n_times), f64::NAN);
+            let mut x_panel = crate::resource::try_zeros2(
+                n_units,
+                n_times,
+                "gsynth covariate panel (units x periods)",
+            )?;
+            x_panel.fill(f64::NAN);
             for (row_idx, (unit, time)) in units.iter().zip(times.iter()).enumerate() {
                 let ui = unit_idx[unit.as_str()];
                 let ti = time_idx[time];
@@ -3477,7 +3565,13 @@ fn extract_factors_svd(
     // We perform PCA on Y to extract factors and loadings.
     // The PC1 normalization convention: factors have unit variance, loadings capture scale.
 
-    // Compute Y'Y (T x T) for factor extraction
+    // Compute Y'Y (T x T) for factor extraction; T can be large next to N, so
+    // the T x T matrix (and its working copy) is checked first.
+    let what = "gsynth factor covariance (pre-treatment periods x pre-treatment periods)";
+    crate::resource::check_alloc::<f64>(
+        crate::resource::checked_len(&[n_cols, n_cols], what)?,
+        what,
+    )?;
     let yty = y.t().dot(y); // T x T
 
     // Simple eigenvalue decomposition via power iteration with deflation
@@ -4030,5 +4124,47 @@ mod gsynth_tests {
                 "unexpected parameter error: {e}"
             ),
         }
+    }
+
+    #[test]
+    fn test_gsynth_matrices_respect_allocation_ceiling() {
+        // the 5 x 10 units-by-periods panel (400 bytes) is over a 64-byte ceiling
+        let ds = create_gsynth_dataset();
+        let r = crate::resource::with_alloc_ceiling(Some(64), || {
+            run_gsynth(&ds, "outcome", "treated", "unit", "time", &[], gs_cfg())
+        });
+        assert!(
+            matches!(r, Err(EconError::ResourceLimit(ref m)) if m.contains("units x periods")),
+            "ok={}",
+            r.is_ok()
+        );
+        // a long panel: 4 x 40 panels (1280 bytes) fit under 2000 bytes, the
+        // 30 x 30 pre-period factor covariance (7200 bytes) does not
+        let (mut u, mut t, mut y, mut d) = (vec![], vec![], vec![], vec![]);
+        for unit in ["C1", "C2", "C3", "T1"] {
+            for time in 1..=40i64 {
+                let k = unit.as_bytes()[1] as f64;
+                u.push(unit);
+                t.push(time);
+                let treated = unit == "T1" && time > 30;
+                y.push(
+                    k + 0.1 * time as f64
+                        + 0.2 * (k * time as f64).sin()
+                        + if treated { 2.0 } else { 0.0 },
+                );
+                d.push(if treated { 1.0 } else { 0.0 });
+            }
+        }
+        let long =
+            Dataset::new(df! { "unit" => u, "time" => t, "outcome" => y, "treated" => d }.unwrap());
+        let r = crate::resource::with_alloc_ceiling(Some(2000), || {
+            run_gsynth(&long, "outcome", "treated", "unit", "time", &[], gs_cfg())
+        });
+        assert!(
+            matches!(r, Err(EconError::ResourceLimit(ref m)) if m.contains("pre-treatment periods")),
+            "ok={}",
+            r.is_ok()
+        );
+        assert!(run_gsynth(&long, "outcome", "treated", "unit", "time", &[], gs_cfg()).is_ok());
     }
 }
