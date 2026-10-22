@@ -148,6 +148,11 @@ impl fmt::Display for MultinomResult {
 ///
 /// `MultinomResult` containing coefficient estimates and statistics.
 ///
+/// # Errors
+///
+/// An outcome with more than 100 distinct values is refused with
+/// `InvalidSpecification` (a method-level cap, like `nnet::multinom`'s `MaxNWts`).
+///
 /// # References
 ///
 /// - McFadden, D. (1974). Conditional logit analysis of qualitative choice behavior.

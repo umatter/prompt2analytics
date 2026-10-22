@@ -162,6 +162,11 @@ impl fmt::Display for OrderedResult {
 /// Run ordered logit regression (proportional odds model).
 ///
 /// R equivalent: `MASS::polr()`
+///
+/// # Errors
+///
+/// An outcome with more than 100 distinct values is refused with
+/// `InvalidSpecification` (a method-level cap on the outcome categories).
 pub fn run_ordered_logit(
     dataset: &Dataset,
     y_col: &str,
@@ -173,6 +178,11 @@ pub fn run_ordered_logit(
 /// Run ordered probit regression.
 ///
 /// R equivalent: `MASS::polr(method = "probit")`
+///
+/// # Errors
+///
+/// An outcome with more than 100 distinct values is refused with
+/// `InvalidSpecification` (a method-level cap on the outcome categories).
 pub fn run_ordered_probit(
     dataset: &Dataset,
     y_col: &str,

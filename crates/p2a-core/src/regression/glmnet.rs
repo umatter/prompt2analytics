@@ -68,7 +68,8 @@ pub struct GlmnetConfig {
     pub alpha: f64,
     /// Sequence of lambda values (if None, automatically generated)
     pub lambda: Option<Vec<f64>>,
-    /// Number of lambda values in path (default: 100)
+    /// Number of lambda values in path (default: 100). At least 1 when `lambda` is `None`
+    /// (otherwise `InvalidSpecification`); a path above the allocation ceiling is `ResourceLimit`.
     pub nlambda: usize,
     /// Minimum lambda ratio (lambda_min / lambda_max)
     pub lambda_min_ratio: f64,
@@ -76,9 +77,9 @@ pub struct GlmnetConfig {
     pub standardize: bool,
     /// Include intercept (default: true)
     pub intercept: bool,
-    /// Maximum iterations for coordinate descent
+    /// Maximum iterations for coordinate descent. At least 1 (otherwise `InvalidSpecification`).
     pub max_iter: usize,
-    /// Convergence threshold
+    /// Convergence threshold. Must be finite and > 0 (otherwise `InvalidSpecification`).
     pub thresh: f64,
     /// Model family
     pub family: GlmnetFamily,

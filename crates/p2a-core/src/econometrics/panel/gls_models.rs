@@ -211,6 +211,12 @@ impl fmt::Display for PanelGlsResult {
 ///
 /// `PanelGlsResult` containing estimates, standard errors, and diagnostics.
 ///
+/// # Errors
+///
+/// A panel with more time periods than entities (T > N) is refused with
+/// `InvalidSpecification`: the unrestricted T x T error covariance is estimated
+/// from N residual vectors and has no inverse.
+///
 /// # Reference
 ///
 /// Implementation adapted from R's plm package pggls() function.
@@ -640,6 +646,10 @@ pub fn run_panel_gls(
 }
 
 /// Convenience function for Panel GLS with fixed effects (FEGLS).
+///
+/// # Errors
+///
+/// Refuses T > N, as [`run_panel_gls`] does.
 pub fn run_fegls(
     dataset: &Dataset,
     y_col: &str,
@@ -658,6 +668,10 @@ pub fn run_fegls(
 }
 
 /// Convenience function for Pooled GLS.
+///
+/// # Errors
+///
+/// Refuses T > N, as [`run_panel_gls`] does.
 pub fn run_pooled_gls(
     dataset: &Dataset,
     y_col: &str,

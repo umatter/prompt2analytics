@@ -942,7 +942,8 @@ fn compute_auxiliary_r2(y: &Array1<f64>, x: &Array2<f64>) -> f64 {
 /// * `dataset` - Dataset containing the data
 /// * `y_col` - Dependent variable column name
 /// * `x_cols` - Independent variable column names
-/// * `powers` - Powers to use (default: [2, 3])
+/// * `powers` - Powers to use (default: [2, 3]). Duplicates are removed (first occurrence
+///   kept) and powers below 2 are ignored; a power above `i32::MAX` is `InvalidSpecification`.
 /// * `reset_type` - Type of augmentation (Fitted, Regressor, PrinComp)
 ///
 /// # Returns
@@ -1263,7 +1264,8 @@ pub fn run_reset_test(
 /// * `ols_result` - Pre-computed OLS result
 /// * `x` - Design matrix used in OLS (including intercept if present)
 /// * `y` - Response vector
-/// * `powers` - Powers to test (e.g., [2, 3])
+/// * `powers` - Powers to test (e.g., [2, 3]). Deduplicated and checked as in [`reset_test`]:
+///   first occurrence kept, powers below 2 ignored, each at most `i32::MAX`.
 /// * `reset_type` - Type of RESET test
 pub fn reset_test_from_ols(
     ols_result: &crate::regression::OlsResult,

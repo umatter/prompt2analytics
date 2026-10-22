@@ -1378,6 +1378,8 @@ impl HacKernel {
 /// * `ols_result` - OLS regression result
 /// * `x` - Design matrix (n × k)
 /// * `bandwidth` - Optional bandwidth (number of lags). If None, uses Newey-West automatic selection.
+///   A user bandwidth must be smaller than n (otherwise `InvalidSpecification`); one above n/4
+///   adds an entry to `HacResult::warnings`.
 /// * `kernel` - Kernel type (default: Bartlett/Newey-West)
 /// * `prewhiten` - Whether to use VAR(1) prewhitening (default: false)
 ///
@@ -1437,8 +1439,9 @@ pub fn vcov_hac(
         });
     }
 
-    // A user bandwidth must leave data at every lag; a large fraction of the
-    // sample is accepted with a warning (sandwich::NeweyWest warns too).
+    // A user bandwidth must leave data at every lag. sandwich::meatHAC warns and
+    // truncates when lag >= n; p2a refuses that case and additionally warns when
+    // a user bandwidth exceeds n/4 (REG-1).
     let mut warnings = Vec::new();
     if let Some(bw) = bandwidth {
         if bw >= n {
@@ -1629,7 +1632,8 @@ fn prewhiten_residuals(residuals: &Array1<f64>) -> (Array1<f64>, f64) {
 /// * `dataset` - The dataset
 /// * `y_col` - Name of the dependent variable column
 /// * `x_cols` - Names of independent variable columns
-/// * `bandwidth` - Optional bandwidth (None for automatic)
+/// * `bandwidth` - Optional bandwidth (None for automatic). Must be smaller than n; one above n/4
+///   adds a warning (see [`vcov_hac`]).
 /// * `kernel` - Kernel type string ("bartlett", "parzen", "qs", "truncated", "tukey-hanning")
 /// * `prewhiten` - Whether to use prewhitening
 ///
@@ -1759,7 +1763,8 @@ impl std::fmt::Display for BootstrapResult {
 /// * `ols_result` - Result from OLS estimation
 /// * `x` - Design matrix (n × k)
 /// * `y` - Response vector (n)
-/// * `n_boot` - Number of bootstrap replications (default: 999)
+/// * `n_boot` - Number of bootstrap replications (default: 999). At least 10, otherwise
+///   `InvalidSpecification`; replicate storage above the allocation ceiling is `ResourceLimit`.
 /// * `bootstrap_type` - Type of bootstrap (Pairs, Residual, Wild)
 /// * `seed` - Optional RNG seed for reproducibility
 ///
@@ -1950,7 +1955,8 @@ pub fn vcov_bootstrap(
 /// * `dataset` - The dataset
 /// * `y_col` - Name of the dependent variable column
 /// * `x_cols` - Names of independent variable columns
-/// * `n_boot` - Number of bootstrap replications (default: 999)
+/// * `n_boot` - Number of bootstrap replications (default: 999). At least 10 (see
+///   [`vcov_bootstrap`]).
 /// * `bootstrap_type` - Type string ("pairs", "residual", "wild")
 /// * `seed` - Optional RNG seed
 ///
@@ -2105,7 +2111,9 @@ impl std::fmt::Display for DriscollKraayResult {
 /// * `ols_result` - Result from OLS estimation
 /// * `x` - Design matrix (n × k)
 /// * `time_ids` - Time period identifier for each observation
-/// * `bandwidth` - Optional bandwidth (None for automatic)
+/// * `bandwidth` - Optional bandwidth (None for automatic). A user bandwidth must be smaller than
+///   the number of time periods T (otherwise `InvalidSpecification`); one above T/4 adds an
+///   entry to `DriscollKraayResult::warnings`.
 /// * `kernel` - Kernel type for HAC
 ///
 /// # Returns
@@ -2168,8 +2176,10 @@ pub fn vcov_driscoll_kraay(
         });
     }
 
-    // A user bandwidth must leave data at every lag of the period series; a
-    // large fraction of the periods is accepted with a warning.
+    // A user bandwidth must leave data at every lag of the period series.
+    // sandwich::meatHAC warns and truncates when lag >= n (sandwich::meatPL, its
+    // Driscoll-Kraay meat, does neither); p2a refuses lag >= T here and
+    // additionally warns when a user bandwidth exceeds T/4 (REG-1).
     let mut warnings = Vec::new();
     if let Some(bw) = bandwidth {
         if bw >= n_periods {
@@ -2330,7 +2340,8 @@ pub fn vcov_driscoll_kraay(
 /// * `y_col` - Name of the dependent variable column
 /// * `x_cols` - Names of independent variable columns
 /// * `time_col` - Name of the time period identifier column
-/// * `bandwidth` - Optional bandwidth (None for automatic)
+/// * `bandwidth` - Optional bandwidth (None for automatic). Must be smaller than the number of
+///   time periods T; one above T/4 adds a warning (see [`vcov_driscoll_kraay`]).
 /// * `kernel` - Kernel type string ("bartlett", "parzen", "qs", etc.)
 ///
 /// # Returns

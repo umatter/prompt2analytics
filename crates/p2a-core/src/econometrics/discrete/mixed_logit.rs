@@ -63,13 +63,14 @@ pub struct RandomParameterSpec {
 /// Configuration for mixed logit estimation.
 #[derive(Debug, Clone)]
 pub struct MixedLogitConfig {
-    /// Number of simulation draws per individual
+    /// Number of simulation draws per individual. At least 1 (otherwise
+    /// `InvalidSpecification`); a draw buffer that cannot be allocated is `ResourceLimit`.
     pub n_draws: usize,
     /// Use Halton sequences (quasi-random) instead of pseudo-random
     pub halton: bool,
-    /// Maximum iterations
+    /// Maximum iterations. At least 1 (otherwise `InvalidSpecification`).
     pub max_iter: usize,
-    /// Convergence tolerance
+    /// Convergence tolerance. Must be finite and > 0 (otherwise `InvalidSpecification`).
     pub tolerance: f64,
     /// Random seed for reproducibility
     pub seed: Option<u64>,
