@@ -10,7 +10,7 @@ use axum::{
 use serde::Deserialize;
 
 use super::http::{ApiResponse, AppState, ContentItem};
-use crate::audit::AuditLogger;
+use crate::audit::{AuditEntry, ResultSummary, sanitize_arguments};
 use crate::exec::CallOrigin;
 use crate::session::SessionError;
 
@@ -92,14 +92,14 @@ pub(crate) async fn call_tool(
 
             // Audit logging (if enabled)
             if state.audit_logger.is_enabled() {
-                let entry = AuditLogger::create_entry(
+                let entry = AuditEntry::new(
                     &request.session_id,
+                    "http",
                     &name,
-                    &request.arguments,
-                    result.success,
+                    sanitize_arguments(&request.arguments),
+                    if result.success { "ok" } else { "tool_error" },
                     duration_ms,
-                    &result_text,
-                    None, // Client IP would require extracting from request headers
+                    ResultSummary::of_tool_result(&result),
                 );
                 state.audit_logger.log(entry).await;
             }
@@ -135,14 +135,14 @@ pub(crate) async fn call_tool(
         Err(e) => {
             // Audit log for failures
             if state.audit_logger.is_enabled() {
-                let entry = AuditLogger::create_entry(
+                let entry = AuditEntry::new(
                     &request.session_id,
+                    "http",
                     &name,
-                    &request.arguments,
-                    false,
+                    sanitize_arguments(&request.arguments),
+                    e.code(),
                     duration_ms,
-                    &e.to_string(),
-                    None,
+                    ResultSummary::default(),
                 );
                 state.audit_logger.log(entry).await;
             }
