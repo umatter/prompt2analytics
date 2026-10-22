@@ -77,6 +77,7 @@ use serde::{Deserialize, Serialize};
 use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
 use crate::linalg::matrix_ops::{matrix_inverse, xtx, xty};
+use crate::resource::{try_zeros1, try_zeros2};
 use crate::spatial::SpatialWeights;
 use crate::traits::estimator::{normal_cdf, normal_pdf};
 
@@ -332,6 +333,9 @@ fn run_spatial_probit_internal(
     config: SpatialProbitConfig,
     model_type: SpatialProbitModel,
 ) -> EconResult<SpatialProbitResult> {
+    // Refuse impossible draw counts before any work.
+    total_mcmc_draws(&config)?;
+
     let df = dataset.df();
     let n = df.height();
     let k = x_cols.len() + 1; // +1 for intercept
@@ -401,7 +405,7 @@ fn run_spatial_probit_internal(
     let w = listw.to_dense();
 
     // Get valid range for spatial parameter
-    let (rho_min, rho_max) = listw.rho_range();
+    let (rho_min, rho_max) = listw.try_rho_range()?;
     let rho_range = (
         rho_min.max(config.rho_prior_range.0),
         rho_max.min(config.rho_prior_range.1),
@@ -514,6 +518,30 @@ fn run_spatial_probit_internal(
     })
 }
 
+/// The number of Gibbs iterations, burn_in + n_draws * thin, after checking that at least
+/// one draw is kept, the thinning interval is positive and the total does not overflow.
+fn total_mcmc_draws(config: &SpatialProbitConfig) -> EconResult<usize> {
+    let (n_draws, burn_in, thin) = (config.n_draws, config.burn_in, config.thin);
+    if n_draws == 0 {
+        return Err(EconError::InvalidSpecification {
+            message: "n_draws must be at least 1".to_string(),
+        });
+    }
+    if thin == 0 {
+        return Err(EconError::InvalidSpecification {
+            message: "thin must be at least 1".to_string(),
+        });
+    }
+    n_draws
+        .checked_mul(thin)
+        .and_then(|v| v.checked_add(burn_in))
+        .ok_or_else(|| {
+            EconError::ResourceLimit(format!(
+                "burn_in + n_draws * thin overflows ({burn_in} + {n_draws} * {thin})"
+            ))
+        })
+}
+
 /// MCMC result structure (internal).
 struct McmcResult {
     beta_draws: Array2<f64>,
@@ -538,7 +566,7 @@ fn run_mcmc_spatial_probit(
 ) -> EconResult<McmcResult> {
     let _n = y.len();
     let k = x.ncols();
-    let total_draws = config.burn_in + config.n_draws * config.thin;
+    let total_draws = total_mcmc_draws(config)?;
 
     // Initialize RNG
     use rand::SeedableRng;
@@ -567,15 +595,17 @@ fn run_mcmc_spatial_probit(
 
     // Storage for draws
     let keep_draws = config.n_draws;
-    let mut beta_draws = Array2::zeros((keep_draws, k));
-    let mut rho_draws = Array1::zeros(keep_draws);
-    let mut log_lik_draws = Array1::zeros(keep_draws);
+    let mut beta_draws = try_zeros2(keep_draws, k, "posterior draws of beta")?;
+    let mut rho_draws = try_zeros1(keep_draws, "posterior draws of rho")?;
+    let mut log_lik_draws = try_zeros1(keep_draws, "posterior log-likelihood draws")?;
 
     // MCMC iterations
     let mut n_accepted = 0;
     let mut draw_idx = 0;
 
     for iter in 0..total_draws {
+        crate::resource::checkpoint()?;
+
         // --- Step 1: Sample latent y* given (beta, rho) ---
         y_star = sample_latent_y(y, x, w, &beta, rho, model_type, &mut rng);
 
@@ -1273,6 +1303,56 @@ mod tests {
         // Mean should be greater than 1 (truncation shifts mean up)
         let mean: f64 = samples.iter().sum::<f64>() / 1000.0;
         assert!(mean > 1.0);
+    }
+
+    fn cfg(n_draws: usize, burn_in: usize, thin: usize) -> SpatialProbitConfig {
+        SpatialProbitConfig {
+            n_draws,
+            burn_in,
+            thin,
+            compute_impacts: false,
+            seed: Some(42),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn probit_rejects_zero_draws_and_zero_thinning() {
+        let (d, mut w) = create_test_spatial_binary_data();
+        for (c, word) in [(cfg(0, 10, 1), "n_draws"), (cfg(10, 10, 0), "thin")] {
+            let e = run_sar_probit(&d, "y", &["x"], &mut w, c).unwrap_err();
+            assert!(
+                matches!(&e, EconError::InvalidSpecification { message } if message.contains(word)),
+                "{e}"
+            );
+        }
+    }
+
+    #[test]
+    fn probit_rejects_draw_counts_that_overflow_or_cannot_be_stored() {
+        let (d, mut w) = create_test_spatial_binary_data();
+        // overflow of burn_in + n_draws * thin, and an n_draws x k buffer larger than isize::MAX bytes
+        for c in [
+            cfg(usize::MAX / 2, 0, 3),
+            cfg(1, usize::MAX, 1),
+            cfg(usize::MAX / 8, 0, 1),
+        ] {
+            assert!(matches!(
+                run_sem_probit(&d, "y", &["x"], &mut w, c),
+                Err(EconError::ResourceLimit(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn probit_sampler_honours_cancellation() {
+        let (d, mut w) = create_test_spatial_binary_data();
+        let t = crate::resource::CancelToken::new();
+        t.cancel();
+        let r = crate::resource::with_budget(crate::resource::Budget::new(None, t), || {
+            run_sar_probit(&d, "y", &["x"], &mut w, cfg(10, 5, 1))
+        });
+        assert!(matches!(r, Err(EconError::Cancelled(_))));
     }
 
     #[test]
