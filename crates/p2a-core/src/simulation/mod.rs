@@ -13,7 +13,25 @@
 //! - **Exponential**: Time between events with specified rate
 //! - **Bernoulli**: Binary (0/1) outcomes with specified probability
 //! - **Categorical**: Random selection from specified categories
+//! - **UniformInt**: Integers uniformly distributed between min and max (both inclusive)
 //! - **Sequence**: Sequential integers (useful for IDs)
+//! - **Constant**: The same number in every row
+//! - **ConstantString**: The same text in every row (stored once)
+//!
+//! # Parameter bounds
+//!
+//! [`Distribution::validate`] (called by [`generate_random_data`]) requires every
+//! floating-point parameter to be finite. Beyond that: a uniform range must have
+//! `min < max` and a representable width `max - min`; normal and exponential scale
+//! parameters must be positive; probabilities lie in `[0, 1]`; a Poisson mean
+//! `lambda` lies in `(0, 1e13]` (larger means are not sampled accurately); a
+//! binomial `n` lies in `1..=2^53`; categorical weights are non-negative with a
+//! finite, positive sum. `n_rows` lies in `1..=IdxSize::MAX` (polars' row limit),
+//! and a sequence's last value `start + n_rows - 1` must fit in `i64`.
+//!
+//! Column buffers are allocated fallibly through [`crate::resource`], and generation
+//! stops with an error when the thread's [`crate::resource::Budget`] is cancelled or
+//! past its deadline.
 //!
 //! # Example
 //!

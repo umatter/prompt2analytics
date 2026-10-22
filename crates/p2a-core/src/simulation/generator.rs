@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 use crate::data::Dataset;
+use crate::resource;
 
 /// Error type for data generation operations.
 #[derive(Debug, Clone)]
@@ -376,6 +377,7 @@ pub fn generate_random_data(
     let mut series_vec: Vec<Column> = Vec::with_capacity(columns.len());
 
     for col in columns {
+        resource::checkpoint().map_err(resource_err)?;
         let series = generate_column(&col.name, &col.distribution, n_rows, &mut rng)?;
         series_vec.push(series);
     }
@@ -388,6 +390,32 @@ pub fn generate_random_data(
     Ok(Dataset::new(df).with_name("generated"))
 }
 
+/// Rows generated between two cancellation checkpoints.
+const CHECKPOINT_ROWS: usize = 1 << 16;
+
+fn resource_err(e: crate::errors::EconError) -> GenerationError {
+    GenerationError::InvalidParameters(e.to_string())
+}
+
+/// Fallible, cancellable `(0..n_rows).map(|_| draw()).collect()`: the buffer is
+/// allocated through [`resource::try_with_capacity`] and the budget is checked
+/// before every block of [`CHECKPOINT_ROWS`] rows. `draw` is called exactly
+/// `n_rows` times, in order, so seeded output is the same as the plain collect.
+fn fill<T>(
+    n_rows: usize,
+    what: &str,
+    mut draw: impl FnMut() -> T,
+) -> Result<Vec<T>, GenerationError> {
+    let mut out = resource::try_with_capacity::<T>(n_rows, what).map_err(resource_err)?;
+    for i in 0..n_rows {
+        if i % CHECKPOINT_ROWS == 0 {
+            resource::checkpoint().map_err(resource_err)?;
+        }
+        out.push(draw());
+    }
+    Ok(out)
+}
+
 /// Generate a single column of random data.
 fn generate_column(
     name: &str,
@@ -398,7 +426,7 @@ fn generate_column(
     match distribution {
         Distribution::Uniform { min, max } => {
             let dist = Uniform::new(*min, *max);
-            let values: Vec<f64> = (0..n_rows).map(|_| rng.sample(dist)).collect();
+            let values: Vec<f64> = fill(n_rows, "uniform column", || rng.sample(dist))?;
             Ok(Column::new(name.into(), values))
         }
 
@@ -406,7 +434,7 @@ fn generate_column(
             let dist = Normal::new(*mean, *std).map_err(|e| {
                 GenerationError::ColumnCreation(format!("Normal distribution error: {}", e))
             })?;
-            let values: Vec<f64> = (0..n_rows).map(|_| rng.sample(dist)).collect();
+            let values: Vec<f64> = fill(n_rows, "normal column", || rng.sample(dist))?;
             Ok(Column::new(name.into(), values))
         }
 
@@ -414,7 +442,7 @@ fn generate_column(
             let dist = Binomial::new(*n, *p).map_err(|e| {
                 GenerationError::ColumnCreation(format!("Binomial distribution error: {}", e))
             })?;
-            let values: Vec<i64> = (0..n_rows).map(|_| rng.sample(dist) as i64).collect();
+            let values: Vec<i64> = fill(n_rows, "binomial column", || rng.sample(dist) as i64)?;
             Ok(Column::new(name.into(), values))
         }
 
@@ -422,7 +450,7 @@ fn generate_column(
             let dist = Poisson::new(*lambda).map_err(|e| {
                 GenerationError::ColumnCreation(format!("Poisson distribution error: {}", e))
             })?;
-            let values: Vec<i64> = (0..n_rows).map(|_| rng.sample(dist) as i64).collect();
+            let values: Vec<i64> = fill(n_rows, "Poisson column", || rng.sample(dist) as i64)?;
             Ok(Column::new(name.into(), values))
         }
 
@@ -430,14 +458,14 @@ fn generate_column(
             let dist = Exp::new(*rate).map_err(|e| {
                 GenerationError::ColumnCreation(format!("Exponential distribution error: {}", e))
             })?;
-            let values: Vec<f64> = (0..n_rows).map(|_| rng.sample(dist)).collect();
+            let values: Vec<f64> = fill(n_rows, "exponential column", || rng.sample(dist))?;
             Ok(Column::new(name.into(), values))
         }
 
         Distribution::Bernoulli { p } => {
-            let values: Vec<i32> = (0..n_rows)
-                .map(|_| if rng.r#gen::<f64>() < *p { 1 } else { 0 })
-                .collect();
+            let values: Vec<i32> = fill(n_rows, "Bernoulli column", || {
+                if rng.r#gen::<f64>() < *p { 1 } else { 0 }
+            })?;
             Ok(Column::new(name.into(), values))
         }
 
@@ -464,23 +492,24 @@ fn generate_column(
                 cumulative.push(sum);
             }
 
-            let values: Vec<String> = (0..n_rows)
-                .map(|_| {
-                    let r: f64 = rng.r#gen();
-                    for (i, &c) in cumulative.iter().enumerate() {
-                        if r < c {
-                            return categories[i].clone();
-                        }
-                    }
-                    categories.last().unwrap().clone()
-                })
-                .collect();
-
-            Ok(Column::new(name.into(), values))
+            // Each row draws one f64 and takes the first label whose cumulative
+            // weight exceeds it (the last label when rounding leaves none), found
+            // by binary search. Rows hold indices into a k-row label column, so
+            // each label's bytes are stored once.
+            let k = categories.len();
+            let labels = StringChunked::from_slice(name.into(), categories.as_slice());
+            let idx: Vec<IdxSize> = fill(n_rows, "category indices", || {
+                let r: f64 = rng.r#gen();
+                cumulative.partition_point(|&c| c <= r).min(k - 1) as IdxSize
+            })?;
+            let column = labels.take(idx.as_slice()).map_err(|e| {
+                GenerationError::ColumnCreation(format!("Categorical column error: {}", e))
+            })?;
+            Ok(column.into_column())
         }
 
         Distribution::UniformInt { min, max } => {
-            let values: Vec<i64> = (0..n_rows).map(|_| rng.r#gen_range(*min..=*max)).collect();
+            let values: Vec<i64> = fill(n_rows, "integer column", || rng.r#gen_range(*min..=*max))?;
             Ok(Column::new(name.into(), values))
         }
 
@@ -499,18 +528,24 @@ fn generate_column(
                     i64::MAX
                 )));
             }
-            let values: Vec<i64> = (0..n_rows as i64).map(|i| start + i).collect();
+            let mut offset: i64 = 0;
+            let values: Vec<i64> = fill(n_rows, "sequence column", || {
+                let v = start + offset;
+                offset += 1;
+                v
+            })?;
             Ok(Column::new(name.into(), values))
         }
 
         Distribution::Constant { value } => {
-            let values: Vec<f64> = vec![*value; n_rows];
+            let values: Vec<f64> = fill(n_rows, "constant column", || *value)?;
             Ok(Column::new(name.into(), values))
         }
 
         Distribution::ConstantString { value } => {
-            let values: Vec<String> = vec![value.clone(); n_rows];
-            Ok(Column::new(name.into(), values))
+            // One stored copy of the text behind a 16-byte view per row.
+            resource::check_alloc::<[u8; 16]>(n_rows, "string column").map_err(resource_err)?;
+            Ok(StringChunked::full(name.into(), value, n_rows).into_column())
         }
     }
 }
@@ -518,6 +553,205 @@ fn generate_column(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::resource;
+
+    /// Sum of the string bytes the column physically stores (views of <= 12 bytes are inline).
+    fn stored_string_bytes(ds: &Dataset, col: &str) -> usize {
+        ds.df()
+            .column(col)
+            .unwrap()
+            .str()
+            .unwrap()
+            .downcast_iter()
+            .map(|arr| arr.total_buffer_len())
+            .sum()
+    }
+
+    #[test]
+    fn test_constant_string_stores_value_once() {
+        let value = "x".repeat(1000);
+        let ds = generate_random_data(
+            10_000,
+            vec![ColumnSpec::new(
+                "s",
+                Distribution::ConstantString {
+                    value: value.clone(),
+                },
+            )],
+            Some(1),
+        )
+        .unwrap();
+        assert!(
+            stored_string_bytes(&ds, "s") <= 2 * value.len(),
+            "{}",
+            stored_string_bytes(&ds, "s")
+        );
+        let ca = ds.df().column("s").unwrap().str().unwrap().clone();
+        assert_eq!(ca.len(), 10_000);
+        assert!(ca.into_no_null_iter().all(|s| s == value));
+    }
+
+    #[test]
+    fn test_categorical_labels_stored_once() {
+        // 100-byte labels
+        let categories: Vec<String> = (0..3).map(|i| format!("{i}{}", "y".repeat(99))).collect();
+        let ds = generate_random_data(
+            10_000,
+            vec![ColumnSpec::new(
+                "c",
+                Distribution::Categorical {
+                    categories: categories.clone(),
+                    weights: None,
+                },
+            )],
+            Some(3),
+        )
+        .unwrap();
+        assert!(
+            stored_string_bytes(&ds, "c") <= 2 * 300,
+            "{}",
+            stored_string_bytes(&ds, "c")
+        );
+        let ca = ds.df().column("c").unwrap().str().unwrap().clone();
+        assert!(
+            ca.into_no_null_iter()
+                .all(|s| categories.iter().any(|c| c == s))
+        );
+    }
+
+    #[test]
+    fn test_categorical_binary_search_matches_linear_scan() {
+        // Pin: the pre-change sampler, consuming one f64 per row from the same seeded StdRng.
+        let categories: Vec<String> = (0..50).map(|i| format!("c{i}")).collect();
+        let mut wrng = StdRng::seed_from_u64(7);
+        let mut weights: Vec<f64> = (0..50).map(|_| wrng.r#gen::<f64>()).collect();
+        // zero-weight runs, including the last label
+        for i in [0, 17, 18, 49] {
+            weights[i] = 0.0;
+        }
+        let n = 20_000;
+        let ds = generate_random_data(
+            n,
+            vec![ColumnSpec::new(
+                "x",
+                Distribution::Categorical {
+                    categories: categories.clone(),
+                    weights: Some(weights.clone()),
+                },
+            )],
+            Some(99),
+        )
+        .unwrap();
+        let got: Vec<String> = ds
+            .df()
+            .column("x")
+            .unwrap()
+            .str()
+            .unwrap()
+            .into_no_null_iter()
+            .map(str::to_string)
+            .collect();
+        let sum: f64 = weights.iter().sum();
+        let mut cumulative = Vec::new();
+        let mut acc = 0.0;
+        for w in &weights {
+            acc += w / sum;
+            cumulative.push(acc);
+        }
+        let mut rng = StdRng::seed_from_u64(99);
+        let expected: Vec<String> = (0..n)
+            .map(|_| {
+                let r: f64 = rng.r#gen();
+                for (i, &c) in cumulative.iter().enumerate() {
+                    if r < c {
+                        return categories[i].clone();
+                    }
+                }
+                categories.last().unwrap().clone()
+            })
+            .collect();
+        assert_eq!(got, expected);
+    }
+
+    #[test]
+    fn test_numeric_draws_unchanged_by_chunked_fill() {
+        // Pin: the chunked, fallible fill must consume the RNG exactly like `(0..n).map(sample)`.
+        let n = 200_001; // crosses three 65,536-row chunks
+        let ds = generate_random_data(
+            n,
+            vec![
+                ColumnSpec::new(
+                    "a",
+                    Distribution::Normal {
+                        mean: 1.0,
+                        std: 2.0,
+                    },
+                ),
+                ColumnSpec::new("b", Distribution::Poisson { lambda: 30.0 }),
+            ],
+            Some(5),
+        )
+        .unwrap();
+        let mut rng = StdRng::seed_from_u64(5);
+        let a: Vec<f64> = (0..n)
+            .map(|_| rng.sample(Normal::new(1.0, 2.0).unwrap()))
+            .collect();
+        let b: Vec<i64> = (0..n)
+            .map(|_| rng.sample(Poisson::new(30.0).unwrap()) as i64)
+            .collect();
+        assert_eq!(
+            ds.df()
+                .column("a")
+                .unwrap()
+                .f64()
+                .unwrap()
+                .into_no_null_iter()
+                .collect::<Vec<_>>(),
+            a
+        );
+        assert_eq!(
+            ds.df()
+                .column("b")
+                .unwrap()
+                .i64()
+                .unwrap()
+                .into_no_null_iter()
+                .collect::<Vec<_>>(),
+            b
+        );
+    }
+
+    #[test]
+    fn test_generation_stops_when_cancelled() {
+        let token = resource::CancelToken::new();
+        token.cancel();
+        let out = resource::with_budget(resource::Budget::new(None, token), || {
+            generate_random_data(
+                200_000,
+                vec![ColumnSpec::new(
+                    "x",
+                    Distribution::Normal {
+                        mean: 0.0,
+                        std: 1.0,
+                    },
+                )],
+                Some(1),
+            )
+        });
+        // Dataset is not Debug, so no unwrap_err.
+        let err = match out {
+            Ok(_) => panic!("generation ignored the cancelled budget"),
+            Err(e) => e.to_string(),
+        };
+        // EconError::Cancelled displays "Computation stopped: ..."
+        assert!(err.contains("stopped"), "{err}");
+    }
+
+    #[test]
+    fn test_impossible_row_count_is_an_error() {
+        let columns = vec![ColumnSpec::new("x", Distribution::Constant { value: 1.0 })];
+        assert!(generate_random_data(usize::MAX / 2, columns, Some(1)).is_err());
+    }
 
     #[test]
     fn test_generate_uniform() {
