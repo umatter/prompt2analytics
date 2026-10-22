@@ -23,7 +23,6 @@
 
 use ndarray::{Array1, Array2};
 use polars::prelude::*;
-use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -1906,73 +1905,19 @@ fn run_placebo_inference(
         f64::INFINITY
     };
 
-    // Run placebo for each donor unit IN PARALLEL
-    // Each placebo test is independent, making this embarrassingly parallel.
-    // The budget is a thread-local of the calling thread, so it is captured
-    // here and installed on the rayon worker for each placebo fit; a placebo
-    // that fails is skipped as before, a stopped budget ends the inference.
-    let budget = crate::resource::current_budget();
-    let placebo_fits: Vec<Option<(String, f64)>> = units
-        .par_iter()
-        .filter(|unit| *unit != &config.treated_unit)
-        .map(|donor_unit| -> EconResult<Option<(String, f64)>> {
-            // Run synth with this donor as treated
-            let placebo_config = SynthConfig {
-                treated_unit: donor_unit.clone(),
-                run_placebos: false,
-                ..config.clone()
-            };
-            let fit = || {
-                run_synthetic_control(
-                    dataset,
-                    outcome,
-                    unit_col,
-                    time_col,
-                    predictors,
-                    placebo_config,
-                )
-            };
-            let result = match &budget {
-                Some(b) => {
-                    b.check()?;
-                    crate::resource::with_budget(b.clone(), fit)
-                }
-                None => fit(),
-            };
-
-            let placebo_result = match result {
-                Ok(r) => r,
-                Err(e @ EconError::Cancelled(_)) => return Err(e),
-                Err(_) => return Ok(None),
-            };
-
-            let rmspe_pre = placebo_result.pre_treatment_rmspe;
-            let rmspe_post = if !placebo_result.treatment_effects.is_empty() {
-                let mse: f64 = placebo_result
-                    .treatment_effects
-                    .iter()
-                    .map(|te| te.effect * te.effect)
-                    .sum::<f64>()
-                    / placebo_result.treatment_effects.len() as f64;
-                mse.sqrt()
-            } else {
-                0.0
-            };
-
-            let ratio = if rmspe_pre > 1e-10 {
-                rmspe_post / rmspe_pre
-            } else {
-                f64::INFINITY
-            };
-
-            Ok(Some((donor_unit.clone(), ratio)))
-        })
-        .collect::<EconResult<Vec<_>>>()?;
-    let donor_ratios: Vec<(String, f64)> = placebo_fits.into_iter().flatten().collect();
-
-    // Combine treated unit ratio with donor ratios
+    // One placebo fit per donor unit, one after another on this thread. The
+    // fits read the caller's budget (a thread-local) at their own checkpoints,
+    // so a deadline or a cancellation stops the inference inside a fit. A
+    // placebo whose fit fails is skipped; a stopped budget ends the inference.
     let mut rmspe_ratios: Vec<(String, f64)> = vec![(config.treated_unit.clone(), treated_ratio)];
-    rmspe_ratios.extend(donor_ratios);
+    for donor_unit in units.iter().filter(|unit| *unit != &config.treated_unit) {
+        crate::resource::checkpoint()?;
+        if let Some(ratio) = placebo_rmspe_ratio(
+            dataset, outcome, unit_col, time_col, predictors, config, donor_unit,
+        )? {
+            rmspe_ratios.push((donor_unit.clone(), ratio));
+        }
+    }
 
     // Sort by ratio (descending)
     rmspe_ratios.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -1995,6 +1940,56 @@ fn run_placebo_inference(
         n_units,
         significance,
     })
+}
+
+/// Post- over pre-treatment RMSPE ratio of the placebo fit that treats `donor`
+/// in place of the treated unit. A fit that fails gives `None`, and the placebo
+/// is skipped; a stopped budget (`Cancelled`) is passed on and ends the inference.
+fn placebo_rmspe_ratio(
+    dataset: &Dataset,
+    outcome: &str,
+    unit_col: &str,
+    time_col: &str,
+    predictors: &[PredictorSpec],
+    config: &SynthConfig,
+    donor: &str,
+) -> EconResult<Option<f64>> {
+    let placebo_config = SynthConfig {
+        treated_unit: donor.to_string(),
+        run_placebos: false,
+        ..config.clone()
+    };
+    let placebo_result = match run_synthetic_control(
+        dataset,
+        outcome,
+        unit_col,
+        time_col,
+        predictors,
+        placebo_config,
+    ) {
+        Ok(r) => r,
+        Err(e @ EconError::Cancelled(_)) => return Err(e),
+        Err(_) => return Ok(None),
+    };
+
+    let rmspe_pre = placebo_result.pre_treatment_rmspe;
+    let rmspe_post = if !placebo_result.treatment_effects.is_empty() {
+        let mse: f64 = placebo_result
+            .treatment_effects
+            .iter()
+            .map(|te| te.effect * te.effect)
+            .sum::<f64>()
+            / placebo_result.treatment_effects.len() as f64;
+        mse.sqrt()
+    } else {
+        0.0
+    };
+
+    Ok(Some(if rmspe_pre > 1e-10 {
+        rmspe_post / rmspe_pre
+    } else {
+        f64::INFINITY
+    }))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -2320,14 +2315,34 @@ mod tests {
 
     #[test]
     fn test_synth_placebos_propagate_cancellation() {
-        // Placebo fits run on rayon workers; the budget must reach them, and a
-        // cancelled placebo must not be dropped like a failed one.
+        // The placebo inference as a whole stops with Cancelled under a
+        // cancelled budget. The treated unit's own fit, which runs first, is the
+        // one that sees it here; how a placebo fit's Cancelled is handled is
+        // tested by test_placebo_fit_passes_on_cancellation_and_skips_failures.
         let ds = create_test_panel();
         let preds = vec![PredictorSpec::new("x1")];
         let r = cancelled(|| {
             run_placebo_inference(&ds, "outcome", "unit", "time", &preds, &synth_cfg(), 1.0)
         });
         assert!(matches!(r, Err(EconError::Cancelled(_))));
+    }
+
+    #[test]
+    fn test_placebo_fit_passes_on_cancellation_and_skips_failures() {
+        // A placebo fit stopped by the budget must end the inference, not be
+        // skipped like a fit that fails
+        let ds = create_test_panel();
+        let preds = vec![PredictorSpec::new("x1")];
+        let fit = |donor: &str| {
+            placebo_rmspe_ratio(&ds, "outcome", "unit", "time", &preds, &synth_cfg(), donor)
+        };
+        assert!(matches!(
+            cancelled(|| fit("B")),
+            Err(EconError::Cancelled(_))
+        ));
+        assert!(fit("B").unwrap().is_some_and(|ratio| ratio > 0.0));
+        // a unit that is not in the data cannot be fitted: that placebo is skipped
+        assert_eq!(fit("Z").unwrap(), None);
     }
 
     #[test]
@@ -2467,6 +2482,31 @@ mod tests {
         .unwrap();
 
         Dataset::new(df)
+    }
+
+    #[test]
+    fn test_synth_placebo_inference_ranks_every_unit() {
+        // every donor gets a placebo fit next to the treated unit's own; T fits
+        // its donors almost exactly before t = 11 and gains 10 after, so its
+        // post/pre RMSPE ratio ranks first
+        let ds = create_validate_synth_dataset();
+        let preds = vec![PredictorSpec::new("x1")];
+        let cfg = SynthConfig {
+            treatment_time: 11,
+            treated_unit: "T".to_string(),
+            v_method: VOptimization::Equal,
+            run_placebos: true,
+            ..Default::default()
+        };
+        let res = run_synthetic_control(&ds, "outcome", "unit", "time", &preds, cfg).unwrap();
+        let p = res.placebo_results.expect("placebo results");
+        let mut units: Vec<&str> = p.rmspe_ratios.iter().map(|(u, _)| u.as_str()).collect();
+        units.sort_unstable();
+        assert_eq!(units, ["D1", "D2", "D3", "D4", "T"]);
+        assert_eq!(p.n_units, 5);
+        assert_eq!(p.treated_rank, 1);
+        assert_eq!(p.p_value, 0.2);
+        assert!(p.rmspe_ratios.windows(2).all(|w| w[0].1 >= w[1].1));
     }
 
     /// Validate synthetic control recovers known weights and treatment effect.
