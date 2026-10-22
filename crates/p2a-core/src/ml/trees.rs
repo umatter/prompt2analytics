@@ -1339,6 +1339,49 @@ mod tests {
     }
 
     #[test]
+    fn test_random_forest_output_does_not_depend_on_chunk_size() {
+        // One rayon thread makes the chunk 4 trees, so 37 trees cross nine
+        // chunk boundaries whatever the host's thread count.
+        let (x, y) = noisy_regression(300, 4, 7);
+        let run = || {
+            let r = random_forest(
+                x.view(),
+                y.view(),
+                Some(37),
+                Some(6),
+                Some(2),
+                Some("sqrt"),
+                Some(11),
+                None,
+            )
+            .unwrap();
+            let m = random_forest_with_trees(
+                x.view(),
+                y.view(),
+                Some(37),
+                Some(6),
+                Some(2),
+                Some("sqrt"),
+                Some(11),
+                None,
+            )
+            .unwrap();
+            (r, m)
+        };
+        let (wide, wide_m) = run();
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .unwrap();
+        let (narrow, narrow_m) = pool.install(run);
+        assert_eq!(wide.predictions, narrow.predictions);
+        assert_eq!(wide.feature_importances, narrow.feature_importances);
+        assert_eq!(wide.oob_score, narrow.oob_score);
+        assert_eq!(wide_m.predictions, narrow_m.predictions);
+        assert_eq!(wide_m.n_trees, narrow_m.trees.len());
+    }
+
+    #[test]
     fn test_lcg_jump_matches_sequential_draws() {
         for seed in [0u64, 1, 42, u64::MAX - 7] {
             let mut s = seed;
