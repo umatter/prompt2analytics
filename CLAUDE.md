@@ -234,6 +234,7 @@ src/
 ├── errors.rs              # EconError, EconResult types
 ├── cache.rs               # Thread-safe LRU cache with memory limits and TTL
 ├── memory.rs              # Memory monitoring, pressure detection, cleanup
+├── resource.rs            # try_* fallible allocation, alloc ceiling, CancelToken/Budget, checkpoint()
 ├── linalg/
 │   ├── matrix_ops.rs      # xtx, xty, safe_inverse, cholesky (via faer), GPU dispatch
 │   └── gpu/               # Optional CUDA acceleration (#[cfg(feature = "cuda")])
@@ -411,19 +412,49 @@ Use `EconError` and `EconResult<T>` from `src/errors.rs`:
 ```rust
 use crate::errors::{EconError, EconResult};
 
-fn my_function() -> EconResult<MyResult> {
-    Err(EconError::InvalidInput("message".to_string()))
+fn my_function(lag: usize, n: usize) -> EconResult<MyResult> {
+    if lag >= n {
+        return Err(EconError::InvalidSpecification {
+            message: format!("lag must be below the number of observations ({n}), got {lag}"),
+        });
+    }
+    // ...
 }
 ```
 
-Common error variants:
-- `EconError::InvalidInput(String)` - Bad input data
-- `EconError::SingularMatrix` - Non-invertible matrix
-- `EconError::ColumnNotFound(String)` - Missing column
-- `EconError::InsufficientObservations` - Not enough data
-- `EconError::ConvergenceFailure(String)` - Optimization didn't converge
+Common error variants (field names as in `errors.rs`):
+- `EconError::InvalidSpecification { message }` - a parameter the data cannot support; name the bound
+- `EconError::ColumnNotFound { column, available }` - Missing column
+- `EconError::SingularMatrix { context, suggestion }` - Non-invertible matrix
+- `EconError::InsufficientData { required, provided, context }` - Not enough observations
+- `EconError::ConvergenceFailure { iterations, last_change, suggestion }` - Optimization didn't converge
+- `EconError::Computation(String)` - a numerical step failed
+- `EconError::ResourceLimit(String)` - an impossible or over-ceiling allocation (`resource::try_*`)
+- `EconError::Cancelled(String)` - the call's budget was cancelled or its deadline passed (`resource::checkpoint()`)
+
+Modules with their own error type (`VisualizationError`, `MungeError`, `GenerationError`,
+`DatabaseError`, `SasError`) map resource errors into their invalid-data variant with `map_err`.
 
 ## Common Patterns
+
+### Resource guards (every entry point)
+
+`p2a_core::resource` (`crates/p2a-core/src/resource.rs`) is how core code stays safe on any input,
+whichever crate calls it. Core never knows about "hosted"; the server's profile only sets the
+allocation ceiling and the deadline.
+- Validate parameters against the data (lags, bandwidths, folds, orders below what `n` supports;
+  tolerances finite and positive) and return `InvalidSpecification` naming the bound.
+- Buffers sized by a caller (or by `n * n`) go through `resource::try_vec`/`try_with_capacity`/
+  `try_zeros1`/`try_zeros2`, with size arithmetic through `checked_len`.
+- Call `resource::checkpoint()?` once per outer iteration of every user-sized loop (replications,
+  trees, permutations, draws, folds, grid points, optimiser iterations). Inside rayon, capture
+  `resource::current_budget()` before the parallel iterator and call `.check()` in the closure.
+- Derive each replicate's RNG from `(seed, index)` instead of materialising all index vectors.
+- Filter NaN/Inf before value-driven loops and sort with `f64::total_cmp`.
+- Replace a quadratic or cubic algorithm where a standard efficient one exists, with an equivalence
+  test against a naive reference on noisy data.
+- Method-level caps (outcome categories, `trials`, `committees`, RD order, tree depth 512, ...) hold
+  in every mode; `docs/guides/DEPLOYMENT.md`, "Core invariants", lists them.
 
 ### Matrix Operations
 
@@ -502,20 +533,30 @@ The MCP server exposes 270 tools organized into modular handler files. For the H
 
 ```
 crates/p2a-mcp/src/
-├── server.rs              # AnalyticsServer struct + router composition
-├── config.rs              # clap CLI args; every flag also has a P2A_* env var (P2A_TRANSPORT, P2A_PORT,
-│                          #   P2A_ACCESS_TOKEN, P2A_CORS_ORIGINS, P2A_DB_PATH, P2A_AUDIT_LOG, ...)
-├── path_jail.rs           # validate_data_path(): all user-supplied filesystem paths MUST go through
-│                          #   this; root = P2A_DATA_ROOT or cwd; blocks ../ and symlink escapes
-├── audit.rs               # Per-tool-call audit log (sanitized args, duration, status)
-├── session.rs             # In-memory per-session dataset storage (HTTP multi-user isolation)
-├── persistent_session.rs  # SurrealDB-backed sessions/conversations (feature `db`)
+├── server.rs              # AnalyticsServer struct + router composition; call_tool_with_session runs the
+│                          #   request limits before deserialising (stdio: the ServerHandler::call_tool impl)
+├── config.rs              # clap CLI args, each with a P2A_* env var; DeploymentMode/ResourceProfile are
+│                          #   decided here and nowhere else (knob list: docs/guides/DEPLOYMENT.md,
+│                          #   "Configuration reference")
+├── exec.rs                # ToolGovernor (slots, deadline, RSS admission, quotas, panics, audit),
+│                          #   ToolCallError (status/code/Retry-After), ExecConfig, StuckWatchdog
+├── path_jail.rs           # validate_data_path() / validate_data_path_for_write(): every user-supplied
+│                          #   path MUST go through these; write_atomically() for writes; display_path()
+│                          #   for messages; per-session scope (enter_session_scope, remove_session_dir)
+├── audit.rs               # Per-tool-call audit log (sanitized args, outcome, sizes; 0600, rotation)
+├── session.rs             # The one registry of live sessions (TTL, LRU eviction, per-session datasets)
+├── persistent_session.rs  # SurrealDB-backed conversations over that registry (feature `db`)
 ├── llm/                   # Provider abstraction: anthropic.rs, openai.rs, ollama.rs; tools.rs holds the
-│                          #   *curated* LLM-facing tool subset, context.rs/tokens.rs manage the budget
-├── transport/             # http.rs (axum + SSE), websocket.rs, conversation.rs
+│                          #   *curated* LLM-facing tool subset, context.rs/tokens.rs manage the budget;
+│                          #   egress.rs: host allowlist, resolve-check-pin resolver, no redirects
+├── transport/             # http.rs (shared types, build_app, bind/serve, /health), middleware.rs (CORS,
+│                          #   token, body limit, Host check), routes_sessions.rs, routes_tools.rs,
+│                          #   llm_routes.rs (chat, SSE, tool executors), conversation.rs, websocket.rs
 ├── tools/
 │   ├── mod.rs             # Re-exports
 │   ├── registry.rs        # Tool metadata for documentation
+│   ├── limits/            # Request limits: mod.rs (Limits, hosted()/off(), overrides, LimitViolation),
+│   │                      #   rules.rs (PARAM_RULES per request field, ROW_RULES per tool)
 │   ├── requests/          # Request structs by category
 │   │   ├── mod.rs
 │   │   ├── causal.rs      # Causal inference requests
@@ -573,6 +614,18 @@ async fn my_tool(
 
 3. Import the request type in the handler module and ensure it's re-exported from `tools/requests/mod.rs`
 
+4. Classify every integer, array and tolerance field of the request struct in `tools/limits/rules.rs`:
+   a `Max(Family)`, `ArrayLen`, `ArrayElemMax`, `UniqueList`, `SquareLen` or `Tolerance` rule, or
+   `Exempt("reason")` when the field is not a cost parameter. The exhaustiveness test
+   (`every_cost_property_of_every_tool_is_classified`, built with the `http` feature, so CI runs it)
+   fails otherwise.
+
+5. Add a `ROW_RULES` entry when the method needs O(n²) memory or O(n³) time in the dataset's rows.
+
+HTTP-side code never calls `call_tool_with_session` directly: it goes through `ToolGovernor::call`
+(or `ToolGovernor::run_blocking` for non-tool blocking work), which is where deadlines, slots,
+quotas, session-scoped paths and the audit entry come from.
+
 ### Router Composition
 
 Each handler module defines a router via `#[tool_router(router = <name>_router, vis = "pub")]`.
@@ -604,6 +657,8 @@ let tool_router = Self::tool_router()
 It exists because most LLM APIs cap a request at 128 tool definitions, so `llm/tools.rs` sends only a
 curated subset and relies on search for the rest. A new tool is reachable through search automatically
 once its handler is registered; if it should be in the always-visible subset, add it to `llm/tools.rs` too.
+The server's own chat loop does not offer the search meta-tools to its model (they are in `INTERNAL_TOOLS`,
+which the loop refuses along with unknown names); registered tools outside the subset stay callable by name.
 
 ### Database Layer (SurrealDB)
 
@@ -755,6 +810,7 @@ Changing any of these silently changes or breaks a paper exhibit; check the pape
 | HTTP API contract in `API_ENDPOINTS.md` (`/api/sessions`, `/api/tools/load_dataset`, `/api/llm/chat/stream`, `/health`) | `run_evaluation.py` (backend URL from `P2A_BASE_URL`, default `localhost:8081`, the Dioxus dev-proxy port used for the paper runs) | Endpoint or SSE event changes break the eval harness |
 | `p2a` **text output format** for `data describe/head`, `reg ols` (text and `--format json`), `panel fe/re/hausman/hdfe`, diagnostics | `paper/code/generate_outputs.sh` → `paper/generated/cli_*.tex`, included verbatim; finds the binary via `SW_REPO`/`P2A`/`P2A_DATA_DIR` (default sibling checkout, release build) | Output formatter changes alter exhibits. `make jss` there re-runs the capture whenever the script is newer than the `.tex` files, so a rebuild after touching the script silently re-captures from whatever `p2a` you have built |
 | `validation/datasets/` (Grunfeld etc.) | CLI captures above, `rust_validation/scripts/run_validation.sh`, several R benchmark DGPs | Moving a dataset breaks `make generate` |
+| The LLM system prompt and dataset-context format (`llm/context.rs`, `llm/tools.rs`) | e2e evaluation accuracy (`run_evaluation.py` results) | Tier 0 bounded and delimited the dataset block (JSON-quoted names and values, byte and column caps), so re-running the evaluation against a newer `SOFTWARE_VERSION` can shift the accuracy numbers. Tool names and SSE events are unchanged |
 | Counts and claims stated as prose in `paper/sections/*.tex`: "over 200 methods", test-function and validation-test counts, ~62% line coverage, version, Rust version, and the description of what CI runs | none (hand-written) | They drift silently; re-derive them when re-pinning `SOFTWARE_VERSION` |
 
 ### Paper-side code that points back here
@@ -810,11 +866,18 @@ Auto-discovered guidance:
 `.github/workflows/ci.yml` runs on the free GitHub runner and is kept cheap on purpose:
 
 - **Gating**: `cargo fmt --all -- --check`; `cargo test --tests` for p2a-core (`ci` feature), p2a-mcp
-  (`http,llm,auth`), p2a-cli (`spectral-analysis`); `cargo test -p p2a-core --doc` (its own step); plus a
-  wasm32 `cargo check` + host tests for p2a-dioxus (`web`).
-- **Doctests are gated as of Sep 2026** and currently run 79 passed / 0 failed / 189 ignored. A doc example
+  (`http,llm,auth`), p2a-cli (`spectral-analysis`); doctests for p2a-core (`ci`) and p2a-mcp
+  (`http,llm,auth`) in their own step; plus a wasm32 `cargo check` + host tests for p2a-dioxus (`web`).
+- **Doctests are gated** and, as of Oct 2026, p2a-core runs 81 passed / 0 failed / 190 ignored. A doc example
   that stops compiling is a build failure, so keep `use p2a_core::...` paths in doc comments pointing at
-  what `mod.rs` actually re-exports. The 189 examples fenced as ignore are NOT compiled and can still rot silently.
+  what `mod.rs` actually re-exports. The 190 examples fenced as ignore are NOT compiled and can still rot silently.
+- **p2a-mcp integration tests** are one file per topic in `crates/p2a-mcp/tests/` (`governor.rs`,
+  `limits_e2e.rs`, `sessions.rs`, `llm_egress.rs`, `isolation.rs`, `integration_tests.rs`); their feature
+  gates and commands are in `docs/guides/TESTING.md`. `sessions.rs` (needs `db`) and the `/ws` test (needs
+  `websocket`) are outside CI: run `cargo test -p p2a-mcp --features full` (or
+  `--no-default-features --features "http,llm,auth,db"`) when touching sessions, the DB or the websocket.
+- **Tests never call `limits::install` or `resource::set_alloc_ceiling_bytes`** (process-global, and tests in
+  one binary run in parallel): use the thread-local `limits::with_limits` and `resource::with_alloc_ceiling`.
 - **Clippy runs but does not gate**: p2a-core has a pre-existing backlog of clippy violations, and
   `Cargo.toml` `[workspace.lints]` allows a long list of lints (dead_code, unused_imports, too_many_arguments, ...).
   Do not "fix" the allow-list to make a build green; do keep new code warning-free.
@@ -827,9 +890,11 @@ Auto-discovered guidance:
 - **`tests/benchmark_ml_rust.rs` and `tests/benchmark_fast_implementations.rs` are benchmarks, not
   correctness tests**, and `cargo test -p p2a-core` runs them. In a debug build the ML one has been
   observed to burn 16+ minutes of CPU. Use `--lib` for a fast correctness loop.
-- **Wall-clock assertions**: only one exists (`test_fast_mboost_componentwise_speed`) and it is gated
-  behind `if !cfg!(debug_assertions)`. Do not add ungated timing assertions — they fail on loaded or
-  slower machines and make `cargo test` machine-dependent, which the paper's reviewers will run.
+- **Wall-clock assertions**: four exist (`test_fast_mboost_componentwise_speed` and the panel scaling
+  tests `test_random_effects_scaling_many_entities`, `test_panel_gls_scaling_many_entities`,
+  `test_gmm_scaling_many_entities`), and all of them are release-only (`cfg!(debug_assertions)` guards).
+  Do not add ungated timing assertions — they fail on loaded or slower machines and make `cargo test`
+  machine-dependent, which the paper's reviewers will run.
 
 ### Two traps on a dev box: disk and rustdoc
 
@@ -881,7 +946,8 @@ let df = df! {
    - HTML tables (self-contained with CSS)
    - CSV via `CsvExport` trait (all result types)
 6. **ARM64 builds**: On aarch64-linux, debug builds require `opt-level = 1` due to relocation range limits with large binaries. Create `.cargo/config.toml` locally (see ARM64 Build Notes); it is gitignored. Release builds work without modification.
-8. **Filesystem access in p2a-mcp**: any tool or HTTP handler that takes a path must call `path_jail::validate_data_path` first. The hosted demo (p2a.qamelab.org) runs in no-login mode with `P2A_DATA_ROOT` narrowed and session-list/file-browser endpoints disabled; see `docs/guides/DEPLOYMENT.md` for the threat model before changing anything on the HTTP surface.
+8. **Filesystem access in p2a-mcp**: any tool or HTTP handler that takes a path must call `path_jail::validate_data_path` first (writers: `validate_data_path_for_write` + `write_atomically`), and messages show `display_path` only, never absolute paths. Paths are session-scoped automatically, because the governor enters `path_jail::enter_session_scope` on the blocking thread that runs the handler; handlers must therefore not spawn threads or tasks that validate paths (those have no scope and are refused). The hosted demo (p2a.qamelab.org) runs in open public mode with the hosted resource profile; see `docs/guides/DEPLOYMENT.md` for the threat model before changing anything on the HTTP surface.
+10. **Deployment mode and resource profile are decided only in `config.rs`** (`DeploymentMode`, `ResourceProfile`). Local, stdio, desktop and the paper's evaluation runs are `Off`: no caps, no deadline, no per-session directories. `P2A_LIMITS=hosted` turns the server layer on anywhere, and open public mode always has it. Never key behaviour to the bind address.
 9. **Native Dioxus builds embed the backend**: `desktop`/`mobile` features depend on `p2a-mcp` and start an in-process server (`start_embedded_server` in `p2a-dioxus/src/main.rs`); the web build talks to `P2A_BACKEND_URL` baked in at build time. A change to `p2a-mcp`'s public API can break the desktop build even when the web build passes.
 7. **Disk space**: The `target/` directory can grow large. Use `cargo clean` to reclaim space.
 
@@ -891,10 +957,11 @@ let df = df! {
 - `crates/p2a-core/src/regression/ols.rs` - OLS with robust SEs, HAC, bootstrap
 - `crates/p2a-core/src/linalg/matrix_ops.rs` - Linear algebra primitives
 - `crates/p2a-core/src/traits/estimator.rs` - LinearEstimator trait
+- `crates/p2a-core/src/resource.rs` - Resource guards: fallible allocation, alloc ceiling, budgets, `checkpoint()`
 
 **Major Econometrics:**
-- `crates/p2a-core/src/econometrics/panel.rs` - Panel data (FE, RE, GMM)
-- `crates/p2a-core/src/econometrics/discrete.rs` - All discrete choice models
+- `crates/p2a-core/src/econometrics/panel/` - Panel data (FE, RE, GLS, GMM)
+- `crates/p2a-core/src/econometrics/discrete/` - All discrete choice models
 - `crates/p2a-core/src/econometrics/staggered_did.rs` - Callaway-Sant'Anna DiD
 - `crates/p2a-core/src/econometrics/synth.rs` - Synthetic control methods
 - `crates/p2a-core/src/econometrics/tmle.rs` - TMLE family (tmle, ctmle, ltmle)
@@ -914,9 +981,13 @@ let df = df! {
 - `crates/p2a-mcp/src/server.rs` - AnalyticsServer struct and router composition
 - `crates/p2a-mcp/src/tools/handlers/` - Tool implementations (270 tools across 17 modules)
 - `crates/p2a-mcp/src/tools/requests/` - Request type definitions
-- `crates/p2a-mcp/src/transport/http.rs` - HTTP transport with SSE streaming
+- `crates/p2a-mcp/src/exec.rs` - Tool governor: slots, deadlines, memory admission, quotas, error codes
+- `crates/p2a-mcp/src/tools/limits/` - Request-limit catalogue (`Limits`, `PARAM_RULES`, `ROW_RULES`)
+- `crates/p2a-mcp/src/transport/http.rs` - Shared HTTP types, router composition, startup (`build_app`, `bind`, `serve`), `/health`
+- `crates/p2a-mcp/src/transport/llm_routes.rs` - LLM chat routes, SSE streaming, tool executors
+- `crates/p2a-mcp/src/llm/egress.rs` - LLM host allowlist and resolve-check-pin resolver
 - `crates/p2a-mcp/src/db/` - SurrealDB persistence layer
-- `crates/p2a-mcp/src/path_jail.rs` - Filesystem path validation (P2A_DATA_ROOT)
+- `crates/p2a-mcp/src/path_jail.rs` - Filesystem path validation (P2A_DATA_ROOT, per-session directories)
 - `crates/p2a-mcp/src/tools/handlers/search.rs` - Tool search meta-tools (128-tool API limit workaround)
 - `crates/p2a-mcp/src/llm/tools.rs` - Curated LLM-facing tool subset and few-shot examples
 
@@ -944,7 +1015,7 @@ let df = df! {
 - `API_ENDPOINTS.md` - Complete HTTP API reference (sessions, datasets, tools, LLM chat, SSE)
 - `docs/guides/TESTING.md` - Test runtime expectations, validation framework
 - `docs/guides/DATA_SECURITY.md` - Data write locations, offline capability
-- `docs/guides/DEPLOYMENT.md` - BYOK web deployment, threat model, Fly.io/GHCR release steps
+- `docs/guides/DEPLOYMENT.md` - BYOK web deployment, deployment modes, in-process controls, every `P2A_*` knob and limit key, release and redeploy steps
 - `docs/guides/CLI_REFERENCE.md` - Full `p2a` command reference; `docs/cookbook.md` - worked workflows
 - `docs/design/IDENTIFICATION_WARNINGS.md` - Design of the `diagnostics/` identification-warning system
 - `docs/security/PROMPT_INJECTION.md` - MCP security considerations
