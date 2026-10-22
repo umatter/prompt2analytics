@@ -134,9 +134,24 @@ fn single_statement_body(query: &str) -> Result<&str, DatabaseError> {
         let next = bytes.get(i + 1).copied();
         match b {
             b'\'' => {
-                let escape = i >= 1
-                    && matches!(bytes[i - 1], b'E' | b'e')
-                    && (i < 2 || !is_ident_byte(bytes[i - 2]));
+                let after_e = i >= 1 && matches!(bytes[i - 1], b'E' | b'e');
+                // DuckDB's `realfail1` rule gives the trailing E/e back after a
+                // numeric literal, so `1E'..'` and `1.E'..'` lex there as a
+                // number followed by an escape string. The byte before the E is
+                // then a digit or `.`, and the quote still starts an escape
+                // string whose `\'` the engine would honour. The lexer cannot
+                // tell that apart from a plain string cheaply, so it fails
+                // closed (over-rejection is acceptable per the plan).
+                if after_e && i >= 2 && (bytes[i - 2].is_ascii_digit() || bytes[i - 2] == b'.') {
+                    return Err(DatabaseError::Forbidden(
+                        "a quote after a digit and `E` is ambiguous (DuckDB reads it as an \
+                         escape string); separate the number from the string"
+                            .to_string(),
+                    ));
+                }
+                // An escape string (`E'..'`) when the E/e is a standalone token,
+                // i.e. not the tail of an identifier.
+                let escape = after_e && (i < 2 || !is_ident_byte(bytes[i - 2]));
                 i = skip_string(bytes, i + 1, escape).ok_or_else(unterminated)?;
                 has_code = true;
             }
@@ -1368,6 +1383,10 @@ mod tests {
             ("SELECT $$x", "unterminated"),
             (r#"SELECT "abc"#, "unterminated"),
             ("SELECT 1\0", "NUL"),
+            // DuckDB reads `1E'..'` / `1.E'..'` as a number plus an escape
+            // string; the lexer fails closed rather than mis-read the quote.
+            (r"SELECT 1E'\''; ATTACH 'x' AS e", "escape string"),
+            (r"SELECT 1.E'\''", "escape string"),
         ] {
             let err = ensure_single_statement(q).unwrap_err();
             assert!(
