@@ -23,14 +23,43 @@ Where:
 
 ### Exact Balance Solution
 
-For equality-constrained QP, the KKT conditions give:
+With H = I the exact problem (`balance_tol = 0`) is the Euclidean projection of the origin
+onto {w : A w = b, w >= l}. With a_i = [x_i, 1] / n for the n reweighted units and
+b = [target; 1] (so the weights sum to n), its dual has only k + 1 variables mu:
 
 ```
-[H    A'][w]   [-c]
-[A    0 ][λ] = [b ]
+w_i(mu) = max(l, a_i . mu)
+g(mu)   = b . mu + sum_i h(a_i . mu),   h(z) = -z^2/2 (z >= l),   l^2/2 - l z (z < l)
+grad g  = r(mu) = b - sum_i w_i(mu) a_i
 ```
 
-Solving this linear system yields optimal weights and Lagrange multipliers.
+The concave, piecewise quadratic dual is maximised by a semismooth Newton method:
+
+```
+mu_0 = (A A')^-1 b                   Schur complement: w = A'(A A')^-1 b, the optimum
+                                     when no bound binds
+S    = {i : a_i . mu > l}            units off the bound
+M    = sum_{i in S} a_i a_i'         (k+1) x (k+1); pseudo-inverse if singular
+mu  <- mu + t M^-1 r(mu)             t = 1 when the step keeps S, otherwise Armijo
+                                     backtracking on g
+```
+
+Each step is one (k+1) x (k+1) solve and O(n k^2) work, with O(n + k^2) memory; no n x n
+matrix is formed. The bound w >= l holds exactly and exact balance is reached to rounding.
+`lambda` is reported as -mu.
+
+Infeasible exact balance is an error (`InvalidSpecification`, suggesting
+`balance_tol > 0`), as R `sbw` refuses it too: with `min_weight >= 0` a target mean outside
+the reweighted group's range is refused up front, and otherwise a dual that does not converge
+(no ascent direction, a failed line search, diverging multipliers or `max_iter` steps) means
+that no feasible weights exist.
+
+Before October 2026 the exact path inverted the dense (n+k+1) x (n+k+1) system of the
+equality-constrained problem, then clipped negative weights at `min_weight` and renormalised.
+That is O(n^3) time and O(n^2) memory, and whenever a bound was active the clipped weights
+were neither the QP optimum nor exactly balanced (on Test Case 1 below: control 1 weight
+3.3271 instead of 6.0244, ATT 0.5825 instead of 0.5553). When no bound binds, the new solver
+returns the old output to floating-point noise, `lambda` included.
 
 ### Approximate Balance Solution
 
@@ -45,97 +74,127 @@ Solved via iterative projected gradient descent.
 
 ## Reference Implementation
 
-- **R Package**: sbw (Zubizarreta et al., 2020)
+- **R Package**: sbw (Zubizarreta et al., 2020), cross-checked against quadprog
 - **URL**: https://cran.r-project.org/package=sbw
-- **Version**: 1.1.6
+- **Version**: sbw 1.2 (ATT value below); quadprog 1.5.8 on R 4.3.3 (weights and multipliers, re-run 2026-10-22)
 
 ## Test Cases
 
 ### Test Case 1: Exact Balance (ATT)
 
-**Synthetic Data**:
+**Synthetic Data** (`create_test_data()` in `crates/p2a-core/src/econometrics/sbw.rs`):
 - n = 30 observations (10 treated, 20 control)
-- k = 2 covariates with known imbalance
-- Treated group has higher covariate means
+- k = 2 covariates; treated means (0.66, 0.55), control ranges cover them
+- Outcome y = 1 + 2 x1 - x2 + 0.5 d + e (e fixed, 2 decimals), for the ATT
+
+With exact balance and w >= 0 the optimum is rational: in the `normalize_to_n` scale the
+control weights are
+
+```
+[2464, 0, 500, 2288, 0, 0, 0, 0, 500, 0, 0, 1096, 0, 1008, 0, 0, 0, 324, 0, 0] / 409
+```
+
+They sum to 20, reproduce the treated means exactly, and satisfy the KKT conditions.
 
 **R Code for Validation**:
 ```r
-library(sbw)
+library(quadprog)
 
-# Create test data
-set.seed(42)
-n_treat <- 10
-n_ctrl <- 20
+x1 <- c(0.6, 0.7, 0.65, 0.75, 0.6, 0.7, 0.55, 0.8, 0.65, 0.6,
+        0.3, 0.5, 0.4, 1.0, 0.35, 0.9, 0.3, 1.2, 0.4, 0.5,
+        0.35, 0.6, 0.45, 0.95, 0.32, 0.85, 0.28, 1.1, 0.42, 0.55)
+x2 <- c(0.5, 0.6, 0.55, 0.6, 0.5, 0.55, 0.5, 0.65, 0.55, 0.5,
+        0.3, 0.4, 0.35, 0.8, 0.3, 0.7, 0.25, 0.9, 0.35, 0.4,
+        0.3, 0.5, 0.38, 0.75, 0.28, 0.65, 0.22, 0.85, 0.35, 0.45)
+d  <- c(rep(1, 10), rep(0, 20))
+y  <- c(2.32, 2.22, 2.30, 2.29, 2.29, 2.37, 2.04, 2.55, 2.22, 2.27,
+        1.21, 1.64, 1.56, 2.15, 1.48, 1.98, 1.38, 2.56, 1.38, 1.61,
+        1.50, 1.68, 1.42, 2.20, 1.45, 2.01, 1.41, 2.27, 1.51, 1.59)
+dat <- data.frame(d = d, y = y, x1 = x1, x2 = x2)
 
-# Treated: higher x1, x2 means (~1.5, ~0.9)
-x1_treat <- c(1.2, 1.5, 1.3, 1.8, 1.4, 1.6, 1.1, 1.7, 1.5, 1.4)
-x2_treat <- c(0.8, 0.9, 0.7, 1.0, 0.85, 0.95, 0.75, 1.1, 0.9, 0.85)
+# Exact QP in the n scale: min 1/2 w'w  s.t.  [Xc'; 1'] w / n = [tm; 1],  w >= 0
+Xc <- cbind(x1[d == 0], x2[d == 0]); tm <- c(mean(x1[d == 1]), mean(x2[d == 1])); n <- 20
+qp <- solve.QP(diag(n), rep(0, n), cbind(t(rbind(t(Xc), 1)) / n, diag(n)),
+               c(tm, 1, rep(0, n)), meq = 3)
+w <- qp$solution
+print(w * 409)                       # 2464 0 500 2288 0 0 0 0 500 0 0 1096 0 1008 0 0 0 324 0 0
 
-# Control: lower x1, x2 means (~0.5, ~0.35)
-x1_ctrl <- c(0.3, 0.5, 0.4, 0.7, 0.2, 0.6, 0.1, 0.8, 0.4, 0.5,
-             0.35, 0.55, 0.45, 0.75, 0.25, 0.65, 0.15, 0.85, 0.45, 0.55)
-x2_ctrl <- c(0.3, 0.4, 0.35, 0.5, 0.25, 0.45, 0.2, 0.55, 0.35, 0.4,
-             0.32, 0.42, 0.37, 0.52, 0.27, 0.47, 0.22, 0.57, 0.37, 0.42)
+# Signed multipliers from the active set (quadprog reports |mu| for equality constraints)
+A <- rbind(t(Xc), 1) / n; S <- w > 1e-9
+mu <- solve(A[, S] %*% t(A[, S]), c(tm, 1))
+print(-mu, digits = 15)              # lambda = -mu
 
-treatment <- c(rep(1, n_treat), rep(0, n_ctrl))
-x1 <- c(x1_treat, x1_ctrl)
-x2 <- c(x2_treat, x2_ctrl)
+# ATT of the exact optimum
+print(mean(y[d == 1]) - sum(w * y[d == 0]) / sum(w), digits = 15)
 
-data <- data.frame(treatment = treatment, x1 = x1, x2 = x2)
-
-# Run SBW
-result <- sbw(
-  data,
-  ind = "treatment",
-  bal = list(x1 = c("mu"), x2 = c("mu")),
-  par = list(par = "att")
-)
-
-# Check balance
-print(summary(result))
-print(result$weights)
+# R sbw with the quadprog solver (bal_tol = 0 exactly is refused by sbw: "no solution from
+# the solver quadprog", because the two-sided inequalities collapse; 1e-8 is the closest)
+s <- sbw::sbw(dat, ind = "d", out = "y",
+              bal = list(bal_cov = c("x1", "x2"), bal_alg = FALSE, bal_tol = 1e-8, bal_std = "group"),
+              sol = list(sol_nam = "quadprog"), par = list(par_est = "att"))
+sbw::estimate(s)                     # ATT 0.555337388135859
 ```
 
-**Expected Results**:
-- Treated weights: all 1.0
-- Control weights: positive, summing to 20
-- Max |Std.Diff| after weighting: < 0.05
-- Convergence: Yes
+**Expected Results** (asserted by `test_sbw_exact_matches_r_sbw`):
+
+| Quantity | Expected | Tolerance |
+|----------|----------|-----------|
+| Treated weights | 1 | 1e-12 |
+| Control weights | [2464, 0, 500, 2288, 0, 0, 0, 0, 500, 0, 0, 1096, 0, 1008, 0, 0, 0, 324, 0, 0] / 409 | 1e-9 |
+| Converged | yes | |
+| Max balance violation | 0 | < 1e-10 |
+| lambda | [3172.6161369150, -4424.4498777446, 255.0611246939] | 1e-8 relative |
+| ATT (exact QP optimum) | 0.555337408312916 | 1e-10 |
+| ATT (R sbw 1.2, bal_tol 1e-8) | 0.555337388135859 | 1e-6 |
+
+Further exact-balance checks in the same module:
+- `test_sbw_exact_matches_dense_kkt_when_no_bound_binds`: 240 LCG controls, no bound active;
+  the weights equal the old dense-KKT solution to 1e-12 and `lambda` to 1e-8 relative.
+- `test_sbw_exact_kkt_certificate_with_binding_bounds`: the same controls with bounds active
+  for `min_weight` 0, 0.1 and -0.5; an optimality certificate (w_i = max(l, z_i)) on every
+  unit, and the maximum weight, sum of squared weights and number of units at the bound
+  against `quadprog::solve.QP` (R 4.3.3, quadprog 1.5.8).
+- `test_sbw_exact_infeasible_is_an_error`: ATC on the Test Case 1 data is infeasible (the
+  control mean of x2, 0.474, is below every treated x2) and is refused, as by R sbw.
+- `test_sbw_exact_large_n_is_tractable`: 2,000 treated and 20,000 controls with binding bounds.
 
 ### Test Case 2: Approximate Balance
 
 **Same data as Test 1, but with balance tolerance**:
 ```r
-result_approx <- sbw(
-  data,
-  ind = "treatment",
-  bal = list(x1 = c("mu"), x2 = c("mu")),
-  par = list(par = "att"),
-  tols = c(0.1, 0.1)  # Allow 0.1 tolerance
-)
+s_approx <- sbw::sbw(dat, ind = "d", out = "y",
+                     bal = list(bal_cov = c("x1", "x2"), bal_alg = FALSE, bal_tol = 0.1, bal_std = "group"),
+                     sol = list(sol_nam = "quadprog"), par = list(par_est = "att"))
 ```
 
 **Expected Results**:
 - Max |Std.Diff| after weighting: < 0.2
-- Lower weight variance than exact balance
-- Higher ESS than exact balance
+- Weights non-negative
+
+The Rust approximate solver minimises a penalised objective by projected gradient descent
+rather than solving R's tolerance-constrained QP, so it is checked against these properties,
+not against R's weights.
 
 ## Validation Status
 
 | Test Case | Status | Tolerance |
 |-----------|--------|-----------|
-| Exact Balance ATT | Implemented | max_std_diff < 0.05 |
+| Exact Balance ATT | Pinned to quadprog / R sbw | see Test Case 1 |
+| Exact balance, no binding bound | Equals old dense solution | weights 1e-12 |
+| Exact balance, binding bounds | KKT certificate + quadprog | 1e-9 |
+| Infeasible exact balance | Error, as in R sbw | |
 | Approximate Balance | Implemented | max_std_diff < 0.2 |
-| ATC Estimand | Implemented | treated weights = 1 |
+| ATC Estimand | Equals ATT with swapped labels | 1e-12 |
 | ESS Computation | Implemented | exact formula |
 | Balance Statistics | Implemented | std_diff, var_ratio |
 
 ## Rust Implementation Notes
 
-1. **Exact Balance**: Uses Lagrangian KKT system solver
+1. **Exact Balance**: dual semismooth Newton in the k + 1 constraint dimensions (Schur-complement first step), O(n k^2) per step
 2. **Approximate Balance**: Uses penalized gradient descent
-3. **Weight Projection**: Ensures non-negativity constraint
+3. **Lower bound**: enforced exactly by the dual (w_i = max(l, a_i . mu)), not by clipping
 4. **Normalization**: Weights normalized to sum to n_reweighted
+5. **Infeasibility**: refused with a message suggesting approximate balance
 
 ## References
 

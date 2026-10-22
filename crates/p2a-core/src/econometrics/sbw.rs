@@ -24,16 +24,46 @@
 //! - b = target means (treated group means for ATT)
 //! - l = minimum weight (default 0 for non-negativity)
 //!
-//! ## Lagrangian Solution
+//! ## Exact Balance: Dual Semismooth Newton
 //!
-//! For equality-constrained QP, the KKT conditions give:
+//! With H = I the exact problem (balance_tol = 0) is the Euclidean projection of the
+//! origin onto {w : A w = b, w >= l}. Writing a_i = [x_i, 1] / n for the columns of A
+//! (n reweighted units, k covariates; b = [target; 1], so the weights sum to n), its dual
+//! has only k + 1 variables mu:
 //!
 //! ```text
-//! [H    A'][w]   [−c]
-//! [A    0 ][λ] = [b ]
+//! w_i(mu) = max(l, a_i . mu)
+//! g(mu)   = b . mu + sum_i h(a_i . mu),   h(z) = -z^2/2 (z >= l),   l^2/2 - l z (z < l)
+//! grad g  = r(mu) = b - sum_i w_i(mu) a_i          (the balance residual)
 //! ```
 //!
-//! Solving this linear system yields optimal weights and Lagrange multipliers.
+//! g is concave and piecewise quadratic, and is maximised by a semismooth Newton method:
+//!
+//! ```text
+//! mu_0 = (A A')^-1 b                   Schur complement: w = A'(A A')^-1 b, the unbounded
+//!                                      optimum (the old dense KKT solution when no bound binds)
+//! S    = {i : a_i . mu > l}            units off the bound
+//! M    = sum_{i in S} a_i a_i'         (k+1) x (k+1); pseudo-inverse if singular
+//! mu  <- mu + t M^-1 r(mu)             t = 1 when the step keeps S (exact on that piece),
+//!                                      otherwise Armijo backtracking on g
+//! ```
+//!
+//! Each step costs one (k+1) x (k+1) solve and O(n k^2) work; nothing of size n x n is
+//! formed. The bound w >= l holds exactly and exact balance is reached to rounding. The
+//! iteration stops when ||r||_inf <= 1e-14 (1 + ||b||_inf), or <= tolerance (1 + ||b||_inf)
+//! after a full step that kept S. If no feasible weights exist the dual is unbounded: no
+//! ascent direction, a failed line search, diverging multipliers or max_iter steps end the
+//! solve with `EconError::InvalidSpecification` suggesting approximate balance. With
+//! min_weight >= 0 a target mean outside the reweighted group's range is refused up front.
+//!
+//! `lambda` in the result is -mu, the multiplier of the KKT system
+//!
+//! ```text
+//! [I    A'][w]   [0]
+//! [A    0 ][λ] = [b]
+//! ```
+//!
+//! which the dual solution satisfies on the free units.
 //!
 //! ## Approximate Balance
 //!
@@ -69,6 +99,7 @@ use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
 use crate::linalg::design::{DesignMatrix, get_column_names};
 use crate::linalg::matrix_ops::{safe_inverse, xtx};
+use crate::resource;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Type Definitions
@@ -359,11 +390,65 @@ pub fn run_sbw(
     covariates: &ArrayView2<f64>,
     config: SBWConfig,
 ) -> EconResult<SBWResult> {
+    let cov_names: Vec<String> = (0..covariates.ncols())
+        .map(|i| format!("X{}", i + 1))
+        .collect();
+    run_sbw_inner(treatment, covariates, &cov_names, config)
+}
+
+/// Checks the configuration before any work.
+fn validate_sbw_config(config: &SBWConfig) -> EconResult<()> {
+    let invalid = |message: String| Err(EconError::InvalidSpecification { message });
+    if !(config.balance_tol.is_finite() && config.balance_tol >= 0.0) {
+        return invalid(format!(
+            "balance_tol must be finite and >= 0 (0 = exact balance); got {}",
+            config.balance_tol
+        ));
+    }
+    if !config.min_weight.is_finite() {
+        return invalid(format!(
+            "min_weight must be finite; got {}",
+            config.min_weight
+        ));
+    }
+    if config.balance_tol == 0.0 && config.min_weight > 1.0 {
+        return invalid(format!(
+            "min_weight must be <= 1 for exact balance (the weights average 1 in the n scale); got {}",
+            config.min_weight
+        ));
+    }
+    if config.max_iter == 0 {
+        return invalid("max_iter must be at least 1; got 0".to_string());
+    }
+    if !(config.tolerance.is_finite() && config.tolerance > 0.0) {
+        return invalid(format!(
+            "tolerance must be finite and > 0; got {}",
+            config.tolerance
+        ));
+    }
+    if config.balance_tol > 0.0
+        && !(config.balance_penalty.is_finite() && config.balance_penalty > 0.0)
+    {
+        return invalid(format!(
+            "balance_penalty must be finite and > 0 for approximate balance; got {}",
+            config.balance_penalty
+        ));
+    }
+    Ok(())
+}
+
+/// [`run_sbw`] with the covariate names used in balance tables and error messages.
+fn run_sbw_inner(
+    treatment: &ArrayView1<f64>,
+    covariates: &ArrayView2<f64>,
+    cov_names: &[String],
+    config: SBWConfig,
+) -> EconResult<SBWResult> {
     let n = treatment.len();
-    let k = covariates.ncols();
     let mut warnings = Vec::new();
 
     // Validate inputs
+    validate_sbw_config(&config)?;
     if n != covariates.nrows() {
         return Err(EconError::InvalidSpecification {
             message: format!(
@@ -372,6 +457,20 @@ pub fn run_sbw(
                 covariates.nrows()
             ),
         });
+    }
+    if treatment.iter().any(|v| !v.is_finite()) {
+        return Err(EconError::InvalidSpecification {
+            message: "treatment values must be finite (no NaN or infinite values)".to_string(),
+        });
+    }
+    for (col, name) in covariates.columns().into_iter().zip(cov_names) {
+        if col.iter().any(|v| !v.is_finite()) {
+            return Err(EconError::InvalidSpecification {
+                message: format!(
+                    "covariate {name} contains NaN or infinite values; covariates must be finite"
+                ),
+            });
+        }
     }
 
     // Identify target and reweight groups based on estimand
@@ -417,17 +516,33 @@ pub fn run_sbw(
         .mean_axis(Axis(0))
         .ok_or_else(|| EconError::Computation("Failed to compute target means".to_string()))?;
 
-    // Compute covariate names
-    let cov_names: Vec<String> = (0..k).map(|i| format!("X{}", i + 1)).collect();
+    // Exact balance with non-negative weights reweights to a convex combination of the
+    // reweighted units, so every target mean must lie within that group's range.
+    if config.balance_tol == 0.0 && config.min_weight >= 0.0 {
+        for (j, name) in cov_names.iter().enumerate() {
+            let col = x_reweight.column(j);
+            let lo = col.iter().cloned().fold(f64::INFINITY, f64::min);
+            let hi = col.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+            let t = target_means[j];
+            if t < lo || t > hi {
+                return Err(EconError::InvalidSpecification {
+                    message: format!(
+                        "Exact balance is infeasible: the target mean of covariate {name} ({t:.4}) lies outside the reweighted group's range [{lo:.4}, {hi:.4}], which weights >= {} cannot reach. Use approximate balance (balance_tol > 0) or another estimand.",
+                        config.min_weight
+                    ),
+                });
+            }
+        }
+    }
 
     // Compute balance before weighting
     let balance_before =
-        compute_balance_stats(&x_target.view(), &x_reweight.view(), &cov_names, None);
+        compute_balance_stats(&x_target.view(), &x_reweight.view(), cov_names, None);
 
     // Solve the quadratic programming problem
     let (weights, lambda, converged, iterations, objective, max_violation) =
         if config.balance_tol == 0.0 {
-            // Exact balance: use Lagrangian method
+            // Exact balance: dual semismooth Newton in the constraint dimension
             solve_sbw_exact(&x_reweight.view(), &target_means.view(), &config)?
         } else {
             // Approximate balance: use penalized QP
@@ -458,7 +573,7 @@ pub fn run_sbw(
     let balance_after = compute_balance_stats(
         &x_target.view(),
         &x_reweight.view(),
-        &cov_names,
+        cov_names,
         Some(&final_weights),
     );
 
@@ -555,30 +670,168 @@ pub fn sbw(
     let design = DesignMatrix::from_dataframe(dataset.df(), covariate_cols, false)?;
     let covariates = design.data;
 
-    // Run SBW
-    let mut result = run_sbw(&treatment.view(), &covariates.view(), config)?;
-
-    // Update covariate names with actual column names
-    result.balance_before.covariate_names = covariate_cols.iter().map(|s| s.to_string()).collect();
-    result.balance_after.covariate_names = covariate_cols.iter().map(|s| s.to_string()).collect();
-
-    Ok(result)
+    // Run SBW with the real column names
+    let cov_names: Vec<String> = covariate_cols.iter().map(|s| s.to_string()).collect();
+    run_sbw_inner(&treatment.view(), &covariates.view(), &cov_names, config)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // QP Solvers
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Solve SBW with exact balance constraints using Lagrangian method.
+/// Residual below which the dual iteration stops at once (relative to `1 + ||b||_inf`).
+const SBW_EXACT_RESIDUAL: f64 = 1e-14;
+/// Multipliers growing beyond this factor of the first step mean the dual is unbounded.
+const SBW_DUAL_DIVERGENCE: f64 = 1e10;
+/// Armijo sufficient-increase constant and smallest step of the backtracking line search.
+const SBW_ARMIJO_C: f64 = 1e-4;
+const SBW_MIN_STEP: f64 = 1e-12;
+/// Rounding allowance of a dual-objective comparison (relative to `1 + |g|`).
+const SBW_DUAL_ROUNDING: f64 = 1e-12;
+
+/// The (k+1)-dimensional dual of the exact SBW problem, evaluated row by row over the
+/// reweighted group's covariates `x` without materialising the constraint matrix.
 ///
-/// Solves the KKT system:
 /// ```text
-/// [H    A'][w]   [-c]
-/// [A    0 ][λ] = [b ]
+/// a_i = [x_i, 1] / n,   b = [target; 1],   z_i(mu) = a_i . mu,   w_i(mu) = max(l, z_i)
+/// g(mu) = b . mu + sum_i h(z_i),   h(z) = -z^2 / 2 (z >= l),   l^2 / 2 - l z (z < l)
+/// grad g(mu) = r(mu) = b - sum_i w_i(mu) a_i
+/// ```
+struct SbwDual<'a> {
+    x: ArrayView2<'a, f64>,
+    b: Array1<f64>,
+    lower: f64,
+    n_f: f64,
+}
+
+impl SbwDual<'_> {
+    fn z(&self, i: usize, mu: &Array1<f64>) -> f64 {
+        let k = self.x.ncols();
+        let mut s = mu[k];
+        for j in 0..k {
+            s += self.x[[i, j]] * mu[j];
+        }
+        s / self.n_f
+    }
+
+    /// Residual r(mu) (compensated sums, so its rounding does not grow with n) and the set
+    /// S = {i : z_i > l} of units off the bound.
+    fn residual(&self, mu: &Array1<f64>) -> (Array1<f64>, Vec<bool>) {
+        let (n, k) = self.x.dim();
+        let m = k + 1;
+        let mut sum = vec![0.0; m];
+        let mut comp = vec![0.0; m];
+        let mut free = vec![false; n];
+        let mut add = |p: usize, v: f64| {
+            let t = sum[p] + v;
+            if sum[p].abs() >= v.abs() {
+                comp[p] += (sum[p] - t) + v;
+            } else {
+                comp[p] += (v - t) + sum[p];
+            }
+            sum[p] = t;
+        };
+        for (i, is_free) in free.iter_mut().enumerate() {
+            let z = self.z(i, mu);
+            let w = if z > self.lower {
+                *is_free = true;
+                z
+            } else {
+                self.lower
+            };
+            for j in 0..k {
+                add(j, w * self.x[[i, j]] / self.n_f);
+            }
+            add(k, w / self.n_f);
+        }
+        let r = Array1::from_shape_fn(m, |p| self.b[p] - (sum[p] + comp[p]));
+        (r, free)
+    }
+
+    /// The set S at `mu` only.
+    fn free_set(&self, mu: &Array1<f64>) -> Vec<bool> {
+        (0..self.x.nrows())
+            .map(|i| self.z(i, mu) > self.lower)
+            .collect()
+    }
+
+    /// Dual objective g(mu).
+    fn value(&self, mu: &Array1<f64>) -> f64 {
+        let l = self.lower;
+        let mut g = self.b.dot(mu);
+        for i in 0..self.x.nrows() {
+            let z = self.z(i, mu);
+            g += if z >= l {
+                -0.5 * z * z
+            } else {
+                0.5 * l * l - l * z
+            };
+        }
+        g
+    }
+
+    /// M = sum over the selected units of a_i a_i' ((k+1) x (k+1)); all units when `free` is None.
+    fn gram(&self, free: Option<&[bool]>) -> Array2<f64> {
+        let (n, k) = self.x.dim();
+        let m = k + 1;
+        let mut g = Array2::<f64>::zeros((m, m));
+        let mut row = vec![0.0; m];
+        for i in 0..n {
+            if free.is_some_and(|f| !f[i]) {
+                continue;
+            }
+            for j in 0..k {
+                row[j] = self.x[[i, j]] / self.n_f;
+            }
+            row[k] = 1.0 / self.n_f;
+            for p in 0..m {
+                for q in 0..=p {
+                    g[[p, q]] += row[p] * row[q];
+                }
+            }
+        }
+        for p in 0..m {
+            for q in 0..p {
+                g[[q, p]] = g[[p, q]];
+            }
+        }
+        g
+    }
+}
+
+fn inf_norm(v: &Array1<f64>) -> f64 {
+    v.iter().fold(0.0_f64, |a, x| a.max(x.abs()))
+}
+
+/// Solve SBW with exact balance constraints through the problem's dual.
+///
+/// The exact problem in the n scale (weights sum to n) is
+///
+/// ```text
+/// minimise (1/2) ||w||^2   subject to   sum_i w_i [x_i, 1] / n = [target; 1],   w_i >= l
 /// ```
 ///
-/// Where H = I (for variance minimization), A is the constraint matrix,
-/// and b is the target means.
+/// i.e. the Euclidean projection of the origin onto {w : A w = b, w >= l}. Its dual has
+/// only k+1 variables mu, with w_i = max(l, a_i . mu) (see [`SbwDual`]); it is solved by a
+/// semismooth Newton method:
+///
+/// ```text
+/// mu_0     = (A A')^-1 b                      (Schur complement: w = A'(AA')^-1 b, no bound)
+/// repeat   S = {i : a_i . mu > l},  M = sum_{i in S} a_i a_i',  delta = M^-1 r(mu)
+///          mu <- mu + t delta                 (t = 1, or Armijo backtracking on g when S changes)
+/// until    ||r||_inf <= 1e-14 (1 + ||b||_inf), or <= tolerance (1 + ||b||_inf) after a
+///          full step that kept S
+/// ```
+///
+/// Each step is one (k+1) x (k+1) solve and O(n k^2) work; memory is O(n + k^2). When no
+/// bound binds, the first step is the old dense-KKT solution. The bound w >= l holds
+/// exactly. A dual that does not converge (no ascent direction, a failed line search,
+/// diverging multipliers or `max_iter` steps) means no feasible weights exist, and is
+/// `EconError::InvalidSpecification` suggesting approximate balance.
+///
+/// Returns weights summing to 1, `lambda = -mu` (the sign convention of the KKT system
+/// `[I A'; A 0][w; lambda] = [0; b]`), convergence, the number of steps (mu_0 counts as
+/// one), the objective and the maximum balance violation.
 fn solve_sbw_exact(
     x: &ArrayView2<f64>,
     target_means: &ArrayView1<f64>,
@@ -586,74 +839,108 @@ fn solve_sbw_exact(
 ) -> EconResult<(Vec<f64>, Vec<f64>, bool, usize, f64, f64)> {
     let n = x.nrows();
     let k = x.ncols();
+    let l = config.min_weight;
 
-    // Constraint matrix A includes:
-    // 1. Balance constraints: (1/n) * Σ w_i X_ij = target_j for each covariate j
-    // 2. Normalization constraint: Σ w_i = n
-    // Total: k + 1 constraints
-
-    let n_constraints = k + 1;
-
-    // Build KKT system matrix
-    // [I    A']  [n x n,     n x (k+1)]
-    // [A    0 ]  [(k+1) x n, (k+1) x (k+1)]
-    let system_size = n + n_constraints;
-    let mut kkt = Array2::<f64>::zeros((system_size, system_size));
-
-    // Top-left: H = I (identity for variance minimization)
-    for i in 0..n {
-        kkt[[i, i]] = 1.0;
-    }
-
-    // Top-right and bottom-left: A' and A
-    // Balance constraints: X (each row of X corresponds to one observation)
-    for i in 0..n {
-        for j in 0..k {
-            // A[j, i] = X[i, j] / n (balance constraint for covariate j)
-            let val = x[[i, j]] / n as f64;
-            kkt[[i, n + j]] = val; // A' part
-            kkt[[n + j, i]] = val; // A part
-        }
-        // Normalization constraint
-        kkt[[i, n + k]] = 1.0 / n as f64;
-        kkt[[n + k, i]] = 1.0 / n as f64;
-    }
-
-    // Build RHS vector
-    // Top: -c = 0 (no linear term in objective)
-    // Bottom: b = [target_means, 1] (constraints)
-    let mut rhs = Array1::<f64>::zeros(system_size);
+    let mut b = Array1::<f64>::zeros(k + 1);
     for j in 0..k {
-        rhs[n + j] = target_means[j];
+        b[j] = target_means[j];
     }
-    rhs[n + k] = 1.0; // Normalized weights sum to 1
+    b[k] = 1.0; // weights sum to n
+    let dual = SbwDual {
+        x: x.view(),
+        b,
+        lower: l,
+        n_f: n as f64,
+    };
+    let b_scale = 1.0 + inf_norm(&dual.b);
 
-    // Solve KKT system
-    let (kkt_inv, _cond) = safe_inverse(&kkt.view()).map_err(|e| EconError::SingularMatrix {
-        context: "SBW KKT system".to_string(),
-        suggestion: format!(
-            "Balance constraints may be infeasible or redundant. Error: {:?}. \
-                 Try using approximate balance (balance_tol > 0).",
-            e
+    let infeasible = || EconError::InvalidSpecification {
+        message: format!(
+            "Exact balance could not be reached: no weights >= {l} on the {n} reweighted units reproduce the target covariate means (the targets may lie outside the reweighted group's range, or covariates may be collinear). Use approximate balance (balance_tol > 0)."
         ),
-    })?;
+    };
 
-    let solution = kkt_inv.dot(&rhs);
+    // First step: the Schur-complement closed form of the unbounded problem.
+    let (m_all_inv, _) =
+        safe_inverse(&dual.gram(None).view()).map_err(|e| EconError::SingularMatrix {
+            context: "SBW balance constraints".to_string(),
+            suggestion: format!(
+                "Balance constraints may be infeasible or redundant. Error: {:?}. \
+                 Try using approximate balance (balance_tol > 0).",
+                e
+            ),
+        })?;
+    let mut mu = m_all_inv.dot(&dual.b);
+    let mu0_scale = 1.0 + inf_norm(&mu);
+    let mut iterations = 1;
+    let mut full_step_kept_set = false;
 
-    // Extract weights and Lagrange multipliers
-    let weights: Vec<f64> = solution.iter().take(n).cloned().collect();
-    let lambda: Vec<f64> = solution.iter().skip(n).cloned().collect();
+    loop {
+        resource::checkpoint()?;
 
-    // Project weights to satisfy lower bound constraint
-    let weights: Vec<f64> = weights.iter().map(|&w| w.max(config.min_weight)).collect();
+        let (r, free) = dual.residual(&mu);
+        let r_inf = inf_norm(&r);
+        let close = r_inf <= config.tolerance * b_scale;
+        if r_inf <= SBW_EXACT_RESIDUAL * b_scale || (close && full_step_kept_set) {
+            break;
+        }
+        if iterations >= config.max_iter || inf_norm(&mu) > SBW_DUAL_DIVERGENCE * mu0_scale {
+            return Err(infeasible());
+        }
 
-    // Renormalize after projection
+        // Newton direction on the current piece (pseudo-inverse when |S| < k + 1 or the
+        // free units' covariates are collinear).
+        let (m_inv, _) = safe_inverse(&dual.gram(Some(&free)).view()).map_err(|_| infeasible())?;
+        let delta = m_inv.dot(&r);
+        let slope = r.dot(&delta);
+        if !(slope.is_finite() && slope > 0.0) {
+            // No ascent direction: stagnation at a solution within tolerance, or infeasible.
+            if close {
+                break;
+            }
+            return Err(infeasible());
+        }
+
+        // On a piece the dual is an exact quadratic, so a full step that keeps S is its
+        // maximiser; otherwise backtrack on g.
+        let full = &mu + &delta;
+        let full_free = dual.free_set(&full);
+        if full_free == free {
+            mu = full;
+            full_step_kept_set = true;
+        } else {
+            let g0 = dual.value(&mu);
+            let slack = SBW_DUAL_ROUNDING * (1.0 + g0.abs());
+            let mut t = 1.0;
+            let mut candidate = full;
+            while dual.value(&candidate) < g0 + SBW_ARMIJO_C * t * slope - slack {
+                t *= 0.5;
+                if t <= SBW_MIN_STEP {
+                    break;
+                }
+                candidate = &mu + &(&delta * t);
+            }
+            if t <= SBW_MIN_STEP {
+                if close {
+                    break;
+                }
+                return Err(infeasible());
+            }
+            mu = candidate;
+            full_step_kept_set = false;
+        }
+        iterations += 1;
+    }
+
+    // Weights on the bound-respecting piece, renormalised to sum 1.
+    let weights: Vec<f64> = (0..n).map(|i| dual.z(i, &mu).max(l)).collect();
     let w_sum: f64 = weights.iter().sum();
     let weights: Vec<f64> = if w_sum > 0.0 {
         weights.iter().map(|&w| w / w_sum).collect()
     } else {
         vec![1.0 / n as f64; n]
     };
+    let lambda: Vec<f64> = mu.iter().map(|v| -v).collect();
 
     // Compute constraint violation
     let max_violation = compute_constraint_violation(x, &weights, target_means);
@@ -662,7 +949,7 @@ fn solve_sbw_exact(
     let w_mean = 1.0 / n as f64;
     let objective: f64 = weights.iter().map(|w| (w - w_mean).powi(2)).sum();
 
-    Ok((weights, lambda, true, 1, objective, max_violation))
+    Ok((weights, lambda, true, iterations, objective, max_violation))
 }
 
 /// Solve SBW with approximate balance using penalized QP.
@@ -692,6 +979,7 @@ fn solve_sbw_approximate(
     let mut iterations = 0;
 
     for iter in 0..config.max_iter {
+        resource::checkpoint()?;
         iterations = iter + 1;
 
         // Compute gradient
@@ -975,8 +1263,397 @@ fn compute_ess(weights: &[f64], treatment: &ArrayView1<f64>) -> (f64, f64, f64) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::resource::{self, Budget, CancelToken};
     use ndarray::array;
     use polars::prelude::*;
+
+    fn expect_invalid_spec(err: EconError, needle: &str) {
+        match err {
+            EconError::InvalidSpecification { message } => {
+                assert!(
+                    message.contains(needle),
+                    "message `{message}` does not mention `{needle}`"
+                )
+            }
+            other => panic!("expected InvalidSpecification mentioning `{needle}`, got {other:?}"),
+        }
+    }
+
+    fn cancelled_budget() -> Budget {
+        let t = CancelToken::new();
+        t.cancel();
+        Budget::new(None, t)
+    }
+
+    fn lcg(seed: &mut u64) -> f64 {
+        *seed = 1_103_515_245u64.wrapping_mul(*seed).wrapping_add(12_345) % 2_147_483_648;
+        *seed as f64 / 2_147_483_648.0
+    }
+
+    /// `rows` x `cols` matrix of LCG draws, filled row-major.
+    fn lcg_matrix(rows: usize, cols: usize, seed: u64) -> Array2<f64> {
+        let mut s = seed;
+        let values: Vec<f64> = (0..rows * cols).map(|_| lcg(&mut s)).collect();
+        Array2::from_shape_vec((rows, cols), values).unwrap()
+    }
+
+    /// The 240 x 3 control matrix shared by the dense-KKT and certificate tests, and the
+    /// target `column means + shift`.
+    fn lcg_controls_and_target(shift: [f64; 3]) -> (Array2<f64>, Array1<f64>) {
+        let xc = lcg_matrix(240, 3, 2026);
+        let target = xc.mean_axis(Axis(0)).unwrap() + &Array1::from(shift.to_vec());
+        (xc, target)
+    }
+
+    /// Verbatim copy of the pre-change `solve_sbw_exact` (dense (n+k+1)^2 KKT build,
+    /// `safe_inverse`, clip at `min_weight = 0`, renormalise), returning (weights, lambda).
+    fn dense_kkt_reference(
+        x: &ArrayView2<f64>,
+        target_means: &ArrayView1<f64>,
+    ) -> (Vec<f64>, Vec<f64>) {
+        let config = SBWConfig::default();
+        let n = x.nrows();
+        let k = x.ncols();
+        let n_constraints = k + 1;
+        let system_size = n + n_constraints;
+        let mut kkt = Array2::<f64>::zeros((system_size, system_size));
+        for i in 0..n {
+            kkt[[i, i]] = 1.0;
+        }
+        for i in 0..n {
+            for j in 0..k {
+                let val = x[[i, j]] / n as f64;
+                kkt[[i, n + j]] = val;
+                kkt[[n + j, i]] = val;
+            }
+            kkt[[i, n + k]] = 1.0 / n as f64;
+            kkt[[n + k, i]] = 1.0 / n as f64;
+        }
+        let mut rhs = Array1::<f64>::zeros(system_size);
+        for j in 0..k {
+            rhs[n + j] = target_means[j];
+        }
+        rhs[n + k] = 1.0;
+        let (kkt_inv, _cond) = safe_inverse(&kkt.view()).unwrap();
+        let solution = kkt_inv.dot(&rhs);
+        let weights: Vec<f64> = solution.iter().take(n).cloned().collect();
+        let lambda: Vec<f64> = solution.iter().skip(n).cloned().collect();
+        let weights: Vec<f64> = weights.iter().map(|&w| w.max(config.min_weight)).collect();
+        let w_sum: f64 = weights.iter().sum();
+        let weights: Vec<f64> = if w_sum > 0.0 {
+            weights.iter().map(|&w| w / w_sum).collect()
+        } else {
+            vec![1.0 / n as f64; n]
+        };
+        (weights, lambda)
+    }
+
+    /// Outcome for create_test_data(): y = 1 + 2 x1 - x2 + 0.5 d + e (e fixed, 2 decimals).
+    const SBW_Y: [f64; 30] = [
+        2.32, 2.22, 2.30, 2.29, 2.29, 2.37, 2.04, 2.55, 2.22, 2.27, 1.21, 1.64, 1.56, 2.15, 1.48,
+        1.98, 1.38, 2.56, 1.38, 1.61, 1.50, 1.68, 1.42, 2.20, 1.45, 2.01, 1.41, 2.27, 1.51, 1.59,
+    ];
+
+    #[test]
+    fn test_sbw_exact_matches_r_sbw() {
+        // R reference (R 4.3.3, quadprog 1.5.8; the sbw call is the plan's sbw 1.2 record):
+        //   Xc <- cbind(x1[d==0], x2[d==0]); tm <- c(mean(x1[d==1]), mean(x2[d==1])); n <- 20
+        //   qp <- quadprog::solve.QP(diag(n), rep(0, n), cbind(t(rbind(t(Xc), 1)) / n, diag(n)),
+        //                            c(tm, 1, rep(0, n)), meq = 3)      # exact QP, n scale
+        //   qp$solution * 409  ->  2464 0 500 2288 0 0 0 0 500 0 0 1096 0 1008 0 0 0 324 0 0
+        //   # signed multipliers from the active set S = {w > 0} (quadprog reports |mu|):
+        //   A <- rbind(t(Xc), 1) / n; mu <- solve(A[, S] %*% t(A[, S]), c(tm, 1)); lambda <- -mu
+        //   s <- sbw::sbw(dat, ind = "d", out = "y", bal = list(bal_cov = c("x1","x2"), bal_alg = FALSE,
+        //                 bal_tol = 1e-8, bal_std = "group"), sol = list(sol_nam = "quadprog"),
+        //                 par = list(par_est = "att"))                  # sbw::estimate(s): ATT 0.555337388135859
+        let (treatment, covariates) = create_test_data();
+        let r = run_sbw(&treatment.view(), &covariates.view(), SBWConfig::default()).unwrap();
+        let expected = [
+            2464.0, 0.0, 500.0, 2288.0, 0.0, 0.0, 0.0, 0.0, 500.0, 0.0, 0.0, 1096.0, 0.0, 1008.0,
+            0.0, 0.0, 0.0, 324.0, 0.0, 0.0,
+        ];
+        for i in 0..10 {
+            assert!((r.weights[i] - 1.0).abs() < 1e-12);
+        }
+        for (j, e) in expected.iter().enumerate() {
+            assert!(
+                (r.weights[10 + j] - e / 409.0).abs() < 1e-9,
+                "control {j}: {} vs {}",
+                r.weights[10 + j],
+                e / 409.0
+            );
+        }
+        assert!(r.converged);
+        assert!(r.max_constraint_violation < 1e-10);
+        let lambda = [3172.6161369150, -4424.4498777446, 255.0611246939];
+        for (got, want) in r.lambda.iter().zip(lambda) {
+            assert!((got - want).abs() < 1e-8 * want.abs(), "{got} vs {want}");
+        }
+        let (sw, swy) = (10..30).fold((0.0, 0.0), |(a, b), i| {
+            (a + r.weights[i], b + r.weights[i] * SBW_Y[i])
+        });
+        let att = SBW_Y[..10].iter().sum::<f64>() / 10.0 - swy / sw;
+        assert!((att - 0.555337408312916).abs() < 1e-10, "ATT {att}"); // exact QP optimum
+        assert!((att - 0.555337388135859).abs() < 1e-6, "ATT {att}"); // R sbw 1.2 (bal_tol 1e-8)
+    }
+
+    #[test]
+    fn test_sbw_exact_matches_dense_kkt_when_no_bound_binds() {
+        // target = column means + [0.02, -0.01, 0.015]; R: unconstrained weights in [0.7938, 1.2560].
+        let (xc, target) = lcg_controls_and_target([0.02, -0.01, 0.015]);
+        // port check: the first three draws (R gives the same with exact integer arithmetic)
+        assert_eq!(
+            [xc[[0, 0]], xc[[0, 1]], xc[[0, 2]]],
+            [
+                0.089137417729943991,
+                0.36493223533034325,
+                0.078967132139950991
+            ]
+        );
+        let (w_ref, lambda_ref) = dense_kkt_reference(&xc.view(), &target.view());
+        assert!(
+            w_ref.iter().all(|&w| w > 0.0),
+            "precondition: no bound binds"
+        );
+        let (w, lambda, converged, iterations, _, viol) =
+            solve_sbw_exact(&xc.view(), &target.view(), &SBWConfig::default()).unwrap();
+        assert!(
+            converged && iterations <= 2 && viol < 1e-12,
+            "converged {converged}, iterations {iterations}, violation {viol}"
+        );
+        for (a, b) in w.iter().zip(&w_ref) {
+            assert!((a - b).abs() < 1e-12, "{a} vs {b}");
+        }
+        for (a, b) in lambda.iter().zip(&lambda_ref) {
+            assert!((a - b).abs() < 1e-8 * b.abs().max(1.0), "{a} vs {b}");
+        }
+    }
+
+    #[test]
+    fn test_sbw_exact_kkt_certificate_with_binding_bounds() {
+        // target = column means + [0.15, -0.12, 0.10]: 24 unconstrained weights are negative.
+        // R quadprog 1.5.8 optimum (n scale, sum = 240), solve.QP(diag(240), 0,
+        //   cbind(cbind(xc, 1) / 240, diag(240)), c(target, 1, rep(l, 240)), meq = 4):
+        //   l = 0:    max w 3.249634429310, sum w^2 385.061327595962, 34 weights at the bound
+        //   l = 0.1:  max w 3.348946038565, sum w^2 388.293680009016, 40 at the bound
+        //   l = -0.5: max w 3.058753620112, sum w^2 380.430452018262,  6 at the bound
+        let (xc, target) = lcg_controls_and_target([0.15, -0.12, 0.10]);
+        for (l, max_w, ssq, at_bound) in [
+            (0.0, 3.249634429310, 385.061327595962, 34),
+            (0.1, 3.348946038565, 388.293680009016, 40),
+            (-0.5, 3.058753620112, 380.430452018262, 6),
+        ] {
+            let cfg = SBWConfig {
+                min_weight: l,
+                ..Default::default()
+            };
+            let (w, lambda, converged, _, _, viol) =
+                solve_sbw_exact(&xc.view(), &target.view(), &cfg).unwrap();
+            let wn: Vec<f64> = w.iter().map(|v| v * 240.0).collect();
+            assert!(converged && viol < 1e-10, "l {l}: violation {viol}");
+            // optimality certificate: w_i = max(l, z_i), z_i = -(lambda . [x_i, 1]) / n
+            for i in 0..240 {
+                let z = -(lambda[0] * xc[[i, 0]]
+                    + lambda[1] * xc[[i, 1]]
+                    + lambda[2] * xc[[i, 2]]
+                    + lambda[3])
+                    / 240.0;
+                assert!((wn[i] - z.max(l)).abs() < 1e-9, "l {l}, unit {i}");
+            }
+            assert!((wn.iter().cloned().fold(f64::MIN, f64::max) - max_w).abs() < 1e-8);
+            assert!((wn.iter().map(|v| v * v).sum::<f64>() - ssq).abs() < 1e-7);
+            assert_eq!(
+                wn.iter().filter(|&&v| (v - l).abs() < 1e-9).count(),
+                at_bound,
+                "l {l}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_sbw_exact_infeasible_is_an_error() {
+        // ATC on create_test_data(): the control mean of x2 (0.474) is below every treated x2
+        // (min 0.5), so no non-negative treated weights reach it. R sbw also refuses it.
+        let (treatment, covariates) = create_test_data();
+        let err = run_sbw(
+            &treatment.view(),
+            &covariates.view(),
+            SBWConfig {
+                estimand: SBWEstimand::ATC,
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        expect_invalid_spec(err, "balance_tol");
+        // the same through the dataset entry point names the real column
+        let ds = create_test_dataset();
+        let err = sbw(
+            &ds,
+            "treatment",
+            &["x1", "x2"],
+            SBWConfig {
+                estimand: SBWEstimand::ATC,
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        expect_invalid_spec(err, "covariate x2");
+    }
+
+    #[test]
+    fn test_sbw_exact_infeasible_without_range_violation_is_an_error() {
+        // Each target mean lies inside its covariate's range, but no convex combination of
+        // the four corner points reaches the pair (0.9, 0.9): the range pre-check passes and
+        // the Newton solver must detect infeasibility itself.
+        let treatment = Array1::from(vec![1.0, 1.0, 0.0, 0.0, 0.0, 0.0]);
+        let covariates = array![
+            [0.9, 0.9],
+            [0.9, 0.9],
+            [0.0, 1.0],
+            [1.0, 0.0],
+            [0.0, 0.0],
+            [0.5, 0.5]
+        ];
+        let err = run_sbw(&treatment.view(), &covariates.view(), SBWConfig::default()).unwrap_err();
+        expect_invalid_spec(err, "balance_tol");
+    }
+
+    #[test]
+    fn test_sbw_atc_with_swapped_labels_matches_att() {
+        // swapping labels turns the ATT problem into an ATC one: same weights
+        let (treatment, covariates) = create_test_data();
+        let swapped = treatment.mapv(|d| 1.0 - d);
+        let att = run_sbw(&treatment.view(), &covariates.view(), SBWConfig::default()).unwrap();
+        let atc = run_sbw(
+            &swapped.view(),
+            &covariates.view(),
+            SBWConfig {
+                estimand: SBWEstimand::ATC,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(atc.n_target, 10);
+        assert_eq!(atc.n_reweighted, 20);
+        for (a, b) in att.weights.iter().zip(&atc.weights) {
+            assert!((a - b).abs() < 1e-12);
+        }
+    }
+
+    #[test]
+    fn test_sbw_rejects_invalid_input() {
+        let (t, x) = create_test_data();
+        let d = SBWConfig::default;
+        let cases = [
+            (
+                SBWConfig {
+                    balance_tol: f64::NAN,
+                    ..d()
+                },
+                "balance_tol",
+            ),
+            (
+                SBWConfig {
+                    balance_tol: -0.1,
+                    ..d()
+                },
+                "balance_tol",
+            ),
+            (
+                SBWConfig {
+                    tolerance: 0.0,
+                    ..d()
+                },
+                "tolerance",
+            ),
+            (SBWConfig { max_iter: 0, ..d() }, "max_iter"),
+            (
+                SBWConfig {
+                    min_weight: f64::NAN,
+                    ..d()
+                },
+                "min_weight",
+            ),
+            (
+                SBWConfig {
+                    min_weight: 1.5,
+                    ..d()
+                },
+                "min_weight",
+            ),
+            (
+                SBWConfig {
+                    balance_tol: 0.1,
+                    balance_penalty: 0.0,
+                    ..d()
+                },
+                "balance_penalty",
+            ),
+        ];
+        for (cfg, needle) in cases {
+            expect_invalid_spec(run_sbw(&t.view(), &x.view(), cfg).unwrap_err(), needle);
+        }
+        let mut x_nan = x.clone();
+        x_nan[[12, 1]] = f64::NAN;
+        expect_invalid_spec(
+            run_sbw(&t.view(), &x_nan.view(), SBWConfig::default()).unwrap_err(),
+            "finite",
+        );
+        let mut t_inf = t.clone();
+        t_inf[3] = f64::INFINITY;
+        expect_invalid_spec(
+            run_sbw(&t_inf.view(), &x.view(), SBWConfig::default()).unwrap_err(),
+            "finite",
+        );
+    }
+
+    #[test]
+    fn test_sbw_honours_cancellation() {
+        let (t, x) = create_test_data();
+        let r = resource::with_budget(cancelled_budget(), || {
+            run_sbw(&t.view(), &x.view(), SBWConfig::default())
+        });
+        assert!(matches!(r, Err(EconError::Cancelled(_))), "got {r:?}");
+        let r = resource::with_budget(cancelled_budget(), || {
+            run_sbw(
+                &t.view(),
+                &x.view(),
+                SBWConfig {
+                    balance_tol: 0.1,
+                    ..Default::default()
+                },
+            )
+        });
+        assert!(matches!(r, Err(EconError::Cancelled(_))), "got {r:?}");
+    }
+
+    #[test]
+    fn test_sbw_exact_large_n_is_tractable() {
+        // 2,000 treated + 20,000 controls, 3 lcg covariates, treated shifted by +0.3 in x0
+        // (with uniform covariates the unconstrained weights are about 1 + 3.6 (x0 - 0.5), so
+        // the bound binds; a +0.15 shift would leave every weight above 0.1). Do not run before
+        // the fix: the old path allocates a 20,004^2 dense matrix (3.2 GB) and inverts it.
+        // No timing assertion.
+        let (n_t, n_c) = (2_000, 20_000);
+        let mut x = lcg_matrix(n_t + n_c, 3, 7);
+        for i in 0..n_t {
+            x[[i, 0]] += 0.3;
+        }
+        let t = Array1::from_shape_fn(n_t + n_c, |i| if i < n_t { 1.0 } else { 0.0 });
+        let r = run_sbw(&t.view(), &x.view(), SBWConfig::default()).unwrap();
+        assert!(r.converged);
+        assert!(r.iterations <= 50, "iterations {}", r.iterations);
+        assert!(
+            r.max_constraint_violation < 1e-9,
+            "violation {}",
+            r.max_constraint_violation
+        );
+        assert!(r.weights.iter().all(|&w| w >= 0.0));
+        assert!(
+            r.weights[n_t..].iter().filter(|&&w| w == 0.0).count() > 0,
+            "precondition: the bound binds"
+        );
+    }
 
     /// Create test data with known imbalance but overlapping support.
     /// SBW requires overlap: control covariate range must contain treated means.
@@ -1081,11 +1758,15 @@ mod tests {
             );
         }
 
-        // SBW should achieve reasonable balance (exact balance is difficult numerically)
-        // Standard threshold is <0.25 standardized difference after weighting
+        // Exact balance is achieved
         assert!(
-            result.balance_after.max_std_diff < 0.3,
-            "SBW should achieve reasonable balance, got max_std_diff = {}",
+            result.max_constraint_violation < 1e-10,
+            "max constraint violation {}",
+            result.max_constraint_violation
+        );
+        assert!(
+            result.balance_after.max_std_diff < 1e-8,
+            "SBW should achieve exact balance, got max_std_diff = {}",
             result.balance_after.max_std_diff
         );
 
@@ -1120,31 +1801,6 @@ mod tests {
 
         // Weights should be positive
         assert!(result.weights.iter().all(|&w| w >= 0.0));
-    }
-
-    #[test]
-    fn test_sbw_atc() {
-        let (treatment, covariates) = create_test_data();
-
-        let config = SBWConfig {
-            estimand: SBWEstimand::ATC,
-            ..Default::default()
-        };
-
-        let result = run_sbw(&treatment.view(), &covariates.view(), config).unwrap();
-
-        // For ATC, control is target, treated is reweighted
-        assert_eq!(result.n_target, 20);
-        assert_eq!(result.n_reweighted, 10);
-
-        // Control units should have weight 1.0
-        for i in 10..30 {
-            assert!(
-                (result.weights[i] - 1.0).abs() < 1e-6,
-                "Control weight should be 1.0 for ATC, got {}",
-                result.weights[i]
-            );
-        }
     }
 
     #[test]
