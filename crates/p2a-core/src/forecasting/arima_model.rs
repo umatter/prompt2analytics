@@ -47,6 +47,11 @@ use rand::rngs::StdRng;
 use serde::{Deserialize, Serialize};
 
 use crate::data::Dataset;
+use crate::errors::EconError;
+
+fn size_overflow(what: &str) -> EconError {
+    EconError::ResourceLimit(format!("{what} is too large: the requested size overflows"))
+}
 
 /// Result from ARIMA model fitting.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -120,7 +125,12 @@ pub fn run_arima(
         .into_no_null_iter()
         .collect();
 
-    if values.len() < p + d + q + 10 {
+    // p + d + q + 10, checked: an order sum that overflows can never be fitted.
+    let required = p
+        .checked_add(d)
+        .and_then(|s| s.checked_add(q))
+        .and_then(|s| s.checked_add(10));
+    if required.is_none_or(|r| values.len() < r) {
         return Err(anyhow!(
             "Not enough observations ({}) for ARIMA({},{},{})",
             values.len(),
@@ -253,6 +263,16 @@ pub fn forecast_arima(
     } else {
         Some(model.ma_coeffs.as_slice())
     };
+
+    // The arima crate grows its buffer with push (one doubling reallocation) and clones it once.
+    // Refuse sizes it could never allocate before it starts; TS-1 (tier 2) replaces this forecaster.
+    const WHAT: &str = "the ARIMA forecast buffer (series length + horizon)";
+    let total = values
+        .len()
+        .checked_add(horizon)
+        .ok_or_else(|| size_overflow(WHAT))?;
+    crate::resource::check_alloc::<f64>(total.saturating_mul(2), WHAT)?;
+    drop(crate::resource::try_with_capacity::<f64>(total, WHAT)?);
 
     // Create a zero-noise function for deterministic forecast
     let noise_fn = |_idx: usize, _rng: &mut StdRng| 0.0;
@@ -462,5 +482,34 @@ mod tests {
 
         // At minimum, AIC should be finite
         assert!(result.aic.is_finite());
+    }
+
+    #[test]
+    fn forecast_arima_refuses_horizon_above_the_allocation_ceiling() {
+        let y = generate_ar1_data(200, 0.6, 7);
+        let dataset = Dataset::new(df! { "y" => &y }.unwrap());
+        let err = crate::resource::with_alloc_ceiling(Some(1 << 20), || {
+            forecast_arima(&dataset, "y", 1, 0, 0, 100_000)
+        })
+        .unwrap_err();
+        assert!(err.to_string().contains("ARIMA forecast"), "{err}");
+        // The buffer length overflows. Never call the pre-fix forecaster with this: the arima
+        // crate grows its buffer one push at a time until memory runs out.
+        assert!(forecast_arima(&dataset, "y", 1, 0, 0, usize::MAX).is_err());
+        assert_eq!(
+            forecast_arima(&dataset, "y", 1, 0, 0, 12)
+                .unwrap()
+                .forecast
+                .len(),
+            12
+        );
+    }
+
+    #[test]
+    fn run_arima_order_sum_cannot_overflow() {
+        let y = generate_ar1_data(200, 0.6, 7);
+        let dataset = Dataset::new(df! { "y" => &y }.unwrap());
+        // a debug-build overflow panic before the fix
+        assert!(run_arima(&dataset, "y", usize::MAX, 0, 1).is_err());
     }
 }

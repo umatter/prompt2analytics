@@ -46,6 +46,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 use crate::errors::{EconError, EconResult};
+use crate::resource::try_with_capacity;
 use crate::traits::SignificanceLevel;
 
 /// Configuration for GARCH estimation.
@@ -613,8 +614,14 @@ fn compute_garch_inference(
 ///
 /// # Returns
 ///
-/// Tuple of (forecast variances, forecast volatilities, forecast returns)
-pub fn garch_forecast(result: &GarchResult, h: usize) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+/// Tuple of (forecast variances, forecast volatilities, forecast returns), or
+/// [`EconError::ResourceLimit`] when the horizon is too large to allocate.
+pub fn garch_forecast(
+    result: &GarchResult,
+    h: usize,
+) -> EconResult<(Vec<f64>, Vec<f64>, Vec<f64>)> {
+    const WHAT: &str = "the GARCH forecast horizon";
+
     let alpha_sum: f64 = result.alpha.iter().sum();
     let beta_sum: f64 = result.beta.iter().sum();
     let persistence = alpha_sum + beta_sum;
@@ -630,9 +637,9 @@ pub fn garch_forecast(result: &GarchResult, h: usize) -> (Vec<f64>, Vec<f64>, Ve
         .map(|z| z.powi(2) * last_var)
         .unwrap_or(result.unconditional_variance);
 
-    let mut forecast_var = Vec::with_capacity(h);
-    let mut forecast_vol = Vec::with_capacity(h);
-    let mut forecast_ret = Vec::with_capacity(h);
+    let mut forecast_var = try_with_capacity(h, WHAT)?;
+    let mut forecast_vol = try_with_capacity(h, WHAT)?;
+    let mut forecast_ret = try_with_capacity(h, WHAT)?;
 
     let uncond_var = result.unconditional_variance;
 
@@ -652,7 +659,7 @@ pub fn garch_forecast(result: &GarchResult, h: usize) -> (Vec<f64>, Vec<f64>, Ve
         forecast_ret.push(result.mu);
     }
 
-    (forecast_var, forecast_vol, forecast_ret)
+    Ok((forecast_var, forecast_vol, forecast_ret))
 }
 
 /// Run GARCH from a Dataset (MCP entry point).
@@ -772,7 +779,7 @@ mod tests {
         let data = generate_garch_data(200, 0.0001, 0.1, 0.8);
         let result = garch(&data, None).unwrap();
 
-        let (var_fc, vol_fc, ret_fc) = garch_forecast(&result, 10);
+        let (var_fc, vol_fc, ret_fc) = garch_forecast(&result, 10).unwrap();
 
         assert_eq!(var_fc.len(), 10);
         assert_eq!(vol_fc.len(), 10);
@@ -1031,7 +1038,7 @@ mod tests {
         let result = garch(&data, None).unwrap();
 
         let horizon = 10;
-        let (var_fc, vol_fc, ret_fc) = garch_forecast(&result, horizon);
+        let (var_fc, vol_fc, ret_fc) = garch_forecast(&result, horizon).unwrap();
 
         assert_eq!(var_fc.len(), horizon);
         assert_eq!(vol_fc.len(), horizon);
@@ -1065,7 +1072,7 @@ mod tests {
         let result = garch(&data, None).unwrap();
 
         // Long horizon forecast should converge to unconditional variance
-        let (var_fc, _, _) = garch_forecast(&result, 50);
+        let (var_fc, _, _) = garch_forecast(&result, 50).unwrap();
 
         let last_fc = var_fc.last().unwrap();
         let diff = (last_fc - result.unconditional_variance).abs();
@@ -1102,5 +1109,15 @@ mod tests {
 
         // Significance levels should be present
         assert_eq!(result.significance.len(), result.p_values.len());
+    }
+
+    #[test]
+    fn garch_forecast_refuses_absurd_horizon() {
+        let result = garch(&generate_garch_data(200, 0.0001, 0.1, 0.8), None).unwrap();
+        assert!(matches!(
+            garch_forecast(&result, 1usize << 50),
+            Err(EconError::ResourceLimit(_))
+        ));
+        assert_eq!(garch_forecast(&result, 10).unwrap().0.len(), 10);
     }
 }

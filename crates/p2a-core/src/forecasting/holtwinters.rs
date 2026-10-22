@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
+use crate::resource::try_with_capacity;
 
 /// Type of seasonal component.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -342,7 +343,7 @@ pub fn holt_winters_forecast(result: &HoltWintersResult, h: usize) -> EconResult
     let b = result.coefficients.trend.unwrap_or(0.0);
     let period = result.period;
 
-    let mut forecasts = Vec::with_capacity(h);
+    let mut forecasts = try_with_capacity(h, "the Holt-Winters forecast horizon")?;
 
     for i in 1..=h {
         let base = a + (i as f64) * b;
@@ -1368,5 +1369,24 @@ mod tests {
             // The difference should be approximately the trend component * 4
             assert!(diff1 > 0.0); // Should be increasing due to trend
         }
+    }
+
+    #[test]
+    fn holt_winters_forecast_refuses_absurd_horizon() {
+        let y: Vec<f64> = (0..20)
+            .map(|i| 10.0 + 0.5 * i as f64 + 0.3 * (((i * 7) % 5) as f64 - 2.0))
+            .collect();
+        let cfg = HoltWintersConfig {
+            use_trend: true,
+            use_seasonal: false,
+            period: 1,
+            ..Default::default()
+        };
+        let fit = holt_winters(&y, cfg).unwrap();
+        // Before the fix: "memory allocation of 9007199254740992 bytes failed", SIGABRT.
+        assert!(matches!(
+            holt_winters_forecast(&fit, 1usize << 50),
+            Err(EconError::ResourceLimit(_))
+        ));
     }
 }
