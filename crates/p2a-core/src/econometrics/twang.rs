@@ -1237,6 +1237,55 @@ mod tests {
     }
 
     #[test]
+    fn test_twang_results_unchanged_by_sweep() {
+        // Pinned from the naive stump search at 1fdb22f.
+        const OPT: usize = 51;
+        const PS0: f64 = 0.7227379628293721;
+        const PS25: f64 = 0.2772620371706279;
+        const ES_AFTER: f64 = 4.502756363651351;
+        const N_STUMPS: usize = 500;
+        // sum over i of (i + 1) * propensity_scores[i]
+        const PS_CHECKSUM: f64 = 320.90481486825115;
+        const LAST_STUMP: (usize, f64, f64, f64) =
+            (0, 1.0, -0.04187293886907061, 0.04187293886907073);
+        let cfg = TwangConfig {
+            n_trees: 500,
+            shrinkage: 0.05,
+            stop_method: StopMethod::ESMean,
+            min_iterations: 50,
+            ..Default::default()
+        };
+        let r = run_twang(
+            &create_test_dataset(),
+            "treatment",
+            &["x1", "x2"],
+            Some(cfg),
+        )
+        .unwrap();
+        assert_eq!(r.optimal_n_trees, OPT);
+        assert!((r.propensity_scores[0] - PS0).abs() < 1e-12);
+        assert!((r.propensity_scores[25] - PS25).abs() < 1e-12);
+        assert!((r.balance_after.es_mean - ES_AFTER).abs() < 1e-12);
+        assert_eq!(r.stumps.len(), N_STUMPS);
+        assert_eq!(r.balance_history.len(), N_STUMPS + 1);
+        let checksum: f64 = r
+            .propensity_scores
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (i + 1) as f64 * p)
+            .sum();
+        assert!(
+            (checksum - PS_CHECKSUM).abs() < 1e-10,
+            "checksum {checksum}"
+        );
+        let s = &r.stumps[N_STUMPS - 1];
+        assert_eq!(s.feature_idx, LAST_STUMP.0);
+        assert!((s.threshold - LAST_STUMP.1).abs() < 1e-12);
+        assert!((s.left_value - LAST_STUMP.2).abs() < 1e-12);
+        assert!((s.right_value - LAST_STUMP.3).abs() < 1e-12);
+    }
+
+    #[test]
     fn test_twang_stop_methods() {
         let dataset = create_test_dataset();
 
