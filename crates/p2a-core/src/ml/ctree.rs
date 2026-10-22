@@ -464,8 +464,17 @@ fn select_best_variable(
 
 /// Find the optimal split point for a selected variable.
 ///
-/// Maximizes the test statistic (or equivalently, minimizes p-value) over all
-/// possible split points.
+/// Maximizes the split statistic over all candidate positions of the sorted
+/// feature: information gain for classification, variance reduction for
+/// regression. The rows are sorted once and scanned with running class counts
+/// (classification: the statistic is bit-identical to evaluating every
+/// candidate from scratch) or running sums of the node-centred response
+/// (regression: minimising the within-child sum of squares is maximising the
+/// variance reduction, so the split is the same except at rounding-level
+/// ties). That is O(n log n) per node instead of O(n^2).
+///
+/// Returns the threshold and the left (`x <= threshold`) and right row
+/// indices, each in sorted order.
 fn find_best_split(
     x: &ArrayView2<f64>,
     y: &ArrayView1<f64>,
@@ -476,7 +485,9 @@ fn find_best_split(
     config: &CtreeConfig,
 ) -> Option<(f64, Vec<usize>, Vec<usize>)> {
     let n = indices.len();
-    if n < config.minbucket.saturating_mul(2) {
+    // A child needs at least one row, so minbucket = 0 acts as 1.
+    let mb = config.minbucket.max(1);
+    if n < mb.saturating_mul(2) {
         return None;
     }
 
@@ -484,111 +495,115 @@ fn find_best_split(
     let mut sorted: Vec<(f64, usize)> = indices.iter().map(|&i| (x[[i, feature]], i)).collect();
     sorted.sort_by(|a, b| a.0.total_cmp(&b.0));
 
-    // Try all possible split points
-    let mut best_stat = f64::NEG_INFINITY;
-    let mut best_threshold = None;
-    let mut best_split_pos = 0;
+    // Candidate positions split sorted[..pos] from sorted[pos..], skipping
+    // positions between (nearly) equal values.
+    let is_candidate = |pos: usize| (sorted[pos - 1].0 - sorted[pos].0).abs() >= 1e-10;
+    let mut best_pos: Option<usize> = None;
 
-    for split_pos in config.minbucket..(n - config.minbucket + 1) {
-        // Check if this is a valid split point (different x values)
-        if (sorted[split_pos - 1].0 - sorted[split_pos].0).abs() < 1e-10 {
-            continue;
+    match classes.filter(|_| is_classification) {
+        Some(cls) => {
+            // Information gain (reduction in entropy)
+            let k = cls.len();
+            let class_of: Vec<Option<usize>> = sorted
+                .iter()
+                .map(|&(_, i)| cls.iter().position(|&c| (c - y[i]).abs() < 1e-10))
+                .collect();
+            let mut total = vec![0usize; k];
+            for c in class_of.iter().flatten() {
+                total[*c] += 1;
+            }
+            let parent_entropy = entropy_from_counts(&total, n);
+            let n_total = n as f64;
+
+            let mut left = vec![0usize; k];
+            let mut right = vec![0usize; k];
+            let mut filled = 0usize;
+            let mut best_stat = f64::NEG_INFINITY;
+            for pos in mb..=n - mb {
+                while filled < pos {
+                    if let Some(c) = class_of[filled] {
+                        left[c] += 1;
+                    }
+                    filled += 1;
+                }
+                if !is_candidate(pos) {
+                    continue;
+                }
+                for c in 0..k {
+                    right[c] = total[c] - left[c];
+                }
+                let n_left = pos as f64;
+                let n_right = (n - pos) as f64;
+                let weighted_child = (n_left * entropy_from_counts(&left, pos)
+                    + n_right * entropy_from_counts(&right, n - pos))
+                    / n_total;
+                let stat = parent_entropy - weighted_child;
+                if stat > best_stat {
+                    best_stat = stat;
+                    best_pos = Some(pos);
+                }
+            }
         }
+        None => {
+            // Variance reduction (regression). Centring on the node mean
+            // keeps the one-pass sums accurate when |mean| >> sd.
+            let mean = sorted.iter().map(|&(_, i)| y[i]).sum::<f64>() / n as f64;
+            let (sum_all, sum_sq_all) = sorted.iter().fold((0.0f64, 0.0f64), |(s, q), &(_, i)| {
+                let d = y[i] - mean;
+                (s + d, q + d * d)
+            });
 
-        let threshold = (sorted[split_pos - 1].0 + sorted[split_pos].0) / 2.0;
-
-        // Compute test statistic for this split
-        // Create binary indicator for split
-        let left_indices: Vec<usize> = sorted[..split_pos].iter().map(|(_, i)| *i).collect();
-        let right_indices: Vec<usize> = sorted[split_pos..].iter().map(|(_, i)| *i).collect();
-
-        // Compute improvement: difference in within-node variance
-        let stat =
-            compute_split_statistic(y, &left_indices, &right_indices, is_classification, classes);
-
-        if stat > best_stat {
-            best_stat = stat;
-            best_threshold = Some(threshold);
-            best_split_pos = split_pos;
+            let (mut sum_left, mut sum_sq_left) = (0.0f64, 0.0f64);
+            let mut filled = 0usize;
+            let mut best_sse = f64::INFINITY;
+            for pos in mb..=n - mb {
+                while filled < pos {
+                    let d = y[sorted[filled].1] - mean;
+                    sum_left += d;
+                    sum_sq_left += d * d;
+                    filled += 1;
+                }
+                if !is_candidate(pos) {
+                    continue;
+                }
+                let n_left = pos as f64;
+                let n_right = (n - pos) as f64;
+                let sum_right = sum_all - sum_left;
+                let sum_sq_right = sum_sq_all - sum_sq_left;
+                let sse = (sum_sq_left - sum_left * sum_left / n_left).max(0.0)
+                    + (sum_sq_right - sum_right * sum_right / n_right).max(0.0);
+                if sse < best_sse {
+                    best_sse = sse;
+                    best_pos = Some(pos);
+                }
+            }
         }
     }
 
-    best_threshold.map(|threshold| {
-        let left_indices: Vec<usize> = sorted[..best_split_pos].iter().map(|(_, i)| *i).collect();
-        let right_indices: Vec<usize> = sorted[best_split_pos..].iter().map(|(_, i)| *i).collect();
+    best_pos.map(|pos| {
+        let threshold = (sorted[pos - 1].0 + sorted[pos].0) / 2.0;
+        let left_indices: Vec<usize> = sorted[..pos].iter().map(|(_, i)| *i).collect();
+        let right_indices: Vec<usize> = sorted[pos..].iter().map(|(_, i)| *i).collect();
         (threshold, left_indices, right_indices)
     })
 }
 
-/// Compute split quality statistic (improvement in criterion).
-fn compute_split_statistic(
-    y: &ArrayView1<f64>,
-    left_indices: &[usize],
-    right_indices: &[usize],
-    is_classification: bool,
-    classes: Option<&[f64]>,
-) -> f64 {
-    let n_left = left_indices.len() as f64;
-    let n_right = right_indices.len() as f64;
-    let n_total = n_left + n_right;
-
-    if n_left < 1.0 || n_right < 1.0 {
-        return f64::NEG_INFINITY;
-    }
-
-    if is_classification && classes.is_some() {
-        // Information gain (reduction in entropy)
-        let cls = classes.unwrap();
-
-        let parent_entropy = compute_entropy(y, &[left_indices, right_indices].concat(), cls);
-        let left_entropy = compute_entropy(y, left_indices, cls);
-        let right_entropy = compute_entropy(y, right_indices, cls);
-
-        let weighted_child = (n_left * left_entropy + n_right * right_entropy) / n_total;
-        parent_entropy - weighted_child
-    } else {
-        // Variance reduction (regression)
-        let parent_var = compute_variance(y, &[left_indices, right_indices].concat());
-        let left_var = compute_variance(y, left_indices);
-        let right_var = compute_variance(y, right_indices);
-
-        let weighted_child = (n_left * left_var + n_right * right_var) / n_total;
-        parent_var - weighted_child
-    }
-}
-
-/// Compute entropy for a set of indices.
-fn compute_entropy(y: &ArrayView1<f64>, indices: &[usize], classes: &[f64]) -> f64 {
-    if indices.is_empty() {
+/// Entropy (natural log) of the class counts of a side holding `n_side` rows,
+/// summed over the classes in order. Rows that match no class count towards
+/// `n_side` only, as in the original per-candidate pass.
+fn entropy_from_counts(counts: &[usize], n_side: usize) -> f64 {
+    if n_side == 0 {
         return 0.0;
     }
-
-    let n = indices.len() as f64;
+    let n = n_side as f64;
     let mut entropy = 0.0;
-
-    for &c in classes {
-        let count = indices
-            .iter()
-            .filter(|&&i| (y[i] - c).abs() < 1e-10)
-            .count() as f64;
-        if count > 0.0 {
-            let p = count / n;
+    for &count in counts {
+        if count > 0 {
+            let p = count as f64 / n;
             entropy -= p * p.ln();
         }
     }
-
     entropy
-}
-
-/// Compute variance for a set of indices.
-fn compute_variance(y: &ArrayView1<f64>, indices: &[usize]) -> f64 {
-    if indices.len() < 2 {
-        return 0.0;
-    }
-
-    let sum: f64 = indices.iter().map(|&i| y[i]).sum();
-    let mean = sum / indices.len() as f64;
-    indices.iter().map(|&i| (y[i] - mean).powi(2)).sum::<f64>() / indices.len() as f64
 }
 
 /// Deepest `maxdepth` ctree accepts (`usize::BITS - 2`, 62 on 64-bit targets).
@@ -1501,5 +1516,248 @@ mod tests {
         assert_eq!(config.maxdepth, 0);
         assert_eq!(config.teststat, "quadratic");
         assert_eq!(config.testtype, "bonferroni");
+    }
+
+    /// The split search as it was before ML-85 (index copies and a full
+    /// variance or entropy pass per candidate), kept as the reference the
+    /// running-sum scan must reproduce.
+    fn find_best_split_reference(
+        x: &ArrayView2<f64>,
+        y: &ArrayView1<f64>,
+        indices: &[usize],
+        feature: usize,
+        is_classification: bool,
+        classes: Option<&[f64]>,
+        config: &CtreeConfig,
+    ) -> Option<(f64, Vec<usize>, Vec<usize>)> {
+        let n = indices.len();
+        if n < config.minbucket.saturating_mul(2) {
+            return None;
+        }
+
+        // Sort indices by feature value
+        let mut sorted: Vec<(f64, usize)> = indices.iter().map(|&i| (x[[i, feature]], i)).collect();
+        sorted.sort_by(|a, b| a.0.total_cmp(&b.0));
+
+        // Try all possible split points
+        let mut best_stat = f64::NEG_INFINITY;
+        let mut best_threshold = None;
+        let mut best_split_pos = 0;
+
+        for split_pos in config.minbucket..(n - config.minbucket + 1) {
+            // Check if this is a valid split point (different x values)
+            if (sorted[split_pos - 1].0 - sorted[split_pos].0).abs() < 1e-10 {
+                continue;
+            }
+
+            let threshold = (sorted[split_pos - 1].0 + sorted[split_pos].0) / 2.0;
+
+            // Compute test statistic for this split
+            // Create binary indicator for split
+            let left_indices: Vec<usize> = sorted[..split_pos].iter().map(|(_, i)| *i).collect();
+            let right_indices: Vec<usize> = sorted[split_pos..].iter().map(|(_, i)| *i).collect();
+
+            // Compute improvement: difference in within-node variance
+            let stat = compute_split_statistic_reference(
+                y,
+                &left_indices,
+                &right_indices,
+                is_classification,
+                classes,
+            );
+
+            if stat > best_stat {
+                best_stat = stat;
+                best_threshold = Some(threshold);
+                best_split_pos = split_pos;
+            }
+        }
+
+        best_threshold.map(|threshold| {
+            let left_indices: Vec<usize> =
+                sorted[..best_split_pos].iter().map(|(_, i)| *i).collect();
+            let right_indices: Vec<usize> =
+                sorted[best_split_pos..].iter().map(|(_, i)| *i).collect();
+            (threshold, left_indices, right_indices)
+        })
+    }
+
+    /// Compute split quality statistic (improvement in criterion).
+    fn compute_split_statistic_reference(
+        y: &ArrayView1<f64>,
+        left_indices: &[usize],
+        right_indices: &[usize],
+        is_classification: bool,
+        classes: Option<&[f64]>,
+    ) -> f64 {
+        let n_left = left_indices.len() as f64;
+        let n_right = right_indices.len() as f64;
+        let n_total = n_left + n_right;
+
+        if n_left < 1.0 || n_right < 1.0 {
+            return f64::NEG_INFINITY;
+        }
+
+        if is_classification && classes.is_some() {
+            // Information gain (reduction in entropy)
+            let cls = classes.unwrap();
+
+            let parent_entropy =
+                compute_entropy_reference(y, &[left_indices, right_indices].concat(), cls);
+            let left_entropy = compute_entropy_reference(y, left_indices, cls);
+            let right_entropy = compute_entropy_reference(y, right_indices, cls);
+
+            let weighted_child = (n_left * left_entropy + n_right * right_entropy) / n_total;
+            parent_entropy - weighted_child
+        } else {
+            // Variance reduction (regression)
+            let parent_var = compute_variance_reference(y, &[left_indices, right_indices].concat());
+            let left_var = compute_variance_reference(y, left_indices);
+            let right_var = compute_variance_reference(y, right_indices);
+
+            let weighted_child = (n_left * left_var + n_right * right_var) / n_total;
+            parent_var - weighted_child
+        }
+    }
+
+    /// Compute entropy for a set of indices.
+    fn compute_entropy_reference(y: &ArrayView1<f64>, indices: &[usize], classes: &[f64]) -> f64 {
+        if indices.is_empty() {
+            return 0.0;
+        }
+
+        let n = indices.len() as f64;
+        let mut entropy = 0.0;
+
+        for &c in classes {
+            let count = indices
+                .iter()
+                .filter(|&&i| (y[i] - c).abs() < 1e-10)
+                .count() as f64;
+            if count > 0.0 {
+                let p = count / n;
+                entropy -= p * p.ln();
+            }
+        }
+
+        entropy
+    }
+
+    /// Compute variance for a set of indices.
+    fn compute_variance_reference(y: &ArrayView1<f64>, indices: &[usize]) -> f64 {
+        if indices.len() < 2 {
+            return 0.0;
+        }
+
+        let sum: f64 = indices.iter().map(|&i| y[i]).sum();
+        let mean = sum / indices.len() as f64;
+        indices.iter().map(|&i| (y[i] - mean).powi(2)).sum::<f64>() / indices.len() as f64
+    }
+
+    #[test]
+    fn test_validate_ctree_split_matches_rpart() {
+        // R reference: the rpart script above (minbucket = 5, one variable at a time).
+        let (x, y_reg, y_cls) = rpart_reference_data();
+        let cfg = CtreeConfig {
+            minbucket: 5,
+            ..Default::default()
+        };
+        let idx: Vec<usize> = (0..40).collect();
+        let classes = [0.0, 1.0, 2.0];
+        for (f, thr, n_left) in [(0, 5.125, 21), (1, 3.5, 17), (2, 2.75, 35)] {
+            let (t, l, r) =
+                find_best_split(&x.view(), &y_reg.view(), &idx, f, false, None, &cfg).unwrap();
+            assert!((t - thr).abs() < 1e-12, "anova x{}: {t}", f + 1);
+            assert_eq!((l.len(), r.len()), (n_left, 40 - n_left));
+        }
+        for (f, thr, n_left) in [(0, 5.125, 21), (1, 6.1, 29), (2, 2.75, 35)] {
+            let (t, l, r) = find_best_split(
+                &x.view(),
+                &y_cls.view(),
+                &idx,
+                f,
+                true,
+                Some(&classes),
+                &cfg,
+            )
+            .unwrap();
+            assert!((t - thr).abs() < 1e-12, "information x{}: {t}", f + 1);
+            assert_eq!((l.len(), r.len()), (n_left, 40 - n_left));
+        }
+    }
+
+    #[test]
+    fn test_ctree_split_matches_naive_reference() {
+        let classes = [0.0, 1.0, 2.0];
+        for seed in 0..20u64 {
+            let n = 20 + 7 * seed as usize;
+            let (mut x, y) = noisy_regression(n, 2, seed);
+            for i in 0..n {
+                x[[i, 1]] = x[[i, 1]].round() / 2.0; // tie-heavy feature
+            }
+            let y_cls = y.mapv(|v| {
+                if v < 3.0 {
+                    0.0
+                } else if v < 9.0 {
+                    1.0
+                } else {
+                    2.0
+                }
+            });
+            let indices: Vec<usize> = (0..n).filter(|i| i % 5 != 2).collect();
+            for minbucket in [1usize, 3, 7] {
+                let cfg = CtreeConfig {
+                    minbucket,
+                    ..Default::default()
+                };
+                for f in 0..2 {
+                    let key = |o: Option<(f64, Vec<usize>, Vec<usize>)>| {
+                        o.map(|(t, l, r)| (t.to_bits(), l, r))
+                    };
+                    assert_eq!(
+                        key(find_best_split(
+                            &x.view(),
+                            &y.view(),
+                            &indices,
+                            f,
+                            false,
+                            None,
+                            &cfg
+                        )),
+                        key(find_best_split_reference(
+                            &x.view(),
+                            &y.view(),
+                            &indices,
+                            f,
+                            false,
+                            None,
+                            &cfg
+                        )),
+                        "anova seed {seed} minbucket {minbucket} feature {f}"
+                    );
+                    assert_eq!(
+                        key(find_best_split(
+                            &x.view(),
+                            &y_cls.view(),
+                            &indices,
+                            f,
+                            true,
+                            Some(&classes),
+                            &cfg
+                        )),
+                        key(find_best_split_reference(
+                            &x.view(),
+                            &y_cls.view(),
+                            &indices,
+                            f,
+                            true,
+                            Some(&classes),
+                            &cfg
+                        )),
+                        "information seed {seed} minbucket {minbucket} feature {f}"
+                    );
+                }
+            }
+        }
     }
 }
