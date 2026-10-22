@@ -419,7 +419,14 @@ impl QuantileTree {
     /// over the sorted values gives each candidate's left count exactly as a
     /// partition with `x <= threshold` would, also when the midpoint rounds up
     /// to the right value. Only the winning split is partitioned, in the
-    /// original row order, so leaves hold the same index vectors as before.
+    /// original row order.
+    ///
+    /// The chosen split is the one the earlier partition-per-threshold search
+    /// (two-pass child variances) chose, except at exact ties in the
+    /// within-child sum of squares: rounding may break those differently, so a
+    /// response with repeated values (counts, integers, Likert scores) can grow
+    /// a different, equally good tree. Seeded output on continuous data is
+    /// unchanged.
     fn find_best_split(
         &self,
         x: &ArrayView2<f64>,
@@ -1327,7 +1334,8 @@ mod tests {
     }
 
     /// The partition-per-threshold split search as it was before WT-14, kept as
-    /// the reference the running-sum scan must reproduce.
+    /// the reference the running-sum scan must reproduce wherever the
+    /// within-child sums of squares do not tie exactly.
     fn find_best_split_reference(
         x: &ArrayView2<f64>,
         y: &ArrayView1<f64>,
@@ -1422,7 +1430,8 @@ mod tests {
             r.variable_importance[2],
             r.oob_error.unwrap(),
         ];
-        // Captured from the partition-per-threshold code; must stay bit-identical.
+        // Captured from the partition-per-threshold code on continuous data (no
+        // exact SSE ties); must stay bit-identical.
         const EXPECTED: [u64; 6] = [
             0x401d26720478d36c,
             0xbff92b57a34a5541,
@@ -1489,6 +1498,26 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn test_qrf_split_tie_may_resolve_differently_from_reference() {
+        // Documents the one place the running-sum scan departs from the old
+        // search: two candidates with exactly equal within-child SSE (32/6 in
+        // units of 0.7^2 here), whose rounded values compare the other way.
+        let x =
+            Array2::from_shape_vec((8, 1), vec![1.1, 1.1, 0.8, 0.0, 0.1, 0.3, 0.2, 0.8]).unwrap();
+        let y = Array1::from(vec![0.0, 0.7, 0.0, 0.7, 0.0, 1.4, 1.4, 1.4]);
+        let idx: Vec<usize> = (0..8).collect();
+        let tree = QuantileTree::new(1);
+        let (f, t, l, r) = tree
+            .find_best_split(&x.view(), &y.view(), &idx, &[0], 1)
+            .unwrap();
+        assert_eq!((f, l.len(), r.len()), (0, 6, 2));
+        assert!((t - 0.95).abs() < 1e-12, "{t}");
+        let (f, t, l, r) = find_best_split_reference(&x.view(), &y.view(), &idx, &[0], 1).unwrap();
+        assert_eq!((f, l.len(), r.len()), (0, 2, 6));
+        assert!((t - 0.15).abs() < 1e-12, "{t}");
     }
 
     /// x = 0, 1, 2, ...; y alternates 0/1: every best split peels one row off an end.
