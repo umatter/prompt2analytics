@@ -324,7 +324,6 @@ fn log_startup(config: &ServerConfig, exec: &ExecConfig) {
              not report the process memory; memory admission is disabled"
         );
     }
-    config.warn_unapplied_limit_overrides();
     tracing::info!(
         "Starting HTTP transport on {addr} (mode {mode:?}, resource profile {:?}, \
          tool concurrency {}, deadline {:?})",

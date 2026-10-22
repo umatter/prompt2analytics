@@ -537,8 +537,9 @@ impl ServerConfig {
             anyhow::bail!(
                 "P2A_LIMITS=off (--limits off) is not allowed for an open public server \
                  (no access token): the hosted resource profile always applies there. \
-                 Raise individual governor limits with their flags instead (for example \
-                 --tool-timeout-secs or --session-data-mb)."
+                 Raise individual request limits with --limit-override \
+                 (P2A_LIMIT_OVERRIDES) and governor limits with their flags instead (for \
+                 example --tool-timeout-secs or --session-data-mb)."
             );
         }
         for (flag, value) in [
@@ -643,35 +644,6 @@ impl ServerConfig {
                 (self.resource_profile() == ResourceProfile::Hosted)
                     .then_some(HOSTED_EVICT_IDLE_MINUTES)
             }),
-        }
-    }
-
-    /// The keys of the `--limit-override` (`P2A_LIMIT_OVERRIDES`) entries,
-    /// empty entries skipped.
-    pub(crate) fn limit_override_keys(&self) -> Vec<String> {
-        self.limits
-            .overrides
-            .iter()
-            .map(|entry| entry.split_once('=').map_or(entry.as_str(), |(key, _)| key))
-            .map(str::trim)
-            .filter(|key| !key.is_empty())
-            .map(str::to_string)
-            .collect()
-    }
-
-    /// Log the keys of the configured request-limit overrides. Called at
-    /// startup by the HTTP transport. `transport::start_transport` applies
-    /// the overrides through `tools::limits::resolve` before any transport
-    /// starts (an unknown key fails startup there), so this only names them.
-    /// The name is kept from the build in which the overrides were not yet
-    /// applied, because the HTTP startup code still calls it.
-    pub(crate) fn warn_unapplied_limit_overrides(&self) {
-        let keys = self.limit_override_keys();
-        if !keys.is_empty() {
-            tracing::info!(
-                "--limit-override (P2A_LIMIT_OVERRIDES) sets: {}",
-                keys.join(", ")
-            );
         }
     }
 }
@@ -877,7 +849,6 @@ mod open_mode_tests {
         assert_eq!(c.worker_threads(), 3);
         assert_eq!(c.session.evict_idle_minutes, None); // resolved where the app is built
         assert_eq!(c.resolved_evict_idle_minutes(), Some(10)); // the hosted default
-        assert_eq!(c.limit_override_keys(), vec!["replications", "folds"]);
     }
 
     #[test]
@@ -901,24 +872,11 @@ mod open_mode_tests {
     }
 
     #[test]
-    fn limit_override_keys_skip_empty_entries() {
-        let mut c = cfg("127.0.0.1:8080", None, false);
-        assert!(c.limit_override_keys().is_empty());
-        c.limits.overrides = vec![
-            String::new(),
-            " dense_rows = 100".into(),
-            "bare".into(),
-            "=5".into(),
-        ];
-        assert_eq!(c.limit_override_keys(), vec!["dense_rows", "bare"]);
-    }
-
-    #[test]
-    fn off_refusal_does_not_point_at_unapplied_overrides() {
+    fn off_refusal_points_at_limit_overrides() {
         let mut c = cfg("0.0.0.0:8080", None, true);
         c.limits.profile = Some(ResourceProfile::Off);
         let e = c.validate().unwrap_err().to_string();
-        assert!(!e.contains("P2A_LIMIT_OVERRIDES"), "{e}");
+        assert!(e.contains("--limit-override (P2A_LIMIT_OVERRIDES)"), "{e}");
     }
 
     #[test]
