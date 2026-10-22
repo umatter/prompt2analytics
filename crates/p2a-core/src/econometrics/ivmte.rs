@@ -153,7 +153,7 @@ impl fmt::Display for PropensityModel {
 /// Configuration for MTE estimation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IVMTEConfig {
-    /// Polynomial degree for MTE approximation (default: 2)
+    /// Polynomial degree for MTE approximation (default: 2).
     /// Higher degrees allow more flexible MTE shapes but risk overfitting.
     /// Must be at least 1, and the second stage's 1 + covariates + degree
     /// columns must be fewer than the observations.
