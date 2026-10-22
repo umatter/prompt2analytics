@@ -589,8 +589,8 @@ fn stop_reason(
         && now.rss_bytes > start.saturating_add(growth)
     {
         return Some(format!(
-            "the server's memory grew by more than {} MiB while the query ran \
-             (twice its {} MiB memory limit)",
+            "process memory grew by more than {} MiB while the query ran \
+             (twice its memory_limit_mb of {} MiB)",
             growth / MIB,
             growth / MIB / 2
         ));
@@ -847,13 +847,12 @@ pub fn query_sqlite_with(
         // error during prepare; name it.
         denied_pragma_error(&denied_pragma, || {
             // A value over SQLITE_LIMIT_LENGTH surfaces as the bare "string or
-            // blob too big"; name the server's result size limit instead.
-            if opts.max_bytes.is_some()
+            // blob too big"; name the result size limit (max_bytes) instead.
+            if let Some(b) = opts.max_bytes
                 && e.sqlite_error_code() == Some(rusqlite::ErrorCode::TooBig)
             {
-                let b = opts.max_bytes.unwrap();
                 return DatabaseError::Forbidden(format!(
-                    "a value is too big for this server's result size limit of {b} bytes"
+                    "a value is too big for the result size limit (max_bytes) of {b} bytes"
                 ));
             }
             stopped_by(reason.get().map(String::as_str), e.into())
@@ -1312,8 +1311,8 @@ fn run_duckdb_query(
 /// `row.get`-ing an owned [`Value`], means a LIST of millions of elements is
 /// never allocated in Rust (outside DuckDB's `memory_limit`, in a conversion
 /// the watchdog cannot interrupt) only to be thrown away. The output column is
-/// identical. Text is decoded losslessly (`from_utf8_lossy`) so a non-UTF-8
-/// byte sequence cannot panic.
+/// identical. Text is decoded lossily (`from_utf8_lossy`: invalid bytes become
+/// U+FFFD), so a non-UTF-8 byte sequence cannot panic.
 fn duckdb_owned_value(value: duckdb::types::ValueRef<'_>) -> (duckdb::types::Value, u64) {
     use duckdb::types::{Value, ValueRef};
     match value {
@@ -1858,23 +1857,27 @@ mod tests {
         assert_eq!(sqlite_open_path(abs), Cow::Borrowed(abs));
         // Behaviourally: a relative `file:…:memory:` name must open as a plain
         // (nonexistent) file, not as an in-memory URI database.
-        let err = open_sqlite_locked(
+        let opened = open_sqlite_locked(
             Path::new("file::memory:?cache=shared"),
             &QueryOptions::default(),
         );
-        assert!(
-            err.is_err(),
-            "a relative file: URI opened as a URI database"
-        );
+        match opened {
+            Err(DatabaseError::Sqlite(e))
+                if e.sqlite_error_code() == Some(rusqlite::ErrorCode::CannotOpen) => {}
+            Err(e) => panic!("expected SQLITE_CANTOPEN for a missing plain file, got {e}"),
+            Ok(_) => panic!("a relative file: URI opened as a URI database"),
+        }
     }
 
     #[test]
     fn sqlite_refuses_side_effecting_pragmas_but_keeps_schema_pragmas() {
         let dir = tempfile::tempdir().unwrap();
         let db = sqlite_fixture(dir.path());
-        // Vectors that do no harm even if the authorizer regresses: a
-        // `hard_heap_limit` of 0 and an empty `temp_store_directory` would both
-        // change process-global SQLite state for every later query.
+        // Side-effecting PRAGMAs with values that are harmless even if the
+        // authorizer regresses (SQLite ignores a `hard_heap_limit` of 0, and an
+        // empty `temp_store_directory` means the default). Without the
+        // authorizer, SQLite would apply such PRAGMAs inside prepare, before
+        // any read-only check.
         for q in [
             "PRAGMA hard_heap_limit = 0",
             "PRAGMA temp_store_directory = ''",
@@ -1985,10 +1988,11 @@ mod tests {
     }
 
     #[test]
-    fn duckdb_container_values_are_not_materialised() {
-        // A LIST of a million elements must not be allocated in Rust just to be
-        // rendered as "". The byte budget would admit it (0 bytes), so a row is
-        // returned; its value is the empty string, and no OOM occurs.
+    fn duckdb_container_values_become_empty_text() {
+        // An output-parity guard: a container value (here a LIST of a million
+        // elements) is rendered as "" and counts 0 bytes, so the row fits the
+        // byte budget. Whether the value is materialised in Rust cannot be
+        // observed deterministically, so this test does not claim to check it.
         let o = query_duckdb_with(
             ":memory:",
             "SELECT list(range) AS l FROM range(1000000)",
@@ -2074,7 +2078,7 @@ mod tests {
             },
         )
         .unwrap_err();
-        // Forbidden, naming the server's result size limit, not the bare
+        // Forbidden, naming the result size limit (max_bytes), not the bare
         // "string or blob too big".
         assert!(
             matches!(err, DatabaseError::Forbidden(_)),
