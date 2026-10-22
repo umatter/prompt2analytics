@@ -21,7 +21,7 @@ use p2a_mcp::config::ServerConfig;
 use p2a_mcp::llm::egress::{EgressPolicy, GuardedResolver, Lookup, guarded_client_builder};
 use p2a_mcp::llm::{
     LlmError, LlmProvider, LlmSettings, Message, OllamaProvider, ProviderConfig, ProviderType,
-    RetryConfig, ToolExecutor, send_with_retry,
+    RetryConfig, ToolExecutor, active_chat_slots, send_with_retry,
 };
 use p2a_mcp::tools::limits::Limits;
 use p2a_mcp::transport::http::{AppState, build_app};
@@ -621,4 +621,126 @@ async fn long_history_is_compacted_before_sending() {
     );
     // The current message is never compacted.
     assert_eq!(msgs.last().unwrap()["content"], "now");
+}
+
+// ---------------------------------------------------------------------------
+// Task 6: iteration cap, chat slots, disconnect
+// ---------------------------------------------------------------------------
+
+/// An Ollama answer that calls one tool.
+fn tool_call_answer(name: &str) -> Value {
+    json!({"message": {"role": "assistant", "content": "",
+                       "tool_calls": [{"function": {"name": name, "arguments": {}}}]},
+           "done": true})
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn provider_honours_iteration_cap() {
+    let hits = counter();
+    let h = hits.clone();
+    // Request n calls tool `t{n}`, so loop detection never fires.
+    let addr = spawn_stub(Router::new().route(
+        "/api/chat",
+        post(move || {
+            let n = h.fetch_add(1, Ordering::SeqCst) + 1;
+            async move { axum::Json(tool_call_answer(&format!("t{n}"))) }
+        }),
+    ))
+    .await;
+    let s = LlmSettings {
+        max_tool_iterations: 3,
+        ..off_settings()
+    };
+    let p = OllamaProvider::with_settings(
+        ProviderConfig {
+            provider_type: ProviderType::Ollama,
+            base_url: Some(format!("http://{addr}")),
+            model: "stub".into(),
+            max_tool_iterations: Some(1000),
+            ..ProviderConfig::default()
+        },
+        &s,
+    );
+    let m = p
+        .chat(&[Message::user("go")], &[], &EchoTools, true)
+        .await
+        .unwrap();
+    assert!(
+        m.content.contains("maximum number of tool calls"),
+        "{}",
+        m.content
+    );
+    assert_eq!(hits.load(Ordering::SeqCst), 3);
+}
+
+/// Poll `cond` every 10 ms; the timeout only guards against a hang.
+async fn eventually(what: &str, cond: impl Fn() -> bool) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !cond() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("{what}"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stream_task_stops_after_client_disconnects() {
+    use futures::StreamExt;
+
+    let (app, _state) = app().await;
+    let sid = new_session(&app).await;
+    let hits = counter();
+    let release = Arc::new(tokio::sync::Notify::new());
+    let (h, r) = (hits.clone(), release.clone());
+    // Request 1 calls list_datasets; request 2 never answers.
+    let addr = spawn_stub(Router::new().route(
+        "/api/chat",
+        post(move || {
+            let (h, r) = (h.clone(), r.clone());
+            async move {
+                if h.fetch_add(1, Ordering::SeqCst) + 1 >= 2 {
+                    r.notified().await;
+                }
+                format!("{}\n", tool_call_answer("list_datasets"))
+            }
+        }),
+    ))
+    .await;
+
+    let resp = app
+        .clone()
+        .oneshot(post_json(
+            "/api/llm/chat/stream",
+            &json!({"session_id": sid, "message": "go", "interpret": true,
+                    "provider": stub_provider(addr)}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let mut stream = resp.into_body().into_data_stream();
+    let mut text = String::new();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !text.contains("\"type\":\"tool_end\"") {
+            let chunk = stream.next().await.expect("more events").unwrap();
+            text.push_str(&String::from_utf8_lossy(&chunk));
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("a tool_end event; got {text}"));
+    eventually("the second provider request", || {
+        hits.load(Ordering::SeqCst) == 2
+    })
+    .await;
+
+    assert_eq!(active_chat_slots(&sid), 1);
+    drop(stream); // the client goes away
+    eventually("the chat task must end when the client disconnects", || {
+        active_chat_slots(&sid) == 0
+    })
+    .await;
+    release.notify_waiters();
+    // The task is gone; nobody sends request 3.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(hits.load(Ordering::SeqCst), 2);
 }

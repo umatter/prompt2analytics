@@ -90,6 +90,20 @@ pub fn validate_provider_config(config: &ProviderConfig) -> Result<(), String> {
         .map_err(|e| e.0)
 }
 
+/// The tool-loop iterations a chat request may run: the request's value,
+/// else the provider config's, else [`DEFAULT_MAX_TOOL_ITERATIONS`], clamped
+/// to `[1, cap]` (`llm_max_tool_iterations`).
+pub fn effective_max_tool_iterations(
+    request: Option<usize>,
+    provider: Option<usize>,
+    cap: usize,
+) -> usize {
+    request
+        .or(provider)
+        .unwrap_or(DEFAULT_MAX_TOOL_ITERATIONS)
+        .clamp(1, cap.max(1))
+}
+
 /// The provider's name in messages.
 fn provider_name(t: ProviderType) -> &'static str {
     match t {
@@ -142,11 +156,11 @@ pub fn resolve_provider_config(
         .map(|u| u.trim().to_string())
         .filter(|u| !u.is_empty());
     cfg.api_key = cfg.api_key.filter(|k| !k.trim().is_empty());
-    cfg.max_tool_iterations = Some(
-        request_max_tool_iterations
-            .or(cfg.max_tool_iterations)
-            .unwrap_or(DEFAULT_MAX_TOOL_ITERATIONS),
-    );
+    cfg.max_tool_iterations = Some(effective_max_tool_iterations(
+        request_max_tool_iterations,
+        cfg.max_tool_iterations,
+        settings.max_tool_iterations,
+    ));
 
     settings
         .egress
@@ -608,6 +622,29 @@ mod key_policy_tests {
             (c.base_url, c.api_key.as_deref()),
             (None, Some("SENTINEL_OPENAI"))
         );
+    }
+
+    #[test]
+    fn max_tool_iterations_are_clamped() {
+        assert_eq!(effective_max_tool_iterations(Some(1000), None, 25), 25);
+        assert_eq!(effective_max_tool_iterations(Some(0), None, 25), 1);
+        assert_eq!(effective_max_tool_iterations(None, Some(40), 50), 40);
+        assert_eq!(effective_max_tool_iterations(None, None, 50), 25);
+        // The request level wins.
+        assert_eq!(effective_max_tool_iterations(Some(10), Some(40), 50), 10);
+        let s = LlmSettings::from_limits(&Limits::hosted(), None);
+        let c = resolve_provider_config(
+            Some(ProviderConfig {
+                provider_type: ProviderType::OpenAI,
+                api_key: Some("k".into()),
+                ..ProviderConfig::default()
+            }),
+            Some(1000),
+            &s,
+            &|_| None,
+        )
+        .unwrap();
+        assert_eq!(c.max_tool_iterations, Some(25));
     }
 
     #[test]

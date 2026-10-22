@@ -15,10 +15,10 @@ use serde::{Deserialize, Serialize};
 use super::http::{ApiResponse, AppState, ContentItem};
 use crate::exec::{CallOrigin, ToolCallError, ToolGovernor};
 use crate::llm::{
-    AnthropicProvider, ContextManager, LlmProvider, LlmSettings, Message, OllamaProvider,
+    AnthropicProvider, ChatSlot, ContextManager, LlmProvider, LlmSettings, Message, OllamaProvider,
     OpenAIProvider, ProviderConfig, ProviderType, ToolDefinition, ToolExecutor,
     build_dataset_context_bounded, check_llm_tool_call, get_system_prompt_with_context,
-    resolve_provider_config, server_key_availability,
+    resolve_provider_config, server_key_availability, try_acquire_chat_slot,
 };
 use crate::session::Session;
 
@@ -254,9 +254,16 @@ pub async fn llm_chat(
     State(state): State<AppState>,
     Json(request): Json<LlmChatRequest>,
 ) -> Response {
+    // At most llm_streams_per_session chat requests run per session; the
+    // non-streaming chat runs the same tool loop, so it takes a slot too.
+    let settings = LlmSettings::current();
+    let _slot = match acquire_chat_slot_or_busy(&request.session_id, settings.streams_per_session) {
+        Ok(slot) => slot,
+        Err(busy) => return busy,
+    };
+
     // Resolve the provider (egress policy, key policy, iteration clamp)
     // before anything else, so a refused config costs nothing.
-    let settings = LlmSettings::current();
     let provider_config = match resolve_provider_config(
         request.provider,
         request.max_tool_iterations,
@@ -1151,388 +1158,75 @@ impl ToolExecutor for StreamingToolExecutor {
     }
 }
 
+/// Take a chat slot of the session, or the 429 `session_busy` answer when
+/// `limit` chat requests are already running for it.
+fn acquire_chat_slot_or_busy(session_id: &str, limit: Option<usize>) -> Result<ChatSlot, Response> {
+    try_acquire_chat_slot(session_id, limit).ok_or_else(|| {
+        let mut busy = (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(ApiResponse::<()>::error_with_code(
+                "Another chat request is still running for this session; wait for it to finish.",
+                "session_busy",
+                None,
+            )),
+        )
+            .into_response();
+        busy.headers_mut().insert(
+            axum::http::header::RETRY_AFTER,
+            axum::http::HeaderValue::from_static("2"),
+        );
+        busy
+    })
+}
+
+/// Run `fut` for as long as the receiver of `tx` (the SSE stream) is alive.
+/// `None` when the receiver went away first: `fut` is then dropped, and with
+/// it everything it was awaiting.
+async fn run_until_client_gone<F: std::future::Future>(
+    tx: &tokio::sync::mpsc::Sender<ProgressEvent>,
+    fut: F,
+) -> Option<F::Output> {
+    tokio::select! {
+        biased;
+        out = fut => Some(out),
+        () = tx.closed() => None,
+    }
+}
+
 /// Streaming LLM chat endpoint using Server-Sent Events.
+///
+/// The chat runs in its own task for as long as the client listens: when
+/// the SSE stream is dropped (the client disconnected), the chat future is
+/// dropped, and with it the provider request and any in-flight governed
+/// tool call, whose guard cancels the tool. The session's chat slot is held
+/// until the task ends.
 pub async fn llm_chat_stream(
     State(state): State<AppState>,
     Json(request): Json<LlmChatRequest>,
-) -> axum::response::sse::Sse<
-    impl futures::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>,
-> {
-    use crate::llm::StreamChunk;
-    use tokio::sync::mpsc;
+) -> Response {
+    let settings = LlmSettings::current();
+    let slot = match acquire_chat_slot_or_busy(&request.session_id, settings.streams_per_session) {
+        Ok(slot) => slot,
+        Err(busy) => return busy,
+    };
 
-    let (tx, mut rx) = mpsc::channel::<ProgressEvent>(100);
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<ProgressEvent>(100);
 
-    // Spawn the chat task
-    let state_clone = state.clone();
-    let tx_clone = tx.clone();
+    #[cfg(feature = "db")]
+    let db = state.persistent_manager.as_ref().map(|pm| pm.db().clone());
+    let placeholder: Arc<OnceLock<String>> = Arc::default();
     tokio::spawn(async move {
-        // Send initial status
-        let _ = tx_clone
-            .send(ProgressEvent::Status {
-                message: "Starting analysis...".to_string(),
-            })
-            .await;
-
-        tracing::info!(interpret = %request.interpret, conversation_id = ?request.conversation_id, "LLM chat request received");
-
-        // Get the session
-        let session = match state_clone
-            .session_manager
-            .get_session(&request.session_id)
-            .await
-        {
-            Ok(s) => s,
-            Err(crate::session::SessionError::NotFound) => {
-                let _ = tx_clone
-                    .send(ProgressEvent::Error {
-                        error: "Session not found".to_string(),
-                    })
-                    .await;
-                return;
-            }
-            Err(e) => {
-                let _ = tx_clone
-                    .send(ProgressEvent::Error {
-                        error: e.to_string(),
-                    })
-                    .await;
-                return;
-            }
-        };
-
-        // Get database connection for persistence/tracking
-        #[cfg(feature = "db")]
-        let db_connection = state_clone
-            .persistent_manager
-            .as_ref()
-            .map(|pm| pm.db().clone());
-
-        // Normalize conversation_id: treat empty string as None
-        #[cfg(feature = "db")]
-        let effective_conversation_id = request
-            .conversation_id
-            .as_ref()
-            .filter(|id| !id.is_empty())
-            .cloned();
-
-        // Create placeholder assistant message if conversation persistence is enabled
-        #[cfg(feature = "db")]
-        let message_id = if let (Some(pm), Some(conv_id)) =
-            (&state_clone.persistent_manager, &effective_conversation_id)
-        {
-            // Create placeholder message
-            match pm.db().add_message(conv_id, "assistant", "").await {
-                Ok(msg) => {
-                    let msg_id = msg.id_string();
-                    tracing::debug!(message_id = %msg_id, "Created placeholder assistant message");
-                    Some(msg_id)
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to create placeholder message: {}", e);
-                    None
-                }
-            }
-        } else {
-            None
-        };
-
-        // Compute a human-readable provider name for the status message
-        // before `request.provider` is moved into the resolver — OpenRouter
-        // is routed through the OpenAI client with a custom base_url, so
-        // "openai" alone would be misleading in the connecting banner.
-        let provider_display = provider_display_name(request.provider.as_ref());
-
-        // Resolve the provider (egress policy, key policy, iteration clamp)
-        // before making any request.
-        let settings = LlmSettings::current();
-        let provider_config = match resolve_provider_config(
-            request.provider.clone(),
-            request.max_tool_iterations,
-            &settings,
-            &server_env,
-        ) {
-            Ok(cfg) => cfg,
-            Err(msg) => {
-                let _ = tx_clone.send(ProgressEvent::Error { error: msg }).await;
-                return;
-            }
-        };
-
-        // Create streaming tool executor (the provider is built once the
-        // messages are, below)
-        // Only the db build reconfigures the executor below.
-        #[cfg_attr(not(feature = "db"), allow(unused_mut))]
-        let mut tool_executor = StreamingToolExecutor::new(
-            state_clone.governor.clone(),
-            state_clone.server.clone(),
-            session.clone(),
-            tx_clone.clone(),
-        );
-
-        // Track whether we've set up the executor for persistence
-        #[cfg(feature = "db")]
-        let mut persistence_configured = false;
-
-        // Add full persistence context if conversation tracking is available
-        #[cfg(feature = "db")]
-        if let (Some(db), Some(conv_id), Some(msg_id)) =
-            (&db_connection, &effective_conversation_id, &message_id)
-        {
-            tool_executor = tool_executor.with_persistence(
-                db.clone(),
-                conv_id.clone(),
-                msg_id.clone(),
-                request.session_id.clone(),
-            );
-            persistence_configured = true;
-        }
-
-        // Fall back to dataset metadata tracking if full persistence wasn't configured
-        // This ensures we always capture dataset metadata when db is available
-        #[cfg(feature = "db")]
-        if !persistence_configured {
-            if let Some(db) = &db_connection {
-                tool_executor =
-                    tool_executor.with_dataset_tracking(db.clone(), request.session_id.clone());
-            }
-        }
-
-        let tools = state.server.list_tools_for_llm();
-
-        let _ = tx_clone
-            .send(ProgressEvent::Status {
-                message: format!("Connecting to {provider_display}..."),
-            })
-            .await;
-
-        // Auto-retrieve history from database if:
-        // 1. conversation_id is provided
-        // 2. history is empty
-        // 3. retrieve_history flag is true (default)
-        #[cfg(feature = "db")]
-        let retrieved_history: Vec<Message> = if request.retrieve_history
-            && request.history.is_empty()
-            && effective_conversation_id.is_some()
-        {
-            if let (Some(db), Some(conv_id)) = (&db_connection, &effective_conversation_id) {
-                match db.get_messages(conv_id).await {
-                    Ok(db_messages) => {
-                        tracing::info!(
-                            conversation_id = %conv_id,
-                            message_count = db_messages.len(),
-                            "Retrieved conversation history from database"
-                        );
-                        // Convert DB messages to LLM messages, including tool calls
-                        let mut history = Vec::new();
-                        for db_msg in db_messages {
-                            // Get tool calls for this message
-                            let tool_calls_for_msg =
-                                db.get_tool_calls_for_message(&db_msg.id_string()).await;
-
-                            match db_msg.role {
-                                crate::db::MessageRole::User => {
-                                    if !db_msg.content.is_empty() {
-                                        history.push(Message::user(db_msg.content.clone()));
-                                    }
-                                }
-                                crate::db::MessageRole::Assistant => {
-                                    // Check if this message has completed tool calls
-                                    if let Ok(tool_calls) = &tool_calls_for_msg {
-                                        let completed_calls: Vec<_> = tool_calls
-                                            .iter()
-                                            .filter(|tc| {
-                                                tc.status == crate::db::ToolCallStatus::Success
-                                            })
-                                            .collect();
-
-                                        if !completed_calls.is_empty() {
-                                            // Create tool calls for the assistant message
-                                            let llm_tool_calls: Vec<crate::llm::ToolCall> =
-                                                completed_calls
-                                                    .iter()
-                                                    .map(|tc| crate::llm::ToolCall {
-                                                        id: tc.id_string(),
-                                                        name: tc.tool_name.clone(),
-                                                        arguments: serde_json::from_str(
-                                                            &tc.arguments,
-                                                        )
-                                                        .unwrap_or(serde_json::Value::Null),
-                                                    })
-                                                    .collect();
-
-                                            // Assistant message with tool calls
-                                            history.push(Message::assistant_with_tools(
-                                                db_msg.content.clone(),
-                                                llm_tool_calls,
-                                            ));
-
-                                            // Tool result message
-                                            let tool_results: Vec<crate::llm::ToolResult> =
-                                                completed_calls
-                                                    .iter()
-                                                    .map(|tc| {
-                                                        let result_content =
-                                                            tc.result.as_deref().unwrap_or("");
-                                                        // Truncate long results
-                                                        let truncated =
-                                                            if result_content.len() > 2000 {
-                                                                format!(
-                                                                    "{}...\n[Truncated]",
-                                                                    &result_content[..2000]
-                                                                )
-                                                            } else {
-                                                                result_content.to_string()
-                                                            };
-                                                        crate::llm::ToolResult {
-                                                            tool_call_id: tc.id_string(),
-                                                            content: truncated,
-                                                            is_error: false,
-                                                        }
-                                                    })
-                                                    .collect();
-
-                                            history.push(Message::tool_result(tool_results));
-                                        } else if !db_msg.content.is_empty() {
-                                            // No tool calls, just content
-                                            history
-                                                .push(Message::assistant(db_msg.content.clone()));
-                                        }
-                                    } else if !db_msg.content.is_empty() {
-                                        history.push(Message::assistant(db_msg.content.clone()));
-                                    }
-                                }
-                                crate::db::MessageRole::System => {
-                                    // Skip system messages in history retrieval
-                                }
-                            }
-                        }
-                        history
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            conversation_id = %conv_id,
-                            error = %e,
-                            "Failed to retrieve conversation history, using empty history"
-                        );
-                        Vec::new()
-                    }
-                }
-            } else {
-                Vec::new()
-            }
-        } else {
-            Vec::new()
-        };
-
-        #[cfg(not(feature = "db"))]
-        let retrieved_history: Vec<Message> = Vec::new();
-
-        // Determine which history to use: client-provided takes precedence
-        let history_to_use = if request.history.is_empty() {
-            retrieved_history
-        } else {
-            request.history.clone()
-        };
-
-        // The bounded dataset block (built under the governor), the history
-        // fitted to the request's budget, and the user's message.
-        let messages = match build_chat_messages(
-            &state_clone.governor,
-            &session,
-            history_to_use,
-            request.message.clone(),
-            &tools,
-            &provider_config,
-            &settings,
-        )
-        .await
-        {
-            Ok(messages) => messages,
-            Err(e) => {
-                #[cfg(feature = "db")]
-                if let (Some(db), Some(msg_id)) = (&db_connection, &message_id) {
-                    let _ = db
-                        .update_message_content(msg_id, &format!("[Error: {e}]"))
-                        .await;
-                }
-                let _ = tx_clone
-                    .send(ProgressEvent::Error {
-                        error: e.to_string(),
-                    })
-                    .await;
-                return;
-            }
-        };
-        let provider = build_provider(provider_config, &settings);
-
-        // Create streaming callback that forwards content chunks
-        let tx_for_callback = tx_clone.clone();
-        let stream_callback: Box<dyn Fn(StreamChunk) + Send + Sync> = Box::new(move |chunk| {
-            match chunk {
-                StreamChunk::Text { content } => {
-                    // Use try_send for non-blocking send from sync callback
-                    let _ = tx_for_callback.try_send(ProgressEvent::Content { text: content });
-                }
-                StreamChunk::Done => {
-                    // Done is handled separately after chat_stream returns
-                }
-                StreamChunk::Error { message } => {
-                    let _ = tx_for_callback.try_send(ProgressEvent::Error { error: message });
-                }
-                StreamChunk::ToolCall { .. } | StreamChunk::ToolResult { .. } => {
-                    // Tool events are handled by StreamingToolExecutor
-                }
-            }
-        });
-
-        // Execute streaming chat
-        match provider
-            .chat_stream(
-                &messages,
-                &tools,
-                &tool_executor,
-                request.interpret,
-                stream_callback,
-            )
-            .await
-        {
-            Ok(response) => {
-                // Update message content in database if persistence is enabled
-                #[cfg(feature = "db")]
-                if let (Some(db), Some(msg_id)) = (&db_connection, &message_id) {
-                    if let Err(e) = db.update_message_content(msg_id, &response.content).await {
-                        tracing::warn!("Failed to update message content: {}", e);
-                    } else {
-                        tracing::debug!(message_id = %msg_id, "Updated assistant message content");
-                    }
-                }
-
-                // Debug: check if content has newlines
-                let has_newlines = response.content.contains('\n');
-                let content_preview: String = response.content.chars().take(300).collect();
-                tracing::info!(
-                    has_newlines = has_newlines,
-                    content_preview = %content_preview,
-                    "Sending Done event with message content"
-                );
-                let _ = tx_clone
-                    .send(ProgressEvent::Done { message: response })
-                    .await;
-            }
-            Err(e) => {
-                // Update message with error content if persistence is enabled
-                #[cfg(feature = "db")]
-                if let (Some(db), Some(msg_id)) = (&db_connection, &message_id) {
-                    let error_content = format!("[Error: {}]", e);
-                    let _ = db.update_message_content(msg_id, &error_content).await;
-                }
-
-                let _ = tx_clone
-                    .send(ProgressEvent::Error {
-                        error: e.to_string(),
-                    })
-                    .await;
+        let _slot = slot;
+        let chat = run_chat_stream(state, request, settings, tx.clone(), placeholder.clone());
+        if run_until_client_gone(&tx, chat).await.is_none() {
+            tracing::info!("The chat stream's client disconnected; the chat was stopped");
+            #[cfg(feature = "db")]
+            if let (Some(db), Some(msg_id)) = (&db, placeholder.get())
+                && let Err(e) = db
+                    .update_message_content(msg_id, "[Stopped: the client disconnected]")
+                    .await
+            {
+                tracing::warn!("Failed to mark the stopped message: {}", e);
             }
         }
     });
@@ -1541,7 +1235,9 @@ pub async fn llm_chat_stream(
     let stream = async_stream::stream! {
         while let Some(event) = rx.recv().await {
             let data = serde_json::to_string(&event).unwrap_or_default();
-            yield Ok(axum::response::sse::Event::default().data(data));
+            yield Ok::<_, std::convert::Infallible>(
+                axum::response::sse::Event::default().data(data),
+            );
 
             // Stop after Done or Error
             if matches!(event, ProgressEvent::Done { .. } | ProgressEvent::Error { .. }) {
@@ -1550,7 +1246,383 @@ pub async fn llm_chat_stream(
         }
     };
 
-    axum::response::sse::Sse::new(stream).keep_alive(axum::response::sse::KeepAlive::default())
+    axum::response::sse::Sse::new(stream)
+        .keep_alive(axum::response::sse::KeepAlive::default())
+        .into_response()
+}
+
+/// The streaming chat: everything [`llm_chat_stream`] runs in its task,
+/// ending with a `Done` or an `Error` event on `tx`. `placeholder` receives
+/// the id of the assistant message it stores (db builds).
+async fn run_chat_stream(
+    state: AppState,
+    request: LlmChatRequest,
+    settings: LlmSettings,
+    tx: tokio::sync::mpsc::Sender<ProgressEvent>,
+    placeholder: Arc<OnceLock<String>>,
+) {
+    use crate::llm::StreamChunk;
+
+    // Send initial status
+    let _ = tx
+        .send(ProgressEvent::Status {
+            message: "Starting analysis...".to_string(),
+        })
+        .await;
+
+    tracing::info!(interpret = %request.interpret, conversation_id = ?request.conversation_id, "LLM chat request received");
+
+    // Get the session
+    let session = match state.session_manager.get_session(&request.session_id).await {
+        Ok(s) => s,
+        Err(crate::session::SessionError::NotFound) => {
+            let _ = tx
+                .send(ProgressEvent::Error {
+                    error: "Session not found".to_string(),
+                })
+                .await;
+            return;
+        }
+        Err(e) => {
+            let _ = tx
+                .send(ProgressEvent::Error {
+                    error: e.to_string(),
+                })
+                .await;
+            return;
+        }
+    };
+
+    // Get database connection for persistence/tracking
+    #[cfg(feature = "db")]
+    let db_connection = state.persistent_manager.as_ref().map(|pm| pm.db().clone());
+
+    // Normalize conversation_id: treat empty string as None
+    #[cfg(feature = "db")]
+    let effective_conversation_id = request
+        .conversation_id
+        .as_ref()
+        .filter(|id| !id.is_empty())
+        .cloned();
+
+    // Create placeholder assistant message if conversation persistence is enabled
+    #[cfg(feature = "db")]
+    let message_id = if let (Some(pm), Some(conv_id)) =
+        (&state.persistent_manager, &effective_conversation_id)
+    {
+        // Create placeholder message
+        match pm.db().add_message(conv_id, "assistant", "").await {
+            Ok(msg) => {
+                let msg_id = msg.id_string();
+                tracing::debug!(message_id = %msg_id, "Created placeholder assistant message");
+                Some(msg_id)
+            }
+            Err(e) => {
+                tracing::warn!("Failed to create placeholder message: {}", e);
+                None
+            }
+        }
+    } else {
+        None
+    };
+    #[cfg(feature = "db")]
+    if let Some(id) = &message_id {
+        let _ = placeholder.set(id.clone());
+    }
+    #[cfg(not(feature = "db"))]
+    let _ = placeholder;
+
+    // Compute a human-readable provider name for the status message
+    // before `request.provider` is moved into the resolver — OpenRouter
+    // is routed through the OpenAI client with a custom base_url, so
+    // "openai" alone would be misleading in the connecting banner.
+    let provider_display = provider_display_name(request.provider.as_ref());
+
+    // Resolve the provider (egress policy, key policy, iteration clamp)
+    // before making any request.
+    let provider_config = match resolve_provider_config(
+        request.provider.clone(),
+        request.max_tool_iterations,
+        &settings,
+        &server_env,
+    ) {
+        Ok(cfg) => cfg,
+        Err(msg) => {
+            let _ = tx.send(ProgressEvent::Error { error: msg }).await;
+            return;
+        }
+    };
+
+    // Create streaming tool executor (the provider is built once the
+    // messages are, below)
+    // Only the db build reconfigures the executor below.
+    #[cfg_attr(not(feature = "db"), allow(unused_mut))]
+    let mut tool_executor = StreamingToolExecutor::new(
+        state.governor.clone(),
+        state.server.clone(),
+        session.clone(),
+        tx.clone(),
+    );
+
+    // Track whether we've set up the executor for persistence
+    #[cfg(feature = "db")]
+    let mut persistence_configured = false;
+
+    // Add full persistence context if conversation tracking is available
+    #[cfg(feature = "db")]
+    if let (Some(db), Some(conv_id), Some(msg_id)) =
+        (&db_connection, &effective_conversation_id, &message_id)
+    {
+        tool_executor = tool_executor.with_persistence(
+            db.clone(),
+            conv_id.clone(),
+            msg_id.clone(),
+            request.session_id.clone(),
+        );
+        persistence_configured = true;
+    }
+
+    // Fall back to dataset metadata tracking if full persistence wasn't configured
+    // This ensures we always capture dataset metadata when db is available
+    #[cfg(feature = "db")]
+    if !persistence_configured {
+        if let Some(db) = &db_connection {
+            tool_executor =
+                tool_executor.with_dataset_tracking(db.clone(), request.session_id.clone());
+        }
+    }
+
+    let tools = state.server.list_tools_for_llm();
+
+    let _ = tx
+        .send(ProgressEvent::Status {
+            message: format!("Connecting to {provider_display}..."),
+        })
+        .await;
+
+    // Auto-retrieve history from database if:
+    // 1. conversation_id is provided
+    // 2. history is empty
+    // 3. retrieve_history flag is true (default)
+    #[cfg(feature = "db")]
+    let retrieved_history: Vec<Message> = if request.retrieve_history
+        && request.history.is_empty()
+        && effective_conversation_id.is_some()
+    {
+        if let (Some(db), Some(conv_id)) = (&db_connection, &effective_conversation_id) {
+            match db.get_messages(conv_id).await {
+                Ok(db_messages) => {
+                    tracing::info!(
+                        conversation_id = %conv_id,
+                        message_count = db_messages.len(),
+                        "Retrieved conversation history from database"
+                    );
+                    // Convert DB messages to LLM messages, including tool calls
+                    let mut history = Vec::new();
+                    for db_msg in db_messages {
+                        // Get tool calls for this message
+                        let tool_calls_for_msg =
+                            db.get_tool_calls_for_message(&db_msg.id_string()).await;
+
+                        match db_msg.role {
+                            crate::db::MessageRole::User => {
+                                if !db_msg.content.is_empty() {
+                                    history.push(Message::user(db_msg.content.clone()));
+                                }
+                            }
+                            crate::db::MessageRole::Assistant => {
+                                // Check if this message has completed tool calls
+                                if let Ok(tool_calls) = &tool_calls_for_msg {
+                                    let completed_calls: Vec<_> = tool_calls
+                                        .iter()
+                                        .filter(|tc| {
+                                            tc.status == crate::db::ToolCallStatus::Success
+                                        })
+                                        .collect();
+
+                                    if !completed_calls.is_empty() {
+                                        // Create tool calls for the assistant message
+                                        let llm_tool_calls: Vec<crate::llm::ToolCall> =
+                                            completed_calls
+                                                .iter()
+                                                .map(|tc| crate::llm::ToolCall {
+                                                    id: tc.id_string(),
+                                                    name: tc.tool_name.clone(),
+                                                    arguments: serde_json::from_str(&tc.arguments)
+                                                        .unwrap_or(serde_json::Value::Null),
+                                                })
+                                                .collect();
+
+                                        // Assistant message with tool calls
+                                        history.push(Message::assistant_with_tools(
+                                            db_msg.content.clone(),
+                                            llm_tool_calls,
+                                        ));
+
+                                        // Tool result message
+                                        let tool_results: Vec<crate::llm::ToolResult> =
+                                            completed_calls
+                                                .iter()
+                                                .map(|tc| {
+                                                    let result_content =
+                                                        tc.result.as_deref().unwrap_or("");
+                                                    // Truncate long results
+                                                    let truncated = if result_content.len() > 2000 {
+                                                        format!(
+                                                            "{}...\n[Truncated]",
+                                                            &result_content[..2000]
+                                                        )
+                                                    } else {
+                                                        result_content.to_string()
+                                                    };
+                                                    crate::llm::ToolResult {
+                                                        tool_call_id: tc.id_string(),
+                                                        content: truncated,
+                                                        is_error: false,
+                                                    }
+                                                })
+                                                .collect();
+
+                                        history.push(Message::tool_result(tool_results));
+                                    } else if !db_msg.content.is_empty() {
+                                        // No tool calls, just content
+                                        history.push(Message::assistant(db_msg.content.clone()));
+                                    }
+                                } else if !db_msg.content.is_empty() {
+                                    history.push(Message::assistant(db_msg.content.clone()));
+                                }
+                            }
+                            crate::db::MessageRole::System => {
+                                // Skip system messages in history retrieval
+                            }
+                        }
+                    }
+                    history
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        conversation_id = %conv_id,
+                        error = %e,
+                        "Failed to retrieve conversation history, using empty history"
+                    );
+                    Vec::new()
+                }
+            }
+        } else {
+            Vec::new()
+        }
+    } else {
+        Vec::new()
+    };
+
+    #[cfg(not(feature = "db"))]
+    let retrieved_history: Vec<Message> = Vec::new();
+
+    // Determine which history to use: client-provided takes precedence
+    let history_to_use = if request.history.is_empty() {
+        retrieved_history
+    } else {
+        request.history.clone()
+    };
+
+    // The bounded dataset block (built under the governor), the history
+    // fitted to the request's budget, and the user's message.
+    let messages = match build_chat_messages(
+        &state.governor,
+        &session,
+        history_to_use,
+        request.message.clone(),
+        &tools,
+        &provider_config,
+        &settings,
+    )
+    .await
+    {
+        Ok(messages) => messages,
+        Err(e) => {
+            #[cfg(feature = "db")]
+            if let (Some(db), Some(msg_id)) = (&db_connection, &message_id) {
+                let _ = db
+                    .update_message_content(msg_id, &format!("[Error: {e}]"))
+                    .await;
+            }
+            let _ = tx
+                .send(ProgressEvent::Error {
+                    error: e.to_string(),
+                })
+                .await;
+            return;
+        }
+    };
+    let provider = build_provider(provider_config, &settings);
+
+    // Create streaming callback that forwards content chunks
+    let tx_for_callback = tx.clone();
+    let stream_callback: Box<dyn Fn(StreamChunk) + Send + Sync> = Box::new(move |chunk| {
+        match chunk {
+            StreamChunk::Text { content } => {
+                // Use try_send for non-blocking send from sync callback
+                let _ = tx_for_callback.try_send(ProgressEvent::Content { text: content });
+            }
+            StreamChunk::Done => {
+                // Done is handled separately after chat_stream returns
+            }
+            StreamChunk::Error { message } => {
+                let _ = tx_for_callback.try_send(ProgressEvent::Error { error: message });
+            }
+            StreamChunk::ToolCall { .. } | StreamChunk::ToolResult { .. } => {
+                // Tool events are handled by StreamingToolExecutor
+            }
+        }
+    });
+
+    // Execute streaming chat
+    match provider
+        .chat_stream(
+            &messages,
+            &tools,
+            &tool_executor,
+            request.interpret,
+            stream_callback,
+        )
+        .await
+    {
+        Ok(response) => {
+            // Update message content in database if persistence is enabled
+            #[cfg(feature = "db")]
+            if let (Some(db), Some(msg_id)) = (&db_connection, &message_id) {
+                if let Err(e) = db.update_message_content(msg_id, &response.content).await {
+                    tracing::warn!("Failed to update message content: {}", e);
+                } else {
+                    tracing::debug!(message_id = %msg_id, "Updated assistant message content");
+                }
+            }
+
+            // Debug: check if content has newlines
+            let has_newlines = response.content.contains('\n');
+            let content_preview: String = response.content.chars().take(300).collect();
+            tracing::info!(
+                has_newlines = has_newlines,
+                content_preview = %content_preview,
+                "Sending Done event with message content"
+            );
+            let _ = tx.send(ProgressEvent::Done { message: response }).await;
+        }
+        Err(e) => {
+            // Update message with error content if persistence is enabled
+            #[cfg(feature = "db")]
+            if let (Some(db), Some(msg_id)) = (&db_connection, &message_id) {
+                let error_content = format!("[Error: {}]", e);
+                let _ = db.update_message_content(msg_id, &error_content).await;
+            }
+
+            let _ = tx
+                .send(ProgressEvent::Error {
+                    error: e.to_string(),
+                })
+                .await;
+        }
+    }
 }
 
 #[cfg(all(test, target_os = "linux"))]
@@ -1740,5 +1812,60 @@ mod chat_tests {
         );
         assert_eq!(hist.last().unwrap().content, last);
         assert_eq!(msgs.last().unwrap().content, "now");
+    }
+
+    #[tokio::test]
+    async fn chat_future_is_dropped_when_receiver_closes() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let (tx, rx) = tokio::sync::mpsc::channel::<ProgressEvent>(1);
+        let dropped = Arc::new(AtomicBool::new(false));
+        struct SetOnDrop(Arc<AtomicBool>);
+        impl Drop for SetOnDrop {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst)
+            }
+        }
+        let g = SetOnDrop(dropped.clone());
+        drop(rx);
+        let out = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            run_until_client_gone(&tx, async move {
+                let _g = g;
+                std::future::pending::<()>().await
+            }),
+        )
+        .await
+        .expect("returns once the receiver is gone");
+        assert!(out.is_none());
+        assert!(dropped.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn chat_future_completes_while_receiver_alive() {
+        let (tx, _rx) = tokio::sync::mpsc::channel::<ProgressEvent>(1);
+        assert_eq!(run_until_client_gone(&tx, async { 7 }).await, Some(7));
+    }
+
+    #[tokio::test]
+    async fn second_chat_in_a_limited_session_is_busy() {
+        let held = acquire_chat_slot_or_busy("chat-busy-test", Some(1)).unwrap();
+        let busy = acquire_chat_slot_or_busy("chat-busy-test", Some(1)).unwrap_err();
+        assert_eq!(busy.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(busy.headers()[axum::http::header::RETRY_AFTER], "2");
+        let body = axum::body::to_bytes(busy.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["code"], "session_busy");
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap()
+                .contains("Another chat request is still running")
+        );
+        // Unlimited sessions are never busy; a released slot is free again.
+        assert!(acquire_chat_slot_or_busy("chat-busy-test", None).is_ok());
+        drop(held);
+        assert!(acquire_chat_slot_or_busy("chat-busy-test", Some(1)).is_ok());
     }
 }

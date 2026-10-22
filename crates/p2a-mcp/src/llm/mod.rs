@@ -13,10 +13,58 @@ mod retry;
 mod tokens;
 mod tools;
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use crate::tools::limits::{self, Limits};
+
+/// Chat requests in flight, per session id. An entry exists only while its
+/// count is non-zero.
+static CHAT_SLOTS: LazyLock<Mutex<HashMap<String, usize>>> = LazyLock::new(Default::default);
+
+/// The slot table; a poisoned lock is recovered (the counts stay valid).
+fn chat_slots() -> MutexGuard<'static, HashMap<String, usize>> {
+    CHAT_SLOTS.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// One running chat request of a session (`/api/llm/chat` or
+/// `/api/llm/chat/stream`). Dropping it releases the slot.
+#[derive(Debug)]
+pub struct ChatSlot {
+    session_id: String,
+}
+
+impl Drop for ChatSlot {
+    fn drop(&mut self) {
+        let mut slots = chat_slots();
+        if let Some(n) = slots.get_mut(&self.session_id) {
+            *n = n.saturating_sub(1);
+            if *n == 0 {
+                slots.remove(&self.session_id);
+            }
+        }
+    }
+}
+
+/// Take one of the session's chat slots, or `None` when `limit` of them are
+/// already taken (`llm_streams_per_session`; `None` = unlimited).
+pub fn try_acquire_chat_slot(session_id: &str, limit: Option<usize>) -> Option<ChatSlot> {
+    let mut slots = chat_slots();
+    let taken = slots.get(session_id).copied().unwrap_or(0);
+    if limit.is_some_and(|l| taken >= l) {
+        return None;
+    }
+    *slots.entry(session_id.to_string()).or_insert(0) += 1;
+    Some(ChatSlot {
+        session_id: session_id.to_string(),
+    })
+}
+
+/// The number of chat requests running for the session.
+pub fn active_chat_slots(session_id: &str) -> usize {
+    chat_slots().get(session_id).copied().unwrap_or(0)
+}
 
 /// The LLM budgets of the active resource profile, read in one place.
 ///
@@ -105,8 +153,8 @@ pub use ollama::OllamaProvider;
 pub use openai::OpenAIProvider;
 pub use provider::{
     LlmError, LlmProvider, Message, MessageRole, ProviderConfig, ProviderType, StreamChunk,
-    ToolCall, ToolDefinition, ToolExecutor, ToolResult, resolve_provider_config,
-    server_key_availability, validate_base_url, validate_provider_config,
+    ToolCall, ToolDefinition, ToolExecutor, ToolResult, effective_max_tool_iterations,
+    resolve_provider_config, server_key_availability, validate_base_url, validate_provider_config,
 };
 pub use retry::{RetryConfig, send_with_retry};
 pub use tokens::{
@@ -161,5 +209,21 @@ mod tests {
             )
         );
         assert!(!h.egress.allow_loopback && h.egress.allowed_hosts.is_some());
+    }
+
+    #[test]
+    fn chat_slots_limit_and_release() {
+        let a = try_acquire_chat_slot("s-slot", Some(1)).unwrap();
+        assert!(try_acquire_chat_slot("s-slot", Some(1)).is_none());
+        assert!(try_acquire_chat_slot("other", Some(1)).is_some());
+        assert_eq!(active_chat_slots("s-slot"), 1);
+        drop(a);
+        assert_eq!(active_chat_slots("s-slot"), 0);
+        let many: Vec<_> = (0..5)
+            .map(|_| try_acquire_chat_slot("s-unl", None).unwrap())
+            .collect();
+        assert_eq!(active_chat_slots("s-unl"), 5);
+        drop(many);
+        assert_eq!(active_chat_slots("s-unl"), 0);
     }
 }

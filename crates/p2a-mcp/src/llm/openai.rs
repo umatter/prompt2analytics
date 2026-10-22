@@ -31,6 +31,8 @@ pub struct OpenAIProvider {
     /// Cap on the tool-result text re-sent to the model in one tool loop
     /// (`llm_history_bytes`).
     loop_tool_bytes: usize,
+    /// Upper bound on tool-loop iterations (`llm_max_tool_iterations`).
+    max_iterations_cap: usize,
 }
 
 impl OpenAIProvider {
@@ -48,6 +50,7 @@ impl OpenAIProvider {
             config,
             timeout: settings.timeout,
             loop_tool_bytes: settings.history_bytes,
+            max_iterations_cap: settings.max_tool_iterations,
         }
     }
 
@@ -734,10 +737,11 @@ impl LlmProvider for OpenAIProvider {
         interpret: bool,
     ) -> Result<Message, LlmError> {
         let mut conversation = messages.to_vec();
-        let max_iterations = self
-            .config
-            .max_tool_iterations
-            .unwrap_or(super::provider::DEFAULT_MAX_TOOL_ITERATIONS);
+        let max_iterations = super::provider::effective_max_tool_iterations(
+            None,
+            self.config.max_tool_iterations,
+            self.max_iterations_cap,
+        );
         self.execute_tool_loop(
             &mut conversation,
             tools,
@@ -757,10 +761,11 @@ impl LlmProvider for OpenAIProvider {
         callback: Box<dyn Fn(StreamChunk) + Send + Sync>,
     ) -> Result<Message, LlmError> {
         let mut conversation = messages.to_vec();
-        let max_iterations = self
-            .config
-            .max_tool_iterations
-            .unwrap_or(super::provider::DEFAULT_MAX_TOOL_ITERATIONS);
+        let max_iterations = super::provider::effective_max_tool_iterations(
+            None,
+            self.config.max_tool_iterations,
+            self.max_iterations_cap,
+        );
         self.execute_tool_loop_stream(
             &mut conversation,
             tools,
