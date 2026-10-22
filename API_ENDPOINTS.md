@@ -334,6 +334,8 @@ POST /api/llm/chat/stream
 
 A `conversation_id` the session does not own ends the stream with an `error` event "Conversation not found", before anything is stored or sent to the provider. Closing the SSE connection stops the tool loop.
 
+An unknown or expired `session_id` does not change the HTTP status: the response is 200 and the stream ends with an `error` event ("Session not found" / "Session expired"). A busy session (one already running `llm_streams_per_session` chat requests; 1 in the hosted profile) is refused before the stream starts, with 429 `session_busy`.
+
 **Response:** Server-Sent Events (SSE) stream with events:
 
 #### Event 1: Status
@@ -940,8 +942,8 @@ An error response has this shape; `data` is absent, and `code` and `details` app
 | 400 | `unknown_tool` | no tool has this name |
 | 400 | `invalid_arguments` | malformed tool arguments, `user_id`, message role, or a missing or conflicting session id on the conversation routes |
 | 401 | none | a token is configured and the request has none or a wrong one: plain-text body `missing or invalid bearer token` and `WWW-Authenticate: Bearer` |
-| 404 | `not_found` | missing, or not owned by the caller's session. A route not registered in this mode answers 404 with an empty body; an unknown session on `POST /api/tools/{name}` or `/api/llm/chat` answers 404 `"Session not found"` without a `code` |
-| 410 | `session_expired` | the session expired (session and conversation routes); on `POST /api/tools/{name}` and `/api/llm/chat` an expired session answers 410 `"Session expired"` without a `code` |
+| 404 | `not_found` | missing, or not owned by the caller's session. A route not registered in this mode answers 404 with an empty body; an unknown session on `POST /api/tools/{name}` or `/api/llm/chat` answers 404 `"Session not found"` without a `code` (the stream route reports these as an SSE `error` event) |
+| 410 | `session_expired` | the session expired (session and conversation routes); on `POST /api/tools/{name}` and `/api/llm/chat` an expired session answers 410 `"Session expired"` without a `code` (the stream route reports these as an SSE `error` event) |
 | 413 | `payload_too_large` | a message, title or settings string above `message_bytes`. A request body above `P2A_MAX_HTTP_BODY_MB` answers 413 with the plain-text body `length limit exceeded` and no `code` |
 | 421 | `misdirected` | a local server received a request addressed to a host other than `localhost` or a loopback address |
 | 422 | `limit_exceeded` | a request limit refused a parameter, the dataset's row count or the response size; `details {parameter, requested, limit}` |
