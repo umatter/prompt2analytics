@@ -29,6 +29,7 @@ Fixed Effects Generalized Linear Model (FEGLM) combines GLM estimation with high
 |---------|----------|----------|----------------|
 | alpaca | R | `feglm()` | 0.3.4 |
 | fixest | R | `feglm()`/`fepois()` | 0.11.x |
+| fixest | R 4.3.3 | `fepois()$ll_null`, with `stats::dpois()` for the pointwise values (Test 7) | 0.14.2 |
 | ppmlhdfe | Stata | `ppmlhdfe` | 2.x |
 
 **Primary Reference**:
@@ -294,6 +295,57 @@ coef(est)
 
 ---
 
+### Test 7: Poisson Log-Likelihood and Null Log-Likelihood (fixest Convention)
+
+**Convention**: The Poisson log-likelihood of one observation is
+```
+y*log(mu) - mu - lgamma(y + 1)
+```
+For integer `y` this equals `dpois(y, mu, log = TRUE)`. For non-integer `y`, which PPML allows, `dpois` returns `-Inf`, so p2a follows fixest and keeps the closed form. The null log-likelihood is the intercept-only model, the sum of that expression at `mu = mean(y)`, which is what `fepois(...)$ll_null` reports even when fixed effects are absorbed. The closed form is O(1) in `y`, so counts near 1e12 are evaluated directly.
+
+**R Code** (R 4.3.3, fixest 0.14.2):
+```r
+dpois(0, 2.5, log = TRUE)            # -2.5
+dpois(3, 2.5, log = TRUE)            # -1.5428872736055899
+dpois(17, 12.3, log = TRUE)          # -3.1418859897045666
+dpois(1e6, 999000, log = TRUE)       # -8.327027479053644
+2.5 * log(3) - 3 - lgamma(3.5)       # -1.4544428806767997 (fixest convention; dpois gives -Inf)
+dpois(1e12, 1e12 + 1e6, log = TRUE)  # -15.234448757835947
+
+library(fixest)
+i <- 0:39
+d <- data.frame(id = i %/% 8, x = ((i * 7) %% 11) / 10)
+d$y1 <- ((i * 37) %% 23) + 1 + 0.25 * (i %% 3)
+d$y2 <- 1e12 + ((i * 7919) %% 1000003) * 1e6
+fepois(y1 ~ x | id, d)$ll_null                               # -165.74049709539213
+sum(d$y2 * log(mean(d$y2)) - mean(d$y2) - lgamma(d$y2 + 1))  # -145041993560.08203
+fepois(y2 ~ x | id, d)$ll_null                               # -145041993560 (same, printed)
+```
+
+The Rust tests build the same 40-row panel (`id = i / 8`, `x = ((i * 7) % 11) / 10`, five groups of eight), with `y1` as the non-integer outcome and `y2` as the large-count outcome.
+
+**Results Comparison**:
+
+| Statistic | y | mu | R | Tolerance |
+|-----------|---|----|---|-----------|
+| log-likelihood | 2.5 | 3 | -1.4544428806767997 | 1e-12 × scale |
+| log-likelihood | 0 | 2.5 | -2.5 | 1e-12 × scale |
+| log-likelihood | 3 | 2.5 | -1.5428872736055899 | 1e-12 × scale |
+| log-likelihood | 17 | 12.3 | -3.1418859897045666 | 1e-12 × scale |
+| log-likelihood | 1e6 | 999000 | -8.327027479053644 | 1e-12 × scale |
+| null log-likelihood, `y1` | non-integer | mean(y1) | -165.74049709539213 | 1e-10 relative |
+| null log-likelihood, `y2` | integers, 1e12 to 1.31e12 | mean(y2) | -145041993560.08203 | 1e-10 relative |
+
+`scale` is `|y*log(mu)| + mu + lgamma(y + 1)` (at least 1): the pointwise value is a difference of terms of that size, so its error is bounded relative to them rather than to the result. The `dpois(1e12, 1e12 + 1e6)` value is checked by `test_poisson_log_lik_large_counts` at 1e-14 × scale (about 0.55), the cancellation floor that fixest's closed form shares; R's `dpois` uses Loader's saddle point instead.
+
+**Rust Test**: `crates/p2a-core/src/econometrics/feglm.rs::tests::test_validate_poisson_log_lik_against_r`
+
+**Rust Test**: `crates/p2a-core/src/econometrics/feglm.rs::tests::test_validate_feglm_poisson_null_loglik_fixest_non_integer`
+
+**Rust Test**: `crates/p2a-core/src/econometrics/feglm.rs::tests::test_validate_feglm_poisson_null_loglik_fixest_large_counts`
+
+---
+
 ## Link Functions
 
 | Family | Link | η = g(μ) | μ = g⁻¹(η) | V(μ) |
@@ -348,6 +400,10 @@ cargo test -p p2a-core -- feglm::tests
 cargo test -p p2a-core -- feglm::tests::test_feglm_logit
 cargo test -p p2a-core -- feglm::tests::test_feglm_probit
 cargo test -p p2a-core -- feglm::tests::test_feglm_poisson
+
+# Run the fixest log-likelihood pins (Test 7)
+cargo test -p p2a-core -- feglm::tests::test_validate_poisson_log_lik
+cargo test -p p2a-core -- feglm::tests::test_validate_feglm_poisson_null_loglik
 
 # Run with output to see computed values
 cargo test -p p2a-core -- feglm::tests --nocapture
