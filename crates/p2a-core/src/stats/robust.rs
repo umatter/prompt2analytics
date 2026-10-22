@@ -346,7 +346,8 @@ const MAX_DENSITY_POINTS: usize = 1 << 20;
 /// * `kernel` - Kernel function to use
 /// * `n_points` - Number of evaluation points, 2 to 1,048,576 (default 512)
 /// * `from` - Lower bound of evaluation range (default: min - 3*bw); must be finite
-/// * `to` - Upper bound of evaluation range (default: max + 3*bw); must be finite
+/// * `to` - Upper bound of evaluation range (default: max + 3*bw); must be finite. A default
+///   bound that overflows, or a range whose width `to - from` overflows, is refused.
 ///
 /// # Returns
 ///
@@ -420,6 +421,21 @@ pub fn density(
 
     let from = from.unwrap_or(data_min - 3.0 * bw);
     let to = to.unwrap_or(data_max + 3.0 * bw);
+    // The default range can overflow for finite data near f64::MAX with a large bw, which would
+    // make the grid and the density NaN
+    if !(from.is_finite() && to.is_finite()) {
+        return Err(EconError::InvalidSpecification {
+            message: "from and to must be finite numbers (the default range min - 3*bw .. \
+                      max + 3*bw overflows)"
+                .to_string(),
+        });
+    }
+    // Two finite bounds can still be too far apart for the grid step
+    if !(to - from).is_finite() {
+        return Err(EconError::InvalidSpecification {
+            message: format!("the range from {from} to {to} is too wide (to - from overflows)"),
+        });
+    }
 
     // For small datasets or compact kernels, use direct computation
     // FFT overhead isn't worth it for small n
@@ -810,6 +826,44 @@ mod tests {
         )
         .unwrap_err();
         assert!(e.to_string().contains("bw"), "{e}");
+    }
+
+    #[test]
+    fn test_density_rejects_overflowing_default_range() {
+        // min - 3*bw and max + 3*bw overflow to -inf/+inf for finite data and a finite bw.
+        // Pre-fix the grid and the density were NaN and the call returned Ok.
+        for (data, from, to) in [
+            (vec![1e308, 1.5e308], None, None),
+            (vec![1e308, 1.5e308], Some(0.0), None),
+            (vec![-1e308, -1.5e308], None, Some(0.0)),
+            // two finite bounds whose difference overflows
+            (vec![0.0, 1.0], Some(-1e308), Some(1e308)),
+        ] {
+            let e = density(
+                &data,
+                Some(1e308),
+                DensityKernel::Gaussian,
+                Some(16),
+                from,
+                to,
+            )
+            .unwrap_err();
+            assert!(
+                matches!(&e, EconError::InvalidSpecification { message } if message.contains("overflows")),
+                "{data:?}: {e}"
+            );
+        }
+        // The same data with a range that fits still works
+        let r = density(
+            &[1e308, 1.5e308],
+            Some(1e306),
+            DensityKernel::Gaussian,
+            Some(16),
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(r.x.iter().chain(&r.y).all(|v| v.is_finite()));
     }
 
     #[test]
