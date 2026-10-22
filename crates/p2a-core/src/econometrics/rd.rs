@@ -553,6 +553,79 @@ impl fmt::Display for FuzzyRdResult {
 }
 
 // ============================================================================
+// Parameter validation
+// ============================================================================
+
+/// Largest local-polynomial order `p` accepted by the RD estimators.
+///
+/// This is a method-level cap (Tier 0 design 3.1) and holds in every mode,
+/// not only on the hosted server. rdrobust allows orders 0..=20, but with the
+/// uncentred polynomial design used here orders above 4 are already
+/// numerically meaningless; 10 leaves ample room while keeping every design
+/// matrix and the pilot fit (order at most 12) small. The bias-correction
+/// order `q` may be at most `MAX_RD_ORDER + 1`.
+pub(crate) const MAX_RD_ORDER: usize = 10;
+
+/// Check the parameters of an [`RdConfig`] that do not depend on the data.
+///
+/// The checks run in this order: the polynomial order `p`, the bias order `q`
+/// (only after `p`, so `p + 1` cannot overflow), the bandwidths `h` and `b`
+/// when given, `rho`, the confidence `level` and `nnmatch`. `q <= p` is
+/// accepted (it means no bias correction). Every failure is an
+/// `EconError::InvalidSpecification` naming the parameter, the value and the
+/// bound.
+pub(crate) fn validate_rd_config(config: &RdConfig) -> EconResult<()> {
+    let spec = |message: String| Err(EconError::InvalidSpecification { message });
+    let p = config.p;
+    if p > MAX_RD_ORDER {
+        return spec(format!(
+            "Polynomial order p = {p} is too large: local polynomial RD supports p from 0 to \
+             {MAX_RD_ORDER} (p = 1, local linear, is the standard choice)."
+        ));
+    }
+    let q = config.q.unwrap_or(p + 1);
+    if q > MAX_RD_ORDER + 1 {
+        return spec(format!(
+            "Bias-correction order q = {q} is too large: q can be at most {} (the default is p + 1).",
+            MAX_RD_ORDER + 1
+        ));
+    }
+    if let Some(h) = config.h {
+        if !(h.is_finite() && h > 0.0) {
+            return spec(format!(
+                "Main bandwidth h must be a finite number greater than 0 (got {h})."
+            ));
+        }
+    }
+    if let Some(b) = config.b {
+        if !(b.is_finite() && b > 0.0) {
+            return spec(format!(
+                "Bias bandwidth b must be a finite number greater than 0 (got {b})."
+            ));
+        }
+    }
+    let rho = config.rho;
+    if !(rho.is_finite() && rho > 0.0) {
+        return spec(format!(
+            "rho (the ratio b/h) must be a finite number greater than 0 (got {rho})."
+        ));
+    }
+    let level = config.level;
+    if !(level.is_finite() && level > 0.0 && level < 1.0) {
+        return spec(format!(
+            "Confidence level must be strictly between 0 and 1 (got {level}); use 0.95 for a 95% \
+             interval."
+        ));
+    }
+    if config.nnmatch == 0 {
+        return spec(
+            "nnmatch (nearest neighbours for the variance) must be at least 1 (got 0).".to_string(),
+        );
+    }
+    Ok(())
+}
+
+// ============================================================================
 // Helper Functions
 // ============================================================================
 
@@ -566,9 +639,14 @@ fn compute_kernel_weights(x: &Array1<f64>, cutoff: f64, h: f64, kernel: KernelTy
 
 /// Build polynomial design matrix of order p centered at cutoff.
 /// Returns matrix with columns [1, (x-c), (x-c)^2, ..., (x-c)^p].
-fn build_polynomial_matrix(x: &Array1<f64>, cutoff: f64, p: usize) -> Array2<f64> {
+///
+/// The `n x (p + 1)` matrix is allocated through `resource::try_zeros2`, so a
+/// size above the allocation ceiling is a `ResourceLimit` error.
+fn build_polynomial_matrix(x: &Array1<f64>, cutoff: f64, p: usize) -> EconResult<Array2<f64>> {
     let n = x.len();
-    let mut matrix = Array2::zeros((n, p + 1));
+    // A saturated column count cannot be allocated, so try_zeros2 reports it.
+    let mut matrix =
+        crate::resource::try_zeros2(n, p.saturating_add(1), "RD polynomial design matrix")?;
 
     for i in 0..n {
         let dx = x[i] - cutoff;
@@ -579,7 +657,7 @@ fn build_polynomial_matrix(x: &Array1<f64>, cutoff: f64, p: usize) -> Array2<f64
         }
     }
 
-    matrix
+    Ok(matrix)
 }
 
 /// Perform weighted least squares regression.
@@ -641,6 +719,38 @@ fn weighted_least_squares(
 
 /// Compute nearest-neighbor variance estimator.
 /// For each observation, estimates σ²ᵢ using J nearest neighbors.
+///
+/// The neighbours of an active row i (weight > 0) are the J other active rows
+/// nearest in `|x_k - x_i|`, ties broken by the lower row index, and the
+/// squared differences are summed in (distance, row) order. That is exactly
+/// what sorting every other active row by distance did before; the estimate
+/// is unchanged bit for bit, but it now costs O(m log m + m J) per side
+/// instead of O(m^2 log m), with m the number of active rows:
+///
+/// 1. The active rows are sorted once by (x, row), with -0.0 and 0.0 as one
+///    value, and the bounds of each run of equal x (a mass point) are
+///    precomputed.
+/// 2. For each row, a window around its sorted position grows by J steps,
+///    always taking the nearer side. Distances only grow outwards, so the
+///    J taken rows are J nearest ones, `d_j` (the last distance taken) is
+///    the J-th smallest distance, and every row outside the window is at
+///    least `d_j` away.
+/// 3. If `d_j == 0`, all candidates lie in the row's own mass point, which is
+///    sorted by row: the neighbours are its first J rows other than i, O(J).
+///    Otherwise the neighbours are the window rows closer than `d_j` plus the
+///    lowest-index rows among those exactly `d_j` away, which may extend past
+///    the window. Such a tie run is scanned only by rows within J sorted
+///    positions of it (a row farther away has J nearer rows), so the scans
+///    add O(m J) in total.
+///
+/// CAUS-1 will switch to rdrobust's rule (all ties at the J-th distance are
+/// kept); that changes only step 3.
+///
+/// `run_rd` gives a finite x to every active row whenever the bandwidth is
+/// finite. A non-finite x on an active row (possible only when a missing
+/// outcome makes the automatic bandwidth NaN, and then every estimate is NaN)
+/// still terminates without panicking, with deterministic but unspecified
+/// neighbours.
 fn nn_variance_estimator(
     y: &Array1<f64>,
     x: &Array1<f64>,
@@ -653,26 +763,110 @@ fn nn_variance_estimator(
     // Get indices of observations with positive weights
     let active: Vec<usize> = (0..n).filter(|&i| w[i] > 0.0).collect();
 
-    if active.len() < j + 1 {
+    if j == 0 || active.len() <= j {
         // Not enough observations for NN estimation
         return sigma2;
     }
 
-    for &i in &active {
-        // Find J nearest neighbors by x value
-        let mut distances: Vec<(usize, f64)> = active
-            .iter()
-            .filter(|&&idx| idx != i)
-            .map(|&idx| (idx, (x[idx] - x[i]).abs()))
-            .collect();
+    let m = active.len();
+    let key = |r: usize| if x[r] == 0.0 { 0.0 } else { x[r] };
+    let mut order = active;
+    order.sort_by(|&a, &b| key(a).total_cmp(&key(b)).then(a.cmp(&b)));
 
-        distances.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+    // Bounds of the run of equal x around each sorted position.
+    let mut block_start = vec![0usize; m];
+    let mut block_end = vec![m; m];
+    for p in 1..m {
+        if key(order[p]) == key(order[p - 1]) {
+            block_start[p] = block_start[p - 1];
+        } else {
+            block_start[p] = p;
+        }
+    }
+    for p in (0..m - 1).rev() {
+        if key(order[p]) == key(order[p + 1]) {
+            block_end[p] = block_end[p + 1];
+        } else {
+            block_end[p] = p + 1;
+        }
+    }
 
-        let neighbors: Vec<usize> = distances.iter().take(j).map(|&(idx, _)| idx).collect();
+    let mut neighbors: Vec<usize> = Vec::with_capacity(j);
+    let mut ties: Vec<usize> = Vec::new();
+
+    for pos in 0..m {
+        let i = order[pos];
+        let xi = x[i];
+        let dist = |r: usize| (x[r] - xi).abs();
+
+        // Grow the window order[lo..hi] (which holds pos) by exactly j rows.
+        let (mut lo, mut hi) = (pos, pos + 1);
+        let mut d_j = 0.0_f64;
+        for _ in 0..j {
+            let take_left = match (lo > 0, hi < m) {
+                (true, true) => dist(order[lo - 1]) <= dist(order[hi]),
+                (true, false) => true,
+                (false, true) => false,
+                (false, false) => break,
+            };
+            if take_left {
+                lo -= 1;
+                d_j = dist(order[lo]);
+            } else {
+                d_j = dist(order[hi]);
+                hi += 1;
+            }
+        }
+
+        neighbors.clear();
+        if d_j == 0.0 {
+            // Every candidate ties at distance 0 inside this mass point.
+            for &r in &order[block_start[pos]..block_end[pos]] {
+                if neighbors.len() == j {
+                    break;
+                }
+                if r != i {
+                    neighbors.push(r);
+                }
+            }
+        } else {
+            ties.clear();
+            for &r in &order[lo..hi] {
+                if r == i {
+                    continue;
+                }
+                let d = dist(r);
+                if d < d_j {
+                    neighbors.push(r);
+                } else if d == d_j {
+                    ties.push(r);
+                }
+            }
+            let mut k = lo;
+            while k > 0 && dist(order[k - 1]) == d_j {
+                ties.push(order[k - 1]);
+                k -= 1;
+            }
+            let mut k = hi;
+            while k < m && dist(order[k]) == d_j {
+                ties.push(order[k]);
+                k += 1;
+            }
+            // Keep the lowest-index ties needed to reach j neighbours.
+            let need = j.saturating_sub(neighbors.len());
+            if ties.len() > need {
+                if need > 0 {
+                    ties.select_nth_unstable(need - 1);
+                }
+                ties.truncate(need);
+            }
+            neighbors.extend_from_slice(&ties);
+        }
 
         if neighbors.is_empty() {
             continue;
         }
+        neighbors.sort_by(|&a, &b| dist(a).total_cmp(&dist(b)).then(a.cmp(&b)));
 
         // Compute variance estimate: (J/(J+1)) × (1/J) × Σⱼ (yᵢ - yⱼ)²
         let yi = y[i];
@@ -791,6 +985,9 @@ fn hc_variance_estimator(
 }
 
 /// Compute MSE-optimal bandwidth using Imbens-Kalyanaraman (2012) method.
+///
+/// Allocation errors of the pilot design matrices propagate; a failed pilot
+/// *fit* still falls back to the rule-of-thumb bandwidth.
 fn compute_mse_bandwidth(
     y: &Array1<f64>,
     x: &Array1<f64>,
@@ -798,7 +995,7 @@ fn compute_mse_bandwidth(
     p: usize,
     kernel: KernelType,
     separate: bool,
-) -> (f64, f64) {
+) -> EconResult<(f64, f64)> {
     let n = y.len();
 
     // Split data at cutoff
@@ -824,15 +1021,18 @@ fn compute_mse_bandwidth(
         let x_range = x.iter().cloned().fold(f64::NEG_INFINITY, f64::max)
             - x.iter().cloned().fold(f64::INFINITY, f64::min);
         let h_rot = x_range / ((n as f64).powf(0.2));
-        return (h_rot, h_rot);
+        return Ok((h_rot, h_rot));
     }
 
     // Estimate second derivative (curvature) using global polynomial
-    // Fit order-4 polynomial to estimate m''(c)
+    // Fit order-4 polynomial to estimate m''(c).
+    // With p <= MAX_RD_ORDER (validated by the callers) the pilot order is at
+    // most 12, and the pilot only runs with at least 10 points on each side
+    // (n >= 20), so the pilot order stays below n without a separate check.
     let pilot_order = 4.max(p + 2);
     let x_arr = Array1::from_vec(x.to_vec());
     let y_arr = y.clone();
-    let x_design = build_polynomial_matrix(&x_arr, cutoff, pilot_order);
+    let x_design = build_polynomial_matrix(&x_arr, cutoff, pilot_order)?;
 
     // Equal weights for pilot
     let pilot_weights = Array1::from_elem(n, 1.0 / n as f64);
@@ -844,7 +1044,7 @@ fn compute_mse_bandwidth(
             let x_range = x.iter().cloned().fold(f64::NEG_INFINITY, f64::max)
                 - x.iter().cloned().fold(f64::INFINITY, f64::min);
             let h_rot = x_range / ((n as f64).powf(0.2));
-            return (h_rot, h_rot);
+            return Ok((h_rot, h_rot));
         }
     };
 
@@ -862,7 +1062,7 @@ fn compute_mse_bandwidth(
     let h_pilot = x_range / 2.0;
 
     let pilot_kernel_weights = compute_kernel_weights(&x_arr, cutoff, h_pilot, kernel);
-    let x_linear = build_polynomial_matrix(&x_arr, cutoff, 1);
+    let x_linear = build_polynomial_matrix(&x_arr, cutoff, 1)?;
 
     let sigma2_est = match weighted_least_squares(&x_linear, &y_arr, &pilot_kernel_weights) {
         Ok((_, resid)) => {
@@ -912,9 +1112,9 @@ fn compute_mse_bandwidth(
         // Using asymmetric pilot estimates (simplified version)
         let h_left = h_opt * ((n_right as f64) / (n_left as f64)).powf(0.1);
         let h_right = h_opt * ((n_left as f64) / (n_right as f64)).powf(0.1);
-        (h_left.clamp(h_min, h_max), h_right.clamp(h_min, h_max))
+        Ok((h_left.clamp(h_min, h_max), h_right.clamp(h_min, h_max)))
     } else {
-        (h_opt, h_opt)
+        Ok((h_opt, h_opt))
     }
 }
 
@@ -946,7 +1146,9 @@ pub fn run_rd(
     cutoff: f64,
     config: RdConfig,
 ) -> EconResult<RdResult> {
-    let mut warnings = Vec::new();
+    validate_rd_config(&config)?;
+
+    let warnings = Vec::new();
 
     // Extract data
     let y = DesignMatrix::extract_column(dataset.df(), outcome).map_err(|e| {
@@ -984,7 +1186,7 @@ pub fn run_rd(
         });
     }
 
-    // Determine polynomial orders
+    // Determine polynomial orders (validated: p <= MAX_RD_ORDER, q <= MAX_RD_ORDER + 1)
     let p = config.p;
     let q = config.q.unwrap_or(p + 1);
 
@@ -999,7 +1201,7 @@ pub fn run_rd(
             p,
             config.kernel,
             config.bwselect.is_separate(),
-        )
+        )?
     };
 
     let (b_left, b_right) = if let Some(b) = config.b {
@@ -1031,18 +1233,24 @@ pub fn run_rd(
     let n_eff_left = weights_left_h.iter().filter(|&&w| w > 0.0).count();
     let n_eff_right = weights_right_h.iter().filter(|&&w| w > 0.0).count();
 
-    if n_eff_left < p + 2 || n_eff_right < p + 2 {
-        warnings.push(format!(
-            "Small effective sample size: {} left, {} right (need {} for p={})",
-            n_eff_left,
-            n_eff_right,
-            p + 2,
-            p
-        ));
+    // A local polynomial of order p needs at least p + 2 points with positive
+    // kernel weight on each side; fewer gives a degenerate (exact or singular)
+    // fit, so this is an error rather than a warning.
+    for (side, n_eff) in [("left", n_eff_left), ("right", n_eff_right)] {
+        if n_eff < p + 2 {
+            return Err(EconError::InvalidSpecification {
+                message: format!(
+                    "Too few observations inside the bandwidth for polynomial order p = {p}: \
+                     {n_eff} on the {side} side of the cutoff, at least {} are needed. Use a \
+                     larger bandwidth h or a lower order p.",
+                    p + 2
+                ),
+            });
+        }
     }
 
     // Build polynomial design matrices (order p)
-    let x_poly = build_polynomial_matrix(&x, cutoff, p);
+    let x_poly = build_polynomial_matrix(&x, cutoff, p)?;
 
     // ========================================================================
     // Step 1: Conventional local polynomial estimation
@@ -1080,8 +1288,23 @@ pub fn run_rd(
         }
     });
 
+    // The bias fit of order q needs at least q + 1 points inside b on each side.
+    for (side, w) in [("left", &weights_left_b), ("right", &weights_right_b)] {
+        let n_b = w.iter().filter(|&&wi| wi > 0.0).count();
+        if n_b < q + 1 {
+            return Err(EconError::InvalidSpecification {
+                message: format!(
+                    "Too few observations inside the bias bandwidth b for the bias-correction \
+                     polynomial of order q = {q}: {n_b} on the {side} side, at least {} are \
+                     needed. Use a larger b (or rho).",
+                    q + 1
+                ),
+            });
+        }
+    }
+
     // Build polynomial design matrices (order q) for bias estimation
-    let x_poly_q = build_polynomial_matrix(&x, cutoff, q);
+    let x_poly_q = build_polynomial_matrix(&x, cutoff, q)?;
 
     // Estimate higher-order polynomial on each side
     let (coef_left_q, _) = weighted_least_squares(&x_poly_q, &y, &weights_left_b)?;
@@ -1276,6 +1499,11 @@ pub fn rd_bandwidth(
     kernel: KernelType,
     bwselect: BandwidthMethod,
 ) -> EconResult<RdBandwidth> {
+    validate_rd_config(&RdConfig {
+        p,
+        ..Default::default()
+    })?;
+
     // Extract data
     let y = DesignMatrix::extract_column(dataset.df(), outcome).map_err(|e| {
         EconError::ColumnNotFound {
@@ -1296,7 +1524,7 @@ pub fn rd_bandwidth(
 
     // Compute MSE-optimal bandwidth
     let (h_left, h_right) =
-        compute_mse_bandwidth(&y, &x, cutoff, p, kernel, bwselect.is_separate());
+        compute_mse_bandwidth(&y, &x, cutoff, p, kernel, bwselect.is_separate())?;
 
     // Bias bandwidth (default: same as h)
     let b_left = h_left;
@@ -1517,7 +1745,7 @@ mod tests {
         let x = Array1::from_vec(vec![0.0, 1.0, 2.0]);
         let cutoff = 1.0;
 
-        let mat = build_polynomial_matrix(&x, cutoff, 2);
+        let mat = build_polynomial_matrix(&x, cutoff, 2).unwrap();
 
         // Row 0: x=0, (x-c) = -1
         // [1, -1, 1]
@@ -1939,6 +2167,371 @@ mod tests {
                 result.se_robust,
                 result.p_robust
             );
+        }
+    }
+
+    // =========================================================================
+    // Parameter validation and resource guards (T0-WP11)
+    // =========================================================================
+
+    fn spec_msg(r: EconResult<RdResult>) -> String {
+        match r {
+            Err(EconError::InvalidSpecification { message }) => message,
+            other => panic!(
+                "expected InvalidSpecification, got {:?}",
+                other.map(|r| r.tau_conventional)
+            ),
+        }
+    }
+
+    #[test]
+    fn test_rd_rejects_polynomial_order_above_cap() {
+        let ds = create_sharp_rd_dataset();
+        let m = spec_msg(run_rd(
+            &ds,
+            "outcome",
+            "running",
+            0.0,
+            RdConfig {
+                p: 11,
+                ..Default::default()
+            },
+        ));
+        assert!(m.contains("p = 11") && m.contains("10"), "{m}");
+        // overflow-sized order: before the fix this panics on `p + 1` / `p + 2`
+        let m = spec_msg(run_rd(
+            &ds,
+            "outcome",
+            "running",
+            0.0,
+            RdConfig {
+                p: usize::MAX,
+                ..Default::default()
+            },
+        ));
+        assert!(m.contains("Polynomial order"), "{m}");
+        let r = run_fuzzy_rd(
+            &create_fuzzy_rd_dataset(),
+            "outcome",
+            "running",
+            "treatment",
+            0.0,
+            RdConfig {
+                p: 11,
+                ..Default::default()
+            },
+        );
+        assert!(matches!(r, Err(EconError::InvalidSpecification { .. })));
+        let r = rd_bandwidth(
+            &ds,
+            "outcome",
+            "running",
+            0.0,
+            11,
+            KernelType::Triangular,
+            BandwidthMethod::MseRd,
+        );
+        assert!(
+            matches!(r, Err(EconError::InvalidSpecification { ref message }) if message.contains("p = 11"))
+        );
+        let m = spec_msg(run_rd(
+            &ds,
+            "outcome",
+            "running",
+            0.0,
+            RdConfig {
+                q: Some(12),
+                ..Default::default()
+            },
+        ));
+        assert!(m.contains("q = 12"), "{m}");
+    }
+
+    #[test]
+    fn test_rd_rejects_invalid_bandwidth_level_and_nnmatch() {
+        let ds = create_sharp_rd_dataset();
+        for h in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            let m = spec_msg(run_rd(
+                &ds,
+                "outcome",
+                "running",
+                0.0,
+                RdConfig {
+                    h: Some(h),
+                    ..Default::default()
+                },
+            ));
+            assert!(m.contains("bandwidth h"), "{m}");
+        }
+        let m = spec_msg(run_rd(
+            &ds,
+            "outcome",
+            "running",
+            0.0,
+            RdConfig {
+                b: Some(0.0),
+                ..Default::default()
+            },
+        ));
+        assert!(m.contains("bandwidth b"), "{m}");
+        let m = spec_msg(run_rd(
+            &ds,
+            "outcome",
+            "running",
+            0.0,
+            RdConfig {
+                rho: 0.0,
+                ..Default::default()
+            },
+        ));
+        assert!(m.contains("rho"), "{m}");
+        // level = 95 panics inside statrs before the fix
+        for level in [95.0, 0.0, 1.0, f64::NAN] {
+            let m = spec_msg(run_rd(
+                &ds,
+                "outcome",
+                "running",
+                0.0,
+                RdConfig {
+                    level,
+                    ..Default::default()
+                },
+            ));
+            assert!(m.contains("level"), "{m}");
+        }
+        let m = spec_msg(run_rd(
+            &ds,
+            "outcome",
+            "running",
+            0.0,
+            RdConfig {
+                nnmatch: 0,
+                ..Default::default()
+            },
+        ));
+        assert!(m.contains("nnmatch"), "{m}");
+    }
+
+    #[test]
+    fn test_rd_requires_enough_observations_inside_bandwidth() {
+        let ds = create_sharp_rd_dataset();
+        // h = 0.1 leaves 2 left-side points (x = -0.08, -0.04) with positive weight: p = 1 needs 3
+        let m = spec_msg(run_rd(
+            &ds,
+            "outcome",
+            "running",
+            0.0,
+            RdConfig {
+                h: Some(0.1),
+                ..Default::default()
+            },
+        ));
+        assert!(m.contains("bandwidth") && m.contains("left"), "{m}");
+        // h wide enough, but the bias bandwidth b = 0.1 is too narrow for q = 2 (needs 3)
+        let m = spec_msg(run_rd(
+            &ds,
+            "outcome",
+            "running",
+            0.0,
+            RdConfig {
+                h: Some(1.0),
+                b: Some(0.1),
+                ..Default::default()
+            },
+        ));
+        assert!(m.contains("bias bandwidth b"), "{m}");
+        // the order cap itself does not reject p = 10 (all 100 points in the window)
+        if let Err(EconError::InvalidSpecification { message }) = run_rd(
+            &ds,
+            "outcome",
+            "running",
+            0.0,
+            RdConfig {
+                p: 10,
+                h: Some(2.5),
+                ..Default::default()
+            },
+        ) {
+            assert!(!message.contains("Polynomial order"), "{message}");
+        }
+    }
+
+    #[test]
+    fn test_rd_design_matrix_respects_allocation_ceiling() {
+        let ds = create_sharp_rd_dataset();
+        // 100 x 2 design = 1600 bytes > 64
+        let r = crate::resource::with_alloc_ceiling(Some(64), || {
+            run_rd(
+                &ds,
+                "outcome",
+                "running",
+                0.0,
+                RdConfig {
+                    h: Some(1.0),
+                    ..Default::default()
+                },
+            )
+        });
+        assert!(
+            matches!(r, Err(EconError::ResourceLimit(_))),
+            "{:?}",
+            r.map(|r| r.tau_conventional)
+        );
+    }
+
+    // =========================================================================
+    // Nearest-neighbour variance: fast path against the previous algorithm
+    // =========================================================================
+
+    /// Verbatim copy of the previous `nn_variance_estimator` (O(m^2 log m)),
+    /// kept as the reference the sorted-window implementation is held to.
+    fn nn_variance_naive(
+        y: &Array1<f64>,
+        x: &Array1<f64>,
+        w: &Array1<f64>,
+        j: usize,
+    ) -> Array1<f64> {
+        let n = y.len();
+        let mut sigma2 = Array1::zeros(n);
+
+        // Get indices of observations with positive weights
+        let active: Vec<usize> = (0..n).filter(|&i| w[i] > 0.0).collect();
+
+        if active.len() < j + 1 {
+            // Not enough observations for NN estimation
+            return sigma2;
+        }
+
+        for &i in &active {
+            // Find J nearest neighbors by x value
+            let mut distances: Vec<(usize, f64)> = active
+                .iter()
+                .filter(|&&idx| idx != i)
+                .map(|&idx| (idx, (x[idx] - x[i]).abs()))
+                .collect();
+
+            distances.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+
+            let neighbors: Vec<usize> = distances.iter().take(j).map(|&(idx, _)| idx).collect();
+
+            if neighbors.is_empty() {
+                continue;
+            }
+
+            // Compute variance estimate: (J/(J+1)) × (1/J) × Σⱼ (yᵢ - yⱼ)²
+            let yi = y[i];
+            let sum_sq: f64 = neighbors.iter().map(|&idx| (yi - y[idx]).powi(2)).sum();
+            let j_actual = neighbors.len() as f64;
+
+            sigma2[i] = (j_actual / (j_actual + 1.0)) * (sum_sq / j_actual);
+        }
+
+        sigma2
+    }
+
+    fn lcg(s: &mut u64) -> f64 {
+        *s = s
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (*s >> 11) as f64 / (1u64 << 53) as f64
+    }
+
+    fn same(a: &Array1<f64>, b: &Array1<f64>) {
+        assert_eq!(a.len(), b.len());
+        for (k, (p, q)) in a.iter().zip(b.iter()).enumerate() {
+            assert!(
+                p.to_bits() == q.to_bits() || (p.is_nan() && q.is_nan()),
+                "row {k}: {p} vs {q}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_nn_variance_fast_matches_reference() {
+        let mut s = 2026u64;
+        let n = 600;
+        let tri = |x: &Array1<f64>, h: f64| {
+            x.mapv(|v| {
+                if v < 0.0 {
+                    KernelType::Triangular.evaluate((v / h).abs())
+                } else {
+                    0.0
+                }
+            })
+        };
+        // (a) continuous x, noisy y
+        let x = Array1::from_iter((0..n).map(|_| -1.0 + 2.0 * lcg(&mut s)));
+        let y = x.mapv(|v| 1.0 + 0.5 * v) + Array1::from_iter((0..n).map(|_| lcg(&mut s) - 0.5));
+        let all = Array1::from_elem(n, 1.0);
+        for j in [1, 3, 5] {
+            same(
+                &nn_variance_estimator(&y, &x, &tri(&x, 0.6), j),
+                &nn_variance_naive(&y, &x, &tri(&x, 0.6), j),
+            );
+            same(
+                &nn_variance_estimator(&y, &x, &all, j),
+                &nn_variance_naive(&y, &x, &all, j),
+            );
+        }
+        // (b) heavy mass points (21 distinct values) and symmetric distance ties
+        let xm = x.mapv(|v| (v * 10.0).round() / 10.0);
+        for j in [1, 3, 7, 40] {
+            same(
+                &nn_variance_estimator(&y, &xm, &all, j),
+                &nn_variance_naive(&y, &xm, &all, j),
+            );
+        }
+        // mass points under a kernel window (inactive rows interleaved)
+        same(
+            &nn_variance_estimator(&y, &xm, &tri(&xm, 0.55), 4),
+            &nn_variance_naive(&y, &xm, &tri(&xm, 0.55), 4),
+        );
+        // (c) integer grid with signed zeros
+        let xg = Array1::from_iter((0..n).map(|i| match i % 9 {
+            0 => -0.0,
+            1 => 0.0,
+            k => k as f64 - 4.0,
+        }));
+        for j in [1, 3, 70, 150] {
+            same(
+                &nn_variance_estimator(&y, &xg, &all, j),
+                &nn_variance_naive(&y, &xg, &all, j),
+            );
+        }
+        // (d) tiny active sets: m == j (all zero), m == j + 1, j == 0
+        let mut w = Array1::zeros(n);
+        for k in 0..4 {
+            w[k] = 1.0;
+        }
+        for j in [0, 3, 4] {
+            same(
+                &nn_variance_estimator(&y, &x, &w, j),
+                &nn_variance_naive(&y, &x, &w, j),
+            );
+        }
+        // (e) NaN in y propagates in the same places
+        let mut yn = y.clone();
+        yn[5] = f64::NAN;
+        same(
+            &nn_variance_estimator(&yn, &xm, &all, 3),
+            &nn_variance_naive(&yn, &xm, &all, 3),
+        );
+        // (f) many small random cases: few distinct x values (heavy ties on
+        // both sides), random inactive rows, every j up to the active count
+        for case in 0..300 {
+            let m = 2 + case % 40;
+            let levels = 1 + (case / 7) % 9;
+            let xs = Array1::from_iter(
+                (0..m).map(|_| ((lcg(&mut s) * levels as f64).floor() - 2.0) * 0.5),
+            );
+            let ys = Array1::from_iter((0..m).map(|_| lcg(&mut s)));
+            let ws = Array1::from_iter((0..m).map(|_| if lcg(&mut s) < 0.8 { 1.0 } else { 0.0 }));
+            for j in 1..=m {
+                same(
+                    &nn_variance_estimator(&ys, &xs, &ws, j),
+                    &nn_variance_naive(&ys, &xs, &ws, j),
+                );
+            }
         }
     }
 

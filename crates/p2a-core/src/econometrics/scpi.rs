@@ -439,6 +439,30 @@ pub fn run_scpi(
         });
     }
 
+    let tol = config.tolerance;
+    if !(tol.is_finite() && tol > 0.0) {
+        return Err(EconError::InvalidSpecification {
+            message: format!("tolerance must be a finite number greater than 0 (got {tol})"),
+        });
+    }
+    if config.max_iter == 0 {
+        return Err(EconError::InvalidSpecification {
+            message: "max_iter must be at least 1 (got 0)".to_string(),
+        });
+    }
+    // The fold count only matters (and is only checked) for K-fold CV.
+    if matches!(config.variance_method, VarianceMethod::KFoldCv)
+        && !(2..=n_pre).contains(&config.cv_folds)
+    {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "cv_folds = {} is out of range for K-fold cross-validation over {n_pre} \
+                 pre-treatment periods; use a value between 2 and {n_pre}.",
+                config.cv_folds
+            ),
+        });
+    }
+
     // Split data into pre- and post-treatment
     let y_pre = treated.slice(s![..treatment_period]).to_owned();
     let y_post = treated.slice(s![treatment_period..]).to_owned();
@@ -634,6 +658,8 @@ fn solve_simplex_weights(
 
     // Frank-Wolfe / projected gradient descent
     for _ in 0..max_iter {
+        crate::resource::checkpoint()?;
+
         // Gradient: H * w + c
         let grad = h_reg.dot(&w) + &c;
 
@@ -717,7 +743,11 @@ fn solve_lasso_weights(
         .map(|j| x.column(j).iter().zip(y.iter()).map(|(&x, &y)| x * y).sum())
         .collect();
 
+    // Each sweep recomputes the partial residuals from scratch, O(t n^2); the
+    // budget check per sweep lets a deadline stop a long run.
     for _ in 0..max_iter {
+        crate::resource::checkpoint()?;
+
         let w_old = w.clone();
 
         for j in 0..n {
@@ -836,6 +866,8 @@ fn solve_lasso_simplex_weights(
     let mut u: Array1<f64> = Array1::zeros(n); // Dual variable
 
     for _ in 0..max_iter {
+        crate::resource::checkpoint()?;
+
         let w_old = w.clone();
 
         // w-update: minimize ||y - Xw||² + (ρ/2)||w - z + u||²
@@ -942,7 +974,7 @@ fn compute_out_sample_variance(
             let mut abs_resid: Vec<f64> = residuals.iter().map(|r| r.abs()).collect();
             abs_resid.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
-            let median_abs = if abs_resid.len() % 2 == 0 {
+            let median_abs = if abs_resid.len().is_multiple_of(2) {
                 let mid = abs_resid.len() / 2;
                 (abs_resid[mid - 1] + abs_resid[mid]) / 2.0
             } else {
@@ -965,6 +997,8 @@ fn compute_out_sample_variance(
             let mut cv_errors = Vec::with_capacity(t);
 
             for i in 0..t {
+                crate::resource::checkpoint()?;
+
                 // Leave out observation i
                 let y_train: Array1<f64> = y
                     .iter()
@@ -982,13 +1016,16 @@ fn compute_out_sample_variance(
                     }
                 }
 
-                // Re-estimate weights (using simplex by default for LOO)
-                if let Ok(w_loo) =
-                    solve_simplex_weights(&y_train.view(), &x_train.view(), 1000, 1e-8)
-                {
-                    let pred = x.row(i).dot(&w_loo);
-                    let error = y[i] - pred;
-                    cv_errors.push(error * error);
+                // Re-estimate weights (using simplex by default for LOO); a
+                // failed fit is skipped, a stopped budget ends the estimation.
+                match solve_simplex_weights(&y_train.view(), &x_train.view(), 1000, 1e-8) {
+                    Ok(w_loo) => {
+                        let pred = x.row(i).dot(&w_loo);
+                        let error = y[i] - pred;
+                        cv_errors.push(error * error);
+                    }
+                    Err(e @ EconError::Cancelled(_)) => return Err(e),
+                    Err(_) => {}
                 }
             }
 
@@ -1003,11 +1040,19 @@ fn compute_out_sample_variance(
         }
 
         VarianceMethod::KFoldCv => {
-            // K-fold cross-validation
+            // K-fold cross-validation. run_scpi checks 2 <= cv_folds <= t;
+            // the guard below only keeps this private helper panic-free.
+            if cv_folds == 0 {
+                return Err(EconError::InvalidSpecification {
+                    message: "cv_folds must be at least 2 for K-fold cross-validation".to_string(),
+                });
+            }
             let fold_size = t.div_ceil(cv_folds);
             let mut cv_errors = Vec::new();
 
             for fold in 0..cv_folds {
+                crate::resource::checkpoint()?;
+
                 let start = fold * fold_size;
                 let end = ((fold + 1) * fold_size).min(t);
 
@@ -1017,8 +1062,7 @@ fn compute_out_sample_variance(
 
                 // Split into train/test
                 let test_indices: Vec<usize> = (start..end).collect();
-                let train_indices: Vec<usize> =
-                    (0..t).filter(|i| !test_indices.contains(i)).collect();
+                let train_indices: Vec<usize> = (0..start).chain(end..t).collect();
 
                 if train_indices.is_empty() {
                     continue;
@@ -1030,16 +1074,19 @@ fn compute_out_sample_variance(
                     x_train.row_mut(row_idx).assign(&x.row(orig_idx));
                 }
 
-                // Re-estimate weights
-                if let Ok(w_fold) =
-                    solve_simplex_weights(&y_train.view(), &x_train.view(), 1000, 1e-8)
-                {
-                    // Compute test errors
-                    for &test_idx in &test_indices {
-                        let pred = x.row(test_idx).dot(&w_fold);
-                        let error = y[test_idx] - pred;
-                        cv_errors.push(error * error);
+                // Re-estimate weights; a failed fit skips the fold, a stopped
+                // budget ends the estimation.
+                match solve_simplex_weights(&y_train.view(), &x_train.view(), 1000, 1e-8) {
+                    Ok(w_fold) => {
+                        // Compute test errors
+                        for &test_idx in &test_indices {
+                            let pred = x.row(test_idx).dot(&w_fold);
+                            let error = y[test_idx] - pred;
+                            cv_errors.push(error * error);
+                        }
                     }
+                    Err(e @ EconError::Cancelled(_)) => return Err(e),
+                    Err(_) => {}
                 }
             }
 
@@ -1257,6 +1304,133 @@ mod tests {
             assert!(result.in_sample_var > 0.0);
             assert!(result.out_sample_var > 0.0);
             assert!(result.total_var > 0.0);
+        }
+    }
+
+    // =========================================================================
+    // Parameter bounds and cancellation (T0-WP11)
+    // =========================================================================
+
+    fn cancelled<R>(f: impl FnOnce() -> R) -> R {
+        use crate::resource::{Budget, CancelToken, with_budget};
+        let token = CancelToken::new();
+        token.cancel();
+        with_budget(Budget::new(None, token), f)
+    }
+
+    fn spec_msg(r: EconResult<SCPIResult>) -> String {
+        match r {
+            Err(EconError::InvalidSpecification { message }) => message,
+            other => panic!("expected InvalidSpecification, got ok={}", other.is_ok()),
+        }
+    }
+
+    #[test]
+    fn test_scpi_kfold_rejects_cv_folds_out_of_range() {
+        let (t, d) = generate_test_data();
+        // 0 divided by zero, 1 ended in "No valid CV folds", 8 > n_pre ran
+        for k in [0usize, 1, 8] {
+            let cfg = SCPIConfig {
+                variance_method: VarianceMethod::KFoldCv,
+                cv_folds: k,
+                ..Default::default()
+            };
+            let m = spec_msg(run_scpi(&t.view(), &d.view(), 7, cfg));
+            assert!(
+                m.contains(&format!("cv_folds = {k}")) && m.contains("between 2 and 7"),
+                "{m}"
+            );
+        }
+        for k in [2usize, 7] {
+            let cfg = SCPIConfig {
+                variance_method: VarianceMethod::KFoldCv,
+                cv_folds: k,
+                ..Default::default()
+            };
+            let r = run_scpi(&t.view(), &d.view(), 7, cfg).unwrap();
+            assert!(r.out_sample_var.is_finite() && r.out_sample_var > 0.0);
+        }
+        // cv_folds is irrelevant (and not checked) for the other variance methods
+        let cfg = SCPIConfig {
+            variance_method: VarianceMethod::Subgaussian,
+            cv_folds: 0,
+            ..Default::default()
+        };
+        assert!(run_scpi(&t.view(), &d.view(), 7, cfg).is_ok());
+    }
+
+    #[test]
+    fn test_scpi_rejects_bad_tolerance_and_max_iter() {
+        let (t, d) = generate_test_data();
+        for tol in [0.0, -1e-8, f64::NAN, f64::INFINITY] {
+            let m = spec_msg(run_scpi(
+                &t.view(),
+                &d.view(),
+                7,
+                SCPIConfig {
+                    tolerance: tol,
+                    ..Default::default()
+                },
+            ));
+            assert!(m.contains("tolerance"), "{m}");
+        }
+        let m = spec_msg(run_scpi(
+            &t.view(),
+            &d.view(),
+            7,
+            SCPIConfig {
+                max_iter: 0,
+                ..Default::default()
+            },
+        ));
+        assert!(m.contains("max_iter"), "{m}");
+    }
+
+    #[test]
+    fn test_scpi_stops_when_cancelled() {
+        let (t, d) = generate_test_data();
+        for vm in [
+            VarianceMethod::Subgaussian,
+            VarianceMethod::LooCv,
+            VarianceMethod::KFoldCv,
+        ] {
+            let cfg = SCPIConfig {
+                variance_method: vm,
+                ..Default::default()
+            };
+            let r = cancelled(|| run_scpi(&t.view(), &d.view(), 7, cfg));
+            assert!(matches!(r, Err(EconError::Cancelled(_))));
+        }
+        let cfg = SCPIConfig {
+            constraint: SCPIConstraint::Lasso { lambda: 0.1 },
+            ..Default::default()
+        };
+        assert!(matches!(
+            cancelled(|| run_scpi(&t.view(), &d.view(), 7, cfg)),
+            Err(EconError::Cancelled(_))
+        ));
+        let cfg = SCPIConfig {
+            constraint: SCPIConstraint::LassoSimplex { lambda: 0.05 },
+            ..Default::default()
+        };
+        assert!(matches!(
+            cancelled(|| run_scpi(&t.view(), &d.view(), 7, cfg)),
+            Err(EconError::Cancelled(_))
+        ));
+    }
+
+    #[test]
+    fn test_scpi_cv_loops_propagate_cancellation() {
+        // The weights for the CV fits come from the solver directly, so the
+        // CV loops must pass the budget error on instead of skipping the fold.
+        let (t, d) = generate_test_data();
+        let y = t.slice(s![..7]).to_owned();
+        let x = d.slice(s![..7, ..]).to_owned();
+        let w = Array1::from_elem(5, 0.2);
+        for vm in [VarianceMethod::LooCv, VarianceMethod::KFoldCv] {
+            let r =
+                cancelled(|| compute_out_sample_variance(&y.view(), &x.view(), &w.view(), &vm, 3));
+            assert!(matches!(r, Err(EconError::Cancelled(_))), "{vm:?}");
         }
     }
 
