@@ -520,7 +520,7 @@ pub fn localmoran(
             &observed_local_i,
             listw,
             permutations,
-        ))
+        )?)
     } else {
         None
     };
@@ -626,7 +626,7 @@ fn compute_all_local_moran_pvalues_permutation(
     observed_i: &[f64],
     listw: &SpatialWeights,
     permutations: usize,
-) -> Vec<f64> {
+) -> EconResult<Vec<f64>> {
     use rand::SeedableRng;
     use rand::seq::SliceRandom;
     use rand_chacha::ChaCha8Rng;
@@ -641,6 +641,8 @@ fn compute_all_local_moran_pvalues_permutation(
     let mut z_perm: Vec<f64> = z.iter().copied().collect();
 
     for _ in 0..permutations {
+        crate::resource::checkpoint()?;
+
         // Shuffle z values (global permutation)
         z_perm.shuffle(&mut rng);
 
@@ -659,10 +661,10 @@ fn compute_all_local_moran_pvalues_permutation(
     }
 
     // Convert counts to p-values
-    count_extreme
+    Ok(count_extreme
         .iter()
         .map(|&count| (count as f64 + 1.0) / (permutations as f64 + 1.0))
-        .collect()
+        .collect())
 }
 
 /// Lagrange Multiplier tests for spatial dependence in regression residuals.
@@ -714,13 +716,8 @@ pub fn spatial_lm_tests(
         .sum();
     let ewe_scaled = ewe / sigma2;
 
-    // Compute trace terms
-    let w = listw.to_dense();
-    let ww = w.dot(&w);
-    let wtw = w.t().dot(&w);
-    let t = &ww + &wtw;
-
-    let tr_t: f64 = t.diag().sum();
+    // Compute trace terms: tr(WW + W'W), from the sparse rows in O(links)
+    let tr_t: f64 = listw.trace_w2() + listw.trace_wtw();
 
     // Compute (WX)'(WX) related terms
     // J = (1/sigma^2) * [tr(WW + W'W) + (WXb)'(WXb)/sigma^2]
@@ -835,28 +832,30 @@ pub fn spatial_lm_tests(
 ///
 /// S1 = 0.5 * sum_i sum_j (w_ij + w_ji)^2
 /// S2 = sum_i (sum_j w_ij + sum_j w_ji)^2
+///
+/// Computed from the sparse rows in O(links): S1 = tr(W'W) + tr(W^2), and S2 from the row
+/// sums and the column sums accumulated in one pass.
 fn compute_s1_s2(listw: &SpatialWeights) -> (f64, f64) {
     let n = listw.n();
-    let w = listw.to_dense();
 
-    // S1 = 0.5 * sum (w_ij + w_ji)^2
-    let mut s1 = 0.0;
-    for i in 0..n {
-        for j in 0..n {
-            let sum = w[[i, j]] + w[[j, i]];
-            s1 += sum * sum;
-        }
-    }
-    s1 *= 0.5;
+    // S1 = 0.5 * sum (w_ij + w_ji)^2 = tr(W'W) + tr(W^2)
+    let s1 = listw.trace_wtw() + listw.trace_w2();
 
     // S2 = sum_i (row_sum_i + col_sum_i)^2
-    let mut s2 = 0.0;
-    for i in 0..n {
-        let row_sum: f64 = w.row(i).sum();
-        let col_sum: f64 = w.column(i).sum();
-        let total = row_sum + col_sum;
-        s2 += total * total;
+    let mut row_sums = vec![0.0; n];
+    let mut col_sums = vec![0.0; n];
+    for (i, row_sum) in row_sums.iter_mut().enumerate() {
+        let sw = listw.get_weights(i);
+        for (&j, &w) in sw.indices.iter().zip(sw.weights.iter()) {
+            *row_sum += w;
+            col_sums[j] += w;
+        }
     }
+    let s2 = row_sums
+        .iter()
+        .zip(col_sums.iter())
+        .map(|(r, c)| (r + c) * (r + c))
+        .sum();
 
     (s1, s2)
 }
@@ -984,6 +983,179 @@ mod tests {
         // At minimum, the extreme values should show some pattern
         assert!(result.local_stats[0].i_local > 0.0); // Hot spot area should have positive local I
         assert!(result.local_stats[24].i_local > 0.0); // Cold spot area should have positive local I
+    }
+
+    use crate::spatial::WeightStyle;
+    use crate::spatial::test_fixtures::{Y, band2, dataset, knn3};
+
+    /// `(a - b).abs() <= tol * max(1, |b|)`.
+    fn assert_close(a: f64, b: f64, tol: f64) {
+        assert!(
+            (a - b).abs() <= tol * b.abs().max(1.0),
+            "{a:.17e} vs {b:.17e} (tol {tol:e})"
+        );
+    }
+
+    /// S1 and S2 from a dense W (the computation before the sparse rewrite).
+    fn dense_s1_s2(listw: &SpatialWeights) -> (f64, f64) {
+        let n = listw.n();
+        let w = listw.to_dense();
+
+        // S1 = 0.5 * sum (w_ij + w_ji)^2
+        let mut s1 = 0.0;
+        for i in 0..n {
+            for j in 0..n {
+                let sum = w[[i, j]] + w[[j, i]];
+                s1 += sum * sum;
+            }
+        }
+        s1 *= 0.5;
+
+        // S2 = sum_i (row_sum_i + col_sum_i)^2
+        let mut s2 = 0.0;
+        for i in 0..n {
+            let row_sum: f64 = w.row(i).sum();
+            let col_sum: f64 = w.column(i).sum();
+            let total = row_sum + col_sum;
+            s2 += total * total;
+        }
+
+        (s1, s2)
+    }
+
+    /// tr(WW + W'W) from dense products (the computation before the sparse rewrite).
+    fn dense_tr_t(listw: &SpatialWeights) -> f64 {
+        let w = listw.to_dense();
+        let ww = w.dot(&w);
+        let wtw = w.t().dot(&w);
+        let t = &ww + &wtw;
+        t.diag().sum()
+    }
+
+    /// OLS residuals of y ~ x1 on the fixture and the design [1, x1].
+    fn fixture_ols() -> (Array1<f64>, Array2<f64>) {
+        use crate::LinearEstimator;
+        use crate::regression::{CovarianceType, run_ols};
+        let ols = run_ols(&dataset(), "y", &["x1"], true, CovarianceType::Standard).unwrap();
+        let e = ols.residuals().to_owned();
+        let mut x = Array2::ones((30, 2));
+        for (i, &v) in crate::spatial::test_fixtures::X1.iter().enumerate() {
+            x[[i, 1]] = v;
+        }
+        (e, x)
+    }
+
+    // R 4.3.3 (fixture), W row-standardised knn3, B binary knn3, Wd row-standardised band (0, 2]:
+    //   z <- y - mean(y); S0 <- sum(W); I <- n/S0 * sum(W * outer(z, z)) / sum(z^2)
+    //   S1 <- 0.5*sum((W + t(W))^2); S2 <- sum((rowSums(W) + colSums(W))^2); K <- n*sum(z^4)/sum(z^2)^2
+    //   VI <- (n*(S1*(n^2-3n+3) - n*S2 + 3*S0^2) - K*(S1*(n^2-n) - 2n*S2 + 6*S0^2)) / ((n-1)(n-2)(n-3)S0^2) - EI^2
+    //   (spdep::moran.test(randomisation = TRUE) formula; for the band, n includes the isolates)
+    //   e <- residuals(lm(y ~ x1)); trT <- sum(diag(W %*% W + t(W) %*% W)); LMerr <- (sum(e * W %*% e) / (sum(e^2)/n))^2 / trT
+    #[test]
+    fn moran_matches_r_reference() {
+        let y = Array1::from(Y.to_vec());
+        let r = moran_test(&y, &knn3(WeightStyle::RowStd), MoranAlternative::TwoSided).unwrap();
+        assert_close(r.statistic, 0.484512219447362502, 1e-12);
+        assert_close(r.expectation, -0.034482758620689655, 1e-15);
+        assert_close(r.variance, 0.017150361023634795, 1e-12);
+        assert_close(r.z_score, 3.963022355681558, 1e-10);
+        let b = moran_test(&y, &knn3(WeightStyle::Binary), MoranAlternative::TwoSided).unwrap();
+        assert_close(b.statistic, 0.484512219447362502, 1e-12);
+        assert_close(b.variance, 0.017150361023634802, 1e-12);
+        let d = moran_test(&y, &band2(WeightStyle::RowStd), MoranAlternative::TwoSided).unwrap();
+        assert_close(d.statistic, 0.453288253607957159, 1e-12);
+        assert_close(d.variance, 0.019046478838964480, 1e-12);
+        assert_close(d.z_score, 3.534342538179581, 1e-10);
+    }
+
+    #[test]
+    fn s1_s2_match_r_and_the_dense_computation() {
+        for (w, s1, s2) in [
+            (
+                knn3(WeightStyle::RowStd),
+                17.333333333333332,
+                126.88888888888887,
+            ),
+            (knn3(WeightStyle::Binary), 156.0, 1142.0),
+            (
+                band2(WeightStyle::RowStd),
+                15.712222222222222,
+                112.31388888888888,
+            ),
+        ] {
+            let (a, b) = compute_s1_s2(&w);
+            assert_close(a, s1, 1e-11);
+            assert_close(b, s2, 1e-10);
+            let (da, db) = dense_s1_s2(&w);
+            assert_close(a, da, 1e-11);
+            assert_close(b, db, 1e-10);
+        }
+    }
+
+    #[test]
+    fn lm_tests_match_r_lm_error_and_dense_traces() {
+        let (e, x) = fixture_ols();
+        // The other four statistics, [lm_lag, rlm_lag, rlm_error, lm_sarma], are pinned at the
+        // values the dense-trace code printed before the sparse rewrite.
+        for (mut w, tr_t, lm_err, others) in [
+            (
+                knn3(WeightStyle::RowStd),
+                17.333333333333332,
+                16.996459496295262,
+                [
+                    1.13308021718770231e1,
+                    2.26624242994720726e0,
+                    3.29499564316506621e1,
+                    4.42807586035276870e1,
+                ],
+            ),
+            (
+                knn3(WeightStyle::Binary),
+                156.0,
+                16.996459496295262,
+                [
+                    1.13308021718770142e1,
+                    2.26624242994720593e0,
+                    4.45394259364320888e1,
+                    5.58702281083091066e1,
+                ],
+            ),
+            (
+                band2(WeightStyle::RowStd),
+                15.712222222222223,
+                13.374603292722762,
+                [
+                    8.09353518719906972e0,
+                    1.99097423272287011e0,
+                    2.18817434925747740e1,
+                    2.99752786797738437e1,
+                ],
+            ),
+        ] {
+            assert_close(w.trace_w2() + w.trace_wtw(), tr_t, 1e-12);
+            assert_close(dense_tr_t(&w), tr_t, 1e-12);
+            let r = spatial_lm_tests(&e, &x, &mut w).unwrap();
+            assert_close(r.lm_error.statistic, lm_err, 1e-9);
+            assert_close(r.lm_lag.statistic, others[0], 1e-10);
+            assert_close(r.rlm_lag.statistic, others[1], 1e-10);
+            assert_close(r.rlm_error.statistic, others[2], 1e-10);
+            assert_close(r.lm_sarma.statistic, others[3], 1e-10);
+        }
+    }
+
+    #[test]
+    fn localmoran_permutations_honour_cancellation() {
+        let t = crate::resource::CancelToken::new();
+        t.cancel();
+        let r = crate::resource::with_budget(crate::resource::Budget::new(None, t), || {
+            localmoran(
+                &Array1::from(Y.to_vec()),
+                &knn3(WeightStyle::RowStd),
+                0.05,
+                99,
+            )
+        });
+        assert!(matches!(r, Err(EconError::Cancelled(_))));
     }
 
     #[test]
