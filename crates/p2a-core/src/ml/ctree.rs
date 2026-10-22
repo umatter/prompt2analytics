@@ -1758,4 +1758,60 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn test_ctree_minbucket_zero_acts_as_one() {
+        // ML-28. The old candidate loop started at split_pos = minbucket, so
+        // minbucket = 0 read sorted[split_pos - 1] at split_pos = 0: "attempt to
+        // subtract with overflow" in debug builds. A child needs at least one
+        // row, so 0 now gives exactly the splits of minbucket = 1.
+        let (x, y_reg, y_cls) = rpart_reference_data();
+        let idx: Vec<usize> = (0..40).collect();
+        let classes = [0.0, 1.0, 2.0];
+        let zero = CtreeConfig {
+            minbucket: 0,
+            ..Default::default()
+        };
+        let one = CtreeConfig {
+            minbucket: 1,
+            ..Default::default()
+        };
+        for f in 0..3 {
+            assert_eq!(
+                find_best_split(&x.view(), &y_reg.view(), &idx, f, false, None, &zero),
+                find_best_split_reference(&x.view(), &y_reg.view(), &idx, f, false, None, &one),
+                "anova x{}",
+                f + 1
+            );
+            assert_eq!(
+                find_best_split(
+                    &x.view(),
+                    &y_cls.view(),
+                    &idx,
+                    f,
+                    true,
+                    Some(&classes),
+                    &zero
+                ),
+                find_best_split_reference(
+                    &x.view(),
+                    &y_cls.view(),
+                    &idx,
+                    f,
+                    true,
+                    Some(&classes),
+                    &one
+                ),
+                "information x{}",
+                f + 1
+            );
+        }
+        let cfg = CtreeConfig {
+            minsplit: 2,
+            minbucket: 0,
+            ..Default::default()
+        };
+        assert!(ctree(x.view(), y_reg.view(), &cfg).is_ok());
+        assert!(ctree(x.view(), y_cls.view(), &cfg).is_ok());
+    }
 }
