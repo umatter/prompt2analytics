@@ -444,6 +444,8 @@ pub fn match_it(
         });
     }
 
+    validate_match_counts(&method, n, n_treated, n_control, covariate_cols.len())?;
+
     // Build covariate matrix
     let design = DesignMatrix::from_dataframe(dataset.df(), covariate_cols, false)?;
     let x = design.data.clone();
@@ -489,7 +491,7 @@ pub fn match_it(
                         *ratio,
                         caliper_abs,
                         *replace,
-                    );
+                    )?;
 
                     (m, w, None, *caliper, ps)
                 }
@@ -593,6 +595,113 @@ pub fn match_it(
         caliper_used,
         effective_sample_size,
     })
+}
+
+/// Check the method's count parameters against the data before any work.
+///
+/// `ratio` must lie in `1..=n_control` (MatchIt only warns above the number of
+/// controls; here it would size every treated unit's control list),
+/// `n_subclasses` in `1..=n_treated`, CEM `n_bins` in `1..=n`, and custom CEM
+/// cutpoints need one vector per covariate. Nearest-neighbour matching may
+/// return up to `ratio` controls per treated unit, so that total is checked
+/// against the allocation ceiling as well.
+fn validate_match_counts(
+    method: &MatchMethod,
+    n: usize,
+    n_treated: usize,
+    n_control: usize,
+    n_covariates: usize,
+) -> EconResult<()> {
+    let spec = |message: String| Err(EconError::InvalidSpecification { message });
+    match method {
+        MatchMethod::NearestNeighbor { ratio, .. } => {
+            let ratio = *ratio;
+            if !(1..=n_control).contains(&ratio) {
+                return spec(format!(
+                    "ratio = {ratio} is out of range: each treated unit can be matched to between \
+                     1 and {n_control} control units (the number of controls in the data)."
+                ));
+            }
+            let pairs = crate::resource::checked_len(
+                &[n_treated, ratio],
+                "matched control lists (ratio controls per treated unit)",
+            )?;
+            crate::resource::check_alloc::<(usize, f64)>(
+                pairs,
+                "matched control lists (ratio controls per treated unit)",
+            )?;
+        }
+        MatchMethod::Subclass { n_subclasses } => {
+            let k = *n_subclasses;
+            if !(1..=n_treated).contains(&k) {
+                return spec(format!(
+                    "n_subclasses = {k} is out of range: use between 1 and {n_treated} subclasses \
+                     (the number of treated units)."
+                ));
+            }
+        }
+        MatchMethod::CoarsenedExact { cutpoints, n_bins } => {
+            if let Some(k) = *n_bins {
+                if !(1..=n).contains(&k) {
+                    return spec(format!(
+                        "n_bins = {k} is out of range: use between 1 and {n} bins"
+                    ));
+                }
+            }
+            if let Some(c) = cutpoints {
+                if c.len() != n_covariates {
+                    return spec(format!(
+                        "cutpoints must contain one vector per covariate ({n_covariates} \
+                         covariates, got {})",
+                        c.len()
+                    ));
+                }
+            }
+        }
+        // min_ratio/max_ratio cannot cause unbounded work (CAUS-70 owns them).
+        MatchMethod::Full { .. } => {}
+    }
+    Ok(())
+}
+
+/// Check the total size of the per-treated copies of stratum control lists
+/// before they are built: every treated unit of a stratum gets its own copy
+/// of the stratum's controls, one `T` per control. `strata` yields
+/// `(n_treated, n_control)` of each kept stratum. `MatchInfo` is public and
+/// keeps this shape; only its size is bounded here (G7).
+fn check_stratum_control_lists<T>(
+    strata: impl IntoIterator<Item = (usize, usize)>,
+) -> EconResult<()> {
+    let overflow = || {
+        EconError::ResourceLimit(
+            "matched control lists: (treated, control) pair count overflows".to_string(),
+        )
+    };
+    let mut total: usize = 0;
+    for (n_t, n_c) in strata {
+        let pairs = n_t.checked_mul(n_c).ok_or_else(overflow)?;
+        total = total.checked_add(pairs).ok_or_else(overflow)?;
+    }
+    crate::resource::check_alloc::<T>(
+        total,
+        "matched control lists (one copy of the stratum's controls per treated unit)",
+    )
+}
+
+/// Cutpoints without NaN, sorted, for counting by binary search.
+fn sorted_cutpoints(cuts: &[f64]) -> Vec<f64> {
+    let mut sorted: Vec<f64> = cuts.iter().copied().filter(|c| !c.is_nan()).collect();
+    sorted.sort_unstable_by(f64::total_cmp);
+    sorted
+}
+
+/// Number of cutpoints strictly below `v` (`sorted` from [`sorted_cutpoints`]).
+///
+/// Equal to `cuts.iter().filter(|&&c| v > c).count()`: a NaN cutpoint or a NaN
+/// `v` never compares greater, and `c < v` is monotone along the sorted list.
+#[inline]
+fn count_below(sorted: &[f64], v: f64) -> usize {
+    sorted.partition_point(|&c| c < v)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -751,6 +860,8 @@ fn estimate_propensity_scores(
     let tolerance = 1e-8;
 
     for _ in 0..max_iter {
+        crate::resource::checkpoint()?;
+
         // Linear predictor
         let z: Array1<f64> = x_with_intercept.dot(&beta);
 
@@ -849,7 +960,7 @@ fn ps_nearest_neighbor_fast(
     ratio: usize,
     caliper_abs: Option<f64>,
     replace: bool,
-) -> (Vec<MatchInfo>, Vec<f64>) {
+) -> EconResult<(Vec<MatchInfo>, Vec<f64>)> {
     let n = propensity_scores.len();
     let mut weights = vec![0.0; n];
     let mut matches = Vec::with_capacity(treated_idx.len());
@@ -876,6 +987,8 @@ fn ps_nearest_neighbor_fast(
 
     // Step 2: For each treated unit, find nearest controls using binary search - O(n_t * log(n_c) * ratio)
     for &ti in treated_idx {
+        crate::resource::checkpoint()?;
+
         let ps_t = propensity_scores[ti];
 
         // Binary search to find insertion point - O(log n_c)
@@ -920,7 +1033,7 @@ fn ps_nearest_neighbor_fast(
         }
     }
 
-    (matches, weights)
+    Ok((matches, weights))
 }
 
 /// Find k nearest neighbors by expanding outward from binary search position.
@@ -941,7 +1054,9 @@ fn find_k_nearest_neighbors(
         return Vec::new();
     }
 
-    let mut result = Vec::with_capacity(k);
+    // k <= n_control is validated by match_it, so this capacity is bounded by
+    // the data already in memory.
+    let mut result = Vec::with_capacity(k.min(n));
 
     // Two-pointer expansion from insertion point
     let mut left = pos.saturating_sub(1) as isize;
@@ -1021,35 +1136,33 @@ fn parallel_distance_matching(
     let use_parallel = treated_idx.len() >= PARALLEL_THRESHOLD;
 
     if replace {
-        // With replacement: can fully parallelize since controls are independent
+        // With replacement: can fully parallelize since controls are independent.
+        // The budget is captured here because rayon workers do not see the
+        // caller's thread-local budget.
+        let budget = crate::resource::current_budget();
+        let match_one = |ti: usize| -> EconResult<MatchInfo> {
+            if let Some(b) = &budget {
+                b.check()?;
+            }
+            Ok(find_best_controls_for_treated(
+                x,
+                ti,
+                control_idx,
+                ratio,
+                caliper_abs,
+                cov_inv.as_ref(),
+            ))
+        };
         let matches: Vec<MatchInfo> = if use_parallel {
             treated_idx
                 .par_iter()
-                .map(|&ti| {
-                    find_best_controls_for_treated(
-                        x,
-                        ti,
-                        control_idx,
-                        ratio,
-                        caliper_abs,
-                        cov_inv.as_ref(),
-                    )
-                })
-                .collect()
+                .map(|&ti| match_one(ti))
+                .collect::<EconResult<Vec<_>>>()?
         } else {
             treated_idx
                 .iter()
-                .map(|&ti| {
-                    find_best_controls_for_treated(
-                        x,
-                        ti,
-                        control_idx,
-                        ratio,
-                        caliper_abs,
-                        cov_inv.as_ref(),
-                    )
-                })
-                .collect()
+                .map(|&ti| match_one(ti))
+                .collect::<EconResult<Vec<_>>>()?
         };
 
         // Compute weights from matches
@@ -1073,6 +1186,8 @@ fn parallel_distance_matching(
             std::collections::HashSet::with_capacity(control_idx.len());
 
         for &ti in treated_idx {
+            crate::resource::checkpoint()?;
+
             // Find available controls
             let available_controls: Vec<usize> = control_idx
                 .iter()
@@ -1307,6 +1422,15 @@ fn coarsened_exact_matching(
         }
     };
 
+    // Sorted copies so each bin is found by binary search
+    let cuts: Vec<Vec<f64>> = cuts.iter().map(|c| sorted_cutpoints(c)).collect();
+
+    // Membership mask instead of a Vec::contains scan per unit
+    let mut is_treated = vec![false; n];
+    for &i in treated_idx {
+        is_treated[i] = true;
+    }
+
     // Assign each observation to a stratum
     let mut strata: HashMap<String, (Vec<usize>, Vec<usize>)> = HashMap::new();
 
@@ -1315,12 +1439,20 @@ fn coarsened_exact_matching(
         let entry = strata
             .entry(stratum_key)
             .or_insert((Vec::new(), Vec::new()));
-        if treated_idx.contains(&i) {
+        if is_treated[i] {
             entry.0.push(i);
         } else {
             entry.1.push(i);
         }
     }
+
+    // Every matched treated unit stores the stratum's controls and a distance each.
+    check_stratum_control_lists::<(usize, f64)>(
+        strata
+            .values()
+            .filter(|(t, c)| !t.is_empty() && !c.is_empty())
+            .map(|(t, c)| (t.len(), c.len())),
+    )?;
 
     // Build matches and subclasses
     let mut matches = Vec::new();
@@ -1397,13 +1529,16 @@ fn compute_quantile_cutpoints(values: &[f64], n_bins: usize) -> Vec<f64> {
 }
 
 /// Compute stratum key for an observation based on coarsened covariates.
+///
+/// `cuts` holds one sorted cutpoint list per covariate (see
+/// [`sorted_cutpoints`]); the bin is the number of cutpoints below the value.
 fn compute_stratum_key(x: &Array2<f64>, row: usize, cuts: &[Vec<f64>]) -> String {
     let k = x.ncols();
     let mut key_parts = Vec::with_capacity(k);
 
-    for j in 0..k {
+    for (j, col_cuts) in cuts.iter().enumerate().take(k) {
         let val = x[[row, j]];
-        let bin = cuts[j].iter().filter(|&&c| val > c).count();
+        let bin = count_below(col_cuts, val);
         key_parts.push(bin.to_string());
     }
 
@@ -1441,13 +1576,22 @@ fn full_matching_optimized(
         .collect();
     all_units.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
 
-    // Greedy stratification
-    let mut subclasses = Vec::new();
-    let mut matches = Vec::new();
+    // Greedy stratification. The strata are formed first and emitted after
+    // their total size has been checked; ids and order are as before.
+    struct Stratum {
+        subclass_id: usize,
+        treated: Vec<usize>,
+        control: Vec<usize>,
+        start_ps: f64,
+        end_ps: f64,
+    }
+    let mut strata: Vec<Stratum> = Vec::new();
     let mut i = 0;
     let mut subclass_id = 0;
 
     while i < all_units.len() {
+        crate::resource::checkpoint()?;
+
         subclass_id += 1;
         let mut treated = Vec::new();
         let mut control = Vec::new();
@@ -1483,30 +1627,46 @@ fn full_matching_optimized(
 
         let end_ps = all_units[i.saturating_sub(1)].1;
 
-        // Compute stratum weights
-        let n_t = treated.len() as f64;
-        let n_c = control.len() as f64;
+        strata.push(Stratum {
+            subclass_id,
+            treated,
+            control,
+            start_ps,
+            end_ps,
+        });
+    }
 
-        for &ti in &treated {
+    check_stratum_control_lists::<usize>(
+        strata.iter().map(|s| (s.treated.len(), s.control.len())),
+    )?;
+
+    let mut subclasses = Vec::with_capacity(strata.len());
+    let mut matches = Vec::new();
+    for s in strata {
+        // Compute stratum weights
+        let n_t = s.treated.len() as f64;
+        let n_c = s.control.len() as f64;
+
+        for &ti in &s.treated {
             weights[ti] = 1.0;
             matches.push(MatchInfo {
                 treated_idx: ti,
-                control_indices: control.clone(),
+                control_indices: s.control.clone(),
                 distances: vec![],
                 weight: 1.0,
             });
         }
 
         let control_weight = n_t / n_c;
-        for &ci in &control {
+        for &ci in &s.control {
             weights[ci] = control_weight;
         }
 
         subclasses.push(SubclassInfo {
-            subclass_id,
-            treated_indices: treated,
-            control_indices: control,
-            ps_range: (start_ps, end_ps),
+            subclass_id: s.subclass_id,
+            treated_indices: s.treated,
+            control_indices: s.control,
+            ps_range: (s.start_ps, s.end_ps),
         });
     }
 
@@ -1560,18 +1720,33 @@ fn subclassification_matching(
         })
         .collect();
 
+    // Membership mask instead of a Vec::contains scan per unit, and sorted
+    // cutpoints so each subclass is found by binary search
+    let mut is_treated = vec![false; n];
+    for &i in treated_idx {
+        is_treated[i] = true;
+    }
+    let sorted_cuts = sorted_cutpoints(&cutpoints);
+
     // Assign units to subclasses
     for &i in treated_idx.iter().chain(control_idx.iter()) {
         let ps = propensity_scores[i];
-        let subclass = cutpoints.iter().filter(|&&c| ps > c).count();
+        let subclass = count_below(&sorted_cuts, ps);
         let subclass = subclass.min(n_subclasses - 1);
 
-        if treated_idx.contains(&i) {
+        if is_treated[i] {
             subclasses[subclass].treated_indices.push(i);
         } else {
             subclasses[subclass].control_indices.push(i);
         }
     }
+
+    check_stratum_control_lists::<usize>(
+        subclasses
+            .iter()
+            .filter(|sc| !sc.treated_indices.is_empty() && !sc.control_indices.is_empty())
+            .map(|sc| (sc.treated_indices.len(), sc.control_indices.len())),
+    )?;
 
     // Compute weights within each subclass
     let mut matches = Vec::new();
@@ -1748,34 +1923,46 @@ fn weighted_variance(values: &[f64], weights: &[f64], mean: f64) -> f64 {
 }
 
 /// Compute Kolmogorov-Smirnov statistic comparing two distributions.
+///
+/// One merge over the two sorted samples, O(n log n). The ECDFs are
+/// evaluated at every distinct value as before: a NaN still counts in the
+/// sample size but is never `<=` anything, and `<=` treats -0.0 and 0.0 as
+/// one value.
 fn compute_ks_statistic(x1: &[f64], x2: &[f64]) -> f64 {
     if x1.is_empty() || x2.is_empty() {
         return 0.0;
     }
+    let (n1, n2) = (x1.len() as f64, x2.len() as f64);
+    let sorted = |x: &[f64]| {
+        let mut v: Vec<f64> = x.iter().copied().filter(|v| !v.is_nan()).collect();
+        v.sort_unstable_by(f64::total_cmp);
+        v
+    };
+    let (s1, s2) = (sorted(x1), sorted(x2));
 
-    // Sort both samples
-    let mut s1 = x1.to_vec();
-    let mut s2 = x2.to_vec();
-    s1.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    s2.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-
-    let n1 = s1.len() as f64;
-    let n2 = s2.len() as f64;
-
-    // Merge and compute CDF differences
-    let mut combined: Vec<f64> = s1.iter().chain(s2.iter()).copied().collect();
-    combined.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    combined.dedup();
-
-    let mut max_diff = 0.0_f64;
-
-    for &x in &combined {
-        let cdf1 = s1.iter().filter(|&&v| v <= x).count() as f64 / n1;
-        let cdf2 = s2.iter().filter(|&&v| v <= x).count() as f64 / n2;
-        max_diff = max_diff.max((cdf1 - cdf2).abs());
+    let (mut i, mut j, mut d) = (0usize, 0usize, 0.0_f64);
+    while i < s1.len() || j < s2.len() {
+        let x = match (s1.get(i), s2.get(j)) {
+            (Some(&a), Some(&b)) => {
+                if a <= b {
+                    a
+                } else {
+                    b
+                }
+            }
+            (Some(&a), None) => a,
+            (None, Some(&b)) => b,
+            (None, None) => break,
+        };
+        while i < s1.len() && s1[i] <= x {
+            i += 1;
+        }
+        while j < s2.len() && s2[j] <= x {
+            j += 1;
+        }
+        d = d.max((i as f64 / n1 - j as f64 / n2).abs());
     }
-
-    max_diff
+    d
 }
 
 /// Compute effective sample size accounting for weights.
@@ -2497,5 +2684,288 @@ mod tests {
 
         // With replacement, ESS might be less than nominal due to repeated use
         // of the same control unit
+    }
+
+    // =========================================================================
+    // Linear KS, count bounds, bounded control lists, cancellation (T0-WP11)
+    // =========================================================================
+
+    fn cancelled<R>(f: impl FnOnce() -> R) -> R {
+        use crate::resource::{Budget, CancelToken, with_budget};
+        let token = CancelToken::new();
+        token.cancel();
+        with_budget(Budget::new(None, token), f)
+    }
+
+    #[test]
+    fn test_ks_statistic_matches_r() {
+        // R: ks.test(c(1.2,3.4,3.4,0.5,2.2,5.0,2.2,4.1), c(0.7,3.4,2.9,2.2,6.3,1.1,4.4))$statistic
+        let a = [1.2, 3.4, 3.4, 0.5, 2.2, 5.0, 2.2, 4.1];
+        let b = [0.7, 3.4, 2.9, 2.2, 6.3, 1.1, 4.4];
+        assert!((compute_ks_statistic(&a, &b) - 0.16071428571428575).abs() < 1e-12);
+        // R: i1 <- 0:59; i2 <- 0:44
+        //    ks.test(((i1*37) %% 23)*0.25, ((i2*11) %% 19)*0.3 + 0.1)$statistic
+        let s1: Vec<f64> = (0..60u64).map(|i| ((i * 37) % 23) as f64 * 0.25).collect();
+        let s2: Vec<f64> = (0..45u64)
+            .map(|i| ((i * 11) % 19) as f64 * 0.3 + 0.1)
+            .collect();
+        assert!((compute_ks_statistic(&s1, &s2) - 0.06666666666666664).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_ks_statistic_matches_previous_implementation() {
+        /// Verbatim copy of the previous compute_ks_statistic (quadratic).
+        fn naive(x1: &[f64], x2: &[f64]) -> f64 {
+            if x1.is_empty() || x2.is_empty() {
+                return 0.0;
+            }
+
+            // Sort both samples
+            let mut s1 = x1.to_vec();
+            let mut s2 = x2.to_vec();
+            s1.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            s2.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+            let n1 = s1.len() as f64;
+            let n2 = s2.len() as f64;
+
+            // Merge and compute CDF differences
+            let mut combined: Vec<f64> = s1.iter().chain(s2.iter()).copied().collect();
+            combined.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            combined.dedup();
+
+            let mut max_diff = 0.0_f64;
+
+            for &x in &combined {
+                let cdf1 = s1.iter().filter(|&&v| v <= x).count() as f64 / n1;
+                let cdf2 = s2.iter().filter(|&&v| v <= x).count() as f64 / n2;
+                max_diff = max_diff.max((cdf1 - cdf2).abs());
+            }
+
+            max_diff
+        }
+        let mut s = 99u64;
+        let mut u = || {
+            s = s
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (s >> 11) as f64 / (1u64 << 53) as f64
+        };
+        for (n1, n2, round) in [
+            (300, 200, false),
+            (300, 200, true),
+            (1, 50, false),
+            (17, 1, true),
+            (40, 40, true),
+        ] {
+            let mut g = |n: usize, sh: f64| -> Vec<f64> {
+                (0..n)
+                    .map(|_| {
+                        let v = u() * 4.0 + sh;
+                        if round { (v * 4.0).round() / 4.0 } else { v }
+                    })
+                    .collect()
+            };
+            let (a, b) = (g(n1, 0.0), g(n2, 0.3));
+            // exact: same count/n arithmetic
+            assert_eq!(compute_ks_statistic(&a, &b), naive(&a, &b));
+        }
+        // signed zeros and infinities
+        let a = [-0.0, 0.0, 1.0, f64::INFINITY, -2.0];
+        let b = [0.0, f64::NEG_INFINITY, 1.0, 1.0];
+        assert_eq!(compute_ks_statistic(&a, &b), naive(&a, &b));
+    }
+
+    #[test]
+    fn test_ks_statistic_nan_semantics_unchanged() {
+        // NaN still counts in the denominator but is never <= anything (the previous semantics):
+        // at x = 4, F1 = 2/3 (the NaN never counts) and F2 = 1, so D = |2/3 - 1| in f64
+        // (0.33333333333333337). Dropping the NaN instead would give D = 0.5.
+        assert_eq!(
+            compute_ks_statistic(&[1.0, f64::NAN, 3.0], &[2.0, 4.0]),
+            (2.0_f64 / 3.0 - 1.0).abs()
+        );
+    }
+
+    /// R 4.3.3, MatchIt 4.8.0, on the CSV of create_matchit_validation_dataset() (regenerated
+    /// with the same LCG and Box-Muller steps in Python, 17-digit repr):
+    ///   m <- matchit(treatment ~ x1 + x2, data = d, method = NULL, distance = "glm")
+    ///   summary(m)$sum.all[, "eCDF Max"]   # x1 0.34643081041698437, x2 0.16215117165658516
+    ///   (191 treated; equal to ks.test(x[treat == 1], x[treat == 0])$statistic)
+    #[test]
+    fn test_validate_ks_before_matching_vs_matchit() {
+        let r = match_it(
+            &create_matchit_validation_dataset(),
+            "treatment",
+            &["x1", "x2"],
+            MatchMethod::default(),
+            Some(DistanceMethod::Logit),
+        )
+        .unwrap();
+        assert_eq!(r.n_treated, 191);
+        let ks = |name: &str| {
+            r.balance_before
+                .covariates
+                .iter()
+                .find(|c| c.name == name)
+                .unwrap()
+                .ks_statistic
+        };
+        assert!((ks("x1") - 0.34643081041698437).abs() < 1e-12);
+        assert!((ks("x2") - 0.16215117165658516).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_matching_rejects_out_of_range_counts() {
+        let ds = create_matchit_validation_dataset(); // 191 treated, 309 control
+        let run = |m: MatchMethod| {
+            match_it(
+                &ds,
+                "treatment",
+                &["x1", "x2"],
+                m,
+                Some(DistanceMethod::Logit),
+            )
+        };
+        let msg = |r: EconResult<MatchResult>| match r {
+            Err(EconError::InvalidSpecification { message }) => message,
+            other => panic!("expected InvalidSpecification, got ok={}", other.is_ok()),
+        };
+        // usize::MAX panicked with "capacity overflow" before the fix; 0 and 310 returned Ok
+        for ratio in [0usize, 310, usize::MAX] {
+            let m = msg(run(MatchMethod::NearestNeighbor {
+                ratio,
+                caliper: None,
+                replace: true,
+            }));
+            assert!(m.contains("ratio") && m.contains("309"), "{m}");
+        }
+        // 0 underflowed (panic) before the fix; 192 returned Ok
+        for k in [0usize, 192, usize::MAX] {
+            let m = msg(run(MatchMethod::Subclass { n_subclasses: k }));
+            assert!(m.contains("n_subclasses") && m.contains("191"), "{m}");
+        }
+        let m = msg(run(MatchMethod::CoarsenedExact {
+            cutpoints: None,
+            n_bins: Some(0),
+        }));
+        assert!(m.contains("n_bins"), "{m}");
+        let m = msg(run(MatchMethod::CoarsenedExact {
+            cutpoints: Some(vec![vec![0.0]]),
+            n_bins: None,
+        }));
+        // one vector for two covariates: index panic before
+        assert!(m.contains("cutpoints"), "{m}");
+        assert!(
+            run(MatchMethod::NearestNeighbor {
+                ratio: 309,
+                caliper: None,
+                replace: true
+            })
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn test_stratified_matching_respects_allocation_ceiling() {
+        let ds = create_matchit_validation_dataset();
+        // about 191*309/5 ≈ 11.8k (treated, control) pairs * 8 B ≈ 94 KB > 1 KiB
+        for method in [
+            MatchMethod::Subclass { n_subclasses: 5 },
+            MatchMethod::Full {
+                min_ratio: 0.5,
+                max_ratio: 2.0,
+            },
+            MatchMethod::CoarsenedExact {
+                cutpoints: None,
+                n_bins: Some(2),
+            },
+        ] {
+            let label = format!("{method}");
+            let r = crate::resource::with_alloc_ceiling(Some(1024), || {
+                match_it(&ds, "treatment", &["x1", "x2"], method, None)
+            });
+            assert!(
+                matches!(r, Err(EconError::ResourceLimit(ref m)) if m.contains("matched control")),
+                "{label}: ok={}",
+                r.is_ok()
+            );
+        }
+    }
+
+    #[test]
+    fn test_full_matching_unchanged_by_two_pass_strata() {
+        // Full matching now forms strata before emitting matches; the output must
+        // be the same. Strata are consecutive in PS order, so each treated unit's
+        // control list is its stratum's control list.
+        let r = match_it(
+            &create_matchit_validation_dataset(),
+            "treatment",
+            &["x1", "x2"],
+            MatchMethod::Full {
+                min_ratio: 0.5,
+                max_ratio: 2.0,
+            },
+            Some(DistanceMethod::Logit),
+        )
+        .unwrap();
+        let sc = r.subclasses.as_ref().unwrap();
+        let mut expected = Vec::new();
+        for s in sc {
+            for &ti in &s.treated_indices {
+                expected.push((ti, s.control_indices.clone()));
+            }
+        }
+        let got: Vec<(usize, Vec<usize>)> = r
+            .matches
+            .iter()
+            .filter(|m| m.weight > 0.0)
+            .map(|m| (m.treated_idx, m.control_indices.clone()))
+            .collect();
+        assert_eq!(got, expected);
+        assert_eq!(r.matches.len(), r.n_treated);
+    }
+
+    #[test]
+    fn test_matching_stops_when_cancelled() {
+        let ds = create_matchit_validation_dataset();
+        let r = cancelled(|| {
+            match_it(
+                &ds,
+                "treatment",
+                &["x1", "x2"],
+                MatchMethod::default(),
+                Some(DistanceMethod::Logit),
+            )
+        });
+        assert!(matches!(r, Err(EconError::Cancelled(_))));
+    }
+
+    #[test]
+    fn test_distance_matching_stops_when_cancelled() {
+        // Mahalanobis and Euclidean matching never estimate a propensity score,
+        // so their own loops must check the budget.
+        let ds = create_matchit_validation_dataset();
+        for replace in [false, true] {
+            for distance in [DistanceMethod::Mahalanobis, DistanceMethod::Euclidean] {
+                let r = cancelled(|| {
+                    match_it(
+                        &ds,
+                        "treatment",
+                        &["x1", "x2"],
+                        MatchMethod::NearestNeighbor {
+                            ratio: 1,
+                            caliper: None,
+                            replace,
+                        },
+                        Some(distance),
+                    )
+                });
+                assert!(
+                    matches!(r, Err(EconError::Cancelled(_))),
+                    "{distance} replace={replace}"
+                );
+            }
+        }
     }
 }
