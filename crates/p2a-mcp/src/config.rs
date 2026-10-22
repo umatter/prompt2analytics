@@ -209,7 +209,7 @@ pub struct CliArgs {
     )]
     pub limit_overrides: Vec<String>,
 
-    /// Async runtime worker threads (default: max(2, CPUs)).
+    /// Async runtime worker threads (default: max(2, CPUs); at most 1024).
     #[arg(long, env = "P2A_WORKER_THREADS")]
     pub worker_threads: Option<usize>,
 
@@ -411,6 +411,11 @@ const HOSTED_MAX_ALLOC_MB: u64 = 256;
 const MAX_KNOB_SECS: u64 = 31_536_000;
 /// Largest accepted session eviction threshold, in minutes (one year).
 const MAX_EVICT_IDLE_MINUTES: u64 = 525_600;
+/// Largest accepted `--worker-threads`. Async workers only serve requests
+/// (tool work runs on the blocking pool), so far fewer are ever useful; the
+/// bound turns a typo into an error that names the flag instead of a panic
+/// in tokio's runtime builder when the OS refuses to spawn the threads.
+const MAX_WORKER_THREADS: usize = 1024;
 
 /// MiB to bytes as `usize`, saturating.
 fn mib_to_usize(mb: u64) -> usize {
@@ -559,6 +564,15 @@ impl ServerConfig {
             if value == Some(0) {
                 anyhow::bail!("{flag} must be at least 1");
             }
+        }
+        if self
+            .exec
+            .worker_threads
+            .is_some_and(|n| n > MAX_WORKER_THREADS)
+        {
+            anyhow::bail!(
+                "--worker-threads (P2A_WORKER_THREADS) must be at most {MAX_WORKER_THREADS}"
+            );
         }
         let max_permits = tokio::sync::Semaphore::MAX_PERMITS;
         for (flag, value) in [
@@ -883,7 +897,17 @@ mod open_mode_tests {
     fn out_of_range_knobs_are_refused() {
         let max_permits = tokio::sync::Semaphore::MAX_PERMITS;
         type Set = fn(&mut ServerConfig);
-        let refused: [(Set, &str, &str); 6] = [
+        let refused: [(Set, &str, &str); 8] = [
+            (
+                |c| c.exec.worker_threads = Some(1025),
+                "--worker-threads (P2A_WORKER_THREADS)",
+                "1024",
+            ),
+            (
+                |c| c.exec.worker_threads = Some(usize::MAX),
+                "--worker-threads (P2A_WORKER_THREADS)",
+                "1024",
+            ),
             (
                 |c| c.exec.tool_timeout_secs = Some(31_536_001),
                 "--tool-timeout-secs (P2A_TOOL_TIMEOUT_SECS)",
@@ -940,6 +964,7 @@ mod open_mode_tests {
         );
         // The bounds themselves are accepted.
         let mut c = cfg("127.0.0.1:8080", None, false);
+        c.exec.worker_threads = Some(1024);
         c.exec.tool_timeout_secs = Some(31_536_000);
         c.exec.stuck_exit_secs = Some(31_536_000);
         c.exec.tool_queue_wait_secs = Some(31_536_000);
