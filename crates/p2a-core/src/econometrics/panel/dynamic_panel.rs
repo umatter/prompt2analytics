@@ -856,14 +856,40 @@ mod tests {
         }
     }
 
-    /// Characterisation test recorded from the code before the T0-WP14 resource
-    /// bounds (full Grunfeld); the refactor must not move these numbers.
+    /// Characterisation test on full Grunfeld (N = 10, T = 20): the code before
+    /// the T0-WP14 resource bounds gives the same numbers, and later refactors
+    /// must not move them. They characterise the current algorithm, not
+    /// pgmm: the instrument rows are misaligned (ECON-38) and the variances are
+    /// not the GMM ones (ECON-29), and fixing either will move these numbers.
+    ///
+    /// - One-step, non-robust, full instruments (155 columns). Z'Z is singular,
+    ///   but its rank gap is clean (singular values below 1e-9 and from 4.5e-2
+    ///   up, either side of the 8.7e-7 tolerance), so the pseudo-inverse is
+    ///   well defined; a numpy re-implementation reproduces these values to
+    ///   1e-10.
+    /// - Two-step, robust, collapsed, lags 2 to 4: 3 lag instruments plus the 2
+    ///   differenced regressors, so the weighting matrix
+    ///   Omega = sum_i Z_i'e_i e_i'Z_i over the 10 firms has full rank 5
+    ///   (condition number 6e4; Z'Z 1.3e2). The numpy re-implementation
+    ///   reproduces these values to 1e-13, and to 4e-13 whether Omega is
+    ///   inverted by Cholesky, LU, SVD or eigh; a symmetric perturbation of size
+    ///   eps * ||Omega||, or one ulp on every third data value, moves no value
+    ///   by more than 4e-13 relative. This still runs both per-entity loops
+    ///   (two-step weighting and robust meat).
+    ///
+    /// The two-step fits with all lag instruments are not pinned. Omega is a
+    /// sum of 10 rank-one terms, so it has rank 10 in 155 dimensions (full) or
+    /// 20 (collapsed), and the pseudo-inverse has to separate its range from
+    /// rounding noise: on the range its condition number is 2e8 (full) and 8e9
+    /// (collapsed), and the two-step coefficients then depend on the
+    /// floating-point path. Independent SVD and eigh routes agree with each
+    /// other to 1e-9 (full) and 2e-8 (collapsed) but give lag coefficients
+    /// 7e-4 and 1.4e-4 away from p2a's, relative.
     #[test]
     fn test_pinned_gmm_outputs() {
         let ds = grunfeld();
         let mut v = Vec::new();
         for cfg in [
-            GmmConfig::default(),
             GmmConfig {
                 step: GmmStep::OneStep,
                 robust: false,
@@ -871,6 +897,7 @@ mod tests {
             },
             GmmConfig {
                 collapse: true,
+                max_lag: Some(4),
                 ..Default::default()
             },
         ] {
@@ -895,16 +922,6 @@ mod tests {
             "GMM",
             &v,
             &[
-                0.29933753513614647,
-                0.09658128264550214,
-                0.1124788052693475,
-                0.042556680865382786,
-                0.010836030299237687,
-                0.12914909016526244,
-                145.0345170734227,
-                -0.45394170305449977,
-                -0.7125582997514519,
-                155.0,
                 0.263063356103039,
                 0.09857082152215238,
                 0.15393705960952475,
@@ -915,16 +932,16 @@ mod tests {
                 -0.5501390898230673,
                 -0.821665673760031,
                 155.0,
-                0.4846652156775235,
-                0.10013294300551934,
-                0.031961729288013885,
-                0.29735479082733934,
-                0.0084031363117453,
-                0.19262156673623862,
-                71.07621397410315,
-                -1.5530614549570625,
-                -0.5429454402428089,
-                20.0,
+                1.2776203861790023,
+                0.10491943788104607,
+                -0.3591484493721673,
+                5.426073095729653,
+                0.05880660004922151,
+                2.7731474160382645,
+                17.86526064174635,
+                -2.112344018854466,
+                -2.014207810925843,
+                5.0,
             ],
         );
     }

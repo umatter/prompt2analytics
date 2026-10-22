@@ -3662,13 +3662,34 @@ mod tests {
         }
     }
 
-    /// Characterisation test recorded from the code before the T0-WP14 resource
-    /// bounds; the refactor must not move these numbers.
+    /// The truncated kernel at bandwidth n - 1 gives every lag weight 1, so the
+    /// meat is (X'u)(X'u)'/n, which the OLS normal equations make zero up to
+    /// rounding. The variances are then noise of about 1e-17 whose sign depends
+    /// on the machine's floating-point path, so they are bounded here, not
+    /// pinned.
+    #[test]
+    fn test_hac_truncated_kernel_at_n_minus_1_collapses() {
+        let ts = create_timeseries_dataset();
+        let r = run_vcov_hac(&ts, "y", &["x"], Some(29), Some("truncated"), false).unwrap();
+        assert!(r.std_errors.iter().all(|&s| s < 1e-6), "{:?}", r.std_errors);
+        // the bandwidth-above-n/4 warning
+        assert_eq!(r.warnings.len(), 1, "{:?}", r.warnings);
+    }
+
+    /// Characterisation test: the code before the T0-WP14 resource bounds gives
+    /// the same numbers, and later refactors must not move them.
+    ///
+    /// The truncated kernel is pinned at bandwidth 5, where its SEs are 0.148
+    /// and 0.0072. At bandwidth n - 1 = 29 they collapse to rounding noise
+    /// (see `test_hac_truncated_kernel_at_n_minus_1_collapses`). A numpy
+    /// re-implementation of the lag loop reproduces the three HAC pins to
+    /// 2e-14, and moving beta by up to 10 ulp changes their variances by at
+    /// most 3e-13 relative.
     #[test]
     fn test_pinned_hac_dk_bootstrap_outputs() {
         let ts = create_timeseries_dataset();
         let mut v = Vec::new();
-        for (bw, kernel) in [(5usize, "bartlett"), (29, "bartlett"), (29, "truncated")] {
+        for (bw, kernel) in [(5usize, "bartlett"), (29, "bartlett"), (5, "truncated")] {
             let r = run_vcov_hac(&ts, "y", &["x"], Some(bw), Some(kernel), false).unwrap();
             v.extend(&r.std_errors);
         }
@@ -3689,8 +3710,8 @@ mod tests {
                 0.0067448421041296615,
                 0.10055839075154051,
                 0.005817042539300054,
-                0.0,
-                0.0,
+                0.14772400250120787,
+                0.007223766353723901,
                 0.01250309685000187,
                 0.0011882147319589296,
                 0.09631970723095434,
