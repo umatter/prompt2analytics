@@ -57,10 +57,12 @@ use crate::traits::estimator::{SignificanceLevel, f_test_p_value, t_test_p_value
 pub struct HdfeConfig {
     /// Convergence tolerance for the demeaning algorithm.
     /// Iteration stops when the L2-norm of change falls below this value.
+    /// Must be finite and greater than 0.
     /// Default: 1e-8
     pub tolerance: f64,
 
     /// Maximum number of iterations for the demeaning algorithm.
+    /// Must be at least 1.
     /// Default: 10000
     pub max_iterations: usize,
 
@@ -395,7 +397,12 @@ fn validate_config(config: &HdfeConfig) -> EconResult<()> {
 }
 
 /// Refuse a column with NaN or infinite values, naming it and the count.
-fn reject_non_finite<'a>(values: impl Iterator<Item = &'a f64>, what: &str) -> EconResult<()> {
+///
+/// Shared with `feglm`, which validates its columns the same way.
+pub(super) fn reject_non_finite<'a>(
+    values: impl Iterator<Item = &'a f64>,
+    what: &str,
+) -> EconResult<()> {
     let bad = values.filter(|v| !v.is_finite()).count();
     if bad == 0 {
         return Ok(());
