@@ -56,7 +56,7 @@ use ndarray::Array2;
 use serde::{Deserialize, Serialize};
 
 use crate::errors::{EconError, EconResult};
-use crate::resource::{checkpoint, try_vec, try_with_capacity};
+use crate::resource::{check_alloc, checkpoint, try_vec, try_with_capacity};
 
 fn size_overflow(what: &str) -> EconError {
     EconError::ResourceLimit(format!("{what} is too large: the requested size overflows"))
@@ -361,28 +361,36 @@ pub fn diffinv(
         });
     }
 
+    const WHAT: &str = "the integrated series (length + lag × differences)";
+
     // For differences > 0, we need lag * differences initial values
-    let n_xi = lag * differences;
-    let xi_values: Vec<f64> = match xi {
-        Some(v) if v.len() >= n_xi => v[..n_xi].to_vec(),
-        Some(v) => {
-            // Pad with zeros if not enough initial values
-            let mut padded = v.to_vec();
-            padded.resize(n_xi, 0.0);
-            padded
-        }
-        None => vec![0.0; n_xi],
-    };
+    let n_xi = lag
+        .checked_mul(differences)
+        .ok_or_else(|| size_overflow(WHAT))?;
+    let final_len = x
+        .len()
+        .checked_add(n_xi)
+        .ok_or_else(|| size_overflow(WHAT))?;
+    // Admit the output before any work, so an oversized request fails at once.
+    check_alloc::<f64>(final_len, WHAT)?;
+
+    // Initial values: a long xi is truncated, a short one padded with zeros.
+    let mut xi_values = try_vec(n_xi, 0.0, WHAT)?;
+    if let Some(v) = xi {
+        let k = v.len().min(n_xi);
+        xi_values[..k].copy_from_slice(&v[..k]);
+    }
 
     // Start with input
     let mut result = x.to_vec();
 
     // Apply cumsum 'differences' times
     for d in 0..differences {
+        checkpoint()?;
         let xi_start = d * lag;
         let xi_for_this_diff = &xi_values[xi_start..xi_start + lag];
 
-        result = cumsum_with_init(&result, lag, xi_for_this_diff);
+        result = cumsum_with_init(&result, lag, xi_for_this_diff)?;
     }
 
     Ok(DiffinvResult {
@@ -394,9 +402,13 @@ pub fn diffinv(
 }
 
 /// Cumulative sum with lag and initial values.
-fn cumsum_with_init(x: &[f64], lag: usize, xi: &[f64]) -> Vec<f64> {
-    let n = x.len() + lag;
-    let mut result = Vec::with_capacity(n);
+fn cumsum_with_init(x: &[f64], lag: usize, xi: &[f64]) -> EconResult<Vec<f64>> {
+    const WHAT: &str = "the integrated series (length + lag × differences)";
+    let n = x
+        .len()
+        .checked_add(lag)
+        .ok_or_else(|| size_overflow(WHAT))?;
+    let mut result = try_with_capacity(n, WHAT)?;
 
     // Initial values
     for &v in xi.iter().take(lag) {
@@ -410,7 +422,7 @@ fn cumsum_with_init(x: &[f64], lag: usize, xi: &[f64]) -> Vec<f64> {
         result.push(x_val + y_prev);
     }
 
-    result
+    Ok(result)
 }
 
 // ============================================================================
@@ -1858,6 +1870,42 @@ mod tests {
             durbin_levinson_from_acf(&acf).unwrap(),
             durbin_levinson_reference(&acf)
         );
+    }
+
+    /// R 4.3.3: diffinv(c(2,3,4), differences = 2)            -> 0 0 2 7 16
+    ///          diffinv(c(2,3,4,5), lag = 2, differences = 2) -> 0 0 0 0 2 3 8 11
+    /// (zero xi, where this module and R agree; non-zero xi with differences >= 2 is TS-28)
+    #[test]
+    fn test_validate_diffinv_zero_xi_against_r() {
+        assert_eq!(
+            diffinv(&[2.0, 3.0, 4.0], 1, 2, None).unwrap().values,
+            vec![0.0, 0.0, 2.0, 7.0, 16.0]
+        );
+        assert_eq!(
+            diffinv(&[2.0, 3.0, 4.0, 5.0], 2, 2, None).unwrap().values,
+            vec![0.0, 0.0, 0.0, 0.0, 2.0, 3.0, 8.0, 11.0]
+        );
+    }
+
+    #[test]
+    fn diffinv_refuses_impossible_sizes() {
+        let x = [1.0, 2.0];
+        let err = diffinv(&x, 1, 1usize << 50, None).unwrap_err(); // aborted before the fix
+        assert!(matches!(err, EconError::ResourceLimit(_)), "{err}");
+        let err = diffinv(&x, usize::MAX, 2, None).unwrap_err(); // lag * differences overflows
+        assert!(matches!(err, EconError::ResourceLimit(_)), "{err}");
+        let err =
+            crate::resource::with_alloc_ceiling(Some(1 << 16), || diffinv(&x, 100, 100, None))
+                .unwrap_err();
+        assert!(err.to_string().contains("integrated series"), "{err}"); // 10,002 values > 64 KiB
+    }
+
+    #[test]
+    fn diffinv_honours_cancellation() {
+        assert!(matches!(
+            cancelled(|| diffinv(&[1.0, 2.0, 3.0], 1, 3, None)),
+            Err(EconError::Cancelled(_))
+        ));
     }
 
     /// Guard for the in-place integration: d = 2 is exactly two cumulative sums of the d = 0 series.
