@@ -14,7 +14,14 @@
 //!    the client disconnects and the handler future is dropped);
 //! 5. a wall-clock deadline (504) and panic isolation (500, session intact);
 //! 6. per-session and total dataset-byte quotas that undo the call that
-//!    crossed them.
+//!    crossed them;
+//! 7. one audit entry per call (when auditing is configured), with the call's
+//!    origin and outcome, written where the work ends; refusals before the
+//!    work starts (memory, session or server busy) are recorded too.
+//!
+//! The request limits in force when the call is made travel with it onto the
+//! blocking thread, where `AnalyticsServer::call_tool_with_session` checks
+//! them before dispatch.
 //!
 //! The streaming chat (`POST /api/llm/chat/stream`) runs its tool loop in a
 //! detached task that is not aborted when the SSE client disconnects, so the
@@ -30,6 +37,7 @@
 //! overdue work, [`ToolGovernor::health`] reports the server unhealthy.
 
 use std::collections::HashMap;
+use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
@@ -44,11 +52,13 @@ use serde::Serialize;
 use tokio::sync::Semaphore;
 use tracing::Instrument;
 
+use crate::audit::{AuditEntry, AuditLogger, ResultSummary, sanitize_arguments};
 use crate::config::{
-    DeploymentMode, ResourceProfile, ServerConfig, SessionDirsSetting, available_cpus,
+    AuditConfig, DeploymentMode, ResourceProfile, ServerConfig, SessionDirsSetting, available_cpus,
 };
 use crate::server::AnalyticsServer;
 use crate::session::{Session, SessionManager, datasets_bytes};
+use crate::tools::limits::{self, LimitViolation};
 use crate::transport::http::{ApiResponse, ToolResult};
 
 /// How long past its deadline cooperative work may take to stop before the
@@ -85,6 +95,9 @@ pub struct ExecConfig {
     /// Leave the process memory and the in-flight count out of `/health`
     /// (open public mode, where `/health` is unauthenticated).
     pub redact_health: bool,
+    /// Where the governor writes one audit entry per call (`None`: no
+    /// audit). The governor shares the process's writer for that file.
+    pub audit: Option<AuditConfig>,
 }
 
 const MIB: u64 = 1 << 20;
@@ -106,6 +119,7 @@ impl Default for ExecConfig {
             alloc_ceiling_bytes: None,
             session_dirs: false,
             redact_health: false,
+            audit: None,
         }
     }
 }
@@ -156,6 +170,7 @@ impl ExecConfig {
                 SessionDirsSetting::Off => false,
             },
             redact_health: cfg.deployment_mode() == DeploymentMode::OpenPublic,
+            audit: cfg.audit.enabled.then(|| cfg.audit.clone()),
         }
     }
 
@@ -188,6 +203,18 @@ pub enum CallOrigin {
     WebSocket,
 }
 
+impl CallOrigin {
+    /// The origin as the audit log records it: `http`, `llm_tool` or
+    /// `websocket`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Http => "http",
+            Self::LlmTool => "llm_tool",
+            Self::WebSocket => "websocket",
+        }
+    }
+}
+
 /// A snapshot of the governor's state, reported by `/health`.
 #[derive(Debug, Clone, Serialize)]
 pub struct GovernorHealth {
@@ -212,9 +239,19 @@ pub enum ToolCallError {
     /// The arguments do not match the tool's schema.
     #[error("{0}")]
     InvalidArguments(String),
-    /// A request limit refused a parameter.
+    /// A request limit refused a parameter, a dataset's size or the size of
+    /// the response.
     #[error("{message}")]
-    LimitExceeded { parameter: String, message: String },
+    LimitExceeded {
+        /// The parameter, dataset field or budget key that was exceeded.
+        parameter: String,
+        /// What the request asked for (or the response size).
+        requested: String,
+        /// The limit that applies.
+        limit: String,
+        /// The refusal shown to the caller.
+        message: String,
+    },
     /// A dataset-memory quota refused the call; its changes were undone.
     #[error("{0}")]
     QuotaExceeded(String),
@@ -307,13 +344,33 @@ impl ToolCallError {
 
     fn details(&self) -> Option<serde_json::Value> {
         match self {
-            Self::LimitExceeded { parameter, .. } => {
-                Some(serde_json::json!({ "parameter": parameter }))
-            }
+            Self::LimitExceeded {
+                parameter,
+                requested,
+                limit,
+                ..
+            } => Some(serde_json::json!({
+                "parameter": parameter,
+                "requested": requested,
+                "limit": limit,
+            })),
             Self::DeadlineExceeded { limit_secs } => {
                 Some(serde_json::json!({ "limit_secs": limit_secs }))
             }
             _ => None,
+        }
+    }
+}
+
+impl From<LimitViolation> for ToolCallError {
+    /// A request-limit refusal (422 `limit_exceeded`). The violation's
+    /// `override_key` is for the server log only and is dropped here.
+    fn from(v: LimitViolation) -> Self {
+        Self::LimitExceeded {
+            parameter: v.parameter,
+            requested: v.requested,
+            limit: v.limit,
+            message: v.message,
         }
     }
 }
@@ -382,6 +439,8 @@ pub struct ToolGovernor {
     capacity: usize,
     in_flight: InFlight,
     next_id: AtomicU64,
+    /// One entry per call (disabled unless `cfg.audit` is set).
+    audit: Arc<AuditLogger>,
 }
 
 /// Wait for a permit of `slots` until `give_up` (`None` = no limit).
@@ -446,7 +505,15 @@ impl ToolGovernor {
     /// (at least 1, at most `Semaphore::MAX_PERMITS`).
     pub fn new(cfg: ExecConfig, sessions: Arc<SessionManager>) -> Self {
         let capacity = cfg.concurrency.clamp(1, Semaphore::MAX_PERMITS);
+        let audit = Arc::new(match &cfg.audit {
+            Some(audit) => AuditLogger::new(audit).unwrap_or_else(|e| {
+                tracing::warn!("Failed to initialize the governor's audit logger: {}", e);
+                AuditLogger::disabled()
+            }),
+            None => AuditLogger::disabled(),
+        });
         Self {
+            audit,
             cfg,
             sessions,
             global: Arc::new(Semaphore::new(capacity)),
@@ -528,26 +595,98 @@ impl ToolGovernor {
             let limit_secs = self.cfg.deadline_secs();
             let tool_name = tool.to_string();
             let s = Arc::clone(&session);
-            self.run_blocking(&session, tool, move |budget| {
-                let budget = budget.clone();
-                handle.block_on(async move {
-                    let snapshot = if quotas.any() {
-                        Some(s.datasets.read().await.clone())
-                    } else {
-                        None
-                    };
-                    let result = server.call_tool_with_session(&tool_name, args, &s).await?;
-                    if !result.success && budget.deadline().is_some_and(|d| Instant::now() >= d) {
-                        return Err(ToolCallError::DeadlineExceeded { limit_secs });
+            // Sanitised before the arguments move into the call, and only when
+            // auditing. One copy is for a refusal before the work starts.
+            let audit = self
+                .audit
+                .is_enabled()
+                .then(|| (Arc::clone(&self.audit), sanitize_arguments(&args)));
+            let refusal_arguments = audit.as_ref().map(|(_, arguments)| arguments.clone());
+            let outcome = self
+                .run_blocking(&session, tool, move |budget| {
+                    let budget = budget.clone();
+                    let started = Instant::now();
+                    // The entry is written where the work ends, also when the
+                    // deadline answer was already sent or the work panicked.
+                    let ran = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                        handle.block_on(async {
+                            let snapshot = if quotas.any() {
+                                Some(s.datasets.read().await.clone())
+                            } else {
+                                None
+                            };
+                            let result =
+                                match server.call_tool_with_session(&tool_name, args, &s).await {
+                                    Ok(result) => result,
+                                    Err(e) => {
+                                        // A result refused for its size comes from work
+                                        // that ran: undo dataset growth past a quota
+                                        // before reporting the refusal.
+                                        if let Some(snapshot) = snapshot {
+                                            quotas.enforce(&s, &sessions, snapshot).await?;
+                                        }
+                                        return Err(e);
+                                    }
+                                };
+                            if !result.success
+                                && budget.deadline().is_some_and(|d| Instant::now() >= d)
+                            {
+                                return Err(ToolCallError::DeadlineExceeded { limit_secs });
+                            }
+                            if let Some(snapshot) = snapshot {
+                                quotas.enforce(&s, &sessions, snapshot).await?;
+                            }
+                            s.touch().await;
+                            Ok(result)
+                        })
+                    }));
+                    if let Some((audit, arguments)) = audit {
+                        let (outcome, summary) = match &ran {
+                            Ok(Ok(result)) => (
+                                result_outcome(result, &budget),
+                                ResultSummary::of_tool_result(result),
+                            ),
+                            Ok(Err(e)) => (e.code(), ResultSummary::default()),
+                            Err(_) => ("internal", ResultSummary::default()),
+                        };
+                        let entry = AuditEntry::new(
+                            &s.id,
+                            origin.as_str(),
+                            &tool_name,
+                            arguments,
+                            outcome,
+                            elapsed_ms(started),
+                            summary,
+                        );
+                        handle.block_on(audit.log(entry));
                     }
-                    if let Some(snapshot) = snapshot {
-                        quotas.enforce(&s, &sessions, snapshot).await?;
+                    match ran {
+                        Ok(result) => result,
+                        Err(panic) => std::panic::resume_unwind(panic),
                     }
-                    s.touch().await;
-                    Ok(result)
                 })
-            })
-            .await
+                .await;
+            // Refusals before the work started never reached the closure.
+            if let (Err(e), Some(arguments)) = (&outcome, refusal_arguments)
+                && matches!(
+                    e,
+                    ToolCallError::MemoryPressure { .. }
+                        | ToolCallError::SessionBusy { .. }
+                        | ToolCallError::ServerBusy { .. }
+                )
+            {
+                let entry = AuditEntry::new(
+                    &session.id,
+                    origin.as_str(),
+                    tool,
+                    arguments,
+                    e.code(),
+                    0,
+                    ResultSummary::default(),
+                );
+                self.audit.log(entry).await;
+            }
+            outcome
         }
         .instrument(span)
         .await
@@ -600,13 +739,19 @@ impl ToolGovernor {
         let active = session.begin_call();
         let session_id = session.id.clone();
         let span = tracing::Span::current();
+        // The request limits in force here (the installed ones, or a test's
+        // thread-local override) travel with the call onto the blocking
+        // thread, where the tool's limit checks and handlers read them.
+        let limits = limits::current();
 
         // 4. Off the runtime. Everything held is released when the work stops.
         let mut join = tokio::task::spawn_blocking(move || {
             let _held = (session_permit, global_permit, in_flight, active);
             let _span = span.enter();
             let _scope = crate::path_jail::enter_session_scope(&session_id);
-            resource::with_budget(budget.clone(), || work(&budget))
+            limits::with_limits((*limits).clone(), || {
+                resource::with_budget(budget.clone(), || work(&budget))
+            })
         });
 
         // 5. Deadline.
@@ -656,6 +801,29 @@ impl ToolGovernor {
             }
         }
     }
+}
+
+/// The audit outcome of a call that returned a tool result: `ok`, or for a
+/// failed result `deadline_exceeded`/`cancelled` when its budget had run out
+/// (the budget has no getter for its token, so a spent budget before the
+/// deadline means cancellation), else `tool_error`.
+fn result_outcome(result: &ToolResult, budget: &Budget) -> &'static str {
+    if result.success {
+        "ok"
+    } else if budget.check().is_err() {
+        if budget.deadline().is_some_and(|d| Instant::now() >= d) {
+            "deadline_exceeded"
+        } else {
+            "cancelled"
+        }
+    } else {
+        "tool_error"
+    }
+}
+
+/// Milliseconds since `started`, saturating.
+fn elapsed_ms(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
 /// The dataset-byte quotas of one call.
@@ -778,6 +946,8 @@ mod tests {
             (
                 LimitExceeded {
                     parameter: "p".into(),
+                    requested: "2".into(),
+                    limit: "1".into(),
                     message: "m".into(),
                 },
                 422,
@@ -846,6 +1016,8 @@ mod tests {
 
         let r = ToolCallError::LimitExceeded {
             parameter: "bootstrap".into(),
+            requested: "20000".into(),
+            limit: "10000".into(),
             message: "m".into(),
         }
         .into_response();
@@ -855,6 +1027,37 @@ mod tests {
 
         let v = body_json(ToolCallError::DeadlineExceeded { limit_secs: 60 }.into_response()).await;
         assert_eq!(v["details"]["limit_secs"], serde_json::json!(60));
+    }
+
+    #[tokio::test]
+    async fn limit_violation_maps_to_422_with_details() {
+        let v = LimitViolation {
+            tool: "mediation_analysis".into(),
+            parameter: "bootstrap".into(),
+            requested: "1000000000000".into(),
+            limit: "10000".into(),
+            override_key: "replications",
+            message: "Parameter `bootstrap` = 1000000000000 exceeds this server's limit of 10000 \
+                      (replications) for `mediation_analysis`. Use a smaller value."
+                .into(),
+        };
+        let e = ToolCallError::from(v.clone());
+        assert_eq!(e.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(e.code(), "limit_exceeded");
+        assert_eq!(e.to_string(), v.message);
+        let body = body_json(e.into_response()).await;
+        assert_eq!(body["code"], "limit_exceeded");
+        assert_eq!(body["error"], v.message.as_str());
+        assert_eq!(
+            body["details"],
+            serde_json::json!({
+                "parameter": "bootstrap",
+                "requested": "1000000000000",
+                "limit": "10000"
+            })
+        );
+        // The override key is for the server log only.
+        assert!(!body.to_string().contains("replications\""), "{body}");
     }
 
     #[test]
@@ -891,6 +1094,8 @@ mod tests {
             UnknownTool("t".into()),
             LimitExceeded {
                 parameter: "p".into(),
+                requested: "2".into(),
+                limit: "1".into(),
                 message: "m".into(),
             },
         ] {
@@ -1040,6 +1245,25 @@ mod tests {
             assert!(!c.session_dirs);
             assert!(!c.redact_health);
         }
+    }
+
+    #[test]
+    fn exec_config_carries_the_audit_config() {
+        let mut c = http_cfg("127.0.0.1:8080", None, false);
+        assert!(ExecConfig::from_config(&c).audit.is_none());
+        assert!(ExecConfig::default().audit.is_none());
+        c.audit.enabled = true;
+        c.audit.path = "audit-test.log".into();
+        let audit = ExecConfig::from_config(&c).audit.unwrap();
+        assert!(audit.enabled);
+        assert_eq!(audit.path, "audit-test.log");
+    }
+
+    #[test]
+    fn call_origin_names() {
+        assert_eq!(CallOrigin::Http.as_str(), "http");
+        assert_eq!(CallOrigin::LlmTool.as_str(), "llm_tool");
+        assert_eq!(CallOrigin::WebSocket.as_str(), "websocket");
     }
 
     #[test]

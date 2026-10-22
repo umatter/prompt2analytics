@@ -48,8 +48,20 @@ pub enum TransportError {
 pub type TransportResult<T> = Result<T, TransportError>;
 
 /// Start the appropriate transport based on configuration.
+///
+/// The request limits of the configured resource profile, with the
+/// `--limit-override` (`P2A_LIMIT_OVERRIDES`) entries applied, are installed
+/// first, for every transport; an unknown override key fails startup.
 pub async fn start_transport(config: &ServerConfig) -> TransportResult<()> {
     use crate::config::TransportType;
+
+    let limits = crate::tools::limits::resolve(config).map_err(TransportError::Config)?;
+    tracing::info!(
+        profile = ?config.resource_profile(),
+        overrides = ?config.limits.overrides,
+        "resource limits"
+    );
+    crate::tools::limits::install(limits);
 
     match config.transport {
         TransportType::Stdio => start_stdio_transport(config).await,
@@ -61,18 +73,25 @@ pub async fn start_transport(config: &ServerConfig) -> TransportResult<()> {
 /// Start the stdio transport (existing behavior).
 ///
 /// The per-allocation ceiling of the configured resource profile applies
-/// here too (none unless `--limits hosted` or `--max-alloc-mb` is set);
+/// here too (none unless `--limits hosted` or `--max-alloc-mb` is set), and
+/// so do the request limits `start_transport` installed (argument, dataset
+/// row and response-size checks in `AnalyticsServer`'s `call_tool`);
 /// deadlines and quotas are HTTP-only.
 async fn start_stdio_transport(config: &ServerConfig) -> TransportResult<()> {
     use crate::server::AnalyticsServer;
     use rmcp::{ServiceExt, transport::stdio};
 
     p2a_core::resource::set_alloc_ceiling_bytes(config.alloc_ceiling_bytes());
-    config.warn_unapplied_limit_overrides();
 
     tracing::info!("Starting stdio transport...");
 
-    let server = AnalyticsServer::new();
+    let audit = std::sync::Arc::new(
+        crate::audit::AuditLogger::new(&config.audit).unwrap_or_else(|e| {
+            tracing::warn!("Failed to initialize audit logger: {}", e);
+            crate::audit::AuditLogger::disabled()
+        }),
+    );
+    let server = AnalyticsServer::new().with_audit_logger(audit.clone());
     let service = server
         .serve(stdio())
         .await
@@ -80,10 +99,13 @@ async fn start_stdio_transport(config: &ServerConfig) -> TransportResult<()> {
 
     tracing::info!("MCP server running on stdio, waiting for requests...");
 
-    service
+    let waited = service
         .waiting()
         .await
-        .map_err(|e| TransportError::Server(format!("Stdio transport error: {}", e)))?;
+        .map_err(|e| TransportError::Server(format!("Stdio transport error: {}", e)));
+    // Write out the queued audit entries before the process exits.
+    audit.flush().await;
+    waited?;
 
     Ok(())
 }

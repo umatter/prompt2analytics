@@ -6,12 +6,14 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use rmcp::{
-    ErrorData as McpError, ServerHandler, handler::server::router::tool::ToolRouter,
-    handler::server::wrapper::Parameters, model::*, tool, tool_handler, tool_router,
+    ErrorData as McpError, RoleServer, ServerHandler, handler::server::router::tool::ToolRouter,
+    handler::server::tool::ToolCallContext, handler::server::wrapper::Parameters, model::*,
+    service::RequestContext, tool, tool_router,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
 
+use crate::tools::limits::{LimitViolation, Limits, ROW_RULES};
 use crate::tools::requests::*;
 
 use p2a_core::{
@@ -538,6 +540,9 @@ pub struct AnalyticsServer {
     pub(crate) memory_profiler: Arc<RwLock<p2a_core::MemoryProfiler>>,
     /// Tool router for handling tool calls
     tool_router: ToolRouter<Self>,
+    /// Audit log for the stdio transport's tool calls (`None`: not audited
+    /// here; governed HTTP-side calls are audited by the governor).
+    audit: Option<Arc<crate::audit::AuditLogger>>,
 }
 
 // ============================================================================
@@ -575,7 +580,15 @@ impl AnalyticsServer {
             global_seed: Arc::new(RwLock::new(None)),
             memory_profiler: Arc::new(RwLock::new(p2a_core::MemoryProfiler::new())),
             tool_router,
+            audit: None,
         }
+    }
+
+    /// Audit this server's MCP tool calls (the stdio transport) to `logger`:
+    /// one entry per call with origin and session id `stdio`.
+    pub fn with_audit_logger(mut self, logger: Arc<crate::audit::AuditLogger>) -> Self {
+        self.audit = Some(logger);
+        self
     }
 
     /// Create a new AnalyticsServer with existing dataset storage.
@@ -609,6 +622,7 @@ impl AnalyticsServer {
             global_seed: session.global_seed.clone(),
             memory_profiler: Arc::new(RwLock::new(p2a_core::MemoryProfiler::new())),
             tool_router,
+            audit: None,
         }
     }
 
@@ -692,6 +706,15 @@ impl AnalyticsServer {
     /// Unknown names, unparsable arguments and handler errors come back as
     /// `ToolCallError`; a tool's own error result is an `Ok` with
     /// `success == false`.
+    ///
+    /// Before the arguments are deserialised, the call is checked against
+    /// the request limits in force on this thread (`tools::limits::current`,
+    /// which the governor sets on its blocking thread): the tool must exist,
+    /// then its cost parameters must be within the catalogue's caps, then the
+    /// dataset a `ROW_RULES` tool names must be within its row class. After
+    /// the handler returns, text and image output above the `response_bytes`
+    /// budget replaces the result. A refusal is
+    /// `ToolCallError::LimitExceeded` (422 `limit_exceeded`).
     #[cfg(feature = "http")]
     pub async fn call_tool_with_session(
         &self,
@@ -700,10 +723,36 @@ impl AnalyticsServer {
         session: &crate::session::Session,
     ) -> Result<crate::transport::http::ToolResult, crate::exec::ToolCallError> {
         use crate::exec::ToolCallError;
+
+        if !self.tool_router.has_route(tool_name) {
+            return Err(ToolCallError::UnknownTool(tool_name.to_string()));
+        }
+        let limits = crate::tools::limits::current();
+        enforce_request_limits(&limits, tool_name, &arguments, &session.datasets)
+            .await
+            .map_err(log_and_convert)?;
+
+        // A session-scoped server instance that shares the session's datasets.
+        let session_server = Self::with_session(session);
+        let result = session_server.dispatch_tool(tool_name, arguments).await?;
+        check_response_size(&limits, tool_name, tool_result_bytes(&result))
+            .map_err(log_and_convert)?;
+        Ok(result)
+    }
+
+    /// Deserialise `arguments` into the tool's request type and run its
+    /// handler on `self` (a session-scoped server). A name without an arm
+    /// is `UnknownTool`.
+    #[cfg(feature = "http")]
+    async fn dispatch_tool(
+        &self,
+        tool_name: &str,
+        arguments: serde_json::Value,
+    ) -> Result<crate::transport::http::ToolResult, crate::exec::ToolCallError> {
+        use crate::exec::ToolCallError;
         use crate::transport::http::{ContentItem, ToolResult};
 
-        // Create a session-scoped server instance that shares the session's datasets
-        let session_server = Self::with_session(session);
+        let session_server = self;
 
         // Helper to convert CallToolResult to our ToolResult
         fn convert_result(call_result: CallToolResult) -> ToolResult {
@@ -1257,11 +1306,234 @@ fn extract_numeric_matrix(
 }
 
 // ============================================================================
+// Request limits (every entry path)
+// ============================================================================
+
+/// The request-limit checks that run before a tool call's arguments are
+/// deserialised, shared by the governed HTTP-side path
+/// (`call_tool_with_session`) and the stdio transport: the cost parameters
+/// against the catalogue (`Limits::check_tool_arguments`), then, for the
+/// tools in `ROW_RULES`, the height of the dataset the request names
+/// (`Limits::check_rows`, skipped when limits are off). A missing dataset
+/// field or an unknown dataset is left to the handler's usual error.
+#[allow(
+    clippy::result_large_err,
+    reason = "LimitViolation is WP02's fixed public shape"
+)]
+async fn enforce_request_limits(
+    limits: &Limits,
+    tool: &str,
+    args: &serde_json::Value,
+    datasets: &RwLock<HashMap<String, Dataset>>,
+) -> Result<(), LimitViolation> {
+    limits.check_tool_arguments(tool, args)?;
+    if limits.is_off() {
+        return Ok(());
+    }
+    for rule in ROW_RULES.iter().filter(|r| r.tool == tool) {
+        let Some(name) = args.get(rule.dataset_field).and_then(|v| v.as_str()) else {
+            continue;
+        };
+        // The guard is dropped before any further await.
+        let shape = datasets.read().await.get(name).map(|d| {
+            let df = d.df();
+            (df.height(), df.width())
+        });
+        if let Some((rows, cols)) = shape {
+            limits.check_rows(tool, rows, cols)?;
+        }
+    }
+    Ok(())
+}
+
+/// Refuses a tool result whose text and image output (`bytes`) is above the
+/// `response_bytes` budget (none when limits are off).
+#[allow(
+    clippy::result_large_err,
+    reason = "LimitViolation is WP02's fixed public shape"
+)]
+fn check_response_size(limits: &Limits, tool: &str, bytes: usize) -> Result<(), LimitViolation> {
+    let Some(max) = limits.response_bytes else {
+        return Ok(());
+    };
+    if u64::try_from(bytes).is_ok_and(|b| b <= max) {
+        return Ok(());
+    }
+    Err(LimitViolation {
+        tool: tool.to_string(),
+        parameter: "response_bytes".to_string(),
+        requested: bytes.to_string(),
+        limit: max.to_string(),
+        override_key: "response_bytes",
+        message: format!(
+            "The output of `{tool}` is {bytes} bytes, above this server's limit of {max} bytes \
+             per response. Ask for less output, for example fewer rows, columns or grid points."
+        ),
+    })
+}
+
+/// Bytes of text and image data in a governed call's result.
+#[cfg(feature = "http")]
+fn tool_result_bytes(result: &crate::transport::http::ToolResult) -> usize {
+    use crate::transport::http::ContentItem;
+    result
+        .content
+        .iter()
+        .map(|item| match item {
+            ContentItem::Text { text } => text.len(),
+            ContentItem::Image { data, .. } => data.len(),
+        })
+        .sum()
+}
+
+/// Logs a refusal with the knob that would raise the limit (`override_key`
+/// is for operators; the caller sees only the message).
+fn log_violation(v: &LimitViolation) {
+    tracing::info!(
+        tool = %v.tool,
+        parameter = %v.parameter,
+        requested = %v.requested,
+        limit = %v.limit,
+        override_key = v.override_key,
+        "request refused by a resource limit"
+    );
+}
+
+/// Bytes of text and image data in an MCP tool result (stdio).
+fn call_result_bytes(result: &CallToolResult) -> usize {
+    result
+        .content
+        .iter()
+        .map(|c| match &c.raw {
+            RawContent::Text(text) => text.text.len(),
+            RawContent::Image(image) => image.data.len(),
+            _ => 0,
+        })
+        .sum()
+}
+
+/// Logs a refusal and turns it into the stdio transport's JSON-RPC error:
+/// `invalid_params` (-32602) whose data names the code, the parameter, the
+/// requested value and the limit.
+fn limit_error(v: LimitViolation) -> McpError {
+    log_violation(&v);
+    McpError::invalid_params(
+        v.message,
+        Some(serde_json::json!({
+            "code": "limit_exceeded",
+            "parameter": v.parameter,
+            "requested": v.requested,
+            "limit": v.limit,
+        })),
+    )
+}
+
+/// Logs a refusal and turns it into the governed path's 422 error.
+#[cfg(feature = "http")]
+fn log_and_convert(v: LimitViolation) -> crate::exec::ToolCallError {
+    log_violation(&v);
+    crate::exec::ToolCallError::from(v)
+}
+
+// ============================================================================
 // ServerHandler Implementation
 // ============================================================================
 
-#[tool_handler(router = self.tool_router)]
+/// The MCP handler of the stdio transport. Tool calls run the same request
+/// limits as the governed HTTP-side path (arguments, dataset rows of this
+/// server's own datasets, response size) before and after delegating to the
+/// tool router, and with `with_audit_logger` each call leaves one audit entry
+/// (origin and session id `stdio`). Deadlines and dataset quotas are
+/// HTTP-only.
 impl ServerHandler for AnalyticsServer {
+    async fn list_tools(
+        &self,
+        _request: Option<PaginatedRequestParam>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListToolsResult, McpError> {
+        Ok(ListToolsResult::with_all_items(self.tool_router.list_all()))
+    }
+
+    async fn call_tool(
+        &self,
+        mut request: CallToolRequestParam,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let started = std::time::Instant::now();
+        let tool = request.name.to_string();
+        let known = self.tool_router.has_route(&tool);
+        let limits = crate::tools::limits::current();
+
+        // Look at the arguments as a JSON object without copying them (for
+        // the limit check and the audit entry), then hand them back to the
+        // request unchanged.
+        let had_arguments = request.arguments.is_some();
+        let args = serde_json::Value::Object(request.arguments.take().unwrap_or_default());
+        let audit = self
+            .audit
+            .as_deref()
+            .filter(|a| a.is_enabled())
+            .map(|a| (a, crate::audit::sanitize_arguments(&args)));
+        let checked = if known {
+            enforce_request_limits(&limits, &tool, &args, &self.datasets).await
+        } else {
+            Ok(())
+        };
+        if let (true, serde_json::Value::Object(map)) = (had_arguments, args) {
+            request.arguments = Some(map);
+        }
+
+        // The error is paired with its audit outcome.
+        let outcome: Result<CallToolResult, (McpError, &'static str)> = async {
+            checked.map_err(|v| (limit_error(v), "limit_exceeded"))?;
+            // An unknown name gets the router's own error.
+            let result = self
+                .tool_router
+                .call(ToolCallContext::new(self, request, context))
+                .await
+                .map_err(|e| {
+                    let code = if !known {
+                        "unknown_tool"
+                    } else if e.code == ErrorCode::INVALID_PARAMS
+                        || e.code == ErrorCode::INVALID_REQUEST
+                    {
+                        "invalid_arguments"
+                    } else {
+                        "internal"
+                    };
+                    (e, code)
+                })?;
+            check_response_size(&limits, &tool, call_result_bytes(&result))
+                .map_err(|v| (limit_error(v), "limit_exceeded"))?;
+            Ok(result)
+        }
+        .await;
+
+        if let Some((audit, arguments)) = audit {
+            let (code, summary) = match &outcome {
+                Ok(result) if result.is_error == Some(true) => (
+                    "tool_error",
+                    crate::audit::ResultSummary::of_call_result(result),
+                ),
+                Ok(result) => ("ok", crate::audit::ResultSummary::of_call_result(result)),
+                Err((_, code)) => (*code, crate::audit::ResultSummary::default()),
+            };
+            let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+            audit
+                .log(crate::audit::AuditEntry::new(
+                    "stdio",
+                    "stdio",
+                    &tool,
+                    arguments,
+                    code,
+                    duration_ms,
+                    summary,
+                ))
+                .await;
+        }
+        outcome.map_err(|(e, _)| e)
+    }
+
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
             protocol_version: ProtocolVersion::V_2024_11_05,
