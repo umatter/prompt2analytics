@@ -12,7 +12,7 @@ use rmcp::{
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use crate::tools::limits::{LimitViolation, Limits};
+use crate::tools::limits::{LimitViolation, Limits, ROW_RULES};
 use crate::tools::requests::*;
 
 use p2a_core::{
@@ -697,7 +697,8 @@ impl AnalyticsServer {
     /// Before the arguments are deserialised, the call is checked against
     /// the request limits in force on this thread (`tools::limits::current`,
     /// which the governor sets on its blocking thread): the tool must exist,
-    /// then its cost parameters must be within the catalogue's caps. A refusal
+    /// then its cost parameters must be within the catalogue's caps, then the
+    /// dataset a `ROW_RULES` tool names must be within its row class. A refusal
     /// is `ToolCallError::LimitExceeded` (422 `limit_exceeded`).
     #[cfg(feature = "http")]
     pub async fn call_tool_with_session(
@@ -712,7 +713,7 @@ impl AnalyticsServer {
             return Err(ToolCallError::UnknownTool(tool_name.to_string()));
         }
         let limits = crate::tools::limits::current();
-        enforce_request_limits(&limits, tool_name, &arguments)
+        enforce_request_limits(&limits, tool_name, &arguments, &session.datasets)
             .await
             .map_err(log_and_convert)?;
 
@@ -1293,7 +1294,10 @@ fn extract_numeric_matrix(
 /// The request-limit checks that run before a tool call's arguments are
 /// deserialised, shared by the governed HTTP-side path
 /// (`call_tool_with_session`) and the stdio transport: the cost parameters
-/// against the catalogue (`Limits::check_tool_arguments`).
+/// against the catalogue (`Limits::check_tool_arguments`), then, for the
+/// tools in `ROW_RULES`, the height of the dataset the request names
+/// (`Limits::check_rows`, skipped when limits are off). A missing dataset
+/// field or an unknown dataset is left to the handler's usual error.
 #[allow(
     clippy::result_large_err,
     reason = "LimitViolation is WP02's fixed public shape"
@@ -1302,8 +1306,25 @@ async fn enforce_request_limits(
     limits: &Limits,
     tool: &str,
     args: &serde_json::Value,
+    datasets: &RwLock<HashMap<String, Dataset>>,
 ) -> Result<(), LimitViolation> {
     limits.check_tool_arguments(tool, args)?;
+    if limits.is_off() {
+        return Ok(());
+    }
+    for rule in ROW_RULES.iter().filter(|r| r.tool == tool) {
+        let Some(name) = args.get(rule.dataset_field).and_then(|v| v.as_str()) else {
+            continue;
+        };
+        // The guard is dropped before any further await.
+        let shape = datasets.read().await.get(name).map(|d| {
+            let df = d.df();
+            (df.height(), df.width())
+        });
+        if let Some((rows, cols)) = shape {
+            limits.check_rows(tool, rows, cols)?;
+        }
+    }
     Ok(())
 }
 

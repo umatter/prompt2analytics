@@ -31,6 +31,7 @@ mod http_paths {
     use axum::body::Body;
     use axum::http::{Request, StatusCode, header};
     use p2a_mcp::config::{ServerConfig, TransportType};
+    use p2a_mcp::transport::http::AppState;
     use serde_json::{Value, json};
     use tower::ServiceExt;
 
@@ -242,6 +243,133 @@ mod http_paths {
             assert_eq!(status, 200, "{body}");
             assert_eq!(body["data"]["success"], true, "{body}");
         });
+    }
+
+    /// Writes a noisy four-column dataset of `rows` rows straight into the
+    /// session (bypassing the dataset quotas: only the limits are under test).
+    pub(super) async fn insert_dataset(state: &AppState, sid: &str, name: &str, rows: usize) {
+        let x1: Vec<f64> = (0..rows)
+            .map(|i| ((i * 7919) % 1013) as f64 / 1013.0)
+            .collect();
+        let x2: Vec<f64> = (0..rows)
+            .map(|i| ((i * 104_729) % 997) as f64 / 997.0)
+            .collect();
+        let y: Vec<f64> = (0..rows)
+            .map(|i| 1.0 + 2.0 * x1[i] - x2[i] + ((i * 31) % 17) as f64 / 170.0)
+            .collect();
+        let t: Vec<f64> = (0..rows).map(|i| (i % 2) as f64).collect();
+        let df = polars::prelude::df! { "x1" => x1, "x2" => x2, "y" => y, "t" => t }.unwrap();
+        state
+            .session_manager
+            .get_session(sid)
+            .await
+            .unwrap()
+            .datasets
+            .write()
+            .await
+            .insert(name.to_string(), p2a_core::data::Dataset::new(df));
+    }
+
+    #[test]
+    fn x4_row_class_override_refuses_small_dataset() {
+        let cfg = open_public_config();
+        let l = Limits::hosted()
+            .with_overrides(&["dense_rows=50".to_string()])
+            .unwrap();
+        run(l, async {
+            let (app, state) = p2a_mcp::transport::http::build_app(&cfg).await.unwrap();
+            let sid = new_session(&app).await;
+            insert_dataset(&state, &sid, "small", 60).await;
+            let (status, body) = post_tool(
+                &app,
+                &sid,
+                "ml_hierarchical",
+                json!({"dataset": "small", "columns": ["x1", "x2"], "n_clusters": 2}),
+            )
+            .await;
+            assert_eq!(status, 422, "{body}");
+            assert_eq!(body["code"], "limit_exceeded", "{body}");
+            assert_eq!(body["details"]["parameter"], "dataset", "{body}");
+            assert_eq!(body["details"]["requested"], "60", "{body}");
+            assert_eq!(body["details"]["limit"], "50", "{body}");
+            assert!(body["error"].as_str().unwrap().contains("rows"), "{body}");
+        });
+    }
+
+    #[test]
+    fn x4_row_classes_do_not_apply_when_off() {
+        let cfg = local_config();
+        run(Limits::off(), async {
+            let (app, state) = p2a_mcp::transport::http::build_app(&cfg).await.unwrap();
+            let sid = new_session(&app).await;
+            insert_dataset(&state, &sid, "small", 60).await;
+            let (status, body) = post_tool(
+                &app,
+                &sid,
+                "ml_hierarchical",
+                json!({"dataset": "small", "columns": ["x1", "x2"], "n_clusters": 2}),
+            )
+            .await;
+            assert_eq!(status, 200, "{body}");
+            assert_eq!(body["data"]["success"], true, "{body}");
+        });
+    }
+
+    #[test]
+    fn x4_every_row_rule_refuses_oversized_datasets() {
+        use p2a_mcp::tools::limits::{ROW_RULES, RowClass};
+        assert!(!ROW_RULES.is_empty());
+        let cfg = open_public_config();
+        let hosted = limits::resolve(&cfg).unwrap();
+        // Design 4.3 caps, one dataset just above each.
+        let class = |c: RowClass| match c {
+            RowClass::Dense => ("dense", 5_000usize),
+            RowClass::Cubic => ("cubic", 2_000),
+            RowClass::Quadratic => ("quadratic", 50_000),
+        };
+        for c in [RowClass::Dense, RowClass::Cubic, RowClass::Quadratic] {
+            assert_eq!(hosted.row_cap(c), Some(class(c).1), "{c:?}");
+        }
+        run(hosted, async {
+            let (app, state) = p2a_mcp::transport::http::build_app(&cfg).await.unwrap();
+            let sid = new_session(&app).await;
+            for c in [RowClass::Dense, RowClass::Cubic, RowClass::Quadratic] {
+                let (name, cap) = class(c);
+                insert_dataset(&state, &sid, name, cap + 1).await;
+            }
+            let mut failures = Vec::new();
+            for rule in ROW_RULES {
+                let (name, cap) = class(rule.class);
+                let (status, body) =
+                    post_tool(&app, &sid, rule.tool, json!({ rule.dataset_field: name })).await;
+                let ok = status == StatusCode::UNPROCESSABLE_ENTITY
+                    && body["code"] == "limit_exceeded"
+                    && body["details"]["requested"] == (cap + 1).to_string()
+                    && body["details"]["limit"] == cap.to_string();
+                if !ok {
+                    failures.push(format!("{}: {status} {body}", rule.tool));
+                }
+            }
+            assert!(failures.is_empty(), "not refused as expected:\n{failures:#?}");
+        });
+    }
+
+    #[test]
+    fn x4_row_rules_name_a_string_field_of_their_tool() {
+        let tools = p2a_mcp::AnalyticsServer::new().list_tools();
+        for rule in limits::ROW_RULES {
+            let tool = tools
+                .iter()
+                .find(|t| t.name == rule.tool)
+                .unwrap_or_else(|| panic!("ROW_RULES names unknown tool {}", rule.tool));
+            assert_eq!(
+                tool.input_schema["properties"][rule.dataset_field]["type"],
+                "string",
+                "{}.{} is not a string field",
+                rule.tool,
+                rule.dataset_field
+            );
+        }
     }
 
     #[test]
