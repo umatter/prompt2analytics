@@ -12,6 +12,7 @@ use rmcp::{
 use schemars::JsonSchema;
 use serde::Deserialize;
 
+use crate::tools::limits::{LimitViolation, Limits};
 use crate::tools::requests::*;
 
 use p2a_core::{
@@ -692,6 +693,12 @@ impl AnalyticsServer {
     /// Unknown names, unparsable arguments and handler errors come back as
     /// `ToolCallError`; a tool's own error result is an `Ok` with
     /// `success == false`.
+    ///
+    /// Before the arguments are deserialised, the call is checked against
+    /// the request limits in force on this thread (`tools::limits::current`,
+    /// which the governor sets on its blocking thread): the tool must exist,
+    /// then its cost parameters must be within the catalogue's caps. A refusal
+    /// is `ToolCallError::LimitExceeded` (422 `limit_exceeded`).
     #[cfg(feature = "http")]
     pub async fn call_tool_with_session(
         &self,
@@ -700,10 +707,33 @@ impl AnalyticsServer {
         session: &crate::session::Session,
     ) -> Result<crate::transport::http::ToolResult, crate::exec::ToolCallError> {
         use crate::exec::ToolCallError;
+
+        if !self.tool_router.has_route(tool_name) {
+            return Err(ToolCallError::UnknownTool(tool_name.to_string()));
+        }
+        let limits = crate::tools::limits::current();
+        enforce_request_limits(&limits, tool_name, &arguments)
+            .await
+            .map_err(log_and_convert)?;
+
+        // A session-scoped server instance that shares the session's datasets.
+        let session_server = Self::with_session(session);
+        session_server.dispatch_tool(tool_name, arguments).await
+    }
+
+    /// Deserialise `arguments` into the tool's request type and run its
+    /// handler on `self` (a session-scoped server). A name without an arm
+    /// is `UnknownTool`.
+    #[cfg(feature = "http")]
+    async fn dispatch_tool(
+        &self,
+        tool_name: &str,
+        arguments: serde_json::Value,
+    ) -> Result<crate::transport::http::ToolResult, crate::exec::ToolCallError> {
+        use crate::exec::ToolCallError;
         use crate::transport::http::{ContentItem, ToolResult};
 
-        // Create a session-scoped server instance that shares the session's datasets
-        let session_server = Self::with_session(session);
+        let session_server = self;
 
         // Helper to convert CallToolResult to our ToolResult
         fn convert_result(call_result: CallToolResult) -> ToolResult {
@@ -1254,6 +1284,47 @@ fn extract_numeric_matrix(
     }
 
     Ok(data)
+}
+
+// ============================================================================
+// Request limits (every entry path)
+// ============================================================================
+
+/// The request-limit checks that run before a tool call's arguments are
+/// deserialised, shared by the governed HTTP-side path
+/// (`call_tool_with_session`) and the stdio transport: the cost parameters
+/// against the catalogue (`Limits::check_tool_arguments`).
+#[allow(
+    clippy::result_large_err,
+    reason = "LimitViolation is WP02's fixed public shape"
+)]
+async fn enforce_request_limits(
+    limits: &Limits,
+    tool: &str,
+    args: &serde_json::Value,
+) -> Result<(), LimitViolation> {
+    limits.check_tool_arguments(tool, args)?;
+    Ok(())
+}
+
+/// Logs a refusal with the knob that would raise the limit (`override_key`
+/// is for operators; the caller sees only the message).
+fn log_violation(v: &LimitViolation) {
+    tracing::info!(
+        tool = %v.tool,
+        parameter = %v.parameter,
+        requested = %v.requested,
+        limit = %v.limit,
+        override_key = v.override_key,
+        "request refused by a resource limit"
+    );
+}
+
+/// Logs a refusal and turns it into the governed path's 422 error.
+#[cfg(feature = "http")]
+fn log_and_convert(v: LimitViolation) -> crate::exec::ToolCallError {
+    log_violation(&v);
+    crate::exec::ToolCallError::from(v)
 }
 
 // ============================================================================

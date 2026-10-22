@@ -49,6 +49,7 @@ use crate::config::{
 };
 use crate::server::AnalyticsServer;
 use crate::session::{Session, SessionManager, datasets_bytes};
+use crate::tools::limits::{self, LimitViolation};
 use crate::transport::http::{ApiResponse, ToolResult};
 
 /// How long past its deadline cooperative work may take to stop before the
@@ -212,9 +213,19 @@ pub enum ToolCallError {
     /// The arguments do not match the tool's schema.
     #[error("{0}")]
     InvalidArguments(String),
-    /// A request limit refused a parameter.
+    /// A request limit refused a parameter, a dataset's size or the size of
+    /// the response.
     #[error("{message}")]
-    LimitExceeded { parameter: String, message: String },
+    LimitExceeded {
+        /// The parameter, dataset field or budget key that was exceeded.
+        parameter: String,
+        /// What the request asked for (or the response size).
+        requested: String,
+        /// The limit that applies.
+        limit: String,
+        /// The refusal shown to the caller.
+        message: String,
+    },
     /// A dataset-memory quota refused the call; its changes were undone.
     #[error("{0}")]
     QuotaExceeded(String),
@@ -307,13 +318,33 @@ impl ToolCallError {
 
     fn details(&self) -> Option<serde_json::Value> {
         match self {
-            Self::LimitExceeded { parameter, .. } => {
-                Some(serde_json::json!({ "parameter": parameter }))
-            }
+            Self::LimitExceeded {
+                parameter,
+                requested,
+                limit,
+                ..
+            } => Some(serde_json::json!({
+                "parameter": parameter,
+                "requested": requested,
+                "limit": limit,
+            })),
             Self::DeadlineExceeded { limit_secs } => {
                 Some(serde_json::json!({ "limit_secs": limit_secs }))
             }
             _ => None,
+        }
+    }
+}
+
+impl From<LimitViolation> for ToolCallError {
+    /// A request-limit refusal (422 `limit_exceeded`). The violation's
+    /// `override_key` is for the server log only and is dropped here.
+    fn from(v: LimitViolation) -> Self {
+        Self::LimitExceeded {
+            parameter: v.parameter,
+            requested: v.requested,
+            limit: v.limit,
+            message: v.message,
         }
     }
 }
@@ -600,13 +631,19 @@ impl ToolGovernor {
         let active = session.begin_call();
         let session_id = session.id.clone();
         let span = tracing::Span::current();
+        // The request limits in force here (the installed ones, or a test's
+        // thread-local override) travel with the call onto the blocking
+        // thread, where the tool's limit checks and handlers read them.
+        let limits = limits::current();
 
         // 4. Off the runtime. Everything held is released when the work stops.
         let mut join = tokio::task::spawn_blocking(move || {
             let _held = (session_permit, global_permit, in_flight, active);
             let _span = span.enter();
             let _scope = crate::path_jail::enter_session_scope(&session_id);
-            resource::with_budget(budget.clone(), || work(&budget))
+            limits::with_limits((*limits).clone(), || {
+                resource::with_budget(budget.clone(), || work(&budget))
+            })
         });
 
         // 5. Deadline.
@@ -778,6 +815,8 @@ mod tests {
             (
                 LimitExceeded {
                     parameter: "p".into(),
+                    requested: "2".into(),
+                    limit: "1".into(),
                     message: "m".into(),
                 },
                 422,
@@ -846,6 +885,8 @@ mod tests {
 
         let r = ToolCallError::LimitExceeded {
             parameter: "bootstrap".into(),
+            requested: "20000".into(),
+            limit: "10000".into(),
             message: "m".into(),
         }
         .into_response();
@@ -855,6 +896,37 @@ mod tests {
 
         let v = body_json(ToolCallError::DeadlineExceeded { limit_secs: 60 }.into_response()).await;
         assert_eq!(v["details"]["limit_secs"], serde_json::json!(60));
+    }
+
+    #[tokio::test]
+    async fn limit_violation_maps_to_422_with_details() {
+        let v = LimitViolation {
+            tool: "mediation_analysis".into(),
+            parameter: "bootstrap".into(),
+            requested: "1000000000000".into(),
+            limit: "10000".into(),
+            override_key: "replications",
+            message: "Parameter `bootstrap` = 1000000000000 exceeds this server's limit of 10000 \
+                      (replications) for `mediation_analysis`. Use a smaller value."
+                .into(),
+        };
+        let e = ToolCallError::from(v.clone());
+        assert_eq!(e.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(e.code(), "limit_exceeded");
+        assert_eq!(e.to_string(), v.message);
+        let body = body_json(e.into_response()).await;
+        assert_eq!(body["code"], "limit_exceeded");
+        assert_eq!(body["error"], v.message.as_str());
+        assert_eq!(
+            body["details"],
+            serde_json::json!({
+                "parameter": "bootstrap",
+                "requested": "1000000000000",
+                "limit": "10000"
+            })
+        );
+        // The override key is for the server log only.
+        assert!(!body.to_string().contains("replications\""), "{body}");
     }
 
     #[test]
@@ -891,6 +963,8 @@ mod tests {
             UnknownTool("t".into()),
             LimitExceeded {
                 parameter: "p".into(),
+                requested: "2".into(),
+                limit: "1".into(),
                 message: "m".into(),
             },
         ] {
