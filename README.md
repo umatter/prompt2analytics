@@ -10,9 +10,9 @@ A comprehensive analytics toolkit exposing econometrics, machine learning, and v
 - **MCP Server**: Model Context Protocol integration for AI assistants (270 tools)
 - **Dioxus App**: Cross-platform frontend (web, desktop) with LLM-powered natural language analysis
 
-**🌐 Live demo (bring your own key):** [p2a.qamelab.org](https://p2a.qamelab.org) — the hosted web app. You supply your own LLM API key in the browser; it is never stored server-side. This is a small **demo deployment**: it runs on a modest single instance (limited performance) and caps uploads at ~24 MB, so expect slower responses and use small datasets. For full performance and large data, run the desktop app or self-host the backend container `ghcr.io/umatter/prompt2analytics/backend` (see [docs/guides/DEPLOYMENT.md](docs/guides/DEPLOYMENT.md)).
+**🌐 Live demo (bring your own key):** [p2a.qamelab.org](https://p2a.qamelab.org) — the hosted web app. You supply your own LLM API key in the browser; it is never stored server-side. This is a small **demo deployment**: it runs on a modest single instance (limited performance) and caps uploads at ~24 MB, so expect slower responses and use small datasets. Each tool call stops after 60 seconds, each session holds up to about 200 MB of data and runs one request at a time, and large or costly requests are refused with a message that names the limit and what to make smaller. For full performance and large data, run the desktop app or self-host the backend container `ghcr.io/umatter/prompt2analytics/backend` (see [docs/guides/DEPLOYMENT.md](docs/guides/DEPLOYMENT.md)).
 
-The demo runs the latest tagged release (check [`/health`](https://p2a-api.qamelab.org/health)) in the hardened no-login mode introduced in v0.1.2: there are no user accounts, per-visitor isolation relies on unguessable session IDs, and the session-list and file-browser endpoints are disabled (threat model in [docs/guides/DEPLOYMENT.md](docs/guides/DEPLOYMENT.md)). Two caveats follow from it being a **public, shared instance**: do **not** upload confidential or personal data — for sensitive work use the desktop app or a self-hosted backend, the deployment mode the project is designed around — and treat sessions as **ephemeral**: the instance has no persistent volume, so uploaded data and results disappear whenever it restarts or is redeployed.
+The demo runs the latest tagged release (check [`/health`](https://p2a-api.qamelab.org/health)) in open public mode with the hosted resource profile: there are no user accounts, per-visitor isolation relies on unguessable session IDs, the session-list and file-browser endpoints are disabled, and idle sessions end after 60 minutes (sooner when the server is full) (threat model and limits in [docs/guides/DEPLOYMENT.md](docs/guides/DEPLOYMENT.md)). Two caveats follow from it being a **public, shared instance**: do **not** upload confidential or personal data — for sensitive work use the desktop app or a self-hosted backend, the deployment mode the project is designed around — and treat sessions as **ephemeral**: the instance has no persistent volume, so uploaded data and results disappear whenever it restarts or is redeployed.
 
 **Requirements**: Rust 1.88+ (edition 2024)
 
@@ -667,6 +667,8 @@ docker compose --profile with-ollama up --build
 curl http://localhost:8080/health
 ```
 
+The container binds all interfaces, so it starts only with `P2A_ACCESS_TOKEN` set (every `/api` route then needs the token), or with `P2A_ALLOW_UNAUTHENTICATED=1` for an open demo, which always runs with the hosted limits; see [docs/guides/DEPLOYMENT.md](docs/guides/DEPLOYMENT.md). The backend accepts a plain-http Ollama endpoint only on its own loopback address and refuses private network addresses, so it cannot reach the `with-ollama` profile's container over the compose network.
+
 For development, run services natively for faster iteration:
 
 ```bash
@@ -707,7 +709,9 @@ dual licensed as above, without any additional terms or conditions.
 
 - `validation/README.md` - Validation framework and method index
 - `validation/VALIDATION_STATUS.md` - Current validation coverage report
-- `docs/guides/TESTING.md` - Test runtime expectations
+- `docs/guides/DEPLOYMENT.md` - Hosting the backend: deployment modes, limits, configuration, release
+- `API_ENDPOINTS.md` - HTTP API reference
+- `docs/guides/TESTING.md` - Test runtime expectations, integration tests, what CI runs
 - `docs/guides/DATA_SECURITY.md` - Data write locations, privacy
 - `docs/security/PROMPT_INJECTION.md` - MCP security considerations
 
