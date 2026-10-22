@@ -54,8 +54,7 @@ use tracing::Instrument;
 
 use crate::audit::{AuditEntry, AuditLogger, ResultSummary, sanitize_arguments};
 use crate::config::{
-    AuditConfig, DeploymentMode, ResourceProfile, ServerConfig, SessionDirsSetting,
-    available_cpus,
+    AuditConfig, DeploymentMode, ResourceProfile, ServerConfig, SessionDirsSetting, available_cpus,
 };
 use crate::server::AnalyticsServer;
 use crate::session::{Session, SessionManager, datasets_bytes};
@@ -603,67 +602,70 @@ impl ToolGovernor {
                 .is_enabled()
                 .then(|| (Arc::clone(&self.audit), sanitize_arguments(&args)));
             let refusal_arguments = audit.as_ref().map(|(_, arguments)| arguments.clone());
-            let outcome = self.run_blocking(&session, tool, move |budget| {
-                let budget = budget.clone();
-                let started = Instant::now();
-                // The entry is written where the work ends, also when the
-                // deadline answer was already sent or the work panicked.
-                let ran = std::panic::catch_unwind(AssertUnwindSafe(|| {
-                    handle.block_on(async {
-                    let snapshot = if quotas.any() {
-                        Some(s.datasets.read().await.clone())
-                    } else {
-                        None
-                    };
-                    let result = match server.call_tool_with_session(&tool_name, args, &s).await
-                    {
-                        Ok(result) => result,
-                        Err(e) => {
-                            // A result refused for its size comes from work
-                            // that ran: undo dataset growth past a quota
-                            // before reporting the refusal.
+            let outcome = self
+                .run_blocking(&session, tool, move |budget| {
+                    let budget = budget.clone();
+                    let started = Instant::now();
+                    // The entry is written where the work ends, also when the
+                    // deadline answer was already sent or the work panicked.
+                    let ran = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                        handle.block_on(async {
+                            let snapshot = if quotas.any() {
+                                Some(s.datasets.read().await.clone())
+                            } else {
+                                None
+                            };
+                            let result =
+                                match server.call_tool_with_session(&tool_name, args, &s).await {
+                                    Ok(result) => result,
+                                    Err(e) => {
+                                        // A result refused for its size comes from work
+                                        // that ran: undo dataset growth past a quota
+                                        // before reporting the refusal.
+                                        if let Some(snapshot) = snapshot {
+                                            quotas.enforce(&s, &sessions, snapshot).await?;
+                                        }
+                                        return Err(e);
+                                    }
+                                };
+                            if !result.success
+                                && budget.deadline().is_some_and(|d| Instant::now() >= d)
+                            {
+                                return Err(ToolCallError::DeadlineExceeded { limit_secs });
+                            }
                             if let Some(snapshot) = snapshot {
                                 quotas.enforce(&s, &sessions, snapshot).await?;
                             }
-                            return Err(e);
-                        }
-                    };
-                    if !result.success && budget.deadline().is_some_and(|d| Instant::now() >= d) {
-                        return Err(ToolCallError::DeadlineExceeded { limit_secs });
+                            s.touch().await;
+                            Ok(result)
+                        })
+                    }));
+                    if let Some((audit, arguments)) = audit {
+                        let (outcome, summary) = match &ran {
+                            Ok(Ok(result)) => (
+                                result_outcome(result, &budget),
+                                ResultSummary::of_tool_result(result),
+                            ),
+                            Ok(Err(e)) => (e.code(), ResultSummary::default()),
+                            Err(_) => ("internal", ResultSummary::default()),
+                        };
+                        let entry = AuditEntry::new(
+                            &s.id,
+                            origin.as_str(),
+                            &tool_name,
+                            arguments,
+                            outcome,
+                            elapsed_ms(started),
+                            summary,
+                        );
+                        handle.block_on(audit.log(entry));
                     }
-                    if let Some(snapshot) = snapshot {
-                        quotas.enforce(&s, &sessions, snapshot).await?;
+                    match ran {
+                        Ok(result) => result,
+                        Err(panic) => std::panic::resume_unwind(panic),
                     }
-                    s.touch().await;
-                    Ok(result)
-                    })
-                }));
-                if let Some((audit, arguments)) = audit {
-                    let (outcome, summary) = match &ran {
-                        Ok(Ok(result)) => (
-                            result_outcome(result, &budget),
-                            ResultSummary::of_tool_result(result),
-                        ),
-                        Ok(Err(e)) => (e.code(), ResultSummary::default()),
-                        Err(_) => ("internal", ResultSummary::default()),
-                    };
-                    let entry = AuditEntry::new(
-                        &s.id,
-                        origin.as_str(),
-                        &tool_name,
-                        arguments,
-                        outcome,
-                        elapsed_ms(started),
-                        summary,
-                    );
-                    handle.block_on(audit.log(entry));
-                }
-                match ran {
-                    Ok(result) => result,
-                    Err(panic) => std::panic::resume_unwind(panic),
-                }
-            })
-            .await;
+                })
+                .await;
             // Refusals before the work started never reached the closure.
             if let (Err(e), Some(arguments)) = (&outcome, refusal_arguments)
                 && matches!(

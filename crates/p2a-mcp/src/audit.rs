@@ -853,7 +853,12 @@ mod tests {
             }
         }
         for key in ["anyOf", "oneOf", "allOf", "prefixItems"] {
-            for sub in schema.get(key).and_then(Value::as_array).into_iter().flatten() {
+            for sub in schema
+                .get(key)
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
                 collect_properties(sub, root, seen, out);
             }
         }
@@ -889,7 +894,12 @@ mod tests {
         for tool in crate::server::AnalyticsServer::new().list_tools() {
             let mut names = std::collections::BTreeSet::new();
             let mut seen = std::collections::HashSet::new();
-            collect_properties(&tool.input_schema, &tool.input_schema, &mut seen, &mut names);
+            collect_properties(
+                &tool.input_schema,
+                &tool.input_schema,
+                &mut seen,
+                &mut names,
+            );
             for name in names {
                 let payload_like = name.split('_').any(|w| PAYLOAD_WORDS.contains(&w));
                 if !payload_like {

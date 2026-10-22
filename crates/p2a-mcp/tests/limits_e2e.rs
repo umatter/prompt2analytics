@@ -83,7 +83,10 @@ mod http_paths {
         let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
             .await
             .unwrap();
-        (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        )
     }
 
     fn post(uri: &str, body: Value) -> Request<Body> {
@@ -181,14 +184,24 @@ mod http_paths {
         ("ml_ppr", "nterms", ABSURD, Some("10000")),
         ("propensity_matching", "ratio", ABSURD, None),
         ("regression_bootstrap_cov", "n_boot", ABSURD, Some("10000")),
-        ("regression_standardization", "n_bootstrap", ABSURD, Some("10000")),
+        (
+            "regression_standardization",
+            "n_bootstrap",
+            ABSURD,
+            Some("10000"),
+        ),
         ("collaborative_tmle", "n_folds", ABSURD, Some("20")),
         ("ts_var_irf", "steps", ABSURD, Some("5000")),
         ("ts_holt_winters", "horizon", ABSURD, Some("5000")),
         ("timeseries_arima_sim", "n", ABSURD, Some("1000000")),
         ("timeseries_diffinv", "lag", ABSURD, Some("1000")),
         ("timeseries_diffinv", "differences", ABSURD, Some("1000")),
-        ("heterogeneity_test", "n_permutations", ABSURD, Some("10000")),
+        (
+            "heterogeneity_test",
+            "n_permutations",
+            ABSURD,
+            Some("10000"),
+        ),
         // merged duplicates of X-1
         ("ml_kmeans", "n_init", ABSURD, Some("100")),
         ("ml_tsne", "max_iterations", ABSURD, Some("100000")),
@@ -234,7 +247,7 @@ mod http_paths {
                 let ok = status == StatusCode::UNPROCESSABLE_ENTITY
                     && body["code"] == "limit_exceeded"
                     && details["parameter"] == field
-                    && details["requested"] == value.to_string()
+                    && details["requested"].as_str() == Some(value.to_string().as_str())
                     && limit_ok
                     && error.contains("exceeds this server's limit")
                     && error.contains(&format!("`{field}`"));
@@ -242,7 +255,10 @@ mod http_paths {
                     failures.push(format!("{tool}.{field}: {status} {body}"));
                 }
             }
-            assert!(failures.is_empty(), "not refused as expected:\n{failures:#?}");
+            assert!(
+                failures.is_empty(),
+                "not refused as expected:\n{failures:#?}"
+            );
             assert_eq!(get_health(&app).await, 200);
         });
     }
@@ -364,13 +380,17 @@ mod http_paths {
                     post_tool(&app, &sid, rule.tool, json!({ rule.dataset_field: name })).await;
                 let ok = status == StatusCode::UNPROCESSABLE_ENTITY
                     && body["code"] == "limit_exceeded"
-                    && body["details"]["requested"] == (cap + 1).to_string()
-                    && body["details"]["limit"] == cap.to_string();
+                    && body["details"]["requested"].as_str()
+                        == Some((cap + 1).to_string().as_str())
+                    && body["details"]["limit"].as_str() == Some(cap.to_string().as_str());
                 if !ok {
                     failures.push(format!("{}: {status} {body}", rule.tool));
                 }
             }
-            assert!(failures.is_empty(), "not refused as expected:\n{failures:#?}");
+            assert!(
+                failures.is_empty(),
+                "not refused as expected:\n{failures:#?}"
+            );
         });
     }
 
@@ -383,11 +403,9 @@ mod http_paths {
                 .find(|t| t.name == rule.tool)
                 .unwrap_or_else(|| panic!("ROW_RULES names unknown tool {}", rule.tool));
             assert_eq!(
-                tool.input_schema["properties"][rule.dataset_field]["type"],
-                "string",
+                tool.input_schema["properties"][rule.dataset_field]["type"], "string",
                 "{}.{} is not a string field",
-                rule.tool,
-                rule.dataset_field
+                rule.tool, rule.dataset_field
             );
         }
     }
@@ -398,7 +416,13 @@ mod http_paths {
         let head = |app: Router, state: AppState| async move {
             let sid = new_session(&app).await;
             insert_dataset(&state, &sid, "small", 60).await;
-            post_tool(&app, &sid, "head_dataset", json!({"dataset": "small", "n": 50})).await
+            post_tool(
+                &app,
+                &sid,
+                "head_dataset",
+                json!({"dataset": "small", "n": 50}),
+            )
+            .await
         };
         let l = Limits::hosted()
             .with_overrides(&["response_bytes=200".to_string()])
@@ -459,7 +483,10 @@ mod http_paths {
             assert_eq!(status, 422, "{body}");
             assert_eq!(body["code"], "quota_exceeded", "{body}");
             let session = state.session_manager.get_session(&sid).await.unwrap();
-            assert!(session.datasets.read().await.is_empty(), "change not undone");
+            assert!(
+                session.datasets.read().await.is_empty(),
+                "change not undone"
+            );
         });
     }
 
@@ -496,7 +523,10 @@ mod http_paths {
             (super::audit_lines(&cfg.audit).await, sid)
         });
         assert_eq!(lines.len(), 3, "{lines:#?}");
-        let origins: Vec<&str> = lines.iter().map(|l| l["origin"].as_str().unwrap()).collect();
+        let origins: Vec<&str> = lines
+            .iter()
+            .map(|l| l["origin"].as_str().unwrap())
+            .collect();
         assert_eq!(origins, ["http", "llm_tool", "websocket"]);
         for line in &lines {
             assert_eq!(line["tool_name"], "list_datasets", "{line}");
@@ -539,7 +569,10 @@ mod http_paths {
         assert_eq!(lines[0]["tool_name"], "create_dataset");
         assert_eq!(lines[0]["arguments"]["csv_content"], "[redacted: 59 bytes]");
         assert_eq!(lines[1]["tool_name"], "head_dataset");
-        assert!(lines[1]["result"]["text_bytes"].as_u64().unwrap() > 0, "{text}");
+        assert!(
+            lines[1]["result"]["text_bytes"].as_u64().unwrap() > 0,
+            "{text}"
+        );
     }
 
     #[test]
@@ -549,8 +582,13 @@ mod http_paths {
         let lines = run(limits::resolve(&cfg).unwrap(), async {
             let (app, _state) = p2a_mcp::transport::http::build_app(&cfg).await.unwrap();
             let sid = new_session(&app).await;
-            let (status, body) =
-                post_tool(&app, &sid, "timeseries_arma_to_ma", json!({"lag_max": ABSURD})).await;
+            let (status, body) = post_tool(
+                &app,
+                &sid,
+                "timeseries_arma_to_ma",
+                json!({"lag_max": ABSURD}),
+            )
+            .await;
             assert_eq!(status, 422, "{body}");
             super::audit_lines(&cfg.audit).await
         });
@@ -777,7 +815,10 @@ mod stdio_path {
         let cfg = audit_cfg(&dir);
         let logger = Arc::new(AuditLogger::new(&cfg).unwrap());
         let calls = [
-            ("timeseries_arma_to_ma", json!({"lag_max": 2000, "ar": [0.5]})),
+            (
+                "timeseries_arma_to_ma",
+                json!({"lag_max": 2000, "ar": [0.5]}),
+            ),
             ("no_such_tool", json!({})),
             ("timeseries_arma_to_ma", json!({"lag_max": "ten"})),
         ];
@@ -787,7 +828,10 @@ mod stdio_path {
             assert!(msg.get("error").is_some(), "{msg}");
         }
         let lines = run(Limits::off(), audit_lines(&cfg));
-        let outcomes: Vec<&str> = lines.iter().map(|l| l["outcome"].as_str().unwrap()).collect();
+        let outcomes: Vec<&str> = lines
+            .iter()
+            .map(|l| l["outcome"].as_str().unwrap())
+            .collect();
         assert_eq!(
             outcomes,
             ["limit_exceeded", "unknown_tool", "invalid_arguments"]

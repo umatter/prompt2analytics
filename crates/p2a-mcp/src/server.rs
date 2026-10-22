@@ -6,9 +6,9 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use rmcp::{
-    ErrorData as McpError, RoleServer, ServerHandler,
-    handler::server::router::tool::ToolRouter, handler::server::tool::ToolCallContext,
-    handler::server::wrapper::Parameters, model::*, service::RequestContext, tool, tool_router,
+    ErrorData as McpError, RoleServer, ServerHandler, handler::server::router::tool::ToolRouter,
+    handler::server::tool::ToolCallContext, handler::server::wrapper::Parameters, model::*,
+    service::RequestContext, tool, tool_router,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -1511,9 +1511,10 @@ impl ServerHandler for AnalyticsServer {
 
         if let Some((audit, arguments)) = audit {
             let (code, summary) = match &outcome {
-                Ok(result) if result.is_error == Some(true) => {
-                    ("tool_error", crate::audit::ResultSummary::of_call_result(result))
-                }
+                Ok(result) if result.is_error == Some(true) => (
+                    "tool_error",
+                    crate::audit::ResultSummary::of_call_result(result),
+                ),
                 Ok(result) => ("ok", crate::audit::ResultSummary::of_call_result(result)),
                 Err((_, code)) => (*code, crate::audit::ResultSummary::default()),
             };
