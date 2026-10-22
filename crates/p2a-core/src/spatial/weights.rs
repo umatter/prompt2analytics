@@ -9,6 +9,8 @@ use ndarray::{Array1, Array2};
 use serde::{Deserialize, Serialize};
 
 use super::neighbors::Neighbors;
+use crate::errors::EconResult;
+use crate::resource::{checkpoint, try_zeros2};
 
 /// Weighting style for spatial weights matrix.
 ///
@@ -348,6 +350,145 @@ impl SpatialWeights {
         &self.spectrum.insert(spectrum).real_sorted
     }
 
+    /// Dense n x n copy of W, allocated fallibly.
+    ///
+    /// # Errors
+    ///
+    /// [`EconError::ResourceLimit`](crate::errors::EconError::ResourceLimit) when the n x n
+    /// matrix cannot be allocated (or exceeds an
+    /// installed per-allocation ceiling).
+    pub fn try_to_dense(&self) -> EconResult<Array2<f64>> {
+        let mut w = try_zeros2(self.n, self.n, "dense spatial weights matrix")?;
+        for (i, sw) in self.weights.iter().enumerate() {
+            for (&j, &v) in sw.indices.iter().zip(sw.weights.iter()) {
+                w[[i, j]] = v;
+            }
+        }
+        Ok(w)
+    }
+
+    /// Eigenvalues of W like [`SpatialWeights::eigenvalues`], but the dense matrix behind
+    /// them is allocated fallibly and an installed budget is checked first.
+    ///
+    /// # Errors
+    ///
+    /// [`EconError::ResourceLimit`](crate::errors::EconError::ResourceLimit) when the dense
+    /// matrix cannot be allocated; [`EconError::Cancelled`](crate::errors::EconError::Cancelled)
+    /// when an installed budget has expired.
+    pub fn try_eigenvalues(&mut self) -> EconResult<&Array1<f64>> {
+        Ok(&self.try_spectrum()?.real_sorted)
+    }
+
+    /// The valid range for ρ like [`SpatialWeights::rho_range`], with the errors of
+    /// [`SpatialWeights::try_eigenvalues`].
+    pub fn try_rho_range(&mut self) -> EconResult<(f64, f64)> {
+        Ok(rho_range_from(self.try_eigenvalues()?))
+    }
+
+    /// log|I - ρW| like [`SpatialWeights::log_det`], with the errors of
+    /// [`SpatialWeights::try_eigenvalues`].
+    pub fn try_log_det(&mut self, rho: f64) -> EconResult<f64> {
+        Ok(log_det_from(self.try_eigenvalues()?, rho))
+    }
+
+    /// The cached spectrum, computed fallibly when missing.
+    fn try_spectrum(&mut self) -> EconResult<&Arc<Spectrum>> {
+        let spectrum = match self.spectrum.take() {
+            Some(s) => s,
+            None => {
+                checkpoint()?;
+                Arc::new(compute_spectrum(&self.try_to_dense()?))
+            }
+        };
+        Ok(self.spectrum.insert(spectrum))
+    }
+
+    /// tr((I - ρW)^-1) = Σ Re(1 / (1 - ρλ)) over the complex eigenvalues λ of W.
+    ///
+    /// `None` when the eigen decomposition failed or the sum is not finite (1 - ρλ = 0).
+    pub(crate) fn trace_inverse_i_minus_rho_w(&mut self, rho: f64) -> EconResult<Option<f64>> {
+        let spectrum = self.try_spectrum()?;
+        if !spectrum.ok {
+            return Ok(None);
+        }
+        let sum: f64 = spectrum
+            .values
+            .iter()
+            .map(|&(a, b)| {
+                // 1 - ρ(a + bi) = (1 - ρa) - ρb i
+                let re = 1.0 - rho * a;
+                let im = rho * b;
+                re / (re * re + im * im)
+            })
+            .sum();
+        Ok(sum.is_finite().then_some(sum))
+    }
+
+    /// The common row sum of W, if every row sums to the same value (within 1e-12
+    /// relative), as row-standardised weights without isolates do.
+    pub(crate) fn constant_row_sum(&self) -> Option<f64> {
+        let mut sums = self.weights.iter().map(|sw| sw.weights.iter().sum::<f64>());
+        let first = sums.next()?;
+        let tol = 1e-12 * first.abs().max(1.0);
+        sums.all(|s| (s - first).abs() <= tol).then_some(first)
+    }
+
+    /// Solves (I - ρW) v = b.
+    ///
+    /// With a spectral radius |ρ| max|λ| below 0.99 this is the Neumann iteration
+    /// v ← b + ρWv (O(links) per step); otherwise, or if the iteration does not settle, a
+    /// dense LU solve on a fallibly allocated n x n matrix.
+    pub(crate) fn solve_i_minus_rho_w(
+        &mut self,
+        rho: f64,
+        b: &Array1<f64>,
+    ) -> EconResult<Array1<f64>> {
+        let spectrum = Arc::clone(self.try_spectrum()?);
+        let q = if spectrum.ok {
+            rho.abs()
+                * spectrum
+                    .values
+                    .iter()
+                    .map(|&(a, im)| a.hypot(im))
+                    .fold(0.0, f64::max)
+        } else {
+            f64::INFINITY
+        };
+        if q < 0.99 {
+            let max_iter = if q > 0.0 {
+                let needed = (1e-17_f64.ln() / q.ln()).ceil();
+                (needed as usize).saturating_add(50).min(100_000)
+            } else {
+                50
+            };
+            let mut v = b.clone();
+            for it in 0..max_iter {
+                if it % 64 == 0 {
+                    checkpoint()?;
+                }
+                let next = b + &(rho * &self.lag(&v));
+                let delta = next
+                    .iter()
+                    .zip(v.iter())
+                    .map(|(x, y)| (x - y).abs())
+                    .fold(0.0, f64::max);
+                let scale = next.iter().map(|x| x.abs()).fold(0.0, f64::max);
+                v = next;
+                if delta <= 1e-14 * scale.max(1.0) {
+                    return Ok(v);
+                }
+            }
+        }
+        let mut a = try_zeros2(self.n, self.n, "dense matrix I - rho*W")?;
+        for (i, sw) in self.weights.iter().enumerate() {
+            a[[i, i]] = 1.0;
+            for (&j, &w) in sw.indices.iter().zip(sw.weights.iter()) {
+                a[[i, j]] -= rho * w;
+            }
+        }
+        Ok(crate::linalg::matrix_ops::solve(&a.view(), b)?)
+    }
+
     /// Get cached eigenvalues if available.
     pub fn get_eigenvalues(&self) -> Option<&Array1<f64>> {
         self.spectrum.as_ref().map(|s| &s.real_sorted)
@@ -372,8 +513,7 @@ impl SpatialWeights {
     ///
     /// The log-determinant value
     pub fn log_det(&mut self, rho: f64) -> f64 {
-        let eigs = self.eigenvalues();
-        eigs.iter().map(|&lambda| (1.0 - rho * lambda).ln()).sum()
+        log_det_from(self.eigenvalues(), rho)
     }
 
     /// Get the valid range for ρ based on eigenvalues.
@@ -382,22 +522,7 @@ impl SpatialWeights {
     /// ρ to be in (1/λ_min, 1/λ_max) where λ_min and λ_max are the
     /// extreme eigenvalues of W.
     pub fn rho_range(&mut self) -> (f64, f64) {
-        let eigs = self.eigenvalues();
-        let lambda_min = eigs.iter().copied().fold(f64::INFINITY, f64::min);
-        let lambda_max = eigs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-
-        let lower = if lambda_min < 0.0 {
-            1.0 / lambda_min
-        } else {
-            f64::NEG_INFINITY
-        };
-        let upper = if lambda_max > 0.0 {
-            1.0 / lambda_max
-        } else {
-            f64::INFINITY
-        };
-
-        (lower, upper)
+        rho_range_from(self.eigenvalues())
     }
 
     /// Compute (I - ρW)y.
@@ -559,6 +684,30 @@ pub struct WeightsSummary {
     pub style: WeightStyle,
 }
 
+/// log|I - ρW| = Σ log(1 - ρλ_i) from the (real parts of the) eigenvalues.
+fn log_det_from(eigs: &Array1<f64>, rho: f64) -> f64 {
+    eigs.iter().map(|&lambda| (1.0 - rho * lambda).ln()).sum()
+}
+
+/// (1/λ_min, 1/λ_max), open-ended when no eigenvalue has that sign.
+fn rho_range_from(eigs: &Array1<f64>) -> (f64, f64) {
+    let lambda_min = eigs.iter().copied().fold(f64::INFINITY, f64::min);
+    let lambda_max = eigs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+
+    let lower = if lambda_min < 0.0 {
+        1.0 / lambda_min
+    } else {
+        f64::NEG_INFINITY
+    };
+    let upper = if lambda_max > 0.0 {
+        1.0 / lambda_max
+    } else {
+        f64::INFINITY
+    };
+
+    (lower, upper)
+}
+
 /// Compute the eigenvalues of a matrix using faer.
 fn compute_spectrum(m: &Array2<f64>) -> Spectrum {
     use crate::linalg::matrix_ops::ndarray_to_faer;
@@ -703,6 +852,27 @@ mod tests {
         // For row-standardized weights, maximum eigenvalue is 1
         let max_eig = eigs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
         assert!((max_eig - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn fallible_eigen_paths_respect_the_ceiling_and_cancellation() {
+        use crate::errors::EconError;
+        use crate::resource::{Budget, CancelToken, with_alloc_ceiling, with_budget};
+        let nb = Neighbors::fully_connected(64);
+        let mut w = SpatialWeights::from_neighbors(&nb, WeightStyle::RowStd);
+        // a 64 x 64 matrix needs 32 KiB
+        let r = with_alloc_ceiling(Some(1024), || w.try_eigenvalues().map(|e| e.len()));
+        assert!(matches!(r, Err(EconError::ResourceLimit(_))), "{r:?}");
+        let t = CancelToken::new();
+        t.cancel();
+        let r = with_budget(Budget::new(None, t), || w.try_rho_range());
+        assert!(matches!(r, Err(EconError::Cancelled(_))), "{r:?}");
+        assert!(w.get_eigenvalues().is_none());
+        // the fallible forms return what the legacy ones return
+        let mut legacy = SpatialWeights::from_neighbors(&nb, WeightStyle::RowStd);
+        assert_eq!(w.try_rho_range().unwrap(), legacy.rho_range());
+        assert_eq!(w.try_log_det(0.3).unwrap(), legacy.log_det(0.3));
+        assert_eq!(w.try_to_dense().unwrap(), legacy.to_dense());
     }
 
     #[test]
