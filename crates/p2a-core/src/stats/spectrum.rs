@@ -26,6 +26,11 @@ use std::fmt;
 
 use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
+use crate::resource::{checkpoint, try_with_capacity};
+
+fn size_overflow(what: &str) -> EconError {
+    EconError::ResourceLimit(format!("{what} is too large: the requested size overflows"))
+}
 
 /// Configuration for spectral density estimation.
 ///
@@ -34,6 +39,8 @@ use crate::errors::{EconError, EconResult};
 pub struct SpectrumConfig {
     /// Widths of modified Daniell smoothers (must be odd integers).
     /// Multiple spans are convolved together. Default: None (no smoothing).
+    /// The combined kernel must be shorter than the series
+    /// (2·Σ⌊span/2⌋ < n_used), as in R.
     ///
     /// # Example
     /// - `spans = Some(vec![3])`: Simple moving average of width 3
@@ -293,14 +300,27 @@ pub fn spectrum(x: &[f64], config: SpectrumConfig) -> EconResult<SpectrumResult>
         });
     }
 
+    if x.iter().any(|v| !v.is_finite()) {
+        return Err(EconError::InvalidSpecification {
+            message: "the series contains NaN or infinite values".to_string(),
+        });
+    }
+
+    if !config.pad_ratio.is_finite() {
+        return Err(EconError::InvalidSpecification {
+            message: format!("pad_ratio must be finite, got {}", config.pad_ratio),
+        });
+    }
+
+    // Zero-padding length. A negative ratio saturates to 0 (no padding), as
+    // R's spec.pgram does for pad <= 0.
+    let n_pad = (n as f64 * config.pad_ratio).round() as usize;
+    let n_used = n
+        .checked_add(n_pad)
+        .ok_or_else(|| size_overflow("the padded series"))?;
+
     if let Some(ref spans) = config.spans {
-        for &span in spans {
-            if span < 1 || span % 2 == 0 {
-                return Err(EconError::InvalidSpecification {
-                    message: format!("Spans must be positive odd integers, got {}", span),
-                });
-            }
-        }
+        validate_spans(spans, n_used)?;
     }
 
     // Step 1: Preprocess - detrend or demean
@@ -318,18 +338,17 @@ pub fn spectrum(x: &[f64], config: SpectrumConfig) -> EconResult<SpectrumResult>
         apply_cosine_taper(&mut y, config.taper);
     }
 
-    // Step 3: Zero-padding
-    let n_pad = (n as f64 * config.pad_ratio).round() as usize;
-    let n_used = n + n_pad;
-    y.extend(vec![0.0; n_pad]);
-
     // Step 4: Compute raw periodogram using FFT (O(n log n) instead of O(n²))
     // We compute at frequencies f_j = j/n_used for j = 1, ..., floor(n_used/2)
     // (skip f_0 = 0 as it's the mean, and we only need positive frequencies)
     let n_freq = n_used / 2;
 
-    // Prepare FFT input: convert real signal to complex
-    let mut fft_input: Vec<Complex<f64>> = y.iter().map(|&v| Complex::new(v, 0.0)).collect();
+    // Prepare FFT input: the real signal as complex values, followed by the
+    // zero padding (Step 3).
+    let mut fft_input: Vec<Complex<f64>> =
+        try_with_capacity(n_used, "the FFT buffer for the padded series")?;
+    fft_input.extend(y.iter().map(|&v| Complex::new(v, 0.0)));
+    fft_input.resize(n_used, Complex::new(0.0, 0.0));
 
     // Compute FFT
     let mut planner = FftPlanner::new();
@@ -360,9 +379,15 @@ pub fn spectrum(x: &[f64], config: SpectrumConfig) -> EconResult<SpectrumResult>
         raw_periodogram.push(power * scale);
     }
 
+    if raw_periodogram.iter().any(|v| !v.is_finite()) {
+        return Err(EconError::InvalidSpecification {
+            message: "the series is too large in magnitude for a periodogram".to_string(),
+        });
+    }
+
     // Step 5: Smooth with modified Daniell kernel(s)
     let (spec, bandwidth, df) = if let Some(ref spans) = config.spans {
-        let smoothed = apply_daniell_smoothing(&raw_periodogram, spans);
+        let smoothed = apply_daniell_smoothing(&raw_periodogram, spans)?;
 
         // Compute bandwidth and degrees of freedom
         // Bandwidth = sum of span weights / n_used
@@ -501,47 +526,132 @@ fn compute_fourier_coef(x: &[f64], freq: f64) -> (f64, f64) {
 /// where span = 2m + 1
 ///
 /// Multiple spans are convolved together by successive application.
-fn apply_daniell_smoothing(periodogram: &[f64], spans: &[usize]) -> Vec<f64> {
+fn apply_daniell_smoothing(periodogram: &[f64], spans: &[usize]) -> EconResult<Vec<f64>> {
     let mut result = periodogram.to_vec();
 
     for &span in spans {
+        checkpoint()?;
+        if span <= 1 {
+            continue;
+        }
         result = apply_single_daniell(&result, span);
     }
 
-    result
+    Ok(result)
 }
 
-/// Apply a single modified Daniell kernel of given span.
+/// Check smoothing spans against the (padded) series length `n_used`.
+///
+/// Every span must be a positive odd integer, and the combined modified
+/// Daniell kernel must be shorter than the series. This is R's `kernapply`
+/// rule: with `M` the sum of the half-widths `span / 2`, `2 * M < n_used`.
+fn validate_spans(spans: &[usize], n_used: usize) -> EconResult<()> {
+    for &span in spans {
+        if span < 1 || span % 2 == 0 {
+            return Err(EconError::InvalidSpecification {
+                message: format!("Spans must be positive odd integers, got {}", span),
+            });
+        }
+    }
+
+    const ADVICE: &str =
+        "R's spec.pgram refuses this too ('x' is shorter than kernel 'k'). Use smaller spans";
+    let Some(half_widths) = spans
+        .iter()
+        .try_fold(0usize, |acc, &s| acc.checked_add(s / 2))
+    else {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "spans give a smoothing kernel too wide to represent, which is not shorter \
+                 than the {n_used}-point series; {ADVICE}"
+            ),
+        });
+    };
+    if half_widths.checked_mul(2).is_none_or(|w| w >= n_used) {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "spans give a smoothing kernel {} ordinates wide (sum of half-widths \
+                 {half_widths}), which is not shorter than the {n_used}-point series; {ADVICE}",
+                half_widths.saturating_mul(2).saturating_add(1)
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// A Neumaier-compensated running sum; values are removed with `add(-v)`.
+///
+/// A periodogram can span many orders of magnitude. The compensation keeps
+/// the rounding a large ordinate leaves behind out of the window sums of the
+/// small ordinates that follow it.
+#[derive(Default)]
+struct RunningSum {
+    sum: f64,
+    comp: f64,
+}
+
+impl RunningSum {
+    fn add(&mut self, v: f64) {
+        let t = self.sum + v;
+        self.comp += if self.sum.abs() >= v.abs() {
+            (self.sum - t) + v
+        } else {
+            (v - t) + self.sum
+        };
+        self.sum = t;
+    }
+
+    fn value(&self) -> f64 {
+        self.sum + self.comp
+    }
+}
+
+/// Apply a single modified Daniell kernel of given (odd) span.
+///
+/// Output `i` is the weighted mean of `x[i-m..=i+m]` (`m = span / 2`) with
+/// half weight on both endpoints, truncated at the edges of the series. The
+/// full-weight part of the kernel is a sliding window, so one pass costs
+/// O(n) whatever the span.
 fn apply_single_daniell(x: &[f64], span: usize) -> Vec<f64> {
     let n = x.len();
     if n == 0 || span <= 1 {
         return x.to_vec();
     }
 
-    let m = span / 2; // Half-width
+    let m = span / 2; // Half-width, at least 1
     let mut result = Vec::with_capacity(n);
 
+    // Full-weight window for i = 0: [0, min(n - 1, m - 1)].
+    let mut window = RunningSum::default();
+    for &v in &x[..m.min(n)] {
+        window.add(v);
+    }
+
     for i in 0..n {
-        let mut sum = 0.0;
-        let mut weight_sum = 0.0;
-
-        for j in 0..span {
-            let k = j as isize - m as isize;
-            let idx = i as isize + k;
-
-            if idx >= 0 && (idx as usize) < n {
-                // Half-weight at endpoints of kernel
-                let w = if j == 0 || j == span - 1 { 0.5 } else { 1.0 };
-                sum += w * x[idx as usize];
-                weight_sum += w;
-            }
+        // The full-weight window is [lo, hi]; it always contains i.
+        let lo = (i + 1).saturating_sub(m);
+        let hi = i.saturating_add(m - 1).min(n - 1);
+        let mut num = window.value();
+        let mut den = (hi - lo + 1) as f64;
+        if i >= m {
+            num += 0.5 * x[i - m];
+            den += 0.5;
         }
+        let right = i.checked_add(m).filter(|&r| r < n);
+        if let Some(r) = right {
+            num += 0.5 * x[r];
+            den += 0.5;
+        }
+        result.push(num / den);
 
-        result.push(if weight_sum > 0.0 {
-            sum / weight_sum
-        } else {
-            x[i]
-        });
+        // Slide to i + 1: x[i + m] gains full weight, and x[i + 1 - m]
+        // becomes the left half-weight endpoint.
+        if let Some(r) = right {
+            window.add(x[r]);
+        }
+        if i + 1 >= m {
+            window.add(-x[i + 1 - m]);
+        }
     }
 
     result
@@ -603,10 +713,14 @@ pub fn spectrum_ar(
     let n_pts = n_freq.unwrap_or(500);
 
     // Compute spectral density at frequencies
-    let mut freq = Vec::with_capacity(n_pts);
-    let mut spec = Vec::with_capacity(n_pts);
+    let mut freq = try_with_capacity(n_pts, "the AR spectrum frequency grid")?;
+    let mut spec = try_with_capacity(n_pts, "the AR spectrum frequency grid")?;
 
     for j in 1..=n_pts {
+        // Each point costs O(p), and p can be as large as n / 2.
+        if j % 1024 == 0 {
+            checkpoint()?;
+        }
         let f = j as f64 / (2.0 * n_pts as f64); // Frequencies in (0, 0.5]
         freq.push(f);
 
@@ -657,6 +771,7 @@ fn fit_ar_yule_walker(x: &[f64], p: usize) -> EconResult<(Vec<f64>, f64)> {
     // Compute autocovariances
     let mut gamma = Vec::with_capacity(p + 1);
     for k in 0..=p {
+        checkpoint()?;
         let mut sum = 0.0;
         for t in 0..(n - k) {
             sum += y[t] * y[t + k];
@@ -720,6 +835,7 @@ fn select_ar_order_aic(x: &[f64], max_order: usize) -> EconResult<(Vec<f64>, f64
     let mut best_var = 0.0;
 
     for p in 0..=max_order {
+        checkpoint()?;
         let (coefs, var) = fit_ar_yule_walker(x, p)?;
 
         if var <= 0.0 {
@@ -953,7 +1069,7 @@ mod tests {
         // Test that smoothing reduces variance
         let x: Vec<f64> = vec![1.0, 5.0, 2.0, 4.0, 3.0, 6.0, 1.0, 5.0, 2.0, 4.0];
 
-        let smoothed = apply_daniell_smoothing(&x, &[3]);
+        let smoothed = apply_daniell_smoothing(&x, &[3]).unwrap();
 
         // Variance should be reduced
         let var_orig: f64 = {
@@ -1281,5 +1397,257 @@ mod tests {
         // R shows CV ≈ 0.35 for white noise with spans=c(5,5)
         // Allow broader range due to different implementations
         assert!(cv < 2.0, "White noise CV {} should be < 2.0 (R ≈ 0.35)", cv);
+    }
+
+    use rand::{Rng, SeedableRng};
+    use rand_chacha::ChaCha8Rng;
+
+    fn cancelled<R>(f: impl FnOnce() -> R) -> R {
+        let token = crate::resource::CancelToken::new();
+        token.cancel();
+        crate::resource::with_budget(crate::resource::Budget::new(None, token), f)
+    }
+
+    /// R: mk <- function(n) { t <- 1:n; sin(2*pi*t/7) + 0.5*cos(2*pi*t/13) + 0.3*(((37*t) %% 11) - 5)/5 + 0.02*t }
+    fn mk(n: usize) -> Vec<f64> {
+        (1..=n)
+            .map(|t| {
+                let tf = t as f64;
+                (2.0 * PI * tf / 7.0).sin()
+                    + 0.5 * (2.0 * PI * tf / 13.0).cos()
+                    + 0.3 * (((37 * t) % 11) as f64 - 5.0) / 5.0
+                    + 0.02 * tf
+            })
+            .collect()
+    }
+
+    /// R 4.3.3 on x <- mk(120) (nextn(120) = 120, so R does not pad):
+    ///   spec.pgram(x, spans = 119)        -> ok
+    ///   spec.pgram(x, spans = 121)        -> Error: 'x' is shorter than kernel 'k'
+    ///   spec.pgram(x, spans = c(59, 61))  -> ok
+    ///   spec.pgram(x, spans = c(61, 61))  -> Error: 'x' is shorter than kernel 'k'
+    ///   spec.pgram(x, spans = c(3, 3, 3)) -> ok
+    #[test]
+    fn spans_follow_r_kernel_length_rule() {
+        let x = mk(120);
+        for (spans, ok) in [
+            (vec![119], true),
+            (vec![121], false),
+            (vec![59, 61], true),
+            (vec![61, 61], false),
+            (vec![3, 3, 3], true),
+        ] {
+            let r = spectrum(&x, SpectrumConfig::with_spans(spans.clone()));
+            assert_eq!(r.is_ok(), ok, "{spans:?}: {r:?}");
+            if let Err(e) = r {
+                let m = e.to_string();
+                assert!(m.contains("spans") && m.contains("shorter"), "{m}");
+            }
+        }
+    }
+
+    #[test]
+    fn validate_spans_bounds_huge_and_overflowing_spans() {
+        // Before the fix any odd span passed and the smoother looped n_freq * span times.
+        assert!(validate_spans(&[usize::MAX], 120).is_err());
+        assert!(validate_spans(&[usize::MAX, usize::MAX], 120).is_err()); // half-width sum overflows
+        assert!(validate_spans(&[4], 120).is_err());
+        assert!(validate_spans(&[0], 120).is_err());
+        assert!(validate_spans(&[1, 3], 120).is_ok()); // span 1 stays a no-op, as before
+        assert!(validate_spans(&[3], 4).is_ok()); // M = 1, 2 < 4
+    }
+
+    #[test]
+    fn spectrum_rejects_non_finite_input_and_padding() {
+        let mut x = mk(64);
+        x[10] = f64::NAN;
+        assert!(matches!(
+            spectrum(&x, SpectrumConfig::default()),
+            Err(EconError::InvalidSpecification { .. })
+        ));
+        let x = mk(64);
+        let inf = SpectrumConfig {
+            pad_ratio: f64::INFINITY,
+            ..Default::default()
+        };
+        assert!(matches!(
+            spectrum(&x, inf),
+            Err(EconError::InvalidSpecification { .. })
+        ));
+        let huge = SpectrumConfig {
+            pad_ratio: 1e15,
+            ..Default::default()
+        }; // aborted before the fix
+        assert!(matches!(
+            spectrum(&x, huge),
+            Err(EconError::ResourceLimit(_))
+        ));
+    }
+
+    #[test]
+    fn spectrum_and_spectrum_ar_honour_cancellation() {
+        let x = mk(64);
+        assert!(matches!(
+            cancelled(|| spectrum(&x, SpectrumConfig::with_spans(vec![3]))),
+            Err(EconError::Cancelled(_))
+        ));
+        assert!(matches!(
+            cancelled(|| spectrum_ar(&x, Some(5), None)),
+            Err(EconError::Cancelled(_))
+        ));
+    }
+
+    /// R 4.3.3: x <- mk(64)
+    ///   spec.pgram(x, spans = c(3,3), taper = 0, detrend = TRUE, fast = FALSE, plot = FALSE)$spec[3:29]
+    ///   spec.pgram(x, spans = c(3,5), taper = 0, detrend = TRUE, fast = FALSE, plot = FALSE)$spec[4:28]
+    /// Interior ordinates only. R smooths circularly over all 64 ordinates. This module smooths the 32
+    /// one-sided ones, truncates at the edges, and doubles every ordinate below Nyquist (STAT-68, tier 4;
+    /// drop the 2.0 factor when that lands). Away from both edges the kernel sees the same ordinates, so the
+    /// value is exactly 2 x R's.
+    #[test]
+    fn test_validate_daniell_interior_against_r() {
+        const R33: [f64; 27] = [
+            0.294751418490341,
+            1.17007599290853,
+            1.76873989206635,
+            1.22699515296737,
+            1.35823766843787,
+            3.95388829751672,
+            5.87221772597407,
+            3.97549758319909,
+            1.0933717954446,
+            0.0942676957167229,
+            0.0552753023526369,
+            0.0276145376573642,
+            0.0177740413045258,
+            0.0313048306960085,
+            0.0562148414270557,
+            0.0636487205499741,
+            0.0447480823053404,
+            0.0253687914716106,
+            0.0549156684327419,
+            0.162137993506803,
+            0.24212869348457,
+            0.181811958853286,
+            0.0694888711707109,
+            0.0182003517065288,
+            0.0107777101276656,
+            0.0132100110502439,
+            0.0170177746538345,
+        ];
+        const R35: [f64; 25] = [
+            1.03174565527834,
+            1.19853557293795,
+            1.56348878025211,
+            2.59044172524204,
+            3.61522769720597,
+            3.9646929403579,
+            3.48279476070933,
+            2.03488263945791,
+            0.574323548898619,
+            0.0609411166870433,
+            0.0365246718285814,
+            0.0294596841766859,
+            0.0369944413657909,
+            0.0474767756229914,
+            0.0504814618661979,
+            0.044508756010792,
+            0.0498318753690409,
+            0.0937533924892071,
+            0.148522180958656,
+            0.171974976180045,
+            0.155808782327641,
+            0.100006155279908,
+            0.0401332906491882,
+            0.0157051813783862,
+            0.01389774239075,
+        ];
+        let cfg = |s: Vec<usize>| SpectrumConfig {
+            spans: Some(s),
+            taper: 0.0,
+            detrend: true,
+            demean: false,
+            pad_ratio: 0.0,
+        };
+        let s33 = spectrum(&mk(64), cfg(vec![3, 3])).unwrap().spec;
+        for (i, r) in (2..=28).zip(R33) {
+            approx::assert_relative_eq!(s33[i], 2.0 * r, max_relative = 1e-10);
+        }
+        let s35 = spectrum(&mk(64), cfg(vec![3, 5])).unwrap().spec;
+        for (i, r) in (3..=27).zip(R35) {
+            approx::assert_relative_eq!(s35[i], 2.0 * r, max_relative = 1e-10);
+        }
+    }
+
+    /// The pre-change smoother, verbatim (direct sum over every kernel position).
+    fn daniell_reference(x: &[f64], span: usize) -> Vec<f64> {
+        let n = x.len();
+        if n == 0 || span <= 1 {
+            return x.to_vec();
+        }
+
+        let m = span / 2; // Half-width
+        let mut result = Vec::with_capacity(n);
+
+        for i in 0..n {
+            let mut sum = 0.0;
+            let mut weight_sum = 0.0;
+
+            for j in 0..span {
+                let k = j as isize - m as isize;
+                let idx = i as isize + k;
+
+                if idx >= 0 && (idx as usize) < n {
+                    // Half-weight at endpoints of kernel
+                    let w = if j == 0 || j == span - 1 { 0.5 } else { 1.0 };
+                    sum += w * x[idx as usize];
+                    weight_sum += w;
+                }
+            }
+
+            result.push(if weight_sum > 0.0 {
+                sum / weight_sum
+            } else {
+                x[i]
+            });
+        }
+
+        result
+    }
+
+    #[test]
+    fn daniell_sliding_window_matches_direct_reference() {
+        let mut rng = ChaCha8Rng::seed_from_u64(11);
+        for n in 1..=60 {
+            let x: Vec<f64> = (0..n).map(|_| rng.r#gen::<f64>() * 10.0).collect();
+            // includes spans wider than the series
+            for span in (1..=2 * n + 3).step_by(2) {
+                let fast = apply_single_daniell(&x, span);
+                let slow = daniell_reference(&x, span);
+                assert_eq!(fast.len(), slow.len());
+                for (a, b) in fast.iter().zip(&slow) {
+                    assert!(
+                        (a - b).abs() <= 1e-12 * b.abs().max(1e-300),
+                        "n={n} span={span}: {a} vs {b}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A periodogram can span 15 orders of magnitude. An uncompensated running sum keeps ~1e-4 of
+    /// rounding from the peak and fails this test; the compensated one passes.
+    #[test]
+    fn daniell_sliding_window_keeps_precision_after_a_large_peak() {
+        let mut x = vec![1e12];
+        x.extend((0..199).map(|i| 1e-3 * (1.5 + (i as f64).sin())));
+        for span in [3, 5, 51, 199] {
+            for (a, b) in apply_single_daniell(&x, span)
+                .iter()
+                .zip(daniell_reference(&x, span))
+            {
+                assert!((a - b).abs() <= 1e-9 * b.abs(), "span={span}: {a} vs {b}");
+            }
+        }
     }
 }
