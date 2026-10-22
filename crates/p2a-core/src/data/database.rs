@@ -61,8 +61,8 @@ pub enum DatabaseError {
 ///
 /// It is defence in depth only. The enforcement is the engine configuration of
 /// every query connection (DuckDB: external access off, extensions off, locked
-/// configuration, read-only files; SQLite: read-only, `query_only`, no ATTACH)
-/// together with [`ensure_single_statement`].
+/// configuration, read-only files; SQLite: read-only, `query_only`, no ATTACH,
+/// schema PRAGMAs only) together with [`ensure_single_statement`].
 pub fn validate_read_only_query(query: &str) -> Result<(), DatabaseError> {
     const ALLOWED: &[&str] = &["select", "with", "explain", "pragma", "describe", "show"];
 
@@ -623,17 +623,57 @@ fn stopped_by(reason: Option<&str>, err: DatabaseError) -> DatabaseError {
 // SQLite Support
 // ============================================================================
 
-/// Open a SQLite database for queries: read-only, without `file:` URI parsing
-/// (so no `mode=`/`vfs=` parameters), no attached databases, `query_only` on,
-/// and, when a byte budget is set, no value larger than that budget.
-fn open_sqlite_locked(
-    path: &Path,
-    opts: &QueryOptions,
-) -> Result<rusqlite::Connection, DatabaseError> {
+/// Read-only schema PRAGMAs that an open [`SqliteConnection`] admits. Every
+/// other PRAGMA is refused by the authorizer, because SQLite applies many
+/// PRAGMAs while it *compiles* them — inside `prepare`, before
+/// `Statement::readonly()` can be checked — and some of them change
+/// process-global state (`hard_heap_limit`, `temp_store_directory`, …) on a
+/// read-only connection and need no valid database.
+const SQLITE_SCHEMA_PRAGMAS: &[&str] = &[
+    "table_info",
+    "table_xinfo",
+    "table_list",
+    "index_list",
+    "index_info",
+    "index_xinfo",
+    "foreign_key_list",
+    "database_list",
+    "collation_list",
+];
+
+/// A locked SQLite connection together with the slot its authorizer writes the
+/// name of a refused PRAGMA into (so the caller can turn the resulting
+/// "not authorized" error into a clear [`DatabaseError::Forbidden`]).
+struct SqliteConnection {
+    conn: rusqlite::Connection,
+    denied_pragma: Arc<OnceLock<String>>,
+}
+
+/// The path handed to SQLite's `open`. The bundled build compiles
+/// `-DSQLITE_USE_URI`, so SQLite parses any filename that *begins with*
+/// `file:` as a URI (`mode=`, `vfs=`, `immutable=`, `cache=`), whether or not
+/// `SQLITE_OPEN_URI` is passed. A relative path is prefixed with `.` so it can
+/// never begin with `file:`; an absolute path (what the MCP jail always passes)
+/// cannot begin with `file:` already and is left unchanged.
+fn sqlite_open_path(path: &Path) -> Cow<'_, Path> {
+    if path.is_relative() {
+        Cow::Owned(Path::new(".").join(path))
+    } else {
+        Cow::Borrowed(path)
+    }
+}
+
+/// Open a SQLite database for queries: read-only, never as a `file:` URI (so no
+/// `mode=`/`vfs=` parameters, see [`sqlite_open_path`]), no attached databases,
+/// `query_only` on, an authorizer that admits only the read-only schema PRAGMAs
+/// ([`SQLITE_SCHEMA_PRAGMAS`]), and, when a byte budget is set, no value larger
+/// than that budget.
+fn open_sqlite_locked(path: &Path, opts: &QueryOptions) -> Result<SqliteConnection, DatabaseError> {
+    use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
     use rusqlite::limits::Limit;
     let flags =
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX;
-    let conn = rusqlite::Connection::open_with_flags(path, flags)?;
+    let conn = rusqlite::Connection::open_with_flags(sqlite_open_path(path).as_ref(), flags)?;
     conn.set_limit(Limit::SQLITE_LIMIT_ATTACHED, 0)?;
     if let Some(bytes) = opts.max_bytes {
         // A larger value could never be returned within the byte budget anyway.
@@ -641,7 +681,43 @@ fn open_sqlite_locked(
         conn.set_limit(Limit::SQLITE_LIMIT_LENGTH, len)?;
     }
     conn.execute_batch("PRAGMA query_only = ON")?;
-    Ok(conn)
+
+    // Arm the authorizer only after the setup PRAGMA above, which it would
+    // otherwise refuse. From here on only the schema PRAGMAs are allowed.
+    let denied_pragma: Arc<OnceLock<String>> = Arc::new(OnceLock::new());
+    let denied = Arc::clone(&denied_pragma);
+    conn.authorizer(Some(move |ctx: AuthContext<'_>| match ctx.action {
+        AuthAction::Pragma { pragma_name, .. }
+            if SQLITE_SCHEMA_PRAGMAS.contains(&pragma_name.to_ascii_lowercase().as_str()) =>
+        {
+            Authorization::Allow
+        }
+        AuthAction::Pragma { pragma_name, .. } => {
+            let _ = denied.set(pragma_name.to_string());
+            Authorization::Deny
+        }
+        _ => Authorization::Allow,
+    }));
+
+    Ok(SqliteConnection {
+        conn,
+        denied_pragma,
+    })
+}
+
+/// Map a `prepare`/`query` error from a connection with a denied PRAGMA to a
+/// clear [`DatabaseError::Forbidden`], leaving other errors untouched.
+fn denied_pragma_error(
+    denied: &OnceLock<String>,
+    fallback: impl FnOnce() -> DatabaseError,
+) -> DatabaseError {
+    match denied.get() {
+        Some(name) => DatabaseError::Forbidden(format!(
+            "PRAGMA {name} is not allowed; only schema PRAGMAs \
+             (table_info, table_list, index_list, ...) may be run"
+        )),
+        None => fallback(),
+    }
 }
 
 /// Execute a SQL query against a SQLite database and return results as a DataFrame.
@@ -674,9 +750,13 @@ pub fn query_sqlite_with(
         return Err(DatabaseError::FileNotFound(path.display().to_string()));
     }
 
-    // Read-only, query_only, no ATTACH. rusqlite's prepare compiles only the
-    // first statement; the lexer above already refused any second one.
-    let conn = open_sqlite_locked(path, opts)?;
+    // Read-only, query_only, no ATTACH, schema PRAGMAs only. rusqlite's prepare
+    // compiles only the first statement; the lexer above already refused any
+    // second one.
+    let SqliteConnection {
+        conn,
+        denied_pragma,
+    } = open_sqlite_locked(path, opts)?;
 
     // The progress handler interrupts the statement at the time limit or when
     // the installed budget is cancelled or past its deadline.
@@ -702,7 +782,14 @@ pub fn query_sqlite_with(
             }),
         );
     }
-    let stopped = |e: rusqlite::Error| stopped_by(reason.get().map(String::as_str), e.into());
+    let stopped = |e: rusqlite::Error| {
+        // A PRAGMA refused by the authorizer surfaces as a "not authorized"
+        // error during prepare; name it. Otherwise fall back to the normal
+        // interrupt/error mapping.
+        denied_pragma_error(&denied_pragma, || {
+            stopped_by(reason.get().map(String::as_str), e.into())
+        })
+    };
 
     let mut stmt = conn.prepare(body).map_err(stopped)?;
     if !stmt.readonly() {
@@ -817,7 +904,7 @@ pub fn list_sqlite_tables(db_path: impl AsRef<Path>) -> Result<Vec<String>, Data
         return Err(DatabaseError::FileNotFound(path.display().to_string()));
     }
 
-    let conn = open_sqlite_locked(path, &QueryOptions::default())?;
+    let conn = open_sqlite_locked(path, &QueryOptions::default())?.conn;
     let mut stmt =
         conn.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")?;
 
@@ -840,7 +927,7 @@ pub fn sqlite_table_schema(
         return Err(DatabaseError::FileNotFound(path.display().to_string()));
     }
 
-    let conn = open_sqlite_locked(path, &QueryOptions::default())?;
+    let conn = open_sqlite_locked(path, &QueryOptions::default())?.conn;
     validate_identifier(table_name)?;
     let mut stmt = conn.prepare(&format!("PRAGMA table_info({})", table_name))?;
 
@@ -1604,7 +1691,7 @@ mod tests {
     // ------------------------------------------------------------------
 
     #[test]
-    fn locked_sqlite_refuses_attach_and_is_query_only() {
+    fn locked_sqlite_refuses_attach_and_non_schema_pragmas() {
         let dir = tempfile::tempdir().unwrap();
         let db = sqlite_fixture(dir.path());
         let other = dir.path().join("other.sqlite");
@@ -1612,16 +1699,64 @@ mod tests {
             .unwrap()
             .execute_batch("CREATE TABLE s(secret TEXT); INSERT INTO s VALUES ('v');")
             .unwrap();
-        let conn = open_sqlite_locked(&db, &QueryOptions::default()).unwrap();
+        let SqliteConnection { conn, .. } =
+            open_sqlite_locked(&db, &QueryOptions::default()).unwrap();
         let err = conn
             .execute_batch(&format!("ATTACH '{}' AS o", other.display()))
             .unwrap_err()
             .to_string();
         assert!(err.contains("too many attached databases"), "{err}");
-        let q: i64 = conn
-            .query_row("PRAGMA query_only", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(q, 1);
+        // A schema PRAGMA is admitted; every other PRAGMA, even read-only
+        // `query_only`, is refused by the authorizer.
+        assert!(conn.execute_batch("PRAGMA table_info('t')").is_ok());
+        assert!(conn.execute_batch("PRAGMA query_only").is_err());
+    }
+
+    #[test]
+    fn sqlite_relative_paths_are_never_parsed_as_file_uris() {
+        // The bundled SQLite is built with -DSQLITE_USE_URI, so any name that
+        // begins with `file:` is URI-parsed. A relative path is prefixed with
+        // `.` so it cannot; an absolute path is left unchanged.
+        let uri_like = Path::new("file:t.sqlite?mode=memory");
+        let opened = sqlite_open_path(uri_like);
+        assert!(!opened.to_string_lossy().starts_with("file:"), "{opened:?}");
+        assert!(opened.starts_with("."));
+        let abs = Path::new("/tmp/file:t.sqlite?mode=memory");
+        assert_eq!(sqlite_open_path(abs), Cow::Borrowed(abs));
+        // Behaviourally: a relative `file:…:memory:` name must open as a plain
+        // (nonexistent) file, not as an in-memory URI database.
+        let err = open_sqlite_locked(
+            Path::new("file::memory:?cache=shared"),
+            &QueryOptions::default(),
+        );
+        assert!(
+            err.is_err(),
+            "a relative file: URI opened as a URI database"
+        );
+    }
+
+    #[test]
+    fn sqlite_refuses_side_effecting_pragmas_but_keeps_schema_pragmas() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = sqlite_fixture(dir.path());
+        // Vectors that do no harm even if the authorizer regresses: a
+        // `hard_heap_limit` of 0 and an empty `temp_store_directory` would both
+        // change process-global SQLite state for every later query.
+        for q in [
+            "PRAGMA hard_heap_limit = 0",
+            "PRAGMA temp_store_directory = ''",
+        ] {
+            let err = query_sqlite(&db, q).unwrap_err();
+            assert!(
+                matches!(err, DatabaseError::Forbidden(_))
+                    && err.to_string().contains("not allowed"),
+                "{q}: {err}"
+            );
+        }
+        // Read-only schema PRAGMAs and their table-valued forms still work.
+        assert!(query_sqlite(&db, "PRAGMA table_info('t')").is_ok());
+        assert!(query_sqlite(&db, "SELECT * FROM pragma_table_info('t')").is_ok());
+        assert!(sqlite_table_schema(&db, "t").is_ok());
     }
 
     #[test]

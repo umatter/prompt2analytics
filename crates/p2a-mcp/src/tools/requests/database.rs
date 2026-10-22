@@ -16,7 +16,7 @@ pub struct SqliteQueryRequest {
 
     /// SQL query to execute
     #[schemars(
-        description = "Exactly one read-only SQL statement (SELECT, WITH, EXPLAIN or PRAGMA). Statements that would modify the database, ATTACH and any second statement are refused. The server may cap the rows returned."
+        description = "Exactly one read-only SQL statement (SELECT, WITH, EXPLAIN, or a schema PRAGMA: table_info, table_list, index_list, ...). Statements that would modify the database, ATTACH, other PRAGMAs and any second statement are refused. The server may cap the rows returned."
     )]
     pub query: String,
 

@@ -236,7 +236,7 @@ impl AnalyticsServer {
 
     /// Query a SQLite database and load results as a dataset.
     #[tool(
-        description = "Execute exactly one read-only SQL statement (SELECT, WITH, EXPLAIN or PRAGMA) against a SQLite database and load the results as a dataset. The resulting dataset can then be analyzed using other tools. Statements that would modify the database, ATTACH and any second statement are refused. The server may cap the number of rows, the result size and the run time; a truncated result is reported."
+        description = "Execute exactly one read-only SQL statement (SELECT, WITH, EXPLAIN or a schema PRAGMA: table_info, table_list, index_list, ...) against a SQLite database and load the results as a dataset. The resulting dataset can then be analyzed using other tools. Statements that would modify the database, ATTACH, other PRAGMAs and any second statement are refused. The server may cap the number of rows, the result size and the run time; a truncated result is reported."
     )]
     pub async fn db_sqlite_query(
         &self,
