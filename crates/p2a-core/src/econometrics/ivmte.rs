@@ -95,6 +95,7 @@ use std::fmt;
 
 use crate::errors::{EconError, EconResult};
 use crate::linalg::matrix_ops::{safe_inverse, xtx, xty};
+use crate::resource;
 use crate::traits::estimator::{SignificanceLevel, normal_cdf, normal_pdf, t_test_p_value};
 
 /// Estimand type for MTE analysis.
@@ -509,6 +510,8 @@ pub fn run_ivmte(
         });
     }
 
+    validate_config(&config, n, x.map_or(0, |m| m.ncols()))?;
+
     // ═══════════════════════════════════════════════════════════════════════════
     // Stage 1: Estimate propensity score P(Z) = Pr(D=1|Z)
     // ═══════════════════════════════════════════════════════════════════════════
@@ -551,20 +554,20 @@ pub fn run_ivmte(
     // MTE(p) = b₁ + 2b₂p + 3b₃p² + ... + kb_kp^(k-1)
     // ═══════════════════════════════════════════════════════════════════════════
 
-    let mte_curve = compute_mte_curve(&polynomial_coefs, config.n_grid);
+    let mte_curve = compute_mte_curve(&polynomial_coefs, config.n_grid)?;
 
     // Compute treatment effect parameters as weighted integrals of MTE
-    let (ate, weights_ate) = compute_ate(&polynomial_coefs, config.n_grid);
-    let (att, weights_att) = compute_att(&polynomial_coefs, propensity, config.n_grid);
-    let (atu, weights_atu) = compute_atu(&polynomial_coefs, propensity, config.n_grid);
-    let (late, weights_late) = compute_late(&polynomial_coefs, propensity, config.n_grid);
+    let (ate, weights_ate) = compute_ate(&polynomial_coefs, config.n_grid)?;
+    let (att, weights_att) = compute_att(&polynomial_coefs, propensity, config.n_grid)?;
+    let (atu, weights_atu) = compute_atu(&polynomial_coefs, propensity, config.n_grid)?;
+    let (late, weights_late) = compute_late(&polynomial_coefs, propensity, config.n_grid)?;
 
     // Compute standard errors for treatment effects
     // Using delta method from polynomial coefficient SEs
-    let ate_se = compute_te_se(&polynomial_coefs, &polynomial_se, &weights_ate);
-    let att_se = compute_te_se(&polynomial_coefs, &polynomial_se, &weights_att);
-    let atu_se = compute_te_se(&polynomial_coefs, &polynomial_se, &weights_atu);
-    let late_se = compute_te_se(&polynomial_coefs, &polynomial_se, &weights_late);
+    let ate_se = compute_te_se(&polynomial_coefs, &polynomial_se, &weights_ate)?;
+    let att_se = compute_te_se(&polynomial_coefs, &polynomial_se, &weights_att)?;
+    let atu_se = compute_te_se(&polynomial_coefs, &polynomial_se, &weights_atu)?;
+    let late_se = compute_te_se(&polynomial_coefs, &polynomial_se, &weights_late)?;
 
     // Build treatment effect estimates
     let df = n.saturating_sub(polynomial_coefs.len() + 1) as f64;
@@ -600,6 +603,44 @@ pub fn run_ivmte(
         residual_se,
         warnings,
     })
+}
+
+/// Check the controls of an MTE estimation against the data they apply to.
+///
+/// `n_x_cols` counts the covariate columns the second stage reserves, as
+/// `estimate_polynomial_stage` does. The grid allocation is checked here too, so
+/// an impossible grid is refused before any estimation runs.
+fn validate_config(config: &IVMTEConfig, n: usize, n_x_cols: usize) -> EconResult<()> {
+    let invalid = |message: String| Err(EconError::InvalidSpecification { message });
+
+    if config.n_grid == 0 {
+        return invalid("n_grid must be at least 1 (got 0)".to_string());
+    }
+    if config.mte_degree == 0 {
+        return invalid("mte_degree must be at least 1 (got 0)".to_string());
+    }
+    let total_cols = 1usize
+        .checked_add(n_x_cols)
+        .and_then(|c| c.checked_add(config.mte_degree));
+    if total_cols.is_none_or(|c| c >= n) {
+        let cols = total_cols.map_or_else(|| "more than usize::MAX".to_string(), |c| c.to_string());
+        return invalid(format!(
+            "mte_degree = {} is too large for {} observations: the second stage would have {} \
+             columns and needs fewer columns than observations",
+            config.mte_degree, n, cols
+        ));
+    }
+    if !(config.tolerance.is_finite() && config.tolerance > 0.0) {
+        return invalid(format!(
+            "tolerance must be a finite number greater than 0 (got {})",
+            config.tolerance
+        ));
+    }
+    if config.max_iter == 0 {
+        return invalid("max_iter must be at least 1 (got 0)".to_string());
+    }
+    resource::check_alloc::<MTEPoint>(config.n_grid, "MTE grid")?;
+    Ok(())
 }
 
 /// Estimate propensity score via probit, logit, or linear model.
@@ -641,6 +682,7 @@ fn estimate_probit(
     let mut iterations = 0;
 
     for iter in 0..config.max_iter {
+        resource::checkpoint()?;
         iterations = iter + 1;
 
         // Compute linear predictor and probabilities
@@ -826,6 +868,7 @@ fn estimate_logit(
     }
 
     for iter in 0..config.max_iter {
+        resource::checkpoint()?;
         iterations = iter + 1;
 
         // Compute linear predictor and probabilities
@@ -1026,7 +1069,12 @@ fn estimate_polynomial_stage(
     let n_poly_cols = degree;
     let total_cols = 1 + n_x_cols + n_poly_cols; // intercept + covariates + polynomial
 
-    let mut design = Array2::zeros((n, total_cols));
+    // X'X is total_cols^2: refuse an impossible size before linalg allocates it
+    resource::check_alloc::<f64>(
+        resource::checked_len(&[total_cols, total_cols], "second-stage X'X")?,
+        "second-stage X'X",
+    )?;
+    let mut design = resource::try_zeros2(n, total_cols, "MTE second-stage design")?;
 
     // Intercept
     for i in 0..n {
@@ -1108,8 +1156,8 @@ fn estimate_polynomial_stage(
 /// Compute MTE curve from polynomial coefficients.
 ///
 /// MTE(p) = dE[Y|P=p]/dp = β₁ + 2β₂p + 3β₃p² + ...
-fn compute_mte_curve(poly_coefs: &[f64], n_grid: usize) -> Vec<MTEPoint> {
-    let mut curve = Vec::with_capacity(n_grid);
+fn compute_mte_curve(poly_coefs: &[f64], n_grid: usize) -> EconResult<Vec<MTEPoint>> {
+    let mut curve = resource::try_with_capacity(n_grid, "MTE curve")?;
 
     for i in 0..n_grid {
         let u = (i as f64 + 0.5) / n_grid as f64; // Grid from 0 to 1
@@ -1131,14 +1179,14 @@ fn compute_mte_curve(poly_coefs: &[f64], n_grid: usize) -> Vec<MTEPoint> {
         });
     }
 
-    curve
+    Ok(curve)
 }
 
 /// Compute ATE = ∫₀¹ MTE(u) du (uniform weights).
-fn compute_ate(poly_coefs: &[f64], n_grid: usize) -> (f64, Vec<f64>) {
+fn compute_ate(poly_coefs: &[f64], n_grid: usize) -> EconResult<(f64, Vec<f64>)> {
     // ATE with uniform weights
     let mut ate = 0.0;
-    let mut weights = Vec::with_capacity(n_grid);
+    let mut weights = resource::try_with_capacity(n_grid, "ATE weights")?;
 
     let du = 1.0 / n_grid as f64;
 
@@ -1165,22 +1213,27 @@ fn compute_ate(poly_coefs: &[f64], n_grid: usize) -> (f64, Vec<f64>) {
         }
     }
 
-    (ate, weights)
+    Ok((ate, weights))
 }
 
 /// Compute ATT = ∫₀¹ MTE(u) × h_ATT(u) du.
 ///
 /// h_ATT(u) = Pr(U_D ≤ u | D=1) / Pr(D=1)
 /// For uniform U_D: h_ATT(u) ∝ P(Z) × 1{u ≤ P(Z)}
-fn compute_att(poly_coefs: &[f64], propensity: &Array1<f64>, n_grid: usize) -> (f64, Vec<f64>) {
+fn compute_att(
+    poly_coefs: &[f64],
+    propensity: &Array1<f64>,
+    n_grid: usize,
+) -> EconResult<(f64, Vec<f64>)> {
     let n = propensity.len();
 
     let mut att = 0.0;
-    let mut weights = Vec::with_capacity(n_grid);
+    let mut weights = resource::try_with_capacity(n_grid, "ATT weights")?;
 
     let du = 1.0 / n_grid as f64;
 
     for i in 0..n_grid {
+        resource::checkpoint()?;
         let u = (i as f64 + 0.5) / n_grid as f64;
 
         // MTE at this point
@@ -1214,21 +1267,26 @@ fn compute_att(poly_coefs: &[f64], propensity: &Array1<f64>, n_grid: usize) -> (
         att /= sum_w;
     }
 
-    (att, weights)
+    Ok((att, weights))
 }
 
 /// Compute ATU = ∫₀¹ MTE(u) × h_ATU(u) du.
 ///
 /// h_ATU(u) = Pr(U_D > u | D=0) weights
-fn compute_atu(poly_coefs: &[f64], propensity: &Array1<f64>, n_grid: usize) -> (f64, Vec<f64>) {
+fn compute_atu(
+    poly_coefs: &[f64],
+    propensity: &Array1<f64>,
+    n_grid: usize,
+) -> EconResult<(f64, Vec<f64>)> {
     let n = propensity.len();
 
     let mut atu = 0.0;
-    let mut weights = Vec::with_capacity(n_grid);
+    let mut weights = resource::try_with_capacity(n_grid, "ATU weights")?;
 
     let du = 1.0 / n_grid as f64;
 
     for i in 0..n_grid {
+        resource::checkpoint()?;
         let u = (i as f64 + 0.5) / n_grid as f64;
 
         // MTE at this point
@@ -1266,13 +1324,17 @@ fn compute_atu(poly_coefs: &[f64], propensity: &Array1<f64>, n_grid: usize) -> (
         atu /= sum_w;
     }
 
-    (atu, weights)
+    Ok((atu, weights))
 }
 
 /// Compute LATE using variation in propensity scores.
 ///
 /// LATE weights MTE over the complier region.
-fn compute_late(poly_coefs: &[f64], propensity: &Array1<f64>, n_grid: usize) -> (f64, Vec<f64>) {
+fn compute_late(
+    poly_coefs: &[f64],
+    propensity: &Array1<f64>,
+    n_grid: usize,
+) -> EconResult<(f64, Vec<f64>)> {
     let p_min = propensity.iter().cloned().fold(f64::INFINITY, f64::min);
     let p_max = propensity.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
 
@@ -1280,11 +1342,11 @@ fn compute_late(poly_coefs: &[f64], propensity: &Array1<f64>, n_grid: usize) -> 
     // LATE = ∫_{p_min}^{p_max} MTE(u) du / (p_max - p_min)
 
     let mut late = 0.0;
-    let mut weights = vec![0.0; n_grid];
+    let mut weights = resource::try_vec(n_grid, 0.0, "LATE weights")?;
 
     if p_max <= p_min {
         // No variation in propensity
-        return (0.0, weights);
+        return Ok((0.0, weights));
     }
 
     let du = 1.0 / n_grid as f64;
@@ -1315,11 +1377,11 @@ fn compute_late(poly_coefs: &[f64], propensity: &Array1<f64>, n_grid: usize) -> 
         late /= sum_w;
     }
 
-    (late, weights)
+    Ok((late, weights))
 }
 
 /// Compute standard error for treatment effect estimate using delta method.
-fn compute_te_se(poly_coefs: &[f64], poly_se: &[f64], weights: &[f64]) -> f64 {
+fn compute_te_se(poly_coefs: &[f64], poly_se: &[f64], weights: &[f64]) -> EconResult<f64> {
     // SE of weighted average of MTE
     // MTE(u) = Σⱼ (j+1) βⱼ u^j
     // TE = Σᵢ wᵢ MTE(uᵢ)
@@ -1333,6 +1395,7 @@ fn compute_te_se(poly_coefs: &[f64], poly_se: &[f64], weights: &[f64]) -> f64 {
     let mut variance = 0.0;
 
     for j in 0..degree {
+        resource::checkpoint()?;
         // Compute the weighted sum of derivatives w.r.t. βⱼ
         let mut deriv = 0.0;
         for i in 0..n_grid {
@@ -1345,7 +1408,7 @@ fn compute_te_se(poly_coefs: &[f64], poly_se: &[f64], weights: &[f64]) -> f64 {
         }
     }
 
-    variance.sqrt()
+    Ok(variance.sqrt())
 }
 
 /// Build a treatment effect estimate struct.
@@ -1389,6 +1452,8 @@ pub fn run_ivmte_multi_z(
 ) -> EconResult<IVMTEResult> {
     let n = y.len();
 
+    validate_config(&config, n, x.map_or(0, |m| m.ncols()))?;
+
     // For multiple instruments, first compute a scalar propensity index
     // by projecting Z onto D via probit, then proceed as usual
 
@@ -1416,20 +1481,18 @@ pub fn run_ivmte_multi_z(
     let (polynomial_coefs, polynomial_se, r_squared, residual_se, _) =
         estimate_polynomial_stage(y, propensity, x, &config)?;
 
-    let mte_curve = compute_mte_curve(&polynomial_coefs, config.n_grid);
-    let (ate, _) = compute_ate(&polynomial_coefs, config.n_grid);
-    let (att, weights_att) = compute_att(&polynomial_coefs, propensity, config.n_grid);
-    let (atu, weights_atu) = compute_atu(&polynomial_coefs, propensity, config.n_grid);
-    let (late, weights_late) = compute_late(&polynomial_coefs, propensity, config.n_grid);
+    let mte_curve = compute_mte_curve(&polynomial_coefs, config.n_grid)?;
+    let (ate, _) = compute_ate(&polynomial_coefs, config.n_grid)?;
+    let (att, weights_att) = compute_att(&polynomial_coefs, propensity, config.n_grid)?;
+    let (atu, weights_atu) = compute_atu(&polynomial_coefs, propensity, config.n_grid)?;
+    let (late, weights_late) = compute_late(&polynomial_coefs, propensity, config.n_grid)?;
 
-    let ate_se = compute_te_se(
-        &polynomial_coefs,
-        &polynomial_se,
-        &vec![1.0 / config.n_grid as f64; config.n_grid],
-    );
-    let att_se = compute_te_se(&polynomial_coefs, &polynomial_se, &weights_att);
-    let atu_se = compute_te_se(&polynomial_coefs, &polynomial_se, &weights_atu);
-    let late_se = compute_te_se(&polynomial_coefs, &polynomial_se, &weights_late);
+    let uniform_weights =
+        resource::try_vec(config.n_grid, 1.0 / config.n_grid as f64, "ATE weights")?;
+    let ate_se = compute_te_se(&polynomial_coefs, &polynomial_se, &uniform_weights)?;
+    let att_se = compute_te_se(&polynomial_coefs, &polynomial_se, &weights_att)?;
+    let atu_se = compute_te_se(&polynomial_coefs, &polynomial_se, &weights_atu)?;
+    let late_se = compute_te_se(&polynomial_coefs, &polynomial_se, &weights_late)?;
 
     let df = n.saturating_sub(polynomial_coefs.len() + 1) as f64;
 
@@ -1468,7 +1531,43 @@ pub fn run_ivmte_multi_z(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::resource::{Budget, CancelToken, with_budget};
     use ndarray::array;
+
+    fn cancelled() -> Budget {
+        let token = CancelToken::new();
+        token.cancel();
+        Budget::new(None, token)
+    }
+
+    fn expect_invalid<T>(res: EconResult<T>, needle: &str) {
+        match res {
+            Err(EconError::InvalidSpecification { message }) => {
+                assert!(
+                    message.contains(needle),
+                    "message {message:?} should name `{needle}`"
+                )
+            }
+            Err(e) => panic!("expected InvalidSpecification naming `{needle}`, got: {e}"),
+            Ok(_) => panic!("expected InvalidSpecification naming `{needle}`, got Ok"),
+        }
+    }
+
+    fn expect_resource_limit<T>(res: EconResult<T>) {
+        match res {
+            Err(EconError::ResourceLimit(_)) => {}
+            Err(e) => panic!("expected ResourceLimit, got: {e}"),
+            Ok(_) => panic!("expected ResourceLimit, got Ok"),
+        }
+    }
+
+    fn expect_cancelled<T>(res: EconResult<T>) {
+        match res {
+            Err(EconError::Cancelled(_)) => {}
+            Err(e) => panic!("expected Cancelled, got: {e}"),
+            Ok(_) => panic!("expected Cancelled, got Ok"),
+        }
+    }
 
     /// Create test data with known treatment effect heterogeneity.
     fn create_mte_test_data() -> (Array1<f64>, Array1<f64>, Array1<f64>) {
@@ -1739,5 +1838,104 @@ mod tests {
         );
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_ivmte_rejects_degenerate_controls() {
+        let (y, d, z) = create_mte_test_data(); // n = 200
+        let run = |config: IVMTEConfig| run_ivmte(&y.view(), &d.view(), &z.view(), None, config);
+        expect_invalid(
+            run(IVMTEConfig {
+                n_grid: 0,
+                ..Default::default()
+            }),
+            "n_grid",
+        );
+        expect_invalid(
+            run(IVMTEConfig {
+                mte_degree: 0,
+                ..Default::default()
+            }),
+            "mte_degree",
+        );
+        expect_invalid(
+            run(IVMTEConfig {
+                mte_degree: 199,
+                ..Default::default()
+            }),
+            "mte_degree",
+        );
+        expect_invalid(
+            run(IVMTEConfig {
+                tolerance: 0.0,
+                ..Default::default()
+            }),
+            "tolerance",
+        );
+        expect_invalid(
+            run(IVMTEConfig {
+                tolerance: f64::NAN,
+                ..Default::default()
+            }),
+            "tolerance",
+        );
+        expect_invalid(
+            run(IVMTEConfig {
+                max_iter: 0,
+                ..Default::default()
+            }),
+            "max_iter",
+        );
+        let z2 = z.clone().insert_axis(ndarray::Axis(1));
+        expect_invalid(
+            run_ivmte_multi_z(
+                &y.view(),
+                &d.view(),
+                &z2.view(),
+                None,
+                IVMTEConfig {
+                    n_grid: 0,
+                    ..Default::default()
+                },
+            ),
+            "n_grid",
+        );
+        assert!(
+            run(IVMTEConfig {
+                mte_degree: 3,
+                n_grid: 1,
+                ..Default::default()
+            })
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn test_ivmte_rejects_unallocatable_grid() {
+        let (y, d, z) = create_mte_test_data();
+        expect_resource_limit(run_ivmte(
+            &y.view(),
+            &d.view(),
+            &z.view(),
+            None,
+            IVMTEConfig {
+                n_grid: usize::MAX / 4,
+                ..Default::default()
+            },
+        ));
+    }
+
+    #[test]
+    fn test_ivmte_stops_when_cancelled() {
+        let (y, d, z) = create_mte_test_data();
+        expect_cancelled(with_budget(cancelled(), || {
+            run_ivmte(
+                &y.view(),
+                &d.view(),
+                &z.view(),
+                None,
+                IVMTEConfig::default(),
+            )
+        }));
     }
 }
