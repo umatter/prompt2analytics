@@ -216,6 +216,13 @@ pub enum RemovalReason {
 /// manager runs a sweep).
 const REMOVAL_CHANNEL_CAPACITY: usize = 1024;
 
+/// Remove a removed session's data directory, logging a failure.
+fn remove_session_dir_logged(id: &str) {
+    if let Err(e) = crate::path_jail::remove_session_dir(id) {
+        tracing::warn!(session_id = %id, error = %e, "Failed to remove session directory");
+    }
+}
+
 /// Manages all active sessions.
 ///
 /// This is the only registry of live sessions and the only owner of their
@@ -425,17 +432,20 @@ impl SessionManager {
     /// The single hook every removal path (delete, expiry, cleanup, eviction)
     /// calls once the session has left the table. It tells the removal
     /// subscribers (the persistent manager deletes the session's rows) and
-    /// removes the session's data directory off the async runtime.
+    /// removes the session's data directory: on tokio's blocking pool inside
+    /// a runtime, inline outside one (the manager's methods only use tokio's
+    /// runtime-agnostic locks, so they can be polled by any executor).
     fn session_removed(&self, id: &str, reason: RemovalReason) {
         tracing::debug!(session_id = %id, ?reason, "Session removed");
         // An error only means that nobody is subscribed.
         let _ = self.removals.send(id.to_string());
         let id = id.to_string();
-        tokio::task::spawn_blocking(move || {
-            if let Err(e) = crate::path_jail::remove_session_dir(&id) {
-                tracing::warn!(session_id = %id, error = %e, "Failed to remove session directory");
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                handle.spawn_blocking(move || remove_session_dir_logged(&id));
             }
-        });
+            Err(_) => remove_session_dir_logged(&id),
+        }
     }
 
     /// Start background cleanup task.
@@ -825,5 +835,35 @@ mod tests {
         assert!(ba >= 8000 && bb >= 24000);
         assert_eq!(sa.data_bytes(), ba);
         assert_eq!(m.total_data_bytes().await, ba + bb);
+    }
+
+    /// Drive `f` on this thread without a Tokio runtime. Uncontended tokio
+    /// locks are ready on their first poll, so a no-op waker is enough.
+    fn block_on_without_runtime<F: std::future::Future>(f: F) -> F::Output {
+        let mut f = std::pin::pin!(f);
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+        loop {
+            if let std::task::Poll::Ready(v) = f.as_mut().poll(&mut cx) {
+                return v;
+            }
+            std::thread::yield_now();
+        }
+    }
+
+    #[test]
+    fn removal_paths_work_outside_a_tokio_runtime() {
+        assert!(tokio::runtime::Handle::try_current().is_err());
+        let m = SessionManager::new(cfg(1, Some(10)));
+        let mut removals = m.subscribe_removals();
+        // Deletion.
+        let a = block_on_without_runtime(m.create_session(None)).unwrap();
+        block_on_without_runtime(m.delete_session(&a)).unwrap();
+        assert_eq!(removals.try_recv().unwrap(), a);
+        // Eviction when the table is full.
+        let b = block_on_without_runtime(m.create_session(None)).unwrap();
+        block_on_without_runtime(backdate(&m, &b, 11));
+        let c = block_on_without_runtime(m.create_session(None)).unwrap();
+        assert_eq!(removals.try_recv().unwrap(), b);
+        assert!(block_on_without_runtime(m.get_session(&c)).is_ok());
     }
 }
