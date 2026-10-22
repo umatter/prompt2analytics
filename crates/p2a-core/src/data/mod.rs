@@ -170,8 +170,8 @@ pub use cleaning_session::{
 };
 #[cfg(feature = "database")]
 pub use database::{
-    DatabaseError, QueryResult, duckdb_table_schema, list_duckdb_tables, list_sqlite_tables,
-    query_duckdb, query_file_with_duckdb, query_sqlite, sqlite_table_schema,
+    DatabaseError, QueryResult, duckdb_table_schema, ensure_single_statement, list_duckdb_tables,
+    list_sqlite_tables, query_duckdb, query_file_with_duckdb, query_sqlite, sqlite_table_schema,
 };
 pub use quality::{
     ColumnProfile, DataIssue, DataQualityProfile, NumericStats, StringStats,

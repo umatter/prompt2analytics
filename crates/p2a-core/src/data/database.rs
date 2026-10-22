@@ -73,6 +73,197 @@ pub fn validate_read_only_query(query: &str) -> Result<(), DatabaseError> {
     Ok(())
 }
 
+/// Refuse any input that is not exactly one SQL statement.
+///
+/// The text may end in `;`, further `;`, whitespace and comments, but nothing
+/// else may follow the first top-level `;`. Strings (`'..'`, `E'..'`), quoted
+/// identifiers, dollar quotes (`$$..$$`, `$tag$..$tag$`) and comments (`--`,
+/// nested `/* */`) are skipped with DuckDB's rules, so a `;` inside them does
+/// not count. Unterminated strings or comments, empty input and NUL bytes are
+/// refused as well.
+pub fn ensure_single_statement(query: &str) -> Result<(), DatabaseError> {
+    single_statement_body(query).map(|_| ())
+}
+
+const MULTIPLE_STATEMENTS: &str =
+    "only one SQL statement may be run per call; remove everything after the first ';'";
+const UNTERMINATED: &str = "unterminated string literal, quoted identifier or comment";
+
+/// Bytes that may continue an identifier (DuckDB: letters, digits, `_`, `$`,
+/// and any non-ASCII byte).
+fn is_ident_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_' || b == b'$' || b >= 0x80
+}
+
+/// The single statement in `query`, without its terminating `;` and anything
+/// after it. The text is not trimmed: a trailing line comment stays part of
+/// the body (callers that wrap the body put a newline after it).
+fn single_statement_body(query: &str) -> Result<&str, DatabaseError> {
+    let bytes = query.as_bytes();
+    if bytes.contains(&0) {
+        return Err(DatabaseError::Forbidden(
+            "the query contains a NUL byte".to_string(),
+        ));
+    }
+    let unterminated = || DatabaseError::Forbidden(UNTERMINATED.to_string());
+
+    let n = bytes.len();
+    let mut i = 0;
+    let mut has_code = false;
+    let mut terminator = None;
+    while i < n {
+        let b = bytes[i];
+        let next = bytes.get(i + 1).copied();
+        match b {
+            b'\'' => {
+                let escape = i >= 1
+                    && matches!(bytes[i - 1], b'E' | b'e')
+                    && (i < 2 || !is_ident_byte(bytes[i - 2]));
+                i = skip_string(bytes, i + 1, escape).ok_or_else(unterminated)?;
+                has_code = true;
+            }
+            b'"' => {
+                i = skip_quoted_identifier(bytes, i + 1).ok_or_else(unterminated)?;
+                has_code = true;
+            }
+            b'$' if i == 0 || !is_ident_byte(bytes[i - 1]) => {
+                match dollar_tag_len(&bytes[i..]) {
+                    Some(len) => {
+                        let tag = &bytes[i..i + len];
+                        let start = i + len;
+                        let close = bytes[start..]
+                            .windows(len)
+                            .position(|w| w == tag)
+                            .ok_or_else(unterminated)?;
+                        i = start + close + len;
+                    }
+                    None => i += 1,
+                }
+                has_code = true;
+            }
+            b'-' if next == Some(b'-') => i = skip_line_comment(bytes, i + 2),
+            b'/' if next == Some(b'*') => {
+                i = skip_block_comment(bytes, i + 2).ok_or_else(unterminated)?;
+            }
+            b';' => {
+                terminator = Some(i);
+                break;
+            }
+            b if b.is_ascii_whitespace() => i += 1,
+            _ => {
+                has_code = true;
+                i += 1;
+            }
+        }
+    }
+
+    let Some(end) = terminator else {
+        return if has_code {
+            Ok(query)
+        } else {
+            Err(DatabaseError::Forbidden("empty SQL statement".to_string()))
+        };
+    };
+
+    // After the first top-level `;`: only blanks, `;` and terminated comments.
+    let mut j = end + 1;
+    while j < n {
+        let b = bytes[j];
+        let next = bytes.get(j + 1).copied();
+        match b {
+            b';' => j += 1,
+            b if b.is_ascii_whitespace() => j += 1,
+            b'-' if next == Some(b'-') => j = skip_line_comment(bytes, j + 2),
+            b'/' if next == Some(b'*') => {
+                j = skip_block_comment(bytes, j + 2).ok_or_else(unterminated)?;
+            }
+            _ => return Err(DatabaseError::Forbidden(MULTIPLE_STATEMENTS.to_string())),
+        }
+    }
+    if !has_code {
+        return Err(DatabaseError::Forbidden("empty SQL statement".to_string()));
+    }
+    Ok(&query[..end])
+}
+
+/// Index just past the closing `'` of a string whose body starts at `i`.
+/// `''` stays inside the string; in an escape string (`E'..'`) a backslash
+/// also skips the next byte. `None` if the string is unterminated.
+fn skip_string(bytes: &[u8], mut i: usize, escape: bool) -> Option<usize> {
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' if escape => i += 2,
+            b'\'' if bytes.get(i + 1) == Some(&b'\'') => i += 2,
+            b'\'' => return Some(i + 1),
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+/// Index just past the closing `"` of a quoted identifier whose body starts at `i`.
+fn skip_quoted_identifier(bytes: &[u8], mut i: usize) -> Option<usize> {
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' if bytes.get(i + 1) == Some(&b'"') => i += 2,
+            b'"' => return Some(i + 1),
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+/// Length of the dollar-quote delimiter (`$$` or `$tag$`) at the start of `s`,
+/// which begins with `$`; `None` if `s` does not start a dollar quote (`$1`).
+fn dollar_tag_len(s: &[u8]) -> Option<usize> {
+    let tag_start = |b: u8| b.is_ascii_alphabetic() || b == b'_' || b >= 0x80;
+    let tag_byte = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b >= 0x80;
+    match s.get(1) {
+        Some(b'$') => Some(2),
+        Some(&b) if tag_start(b) => {
+            let mut k = 2;
+            while k < s.len() && tag_byte(s[k]) {
+                k += 1;
+            }
+            (s.get(k) == Some(&b'$')).then_some(k + 1)
+        }
+        _ => None,
+    }
+}
+
+/// Index of the byte after the newline ending a line comment whose body
+/// starts at `i`, or the end of the input.
+fn skip_line_comment(bytes: &[u8], i: usize) -> usize {
+    let i = i.min(bytes.len());
+    match bytes[i..].iter().position(|&b| b == b'\n') {
+        Some(p) => i + p + 1,
+        None => bytes.len(),
+    }
+}
+
+/// Index just past the `*/` closing a (nested) block comment whose body starts
+/// at `i`; `None` if it is unterminated.
+fn skip_block_comment(bytes: &[u8], mut i: usize) -> Option<usize> {
+    let mut depth = 1usize;
+    while i < bytes.len() {
+        match (bytes[i], bytes.get(i + 1)) {
+            (b'/', Some(b'*')) => {
+                depth += 1;
+                i += 2;
+            }
+            (b'*', Some(b'/')) => {
+                depth -= 1;
+                i += 2;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    None
+}
+
 fn strip_leading_comments(query: &str) -> &str {
     let mut rest = query.trim_start();
     loop {
@@ -100,6 +291,7 @@ fn strip_leading_comments(query: &str) -> &str {
 }
 
 /// Result of a database query.
+#[derive(Debug)]
 pub struct QueryResult {
     /// The resulting DataFrame
     pub dataframe: DataFrame,
@@ -134,6 +326,7 @@ impl std::fmt::Display for QueryResult {
 /// # Returns
 /// QueryResult containing the DataFrame and metadata
 pub fn query_sqlite(db_path: impl AsRef<Path>, query: &str) -> Result<QueryResult, DatabaseError> {
+    let query = single_statement_body(query)?;
     validate_read_only_query(query)?;
     let path = db_path.as_ref();
 
@@ -305,6 +498,7 @@ pub fn sqlite_table_schema(
 /// # Returns
 /// QueryResult containing the DataFrame and metadata
 pub fn query_duckdb(db_path: impl AsRef<Path>, query: &str) -> Result<QueryResult, DatabaseError> {
+    let query = single_statement_body(query)?;
     validate_read_only_query(query)?;
     let path = db_path.as_ref();
     let path_str = path.to_string_lossy();
@@ -512,8 +706,15 @@ pub fn query_file_with_duckdb(
     // External-access SQL functions (read_csv_auto, read_parquet, …) are the whole
     // point of this entry point, so we cannot disable external access wholesale;
     // but the statement itself must still be a read-only query.
-    validate_read_only_query(query)?;
     let path = file_path.as_ref();
+
+    // Replace placeholder with actual file path, escaping single quotes to prevent
+    // injection. The path sits inside a quoted literal, so it cannot open a second
+    // statement; the lexer checks the substituted text.
+    let sanitized_path = path.display().to_string().replace('\'', "''");
+    let full_query = query.replace("{file}", &format!("'{}'", sanitized_path));
+    let body = single_statement_body(&full_query)?;
+    validate_read_only_query(body)?;
 
     if !path.exists() {
         return Err(DatabaseError::FileNotFound(path.display().to_string()));
@@ -522,11 +723,7 @@ pub fn query_file_with_duckdb(
     // Use in-memory DuckDB
     let conn = duckdb::Connection::open_in_memory()?;
 
-    // Replace placeholder with actual file path, escaping single quotes to prevent injection
-    let sanitized_path = path.display().to_string().replace('\'', "''");
-    let full_query = query.replace("{file}", &format!("'{}'", sanitized_path));
-
-    query_duckdb_connection(&conn, &full_query)
+    query_duckdb_connection(&conn, body)
 }
 
 /// Internal helper to query an existing DuckDB connection.
@@ -645,7 +842,174 @@ fn query_duckdb_connection(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
+    use std::path::PathBuf;
+
+    fn write_file(dir: &Path, name: &str, body: &str) -> PathBuf {
+        let p = dir.join(name);
+        std::fs::write(&p, body).unwrap();
+        p
+    }
+
+    fn dir_names(dir: &Path) -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        v.sort();
+        v
+    }
+
+    fn i64_col(df: &DataFrame, name: &str) -> Vec<Option<i64>> {
+        df.column(name)
+            .unwrap()
+            .as_materialized_series()
+            .i64()
+            .unwrap()
+            .into_iter()
+            .collect()
+    }
+
+    /// `t(x INTEGER)` holding 0..=999.
+    fn sqlite_fixture(dir: &Path) -> PathBuf {
+        let db = dir.join("t.sqlite");
+        rusqlite::Connection::open(&db)
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE t(x INTEGER); \
+                 WITH RECURSIVE c(n) AS (SELECT 0 UNION ALL SELECT n + 1 FROM c WHERE n < 999) \
+                 INSERT INTO t SELECT n FROM c;",
+            )
+            .unwrap();
+        db
+    }
+
+    // ------------------------------------------------------------------
+    // Single statement (LLM-1)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn single_statement_accepts_one_statement() {
+        for q in [
+            "SELECT 1",
+            "SELECT 1;",
+            "SELECT 1; -- done",
+            "SELECT 1;;",
+            "SELECT 1 /* c */ ;  \n",
+            r"SELECT 'a;b'",
+            r"SELECT 'it''s; fine'",
+            r"SELECT E'it\'s; fine'",
+            "SELECT $$a;b$$",
+            "SELECT $tag$a;$$b$tag$",
+            r#"SELECT "a;b" FROM t"#,
+            r#"SELECT "a""b;" FROM t"#,
+            "SELECT /* ; */ 1",
+            "SELECT /* outer /* inner ; */ still ; */ 2",
+            "SELECT 1 -- ; trailing",
+            "SELECT $1",
+            "WITH x AS (SELECT 1) SELECT * FROM x",
+        ] {
+            assert!(
+                ensure_single_statement(q).is_ok(),
+                "expected {q:?} to be accepted"
+            );
+        }
+        assert_eq!(
+            single_statement_body("SELECT 1; -- done").unwrap(),
+            "SELECT 1"
+        );
+        assert_eq!(
+            single_statement_body("SELECT 'a;b';").unwrap(),
+            "SELECT 'a;b'"
+        );
+        assert_eq!(
+            single_statement_body("SELECT 1 -- c").unwrap(),
+            "SELECT 1 -- c"
+        );
+    }
+
+    #[test]
+    fn single_statement_rejects_a_second_statement() {
+        for q in [
+            "SELECT 1; SELECT 2",
+            "SELECT 1;\nATTACH 'x.duckdb' AS e",
+            "SELECT 1 -- c\n; SELECT 2",
+            // E-string: DuckDB sees two statements
+            r"SELECT E'\''; ATTACH 'x' AS e; --'",
+            // nested comment: DuckDB sees two statements
+            r"SELECT 1 /* /* */ ' */ ; ATTACH 'x' AS e; -- '",
+            "SELECT $$ x $$; SELECT 2",
+            // `$` inside an identifier is not a quote
+            "SELECT a$b$ FROM t; SELECT 2",
+        ] {
+            let err = ensure_single_statement(q).unwrap_err();
+            assert!(matches!(err, DatabaseError::Forbidden(_)), "{q:?}: {err}");
+            assert!(
+                err.to_string().contains("only one SQL statement"),
+                "{q:?}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn single_statement_rejects_unterminated_empty_and_nul() {
+        for (q, needle) in [
+            ("", "empty"),
+            ("   ", "empty"),
+            (";", "empty"),
+            ("-- only a comment", "empty"),
+            ("/* c */ ;", "empty"),
+            ("SELECT 'abc", "unterminated"),
+            ("SELECT /* x", "unterminated"),
+            ("SELECT $$x", "unterminated"),
+            (r#"SELECT "abc"#, "unterminated"),
+            ("SELECT 1\0", "NUL"),
+        ] {
+            let err = ensure_single_statement(q).unwrap_err();
+            assert!(
+                matches!(err, DatabaseError::Forbidden(_)) && err.to_string().contains(needle),
+                "{q:?}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn query_duckdb_refuses_multi_statement_and_creates_no_file() {
+        let outside = tempfile::tempdir().unwrap();
+        let target = outside.path().join("evil.duckdb");
+        let q = format!(
+            "SELECT 1; ATTACH '{}' AS e; CREATE TABLE e.s AS SELECT 'x' AS v",
+            target.display()
+        );
+        let err = query_duckdb(":memory:", &q).unwrap_err();
+        assert!(matches!(err, DatabaseError::Forbidden(_)), "{err}");
+        assert!(!target.exists(), "a second statement reached the engine");
+    }
+
+    #[test]
+    fn query_sqlite_refuses_trailing_statement() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = sqlite_fixture(dir.path());
+        assert!(matches!(
+            query_sqlite(&db, "SELECT x FROM t; SELECT 2").unwrap_err(),
+            DatabaseError::Forbidden(_)
+        ));
+    }
+
+    #[test]
+    fn query_file_refuses_trailing_statement() {
+        let dir = tempfile::tempdir().unwrap();
+        let csv = write_file(dir.path(), "in.csv", "a,b\n1,2\n3,4\n");
+        let out = dir.path().join("copied.csv");
+        let q = format!(
+            "SELECT * FROM {{file}}; COPY (SELECT 1) TO '{}'",
+            out.display()
+        );
+        assert!(matches!(
+            query_file_with_duckdb(&csv, &q).unwrap_err(),
+            DatabaseError::Forbidden(_)
+        ));
+        assert!(!out.exists());
+    }
 
     #[test]
     fn test_validate_read_only_allows_select() {
@@ -691,12 +1055,9 @@ mod tests {
 
     #[test]
     fn test_sqlite_query() {
-        // Create a temporary SQLite database
-        let temp_dir = std::env::temp_dir();
-        let db_path = temp_dir.join("test_p2a.db");
-
-        // Clean up if exists
-        let _ = fs::remove_file(&db_path);
+        // A fresh temporary directory: a fixed path would race between parallel runs.
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test_p2a.db");
 
         let conn = rusqlite::Connection::open(&db_path).unwrap();
         conn.execute("CREATE TABLE test (id INTEGER, name TEXT, value REAL)", [])
@@ -710,9 +1071,6 @@ mod tests {
         let result = query_sqlite(&db_path, "SELECT * FROM test").unwrap();
         assert_eq!(result.rows, 2);
         assert_eq!(result.columns.len(), 3);
-
-        // Clean up
-        let _ = fs::remove_file(&db_path);
     }
 
     #[test]
