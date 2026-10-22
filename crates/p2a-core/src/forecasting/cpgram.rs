@@ -54,8 +54,15 @@
 //!
 //! R equivalent: `stats::cpgram()` (originally from MASS package)
 
+#[cfg(feature = "spectral-analysis")]
+use rustfft::{FftPlanner, num_complex::Complex};
 use serde::{Deserialize, Serialize};
 use std::f64::consts::PI;
+
+#[cfg(any(test, not(feature = "spectral-analysis")))]
+use crate::resource::checkpoint;
+#[cfg(feature = "spectral-analysis")]
+use crate::resource::try_with_capacity;
 
 /// Result of cumulative periodogram computation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -116,7 +123,7 @@ pub fn cpgram(x: &[f64], taper: Option<f64>) -> Result<CpgramResult, String> {
     let tapered = apply_taper(x, taper_prop);
 
     // Compute periodogram via FFT
-    let pgram = compute_periodogram(&tapered);
+    let pgram = compute_periodogram(&tapered)?;
     let m = pgram.len(); // Number of Fourier frequencies
 
     // Compute cumulative periodogram (normalized)
@@ -219,21 +226,55 @@ fn apply_taper(x: &[f64], taper: f64) -> Vec<f64> {
     tapered
 }
 
-/// Compute the periodogram using FFT-like computation.
-/// Returns periodogram ordinates at Fourier frequencies.
-fn compute_periodogram(x: &[f64]) -> Vec<f64> {
+/// Compute the periodogram ordinates `|X_k|² / n` at the Fourier frequencies
+/// `k = 1..=n/2` of the centered series, with an FFT (O(n log n)) when the
+/// `spectral-analysis` feature is enabled and a direct DFT otherwise.
+fn compute_periodogram(x: &[f64]) -> Result<Vec<f64>, String> {
     let n = x.len();
-    let n_freq = n / 2; // Number of Fourier frequencies (excluding DC and Nyquist)
 
     // Center the data
     let mean: f64 = x.iter().sum::<f64>() / n as f64;
     let centered: Vec<f64> = x.iter().map(|&v| v - mean).collect();
 
-    // Compute periodogram via direct Fourier transform
-    // (For production, this should use FFT, but direct computation is clearer)
+    #[cfg(feature = "spectral-analysis")]
+    {
+        periodogram_fft(&centered)
+    }
+    #[cfg(not(feature = "spectral-analysis"))]
+    {
+        periodogram_direct(&centered)
+    }
+}
+
+/// Periodogram of a centered series via rustfft.
+#[cfg(feature = "spectral-analysis")]
+fn periodogram_fft(centered: &[f64]) -> Result<Vec<f64>, String> {
+    let n = centered.len();
+    let mut buf: Vec<Complex<f64>> =
+        try_with_capacity(n, "the periodogram FFT buffer").map_err(|e| e.to_string())?;
+    buf.extend(centered.iter().map(|&v| Complex::new(v, 0.0)));
+
+    FftPlanner::new().plan_fft_forward(n).process(&mut buf);
+
+    Ok(buf
+        .iter()
+        .skip(1)
+        .take(n / 2)
+        .map(|c| (c.re * c.re + c.im * c.im) / n as f64)
+        .collect())
+}
+
+/// Periodogram of a centered series via a direct DFT (O(n²)): the fallback
+/// for builds without `spectral-analysis`, and the reference in tests.
+#[cfg(any(test, not(feature = "spectral-analysis")))]
+fn periodogram_direct(centered: &[f64]) -> Result<Vec<f64>, String> {
+    let n = centered.len();
+    let n_freq = n / 2; // Number of Fourier frequencies (excluding DC and Nyquist)
+
     let mut pgram = Vec::with_capacity(n_freq);
 
     for k in 1..=n_freq {
+        checkpoint().map_err(|e| e.to_string())?;
         let freq = 2.0 * PI * k as f64 / n as f64;
 
         // Compute Fourier coefficients
@@ -250,7 +291,7 @@ fn compute_periodogram(x: &[f64]) -> Vec<f64> {
         pgram.push(intensity);
     }
 
-    pgram
+    Ok(pgram)
 }
 
 /// Approximate p-value from Kolmogorov distribution.
@@ -395,5 +436,121 @@ mod tests {
 
         assert!(ks_stat >= 0.0);
         assert!((0.0..=1.0).contains(&p_value));
+    }
+
+    #[cfg(feature = "spectral-analysis")]
+    use rand::{Rng, SeedableRng};
+    #[cfg(feature = "spectral-analysis")]
+    use rand_chacha::ChaCha8Rng;
+
+    fn cancelled<R>(f: impl FnOnce() -> R) -> R {
+        let token = crate::resource::CancelToken::new();
+        token.cancel();
+        crate::resource::with_budget(crate::resource::Budget::new(None, token), f)
+    }
+
+    /// R: mk <- function(n) { t <- 1:n; sin(2*pi*t/7) + 0.5*cos(2*pi*t/13) + 0.3*(((37*t) %% 11) - 5)/5 + 0.02*t }
+    fn mk(n: usize) -> Vec<f64> {
+        (1..=n)
+            .map(|t| {
+                let tf = t as f64;
+                (2.0 * PI * tf / 7.0).sin()
+                    + 0.5 * (2.0 * PI * tf / 13.0).cos()
+                    + 0.3 * (((37 * t) % 11) as f64 - 5.0) / 5.0
+                    + 0.02 * tf
+            })
+            .collect()
+    }
+
+    /// R 4.3.3: x <- mk(16); (Mod(fft(x - mean(x)))^2/16)[2:9]
+    #[test]
+    fn test_validate_periodogram_against_r() {
+        const R: [f64; 8] = [
+            1.80591047303584,
+            3.57672788347167,
+            0.376257997633748,
+            0.00111389265450212,
+            0.0103007549093163,
+            0.22385447313,
+            0.000553155027280382,
+            0.0282290746094887,
+        ];
+        let p = compute_periodogram(&mk(16)).unwrap();
+        assert_eq!(p.len(), 8);
+        for (a, b) in p.iter().zip(R) {
+            assert_relative_eq!(*a, b, max_relative = 1e-9);
+        }
+    }
+
+    /// The body of R's stats::cpgram with taper = 0 on x <- mk(65) (R 4.3.3):
+    ///   xx <- spec.taper(scale(x, TRUE, FALSE), p = 0); y <- Mod(fft(xx))^2/65; y[1] <- 0
+    ///   y <- y[1:33]; (cumsum(y)/sum(y))[-1]
+    /// Untapered, this module's cumulative periodogram is R's without the leading 0
+    /// (the tapered case is TS-9, tier 4).
+    #[test]
+    fn test_validate_cpgram_untapered_against_r() {
+        const R: [f64; 32] = [
+            0.100911253103486,
+            0.127560049770315,
+            0.140693342474136,
+            0.149483378650379,
+            0.362132157418225,
+            0.369968644005227,
+            0.380512496974472,
+            0.406740755514208,
+            0.860618017893972,
+            0.926542914253333,
+            0.936800090507442,
+            0.94747044688618,
+            0.950647391371401,
+            0.952659066496785,
+            0.954166999426409,
+            0.955527892455196,
+            0.957729172326381,
+            0.96181462299091,
+            0.962016154050691,
+            0.962106138742785,
+            0.962121805715227,
+            0.962177610261033,
+            0.964987905713569,
+            0.987299832161561,
+            0.990250012837924,
+            0.991797741540399,
+            0.992883530625223,
+            0.993732346343451,
+            0.994725671614886,
+            0.997696480844003,
+            0.998935361954203,
+            1.0,
+        ];
+        let r = cpgram(&mk(65), Some(0.0)).unwrap();
+        assert_eq!(r.cpgram.len(), 32);
+        for (a, b) in r.cpgram.iter().zip(R) {
+            assert_relative_eq!(*a, b, max_relative = 1e-10);
+        }
+    }
+
+    #[cfg(feature = "spectral-analysis")]
+    #[test]
+    fn fft_periodogram_matches_direct_dft() {
+        let mut rng = ChaCha8Rng::seed_from_u64(3);
+        // even, odd and prime (Bluestein) lengths
+        for n in [4usize, 5, 16, 97, 1000, 1009] {
+            let x: Vec<f64> = (0..n).map(|_| rng.r#gen::<f64>() - 0.5).collect();
+            let mean = x.iter().sum::<f64>() / n as f64;
+            let c: Vec<f64> = x.iter().map(|v| v - mean).collect();
+            let fast = periodogram_fft(&c).unwrap();
+            let slow = periodogram_direct(&c).unwrap();
+            let scale = slow.iter().cloned().fold(0.0, f64::max);
+            assert_eq!(fast.len(), n / 2);
+            for (a, b) in fast.iter().zip(&slow) {
+                assert!((a - b).abs() <= 1e-9 * scale, "n={n}: {a} vs {b}");
+            }
+        }
+    }
+
+    #[test]
+    fn direct_periodogram_honours_cancellation() {
+        assert!(cancelled(|| periodogram_direct(&[1.0, -1.0, 0.5, 0.2, -0.3])).is_err());
     }
 }
