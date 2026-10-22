@@ -61,6 +61,7 @@ use crate::data::Dataset;
 use crate::errors::{EconError, EconResult};
 use crate::linalg::design::{DesignMatrix, get_column_names};
 use crate::linalg::matrix_ops::{safe_inverse, xtx, xty};
+use crate::resource;
 use crate::traits::estimator::{SignificanceLevel, logistic_cdf, normal_cdf};
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -173,7 +174,8 @@ impl fmt::Display for CTmleQModel {
 /// Configuration for C-TMLE estimation.
 #[derive(Debug, Clone)]
 pub struct CTmleConfig {
-    /// Number of cross-validation folds (default: 5).
+    /// Number of cross-validation folds (default: 5). Must be between 2 and n/2, so
+    /// that every fold holds at least 2 observations.
     pub n_folds: usize,
 
     /// Maximum number of covariates to include in propensity model.
@@ -192,14 +194,14 @@ pub struct CTmleConfig {
     /// Outcome model specification.
     pub q_model: CTmleQModel,
 
-    /// Truncation bounds for propensity scores (min, max).
+    /// Truncation bounds for propensity scores (min, max), with 0 < min < max < 1.
     /// Default: (0.025, 0.975) as recommended in ctmle package.
     pub gbound: (f64, f64),
 
-    /// Maximum iterations for logistic regression.
+    /// Maximum iterations for logistic regression (at least 1).
     pub max_iter: usize,
 
-    /// Convergence tolerance.
+    /// Convergence tolerance (finite and > 0).
     pub tolerance: f64,
 
     /// Penalty factor for PenRSS criterion (multiplied by log(n)).
@@ -504,6 +506,7 @@ pub fn ctmle(
     })?;
 
     let n = y.len();
+    validate_ctmle_config(&config, n)?;
 
     // Validate treatment is binary
     let n_treated: usize = a.iter().filter(|&&v| v >= 0.5).count();
@@ -655,6 +658,7 @@ pub fn ctmle(
     // ═══════════════════════════════════════════════════════════════════════
 
     for step in 0..max_to_select {
+        resource::checkpoint()?;
         if available.is_empty() {
             break;
         }
@@ -683,6 +687,8 @@ pub fn ctmle(
 
         // Try adding each candidate covariate
         for &cov_idx in &candidates {
+            resource::checkpoint()?;
+
             // Temporarily add this covariate
             let mut test_selected = selected.clone();
             test_selected.push(cov_idx);
@@ -1061,6 +1067,39 @@ pub fn ctmle_arrays(
 // Internal Helper Functions
 // ═══════════════════════════════════════════════════════════════════════════════
 
+/// Checks the fold count, the iteration controls and the propensity bounds against the
+/// sample size before any work.
+fn validate_ctmle_config(config: &CTmleConfig, n: usize) -> EconResult<()> {
+    let max_folds = n / 2;
+    if config.n_folds < 2 || config.n_folds > max_folds {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "n_folds must be between 2 and n/2 = {max_folds} for {n} observations (each fold needs at least 2); got {}",
+                config.n_folds
+            ),
+        });
+    }
+    if config.max_iter == 0 {
+        return Err(EconError::InvalidSpecification {
+            message: "max_iter must be at least 1; got 0".to_string(),
+        });
+    }
+    if !(config.tolerance.is_finite() && config.tolerance > 0.0) {
+        return Err(EconError::InvalidSpecification {
+            message: format!("tolerance must be finite and > 0; got {}", config.tolerance),
+        });
+    }
+    let (lo, hi) = config.gbound;
+    if !(lo.is_finite() && hi.is_finite() && 0.0 < lo && lo < hi && hi < 1.0) {
+        return Err(EconError::InvalidSpecification {
+            message: format!(
+                "gbound must satisfy 0 < lower < upper < 1 (propensity truncation bounds); got ({lo}, {hi})"
+            ),
+        });
+    }
+    Ok(())
+}
+
 /// Core C-TMLE implementation operating on array data.
 fn ctmle_core(
     y: &Array1<f64>,
@@ -1071,6 +1110,7 @@ fn ctmle_core(
 ) -> EconResult<CTmleResult> {
     let mut warnings = Vec::new();
     let n = y.len();
+    validate_ctmle_config(&config, n)?;
     let n_covariates = covariate_data.len();
 
     // Validate treatment is binary
@@ -1171,6 +1211,7 @@ fn ctmle_core(
 
     // Forward selection steps
     for _step in 0..max_to_select {
+        resource::checkpoint()?;
         if available.is_empty() {
             break;
         }
@@ -1182,6 +1223,8 @@ fn ctmle_core(
         let mut best_ate_se_this_step = 0.0;
 
         for &cov_idx in &available {
+            resource::checkpoint()?;
+
             let mut test_selected = selected.clone();
             test_selected.push(cov_idx);
 
@@ -1496,6 +1539,8 @@ fn evaluate_propensity_model_cv(
     let mut fold_rss: Vec<f64> = Vec::with_capacity(n_folds);
 
     for fold_idx in 0..n_folds {
+        resource::checkpoint()?;
+
         let test_indices = &folds[fold_idx];
         let train_indices: Vec<usize> = (0..n_folds)
             .filter(|&i| i != fold_idx)
@@ -1517,6 +1562,7 @@ fn evaluate_propensity_model_cv(
         let (_g_train_raw, g_beta, _, _) =
             match fit_logistic_model(&w_train, &a_train, max_iter, tolerance) {
                 Ok(result) => result,
+                Err(e @ (EconError::Cancelled(_) | EconError::ResourceLimit(_))) => return Err(e),
                 Err(_) => continue, // Skip this fold if fitting fails
             };
 
@@ -1545,6 +1591,7 @@ fn evaluate_propensity_model_cv(
         // Targeting step on test set
         let (epsilon_test, _) = match fit_targeting_model(&y_test, &q_init_test, &h_test, q_model) {
             Ok(result) => result,
+            Err(e @ (EconError::Cancelled(_) | EconError::ResourceLimit(_))) => return Err(e),
             Err(_) => continue,
         };
 
@@ -1672,6 +1719,7 @@ fn fit_logistic_model(
     let mut iterations = 0;
 
     for iter in 0..max_iter {
+        resource::checkpoint()?;
         iterations = iter + 1;
 
         let z: Array1<f64> = x.dot(&beta);
@@ -1811,7 +1859,157 @@ fn fit_targeting_model(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::resource::{self, Budget, CancelToken};
     use polars::prelude::*;
+
+    fn expect_invalid_spec(err: EconError, needle: &str) {
+        match err {
+            EconError::InvalidSpecification { message } => {
+                assert!(
+                    message.contains(needle),
+                    "message `{message}` does not mention `{needle}`"
+                )
+            }
+            other => panic!("expected InvalidSpecification mentioning `{needle}`, got {other:?}"),
+        }
+    }
+
+    fn cancelled_budget() -> Budget {
+        let t = CancelToken::new();
+        t.cancel();
+        Budget::new(None, t)
+    }
+
+    fn small_config() -> CTmleConfig {
+        CTmleConfig {
+            n_folds: 3,
+            max_covariates: Some(2),
+            q_model: CTmleQModel::Linear,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_ctmle_rejects_out_of_range_folds() {
+        let ds = create_ctmle_test_dataset(); // n = 40, so 2..=20 is valid
+        for v in [0, 1, 21, usize::MAX] {
+            let cfg = CTmleConfig {
+                n_folds: v,
+                ..small_config()
+            };
+            expect_invalid_spec(
+                ctmle(&ds, "y", "treatment", &["w1", "w2"], cfg).unwrap_err(),
+                "n_folds",
+            );
+        }
+        assert!(
+            ctmle(
+                &ds,
+                "y",
+                "treatment",
+                &["w1", "w2"],
+                CTmleConfig {
+                    n_folds: 20,
+                    ..small_config()
+                }
+            )
+            .is_ok()
+        );
+        // the array entry point validates too (same 40 rows as arrays)
+        let y = DesignMatrix::extract_column(ds.df(), "y").unwrap();
+        let a = DesignMatrix::extract_column(ds.df(), "treatment").unwrap();
+        let w = DesignMatrix::from_dataframe(ds.df(), &["w1", "w2"], false)
+            .unwrap()
+            .data;
+        for v in [0, 21, usize::MAX] {
+            let cfg = CTmleConfig {
+                n_folds: v,
+                ..small_config()
+            };
+            expect_invalid_spec(
+                ctmle_arrays(&y.view(), &a.view(), &w.view(), cfg).unwrap_err(),
+                "n_folds",
+            );
+        }
+    }
+
+    #[test]
+    fn test_ctmle_rejects_bad_controls() {
+        let ds = create_ctmle_test_dataset();
+        let cases = [
+            (
+                CTmleConfig {
+                    max_iter: 0,
+                    ..small_config()
+                },
+                "max_iter",
+            ),
+            (
+                CTmleConfig {
+                    tolerance: 0.0,
+                    ..small_config()
+                },
+                "tolerance",
+            ),
+            (
+                CTmleConfig {
+                    tolerance: f64::NAN,
+                    ..small_config()
+                },
+                "tolerance",
+            ),
+            (
+                CTmleConfig {
+                    gbound: (0.9, 0.1),
+                    ..small_config()
+                },
+                "gbound",
+            ),
+            (
+                CTmleConfig {
+                    gbound: (0.0, 1.0),
+                    ..small_config()
+                },
+                "gbound",
+            ),
+            (
+                CTmleConfig {
+                    gbound: (f64::NAN, 0.9),
+                    ..small_config()
+                },
+                "gbound",
+            ),
+        ];
+        for (cfg, needle) in cases {
+            expect_invalid_spec(
+                ctmle(&ds, "y", "treatment", &["w1", "w2"], cfg).unwrap_err(),
+                needle,
+            );
+        }
+    }
+
+    #[test]
+    fn test_ctmle_honours_cancellation() {
+        let ds = create_ctmle_test_dataset();
+        let r = resource::with_budget(cancelled_budget(), || {
+            ctmle(&ds, "y", "treatment", &["w1", "w2"], small_config())
+        });
+        assert!(matches!(r, Err(EconError::Cancelled(_))), "got {r:?}");
+        // the logistic outcome model's IRLS loop is a checkpoint too
+        let r = resource::with_budget(cancelled_budget(), || {
+            ctmle(
+                &ds,
+                "y",
+                "treatment",
+                &["w1", "w2"],
+                CTmleConfig {
+                    q_model: CTmleQModel::Logistic,
+                    ..small_config()
+                },
+            )
+        });
+        assert!(matches!(r, Err(EconError::Cancelled(_))), "got {r:?}");
+    }
 
     /// Create test dataset with known treatment effect and confounding.
     ///
