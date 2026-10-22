@@ -2,9 +2,13 @@
 //!
 //! Provides functions to execute SQL queries and load results as Polars DataFrames.
 
+use crate::errors::EconError;
+use crate::resource::{self, Budget};
 use polars::prelude::*;
 use std::borrow::Cow;
 use std::path::Path;
+use std::sync::{Arc, OnceLock, mpsc};
+use std::time::{Duration, Instant};
 use thiserror::Error;
 
 /// Validate that a string is a safe SQL identifier (table name, column name, etc.).
@@ -40,6 +44,9 @@ pub enum DatabaseError {
 
     #[error("Query rejected: {0}")]
     Forbidden(String),
+
+    #[error("Query stopped: {0}")]
+    Interrupted(String),
 }
 
 /// Validate that a SQL statement is a read-only query.
@@ -310,8 +317,9 @@ pub struct QueryOptions {
     pub max_rows: Option<usize>,
     /// Estimated result bytes kept; for SQLite also the largest value (`SQLITE_LIMIT_LENGTH`).
     pub max_bytes: Option<u64>,
-    /// Wall-clock limit for the query.
-    pub timeout: Option<std::time::Duration>,
+    /// Wall-clock limit for the query. The query also stops when the installed
+    /// [`resource`] budget is cancelled or past its deadline.
+    pub timeout: Option<Duration>,
     /// DuckDB `memory_limit` in MiB (spilling to disk is then disabled). SQLite ignores it.
     pub memory_limit_mb: Option<u64>,
     /// DuckDB worker threads. SQLite ignores it.
@@ -434,6 +442,159 @@ fn finish_outcome<V>(
 }
 
 // ============================================================================
+// Deadlines, cancellation and memory growth
+// ============================================================================
+
+/// How often the DuckDB watchdog checks its stop conditions.
+const WATCH_POLL: Duration = Duration::from_millis(20);
+/// Rows between two budget checks in the row loops.
+const CHECK_EVERY_ROWS: usize = 1024;
+/// SQLite virtual-machine instructions between two progress-handler calls.
+const SQLITE_PROGRESS_OPS: i32 = 1000;
+const MIB: usize = 1024 * 1024;
+
+/// The text of a failed budget check, without the "Computation stopped:" prefix.
+fn budget_message(err: EconError) -> String {
+    match err {
+        EconError::Cancelled(message) => message,
+        other => other.to_string(),
+    }
+}
+
+/// [`resource::checkpoint`] as a [`DatabaseError::Interrupted`].
+fn checkpoint() -> Result<(), DatabaseError> {
+    resource::checkpoint().map_err(|e| DatabaseError::Interrupted(budget_message(e)))
+}
+
+/// The RSS guard of a query: `(RSS at the start, allowed growth)` in bytes,
+/// the growth being twice the memory limit. DuckDB allocates materialised
+/// results and string data outside `memory_limit`, so this is the only bound
+/// on them. Active only with a memory limit and where RSS is readable (Linux).
+fn rss_guard(opts: &QueryOptions) -> Option<(usize, usize)> {
+    let mb = opts.memory_limit_mb?;
+    let start = crate::memory::get_process_memory()?.rss_bytes;
+    let growth = usize::try_from(mb)
+        .unwrap_or(usize::MAX)
+        .saturating_mul(2 * MIB);
+    Some((start, growth))
+}
+
+/// Why a running query must stop, if it must: its own time limit, the
+/// installed budget (cancelled or past its deadline), or RSS growth past the
+/// guard, checked in that order.
+fn stop_reason(
+    started: Instant,
+    timeout: Option<Duration>,
+    budget: Option<&Budget>,
+    rss_guard: Option<(usize, usize)>,
+) -> Option<String> {
+    if let Some(limit) = timeout
+        && started.elapsed() >= limit
+    {
+        return Some(format!(
+            "the query exceeded its time limit of {:.1} s",
+            limit.as_secs_f64()
+        ));
+    }
+    if let Some(budget) = budget
+        && let Err(e) = budget.check()
+    {
+        return Some(budget_message(e));
+    }
+    if let Some((start, growth)) = rss_guard
+        && let Some(now) = crate::memory::get_process_memory()
+        && now.rss_bytes > start.saturating_add(growth)
+    {
+        return Some(format!(
+            "the query used more than {} MiB of working memory",
+            growth / MIB
+        ));
+    }
+    None
+}
+
+/// A watchdog thread that interrupts a running DuckDB query once
+/// [`stop_reason`] gives a reason. It re-issues the interrupt on every poll
+/// until it is dropped, because an interrupt that arrives before DuckDB starts
+/// executing is lost. Dropping it stops and joins the thread.
+///
+/// A polling thread rather than one timer armed at the deadline: a cancelled
+/// budget has no wake-up signal, and polling [`Budget::check`] sees both.
+struct QueryWatch {
+    reason: Arc<OnceLock<String>>,
+    stop: Option<mpsc::Sender<()>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl QueryWatch {
+    /// Arm a watchdog for the query about to run on `conn`; `None` when
+    /// nothing can stop it (no timeout, no installed budget, no RSS guard).
+    /// Fails closed when a timeout or budget applies and no thread can start.
+    fn arm(conn: &duckdb::Connection, opts: &QueryOptions) -> Result<Option<Self>, DatabaseError> {
+        let budget = resource::current_budget();
+        let rss = rss_guard(opts);
+        let timeout = opts.timeout;
+        if timeout.is_none() && budget.is_none() && rss.is_none() {
+            return Ok(None);
+        }
+        let required = timeout.is_some() || budget.is_some();
+        let handle = conn.interrupt_handle();
+        let reason = Arc::new(OnceLock::new());
+        let seen = Arc::clone(&reason);
+        let (stop, stopped) = mpsc::channel::<()>();
+        let started = Instant::now();
+        let spawned = std::thread::Builder::new()
+            .name("p2a-sql-watchdog".to_string())
+            .spawn(move || {
+                while let Err(mpsc::RecvTimeoutError::Timeout) = stopped.recv_timeout(WATCH_POLL) {
+                    if seen.get().is_none()
+                        && let Some(why) = stop_reason(started, timeout, budget.as_ref(), rss)
+                    {
+                        let _ = seen.set(why);
+                    }
+                    if seen.get().is_some() {
+                        handle.interrupt();
+                    }
+                }
+            });
+        match spawned {
+            Ok(thread) => Ok(Some(Self {
+                reason,
+                stop: Some(stop),
+                thread: Some(thread),
+            })),
+            Err(e) if required => Err(DatabaseError::Interrupted(format!(
+                "could not start the query watchdog: {e}"
+            ))),
+            Err(_) => Ok(None),
+        }
+    }
+
+    /// Why the watchdog stopped the query, once it has.
+    fn reason(&self) -> Option<&str> {
+        self.reason.get().map(String::as_str)
+    }
+}
+
+impl Drop for QueryWatch {
+    fn drop(&mut self) {
+        drop(self.stop.take());
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+/// Map an engine error to [`DatabaseError::Interrupted`] when a stop reason
+/// was recorded: the error is then the interrupt that reason caused.
+fn stopped_by(reason: Option<&str>, err: DatabaseError) -> DatabaseError {
+    match reason {
+        Some(why) => DatabaseError::Interrupted(why.to_string()),
+        None => err,
+    }
+}
+
+// ============================================================================
 // SQLite Support
 // ============================================================================
 
@@ -479,6 +640,7 @@ pub fn query_sqlite_with(
     query: &str,
     opts: &QueryOptions,
 ) -> Result<QueryOutcome, DatabaseError> {
+    checkpoint()?;
     let body = single_statement_body(query)?;
     validate_read_only_query(body)?;
     let path = db_path.as_ref();
@@ -490,7 +652,34 @@ pub fn query_sqlite_with(
     // Read-only, query_only, no ATTACH. rusqlite's prepare compiles only the
     // first statement; the lexer above already refused any second one.
     let conn = open_sqlite_locked(path, opts)?;
-    let mut stmt = conn.prepare(body)?;
+
+    // The progress handler interrupts the statement at the time limit or when
+    // the installed budget is cancelled or past its deadline.
+    let reason: Arc<OnceLock<String>> = Arc::new(OnceLock::new());
+    let budget = resource::current_budget();
+    if opts.timeout.is_some() || budget.is_some() {
+        let seen = Arc::clone(&reason);
+        let timeout = opts.timeout;
+        let started = Instant::now();
+        conn.progress_handler(
+            SQLITE_PROGRESS_OPS,
+            Some(move || {
+                if seen.get().is_some() {
+                    return true;
+                }
+                match stop_reason(started, timeout, budget.as_ref(), None) {
+                    Some(why) => {
+                        let _ = seen.set(why);
+                        true
+                    }
+                    None => false,
+                }
+            }),
+        );
+    }
+    let stopped = |e: rusqlite::Error| stopped_by(reason.get().map(String::as_str), e.into());
+
+    let mut stmt = conn.prepare(body).map_err(stopped)?;
     if !stmt.readonly() {
         return Err(DatabaseError::Forbidden(
             "the statement would modify the database; only read-only queries are allowed"
@@ -504,14 +693,20 @@ pub fn query_sqlite_with(
     // SQLite streams: each `next` steps the statement once.
     let mut collector = RowCollector::new(column_count, opts);
     let mut row_values = Vec::with_capacity(column_count);
-    let mut rows = stmt.query([])?;
-    while let Some(row) = rows.next()? {
+    let mut rows = stmt.query([]).map_err(stopped)?;
+    while let Some(row) = rows.next().map_err(stopped)? {
         if !collector.wants_row() {
             break;
         }
+        if collector.rows % CHECK_EVERY_ROWS == CHECK_EVERY_ROWS - 1 {
+            checkpoint()?;
+            if let Some(why) = reason.get() {
+                return Err(DatabaseError::Interrupted(why.clone()));
+            }
+        }
         let mut row_bytes = 0u64;
         for i in 0..column_count {
-            let value: rusqlite::types::Value = row.get_ref(i)?.into();
+            let value: rusqlite::types::Value = row.get_ref(i).map_err(stopped)?.into();
             row_bytes = row_bytes.saturating_add(sqlite_value_bytes(&value));
             row_values.push(value);
         }
@@ -740,6 +935,7 @@ pub fn query_duckdb_with(
     query: &str,
     opts: &QueryOptions,
 ) -> Result<QueryOutcome, DatabaseError> {
+    checkpoint()?;
     let body = single_statement_body(query)?;
     validate_read_only_query(body)?;
     let path = db_path.as_ref();
@@ -825,6 +1021,7 @@ pub fn query_file_with_duckdb_with(
     query: &str,
     opts: &QueryOptions,
 ) -> Result<QueryOutcome, DatabaseError> {
+    checkpoint()?;
     // Replace the placeholder with the file path as a quoted literal (`'` doubled).
     // The path cannot open a second statement from inside the literal; the lexer
     // checks the substituted text.
@@ -870,10 +1067,15 @@ fn run_duckdb_query(
     opts: &QueryOptions,
 ) -> Result<QueryOutcome, DatabaseError> {
     let sql = bounded_duckdb_sql(body, opts);
-    let mut stmt = conn.prepare(&sql)?;
+    let watch = QueryWatch::arm(conn, opts)?;
+    let reason = || watch.as_ref().and_then(QueryWatch::reason);
+    let stopped = |e: duckdb::Error| stopped_by(reason(), e.into());
 
-    // Execute query first - DuckDB requires this before accessing column info
-    let mut rows = stmt.query([])?;
+    let mut stmt = conn.prepare(&sql).map_err(stopped)?;
+
+    // Execute query first - DuckDB requires this before accessing column info.
+    // This materialises the whole result; the watchdog interrupts it.
+    let mut rows = stmt.query([]).map_err(stopped)?;
 
     // Get column information after execution
     let column_count = rows.as_ref().map(|r| r.column_count()).unwrap_or(0);
@@ -884,13 +1086,19 @@ fn run_duckdb_query(
 
     let mut collector = RowCollector::new(column_count, opts);
     let mut row_values = Vec::with_capacity(column_count);
-    while let Some(row) = rows.next()? {
+    while let Some(row) = rows.next().map_err(stopped)? {
         if !collector.wants_row() {
             break;
         }
+        if collector.rows % CHECK_EVERY_ROWS == CHECK_EVERY_ROWS - 1 {
+            checkpoint()?;
+            if let Some(why) = reason() {
+                return Err(DatabaseError::Interrupted(why.to_string()));
+            }
+        }
         let mut row_bytes = 0u64;
         for i in 0..column_count {
-            let value: duckdb::types::Value = row.get(i)?;
+            let value: duckdb::types::Value = row.get(i).map_err(stopped)?;
             row_bytes = row_bytes.saturating_add(duckdb_value_bytes(&value));
             row_values.push(value);
         }
@@ -899,6 +1107,8 @@ fn run_duckdb_query(
         }
     }
     drop(rows);
+    drop(stmt);
+    drop(watch);
 
     finish_outcome(collector, column_names, duckdb_column_to_series)
 }
@@ -1018,8 +1228,9 @@ fn duckdb_column_to_series(name: &str, values: Vec<duckdb::types::Value>) -> Ser
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::resource::{self, Budget, CancelToken};
     use std::path::PathBuf;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     fn write_file(dir: &Path, name: &str, body: &str) -> PathBuf {
         let p = dir.join(name);
@@ -1515,6 +1726,143 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("too big"), "{err}");
+    }
+
+    // ------------------------------------------------------------------
+    // Deadlines, cancellation and memory growth (LLM-2)
+    // ------------------------------------------------------------------
+    // None asserts wall-clock time except the release-only bound. Each query is
+    // finite even if the watchdog is broken, so a regression fails instead of hanging.
+
+    fn heavy_duckdb() -> &'static str {
+        // ~7 s single-threaded in release, much longer in debug
+        "SELECT count(*) AS n FROM range(20000) a, range(20000) b WHERE a.range + b.range = 3"
+    }
+
+    #[test]
+    fn duckdb_query_stops_at_timeout() {
+        let opts = QueryOptions {
+            timeout: Some(Duration::from_millis(200)),
+            threads: Some(1),
+            ..Default::default()
+        };
+        let t0 = Instant::now();
+        let err = query_duckdb_with(":memory:", heavy_duckdb(), &opts).unwrap_err();
+        assert!(
+            matches!(err, DatabaseError::Interrupted(_)) && err.to_string().contains("time limit"),
+            "{err}"
+        );
+        if !cfg!(debug_assertions) {
+            assert!(t0.elapsed() < Duration::from_secs(5));
+        }
+    }
+
+    #[test]
+    fn duckdb_query_stops_when_budget_cancelled() {
+        let token = CancelToken::new();
+        let canceller = {
+            let t = token.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(200));
+                t.cancel();
+            })
+        };
+        let opts = QueryOptions {
+            threads: Some(1),
+            ..Default::default()
+        };
+        let err = resource::with_budget(Budget::new(None, token), || {
+            query_duckdb_with(":memory:", heavy_duckdb(), &opts)
+        })
+        .unwrap_err();
+        canceller.join().unwrap();
+        assert!(matches!(err, DatabaseError::Interrupted(_)), "{err}");
+    }
+
+    #[test]
+    fn duckdb_query_stops_at_budget_deadline() {
+        let budget = Budget::new(
+            Some(Instant::now() + Duration::from_millis(200)),
+            CancelToken::new(),
+        );
+        let opts = QueryOptions {
+            threads: Some(1),
+            ..Default::default()
+        };
+        let err = resource::with_budget(budget, || {
+            query_duckdb_with(":memory:", heavy_duckdb(), &opts)
+        })
+        .unwrap_err();
+        assert!(matches!(err, DatabaseError::Interrupted(_)), "{err}");
+    }
+
+    #[test]
+    fn expired_budget_refuses_before_opening() {
+        let budget = Budget::new(
+            Some(Instant::now() - Duration::from_millis(1)),
+            CancelToken::new(),
+        );
+        let err = resource::with_budget(budget, || {
+            query_duckdb_with(":memory:", "SELECT 1", &QueryOptions::default())
+        })
+        .unwrap_err();
+        assert!(matches!(err, DatabaseError::Interrupted(_)), "{err}");
+    }
+
+    #[test]
+    fn sqlite_query_stops_at_timeout_and_on_cancel() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = sqlite_fixture(dir.path());
+        let q = "WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r WHERE n < 500000000) \
+                 SELECT count(*) FROM r";
+        let err = query_sqlite_with(
+            &db,
+            q,
+            &QueryOptions {
+                timeout: Some(Duration::from_millis(200)),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, DatabaseError::Interrupted(_)) && err.to_string().contains("time limit"),
+            "{err}"
+        );
+        let token = CancelToken::new();
+        let t = token.clone();
+        let h = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            t.cancel();
+        });
+        let err = resource::with_budget(Budget::new(None, token), || {
+            query_sqlite_with(&db, q, &QueryOptions::default())
+        })
+        .unwrap_err();
+        h.join().unwrap();
+        assert!(matches!(err, DatabaseError::Interrupted(_)), "{err}");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn duckdb_rss_guard_stops_untracked_result_growth() {
+        // No max_rows: DuckDB materialises ~200 MB outside memory_limit; the guard
+        // interrupts once RSS has grown by more than 2 x 32 MiB. Parallel tests can
+        // only make it fire earlier.
+        let opts = QueryOptions {
+            memory_limit_mb: Some(32),
+            threads: Some(1),
+            ..Default::default()
+        };
+        let err = query_duckdb_with(
+            ":memory:",
+            "SELECT repeat(range::VARCHAR, 64) AS s FROM range(500000)",
+            &opts,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, DatabaseError::Interrupted(_)) && err.to_string().contains("memory"),
+            "{err}"
+        );
     }
 
     #[test]
