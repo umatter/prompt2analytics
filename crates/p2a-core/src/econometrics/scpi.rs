@@ -1040,7 +1040,9 @@ fn compute_out_sample_variance(
             // helper is panic-free on its own.
             if cv_folds < 2 {
                 return Err(EconError::InvalidSpecification {
-                    message: "cv_folds must be at least 2 for K-fold cross-validation".to_string(),
+                    message: format!(
+                        "cv_folds must be at least 2 for K-fold cross-validation (got {cv_folds})"
+                    ),
                 });
             }
             let fold_size = t.div_ceil(cv_folds);
@@ -1443,7 +1445,7 @@ mod tests {
     fn test_kfold_variance_needs_two_folds() {
         // run_scpi rejects cv_folds outside 2..=n_pre before this point. The
         // helper's own guard now matches its message: 1 used to pass it and end
-        // in "No valid CV folds"
+        // in "No valid CV folds". The message names the value it got
         let (t, d) = generate_test_data();
         let y = t.slice(s![..7]).to_owned();
         let x = d.slice(s![..7, ..]).to_owned();
@@ -1460,7 +1462,8 @@ mod tests {
         for k in [0usize, 1] {
             let r = var(k);
             assert!(
-                matches!(r, Err(EconError::InvalidSpecification { ref message }) if message.contains("at least 2")),
+                matches!(r, Err(EconError::InvalidSpecification { ref message })
+                    if message.contains("at least 2") && message.contains(&format!("(got {k})"))),
                 "k={k}: ok={}",
                 r.is_ok()
             );
