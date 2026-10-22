@@ -430,8 +430,12 @@ impl CausalTree {
     /// thresholds (midpoints of consecutive distinct values, ascending) are
     /// swept with running treated/control counts and sums. The left child of a
     /// threshold is every observation with `x <= threshold`, exactly as a
-    /// partition of the node would give, so the chosen split matches the
-    /// re-partitioning search this replaces. `x` must be finite.
+    /// partition of the node would give, so the candidate children are those
+    /// of the re-partitioning search this replaces. The child means now come
+    /// from sums accumulated in sorted-x order (the right child's by
+    /// subtraction from the node totals) rather than in index order, so the
+    /// chosen split is the same except where two candidates' criteria agree
+    /// to within floating-point rounding. `x` must be finite.
     fn find_best_causal_split(
         &self,
         x: &ArrayView2<f64>,

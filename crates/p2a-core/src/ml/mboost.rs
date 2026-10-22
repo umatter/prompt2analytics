@@ -500,9 +500,11 @@ fn fit_linear_base_learner(
 /// ascending sort order of `x_col` (see [`feature_orders`]). The candidates
 /// are swept once with running sums: minimising the RSS of a split is
 /// maximising `left_sum^2 / left_n + right_sum^2 / right_n`, so the scan is
-/// O(n). The RSS of the chosen split is then recomputed with the two-pass
-/// sums of squares the full search used, so the returned fit is bit-identical
-/// to the quadratic search it replaces.
+/// O(n). That criterion is accumulated in sort order, so the sweep chooses
+/// the split the quadratic search it replaces chose, except where two
+/// candidates' criteria agree to within floating-point rounding. The RSS of
+/// the chosen split is then recomputed exactly, with the two-pass sums of
+/// squares the full search used.
 fn fit_tree_base_learner(
     x_col: &ArrayView1<f64>,
     residuals: &ArrayView1<f64>,

@@ -438,7 +438,11 @@ impl RegressionTree {
     /// values are sorted once and the thresholds (midpoints of consecutive
     /// distinct values, ascending) are swept with a pointer that adds every
     /// observation with `x <= threshold` to the left, the partition the
-    /// re-partitioning search this replaces used. `x` must be finite.
+    /// re-partitioning search this replaces used. The score is accumulated in
+    /// sorted-x order, where that search summed each child's squares around
+    /// its mean in index order, so the chosen split is the same except where
+    /// two candidates' scores agree to within floating-point rounding. `x`
+    /// must be finite.
     fn find_best_split(
         &self,
         x: &ArrayView2<f64>,
